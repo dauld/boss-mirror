@@ -236,6 +236,30 @@ secret_presence() {
     echo "cannot: $(head -n 1 <<< "$out")"
 }
 
+# instance_secrets_absent K KM NS PATH — the QUIET half of the gate.
+#   Prints the required Secrets (manifest_secrets of PATH) that NS lacks,
+#   space-separated in that order, empty when none, and returns 0; 2
+#   when a read the credential could not make (the reason on stderr).
+#   No verdict, no shapes: the runner asks this BEFORE it provisions
+#   (provision_instance_secrets below) and instance_secret_gate after,
+#   so a Secret the converge is about to mint is never printed as one a
+#   person must (backlog dc1bc724).
+instance_secrets_absent() {
+    local k="$1" km="$2" ns="$3" path="$4"
+    local required name answer absent=""
+    required=$(manifest_secrets "$km" "$path") || return 2
+    for name in $required; do
+        answer=$(secret_presence "$k" "$ns" "$name")
+        case "$answer" in
+            present) ;;
+            absent) absent="$absent $name" ;;
+            *)  echo "cluster-deploy-runner: cannot read Secret $ns/$name — ${answer#cannot: }" >&2
+                return 2 ;;
+        esac
+    done
+    echo "${absent# }"
+}
+
 # instance_secret_gate K KM NS PATH
 #   0  every required Secret exists in NS — apply the instance
 #   1  at least one is absent — SKIP the instance; stdout is the absent
@@ -250,19 +274,9 @@ secret_presence() {
 #   runner's manifests mount) — the same command when there is one.
 instance_secret_gate() {
     local k="$1" km="$2" ns="$3" path="$4"
-    local required name answer absent="" keys
-    required=$(manifest_secrets "$km" "$path") || return 2
-    for name in $required; do
-        answer=$(secret_presence "$k" "$ns" "$name")
-        case "$answer" in
-            present) ;;
-            absent) absent="$absent $name" ;;
-            *)  echo "cluster-deploy-runner: cannot read Secret $ns/$name — ${answer#cannot: }" >&2
-                return 2 ;;
-        esac
-    done
+    local name absent keys
+    absent=$(instance_secrets_absent "$k" "$km" "$ns" "$path") || return 2
     [ -n "$absent" ] || return 0
-    absent="${absent# }"
     echo "$absent"
     keys=$(manifest_secret_keys "$km" "$path")
     echo "cluster-deploy-runner: instance $ns SKIPPED — these Secrets are not minted in it: $absent" >&2
@@ -282,6 +296,237 @@ instance_secret_gate() {
         fi
     done
     return 1
+}
+
+# PROVISIONING MINTS AN INSTANCE'S OWN SECRETS (backlog dc1bc724; David
+# 2026-09-16: no hand work unless absolutely required). The gate above
+# was built with every Secret a person's to mint, and the playground
+# was skipped on every converge from 2026-09-15 for want of that
+# ceremony. Measured against its render (six names, five keys), the
+# six are not one kind of thing, and only one of them is a person's:
+#
+#   internal  boss-secrets (postgres-password, admin-password, and
+#             database-url composed from the password and the
+#             instance's OWN postgres Service), boss-session-key —
+#             random bytes NOBODY needs to know. Minted here, once,
+#             when absent; the values ride kubectl's stdin, never its
+#             argv and never this journal (names only).
+#   shared    forgejo-registry (the registry pull credential), resend
+#             (the mail sender) — the SAME credential as the source
+#             instance's. Copied from the namespace instances.toml
+#             names as `shares_with`: type and data, none of the
+#             source object's identity. No `shares_with`: left absent,
+#             named, and the gate names them to a person.
+#   root      boss-oidc (client-secret) — the Kanidm OIDC client the
+#             identity provider issues; the estate cannot mint it.
+#             MEASURED in boss-gateway oidc.rs OidcConfig::from_env: an
+#             EMPTY client secret is "no OIDC" and the gateway boots
+#             with guest sessions and local auth; an ABSENT Secret
+#             wedges the pod (the ref is not optional). So the object
+#             is created with every key the manifests read present and
+#             EMPTY — the way ensure_declared_secrets creates a broker
+#             Secret — and the ceremony that registers the client fills
+#             it. Until then the instance is guest-only, which is what
+#             a public example needs.
+#   by hand   everything else — today boss-tls, the lego certificate,
+#             whose reference leaves with 974d2015 (everything behind
+#             the tunnel). Not created; the gate still names it.
+#
+# The class is a decision per NAME and lives here beside its recipe,
+# not on a roster: a roster line could not carry how a value is made,
+# and a second copy of the class would be the §9a pair. The KEYS an
+# internal Secret needs are still DERIVED from the manifests, and a key
+# the recipe does not know refuses by name — a Secret minted without a
+# key the pod reads is the same wedge one step later.
+
+# instance_secret_class NAME — internal | shared | root | by-hand
+instance_secret_class() {
+    case "$1" in
+        boss-secrets | boss-session-key) echo internal ;;
+        forgejo-registry | resend) echo shared ;;
+        boss-oidc) echo root ;;
+        *) echo by-hand ;;
+    esac
+}
+
+# _random_hex N — N random bytes as 2N hex characters, from the kernel.
+#   coreutils only (od), so the forge host needs nothing new; hex is
+#   URL-safe, which is what lets the password ride inside database-url
+#   unescaped.
+_random_hex() {
+    od -An -tx1 -v -N "$1" /dev/urandom | tr -d ' \n'
+}
+
+# _postgres_endpoint KM PATH — service<TAB>port<TAB>user<TAB>db of the
+#   postgres StatefulSet in the rendered manifests at PATH: the
+#   StatefulSet's serviceName, and from the container carrying
+#   POSTGRES_USER its first containerPort, POSTGRES_USER and
+#   POSTGRES_DB. Empty when there is none.
+_postgres_endpoint() {
+    local km="$1" path="$2"
+    $km create --dry-run=client -o json -f "$path" | jq -rs '
+        [ .[] | select(.kind == "StatefulSet") | . as $s
+          | .spec.template.spec.containers[]
+          | select(any(.env[]?; .name == "POSTGRES_USER"))
+          | [ $s.spec.serviceName,
+              (.ports[0].containerPort | tostring),
+              (.env[] | select(.name == "POSTGRES_USER") | .value),
+              (.env[] | select(.name == "POSTGRES_DB") | .value) ]
+          | @tsv ] | first // empty'
+}
+
+# _secret_json NS NAME TYPE KEYMAP — a Secret object as JSON. KEYMAP is
+#   key<TAB>variable per line; each data[key] is that ENVIRONMENT
+#   variable's value, base64 by jq. Values pass through the environment
+#   and stdin only — `ps` shows neither — and this journal never
+#   prints the object.
+_secret_json() {
+    local ns="$1" name="$2" type="$3" keymap="$4"
+    KEYMAP="$keymap" jq -n --arg ns "$ns" --arg name "$name" --arg type "$type" '
+        { apiVersion: "v1", kind: "Secret", type: $type,
+          metadata: { name: $name, namespace: $ns },
+          data: ( [ $ENV.KEYMAP | split("\n")[] | select(length > 0) | split("\t")
+                    | { key: .[0], value: ($ENV[.[1]] | @base64) } ]
+                  | from_entries ) }'
+}
+
+# _create_secret KI JSON — the ONE create: the object on stdin of the
+#   kubectl that reads stdin (the runner's KAPPLY; a `docker run`
+#   without -i reads nothing, which was the step-plugins bug). `create`,
+#   not `apply`: an object that exists is AlreadyExists, never
+#   rewritten. Prints nothing on success; on failure the first line of
+#   kubectl's error — which names the object and the reason, never its
+#   data — and returns 1.
+_create_secret() {
+    local ki="$1" json="$2" out
+    if out=$(printf '%s' "$json" | $ki create -f - 2>&1); then
+        return 0
+    fi
+    head -n 1 <<< "$out"
+    return 1
+}
+
+# provision_instance_secrets K KI KM NS PATH SHARE_NS ABSENT
+#   For each Secret in ABSENT (instance_secrets_absent's answer for NS
+#   against the rendered manifests at PATH): mint, copy from SHARE_NS
+#   (a namespace, or empty when the instance shares with nobody),
+#   create empty, or leave alone — by instance_secret_class. K reads
+#   the cluster (the source's copy of a shared Secret), KI creates from
+#   stdin, KM sees PATH. Prints ONE line for the converge packet:
+#     minted a, b | copied c, d from SRC | empty e (…) | cannot f (REASON), … | by hand g, …
+#   (each part only when non-empty; `nothing absent` for an empty
+#   ABSENT). Returns 0 in every case: the line is the verdict, the gate
+#   that follows decides whether the instance applies, and a Secret the
+#   converge could not make is named there too. The runner's journal
+#   carries this line and nothing else about these Secrets.
+provision_instance_secrets() {
+    local k="$1" ki="$2" km="$3" ns="$4" path="$5" share_ns="$6" absent="$7"
+    local name keys required key bad json err endpoint keymap
+    local svc port user db pw
+    local minted="" copied="" empty="" cannot="" byhand=""
+    if [ -z "$absent" ]; then
+        echo "nothing absent"
+        return 0
+    fi
+    keys=$(manifest_secret_keys "$km" "$path") || keys=""
+    for name in $absent; do
+        required=$(awk -F'\t' -v n="$name" '$1 == n { print $2 }' <<< "$keys")
+        case "$(instance_secret_class "$name")" in
+            internal)
+                case "$name" in
+                    boss-secrets)
+                        # Every key the manifests read must be one the
+                        # recipe makes; a recipe is not a guess.
+                        bad=""
+                        for key in $required; do
+                            case "$key" in
+                                postgres-password | admin-password | database-url) ;;
+                                *) bad="$key" ;;
+                            esac
+                        done
+                        if [ -n "$bad" ]; then
+                            cannot="${cannot:+$cannot, }$name (the manifests read key $bad, which the converge has no recipe for)"
+                            continue
+                        fi
+                        endpoint=$(_postgres_endpoint "$km" "$path")
+                        if [ -z "$endpoint" ]; then
+                            cannot="${cannot:+$cannot, }$name (no postgres StatefulSet in the rendered manifests to compose database-url from)"
+                            continue
+                        fi
+                        IFS=$'\t' read -r svc port user db <<< "$endpoint"
+                        pw=$(_random_hex 24)
+                        # The URL the boss pod and every chore read
+                        # (boss.yaml: DATABASE_URL / BOSS_POSTGRES_URL),
+                        # pointing INTO this instance by its own
+                        # Service's cluster DNS name — the name
+                        # render-instance.sh substitutes per namespace.
+                        json=$(V_PG="$pw" V_ADMIN="$(_random_hex 24)" \
+                            V_URL="postgres://$user:$pw@$svc.$ns.svc.cluster.local:$port/$db" \
+                            _secret_json "$ns" "$name" Opaque \
+                            $'postgres-password\tV_PG\nadmin-password\tV_ADMIN\ndatabase-url\tV_URL') ;;
+                    boss-session-key)
+                        # boss.yaml projects key `session.key` to the
+                        # path BOSS_SESSION_KEY names; boss-gateway
+                        # load_or_create_session_key reads it as hex and
+                        # wants at least 32 bytes decoded — 32 random
+                        # bytes as 64 hex characters, the prod shape.
+                        json=$(V_KEY="$(_random_hex 32)" \
+                            _secret_json "$ns" "$name" Opaque $'session.key\tV_KEY') ;;
+                esac
+                if err=$(_create_secret "$ki" "$json"); then
+                    minted="${minted:+$minted, }$name"
+                else
+                    cannot="${cannot:+$cannot, }$name ($err)"
+                fi ;;
+            shared)
+                if [ -z "$share_ns" ]; then
+                    cannot="${cannot:+$cannot, }$name (shared, but [$ns] declares no shares_with in instances.toml)"
+                    continue
+                fi
+                # The object, not its presence (secret_presence is the
+                # one presence read): type and data survive, the
+                # source's identity — uid, resourceVersion, timestamps,
+                # managedFields, the last-applied annotation — does not.
+                if ! json=$($k get secret "$name" -n "$share_ns" -o json 2>&1); then
+                    if grep -qi 'not found' <<< "$json"; then
+                        cannot="${cannot:+$cannot, }$name (not found in $share_ns)"
+                    else
+                        cannot="${cannot:+$cannot, }$name ($(head -n 1 <<< "$json"))"
+                    fi
+                    continue
+                fi
+                json=$(jq --arg ns "$ns" '
+                    { apiVersion, kind, type, data,
+                      metadata: ({ name: .metadata.name, namespace: $ns }
+                                 + (if .metadata.labels then { labels: .metadata.labels } else {} end)) }' <<< "$json")
+                if err=$(_create_secret "$ki" "$json"); then
+                    copied="${copied:+$copied, }$name"
+                else
+                    cannot="${cannot:+$cannot, }$name ($err)"
+                fi ;;
+            root)
+                # Every key the manifests read, present and empty.
+                keymap=""
+                for key in $required; do
+                    keymap="$keymap$key"$'\t'"V_EMPTY"$'\n'
+                done
+                json=$(V_EMPTY="" _secret_json "$ns" "$name" Opaque "$keymap")
+                if err=$(_create_secret "$ki" "$json"); then
+                    empty="${empty:+$empty, }$name"
+                else
+                    cannot="${cannot:+$cannot, }$name ($err)"
+                fi ;;
+            *)  byhand="${byhand:+$byhand, }$name" ;;
+        esac
+    done
+    local line=""
+    [ -z "$minted" ] || line="minted $minted"
+    [ -z "$copied" ] || line="${line:+$line | }copied $copied from $share_ns"
+    [ -z "$empty" ] || line="${line:+$line | }empty $empty (guest sessions only until a Kanidm client exists — root ceremony)"
+    [ -z "$cannot" ] || line="${line:+$line | }cannot $cannot"
+    [ -z "$byhand" ] || line="${line:+$line | }by hand $byhand"
+    echo "$line"
+    return 0
 }
 
 # THE TUNNEL CONNECTOR REPORTS AFTER THE ROLL (backlog 5a2bb0ce; design

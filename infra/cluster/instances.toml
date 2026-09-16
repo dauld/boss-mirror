@@ -37,19 +37,40 @@
 #              the `boss-tls` Secret in the instance's namespace, minted
 #              out of band.
 #
-# WHAT AN INSTANCE STILL NEEDS BY HAND, once, per namespace: the Secrets
-# the manifests reference by name (README: secrets never live here).
-# The converge DERIVES that list from the rendered manifests
+# THE SECRETS, and the one optional key. The manifests reference their
+# Secrets by name (README: secrets never live here), and the converge
+# DERIVES the list an instance needs from its rendered manifests
 # (cluster-deploy-lib.sh manifest_secrets — every secretKeyRef, secret
 # volume and imagePullSecret not marked optional; measured 2026-09-16
 # for the playground: boss-oidc, boss-secrets, boss-session-key,
-# boss-tls, forgejo-registry, resend) and asks the cluster before it
-# applies: an instance missing any is SKIPPED whole, named on the
-# converge packet as `instances_skipped`, with the `kubectl create
-# secret` shapes printed in the journal, and the converge exits 0.
-# Prod is applied, rolled, stamped and verified first and is
-# unaffected. Once the Secrets exist the instance applies on the next
-# converge with no other change.
+# boss-tls, forgejo-registry, resend). PROVISIONING MINTS THEM (backlog
+# dc1bc724; David 2026-09-16: no hand work unless absolutely required):
+# on the first converge that finds one absent the runner creates the
+# instance's Namespace and then, per Secret and by its class
+# (cluster-deploy-lib.sh provision_instance_secrets):
+#
+#   internal  boss-secrets, boss-session-key — random values nobody
+#             needs to know, minted in the namespace; names only reach
+#             the journal and the packet
+#   shared    forgejo-registry, resend — the same credential as another
+#             instance's, COPIED from the namespace of the instance this
+#             one names as `shares_with` (the optional fifth key, an
+#             instance name in this file; the renderer refuses one it
+#             cannot find). Without it they stay absent and are named.
+#   root      boss-oidc — created with an EMPTY client-secret: the
+#             gateway then boots guest-only (its OidcConfig reads empty
+#             as "no OIDC"), and registering the Kanidm client is the
+#             ceremony that fills it
+#   by hand   anything else — boss-tls until 974d2015 removes its
+#             reference
+#
+# The packet records the line as `instance_secrets_minted`. Then the
+# secret gate asks the cluster again: an instance still missing any
+# Secret is SKIPPED whole, named as `instances_skipped`, with the
+# `kubectl create secret` shapes printed in the journal, and the
+# converge exits 0; one that has everything applies on this same
+# converge. Prod is applied, rolled, stamped and verified first and is
+# unaffected either way.
 
 source = "prod"
 
@@ -64,3 +85,6 @@ namespace = "boss-playground"
 tenant = "examples/brewery/seeds/tenant.toml"
 sim = true
 hostname = "playground.algedonic.dev"
+# The playground pulls the same images and sends mail as the same
+# sender: its shared Secrets are prod's, copied.
+shares_with = "prod"

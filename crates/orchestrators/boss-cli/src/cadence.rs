@@ -2546,10 +2546,12 @@ mod db_tests {
         //
         // This is why the number lives in exactly two places that must
         // move together — the migration seeds the row, this test pins
-        // it (§9a). Note `--auto` gates a schema-only change with
-        // "fixture + lints only" and SKIPS the tests, so editing the
-        // migration alone leaves this red until a crate change drags
-        // boss-cli back into scope. CAVEAT still live: this is the
+        // it (§9a). Until 2026-09-16 `--auto` gated a schema-only
+        // change with "fixture + lints only" and SKIPPED the tests, so
+        // editing the migration alone left this red until a crate
+        // change dragged boss-cli back into scope; since backlog
+        // 4711828d a migration scopes every crate that stands up a
+        // TestDb, this one included. CAVEAT still live: this is the
         // CLUSTER SoR value; whether the boarding loop reads it depends
         // on resolving the conductor's cadence source (the-cluster-is-
         // the-system Q2) — the conductor move makes it moot.

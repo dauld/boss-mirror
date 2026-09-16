@@ -16,7 +16,8 @@
 #
 # A packet that stays open at `observe` is a zone that could not be
 # read or compared — the handler NAKs the firing and the dead letter on
-# the step says why. The daily spawner's dedup guard files no twin
+# the step says why. (A write the ACCOUNT refuses is not that: it is a
+# REFUSED verdict on a completed step, since 2026-09-16.) The daily spawner's dedup guard files no twin
 # while one is open; the cadence-silence sweep reports it SUPPRESSED,
 # naming the packet.
 [[workflow]]

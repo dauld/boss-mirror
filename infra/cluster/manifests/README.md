@@ -49,7 +49,19 @@ a test holds it so. Which manifests are per-instance and which exist
 once for the pipeline is `infra/cluster/instance-manifests.txt`, with
 the reason on each line — a new file here must be classified there, or
 the render refuses by name. Secrets are still per namespace and still
-out of tree: a new instance's pods wait until they are minted.
+out of tree — and PROVISIONING MINTS an instance's own (backlog
+dc1bc724, David 2026-09-16: no hand work unless absolutely required):
+on the converge that finds one absent, the runner creates the
+instance's Namespace and then mints the internal ones (`boss-secrets`,
+`boss-session-key` — random values nobody needs to know), copies the
+shared ones (`forgejo-registry`, `resend`) from the instance named as
+`shares_with` in `instances.toml`, and creates `boss-oidc` with an
+empty `client-secret` so the gateway boots guest-only until the Kanidm
+client is registered. Values ride kubectl's stdin, never a journal;
+the packet records names as `instance_secrets_minted`. Anything else
+the manifests reference (`boss-tls` until 974d2015) is still a person's,
+and the instance is skipped by name until it exists
+(`infra/forge/cluster-deploy-lib.sh`, `provision_instance_secrets`).
 
 **The tunnel's credentials — one Secret, created empty by the converge,
 filled by the broker.** The connector (`cloudflared.yaml`; backlog

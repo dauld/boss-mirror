@@ -784,3 +784,286 @@ fn the_receipt_times_every_check() {
         );
     }
 }
+
+/// `--auto` in a SCRATCH TREE: a shared clone of this checkout carrying
+/// the working tree's `infra/gate.sh` (committed, so the clone is clean),
+/// plus the files `touch` names as untracked scratch, gated with a `df`
+/// that reports plenty at startup and trips at the first phase boundary
+/// after it (`fixture`). The gate has derived its scope by then and the
+/// refusal writes the receipt, so this reads what `--auto` DECIDED
+/// without compiling anything — the same trick
+/// `the_receipt_times_every_check` uses to get a receipt cheaply.
+///
+/// The gate under test is the one in THIS tree, not the one at HEAD: a
+/// clone alone would gate the committed script and pass or fail about
+/// the wrong version (a read without its version is a guess).
+fn auto_scope_of(label: &str, touch: &[&str]) -> (String, serde_json::Value) {
+    let root = repo_root();
+    let dir = boss_testing::scratch_dir(label);
+    let tree = dir.join("tree");
+    let git = |args: &[&str], cwd: &std::path::Path| {
+        let slot = std::env::var("GIT_CONFIG_COUNT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0);
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_CONFIG_COUNT", (slot + 1).to_string())
+            .env(format!("GIT_CONFIG_KEY_{slot}"), "safe.directory")
+            .env(format!("GIT_CONFIG_VALUE_{slot}"), &root)
+            .output()
+            .unwrap_or_else(|e| panic!("git {}: {e}", args.join(" ")));
+        assert!(
+            out.status.success(),
+            "git {} in {} failed: {}",
+            args.join(" "),
+            cwd.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(
+        &[
+            "clone",
+            "--shared",
+            "--quiet",
+            root.to_str().expect("utf8"),
+            tree.to_str().expect("utf8"),
+        ],
+        &dir,
+    );
+    std::fs::copy(root.join("infra/gate.sh"), tree.join("infra/gate.sh"))
+        .expect("carry this tree's gate.sh into the scratch clone");
+    git(
+        &[
+            "-c",
+            "user.email=gate-scope@test",
+            "-c",
+            "user.name=gate-scope",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-am",
+            "the gate under test",
+        ],
+        &tree,
+    );
+    for rel in touch {
+        let path = tree.join(rel);
+        boss_testing::create_dir(path.parent().expect("a scratch path has a parent"));
+        boss_testing::write_file(&path, "-- scratch\n");
+    }
+
+    let counter = dir.join("calls");
+    let fake = dir.join("df");
+    boss_testing::write_exec(
+        &fake,
+        &format!(
+            "#!/usr/bin/env bash\n\
+             n=$(cat {c} 2>/dev/null || echo 0)\n\
+             echo $((n+1)) > {c}\n\
+             echo 'Filesystem 1024-blocks Used Available Capacity Mounted on'\n\
+             if [ \"$n\" -lt 1 ]; then echo '/dev/fake 1 1 943718400 1% /'; \
+             else echo '/dev/fake 1 1 1048576 99% /'; fi\n",
+            c = counter.display()
+        ),
+    );
+    let receipt = dir.join("receipt.json");
+    let out = std::process::Command::new("bash")
+        .arg(tree.join("infra/gate.sh"))
+        .arg("--auto")
+        .current_dir(&tree)
+        .env("BOSS_GATE_DF_CMD", fake.to_str().expect("utf8"))
+        .env("BOSS_GATE_MIN_FREE_GB", "12")
+        .env("BOSS_GATE_RECEIPT", receipt.to_str().expect("utf8"))
+        .env("BOSS_GATE_TRUNK", "HEAD")
+        .output()
+        .expect("run gate.sh --auto in the scratch clone");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let body = std::fs::read_to_string(&receipt).unwrap_or_else(|e| {
+        panic!(
+            "the refusal at the first phase must still write a receipt ({e}).\nstdout: {stdout}\nstderr: {stderr}"
+        )
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    let parsed: serde_json::Value = serde_json::from_str(&body)
+        .unwrap_or_else(|e| panic!("receipt is not JSON ({e}): {body}\nstderr: {stderr}"));
+    (stdout, parsed)
+}
+
+fn scope_of(receipt: &serde_json::Value) -> Vec<String> {
+    receipt
+        .get("scope")
+        .and_then(|s| s.as_str())
+        .unwrap_or_else(|| panic!("receipt carries no scope: {receipt}"))
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Does this crate stand up the shared schema in a test? `TestDb::new`
+/// (and `new_without`) is the one constructor that applies
+/// `infra/postgres/schema/` to a fresh database, so a crate that calls
+/// it reads every migration, whatever its test files are named and
+/// whether or not its manifest declares a `postgres` feature.
+fn stands_up_the_schema(crate_name: &str) -> bool {
+    let root = repo_root();
+    let manifest = std::fs::read_dir(root.join("crates"))
+        .expect("crates/")
+        .filter_map(Result::ok)
+        .map(|tier| tier.path().join(crate_name))
+        .find(|p| p.join("Cargo.toml").is_file())
+        .unwrap_or_else(|| panic!("{crate_name} is not a crate under crates/*/"));
+    fn mentions(dir: &std::path::Path) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        entries.filter_map(Result::ok).any(|e| {
+            let p = e.path();
+            if p.is_dir() {
+                mentions(&p)
+            } else {
+                p.extension().is_some_and(|x| x == "rs")
+                    && std::fs::read_to_string(&p)
+                        .map(|s| s.contains("TestDb::new"))
+                        .unwrap_or(false)
+            }
+        })
+    }
+    mentions(&manifest.join("src")) || mentions(&manifest.join("tests"))
+}
+
+const SCRATCH_MIGRATION: &str =
+    "infra/postgres/schema/99991231235959-a-scratch-migration-gates-its-readers.sql";
+
+/// THE PACKET (backlog 4711828d). On 2026-09-16 two cars each added a
+/// credentials-registry migration; `--auto` scoped each to the crates
+/// whose FILES changed (boss-dispatcher-handlers, boss-testing) and never
+/// ran boss-jobs, whose `credentials_pg.rs` pins the seeded rows. Both
+/// gated green (receipts 4c2f15c5, 719b6e61); the train gate ran boss-jobs
+/// on the assembled tree and struck all six cars aboard (train 767cfb14,
+/// gate-run 06995f6c). A schema change is a change to every crate that
+/// stands up the schema, and the scope has to say so.
+#[test]
+fn a_migration_only_car_scopes_every_crate_that_stands_up_the_schema() {
+    let (stdout, receipt) = auto_scope_of("gate-scope-migration-only", &[SCRATCH_MIGRATION]);
+    let scope = scope_of(&receipt);
+    // The crate from the incident, and the crate that owns the fixture.
+    for must in ["boss-jobs", "boss-testing"] {
+        assert!(
+            scope.iter().any(|c| c == must),
+            "a migration-only car must scope {must} — the car that struck train 767cfb14 \
+             gated without it.\nscope: {scope:?}\nstdout: {stdout}"
+        );
+    }
+    // The HONEST predicate, not the convenient one: boss-dispatcher
+    // declares no `postgres` feature and still stands up a TestDb in
+    // tests/rules_wait_pg.rs. A derivation keyed on the feature flag
+    // would drop it and read 13 crates where 25 read the schema.
+    assert!(
+        scope.iter().any(|c| c == "boss-dispatcher"),
+        "boss-dispatcher stands up the schema without a `postgres` feature; a scope \
+         that omits it was derived from the manifest instead of from the tests.\n\
+         scope: {scope:?}"
+    );
+    // Every crate pulled in is one that reads the schema — nothing rides
+    // in on a name or a list.
+    for c in &scope {
+        assert!(
+            stands_up_the_schema(c),
+            "{c} was scoped by a schema change but constructs no TestDb — the \
+             derivation named a crate that does not read the schema.\nscope: {scope:?}"
+        );
+    }
+    assert!(
+        scope.len() >= 10,
+        "the schema readers came back suspiciously few ({}) — a grep that matches \
+         nothing is a map that covers nothing.\nscope: {scope:?}",
+        scope.len()
+    );
+    // The receipt names WHY: the migration it saw and the crates it
+    // pulled in for it, so a reader of the packet can tell "scoped
+    // because the tree changed these crates" from "scoped because the
+    // schema moved".
+    let why = receipt
+        .get("schema_change")
+        .unwrap_or_else(|| panic!("receipt carries no schema_change field: {receipt}"));
+    let paths: Vec<&str> = why
+        .get("paths")
+        .and_then(|p| p.as_array())
+        .unwrap_or_else(|| panic!("schema_change carries no paths array: {receipt}"))
+        .iter()
+        .filter_map(|p| p.as_str())
+        .collect();
+    assert_eq!(
+        paths,
+        vec![SCRATCH_MIGRATION],
+        "schema_change.paths must name the migration the gate saw: {receipt}"
+    );
+    let readers: Vec<String> = why
+        .get("readers")
+        .and_then(|r| r.as_str())
+        .unwrap_or_else(|| panic!("schema_change carries no readers: {receipt}"))
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        readers, scope,
+        "for a migration-only car the scope IS the readers, and the receipt must say \
+         so in one place: {receipt}"
+    );
+    assert!(
+        stdout.contains("schema change ->"),
+        "the gate must say on stdout that the schema change is what widened the \
+         scope.\nstdout: {stdout}"
+    );
+}
+
+/// A migration beside a crate change scopes BOTH: the crate the tree
+/// changed and the crates that read the schema. And the contrast — a
+/// crate change with no migration pulls no reader in — pins that the
+/// widening is keyed on `infra/postgres/schema/`, not on every car.
+#[test]
+fn a_migration_beside_a_crate_change_scopes_both() {
+    // boss-expr constructs no TestDb, so it can only enter the scope
+    // through its own changed file.
+    assert!(
+        !stands_up_the_schema("boss-expr"),
+        "this test needs a crate that does NOT read the schema; pick another"
+    );
+    let (stdout, receipt) = auto_scope_of(
+        "gate-scope-migration-and-crate",
+        &[SCRATCH_MIGRATION, "crates/core/boss-expr/src/zz_scratch.rs"],
+    );
+    let scope = scope_of(&receipt);
+    for must in ["boss-expr", "boss-jobs"] {
+        assert!(
+            scope.iter().any(|c| c == must),
+            "a migration beside a boss-expr change must scope {must}.\nscope: {scope:?}\n\
+             stdout: {stdout}"
+        );
+    }
+
+    let (stdout, receipt) = auto_scope_of(
+        "gate-scope-crate-only",
+        &["crates/core/boss-expr/src/zz_scratch.rs"],
+    );
+    let scope = scope_of(&receipt);
+    assert_eq!(
+        scope,
+        vec!["boss-expr".to_string()],
+        "a crate change with no migration must not pull the schema readers in — \
+         that would make every car a whole-workspace gate.\nstdout: {stdout}"
+    );
+    let paths = receipt
+        .get("schema_change")
+        .and_then(|w| w.get("paths"))
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        paths.is_empty(),
+        "no migration changed, so schema_change.paths must be empty: {receipt}"
+    );
+}

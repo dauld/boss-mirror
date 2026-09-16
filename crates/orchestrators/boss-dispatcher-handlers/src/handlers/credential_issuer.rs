@@ -560,13 +560,17 @@ pub trait ZoneRecords: Send + Sync {
 /// One policy attached to an Access application, as the account lists
 /// it: `include` is the raw rule list (`[{"email": {"email": ...}}]`
 /// and kin) so a rule kind the declaration has no vocabulary for is
-/// still printed on a DRIFT verdict, never dropped.
+/// still printed on a DRIFT verdict, never dropped. `precedence` is
+/// read back because a create has to avoid every one the account
+/// already holds (see [`AccessPolicySpec::precedence`]); 0 when the
+/// listing carries none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessPolicy {
     pub id: String,
     pub name: String,
     pub decision: String,
     pub include: Vec<JsonValue>,
+    pub precedence: u32,
 }
 
 /// One Cloudflare Access application as the account lists it, with
@@ -598,6 +602,14 @@ pub struct AccessPolicySpec {
     pub name: String,
     pub decision: String,
     pub include: Vec<JsonValue>,
+    /// Cloudflare's documented rule is "unique within an app"; the
+    /// rule it ENFORCES is wider. Measured 2026-09-16 15:06Z (packet
+    /// ca4dd287): the first policy on a freshly created application,
+    /// sent with precedence 1, was refused `12130 policy precedences
+    /// must be unique` eight deliveries running — the only policy at
+    /// 1 anywhere was the dashboard's, on another application. So a
+    /// caller chooses one above every precedence the ACCOUNT lists,
+    /// which satisfies either reading of the rule.
     pub precedence: u32,
 }
 
@@ -1043,6 +1055,11 @@ fn policy_from(v: &JsonValue) -> Option<AccessPolicy> {
             .get("include")
             .and_then(JsonValue::as_array)
             .cloned()
+            .unwrap_or_default(),
+        precedence: v
+            .get("precedence")
+            .and_then(JsonValue::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
             .unwrap_or_default(),
     })
 }

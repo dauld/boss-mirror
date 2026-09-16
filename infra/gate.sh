@@ -16,7 +16,9 @@
 #                                 # tree. Skips cargo entirely when
 #                                 # nothing changed implies a crate —
 #                                 # 74 of 164 live branches are in that
-#                                 # class. Never used by CI.
+#                                 # class. A migration implies every
+#                                 # crate that stands up the schema.
+#                                 # Never used by CI.
 #   infra/gate.sh --self-test     # run the roster loop's own pin and
 #                                 # nothing else. It runs inside every
 #                                 # mode below too; this is the way to
@@ -459,10 +461,11 @@ crates_from_paths() {
 #
 #   infra/postgres/schema/** — boss-testing's build.rs compiles every
 #   migration in, and boss-jobs names one in a test, so this scan would
-#   map migrations to crates. It must not: `--auto` asks `schema_touched`
-#   separately and the unscoped `check "fixture"` below is what judges a
-#   schema change in every mode. Mapping it here would compile two crates
-#   per migration and answer a question the fixture already answers.
+#   map migrations to those TWO crates — an under-count, and a wrong
+#   shape: a migration is read by every crate that stands up the
+#   schema, not by the ones that mention it by path. `schema_readers`
+#   below derives that set, and `path_map` applies it to any change
+#   under this tree (backlog 4711828d).
 #
 #   docs/design/** — boss-jobs' subject_existence_pg.rs uses
 #   "docs/design/subject-identity-and-relationships.md" as a Subject ID,
@@ -537,6 +540,70 @@ file_input_index() {
 # calls it a few dozen times.
 GATE_FILE_INPUTS="$(file_input_index)"
 
+# ---------------------------------------------------------------------
+# Crates that READ THE SCHEMA: derived from the tree, never listed here
+# ---------------------------------------------------------------------
+# A migration is a change to every crate whose tests stand the schema
+# up. On 2026-09-16 two cars each added a credentials-registry
+# migration; `--auto` scoped each to the crates whose FILES changed
+# (boss-dispatcher-handlers, boss-testing) and never ran boss-jobs,
+# whose credentials_pg.rs pins the seeded rows. Both gated green
+# (receipts 4c2f15c5, 719b6e61), the train gate ran boss-jobs on the
+# assembled tree, and all six cars aboard were struck (train 767cfb14,
+# gate-run 06995f6c; backlog 4711828d). Until then a migration-only car
+# ran "fixture + lints only": the fixture proves the schema APPLIES,
+# and nothing proved that what it seeds still agrees with the tests
+# that read it.
+#
+# THE PREDICATE IS THE CONSTRUCTOR, not a feature flag or a file name.
+# `boss_testing::TestDb::new` (and `new_without`) is the one call that
+# applies infra/postgres/schema/ to a fresh database, so a crate that
+# calls it anywhere in src/ or tests/ reads every migration. Measured
+# on 2026-09-16 against the alternatives: "declares a `postgres`
+# feature AND has tests/*_pg.rs" names 13 crates and drops
+# boss-dispatcher (no feature, stands up a TestDb in rules_wait_pg.rs)
+# and eleven others whose DB tests are named differently; the
+# constructor names 25 — which is the whole Pg-tested workspace, and
+# that is the honest answer, not a cost to optimise away. Correctness
+# over speed: a migration-only gate now runs those 25 crates instead of
+# none, ~2 minutes to a workspace-shaped run.
+#
+# Members come from `cargo metadata --no-deps` (~0.05 s, no resolution,
+# no network), so a crate outside the workspace cannot be named and a
+# `-p` it produces is one cargo can satisfy. The crate name is the
+# manifest's directory, the same convention `path_shapes` reads off
+# `crates/<tier>/<name>/`, and `scope_self_test` refuses a name that is
+# not a crate. ~0.12 s in total, once per invocation, in every mode —
+# `--quick` derives no scope and never reads it, but the cost is the
+# same either way and a conditional would be a second code path to
+# keep honest.
+schema_readers() {
+    local dir
+    cargo metadata --no-deps --format-version 1 2>/dev/null \
+        | grep -o '"manifest_path":"[^"]*/Cargo.toml"' \
+        | sed -e 's|^"manifest_path":"||' -e 's|/Cargo.toml"$||' \
+        | while read -r dir; do
+            if grep -rlq --include='*.rs' 'TestDb::new' "$dir/src" "$dir/tests" 2>/dev/null; then
+                basename "$dir"
+            fi
+        done | sort -u | tr '\n' ' '
+}
+GATE_SCHEMA_READERS="$(schema_readers)"
+GATE_SCHEMA_READERS="${GATE_SCHEMA_READERS% }"
+
+# The paths on stdin that are migrations, one per line. Empty when the
+# change touches none.
+schema_paths() {
+    grep -E '^infra/postgres/schema/' || true
+}
+
+# The schema half of the map: a change under infra/postgres/schema/
+# implies every reader. Reads the readers out of the environment for
+# the same reason `input_crates` does.
+schema_crates() {
+    if [ -n "$(schema_paths)" ]; then printf '%s\n' "${GATE_SCHEMA_READERS}"; fi
+}
+
 # The derived half of the map: which crates read the paths on stdin.
 input_crates() {
     awk -v idx="${GATE_FILE_INPUTS}" '
@@ -552,12 +619,14 @@ input_crates() {
 }
 
 path_map() {
-    # Stdin is read ONCE and handed to both halves: the hand-written
-    # shapes below, and the derivation above that reads the tree.
+    # Stdin is read ONCE and handed to all three parts: the hand-written
+    # shapes below, the file-input derivation above that reads the
+    # tree, and the schema readers.
     local paths
     paths="$(cat)"
     { printf '%s\n' "$paths" | path_shapes
       printf '%s\n' "$paths" | input_crates
+      printf '%s\n' "$paths" | schema_crates
     } | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' '
 }
 
@@ -722,11 +791,21 @@ scope_self_test() {
     _case "a runbook a test reads implies that crate" "boss-testing" \
         "docs/runbooks/dev-environment-bootstrap.md"
     _case "the web app implies no crate" "" "apps/web/src/me/MePage.svelte"
-    # Schema files imply no CRATE, which is why --auto asks
-    # `schema_touched` separately rather than reading it off this map.
-    # Get this wrong in the other direction — map schema to some crate
-    # — and every migration would compile a crate for no reason.
-    _case "a migration implies no crate" "" "infra/postgres/schema/141-x.sql"
+    # THE SECOND RE-PIN (backlog 4711828d). Until this car the line here
+    # asserted "a migration implies no crate", with a note that mapping
+    # schema to a crate "would compile a crate for no reason". The
+    # reason arrived on 2026-09-16: two migration cars gated green
+    # without boss-jobs and struck a six-car train on its
+    # credentials_pg pin. A migration implies every crate that stands
+    # up the schema — derived, so the want is read from the same
+    # derivation and this case pins the WIRING (path_map consults it),
+    # while the checks below pin the derivation itself.
+    _case "a migration implies every crate that stands up the schema" \
+        "${GATE_SCHEMA_READERS}" "infra/postgres/schema/141-x.sql"
+    # And beside a crate change it implies both, named once each.
+    _case "a migration beside a crate change implies both" \
+        "$(printf '%s\n' "${GATE_SCHEMA_READERS}" boss-expr | tr ' ' '\n' | sort -u | tr '\n' ' ' | sed 's/ $//')" \
+        "infra/postgres/schema/141-x.sql" "crates/core/boss-expr/src/lib.rs"
     # The tenant-bundle rules DERIVE a crate name from the directory
     # rather than listing the two tenants, which moves the thing that
     # can rot: a third tenant whose engine crate is not
@@ -770,6 +849,38 @@ scope_self_test() {
             fails=1
         fi
     done <<< "${GATE_FILE_INPUTS}"
+    # The schema readers rot the same two ways, plus a third: the
+    # derivation could quietly key on the wrong thing and drop a crate
+    # that reads the schema without saying so. Two named readers pin
+    # that — boss-jobs, whose credentials_pg pin is the one the train
+    # found, and boss-dispatcher, which declares no `postgres` feature
+    # and stands up a TestDb anyway, so a derivation keyed on the
+    # manifest instead of the constructor reds here by name. The floor
+    # is a round number well under the live 25, for the reason given
+    # above the index floor.
+    local rd_count=0 rd_crate rd_found rd_manifest
+    for rd_crate in ${GATE_SCHEMA_READERS}; do
+        rd_count=$((rd_count + 1))
+        rd_found=0
+        for rd_manifest in crates/*/"$rd_crate"/Cargo.toml; do
+            [ -f "$rd_manifest" ] && rd_found=1
+        done
+        if [ "$rd_found" -eq 0 ]; then
+            echo "gate.sh scope self-test FAIL: ${rd_crate} was derived as a schema reader, which is not a crate — the map would demand a -p cargo cannot satisfy" >&2
+            fails=1
+        fi
+    done
+    if [ "$rd_count" -lt 10 ]; then
+        echo "gate.sh scope self-test FAIL: only ${rd_count} crate(s) derived as schema readers, which is too few to be a real answer — cargo metadata or the TestDb scan is broken and a migration now implies almost nothing (backlog 4711828d)" >&2
+        fails=1
+    fi
+    for rd_crate in boss-jobs boss-dispatcher; do
+        case " ${GATE_SCHEMA_READERS} " in
+            *" ${rd_crate} "*) ;;
+            *) echo "gate.sh scope self-test FAIL: ${rd_crate} stands up a TestDb and was not derived as a schema reader — a migration car would gate without the crate that reads it (backlog 4711828d)" >&2
+               fails=1 ;;
+        esac
+    done
     if [ "$fails" -ne 0 ]; then
         echo "gate.sh: the scope check cannot be trusted — fix it before relying on -p" >&2
         exit 2
@@ -790,6 +901,9 @@ if [ ${#NAMED[@]} -gt 0 ]; then
         if [ -n "$MISSING" ]; then
             echo "" >&2
             echo "GATE REFUSED: -p names [${NAMED[*]}] but the tree also changes:${MISSING}" >&2
+            if [ "$(schema_touched)" = "yes" ]; then
+                echo "  (a change under infra/postgres/schema/ is a change to every crate that stands up the schema)" >&2
+            fi
             echo "" >&2
             echo "Those crates would not be compiled or tested by this run. Either add" >&2
             echo "them (-p ${MISSING# }) or run the full gate. If a change is there by" >&2
@@ -817,16 +931,18 @@ fi
 # the same hole as the mis-scoped `-p` that reddened a three-car train
 # (a6ffcb7c), pointed the other way.
 #
-# THE FIXTURE IS THE SUBTLE PART. `infra/postgres/schema/**` maps to no
-# crate, but the shared fixture LOADS the schema — so a schema-only
-# change has no crate to compile and can still break every DB-backed
-# test in the workspace. Skipping cargo entirely there would scope away
-# the exact break the fixture check exists to catch, which is what the
-# comment above `check "fixture"` warns about. So the derivation
-# answers two questions: which crates, and whether the fixture is
-# implicated.
+# THE SCHEMA IS THE SUBTLE PART. `infra/postgres/schema/**` is not a
+# crate, but the shared fixture LOADS it into every DB-backed test in
+# the workspace, so a schema-only change can break any of them. Until
+# 2026-09-16 the answer was "fixture + lints only": the fixture proved
+# the schema applied and no test that reads it ran (backlog 4711828d —
+# two such cars struck a six-car train). Now `path_map` maps a schema
+# change to every crate that stands up the schema (`schema_readers`),
+# so a migration-only car derives a scope like any other and the
+# fixture runs unscoped ahead of it as before. What remains here is the
+# question the receipt asks: did the schema move at all.
 schema_touched() {
-    if changed_paths | grep -qE '^infra/postgres/schema/'; then echo yes; else echo no; fi
+    if [ -n "$(changed_paths | schema_paths)" ]; then echo yes; else echo no; fi
 }
 
 # Which ref is "the trunk" for deriving a branch's own commits. The
@@ -851,11 +967,12 @@ if [ "$AUTO" -eq 1 ]; then
     if [ -n "$DERIVED" ]; then
         for c in $DERIVED; do SCOPE+=(-p "$c"); NAMED+=("$c"); done
         echo "gate: --auto scoping to $(echo "$DERIVED" | tr '\n' ' ')"
-    elif [ "$(schema_touched)" = "yes" ]; then
-        # No crate, but the schema moved: the fixture is the one check
-        # that can see that, so it runs and nothing else cargo-shaped.
-        AUTO_LINTS_ONLY=1
-        echo "gate: --auto — no crate changed, but infra/postgres/schema/ did; fixture + lints only"
+        # Say WHY when the schema widened it: an author who changed one
+        # crate and sees twenty-six in the scope should read the reason
+        # here, not infer it.
+        if [ "$(schema_touched)" = "yes" ]; then
+            echo "gate: --auto schema change -> $(changed_paths | schema_paths | tr '\n' ' ')is read by ${GATE_SCHEMA_READERS}"
+        fi
     else
         AUTO_LINTS_ONLY=1
         AUTO_SKIP_FIXTURE=1
@@ -944,6 +1061,20 @@ write_receipt() {
             unver_count=$((unver_count + 1))
         done
     fi
+    # WHY the scope is what it is, for the half of it a reader cannot
+    # infer from the changed files: a migration names no crate, so a
+    # scope of twenty-five crates over a one-file diff looks wrong
+    # until the receipt says the schema moved and these are its
+    # readers. `paths` is the migrations this change carries (empty
+    # when none), `readers` the derived set whether or not it was
+    # pulled in — so a full-mode receipt still states which crates a
+    # migration reaches (backlog 4711828d).
+    local schema_json="" schema_n=0
+    for p in $(changed_paths | schema_paths); do
+        [ "$schema_n" -eq 0 ] || schema_json="${schema_json},"
+        schema_json="${schema_json}\"${p}\""
+        schema_n=$((schema_n + 1))
+    done
     # Only a refusal sets this; it names WHY the gate declined, which is
     # the fact a reader needs to tell "the host was unfit" from "the
     # branch was bad".
@@ -963,6 +1094,7 @@ write_receipt() {
   "ci": ${in_ci},
   "free_gb": $(gate_avail_gb),
   "unverifiable": [${unver}],
+  "schema_change": {"paths": [${schema_json}], "readers": "${GATE_SCHEMA_READERS}"},
   "checks": [${checks}]
 }
 RECEIPT

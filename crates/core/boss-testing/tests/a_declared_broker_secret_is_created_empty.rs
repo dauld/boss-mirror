@@ -361,8 +361,11 @@ fn one_helper_answers_whether_a_secret_exists() {
         3,
         "the converge creates a Secret in exactly one place"
     );
+    // The gate's presence loop is instance_secrets_absent since
+    // dc1bc724 (the quiet half the runner provisions from); the gate
+    // itself reads through it.
     for f in [
-        "instance_secret_gate",
+        "instance_secrets_absent",
         "connector_status",
         "ensure_declared_secrets",
     ] {
@@ -376,6 +379,13 @@ fn one_helper_answers_whether_a_secret_exists() {
             "{f} asks secret_presence rather than reading kubectl itself"
         );
     }
+    let start = lib.find("instance_secret_gate() {").unwrap();
+    let body = &lib[start..];
+    let end = body.find("\n}\n").unwrap();
+    assert!(
+        body[..end].contains("instance_secrets_absent") && !body[..end].contains("$k get secret"),
+        "instance_secret_gate reads presence through instance_secrets_absent"
+    );
 }
 
 #[test]

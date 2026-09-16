@@ -405,11 +405,18 @@ KM=$(kubectl_seeing "$APPLY_DIR")
 # the apply would exit 1 after creating the namespace, and only the
 # NEXT converge would succeed. A second apply of an unchanged file is
 # a no-op, so prod pays nothing for the same ordering.
-apply_instance() {
+# apply_namespaces NAMESPACE — the Namespace files alone. Also what
+# provisioning runs before it creates an instance's Secrets IN that
+# namespace (dc1bc724): the one definition of "the Namespace first".
+apply_namespaces() {
     local ns="$1" f
     for f in $(grep -l '^kind: Namespace$' "$APPLY_DIR/$ns"/*.yaml); do
         $KM apply -f "/manifests/$ns/${f##*/}"
     done
+}
+apply_instance() {
+    local ns="$1"
+    apply_namespaces "$ns"
     $KM apply -f "/manifests/$ns"
 }
 STAGE="apply manifests"
@@ -613,13 +620,45 @@ echo "cluster-deploy-runner: secrets declared: $SECRETS_DECLARED"
 # Secrets exist the instance applies with no other change and the
 # field flips from skipped to applied. A read the credential cannot
 # make is neither — it fails this stage, after prod's stamp.
+#
+# AND PROVISIONING MINTS WHAT THE INSTANCE CAN MINT ITSELF, before the
+# gate decides (backlog dc1bc724; David 2026-09-16: no hand work unless
+# absolutely required — the playground was skipped on every converge
+# from 2026-09-15 for want of six hand-minted Secrets, and only one of
+# the six is a person's). The loop reads the absent set QUIETLY first
+# (instance_secrets_absent — no verdict, no shapes for a person), and
+# when anything is absent it applies the instance's Namespace — the
+# Secrets must live somewhere — and hands the set to
+# provision_instance_secrets (cluster-deploy-lib.sh, where each of the
+# six is classified with its reason): internal ones minted from random
+# bytes, shared ones copied from the namespace the instance list's
+# `shares_with` resolves to (the sixth --instances column), the OIDC
+# root created empty so the gateway boots guest-only, and anything else
+# left for the gate to name. Values ride the `-i` kubectl's stdin —
+# KAPPLY, the one that reads it — never argv, never this journal: the
+# line below is names only, and it rides the packet as
+# `instance_secrets_minted` the moment it is known. THEN the gate asks
+# the cluster again, loud, and an instance that now has everything
+# applies on this same converge.
 STAGE="apply instances"
 INSTANCES_APPLIED="$SOURCE_NS"
 INSTANCES_SKIPPED=""
-while IFS=$'\t' read -r iname ins_ns _t _s _h; do
+INSTANCE_SECRETS_MINTED=""
+while IFS=$'\t' read -r iname ins_ns _t _s _h share_ns; do
     [ "$ins_ns" = "$SOURCE_NS" ] && continue
     STAGE="apply $ins_ns"
     absent=""
+    read_rc=0
+    absent=$(instance_secrets_absent "$K" "$KM" "$ins_ns" "/manifests/$ins_ns") || read_rc=$?
+    if [ "$read_rc" -eq 0 ] && [ -n "$absent" ]; then
+        STAGE="provision $ins_ns"
+        apply_namespaces "$ins_ns"
+        minted=$(provision_instance_secrets "$K" "$KAPPLY" "$KM" "$ins_ns" "/manifests/$ins_ns" "$share_ns" "$absent")
+        INSTANCE_SECRETS_MINTED="${INSTANCE_SECRETS_MINTED:+$INSTANCE_SECRETS_MINTED; }$ins_ns: $minted"
+        run_summary_field instance_secrets_minted "$INSTANCE_SECRETS_MINTED"
+        echo "cluster-deploy-runner: instance $ins_ns secrets: $minted"
+        STAGE="apply $ins_ns"
+    fi
     gate_rc=0
     absent=$(instance_secret_gate "$K" "$KM" "$ins_ns" "/manifests/$ins_ns") || gate_rc=$?
     case "$gate_rc" in

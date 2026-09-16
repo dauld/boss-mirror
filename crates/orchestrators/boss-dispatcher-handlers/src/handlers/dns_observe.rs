@@ -509,8 +509,21 @@ pub fn annotate_verdicts(verdicts: &[Json], gate_for: impl Fn(&str) -> AccessGat
 fn is_hard(v: &Json) -> bool {
     matches!(
         v.get("verdict").and_then(Json::as_str),
-        Some("DRIFT" | "ABSENT")
+        Some("DRIFT" | "ABSENT" | "REFUSED")
     )
+}
+
+/// The Access verdict a write the account would not take becomes:
+/// the domain it was for, the write in words, and the account's own
+/// answer verbatim (the Cloudflare error body names the rule broken —
+/// `12130 policy precedences must be unique` was the first).
+pub fn refused_verdict(domain: &str, write: &str, error: &str) -> Json {
+    json!({
+        "domain": domain,
+        "verdict": "REFUSED",
+        "write": write,
+        "error": error,
+    })
 }
 
 /// One observation, whole: the zone's verdicts (annotated), the
@@ -532,7 +545,8 @@ impl Reading {
     }
 
     fn counts_of(verdicts: &[Json]) -> Json {
-        let mut counts = json!({"MATCH": 0, "DRIFT": 0, "ABSENT": 0, "UNDECLARED": 0, "HELD": 0});
+        let mut counts =
+            json!({"MATCH": 0, "DRIFT": 0, "ABSENT": 0, "UNDECLARED": 0, "HELD": 0, "REFUSED": 0});
         for v in verdicts {
             if let Some(k) = v.get("verdict").and_then(Json::as_str)
                 && let Some(n) = counts.get(k).and_then(Json::as_u64)
@@ -570,6 +584,9 @@ impl Reading {
             "{} · access: {} match, {} drift, {} absent, {} undeclared",
             self.zone.summary, a["MATCH"], a["DRIFT"], a["ABSENT"], a["UNDECLARED"]
         );
+        if a["REFUSED"] != 0 {
+            s.push_str(&format!(", {} refused", a["REFUSED"]));
+        }
         if !self.applied.is_empty() {
             s.push_str(" · applied: ");
             s.push_str(&self.applied.join("; "));
@@ -887,16 +904,38 @@ impl DnsObserve {
 
     /// Create every declared application the account lacks, and every
     /// declared policy a present application lacks. Returns what was
-    /// written (for the packet) and the domains created (for the gate).
+    /// written (for the packet), the domains created (for the gate),
+    /// and every write the account REFUSED as a `REFUSED` verdict.
+    ///
+    /// A refusal is a finding, not an error. Until 2026-09-16 it was
+    /// an error: the account refused the first policy on boss.
+    /// (precedence, below), the handler failed, NATS redelivered it
+    /// eight times against the same 400 and dead-lettered — and the
+    /// packet recorded the dead letter and NOTHING it had read, the
+    /// application it had created, or the interlock it therefore
+    /// held. The zone was never read at all. What the account will not
+    /// take is exactly what the observation exists to record: it rides
+    /// the verdicts, the step completes with findings, the alarm names
+    /// it, and the next day's reading retries with what has changed.
     async fn apply_access(
         &self,
         account_id: &str,
         declared: &[DeclaredApp],
         live: &[AccessApp],
         verdicts: &[Json],
-    ) -> Result<(Vec<String>, Vec<String>), HandlerError> {
+    ) -> (Vec<String>, Vec<String>, Vec<Json>) {
         let mut applied = Vec::new();
         let mut created = Vec::new();
+        let mut refused = Vec::new();
+        // One above every precedence the ACCOUNT holds, counted up
+        // across this firing's creates: the uniqueness Cloudflare
+        // enforces reaches across applications (AccessPolicySpec).
+        let mut next_precedence = live
+            .iter()
+            .flat_map(|a| a.policies.iter().map(|p| p.precedence))
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
         for d in declared {
             let verdict = verdicts
                 .iter()
@@ -907,7 +946,7 @@ impl DnsObserve {
                 .unwrap_or_default();
             let policies: Vec<(&DeclaredPolicy, String)> = match kind {
                 "ABSENT" => {
-                    let id = self
+                    let id = match self
                         .access
                         .create_access_app(
                             account_id,
@@ -919,7 +958,17 @@ impl DnsObserve {
                             },
                         )
                         .await
-                        .map_err(HandlerError::Downstream)?;
+                    {
+                        Ok(id) => id,
+                        Err(e) => {
+                            refused.push(refused_verdict(
+                                &d.domain,
+                                &format!("create Access application {}", d.domain),
+                                &e,
+                            ));
+                            continue;
+                        }
+                    };
                     created.push(d.domain.clone());
                     applied.push(format!("Access application {} created", d.domain));
                     d.policy.iter().map(|p| (p, id.clone())).collect()
@@ -943,8 +992,11 @@ impl DnsObserve {
                 }
                 _ => Vec::new(),
             };
-            for (i, (p, app_id)) in policies.iter().enumerate() {
-                self.access
+            for (p, app_id) in &policies {
+                let precedence = next_precedence;
+                next_precedence = next_precedence.saturating_add(1);
+                let written = self
+                    .access
                     .create_access_policy(
                         account_id,
                         app_id,
@@ -957,18 +1009,27 @@ impl DnsObserve {
                                 .iter()
                                 .map(|e| json!({"email": {"email": e}}))
                                 .collect(),
-                            precedence: u32::try_from(i + 1).unwrap_or(u32::MAX),
+                            precedence,
                         },
                     )
-                    .await
-                    .map_err(HandlerError::Downstream)?;
-                applied.push(format!(
-                    "Access policy {} ({}) created on {}",
-                    p.name, p.decision, d.domain
-                ));
+                    .await;
+                match written {
+                    Ok(()) => applied.push(format!(
+                        "Access policy {} ({}) created on {}",
+                        p.name, p.decision, d.domain
+                    )),
+                    Err(e) => refused.push(refused_verdict(
+                        &d.domain,
+                        &format!(
+                            "create Access policy {} ({}) on {} at precedence {}",
+                            p.name, p.decision, d.domain, precedence
+                        ),
+                        &e,
+                    )),
+                }
             }
         }
-        Ok((applied, created))
+        (applied, created, refused)
     }
 
     /// Execute one released zone write.
@@ -1128,14 +1189,14 @@ impl Handler for DnsObserve {
             .await
             .map_err(HandlerError::Downstream)?;
         let mut access_verdicts = compare_access(&access_decl.application, &live_apps);
-        let (mut applied, created) = self
+        let (mut applied, created, refused) = self
             .apply_access(
                 &info.account_id,
                 &access_decl.application,
                 &live_apps,
                 &access_verdicts,
             )
-            .await?;
+            .await;
         if !applied.is_empty() {
             live_apps = self
                 .access
@@ -1144,6 +1205,9 @@ impl Handler for DnsObserve {
                 .map_err(HandlerError::Downstream)?;
             access_verdicts = compare_access(&access_decl.application, &live_apps);
         }
+        // What the account refused rides beside what it holds: a
+        // finding on the step, in the alarm, counted as hard.
+        access_verdicts.extend(refused);
         let gate_for = |hostname: &str| access_gate(hostname, &live_apps, &created);
 
         // The zone, with the only token that can read it; then the
@@ -1446,12 +1510,16 @@ mod tests {
         }
     }
 
+    /// The dashboard's policies sit at precedence 1 — the shape the
+    /// account had on 2026-09-16 when a second application's first
+    /// policy at 1 was refused.
     fn allow(name: &str, emails: &[&str]) -> AccessPolicy {
         AccessPolicy {
             id: format!("pol-{name}"),
             name: name.to_string(),
             decision: "allow".into(),
             include: email_rules(emails),
+            precedence: 1,
         }
     }
 
@@ -1569,6 +1637,7 @@ why = "x"
                     name: "Allow visitors".into(),
                     decision: "allow".into(),
                     include: vec![json!({"everyone": {}})],
+                    precedence: 1,
                 }],
             ),
             live_app("other.algedonic.dev", vec![]),
@@ -1843,11 +1912,21 @@ why = "x"
         }
     }
 
-    /// An account that remembers its applications and honours creates.
+    /// The account's answer to a policy whose precedence another
+    /// policy in the account already holds — verbatim from the API,
+    /// 2026-09-16 (code 12130).
+    const PRECEDENCE_TAKEN: &str = "returned 400 Bad Request: access.api.error.invalid_request: policy precedences must be unique";
+
+    /// An account that remembers its applications and honours creates —
+    /// and refuses a policy whose precedence the account already holds,
+    /// across applications, the way the real one did on 2026-09-16.
+    /// `refuse_policies` refuses every policy create with that text,
+    /// for the reading where the account will not take a write at all.
     struct FakeAccess {
         apps: Mutex<Result<Vec<AccessApp>, String>>,
         reads: Mutex<usize>,
         writes: Mutex<Vec<String>>,
+        refuse_policies: Option<String>,
     }
 
     impl FakeAccess {
@@ -1856,6 +1935,15 @@ why = "x"
                 apps: Mutex::new(Ok(apps)),
                 reads: Mutex::new(0),
                 writes: Mutex::new(vec![]),
+                refuse_policies: None,
+            })
+        }
+        fn refusing_policies(apps: Vec<AccessApp>, why: &str) -> Arc<Self> {
+            Arc::new(Self {
+                apps: Mutex::new(Ok(apps)),
+                reads: Mutex::new(0),
+                writes: Mutex::new(vec![]),
+                refuse_policies: Some(why.to_string()),
             })
         }
         fn dark(msg: &str) -> Arc<Self> {
@@ -1863,6 +1951,7 @@ why = "x"
                 apps: Mutex::new(Err(msg.to_string())),
                 reads: Mutex::new(0),
                 writes: Mutex::new(vec![]),
+                refuse_policies: None,
             })
         }
         fn writes(&self) -> Vec<String> {
@@ -1914,15 +2003,26 @@ why = "x"
                 Json::Array(spec.include.clone()),
                 spec.precedence
             ));
-            if let Ok(apps) = &mut *self.apps.lock().unwrap()
-                && let Some(app) = apps.iter_mut().find(|a| a.id == app_id)
-            {
-                app.policies.push(AccessPolicy {
-                    id: format!("pol-{}", spec.name),
-                    name: spec.name.clone(),
-                    decision: spec.decision.clone(),
-                    include: spec.include.clone(),
-                });
+            if let Some(why) = &self.refuse_policies {
+                return Err(why.clone());
+            }
+            if let Ok(apps) = &mut *self.apps.lock().unwrap() {
+                if apps
+                    .iter()
+                    .flat_map(|a| a.policies.iter())
+                    .any(|p| p.precedence == spec.precedence)
+                {
+                    return Err(PRECEDENCE_TAKEN.to_string());
+                }
+                if let Some(app) = apps.iter_mut().find(|a| a.id == app_id) {
+                    app.policies.push(AccessPolicy {
+                        id: format!("pol-{}", spec.name),
+                        name: spec.name.clone(),
+                        decision: spec.decision.clone(),
+                        include: spec.include.clone(),
+                        precedence: spec.precedence,
+                    });
+                }
             }
             Ok(())
         }
@@ -2288,8 +2388,10 @@ why = "x"
             access.writes(),
             vec![
                 "create app BOSS boss.algedonic.dev self_hosted 24h".to_string(),
+                // 2, not 1: the dashboard's visitors policy holds 1 and
+                // the account refuses a second 1 on ANY application.
                 format!(
-                    "create policy operators allow [{{\"email\":{{\"email\":\"{DAVID}\"}}}}] on app-boss.algedonic.dev precedence=1"
+                    "create policy operators allow [{{\"email\":{{\"email\":\"{DAVID}\"}}}}] on app-boss.algedonic.dev precedence=2"
                 ),
             ]
         );
@@ -2369,8 +2471,12 @@ why = "x"
         let (jobs, captured) = stub_jobs_api("ready", vec![], LOCATION).await;
         let zone = FakeZone::with(as_measured());
         // The account answers reads but the create is refused (the
-        // token without Access: Edit, say): the observation must not
-        // fail closed silently — it fails the firing loudly...
+        // token without Access: Edit, say). Until 2026-09-16 this
+        // failed the firing: eight redeliveries against the same
+        // answer, a dead letter, and a packet that recorded neither
+        // the zone nor the refusal. The refusal is what the reading
+        // is FOR: a REFUSED finding, the zone still read, the flip
+        // held on the verdict, the alarm naming the account's answer.
         struct RefusingAccess(Arc<FakeAccess>);
         #[async_trait]
         impl AccessApps for RefusingAccess {
@@ -2404,17 +2510,165 @@ why = "x"
             secrets(),
             declarations(),
         );
-        let err = h.invoke(&zone_args(), &ctx()).await.unwrap_err();
-        assert!(
-            matches!(&err, HandlerError::Downstream(m) if m.contains("403")),
-            "{err:?}"
-        );
+        h.invoke(&zone_args(), &ctx())
+            .await
+            .expect("a refused write is a finding, not a failed firing");
         assert!(zone.writes().is_empty(), "nothing touches the zone");
-        assert_eq!(*zone.reads.lock().unwrap(), 0, "the zone is not even read");
-        assert!(
-            writes(&captured).is_empty(),
-            "the packet stays open at observe"
+        assert_eq!(*zone.reads.lock().unwrap(), 1, "the zone is still read");
+
+        let w = writes(&captured);
+        assert_eq!(
+            w.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+            vec!["POST /api/jobs", "PUT /api/jobs/obs-1/steps/step-observe"],
+            "the alarm, then the step: {w:?}"
         );
+        let body = step_put(&w);
+        assert_eq!(body["status"], "completed");
+        assert_eq!(body["metadata"]["result"], "findings");
+        let boss = boss_verdict(&body);
+        assert_eq!(boss["verdict"], "HELD", "{boss}");
+        assert_eq!(boss["access"], "absent");
+        let access_v = body["metadata"]["access"].as_array().unwrap();
+        let refused: Vec<&Json> = access_v
+            .iter()
+            .filter(|v| v["verdict"] == "REFUSED")
+            .collect();
+        assert_eq!(refused.len(), 1, "{access_v:?}");
+        assert_eq!(refused[0]["domain"], "boss.algedonic.dev");
+        assert_eq!(
+            refused[0]["write"],
+            "create Access application boss.algedonic.dev"
+        );
+        assert!(
+            refused[0]["error"].as_str().unwrap().contains("403"),
+            "the account's own answer, verbatim: {}",
+            refused[0]
+        );
+        assert_eq!(body["metadata"]["counts"]["access"]["REFUSED"], 1);
+        let summary = body["metadata"]["summary"].as_str().unwrap();
+        assert!(
+            summary.contains("1 absent, 0 undeclared, 1 refused"),
+            "{summary}"
+        );
+        let alarm = &w[0].1;
+        let findings = alarm["metadata"]["findings"].as_array().unwrap();
+        assert!(
+            findings
+                .iter()
+                .any(|f| f["verdict"] == "REFUSED" && f["scope"] == "access"),
+            "the alarm carries the refusal: {findings:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_policy_is_a_finding_and_the_next_reading_takes_the_next_precedence() {
+        // The measured 2026-09-16 firing (packet ca4dd287): the boss.
+        // application was created, then its first policy — sent at
+        // precedence 1 while the dashboard's playground policy held 1
+        // — was refused `policy precedences must be unique`. Day one:
+        // the app stands without an allow policy, the flip is HELD,
+        // the refusal is on the packet and in the alarm.
+        let (jobs, captured) = stub_jobs_api("ready", vec![], LOCATION).await;
+        let zone = FakeZone::with(as_measured());
+        let access = FakeAccess::refusing_policies(
+            vec![live_app(
+                "playground.algedonic.dev",
+                vec![allow("visitors", &[DAVID])],
+            )],
+            PRECEDENCE_TAKEN,
+        );
+        let h = handler(
+            jobs,
+            zone.clone(),
+            access.clone(),
+            secrets(),
+            declarations(),
+        );
+        h.invoke(&zone_args(), &ctx()).await.unwrap();
+        assert_eq!(
+            access.writes(),
+            vec![
+                "create app BOSS boss.algedonic.dev self_hosted 24h".to_string(),
+                format!(
+                    "create policy operators allow [{{\"email\":{{\"email\":\"{DAVID}\"}}}}] on app-boss.algedonic.dev precedence=2"
+                ),
+            ],
+            "the app created, the policy sent (and refused)"
+        );
+        assert!(zone.writes().is_empty(), "the interlock holds the flip");
+        let w = writes(&captured);
+        assert_eq!(
+            w.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+            vec!["POST /api/jobs", "PUT /api/jobs/obs-1/steps/step-observe"],
+            "{w:?}"
+        );
+        let body = step_put(&w);
+        assert_eq!(body["metadata"]["result"], "findings");
+        let boss = boss_verdict(&body);
+        assert_eq!(boss["verdict"], "HELD", "{boss}");
+        assert_eq!(
+            boss["access"], "no-allow-policy",
+            "the app is there, its allow policy is not: {boss}"
+        );
+        let refused: Vec<Json> = body["metadata"]["access"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|v| v["verdict"] == "REFUSED")
+            .cloned()
+            .collect();
+        assert_eq!(refused.len(), 1, "{body}");
+        assert_eq!(
+            refused[0]["write"],
+            "create Access policy operators (allow) on boss.algedonic.dev at precedence 2"
+        );
+        assert!(
+            refused[0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("policy precedences must be unique"),
+            "{}",
+            refused[0]
+        );
+        assert_eq!(
+            body["metadata"]["applied"],
+            json!(["Access application boss.algedonic.dev created"]),
+            "what WAS written is still recorded"
+        );
+
+        // Day two: the account holds the app (no policy) and the
+        // dashboard's policy at 1. The reading finds `operators`
+        // absent, creates it one above every precedence the account
+        // lists — 2 — and the flip releases.
+        let (jobs, captured) = stub_jobs_api("ready", vec![], LOCATION).await;
+        let zone = FakeZone::with(as_measured());
+        let access = FakeAccess::with(vec![
+            live_app(
+                "playground.algedonic.dev",
+                vec![allow("visitors", &[DAVID])],
+            ),
+            live_app("boss.algedonic.dev", vec![]),
+        ]);
+        let h = handler(
+            jobs,
+            zone.clone(),
+            access.clone(),
+            secrets(),
+            declarations(),
+        );
+        h.invoke(&zone_args(), &ctx()).await.unwrap();
+        assert_eq!(
+            access.writes(),
+            vec![format!(
+                "create policy operators allow [{{\"email\":{{\"email\":\"{DAVID}\"}}}}] on app-boss.algedonic.dev precedence=2"
+            )]
+        );
+        assert_eq!(zone.writes().len(), 2, "{:?}", zone.writes());
+        let body = step_put(&writes(&captured));
+        assert_eq!(body["metadata"]["result"], "match", "{body}");
+        let boss = boss_verdict(&body);
+        assert_eq!(boss["verdict"], "MATCH");
+        assert_eq!(boss["access"], "present");
     }
 
     #[tokio::test]

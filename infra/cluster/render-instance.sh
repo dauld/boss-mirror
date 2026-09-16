@@ -9,8 +9,11 @@
 #   render-instance.sh --all DIR       every instance in instances.toml
 #       into DIR/<namespace>/; the source instance's directory also gets
 #       every `pipeline` manifest, copied as written
-#   render-instance.sh --instances     name<TAB>namespace<TAB>tenant<TAB>sim<TAB>hostname
-#       per instance, in file order — what the converge iterates
+#   render-instance.sh --instances     name<TAB>namespace<TAB>tenant<TAB>sim<TAB>hostname<TAB>shares-with
+#       per instance, in file order — what the converge iterates. The
+#       sixth column is the NAMESPACE of the instance this one copies
+#       its shared Secrets from (`shares_with` in instances.toml; backlog
+#       dc1bc724), empty when it declares none
 #   render-instance.sh --source        the source instance's namespace (the
 #       one the files are written for; its render is the identity)
 #   render-instance.sh --roster        file<TAB>set per manifest, or a refusal
@@ -66,6 +69,10 @@
 #   * a tenant path that is not examples/<name>/seeds/tenant.toml, or is
 #     not in the tree;
 #   * a sim value that is not true or false; a hostname that is not one;
+#   * a `shares_with` that names no instance in the file, or the
+#     instance itself — the converge copies shared Secrets from the
+#     namespace this resolves to, and an unknown source must not read
+#     as "shares with nobody";
 #   * a roster that does not match the directory (above);
 #   * a SOURCE value the instance manifests do not carry. The source's
 #     values in instances.toml must be what the files say; a prod entry
@@ -169,6 +176,23 @@ check_sim() {
 check_hostname() {
     [[ "$1" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]] || refuse "hostname \`$1\`: a TLS-front hostname is a lowercase DNS name with at least one dot"
 }
+# shares_with_ns <section> — the namespace of the instance <section>
+# declares `shares_with`, empty when it declares none. The converge
+# copies the instance's shared Secrets (forgejo-registry, resend —
+# cluster-deploy-lib.sh provision_instance_secrets) from that namespace,
+# so a value that names no instance is refused rather than read as
+# "nobody": the instance would then wait on a person for Secrets it
+# was declared to inherit.
+shares_with_ns() {
+    local s="$1" v
+    v=$(param "$s" shares_with)
+    [ -n "$v" ] || return 0
+    [ "$v" != "$s" ] || refuse "${INSTANCES#"$TREE"/}: instance [$s] declares shares_with = \"$v\" — itself"
+    # A here-string, not a pipe: `grep -q` exits at its match and a
+    # producer still writing is SIGPIPE under pipefail.
+    grep -qx -- "$v" <<< "$(sections)" || refuse "${INSTANCES#"$TREE"/}: instance [$s] declares shares_with = \"$v\", which is not an instance in this file"
+    param "$v" namespace
+}
 
 # --- the source instance ----------------------------------------------------
 # The values the files are WRITTEN with. Each is checked against the
@@ -261,13 +285,19 @@ case "${1:-}" in
         roster > /dev/null
         load_source
         for s in $(sections); do
-            printf '%s\t%s\t%s\t%s\t%s\n' "$s" "$(param "$s" namespace)" "$(param "$s" tenant)" "$(param "$s" sim)" "$(param "$s" hostname)"
+            share=$(shares_with_ns "$s") || exit $?
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$s" "$(param "$s" namespace)" "$(param "$s" tenant)" "$(param "$s" sim)" "$(param "$s" hostname)" "$share"
         done
         ;;
     --all)
         [ $# -eq 2 ] && [ -n "$2" ] || usage
         roster > /dev/null
         load_source
+        # Every `shares_with` resolves, or nothing is rendered: the
+        # render stage is where the converge first reads this file, and
+        # a refusal after the first instance's directory exists would
+        # read as a partial render.
+        for s in $(sections); do shares_with_ns "$s" > /dev/null; done
         seen_ns=""
         for s in $(sections); do
             ns=$(param "$s" namespace); tenant=$(param "$s" tenant); sim=$(param "$s" sim); host=$(param "$s" hostname)

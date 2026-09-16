@@ -77,11 +77,13 @@ async fn seeded_rules_serve_the_thresholds_the_schema_declares() {
     // THIS NUMBER LIVES IN FOUR PLACES and they do not move together:
     // the migration, boss-gcp's LOCAL cadence_rules (which is what the
     // boarding loop actually reads — see 131 and 147), this assertion,
-    // and the sibling in boss-cli's cadence::db_tests. `--auto` gates a
-    // schema-only change with "fixture + lints only" and SKIPS tests, so
-    // editing the migration alone leaves both assertions red and reports
-    // green. That is how this one was found: not by the change that
-    // broke it, but by an unrelated merge dragging the crate into scope.
+    // and the sibling in boss-cli's cadence::db_tests. Until 2026-09-16
+    // `--auto` gated a schema-only change with "fixture + lints only" and
+    // SKIPPED tests, so editing the migration alone left both assertions
+    // red and reported green. That is how this one was found: not by the
+    // change that broke it, but by an unrelated merge dragging the crate
+    // into scope. Since backlog 4711828d a migration scopes every crate
+    // that stands up a TestDb, so the migration edit now runs this pin.
     let depth = by_name("train-board-on-dock-depth");
     assert_eq!(depth.verb, "board");
     assert_eq!(depth.basis, "queue-depth");

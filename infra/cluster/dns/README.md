@@ -16,7 +16,16 @@ on any DRIFT or ABSENT, and writes exactly two kinds of thing: an
 ABSENT declared Access application (created with its declared policies,
 read back before it is judged) and a zone record declaring
 `interlock = "access"`, once the application for that name reads
-present with an allow policy.
+present with an allow policy. A write the account refuses is a
+`REFUSED` verdict (the write in words, the account's answer verbatim),
+counted as a finding and carried by the alarm — never a failed firing:
+on 2026-09-16 the first policy on the freshly created boss. application
+was refused `policy precedences must be unique` (the dashboard's
+playground policy held precedence 1 and Cloudflare's uniqueness reaches
+across applications), the handler dead-lettered after eight identical
+redeliveries, and the packet recorded the dead letter and nothing it had
+read. A policy is now created one above every precedence the account
+lists, and the next day's reading retries what was refused.
 
 ## Runbook: the first observation after 198c5fe9 lands
 
