@@ -76,6 +76,15 @@ fn yaml_names(dir: &Path) -> BTreeSet<String> {
 
 /// `key = "value"` / `key = true` lines under `[name]` headers — the
 /// shell-readable subset the script itself parses.
+/// The directory under /opt/boss an instance's pod reads: `tenant_dir`
+/// for an image-sourced instance, `tenant` (the delivered ConfigMap
+/// mount) for a repo-sourced one — prod, since the flip (2026-09-16).
+fn tenant_of(inst: &BTreeMap<String, String>) -> String {
+    inst.get("tenant_dir")
+        .cloned()
+        .unwrap_or_else(|| "tenant".to_string())
+}
+
 fn instances_of(tree: &Path) -> BTreeMap<String, BTreeMap<String, String>> {
     let text = std::fs::read_to_string(tree.join(INSTANCES))
         .expect("the tree carries infra/cluster/instances.toml");
@@ -202,8 +211,12 @@ fn the_instance_list_declares_prod_and_the_playground() {
         "the brewery sim runs on the playground"
     );
     assert_eq!(
-        play["tenant_dir"], prod["tenant_dir"],
-        "the playground boots the tenant prod runs today (the brewery), from the image"
+        play["tenant_dir"], "examples/brewery",
+        "the playground boots the public example from the image"
+    );
+    assert_eq!(
+        prod["tenant_repo"], "david/algedonic-llc",
+        "prod boots the company's own tenant from its repo (the flip, 2026-09-16)"
     );
     assert_eq!(play["hostname"], "playground.algedonic.dev");
     assert_eq!(
@@ -213,16 +226,15 @@ fn the_instance_list_declares_prod_and_the_playground() {
     // GUEST ACCESS IS PER INSTANCE (backlog 0d2d7daa, 2026-09-16).
     // BOSS_GUEST_ACCESS=1 hands an anonymous visitor a read-only
     // session — right for the public example, wrong for the operating
-    // site behind Access. The playground keeps it; prod keeps it TODAY
-    // so the render stays byte-identical to the tree, and the flip car
-    // sets `guest = false` here and `"0"` in boss.yaml together.
+    // site behind Access. The playground keeps it; the flip (2026-09-16)
+    // set `guest = false` here and `"0"` in boss.yaml together.
     assert_eq!(
         play["guest"], "true",
         "anonymous read-only sessions stay on for the public playground"
     );
     assert_eq!(
-        prod["guest"], "true",
-        "prod keeps guest access until the flip car (David's) sets it false"
+        prod["guest"], "false",
+        "the operating site hands out no anonymous session (the flip)"
     );
 }
 
@@ -254,7 +266,7 @@ fn the_prod_render_is_byte_identical_to_the_tree() {
         &repo_root(),
         &[
             &prod["namespace"],
-            &prod["tenant_dir"],
+            &tenant_of(prod),
             &prod["sim"],
             &prod["hostname"],
             &prod["guest"],
@@ -343,9 +355,9 @@ fn the_playground_render_substitutes_the_four_parameters() {
         boss_yaml.contains("BOSS_GUEST_ACCESS, value: \"1\""),
         "the playground keeps anonymous read-only sessions (guest = true)"
     );
-    let prod_tenant = instances_of(&repo_root())["prod"]["tenant_dir"].clone();
+    let play_tenant = instances_of(&repo_root())["playground"]["tenant_dir"].clone();
     assert!(
-        boss_yaml.contains(&format!("BOSS_TENANT_DIR, value: /opt/boss/{prod_tenant}")),
+        boss_yaml.contains(&format!("BOSS_TENANT_DIR, value: /opt/boss/{play_tenant}")),
         "the tenant directory is rendered under /opt/boss as the image ships it"
     );
     assert!(
@@ -386,7 +398,10 @@ fn the_playground_render_substitutes_the_four_parameters() {
     );
     assert_eq!(rc, 0, "{err}");
     assert!(stream.contains("BOSS_TENANT_DIR, value: /opt/boss/examples/other}"));
-    assert!(!stream.contains(&format!("/opt/boss/{prod_tenant}")));
+    assert!(
+        !stream.contains("/opt/boss/tenant}"),
+        "the source value was substituted away"
+    );
     // guest = false renders the value the gateway reads as "no guest
     // button" (boss-gateway/src/main.rs: guest_access iff == "1") —
     // the line the flip car puts on prod. Substituted, not duplicated.
@@ -408,7 +423,7 @@ fn the_playground_render_substitutes_the_four_parameters() {
 #[test]
 fn the_renderer_refuses_bad_parameters() {
     let tree = repo_root();
-    let prod_tenant = instances_of(&tree)["prod"]["tenant_dir"].clone();
+    let prod_tenant = tenant_of(&instances_of(&tree)["prod"]);
     let tenant = prod_tenant.as_str();
     let cases: &[(&[&str], &str)] = &[
         (&["prod", tenant, "false", "h.example", "true"], "namespace"),

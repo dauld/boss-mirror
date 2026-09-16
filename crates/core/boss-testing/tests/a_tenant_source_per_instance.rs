@@ -134,11 +134,18 @@ fn the_tree_names_a_tenant_directory_per_instance_and_the_pod_reads_it() {
             "instances.toml still declares the retired `tenant` (manifest path) key: {line}"
         );
     }
+    // THE FLIP (2026-09-16, David: "prep the flip car"): prod reads the
+    // company's own tenant from its repo; the playground keeps the
+    // brewery from the image. Before the flip both read the image.
     assert_eq!(
         toml.matches("tenant_dir = \"examples/brewery\"").count(),
-        2,
-        "prod AND the playground read the brewery from the image in this car — \
-         the flip to david/algedonic-llc is David's decision moment, not this car's"
+        1,
+        "the playground reads the brewery from the image"
+    );
+    assert!(
+        toml.contains("tenant_repo = \"david/algedonic-llc\"")
+            && toml.contains("tenant_ref = \"main\""),
+        "prod reads Algedonic, LLC from its repo at main"
     );
     let (rc, out, err) = run_renderer(&repo_root(), &["--instances"]);
     assert_eq!(rc, 0, "{err}");
@@ -150,18 +157,23 @@ fn the_tree_names_a_tenant_directory_per_instance_and_the_pod_reads_it() {
             8,
             "name, namespace, tenant, sim, hostname, shares-with, tenant-repo, tenant-ref: {row:?}"
         );
-        assert_eq!(
-            row[2], "examples/brewery",
-            "the third column is the DIRECTORY the pod reads under /opt/boss"
-        );
-        assert_eq!(row[6], "", "no repo for an image-sourced instance");
-        assert_eq!(row[7], "", "no ref for an image-sourced instance");
     }
+    let play = rows.iter().find(|r| r[0] == "playground").unwrap();
+    assert_eq!(
+        play[2], "examples/brewery",
+        "the third column is the DIRECTORY the pod reads under /opt/boss"
+    );
+    assert_eq!(play[6], "", "no repo for an image-sourced instance");
+    assert_eq!(play[7], "", "no ref for an image-sourced instance");
+    let prod = rows.iter().find(|r| r[0] == "prod").unwrap();
+    assert_eq!(prod[2], "tenant", "prod reads the delivered directory");
+    assert_eq!(prod[6], "david/algedonic-llc");
+    assert_eq!(prod[7], "main");
 
     let boss = std::fs::read_to_string(repo_root().join(BOSS_YAML)).unwrap();
     assert!(
-        boss.contains("- {name: BOSS_TENANT_DIR, value: /opt/boss/examples/brewery}"),
-        "the boss container reads BOSS_TENANT_DIR — the brewery from the image"
+        boss.contains("- {name: BOSS_TENANT_DIR, value: /opt/boss/tenant}"),
+        "the boss container reads BOSS_TENANT_DIR — the delivered tenant (the source instance's value)"
     );
     assert!(
         !boss.contains("name: BOSS_TENANT_MANIFEST_TOML")
@@ -203,7 +215,7 @@ fn a_repo_sourced_instance_renders_the_delivered_mount_and_a_bad_source_is_refus
     assert_eq!(play[6], "david/tenant-fixture");
     assert_eq!(play[7], "main");
     let prod = rows.iter().find(|r| r[0] == "prod").unwrap();
-    assert_eq!(prod[2], "examples/brewery");
+    assert_eq!(prod[2], "tenant", "prod is repo-sourced since the flip");
 
     let out_dir = tree.join("out");
     let (rc, _, err) = run_renderer(&tree, &["--all", out_dir.to_str().unwrap()]);

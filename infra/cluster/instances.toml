@@ -137,12 +137,22 @@
 
 source = "prod"
 
+# THE FLIP, 2026-09-16 (design ffc83387, decided; e652c7c6 Option 3,
+# decided; David: "prep the flip car"): prod is Algedonic, LLC. The
+# tenant is the private repo the converge checks out and delivers as the
+# boss-tenant ConfigMap; the database is the fresh one
+# switch-instance-database repointed the Secret at while the converge
+# was held (063dba4e). The public example lives on as the playground.
 [prod]
 namespace = "boss"
-tenant_dir = "examples/brewery"
+tenant_repo = "david/algedonic-llc"
+tenant_ref = "main"
 sim = false
 hostname = "boss.algedonic.dev"
-guest = true
+# No anonymous read session on the operating site: the edge asks for an
+# identity (Access) and the gateway asks for a login; the playground keeps
+# the guest door (decided 2026-09-16, 0d2d7daa).
+guest = false
 
 [playground]
 namespace = "boss-playground"

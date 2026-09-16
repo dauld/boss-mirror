@@ -406,7 +406,7 @@ spec:
             # so this line and prod's `guest` line change together — the
             # flip car sets prod to false ("0" here) and the playground
             # keeps "1".
-            - {name: BOSS_GUEST_ACCESS, value: "1"}
+            - {name: BOSS_GUEST_ACCESS, value: "0"}
             # THE TENANT DIRECTORY (backlog f4f5c387, car 2 of fcc1d57b;
             # David 2026-09-16 'Let's do it'). One directory holding
             # tenant.toml (or seeds/tenant.toml) and seeds/; the launcher
@@ -421,7 +421,7 @@ spec:
             # ConfigMap below. Prod stays on the baked examples/brewery
             # until David flips it; the flip is two lines and
             # instances.toml names both.
-            - {name: BOSS_TENANT_DIR, value: /opt/boss/examples/brewery}
+            - {name: BOSS_TENANT_DIR, value: /opt/boss/tenant}
             # A PATH, NOT A KEY — the name is a trap and this comment is
             # the guard rail. boss-gateway reads this variable as a
             # filename and loads the key from it, generating one only if
