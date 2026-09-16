@@ -35,6 +35,22 @@ cluster config, and it converges the same way code does:
   `boss-tls`); the Secret objects themselves are created out-of-band
   and stay out-of-tree.
 
+**One source, rendered per instance.** This directory is written for
+ONE instance — prod, namespace `boss` — and every instance in
+`infra/cluster/instances.toml` (today: prod and the playground,
+namespace `boss-playground`, brewery tenant, sim on) is this directory
+rendered by `infra/cluster/render-instance.sh` with its namespace,
+tenant manifest, `BOSS_SIM_ENABLED` and TLS-front hostname substituted,
+plus the `.boss.svc.cluster.local` names and the LoadBalancer IP pins
+(commented out: only prod's copy may hold an address). The converge
+renders and applies every instance on every train (design ffc83387,
+David 2026-09-16); prod's render is byte-identical to these files, and
+a test holds it so. Which manifests are per-instance and which exist
+once for the pipeline is `infra/cluster/instance-manifests.txt`, with
+the reason on each line — a new file here must be classified there, or
+the render refuses by name. Secrets are still per namespace and still
+out of tree: a new instance's pods wait until they are minted.
+
 **Code, config and schema all converge from the tree, every deploy**
 
 Config converges here, code converges in the image — and the database

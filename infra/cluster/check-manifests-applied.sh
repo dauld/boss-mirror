@@ -66,6 +66,22 @@ set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
 DIR="infra/cluster/manifests"
 
+# WHAT THE TREE DECLARES is the RENDERED set, not the directory (backlog
+# 07d7549c): the directory is written for prod, and every instance in
+# infra/cluster/instances.toml is that directory rendered with its own
+# namespace, tenant, sim flag and hostname — which is exactly what the
+# converge applies. So this walks the same render the converge applied,
+# one directory per namespace, and a playground object that is missing
+# is reported by name like a prod one. The render refuses (exit 2) a
+# manifest the roster does not classify; a refusal here is 'unknown',
+# not 'clean', for the same reason a missing credential is.
+RENDERED=$(mktemp -d) || exit 2
+trap 'rm -rf "$RENDERED"' EXIT
+if ! "$DIR/../render-instance.sh" --all "$RENDERED"; then
+    echo "check-manifests-applied: the instance render refused — cannot say what the tree declares." >&2
+    exit 2
+fi
+
 command -v kubectl >/dev/null 2>&1 || {
     echo "check-manifests-applied: kubectl not found — cannot verify." >&2
     echo "  This is 'unknown', not 'clean'. Install kubectl and point" >&2
@@ -80,7 +96,7 @@ fi
 # kind/name/namespace for every document, via kubectl's own parser so
 # this does not grow a YAML implementation.
 inventory=$(
-    for f in "$DIR"/*.yaml; do
+    for f in "$RENDERED"/*/*.yaml; do
         [ -f "$f" ] || continue
         # No {range .items[*]}: kubectl emits one JSON document per
         # object, not a List, so the template applies per document.
@@ -175,7 +191,7 @@ while IFS=$'\t' read -r file kind name ns; do
             Role|ClusterRole|RoleBinding|ClusterRoleBinding)
                 why=$(rbac_drift "$kind" "$name" "$ns" "$file")
                 if [ -n "$why" ]; then
-                    echo "  DRIFT   $kind/$name${ns:+ (ns $ns)} — $why from $file" >&2
+                    echo "  DRIFT   $kind/$name${ns:+ (ns $ns)} — $why from $DIR/${file##*/} (rendered for ${file%/*})" >&2
                     drifted=$((drifted + 1))
                 fi
                 ;;
