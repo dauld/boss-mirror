@@ -1,0 +1,44 @@
+# VOCABULARY — the words that belong to the brewery tenant and to no
+# other tier (backlog be39298f).
+#
+# why: BOSS core is a generic state-machine toolkit; the brewery is one
+# tenant instantiated on it (CLAUDE.md §10). Until 2026-09-16 the tier
+# rule was enforced only as a Cargo dependency audit, and a grep for
+# these words outside the brewery found them in every tier above it:
+# kegs in core registries, excise in module ledgers, the brewery
+# simulator in an orchestrator crate. This file is the TENANT declaring
+# its own words, so the sensor that counts them
+# (infra/lint/no-tenant-vocabulary-above-its-tier.sh) reads the list
+# from the tenant rather than carrying an opinion about what a brewery
+# is. A word here is one that names nothing but this tenant: a hit in
+# crates/core is a leak by definition, never a coincidence.
+#
+# Format: one term per line, matched case-insensitively. A trailing `*`
+# matches any word beginning so (brew* = brew, brewery, brewhouse,
+# brewing); without it the term is a whole word (wort, not worth).
+# Terms are lowercase letters, digits, spaces and hyphens only.
+#
+# Deliberately NOT listed, because each names something outside the
+# brewery too: tap (a network/route sense), batch, hop/hops (a routing
+# hop), grain (coarse-grained), barrel (a generic container), ale (an
+# alert's prefix), recipe, distributor, seasonal, diagnosis.
+algedonic ales
+brew*
+beer
+beers
+keg*
+wort
+worts
+excise*
+taproom*
+ferment*
+malt*
+mash
+mashes
+lager*
+stout
+stouts
+cellar*
+yeast*
+bbl
+ttb

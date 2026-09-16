@@ -1,0 +1,21 @@
+# tenant-vocabulary.baseline — the ratchet on tenant words above their
+# tier, read by infra/lint/no-tenant-vocabulary-above-its-tier.sh
+# (backlog be39298f). One line per tier: `<tier> <count>`.
+#
+# Each number is the lint's OWN measurement of the tree on the day it
+# was written, and it only goes down: the lint refuses a tier whose
+# count is above its line (the leak grew) and a tier whose count is
+# below it (lower the line in the same car). Nobody raises one. The
+# target is zero in every tier, held there by the same refusal.
+#
+# Written 2026-09-16 from the lint's measurement of origin/main b4d7a0fd
+# plus this car — the brewery's and the used-device shop's VOCABULARY
+# together, 23 terms, with a tenant's name as a path or an id exempt.
+crates/core 386
+crates/modules 446
+crates/orchestrators 836
+apps/web/src 313
+apps/simulator 55
+infra/postgres/schema 202
+infra/platform 3
+infra/cluster 8

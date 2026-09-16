@@ -90,6 +90,15 @@ _finish() {
     elif [ "$rc" -ne 0 ]; then
         answer_converge_requests "$REPO" converge_failed "$STAGE (exit $rc)" || true
     fi
+    # THE MAINTENANCE PACKET NAMES THE STAGE TOO (backlog 07d7549c,
+    # 2026-09-16). The ops-request above has read `converge_failed:
+    # <stage>` since d66f92b2, but a run the TIMER started answers no
+    # request, and its own packet closed `result: exit-code` — the
+    # stage that died was in this journal alone. A verdict must name
+    # what failed (CLAUDE.md §Diagnosis), on the packet that carries it.
+    if [ "$rc" -ne 0 ]; then
+        run_summary_field failed_stage "$STAGE"
+    fi
     exit "$rc"
 }
 trap _finish EXIT
@@ -598,9 +607,25 @@ STAGE="verify manifests"
 # carrying the check's own report in the journal. It does not retry on
 # its own; the next converge — the next main move — re-applies and
 # re-checks, which is the honest cadence for a drift.
+#
+# THE CHECK IS TOLD WHAT THE APPLY SKIPPED, and its verdict rides the
+# packet (backlog 07d7549c; forge journal 2026-09-16 06:06Z). The
+# first converge with the secret gate above skipped the playground —
+# correctly — and then failed here: the check walked the rendered set
+# and counted the skipped instance's 21 objects MISSING. And the packet
+# said `result: exit-code` and nothing else; the cause was readable
+# only in this journal. So the check gets the SAME string the packet
+# carries as `instances_skipped` (one definition; it counts those
+# instances' absent objects `skipped`, apart from `missing`), and its
+# one-line summary is recorded as `manifests_check` whatever its exit —
+# the field a reader off the host needs, and the one the packet lacked.
 echo "cluster-deploy-runner: verifying infra/cluster/manifests against the cluster"
 check_rc=0
-KUBECONFIG="$KUBECONFIG_PATH" "$REPO/infra/cluster/check-manifests-applied.sh" || check_rc=$?
+check_out=$(KUBECONFIG="$KUBECONFIG_PATH" BOSS_INSTANCES_SKIPPED="$INSTANCES_SKIPPED" \
+    "$REPO/infra/cluster/check-manifests-applied.sh") || check_rc=$?
+printf '%s\n' "$check_out"
+check_summary=$(printf '%s\n' "$check_out" | grep '^check-manifests-applied: ' | tail -n 1) || true
+run_summary_field manifests_check "${check_summary:-no summary printed (exit $check_rc)}"
 if [ "$check_rc" -ne 0 ]; then
     rc=$check_rc
     echo "cluster-deploy-runner: MANIFESTS CHECK FAILED (rc=$rc) — the tree and the cluster disagree, or the check could not verify; the converge packet stays open until a converge passes it" >&2
