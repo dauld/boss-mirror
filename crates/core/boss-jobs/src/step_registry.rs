@@ -168,6 +168,21 @@ pub struct StepType {
     pub decision_shaped: bool,
 }
 
+impl StepType {
+    /// A structural MARKER — state the machine reaches on its own, not
+    /// work an executor performs: no role and zero typical duration
+    /// (`trigger` / `outcome` / `milestone`). The dispatcher completes
+    /// one the instant it goes ready (`complete-marker-on-step-ready`,
+    /// through `jobs.complete_step`); `task` is excluded because its
+    /// duration is unset, which is real work of unknown length. ONE
+    /// definition, read by that handler and by the no-orphan-steps
+    /// check (`orphan_steps`), so the two cannot disagree about which
+    /// steps are a person's.
+    pub fn is_marker(&self) -> bool {
+        self.required_roles.is_empty() && self.typical_duration_hours.is_some_and(|h| h <= 0.0)
+    }
+}
+
 /// Validation error for step metadata.
 #[derive(Debug, Clone)]
 pub struct ValidationError {

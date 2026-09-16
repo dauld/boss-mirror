@@ -26,20 +26,27 @@
 //! to be worth that risk; the part that mattered — pricing is DATA and
 //! not a `match` in Rust — is already true.
 //!
-//! **Not in scope, deliberately.** Two sibling packets border this one
-//! and this module is additive to both:
-//!   - `7dd9f28c` — AgentSpec and BudgetDecision have no registry.
-//!     `boss_core::port::CostLedger::check_budget` is where a budget is
-//!     consulted BEFORE a run; this module records runs AFTER. Its
-//!     `spent(agent, window)` question is this module's
-//!     `list_runs(actor_id, since)` + `summarize`, which is the join
-//!     point: a budget can be spent against these rows. Design
-//!     6fda05ae (decided 2026-09-15) made that join possible: the
-//!     `agents` registry gives the actor one id (`agent-claude`) and
-//!     this module's `model` column (see `types`, rule 1) prices the
-//!     run against the model it actually ran, so an agent's cap can be
-//!     read off its row and spent against these rows. The budget
-//!     check itself is still the next car.
+//! **The budget is consulted here, at the record (backlog 7dd9f28c).**
+//! `boss_core::agent::BudgetDecision::decide` is the ONE rule — the
+//! cybernetics ledger (`boss_events::ledger`) and this recorder both
+//! call it — and the caps it judges against are the `agents` row's
+//! (design 6fda05ae gave the actor one id and this module's `model`
+//! column priced the run against what it actually ran, which is what
+//! made the join possible). The recorder measures the actor's priced
+//! spend in the hour before the run STARTED plus its runs in flight at
+//! that instant (`types::measure_load`), admits or refuses
+//! (`port::admit`), and writes the decision down: an `Allow` rides the
+//! row and the event as `budget`, a `Deny` is its own event
+//! (`agents.run.denied`) and no row. So a refusal is as visible as
+//! spend, which is the whole point of the value-shaped decision: on
+//! 2026-09-08 a session ran out of credit and the only signal was the
+//! work stopping. HONEST LIMIT: this record is written at FINISH, so
+//! "admitted" here is a judgement of a run that already happened — the
+//! refusal is a fact the desk can act on, not a gate that stopped the
+//! spend. Stopping it needs a run that opens at start (below).
+//!
+//! **Not in scope, deliberately.** One sibling packet borders this one
+//! and this module is additive to it:
 //!   - `be025b44` — a car's packet is filed only at gate-green, so the
 //!     build is invisible while it happens. When a builder opens its
 //!     car at build START, that packet's id is what
@@ -57,14 +64,14 @@ pub mod postgres;
 pub mod rebuild;
 pub mod types;
 
-pub use events::AGENT_RUN_RECORDED;
+pub use events::{AGENT_RUN_DENIED, AGENT_RUN_RECORDED};
 pub use in_memory::InMemoryAgentRuns;
-pub use port::{AgentRunError, AgentRunLog, RecordedRun};
+pub use port::{AgentRunError, AgentRunLog, RecordedRun, RegisteredAgent, admit};
 #[cfg(feature = "postgres")]
 pub use postgres::PgAgentRuns;
 #[cfg(feature = "postgres")]
 pub use rebuild::rebuild_agent_runs;
 pub use types::{
-    AgentRun, GroupSpend, NewAgentRun, RateCardRow, RunFilter, RunOutcome, RunSummary, TokenUsage,
-    price_run, summarize,
+    ADMISSION_WINDOW, AgentRun, GroupSpend, NewAgentRun, RateCardRow, RunFilter, RunOutcome,
+    RunSummary, TokenUsage, measure_load, price_run, summarize,
 };

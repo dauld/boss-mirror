@@ -211,14 +211,84 @@ impl Outcome {
 }
 
 /// Decision returned from a budget check.
+///
+/// A VALUE, not a failure — a denied run is a decision the desk can
+/// show (which actor, refused for what), not an agent that quietly
+/// stops mid-task (backlog 7dd9f28c: that happened for real on
+/// 2026-09-08, and the only signal was the work stopping).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BudgetDecision {
-    Allow { remaining_usd_micros: u64 },
-    Deny { reason: String },
+    /// `remaining_usd_micros` is `None` when no hourly cap is declared:
+    /// an unbudgeted agent is admitted with nothing to count down.
+    Allow {
+        remaining_usd_micros: Option<u64>,
+    },
+    Deny {
+        reason: String,
+    },
+}
+
+/// The caps an agent's registry row declares — `agents.hourly_budget_
+/// usd_micros` and `agents.max_concurrent_runs` (20260915212644), both
+/// nullable there and both optional here. `None` is "no cap declared"
+/// and admits every run: a missing number must not stop the stack (the
+/// boot-guard lesson of 2026-09-07), so unbudgeted is never a refusal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCaps {
+    pub hourly_budget_usd_micros: Option<u64>,
+    pub max_concurrent_runs: Option<u32>,
+}
+
+/// What the ledger measured for an agent at the admission instant: the
+/// micro-USD its priced runs spent in the window, and how many of its
+/// runs were in flight.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AgentLoad {
+    pub spent_usd_micros: u64,
+    pub in_flight: u32,
 }
 
 impl BudgetDecision {
+    /// The ONE budget rule (§9a): the cybernetics ledger and the
+    /// jobs-API run recorder both call this, so "at the cap" cannot
+    /// mean two things in two places. A pure function of the caps and
+    /// the load — it reads no clock and no table — so it is exhaustively
+    /// testable and a recorded decision replays without recomputing.
+    ///
+    /// Spend at or over the cap denies (a cap of zero denies every run:
+    /// declared, not absent); in-flight at or over the concurrency cap
+    /// denies; a budget denial is reported before a concurrency one,
+    /// because the money is what the desk can act on. Otherwise allow,
+    /// with the remainder when there is a cap to count down from.
+    pub fn decide(caps: AgentCaps, load: AgentLoad) -> BudgetDecision {
+        if let Some(cap) = caps.hourly_budget_usd_micros
+            && load.spent_usd_micros >= cap
+        {
+            return BudgetDecision::Deny {
+                reason: format!(
+                    "hourly budget exhausted: spent {} of {} usd_micros in the last hour",
+                    load.spent_usd_micros, cap
+                ),
+            };
+        }
+        if let Some(max) = caps.max_concurrent_runs
+            && load.in_flight >= max
+        {
+            return BudgetDecision::Deny {
+                reason: format!(
+                    "concurrency cap reached: {} of {} runs in flight",
+                    load.in_flight, max
+                ),
+            };
+        }
+        BudgetDecision::Allow {
+            remaining_usd_micros: caps
+                .hourly_budget_usd_micros
+                .map(|cap| cap - load.spent_usd_micros),
+        }
+    }
+
     pub fn is_allowed(&self) -> bool {
         matches!(self, BudgetDecision::Allow { .. })
     }
@@ -237,6 +307,17 @@ pub struct AgentSpec {
     pub max_concurrent_runs: u32,
 }
 
+impl AgentSpec {
+    /// The spec's caps in the registry row's shape. A TOML-configured
+    /// spec always declares both, so both are `Some`.
+    pub fn caps(&self) -> AgentCaps {
+        AgentCaps {
+            hourly_budget_usd_micros: Some(self.hourly_budget_usd_micros),
+            max_concurrent_runs: Some(self.max_concurrent_runs),
+        }
+    }
+}
+
 /// Time window for cost queries.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -244,6 +325,20 @@ pub enum Window {
     LastHour,
     LastDay,
     Since { at: DateTime<Utc> },
+}
+
+impl Window {
+    /// The instant this window opens, measured back from `at`. Takes
+    /// the reference instant rather than reading a clock so a window
+    /// can be asked at the moment a run STARTED (the admission instant)
+    /// as well as at "now", and so the answer is deterministic.
+    pub fn cutoff(self, at: DateTime<Utc>) -> DateTime<Utc> {
+        match self {
+            Window::LastHour => at - chrono::Duration::hours(1),
+            Window::LastDay => at - chrono::Duration::days(1),
+            Window::Since { at: since } => since,
+        }
+    }
 }
 
 /// Lifecycle status of a run.
@@ -446,7 +541,7 @@ mod tests {
     fn budget_decision_is_allowed() {
         assert!(
             BudgetDecision::Allow {
-                remaining_usd_micros: 100
+                remaining_usd_micros: Some(100)
             }
             .is_allowed()
         );
@@ -461,10 +556,174 @@ mod tests {
     #[test]
     fn budget_decision_round_trips_serde() {
         let d = BudgetDecision::Allow {
-            remaining_usd_micros: 42,
+            remaining_usd_micros: Some(42),
         };
         let json = serde_json::to_string(&d).unwrap();
         let back: BudgetDecision = serde_json::from_str(&json).unwrap();
         assert_eq!(back, d);
+    }
+
+    // -- the one decision function, every case (backlog 7dd9f28c) ------
+
+    fn capped(cap: u64) -> AgentCaps {
+        AgentCaps {
+            hourly_budget_usd_micros: Some(cap),
+            max_concurrent_runs: None,
+        }
+    }
+
+    fn spent(usd: u64) -> AgentLoad {
+        AgentLoad {
+            spent_usd_micros: usd,
+            in_flight: 0,
+        }
+    }
+
+    #[test]
+    fn under_cap_allows_with_the_remainder() {
+        assert_eq!(
+            BudgetDecision::decide(capped(1_000), spent(300)),
+            BudgetDecision::Allow {
+                remaining_usd_micros: Some(700)
+            }
+        );
+    }
+
+    #[test]
+    fn no_prior_spend_allows_the_whole_cap() {
+        assert_eq!(
+            BudgetDecision::decide(capped(1_000), spent(0)),
+            BudgetDecision::Allow {
+                remaining_usd_micros: Some(1_000)
+            }
+        );
+    }
+
+    #[test]
+    fn at_cap_denies_naming_spend_and_cap() {
+        let d = BudgetDecision::decide(capped(1_000), spent(1_000));
+        let BudgetDecision::Deny { reason } = d else {
+            panic!("at the cap there is nothing left to spend: {d:?}");
+        };
+        assert!(reason.contains("1000 of 1000"), "{reason}");
+        assert!(reason.contains("hourly"), "{reason}");
+    }
+
+    #[test]
+    fn over_cap_denies_and_never_underflows() {
+        let d = BudgetDecision::decide(capped(1_000), spent(1_500));
+        assert!(matches!(d, BudgetDecision::Deny { .. }), "{d:?}");
+    }
+
+    #[test]
+    fn a_zero_cap_denies_every_run() {
+        // A cap of zero is a declared cap, not an absent one: the agent
+        // is switched off, and the reason says so.
+        let d = BudgetDecision::decide(capped(0), spent(0));
+        assert!(matches!(d, BudgetDecision::Deny { .. }), "{d:?}");
+    }
+
+    #[test]
+    fn no_cap_allows_with_no_remainder_whatever_was_spent() {
+        // NULL caps on the registry row are "unbudgeted", never a
+        // refusal: a missing number must not stop the stack.
+        let d = BudgetDecision::decide(AgentCaps::default(), spent(u64::MAX));
+        assert_eq!(
+            d,
+            BudgetDecision::Allow {
+                remaining_usd_micros: None
+            }
+        );
+    }
+
+    #[test]
+    fn under_the_concurrency_cap_allows() {
+        let caps = AgentCaps {
+            hourly_budget_usd_micros: None,
+            max_concurrent_runs: Some(2),
+        };
+        let d = BudgetDecision::decide(
+            caps,
+            AgentLoad {
+                spent_usd_micros: 0,
+                in_flight: 1,
+            },
+        );
+        assert!(d.is_allowed(), "{d:?}");
+    }
+
+    #[test]
+    fn at_the_concurrency_cap_denies_naming_the_count() {
+        let caps = AgentCaps {
+            hourly_budget_usd_micros: None,
+            max_concurrent_runs: Some(2),
+        };
+        let d = BudgetDecision::decide(
+            caps,
+            AgentLoad {
+                spent_usd_micros: 0,
+                in_flight: 2,
+            },
+        );
+        let BudgetDecision::Deny { reason } = d else {
+            panic!("two in flight of two is full: {d:?}");
+        };
+        assert!(reason.contains("2 of 2"), "{reason}");
+        assert!(reason.contains("in flight"), "{reason}");
+    }
+
+    #[test]
+    fn a_budget_denial_is_reported_before_a_concurrency_one() {
+        // Both exhausted: the reason names the money, because the
+        // money is what the desk can do something about.
+        let caps = AgentCaps {
+            hourly_budget_usd_micros: Some(10),
+            max_concurrent_runs: Some(1),
+        };
+        let d = BudgetDecision::decide(
+            caps,
+            AgentLoad {
+                spent_usd_micros: 10,
+                in_flight: 1,
+            },
+        );
+        let BudgetDecision::Deny { reason } = d else {
+            panic!("{d:?}");
+        };
+        assert!(reason.contains("hourly"), "{reason}");
+    }
+
+    #[test]
+    fn a_spec_derives_its_caps_as_declared() {
+        let spec = AgentSpec {
+            id: AgentId::try_new("planner").unwrap(),
+            display_name: "p".into(),
+            system_prompt: String::new(),
+            model: "m".into(),
+            hourly_budget_usd_micros: 5,
+            max_concurrent_runs: 3,
+        };
+        assert_eq!(
+            spec.caps(),
+            AgentCaps {
+                hourly_budget_usd_micros: Some(5),
+                max_concurrent_runs: Some(3),
+            }
+        );
+    }
+
+    #[test]
+    fn a_window_cuts_off_relative_to_the_instant_it_is_asked_at() {
+        let at: DateTime<Utc> = "2026-09-15T12:00:00Z".parse().unwrap();
+        assert_eq!(
+            Window::LastHour.cutoff(at),
+            "2026-09-15T11:00:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
+        assert_eq!(
+            Window::LastDay.cutoff(at),
+            "2026-09-14T12:00:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
+        let since: DateTime<Utc> = "2026-09-01T00:00:00Z".parse().unwrap();
+        assert_eq!(Window::Since { at: since }.cutoff(at), since);
     }
 }

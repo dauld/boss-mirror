@@ -11,6 +11,7 @@
   // There is deliberately no kind match here — the
   // no-step-kind-match lint fails the build if one returns.
 
+  import type { Component } from 'svelte';
   import GenericSurface from './GenericSurface.svelte';
   import DecisionContext from './DecisionContext.svelte';
   import StepProcedure from './StepProcedure.svelte';
@@ -111,6 +112,29 @@
       ? { id: session.value.user.id, role: session.value.user.role }
       : undefined,
   );
+
+  // The surface-id → component table the file header promises. Keyed
+  // by the SURFACE id the registry names for a kind (never the kind),
+  // and absent for 'generic' — the fallback is not a row, it is what
+  // renders when there is none. This was an eleven-arm if/else chain;
+  // it became a table when the generic fallback started taking the
+  // decision-context panel as children (feedback 26ae4d44), which
+  // needed one place that says "platform surface or not".
+  type SurfaceProps = { step: StepData; jobId: string; onUpdate: () => void };
+  const PLATFORM_SURFACES: Readonly<Record<string, Component<SurfaceProps>>> = {
+    approval: ApprovalSurface,
+    repair: RepairSurface,
+    inspection: InspectionSurface,
+    billing: BillingSurface,
+    intake: IntakeSurface,
+    shipment: ShipmentSurface,
+    scheduling: SchedulingSurface,
+    'production-consume': ProductionConsumeSurface,
+    handoff: HandoffSurface,
+    receiving: ReceivingSurface,
+    procurement: ProcurementSurface,
+  };
+  let Platform = $derived(PLATFORM_SURFACES[surfaceOf(step.kind)] ?? null);
 </script>
 
 <!-- Every step surface — platform, generic fallback, and mounted
@@ -159,32 +183,17 @@
        which doesn't seem like much of a choice"). A mounted plugin is
        its own presentation, so the panel lives on this side of the
        fork — once, for every platform surface and the generic
-       fallback alike. -->
-  <DecisionContext {step} {jobId} />
-  {#if surfaceOf(step.kind) === 'approval'}
-    <ApprovalSurface {step} {jobId} {onUpdate} />
-  {:else if surfaceOf(step.kind) === 'repair'}
-    <RepairSurface {step} {jobId} {onUpdate} />
-  {:else if surfaceOf(step.kind) === 'inspection'}
-    <InspectionSurface {step} {jobId} {onUpdate} />
-  {:else if surfaceOf(step.kind) === 'billing'}
-    <BillingSurface {step} {jobId} {onUpdate} />
-  {:else if surfaceOf(step.kind) === 'intake'}
-    <IntakeSurface {step} {jobId} {onUpdate} />
-  {:else if surfaceOf(step.kind) === 'shipment'}
-    <ShipmentSurface {step} {jobId} {onUpdate} />
-  {:else if surfaceOf(step.kind) === 'scheduling'}
-    <SchedulingSurface {step} {jobId} {onUpdate} />
-  {:else if surfaceOf(step.kind) === 'production-consume'}
-    <ProductionConsumeSurface {step} {jobId} {onUpdate} />
-  {:else if surfaceOf(step.kind) === 'handoff'}
-    <HandoffSurface {step} {jobId} {onUpdate} />
-  {:else if surfaceOf(step.kind) === 'receiving'}
-    <ReceivingSurface {step} {jobId} {onUpdate} />
-  {:else if surfaceOf(step.kind) === 'procurement'}
-    <ProcurementSurface {step} {jobId} {onUpdate} />
+       fallback alike. The generic surface takes it as children so it
+       lands INSIDE the card, under the step's title and above its
+       form: title, case, answer, in that order (feedback 26ae4d44). -->
+  {#snippet theCase()}
+    <DecisionContext {step} {jobId} />
+  {/snippet}
+  {#if Platform}
+    {@render theCase()}
+    <Platform {step} {jobId} {onUpdate} />
   {:else}
-    <GenericSurface {step} {jobId} {onUpdate} />
+    <GenericSurface {step} {jobId} {onUpdate}>{@render theCase()}</GenericSurface>
   {/if}
 {/if}
 

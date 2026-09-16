@@ -158,8 +158,37 @@ pub struct StepSpec {
     /// so every existing spec is unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claimable: Option<bool>,
+    /// WHO THIS STEP IS FOR, declared once (design f5ebd2e1, backlog
+    /// 67a58840). A closed set of shapes — an individual, a role, a
+    /// department, a named station — from which today's three placement
+    /// keys are DERIVED by [`crate::audience::selectors_for`] and written
+    /// onto the packet at materialisation. `authority_role` above is the
+    /// legacy spelling of the `role` shape and is kept as the projection
+    /// so every existing reader (the assignment query, the projected
+    /// `q.<role>.<kind>` stations, the workflow editor) keeps working
+    /// unchanged; the seed loader fills it in from a `role` audience,
+    /// and the publish lint refuses a step that declares both and
+    /// disagrees. `None` means today's behaviour, exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<crate::audience::Audience>,
     #[serde(default)]
     pub metadata_defaults: serde_json::Value,
+}
+
+impl StepSpec {
+    /// The placement keys this step projects — the ONE reader's door
+    /// for "who is this for" on a spec. An audience wins outright; a
+    /// step that declares none projects its legacy `authority_role`
+    /// alone, which is today's behaviour unchanged.
+    pub fn selectors(&self) -> crate::audience::Selectors {
+        match &self.audience {
+            Some(audience) => crate::audience::selectors_for(audience),
+            None => crate::audience::Selectors {
+                authority_role: self.authority_role.clone(),
+                ..Default::default()
+            },
+        }
+    }
 }
 
 /// An outcome marker on a terminal step. Reaching `Completed` on a
@@ -1255,7 +1284,10 @@ where
             // in-flight step keeps the assurance its Workflow version
             // declared even if the protocol is later edited.
             assurance_required: spec_step.assurance_required,
-            assignee_id: None,
+            // An `individual` audience is born assigned — the one key
+            // the assignment query's individual arm reads. Every other
+            // shape (and no audience) is born unassigned, as before.
+            assignee_id: spec_step.selectors().assignee_id,
             status: StepStatus::Pending,
             sort_order: idx as i32,
             blocked_by,
@@ -1264,7 +1296,7 @@ where
                 .iter()
                 .filter_map(|r| {
                     if r == "@authority_role" {
-                        spec_step.authority_role.clone()
+                        spec_step.selectors().authority_role
                     } else {
                         Some(r.clone())
                     }
@@ -1767,11 +1799,31 @@ fn merge_metadata(defaults: &serde_json::Value, step: &StepSpec) -> serde_json::
         serde_json::Value::Object(_) => defaults.clone(),
         _ => serde_json::Value::Object(serde_json::Map::new()),
     };
-    if let (Some(role), serde_json::Value::Object(m)) = (&step.authority_role, &mut merged) {
+    // The placement keys are DERIVED from the step's one audience
+    // declaration (`selectors()`; the legacy `authority_role` when it
+    // declares none — today's behaviour unchanged). `authority_role`
+    // is what the assignment query's role arm and every projected
+    // `q.<role>.<kind>` station read; `station` is new and readable by
+    // any station predicate through `step.metadata_equals`; the
+    // audience itself rides beside them so the projection can be
+    // checked against its source on the packet (f5ebd2e1 car 1).
+    let selectors = step.selectors();
+    if let (Some(role), serde_json::Value::Object(m)) = (&selectors.authority_role, &mut merged) {
         m.insert(
             "authority_role".to_string(),
             serde_json::Value::String(role.clone()),
         );
+    }
+    if let (Some(station), serde_json::Value::Object(m)) = (&selectors.station, &mut merged) {
+        m.insert(
+            "station".to_string(),
+            serde_json::Value::String(station.clone()),
+        );
+    }
+    if let (Some(audience), serde_json::Value::Object(m)) = (&step.audience, &mut merged)
+        && let Ok(value) = serde_json::to_value(audience)
+    {
+        m.insert("audience".to_string(), value);
     }
     // Surfaced the same way `authority_role` is, because the
     // dispatcher reads the materialized STEP, never the spec — it is
@@ -4643,6 +4695,121 @@ mod tests {
         assert_eq!(
             steps[0].sign_offs_required,
             vec!["platform-admin".to_string()]
+        );
+    }
+
+    /// One declaration, three keys written (f5ebd2e1 car 1, 67a58840).
+    /// The spec below declares ONLY an audience on each step — no
+    /// `authority_role`, no assignee — and the materialised packet
+    /// carries exactly the keys today's readers already look for:
+    /// `assignee_id` for an individual, `metadata.authority_role` for a
+    /// role, `metadata.station` for a station, and the audience itself
+    /// so a later reader can check the projection against its source.
+    fn one_step_with(title: &str, audience: crate::audience::Audience) -> StepSpec {
+        StepSpec {
+            title: title.into(),
+            kind: "task".into(),
+            ready_when: "true".into(),
+            title_template: title.into(),
+            audience: Some(audience),
+            terminal: Some(Terminal {
+                outcome: "done".into(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn materialize_writes_the_selectors_an_audience_derives() {
+        use crate::audience::Audience;
+        let spec = WorkflowSpec::platform_seed(
+            "audience-probe",
+            "Audience probe",
+            "platform",
+            vec!["custom".into()],
+            vec![
+                one_step_with("for-a-person", Audience::Individual("emp-david".into())),
+                one_step_with("for-a-role", Audience::Role("platform-admin".into())),
+                one_step_with("for-a-station", Audience::Station("design-review".into())),
+            ],
+        );
+        let subject = Subject::new("custom", "x");
+        let job_metadata = serde_json::Value::Object(Default::default());
+        let steps = materialize_steps(&spec, &subject, JobId::new(), &job_metadata, StepId::new);
+        let by_slug = |slug: &str| {
+            steps
+                .iter()
+                .find(|s| s.spec_slug.as_deref() == Some(slug))
+                .expect("materialised")
+        };
+
+        let person = by_slug("for-a-person");
+        assert_eq!(person.assignee_id.as_deref(), Some("emp-david"));
+        assert!(person.metadata.get("authority_role").is_none());
+
+        let role = by_slug("for-a-role");
+        assert_eq!(role.assignee_id, None);
+        assert_eq!(
+            role.metadata.get("authority_role").and_then(|v| v.as_str()),
+            Some("platform-admin"),
+            "the role arm of the assignment query and every q.<role>.<kind> station read \
+             this key; a role audience must write it"
+        );
+
+        let station = by_slug("for-a-station");
+        assert_eq!(
+            station.metadata.get("station").and_then(|v| v.as_str()),
+            Some("design-review")
+        );
+        assert!(station.metadata.get("authority_role").is_none());
+
+        // The declaration rides the packet beside its projection.
+        for (slug, want) in [
+            (
+                "for-a-person",
+                serde_json::json!({"individual": "emp-david"}),
+            ),
+            ("for-a-role", serde_json::json!({"role": "platform-admin"})),
+            (
+                "for-a-station",
+                serde_json::json!({"station": "design-review"}),
+            ),
+        ] {
+            assert_eq!(
+                by_slug(slug).metadata.get("audience"),
+                Some(&want),
+                "{slug}"
+            );
+        }
+    }
+
+    /// A step that declares no audience is materialised exactly as
+    /// before: no `audience` key appears, and the legacy keys come from
+    /// where they always did.
+    #[test]
+    fn materialize_leaves_a_step_without_an_audience_untouched() {
+        let mut step = one_step_with("legacy", crate::audience::Audience::Role("x".into()));
+        step.audience = None;
+        step.authority_role = Some("qa-lead".into());
+        let spec = WorkflowSpec::platform_seed(
+            "legacy-probe",
+            "Legacy probe",
+            "platform",
+            vec!["custom".into()],
+            vec![step],
+        );
+        let subject = Subject::new("custom", "x");
+        let job_metadata = serde_json::Value::Object(Default::default());
+        let steps = materialize_steps(&spec, &subject, JobId::new(), &job_metadata, StepId::new);
+        assert_eq!(steps[0].assignee_id, None);
+        assert!(steps[0].metadata.get("audience").is_none());
+        assert!(steps[0].metadata.get("station").is_none());
+        assert_eq!(
+            steps[0]
+                .metadata
+                .get("authority_role")
+                .and_then(|v| v.as_str()),
+            Some("qa-lead")
         );
     }
 

@@ -406,7 +406,11 @@ pub fn convertibility(from: &WorkflowSpec, to: &WorkflowSpec) -> Convertibility 
 
         // Authority. Widening is the loosening we expect most often:
         // `Some(role)` -> `None` opens a step to any authorized actor.
-        match (f.authority_role.as_deref(), t.authority_role.as_deref()) {
+        // Read through `selectors()` so a version that moves a role from
+        // the legacy key to `audience = { role = ... }` compares as the
+        // no-change it is (f5ebd2e1 car 1).
+        let (f_sel, t_sel) = (f.selectors(), t.selectors());
+        match (f_sel.authority_role.as_deref(), t_sel.authority_role.as_deref()) {
             (Some(a), Some(b)) if a != b => obstacles.push(Obstacle::step_if_pending(
                 slug,
                 format!("authority changed `{a}` -> `{b}` — neither contains the other"),
@@ -498,6 +502,7 @@ mod tests {
             fields: Vec::new(),
             authority_role: None,
             claimable: None,
+            audience: None,
             metadata_defaults: serde_json::json!({}),
         }
     }

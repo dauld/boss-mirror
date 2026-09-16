@@ -4,20 +4,33 @@
   // every service Job's steps pick up implicitly. Port of
   // apps/web-legacy/src/steps/GenericSurface.tsx.
 
+  import type { Snippet } from 'svelte';
   import {
     isPending,
     isTerminal as _isTerminal,
     type StepStatus,
     type StepField,
   } from '../jobs/types';
+  import type { SpecStep } from '../jobs/fork';
   import type { Employee } from '../people/types';
   import { putStep } from './stepWrite';
   import { PROCEDURE_KEY } from './procedure';
+  import {
+    askRoutes,
+    completeLabel,
+    missingRequired as missingOf,
+    needsLine,
+    optionsFor,
+    specSlugOf,
+  } from './stepAsk';
 
   type StepData = {
     id: string;
     kind: string;
     title: string;
+    /// The authored step name inside its Workflow — what the spec's
+    /// predicates refer to. On the wire; optional for older callers.
+    spec_slug?: string;
     status: StepStatus;
     assignee_id: string | null;
     metadata: Record<string, unknown>;
@@ -28,12 +41,18 @@
     fields?: StepField[];
   };
 
-  type Props = {
+  type Props = Readonly<{
     step: StepData;
     jobId: string;
     onUpdate: () => void;
-  };
-  let { step, jobId, onUpdate }: Props = $props();
+    /// The step's case — the decision-context panel — rendered by the
+    /// dispatcher INSIDE this card, under the title and above the
+    /// form. It used to sit above the card, so the order on screen
+    /// was brief, title, assignee, due date, form: the one thing the
+    /// step asks for came fifth (feedback 26ae4d44).
+    children?: Snippet;
+  }>;
+  let { step, jobId, onUpdate, children }: Props = $props();
 
   const initialDueOn =
     typeof step.metadata.due_on === 'string' ? step.metadata.due_on : '';
@@ -56,15 +75,69 @@
     ),
   );
 
-  /// A pipe-shaped `field_type` is an enum domain — the same shape the
-  /// Workflow viability lint reads to prove fork coverage. Anything
-  /// else is free text.
-  function optionsFor(f: StepField): string[] | null {
-    return f.field_type.includes('|') ? f.field_type.split('|') : null;
-  }
+  let missingRequired = $derived(missingOf(step.fields ?? [], fieldValues));
+  let needs = $derived(needsLine(missingRequired));
 
-  let missingRequired = $derived(
-    (step.fields ?? []).filter((f) => f.required && !fieldValues[f.name]?.trim()),
+  /// The Workflow's step graph, read so each enum option can say which
+  /// step it opens (stepAsk). Fetched only when the step has an enum
+  /// field to explain; the job says which kind and which VERSION the
+  /// packet is pinned to, and that version's spec is the one whose
+  /// predicates will actually route this answer. A failed read leaves
+  /// every route null — the select still shows its words, the button
+  /// still says Complete — so the surface degrades, never blanks.
+  let specSteps = $state<ReadonlyArray<SpecStep> | null>(null);
+  let hasEnumField = $derived((step.fields ?? []).some((f) => optionsFor(f) !== null));
+  $effect(() => {
+    if (!hasEnumField) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const jr = await fetch(`/api/jobs/${jobId}`, { headers: { accept: 'application/json' } });
+        if (!jr.ok || cancelled) return;
+        const job = (await jr.json()) as { kind?: string; workflow_version?: number };
+        if (cancelled || !job.kind) return;
+        const kind = encodeURIComponent(job.kind);
+        const path =
+          typeof job.workflow_version === 'number'
+            ? `/api/workflows/${kind}/versions/${job.workflow_version}`
+            : `/api/workflows/${kind}`;
+        const sr = await fetch(path, { headers: { accept: 'application/json' } });
+        if (!sr.ok || cancelled) return;
+        const spec = (await sr.json()) as { steps?: unknown };
+        if (cancelled) return;
+        specSteps = Array.isArray(spec.steps) ? (spec.steps as SpecStep[]) : null;
+      } catch {
+        // No graph is a quiet absence: the words render without routes.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  });
+  let specSlug = $derived(specSlugOf(step, specSteps));
+  let routesByField = $derived(
+    new Map(
+      (step.fields ?? [])
+        .filter((f) => optionsFor(f) !== null)
+        .map((f) => [f.name, askRoutes(specSteps, specSlug, f)]),
+    ),
+  );
+  /// The fork field — the first enum field — is the one whose chosen
+  /// value names the route the Complete control takes.
+  let forkField = $derived((step.fields ?? []).find((f) => optionsFor(f) !== null) ?? null);
+  let completeText = $derived(
+    forkField
+      ? completeLabel(routesByField.get(forkField.name) ?? [], fieldValues[forkField.name] ?? '')
+      : 'Complete',
+  );
+  /// The ask renders whenever the step has a contract and a person can
+  /// still answer it. `ready` is included: an assigned triage step IS
+  /// ready, and the API accepts completion from there (TriageFlow has
+  /// completed forks from ready since it existed). Making a person
+  /// press Start first, then find Complete, was half of what stopped
+  /// David on 2026-09-15.
+  let hasAsk = $derived(
+    (step.fields ?? []).length > 0 && (step.status === 'ready' || step.status === 'active'),
   );
 
   let notes = $state(step.notes ?? '');
@@ -222,6 +295,79 @@
     <span class="step-status step-status-{step.status}">{step.status}</span>
   </div>
 
+  <!-- The one ask, in reading order: the step's title (its question),
+       the case for it (the dispatcher's decision-context panel, passed
+       in as children), then the answer — the declared fields and the
+       control that records them. Nothing else sits between. The
+       assignee, due date and notes are details of the step, and they
+       follow the ask (feedback 26ae4d44). -->
+  {@render children?.()}
+
+  {#if hasAsk}
+    <!-- The step's own completion contract, rendered from data.
+         Validators run at `completed`, so a required field missing
+         here is not a warning — it is a step that cannot close.
+         Independent of any metadata: the form's presence depends on
+         the CONTRACT, not on whether context happens to exist (they
+         were tangled, and a context-less step lost its form). -->
+    <div class="step-fields step-ask">
+      {#each step.fields ?? [] as f (f.name)}
+        {@const options = optionsFor(f)}
+        {@const routes = routesByField.get(f.name) ?? []}
+        <label class="step-field">
+          <span class="step-field-label">
+            {f.name.replace(/_/g, ' ')}{#if f.required}<span
+                class="step-field-required"
+                title="required">*</span
+              >{/if}
+          </span>
+          {#if options}
+            <!-- Each option carries the step it opens, read off the
+                 Workflow's predicates: "build — Build the change". The
+                 bare word was the whole label before, and six bare
+                 words are not a choice a person can make unaided. -->
+            <select class="step-field-input" bind:value={fieldValues[f.name]}>
+              <option value="">Choose…</option>
+              {#each routes as r (r.value)}
+                <option value={r.value}>{r.route ? `${r.value} — ${r.route}` : r.value}</option>
+              {/each}
+            </select>
+          {:else if f.field_type === 'string'}
+            <!-- Free text is prose (evidence, a finding, a brief), and a
+                 one-line box crammed a whole markdown brief into one
+                 scrolling line. -->
+            <textarea class="step-field-input" rows="2" bind:value={fieldValues[f.name]}
+            ></textarea>
+          {:else}
+            <input
+              class="step-field-input"
+              type="text"
+              bind:value={fieldValues[f.name]}
+              placeholder={f.field_type}
+            />
+          {/if}
+        </label>
+      {/each}
+      <div class="step-ask-actions">
+        <!-- Labelled with its effect — the route the chosen answer
+             takes — and, when it cannot be pressed, the field it is
+             waiting on, in the row rather than a hover title. -->
+        <button
+          class="step-btn step-btn-primary"
+          onclick={() => persist({ status: 'completed' })}
+          disabled={saving || missingRequired.length > 0}
+        >
+          {completeText}
+        </button>
+        {#if needs}
+          <span class="step-ask-needs">{needs}</span>
+        {:else}
+          <span class="step-ask-needs step-ask-legend">* required</span>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
   <div class="step-field step-assign-row">
     <label for={`assignee-${step.id}`}>Assignee</label>
     <select
@@ -261,43 +407,6 @@
           <span class="gs-context-k">{c.key}</span>
           <p class="gs-context-v">{c.value}</p>
         </div>
-      {/each}
-    </div>
-  {/if}
-
-  {#if (step.fields ?? []).length > 0 && !terminal}
-    <!-- The step's own completion contract, rendered from data.
-         Validators run at `completed`, so a required field missing
-         here is not a warning — it is a step that cannot close.
-         Independent of any metadata: the form's presence depends on
-         the CONTRACT, not on whether context happens to exist (they
-         were tangled, and a context-less step lost its form). -->
-    <div class="step-fields">
-      {#each step.fields ?? [] as f (f.name)}
-        {@const options = optionsFor(f)}
-        <label class="step-field">
-          <span class="step-field-label">
-            {f.name.replace(/_/g, ' ')}{#if f.required}<span
-                class="step-field-required"
-                aria-hidden="true">*</span
-              >{/if}
-          </span>
-          {#if options}
-            <select class="step-field-input" bind:value={fieldValues[f.name]}>
-              <option value="">Choose…</option>
-              {#each options as o (o)}
-                <option value={o}>{o}</option>
-              {/each}
-            </select>
-          {:else}
-            <input
-              class="step-field-input"
-              type="text"
-              bind:value={fieldValues[f.name]}
-              placeholder={f.field_type}
-            />
-          {/if}
-        </label>
       {/each}
     </div>
   {/if}
@@ -347,17 +456,49 @@
         Start
       </button>
     {/if}
-    {#if !terminal && step.status === 'active'}
+    {#if !terminal && step.status === 'active' && !hasAsk}
+      <!-- A step with no contract completes here; one WITH a contract
+           completes from the ask above, where the answer is. -->
       <button
         class="step-btn step-btn-primary"
         onclick={() => persist({ status: 'completed' })}
-        disabled={saving || missingRequired.length > 0}
-        title={missingRequired.length > 0
-          ? `Needs ${missingRequired.map((f) => f.name).join(', ')}`
-          : undefined}
+        disabled={saving}
       >
         Complete
       </button>
     {/if}
   </div>
 </div>
+
+<style>
+  .step-ask {
+    border: 1px solid var(--border, #e7e5e4);
+    border-left: 3px solid var(--accent, #2563eb);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+  }
+  .step-ask-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .step-ask-needs {
+    font-size: 12px;
+    color: var(--text-dim, #78716c);
+  }
+  .step-field-label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-dim, #78716c);
+  }
+  .step-ask-legend {
+    margin-left: auto;
+  }
+  .step-field-required {
+    color: var(--danger, #b91c1c);
+    margin-left: 2px;
+  }
+</style>

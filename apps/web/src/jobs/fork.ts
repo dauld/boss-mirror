@@ -59,6 +59,42 @@ export function disposition(j: Job, fork: Fork | null): string | null {
   return typeof v === 'string' && v.length > 0 ? v : null;
 }
 
+/// The shape of a registry step this module reads: its slug (`title`),
+/// its predicate, and the human name a successor lends to the route
+/// that opens it.
+export type SpecStep = Readonly<{
+  title?: string;
+  ready_when?: string;
+  title_template?: string | null;
+}>;
+
+/// The step that `steps.<slug>.metadata.<field> = "<value>"` opens —
+/// the ROUTE that answer takes — or null when no predicate reads it.
+///
+/// Anchored to the slug: two steps can fork on a field spelled the
+/// same way (user-feedback's `triage` and `investigate` both set
+/// `disposition`), and a match on the bare `field = "value"` would
+/// hand `investigate`'s options `triage`'s successors. One reader for
+/// the queue boards (readFork) and the step surface (stepAsk, feedback
+/// 26ae4d44), so the two cannot disagree about which step an answer
+/// opens (CLAUDE.md 9a).
+export function routeFor(
+  steps: ReadonlyArray<SpecStep>,
+  slug: string,
+  field: string,
+  value: string,
+): string | null {
+  const re = new RegExp(
+    `steps\\.${escapeRe(slug)}\\.metadata\\.${escapeRe(field)}\\s*=\\s*"${escapeRe(value)}"`,
+  );
+  const successor = steps.find((s) => re.test(s.ready_when ?? ''));
+  return successor ? successor.title_template || successor.title || null : null;
+}
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /// Read the queue's fork out of the Workflow registry: the step with a
 /// required pipe-shaped field is the fork, its values are the
 /// dispositions, and each successor's `title_template` is that route's
@@ -69,21 +105,17 @@ export function readFork(spec: unknown): Fork | null {
   const steps = (spec as { steps?: unknown[] })?.steps;
   if (!Array.isArray(steps)) return null;
 
-  for (const step of steps) {
+  for (const step of steps as SpecStep[]) {
     const fields = (step as { fields?: unknown[] }).fields ?? [];
     for (const f of fields) {
       const field = f as { name?: string; field_type?: string; required?: boolean };
       if (!field.required || !field.name || !field.field_type?.includes('|')) continue;
-      const options = field.field_type.split('|').map((value) => {
-        const successor = steps.find((s) =>
-          (s as { ready_when?: string }).ready_when?.includes(`${field.name} = "${value}"`),
-        ) as { title_template?: string; title?: string } | undefined;
-        return {
-          value,
-          label: successor?.title_template || successor?.title || value,
-        };
-      });
-      return { field: field.name, options };
+      const name = field.name;
+      const options = field.field_type.split('|').map((value) => ({
+        value,
+        label: routeFor(steps as SpecStep[], step.title ?? '', name, value) ?? value,
+      }));
+      return { field: name, options };
     }
   }
   return null;

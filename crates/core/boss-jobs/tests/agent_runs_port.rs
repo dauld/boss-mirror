@@ -11,9 +11,10 @@
 //! key, so what passes here is the contract both sides owe.
 
 use boss_core::actor::ActorId;
+use boss_core::agent::{AgentCaps, BudgetDecision};
 use boss_jobs::agent_runs::{
-    AGENT_RUN_RECORDED, AgentRunLog, InMemoryAgentRuns, NewAgentRun, RateCardRow, RunFilter,
-    RunOutcome, TokenUsage, summarize,
+    AGENT_RUN_DENIED, AGENT_RUN_RECORDED, AgentRunError, AgentRunLog, InMemoryAgentRuns,
+    NewAgentRun, RateCardRow, RunFilter, RunOutcome, TokenUsage, summarize,
 };
 use boss_testing::assert_explicit_null;
 use chrono::{DateTime, Duration, Utc};
@@ -628,4 +629,214 @@ async fn the_summary_groups_a_registered_run_and_a_legacy_run_under_one_model() 
         vec![("opus-5", 2)],
         "one model, two spellings of the actor — one bucket"
     );
+}
+
+// --------------------------------------------------------------------
+// A RUN IS ALLOWED OR DENIED AGAINST A BUDGET (backlog 7dd9f28c). The
+// caps live on the agent's registry row; the record consults them
+// BEFORE it writes, measures the actor's priced spend in the hour
+// before the run STARTED (the admission instant, not the report's
+// arrival), and writes the decision down — on the run when allowed,
+// as its own event when refused — so a refusal is as visible as spend.
+// --------------------------------------------------------------------
+
+/// `agent-claude` with a $0.02/hour cap and at most two runs in
+/// flight. Every `measured` fixture run is 1,000 tokens at opus-5 =
+/// 7,000 micro-USD, so the cap admits two and refuses the third.
+fn budgeted_log() -> InMemoryAgentRuns {
+    InMemoryAgentRuns::new(card()).with_budgeted_agent(
+        "agent-claude",
+        "opus-5",
+        AgentCaps {
+            hourly_budget_usd_micros: Some(20_000),
+            max_concurrent_runs: Some(2),
+        },
+    )
+}
+
+/// A one-minute registered run starting at the given clock time on
+/// 2026-09-10.
+fn registered_at(run_id: &str, hh: u32, mm: u32) -> NewAgentRun {
+    let started = at(&format!("2026-09-10T{hh:02}:{mm:02}:00Z"));
+    NewAgentRun {
+        run_id: run_id.into(),
+        started_at: started,
+        finished_at: started + Duration::minutes(1),
+        ..registered_run(None)
+    }
+}
+
+#[tokio::test]
+async fn an_admitted_run_carries_what_was_left_at_admission() {
+    let log = budgeted_log();
+    let first = log
+        .record_run(&registered_at("run-1", 1, 0), &filer())
+        .await
+        .expect("nothing spent yet: admitted");
+    assert_eq!(
+        first.run.budget,
+        Some(BudgetDecision::Allow {
+            remaining_usd_micros: Some(20_000)
+        }),
+        "no prior spend: the whole cap remains"
+    );
+    let second = log
+        .record_run(&registered_at("run-2", 1, 30), &filer())
+        .await
+        .expect("7,000 of 20,000 spent: admitted");
+    assert_eq!(
+        second.run.budget,
+        Some(BudgetDecision::Allow {
+            remaining_usd_micros: Some(13_000)
+        })
+    );
+    // The decision rides the event, so a rebuild replays it rather
+    // than re-measuring against a registry whose cap may have moved.
+    let events = log.recorded_events().await;
+    assert_eq!(events[1].kind, AGENT_RUN_RECORDED);
+    assert_eq!(events[1].payload["budget"]["kind"], "allow");
+    assert_eq!(events[1].payload["budget"]["remaining_usd_micros"], 13_000);
+}
+
+#[tokio::test]
+async fn a_run_past_the_cap_is_refused_and_the_refusal_is_a_fact_on_the_log() {
+    let log = budgeted_log();
+    for (id, mm) in [("run-1", 0), ("run-2", 10), ("run-3", 20)] {
+        log.record_run(&registered_at(id, 1, mm), &filer())
+            .await
+            .expect("under the cap");
+    }
+    // 21,000 spent in the hour before 01:30 against a 20,000 cap.
+    let err = log
+        .record_run(&registered_at("run-4", 1, 30), &filer())
+        .await
+        .expect_err("over the cap is a refusal");
+    let AgentRunError::Denied { reason } = &err else {
+        panic!("a budget refusal is its own error class, not a 400: {err:?}");
+    };
+    assert!(reason.contains("21000 of 20000"), "{reason}");
+
+    // Not recorded as a run...
+    let runs = log.list_runs(&RunFilter::default()).await.expect("lists");
+    assert_eq!(runs.len(), 3, "the refused run is not a row");
+
+    // ...but recorded as a refusal: which actor, for what, against
+    // which cap, in which window — and what the refused run itself
+    // cost, so the money is on the log even though the row is not.
+    let events = log.recorded_events().await;
+    let denied = events
+        .iter()
+        .find(|e| e.kind == AGENT_RUN_DENIED)
+        .expect("the refusal is an event");
+    assert_eq!(denied.payload["run_id"], "run-4");
+    assert_eq!(denied.payload["actor_id"], "agent-claude");
+    assert_eq!(denied.payload["reason"], reason.as_str());
+    assert_eq!(denied.payload["spent_usd_micros"], 21_000);
+    assert_eq!(denied.payload["hourly_budget_usd_micros"], 20_000);
+    assert_eq!(denied.payload["window"]["kind"], "last_hour");
+    assert_eq!(denied.payload["window_from"], "2026-09-10T00:30:00Z");
+    assert_eq!(denied.payload["usd_micros"], 7_000);
+    assert_eq!(denied.payload["_actor"], "claude:opus-5[1m]");
+}
+
+#[tokio::test]
+async fn the_window_rolls_off_the_runs_start_not_the_reports_arrival() {
+    let log = budgeted_log();
+    for (id, mm) in [("run-1", 0), ("run-2", 10), ("run-3", 20)] {
+        log.record_run(&registered_at(id, 1, mm), &filer())
+            .await
+            .expect("under the cap");
+    }
+    // Started at 02:05: run-1 (finished 01:01) is out of the hour, so
+    // 14,000 is spent and the run is admitted with 6,000 left.
+    let out = log
+        .record_run(&registered_at("run-late", 2, 5), &filer())
+        .await
+        .expect("the hour has rolled");
+    assert_eq!(
+        out.run.budget,
+        Some(BudgetDecision::Allow {
+            remaining_usd_micros: Some(6_000)
+        })
+    );
+}
+
+#[tokio::test]
+async fn an_unbudgeted_agent_is_admitted_with_nothing_to_count_down() {
+    // NULL caps on the row — the registry's one live row today — are
+    // "no cap declared", never a refusal: a missing number must not
+    // stop the stack.
+    let log = log_with_the_registry();
+    let out = log
+        .record_run(&registered_run(None), &filer())
+        .await
+        .expect("unbudgeted is admitted");
+    assert_eq!(
+        out.run.budget,
+        Some(BudgetDecision::Allow {
+            remaining_usd_micros: None
+        })
+    );
+    let events = log.recorded_events().await;
+    assert_eq!(events[0].payload["budget"]["kind"], "allow");
+    assert_explicit_null!(
+        events[0].payload["budget"],
+        "remaining_usd_micros",
+        "no cap, so no remainder — said out loud"
+    );
+}
+
+#[tokio::test]
+async fn a_legacy_colon_form_actor_has_no_row_and_is_unbudgeted() {
+    let log = budgeted_log();
+    let out = log
+        .record_run(&measured("feat/legacy", 1_000, 1, 1), &filer())
+        .await
+        .expect("no row, no cap");
+    assert_eq!(
+        out.run.budget,
+        Some(BudgetDecision::Allow {
+            remaining_usd_micros: None
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_run_that_started_while_the_cap_was_full_of_flights_is_refused() {
+    let log = InMemoryAgentRuns::new(card()).with_budgeted_agent(
+        "agent-claude",
+        "opus-5",
+        AgentCaps {
+            hourly_budget_usd_micros: None,
+            max_concurrent_runs: Some(1),
+        },
+    );
+    // run-long: 01:00 -> 01:10.
+    let long = NewAgentRun {
+        finished_at: at("2026-09-10T01:10:00Z"),
+        ..registered_at("run-long", 1, 0)
+    };
+    log.record_run(&long, &filer()).await.expect("first in");
+    // run-mid started at 01:05, while run-long was in flight.
+    let err = log
+        .record_run(&registered_at("run-mid", 1, 5), &filer())
+        .await
+        .expect_err("one of one in flight is full");
+    let AgentRunError::Denied { reason } = &err else {
+        panic!("{err:?}");
+    };
+    assert!(reason.contains("1 of 1"), "{reason}");
+    assert!(reason.contains("in flight"), "{reason}");
+    let denied = log
+        .recorded_events()
+        .await
+        .into_iter()
+        .find(|e| e.kind == AGENT_RUN_DENIED)
+        .expect("refusal on the log");
+    assert_eq!(denied.payload["in_flight"], 1);
+    assert_eq!(denied.payload["max_concurrent_runs"], 1);
+    // And a run that started after run-long finished is admitted.
+    log.record_run(&registered_at("run-after", 1, 11), &filer())
+        .await
+        .expect("nothing in flight at 01:11");
 }

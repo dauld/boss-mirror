@@ -20,8 +20,10 @@
 //! malformed row or merely trusts its callers.
 
 use boss_core::actor::ActorId;
+use boss_core::agent::BudgetDecision;
 use boss_jobs::agent_runs::{
-    AgentRunLog, NewAgentRun, PgAgentRuns, RunFilter, RunOutcome, TokenUsage, rebuild_agent_runs,
+    AgentRunError, AgentRunLog, NewAgentRun, PgAgentRuns, RunFilter, RunOutcome, TokenUsage,
+    rebuild_agent_runs,
 };
 use boss_testing::TestDb;
 use chrono::{TimeZone, Utc};
@@ -407,4 +409,252 @@ async fn the_backfill_and_the_rebuild_derive_the_same_model() {
         ..a_run("run-pre", TokenUsage::TotalOnly { total: 1 })
     };
     assert_eq!(run.model(), backfilled.as_deref());
+}
+
+// --------------------------------------------------------------------
+// A RUN IS ALLOWED OR DENIED AGAINST A BUDGET (backlog 7dd9f28c). The
+// port test proves the CONTRACT over the in-memory map; this half
+// proves the SCHEMA: the caps are read off the live `agents` row, the
+// decision lands in `agent_runs.budget`, a refusal lands on the outbox
+// and NOT in the table, and a rebuild replays the decision.
+// --------------------------------------------------------------------
+
+/// Cap the one seeded agent — a data change on its row, no deploy —
+/// at 20,000 micro-USD/hour. Every `priced_run` below is 1,000 tokens
+/// at opus-5[1m] (900 in, 100 out) = 7,000 micro-USD, so the cap
+/// admits two and refuses the third.
+async fn cap_the_agent(db: &TestDb, hourly: Option<i64>, concurrent: Option<i32>) {
+    sqlx::query(
+        "UPDATE agents SET hourly_budget_usd_micros = $1, max_concurrent_runs = $2 \
+         WHERE id = 'agent-claude'",
+    )
+    .bind(hourly)
+    .bind(concurrent)
+    .execute(&db.pool)
+    .await
+    .expect("the seeded row takes a cap");
+}
+
+fn priced_run(run_id: &str, hh: u32, mm: u32) -> NewAgentRun {
+    let started = Utc.with_ymd_and_hms(2026, 9, 15, hh, mm, 0).unwrap();
+    NewAgentRun {
+        run_id: run_id.into(),
+        actor_id: ActorId::RegisteredAgent("agent-claude".into()),
+        started_at: started,
+        finished_at: started + chrono::Duration::minutes(1),
+        ..a_run(
+            run_id,
+            TokenUsage::Split {
+                input: 900,
+                output: 100,
+            },
+        )
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_caps_are_read_off_the_agents_row_and_the_decision_is_stored() {
+    let db = TestDb::new().await;
+    cap_the_agent(&db, Some(20_000), None).await;
+    let log = PgAgentRuns::new(db.pool.clone());
+
+    let first = log
+        .record_run(&priced_run("run-1", 1, 0), &filer())
+        .await
+        .expect("nothing spent: admitted");
+    assert_eq!(
+        first.run.budget,
+        Some(BudgetDecision::Allow {
+            remaining_usd_micros: Some(20_000)
+        })
+    );
+    let second = log
+        .record_run(&priced_run("run-2", 1, 10), &filer())
+        .await
+        .expect("7,000 spent: admitted");
+    assert_eq!(
+        second.run.budget,
+        Some(BudgetDecision::Allow {
+            remaining_usd_micros: Some(13_000)
+        })
+    );
+
+    // The column holds the decision as the wire spells it.
+    let stored: serde_json::Value =
+        sqlx::query_scalar("SELECT budget FROM agent_runs WHERE run_id = 'run-2'")
+            .fetch_one(&db.pool)
+            .await
+            .expect("the row is there");
+    assert_eq!(
+        stored,
+        serde_json::json!({"kind": "allow", "remaining_usd_micros": 13_000})
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_is_on_the_outbox_and_not_in_the_table() {
+    let db = TestDb::new().await;
+    cap_the_agent(&db, Some(20_000), None).await;
+    let log = PgAgentRuns::new(db.pool.clone());
+    for (id, mm) in [("run-1", 0), ("run-2", 10), ("run-3", 20)] {
+        log.record_run(&priced_run(id, 1, mm), &filer())
+            .await
+            .expect("under the cap");
+    }
+
+    // 21,000 spent in the hour before 01:30, cap 20,000.
+    let err = log
+        .record_run(&priced_run("run-4", 1, 30), &filer())
+        .await
+        .expect_err("over the cap");
+    let AgentRunError::Denied { reason } = &err else {
+        panic!("{err:?}");
+    };
+    assert!(reason.contains("21000 of 20000"), "{reason}");
+
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_runs")
+        .fetch_one(&db.pool)
+        .await
+        .expect("counts");
+    assert_eq!(rows, 3, "the refused run is not a row");
+
+    let denied: serde_json::Value =
+        sqlx::query_scalar("SELECT payload FROM event_outbox WHERE kind = 'agents.run.denied'")
+            .fetch_one(&db.pool)
+            .await
+            .expect("the refusal committed to the outbox");
+    assert_eq!(denied["run_id"], "run-4");
+    assert_eq!(denied["actor_id"], "agent-claude");
+    assert_eq!(denied["spent_usd_micros"], 21_000);
+    assert_eq!(denied["hourly_budget_usd_micros"], 20_000);
+    assert_eq!(denied["window_from"], "2026-09-15T00:30:00Z");
+    assert_eq!(denied["usd_micros"], 7_000, "the refused run's own cost");
+    assert_eq!(denied["reason"], reason.as_str());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_started_while_another_was_in_flight_is_refused_by_the_concurrency_cap() {
+    let db = TestDb::new().await;
+    cap_the_agent(&db, None, Some(1)).await;
+    let log = PgAgentRuns::new(db.pool.clone());
+
+    // 01:00 -> 01:10.
+    let long = NewAgentRun {
+        finished_at: Utc.with_ymd_and_hms(2026, 9, 15, 1, 10, 0).unwrap(),
+        ..priced_run("run-long", 1, 0)
+    };
+    log.record_run(&long, &filer()).await.expect("first in");
+    let err = log
+        .record_run(&priced_run("run-mid", 1, 5), &filer())
+        .await
+        .expect_err("one of one in flight at 01:05");
+    assert!(err.to_string().contains("in flight"), "{err}");
+    log.record_run(&priced_run("run-after", 1, 11), &filer())
+        .await
+        .expect("nothing in flight at 01:11");
+}
+
+/// The seeded row has both caps NULL, and that is the live shape: the
+/// run is admitted with nothing to count down, never refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_seeded_agent_is_unbudgeted_and_admitted() {
+    let db = TestDb::new().await;
+    let log = PgAgentRuns::new(db.pool.clone());
+    let out = log
+        .record_run(&priced_run("run-free", 1, 0), &filer())
+        .await
+        .expect("NULL caps admit");
+    assert_eq!(
+        out.run.budget,
+        Some(BudgetDecision::Allow {
+            remaining_usd_micros: None
+        })
+    );
+    let stored: serde_json::Value =
+        sqlx::query_scalar("SELECT budget FROM agent_runs WHERE run_id = 'run-free'")
+            .fetch_one(&db.pool)
+            .await
+            .expect("the row is there");
+    assert_eq!(
+        stored,
+        serde_json::json!({"kind": "allow", "remaining_usd_micros": null})
+    );
+}
+
+/// Determinism: the decision is replayed from the event, not re-judged.
+/// Move the cap after recording; the rebuilt row still says what was
+/// decided on the day.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rebuild_replays_the_decision_rather_than_rejudging_it() {
+    let db = TestDb::new().await;
+    cap_the_agent(&db, Some(20_000), None).await;
+    let log = PgAgentRuns::new(db.pool.clone());
+    log.record_run(&priced_run("run-1", 1, 0), &filer())
+        .await
+        .expect("admitted with 20,000 left");
+    // The outbox is what a live write fills; the rebuild reads
+    // audit_log, so move the event across as the relay would.
+    sqlx::query(
+        "INSERT INTO audit_log (event_id, kind, source, timestamp, payload) \
+         SELECT event_id, kind, source, timestamp, payload FROM event_outbox \
+         WHERE kind = 'agents.run.recorded'",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("relay the event");
+    cap_the_agent(&db, Some(5), None).await;
+
+    let report = rebuild_agent_runs(&db.pool).await.expect("rebuilds");
+    assert_eq!(report.runs_inserted, 1);
+    let stored: serde_json::Value =
+        sqlx::query_scalar("SELECT budget FROM agent_runs WHERE run_id = 'run-1'")
+            .fetch_one(&db.pool)
+            .await
+            .expect("the rebuilt row is there");
+    assert_eq!(
+        stored,
+        serde_json::json!({"kind": "allow", "remaining_usd_micros": 20_000}),
+        "the cap moved to 5 afterwards; the record keeps the decision made under 20,000"
+    );
+}
+
+/// An event written before budgets were consulted carries no `budget`
+/// key; it rebuilds to NULL — no decision — not to an allow.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rebuild_of_a_pre_budget_event_holds_no_decision() {
+    let db = TestDb::new().await;
+    let payload = serde_json::json!({
+        "run_id": "run-old",
+        "actor_id": "claude:opus-5[1m]",
+        "model": "opus-5[1m]",
+        "started_at": "2026-09-10T02:37:27Z",
+        "finished_at": "2026-09-10T02:47:58Z",
+        "outcome": "success",
+        "error": null,
+        "input_tokens": null,
+        "output_tokens": null,
+        "total_tokens": 142982,
+        "tool_calls": 52,
+        "job_id": null,
+        "branch": "fix/x",
+        "detail": {},
+        "usd_micros": null,
+        "priced_by": null,
+        "_actor": "claude:opus-5[1m]"
+    });
+    sqlx::query(
+        "INSERT INTO audit_log (event_id, kind, source, timestamp, payload) \
+         VALUES (gen_random_uuid(), 'agents.run.recorded', 'jobs', NOW(), $1)",
+    )
+    .bind(&payload)
+    .execute(&db.pool)
+    .await
+    .expect("seed the pre-budget event");
+    rebuild_agent_runs(&db.pool).await.expect("rebuilds");
+    let stored: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT budget FROM agent_runs WHERE run_id = 'run-old'")
+            .fetch_one(&db.pool)
+            .await
+            .expect("the rebuilt row is there");
+    assert_eq!(stored, None, "no decision was made, and the row says so");
 }

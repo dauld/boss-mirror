@@ -11,6 +11,7 @@
 
 pub mod agent_runs;
 pub mod agents;
+pub mod audience;
 pub mod bootstrap;
 pub mod cadence;
 pub mod calendar_hook;
@@ -29,6 +30,7 @@ pub mod jobs_config;
 pub mod landing;
 pub mod metadata_containment;
 pub mod metadata_key;
+pub mod orphan_steps;
 pub mod policy_glue;
 pub mod port;
 #[cfg(feature = "postgres")]

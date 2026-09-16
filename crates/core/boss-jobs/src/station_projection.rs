@@ -61,10 +61,14 @@ pub fn constraints_of(workflows: &[WorkflowSpec]) -> BTreeSet<Constraint> {
         .iter()
         .filter(|w| w.status == WorkflowStatus::Active)
         .flat_map(|w| w.steps.iter())
+        // Through `selectors()`, not the raw key: a step that declares
+        // `audience = { role = ... }` and nothing else has declared
+        // this queue exactly as a legacy `authority_role` does
+        // (f5ebd2e1 car 1).
         .filter_map(|s| {
-            s.authority_role.as_ref().map(|role| Constraint {
+            s.selectors().authority_role.map(|role| Constraint {
                 step_kind: s.kind.clone(),
-                role: role.clone(),
+                role,
             })
         })
         .collect()
@@ -368,6 +372,32 @@ mod tests {
         assert_eq!(found.len(), 1, "two protocols, one constraint: {found:#?}");
         let only = found.iter().next().expect("one constraint");
         assert_eq!(station_name(only), "q.bookkeeper.bill-approval");
+    }
+
+    /// A role declared as an AUDIENCE projects the same queue a legacy
+    /// `authority_role` does (f5ebd2e1 car 1): the constraint is read
+    /// through `StepSpec::selectors`, so a step that declares its
+    /// audience once — and nothing else — is not an orphan here.
+    #[test]
+    fn a_role_audience_projects_a_constraint_queue() {
+        let mut wf = seedable_platform_workflows()
+            .into_iter()
+            .find(|w| !w.steps.is_empty())
+            .expect("a platform kind with steps");
+        wf.status = WorkflowStatus::Active;
+        wf.steps.truncate(1);
+        wf.steps[0].kind = "answer-question".into();
+        wf.steps[0].authority_role = None;
+        wf.steps[0].audience = Some(crate::audience::Audience::Role("platform-admin".into()));
+
+        let found = constraints_of(std::slice::from_ref(&wf));
+        let only = found.iter().next().expect("one constraint");
+        assert_eq!(found.len(), 1, "{found:#?}");
+        assert_eq!(station_name(only), "q.platform-admin.answer-question");
+
+        // An individual audience is not a role queue and projects none.
+        wf.steps[0].audience = Some(crate::audience::Audience::Individual("emp-david".into()));
+        assert!(constraints_of(std::slice::from_ref(&wf)).is_empty());
     }
 
     /// A retired protocol stops requiring a queue.

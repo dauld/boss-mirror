@@ -879,15 +879,17 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
             .as_ref()
             .and_then(|s| s.metadata.get("owner_role"))
             .and_then(|v| v.as_str());
+        // Through `selectors()`: a role declared as `audience` is the
+        // same fallback a legacy `authority_role` is (f5ebd2e1 car 1).
         let step_fallback = kind_spec
             .as_ref()
-            .and_then(|s| s.steps.iter().find_map(|st| st.authority_role.as_deref()));
+            .and_then(|s| s.steps.iter().find_map(|st| st.selectors().authority_role));
         match crate::owner_resolution::resolve_owner(
             roster.as_ref(),
             &job.owner_id,
             &job.id.to_string(),
             owner_role,
-            step_fallback,
+            step_fallback.as_deref(),
         )
         .await
         {
