@@ -27,9 +27,23 @@
 //!     same file gives (`jq length`, or the count of `[[table]]` headers
 //!     for TOML, which has no jq).
 //!   * THE DOCUMENT'S SHAPE, from the stub: one JSON object, the five
-//!     sections the packet asked for, the kubectl argv the brief named
-//!     (namespace, workload, container, user, database), and the seed
-//!     keys riding INSIDE the SQL rather than in a second round trip.
+//!     sections the packet asked for plus `log`, the kubectl argv the
+//!     brief named (namespace, workload, container, user, database),
+//!     and the seed keys riding INSIDE the SQL rather than in a second
+//!     round trip.
+//!   * THE LOG SECTION MEASURES THE MARKER, NOT THE PACKET (backlog
+//!     e2604427, 2026-09-16). Before a log-filtered rebuild can trim
+//!     the simulated projections (design e652c7c6 option 1), one fact
+//!     has to be measured: what marks a simulated EVENT. Every
+//!     audit_log payload carries `_simulated`, but that bool resolved
+//!     from the CLOCK MODE at publish time, while the packet partition
+//!     (`jobs.partition`, 508cc38c) is per packet — so under the sim
+//!     clock a real packet's events may read `_simulated: true`. The
+//!     `log` query cross-tabs the marker against the partition of the
+//!     job the row names, reads `_partition` (the stamp the rebuilder
+//!     prefers, boss-core partition.rs) beside it, counts the rows
+//!     that name no job at all, and reads event_outbox / event_facts
+//!     for the same marker so a reader can see whether they mirror.
 //!   * EXIT 4 NAMES THE QUERY and prints NO document: a partial census
 //!     that looks whole is the failure mode the conformance-report
 //!     shape exists to prevent.
@@ -105,6 +119,10 @@ fn answers(dir: &Path) -> PathBuf {
     boss_testing::write_file(
         &a.join("workflows.json"),
         r#"[{"owning_team": "brewery", "kinds": 37, "versions": 40, "active_versions": 37, "open_jobs": 12, "open_real_jobs": 0}, {"owning_team": "platform", "kinds": 20, "versions": 60, "active_versions": 20, "open_jobs": 300, "open_real_jobs": 300}]"#,
+    );
+    boss_testing::write_file(
+        &a.join("log.json"),
+        r#"{"audit_log": {"rows": 500000, "by_simulated": {"true": 490000, "false": 9000, "absent": 1000}, "by_partition_stamp": {"absent": 499000, "real": 1000}, "by_simulated_and_partition_stamp": {"true": {"absent": 490000}, "false": {"absent": 8000, "real": 1000}, "absent": {"absent": 1000}}, "by_prefix": {"jobs": {"true": 400000, "false": 5000}, "ledger": {"true": 90000, "false": 4000, "absent": 1000}}, "job_linked": {"rows": 405000, "cross_tab": {"true": {"simulated": 399000, "real": 900, "missing": 100}, "false": {"real": 5000}}, "missing_job": 100}, "unlinked": {"rows": 95000, "by_prefix": {"ledger": {"true": 90000, "false": 4000, "absent": 1000}}}}, "event_outbox": {"rows": 12, "pending": 0, "by_simulated": {"true": 12}, "note": "mirrors"}, "event_facts": {"rows": 500000, "by_simulated": {"true": 490000, "false": 9000, "absent": 1000}, "note": "projection"}}"#,
     );
     a
 }
@@ -347,6 +365,7 @@ fn the_census_is_one_document_read_through_the_postgres_container() {
         "partitions",
         "references",
         "workflows",
+        "log",
     ] {
         assert!(
             doc.get(key).is_some(),
@@ -359,6 +378,18 @@ fn the_census_is_one_document_read_through_the_postgres_container() {
     assert_eq!(doc["row_counts"]["jobs"], 7900);
     assert_eq!(doc["references"]["jobs.owner_id"]["count"], 2);
     assert_eq!(doc["workflows"][0]["owning_team"], "brewery");
+    assert_eq!(doc["log"]["audit_log"]["by_simulated"]["true"], 490000);
+    assert_eq!(
+        doc["log"]["audit_log"]["job_linked"]["cross_tab"]["true"]["real"],
+        900
+    );
+    // The log section's runtime rides beside it: 1.4M rows, and the
+    // brief asked for the measured cost, not a guess.
+    assert!(
+        doc["log"]["elapsed_ms"].as_u64().is_some(),
+        "log carries elapsed_ms:\n{}",
+        r.stdout
+    );
     // The seed keys ride in the document too, so a reader of the packet
     // sees what the queries matched against.
     assert!(doc["seed_keys"]["employees"].as_array().unwrap().len() > 400);
@@ -370,12 +401,7 @@ fn the_census_is_one_document_read_through_the_postgres_container() {
         .filter(|c| !c.trim().is_empty())
         .map(|c| c.lines().collect())
         .collect();
-    assert_eq!(
-        calls.len(),
-        5,
-        "five census queries, five reads:\n{}",
-        r.log
-    );
+    assert_eq!(calls.len(), 6, "six census queries, six reads:\n{}", r.log);
     let mut sqls: Vec<String> = Vec::new();
     for call in &calls {
         let head: Vec<&str> = call.iter().take_while(|w| **w != "--").copied().collect();
@@ -424,6 +450,28 @@ fn the_census_is_one_document_read_through_the_postgres_container() {
     );
     assert!(seed_sql.contains("emp-aa-001"));
     assert!(seed_sql.contains("Cascade Hop Distributors"));
+
+    // The log query reads the marker AND the partition, from every
+    // table that carries the envelope — never one without the other,
+    // which is the gap the packet names.
+    let log_sql = sqls
+        .iter()
+        .find(|s| s.starts_with("-- census:log"))
+        .expect("a log query");
+    for want in [
+        "FROM audit_log",
+        "'_simulated'",
+        "'_partition'",
+        "'job_id'",
+        "LIKE 'jobs.job.%'",
+        "LEFT JOIN jobs",
+        "partition",
+        "FROM event_outbox",
+        "delivered_at IS NULL",
+        "FROM event_facts",
+    ] {
+        assert!(log_sql.contains(want), "log query lacks {want}:\n{log_sql}");
+    }
 }
 
 #[test]

@@ -18,6 +18,15 @@
 //! real job that names it makes the references section non-trivial: the
 //! job's id must come back under `jobs.owner_id`.
 //!
+//! The `log` section (backlog e2604427, 2026-09-16) gets its own
+//! fixture: six audit_log rows that each land in a different cell of
+//! the marker × partition cross-tab — a step event stamped
+//! `_simulated: true` on the REAL job (the clock-mode leak the packet
+//! names), one on the simulated job, a job event that names its job as
+//! `id`, one naming a job that no longer exists, a ledger row with no
+//! job reference, and one with no marker at all — so every count the
+//! query produces is checked against a row that was put there for it.
+//!
 //! Never against production: `TestDb` refuses a server hosting a
 //! database named `boss` (test_db.rs), which is what a port-forward to
 //! the cluster looks like from here.
@@ -57,7 +66,7 @@ exec psql "$DB_URL" "${args[@]}"
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_five_queries_run_read_only_against_the_real_schema() {
+async fn the_census_queries_run_read_only_against_the_real_schema() {
     let db = TestDb::new().await;
     // A brewery employee (the seed's first id) owning one REAL job, one
     // simulated job under a brewery workflow kind, and a step completed
@@ -70,7 +79,31 @@ async fn the_five_queries_run_read_only_against_the_real_schema() {
              VALUES ('11111111-1111-1111-1111-111111111111', 'morning-brew', 'employee', 'emp-aa-001', 'real one', 'emp-aa-001', 'open', 'standard', '2026-09-16', 'real'),
                     ('22222222-2222-2222-2222-222222222222', 'morning-brew', 'employee', 'nobody', 'sim one', 'nobody', 'closed', 'standard', '2026-09-16', 'simulated');
          INSERT INTO steps (id, job_id, kind, title, status, completed_by)
-             VALUES ('33333333-3333-3333-3333-333333333333', '11111111-1111-1111-1111-111111111111', 'generic', 'do it', 'completed', 'emp-aa-001');",
+             VALUES ('33333333-3333-3333-3333-333333333333', '11111111-1111-1111-1111-111111111111', 'generic', 'do it', 'completed', 'emp-aa-001');
+         INSERT INTO audit_log (event_id, timestamp, source, kind, payload) VALUES
+             -- the leak: a REAL job's step, stamped simulated by the clock mode
+             (gen_random_uuid(), now(), 'boss-jobs', 'jobs.step.completed',
+              '{\"job_id\": \"11111111-1111-1111-1111-111111111111\", \"_simulated\": true}'),
+             -- the simulated job's step, stamped simulated AND carrying _partition
+             (gen_random_uuid(), now(), 'boss-jobs', 'jobs.step.completed',
+              '{\"job_id\": \"22222222-2222-2222-2222-222222222222\", \"_simulated\": true, \"_partition\": \"simulated\"}'),
+             -- a job event names its job as `id`, not `job_id`
+             (gen_random_uuid(), now(), 'boss-jobs', 'jobs.job.closed',
+              '{\"id\": \"11111111-1111-1111-1111-111111111111\", \"_simulated\": false}'),
+             -- names a job no row exists for
+             (gen_random_uuid(), now(), 'boss-jobs', 'jobs.step.completed',
+              '{\"job_id\": \"99999999-9999-9999-9999-999999999999\", \"_simulated\": true}'),
+             -- a domain event with no job reference at all
+             (gen_random_uuid(), now(), 'boss-ledger', 'ledger.invoice.issued',
+              '{\"invoice_id\": \"inv-1\", \"_simulated\": true}'),
+             -- no marker at all
+             (gen_random_uuid(), now(), 'boss-ledger', 'ledger.invoice.issued',
+              '{\"invoice_id\": \"inv-2\"}');
+         INSERT INTO event_outbox (event_id, timestamp, source, kind, payload, delivered_at) VALUES
+             (gen_random_uuid(), now(), 'boss-ledger', 'ledger.invoice.issued', '{\"_simulated\": true}', now()),
+             (gen_random_uuid(), now(), 'boss-ledger', 'ledger.invoice.issued', '{\"_simulated\": false}', NULL);
+         INSERT INTO event_facts (audit_id, event_id, kind, source, occurred_at, payload)
+             SELECT id, event_id, kind, source, timestamp, payload FROM audit_log WHERE kind LIKE 'ledger.%';",
     )
     .execute(&db.pool)
     .await
@@ -166,6 +199,69 @@ async fn the_five_queries_run_read_only_against_the_real_schema() {
     assert_eq!(brewery["kinds"], 1);
     assert_eq!(brewery["open_jobs"], 1);
     assert_eq!(brewery["open_real_jobs"], 1);
+
+    // (f) log: the marker against the partition. Six rows, each in its
+    // own cell — see the module doc for which row is which.
+    let log = &doc["log"];
+    let al = &log["audit_log"];
+    assert_eq!(al["rows"], 6);
+    assert_eq!(al["by_simulated"]["true"], 4);
+    assert_eq!(al["by_simulated"]["false"], 1);
+    assert_eq!(al["by_simulated"]["absent"], 1);
+    // `_partition` is the newer stamp: one row carries it here, and the
+    // cross-tab shows it beside the bool it supersedes.
+    assert_eq!(al["by_partition_stamp"]["simulated"], 1);
+    assert_eq!(al["by_partition_stamp"]["absent"], 5);
+    assert_eq!(
+        al["by_simulated_and_partition_stamp"]["true"]["simulated"],
+        1
+    );
+    assert_eq!(al["by_simulated_and_partition_stamp"]["true"]["absent"], 3);
+    // kind prefix × marker
+    assert_eq!(al["by_prefix"]["jobs"]["true"], 3);
+    assert_eq!(al["by_prefix"]["jobs"]["false"], 1);
+    assert_eq!(al["by_prefix"]["ledger"]["true"], 1);
+    assert_eq!(al["by_prefix"]["ledger"]["absent"], 1);
+    // The cross-tab that decides the rebuild filter: `_simulated: true`
+    // on a REAL job's event is the leak, and it must be countable.
+    let linked = &al["job_linked"];
+    assert_eq!(linked["rows"], 4);
+    assert_eq!(linked["cross_tab"]["true"]["real"], 1);
+    assert_eq!(linked["cross_tab"]["true"]["simulated"], 1);
+    assert_eq!(linked["cross_tab"]["true"]["missing"], 1);
+    assert_eq!(linked["cross_tab"]["false"]["real"], 1);
+    assert_eq!(linked["missing_job"], 1);
+    // rows with no job reference, by prefix and marker
+    assert_eq!(al["unlinked"]["rows"], 2);
+    assert_eq!(al["unlinked"]["by_prefix"]["ledger"]["true"], 1);
+    assert_eq!(al["unlinked"]["by_prefix"]["ledger"]["absent"], 1);
+    assert!(al["unlinked"]["by_prefix"].get("jobs").is_none());
+    // The outbox and the facts projection carry the same envelope, so
+    // the same marker count is read from each and the note says how
+    // each relates to the log.
+    assert_eq!(log["event_outbox"]["rows"], 2);
+    assert_eq!(log["event_outbox"]["pending"], 1);
+    assert_eq!(log["event_outbox"]["by_simulated"]["true"], 1);
+    assert_eq!(log["event_outbox"]["by_simulated"]["false"], 1);
+    assert_eq!(log["event_facts"]["rows"], 2);
+    assert_eq!(log["event_facts"]["by_simulated"]["true"], 1);
+    assert_eq!(log["event_facts"]["by_simulated"]["absent"], 1);
+    assert!(
+        log["event_outbox"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("audit_log")
+    );
+    assert!(
+        log["event_facts"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("audit_log")
+    );
+    assert!(
+        log["elapsed_ms"].as_u64().is_some(),
+        "log carries its measured runtime"
+    );
 }
 
 /// The read-only SET is not decoration: a statement that writes, sent

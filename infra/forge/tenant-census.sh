@@ -22,7 +22,7 @@
 # container the manifest declares. The eviction verb (the next car)
 # takes its bounds from THESE queries — one definition (CLAUDE.md §9a).
 #
-# WHAT IT ANSWERS — five sections, five reads
+# WHAT IT ANSWERS — six sections, six reads
 #   row_counts   (a) exact rows per table, every table in `public`
 #   seed_owned   (b) rows the brewery seed owns per table, matched by
 #                    the seed's OWN ids/codes read from the checkout's
@@ -38,6 +38,24 @@
 #                    something
 #   workflows    (e) the workflows table by owning_team, with open-job
 #                    counts (all partitions, and real only)
+#   log          (f) what marks a simulated EVENT (backlog e2604427,
+#                    2026-09-16): audit_log rows by the payload's
+#                    `_simulated` bool and by the newer `_partition`
+#                    stamp, by kind prefix, and — for rows that name a
+#                    job — the cross-tab of `_simulated` against the
+#                    partition of THAT job; rows naming no job, by
+#                    prefix; the same marker read from event_outbox
+#                    and event_facts; and the measured `elapsed_ms`.
+#                    Why it must be measured and not assumed: the bool
+#                    resolved from the CLOCK MODE at publish time (each
+#                    module's http.rs: "resolved by the publisher's
+#                    clock"), while jobs.partition (508cc38c) is per
+#                    packet — so under the sim clock a real packet's
+#                    events may read `_simulated: true`. The answer
+#                    decides whether the log-filtered rebuild that
+#                    trims the simulated projections (design e652c7c6
+#                    option 1) filters on the flag, on the job's
+#                    partition, or repairs the flag first.
 #
 # READ-ONLY BY CONSTRUCTION. Every psql opens with
 # `SET default_transaction_read_only = on` in its own -c, so the query
@@ -63,7 +81,7 @@
 # EXIT
 #   0  the document is on stdout, one line. The ops-runner captures
 #      stdout AND stderr onto the packet (`> raw 2>&1`), so on the
-#      ops-request the five progress lines precede it: the document is
+#      ops-request the six progress lines precede it: the document is
 #      the LAST line of `output` — `tail -1 | jq .`
 #   4  cannot answer — stderr names the query and carries psql's words;
 #      NOTHING on stdout
@@ -397,6 +415,84 @@ FROM (
 SQL
 }
 
+# (f) What marks a simulated EVENT (backlog e2604427). ONE pass over
+# audit_log (1.4M rows on 2026-09-16): every row is reduced to its cell
+# — kind prefix, the `_simulated` bool, the `_partition` stamp, and the
+# partition of the job it names — and counted; every cross-tab below
+# is then an aggregate over those few hundred cells, never a second
+# scan. The job reference is what the packet named: payload.job_id, or
+# payload.id when the kind is jobs.job.* (a job's own events carry
+# themselves as `id`, boss-jobs rebuild.rs). `_partition` is read
+# beside `_simulated` because the rebuilder prefers it when present
+# (boss-core partition.rs from_event_payload) — so the cross-tab shows
+# both facts the replay would use. event_outbox and event_facts carry
+# the same envelope: one grouped pass each, and the note beside each
+# says how it relates to the log, so a count that differs is read as a
+# lag, not a second opinion. Nothing here is a per-row subquery.
+#
+# The marker expression lives once, expanded into the (unquoted)
+# heredoc: true / false / absent, and `other` for a value that is
+# present but not a boolean (a JSON null, a string) — which the
+# rebuilder reads as REAL, so it must not hide under `absent`.
+LOG_MARKER_SQL="CASE WHEN NOT (payload ? '_simulated') THEN 'absent' WHEN jsonb_typeof(payload->'_simulated') = 'boolean' THEN payload->>'_simulated' ELSE 'other' END"
+sql_log() {
+    cat <<SQL
+-- census:log
+WITH cells AS (
+    SELECT split_part(a.kind, '.', 1) AS prefix,
+           (${LOG_MARKER_SQL}) AS sim,
+           coalesce(a.payload->>'_partition', 'absent') AS pstamp,
+           CASE WHEN ref.job_ref IS NULL THEN 'none' ELSE coalesce(j.partition, 'missing') END AS jpart,
+           count(*) AS n
+    FROM audit_log a
+    CROSS JOIN LATERAL (SELECT coalesce(a.payload->>'job_id', CASE WHEN a.kind LIKE 'jobs.job.%' THEN a.payload->>'id' END) AS job_ref) ref
+    LEFT JOIN jobs j ON j.id::text = ref.job_ref
+    GROUP BY 1, 2, 3, 4
+),
+ob AS (
+    SELECT (${LOG_MARKER_SQL}) AS sim, (delivered_at IS NULL) AS pending, count(*) AS n
+    FROM event_outbox GROUP BY 1, 2
+),
+ef AS (
+    SELECT (${LOG_MARKER_SQL}) AS sim, count(*) AS n
+    FROM event_facts GROUP BY 1
+)
+SELECT json_build_object(
+    'audit_log', json_build_object(
+        'rows', (SELECT coalesce(sum(n), 0)::bigint FROM cells),
+        'by_simulated', (SELECT coalesce(json_object_agg(sim, n ORDER BY sim), '{}'::json) FROM (SELECT sim, sum(n)::bigint AS n FROM cells GROUP BY 1) x),
+        'by_partition_stamp', (SELECT coalesce(json_object_agg(pstamp, n ORDER BY pstamp), '{}'::json) FROM (SELECT pstamp, sum(n)::bigint AS n FROM cells GROUP BY 1) x),
+        'by_simulated_and_partition_stamp', (SELECT coalesce(json_object_agg(sim, o ORDER BY sim), '{}'::json) FROM (
+            SELECT sim, json_object_agg(pstamp, n ORDER BY pstamp) AS o FROM (SELECT sim, pstamp, sum(n)::bigint AS n FROM cells GROUP BY 1, 2) y GROUP BY sim) x),
+        'by_prefix', (SELECT coalesce(json_object_agg(prefix, o ORDER BY prefix), '{}'::json) FROM (
+            SELECT prefix, json_object_agg(sim, n ORDER BY sim) AS o FROM (SELECT prefix, sim, sum(n)::bigint AS n FROM cells GROUP BY 1, 2) y GROUP BY prefix) x),
+        'job_linked', json_build_object(
+            'rows', (SELECT coalesce(sum(n), 0)::bigint FROM cells WHERE jpart <> 'none'),
+            'cross_tab', (SELECT coalesce(json_object_agg(sim, o ORDER BY sim), '{}'::json) FROM (
+                SELECT sim, json_object_agg(jpart, n ORDER BY jpart) AS o FROM (SELECT sim, jpart, sum(n)::bigint AS n FROM cells WHERE jpart <> 'none' GROUP BY 1, 2) y GROUP BY sim) x),
+            'missing_job', (SELECT coalesce(sum(n), 0)::bigint FROM cells WHERE jpart = 'missing')
+        ),
+        'unlinked', json_build_object(
+            'rows', (SELECT coalesce(sum(n), 0)::bigint FROM cells WHERE jpart = 'none'),
+            'by_prefix', (SELECT coalesce(json_object_agg(prefix, o ORDER BY prefix), '{}'::json) FROM (
+                SELECT prefix, json_object_agg(sim, n ORDER BY sim) AS o FROM (SELECT prefix, sim, sum(n)::bigint AS n FROM cells WHERE jpart = 'none' GROUP BY 1, 2) y GROUP BY prefix) x)
+        )
+    ),
+    'event_outbox', json_build_object(
+        'rows', (SELECT coalesce(sum(n), 0)::bigint FROM ob),
+        'pending', (SELECT coalesce(sum(n), 0)::bigint FROM ob WHERE pending),
+        'by_simulated', (SELECT coalesce(json_object_agg(sim, n ORDER BY sim), '{}'::json) FROM (SELECT sim, sum(n)::bigint AS n FROM ob GROUP BY 1) x),
+        'note', 'the same envelope as audit_log: the relay copies each row into audit_log and stamps delivered_at, and nothing prunes delivered rows (02-events.sql), so rows here are the log since the outbox landed, pending is the relay lag, and a marker split that differs from audit_log over the same era is a relay gap'
+    ),
+    'event_facts', json_build_object(
+        'rows', (SELECT coalesce(sum(n), 0)::bigint FROM ef),
+        'by_simulated', (SELECT coalesce(json_object_agg(sim, n ORDER BY sim), '{}'::json) FROM (SELECT sim, sum(n)::bigint AS n FROM ef GROUP BY 1) x),
+        'note', 'a projection of audit_log with payload kept whole (43-event-facts.sql): fewer rows than audit_log is projection lag, and the marker split must match audit_log for the rows it holds'
+    )
+)
+SQL
+}
+
 # --- the kubectl, resolved once, by the derivation the delete verb uses --
 KUBECTL_LINE=$("$RESOLVE" --kubectl) || {
     say "CANNOT ANSWER — no kubectl to read with (see above). Nothing measured."
@@ -412,9 +508,19 @@ trap 'rm -rf "$TMP"' EXIT
 # json value bare, on one line; jq -c proves it parsed. On any failure
 # the answer is exit 4 naming the section, with psql's own words — and
 # no document, because a census with a section missing is not a census.
+# Wall-clock milliseconds, for the `log` section's measured cost (three
+# full scans of the largest tables; backlog e2604427 asked for the
+# number, not a guess). GNU date — the forge and the gate are Linux;
+# anything else reads 0 rather than failing the census.
+now_ms() {
+    local ns
+    ns=$(date +%s%N)
+    case "$ns" in *[!0-9]*) echo 0 ;; *) echo $((ns / 1000000)) ;; esac
+}
 read_section() { # <name> <sql>
-    local name="$1" sql="$2"
+    local name="$1" sql="$2" t0
     say "reading $name"
+    t0=$(now_ms)
     if ! "${KUBECTL[@]}" -n "$CENSUS_NS" exec "$CENSUS_WORKLOAD" -c "$CENSUS_CONTAINER" -- \
             psql -X -q -At -v ON_ERROR_STOP=1 -U "$CENSUS_DB_USER" -d "$CENSUS_DB_NAME" \
             -c 'SET default_transaction_read_only = on' \
@@ -429,6 +535,7 @@ read_section() { # <name> <sql>
         head -c 400 "$TMP/$name.out" | sed 's/^/    /' >&2
         exit "$CANNOT_ANSWER"
     fi
+    echo $(( $(now_ms) - t0 )) > "$TMP/$name.ms"
 }
 
 read_section row_counts "$(sql_row_counts)"
@@ -436,8 +543,11 @@ read_section seed_owned "$(sql_seed_owned)"
 read_section partitions "$(sql_partitions)"
 read_section references "$(sql_references)"
 read_section workflows "$(sql_workflows)"
+read_section log "$(sql_log)"
 
-# All five answered: assemble, and only now print.
+# All six answered: assemble, and only now print. Only `log` carries
+# its elapsed_ms — the five earlier sections keep the shape the
+# eviction verb (built beside this car) reads.
 jq -n -c \
     --arg verb "$ME" \
     --arg tenant_id "$TENANT_ID" \
@@ -449,8 +559,12 @@ jq -n -c \
     --slurpfile partitions "$TMP/partitions.json" \
     --slurpfile references "$TMP/references.json" \
     --slurpfile workflows "$TMP/workflows.json" \
+    --slurpfile log "$TMP/log.json" \
+    --arg log_ms "$(cat "$TMP/log.ms")" \
     '{
         verb: $verb, tenant_id: $tenant_id, measured_at: $measured_at, seeds: $seeds,
         row_counts: $row_counts[0], seed_owned: $seed_owned[0], partitions: $partitions[0],
-        references: $references[0], workflows: $workflows[0], seed_keys: $seed_keys
+        references: $references[0], workflows: $workflows[0],
+        log: ($log[0] + {elapsed_ms: ($log_ms | tonumber)}),
+        seed_keys: $seed_keys
     }'
