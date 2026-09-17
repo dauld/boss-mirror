@@ -789,3 +789,253 @@ fn the_reader_takes_a_path_and_refuses_anything_else() {
         assert!(!stderr.is_empty(), "{case} must say why");
     }
 }
+
+// =====================================================================
+// THE READER ROUTES BY PATH (design 28d2bed9, David 2026-09-17). The
+// machine door carries every read surface of the instance on one IP,
+// one port per service; the reader picks the port from a `name=port`
+// table the runner hands it as BOSS_SOR_PORTS, by the path's prefix,
+// and keeps the HOST from BOSS_JOBS_URL. Without a table it is exactly
+// the reader it was: one base, one port, the jobs API — so nothing
+// changes until the runner carries the table. The equality pin between
+// the table, the manifest and boss-ports is in
+// the_machine_door_carries_every_read_surface.rs.
+// =====================================================================
+
+const PORTS_TABLE: &str = "jobs=7900 events=7150 people=7500 classes=7800 locations=7820";
+
+fn reader_env<'a>(actor: &'a str, table: Option<&'a str>) -> Vec<(&'a str, &'a str)> {
+    let mut env = vec![
+        ("BOSS_JOBS_URL", "http://sor.invalid:7900"),
+        ("BOSS_SOR_USER", actor),
+    ];
+    if let Some(t) = table {
+        env.push(("BOSS_SOR_PORTS", t));
+    }
+    env
+}
+
+/// The URL the stub curl was handed — the last argv line.
+fn url_read(argv: &str) -> String {
+    argv.lines().last().unwrap_or_default().to_string()
+}
+
+/// A path under a routed prefix goes to that service's port, on the
+/// host BOSS_JOBS_URL names — the measured case first: the audit tail,
+/// which 404'd on the jobs port for car 056f7bd8.
+#[test]
+fn the_reader_routes_a_prefixed_path_to_its_services_port() {
+    let actor = "{\"id\":\"automation:x\",\"role\":\"audit-readonly\"}";
+    for (case, path, want) in [
+        (
+            "route-events",
+            "/api/events/tail?kind=declared&limit=500",
+            "http://sor.invalid:7150/api/events/tail?kind=declared&limit=500",
+        ),
+        (
+            "route-people",
+            "/api/people/emp-david",
+            "http://sor.invalid:7500/api/people/emp-david",
+        ),
+        (
+            "route-people-bare",
+            "/api/people?limit=1",
+            "http://sor.invalid:7500/api/people?limit=1",
+        ),
+        (
+            "route-classes",
+            "/api/classes?subject_kind=employee",
+            "http://sor.invalid:7800/api/classes?subject_kind=employee",
+        ),
+        (
+            "route-locations",
+            "/api/locations/loc-hq",
+            "http://sor.invalid:7820/api/locations/loc-hq",
+        ),
+    ] {
+        let (rc, _, stderr, argv) =
+            run_reader(case, &[path], &reader_env(actor, Some(PORTS_TABLE)));
+        assert_eq!(rc, 0, "{case}: stderr: {stderr}");
+        assert_eq!(url_read(&argv), want, "{case}: argv:\n{argv}");
+        assert!(
+            argv.contains(&format!("x-boss-user: {actor}")),
+            "{case}: the routed read lost the runner's actor; argv:\n{argv}"
+        );
+    }
+}
+
+/// Everything else is the jobs API, on the base exactly as the runner
+/// pinned it — including a prefix that merely RESEMBLES a routed one.
+#[test]
+fn the_reader_defaults_to_the_jobs_api() {
+    let actor = "{\"id\":\"automation:x\",\"role\":\"audit-readonly\"}";
+    for (case, path) in [
+        ("default-yard", "/api/yard/status"),
+        ("default-jobs", "/api/jobs?kind=pr-train&status=open"),
+        ("default-agents", "/api/agents"),
+        ("default-lookalike", "/api/peoples/x"),
+        ("default-eventsish", "/api/eventsource"),
+    ] {
+        let (rc, _, stderr, argv) =
+            run_reader(case, &[path], &reader_env(actor, Some(PORTS_TABLE)));
+        assert_eq!(rc, 0, "{case}: stderr: {stderr}");
+        assert_eq!(
+            url_read(&argv),
+            format!("http://sor.invalid:7900{path}"),
+            "{case}: argv:\n{argv}"
+        );
+    }
+}
+
+/// NO TABLE, NO CHANGE. A runner that does not carry BOSS_SOR_PORTS
+/// (a checkout older than this car, a hand run) gets the reader it
+/// always had: every path on the base, the jobs port. The routed read
+/// then 404s exactly as it did, which is a loud failure and not a
+/// guessed port.
+#[test]
+fn the_reader_without_a_table_reads_every_path_on_the_base() {
+    let actor = "{\"id\":\"automation:x\",\"role\":\"audit-readonly\"}";
+    for (case, path) in [
+        ("no-table-events", "/api/events/tail?limit=1"),
+        ("no-table-jobs", "/api/jobs"),
+    ] {
+        let (rc, _, stderr, argv) = run_reader(case, &[path], &reader_env(actor, None));
+        assert_eq!(rc, 0, "{case}: stderr: {stderr}");
+        assert_eq!(
+            url_read(&argv),
+            format!("http://sor.invalid:7900{path}"),
+            "{case}: argv:\n{argv}"
+        );
+    }
+}
+
+/// A table that EXISTS but lacks the service a path routes to is a
+/// defect in the table, not a reason to guess: the reader refuses and
+/// names the missing entry, before curl is reached.
+#[test]
+fn the_reader_refuses_a_table_that_lacks_the_routed_service() {
+    let actor = "{\"id\":\"automation:x\",\"role\":\"audit-readonly\"}";
+    let (rc, _, stderr, argv) = run_reader(
+        "table-missing-events",
+        &["/api/events/tail"],
+        &reader_env(actor, Some("jobs=7900 people=7500")),
+    );
+    assert_eq!(rc, 2, "stderr: {stderr}");
+    assert!(
+        argv.is_empty(),
+        "curl was reached with a guessed port; argv:\n{argv}"
+    );
+    assert!(
+        stderr.contains("events") && stderr.contains("BOSS_SOR_PORTS"),
+        "the refusal must name the missing service and the table; stderr: {stderr}"
+    );
+}
+
+/// The refusals are untouched by routing: still one argument, still a
+/// path, still identified — with the table present.
+#[test]
+fn routing_leaves_every_refusal_in_place() {
+    let actor = "{\"id\":\"automation:x\",\"role\":\"audit-readonly\"}";
+    for (case, args, env) in [
+        (
+            "routed-url",
+            vec!["http://sor.invalid:7150/api/events/tail"],
+            reader_env(actor, Some(PORTS_TABLE)),
+        ),
+        (
+            "routed-two-args",
+            vec!["/api/events/tail", "/api/jobs"],
+            reader_env(actor, Some(PORTS_TABLE)),
+        ),
+        (
+            "routed-unidentified",
+            vec!["/api/events/tail"],
+            vec![
+                ("BOSS_JOBS_URL", "http://sor.invalid:7900"),
+                ("BOSS_SOR_PORTS", PORTS_TABLE),
+            ],
+        ),
+    ] {
+        let (rc, _, stderr, argv) = run_reader(case, &args, &env);
+        assert_eq!(rc, 2, "{case} must be refused; stderr: {stderr}");
+        assert!(argv.is_empty(), "{case} reached curl anyway; argv:\n{argv}");
+    }
+}
+
+/// THE TABLE REACHES THE PROBE. run-car-probe.sh reads
+/// infra/forge/sor-ports.env from the checkout the probe runs in — the
+/// same checkout it takes the reader from — and exports it on BOTH
+/// hand-offs as BOSS_SOR_PORTS. A checkout without the file exports an
+/// empty table, which the reader treats as absent.
+#[test]
+fn the_runner_hands_the_probe_the_port_table_from_its_own_checkout() {
+    let sh = script();
+    assert!(
+        sh.contains("$PROBE_DIR/infra/forge/sor-ports.env"),
+        "run-car-probe.sh does not read the port table from the probe's checkout"
+    );
+    let handoffs: Vec<&str> = sh
+        .split("bash -c \"$probe_prelude$probe\"")
+        .take(2)
+        .collect();
+    assert_eq!(handoffs.len(), 2);
+    for (which, segment) in ["root/runuser", "by-hand"].iter().zip(handoffs) {
+        let tail = &segment[segment.len().saturating_sub(600)..];
+        assert!(
+            tail.contains("BOSS_SOR_PORTS=\"$SOR_PORTS\""),
+            "the {which} hand-off does not export the port table to the probe:\n{tail}"
+        );
+    }
+}
+
+/// And the extraction itself, run: the file's `name=port` lines become
+/// one space-separated table; comments and blank lines are not in it.
+#[test]
+fn the_runners_table_extraction_reads_the_file_as_data() {
+    let sh = script();
+    let block = sh
+        .split_once("# SOR-PORTS-BEGIN")
+        .expect("run-car-probe.sh has a # SOR-PORTS-BEGIN marker")
+        .1
+        .split_once("# SOR-PORTS-END")
+        .expect("run-car-probe.sh has a # SOR-PORTS-END marker")
+        .0;
+    let dir = scratch("runner-ports-table");
+    let forge = dir.join("infra/forge");
+    boss_testing::create_dir(&forge);
+    boss_testing::write_file(
+        &forge.join("sor-ports.env"),
+        "# a comment\n\njobs=7900\nevents=7150\n  people=7500  \n",
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "PROBE_DIR='{}'\n{block}\nprintf '%s' \"$SOR_PORTS\"",
+            dir.display()
+        ))
+        .output()
+        .expect("bash runs");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "jobs=7900 events=7150 people=7500",
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // No file: an empty table, not an error.
+    let empty = scratch("runner-ports-table-absent");
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "set -u\nPROBE_DIR='{}'\n{block}\nprintf '[%s]' \"$SOR_PORTS\"",
+            empty.display()
+        ))
+        .output()
+        .expect("bash runs");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "[]");
+}

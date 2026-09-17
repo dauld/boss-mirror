@@ -1,11 +1,40 @@
-# Machine door for the BOSS jobs API — the system of record's write
-# path for off-cluster machinery (the train conductor on boss-gcp,
-# operator tooling over WireGuard). Same posture as the forge and
-# registry on this LAN: infrastructure door, never a human door;
-# humans stay behind the gateway at playground.algedonic.dev.
-# Born 2026-08-12 fixing the split-brain where the conductor wrote
-# its train bookkeeping to boss-gcp's legacy instance because the
-# SoR had no reachable jobs port.
+# The LAN machine door for the BOSS instance — every READ surface of
+# the system of record, and the jobs API's write path, for off-cluster
+# machinery (the train conductor, the forge's ops-runner and the
+# recorded probes it runs, operator tooling over WireGuard). Same
+# posture as the forge and registry on this LAN: infrastructure door,
+# never a human door; humans stay behind the gateway. Header-trusted
+# and LAN-only: MetalLB pins it to 10.20.0.34, reachable from the LAN
+# and WireGuard peers, and nothing public.
+#
+# Born 2026-08-12 (jobs only) fixing the split-brain where the
+# conductor wrote its train bookkeeping to boss-gcp's legacy instance
+# because the SoR had no reachable jobs port.
+#
+# Widened 2026-09-17 (design 28d2bed9, David: both questions resolved
+# as proposed) to carry the instance's other read surfaces on the same
+# IP — the audit tail (boss-events-api), people, classes, locations —
+# because a car's recorded probe reads the system of record through
+# this door (infra/forge/probe-bin/boss-sor-read) and two landed cars
+# could not be proven for want of a port: /api/events/tail answered
+# 404 on the jobs port. Same trust class, deliberately: the jobs API
+# is already header-trusted here WITH its writes, so a read service
+# on the same IP exposes nothing to anyone who could not already write
+# the record. Not chosen: proxying read paths inside the jobs API
+# (duplicates the gateway's routing in a domain service) and an Access
+# service token through the gateway — right for OFF-LAN machines and
+# deferred to the hardening programme. Agents and sensors are mounted
+# on boss-jobs, so the jobs port already carries them.
+#
+# The ports are boss-ports' prod ports under boss-ports' names, and
+# the all-in-one pod listens on each (generate-configs.sh binds
+# 0.0.0.0), so port == targetPort. Which services, on which port, is
+# the same fact as the reader's route table and the runner's
+# infra/forge/sor-ports.env: boss-testing's
+# the_machine_door_carries_every_read_surface.rs holds all three equal
+# to crates/core/boss-ports (CLAUDE.md §9a) and names the entry that
+# drifts. Each entry stays on one flow-style line — that is the shape
+# the pin reads.
 apiVersion: v1
 kind: Service
 metadata:
@@ -19,3 +48,7 @@ spec:
   selector: {app: boss}
   ports:
     - {port: 7900, targetPort: 7900, name: jobs}
+    - {port: 7150, targetPort: 7150, name: events}
+    - {port: 7500, targetPort: 7500, name: people}
+    - {port: 7800, targetPort: 7800, name: classes}
+    - {port: 7820, targetPort: 7820, name: locations}

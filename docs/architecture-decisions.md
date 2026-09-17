@@ -1340,6 +1340,37 @@ proof that permanently-red and green-with-warnings decay the same way.
 First instance landed 2026-09-15: the protocol-drift chore records
 `measured` (kinds compared, fields, head) on every run.
 
+**The LAN machine door carries every read surface of the instance, not
+only the jobs API** (design `28d2bed9`, David 2026-09-17; both
+questions resolved as proposed). Measured: `boss-jobs-internal`
+(10.20.0.34, MetalLB, LAN-only) exposed one port, and
+`boss-sor-read` — the one way a car's recorded probe reads the system
+of record — was `curl $BOSS_JOBS_URL$path`; so the batch-door events
+car (`056f7bd8`) sat UNPROVEN because `/api/events/tail` lives on
+boss-events-api and answered 404 on the jobs port, the locations door
+(`1ec8312a`) was proved by tree shape instead, and every future car
+about people, classes, locations or the audit tail had the same
+blindness. Decided: (1) **the door widens, the trust class does not** —
+the events, people, classes and locations ports join the same Service
+on the same IP, header-trusted and LAN-only exactly as the jobs API
+already is there WITH its writes (the conductor writes through it), so
+a read service on that IP exposes nothing to anyone who could not
+already write the record; the manifest's ports are boss-ports' prod
+ports under boss-ports' names, pinned by one equality test
+(`the_machine_door_carries_every_read_surface.rs`, CLAUDE.md §9a); (2)
+**the reader routes by path** from a `name=port` table rendered from
+boss-ports into the ops-runner's environment (`BOSS_SOR_PORTS`, read
+by run-car-probe.sh from `infra/forge/sor-ports.env` in its own
+checkout), defaulting to jobs, still one argument, still refusing a
+URL and an unidentified read, and unchanged when no table is present;
+(3) **the gateway service-token door is deferred** to the hardening
+programme, as the machine door for OFF-LAN callers — the probe runner
+is on the LAN and needs no public door, and a proof instrument that
+depends on Cloudflare and a credential rotation is the wrong
+dependency to add before hardening starts. Not chosen: the jobs API
+proxying read-only paths for the probe tier, which duplicates the
+gateway's routing inside a domain service.
+
 ## Design docs and the decision record
 
 The markdown corpus stopped being the source of truth and kept the

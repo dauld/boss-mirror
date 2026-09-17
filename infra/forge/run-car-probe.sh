@@ -88,8 +88,9 @@
 #
 # What the probe's own env gets, and nothing else: BOSS_JOBS_URL,
 # BOSS_PROBE_NOTFOUND, BOSS_SOR_USER (a read-scoped actor — never this
-# script's platform-admin one), and a PATH led by
-# infra/forge/probe-bin, which holds `boss-sor-read`. See the
+# script's platform-admin one), BOSS_SOR_PORTS (the door's `name=port`
+# table, read from the checkout — see WHICH PORT below), and a PATH
+# led by infra/forge/probe-bin, which holds `boss-sor-read`. See the
 # READ-ONLY READER block below (backlog 61085a9e).
 set -uo pipefail
 
@@ -165,6 +166,27 @@ READER_USER="{\"id\":\"$READER_ACTOR\",\"role\":\"audit-readonly\",\"access_tier
 # `boss gate --park-probe` refuses a probe that reads the system of
 # record any other way.
 PROBE_BIN="$PROBE_DIR/infra/forge/probe-bin"
+
+# WHICH PORT THE READER USES — design 28d2bed9 (David, 2026-09-17). The
+# LAN machine door carries every read surface of the instance on one
+# IP, one port per service (boss-jobs-internal.yaml), and the reader
+# routes a path to its port from this table: `name=port` entries,
+# handed over as BOSS_SOR_PORTS. It is read from the SAME checkout the
+# reader comes from, as data (never sourced — this script is root), so
+# a converge that brings the reader brings its table, and no unit
+# carries a second copy to reinstall. A checkout without the file hands
+# the reader an empty table, which is the reader it was: jobs only.
+# The file is pinned to boss-ports by
+# the_machine_door_carries_every_read_surface.rs; the markers are that
+# test's extraction point for this read.
+# SOR-PORTS-BEGIN
+SOR_PORTS=""
+if [[ -r "$PROBE_DIR/infra/forge/sor-ports.env" ]]; then
+    SOR_PORTS=$(grep -Ev '^[[:space:]]*(#|$)' "$PROBE_DIR/infra/forge/sor-ports.env" \
+        | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')
+fi
+# SOR-PORTS-END
+
 for t in curl jq timeout; do
     command -v "$t" >/dev/null 2>&1 || refuse "$t is not installed on this host"
 done
@@ -241,7 +263,7 @@ if [[ "$(id -u)" -eq 0 ]]; then
         env --chdir="$PROBE_DIR" HOME="$home" USER="$PROBE_USER" \
             PATH="$PROBE_BIN:$PATH" \
             BOSS_JOBS_URL="$BASE" BOSS_PROBE_NOTFOUND="$notfound" \
-            BOSS_SOR_USER="$READER_USER" \
+            BOSS_SOR_USER="$READER_USER" BOSS_SOR_PORTS="$SOR_PORTS" \
             bash -c "$probe_prelude$probe" \
         > "$workdir/out" 2> "$workdir/errs" < /dev/null
     rc=$?
@@ -250,6 +272,7 @@ else
     timeout -k 5 "$PROBE_TIMEOUT" env --chdir="$PROBE_DIR" BOSS_JOBS_URL="$BASE" \
         PATH="$PROBE_BIN:$PATH" \
         BOSS_PROBE_NOTFOUND="$notfound" BOSS_SOR_USER="$READER_USER" \
+        BOSS_SOR_PORTS="$SOR_PORTS" \
         bash -c "$probe_prelude$probe" \
         > "$workdir/out" 2> "$workdir/errs" < /dev/null
     rc=$?

@@ -44,6 +44,12 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 # (CLAUDE.md §9a) — `audit-readonly` must grant Read everywhere a probe
 # reads and no non-Read action anywhere. Core → core; no tier crossing.
 boss-policy-client = { path = "../boss-policy-client" }
+# Test-only, for `the_machine_door_carries_every_read_surface.rs`: the
+# ports the LAN machine door (boss-jobs-internal.yaml) exposes, the table
+# the forge runner hands the probe reader (infra/forge/sor-ports.env) and
+# the services that reader routes to are three copies of one fact whose
+# definition is boss-ports. Pinned equal (CLAUDE.md §9a; design 28d2bed9).
+boss-ports = { path = "../boss-ports" }
 
 [[test]]
 name = "migrate_sh"
