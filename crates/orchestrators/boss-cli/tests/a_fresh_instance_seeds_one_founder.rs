@@ -4,9 +4,11 @@
 //!
 //! What runs here is what the pod runs: the schema on an empty TestDb,
 //! the REAL people router (`PgPeople`), the REAL locations router
-//! (`PgLocations`) and the REAL policy router (`PgPolicy`, after the
-//! same default-rule reconcile boss-policy-api runs at boot) on one
-//! ephemeral port, then the shipped `boss` binary's `tenant publish
+//! (`PgLocations`), the REAL agents router (`PgAgents`, over the
+//! migration-registered `agent-claude`) and the REAL policy router
+//! (`PgPolicy`, after the same default-rule reconcile boss-policy-api
+//! runs at boot) on one ephemeral port, then the shipped `boss`
+//! binary's `tenant publish
 //! --gateway` against a verbatim copy of the real company's tenant
 //! directory (tests/fixtures/tenant-algedonic, its HEAD 20f3a9e — no
 //! secrets: the manifest says so and a grep agrees), then the
@@ -43,7 +45,14 @@
 //! door: `POST /api/locations/batch`, sent by `boss tenant publish`
 //! BEFORE the roster. The first case now proves the verbatim tenant
 //! lands and that the location is there before the employee — the
-//! foreign key is the machine's own proof of the order.
+//! foreign key is the machine's own proof of the order. Backlog
+//! f56155f0 (same day) added the agents seed: the same case proves the
+//! tenant's `agent-claude` meets the migration's row, is KEPT as the
+//! platform registered it, and the publish line names the field the
+//! declaration differs on (`display_name`) instead of a silent "already
+//! there" — the fixture's agents.toml is the contract's shape, which is
+//! the real tenant's @ 20f3a9e minus the `role` and `department` the
+//! registry cannot hold (check refuses those by name).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -81,6 +90,12 @@ async fn serve(pool: PgPool) -> String {
     // itself declared.
     let locations_router = boss_locations::http::router(boss_locations::http::LocationsApiState {
         locations: Arc::new(boss_locations::PgLocations::new(pool.clone())),
+    });
+    // The agents door (backlog f56155f0): the real registry over the
+    // same pool — the schema's migration already registered
+    // agent-claude, so the tenant's declaration meets a kept row.
+    let agents_router = boss_jobs::agents::http::router(boss_jobs::agents::http::AgentsApiState {
+        registry: Arc::new(boss_jobs::agents::PgAgents::new(pool.clone())),
     });
     // What boss-policy-api does before it binds: reconcile the code
     // defaults (platform-admin / audit-readonly / smoke-tester / guest)
@@ -124,6 +139,7 @@ async fn serve(pool: PgPool) -> String {
         );
     let app = people_router
         .merge(locations_router)
+        .merge(agents_router)
         .merge(policy_router)
         .merge(outside_this_proof);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -255,6 +271,47 @@ async fn the_real_tenant_verbatim_lands_its_location_before_its_founder() {
         Some("loc-algedonic-hq"),
         "the founder sits at the tenant's own site, not the platform's loc-hq"
     );
+
+    // The agent (backlog f56155f0): the migration registered
+    // agent-claude under the platform's own display name; the tenant
+    // declares it under its own. Insert-if-absent keeps the migration's
+    // row, the publish line NAMES the field that differs, the declared
+    // alias resolves, and the agents door went before the Workflows.
+    assert!(
+        line_of("seeds/agents.toml") < line_of("seeds/workflows.toml"),
+        "the agents are sent before the Workflows:\n{out}"
+    );
+    let agents_line = out
+        .lines()
+        .find(|l| l.contains("seeds/agents.toml"))
+        .unwrap();
+    assert!(
+        agents_line.contains("POST /api/agents/batch")
+            && agents_line.contains("received 1, inserted 0")
+            && agents_line.contains("agent-claude (display_name differs)"),
+        "{agents_line}"
+    );
+    let agent: Option<(String, String)> =
+        sqlx::query_as("SELECT display_name, default_model FROM agents WHERE id = 'agent-claude'")
+            .fetch_optional(&db.pool)
+            .await
+            .unwrap();
+    let (display_name, default_model) = agent.expect("the agent row is there");
+    assert_eq!(
+        display_name, "Claude (Claude Code sessions on the dev pod)",
+        "kept as the migration registered it, never overwritten"
+    );
+    assert_eq!(
+        default_model, "opus-5[1m]",
+        "and the tenant's model matches it"
+    );
+    let alias: Option<String> = sqlx::query_scalar(
+        "SELECT actor_id FROM actor_aliases WHERE alias = 'claude@algedonic.dev'",
+    )
+    .fetch_optional(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(alias.as_deref(), Some("agent-claude"));
 
     // A second publish inserts nothing and changes nothing.
     let (ok, out) = boss_tenant_publish(&dir, &base);

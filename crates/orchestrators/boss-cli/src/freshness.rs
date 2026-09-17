@@ -260,6 +260,29 @@ pub(crate) struct Rebased {
     pub old_head: String,
     pub new_head: String,
     pub replayed: usize,
+    /// Commits main already held, in branch order — replayed EMPTY and
+    /// skipped, each one named to the operator (1cfab20e).
+    pub dropped: Vec<Dropped>,
+}
+
+/// One commit `--rebase` dropped because its patch is already on main:
+/// the predecessor car landed by squash, so the same change sits on main
+/// under another sha and the replay produces nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Dropped {
+    pub sha: String,
+    pub title: String,
+}
+
+impl Dropped {
+    /// The one line the CLI prints per dropped commit.
+    pub(crate) fn line(&self) -> String {
+        format!(
+            "rebase: dropped {} \"{}\" — its patch is already on main",
+            &self.sha[..7.min(self.sha.len())],
+            self.title
+        )
+    }
 }
 
 /// Replay a stale car onto origin/main and move its branch on the forge
@@ -328,6 +351,7 @@ pub(crate) fn rebase_onto_main(repo: &Path, branch: &str) -> anyhow::Result<Reba
             old_head: old_head.clone(),
             new_head: old_head,
             replayed: 0,
+            dropped: vec![],
         });
     }
     let tmp = std::env::temp_dir().join(format!(
@@ -353,6 +377,15 @@ pub(crate) fn rebase_onto_main(repo: &Path, branch: &str) -> anyhow::Result<Reba
         let _ = git(&["worktree", "prune"]);
     };
     let tmp_str = tmp.to_str().context("temp path is utf8")?.to_string();
+    let in_tmp = |args: &[&str]| -> anyhow::Result<std::process::Output> {
+        crate::git_auth::command()
+            .arg("-C")
+            .arg(&tmp_str)
+            .args(args)
+            .output()
+            .with_context(|| format!("git {args:?} in {tmp_str}"))
+    };
+    let mut dropped: Vec<Dropped> = Vec::new();
     for c in &commits {
         // cherry-pick keeps the car's AUTHOR; the COMMITTER is this
         // verb, acting for whoever runs it — set explicitly so the replay
@@ -378,12 +411,33 @@ pub(crate) fn rebase_onto_main(repo: &Path, branch: &str) -> anyhow::Result<Reba
                         .replace('\n', ", ")
                 })
                 .unwrap_or_default();
+            // A pick with NO conflict that left the index equal to HEAD
+            // produced nothing: main already holds this patch under
+            // another sha (the predecessor car landed by squash). git
+            // stops there — "The previous cherry-pick is now empty" —
+            // and until 2026-09-17 (1cfab20e) so did this verb, and the
+            // builder cherry-picked by hand. Drop it, say so, go on.
+            // (`cherry-pick --empty=drop` is git 2.45; the pod has 2.39.)
+            let empty = files.is_empty()
+                && in_tmp(&["diff", "--cached", "--quiet", "HEAD"])
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+            let skipped = empty
+                && in_tmp(&["cherry-pick", "--skip"])
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+            if skipped {
+                let title = in_tmp(&["log", "-1", "--format=%s", c])
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default();
+                dropped.push(Dropped {
+                    sha: c.to_string(),
+                    title,
+                });
+                continue;
+            }
             let said = String::from_utf8_lossy(&pick.stderr).trim().to_string();
-            let _ = crate::git_auth::command()
-                .arg("-C")
-                .arg(&tmp_str)
-                .args(["cherry-pick", "--abort"])
-                .output();
+            let _ = in_tmp(&["cherry-pick", "--abort"]);
             cleanup(&git);
             if files.is_empty() {
                 bail!(
@@ -405,13 +459,26 @@ pub(crate) fn rebase_onto_main(repo: &Path, branch: &str) -> anyhow::Result<Reba
             );
         }
     }
+    // Every commit dropped: the branch is entirely on main. Nothing to
+    // gate — pushing main's head to the branch would only manufacture a
+    // car with no diff — so refuse, and point at the verb that proves it.
+    if !commits.is_empty() && dropped.len() == commits.len() {
+        cleanup(&git);
+        let named = dropped
+            .iter()
+            .map(|d| format!("{} \"{}\"", &d.sha[..8.min(d.sha.len())], d.title))
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!(
+            "boss gate --rebase: REFUSED — {branch} is already landed: every commit it carries \
+             ({named}) replays empty onto origin/main@{}, so there is nothing to gate. Nothing \
+             was pushed; {branch} still points at {}. Confirm with `boss merged {branch}`.",
+            &main_head[..8],
+            &old_head[..8]
+        );
+    }
     let new_head = match ok(
-        &crate::git_auth::command()
-            .arg("-C")
-            .arg(&tmp_str)
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .context("reading the replayed head")?,
+        &in_tmp(&["rev-parse", "HEAD"])?,
         "reading the replayed head",
     ) {
         Ok(h) => h,
@@ -449,7 +516,8 @@ pub(crate) fn rebase_onto_main(repo: &Path, branch: &str) -> anyhow::Result<Reba
     Ok(Rebased {
         old_head,
         new_head,
-        replayed: commits.len(),
+        replayed: commits.len() - dropped.len(),
+        dropped,
     })
 }
 
@@ -779,6 +847,147 @@ mod tests {
         let done = rebase_onto_main(&f.clone, "car/ahead").expect("nothing to do is ok");
         assert_eq!(done.replayed, 0);
         assert_eq!(done.old_head, done.new_head);
+    }
+
+    impl Forge {
+        /// The shape measured 2026-09-17 (1cfab20e): `car/first` lands by
+        /// SQUASH, so its patch is on main under another sha; `car/second`
+        /// was cut from car/first's head and carries that commit plus one
+        /// of its own; `car/landed` IS car/first, entirely on main now.
+        fn build_after_squash(name: &str) -> Self {
+            let root = boss_testing::scratch::scratch_dir(name);
+            let origin = root.join("forge");
+            let clone = root.join("clone");
+            boss_testing::scratch::create_dir(&origin);
+            let w = |rel: &str, body: &str| {
+                boss_testing::scratch::write_file(&origin.join(rel), body);
+            };
+            Self::git(&origin, &["init", "-q", "-b", "main"]);
+            w("base.rs", "base\n");
+            Self::git(&origin, &["add", "."]);
+            Self::git(&origin, &["commit", "-qm", "base B"]);
+
+            Self::git(&origin, &["checkout", "-q", "-b", "car/first", "main"]);
+            w("first.rs", "fn first() {}\n");
+            Self::git(&origin, &["add", "."]);
+            Self::git(&origin, &["commit", "-qm", "first car: first.rs"]);
+            Self::git(&origin, &["branch", "car/landed", "car/first"]);
+
+            Self::git(
+                &origin,
+                &["checkout", "-q", "-b", "car/second", "car/first"],
+            );
+            w("second.rs", "fn second() {}\n");
+            Self::git(&origin, &["add", "."]);
+            Self::git(&origin, &["commit", "-qm", "second car: second.rs"]);
+
+            // The train squash-merges the first car: same patch, new sha.
+            Self::git(&origin, &["checkout", "-q", "main"]);
+            Self::git(&origin, &["merge", "-q", "--squash", "car/first"]);
+            Self::git(&origin, &["commit", "-qm", "train: first car lands"]);
+
+            Self::git(
+                &root,
+                &["clone", "-q", origin.to_str().expect("utf8 path"), "clone"],
+            );
+            Self { clone }
+        }
+    }
+
+    /// A commit main already holds (the predecessor car landed by squash)
+    /// replays EMPTY; it is dropped and NAMED, and the car's own commit
+    /// lands. Measured 2026-09-17 (1cfab20e): git stopped on "previous
+    /// cherry-pick is now empty" and the builder cherry-picked by hand —
+    /// one lost launch.
+    #[test]
+    fn a_commit_main_already_holds_is_dropped_and_named() {
+        let f = Forge::build_after_squash("boss-cli-freshness-rebase-squashed");
+        let first_sha = String::from_utf8_lossy(
+            &Forge::git(&f.clone, &["rev-parse", "origin/car/first"]).stdout,
+        )
+        .trim()
+        .to_string();
+        let done = rebase_onto_main(&f.clone, "car/second")
+            .expect("the already-landed commit is dropped, the new one replays");
+        assert_eq!(done.replayed, 1, "{done:?}");
+        assert_eq!(done.dropped.len(), 1, "{done:?}");
+        assert_eq!(done.dropped[0].sha, first_sha, "{done:?}");
+        assert_eq!(done.dropped[0].title, "first car: first.rs", "{done:?}");
+        let line = done.dropped[0].line();
+        assert!(
+            line.starts_with(&format!(
+                "rebase: dropped {} \"first car: first.rs\" — its patch is already on main",
+                &first_sha[..7]
+            )),
+            "{line}"
+        );
+
+        Forge::git(&f.clone, &["fetch", "-q", "origin"]);
+        let forge_head = String::from_utf8_lossy(
+            &Forge::git(&f.clone, &["rev-parse", "origin/car/second"]).stdout,
+        )
+        .trim()
+        .to_string();
+        assert_eq!(
+            forge_head, done.new_head,
+            "the forge carries the replayed head"
+        );
+        // Exactly one commit above main, and it is the car's own.
+        let above = String::from_utf8_lossy(
+            &Forge::git(
+                &f.clone,
+                &["log", "--format=%s", "origin/main..origin/car/second"],
+            )
+            .stdout,
+        )
+        .trim()
+        .to_string();
+        assert_eq!(above, "second car: second.rs", "{above}");
+        assert_eq!(observe(&f.clone, "car/second").standing, Base::Current);
+        let wts = String::from_utf8_lossy(&Forge::git(&f.clone, &["worktree", "list"]).stdout)
+            .to_string();
+        assert_eq!(
+            wts.lines().count(),
+            1,
+            "the temporary worktree is gone: {wts}"
+        );
+    }
+
+    /// A branch whose EVERY commit main already holds has nothing to gate:
+    /// the rebase refuses, names the branch as landed, points at
+    /// `boss merged`, and moves nothing on the forge.
+    #[test]
+    fn a_branch_entirely_on_main_is_refused_as_landed() {
+        let f = Forge::build_after_squash("boss-cli-freshness-rebase-all-landed");
+        let old_head = String::from_utf8_lossy(
+            &Forge::git(&f.clone, &["rev-parse", "origin/car/landed"]).stdout,
+        )
+        .trim()
+        .to_string();
+        let err = rebase_onto_main(&f.clone, "car/landed")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("car/landed")
+                && err.contains("landed")
+                && err.contains("boss merged car/landed")
+                && err.contains("first car: first.rs"),
+            "{err}"
+        );
+        Forge::git(&f.clone, &["fetch", "-q", "origin"]);
+        let forge_head = String::from_utf8_lossy(
+            &Forge::git(&f.clone, &["rev-parse", "origin/car/landed"]).stdout,
+        )
+        .trim()
+        .to_string();
+        assert_eq!(forge_head, old_head, "the forge's branch did not move");
+        let wts = String::from_utf8_lossy(&Forge::git(&f.clone, &["worktree", "list"]).stdout)
+            .to_string();
+        assert_eq!(
+            wts.lines().count(),
+            1,
+            "no temporary worktree left behind: {wts}"
+        );
     }
 
     /// THE ANCHOR. A branch whose base is behind main, and whose diff

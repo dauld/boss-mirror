@@ -106,3 +106,85 @@ async fn the_schema_refuses_an_alias_to_nothing_and_a_mis_shaped_id() {
         Some("agent-x")
     );
 }
+
+/// The tenant's batch against the real tables (backlog f56155f0,
+/// 2026-09-17): insert-if-absent by id, aliases insert-if-absent by
+/// alias, a row the migration already registered is KEPT and the batch
+/// names which declared fields differ, and an unpriced default model is
+/// refused as `Unpriced` naming the model — not as a storage error.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_registers_new_agents_keeps_the_migrations_row_and_names_what_differs() {
+    use boss_jobs::agents::{AgentInput, AgentsError};
+    let db = TestDb::new().await;
+    let registry = PgAgents::new(db.pool.clone());
+    let declared = |id: &str, name: &str, alias: &str| AgentInput {
+        id: id.into(),
+        display_name: name.into(),
+        default_model: "opus-5[1m]".into(),
+        aliases: vec![alias.into()],
+        hourly_budget_usd_micros: None,
+        max_concurrent_runs: None,
+    };
+
+    let out = registry
+        .publish(&[
+            // The migration's row, declared with the tenant's own name.
+            declared(
+                "agent-claude",
+                "Claude (engineering)",
+                "claude@algedonic.dev",
+            ),
+            declared("agent-scout", "Scout", "scout@example.test"),
+        ])
+        .await
+        .expect("the batch lands");
+    assert_eq!((out.received, out.inserted), (2, 1));
+    assert_eq!(out.kept.len(), 1);
+    assert_eq!(out.kept[0].id, "agent-claude");
+    assert_eq!(out.kept[0].differs, ["display_name"]);
+
+    let rows = registry.list().await.expect("list");
+    let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, ["agent-claude", "agent-scout"]);
+    assert_eq!(
+        rows[0].display_name, "Claude (Claude Code sessions on the dev pod)",
+        "the migration's row is kept as registered, never overwritten"
+    );
+    assert_eq!(rows[0].aliases, ["claude@algedonic.dev"]);
+    assert_eq!(rows[1].aliases, ["scout@example.test"]);
+    assert_eq!(
+        registry
+            .resolve_login("scout@example.test")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("agent-scout"),
+        "the declared alias resolves through the login door"
+    );
+
+    // A second, identical publish inserts nothing and differs nowhere.
+    let again = registry
+        .publish(&[declared("agent-scout", "Scout", "scout@example.test")])
+        .await
+        .unwrap();
+    assert_eq!((again.received, again.inserted), (1, 0));
+    assert_eq!(again.kept[0].differs, Vec::<String>::new());
+
+    // A default model the rate card does not price is refused by name,
+    // and the whole batch rolls back (agent-later never lands).
+    let mut unpriced = declared("agent-unpriced", "U", "u@example.test");
+    unpriced.default_model = "claude-opus-5".into();
+    let err = registry
+        .publish(&[unpriced, declared("agent-later", "L", "l@example.test")])
+        .await
+        .unwrap_err();
+    match err {
+        AgentsError::Unpriced(m) => assert_eq!(m, "claude-opus-5"),
+        other => panic!("expected Unpriced, got {other:?}"),
+    }
+    let after = registry.list().await.unwrap();
+    assert!(
+        !after.iter().any(|r| r.id == "agent-later"),
+        "one transaction: nothing after the refused row landed"
+    );
+}

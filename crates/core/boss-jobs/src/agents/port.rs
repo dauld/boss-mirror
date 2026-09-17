@@ -1,16 +1,26 @@
-//! Agents-registry port — the one read the door needs.
+//! Agents-registry port — the read the door needs, the roster a
+//! surface reads, and the one write a tenant's declaration lands by.
 //!
-//! Deliberately a single question. The registry's rows arrive by
-//! migration (see the module doc), and a `list` / `get` with no reader
-//! would be scope nobody asked for; when a surface wants the roster,
-//! the read is added beside the reader that needs it.
+//! The read stayed a single question until 2026-09-17 (the registry's
+//! rows arrived by migration, and a `list` with no reader would have
+//! been scope nobody asked for). Backlog f56155f0 added the reader — a
+//! tenant declares its agents in `seeds/agents.toml`, the batch lands
+//! them, and `GET /api/agents` is how the declaration is read back and
+//! proved — so `list` and `publish` were added beside it.
 
 use async_trait::async_trait;
+
+use super::types::{AgentInput, AgentRow, AgentsBatchOutcome};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AgentsError {
     #[error("storage: {0}")]
     Storage(String),
+    /// A `default_model` the rate card does not price. The `agents`
+    /// table's FK refuses it; named here so the door can answer 422
+    /// with the model rather than a storage error.
+    #[error("default_model `{0}` is not a rate-card model")]
+    Unpriced(String),
 }
 
 #[async_trait]
@@ -21,4 +31,15 @@ pub trait AgentsRegistry: Send + Sync {
     /// and counted — and `Err` is the registry failing to answer at
     /// all, which is a different fact and is logged as one.
     async fn resolve_login(&self, login: &str) -> Result<Option<String>, AgentsError>;
+
+    /// Every registered agent with its aliases, ordered by id.
+    async fn list(&self) -> Result<Vec<AgentRow>, AgentsError>;
+
+    /// Land a tenant's declarations: insert-if-absent by id (a row the
+    /// platform already registered is KEPT, never overwritten, and the
+    /// outcome names which declared fields differ), aliases
+    /// insert-if-absent by alias, one transaction. Rows arrive already
+    /// validated (`validate_agent`); an unpriced `default_model` is
+    /// the one refusal the registry itself makes.
+    async fn publish(&self, rows: &[AgentInput]) -> Result<AgentsBatchOutcome, AgentsError>;
 }

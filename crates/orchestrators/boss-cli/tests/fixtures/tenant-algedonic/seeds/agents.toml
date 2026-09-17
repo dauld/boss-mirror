@@ -1,20 +1,22 @@
 # The registered agents of Algedonic, LLC — actors, not people.
 #
-# An agent's canonical id is agent-<slug> (design 6fda05ae); its login
-# address is an alias; the model is a fact about each RUN; the caps are
-# the budget the jobs API admits each run against (7dd9f28c).
+# An agent's canonical id is agent-<slug> (design 6fda05ae); the
+# addresses it logs in with are `aliases` of that id, resolved at the
+# jobs API's door; the model is a fact about each RUN, and
+# `default_model` is what a run uses when it does not say (spelled as
+# the rate card spells it); the caps are the budget the jobs API admits
+# each run against (7dd9f28c).
 #
-# GAP (fcc1d57b): the product's tenant contract has no agents seed yet
-# — prod's agents table was seeded by migration 20260915212644. Until
-# the loader reads this file it is the declaration that migration
-# should equal; `boss tenant check` compares them once it exists.
+# Published to the agents registry by `boss tenant publish` (POST
+# /api/agents/batch, insert-if-absent by id — backlog f56155f0): a row
+# the platform already registered (prod's agent-claude came from
+# migration 20260915212644) is kept as registered, and the publish
+# names any field this declaration differs on.
 
 [[agent]]
 id = "agent-claude"
 display_name = "Claude (engineering)"
 default_model = "opus-5[1m]"
 aliases = ["claude@algedonic.dev"]
-role = "engineering-agent"
-department = "engineering"
 # Caps are unset until the first month's spend is measured — an
 # unbudgeted agent is admitted, never refused (the boot-guard rule).

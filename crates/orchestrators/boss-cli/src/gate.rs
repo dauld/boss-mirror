@@ -2194,6 +2194,13 @@ pub async fn run(
         );
     } else if rebase && base_obs.standing == crate::freshness::Base::Behind {
         let done = crate::freshness::rebase_onto_main(std::path::Path::new("."), branch)?;
+        // A commit main already holds (the predecessor car landed by
+        // squash) replayed empty and was dropped: say which, and why,
+        // one line each — the operator reads the count below against
+        // the commits they know the branch carries (1cfab20e).
+        for d in &done.dropped {
+            println!("boss gate: {}", d.line());
+        }
         println!(
             "boss gate: --rebase replayed {} commit(s) of {branch} onto origin/main — {} → {} \
              (pushed with a lease on the old head; your own worktree still has the old head: \

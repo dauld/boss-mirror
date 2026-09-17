@@ -35,8 +35,9 @@
 //!
 //! WHAT A VERDICT CARRIES. Per file: OK / MISSING (required) / INVALID
 //! (the loader's own error, never rephrased) / UNKNOWN (a file the
-//! contract does not name — `seeds/agents.toml` in the real tenant is
-//! the first such extension). Exit 0 when nothing is MISSING or
+//! contract does not name — `seeds/agents.toml` in the real tenant was
+//! the first such extension, until its seed landed on 2026-09-17,
+//! backlog f56155f0). Exit 0 when nothing is MISSING or
 //! INVALID. A file that parses to nothing because the loader reads a
 //! different table name (`[[rule]]` where the loader reads `[[grants]]`)
 //! is INVALID naming both: no evidence is not a pass.
@@ -178,6 +179,21 @@ pub const CONTRACT: &[Entry] = &[
                 enabled? — validated by `boss_jobs::sensors::load_sensors_toml`",
         parse: parse_sensors,
         scaffold: Some(scaffold_sensors),
+    },
+    Entry {
+        paths: &["seeds/agents.toml"],
+        required: false,
+        read_by: "POST /api/agents/batch (boss-jobs, insert-if-absent by id and by alias) — sent by \
+                  `boss tenant publish` BEFORE the Workflows (a step's audience may name an agent); \
+                  a row the platform already registered is kept and the publish line names any \
+                  field the declaration differs on; the jobs API's login door resolves each alias \
+                  to the id (design 6fda05ae; backlog f56155f0)",
+        shape: "`[[agent]]` rows: id (`agent-<slug>`), display_name, default_model (a rate-card \
+                model, e.g. `opus-5[1m]`), aliases? (the logins that sign as it), \
+                hourly_budget_usd_micros?, max_concurrent_runs? — the `agents` table's columns \
+                and nothing else; validated by `boss_jobs::agents::load_agents_toml`",
+        parse: parse_agents,
+        scaffold: Some(scaffold_agents),
     },
     Entry {
         paths: &["seeds/locations.toml"],
@@ -398,6 +414,27 @@ fn parse_sensors(path: &Path, _: &Ctx) -> Result<String, String> {
                 .map(|r| format!(
                     "{} ({} every {}m -> {})",
                     r.id, r.source, r.every_minutes, r.opens
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    })
+}
+
+fn parse_agents(path: &Path, _: &Ctx) -> Result<String, String> {
+    let rows = boss_jobs::agents::load_agents_toml(path)?;
+    refuse_if_stray(&read(path)?, "agent", rows.len())?;
+    Ok(match rows.len() {
+        0 => "0 agents".to_string(),
+        n => format!(
+            "{n} agents: {}",
+            rows.iter()
+                .map(|a| format!(
+                    "{} ({}, {}; {} alias(es))",
+                    a.id,
+                    a.display_name,
+                    a.default_model,
+                    a.aliases.len()
                 ))
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -951,6 +988,31 @@ fn scaffold_sensors(s: &Scaffold) -> String {
     )
 }
 
+fn scaffold_agents(s: &Scaffold) -> String {
+    format!(
+        "# {display} — registered agents (design 6fda05ae; backlog f56155f0).\n\
+#\n\
+# An agent is an actor, not a person: the machine half of the roster\n\
+# the employees file is the human half of. Its canonical id is\n\
+# agent-<slug>; the addresses it logs in with are `aliases` of that id\n\
+# (the jobs API resolves each one at its door); `default_model` is\n\
+# what a run uses when it does not say, spelled as the rate card\n\
+# spells it (opus-5[1m], never claude-…); the caps are the budget the\n\
+# jobs API admits each run against, and are unset until measured.\n\
+# Published to the agents registry by `boss tenant publish`,\n\
+# insert-if-absent by id: a row the platform already registered is\n\
+# kept, and the publish names any field this file differs on.\n\
+#\n\
+# [[agent]]\n\
+# id = \"agent-scout\"\n\
+# display_name = \"Scout (research)\"\n\
+# default_model = \"sonnet-5\"\n\
+# aliases = [\"scout@{name}.example\"]\n",
+        display = s.display_name,
+        name = s.name,
+    )
+}
+
 fn scaffold_locations(s: &Scaffold) -> String {
     format!(
         "# {display} — locations.\n\
@@ -1198,11 +1260,15 @@ mod tests {
 
     /// The real tenant's shape (david/algedonic-llc @ 7619cfc,
     /// 2026-09-16), copied as a fixture — a test never reads the
-    /// private repo. What it must say: agents.toml is UNKNOWN (the
-    /// first extension the real tenant asked for), and every file the
-    /// contract names is judged by the product's own loader.
+    /// private repo. Every file the contract names is judged by the
+    /// product's own loader — including agents.toml, which was UNKNOWN
+    /// (the first extension the real tenant asked for) until its seed
+    /// landed (f56155f0, 2026-09-17): in the contract's shape it is OK;
+    /// in the real tenant's first-draft shape, carrying `role` and
+    /// `department` the registry cannot hold, it is INVALID naming the
+    /// field rather than silently dropping it.
     #[test]
-    fn the_real_tenants_shape_reports_agents_toml_unknown() {
+    fn the_real_tenants_shape_is_judged_file_by_file() {
         let dir = scratch_dir("boss-cli-tenant-check-algedonic-shape");
         write_file(
             &dir.join("tenant.toml"),
@@ -1215,7 +1281,8 @@ mod tests {
         boss_testing::scratch::create_dir(&seeds);
         write_file(
             &seeds.join("agents.toml"),
-            "[[agent]]\nid = \"agent-claude\"\ndisplay_name = \"Claude\"\n",
+            "[[agent]]\nid = \"agent-claude\"\ndisplay_name = \"Claude (engineering)\"\n\
+             default_model = \"opus-5[1m]\"\naliases = [\"claude@algedonic.dev\"]\n",
         );
         write_file(
             &seeds.join("classes.json"),
@@ -1292,10 +1359,9 @@ terminal = { outcome = "sponsored" }
         );
 
         let r = check(&dir);
-        let agents = status_of(&r, "seeds/agents.toml").expect("agents.toml is reported");
-        assert_eq!(agents.status, Status::Unknown, "{agents:?}");
         for ok in [
             "tenant.toml",
+            "seeds/agents.toml",
             "seeds/classes.json",
             "seeds/employees.json",
             "seeds/locations.toml",
@@ -1304,6 +1370,29 @@ terminal = { outcome = "sponsored" }
             let row = status_of(&r, ok).unwrap_or_else(|| panic!("{ok} is reported"));
             assert_eq!(row.status, Status::Ok, "{row:?}");
         }
+        let agents = status_of(&r, "seeds/agents.toml").unwrap();
+        assert!(
+            agents.detail.contains("agent-claude") && agents.detail.contains("opus-5[1m]"),
+            "{agents:?}"
+        );
+        // The real tenant's first draft (20f3a9e) carried role and
+        // department: a field the agents registry cannot hold is
+        // refused by name, never dropped.
+        write_file(
+            &seeds.join("agents.toml"),
+            "[[agent]]\nid = \"agent-claude\"\ndisplay_name = \"Claude (engineering)\"\n\
+             default_model = \"opus-5[1m]\"\naliases = [\"claude@algedonic.dev\"]\n\
+             role = \"engineering-agent\"\ndepartment = \"engineering\"\n",
+        );
+        let drafted = check(&dir);
+        let agents = status_of(&drafted, "seeds/agents.toml").unwrap();
+        assert_eq!(agents.status, Status::Invalid, "{agents:?}");
+        // toml names one unknown field per refusal (the last it read).
+        assert!(
+            agents.detail.contains("unknown field")
+                && (agents.detail.contains("`role`") || agents.detail.contains("`department`")),
+            "{agents:?}"
+        );
         // Three files the product would refuse or silently mis-read
         // are named, with the loader's own words. The workflow's
         // trigger declares `trigger_kind = "sensor"`, a value outside

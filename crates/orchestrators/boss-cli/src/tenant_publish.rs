@@ -24,9 +24,11 @@
 //! account writes validate against them) → locations (an employee's
 //! `location` FKs into them; backlog 1ec8312a) → business calendars →
 //! the company Subject → policy grants → people (two passes: create,
-//! then link managers) → Workflows, after a barrier on the people
-//! projection (a publish opens design Jobs whose role-bearing steps are
-//! assigned against the roster) → sensors LAST. Every file present in the directory
+//! then link managers) → agents (the machine half of the roster; a
+//! step's audience may name one; backlog f56155f0) → Workflows, after
+//! a barrier on the people projection (a publish opens design Jobs
+//! whose role-bearing steps are assigned against the roster) →
+//! sensors LAST. Every file present in the directory
 //! gets a line: a door and a count when publish writes it, `skipped:
 //! <why>` when nothing reads it — never silence. `--dry-run` prints
 //! that plan and makes no HTTP call.
@@ -140,6 +142,12 @@ pub enum Door {
     People {
         roster: Vec<Value>,
     },
+    /// The tenant's registered agents (backlog f56155f0, 2026-09-17):
+    /// the machine half of the roster. After the people, before the
+    /// Workflows — a step's audience may name an agent by id.
+    Agents {
+        rows: Vec<boss_jobs::agents::AgentInput>,
+    },
     Workflows {
         path: PathBuf,
         owning_team: String,
@@ -164,6 +172,7 @@ impl Door {
             Door::Company { .. } => "POST /api/subjects/company",
             Door::Policy { .. } => "GET+POST /api/policy/rules",
             Door::People { .. } => "POST /api/people, then PUT manager links",
+            Door::Agents { .. } => "POST /api/agents/batch",
             Door::Workflows { .. } => "POST /api/jobs (workflow-design), walked to publish",
             Door::Sensors { .. } => "POST /api/sensors/batch",
         }
@@ -190,6 +199,14 @@ impl Door {
                 "{} people, {} manager links (409 = already there)",
                 roster.len(),
                 manager_split(roster.clone()).1.len()
+            ),
+            Door::Agents { rows } => format!(
+                "{} agents (insert-if-absent by id: {}; a registered row is kept and a differing field is named)",
+                rows.len(),
+                rows.iter()
+                    .map(|a| a.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             Door::Workflows {
                 owning_team, kinds, ..
@@ -524,7 +541,15 @@ pub fn plan(dir: &Path) -> Result<Plan> {
             roster: load_hire_rows(p)?,
         })
     })?;
-    // 7. Workflows — after everything a packet needs.
+    // 7. Agents (backlog f56155f0) — the machine half of the roster,
+    //    before the Workflows: a step's audience may name an agent by
+    //    id, and the login door resolves a declared alias from here on.
+    door(present(dir, &["seeds/agents.toml"]), &|p| {
+        Ok(Door::Agents {
+            rows: boss_jobs::agents::load_agents_toml(p).map_err(anyhow::Error::msg)?,
+        })
+    })?;
+    // 8. Workflows — after everything a packet needs.
     door(present(dir, &["seeds/workflows.toml"]), &|p| {
         let specs = boss_jobs::seed_loader::load_workflows_with_owning_team(p, &tenant_id)?;
         Ok(Door::Workflows {
@@ -533,7 +558,7 @@ pub fn plan(dir: &Path) -> Result<Plan> {
             kinds: specs.iter().map(|s| s.kind.clone()).collect(),
         })
     })?;
-    // 8. Sensors LAST (design 14c9b2ad): each row names the workflow
+    // 9. Sensors LAST (design 14c9b2ad): each row names the workflow
     //    kind a reading opens, so the kinds go first; the registry row
     //    is what the platform's 5-minute poll reads.
     door(present(dir, &["seeds/sensors.toml"]), &|p| {
@@ -757,6 +782,17 @@ fn send(client: &Client, bases: &Bases, door: &Door) -> Result<String> {
             Ok("ok (posted/skipped counts in the log)".to_string())
         }
         Door::People { roster } => seed_people(client, &bases.people, roster),
+        Door::Agents { rows } => {
+            let u = url(&bases.jobs, "/api/agents/batch");
+            let resp = refuse(client.post(&u).json(rows).send()?, &format!("POST {u}"))?;
+            // The door's own outcome type, so the line names a kept
+            // row's differing fields the way the registry reported
+            // them — never a count that hides a disagreement.
+            let out: boss_jobs::agents::AgentsBatchOutcome = resp
+                .json()
+                .with_context(|| format!("POST {u}: the outcome did not parse"))?;
+            Ok(out.summary())
+        }
         Door::Workflows {
             path, owning_team, ..
         } => {
@@ -923,10 +959,12 @@ terminal = { outcome = "sponsored" }
             "seeds/locations.toml",
             "[[location]]\nid = \"loc-acme-hq\"\nname = \"HQ\"\nkind = \"office\"\ntimezone = \"America/Los_Angeles\"\n",
         );
+        // The real tenant's agent, in the contract's shape (f56155f0).
         put(
             &dir,
             "seeds/agents.toml",
-            "[[agent]]\nid = \"agent-claude\"\ndisplay_name = \"Claude\"\n",
+            "[[agent]]\nid = \"agent-claude\"\ndisplay_name = \"Claude (engineering)\"\n\
+             default_model = \"opus-5[1m]\"\naliases = [\"claude@acme.example\"]\n",
         );
         put(&dir, "seeds/workflows.toml", WORKFLOWS);
         // The first sensor (design 14c9b2ad): opens the workflow above.
@@ -972,11 +1010,24 @@ terminal = { outcome = "sponsored" }
                 "tenant.toml",
                 "seeds/policy_rules.toml",
                 "seeds/employees.json",
+                "seeds/agents.toml",
                 "seeds/workflows.toml",
                 "seeds/sensors.toml",
             ],
-            "classes → locations → calendars → company → policy → people → workflows → sensors LAST"
+            "classes → locations → calendars → company → policy → people → agents → workflows → sensors LAST"
         );
+        // The agents door (backlog f56155f0): the declarations as the
+        // batch endpoint's rows, before the Workflows whose steps may
+        // name an agent as their audience.
+        match &step(&p, "seeds/agents.toml").action {
+            Action::Write(Door::Agents { rows }) => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].id, "agent-claude");
+                assert_eq!(rows[0].default_model, "opus-5[1m]");
+                assert_eq!(rows[0].aliases, ["claude@acme.example"]);
+            }
+            other => panic!("{other:?}"),
+        }
         match &step(&p, "seeds/classes.json").action {
             Action::Write(Door::Classes { rows }) => assert_eq!(rows.len(), 2),
             other => panic!("{other:?}"),
@@ -1050,13 +1101,25 @@ terminal = { outcome = "sponsored" }
             "locations are written, not skipped: {:?}",
             step(&p, "seeds/locations.toml").action
         );
-        match &step(&p, "seeds/agents.toml").action {
+        // A file the contract does not name at all (agents.toml was
+        // this until f56155f0, 2026-09-17).
+        put(&dir, "seeds/notes.toml", "[[note]]\ntext = \"x\"\n");
+        let p = plan(&dir).unwrap();
+        match &step(&p, "seeds/notes.toml").action {
             Action::Skip(why) => {
                 assert!(why.contains("no reader"), "{why}");
                 assert!(why.contains("not named by the contract"), "{why}");
             }
             other => panic!("{other:?}"),
         }
+        assert!(
+            matches!(
+                step(&p, "seeds/agents.toml").action,
+                Action::Write(Door::Agents { .. })
+            ),
+            "agents are written, not skipped: {:?}",
+            step(&p, "seeds/agents.toml").action
+        );
         // An engine-only file names its engine, not "no reader".
         put(&dir, "seeds/vendors.toml", "[[vendor]]\nid = \"v\"\n");
         let p = plan(&dir).unwrap();
@@ -1067,7 +1130,7 @@ terminal = { outcome = "sponsored" }
             }
             other => panic!("{other:?}"),
         }
-        let rendered = p.render_step(step(&p, "seeds/agents.toml"), None);
+        let rendered = p.render_step(step(&p, "seeds/notes.toml"), None);
         assert!(rendered.contains("skipped:"), "{rendered}");
     }
 
@@ -1153,6 +1216,10 @@ terminal = { outcome = "sponsored" }
         sensors: BTreeSet<String>,
         /// Published location ids (insert-if-absent, like the door).
         locations: BTreeSet<String>,
+        /// Registered agents: id -> display_name (insert-if-absent;
+        /// the stub's "migration" pre-registers agent-claude under
+        /// the platform's own name, as the real schema does).
+        agents: BTreeMap<String, String>,
     }
 
     impl Stub {
@@ -1163,6 +1230,7 @@ terminal = { outcome = "sponsored" }
                 + self.jobs
                 + self.sensors.len()
                 + self.locations.len()
+                + self.agents.len()
         }
     }
 
@@ -1186,6 +1254,31 @@ terminal = { outcome = "sponsored" }
                 (
                     200,
                     json!({"received": rows.len(), "inserted": inserted}).to_string(),
+                )
+            }
+            ("POST", "/api/agents/batch") => {
+                // Insert-if-absent by id; a kept row reports which
+                // declared fields differ (here: display_name only).
+                let rows = serde_json::from_str::<Vec<Value>>(body).unwrap_or_default();
+                let mut inserted = 0usize;
+                let mut kept = Vec::new();
+                for r in &rows {
+                    let id = r["id"].as_str().unwrap_or("").to_string();
+                    let name = r["display_name"].as_str().unwrap_or("").to_string();
+                    match st.agents.get(&id) {
+                        Some(have) => kept.push(json!({
+                            "id": id,
+                            "differs": if *have == name { json!([]) } else { json!(["display_name"]) }
+                        })),
+                        None => {
+                            st.agents.insert(id, name);
+                            inserted += 1;
+                        }
+                    }
+                }
+                (
+                    200,
+                    json!({"received": rows.len(), "inserted": inserted, "kept": kept}).to_string(),
                 )
             }
             ("POST", "/api/calendar/business-calendars/batch") => (200, "{}".into()),
@@ -1391,6 +1484,12 @@ terminal = { outcome = "sponsored" }
         );
         assert_eq!(hit("POST", "/api/jobs"), 1, "one design Job per workflow");
         assert_eq!(
+            hit("POST", "/api/agents/batch"),
+            1,
+            "one batch for the agents file"
+        );
+        assert_eq!(st.agents.keys().collect::<Vec<_>>(), ["agent-claude"]);
+        assert_eq!(
             hit("POST", "/api/sensors/batch"),
             1,
             "one batch for the sensors file"
@@ -1414,6 +1513,10 @@ terminal = { outcome = "sponsored" }
             "employees.location is a FK into locations, so the sites land first"
         );
         assert!(pos("POST", "/api/people") < pos("POST", "/api/jobs"));
+        assert!(
+            pos("POST", "/api/agents/batch") < pos("POST", "/api/jobs"),
+            "a step's audience may name an agent, so the agents go before the Workflows"
+        );
         assert!(
             pos("POST", "/api/jobs") < pos("POST", "/api/sensors/batch"),
             "the sensors name a workflow kind, so the kinds go first"
@@ -1501,6 +1604,40 @@ terminal = { outcome = "sponsored" }
         assert!(
             people_line.contains("0 posted, 2 already there"),
             "{people_line}"
+        );
+    }
+
+    /// A REGISTERED AGENT IS KEPT, AND THE LINE SAYS HOW THE DECLARATION
+    /// DIFFERS (backlog f56155f0). The platform's migration registered
+    /// `agent-claude` under its own display name; the tenant declares
+    /// the same id under another. Insert-if-absent keeps the row, and
+    /// the publish line names the field — never a silent "already
+    /// there".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_registered_agent_is_kept_and_the_differing_field_is_named_in_the_line() {
+        let dir = real_shape("agent-kept");
+        let p = plan(&dir).unwrap();
+        let st = Arc::new(Mutex::new(Stub::default()));
+        st.lock().unwrap().agents.insert(
+            "agent-claude".into(),
+            "Claude (Claude Code sessions on the dev pod)".into(),
+        );
+        let base = spawn_stub(st.clone()).await;
+        let lines = run_publish(p, base).await.unwrap();
+        let agents_line = lines
+            .iter()
+            .find(|l| l.contains("seeds/agents.toml"))
+            .unwrap();
+        assert!(
+            agents_line.contains("POST /api/agents/batch")
+                && agents_line.contains("received 1, inserted 0")
+                && agents_line.contains("agent-claude (display_name differs)"),
+            "{agents_line}"
+        );
+        let st = st.lock().unwrap();
+        assert_eq!(
+            st.agents["agent-claude"], "Claude (Claude Code sessions on the dev pod)",
+            "kept as the platform registered it"
         );
     }
 

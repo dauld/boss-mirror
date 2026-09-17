@@ -388,6 +388,15 @@ async fn run_server<R: JobsRepository + 'static>(
             boss_jobs::sensors::http::SensorsApiState { repo },
         ));
     }
+    // The agents roster and the tenant batch (backlog f56155f0): the
+    // same registry the login door below resolves through, so an
+    // alias a tenant declares resolves on the next request.
+    info!("agents mounted at /api/agents (+ /batch)");
+    app = app.merge(boss_jobs::agents::http::router(
+        boss_jobs::agents::http::AgentsApiState {
+            registry: agents.clone(),
+        },
+    ));
     // Sim-origin middleware: extract x-sim-origin header and set the
     // per-request task-local so the publisher inherits the sim
     // marker. Closes the gap where a sim chain could trigger a

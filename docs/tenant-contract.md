@@ -20,7 +20,8 @@ Three verbs make the contract usable:
 - `boss tenant check <dir>` validates a directory **with the product's
   own loaders** — `boss_jobs::seed_loader` for `workflows.toml` (with
   its viability lint), `boss_policy_client`'s grant loader, the classes
-  and locations batch endpoints' row types, `boss_people::Employee`,
+  and locations batch endpoints' row types, the agents and sensors
+  loaders in `boss_jobs`, `boss_people::Employee`,
   `boss_core`'s `BusinessCalendar` and the gateway's `TenantToml` — and reports one
   line per file: **OK** / **MISSING** (a required file) / **INVALID**
   (with the loader's own error, never rephrased) / **UNKNOWN** (a file
@@ -30,8 +31,8 @@ Three verbs make the contract usable:
   a directory into a running deployment through the **same shared
   doors the tenant engines' prepare compose** (backlog `ee7b62bb`):
   classes → locations → business calendars → the company Subject →
-  policy grants → people (two passes) → Workflows, after a barrier on
-  the people projection → sensors last. Idempotent (insert-if-absent, upsert, 409 swallowed, a
+  policy grants → people (two passes) → agents → Workflows, after a
+  barrier on the people projection → sensors last. Idempotent (insert-if-absent, upsert, 409 swallowed, a
   kind an authoring Job already published is skipped), signed as
   `automation:tenant-seed` and **not** as a sim chain. One line per
   file present: the door and a count, or `skipped: <why>` for a file
@@ -99,6 +100,7 @@ stating plainly:
 | `seeds/operator_hires.toml` | no | boss-brewery-engine prepare (`seed_brewery_operator_hires`): each `[[hire]]` POSTed to /api/people as a `boss_people::Employee` | `[[hire]]` rows in the Employee shape above | no |
 | `seeds/business_calendars.json` | no | POST /api/calendar/business-calendars/batch as `Vec<boss_core::calendar::BusinessCalendar>` (the brewery engine's prepare); the dispatcher's timing triggers and the sim resolve business days from it | JSON array of {code, name, weekend: [0..6 Mon=0], closed: [YYYY-MM-DD]} | yes |
 | `seeds/sensors.toml` | no | POST /api/sensors/batch (boss-jobs, insert-if-absent by id) — sent by `boss tenant publish` as the tenant's declarations; the dispatcher's `sensor.poll` handler reads the registry every 5 minutes and polls each due sensor (design 14c9b2ad) | `[[sensor]]` rows: id, source (`stripe`), credential (a `credentials` registry id), every_minutes, opens (the workflow kind one reading opens), subject_kind, enabled? — validated by `boss_jobs::sensors::load_sensors_toml` | yes |
+| `seeds/agents.toml` | no | POST /api/agents/batch (boss-jobs, insert-if-absent by id and by alias) — sent by `boss tenant publish` BEFORE the Workflows (a step's audience may name an agent); a row the platform already registered is kept and the publish line names any field the declaration differs on; the jobs API's login door resolves each alias to the id (design 6fda05ae; backlog f56155f0) | `[[agent]]` rows: id (`agent-<slug>`), display_name, default_model (a rate-card model, e.g. `opus-5[1m]`), aliases? (the logins that sign as it), hourly_budget_usd_micros?, max_concurrent_runs? — the `agents` table's columns and nothing else; validated by `boss_jobs::agents::load_agents_toml` | yes |
 | `seeds/locations.toml` | no | POST /api/locations/batch, one boss-locations `http::LocationInput` per row (insert-if-absent by id) — sent by `boss tenant publish` BEFORE the roster, because an `employees.json` `location` is a foreign key into the registry (backlog 1ec8312a; until 2026-09-17 nothing read this file) | `[[location]]` rows: id, name, kind, timezone (+ parent_id, latitude, longitude, address, account_id, metadata) — the `locations` table's columns | yes |
 | `seeds/subject_kinds.toml` | no | NO READER (measured 2026-09-16). Check parses the rows conservatively | `[[subject_kind]]` rows: kind, label, description, owning_team, sort_order | no |
 | `seeds/accounts.toml` | no | boss-brewery-engine, `include_str!` at compile time from examples/brewery/seeds — a copy in a tenant directory is never read | brewery engine data (`names`, `[[city]]`); check parses TOML only | no |
@@ -136,12 +138,16 @@ stating plainly:
   `data/employees.json`) is read by those engines from `seeds/../data`
   and is not part of the platform contract; `check` does not descend
   into it.
-- **`seeds/agents.toml`** — the first extension the real tenant asked
-  for (`agent-claude` declared as an actor, with model, aliases, role
-  and department). The product has no agents seed yet — prod's agents
-  table was seeded by migration `20260915212644` — so `check` reports
-  the file **UNKNOWN** today. When an agents seed loader lands, its row
-  joins this table and the file becomes OK.
+- **A field the registry cannot hold.** `seeds/agents.toml` was the
+  first extension the real tenant asked for and read UNKNOWN until its
+  seed landed (backlog `f56155f0`, 2026-09-17). Its row is the `agents`
+  table's columns plus the aliases the row owns, and nothing else: the
+  real tenant's first draft also carried `role` and `department`, which
+  the registry has no column for, and `check` refuses those **by name**
+  (`unknown field`) rather than dropping them in silence. A row the
+  platform already registered (prod's `agent-claude` came from
+  migration `20260915212644`) is kept as registered, and the publish
+  line names any field the declaration differs on.
 
 ## What `check` found on the first real tenant
 
@@ -164,7 +170,8 @@ repo):
   day_start, day_end}`; the batch endpoint's `BusinessCalendar` is
   `{code, name, weekend, closed}` and would reject it. INVALID with
   serde's own "missing field `code`".
-- `seeds/agents.toml` — UNKNOWN, as above.
+- `seeds/agents.toml` — UNKNOWN then; since `f56155f0` it is judged,
+  and its `role` / `department` are refused by name (above).
 - Everything else — the manifest, the
   classes, the founder's employee row, the location — is OK under the
   product's own loaders.

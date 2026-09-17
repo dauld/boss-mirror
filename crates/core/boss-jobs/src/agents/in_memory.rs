@@ -1,21 +1,50 @@
 //! In-memory adapter for `AgentsRegistry` — the port-level test double.
 //!
-//! Mirrors the one Pg invariant that matters here: an alias exists
-//! only under a registered agent (`actor_aliases.actor_id` is a foreign
-//! key into `agents`), so the builder takes the agent and its logins
-//! together and there is no way to register a login to nothing.
+//! Mirrors the Pg invariants that matter here: an alias exists only
+//! under a registered agent (`actor_aliases.actor_id` is a foreign key
+//! into `agents`), so the builder takes the agent and its logins
+//! together and there is no way to register a login to nothing; and a
+//! publish is insert-if-absent by id and by alias, so a registered row
+//! is kept and the outcome names what the declaration differs on. The
+//! rate-card FK is NOT mirrored (the Pg test proves that refusal).
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 
 use super::port::{AgentsError, AgentsRegistry};
+use super::types::{AgentInput, AgentRow, AgentsBatchOutcome, KeptAgent};
+
+#[derive(Default)]
+struct Rows {
+    /// id -> the row (without its aliases).
+    agents: BTreeMap<String, AgentInput>,
+    /// login -> registered agent id.
+    aliases: BTreeMap<String, String>,
+}
+
+impl Rows {
+    fn row(&self, a: &AgentInput) -> AgentRow {
+        AgentRow {
+            id: a.id.clone(),
+            display_name: a.display_name.clone(),
+            default_model: a.default_model.clone(),
+            hourly_budget_usd_micros: a.hourly_budget_usd_micros,
+            max_concurrent_runs: a.max_concurrent_runs,
+            aliases: self
+                .aliases
+                .iter()
+                .filter(|(_, id)| **id == a.id)
+                .map(|(alias, _)| alias.clone())
+                .collect(),
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct InMemoryAgents {
-    /// login -> registered agent id.
-    aliases: Mutex<HashMap<String, String>>,
+    rows: Mutex<Rows>,
 }
 
 impl InMemoryAgents {
@@ -26,9 +55,19 @@ impl InMemoryAgents {
     /// Register `agent_id` with the logins it may sign as.
     pub fn with_agent<'a>(self, agent_id: &str, logins: impl IntoIterator<Item = &'a str>) -> Self {
         {
-            let mut aliases = self.aliases.lock().expect("aliases lock");
+            let mut rows = self.rows.lock().expect("agents lock");
+            rows.agents
+                .entry(agent_id.to_string())
+                .or_insert_with(|| AgentInput {
+                    id: agent_id.to_string(),
+                    display_name: agent_id.to_string(),
+                    default_model: "opus-5".to_string(),
+                    aliases: Vec::new(),
+                    hourly_budget_usd_micros: None,
+                    max_concurrent_runs: None,
+                });
             for login in logins {
-                aliases.insert(login.to_string(), agent_id.to_string());
+                rows.aliases.insert(login.to_string(), agent_id.to_string());
             }
         }
         self
@@ -39,10 +78,48 @@ impl InMemoryAgents {
 impl AgentsRegistry for InMemoryAgents {
     async fn resolve_login(&self, login: &str) -> Result<Option<String>, AgentsError> {
         Ok(self
-            .aliases
+            .rows
             .lock()
-            .expect("aliases lock")
+            .expect("agents lock")
+            .aliases
             .get(login)
             .cloned())
+    }
+
+    async fn list(&self) -> Result<Vec<AgentRow>, AgentsError> {
+        let rows = self.rows.lock().expect("agents lock");
+        Ok(rows.agents.values().map(|a| rows.row(a)).collect())
+    }
+
+    async fn publish(&self, declared: &[AgentInput]) -> Result<AgentsBatchOutcome, AgentsError> {
+        let mut rows = self.rows.lock().expect("agents lock");
+        let mut inserted = 0usize;
+        let mut kept = Vec::new();
+        for a in declared {
+            let is_new = !rows.agents.contains_key(&a.id);
+            if is_new {
+                let mut stored = a.clone();
+                stored.aliases.clear();
+                rows.agents.insert(a.id.clone(), stored);
+                inserted += 1;
+            }
+            for alias in &a.aliases {
+                rows.aliases
+                    .entry(alias.clone())
+                    .or_insert_with(|| a.id.clone());
+            }
+            if !is_new {
+                let row = rows.row(&rows.agents[&a.id]);
+                kept.push(KeptAgent {
+                    id: a.id.clone(),
+                    differs: row.differs_from(a),
+                });
+            }
+        }
+        Ok(AgentsBatchOutcome {
+            received: declared.len(),
+            inserted,
+            kept,
+        })
     }
 }

@@ -35,19 +35,30 @@
 //! next car close the window knowing it refuses nothing live.
 //!
 //! Hexagonal, the same shape as `crate::credentials`: port + in-memory
-//! double + Pg adapter behind the `postgres` feature. No HTTP read door
-//! yet — the two rows the registry holds arrive by migration (the
-//! rate-card precedent: a wrong identity is harder to notice than a
-//! missing one) and are read by SQL until a surface needs them.
+//! double + Pg adapter behind the `postgres` feature, plus (since
+//! backlog f56155f0, 2026-09-17) the HTTP door — `GET /api/agents` and
+//! the tenant batch `POST /api/agents/batch` — and the one TOML loader
+//! `boss tenant check` and `boss tenant publish` share
+//! ([`seed::load_agents_toml`]). Until that car the registry's rows
+//! arrived by migration only (the rate-card precedent: a wrong identity
+//! is harder to notice than a missing one), which left the company's
+//! own agent declared nowhere the product read; the batch is
+//! insert-if-absent by id, so a migration-registered row is kept and
+//! the publish names any field the tenant's declaration differs on.
 
 pub mod door;
+pub mod http;
 pub mod in_memory;
 pub mod port;
 #[cfg(feature = "postgres")]
 pub mod postgres;
+pub mod seed;
+pub mod types;
 
 pub use door::{LoginDoor, Resolution, UNRESOLVED_LOGIN, decide, resolve_login};
 pub use in_memory::InMemoryAgents;
 pub use port::{AgentsError, AgentsRegistry};
 #[cfg(feature = "postgres")]
 pub use postgres::PgAgents;
+pub use seed::{load_agents_toml, parse_agents_toml};
+pub use types::{AgentInput, AgentRow, AgentsBatchOutcome, KeptAgent, validate_agent};
