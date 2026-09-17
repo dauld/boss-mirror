@@ -214,6 +214,25 @@ async fn a_rule_file_alone_reaches_the_registry() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = authored_copy(&tmp);
 
+    // Bring the derived registry to the directory FIRST. The migrations
+    // are applied history and seed rules the directory no longer names
+    // — thirty-one moved to the brewery tenant's seeds/rules.toml on
+    // 2026-09-17 (design e2580840 car 4) — and this pass retires them,
+    // which is the collapse doing its job. The claim under test is
+    // about the NEXT pass: a file added to a registry already derived
+    // from the directory reaches the table and retires nothing.
+    let first = seed_authored_rules(&db.pool, &dir)
+        .await
+        .expect("derive the registry from the directory");
+    assert!(
+        first
+            .retired
+            .iter()
+            .all(|n| !dir.join(format!("{n}.toml")).exists()),
+        "the first pass may retire only what the directory does not author: {:?}",
+        first.retired
+    );
+
     let name = "zzz-a-rule-no-migration-ever-wrote";
     std::fs::write(
         dir.join(format!("{name}.toml")),
@@ -363,7 +382,7 @@ async fn a_rule_the_tree_no_longer_authors_is_retired() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = authored_copy(&tmp);
 
-    let name = "forward-handoff-done-to-webhook";
+    let name = "expire-signals-on-job-closed";
     assert!(
         active_version(&db.pool, name).await.is_some(),
         "the migrations seeded it, so there is something to retire"
@@ -495,7 +514,7 @@ async fn a_tenant_sourced_rule_survives_a_seed_that_names_no_file_for_it() {
         "the fixture registry must not author the tenant's rule, or this test proves nothing"
     );
     // The control: a PRODUCT row with no file is still retired.
-    let product_rule = "forward-handoff-done-to-webhook";
+    let product_rule = "expire-signals-on-job-closed";
     std::fs::remove_file(dir.join(format!("{product_rule}.toml"))).expect("delete the rule file");
 
     let report = seed_authored_rules(&db.pool, &dir)

@@ -51,12 +51,22 @@
 #   DECLARED — the basenames of `infra/dispatcher/rules/*.toml`. A rule
 #     the tree declares. Adding a rule is dropping a file in; retiring
 #     one is deleting the file.
+#   TENANT-DECLARED — every `name = "…"` in an example tenant's
+#     `examples/*/seeds/rules.toml`. Since the tenant contract took
+#     `seeds/rules.toml` (#430) a tenant's reactors are declared THERE,
+#     and on 2026-09-17 thirty-one rules moved from the product
+#     directory to the brewery's file (design e2580840 car 4). A name
+#     that moved is still declared by the tree — the file that declares
+#     it, the test that reads it and the fixture that borrows it are
+#     all correct — so it is not RETIRED. The pins below
+#     (`rule-registry-pin`) still count the product directory alone: a
+#     pin is over the registry the product's seed derives.
 #   EVER — DECLARED plus every rule name a `dispatcher_rules` statement
 #     under `infra/postgres/schema/` has ever mentioned. Migrations are
 #     applied history: they stay in the tree forever, which is exactly
 #     why they are the memory of what a rule name USED to mean.
-#   RETIRED — EVER minus DECLARED. A name the tree once declared and
-#     declares no longer.
+#   RETIRED — EVER minus DECLARED minus TENANT-DECLARED. A name the tree
+#     once declared and declares no longer, anywhere.
 #
 # A reference to a RETIRED name, in code, anywhere outside the two
 # directories that legitimately remember it, is the defect. It is named
@@ -155,6 +165,7 @@ NAME="an-expectation-names-a-rule-the-tree-declares"
 SELF_REL="infra/lint/$NAME.sh"
 RULES_REL="infra/dispatcher/rules"
 SCHEMA_REL="infra/postgres/schema"
+TENANT_RULES_GLOB="examples/*/seeds/rules.toml"
 PIN_TOKEN="rule-registry-pin:"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -170,6 +181,22 @@ declared_names() {
     local files=("$tree/$RULES_REL"/*.toml)
     shopt -u nullglob
     for f in "${files[@]}"; do basename "$f" .toml; done | LC_ALL=C sort -u
+}
+
+# Rule names an example tenant DECLARES in its own seeds/rules.toml —
+# the `name = "…"` key of each `[[rule]]`, read the way the ratchet
+# lint reads the product's files. A tenant file that does not exist is
+# an empty set, not an error: the used-device-shop had none until
+# 2026-09-17, and a tree with no example tenants is still a tree.
+tenant_declared_names() {
+    local tree="$1" f
+    shopt -s nullglob
+    # shellcheck disable=SC2206
+    local files=("$tree"/$TENANT_RULES_GLOB)
+    shopt -u nullglob
+    for f in "${files[@]}"; do
+        LC_ALL=C sed -n 's/^name[ \t]*=[ \t]*"\([^"]*\)".*/\1/p' "$f"
+    done | LC_ALL=C sort -u
 }
 
 # Every rule name a `dispatcher_rules` statement has ever mentioned.
@@ -401,7 +428,9 @@ scan_tree() {
     fi
     nunseeded=$(LC_ALL=C grep -c . < "$tmp/unscraped" || true)
 
-    LC_ALL=C comm -13 "$tmp/declared" "$tmp/scraped" > "$tmp/retired"
+    tenant_declared_names "$tree" > "$tmp/tenant"
+    LC_ALL=C comm -13 "$tmp/declared" "$tmp/scraped" \
+        | LC_ALL=C comm -23 - "$tmp/tenant" > "$tmp/retired"
 
     candidate_files "$tree" > "$tmp/files"
 
@@ -499,10 +528,11 @@ EOF
 
     [ "$problems" -eq 0 ] || return 1
 
-    local nretired npins
+    local nretired npins ntenant
     nretired="$(LC_ALL=C grep -c . < "$tmp/retired" || true)"
+    ntenant="$(LC_ALL=C grep -c . < "$tmp/tenant" || true)"
     npins="$(cd "$tree" && LC_ALL=C grep -lF -- "$PIN_TOKEN" /dev/null $(tr '\n' ' ' < "$tmp/files") 2>/dev/null | LC_ALL=C grep -c . || true)"
-    echo "$NAME: OK — $(LC_ALL=C grep -c . < "$tmp/declared") declared rules ($nunseeded declared since the collapse, by file alone), $nretired retired and referenced nowhere in code, $npins file(s) carrying a $PIN_TOKEN pin"
+    echo "$NAME: OK — $(LC_ALL=C grep -c . < "$tmp/declared") declared rules ($nunseeded declared since the collapse, by file alone), $nretired retired and referenced nowhere in code, $npins file(s) carrying a $PIN_TOKEN pin, $ntenant declared by an example tenant's seeds/rules.toml"
     return 0
 }
 
@@ -664,6 +694,28 @@ RS
     out="$(scan_tree "$tmp/hollow" 2>&1)"; rc=$?
     [ "$rc" -eq 1 ] || st_fail "an empty rule directory was read as a clean tree (rc=$rc): $out"
 
+    # 8. A RULE THAT MOVED TO A TENANT (2026-09-17): its migration still
+    #    names it, the product directory no longer does, and an example
+    #    tenant's seeds/rules.toml declares it. A test that reads that
+    #    file by name is right, not stale — passes, and the OK line says
+    #    how many names a tenant declares. The control: with the tenant
+    #    file gone, the same reference IS stale and is refused.
+    mk_tree "$tmp/moved"
+    rm -f "$tmp/moved/$RULES_REL/publish-to-github-daily.toml"
+    mkdir -p "$tmp/moved/examples/acme/seeds"
+    printf '[[rule]]\nname = "publish-to-github-daily"\nversion = 1\n' \
+        > "$tmp/moved/examples/acme/seeds/rules.toml"
+    printf 'const MOVED: &str = "publish-to-github-daily";\n' > "$tmp/moved/crates/t/tests/pin.rs"
+    out="$(scan_tree "$tmp/moved" 2>&1)"; rc=$?
+    [ "$rc" -eq 0 ] || st_fail "a name an example tenant's seeds/rules.toml declares was read as retired (rc=$rc): $out"
+    printf '%s' "$out" | grep -q "1 declared by an example tenant's seeds/rules.toml" \
+        || st_fail "the OK line does not count the tenant-declared name: $out"
+    rm -f "$tmp/moved/examples/acme/seeds/rules.toml"
+    out="$(scan_tree "$tmp/moved" 2>&1)"; rc=$?
+    [ "$rc" -eq 1 ] || st_fail "without the tenant file the moved name must read as retired (rc=$rc): $out"
+    printf '%s' "$out" | grep -q 'publish-to-github-daily' \
+        || st_fail "the control refusal does not name the rule: $out"
+
     # 7. THIS SCRIPT MUST NOT READ STDIN, and the cost of getting that
     #    wrong is not its own result. gate.sh runs the roster as
     #    `while read -r name path; do check "$name" bash "$path"; done
@@ -684,7 +736,7 @@ roster loop that silently truncates the roster and still reports clean"
     echo "$NAME: self-test ok — a retired rule QUOTED in code fails with its file, line and \
 retiring migration; a stale count pin fails with expected vs actual; a pin matching nothing \
 fails; a rule declared by file alone passes and is counted; a scrape finding no declared rule fails; the same names in line comments, block comments, \
-backticked prose inside a string literal, and docs all pass; and the scan leaves stdin alone, \
+backticked prose inside a string literal, and docs all pass; a name an example tenant's seeds/rules.toml declares is not retired; and the scan leaves stdin alone, \
 so it cannot truncate gate.sh's roster loop"
     return 0
 }

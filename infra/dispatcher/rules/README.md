@@ -199,15 +199,27 @@ whichever member file happens to sort first.
 `step.done.<kind>` event to the handler that runs the step's side
 effect. Handler implementations live at
 `boss-dispatcher::rules::handlers::*`. This is the routing residue
-above.
-
-**External-party callbacks** (`forward-*-to-webhook`). Forward the
-events the simulator's CounterpartyEngine reacts to — banks, suppliers,
-the keg courier, the tax authority, the operational broadcasts — to its
-callback receiver via `webhook.notify`. The simulator never subscribes
-to the event stream; the system pushes to a configured webhook,
-preserving the sim/system boundary. No-op in any deployment without
-`BOSS_EVENT_WEBHOOK_URL` set.
+above. **The business-step ones are a tenant's, and are not here**
+(design e2580840 car 4, backlog 105fb702, 2026-09-17): a reactor on
+`step.done.billing`, `step.done.production-produce`,
+`step.done.payroll-release`, `step.done.hr-hire` and the rest fires on
+a step kind no platform workflow declares — only an example tenant's
+`seeds/workflows.toml` does — and was enforced on a real instance whose
+tenant had no such protocol. Thirty-one rules moved verbatim to
+`examples/brewery/seeds/rules.toml` (thirteen of them also to
+`examples/used-device-shop/seeds/rules.toml`): eight brewery-domain
+reactors (keg return and settle, tasting panel, excise, packaging,
+produce/consume, ingredient restock), fourteen company-module reactors
+(invoice issue, FG drawdown on invoice, shipment, PO, receive, bills,
+payroll, tax remit, hire/terminate) and the nine `forward-*-to-webhook`
+callbacks, which pushed the events the simulator's CounterpartyEngine
+reacts to at `BOSS_EVENT_WEBHOOK_URL`. What stays here runs the
+platform itself: trains and gates, sweeps and their measures, the
+estate, DNS, credentials, notifications, the step markers. The test
+`the_product_rules_are_the_platforms` (boss-dispatcher) is the ratchet:
+a rule here naming an `inventory.*`, `products.*`, `commerce.*`,
+`shipping.*`, `ledger.*`, `people.*` or `webhook.notify` handler, or a
+tenant's kind in its trigger, is refused by name.
 
 **Delegate-subjob** (Workflow v2, D7) — the spawn → link → resolve loop.
 A `delegate-subjob` step spawns a child Job of `metadata.subworkflow`

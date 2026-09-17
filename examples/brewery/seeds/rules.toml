@@ -1,0 +1,856 @@
+# Algedonic Ales — the brewery tenant's dispatcher rules.
+#
+# A tenant's reactors are the tenant's protocol data, not the
+# product's (docs/tenant-contract.md §A tenant's own reactors; backlog
+# 458971ef, decided by design b64c4377). This file holds every `[[rule]]`
+# the brewery declares, in the product rule file's own shape
+# (infra/dispatcher/rules/README.md): `name`, a `why` naming the
+# standing exemption the rule claims, `version`, `on_event` or
+# `schedule`, an optional `when`, and one or more `[[rule.do]]`.
+#
+# HOW IT REACHES THE REGISTRY. `boss tenant check examples/brewery`
+# reads it with the dispatcher's own parser and checks every handler
+# against `cascade::handler_emits`; `boss tenant publish` sends each
+# rule through POST /api/dispatcher/rules/_validate, then a draft
+# carrying `source = tenant:brewery` and a publish, LAST — after the
+# Workflows these rules react on. The dispatcher's boot seed retires
+# only product-sourced rows no file under infra/dispatcher/rules/
+# names, so a rule published from here survives every converge.
+#
+# WHERE THESE CAME FROM (design e2580840 car 4, backlog 105fb702,
+# 2026-09-17). Until that car every rule below was a file under
+# infra/dispatcher/rules/ — enforced on EVERY instance, including a
+# real one whose tenant declares no brew, no keg fleet and no taproom.
+# A read-only audit of prod measured 31 of its 73 active rules as this
+# tenant's: eight brewery-domain reactors, nine `webhook.notify`
+# forwards to BOSS_EVENT_WEBHOOK_URL (the simulator's callback, a port
+# nothing listened on there), and fourteen company-module reactors
+# whose trigger is a step kind no platform workflow declares
+# (`step.done.billing`, `step.done.payroll-release`, `step.done.hr-hire`
+# …) — only examples/*/seeds/workflows.toml do. Each rule moved here
+# VERBATIM, its `why` and its file's leading comment included, so the
+# history each one narrates is still where a reader looks for it.
+#
+# ONE NAME, ONE OWNER. `dispatcher_rules` is one namespace. On an
+# instance that ran the product files before the move, the retired
+# product-sourced rows still hold these names, and `boss tenant publish`
+# refuses a tenant draft under a name another source owns. A fresh
+# playground (the design's intended home for this tenant) has no such
+# rows; an instance with them needs the product rows removed before
+# this file can publish under the same names.
+
+# ======================================================================
+# Brewery-domain reactors: the brewhouse, the keg fleet, the sensory panel
+# ======================================================================
+
+# Brewery demo tenant (Algedonic Ales). THE SOURCE FOR THIS RULE'S
+# INTENT is docs/design/brewery-fidelity.md §The live experiment, which
+# names this exact reaction: "**`tasting-panel` v1** (active 2026-08-21):
+# brew close spawns a sensory panel — pour-flight (qa-tech) →
+# panel-verdict (qa-supervisor, `release|hold`) → terminals
+# released/held. Measures a *hold rate* the brewery has never had." The
+# same section records how it was authored: "Spawn rules ride the
+# dispatcher registry (`jobs.job.closed` filtered by kind)."
+#
+# WHAT IT WAS FOR — a measured hole, not a hypothetical. The same doc's
+# direct SoR queries against the live tenant found: "**batch-qc-hold has
+# never fired.** Zero packets, ever. The workflow is well-formed (5
+# steps) but nothing spawns it — no `job_rate`, no dispatcher rule, no
+# engine hook. QC exists as authored intent only", and in the gap list,
+# "QC is authored at both ends (qc-checkpoint step, batch-qc-hold
+# workflow) minus the wire between them." The program entry then reads
+# "Wire QC. Spawn `batch-qc-hold` from failed qc-checkpoints; the live
+# `tasting-panel` protocol is the sensory layer of the same program."
+# This rule is that sensory layer's wire; the tasting-panel protocol's
+# own description states the obligation it discharges — "Sensory QC on
+# every packaged batch: a real brewery tastes before it ships. A held
+# verdict is the feeder batch-qc-hold never had."
+# (`GET /api/workflows/tasting-panel`, v2.)
+#
+# IT HAS FIRED AND THE MEASUREMENT PAID. The hold rate it was published
+# to measure read 0% across "all ten closed `tasting-panel` packets",
+# which is what exposed a sim defect: the workforce always took the
+# leading enum variant, so "any outcome-distribution measured over sim
+# traffic measured nothing" (boss-sim workforce.rs). Ten panels exist
+# only because this rule opened them.
+#
+# WHY THE BREW'S CLOSE AND NOT ITS PACKAGING STEPS. A `morning-brew`
+# batch packages in up to TWO steps — `package-half` and
+# `package-sixtel`, both `production-produce` kind — and its
+# `brew-completed` terminal is reached only when each has either
+# packaged or been skipped (examples/brewery/seeds/workflows.toml).
+# Listening on `step.done.production-produce` would open TWO panels for
+# one batch, and would also wake on every production-produce step in
+# every other workflow — the `spawn-car-on-sweep-remediated` reasoning.
+# The close is the one-per-batch fact.
+#
+# WHY `outcome = "completed"`. `morning-brew` has two terminals:
+# `brew-completed` (`terminal = { outcome = "completed" }`) and
+# `day-skipped` (`outcome = "skipped"`), the latter reached when the
+# Tier-0 demand gate reads oversupply and the Job routes there "WITHOUT
+# consuming raw ingredients or producing FG". A skipped day produced no
+# beer, so there is nothing to taste.
+#
+# WHY THE SUBJECT IS THE COMPANY. `tasting-panel` declares
+# `subject_kinds = ["company"]` and `morning-brew` runs on the brewhouse
+# Subject, so the spawn pins `subject = "brewery"` /
+# `subject_kind = "company"`. `metadata.batch_job_id = id` is the
+# back-edge to the batch tasted — the only link from a verdict to the
+# beer it judged, and `id` rather than `job_id` for the reason recorded
+# on `spawn-keg-return-on-delivery` (the 2026-08-24 topic-wide abort).
+#
+# THE `when` ENUMERATES THE RECIPES, and that is this rule's one sharp
+# edge. All five kinds it names exist (`morning-brew`, `-ipa`, `-stout`,
+# `-lager`, `-hazy`; each variant's seed says "Identical step graph to
+# morning-brew"), checked against `GET /api/workflows` on 2026-09-10 —
+# but publishing a SIXTH recipe silently gets no tasting panel until
+# this predicate is edited. Recording the edge here is the honest
+# minimum until the expression language can match a kind family.
+#
+# AUTHORED LIVE, NOT WRITTEN BACK. Both the protocol and the rule were
+# published through the API during the 2026-08-21 experiment week and
+# neither reached the tree: there is no `tasting-panel` WorkflowSpec in
+# this repo, no commit message names this rule, and until this file there
+# was no migration for it either. So it ran with no `why` until backlog
+# 8d471ec5. The row below is the live v2 row, copied from
+# `GET /api/dispatcher/rules`.
+[[rule]]
+name = "spawn-tasting-panel-on-brew-close"
+why = """
+A CROSS-PROTOCOL REACTOR: a completed `morning-brew` batch admits a
+`tasting-panel` packet. Two protocols, so no single Workflow
+definition can declare it — the same standing exemption
+`spawn-car-on-sweep-remediated` and `spawn-keg-return-on-delivery`
+claim.
+
+WHAT IT IS FOR, in the design doc that published it: "brew close
+spawns a sensory panel … Measures a *hold rate* the brewery has never
+had" (docs/design/brewery-fidelity.md §The live experiment). The hole
+it fills was measured, not assumed: "batch-qc-hold has never fired.
+Zero packets, ever. … nothing spawns it — no `job_rate`, no dispatcher
+rule, no engine hook. QC exists as authored intent only." This rule is
+the wire that doc's program item 6 asks for, and the protocol it opens
+says the same in its own words: "Sensory QC on every packaged batch: a
+real brewery tastes before it ships. A held verdict is the feeder
+batch-qc-hold never had."
+
+Fires on the batch's TERMINAL OUTCOME rather than its packaging steps
+because a batch packages in up to two `production-produce` steps
+(`package-half`, `package-sixtel`) and a panel is ONE per batch, not
+one per package run. `outcome = "completed"` selects `brew-completed`
+and excludes `day-skipped`, the oversupply terminal where the Tier-0
+demand gate aborted before the mash — no beer, nothing to taste. It
+adds no routing: one closed batch, one panel, carrying
+`metadata.batch_job_id` as the back-edge.
+
+TWO HONEST CAVEATS. (1) `on_complete_create` is a shipped WorkflowSpec
+field that docs/design/protocol-policy-publish.md calls "the precedent
+that [consequences] belong in the protocol"; nothing in the repo
+records it being weighed for this rule, and the account is historical
+— protocol and rule were authored live together in the 2026-08-21
+experiment week. Against moving it there: the predicate fans in over
+FIVE brew kinds, so the protocol-declared form is five identical
+copies on five specs. (2) The `when` enumerates those five by name, so
+a sixth recipe gets no panel until someone edits this file.
+"""
+version = 2
+on_event = "jobs.job.closed"
+when = "(kind = \"morning-brew\" OR kind = \"morning-brew-ipa\" OR kind = \"morning-brew-stout\" OR kind = \"morning-brew-lager\" OR kind = \"morning-brew-hazy\") AND outcome = \"completed\""
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"tasting-panel\"", subject_kind = "\"company\"", subject = "\"brewery\"", title = "\"Tasting panel\"", "metadata.batch_job_id" = "id" }
+
+# Brewery demo tenant (Algedonic Ales). THE SOURCE FOR THIS RULE'S
+# INTENT is docs/design/brewery-fidelity.md §The live experiment, which
+# names this exact reaction as one of two protocols published live on
+# 2026-08-21: "**`keg-return` v1** (active 2026-08-21): a delivered
+# wholesale order spawns the fleet-return leg — log-fleet-out (kegs,
+# deposit) → receive-returns (returned/lost counts) → wash-and-restock →
+# reconciled. Measures a *keg loss rate* — the first thread of program
+# item 1." The same section records how it was authored: "Spawn rules
+# ride the dispatcher registry (`jobs.job.closed` filtered by kind)."
+#
+# WHAT IT WAS FOR. Program item 1 of that doc — the highest-leverage
+# entry — is "Keg economics. Deposit liability account + returnable-float
+# asset + kegs-out ≡ kegs-returned + kegs-lost conservation + the return
+# leg. First thread is already live (`keg-return` v1, below)". The audit
+# it answers: "Keg economics are absent entirely — no deposit liability
+# …, no loss/reconciliation, no return leg on the delivery route, no keg
+# conservation invariant. The one quantity a keg brewer obsesses over is
+# the one quantity nothing conserves."
+#
+# WHY THE PREDICATE IS WHAT IT IS. `wholesale-keg-order` has two
+# terminals: `delivered-invoiced` (`terminal = { outcome = "completed" }`,
+# examples/brewery/seeds/workflows.toml) and `backordered`
+# (`outcome = "skipped"`). So `outcome = "completed"` is precisely "the
+# kegs actually went out" — a backordered order has no fleet in the field
+# and must not open a return packet. It is also what keeps the deposit
+# liability honest in the direction the settlement migration demands:
+# "The release REQUIRES kegs_returned + kegs_lost == kegs_out, so 2400's
+# standing balance is exactly the deposits of fleets still in the field —
+# never a liability owed to nobody"
+# (202609021400-a-keg-deposit-is-a-liability.sql). A delivered order that
+# spawned no return would be that liability owed to nobody.
+#
+# WHY THE ORDER'S CLOSE AND NOT ITS `deliver` STEP. The downstream
+# handler states the same structural reason for the same fleet: "The
+# keg-return protocol's field-bearing steps are plain `task` kind, so
+# there is no precise `step.done.<kind>` topic to ride — the packet's
+# terminal close is the honest trigger" (ledger_keg_deposit_settle.rs).
+# Every middle step of `wholesale-keg-order` that could be ridden instead
+# belongs to another domain's rule already.
+#
+# ITS SIBLING ON THE SAME FLEET. `keg-deposit-settle-on-keg-return-closed`
+# fires on the close of the packet this rule OPENS and books the deposit.
+# This rule is that rule's only producer: with no return packet, the 2400
+# liability account, the two GL projection rules and the settlement
+# endpoint all have zero inputs.
+#
+# WHY `id` AND NOT `job_id` — a dated scar. v1 of this rule referenced
+# `job_id`, which is not in the `jobs.job.closed` payload, and on
+# 2026-08-24 that arg-resolution failure aborted matching for the ENTIRE
+# topic, taking `expire-signals-on-job-closed`, `jobs-clear-waiting-on`
+# and `resolve-subjob-on-child-job-closed` down with it as collateral.
+# That incident is why `MatchOutcome` is not a `Result`, and it is pinned
+# by a regression test naming this rule (boss-dispatcher
+# rules/registry.rs). The v2 below is the fix.
+#
+# AUTHORED LIVE, NOT WRITTEN BACK. Both the protocol and the rule were
+# published through the API during the 2026-08-21 experiment week and
+# neither reached the tree: there is no `keg-return` WorkflowSpec in this
+# repo, no commit message names this rule, and until this file there was
+# no migration for it either. So it ran with no `why` until backlog
+# 8d471ec5. The row below is the live v2 row, copied from
+# `GET /api/dispatcher/rules`.
+[[rule]]
+name = "spawn-keg-return-on-delivery"
+why = """
+A CROSS-PROTOCOL REACTOR: a delivered `wholesale-keg-order` admits a
+`keg-return` packet. Two protocols, so no single Workflow definition
+can declare it — the same standing exemption
+`spawn-car-on-sweep-remediated` claims, and the mirror of
+`keg-deposit-settle-on-keg-return-closed`, which fires on the close of
+the packet this rule opens and for which this rule is the only
+producer.
+
+WHAT IT IS FOR, in the design doc that published it: "a delivered
+wholesale order spawns the fleet-return leg … Measures a *keg loss
+rate* — the first thread of program item 1"
+(docs/design/brewery-fidelity.md §The live experiment). Program item 1
+is keg economics, and the audit it answers reads "no
+loss/reconciliation, no return leg on the delivery route, no keg
+conservation invariant. The one quantity a keg brewer obsesses over is
+the one quantity nothing conserves."
+
+Fires on the order's TERMINAL OUTCOME rather than its `deliver` step:
+`outcome = "completed"` selects `delivered-invoiced` and excludes
+`backordered`, whose terminal outcome is `skipped` — an order that
+never shipped has no fleet in the field, and a return packet for it
+would put a deposit on the books that is "a liability owed to nobody"
+(202609021400-a-keg-deposit-is-a-liability.sql). The keg-return
+protocol's own field-bearing steps are plain `task` kind, so there is
+no narrower topic to ride either. It adds no routing: one delivered
+order, one return packet, carrying `metadata.order_job_id` as the
+back-edge.
+
+HONEST CAVEAT ON THE EXEMPTION. `on_complete_create` is a shipped
+WorkflowSpec field and docs/design/protocol-policy-publish.md calls it
+"the precedent that [consequences] belong in the protocol … a
+cross-protocol spawn the definition owns, not a rule the dispatcher
+owns". Nothing in the repo records that alternative being weighed for
+THIS rule; the account is historical — protocol and rule were authored
+live together in the 2026-08-21 experiment week, when "spawn rules
+ride the dispatcher registry" was the working pattern. Moving it onto
+the `wholesale-keg-order` spec is a live option, not a defect being
+argued away here.
+"""
+version = 2
+on_event = "jobs.job.closed"
+when = "kind = \"wholesale-keg-order\" AND outcome = \"completed\""
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"keg-return\"", subject_kind = "\"account\"", subject = "subject_id", title = "\"Keg fleet return\"", "metadata.order_job_id" = "id" }
+
+# A reconciled keg fleet settles its deposit (93f936b9, David's Q1
+# decision: the full balance-sheet keg model). The keg-return
+# protocol's field-bearing steps (log-fleet-out, receive-returns) are
+# plain `task` kind, so the honest trigger is the packet's terminal
+# close — `step.done.task` would wake on every task step in every
+# workflow and lean on a `when` to discard almost all of them (the
+# spawn-car-on-sweep-remediated reasoning). The handler reads
+# kegs_out + deposit_cents and kegs_returned + kegs_lost from the
+# closed job's own steps and POSTs one settlement to the ledger,
+# which books DR 1000 / CR 2400 at the fleet-out date and
+# DR 2400 / CR 1000 refund + CR 4150 forfeiture at the return date.
+# `outcome = "completed"` keeps aborted/withdrawn packets off the
+# books; both keys are always present on the close marker (null when
+# unanswered), so the predicate can't dead-letter on an absent
+# identifier. Seeded live by
+# 202609021400-a-keg-deposit-is-a-liability.sql.
+[[rule]]
+name = "keg-deposit-settle-on-keg-return-closed"
+why = """
+A CROSS-PROTOCOL REACTOR: it advances the LEDGER from a `keg-return`
+packet's close (93f936b9, the full balance-sheet keg model). The
+keg-return Workflow cannot declare it — its field-bearing steps are
+plain `task` kind with no per-kind topic, and a protocol row cannot
+POST a double-entry settlement. It adds no routing: one firing books
+one settlement. (Ratchet history: 53 -> 54, 2026-09-02, migration
+202609021400.)
+"""
+on_event = "jobs.job.closed"
+when = "kind = \"keg-return\" AND outcome = \"completed\""
+[[rule.do]]
+handler = "ledger.keg_deposit.settle"
+
+# Packaging allocation — a brewed batch is fungible wort. On step.ready the
+# dispatcher reads real FG stock, splits the whole batch across its formats
+# by demand shortfall, writes the packaged keg quantities + excise onto the
+# produce steps, and stamps per-format outcomes the Workflow forks on — so
+# the whole batch always packages (WIP → FG, never dumped). Same
+# computer-speed agent pattern as the gate above.
+[[rule]]
+name = "allocate-packaging-on-step-ready"
+why = """
+An ACTOR registration, same class as the agent gate above: a brewed
+batch is fungible wort and the split across formats is a computed
+decision against live finished-goods stock, not a human's. A protocol
+row can declare the step; it cannot execute it.
+"""
+on_event = "step.ready.packaging-allocate"
+[[rule.do]]
+handler = "packaging.allocate"
+
+[[rule]]
+name = "parts-consume-on-production-consume-step-done"
+why = """
+Step-completion side effect: a completed `production-consume` step consumes the brew's
+ingredients and capitalizes production overhead onto WIP.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.production-consume"
+[[rule.do]]
+handler = "inventory.parts.consume"
+args = { reason = "\"morning-brew\"" }
+# Production-overhead absorption — the excise pattern applied to burden:
+# each do capitalizes one granular driver DR 1310 / CR <expense>, sized
+# `rate_cents_per_bbl × batch bbl` at runtime (batch bbl from the job's
+# own data: a step's `batch_bbl`, else the summed `excise_bbl` of its
+# produce steps). PREDETERMINED per-bbl rates pinned to the model's own
+# inputs at the ~262k-bbl/yr expected volume (derivations in the
+# pale-ale mash-in comment, examples/brewery/seeds/workflows.toml):
+#   • Direct labor  $36.60/bbl — $9.59M/yr gross production payroll ÷ 262k
+#   • Process utilities $5.60/bbl — 70% of the $2.1M/yr utilities bill ÷ 262k
+#   • Production depreciation $8.60/bbl — 80% of $2.82M/yr depreciation ÷ 262k
+# Absorption nets each expense to its over/under-absorption variance.
+# The produce rule's `overhead_accounts` below names the same accounts —
+# capitalize-set == drain-set, asserted by the brewery seed test
+# (`overhead_absorption_rules_agree`).
+[[rule.do]]
+handler = "inventory.overhead.absorb"
+args = { rate_cents_per_bbl = "3660", credit_account = "\"6100\"", driver = "\"Direct labor\"" }
+[[rule.do]]
+handler = "inventory.overhead.absorb"
+args = { rate_cents_per_bbl = "560", credit_account = "\"6300\"", driver = "\"Process utilities\"" }
+[[rule.do]]
+handler = "inventory.overhead.absorb"
+args = { rate_cents_per_bbl = "860", credit_account = "\"6900\"", driver = "\"Production depreciation\"" }
+
+[[rule]]
+name = "products-produce-on-production-produce-step-done"
+why = """
+Step-completion side effect: a completed `production-produce` step moves the packaged batch
+from WIP to finished goods.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.production-produce"
+[[rule.do]]
+handler = "products.produce"
+# Cost basis selected by data: `drain-actual-wip` values the finished
+# goods at the WIP that was actually capitalized — this format's own
+# packaging (current avg_cost) plus its volume-share of the brew's real
+# mash cost, read back from the ledger's DR-1310 facts. This is what keeps
+# WIP from trending negative (a brew mashes once but packages per-format;
+# re-deriving the drain from current avg_cost double-drained the shared
+# mash and drifted with restock prices). Code provides the named bases;
+# `current-avg-cost` stays reachable as the legacy basis + the fallback.
+# `overhead_accounts` is the drain-set half of the absorption contract:
+# the mash-step facts to reconstruct are keyed by these credit accounts —
+# the same accounts the `inventory.overhead.absorb` dos above capitalize.
+args = { cost_basis = "\"drain-actual-wip\"", overhead_accounts = "\"6100,6300,6900\"" }
+[[rule.do]]
+handler = "inventory.parts.consume"
+args = { reason = "\"morning-brew-packaging\"" }
+
+# Federal beer excise tax accrual. Each brew batch's package step
+# accrues its `excise_bbl` (step metadata, seeded per beer) as
+# DR 6550 Excise Tax Expense / CR 2320 Excise Tax Payable, exactly
+# the way sales tax accrues per invoice line. The quarterly
+# excise-tax-filing Workflow drains 2320 → 1000 Cash. A batch with
+# no taxable barrels is a no-op.
+#
+# THE RATE IS REGISTRY DATA (brewery-fidelity Q4): the handler sends
+# barrels, and the ledger resolves the jurisdiction's graduated tier
+# schedule from `excise_rate_schedules` against year-to-date taxed
+# barrels — the real TTB curve ($3.50/bbl for the first 60,000 bbl of
+# the calendar year, $16.00/bbl above; the brewery seeds it via
+# examples/brewery/seeds/excise_rates.toml). `rate_cents_per_bbl`
+# here is only the flat FALLBACK for a jurisdiction with no registry
+# row — applied loudly, kept so pre-registry deployments accrue
+# exactly as before. It understates real TTB liability ~3.7× at the
+# demo tenant's volume; the registry row is the fix, not this arg.
+[[rule]]
+name = "excise-accrue-on-production-produce-step-done"
+why = """
+Step-completion side effect: a completed `production-produce` step accrues federal beer excise
+on the barrels it packaged.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.production-produce"
+[[rule.do]]
+handler = "ledger.tax.accrue"
+args = { rate_cents_per_bbl = "350", liability_account = "\"2320\"", expense_account = "\"6550\"", jurisdiction = "\"US-FEDERAL\"" }
+
+# ---------------------------------------------------------------------------
+# Reorder-threshold spawn — the canonical example.
+#
+# When a part crosses its reorder point, spawn one restock Job — unless
+# one is already in flight. The idempotency check is the open-restock
+# predicate (`open_restock_exists`), which goes true the instant the Job
+# is spawned, so a duplicate restock never fires while a PO is pending.
+# ---------------------------------------------------------------------------
+
+[[rule]]
+name = "spawn-restock-on-low-inventory"
+why = """
+A THRESHOLD, the second of the dispatcher's three sanctioned roles
+(David, 2026-08-14: clock, threshold, matchmaking, and nothing else).
+A part crossing its reorder point is a LEVEL of stock, not a
+transition any protocol row can name, so no Workflow definition can
+declare it. It admits one restock packet and routes nothing; the
+open-restock predicate is the idempotency.
+"""
+on_event = "inventory.item.consumed"
+when = "on_hand <= reorder_point AND NOT open_restock_exists(part_sku)"
+[[rule.do]]
+handler = "jobs.spawn"
+# The restock Job's subject is the category-appropriate supplier for
+# the part that crossed its threshold: `vendor_for(part_sku)` resolves
+# it via inventory-api `primary_vendor_for_part`, which matches the
+# part's data-seeded `vendor_category` (parts.toml) against
+# `vendors.category`. Args are expr-evaluated against the event +
+# helpers (same as `when`), so `part_sku` binds from the
+# `inventory.item.consumed` payload.
+# The triggering part rides in Job metadata (`metadata.part_sku`) so the
+# per-SKU dedup (`open_restock_exists`) can match it — each restock buys
+# ONE ingredient, not the whole catalog.
+# `metadata.trigger_name` stamps which trigger fired: this rule reacts
+# to a threshold breach, so the spawned Job records the
+# `inventory-reorder-threshold` trigger. The materializer reads it to
+# complete that trigger step and Skip the alternative
+# (`demand-forecast-reorder`) — only the trigger that actually fired is
+# recorded Completed, never both.
+args = { kind = "\"ingredient-restock\"", subject_kind = "\"vendor\"", subject = "vendor_for(part_sku)", "metadata.part_sku" = "part_sku", "metadata.trigger_name" = "\"inventory-reorder-threshold\"" }
+
+# ======================================================================
+# Step-completion side effects: sales, fulfilment, procurement, AP
+# ======================================================================
+
+[[rule]]
+name = "invoice-issue-on-billing-step-done"
+why = """
+Step-completion side effect: a completed `billing` step issues the customer invoice. The
+sales-tax rate, jurisdiction and taxable categories ride in the
+rule args, so a rate change is a registry edit rather than a deploy.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.billing"
+[[rule.do]]
+handler = "commerce.invoice.issue"
+# Sales tax: retail + taproom + event-package lines are end-user sales and
+# carry CA state sales tax (725 bps / US-CA); wholesale + distribution are
+# resale-exempt (omitted from taxable_categories, so they accrue no 2300).
+# The handler taxes only the taxable-category line subtotal; commerce stamps
+# a tax_lines[account=2300] that the ledger accrues, and the quarterly
+# sales-tax-filing Workflow remits it back to Cash.
+args = { due_days = "30", default_revenue_category = "\"uncategorized\"", tax_rate_bps = "725", tax_jurisdiction = "\"US-CA\"", taxable_categories = "\"retail,taproom,event-package\"" }
+
+# FG drawdown + COGS per issued invoice — the consume owns COGS
+# (Q2, docs/architecture-decisions.md §Finance & ledger). Commerce posts
+# revenue/AR/tax only; this rule drives the physical drain + the
+# DR 5100 / CR 1320 recognition through the products surface, at the
+# drained value, tagged with each line's revenue_category. Insufficient
+# stock NAKs and converges when production lands (a visible backorder,
+# not a blocked sale).
+[[rule]]
+name = "products-consume-on-invoice-created"
+why = """
+Step-completion side effect: an issued invoice drains finished goods and recognizes COGS. Keyed
+on a domain event rather than a step, but the same census class:
+the consume owns COGS, and the ordering belongs in the protocol.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "commerce.invoice.created"
+[[rule.do]]
+handler = "products.consume_from_invoice"
+
+[[rule]]
+name = "shipment-side-effects-on-shipment-step-done"
+why = """
+Step-completion side effect: a completed `shipment` step creates the shipment and drains what
+it ships.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.shipment"
+[[rule.do]]
+handler = "shipping.create"
+[[rule.do]]
+handler = "inventory.parts.consume"
+args = { reason = "\"sale\"" }
+[[rule.do]]
+handler = "products.consume"
+
+[[rule]]
+name = "po-place-on-procurement-step-done"
+why = """
+Step-completion side effect: a completed `procurement` step places the purchase order.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.procurement"
+[[rule.do]]
+handler = "inventory.po.place"
+
+[[rule]]
+name = "receive-on-receiving-step-done"
+why = """
+Step-completion side effect: a completed `receiving` step receives the shipment into inventory.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.receiving"
+[[rule.do]]
+handler = "inventory.receive"
+
+[[rule]]
+name = "parts-consume-on-repair-step-done"
+why = """
+Step-completion side effect: a completed `repair` step consumes the parts the repair used.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.repair"
+[[rule.do]]
+handler = "inventory.parts.consume"
+args = { reason = "\"equipment-preventive-maintenance-repair\"" }
+
+[[rule]]
+name = "bill-approve-on-bill-approval-step-done"
+why = """
+Step-completion side effect: a completed `bill-approval` step approves the vendor invoice.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.bill-approval"
+[[rule.do]]
+handler = "inventory.bill.approve"
+
+[[rule]]
+name = "bill-payment-batch-on-bill-payment-batch-step-done"
+why = """
+Step-completion side effect: a completed `bill-payment-batch` step pays the approved batch.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.bill-payment-batch"
+[[rule.do]]
+handler = "inventory.bill.payment_batch"
+
+# ======================================================================
+# Step-completion side effects: the general ledger, payroll, tax, HR
+# ======================================================================
+
+# General operating bills (rent, utilities, …) owned by the ledger —
+# routed to a GL expense account by `bill_category` (bill_accounts.toml),
+# decoupled from the inventory parts vendor-invoice above.
+[[rule]]
+name = "ledger-bill-approve-on-expense-bill-step-done"
+why = """
+Step-completion side effect: a completed `expense-bill` step books a general operating bill to
+its GL expense account.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.expense-bill"
+[[rule.do]]
+handler = "ledger.bill.approve"
+
+[[rule]]
+name = "ledger-bill-payment-batch-on-expense-bill-payment-step-done"
+why = """
+Step-completion side effect: a completed `expense-bill-payment` step pays a batch of operating bills.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.expense-bill-payment"
+[[rule.do]]
+handler = "ledger.bill.payment_batch"
+
+[[rule]]
+name = "payroll-submit-on-payroll-release-step-done"
+why = """
+Step-completion side effect: a completed `payroll-release` step submits the payroll run.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.payroll-release"
+[[rule.do]]
+handler = "ledger.payroll.run.submit"
+args = { periods_per_year = "26", withholding_bps = "2200", employer_cost_bps = "1500", provider = "\"in-house\"" }
+
+[[rule]]
+name = "tax-remit-on-tax-remittance-step-done"
+why = """
+Step-completion side effect: a completed `tax-remittance` step remits the accrued liability.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.tax-remittance"
+[[rule.do]]
+handler = "ledger.tax.remit"
+args = { remit = "true", provider = "\"in-house\"" }
+
+[[rule]]
+name = "people-hire-on-hr-hire-step-done"
+why = """
+Step-completion side effect: a completed `hr-hire` step hires the employee into the people registry.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.hr-hire"
+[[rule.do]]
+handler = "people.hire"
+
+[[rule]]
+name = "people-terminate-on-hr-terminate-step-done"
+why = """
+Step-completion side effect: a completed `hr-terminate` step terminates the employee.
+This is ROUTING, the residue the rule census (protocol-policy-publish.md)
+owes back to the protocol row as an admission-staged obligation. It is
+kept because the migration has not been written, not because it could
+not be a protocol consequence — and it must not be joined by new
+routing. The census counts these 22 `step.done.*` rules as the number to
+watch.
+"""
+on_event = "step.done.hr-terminate"
+[[rule.do]]
+handler = "people.terminate"
+
+# ======================================================================
+# External-party callbacks: forward to the simulator's CounterpartyEngine
+# ======================================================================
+
+[[rule]]
+name = "forward-billing-done-to-webhook"
+why = """
+External glue, the census class for reactions whose EFFECT LIVES OUTSIDE
+the system: forwards `step.done.billing` to the configured webhook so an external
+party — the simulator's CounterpartyEngine standing in for banks,
+suppliers, the keg courier, the tax authority — reacts without
+subscribing to the event stream. No Workflow definition can declare a
+consequence that happens off-system. No-op wherever
+BOSS_EVENT_WEBHOOK_URL is unset.
+"""
+on_event = "step.done.billing"
+[[rule.do]]
+handler = "webhook.notify"
+
+[[rule]]
+name = "forward-handoff-done-to-webhook"
+why = """
+External glue, the census class for reactions whose EFFECT LIVES OUTSIDE
+the system: forwards `step.done.handoff` to the configured webhook so an external
+party — the simulator's CounterpartyEngine standing in for banks,
+suppliers, the keg courier, the tax authority — reacts without
+subscribing to the event stream. No Workflow definition can declare a
+consequence that happens off-system. No-op wherever
+BOSS_EVENT_WEBHOOK_URL is unset.
+"""
+on_event = "step.done.handoff"
+[[rule.do]]
+handler = "webhook.notify"
+
+[[rule]]
+name = "forward-invoice-paid-to-webhook"
+why = """
+External glue, the census class for reactions whose EFFECT LIVES OUTSIDE
+the system: forwards `commerce.invoice.paid` to the configured webhook so an external
+party — the simulator's CounterpartyEngine standing in for banks,
+suppliers, the keg courier, the tax authority — reacts without
+subscribing to the event stream. No Workflow definition can declare a
+consequence that happens off-system. No-op wherever
+BOSS_EVENT_WEBHOOK_URL is unset.
+"""
+on_event = "commerce.invoice.paid"
+[[rule.do]]
+handler = "webhook.notify"
+
+[[rule]]
+name = "forward-invoice-past-due-to-webhook"
+why = """
+External glue, the census class for reactions whose EFFECT LIVES OUTSIDE
+the system: forwards `commerce.invoice.past_due` to the configured webhook so an external
+party — the simulator's CounterpartyEngine standing in for banks,
+suppliers, the keg courier, the tax authority — reacts without
+subscribing to the event stream. No Workflow definition can declare a
+consequence that happens off-system. No-op wherever
+BOSS_EVENT_WEBHOOK_URL is unset.
+"""
+on_event = "commerce.invoice.past_due"
+[[rule.do]]
+handler = "webhook.notify"
+
+[[rule]]
+name = "forward-procurement-done-to-webhook"
+why = """
+External glue, the census class for reactions whose EFFECT LIVES OUTSIDE
+the system: forwards `step.done.procurement` to the configured webhook so an external
+party — the simulator's CounterpartyEngine standing in for banks,
+suppliers, the keg courier, the tax authority — reacts without
+subscribing to the event stream. No Workflow definition can declare a
+consequence that happens off-system. No-op wherever
+BOSS_EVENT_WEBHOOK_URL is unset.
+"""
+on_event = "step.done.procurement"
+[[rule.do]]
+handler = "webhook.notify"
+
+[[rule]]
+name = "forward-receiving-done-to-webhook"
+why = """
+External glue, the census class for reactions whose EFFECT LIVES OUTSIDE
+the system: forwards `step.done.receiving` to the configured webhook so an external
+party — the simulator's CounterpartyEngine standing in for banks,
+suppliers, the keg courier, the tax authority — reacts without
+subscribing to the event stream. No Workflow definition can declare a
+consequence that happens off-system. No-op wherever
+BOSS_EVENT_WEBHOOK_URL is unset.
+"""
+on_event = "step.done.receiving"
+[[rule.do]]
+handler = "webhook.notify"
+
+[[rule]]
+name = "forward-shipment-done-to-webhook"
+why = """
+External glue, the census class for reactions whose EFFECT LIVES OUTSIDE
+the system: forwards `step.done.shipment` to the configured webhook so an external
+party — the simulator's CounterpartyEngine standing in for banks,
+suppliers, the keg courier, the tax authority — reacts without
+subscribing to the event stream. No Workflow definition can declare a
+consequence that happens off-system. No-op wherever
+BOSS_EVENT_WEBHOOK_URL is unset.
+"""
+on_event = "step.done.shipment"
+[[rule.do]]
+handler = "webhook.notify"
+
+[[rule]]
+name = "forward-tax-filing-to-webhook"
+why = """
+External glue, the census class for reactions whose EFFECT LIVES OUTSIDE
+the system: forwards `ledger.tax_filing_filed` to the configured webhook so an external
+party — the simulator's CounterpartyEngine standing in for banks,
+suppliers, the keg courier, the tax authority — reacts without
+subscribing to the event stream. No Workflow definition can declare a
+consequence that happens off-system. No-op wherever
+BOSS_EVENT_WEBHOOK_URL is unset.
+"""
+on_event = "ledger.tax_filing_filed"
+[[rule.do]]
+handler = "webhook.notify"
+
+[[rule]]
+name = "forward-vendor-invoice-to-webhook"
+why = """
+External glue, the census class for reactions whose EFFECT LIVES OUTSIDE
+the system: forwards `inventory.vendor_invoice_received` to the configured webhook so an external
+party — the simulator's CounterpartyEngine standing in for banks,
+suppliers, the keg courier, the tax authority — reacts without
+subscribing to the event stream. No Workflow definition can declare a
+consequence that happens off-system. No-op wherever
+BOSS_EVENT_WEBHOOK_URL is unset.
+"""
+on_event = "inventory.vendor_invoice_received"
+[[rule.do]]
+handler = "webhook.notify"

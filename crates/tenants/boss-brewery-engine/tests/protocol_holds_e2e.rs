@@ -116,8 +116,10 @@ fn wholesale_order_references_one_consistent_sku_set() {
 ///   (d) every producing kind still states the batch size the runtime
 ///       multiplication reads (`batch_bbl` on a step, else the summed
 ///       `excise_bbl` of its produce steps).
-/// Change a rate → change it here + in the rule's own file under
-/// infra/dispatcher/rules/ (plus a timestamped seed migration).
+/// Change a rate → change it here + in the rule's `[[rule]]` in
+/// examples/brewery/seeds/rules.toml (the brewery's own rules since
+/// design e2580840 car 4, 2026-09-17; before that, one file per rule
+/// under infra/dispatcher/rules/, and before 2026-09-11 a migration too).
 #[test]
 fn overhead_absorption_rules_agree() {
     use boss_jobs::seed_loader::load_workflows_with_owning_team;
@@ -134,25 +136,30 @@ fn overhead_absorption_rules_agree() {
     }
 
     // --- the rule registry: both halves of the contract -------------
-    // One file per rule, named for it (infra/dispatcher/rules/README.md).
-    let rules_dir = brewery_seeds_dir()
-        .join("..")
-        .join("..")
-        .join("..")
-        .join("infra/dispatcher/rules");
+    // The brewery's reactors are the brewery's: one `[[rule]]` per rule
+    // in the tenant's own seeds/rules.toml (docs/tenant-contract.md),
+    // read here by name the way `boss tenant check` reads it.
+    let rules_path = brewery_seeds_dir().join("rules.toml");
+    let rules_doc: toml::Value = toml::from_str(
+        &std::fs::read_to_string(&rules_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", rules_path.display())),
+    )
+    .unwrap_or_else(|e| panic!("rules.toml parses: {e}"));
     let read_rule = |name: &str| -> toml::Value {
-        let path = rules_dir.join(format!("{name}.toml"));
-        let doc: toml::Value = toml::from_str(
-            &std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("read {}: {e}", path.display())),
-        )
-        .unwrap_or_else(|e| panic!("{name}.toml parses: {e}"));
-        let rules = doc
+        let rules = rules_doc
             .get("rule")
             .and_then(|v| v.as_array())
-            .unwrap_or_else(|| panic!("{name}.toml has no [[rule]]"));
-        assert_eq!(rules.len(), 1, "{name}.toml holds one rule");
-        rules[0].clone()
+            .expect("rules.toml has [[rule]] tables");
+        let matching: Vec<&toml::Value> = rules
+            .iter()
+            .filter(|r| r.get("name").and_then(|v| v.as_str()) == Some(name))
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "rules.toml declares `{name}` exactly once"
+        );
+        matching[0].clone()
     };
 
     // (a) capitalize-set: exactly the three canonical drivers.
