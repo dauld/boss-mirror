@@ -256,6 +256,47 @@ pub(crate) async fn get_json(
         .map_err(|e| HandlerError::Downstream(format!("GET {url} not JSON: {e}")))
 }
 
+/// Every open Job of `kind`, steps inline, paged on the list's `total`
+/// so a packet sorted past one page is still found — a capped page is
+/// a false negative that grows with the board's age.
+///
+/// Lived in `jobs_run_car_probes` until `jobs.complete_step_matching`
+/// needed the same walk (c34583cb) — one definition rather than a
+/// second copy (CLAUDE.md §9a).
+pub(crate) async fn open_jobs_of_kind(
+    client: &reqwest::Client,
+    jobs_base: &str,
+    kind: &str,
+    rule_name: &str,
+) -> Result<Vec<Value>, HandlerError> {
+    const PAGE: usize = 500;
+    let mut rows: Vec<Value> = Vec::new();
+    loop {
+        let body = get_json(
+            client,
+            &format!(
+                "{}/api/jobs?kind={kind}&status=open&limit={PAGE}&offset={}",
+                jobs_base.trim_end_matches('/'),
+                rows.len()
+            ),
+            rule_name,
+        )
+        .await?;
+        let total = body.get("total").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let page: Vec<Value> = body
+            .get("data")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let got = page.len();
+        rows.extend(page);
+        if got == 0 || rows.len() >= total {
+            break;
+        }
+    }
+    Ok(rows)
+}
+
 /// PUT or PATCH a body, mapping non-2xx the same way [`post_json`]
 /// does. Completing a step is a PUT and merging job metadata is a
 /// PATCH on the metadata door; the shared POST helper covers neither.

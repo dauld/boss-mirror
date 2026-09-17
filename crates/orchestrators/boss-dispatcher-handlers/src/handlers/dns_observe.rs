@@ -2563,6 +2563,13 @@ why = "x"
         }], "total": 1})
     }
 
+    /// The zone before the boss. flip (measured 2026-09-16), PLUS the
+    /// company website's record (b64c4377, 2026-09-17) already in
+    /// place: the cases below are about the boss. flip's mechanics,
+    /// and www — the same interlock, one more record — would otherwise
+    /// be applied in every one of them and turn each into a test of
+    /// two flips. www's own first observation is
+    /// `the_website_record_is_applied_behind_its_own_access_app`.
     fn as_measured() -> Vec<Json> {
         vec![
             record("boss.algedonic.dev", "A", "10.20.0.33", false, 300),
@@ -2574,6 +2581,7 @@ why = "x"
                 true,
                 1,
             ),
+            record("www.algedonic.dev", "CNAME", &tunnel_cname(), true, 1),
         ]
     }
 
@@ -2589,6 +2597,7 @@ why = "x"
                 true,
                 1,
             ),
+            record("www.algedonic.dev", "CNAME", &tunnel_cname(), true, 1),
         ]
     }
 
@@ -2600,6 +2609,9 @@ why = "x"
     fn account_as_declared() -> Vec<AccessApp> {
         vec![
             live_app("boss.algedonic.dev", vec![allow("operators", &[DAVID])]),
+            // The company website (b64c4377): the boss. shape, behind
+            // Access until the public launch.
+            live_app("www.algedonic.dev", vec![allow("operators", &[DAVID])]),
             live_app(
                 "playground.algedonic.dev",
                 vec![
@@ -2853,7 +2865,7 @@ why = "x"
             "existing step metadata rides along"
         );
         let verdicts = body["metadata"]["verdicts"].as_array().unwrap();
-        assert_eq!(verdicts.len(), 3, "boss., id. and playground.");
+        assert_eq!(verdicts.len(), 4, "boss., id., playground. and www.");
         assert!(
             verdicts.iter().all(|v| v["verdict"] == "MATCH"),
             "{verdicts:?}"
@@ -2875,8 +2887,8 @@ why = "x"
         let access_v = body["metadata"]["access"].as_array().unwrap();
         assert_eq!(
             access_v.len(),
-            3,
-            "boss., the playground and its callback bypass"
+            4,
+            "boss., www., the playground and its callback bypass"
         );
         assert!(
             access_v.iter().all(|v| v["verdict"] == "MATCH"),
@@ -2886,8 +2898,8 @@ why = "x"
         let summary = body["metadata"]["summary"].as_str().unwrap();
         assert!(
             summary.contains(
-                "3 match, 0 drift, 0 absent, 0 undeclared — every declared record matches"
-            ) && summary.contains("· access: 3 match, 0 drift, 0 absent, 0 undeclared"),
+                "4 match, 0 drift, 0 absent, 0 undeclared — every declared record matches"
+            ) && summary.contains("· access: 4 match, 0 drift, 0 absent, 0 undeclared"),
             "{summary}"
         );
     }
@@ -2939,7 +2951,7 @@ why = "x"
             ]
         );
         assert_eq!(*zone.reads.lock().unwrap(), 2, "read back after the apply");
-        assert_eq!(zone.live().len(), 3, "no A left beside the CNAME");
+        assert_eq!(zone.live().len(), 4, "no A left beside the CNAME");
 
         let w = writes(&captured);
         assert_eq!(
@@ -2967,6 +2979,76 @@ why = "x"
             "{summary}"
         );
         assert!(!summary.contains("flip held"), "{summary}");
+    }
+
+    /// The company website's first observation (b64c4377, 2026-09-17):
+    /// the zone holds boss., id. and playground. as declared and no www
+    /// at all; the account fronts boss. and the playground and not www.
+    /// The observer creates the www Access application with its
+    /// operators policy, reads the account back, and only then creates
+    /// the www CNAME behind the released interlock — the boss. shape,
+    /// so the website is never reachable ahead of the door in front of
+    /// it. Nothing else is written.
+    #[tokio::test]
+    async fn the_website_record_is_applied_behind_its_own_access_app() {
+        let (jobs, captured) = stub_jobs_api("ready", vec![], LOCATION).await;
+        let before: Vec<Json> = as_declared()
+            .into_iter()
+            .filter(|r| r["name"] != "www.algedonic.dev")
+            .collect();
+        let zone = FakeZone::with(before);
+        let access = FakeAccess::with(
+            account_as_declared()
+                .into_iter()
+                .filter(|a| a.domain != "www.algedonic.dev")
+                .collect(),
+        );
+        let h = handler(
+            jobs,
+            zone.clone(),
+            access.clone(),
+            secrets(),
+            declarations(),
+        );
+        h.invoke(&zone_args(), &ctx()).await.unwrap();
+        assert_eq!(
+            access.writes(),
+            vec![
+                "create app BOSS site www.algedonic.dev self_hosted 24h".to_string(),
+                format!(
+                    "create policy operators allow [{{\"email\":{{\"email\":\"{DAVID}\"}}}}] on app-www.algedonic.dev precedence=2"
+                ),
+            ]
+        );
+        assert_eq!(
+            zone.writes(),
+            vec![format!(
+                "create www.algedonic.dev CNAME {} proxied=true ttl=1",
+                tunnel_cname()
+            )],
+            "the record is created once the application reads present; nothing else is touched"
+        );
+        let w = writes(&captured);
+        assert_eq!(w.len(), 1, "no alarm: {w:?}");
+        let body = step_put(&w);
+        assert_eq!(body["metadata"]["result"], "match");
+        let www = body["metadata"]["verdicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == "www.algedonic.dev")
+            .cloned()
+            .unwrap_or_else(|| panic!("no www verdict: {body}"));
+        assert_eq!(www["verdict"], "MATCH", "{www}");
+        assert_eq!(www["access"], "created");
+        assert_eq!(
+            body["metadata"]["applied"],
+            json!([
+                "Access application www.algedonic.dev created",
+                "Access policy operators (allow) created on www.algedonic.dev",
+                "www.algedonic.dev CNAME created",
+            ])
+        );
     }
 
     /// The measured 2026-09-16 16:00Z firing (packet 95cf8740): the
@@ -3070,6 +3152,7 @@ why = "x"
                 true,
                 1,
             ),
+            record("www.algedonic.dev", "CNAME", &tunnel_cname(), true, 1),
         ];
         let (jobs, captured) = stub_jobs_api("ready", vec![], LOCATION).await;
         let zone = FakeZone::with(stale.clone());
@@ -3681,7 +3764,11 @@ why = "x"
     async fn an_access_drift_alone_raises_the_alarm_with_both_values() {
         let (jobs, captured) = stub_jobs_api("ready", vec![], LOCATION).await;
         let mut apps = account_as_declared();
-        apps[1].session_duration = "720h".into();
+        let pg = apps
+            .iter()
+            .position(|a| a.domain == "playground.algedonic.dev")
+            .unwrap();
+        apps[pg].session_duration = "720h".into();
         let h = handler(
             jobs,
             FakeZone::with(as_declared()),

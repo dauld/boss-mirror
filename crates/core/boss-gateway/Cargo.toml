@@ -60,6 +60,10 @@ path = "src/bin/boss_auth.rs"
 
 [dev-dependencies]
 tempfile = "3"
+# scratch_dir for the tenant-site tests (site.rs): a per-uid, per-pid
+# directory, the shape infra/lint/a-fixture-path-cannot-be-a-literal.sh
+# accepts.
+boss-testing = { path = "../boss-testing" }
 # oneshot() for the role-header middleware probe tests.
 tower = { version = "0.5", features = ["util"] }
 

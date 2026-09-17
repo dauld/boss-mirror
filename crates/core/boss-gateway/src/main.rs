@@ -11,6 +11,7 @@ mod perf;
 mod plugin_files;
 mod proxy;
 mod role_headers;
+mod site;
 mod static_files;
 mod timing;
 
@@ -194,6 +195,17 @@ async fn main() -> Result<()> {
             role_headers::inject_role_headers,
         ))
         .with_state(state);
+
+    // The tenant site (site.rs), OUTERMOST: a request whose Host names
+    // the instance's site hostname is answered from the site directory
+    // before the session middleware above ever sees it. No site
+    // configured → the router unchanged.
+    let site = site::Site::from_env();
+    match &site {
+        Some(s) => tracing::info!(site_host = %s.host(), "tenant site mounted"),
+        None => tracing::info!("no tenant site (BOSS_SITE_HOST / BOSS_SITE_DIR unset)"),
+    }
+    let app = site::mount(app, site);
 
     tracing::info!(listen = %listen, static_dir = %static_files::static_dir(), "boss-gateway starting");
     let listener = TcpListener::bind(&listen).await?;

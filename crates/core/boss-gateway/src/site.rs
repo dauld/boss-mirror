@@ -1,0 +1,399 @@
+//! The tenant SITE — a second hostname on the same gateway, answered
+//! from a directory and nothing else (design b64c4377, decided by
+//! David 2026-09-17; backlog c8f6b233).
+//!
+//! The operating company's public website is company data: static,
+//! text-first pages in the tenant repository's `site/`, delivered to
+//! the instance by the converge as the `boss-site` ConfigMap exactly
+//! as the seeds are (`boss-tenant`). It is served by the SAME gateway
+//! the instance already runs, under the SITE hostname the instance
+//! declares (`site = "www.…"` in infra/cluster/instances.toml), which
+//! the tunnel routes to this gateway beside the instance hostname.
+//!
+//! ONE decision per request, made before anything else: does the
+//! request's `Host` name the site? If so the answer comes from the
+//! site directory — `/` is `index.html`, `/x/y.css` is that file, a
+//! path that names nothing is a plain-text 404 — and NOTHING of the
+//! application is reachable: not the SPA, not `/api`, not the login.
+//! No cookie is read, no session is minted, no identity header is
+//! injected: the site is anonymous by construction, which is why this
+//! layer sits OUTSIDE the session middleware rather than being a route
+//! among the others. If the host is anything else, the request goes
+//! on to the application untouched.
+//!
+//! `Host` is the header the tunnel connector forwards as the visitor
+//! sent it (cloudflared sets the origin's Host to the public hostname
+//! unless `originRequest.httpHostHeader` overrides it, and the ingress
+//! render sets no override). The port, if a client sends one, is not
+//! part of the name.
+//!
+//! ABSENT CONFIGURATION IS AN INERT LAYER. `BOSS_SITE_HOST` and
+//! `BOSS_SITE_DIR` both set → the site is mounted; either empty or
+//! unset → `Site::from_env` is `None` and `mount` returns the router
+//! it was given. An instance without a site renders the host as `""`
+//! (render-instance.sh), which is this spelling of "no site".
+
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+
+use axum::extract::{Request, State};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+
+/// The site an instance serves: the hostname it answers to and the
+/// directory it answers from.
+#[derive(Clone, Debug)]
+pub struct Site {
+    host: String,
+    dir: PathBuf,
+}
+
+impl Site {
+    /// `BOSS_SITE_HOST` + `BOSS_SITE_DIR`, or `None` when either is
+    /// unset or empty — the inert spelling.
+    pub fn from_env() -> Option<Self> {
+        Self::from_values(
+            &std::env::var("BOSS_SITE_HOST").unwrap_or_default(),
+            &std::env::var("BOSS_SITE_DIR").unwrap_or_default(),
+        )
+    }
+
+    /// Pure: the same two strings always give the same answer. The
+    /// host is compared case-insensitively, so it is stored folded.
+    pub fn from_values(host: &str, dir: &str) -> Option<Self> {
+        let host = host.trim().to_ascii_lowercase();
+        let dir = dir.trim();
+        if host.is_empty() || dir.is_empty() {
+            return None;
+        }
+        Some(Self {
+            host,
+            dir: PathBuf::from(dir),
+        })
+    }
+
+    /// The hostname the site answers to, as it will be compared.
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+}
+
+/// The router with the site in front of it — or the router itself
+/// when there is no site. Called once in `main`, outermost, so a site
+/// request never reaches the session middleware.
+pub fn mount(app: axum::Router, site: Option<Site>) -> axum::Router {
+    match site {
+        Some(site) => app.layer(axum::middleware::from_fn_with_state(Arc::new(site), serve)),
+        None => app,
+    }
+}
+
+/// The layer: answer from the directory when `Host` names the site,
+/// otherwise hand the request on unchanged.
+async fn serve(State(site): State<Arc<Site>>, req: Request, next: Next) -> Response {
+    if !names_the_site(req.headers(), &site) {
+        return next.run(req).await;
+    }
+    answer(&site, req.method(), req.uri().path()).await
+}
+
+/// `Host` equals the site's hostname, port stripped, case folded.
+fn names_the_site(headers: &HeaderMap, site: &Site) -> bool {
+    headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(host_name)
+        .is_some_and(|h| h.eq_ignore_ascii_case(&site.host))
+}
+
+/// The name part of a `Host` value: `www.example:443` → `www.example`.
+/// A bracketed IPv6 literal keeps its brackets and loses its port.
+fn host_name(value: &str) -> &str {
+    let v = value.trim();
+    if let Some(end) = v.strip_prefix('[').and_then(|_| v.find(']')) {
+        return &v[..=end];
+    }
+    v.rsplit_once(':').map_or(v, |(name, _)| name)
+}
+
+/// The file a request path names inside the site directory, or `None`
+/// when the path names nothing servable: any component that is not a
+/// plain name (`..`, a root, a prefix) is refused rather than resolved,
+/// so a request can never read outside the directory. A path ending
+/// in `/` (the root included) names that directory's `index.html`.
+fn resolve(dir: &Path, path: &str) -> Option<PathBuf> {
+    let rel = path.trim_start_matches('/');
+    let mut out = dir.to_path_buf();
+    for c in Path::new(rel).components() {
+        match c {
+            Component::Normal(seg) => out.push(seg),
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    if rel.is_empty() || rel.ends_with('/') {
+        out.push("index.html");
+    }
+    Some(out)
+}
+
+/// The response for a site request. Only reads are answered: the site
+/// has nothing to write to.
+async fn answer(site: &Site, method: &Method, path: &str) -> Response {
+    if method != Method::GET && method != Method::HEAD {
+        return (StatusCode::METHOD_NOT_ALLOWED, "site: GET or HEAD only\n").into_response();
+    }
+    let Some(file) = resolve(&site.dir, path) else {
+        return not_found();
+    };
+    match tokio::fs::read(&file).await {
+        Ok(bytes) => {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::CONTENT_TYPE,
+                crate::static_files::guess_content_type(&file),
+            );
+            // Short and honest: the site changes when the tenant repo
+            // does, delivered by the next converge; five minutes at
+            // the edge is the staleness a text-first site can afford,
+            // and no `immutable`, since these names carry no hash.
+            headers.insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=300"),
+            );
+            (StatusCode::OK, headers, bytes).into_response()
+        }
+        // A directory, a missing file, a permission refusal: none of
+        // them is a page, and none of them is the application.
+        Err(_) => not_found(),
+    }
+}
+
+fn not_found() -> Response {
+    (StatusCode::NOT_FOUND, "not found\n").into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    //! Through the gateway's own router, with a site directory in
+    //! scratch: every answer below is one the mounted router gave.
+
+    use super::*;
+    use crate::AppState;
+    use crate::perf::PerfCollector;
+    use axum::body::Body;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    const HOST: &str = "www.site.test";
+
+    /// A site directory holding index.html, a stylesheet in a
+    /// subdirectory, and a file OUTSIDE the site that traversal must
+    /// never reach.
+    fn site_dir(case: &str) -> PathBuf {
+        let root = boss_testing::scratch_dir(&format!("gateway-site-{case}"));
+        let dir = root.join("site");
+        boss_testing::create_dir(&dir.join("css"));
+        boss_testing::create_dir(&dir.join("docs"));
+        boss_testing::write_file(
+            &dir.join("index.html"),
+            "<!doctype html><title>the site</title>",
+        );
+        boss_testing::write_file(&dir.join("css/site.css"), "body{}");
+        boss_testing::write_file(&dir.join("docs/index.html"), "<p>docs</p>");
+        boss_testing::write_file(&root.join("outside.txt"), "not yours");
+        dir
+    }
+
+    fn app(site: Option<Site>) -> axum::Router {
+        let state = Arc::new(AppState {
+            session_key: vec![0u8; 32],
+            proxy_client: reqwest::Client::new(),
+            perf: Arc::new(PerfCollector::new()),
+        });
+        mount(crate::build_router(None).with_state(state), site)
+    }
+
+    async fn get(app: axum::Router, host: &str, path: &str) -> (StatusCode, HeaderMap, String) {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header(header::HOST, host)
+                    // A session cookie rides along: the site must not
+                    // read it, and must not answer differently for it.
+                    .header(header::COOKIE, "boss_session=forged")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("router responds");
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+        (
+            status,
+            headers,
+            String::from_utf8_lossy(&bytes).into_owned(),
+        )
+    }
+
+    fn content_type(h: &HeaderMap) -> &str {
+        h.get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+    }
+
+    #[tokio::test]
+    async fn the_site_host_is_answered_from_the_directory_and_never_the_application() {
+        let dir = site_dir("serves");
+        let site = Site::from_values(HOST, dir.to_str().unwrap());
+        let (status, h, body) = get(app(site.clone()), HOST, "/").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(content_type(&h), "text/html; charset=utf-8");
+        assert!(body.contains("the site"), "/ is index.html: {body}");
+        assert!(
+            h.get(header::SET_COOKIE).is_none(),
+            "no session is minted for the site"
+        );
+        assert!(
+            !body.contains("__BOSS_TENANT_MANIFEST__"),
+            "the site's index is not the SPA's index"
+        );
+
+        let (status, h, body) = get(app(site.clone()), HOST, "/css/site.css").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(content_type(&h), "text/css; charset=utf-8");
+        assert_eq!(body, "body{}");
+
+        // A directory path names its index.
+        let (status, _, body) = get(app(site.clone()), HOST, "/docs/").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, "<p>docs</p>");
+
+        // Nothing of the application answers on the site host: the API
+        // catch-all, a live API route, the SPA shell, the login page.
+        for path in [
+            "/api/session",
+            "/api/workflow",
+            "/dashboard",
+            "/login",
+            "/health",
+        ] {
+            let (status, h, body) = get(app(site.clone()), HOST, path).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body}");
+            assert!(
+                content_type(&h).starts_with("text/plain"),
+                "{path}: a site miss is plain text, not JSON and not HTML: {}",
+                content_type(&h)
+            );
+            assert!(
+                !body.contains("no such API route") && !body.to_lowercase().contains("<!doctype"),
+                "{path} reached the application: {body}"
+            );
+        }
+
+        // The port a client may send is not part of the name, and the
+        // case is not either.
+        for host in ["www.site.test:443", "WWW.Site.Test"] {
+            let (status, _, body) = get(app(site.clone()), host, "/").await;
+            assert_eq!(status, StatusCode::OK, "{host}: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_path_that_leaves_the_directory_is_refused_not_resolved() {
+        let dir = site_dir("traversal");
+        let site = Site::from_values(HOST, dir.to_str().unwrap());
+        for path in [
+            "/../outside.txt",
+            "/css/../../outside.txt",
+            "/./../outside.txt",
+        ] {
+            let (status, _, body) = get(app(site.clone()), HOST, path).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body}");
+            assert!(!body.contains("not yours"), "{path} read outside the site");
+        }
+        // The pure resolver, pinned on the shapes that matter.
+        assert_eq!(
+            resolve(Path::new("/s"), "/"),
+            Some(PathBuf::from("/s/index.html"))
+        );
+        assert_eq!(
+            resolve(Path::new("/s"), "/a/b.css"),
+            Some(PathBuf::from("/s/a/b.css"))
+        );
+        assert_eq!(
+            resolve(Path::new("/s"), "/a/"),
+            Some(PathBuf::from("/s/a/index.html"))
+        );
+        assert_eq!(resolve(Path::new("/s"), "/../x"), None);
+        assert_eq!(resolve(Path::new("/s"), "/a/../../x"), None);
+    }
+
+    #[tokio::test]
+    async fn any_other_host_reaches_the_application_untouched() {
+        let dir = site_dir("other-host");
+        let site = Site::from_values(HOST, dir.to_str().unwrap());
+        // The API catch-all answers its JSON miss, as it does without
+        // a site mounted.
+        let (status, _, body) = get(app(site.clone()), "boss.site.test", "/api/workflow").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(body.contains("no such API route"), "{body}");
+        // An application page reaches the SPA handler, which gates on
+        // the session (the forged cookie does not decode): 401, never
+        // the site. `/` itself is a public path there, so a page is
+        // the discriminating request.
+        let (status, _, body) = get(app(site), "boss.site.test", "/ux/jobs").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert!(
+            !body.contains("the site"),
+            "the site leaked onto another host"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_site_the_layer_is_inert() {
+        assert!(Site::from_values("", "/x").is_none());
+        assert!(Site::from_values("www.site.test", "").is_none());
+        assert!(Site::from_values("  ", "  ").is_none());
+        assert_eq!(
+            Site::from_values("WWW.Site.Test", "/x").unwrap().host(),
+            "www.site.test"
+        );
+        // No site: the site host is just another host to the
+        // application — the SPA handler answers, not a directory.
+        let (status, _, body) = get(app(None), HOST, "/ux/jobs").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        let (_, _, body) = get(app(None), HOST, "/api/workflow").await;
+        assert!(body.contains("no such API route"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn the_site_answers_reads_only() {
+        let dir = site_dir("methods");
+        let site = Site::from_values(HOST, dir.to_str().unwrap());
+        let resp = app(site)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/auth/login")
+                    .header(header::HOST, HOST)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[test]
+    fn a_host_value_loses_its_port_and_nothing_else() {
+        assert_eq!(host_name("www.site.test"), "www.site.test");
+        assert_eq!(host_name("www.site.test:443"), "www.site.test");
+        assert_eq!(host_name(" www.site.test "), "www.site.test");
+        assert_eq!(host_name("[::1]:8080"), "[::1]");
+        assert_eq!(host_name("[::1]"), "[::1]");
+    }
+}

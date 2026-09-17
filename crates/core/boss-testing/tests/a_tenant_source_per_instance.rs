@@ -154,8 +154,9 @@ fn the_tree_names_a_tenant_directory_per_instance_and_the_pod_reads_it() {
         let row = rows.iter().find(|r| r[0] == name).expect(name);
         assert_eq!(
             row.len(),
-            8,
-            "name, namespace, tenant, sim, hostname, shares-with, tenant-repo, tenant-ref: {row:?}"
+            9,
+            "name, namespace, tenant, sim, hostname, shares-with, tenant-repo, tenant-ref, site \
+             (the ninth since design b64c4377; a_tenant_site_per_instance.rs): {row:?}"
         );
     }
     let play = rows.iter().find(|r| r[0] == "playground").unwrap();
@@ -723,7 +724,11 @@ fn an_empty_instance_column_keeps_its_place_when_the_runner_reads_the_row() {
         "the measured shape: prod carries an empty column (shares_with) before its repo: {prod:?}"
     );
     let script = format!(
-        ". '{}'\nwhile IFS=\"$IFS_ROW\" read -r iname ins_ns tdir _s _h _share trepo tref; do printf '%s|%s|%s|%s\\n' \"$iname\" \"$tdir\" \"$trepo\" \"$tref\"; done <<< \"$(instance_rows \"$INSTANCES\")\"\n",
+        // Every column named, the site (ninth) included: `read` folds the
+        // rest of a row into its LAST variable, so a reader one column
+        // short would take `main<US>www…` for the ref (measured when the
+        // site column landed, b64c4377).
+        ". '{}'\nwhile IFS=\"$IFS_ROW\" read -r iname ins_ns tdir _s _h _share trepo tref site; do printf '%s|%s|%s|%s\\n' \"$iname\" \"$tdir\" \"$trepo\" \"$tref\"; done <<< \"$(instance_rows \"$INSTANCES\")\"\n",
         repo_root().join(LIB).display()
     );
     let read = Command::new("bash")

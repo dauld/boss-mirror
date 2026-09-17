@@ -403,14 +403,14 @@ INSTANCES=$("$REPO/infra/cluster/render-instance.sh" --instances)
 SOURCE_NS=$("$REPO/infra/cluster/render-instance.sh" --source)
 # The source instance's row — its name and its tenant source — read
 # off the same list every other instance is read from.
-SOURCE_NAME=""; SOURCE_TENANT_REPO=""; SOURCE_TENANT_REF=""; SOURCE_TENANT_DIR=""
+SOURCE_NAME=""; SOURCE_TENANT_REPO=""; SOURCE_TENANT_REF=""; SOURCE_TENANT_DIR=""; SOURCE_SITE=""
 # The applied copy carries the build that is ALREADY converged (the
 # stamp), not the manifest's placeholder tag: the apply must never
 # change what runs. Rolling to $HEAD is roll_deployment's job below.
-while IFS="$IFS_ROW" read -r iname ins_ns tdir _s _h _share trepo tref; do
+while IFS="$IFS_ROW" read -r iname ins_ns tdir _s _h _share trepo tref site; do
     manifests_with_image "$RENDER_DIR/$ins_ns" "$APPLY_DIR/$ins_ns" "$REGISTRY" "$LAST"
     if [ "$ins_ns" = "$SOURCE_NS" ]; then
-        SOURCE_NAME="$iname"; SOURCE_TENANT_DIR="$tdir"; SOURCE_TENANT_REPO="$trepo"; SOURCE_TENANT_REF="$tref"
+        SOURCE_NAME="$iname"; SOURCE_TENANT_DIR="$tdir"; SOURCE_TENANT_REPO="$trepo"; SOURCE_TENANT_REF="$tref"; SOURCE_SITE="$site"
     fi
 done <<< "$(instance_rows "$INSTANCES")"
 rm -rf "$RENDER_DIR"
@@ -485,15 +485,27 @@ tenant_source_verdict() {
         *) echo "cluster-deploy-runner: cannot derive a URL for $trepo — $REPO has no forgejo remote" >&2; return 2 ;;
     esac
 }
-# converge_tenant NAME NS TREPO TREF — a repo-sourced instance's tenant:
-# a fresh shallow checkout under $TENANTS_DIR/<name>, staged flat
-# (tenant_stage) and applied as ConfigMap boss-tenant in NS from a
+# converge_tenant NAME NS TREPO TREF SITE — a repo-sourced instance's
+# tenant: a fresh shallow checkout under $TENANTS_DIR/<name>, staged
+# flat (tenant_stage) and applied as ConfigMap boss-tenant in NS from a
 # client dry run, exactly as converge_step_plugins below applies the
 # bundles. Nothing to do for an image-sourced instance. A checkout or
 # stage that fails FAILS this stage: readability was measured first,
 # so what is left is a defect, not a missing scope.
+#
+# THE SITE rides the same checkout (design b64c4377; backlog c8f6b233).
+# When the instance declares a SITE hostname, the checkout's site/ is
+# staged flat (site_stage) and applied as ConfigMap boss-site in NS —
+# the directory the gateway serves under that hostname, mounted at
+# BOSS_SITE_DIR. A checkout with no site/ yet applies an EMPTY
+# ConfigMap (the site answers 404, the instance converges) and the
+# packet says so: `site_source: <ns>: <site> (<n> files from
+# <repo>@<ref>)` or `… (no site/ in <repo>@<ref> — nothing staged,
+# the site answers 404)`. An instance without a site stages nothing
+# and records nothing.
+SITE_SOURCE=""
 converge_tenant() {
-    local iname="$1" ns="$2" trepo="$3" tref="$4" dir stage kt
+    local iname="$1" ns="$2" trepo="$3" tref="$4" site="${5:-}" dir stage kt sstage n from
     [ -n "$trepo" ] || return 0
     dir="$TENANTS_DIR/$iname"
     stage="$TENANTS_DIR/$iname.configmap"
@@ -505,6 +517,25 @@ converge_tenant() {
     echo "cluster-deploy-runner: converging the boss-tenant ConfigMap in $ns from $trepo@$tref ($(ls "$stage" | wc -l) files)"
     $kt create configmap boss-tenant -n "$ns" --from-file=/tenant \
         --dry-run=client -o yaml | $KAPPLY apply -f -
+    [ -n "$site" ] || return 0
+    sstage="$TENANTS_DIR/$iname.site.configmap"
+    n=$(site_stage "$dir" "$sstage")
+    # `--from-file` only when there is a file to take: kubectl refuses
+    # an empty directory, and an empty ConfigMap is the honest object
+    # for a tenant with no site/ yet.
+    from=""
+    if [ "$n" -gt 0 ]; then from="--from-file=/site"; fi
+    kt="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro -v $sstage:/site:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
+    echo "cluster-deploy-runner: converging the boss-site ConfigMap in $ns for $site from $trepo@$tref/site ($n files)"
+    # shellcheck disable=SC2086
+    $kt create configmap boss-site -n "$ns" $from \
+        --dry-run=client -o yaml | $KAPPLY apply -f -
+    if [ "$n" -gt 0 ]; then
+        SITE_SOURCE="${SITE_SOURCE:+$SITE_SOURCE; }$ns: $site ($n files from $trepo@$tref)"
+    else
+        SITE_SOURCE="${SITE_SOURCE:+$SITE_SOURCE; }$ns: $site (no site/ in $trepo@$tref — nothing staged, the site answers 404)"
+    fi
+    run_summary_field site_source "$SITE_SOURCE"
 }
 # The source instance first: its verdict rides the packet as
 # `tenant_source` before anything is applied, and an unreadable source
@@ -525,7 +556,7 @@ if [ "$verdict_rc" -ne 0 ]; then
     exit 1
 fi
 echo "cluster-deploy-runner: tenant source: $verdict"
-converge_tenant "$SOURCE_NAME" "$SOURCE_NS" "$SOURCE_TENANT_REPO" "$SOURCE_TENANT_REF"
+converge_tenant "$SOURCE_NAME" "$SOURCE_NS" "$SOURCE_TENANT_REPO" "$SOURCE_TENANT_REF" "$SOURCE_SITE"
 STAGE="apply manifests"
 echo "cluster-deploy-runner: applying infra/cluster/manifests for $SOURCE_NS (boss image pinned to the converged $LAST)"
 # SAY WHAT THE APPLY DOES NOT DO. `kubectl apply` with no `--prune` is
@@ -749,7 +780,7 @@ STAGE="apply instances"
 INSTANCES_APPLIED="$SOURCE_NS"
 INSTANCES_SKIPPED=""
 INSTANCE_SECRETS_MINTED=""
-while IFS="$IFS_ROW" read -r iname ins_ns tdir _s _h share_ns trepo tref; do
+while IFS="$IFS_ROW" read -r iname ins_ns tdir _s _h share_ns trepo tref site; do
     [ "$ins_ns" = "$SOURCE_NS" ] && continue
     STAGE="tenant $ins_ns"
     verdict_rc=0
@@ -792,7 +823,7 @@ while IFS="$IFS_ROW" read -r iname ins_ns tdir _s _h share_ns trepo tref; do
     if [ -n "$trepo" ]; then
         STAGE="tenant $ins_ns"
         apply_namespaces "$ins_ns"
-        converge_tenant "$iname" "$ins_ns" "$trepo" "$tref"
+        converge_tenant "$iname" "$ins_ns" "$trepo" "$tref" "$site"
         STAGE="apply $ins_ns"
     fi
     apply_instance "$ins_ns"

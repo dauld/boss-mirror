@@ -138,6 +138,12 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         // the packet's own `closed` terminal → jobs.job.closed, which
         // re-enters the rule set at notify-filer-on-feedback-terminal.
         ("jobs.complete_linked_step", vec!["jobs.step.completed"]),
+        // Completes a step on every open packet whose recorded step
+        // metadata matches a value the closing Job carries — the
+        // converge that records a site's hash making that site's
+        // packet `live` (c34583cb). No rule this tree ships names it;
+        // the rule is the tenant's.
+        ("jobs.complete_step_matching", vec!["jobs.step.completed"]),
         ("gate.resolve", vec!["jobs.step.completed"]),
         ("packaging.allocate", vec!["jobs.step.completed"]),
         // The packet-loss census (migration 152): reads the whole

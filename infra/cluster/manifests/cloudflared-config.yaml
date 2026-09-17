@@ -20,6 +20,9 @@ data:
       # [prod] — its own gateway, in its own namespace
       - hostname: boss.algedonic.dev
         service: http://boss-gateway.boss.svc.cluster.local:80
+      # [prod] site — the same gateway, answered from the tenant's site/ by Host
+      - hostname: www.algedonic.dev
+        service: http://boss-gateway.boss.svc.cluster.local:80
       # [playground] — its own gateway, in its own namespace
       - hostname: playground.algedonic.dev
         service: http://boss-gateway.boss-playground.svc.cluster.local:80

@@ -110,3 +110,22 @@ target = "tunnel:cloudflare-tunnel-credentials"
 proxied = true
 ttl = 1
 why = "public example tenant, behind the Cloudflare Tunnel the connector serves"
+
+# The company website (design b64c4377, decided by David 2026-09-17):
+# static pages from the tenant repo's site/, served by prod's gateway
+# under this name — instances.toml declares it as prod's `site`, the
+# tunnel routes it to the same gateway boss. reaches (tunnel_ingress on
+# every converge names it `www.algedonic.dev → boss (site)`), and the
+# gateway answers it from the delivered boss-site ConfigMap with no
+# session. Behind Access until the public-launch design (the same
+# interlock as boss.: applied once the application access.toml declares
+# for this name reads present with an allow policy), so the record is
+# never created ahead of the door in front of it.
+[[record]]
+name = "www.algedonic.dev"
+type = "CNAME"
+target = "tunnel:cloudflare-tunnel-credentials"
+proxied = true
+ttl = 1
+interlock = "access"
+why = "the company website, served by prod's gateway from the tenant's site/ through the same tunnel; behind Access until the public launch"

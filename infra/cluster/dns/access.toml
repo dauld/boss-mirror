@@ -63,6 +63,24 @@ name = "operators"
 decision = "allow"
 include.emails = ["david@algedonic.dev"]
 
+# The company website (design b64c4377, decided by David 2026-09-17).
+# www stays behind Access until a public-launch process has been gone
+# through — a design of its own, after the hardening programme — so
+# this application is the same shape as boss.'s: one allow policy
+# naming the operator. Removing it is that later design's car, not a
+# dashboard click.
+[[application]]
+name = "BOSS site"
+domain = "www.algedonic.dev"
+type = "self_hosted"
+session_duration = "24h"
+why = "the company website, behind Access until the public-launch design; the operator alone may read it until then"
+
+[[application.policy]]
+name = "operators"
+decision = "allow"
+include.emails = ["david@algedonic.dev"]
+
 # The public worked example. Declared blind on 2026-09-16 (a shape an
 # operator would have given it), read that day by observations 03b411ec
 # and f0f2767f, and corrected FROM THE READ (design 08b8b396 q1, decided

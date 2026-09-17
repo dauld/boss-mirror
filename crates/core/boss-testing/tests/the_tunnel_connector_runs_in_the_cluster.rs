@@ -276,23 +276,38 @@ fn every_instance_hostname_routes_to_its_own_gateway_and_the_catch_all_is_last()
     let instances = instances_of(&repo_root());
     assert!(instances.len() >= 2, "prod and the playground are declared");
     let origins = origins_of(&repo_root());
+    let sites = instances
+        .iter()
+        .filter(|(_, i)| i.contains_key("site"))
+        .count();
     assert_eq!(
         rules.len(),
-        instances.len() + origins.len() + 1,
-        "one rule per instance, one per declared origin, plus the catch-all; got {rules:?}"
+        instances.len() + sites + origins.len() + 1,
+        "one rule per instance, one per declared site (b64c4377), one per declared origin, \
+         plus the catch-all; got {rules:?}"
     );
-    for (i, (name, inst)) in instances.iter().enumerate() {
+    // In instance order: the hostname, then the instance's site (if
+    // any) to the SAME gateway — the site is told apart by Host.
+    let mut i = 0;
+    for (name, inst) in &instances {
         let host = &inst["hostname"];
         let ns = &inst["namespace"];
+        let gateway = format!("http://boss-gateway.{ns}.svc.cluster.local:80");
         assert_eq!(
             rules[i],
-            (
-                host.clone(),
-                format!("http://boss-gateway.{ns}.svc.cluster.local:80")
-            ),
+            (host.clone(), gateway.clone()),
             "instance [{name}] routes its hostname to its OWN gateway Service, plain HTTP — the \
              edge terminates TLS and the connector is in-cluster"
         );
+        i += 1;
+        if let Some(site) = inst.get("site") {
+            assert_eq!(
+                rules[i],
+                (site.clone(), gateway),
+                "instance [{name}]'s site routes to the same gateway, directly after its hostname"
+            );
+            i += 1;
+        }
     }
     // Then every declared non-instance origin, in file order, AFTER
     // the instances and BEFORE the catch-all (2026-09-16: the IdP's
@@ -300,7 +315,7 @@ fn every_instance_hostname_routes_to_its_own_gateway_and_the_catch_all_is_last()
     // the tree routed it; see infra/cluster/tunnel-origins.toml).
     for (j, (host, svc)) in origins.iter().enumerate() {
         assert_eq!(
-            rules[instances.len() + j],
+            rules[instances.len() + sites + j],
             (host.clone(), svc.clone()),
             "declared origin [{host}] routes to its declared service"
         );
@@ -643,9 +658,13 @@ fn a_skipped_instances_hostname_is_served_by_the_source_gateway_until_provisione
     let rules = ingress_of(&out);
     let instances = instances_of(&repo_root());
     let origins = origins_of(&repo_root());
+    let sites = instances
+        .iter()
+        .filter(|(_, i)| i.contains_key("site"))
+        .count();
     assert_eq!(
         rules.len(),
-        instances.len() + origins.len() + 1,
+        instances.len() + sites + origins.len() + 1,
         "{rules:?}"
     );
     assert_eq!(
@@ -653,8 +672,14 @@ fn a_skipped_instances_hostname_is_served_by_the_source_gateway_until_provisione
         ("boss.algedonic.dev".to_string(), SOURCE_GATEWAY.to_string()),
         "the source instance still routes to its own gateway"
     );
+    // prod's site sits between prod and the playground (b64c4377).
     assert_eq!(
         rules[1],
+        ("www.algedonic.dev".to_string(), SOURCE_GATEWAY.to_string()),
+        "the source's site routes to the source's gateway"
+    );
+    assert_eq!(
+        rules[2],
         (
             "playground.algedonic.dev".to_string(),
             SOURCE_GATEWAY.to_string()
@@ -692,13 +717,13 @@ fn a_skipped_instances_hostname_is_served_by_the_source_gateway_until_provisione
     assert_eq!(rc, 0, "{err}");
     assert_eq!(
         out.trim(),
-        "boss.algedonic.dev → boss; playground.algedonic.dev → boss (boss-playground skipped: secrets absent); id.algedonic.dev → https://10.20.0.31:443 (origin)"
+        "boss.algedonic.dev → boss; www.algedonic.dev → boss (site); playground.algedonic.dev → boss (boss-playground skipped: secrets absent); id.algedonic.dev → https://10.20.0.31:443 (origin)"
     );
     let (rc, out, err) = run_render_env(&repo_root(), &["--summary"], &[]);
     assert_eq!(rc, 0, "{err}");
     assert_eq!(
         out.trim(),
-        "boss.algedonic.dev → boss; playground.algedonic.dev → boss-playground; id.algedonic.dev → https://10.20.0.31:443 (origin)",
+        "boss.algedonic.dev → boss; www.algedonic.dev → boss (site); playground.algedonic.dev → boss-playground; id.algedonic.dev → https://10.20.0.31:443 (origin)",
         "applied: the field says the hostname is its own instance's again"
     );
 
@@ -900,8 +925,9 @@ fn the_runner_re_renders_the_ingress_after_the_secret_gate_and_rolls_the_connect
     assert_eq!(rc, 0, "{out}\n{err}");
     let applied = std::fs::read_to_string(dir.join("applied.yaml")).unwrap();
     let rules = ingress_of(&applied);
+    // rules[1] is prod's site (b64c4377); the playground follows it.
     assert_eq!(
-        rules[1],
+        rules[2],
         (
             "playground.algedonic.dev".to_string(),
             SOURCE_GATEWAY.to_string()
@@ -911,7 +937,7 @@ fn the_runner_re_renders_the_ingress_after_the_secret_gate_and_rolls_the_connect
     assert!(applied.contains(SKIP_COMMENT), "{applied}");
     assert_eq!(
         recorded["tunnel_ingress"],
-        "boss.algedonic.dev → boss; playground.algedonic.dev → boss (boss-playground skipped: secrets absent); id.algedonic.dev → https://10.20.0.31:443 (origin)",
+        "boss.algedonic.dev → boss; www.algedonic.dev → boss (site); playground.algedonic.dev → boss (boss-playground skipped: secrets absent); id.algedonic.dev → https://10.20.0.31:443 (origin)",
         "{recorded}"
     );
     // The deploying tick still records the connector beside the map,
@@ -958,7 +984,7 @@ fn the_runner_re_renders_the_ingress_after_the_secret_gate_and_rolls_the_connect
     );
     assert_eq!(
         recorded["tunnel_ingress"],
-        "boss.algedonic.dev → boss; playground.algedonic.dev → boss-playground; id.algedonic.dev → https://10.20.0.31:443 (origin)"
+        "boss.algedonic.dev → boss; www.algedonic.dev → boss (site); playground.algedonic.dev → boss-playground; id.algedonic.dev → https://10.20.0.31:443 (origin)"
     );
     let sha = sha256_hex(&applied);
     assert_eq!(

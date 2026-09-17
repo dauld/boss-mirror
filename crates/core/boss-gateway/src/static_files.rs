@@ -177,7 +177,7 @@ pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Respons
     (StatusCode::OK, headers, content).into_response()
 }
 
-fn guess_content_type(path: &Path) -> HeaderValue {
+pub(crate) fn guess_content_type(path: &Path) -> HeaderValue {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let ct = match ext {
         "html" => "text/html; charset=utf-8",

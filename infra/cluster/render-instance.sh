@@ -2,15 +2,15 @@
 #
 # render-instance.sh — ONE manifest source, rendered per instance.
 #
-#   render-instance.sh <namespace> <tenant-dir> <sim> <hostname> <guest>
+#   render-instance.sh <namespace> <tenant-dir> <sim> <hostname> <guest> [<site>]
 #       the instance manifests for that instance, on stdout, one YAML
-#       stream
-#   render-instance.sh <namespace> <tenant-dir> <sim> <hostname> <guest> --out-dir DIR
+#       stream; <site> is the optional site hostname (none without it)
+#   render-instance.sh <namespace> <tenant-dir> <sim> <hostname> <guest> [<site>] --out-dir DIR
 #       the same, one file per manifest (the source's basenames) in DIR
 #   render-instance.sh --all DIR       every instance in instances.toml
 #       into DIR/<namespace>/; the source instance's directory also gets
 #       every `pipeline` manifest, copied as written
-#   render-instance.sh --instances     name<TAB>namespace<TAB>tenant<TAB>sim<TAB>hostname<TAB>shares-with<TAB>tenant-repo<TAB>tenant-ref
+#   render-instance.sh --instances     name<TAB>namespace<TAB>tenant<TAB>sim<TAB>hostname<TAB>shares-with<TAB>tenant-repo<TAB>tenant-ref<TAB>site
 #       per instance, in file order — what the converge iterates. The
 #       sixth column is the NAMESPACE of the instance this one copies
 #       its shared Secrets from (`shares_with` in instances.toml; backlog
@@ -18,7 +18,10 @@
 #       DIRECTORY the pod reads under /opt/boss (`tenant_dir`, or the
 #       literal `tenant` for a repo-sourced instance); the seventh and
 #       eighth are `tenant_repo` and `tenant_ref`, empty for an
-#       image-sourced one (backlog f4f5c387)
+#       image-sourced one (backlog f4f5c387); the ninth is the SITE
+#       hostname (`site`; design b64c4377), empty for an instance
+#       without one — every reader keeps an empty column in place
+#       (cluster-deploy-lib.sh instance_rows)
 #   render-instance.sh --source        the source instance's namespace (the
 #       one the files are written for; its render is the identity)
 #   render-instance.sh --roster        file<TAB>set per manifest, or a refusal
@@ -61,6 +64,12 @@
 #   * the public hostname (BOSS_PUBLIC_URL — since 21c17ebc, 2026-09-17,
 #     there is no TLS front: Cloudflare terminates TLS at the edge and
 #     the tunnel proxies to the gateway), everywhere the source's appears;
+#   * the SITE hostname — BOSS_SITE_HOST on the boss container (design
+#     b64c4377): the instance's `site`, or `""` for an instance that
+#     declares none, which the gateway reads as "no site". Nothing
+#     else about the site is substituted: BOSS_SITE_DIR and the
+#     optional boss-site mount are the same for every instance, and an
+#     instance without a site simply has an empty mount;
 #   * and the LoadBalancer IP pins (io.cilium/lb-ipam-ips,
 #     metallb.universe.tf/loadBalancerIPs, spec.loadBalancerIP) are
 #     COMMENTED OUT — only one Service on the LAN can hold an address,
@@ -89,6 +98,10 @@
 #   * a sim value that is not true or false; a guest value that is not
 #     true or false (or is missing — silence must not read as "guests
 #     may read"); a hostname that is not one;
+#   * a site that is not a hostname, that equals any instance's
+#     hostname or another instance's site (one name, two routes), or
+#     that is declared on an image-sourced instance — the converge
+#     stages a site from a tenant CHECKOUT, so a site needs tenant_repo;
 #   * a `shares_with` that names no instance in the file, or the
 #     instance itself — the converge copies shared Secrets from the
 #     namespace this resolves to, and an unknown source must not read
@@ -121,7 +134,7 @@ refuse() { # <headline> [detail lines...]
 
 usage() {
     refuse "usage" \
-        "$ME <namespace> <tenant> <sim: true|false> <hostname> <guest: true|false> [--out-dir DIR]" \
+        "$ME <namespace> <tenant> <sim: true|false> <hostname> <guest: true|false> [<site>] [--out-dir DIR]" \
         "$ME --all DIR | --instances | --roster"
 }
 
@@ -248,6 +261,36 @@ guest_of() {
 check_hostname() {
     [[ "$1" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]] || refuse "hostname \`$1\`: a public hostname is a lowercase DNS name with at least one dot"
 }
+# check_site <site> [<where>] — empty (no site) or a hostname.
+check_site() {
+    [ -z "$1" ] && return 0
+    [[ "$1" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]] || refuse "site \`$1\`${2:+ ($2)}: a site hostname is a lowercase DNS name with at least one dot"
+}
+# site_of <section> — the instance's optional `site` (design b64c4377):
+# the second public hostname its gateway answers from the tenant repo's
+# site/ directory. Empty when it declares none. Refused by name when it
+# is not a hostname, when it is an instance hostname or another
+# instance's site (one name must route to one gateway — the tunnel
+# renders a rule per name), or when the instance is image-sourced (the
+# converge stages a site from a tenant CHECKOUT, which an image-sourced
+# instance has none of).
+site_of() {
+    local s="$1" v o where
+    where="${INSTANCES#"$TREE"/}: instance [$s]"
+    v=$(param "$s" site)
+    [ -n "$v" ] || return 0
+    check_site "$v" "[$s]"
+    [ -n "$(param "$s" tenant_repo)" ] \
+        || refuse "$where declares site = \"$v\" on an image-sourced tenant — a site is staged from the tenant checkout, so it needs tenant_repo + tenant_ref"
+    for o in $(sections); do
+        [ "$(param "$o" hostname)" != "$v" ] \
+            || refuse "$where declares site = \"$v\", which is instance [$o]'s hostname — one name, one route"
+        [ "$o" = "$s" ] && continue
+        [ "$(param "$o" site)" != "$v" ] \
+            || refuse "$where declares site = \"$v\", which is instance [$o]'s site too — one name, one route"
+    done
+    printf '%s\n' "$v"
+}
 # shares_with_ns <section> — the namespace of the instance <section>
 # declares `shares_with`, empty when it declares none. The converge
 # copies the instance's shared Secrets (forgejo-registry, resend —
@@ -275,6 +318,7 @@ load_source() {
     SRC_NS=$(param "$SRC" namespace); SRC_TENANT=$(tenant_of "$SRC") || exit $?
     SRC_SIM=$(param "$SRC" sim);      SRC_HOST=$(param "$SRC" hostname)
     SRC_GUEST=$(guest_of "$SRC") || exit $?
+    SRC_SITE=$(site_of "$SRC") || exit $?
     [ -n "$SRC_NS" ] && [ -n "$SRC_TENANT" ] && [ -n "$SRC_SIM" ] && [ -n "$SRC_HOST" ] \
         || refuse "${INSTANCES#"$TREE"/}: source instance [$SRC] must declare namespace, a tenant source, sim, hostname and guest"
     check_namespace "$SRC_NS"; check_tenant "$SRC_TENANT"; check_sim "$SRC_SIM"; check_hostname "$SRC_HOST"
@@ -293,13 +337,35 @@ load_source() {
         || refuse "source guest \`$SRC_GUEST\` is not the BOSS_GUEST_ACCESS value (\"$(guest_value "$SRC_GUEST")\") in the instance manifests — ${INSTANCES#"$TREE"/} [$SRC] has drifted from the files"
     grep -qF -- "$SRC_HOST" "${files[@]}" \
         || refuse "source hostname \`$SRC_HOST\` appears in no instance manifest — ${INSTANCES#"$TREE"/} [$SRC] has drifted from the files (BOSS_PUBLIC_URL is what it must be)"
+    # The site line. A source WITH a site: the files must carry it. A
+    # source WITHOUT one: the files must not carry a site (a value left
+    # behind is the same drift the other way), and if any OTHER instance
+    # declares a site the files must carry `BOSS_SITE_HOST, value: ""` —
+    # the line that instance's substitution lands on, or it would
+    # substitute nothing and answer instead of erroring. A tree where no
+    # instance has a site needs no line at all.
+    if [ -n "$SRC_SITE" ]; then
+        grep -qF -- "BOSS_SITE_HOST, value: \"$SRC_SITE\"" "${files[@]}" \
+            || refuse "source site \`$SRC_SITE\` is not the BOSS_SITE_HOST value in the instance manifests — ${INSTANCES#"$TREE"/} [$SRC] has drifted from the files (boss.yaml must carry BOSS_SITE_HOST, value: \"$SRC_SITE\")"
+    else
+        if grep -qE -- 'BOSS_SITE_HOST, value: "[^"]+"' "${files[@]}"; then
+            refuse "the instance manifests carry a BOSS_SITE_HOST value while ${INSTANCES#"$TREE"/} [$SRC] declares no site — the files have drifted from the source (boss.yaml must carry BOSS_SITE_HOST, value: \"\", or [$SRC] must declare the site)"
+        fi
+        local other
+        for other in $(sections); do
+            [ -n "$(param "$other" site)" ] || continue
+            grep -qF -- 'BOSS_SITE_HOST, value: ""' "${files[@]}" \
+                || refuse "instance [$other] declares a site but the instance manifests carry no BOSS_SITE_HOST line to substitute it into — boss.yaml must carry BOSS_SITE_HOST, value: \"\" (the source [$SRC] has no site)"
+            break
+        done
+    fi
 }
 
 re_escape() { printf '%s' "$1" | sed -e 's,[][\.*^$/|],\\&,g'; }
 
 # --- one file, rendered --------------------------------------------------
-render_file() { # <src file> <ns> <tenant> <sim> <hostname> <guest>
-    local f="$1" ns="$2" tenant="$3" sim="$4" host="$5" guest="$6"
+render_file() { # <src file> <ns> <tenant> <sim> <hostname> <guest> <site>
+    local f="$1" ns="$2" tenant="$3" sim="$4" host="$5" guest="$6" site="$7"
     local ns_re tenant_re host_re
     ns_re=$(re_escape "$SRC_NS"); tenant_re=$(re_escape "$SRC_TENANT"); host_re=$(re_escape "$SRC_HOST")
     local pins=()
@@ -317,15 +383,16 @@ render_file() { # <src file> <ns> <tenant> <sim> <hostname> <guest>
         -e "s#/opt/boss/${tenant_re}([^A-Za-z0-9_./-]|\$)#/opt/boss/${tenant}\1#g" \
         -e "s|(BOSS_SIM_ENABLED, value: )\"${SRC_SIM}\"|\1\"${sim}\"|" \
         -e "s|(BOSS_GUEST_ACCESS, value: )\"$(guest_value "$SRC_GUEST")\"|\1\"$(guest_value "$guest")\"|" \
+        -e "s|(BOSS_SITE_HOST, value: )\"$(re_escape "$SRC_SITE")\"|\1\"${site}\"|" \
         -e "s|${host_re}|${host}|g" \
         ${pins[@]+"${pins[@]}"} \
         "$f"
 }
 
 # --- one instance, into a directory or a stream ---------------------------
-render_instance() { # <ns> <tenant> <sim> <hostname> <guest> <out-dir or "-">
-    local ns="$1" tenant="$2" sim="$3" host="$4" guest="$5" out="$6" f first=1
-    check_namespace "$ns"; check_tenant "$tenant"; check_sim "$sim"; check_hostname "$host"; check_guest "$guest"
+render_instance() { # <ns> <tenant> <sim> <hostname> <guest> <site or ""> <out-dir or "-">
+    local ns="$1" tenant="$2" sim="$3" host="$4" guest="$5" site="$6" out="$7" f first=1
+    check_namespace "$ns"; check_tenant "$tenant"; check_sim "$sim"; check_hostname "$host"; check_guest "$guest"; check_site "$site"
     if [ "$out" != - ]; then
         mkdir -p "$out"
     fi
@@ -333,9 +400,9 @@ render_instance() { # <ns> <tenant> <sim> <hostname> <guest> <out-dir or "-">
         if [ "$out" = - ]; then
             [ "$first" = 1 ] || printf -- '---\n'
             first=0
-            render_file "$DIR/$f" "$ns" "$tenant" "$sim" "$host" "$guest"
+            render_file "$DIR/$f" "$ns" "$tenant" "$sim" "$host" "$guest" "$site"
         else
-            render_file "$DIR/$f" "$ns" "$tenant" "$sim" "$host" "$guest" > "$out/$f"
+            render_file "$DIR/$f" "$ns" "$tenant" "$sim" "$host" "$guest" "$site" > "$out/$f"
         fi
     done < <(in_set instance)
     # The pipeline set rides with the source instance, as written.
@@ -368,7 +435,8 @@ case "${1:-}" in
         for s in $(sections); do
             share=$(shares_with_ns "$s") || exit $?
             tenant=$(tenant_of "$s") || exit $?
-            rows="$rows$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$s" "$(param "$s" namespace)" "$tenant" "$(param "$s" sim)" "$(param "$s" hostname)" "$share" "$(param "$s" tenant_repo)" "$(param "$s" tenant_ref)")"$'\n'
+            site=$(site_of "$s") || exit $?
+            rows="$rows$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$s" "$(param "$s" namespace)" "$tenant" "$(param "$s" sim)" "$(param "$s" hostname)" "$share" "$(param "$s" tenant_repo)" "$(param "$s" tenant_ref)" "$site")"$'\n'
         done
         printf '%s' "$rows"
         ;;
@@ -380,29 +448,35 @@ case "${1:-}" in
         # nothing is rendered: the render stage is where the converge
         # first reads this file, and a refusal after the first instance's
         # directory exists would read as a partial render.
-        for s in $(sections); do shares_with_ns "$s" > /dev/null; tenant_of "$s" > /dev/null; guest_of "$s" > /dev/null; done
+        for s in $(sections); do shares_with_ns "$s" > /dev/null; tenant_of "$s" > /dev/null; guest_of "$s" > /dev/null; site_of "$s" > /dev/null; done
         seen_ns=""
         for s in $(sections); do
-            ns=$(param "$s" namespace); tenant=$(tenant_of "$s"); sim=$(param "$s" sim); host=$(param "$s" hostname); guest=$(guest_of "$s")
+            ns=$(param "$s" namespace); tenant=$(tenant_of "$s"); sim=$(param "$s" sim); host=$(param "$s" hostname); guest=$(guest_of "$s"); site=$(site_of "$s")
             [ -n "$ns" ] && [ -n "$tenant" ] && [ -n "$sim" ] && [ -n "$host" ] \
                 || refuse "${INSTANCES#"$TREE"/}: instance [$s] must declare namespace, a tenant source, sim, hostname and guest"
             case "$seen_ns" in *"|$ns|"*) refuse "${INSTANCES#"$TREE"/}: two instances share namespace \`$ns\`" ;; esac
             seen_ns="$seen_ns|$ns|"
-            render_instance "$ns" "$tenant" "$sim" "$host" "$guest" "$2/$ns"
+            render_instance "$ns" "$tenant" "$sim" "$host" "$guest" "$site" "$2/$ns"
         done
         ;;
     --*|'')
         usage
         ;;
     *)
+        # Five positional parameters, an optional sixth (the site), an
+        # optional trailing `--out-dir DIR`.
         out=-
-        if [ $# -eq 7 ] && [ "$6" = --out-dir ] && [ -n "$7" ]; then
-            out="$7"
-        elif [ $# -ne 5 ]; then
-            usage
+        if [ $# -ge 2 ] && [ "${*: -2:1}" = --out-dir ] && [ -n "${*: -1}" ]; then
+            out="${*: -1}"
+            set -- "${@:1:$(($# - 2))}"
         fi
+        case $# in
+            5) site="" ;;
+            6) site="$6" ;;
+            *) usage ;;
+        esac
         roster > /dev/null
         load_source
-        render_instance "$1" "$2" "$3" "$4" "$5" "$out"
+        render_instance "$1" "$2" "$3" "$4" "$5" "$site" "$out"
         ;;
 esac

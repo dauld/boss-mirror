@@ -42,6 +42,7 @@ use boss_dispatcher_handlers::handlers::{
     jobs_clear_waiting::JobsClearWaiting,
     jobs_complete_linked_step::JobsCompleteLinkedStep,
     jobs_complete_step::JobsCompleteStep,
+    jobs_complete_step_matching::JobsCompleteStepMatching,
     jobs_run_car_probes::JobsRunCarProbes,
     jobs_subjob_resolve::JobsSubjobResolve,
     ledger_bill_approve::LedgerBillApprove,
@@ -346,6 +347,13 @@ async fn main() -> Result<()> {
             // → feedback-packet obligation (2c4ae549). Generic: which
             // edge and which steps ride the rule row.
             handlers.register(JobsCompleteLinkedStep::new(cfg.jobs_api_url.clone()));
+            // A closing Job completes a step on every open packet whose
+            // RECORDED step metadata matches a value it carries — the
+            // converge that records a site's hash making the packet
+            // that published it `live` (c34583cb). Generic: kind, the
+            // two steps, the field and the path ride the rule row, and
+            // the rule is the tenant's.
+            handlers.register(JobsCompleteStepMatching::new(cfg.jobs_api_url.clone()));
             // System-completes zero-duration, no-role markers
             // (trigger / outcome / milestone) the moment they go
             // Ready, so a Job flows past its structural checkpoints

@@ -52,6 +52,25 @@
 #              car sets it false here AND writes "0" into boss.yaml
 #              (prod is the source; the byte-identity test holds them
 #              equal).
+#   site       OPTIONAL — a second public hostname the instance's
+#              gateway answers from the tenant repository's site/
+#              directory, with no session (design b64c4377, decided
+#              2026-09-17: the company website is company data,
+#              published like the seeds). BOSS_SITE_HOST on the boss
+#              container, a second tunnel ingress rule beside the
+#              instance hostname (same gateway), and the `boss-site`
+#              ConfigMap the converge stages from `<checkout>/site/`
+#              (cluster-deploy-lib.sh site_stage; 1 MiB, flat, like
+#              boss-tenant) mounted at BOSS_SITE_DIR. Needs a
+#              tenant_repo — the site is staged from the checkout — and
+#              must differ from every hostname in this file. An
+#              instance without one renders BOSS_SITE_HOST as "", the
+#              gateway's spelling of "no site", over the same optional
+#              mount. A tenant that declares a site but has no site/
+#              yet gets an EMPTY ConfigMap and its site answers 404
+#              until the directory lands (the converge names it as
+#              `site_source`); it is not a refusal, so the instance
+#              converges either way.
 #
 # THE TENANT SOURCE (backlog f4f5c387, car 2 of fcc1d57b; David
 # 2026-09-16 'Let's do it'). The image bakes examples/ in, so a tenant
@@ -155,6 +174,11 @@ tenant_repo = "david/algedonic-llc"
 tenant_ref = "main"
 sim = false
 hostname = "boss.algedonic.dev"
+# The company website (design b64c4377): www is the same gateway
+# answering from the tenant repo's site/ — declared in the zone and in
+# Access beside boss. (infra/cluster/dns/), behind Access until the
+# public-launch design.
+site = "www.algedonic.dev"
 # No anonymous read session on the operating site: the edge asks for an
 # identity (Access) and the gateway asks for a login; the playground keeps
 # the guest door (decided 2026-09-16, 0d2d7daa).

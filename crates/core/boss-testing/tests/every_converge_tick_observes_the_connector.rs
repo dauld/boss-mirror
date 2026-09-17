@@ -187,7 +187,7 @@ fn an_unchanged_tick_records_the_connector_and_the_ingress_from_the_gates_skippe
     assert_eq!(r.recorded["cloudflared"], "connected", "{}", r.recorded);
     assert_eq!(
         r.recorded["tunnel_ingress"],
-        "boss.algedonic.dev → boss; playground.algedonic.dev → boss (boss-playground skipped: secrets absent); id.algedonic.dev → https://10.20.0.31:443 (origin)",
+        "boss.algedonic.dev → boss; www.algedonic.dev → boss (site); playground.algedonic.dev → boss (boss-playground skipped: secrets absent); id.algedonic.dev → https://10.20.0.31:443 (origin)",
         "the renderer is handed the gate's skipped set, exactly as the deploying tick hands it: {}",
         r.recorded
     );
@@ -211,7 +211,7 @@ fn an_unchanged_tick_records_the_connector_and_the_ingress_from_the_gates_skippe
     assert_eq!(r.rc, 0, "{}\n{}", r.out, r.err);
     assert_eq!(
         r.recorded["tunnel_ingress"],
-        "boss.algedonic.dev → boss; playground.algedonic.dev → boss-playground; id.algedonic.dev → https://10.20.0.31:443 (origin)",
+        "boss.algedonic.dev → boss; www.algedonic.dev → boss (site); playground.algedonic.dev → boss-playground; id.algedonic.dev → https://10.20.0.31:443 (origin)",
         "{}",
         r.recorded
     );

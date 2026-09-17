@@ -616,8 +616,9 @@ skipped_tenant_entry() {
 # converge checks out beside the product and delivers as the
 # `boss-tenant` ConfigMap — infra/cluster/instances.toml says which,
 # and render-instance.sh --instances carries the repo and ref as its
-# seventh and eighth columns. The functions below are the repo half,
-# written so a fixture forge can exercise every verdict.
+# seventh and eighth columns (and the instance's optional site as the
+# ninth). The functions below are the repo half, written so a fixture
+# forge can exercise every verdict.
 #
 # ONE CREDENTIAL: the checkout's own. The runner fetches forge main
 # through its `forgejo` remote, and the tenant is read with exactly
@@ -717,6 +718,39 @@ tenant_stage() {
     fi
     return 0
 }
+# site_stage SRC STAGE — the tenant checkout's site/ directory flattened
+#   into STAGE as ONE ConfigMap's keys (design b64c4377; backlog
+#   c8f6b233): every file directly under SRC/site — the company website
+#   the gateway serves under the instance's `site` hostname
+#   (boss-gateway site.rs), delivered as the `boss-site` ConfigMap
+#   beside boss-tenant, with the same shape and the same 1 MiB bound.
+#   Prints the number of files staged. A checkout with NO site/ stages
+#   nothing and prints 0 with rc 0 — an empty STAGE, from which the
+#   runner applies an EMPTY ConfigMap: the tenant has no site yet, the
+#   instance still converges, and the site hostname answers 404 until
+#   the directory lands (the packet's `site_source` line says so). Not
+#   a refusal, because a declared site whose content is one tenant
+#   commit away must not hold the instance's converge. Over the bound
+#   is rc 2, nothing staged, like tenant_stage.
+site_stage() {
+    local src="$1" stage="$2" f n=0 size
+    rm -rf "$stage"
+    mkdir -p "$stage"
+    if [ -d "$src/site" ]; then
+        for f in "$src"/site/*; do
+            [ -f "$f" ] || continue
+            cp "$f" "$stage/"
+            n=$((n + 1))
+        done
+    fi
+    size=$(du -sb "$stage" | cut -f1)
+    if [ "$size" -gt 1000000 ]; then
+        echo "site_stage: $src/site stages $size bytes — over the 1 MiB a ConfigMap holds; the site stays small by construction until it has a build of its own" >&2
+        rm -rf "$stage"
+        return 2
+    fi
+    printf '%s\n' "$n"
+}
 
 # instances_skipped_by_gate K KM SOURCE_NS INSTANCES MOUNT
 #   The packet's `instances_skipped` string as the secret gate would
@@ -755,7 +789,7 @@ IFS_ROW=$'\037'
 instances_skipped_by_gate() {
     local k="$1" km="$2" source_ns="$3" instances="$4" mount="$5"
     local iname ins_ns _t _s _h _share trepo tref absent err rc skipped=""
-    while IFS="$IFS_ROW" read -r iname ins_ns _t _s _h _share trepo tref; do
+    while IFS="$IFS_ROW" read -r iname ins_ns _t _s _h _share trepo tref _site; do
         [ -n "$ins_ns" ] || continue
         [ "$ins_ns" = "$source_ns" ] && continue
         if [ -n "$trepo" ]; then

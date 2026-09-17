@@ -106,8 +106,8 @@ fn as_declared() -> Vec<serde_json::Value> {
             true,
             1,
         ),
-        // The IdP (fd75c641) — last, so the positional fixtures above
-        // it keep their meaning.
+        // The IdP (fd75c641) — after the two doors, so the positional
+        // fixtures above it keep their meaning.
         record(
             "id.algedonic.dev",
             "CNAME",
@@ -115,8 +115,25 @@ fn as_declared() -> Vec<serde_json::Value> {
             true,
             1,
         ),
+        // The company website (b64c4377) — last, for the same reason.
+        record(
+            "www.algedonic.dev",
+            "CNAME",
+            &format!("{TUNNEL_ID}.cfargotunnel.com"),
+            true,
+            1,
+        ),
     ]
 }
+
+/// The declared records, as (name, type), sorted — what the shipped
+/// declaration must name exactly.
+const DECLARED: &[(&str, &str)] = &[
+    ("boss.algedonic.dev", "CNAME"),
+    ("id.algedonic.dev", "CNAME"),
+    ("playground.algedonic.dev", "CNAME"),
+    ("www.algedonic.dev", "CNAME"),
+];
 
 /// The body `GET /zones/{id}/dns_records` answers: the v4 envelope.
 fn envelope(records: &[serde_json::Value]) -> String {
@@ -239,14 +256,14 @@ fn the_shipped_declaration_puts_boss_behind_the_tunnel_behind_an_interlock() {
     names.sort();
     assert_eq!(
         names,
-        vec![
-            ("boss.algedonic.dev".to_string(), "CNAME".to_string()),
-            ("id.algedonic.dev".to_string(), "CNAME".to_string()),
-            ("playground.algedonic.dev".to_string(), "CNAME".to_string()),
-        ],
-        "exactly the two doors and the identity provider (fd75c641, 2026-09-16): www and the apex \
-         are absent from the zone (measured 2026-09-16) and a record declared before it exists \
-         reads ABSENT on every observation"
+        DECLARED
+            .iter()
+            .map(|(n, t)| (n.to_string(), t.to_string()))
+            .collect::<Vec<_>>(),
+        "exactly the two doors, the identity provider (fd75c641, 2026-09-16) and the company \
+         website (b64c4377, 2026-09-17): the apex is absent from the zone (measured 2026-09-16) \
+         and a record declared before it exists reads ABSENT on every observation — which is \
+         why www rides the Access interlock rather than being declared blind"
     );
     let idp = records
         .iter()
@@ -305,6 +322,18 @@ fn the_shipped_declaration_puts_boss_behind_the_tunnel_behind_an_interlock() {
         playground.get("interlock").is_none(),
         "playground. is the rotation handler's record: compared, never applied by the observer"
     );
+    // The company website (b64c4377): behind Access until the public
+    // launch, so its record is applied only once the application
+    // access.toml declares for it reads present — the boss. shape.
+    let www = records
+        .iter()
+        .find(|r| r["name"].as_str() == Some("www.algedonic.dev"))
+        .expect("www is declared");
+    assert_eq!(
+        www["interlock"].as_str(),
+        Some("access"),
+        "www is applied only behind the Access interlock — never exposed without Access in front"
+    );
     assert!(
         !toml
             .lines()
@@ -334,11 +363,17 @@ fn the_zone_as_declared_matches_and_exits_0() {
     let t = text(&out);
     assert_eq!(code(&out), 0, "{t}");
     let matches = lines_with(&out, "MATCH");
-    assert_eq!(matches.len(), 3, "{t}");
+    assert_eq!(matches.len(), DECLARED.len(), "{t}");
     assert!(
         matches
             .iter()
             .any(|l| l.contains("boss.algedonic.dev CNAME")),
+        "{t}"
+    );
+    assert!(
+        matches
+            .iter()
+            .any(|l| l.contains("www.algedonic.dev CNAME")),
         "{t}"
     );
     assert!(
@@ -351,7 +386,7 @@ fn the_zone_as_declared_matches_and_exits_0() {
     assert!(lines_with(&out, "ABSENT").is_empty(), "{t}");
     assert!(lines_with(&out, "UNDECLARED").is_empty(), "{t}");
     assert!(
-        t.contains("check-declared: algedonic.dev: 3 match, 0 drift, 0 absent, 0 undeclared — every declared record matches"),
+        t.contains("check-declared: algedonic.dev: 4 match, 0 drift, 0 absent, 0 undeclared — every declared record matches"),
         "{t}"
     );
 }
@@ -375,12 +410,20 @@ fn the_zone_as_measured_before_the_flip_reads_the_cname_absent_and_the_a_undecla
     let t = text(&out);
     assert_eq!(code(&out), 1, "{t}");
     let absent = lines_with(&out, "ABSENT");
-    assert_eq!(absent.len(), 1, "{t}");
+    // boss. (the flip) and www (b64c4377, declared before the zone
+    // holds it — the honest reading until its interlock applies it).
+    assert_eq!(absent.len(), 2, "{t}");
+    let boss = absent
+        .iter()
+        .find(|l| l.contains("boss.algedonic.dev CNAME"))
+        .unwrap_or_else(|| panic!("{t}"));
     assert!(
-        absent[0].contains("boss.algedonic.dev CNAME")
-            && absent[0].contains(&format!("{TUNNEL_ID}.cfargotunnel.com")),
-        "{}",
-        absent[0]
+        boss.contains(&format!("{TUNNEL_ID}.cfargotunnel.com")),
+        "{boss}"
+    );
+    assert!(
+        absent.iter().any(|l| l.contains("www.algedonic.dev CNAME")),
+        "{t}"
     );
     let undeclared = lines_with(&out, "UNDECLARED");
     assert_eq!(undeclared.len(), 1, "{t}");
@@ -390,7 +433,7 @@ fn the_zone_as_measured_before_the_flip_reads_the_cname_absent_and_the_a_undecla
         undeclared[0]
     );
     assert!(
-        t.contains("2 match, 0 drift, 1 absent, 1 undeclared"),
+        t.contains("2 match, 0 drift, 2 absent, 1 undeclared"),
         "{t}"
     );
 }
@@ -409,7 +452,12 @@ fn a_tunnel_reference_resolves_from_a_bare_tunnel_argument_too() {
     )
     .go();
     assert_eq!(code(&out), 0, "{}", text(&out));
-    assert_eq!(lines_with(&out, "MATCH").len(), 3, "{}", text(&out));
+    assert_eq!(
+        lines_with(&out, "MATCH").len(),
+        DECLARED.len(),
+        "{}",
+        text(&out)
+    );
 }
 
 #[test]
@@ -443,7 +491,7 @@ fn a_record_nobody_declared_is_undeclared_reported_and_not_a_failure() {
         "{t}"
     );
     assert!(
-        t.contains("3 match, 0 drift, 0 absent, 2 undeclared"),
+        t.contains("4 match, 0 drift, 0 absent, 2 undeclared"),
         "{t}"
     );
 }
@@ -478,7 +526,7 @@ fn a_cname_still_pointing_at_the_old_tunnel_is_drift_with_both_values_and_exits_
         drift[0]
     );
     assert!(
-        t.contains("2 match, 1 drift, 0 absent, 0 undeclared"),
+        t.contains("3 match, 1 drift, 0 absent, 0 undeclared"),
         "{t}"
     );
     assert!(t.contains("1 finding(s) against the declaration"), "{t}");
@@ -540,7 +588,7 @@ fn a_declared_record_the_zone_lacks_is_absent_and_exits_1() {
         absent[0]
     );
     assert!(
-        t.contains("2 match, 0 drift, 1 absent, 0 undeclared"),
+        t.contains("3 match, 0 drift, 1 absent, 0 undeclared"),
         "{t}"
     );
 }
@@ -559,7 +607,12 @@ fn a_bare_result_array_reads_the_same_as_the_envelope() {
     )
     .go();
     assert_eq!(code(&out), 0, "{}", text(&out));
-    assert_eq!(lines_with(&out, "MATCH").len(), 3, "{}", text(&out));
+    assert_eq!(
+        lines_with(&out, "MATCH").len(),
+        DECLARED.len(),
+        "{}",
+        text(&out)
+    );
 }
 
 // ---- the machine-readable form and the reference listing -----------
@@ -590,13 +643,13 @@ fn json_output_carries_one_verdict_per_record_and_the_counts() {
     let body: serde_json::Value = serde_json::from_slice(&out.stdout)
         .unwrap_or_else(|e| panic!("--json prints one JSON document on stdout ({e}): {t}"));
     assert_eq!(body["zone"], "algedonic.dev");
-    assert_eq!(body["counts"]["MATCH"], 2);
+    assert_eq!(body["counts"]["MATCH"], 3);
     assert_eq!(body["counts"]["DRIFT"], 1);
     assert_eq!(body["counts"]["ABSENT"], 0);
     assert_eq!(body["counts"]["UNDECLARED"], 1);
     assert_eq!(body["hard"], 1);
     let verdicts = body["verdicts"].as_array().expect("verdicts array");
-    assert_eq!(verdicts.len(), 4);
+    assert_eq!(verdicts.len(), 5);
     let by_record = |rec: &str| {
         verdicts
             .iter()

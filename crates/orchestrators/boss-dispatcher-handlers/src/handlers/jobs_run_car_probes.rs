@@ -58,7 +58,7 @@ use serde_json::{Value, json};
 use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext};
 use boss_jobs::car;
 
-use super::common::{api_client, get_json, post_json, write_json};
+use super::common::{api_client, open_jobs_of_kind, post_json, write_json};
 
 /// The allowlisted verb (a file under `infra/ops/verbs/`) and the host that
 /// answers it. One definition each, read by the request builder and
@@ -95,34 +95,10 @@ impl JobsRunCarProbes {
     /// Every open Job of `kind`, paged on `total` so a car sorted past
     /// one page is still found — the same paging `boss prove` does,
     /// for the same reason (a capped page is a false negative that
-    /// grows with the pipeline's age).
+    /// grows with the pipeline's age). One definition, in `common`,
+    /// since `jobs.complete_step_matching` walks the same list.
     async fn all_open(&self, kind: &str, rule: &str) -> Result<Vec<Value>, HandlerError> {
-        const PAGE: usize = 500;
-        let mut rows: Vec<Value> = Vec::new();
-        loop {
-            let body = get_json(
-                &self.client,
-                &format!(
-                    "{}/api/jobs?kind={kind}&status=open&limit={PAGE}&offset={}",
-                    self.base(),
-                    rows.len()
-                ),
-                rule,
-            )
-            .await?;
-            let total = body.get("total").and_then(Value::as_u64).unwrap_or(0) as usize;
-            let page: Vec<Value> = body
-                .get("data")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let got = page.len();
-            rows.extend(page);
-            if got == 0 || rows.len() >= total {
-                break;
-            }
-        }
-        Ok(rows)
+        open_jobs_of_kind(&self.client, self.base(), kind, rule).await
     }
 }
 

@@ -336,7 +336,14 @@ fn noop_reason(target: &serde_json::Value, allowed: &[&str]) -> Option<String> {
 
 /// Find a Job's step by `spec_slug` — the stable machine-facing
 /// identifier, distinct from the rendered `title`.
-fn step_by_slug<'a>(job: &'a serde_json::Value, slug: &str) -> Option<&'a serde_json::Value> {
+///
+/// Shared with `jobs_complete_step_matching`, along with `is_open`,
+/// `is_unset` and `template_arg`: the two handlers complete a step the
+/// same way and differ only in how they find the packet (c34583cb).
+pub(crate) fn step_by_slug<'a>(
+    job: &'a serde_json::Value,
+    slug: &str,
+) -> Option<&'a serde_json::Value> {
     job.get("steps")?
         .as_array()?
         .iter()
@@ -608,7 +615,7 @@ struct Route {
 /// redelivery cannot fix a malformed template, and dying on it would
 /// also kill the evidence write — so a malformed one is a warning and
 /// `None`, never an error.
-fn template_arg(
+pub(crate) fn template_arg(
     args: &[(String, Value)],
     name: &str,
     rule: &str,
@@ -666,7 +673,7 @@ fn parse_routes(args: &[(String, Value)], rule: &str) -> Vec<Route> {
     }
 }
 
-fn is_open(step: &serde_json::Value) -> bool {
+pub(crate) fn is_open(step: &serde_json::Value) -> bool {
     step.get("status")
         .and_then(|v| v.as_str())
         .is_some_and(|st| OPEN_STATUSES.contains(&st))
@@ -701,7 +708,7 @@ fn stamped_by(step: &serde_json::Value, evidence_key: &str, car: &str) -> bool {
 /// (backlog 5f0b2661, found by the design-close witness test). A
 /// person's real verdict is never the empty string, so this cannot
 /// overwrite one.
-fn is_unset(v: Option<&serde_json::Value>) -> bool {
+pub(crate) fn is_unset(v: Option<&serde_json::Value>) -> bool {
     match v {
         None => true,
         Some(serde_json::Value::String(s)) => s.is_empty(),

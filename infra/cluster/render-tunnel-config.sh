@@ -62,6 +62,13 @@
 #     (boss-gateway proxy.rs) and builds its URLs from BOSS_PUBLIC_URL,
 #     so no originRequest override is needed. Its session cookie is
 #     `Secure`, and the visitor's leg is HTTPS at the edge.
+#   * directly after an instance's rule, ITS SITE if it declares one
+#     (`site` in instances.toml; design b64c4377): the site hostname ->
+#     the SAME gateway Service, which answers it from the tenant's
+#     site/ by Host (boss-gateway site.rs — the connector forwards the
+#     visitor's Host, which is how the gateway tells the two apart).
+#     The packet's summary names it `<site> → <ns> (site)`. A skipped
+#     instance's site follows its hostname to the source's gateway.
 #   * the catch-all `http_status:404` LAST — cloudflared refuses a
 #     config without one, and a hostname the tunnel is not declared for
 #     must answer 404 at the edge, never the first instance's gateway.
@@ -90,8 +97,8 @@
 #
 # REFUSALS (exit 2, nothing rendered, the reason on stderr):
 #   * an instance without a hostname or a namespace;
-#   * two instances on one hostname — a route that answers the wrong
-#     instance;
+#   * two instances on one hostname, or a site that is any other
+#     route's hostname — a route that answers the wrong instance;
 #   * a boss.yaml that no longer declares the gateway Service named
 #     below on the port below — the routes would point at nothing, and
 #     a render that answers instead of erroring is the class of failure
@@ -187,13 +194,19 @@ fi
 RULES=""
 SUMMARY=""
 routes() {
-    local s ns host seen="" reason origin_ns
+    local s ns host site seen="" reason origin_ns
+    # Every hostname and site first, so a site that collides with a
+    # LATER instance's hostname is refused too, not only an earlier one.
     for s in $(sections); do
-        ns=$(param "$s" namespace); host=$(param "$s" hostname)
+        for host in $(param "$s" hostname) $(param "$s" site); do
+            case "$seen" in *"|$host|"*) refuse "${INSTANCES#"$TREE"/}: \`$host\` is declared twice (a hostname or a site of two instances, or an instance's own site) — a route that answers the wrong instance" ;; esac
+            seen="$seen|$host|"
+        done
+    done
+    for s in $(sections); do
+        ns=$(param "$s" namespace); host=$(param "$s" hostname); site=$(param "$s" site)
         [ -n "$ns" ] && [ -n "$host" ] \
             || refuse "${INSTANCES#"$TREE"/}: instance [$s] must declare namespace and hostname — a tunnel route needs both"
-        case "$seen" in *"|$host|"*) refuse "${INSTANCES#"$TREE"/}: two instances declare hostname \`$host\` — a route that answers the wrong instance" ;; esac
-        seen="$seen|$host|"
         reason=$(skip_reason "$ns")
         if [ -n "$reason" ]; then
             origin_ns="$SRC_NS"
@@ -205,6 +218,17 @@ routes() {
             SUMMARY="${SUMMARY:+$SUMMARY; }$host → $ns"
         fi
         RULES="$RULES"$'\n'"      - hostname: $host"
+        RULES="$RULES"$'\n'"        service: http://$GATEWAY_SVC.$origin_ns.svc.cluster.local:$GATEWAY_PORT"
+        [ -n "$site" ] || continue
+        # The instance's site: the same origin, told apart by Host.
+        if [ -n "$reason" ]; then
+            RULES="$RULES"$'\n'"      # [$s] site, skipped: $reason — served by $SRC_NS until provisioned"
+            SUMMARY="${SUMMARY:+$SUMMARY; }$site → $SRC_NS ($ns skipped: $reason; site)"
+        else
+            RULES="$RULES"$'\n'"      # [$s] site — the same gateway, answered from the tenant's site/ by Host"
+            SUMMARY="${SUMMARY:+$SUMMARY; }$site → $ns (site)"
+        fi
+        RULES="$RULES"$'\n'"      - hostname: $site"
         RULES="$RULES"$'\n'"        service: http://$GATEWAY_SVC.$origin_ns.svc.cluster.local:$GATEWAY_PORT"
     done
     [ -n "$RULES" ] || refuse "${INSTANCES#"$TREE"/} declares no instance — nothing for the tunnel to route"

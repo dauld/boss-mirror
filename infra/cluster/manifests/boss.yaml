@@ -324,6 +324,18 @@ spec:
           configMap:
             name: boss-tenant
             optional: true
+        # THE TENANT SITE (design b64c4377): the tenant repo's site/
+        # directory, staged flat by the converge beside boss-tenant
+        # (cluster-deploy-lib.sh site_stage, the same 1 MiB bound) and
+        # served by the gateway under BOSS_SITE_HOST. `optional` for the
+        # same reason as boss-tenant: an instance that declares no site
+        # has no such ConfigMap, and one whose tenant has no site/ yet
+        # gets an empty one — either way the pod boots, and the site
+        # host answers 404 rather than the application.
+        - name: boss-site
+          configMap:
+            name: boss-site
+            optional: true
         # Break-glass PUBLIC credential records (boss-break-glass-
         # credentials.yaml — the manifest header is the ceremony doc).
         # `optional` so a deployment that has not adopted the ceremony
@@ -422,6 +434,20 @@ spec:
             # until David flips it; the flip is two lines and
             # instances.toml names both.
             - {name: BOSS_TENANT_DIR, value: /opt/boss/tenant}
+            # THE TENANT SITE (design b64c4377, decided 2026-09-17;
+            # backlog c8f6b233). A request whose Host is BOSS_SITE_HOST
+            # is answered from BOSS_SITE_DIR with no session — the
+            # company website, static pages from the tenant repo's
+            # site/, delivered by the converge as the boss-site
+            # ConfigMap below (site_stage, beside boss-tenant). The host
+            # is the instance's `site` in infra/cluster/instances.toml,
+            # substituted per instance by render-instance.sh: an
+            # instance without one renders "" here, which the gateway
+            # reads as "no site" (boss-gateway site.rs), and nothing
+            # else changes. The tunnel routes the site hostname to this
+            # same gateway (render-tunnel-config.sh).
+            - {name: BOSS_SITE_HOST, value: "www.algedonic.dev"}
+            - {name: BOSS_SITE_DIR, value: /opt/boss/site}
             # A PATH, NOT A KEY — the name is a trap and this comment is
             # the guard rail. boss-gateway reads this variable as a
             # filename and loads the key from it, generating one only if
@@ -611,6 +637,10 @@ spec:
             # BOSS_TENANT_DIR names for one. Empty on an image-sourced
             # instance, and nothing reads it there.
             - {name: boss-tenant, mountPath: /opt/boss/tenant/seeds, readOnly: true}
+            # The delivered site (the boss-site volume above), at the
+            # directory BOSS_SITE_DIR names. Empty on an instance
+            # without a site, and nothing reads it there.
+            - {name: boss-site, mountPath: /opt/boss/site, readOnly: true}
             # Public break-glass credential records; the gateway only
             # ever reads them (enrollment emits records for a commit,
             # never a write here — the manifest header explains why).

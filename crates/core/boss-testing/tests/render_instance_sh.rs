@@ -260,8 +260,10 @@ fn the_prod_render_is_byte_identical_to_the_tree() {
         );
     }
     // The stream form says the same thing, file after file — with the
-    // source's own four parameters, read from instances.toml.
+    // source's own parameters, read from instances.toml (the site is
+    // the optional sixth; a_tenant_site_per_instance.rs).
     let prod = &instances_of(&repo_root())["prod"];
+    let site = prod.get("site").cloned().unwrap_or_default();
     let (rc, stream, err) = run(
         &repo_root(),
         &[
@@ -270,6 +272,7 @@ fn the_prod_render_is_byte_identical_to_the_tree() {
             &prod["sim"],
             &prod["hostname"],
             &prod["guest"],
+            &site,
         ],
     );
     assert_eq!(rc, 0, "stream render: {err}");

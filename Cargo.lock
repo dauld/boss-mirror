@@ -1062,6 +1062,7 @@ dependencies = [
  "boss-core",
  "boss-events",
  "boss-ports",
+ "boss-testing",
  "bytes",
  "chrono",
  "futures",

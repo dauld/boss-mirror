@@ -112,8 +112,9 @@
 #   undeclared-objects.sh --exemptions
 #   undeclared-objects.sh --exemptions-derived
 #       the generated per-instance objects (ConfigMap/<ns>/boss-tenant
-#       for every tenant_repo instance in instances.toml) — exempt when
-#       present, never stale when absent
+#       for every tenant_repo instance in instances.toml, and
+#       ConfigMap/<ns>/boss-site for every one that declares a site) —
+#       exempt when present, never stale when absent
 #       the exemption entries, as `Kind/ns/name` or `Kind/name`.
 #   undeclared-objects.sh --kubectl
 #       the resolved kubectl argv, so a caller needing its own kubectl
@@ -210,15 +211,24 @@ EXEMPT=(
 # (d7d23650) — a hand entry could not be added earlier because the lint
 # refuses an exemption for an object the cluster does not hold yet. Read
 # with awk the way render-instance.sh reads the file (one key per line).
+# An instance that also declares a `site` (design b64c4377) gets its
+# site delivered the same way, as ConfigMap/<namespace>/boss-site.
 derived_exemptions() {
     local f="$TREE/infra/cluster/instances.toml"
     [ -f "$f" ] || return 0
     awk '
-        function flush() { if (ns != "" && repo != "") print "ConfigMap/" ns "/boss-tenant"; ns = ""; repo = "" }
+        function flush() {
+            if (ns != "" && repo != "") {
+                print "ConfigMap/" ns "/boss-tenant"
+                if (site != "") print "ConfigMap/" ns "/boss-site"
+            }
+            ns = ""; repo = ""; site = ""
+        }
         /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
         /^\[/ { flush(); next }
         $1 == "namespace"   { sub(/^[^=]*=[[:space:]]*/, ""); gsub(/"/, ""); ns = $0; next }
         $1 == "tenant_repo" { sub(/^[^=]*=[[:space:]]*/, ""); gsub(/"/, ""); repo = $0; next }
+        $1 == "site"        { sub(/^[^=]*=[[:space:]]*/, ""); gsub(/"/, ""); site = $0; next }
         END { flush() }
     ' "$f"
 }
