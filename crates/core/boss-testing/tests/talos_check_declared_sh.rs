@@ -218,12 +218,15 @@ fn run(args: &[&str], stdin: &str, patches: Option<&Path>, path_env: Option<&Pat
         cmd.env("PATH", p);
     }
     let mut child = cmd.spawn().expect("spawn check-declared.sh");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(stdin.as_bytes())
-        .unwrap();
+    // A usage refusal exits before it reads stdin, so the write races
+    // the exit and loses about one run in four with EPIPE (backlog
+    // 28f29f0b). A closed pipe here is the child's verdict, not the
+    // test's failure: the verdict is read from the exit status below.
+    match child.stdin.take().unwrap().write_all(stdin.as_bytes()) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+        Err(e) => panic!("write stdin to check-declared.sh: {e}"),
+    }
     child.wait_with_output().unwrap()
 }
 
