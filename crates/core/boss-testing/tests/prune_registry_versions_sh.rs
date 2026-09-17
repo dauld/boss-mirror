@@ -41,6 +41,14 @@
 //!   * THE VERB FILE serves the forge, is MUTATING, names David and the
 //!     packet, takes mode plus an optional keep count, and declares a
 //!     timeout for ~1,400 versions of reads.
+//!   * THE VERDICT COMES FIRST (backlog 5323f3ef, measured 2026-09-17
+//!     05:27Z on the first dry run, ops-request 279b8659): the verb
+//!     printed 1,313 per-version lines (165 KB) and the JSON record
+//!     LAST; the ops runner keeps the first 100 KB, so the packet held
+//!     the plan's head and none of its verdict. Now the record and the
+//!     summary precede the per-version list in the runner's combined
+//!     capture, and the full list is a file on the forge the record
+//!     names — refused before any DELETE when it cannot be written.
 
 use boss_testing::{repo_root, scratch_dir, write_exec, write_file};
 use std::path::PathBuf;
@@ -144,6 +152,7 @@ struct Case {
     docker_config: PathBuf,
     stamp: PathBuf,
     df_path: PathBuf,
+    list_dir: PathBuf,
 }
 
 fn forty(seven: &str) -> String {
@@ -169,6 +178,10 @@ impl Case {
         let stamp = root.join("boss-last-built");
         let df_path = root.join("forgejo-data");
         std::fs::create_dir_all(&df_path).unwrap();
+        // Where the per-version list lands (the forge's
+        // /var/backups/boss/registry-prune in production): not created
+        // here — the script creates it.
+        let list_dir = root.join("registry-prune");
 
         write_file(
             &docker_config,
@@ -414,6 +427,7 @@ exit 1
             docker_config,
             stamp,
             df_path,
+            list_dir,
         }
     }
 
@@ -423,9 +437,39 @@ exit 1
 
     fn run_env(&self, args: &[&str], extra: &[(&str, String)]) -> (i32, String) {
         let mut cmd = Command::new("bash");
-        cmd.arg(repo_root().join(SCRIPT))
-            .args(args)
-            .env_clear()
+        cmd.arg(repo_root().join(SCRIPT)).args(args);
+        self.env(&mut cmd, extra);
+        let out = cmd.output().expect("prune-registry-versions.sh runs");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.code().unwrap_or(-1), text)
+    }
+
+    /// The streams interleaved the way the ops runner captures them
+    /// (`> raw 2>&1`, ops-runner.sh) — the only reading in which the
+    /// ORDER of the record against the per-version lines means
+    /// anything, since the runner keeps the first 100 KB of that file.
+    fn run_combined(&self, args: &[&str]) -> (i32, String) {
+        let mut cmd = Command::new("bash");
+        cmd.arg("-c")
+            .arg(r#"exec bash "$@" 2>&1"#)
+            .arg("_")
+            .arg(repo_root().join(SCRIPT))
+            .args(args);
+        self.env(&mut cmd, &[]);
+        let out = cmd.output().expect("prune-registry-versions.sh runs");
+        assert!(out.stderr.is_empty(), "stderr was not merged");
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    }
+
+    fn env(&self, cmd: &mut Command, extra: &[(&str, String)]) {
+        cmd.env_clear()
             .env(
                 "PATH",
                 format!(
@@ -440,6 +484,7 @@ exit 1
             .env("BOSS_PRUNE_DOCKER_CONFIG", &self.docker_config)
             .env("BOSS_FORGE_LAST_BUILT", &self.stamp)
             .env("BOSS_PRUNE_DF_PATH", &self.df_path)
+            .env("BOSS_PRUNE_LIST_DIR", &self.list_dir)
             .env("STUB_DIR", &self.stub)
             .env("STUB_CURL_LOG", &self.curl_log)
             .env("STUB_DELETES", &self.deletes)
@@ -449,13 +494,6 @@ exit 1
         for (k, v) in extra {
             cmd.env(k, v);
         }
-        let out = cmd.output().expect("prune-registry-versions.sh runs");
-        let text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        (out.status.code().unwrap_or(-1), text)
     }
 
     /// The DELETEs the registry saw, in order, as `name version`.
@@ -477,6 +515,10 @@ exit 1
 
     /// The one JSON record line on stdout — the line that names the
     /// verb (a failure also echoes the forge's JSON body, on stderr).
+    /// Found by content, not position; in the runner's combined capture
+    /// it is the FIRST JSON line, and
+    /// `the_verdict_precedes_the_per_version_list_and_the_list_is_a_named_file`
+    /// pins that.
     fn record(&self, text: &str) -> serde_json::Value {
         text.lines()
             .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
@@ -931,6 +973,129 @@ fn a_failed_delete_mid_way_stops_and_states_what_was_deleted() {
     let r = c.record(&out);
     assert_eq!(r["packages"]["boss"]["deleted"], 1, "{r}");
     assert_eq!(r["packages"]["boss"]["failed"], 1, "{r}");
+}
+
+// ---------------------------------------------------------------------------
+// The verdict comes first, and the full list is a file.
+// ---------------------------------------------------------------------------
+
+/// Backlog 5323f3ef (measured 2026-09-17 05:27Z, ops-request 279b8659):
+/// 1,313 `would DELETE` lines (165 KB) and the record printed last; the
+/// runner kept the first 100 KB, and the packet held no verdict. The
+/// order is judged on the streams merged the way the runner merges
+/// them, and the record must sit inside the first 4 KB — the window
+/// the landing probe reads on the next ops-request.
+#[test]
+fn the_verdict_precedes_the_per_version_list_and_the_list_is_a_named_file() {
+    if !has("jq") {
+        return;
+    }
+    for (mode, summary) in [("--dry-run", "DRY RUN"), ("--for-real", "OK —")] {
+        let c = Case::new(&format!("verdict-first{mode}"));
+        let (rc, out) = c.run_combined(&[mode]);
+        assert_eq!(rc, 0, "{mode}: {out}");
+        let at = |needle: &str| {
+            out.find(needle)
+                .unwrap_or_else(|| panic!("{mode}: no `{needle}` in:\n{out}"))
+        };
+        let record_at = at(r#"{"verb":"prune-registry-versions""#);
+        let first_delete = at("would DELETE ");
+        let first_unclassified = at("unclassified boss");
+        let summary_at = at(summary);
+        assert!(
+            record_at < first_delete && record_at < first_unclassified,
+            "{mode}: the record follows a per-version line (record at {record_at}, \
+             first would DELETE at {first_delete}, first unclassified at {first_unclassified}):\n{out}"
+        );
+        assert!(
+            summary_at < first_delete,
+            "{mode}: the summary line follows the per-version list:\n{out}"
+        );
+        assert!(
+            record_at < 4096,
+            "{mode}: the record starts at byte {record_at}, outside the first 4 KB:\n{out}"
+        );
+        // Every plan line is still printed, after the verdict.
+        contains_all(
+            &out,
+            &[
+                "would DELETE boss:01d0001",
+                &format!("would DELETE boss-ci:{}", digest("ci-old1")),
+                "unclassified boss:v1",
+            ],
+            mode,
+        );
+
+        // The record names the list file, under the directory the verb
+        // was given, and the file holds every per-version line.
+        let r = c.record(&out);
+        let list_file = PathBuf::from(
+            r["list_file"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{mode}: the record names no list_file: {r}")),
+        );
+        assert!(
+            list_file.starts_with(&c.list_dir),
+            "{mode}: {} is not under {}",
+            list_file.display(),
+            c.list_dir.display()
+        );
+        assert_eq!(list_file.extension().and_then(|e| e.to_str()), Some("txt"));
+        let list = std::fs::read_to_string(&list_file)
+            .unwrap_or_else(|e| panic!("{mode}: {} unreadable: {e}", list_file.display()));
+        contains_all(
+            &list,
+            &[
+                mode,
+                "would DELETE boss:01d0001",
+                "would DELETE boss:deadbee",
+                &format!("would DELETE boss:{}", digest("orphan-old")),
+                &format!("would DELETE boss-ci:{}", forty("01d0001")),
+                "unclassified boss:v1",
+                "unclassified boss-ci:rust1.96",
+            ],
+            "the list file",
+        );
+        no_credential(&list, "the list file");
+        if mode == "--for-real" {
+            // The outcomes ride the same file: what went, by name.
+            contains_all(
+                &list,
+                &["deleted boss:01d0001", "deleted boss:deadbee"],
+                "the list file's outcomes",
+            );
+        } else {
+            assert!(!list.contains("deleted boss"), "a dry run deleted: {list}");
+        }
+    }
+}
+
+/// The file is written BEFORE the first DELETE, and a file that cannot
+/// be written is a refusal: a real run whose only full record is the
+/// runner's 100 KB window would be the defect again.
+#[test]
+fn an_unwritable_list_file_refuses_before_any_delete() {
+    if !has("jq") {
+        return;
+    }
+    let c = Case::new("list-unwritable");
+    // The list "directory" is a plain file, so it cannot be created.
+    write_file(&c.list_dir, "not a directory\n");
+    for mode in ["--dry-run", "--for-real"] {
+        let (rc, out) = c.run(&[mode]);
+        assert_eq!(rc, 2, "{mode}: {out}");
+        contains_all(
+            &out,
+            &["REFUSED", "registry-prune", "Nothing was deleted"],
+            mode,
+        );
+        assert!(
+            c.deleted().is_empty(),
+            "{mode}: a DELETE was sent without the list file: {:?}",
+            c.deleted()
+        );
+        no_credential(&out, mode);
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -20,8 +20,8 @@ Three verbs make the contract usable:
 - `boss tenant check <dir>` validates a directory **with the product's
   own loaders** — `boss_jobs::seed_loader` for `workflows.toml` (with
   its viability lint), `boss_policy_client`'s grant loader, the classes
-  batch endpoint's row type, `boss_people::Employee`, `boss_core`'s
-  `BusinessCalendar` and the gateway's `TenantToml` — and reports one
+  and locations batch endpoints' row types, `boss_people::Employee`,
+  `boss_core`'s `BusinessCalendar` and the gateway's `TenantToml` — and reports one
   line per file: **OK** / **MISSING** (a required file) / **INVALID**
   (with the loader's own error, never rephrased) / **UNKNOWN** (a file
   the contract does not name). Exit 0 when nothing is MISSING or
@@ -29,9 +29,9 @@ Three verbs make the contract usable:
 - `boss tenant publish <dir> [--gateway <url>] [--dry-run]` publishes
   a directory into a running deployment through the **same shared
   doors the tenant engines' prepare compose** (backlog `ee7b62bb`):
-  classes → business calendars → the company Subject → policy grants →
-  people (two passes) → Workflows last, after a barrier on the people
-  projection. Idempotent (insert-if-absent, upsert, 409 swallowed, a
+  classes → locations → business calendars → the company Subject →
+  policy grants → people (two passes) → Workflows, after a barrier on
+  the people projection → sensors last. Idempotent (insert-if-absent, upsert, 409 swallowed, a
   kind an authoring Job already published is skipped), signed as
   `automation:tenant-seed` and **not** as a sim chain. One line per
   file present: the door and a count, or `skipped: <why>` for a file
@@ -58,12 +58,17 @@ tenant engines' prepare steps, the seed shell scripts, the gate's
 scoping rules and the live-protocols lint. Three findings worth
 stating plainly:
 
-- **Two shipped files have no reader.** `seeds/locations.toml` and
-  `seeds/subject_kinds.toml` are authored in the brewery bundle and
-  nothing consumes them: no seeder POSTs locations, so an
-  `employees.json` row's `location` must already exist in the
-  registry. The table says "NO READER" rather than implying one, and
-  `check` parses them conservatively.
+- **Two shipped files had no reader; one still has none.**
+  `seeds/locations.toml` and `seeds/subject_kinds.toml` are authored
+  in the brewery bundle and, when measured, nothing consumed either:
+  no seeder POSTed locations, so an `employees.json` row's `location`
+  had to already exist in the registry — which is how the first real
+  tenant's founder came to sit at the platform's `loc-hq` (backlog
+  `1ec8312a`). On 2026-09-17 locations gained their door, `POST
+  /api/locations/batch` (insert-if-absent by id), sent by `publish`
+  before the roster; `subject_kinds.toml` still has none, the table
+  says "NO READER" rather than implying one, and `check` parses it
+  conservatively.
 - **The manifest has two readers with two strictnesses.** The gateway
   reads `[meta]`/`[modules]`/`[labels]` and ignores the rest; the
   simulator's `TenantConfig` additionally requires `seed`,
@@ -94,7 +99,7 @@ stating plainly:
 | `seeds/operator_hires.toml` | no | boss-brewery-engine prepare (`seed_brewery_operator_hires`): each `[[hire]]` POSTed to /api/people as a `boss_people::Employee` | `[[hire]]` rows in the Employee shape above | no |
 | `seeds/business_calendars.json` | no | POST /api/calendar/business-calendars/batch as `Vec<boss_core::calendar::BusinessCalendar>` (the brewery engine's prepare); the dispatcher's timing triggers and the sim resolve business days from it | JSON array of {code, name, weekend: [0..6 Mon=0], closed: [YYYY-MM-DD]} | yes |
 | `seeds/sensors.toml` | no | POST /api/sensors/batch (boss-jobs, insert-if-absent by id) — sent by `boss tenant publish` as the tenant's declarations; the dispatcher's `sensor.poll` handler reads the registry every 5 minutes and polls each due sensor (design 14c9b2ad) | `[[sensor]]` rows: id, source (`stripe`), credential (a `credentials` registry id), every_minutes, opens (the workflow kind one reading opens), subject_kind, enabled? — validated by `boss_jobs::sensors::load_sensors_toml` | yes |
-| `seeds/locations.toml` | no | NO READER (measured 2026-09-16): nothing seeds locations from a file, so an `employees.json` `location` id must already exist in the registry. Check parses the rows conservatively | `[[location]]` rows: id, name, kind, timezone (+ parent_id, latitude, longitude, address, metadata) — the `locations` table's columns | yes |
+| `seeds/locations.toml` | no | POST /api/locations/batch, one boss-locations `http::LocationInput` per row (insert-if-absent by id) — sent by `boss tenant publish` BEFORE the roster, because an `employees.json` `location` is a foreign key into the registry (backlog 1ec8312a; until 2026-09-17 nothing read this file) | `[[location]]` rows: id, name, kind, timezone (+ parent_id, latitude, longitude, address, account_id, metadata) — the `locations` table's columns | yes |
 | `seeds/subject_kinds.toml` | no | NO READER (measured 2026-09-16). Check parses the rows conservatively | `[[subject_kind]]` rows: kind, label, description, owning_team, sort_order | no |
 | `seeds/accounts.toml` | no | boss-brewery-engine, `include_str!` at compile time from examples/brewery/seeds — a copy in a tenant directory is never read | brewery engine data (`names`, `[[city]]`); check parses TOML only | no |
 | `seeds/vendors.toml` | no | boss-brewery-engine, `include_str!` at compile time — never read from a tenant directory | brewery engine data (`[[vendor]]`); check parses TOML only | no |

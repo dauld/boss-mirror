@@ -41,3 +41,9 @@ sqlx = { version = "0.8", default-features = false, features = ["macros", "runti
 
 [lints]
 workspace = true
+
+# The batch door's Pg proof (1ec8312a) reaches the adapter, so a
+# default-features build must not try to compile it.
+[[test]]
+name = "locations_pg"
+required-features = ["postgres"]

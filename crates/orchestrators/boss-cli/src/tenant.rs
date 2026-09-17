@@ -17,17 +17,19 @@
 //! THE CONTRACT IS MEASURED, NOT DESIGNED. [`CONTRACT`] is the list of
 //! files the product actually READS from a tenant directory, found by
 //! grepping every reader on 2026-09-16 (each entry's `read_by` names
-//! it). Two files the examples ship — `seeds/locations.toml` and
-//! `seeds/subject_kinds.toml` — have NO reader today, and the table
-//! says so rather than implying one. `docs/tenant-contract.md` carries
+//! it). One file the examples ship — `seeds/subject_kinds.toml` — has
+//! NO reader today, and the table says so rather than implying one
+//! (`seeds/locations.toml` was the other until its door landed on
+//! 2026-09-17, backlog 1ec8312a). `docs/tenant-contract.md` carries
 //! the same table between two markers; a test holds the two equal
 //! (CLAUDE.md §9a), and `boss tenant contract` prints it for pasting.
 //!
 //! ONE LOADER, TWO DOORS. `check` validates each file with the type
 //! or loader the product reads it with — `boss_jobs::seed_loader` for
 //! workflows (with its viability lint), `boss_policy_client`'s grant
-//! loader, the classes batch endpoint's `ClassInput`, `boss_people`'s
-//! `Employee`, `boss_core`'s `BusinessCalendar` and `TenantToml`. A
+//! loader, the classes batch endpoint's `ClassInput`, the locations
+//! batch endpoint's `LocationInput`, `boss_people`'s `Employee`,
+//! `boss_core`'s `BusinessCalendar` and `TenantToml`. A
 //! second parser would be a second contract that drifts. Where a file
 //! has no reader, the parse is conservative and the table names that.
 //!
@@ -180,11 +182,12 @@ pub const CONTRACT: &[Entry] = &[
     Entry {
         paths: &["seeds/locations.toml"],
         required: false,
-        read_by: "NO READER (measured 2026-09-16): nothing seeds locations from a file, so an \
-                  `employees.json` `location` id must already exist in the registry. \
-                  Check parses the rows conservatively",
+        read_by: "POST /api/locations/batch, one boss-locations `http::LocationInput` per row \
+                  (insert-if-absent by id) — sent by `boss tenant publish` BEFORE the roster, \
+                  because an `employees.json` `location` is a foreign key into the registry \
+                  (backlog 1ec8312a; until 2026-09-17 nothing read this file)",
         shape: "`[[location]]` rows: id, name, kind, timezone (+ parent_id, latitude, \
-                longitude, address, metadata) — the `locations` table's columns",
+                longitude, address, account_id, metadata) — the `locations` table's columns",
         parse: parse_locations,
         scaffold: Some(scaffold_locations),
     },
@@ -402,22 +405,15 @@ fn parse_sensors(path: &Path, _: &Ctx) -> Result<String, String> {
     })
 }
 
-/// Conservative row shape for a file with no reader (see the entry):
-/// the `locations` table's NOT NULL columns, each read into the
-/// detail line so a missing one is refused by name.
-#[derive(serde::Deserialize)]
-struct LocationRow {
-    id: String,
-    name: String,
-    kind: String,
-    timezone: String,
-}
-
+/// The batch door's own row type (backlog 1ec8312a): what publish
+/// sends is what check judged, so a row the door would refuse is
+/// INVALID here, by the door's own field name.
 fn parse_locations(path: &Path, _: &Ctx) -> Result<String, String> {
+    use boss_locations::http::LocationInput;
     #[derive(serde::Deserialize)]
     struct Bundle {
         #[serde(default)]
-        location: Vec<LocationRow>,
+        location: Vec<LocationInput>,
     }
     let text = read(path)?;
     let b: Bundle = toml::from_str(&text).map_err(|e| e.to_string())?;
@@ -427,11 +423,7 @@ fn parse_locations(path: &Path, _: &Ctx) -> Result<String, String> {
         .iter()
         .map(|l| format!("{} ({}, {}, {})", l.id, l.name, l.kind, l.timezone))
         .collect();
-    Ok(format!(
-        "{} locations: {} (no reader consumes this file today)",
-        rows.len(),
-        rows.join("; ")
-    ))
+    Ok(format!("{} locations: {}", rows.len(), rows.join("; ")))
 }
 
 fn parse_subject_kinds(path: &Path, _: &Ctx) -> Result<String, String> {
@@ -965,10 +957,9 @@ fn scaffold_locations(s: &Scaffold) -> String {
 #\n\
 # One [[location]] per row of the `locations` table (id, name, kind,\n\
 # timezone; parent_id / latitude / longitude / address / metadata are\n\
-# optional). NOTE: measured 2026-09-16, nothing in the product seeds\n\
-# locations from this file yet — an employee's `location` must already\n\
-# exist in the registry. The file is here so the shape is authored in\n\
-# one place when a seeder lands.\n\
+# optional). Published to the registry by `boss tenant publish`\n\
+# (POST /api/locations/batch, insert-if-absent by id) BEFORE the\n\
+# roster, because an employee's `location` must name a row here.\n\
 \n\
 [[location]]\n\
 id = \"loc-{name}-hq\"\n\

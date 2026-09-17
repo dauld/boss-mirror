@@ -57,6 +57,20 @@ impl LocationRepository for InMemoryLocations {
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
     }
+
+    async fn batch_upsert(&self, incoming: &[Location]) -> Result<u64, LocationError> {
+        // Mirror the Postgres `ON CONFLICT (id) DO NOTHING`: an id
+        // already present is left untouched; only new rows append.
+        let mut rows = self.rows.write().expect("rwlock poisoned");
+        let mut inserted: u64 = 0;
+        for r in incoming {
+            if !rows.iter().any(|l| l.id == r.id) {
+                rows.push(r.clone());
+                inserted += 1;
+            }
+        }
+        Ok(inserted)
+    }
 }
 
 #[cfg(test)]
@@ -164,6 +178,24 @@ mod tests {
             vec!["loc-bay", "loc-mission"],
             "only direct children, not transitive"
         );
+    }
+
+    /// Insert-if-absent by id, mirroring the Postgres `ON CONFLICT (id)
+    /// DO NOTHING` (backlog 1ec8312a, 2026-09-17): a re-run of a
+    /// tenant's publish leaves an existing row exactly as it was.
+    #[tokio::test]
+    async fn batch_upsert_inserts_if_absent_and_counts_only_new_rows() {
+        let repo = InMemoryLocations::new(vec![loc("loc-hq", "HQ", "hq", None, false)]);
+        let inserted = repo
+            .batch_upsert(&[
+                loc("loc-hq", "HQ renamed", "hq", None, false),
+                loc("loc-lab", "Lab", "office", Some("loc-hq"), false),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(inserted, 1, "the existing id is left untouched");
+        assert_eq!(repo.get("loc-hq").await.unwrap().unwrap().name, "HQ");
+        assert!(repo.exists_active("loc-lab").await.unwrap());
     }
 
     #[tokio::test]

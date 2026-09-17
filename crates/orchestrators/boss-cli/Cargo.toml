@@ -23,6 +23,9 @@ boss-jobs = { path = "../../core/boss-jobs" }
 # the people row, the policy grant loader, and the manifest in
 # boss-core. A second parser would be a second contract.
 boss-classes = { path = "../../core/boss-classes" }
+# The locations batch row, for the same reason (1ec8312a): check reads
+# `seeds/locations.toml` with the door's own `LocationInput`.
+boss-locations = { path = "../../core/boss-locations" }
 boss-people = { path = "../../modules/boss-people" }
 boss-policy-client = { path = "../../core/boss-policy-client" }
 # `boss tenant publish` sends a tenant through the SAME doors the two

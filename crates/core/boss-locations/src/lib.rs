@@ -4,8 +4,10 @@
 //! See `docs/architecture-decisions.md` §Locations. The
 //! `Location` type lives in `boss-core::primitives`; this crate
 //! adds the persistence port, in-memory + Postgres adapters, and
-//! a read-only HTTP API. Authoring (POST/PUT/DELETE) lands later
-//! when the admin UI does.
+//! an HTTP API: open reads plus ONE write, `POST /api/locations/batch`
+//! (insert-if-absent by id), the door a tenant's `seeds/locations.toml`
+//! goes through (backlog 1ec8312a, 2026-09-17). Authoring (edit /
+//! retire) lands later when the admin UI does.
 //!
 //! Locations show up in two grammatical positions:
 //! - **Subject** — the place itself, owned by this crate.

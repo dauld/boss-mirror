@@ -3,13 +3,14 @@
 //! we have our seeding setup properly for our new, real instance").
 //!
 //! What runs here is what the pod runs: the schema on an empty TestDb,
-//! the REAL people router (`PgPeople`) and the REAL policy router
-//! (`PgPolicy`, after the same default-rule reconcile boss-policy-api
-//! runs at boot) on one ephemeral port, then the shipped `boss`
-//! binary's `tenant publish --gateway` against a verbatim copy of the
-//! real company's tenant directory (tests/fixtures/tenant-algedonic,
-//! its HEAD 20f3a9e — no secrets: the manifest says so and a grep
-//! agrees), then the operator-baseline seed's library entry
+//! the REAL people router (`PgPeople`), the REAL locations router
+//! (`PgLocations`) and the REAL policy router (`PgPolicy`, after the
+//! same default-rule reconcile boss-policy-api runs at boot) on one
+//! ephemeral port, then the shipped `boss` binary's `tenant publish
+//! --gateway` against a verbatim copy of the real company's tenant
+//! directory (tests/fixtures/tenant-algedonic, its HEAD 20f3a9e — no
+//! secrets: the manifest says so and a grep agrees), then the
+//! operator-baseline seed's library entry
 //! (`boss_people::operator_baseline::seed`, the binary's whole body)
 //! with BOSS_BOOTSTRAP_ADMIN_EMAIL set to the founder's address, in
 //! the order tenant-launch.sh now runs them for a tenant with no
@@ -31,15 +32,18 @@
 //! way a second publish does. `receive-a-sponsorship active` is
 //! therefore NOT asserted here (follow-up: a jobs-router harness).
 //!
-//! WHAT IT FOUND. The real tenant's founder declares `location =
-//! "loc-algedonic-hq"`, and no door seeds a tenant's locations
-//! (docs/tenant-contract.md: seeds/locations.toml has NO READER) —
-//! `employees.location` is a foreign key into a registry only the
-//! schema fills. Run verbatim, the publish is REFUSED at employees.json
-//! naming the location, and the first case below pins that refusal so
-//! it stays loud (it used to be a 409 swallowed as "already there").
-//! The second case clears that one field, the way a locations door
-//! will, and proves the rest of the path.
+//! WHAT IT FOUND, AND WHAT CLOSED IT. On 2026-09-16 the real tenant's
+//! founder declared `location = "loc-algedonic-hq"` and no door seeded
+//! a tenant's locations — `employees.location` is a foreign key into
+//! a registry only the schema filled — so run verbatim the publish
+//! was REFUSED at employees.json naming the location (the first case
+//! pinned that refusal loud; it used to be a 409 swallowed as "already
+//! there"), and the tenant worked around it by sitting the founder at
+//! the platform's `loc-hq`. Backlog 1ec8312a (2026-09-17) added the
+//! door: `POST /api/locations/batch`, sent by `boss tenant publish`
+//! BEFORE the roster. The first case now proves the verbatim tenant
+//! lands and that the location is there before the employee — the
+//! foreign key is the machine's own proof of the order.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -58,9 +62,10 @@ const OPERATOR_HIRES: &str = "infra/operator-baseline/operator_hires.toml";
 const FOUNDER_EMAIL: &str = "david@algedonic.dev";
 const FOUNDER_ID: &str = "emp-david";
 
-/// The real people and policy routers over `pool`, plus a stub for the
-/// four doors outside this proof, on one ephemeral port — the shape
-/// `--gateway` expects (every /api prefix through one base).
+/// The real people, locations and policy routers over `pool`, plus a
+/// stub for the four doors outside this proof, on one ephemeral port
+/// — the shape `--gateway` expects (every /api prefix through one
+/// base).
 async fn serve(pool: PgPool) -> String {
     let people = Arc::new(boss_people::PgPeople::new(pool.clone()));
     let policy: Arc<dyn PolicyClient> = Arc::new(PermissivePolicyClient);
@@ -70,6 +75,12 @@ async fn serve(pool: PgPool) -> String {
         policy: Some(policy),
         subject_kinds: None,
         clock: Arc::new(boss_clock_client::WallClockClient),
+    });
+    // The locations door (backlog 1ec8312a): the real router over the
+    // same pool, so `employees.location` FKs into rows the tenant
+    // itself declared.
+    let locations_router = boss_locations::http::router(boss_locations::http::LocationsApiState {
+        locations: Arc::new(boss_locations::PgLocations::new(pool.clone())),
     });
     // What boss-policy-api does before it binds: reconcile the code
     // defaults (platform-admin / audit-readonly / smoke-tester / guest)
@@ -111,7 +122,10 @@ async fn serve(pool: PgPool) -> String {
             "/api/workflows/{kind}",
             get(|| async { Json(json!({"authoring_job_id": "outside-this-proof"})) }),
         );
-    let app = people_router.merge(policy_router).merge(outside_this_proof);
+    let app = people_router
+        .merge(locations_router)
+        .merge(policy_router)
+        .merge(outside_this_proof);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -182,24 +196,76 @@ async fn holders_of(pool: &PgPool, email: &str) -> Vec<(String, Option<String>)>
         .unwrap()
 }
 
+/// The tenant's own site lands BEFORE the employee who sits at it
+/// (backlog 1ec8312a). The order is proved two ways: the publish
+/// prints the locations line above the employees line, and the
+/// database holds the employee's FK into a row the schema never
+/// seeded — Postgres would have refused the row otherwise, which is
+/// exactly what it did on 2026-09-16.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_real_tenant_verbatim_is_refused_loudly_at_its_unseeded_location() {
+async fn the_real_tenant_verbatim_lands_its_location_before_its_founder() {
     let db = TestDb::new().await;
     let base = serve(db.pool.clone()).await;
     let dir = tenant_copy("verbatim");
+    let before: Option<String> =
+        sqlx::query_scalar("SELECT id FROM locations WHERE id = 'loc-algedonic-hq'")
+            .fetch_optional(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(before, None, "the schema does not seed the tenant's site");
 
     let (ok, out) = boss_tenant_publish(&dir, &base);
+    assert!(ok, "the verbatim tenant publishes:\n{out}");
+    let line_of = |needle: &str| {
+        out.lines()
+            .position(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} has a line:\n{out}"))
+    };
     assert!(
-        !ok,
-        "the verbatim tenant must NOT publish: its founder's location has no door\n{out}"
+        line_of("seeds/locations.toml") < line_of("seeds/employees.json"),
+        "the sites are sent before the roster:\n{out}"
     );
+    let locations_line = out
+        .lines()
+        .find(|l| l.contains("seeds/locations.toml"))
+        .unwrap();
     assert!(
-        out.contains("employees.json") && out.contains("location"),
-        "the refusal names the file and the field:\n{out}"
+        locations_line.contains("POST /api/locations/batch")
+            && locations_line.contains("received 1, inserted 1"),
+        "{locations_line}"
     );
+
+    let site: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT name, kind, timezone FROM locations WHERE id = 'loc-algedonic-hq' AND retired_at IS NULL",
+    )
+    .fetch_optional(&db.pool)
+    .await
+    .unwrap();
+    let (name, kind, timezone) = site.expect("the tenant's HQ landed");
+    assert_eq!(name, "Algedonic, LLC — HQ (remote)");
+    assert_eq!(kind, "office");
+    assert_eq!(timezone, "America/Los_Angeles");
+    let at: Option<String> = sqlx::query_scalar("SELECT location FROM employees WHERE id = $1")
+        .bind(FOUNDER_ID)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        at.as_deref(),
+        Some("loc-algedonic-hq"),
+        "the founder sits at the tenant's own site, not the platform's loc-hq"
+    );
+
+    // A second publish inserts nothing and changes nothing.
+    let (ok, out) = boss_tenant_publish(&dir, &base);
+    assert!(ok, "the second publish:\n{out}");
+    let locations_line = out
+        .lines()
+        .find(|l| l.contains("seeds/locations.toml"))
+        .unwrap();
     assert!(
-        holders_of(&db.pool, FOUNDER_EMAIL).await.is_empty(),
-        "nothing landed for the founder"
+        locations_line.contains("received 1, inserted 0"),
+        "{locations_line}"
     );
 }
 
@@ -208,21 +274,8 @@ async fn tenant_then_baseline_leaves_one_founder_row_and_no_bootstrap_admin() {
     let db = TestDb::new().await;
     let base = serve(db.pool.clone()).await;
     let dir = tenant_copy("one-founder");
-    // The one field outside this proof (see the module doc): a
-    // location the registry does not hold. Cleared, not re-pointed at
-    // loc-hq — the fixture stays the real tenant's shape everywhere
-    // else.
-    let employees = dir.join("seeds/employees.json");
-    let text = std::fs::read_to_string(&employees).unwrap();
-    let cleared = text.replacen(
-        "\"location\": \"loc-algedonic-hq\"",
-        "\"location\": null",
-        1,
-    );
-    assert_ne!(text, cleared, "the fixture carries the real location");
-    std::fs::write(&employees, cleared).unwrap();
 
-    // 1. The tenant, through the shipped verb.
+    // 1. The tenant, verbatim, through the shipped verb.
     let (ok, out) = boss_tenant_publish(&dir, &base);
     assert!(ok, "boss tenant publish:\n{out}");
     assert!(

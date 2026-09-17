@@ -93,7 +93,17 @@
 #
 # The record is ONE JSON line on stdout; every human-readable line is
 # on stderr, so the ops runner's captured output carries both and a
-# reader can jq the last line.
+# reader can jq the FIRST JSON line. The order is load-bearing (backlog
+# 5323f3ef, measured 2026-09-17 05:27Z on the first dry run, ops-request
+# 279b8659): the verb printed 1,313 per-version lines (165 KB) and the
+# record LAST, the runner keeps the first 100 KB of a verb's output
+# (ops-runner.sh, OPS_OUTPUT_CAP), and the packet held the plan's head
+# and none of its verdict. So the summary and the record are printed
+# BEFORE the per-version lines, in both modes, and the full list is
+# also a file on the forge (BOSS_PRUNE_LIST_DIR/<stamp>.txt) the record
+# names — written before the first DELETE, and a file that cannot be
+# written is a refusal. A verb whose verdict is the last line must fit
+# in the runner's window; this one no longer relies on that.
 #
 # ENV (test seams — the ops-runner passes no packet-supplied environment,
 # only an argv built from the allowlist, so a packet cannot set these)
@@ -112,6 +122,10 @@
 #   BOSS_PRUNE_KEEP_HOURS      the freshness window (default: 24)
 #   BOSS_PRUNE_DF_PATH         the directory df measures (default:
 #                              /opt/forgejo/data; unmeasured if absent)
+#   BOSS_PRUNE_LIST_DIR        where the full per-version list is written
+#                              (default: /var/backups/boss/registry-prune,
+#                              beside the second stack's capture; the ops
+#                              runner is root there)
 #   BOSS_KUBECTL / KUBECONFIG  see undeclared-objects.sh; resolved once
 
 set -uo pipefail
@@ -193,6 +207,7 @@ fi
 DOCKER_CONFIG_FILE="${BOSS_PRUNE_DOCKER_CONFIG:-$OWNER_HOME/.docker/config.json}"
 STAMP_FILE="${BOSS_FORGE_LAST_BUILT:-$OWNER_HOME/.boss-last-built}"
 DF_PATH="${BOSS_PRUNE_DF_PATH:-/opt/forgejo/data}"
+LIST_DIR="${BOSS_PRUNE_LIST_DIR:-/var/backups/boss/registry-prune}"
 
 TMP=$(mktemp -d) || exit 1
 chmod 700 "$TMP"
@@ -413,10 +428,10 @@ if [ "$INDEX_OK" = 1 ]; then
     done < "$TMP/versions.tsv"
 fi
 UNREADABLE=$(grep -c . "$TMP/unreadable.tsv" || true)
-if [ "$UNREADABLE" -gt 0 ]; then
-    say "index: $UNREADABLE tag(s) whose manifest could not be read — kept, and every orphan is unclassified this pass:"
-    awk -F'\t' '{ printf "    %s:%s (HTTP %s)\n", $1, $2, $3 }' "$TMP/unreadable.tsv" >&2
-fi
+# The count only: each unreadable tag is named, with its HTTP code, in
+# the per-version list that follows the record (backlog 5323f3ef — a
+# per-tag list here sat before the verdict).
+[ "$UNREADABLE" -gt 0 ] && say "index: $UNREADABLE tag(s) whose manifest could not be read — kept, and every orphan is unclassified this pass (named below, after the record)"
 
 # --- the classification ------------------------------------------------------
 # One pass over the tags, one over the untagged children; the verdicts
@@ -476,12 +491,33 @@ while IFS=$'\t' read -r name ver created epoch; do
     printf '%s\t%s\t%s\n' "$name" "$ver" "$verdict" >> "$TMP/classes.tsv"
 done < "$TMP/versions.tsv"
 
-# --- the plan, on the packet ------------------------------------------------
+# --- the plan: the counts on the packet, the list in a file ----------------
+# The per-version lines are NOT printed here. Measured 2026-09-17 05:27Z
+# (backlog 5323f3ef): 1,313 of them, 165 KB, and the runner's 100 KB
+# window closed before the record. They go to a file on the forge now,
+# and onto the packet only AFTER the record and the verdict (the tail
+# of this script); the record names the file. Written before the first
+# DELETE so that a real run always has a full list somewhere, and a
+# file that cannot be written is a refusal — the alternative is the
+# defect again, on the run that cannot be repeated.
 for name in $PACKAGES; do
     awk -F'\t' -v n="$name" '$1 == n { c[$3]++ } END { printf "%s: %d keep, %d delete, %d unclassified\n", n, c["keep"], c["delete"], c["unclassified"] }' "$TMP/classes.tsv" | sed "s/^/$ME: plan: /" >&2
 done
-awk -F'\t' '$3 == "delete" { printf "would DELETE %s:%s — %s\n", $1, $2, $4 }' "$TMP/classes.tsv" | sed "s/^/$ME: /" >&2
-awk -F'\t' '$3 == "unclassified" { printf "unclassified %s:%s — %s (kept)\n", $1, $2, $4 }' "$TMP/classes.tsv" | sed "s/^/$ME: /" >&2
+plan_lines() { # -> one line per planned deletion, then per unclassified version
+    awk -F'\t' '$3 == "delete" { printf "would DELETE %s:%s — %s\n", $1, $2, $4 }' "$TMP/classes.tsv"
+    awk -F'\t' '$3 == "unclassified" { printf "unclassified %s:%s — %s (kept)\n", $1, $2, $4 }' "$TMP/classes.tsv"
+}
+LIST_FILE="$LIST_DIR/$(date -u +%Y%m%dT%H%M%SZ).txt"
+if ! mkdir -p "$LIST_DIR" 2> "$TMP/list.err" \
+    || ! { printf '# %s %s at %s — registry %s/%s, packages %s; the record is on the ops-request packet\n' \
+               "$ME" "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$REG_HOST" "$OWNER" "$PACKAGES"
+           plan_lines; } > "$LIST_FILE" 2>> "$TMP/list.err"; then
+    say "REFUSED — the per-version list cannot be written to $LIST_FILE (BOSS_PRUNE_LIST_DIR); the runner keeps only the first 100 KB of this output, so without the file a real run would leave no full record:"
+    sed 's/^/    /' "$TMP/list.err" >&2
+    say "  Nothing was deleted."
+    exit 2
+fi
+say "list: every per-version line is in $LIST_FILE on this host (the plan now; the outcomes appended after a real run)"
 
 disk_avail_kb() { # -> KB free where the registry lives, or "null"
     if [ -d "$DF_PATH" ]; then df -Pk "$DF_PATH" 2>/dev/null | awk 'NR == 2 { print $4 }' | grep -E '^[0-9]+$' || echo null
@@ -524,6 +560,11 @@ if [ "$DRY" = 0 ]; then
                 break ;;
         esac
     done < "$TMP/todo.tsv"
+    # The outcomes, by name, onto the same file as the plan. Best
+    # effort: the deletes have happened, and the record's counts are
+    # the verdict either way.
+    awk -F'\t' '{ printf "%s %s:%s\n", $3, $1, $2 }' "$TMP/deleted.tsv" >> "$LIST_FILE" 2>/dev/null \
+        || say "list: the outcomes could not be appended to $LIST_FILE; the record's counts stand"
 fi
 DF_AFTER=null
 [ "$DRY" = 0 ] && DF_AFTER=$(disk_avail_kb)
@@ -560,7 +601,7 @@ jq -n -c \
     --argjson packages "$PACKAGES_JSON" --argjson planned "$PLANNED_TOTAL" --argjson deleted "$DELETED_TOTAL" \
     --arg write_scope "$WRITE_SCOPE" --arg refused "$REFUSED_SCOPE" --arg fail "$FAIL_CODE" \
     --argjson df_before "$DF_BEFORE" --argjson df_after "$DF_AFTER" --arg df_path "$DF_PATH" \
-    --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+    --arg list_file "$LIST_FILE" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
     { verb: $verb, dry_run: $dry, registry: $registry, owner: $owner, packages_read: ($pkgs | split(" ")),
       keep: { live_main: $live_main, live: $live, stamp: $stamp, landed_trains: $landed,
               keep_trains: $keep_trains, trains_read: $lookback, latest: true, newer_than_hours: $hours },
@@ -569,22 +610,28 @@ jq -n -c \
       declared_bytes: null,
       bytes_note: "the packages API declares no sizes (files[].size is null, Forgejo 16.0.2); blobs are freed by Forgejo cleanup once unreferenced — read df on the packet",
       disk_path: $df_path, disk_avail_kb_before: $df_before, disk_avail_kb_after: $df_after,
-      write_scope: $write_scope }
+      list_file: $list_file, write_scope: $write_scope }
     + (if $refused == "" then {} else { refused: $refused } end)
     + (if $fail == "" then {} else { failed_http: $fail } end)
     + { at: $at }'
 
+# --- the verdict, then the list ------------------------------------------------
+# The verdict is one line right after the record; the per-version list
+# (the file's contents: the plan, and after a real run the outcomes)
+# comes LAST, so the runner's window holds the record and the verdict
+# whatever the list's length (backlog 5323f3ef).
+RC=0
 if [ "$DRY" = 1 ]; then
     say "DRY RUN — would delete $PLANNED_TOTAL version(s) across $PACKAGES; the keep set held $(grep -c . "$TMP/keys.tsv" || true) sha(s), latest, and $KEEP_HOURS h. Nothing was deleted."
-    exit 0
-fi
-if [ -n "$REFUSED_SCOPE" ]; then
+elif [ -n "$REFUSED_SCOPE" ]; then
     say "  $DELETED_TOTAL of $PLANNED_TOTAL deleted before the refusal. Nothing was deleted."
-    exit 2
-fi
-if [ -n "$FAIL_CODE" ]; then
+    RC=2
+elif [ -n "$FAIL_CODE" ]; then
     say "  deleted $DELETED_TOTAL of $PLANNED_TOTAL planned before the failure (HTTP $FAIL_CODE); the rest stay for the next pass."
-    exit 1
+    RC=1
+else
+    say "OK — deleted $DELETED_TOTAL of $PLANNED_TOTAL planned version(s) across $PACKAGES; df $DF_PATH before ${DF_BEFORE} KB, after ${DF_AFTER} KB free. The blobs are Forgejo's to free (its cleanup cron), so the difference lands later; read df on this packet, not a claim here."
 fi
-say "OK — deleted $DELETED_TOTAL of $PLANNED_TOTAL planned version(s) across $PACKAGES; df $DF_PATH before ${DF_BEFORE} KB, after ${DF_AFTER} KB free. The blobs are Forgejo's to free (its cleanup cron), so the difference lands later; read df on this packet, not a claim here."
-exit 0
+say "list: every line of $LIST_FILE follows; the runner may cut it, the file is whole"
+sed "s/^/$ME: /" "$LIST_FILE" >&2
+exit "$RC"

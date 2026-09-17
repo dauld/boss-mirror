@@ -1,4 +1,5 @@
-//! `boss-locations-api` service: read-only Locations registry over Postgres.
+//! `boss-locations-api` service: the Locations registry over Postgres —
+//! open reads, plus the tenant seed door `POST /api/locations/batch`.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

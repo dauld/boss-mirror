@@ -21,11 +21,12 @@
 //!
 //! THE PLAN IS THE CONTRACT, IN DEPENDENCY ORDER. [`plan`] walks the
 //! directory the way the engines' prepare does: classes (employee and
-//! account writes validate against them) → business calendars → the
-//! company Subject → policy grants → people (two passes: create, then
-//! link managers) → Workflows LAST, after a barrier on the people
+//! account writes validate against them) → locations (an employee's
+//! `location` FKs into them; backlog 1ec8312a) → business calendars →
+//! the company Subject → policy grants → people (two passes: create,
+//! then link managers) → Workflows, after a barrier on the people
 //! projection (a publish opens design Jobs whose role-bearing steps are
-//! assigned against the roster). Every file present in the directory
+//! assigned against the roster) → sensors LAST. Every file present in the directory
 //! gets a line: a door and a count when publish writes it, `skipped:
 //! <why>` when nothing reads it — never silence. `--dry-run` prints
 //! that plan and makes no HTTP call.
@@ -76,6 +77,7 @@ pub const SEED_USER: &str = r#"{"id":"automation:tenant-seed","role":"platform-a
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bases {
     pub classes: String,
+    pub locations: String,
     pub calendar: String,
     pub subjects: String,
     pub policy: String,
@@ -92,6 +94,7 @@ impl Bases {
         };
         Self {
             classes: resolve("classes"),
+            locations: resolve("locations"),
             calendar: resolve("calendar"),
             subjects: resolve("subject-kinds"),
             policy: resolve("policy"),
@@ -113,6 +116,13 @@ impl Bases {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Door {
     Classes {
+        rows: Vec<Value>,
+    },
+    /// The tenant's sites (backlog 1ec8312a, 2026-09-17), as the
+    /// batch endpoint's JSON rows. Before the roster: an employee's
+    /// `location` is a foreign key into the registry, and until this
+    /// door the only rows were the schema's.
+    Locations {
         rows: Vec<Value>,
     },
     Calendars {
@@ -149,6 +159,7 @@ impl Door {
     pub fn label(&self) -> &'static str {
         match self {
             Door::Classes { .. } => "POST /api/classes/batch",
+            Door::Locations { .. } => "POST /api/locations/batch",
             Door::Calendars { .. } => "POST /api/calendar/business-calendars/batch",
             Door::Company { .. } => "POST /api/subjects/company",
             Door::Policy { .. } => "GET+POST /api/policy/rules",
@@ -162,6 +173,14 @@ impl Door {
     pub fn what(&self) -> String {
         match self {
             Door::Classes { rows } => format!("{} classes (insert-if-absent)", rows.len()),
+            Door::Locations { rows } => format!(
+                "{} locations (insert-if-absent by id: {})",
+                rows.len(),
+                rows.iter()
+                    .filter_map(|r| r.get("id").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Door::Calendars { count, .. } => format!("{count} calendars (replaced by code)"),
             Door::Company { id, label } => format!("company `{id}` ({label}) (upsert)"),
             Door::Policy { rules, .. } => {
@@ -309,6 +328,20 @@ fn load_class_rows(path: &Path) -> Result<Vec<Value>> {
     }
 }
 
+/// `seeds/locations.toml` `[[location]]` rows as the JSON rows the
+/// batch endpoint takes (a bare array, the classes shape) — already
+/// validated as `boss_locations::http::LocationInput` by check.
+fn load_location_rows(path: &Path) -> Result<Vec<Value>> {
+    #[derive(serde::Deserialize)]
+    struct Bundle {
+        #[serde(default)]
+        location: Vec<Value>,
+    }
+    let b: Bundle =
+        toml::from_str(&read(path)?).with_context(|| format!("parse {}", path.display()))?;
+    Ok(b.location)
+}
+
 /// `seeds/operator_hires.toml` `[[hire]]` rows — the Employee shape at
 /// a second spelling, through the same door.
 fn load_hire_rows(path: &Path) -> Result<Vec<Value>> {
@@ -436,7 +469,17 @@ pub fn plan(dir: &Path) -> Result<Plan> {
             })
         },
     )?;
-    // 2. Business calendars — reference data the dispatcher's timing
+    // 2. Locations (backlog 1ec8312a) — a row's `kind` is a Class
+    //    code, and `employees.location` is a foreign key into the
+    //    registry, so the sites go after the classes and before the
+    //    roster. Until 2026-09-17 nothing read this file and the
+    //    people door refused a founder at the tenant's own HQ.
+    door(present(dir, &["seeds/locations.toml"]), &|p| {
+        Ok(Door::Locations {
+            rows: load_location_rows(p)?,
+        })
+    })?;
+    // 3. Business calendars — reference data the dispatcher's timing
     //    triggers resolve business days from; before anything that
     //    consumes them.
     door(present(dir, &["seeds/business_calendars.json"]), &|p| {
@@ -447,7 +490,7 @@ pub fn plan(dir: &Path) -> Result<Plan> {
             count: rows.len(),
         })
     })?;
-    // 3. The company Subject — the organization being modeled is
+    // 4. The company Subject — the organization being modeled is
     //    itself a Subject; org-level Workflows open Jobs about it.
     //    A missing required manifest is the one Refused step that
     //    has no file to name, so it is named here.
@@ -460,7 +503,7 @@ pub fn plan(dir: &Path) -> Result<Plan> {
             })
         },
     )?;
-    // 4. Policy grants — capability-level, so before the roster and
+    // 5. Policy grants — capability-level, so before the roster and
     //    the Workflows whose design Jobs need `workflow-approver`.
     door(present(dir, &["seeds/policy_rules.toml"]), &|p| {
         let rules = boss_policy_client::seed_loader::load_policy_rules(p)?;
@@ -469,7 +512,7 @@ pub fn plan(dir: &Path) -> Result<Plan> {
             rules: rules.len(),
         })
     })?;
-    // 5. People — before Workflows, so the dispatcher's role-bearing
+    // 6. People — before Workflows, so the dispatcher's role-bearing
     //    auto-assignment resolves against a real roster.
     door(present(dir, &["seeds/employees.json"]), &|p| {
         Ok(Door::People {
@@ -481,7 +524,7 @@ pub fn plan(dir: &Path) -> Result<Plan> {
             roster: load_hire_rows(p)?,
         })
     })?;
-    // 6. Workflows — after everything a packet needs.
+    // 7. Workflows — after everything a packet needs.
     door(present(dir, &["seeds/workflows.toml"]), &|p| {
         let specs = boss_jobs::seed_loader::load_workflows_with_owning_team(p, &tenant_id)?;
         Ok(Door::Workflows {
@@ -490,7 +533,7 @@ pub fn plan(dir: &Path) -> Result<Plan> {
             kinds: specs.iter().map(|s| s.kind.clone()).collect(),
         })
     })?;
-    // 7. Sensors LAST (design 14c9b2ad): each row names the workflow
+    // 8. Sensors LAST (design 14c9b2ad): each row names the workflow
     //    kind a reading opens, so the kinds go first; the registry row
     //    is what the platform's 5-minute poll reads.
     door(present(dir, &["seeds/sensors.toml"]), &|p| {
@@ -666,6 +709,16 @@ fn send(client: &Client, bases: &Bases, door: &Door) -> Result<String> {
     match door {
         Door::Classes { rows } => {
             let u = url(&bases.classes, "/api/classes/batch");
+            let resp = refuse(client.post(&u).json(rows).send()?, &format!("POST {u}"))?;
+            let body: Value = resp.json().unwrap_or(Value::Null);
+            Ok(format!(
+                "received {}, inserted {}",
+                body.get("received").and_then(Value::as_u64).unwrap_or(0),
+                body.get("inserted").and_then(Value::as_u64).unwrap_or(0)
+            ))
+        }
+        Door::Locations { rows } => {
+            let u = url(&bases.locations, "/api/locations/batch");
             let resp = refuse(client.post(&u).json(rows).send()?, &format!("POST {u}"))?;
             let body: Value = resp.json().unwrap_or(Value::Null);
             Ok(format!(
@@ -914,6 +967,7 @@ terminal = { outcome = "sponsored" }
             writes,
             [
                 "seeds/classes.json",
+                "seeds/locations.toml",
                 "seeds/business_calendars.json",
                 "tenant.toml",
                 "seeds/policy_rules.toml",
@@ -921,10 +975,21 @@ terminal = { outcome = "sponsored" }
                 "seeds/workflows.toml",
                 "seeds/sensors.toml",
             ],
-            "classes → calendars → company → policy → people → workflows → sensors LAST"
+            "classes → locations → calendars → company → policy → people → workflows → sensors LAST"
         );
         match &step(&p, "seeds/classes.json").action {
             Action::Write(Door::Classes { rows }) => assert_eq!(rows.len(), 2),
+            other => panic!("{other:?}"),
+        }
+        // The locations door (backlog 1ec8312a): the rows go as the
+        // batch endpoint's JSON array, before the roster that FKs
+        // into them.
+        match &step(&p, "seeds/locations.toml").action {
+            Action::Write(Door::Locations { rows }) => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0]["id"], "loc-acme-hq");
+                assert_eq!(rows[0]["timezone"], "America/Los_Angeles");
+            }
             other => panic!("{other:?}"),
         }
         match &step(&p, "tenant.toml").action {
@@ -965,11 +1030,26 @@ terminal = { outcome = "sponsored" }
     #[test]
     fn a_file_with_no_reader_is_skipped_by_name_never_silently() {
         let dir = real_shape("plan-skips");
+        // The one contract file still without a reader (locations
+        // gained its door on 2026-09-17, backlog 1ec8312a).
+        put(
+            &dir,
+            "seeds/subject_kinds.toml",
+            "[[subject_kind]]\nkind = \"recipe\"\nlabel = \"Recipe\"\n",
+        );
         let p = plan(&dir).unwrap();
-        match &step(&p, "seeds/locations.toml").action {
+        match &step(&p, "seeds/subject_kinds.toml").action {
             Action::Skip(why) => assert!(why.contains("no reader"), "{why}"),
             other => panic!("{other:?}"),
         }
+        assert!(
+            matches!(
+                step(&p, "seeds/locations.toml").action,
+                Action::Write(Door::Locations { .. })
+            ),
+            "locations are written, not skipped: {:?}",
+            step(&p, "seeds/locations.toml").action
+        );
         match &step(&p, "seeds/agents.toml").action {
             Action::Skip(why) => {
                 assert!(why.contains("no reader"), "{why}");
@@ -1071,6 +1151,8 @@ terminal = { outcome = "sponsored" }
         jobs: usize,
         /// Published sensor ids (insert-if-absent, like the door).
         sensors: BTreeSet<String>,
+        /// Published location ids (insert-if-absent, like the door).
+        locations: BTreeSet<String>,
     }
 
     impl Stub {
@@ -1080,6 +1162,7 @@ terminal = { outcome = "sponsored" }
                 + self.workflows.len()
                 + self.jobs
                 + self.sensors.len()
+                + self.locations.len()
         }
     }
 
@@ -1091,6 +1174,19 @@ terminal = { outcome = "sponsored" }
                     .map(|v| v.len())
                     .unwrap_or(0);
                 (200, json!({"received": n, "inserted": n}).to_string())
+            }
+            ("POST", "/api/locations/batch") => {
+                // The classes batch shape: a bare JSON array of rows.
+                let rows = serde_json::from_str::<Vec<Value>>(body).unwrap_or_default();
+                let inserted = rows
+                    .iter()
+                    .filter_map(|r| r["id"].as_str().map(str::to_string))
+                    .filter(|id| st.locations.insert(id.clone()))
+                    .count();
+                (
+                    200,
+                    json!({"received": rows.len(), "inserted": inserted}).to_string(),
+                )
             }
             ("POST", "/api/calendar/business-calendars/batch") => (200, "{}".into()),
             ("POST", "/api/subjects/company") => (201, String::new()),
@@ -1274,6 +1370,12 @@ terminal = { outcome = "sponsored" }
                 .count()
         };
         assert_eq!(hit("POST", "/api/classes/batch"), 1);
+        assert_eq!(
+            hit("POST", "/api/locations/batch"),
+            1,
+            "one batch for the locations file"
+        );
+        assert_eq!(st.locations.iter().collect::<Vec<_>>(), ["loc-acme-hq"]);
         assert_eq!(hit("POST", "/api/calendar/business-calendars/batch"), 1);
         assert_eq!(hit("POST", "/api/subjects/company"), 1);
         assert_eq!(
@@ -1307,6 +1409,10 @@ terminal = { outcome = "sponsored" }
                 .unwrap()
         };
         assert!(pos("POST", "/api/classes/batch") < pos("POST", "/api/people"));
+        assert!(
+            pos("POST", "/api/locations/batch") < pos("POST", "/api/people"),
+            "employees.location is a FK into locations, so the sites land first"
+        );
         assert!(pos("POST", "/api/people") < pos("POST", "/api/jobs"));
         assert!(
             pos("POST", "/api/jobs") < pos("POST", "/api/sensors/batch"),
