@@ -1012,6 +1012,40 @@ fi
 #     old seed is removed first because two targets (~74G each) do
 #     not fit the 120Gi volume; the cold window is the price of
 #     fitting, and it only opens on a mid-refresh death.
+# PRUNE THE STALE BINARIES BEFORE THE SEED IS RENAMED INTO PLACE.
+# Measured 2026-09-17 17:58Z, the day the seed grew past the workspace:
+# /gate-seed/target was 154G, 153G of it debug/deps, and 3,226 of those
+# files were TEST AND BIN EXECUTABLES — 138 builds of `boss`, 195 of
+# `boss_dispatcher`, 126 of `rebuild_e2e`, each 50–110 MB, one per
+# gate that ever relinked them. Cargo names an executable
+# <stem>-<16 hex> and never deletes a superseded one, so the seed
+# grows by every relink and a reflink copy of it is measured by the
+# kubelet at full size: the train gate for #424 was evicted two minutes
+# in ("Usage of EmptyDir volume gate-workspace exceeds the limit
+# 160Gi") before a single check ran, and settled LOST. An executable is
+# never reused across source changes — the next gate relinks it in
+# seconds — so the seed keeps ONE per stem (the newest) and drops the
+# rest. Libraries (.rlib/.rmeta/.so/.d) are untouched: those ARE the
+# warmth. Pure over its argument; the refresh calls it on the staged
+# copy, so a torn prune can only ever touch target.partial.
+prune_seed_binaries() { # <deps dir> — prints "pruned N binaries, M MiB"
+    local deps="$1" n=0 bytes=0 f stem
+    [ -d "$deps" ] || { echo "pruned 0 binaries, 0 MiB"; return 0; }
+    # newest first, so the first of each stem is the keeper
+    while IFS= read -r f; do
+        case "$f" in *.*) continue ;; esac
+        [ -f "$deps/$f" ] && [ -x "$deps/$f" ] || continue
+        stem=$(printf '%s' "$f" | sed -E 's/-[0-9a-f]{16}$//')
+        [ "$stem" = "$f" ] && continue
+        case " $KEPT " in *" $stem "*)
+            bytes=$((bytes + $(stat -c %s "$deps/$f")))
+            rm -f -- "$deps/$f" "$deps/$f.d" && n=$((n + 1)) ;;
+        *) KEPT="$KEPT $stem" ;;
+        esac
+    done < <(ls -t "$deps" 2>/dev/null)
+    echo "pruned $n binaries, $((bytes / 1048576)) MiB"
+}
+
 refresh_seed() {
     if [ ! -d "$SEED" ]; then return 0; fi
     if ! [ "$VERDICT" = "green" ]; then return 0; fi
@@ -1034,6 +1068,7 @@ refresh_seed() {
          rm -f "$SEED/.seed-head" &&
          rm -rf "$SEED/target" "$SEED/target.partial" &&
          cp -a --reflink=auto /gate-target/target "$SEED/target.partial" &&
+         { KEPT=""; prune_seed_binaries "$SEED/target.partial/debug/deps"; } &&
          mv "$SEED/target.partial" "$SEED/target" &&
          echo "$HEAD_SHA" > "$SEED/.seed-head"
        ) 9>>"$SEED_LOCK"; then
