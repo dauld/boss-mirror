@@ -2793,3 +2793,193 @@ async fn keg_deposit_same_day_settlement_survives_a_rebuild() {
     assert_eq!(debits, 12_000, "liability drains on rebuild too");
     assert_eq!(credits, 12_000);
 }
+
+// ---------------------------------------------------------------------------
+// POST /api/ledger/accounts/batch — the tenant declares its chart
+// (backlog 41af5195; design 18cf4272).
+// ---------------------------------------------------------------------------
+
+/// The seed identity `boss tenant publish` signs with: operator tier.
+async fn post_as_operator(router: axum::Router, path: &str, body: Value) -> (StatusCode, Value) {
+    let user_json = json!({
+        "id": "automation:tenant-seed",
+        "role": "platform-admin",
+        "access_tier": "operator",
+        "territory_account_ids": [],
+        "direct_report_ids": [],
+        "department": "platform",
+    })
+    .to_string();
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("Content-Type", "application/json")
+                .header("x-boss-user", user_json)
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let parsed: Value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes)
+            .unwrap_or(Value::String(String::from_utf8_lossy(&bytes).into_owned()))
+    };
+    (status, parsed)
+}
+
+fn chart_state(db: &TestDb) -> LedgerApiState {
+    LedgerApiState {
+        pool: db.pool.clone(),
+        publisher: None,
+        clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
+        policy: None,
+    }
+}
+
+/// The real tenant's chart meets the starter chart: 1000 and 1010 are
+/// starter codes (Cash, Cash in Transit) and are KEPT under the
+/// starter's names with the difference named; the rest insert. One
+/// `ledger.account.declared` per INSERTED row on the outbox, none for
+/// a kept row; a second run inserts and records nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn chart_batch_inserts_if_absent_keeps_a_starter_code_and_names_the_difference() {
+    let db = TestDb::new().await;
+    let rows = json!([
+        {"code": "1000", "name": "Bank", "kind": "asset", "normal_balance": "debit"},
+        {"code": "1010", "name": "Cash in Transit", "kind": "asset", "normal_balance": "debit"},
+        {"code": "4300", "name": "Hosting revenue", "kind": "revenue", "normal_balance": "credit"},
+        {"code": "4310", "name": "Hosting revenue — managed", "kind": "revenue", "normal_balance": "credit", "parent": "4300"},
+    ]);
+    let (status, body) = post_as_operator(
+        router(chart_state(&db)),
+        "/api/ledger/accounts/batch",
+        rows.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["received"], 4);
+    assert_eq!(body["inserted"], 2);
+    assert_eq!(
+        body["kept"],
+        json!([
+            {"code": "1000", "differs": ["name"]},
+            {"code": "1010", "differs": []},
+        ]),
+        "{body}"
+    );
+
+    // Kept as the starter registered it; the child hangs off its parent.
+    let (name,): (String,) = sqlx::query_as("SELECT name FROM gl_accounts WHERE code = '1000'")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        name, "Cash",
+        "a colliding code is the SAME account, never renamed"
+    );
+    let (parent_code,): (String,) = sqlx::query_as(
+        "SELECT p.code FROM gl_accounts a JOIN gl_accounts p ON p.id = a.parent_id WHERE a.code = '4310'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(parent_code, "4300");
+
+    // The GET door lists the tenant's rows beside the starter's.
+    let (status, listed) = get(router(chart_state(&db)), "/api/ledger/accounts").await;
+    assert_eq!(status, StatusCode::OK);
+    let codes: Vec<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["code"].as_str())
+        .collect();
+    assert!(
+        codes.contains(&"4300") && codes.contains(&"4310"),
+        "{codes:?}"
+    );
+
+    // One fact per inserted row, staged on the outbox with the row and
+    // declared_by = the actor the request signed with.
+    let staged: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT source, payload FROM event_outbox WHERE kind = $1 ORDER BY payload->>'code'",
+    )
+    .bind(boss_ledger::chart::ACCOUNT_DECLARED)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(staged.len(), 2, "{staged:?}");
+    assert!(staged.iter().all(|(s, _)| s == "ledger"), "{staged:?}");
+    assert_eq!(staged[0].1["code"], "4300");
+    assert_eq!(staged[0].1["name"], "Hosting revenue");
+    assert_eq!(staged[0].1["normal_balance"], "credit");
+    assert_eq!(staged[0].1["declared_by"], "automation:tenant-seed");
+    assert_eq!(staged[1].1["code"], "4310");
+    assert_eq!(staged[1].1["parent"], "4300");
+
+    // Idempotent: the second run keeps all four and stages nothing.
+    let (status, body) =
+        post_as_operator(router(chart_state(&db)), "/api/ledger/accounts/batch", rows).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["inserted"], 0);
+    assert_eq!(body["kept"].as_array().unwrap().len(), 4);
+    let (n,): (i64,) = sqlx::query_as("SELECT count(*) FROM event_outbox WHERE kind = $1")
+        .bind(boss_ledger::chart::ACCOUNT_DECLARED)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 2, "a kept row records nothing");
+}
+
+/// A row outside the table's constraints is refused as a caller error
+/// naming the row — before ANY row is written, so a batch with one bad
+/// row lands nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn chart_batch_refuses_an_invalid_kind_by_row_and_writes_nothing() {
+    let db = TestDb::new().await;
+    let rows = json!([
+        {"code": "4300", "name": "Hosting revenue", "kind": "revenue", "normal_balance": "credit"},
+        {"code": "6200", "name": "Infrastructure", "kind": "cost", "normal_balance": "debit"},
+    ]);
+    let (status, body) =
+        post_as_operator(router(chart_state(&db)), "/api/ledger/accounts/batch", rows).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let text = body.as_str().unwrap_or_default().to_string();
+    assert!(
+        text.contains("account #2 (6200)") && text.contains("cost"),
+        "{text}"
+    );
+    let (n,): (i64,) = sqlx::query_as("SELECT count(*) FROM gl_accounts WHERE code = '4300'")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 0, "the good row before the bad one did not land");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chart_batch_is_operator_tier_and_refuses_an_auditor_and_an_anonymous_caller() {
+    let db = TestDb::new().await;
+    let rows = json!([
+        {"code": "4300", "name": "Hosting revenue", "kind": "revenue", "normal_balance": "credit"},
+    ]);
+    let (status, _) = post_as_auditor(
+        router(chart_state(&db)),
+        "/api/ledger/accounts/batch",
+        rows.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = post_json(router(chart_state(&db)), "/api/ledger/accounts/batch", rows).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (n,): (i64,) = sqlx::query_as("SELECT count(*) FROM gl_accounts WHERE code = '4300'")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+}

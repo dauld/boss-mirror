@@ -139,3 +139,7 @@ required-features = ["postgres"]
 [[test]]
 name = "supersede_e2e"
 required-features = ["postgres"]
+
+[[test]]
+name = "chart_pg"
+required-features = ["postgres"]

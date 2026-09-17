@@ -679,6 +679,30 @@ TEXT currency column on every money-bearing row; `Currency` lives
 in `boss-core::money`; column prefixes (`amount_`, `price_`,
 `cost_`) distinguish kind, not currency.
 
+**The chart of accounts is tenant data; the starter chart is the OSS
+default.** (Backlog `41af5195`; design `18cf4272`, David 2026-09-17.)
+40-ledger.sql seeds the brewery's chart and that seed stays as the
+default every deployment boots with, so the demo tenant and the
+posting rules that name its codes keep working untouched. A tenant
+declares its own accounts in `seeds/chart_of_accounts.toml` and `boss
+tenant publish` sends them through `POST /api/ledger/accounts/batch`
+after the classes — insert-if-absent by code, the batch-door shape the
+classes, locations and agents doors share, one `ledger.account.declared`
+fact per inserted row staged on the outbox in the insert's own
+transaction. **A code that collides with a starter row is the SAME
+account under the starter's name.** The code is the identity every
+posting rule and journal line points at, so two rows cannot share one;
+insert-if-absent keeps the registered row and the answer names the
+difference (`kept: [{code, differs: [field…]}]`, `1000 (name differs)`
+in the publish line), and the tenant then adopts the code as it stands
+or chooses another. There is deliberately no upsert and no rename in
+place: renaming `1000` would re-label every entry already posted
+against it, silently. `boss tenant check` judges the file with the
+door's own validation (codes unique, kinds and balances inside the
+table's CHECK constraints, a parent declared before its child); the
+collision itself is only visible at publish, because only the
+deployment knows its chart.
+
 **Counterparty prices are data; our costs emerge.** The vendor's
 agreed price (`inventory_items.vendor_price_cents`, seeded per
 part) prices the PO **once, at placement** (qty from our

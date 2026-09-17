@@ -2,6 +2,8 @@
 //!
 //! - `GET /api/ledger/health`
 //! - `GET /api/ledger/accounts` — full chart of accounts
+//! - `POST /api/ledger/accounts/batch` — the tenant declares its chart,
+//!   insert-if-absent by code (backlog 41af5195; `accounts` module)
 //! - `GET /api/ledger/trial-balance?as_of=YYYY-MM-DD` — per-account totals
 //! - `GET /api/ledger/entries?account_code=XXXX&limit=N` — drill-down entries
 //! - `GET /api/ledger/entries?fact_id=UUID` — entries for a specific fact
@@ -21,6 +23,7 @@ use axum::routing::get;
 use boss_policy::User;
 use sqlx::PgPool;
 
+mod accounts;
 mod bank_settlements;
 mod bills;
 mod entries;
@@ -33,6 +36,7 @@ mod revenue;
 mod statements;
 mod tax;
 
+use accounts::*;
 use bank_settlements::*;
 use bills::*;
 use entries::*;
@@ -164,6 +168,10 @@ pub fn router(state: LedgerApiState) -> Router {
     Router::new()
         .route("/api/ledger/health", get(health))
         .route("/api/ledger/accounts", get(list_accounts))
+        .route(
+            "/api/ledger/accounts/batch",
+            axum::routing::post(declare_accounts_batch),
+        )
         .route("/api/ledger/trial-balance", get(trial_balance))
         .route("/api/ledger/income-statement", get(income_statement))
         .route("/api/ledger/balance-sheet", get(balance_sheet))
@@ -329,6 +337,9 @@ fn ledger_err(e: crate::error::LedgerError) -> Response {
         | LedgerError::Unbalanced { .. }
         | LedgerError::LockedPeriod { .. }
         | LedgerError::UnknownFactKind(_) => StatusCode::BAD_REQUEST,
+        // A caller error naming the row (the classes door's 422 for an
+        // unregistered kind), never a storage failure.
+        LedgerError::InvalidChart(_) => StatusCode::UNPROCESSABLE_ENTITY,
         LedgerError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (status, e.to_string()).into_response()

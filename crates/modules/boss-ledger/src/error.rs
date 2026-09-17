@@ -39,6 +39,14 @@ pub enum LedgerError {
         happened_on: chrono::NaiveDate,
     },
 
+    /// A chart-of-accounts batch that fails the door's own validation
+    /// (`chart::validate`: an unknown kind or normal_balance, a
+    /// duplicated code, a parent not declared before its child) —
+    /// a caller error naming the row, refused before any row is
+    /// written (backlog 41af5195).
+    #[error("chart of accounts refused: {0}")]
+    InvalidChart(String),
+
     /// Postgres failure during insert, lookup, or trigger check.
     #[error("storage failure: {0}")]
     Storage(String),

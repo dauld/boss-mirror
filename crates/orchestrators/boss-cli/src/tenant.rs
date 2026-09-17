@@ -28,10 +28,12 @@
 //! or loader the product reads it with — `boss_jobs::seed_loader` for
 //! workflows (with its viability lint), `boss_policy_client`'s grant
 //! loader, the classes batch endpoint's `ClassInput`, the locations
-//! batch endpoint's `LocationInput`, `boss_people`'s `Employee`,
-//! `boss_core`'s `BusinessCalendar` and `TenantToml`. A
-//! second parser would be a second contract that drifts. Where a file
-//! has no reader, the parse is conservative and the table names that.
+//! batch endpoint's `LocationInput`, the ledger's `chart::AccountInput`
+//! + `validate` for the chart of accounts (backlog 41af5195),
+//! `boss_people`'s `Employee`, `boss_core`'s `BusinessCalendar` and
+//! `TenantToml`. A second parser would be a second contract that
+//! drifts. Where a file has no reader, the parse is conservative and
+//! the table names that.
 //!
 //! WHAT A VERDICT CARRIES. Per file: OK / MISSING (required) / INVALID
 //! (the loader's own error, never rephrased) / UNKNOWN (a file the
@@ -135,6 +137,22 @@ pub const CONTRACT: &[Entry] = &[
                 parent_code?, member_attribute?, metadata?, sort_order?}",
         parse: parse_classes,
         scaffold: Some(scaffold_classes),
+    },
+    Entry {
+        paths: &["seeds/chart_of_accounts.toml"],
+        required: false,
+        read_by: "POST /api/ledger/accounts/batch, one boss-ledger `chart::AccountInput` per row \
+                  (insert-if-absent by code) — sent by `boss tenant publish` AFTER the classes; a \
+                  code the starter chart (40-ledger.sql, the OSS default) already holds is the SAME \
+                  account, kept under its registered name, and the publish line names the field \
+                  the declaration differs on — adopt the code or choose another (backlog 41af5195; \
+                  design 18cf4272)",
+        shape: "`[[account]]` rows: code, name, kind (asset|liability|equity|revenue|expense), \
+                normal_balance (debit|credit), parent? (a code declared earlier in the file) — \
+                the `gl_accounts` table's authorable columns; validated by \
+                `boss_ledger::chart::validate`",
+        parse: parse_chart_of_accounts,
+        scaffold: Some(scaffold_chart_of_accounts),
     },
     Entry {
         paths: &["seeds/employees.json"],
@@ -406,6 +424,32 @@ fn parse_classes(path: &Path, _: &Ctx) -> Result<String, String> {
         rows.len(),
         kinds.len()
     ))
+}
+
+/// The ledger door's own row type and validation (backlog 41af5195):
+/// what publish sends is what check judged, so a row the door would
+/// refuse — a kind outside the table's enum, a code declared twice, a
+/// parent not declared before its child — is INVALID here, by the
+/// door's own words.
+fn parse_chart_of_accounts(path: &Path, _: &Ctx) -> Result<String, String> {
+    let rows = boss_ledger::chart::load_chart_toml(path)?;
+    refuse_if_stray(&read(path)?, "account", rows.len())?;
+    Ok(match rows.len() {
+        0 => "0 accounts".to_string(),
+        n => format!(
+            "{n} accounts: {}",
+            rows.iter()
+                .map(|a| match &a.parent {
+                    Some(p) => format!(
+                        "{} {} ({}/{}, under {p})",
+                        a.code, a.name, a.kind, a.normal_balance
+                    ),
+                    None => format!("{} {} ({}/{})", a.code, a.name, a.kind, a.normal_balance),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    })
 }
 
 fn parse_employees(path: &Path, _: &Ctx) -> Result<String, String> {
@@ -1009,6 +1053,38 @@ fn scaffold_classes(_: &Scaffold) -> String {
     .to_string()
 }
 
+fn scaffold_chart_of_accounts(s: &Scaffold) -> String {
+    format!(
+        "# {display} — chart of accounts (backlog 41af5195; design 18cf4272).\n\
+#\n\
+# The chart is yours: one [[account]] per row of the ledger's\n\
+# `gl_accounts` table — code, name, kind (asset | liability | equity |\n\
+# revenue | expense), normal_balance (debit | credit), and an optional\n\
+# parent naming a code declared EARLIER in this file. Published by\n\
+# `boss tenant publish` (POST /api/ledger/accounts/batch) after the\n\
+# classes, insert-if-absent by code. The product ships a starter chart\n\
+# (the OSS default the demo tenant runs on); a code it already holds is\n\
+# the SAME account, kept under the starter's name, and the publish line\n\
+# names the field this file differs on — adopt the code as it stands or\n\
+# choose another. Nothing renames an account in place: the code is what\n\
+# every posting rule and journal line points at.\n\
+#\n\
+# [[account]]\n\
+# code = \"1000\"\n\
+# name = \"Bank\"\n\
+# kind = \"asset\"\n\
+# normal_balance = \"debit\"\n\
+#\n\
+# [[account]]\n\
+# code = \"1010\"\n\
+# name = \"Stripe balance\"\n\
+# kind = \"asset\"\n\
+# normal_balance = \"debit\"\n\
+# parent = \"1000\"\n",
+        display = s.display_name
+    )
+}
+
 fn scaffold_employees(s: &Scaffold) -> String {
     format!(
         r#"[
@@ -1571,7 +1647,6 @@ terminal = { outcome = "sponsored" }
         assert_eq!(row.status, Status::Invalid, "{row:?}");
         assert!(row.detail.contains("[[sensor]]"), "{row:?}");
     }
-
     /// The two ledger rule files (backlog a40541cb) are judged by the
     /// ledger's own loaders: an unbalanced posting rule is INVALID
     /// naming the rule, a projection whose `when` key is not a pointer
@@ -1626,6 +1701,76 @@ terminal = { outcome = "sponsored" }
         let row = status_of(&r, "seeds/fact_projection_rules.toml").unwrap();
         assert_eq!(row.status, Status::Invalid, "{row:?}");
         assert!(row.detail.contains("[[projection]]"), "{row:?}");
+    }
+
+    /// The chart of accounts (backlog 41af5195) is judged by the
+    /// ledger door's own validation: the real tenant's chart is OK and
+    /// the detail names its rows; a kind outside the table's enum, a
+    /// code declared twice and a parent not declared before its child
+    /// are INVALID by row, in the door's words; rows under the wrong
+    /// table name parse to nothing and are refused rather than passed.
+    #[test]
+    fn a_chart_of_accounts_is_judged_by_the_ledger_doors_own_validation() {
+        let dir = scratch_dir("boss-cli-tenant-check-chart");
+        write_file(&dir.join("tenant.toml"), "[meta]\ntenant_id = \"t\"\n");
+        let seeds = dir.join("seeds");
+        boss_testing::scratch::create_dir(&seeds);
+        write_file(&seeds.join("workflows.toml"), "");
+        write_file(
+            &seeds.join("chart_of_accounts.toml"),
+            "[[account]]\ncode = \"1000\"\nname = \"Bank\"\nkind = \"asset\"\nnormal_balance = \"debit\"\n\
+             [[account]]\ncode = \"1010\"\nname = \"Stripe balance\"\nkind = \"asset\"\n\
+             normal_balance = \"debit\"\nparent = \"1000\"\n\
+             [[account]]\ncode = \"4100\"\nname = \"Sponsorship revenue\"\nkind = \"revenue\"\n\
+             normal_balance = \"credit\"\n",
+        );
+        let r = check(&dir);
+        let row = status_of(&r, "seeds/chart_of_accounts.toml").unwrap();
+        assert_eq!(row.status, Status::Ok, "{row:?}");
+        assert!(
+            row.detail.starts_with("3 accounts")
+                && row
+                    .detail
+                    .contains("1010 Stripe balance (asset/debit, under 1000)")
+                && row
+                    .detail
+                    .contains("4100 Sponsorship revenue (revenue/credit)"),
+            "{row:?}"
+        );
+
+        write_file(
+            &seeds.join("chart_of_accounts.toml"),
+            "[[account]]\ncode = \"6200\"\nname = \"Infrastructure\"\nkind = \"cost\"\nnormal_balance = \"debit\"\n",
+        );
+        let row = check(&dir);
+        let row = status_of(&row, "seeds/chart_of_accounts.toml").unwrap();
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(
+            row.detail.contains("account #1 (6200)") && row.detail.contains("cost"),
+            "{row:?}"
+        );
+
+        write_file(
+            &seeds.join("chart_of_accounts.toml"),
+            "[[account]]\ncode = \"1010\"\nname = \"Stripe balance\"\nkind = \"asset\"\n\
+             normal_balance = \"debit\"\nparent = \"1000\"\n",
+        );
+        let row = check(&dir);
+        let row = status_of(&row, "seeds/chart_of_accounts.toml").unwrap();
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(
+            row.detail.contains("parent `1000`") && row.detail.contains("earlier"),
+            "{row:?}"
+        );
+
+        write_file(
+            &seeds.join("chart_of_accounts.toml"),
+            "[[accounts]]\ncode = \"x\"\n",
+        );
+        let row = check(&dir);
+        let row = status_of(&row, "seeds/chart_of_accounts.toml").unwrap();
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(row.detail.contains("[[account]]"), "{row:?}");
     }
 
     #[test]

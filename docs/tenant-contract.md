@@ -20,9 +20,10 @@ Three verbs make the contract usable:
 - `boss tenant check <dir>` validates a directory **with the product's
   own loaders** — `boss_jobs::seed_loader` for `workflows.toml` (with
   its viability lint), `boss_policy_client`'s grant loader, the classes
-  and locations batch endpoints' row types, the agents and sensors
-  loaders in `boss_jobs`, the posting-rule and projection loaders in
-  `boss_ledger`, `boss_people::Employee`,
+  and locations batch endpoints' row types, the ledger's
+  `chart::AccountInput` + `validate` for the chart of accounts, the
+  agents and sensors loaders in `boss_jobs`, the posting-rule and
+  projection loaders in `boss_ledger`, `boss_people::Employee`,
   `boss_core`'s `BusinessCalendar` and the gateway's `TenantToml` — and reports one
   line per file: **OK** / **MISSING** (a required file) / **INVALID**
   (with the loader's own error, never rephrased) / **UNKNOWN** (a file
@@ -31,10 +32,10 @@ Three verbs make the contract usable:
 - `boss tenant publish <dir> [--gateway <url>] [--dry-run]` publishes
   a directory into a running deployment through the **same shared
   doors the tenant engines' prepare compose** (backlog `ee7b62bb`):
-  classes → locations → business calendars → the company Subject →
-  policy grants → people (two passes) → agents → Workflows, after a
-  barrier on the people projection → sensors → the ledger's posting
-  rules → its event→fact projections last. Idempotent (insert-if-absent, upsert, 409 swallowed, a
+  classes → the chart of accounts → locations → business calendars →
+  the company Subject → policy grants → people (two passes) → agents →
+  Workflows, after a barrier on the people projection → sensors → the
+  ledger's posting rules → its event→fact projections last. Idempotent (insert-if-absent, upsert, 409 swallowed, a
   kind an authoring Job already published is skipped), signed as
   `automation:tenant-seed` and **not** as a sim chain. One line per
   file present: the door and a count, or `skipped: <why>` for a file
@@ -98,6 +99,7 @@ stating plainly:
 | `seeds/workflows.toml` | yes | boss-jobs `seed_loader::load_workflows_with_owning_team` + the viability lint (the tenant prepare publishes each row); infra/lint/the-live-protocols-are-the-authored-protocols.sh; infra/gcp/publish-workflow.sh | `[[workflow]]` rows (kind, label, category, subject_kinds, description, metadata) each with flat `[[workflow.step]]` rows whose `ready_when` predicates imply the DAG; >= 1 trigger and >= 1 terminal per workflow | yes |
 | `seeds/policy_rules.toml` | no | boss-policy-bootstrap / `boss_policy::bootstrap::publish_policy_rules` via `boss_policy_client::seed_loader::load_policy_rules` (the tenant prepare, first boot) | `[[grants]]` rows: `role` or `roles`, `resource` or `resources`, `action` or `actions`, `scope` (all/self/team/territory/none/department:<name>); expanded to one rule per role x resource x action | yes |
 | `seeds/classes.json` or `seeds/classes.toml` | no | POST /api/classes/batch, one boss-classes `http::ClassInput` per row — sent by the tenant prepare (brewery: classes.json; used-device-shop: classes.toml `[[class]]`) and infra/postgres/reset-to-baseline.sh | JSON array (or TOML `[[class]]` rows) of {subject_kind, code, display_name, parent_code?, member_attribute?, metadata?, sort_order?} | yes |
+| `seeds/chart_of_accounts.toml` | no | POST /api/ledger/accounts/batch, one boss-ledger `chart::AccountInput` per row (insert-if-absent by code) — sent by `boss tenant publish` AFTER the classes; a code the starter chart (40-ledger.sql, the OSS default) already holds is the SAME account, kept under its registered name, and the publish line names the field the declaration differs on — adopt the code or choose another (backlog 41af5195; design 18cf4272) | `[[account]]` rows: code, name, kind (asset|liability|equity|revenue|expense), normal_balance (debit|credit), parent? (a code declared earlier in the file) — the `gl_accounts` table's authorable columns; validated by `boss_ledger::chart::validate` | yes |
 | `seeds/employees.json` | no | POST /api/people, one `boss_people::Employee` per row (the brewery engine's prepare reads it at the FIXED path /opt/boss/examples/brewery/seeds/, not from the bundle; used-device-shop reads data/employees.json instead) | JSON array of Employee rows: id, name, email, role, department, hire_date, location, manager_id, employment_type, status, skills[], certifications[], annual_salary_cents; role/department/location are validated against the registries at write time, not here | yes |
 | `seeds/operator_hires.toml` | no | boss-brewery-engine prepare (`seed_brewery_operator_hires`): each `[[hire]]` POSTed to /api/people as a `boss_people::Employee` | `[[hire]]` rows in the Employee shape above | no |
 | `seeds/business_calendars.json` | no | POST /api/calendar/business-calendars/batch as `Vec<boss_core::calendar::BusinessCalendar>` (the brewery engine's prepare); the dispatcher's timing triggers and the sim resolve business days from it | JSON array of {code, name, weekend: [0..6 Mon=0], closed: [YYYY-MM-DD]} | yes |
@@ -152,6 +154,127 @@ stating plainly:
   platform already registered (prod's `agent-claude` came from
   migration `20260915212644`) is kept as registered, and the publish
   line names any field the declaration differs on.
+
+## The chart of accounts is the tenant's
+
+`seeds/chart_of_accounts.toml` (backlog `41af5195`; design `18cf4272`,
+David 2026-09-17) declares what the tenant's books are made of: one
+`[[account]]` per row of the ledger's `gl_accounts` table — `code`,
+`name`, `kind` (`asset` | `liability` | `equity` | `revenue` |
+`expense`), `normal_balance` (`debit` | `credit`) and an optional
+`parent` naming a code declared earlier in the file. Until this file
+had a door, `gl_accounts` came from the product: 40-ledger.sql seeds
+the brewery's chart (1000 Cash … 2200 Deferred Revenue, the excise
+accounts) and `GET /api/ledger/accounts` was the only way in, so a
+tenant that is not a brewery could not name its own accounts without a
+migration. The starter chart stays as the **OSS default** the demo
+tenant runs on; a tenant's chart is published over it, insert-if-absent
+by code, through `POST /api/ledger/accounts/batch` — the batch-door
+shape the classes, locations and agents doors share — and every row
+the batch inserts leaves one `ledger.account.declared` fact on the
+outbox, in the insert's own transaction.
+
+**A code that collides with the starter chart is the same account.**
+The code is what every posting rule and journal line points at (`1000`
+is debited by name), so a tenant's `1000 Bank` and the starter's
+`1000 Cash` cannot be two rows. Insert-if-absent keeps the registered
+row under the starter's name and the answer names the difference —
+`kept: [{code: "1000", differs: ["name"]}]`, rendered in the publish
+line as `1000 (name differs)` — and the tenant then either adopts the
+code as it stands or chooses another. Nothing renames an account in
+place: a rename would silently re-label every entry already posted.
+
+The worked example is Algedonic's own chart (a tenant commit, not the
+product's):
+
+```toml
+[[account]]
+code = "1000"
+name = "Bank"
+kind = "asset"
+normal_balance = "debit"
+
+[[account]]
+code = "1010"
+name = "Stripe balance"
+kind = "asset"
+normal_balance = "debit"
+parent = "1000"
+
+[[account]]
+code = "2100"
+name = "Accounts payable"
+kind = "liability"
+normal_balance = "credit"
+
+[[account]]
+code = "3000"
+name = "Owner's equity"
+kind = "equity"
+normal_balance = "credit"
+
+[[account]]
+code = "3100"
+name = "Retained earnings"
+kind = "equity"
+normal_balance = "credit"
+
+[[account]]
+code = "4100"
+name = "Sponsorship revenue"
+kind = "revenue"
+normal_balance = "credit"
+
+[[account]]
+code = "4200"
+name = "Support revenue"
+kind = "revenue"
+normal_balance = "credit"
+
+[[account]]
+code = "4300"
+name = "Hosting revenue"
+kind = "revenue"
+normal_balance = "credit"
+
+[[account]]
+code = "6100"
+name = "Payment processing fees"
+kind = "expense"
+normal_balance = "debit"
+
+[[account]]
+code = "6200"
+name = "Infrastructure"
+kind = "expense"
+normal_balance = "debit"
+
+[[account]]
+code = "6300"
+name = "Hardware"
+kind = "expense"
+normal_balance = "debit"
+
+[[account]]
+code = "6400"
+name = "Software and services"
+kind = "expense"
+normal_balance = "debit"
+```
+
+Published against the starter chart, nine of these twelve codes
+collide — `1000` Cash, `1010` Cash in Transit, `2100` Accounts Payable,
+`3000` Retained Earnings, `4100` Revenue — Wholesale Beer Sales, `6100`
+Operating Expense — Payroll, `6200` Operating Expense — Rent, `6300`
+Operating Expense — General, `6400` Payroll Taxes & Benefits — and the
+publish line reads `received 12, inserted 3; kept as registered, not as
+declared — adopt the code or choose another: 1000 (name differs); 1010
+(name differs); …`. That line is the decision surface: each kept code
+is either adopted (the tenant posts to `1000` and calls it what the
+ledger calls it) or moved (the tenant picks `1001 Bank` and the next
+publish inserts it). `boss tenant check` cannot see the deployment's
+chart, so it judges the file alone: codes unique, kinds and balances
+inside the enum, every parent declared before its child.
 
 ## The ledger's two rule files — a worked example
 

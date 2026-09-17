@@ -14,6 +14,7 @@
 //!   that commerce and inventory call synchronously inside their
 //!   write transactions
 
+pub mod chart;
 pub mod error;
 pub mod excise;
 pub mod posting_rules;

@@ -21,8 +21,10 @@
 //!
 //! THE PLAN IS THE CONTRACT, IN DEPENDENCY ORDER. [`plan`] walks the
 //! directory the way the engines' prepare does: classes (employee and
-//! account writes validate against them) → locations (an employee's
-//! `location` FKs into them; backlog 1ec8312a) → business calendars →
+//! account writes validate against them) → the chart of accounts (the
+//! ledger's rows, after the classes; backlog 41af5195) → locations (an
+//! employee's `location` FKs into them; backlog 1ec8312a) → business
+//! calendars →
 //! the company Subject → policy grants → people (two passes: create,
 //! then link managers) → agents (the machine half of the roster; a
 //! step's audience may name one; backlog f56155f0) → Workflows, after
@@ -82,13 +84,13 @@ pub const SEED_USER: &str = r#"{"id":"automation:tenant-seed","role":"platform-a
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bases {
     pub classes: String,
+    pub ledger: String,
     pub locations: String,
     pub calendar: String,
     pub subjects: String,
     pub policy: String,
     pub people: String,
     pub jobs: String,
-    pub ledger: String,
 }
 
 impl Bases {
@@ -100,13 +102,13 @@ impl Bases {
         };
         Self {
             classes: resolve("classes"),
+            ledger: resolve("ledger"),
             locations: resolve("locations"),
             calendar: resolve("calendar"),
             subjects: resolve("subject-kinds"),
             policy: resolve("policy"),
             people: resolve("people"),
             jobs: resolve("jobs"),
-            ledger: resolve("ledger"),
         }
     }
 
@@ -124,6 +126,12 @@ impl Bases {
 pub enum Door {
     Classes {
         rows: Vec<Value>,
+    },
+    /// The tenant's chart of accounts (backlog 41af5195, 2026-09-17),
+    /// as the ledger door's own rows. After the classes; a code the
+    /// starter chart holds is kept and the line names the difference.
+    Chart {
+        rows: Vec<boss_ledger::chart::AccountInput>,
     },
     /// The tenant's sites (backlog 1ec8312a, 2026-09-17), as the
     /// batch endpoint's JSON rows. Before the roster: an employee's
@@ -183,6 +191,7 @@ impl Door {
     pub fn label(&self) -> &'static str {
         match self {
             Door::Classes { .. } => "POST /api/classes/batch",
+            Door::Chart { .. } => "POST /api/ledger/accounts/batch",
             Door::Locations { .. } => "POST /api/locations/batch",
             Door::Calendars { .. } => "POST /api/calendar/business-calendars/batch",
             Door::Company { .. } => "POST /api/subjects/company",
@@ -200,6 +209,14 @@ impl Door {
     pub fn what(&self) -> String {
         match self {
             Door::Classes { rows } => format!("{} classes (insert-if-absent)", rows.len()),
+            Door::Chart { rows } => format!(
+                "{} accounts (insert-if-absent by code: {}; a code the starter chart holds is kept and a differing field is named)",
+                rows.len(),
+                rows.iter()
+                    .map(|a| a.code.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Door::Locations { rows } => format!(
                 "{} locations (insert-if-absent by id: {})",
                 rows.len(),
@@ -520,6 +537,16 @@ pub fn plan(dir: &Path) -> Result<Plan> {
             })
         },
     )?;
+    // 1b. The chart of accounts (backlog 41af5195) — the ledger's
+    //    rows, after the classes (the design's order; nothing here
+    //    FKs into them yet) and before anything that could post.
+    //    Insert-if-absent by code: a code the starter chart holds is
+    //    kept under the starter's name and the line names the field.
+    door(present(dir, &["seeds/chart_of_accounts.toml"]), &|p| {
+        Ok(Door::Chart {
+            rows: boss_ledger::chart::load_chart_toml(p).map_err(anyhow::Error::msg)?,
+        })
+    })?;
     // 2. Locations (backlog 1ec8312a) — a row's `kind` is a Class
     //    code, and `employees.location` is a foreign key into the
     //    registry, so the sites go after the classes and before the
@@ -794,6 +821,18 @@ fn send(client: &Client, bases: &Bases, door: &Door) -> Result<String> {
                 body.get("inserted").and_then(Value::as_u64).unwrap_or(0)
             ))
         }
+        Door::Chart { rows } => {
+            let u = url(&bases.ledger, "/api/ledger/accounts/batch");
+            let resp = refuse(client.post(&u).json(rows).send()?, &format!("POST {u}"))?;
+            // The door's own outcome type: the line names a kept
+            // row's differing fields the way the ledger reported
+            // them — `1000 (name differs)` — never a count that
+            // hides that the tenant's Bank is the starter's Cash.
+            let out: boss_ledger::chart::ChartBatchOutcome = resp
+                .json()
+                .with_context(|| format!("POST {u}: the outcome did not parse"))?;
+            Ok(out.summary())
+        }
         Door::Locations { rows } => {
             let u = url(&bases.locations, "/api/locations/batch");
             let resp = refuse(client.post(&u).json(rows).send()?, &format!("POST {u}"))?;
@@ -1052,6 +1091,17 @@ terminal = { outcome = "sponsored" }
             "[[agent]]\nid = \"agent-claude\"\ndisplay_name = \"Claude (engineering)\"\n\
              default_model = \"opus-5[1m]\"\naliases = [\"claude@acme.example\"]\n",
         );
+        // The real tenant's chart (design 18cf4272): 1000 collides with
+        // the starter's Cash, 1010 with Cash in Transit; 4200 is new.
+        put(
+            &dir,
+            "seeds/chart_of_accounts.toml",
+            "[[account]]\ncode = \"1000\"\nname = \"Bank\"\nkind = \"asset\"\nnormal_balance = \"debit\"\n\
+             [[account]]\ncode = \"1010\"\nname = \"Stripe balance\"\nkind = \"asset\"\n\
+             normal_balance = \"debit\"\nparent = \"1000\"\n\
+             [[account]]\ncode = \"4200\"\nname = \"Support revenue\"\nkind = \"revenue\"\n\
+             normal_balance = \"credit\"\n",
+        );
         put(&dir, "seeds/workflows.toml", WORKFLOWS);
         // The first sensor (design 14c9b2ad): opens the workflow above.
         put(
@@ -1111,6 +1161,7 @@ terminal = { outcome = "sponsored" }
             writes,
             [
                 "seeds/classes.json",
+                "seeds/chart_of_accounts.toml",
                 "seeds/locations.toml",
                 "seeds/business_calendars.json",
                 "tenant.toml",
@@ -1122,8 +1173,19 @@ terminal = { outcome = "sponsored" }
                 "seeds/posting_rules.toml",
                 "seeds/fact_projection_rules.toml",
             ],
-            "classes → locations → calendars → company → policy → people → agents → workflows → sensors → posting rules → projections LAST"
+            "classes → chart of accounts → locations → calendars → company → policy → people → agents → workflows → sensors → posting rules → projections LAST"
         );
+        // The chart door (backlog 41af5195): the rows as the ledger
+        // door's own type, after the classes.
+        match &step(&p, "seeds/chart_of_accounts.toml").action {
+            Action::Write(Door::Chart { rows }) => {
+                assert_eq!(rows.len(), 3);
+                assert_eq!(rows[0].code, "1000");
+                assert_eq!(rows[1].parent.as_deref(), Some("1000"));
+                assert_eq!(rows[2].kind, "revenue");
+            }
+            other => panic!("{other:?}"),
+        }
         // The agents door (backlog f56155f0): the declarations as the
         // batch endpoint's rows, before the Workflows whose steps may
         // name an agent as their audience.
@@ -1320,6 +1382,7 @@ terminal = { outcome = "sponsored" }
         let d = Bases::resolve(None);
         assert_eq!(d.jobs, boss_ports::url("jobs"));
         assert_eq!(d.classes, boss_ports::url("classes"));
+        assert_eq!(d.ledger, boss_ports::url("ledger"));
         assert_ne!(d.jobs, d.classes, "solo ports, not one base");
         assert!(d.describe(None).contains("boss_ports"));
         assert!(g.describe(Some("http://gw:8080")).contains("gateway"));
@@ -1352,6 +1415,10 @@ terminal = { outcome = "sponsored" }
         posting_rules: BTreeSet<String>,
         /// Published projections, "event_kind when" (insert-if-absent).
         projections: BTreeSet<String>,
+        /// The chart of accounts: code -> name (insert-if-absent by
+        /// code; a test pre-seeds the starter's rows the way
+        /// 40-ledger.sql does).
+        accounts: BTreeMap<String, String>,
     }
 
     impl Stub {
@@ -1365,6 +1432,7 @@ terminal = { outcome = "sponsored" }
                 + self.agents.len()
                 + self.posting_rules.len()
                 + self.projections.len()
+                + self.accounts.len()
         }
     }
 
@@ -1406,6 +1474,31 @@ terminal = { outcome = "sponsored" }
                         })),
                         None => {
                             st.agents.insert(id, name);
+                            inserted += 1;
+                        }
+                    }
+                }
+                (
+                    200,
+                    json!({"received": rows.len(), "inserted": inserted, "kept": kept}).to_string(),
+                )
+            }
+            ("POST", "/api/ledger/accounts/batch") => {
+                // Insert-if-absent by code; a kept row reports which
+                // declared fields differ (here: name only).
+                let rows = serde_json::from_str::<Vec<Value>>(body).unwrap_or_default();
+                let mut inserted = 0usize;
+                let mut kept = Vec::new();
+                for r in &rows {
+                    let code = r["code"].as_str().unwrap_or("").to_string();
+                    let name = r["name"].as_str().unwrap_or("").to_string();
+                    match st.accounts.get(&code) {
+                        Some(have) => kept.push(json!({
+                            "code": code,
+                            "differs": if *have == name { json!([]) } else { json!(["name"]) }
+                        })),
+                        None => {
+                            st.accounts.insert(code, name);
                             inserted += 1;
                         }
                     }
@@ -1632,6 +1725,15 @@ terminal = { outcome = "sponsored" }
             "one batch for the locations file"
         );
         assert_eq!(st.locations.iter().collect::<Vec<_>>(), ["loc-acme-hq"]);
+        assert_eq!(
+            hit("POST", "/api/ledger/accounts/batch"),
+            1,
+            "one batch for the chart of accounts"
+        );
+        assert_eq!(
+            st.accounts.keys().collect::<Vec<_>>(),
+            ["1000", "1010", "4200"]
+        );
         assert_eq!(hit("POST", "/api/calendar/business-calendars/batch"), 1);
         assert_eq!(hit("POST", "/api/subjects/company"), 1);
         assert_eq!(
@@ -1678,6 +1780,10 @@ terminal = { outcome = "sponsored" }
                 .unwrap()
         };
         assert!(pos("POST", "/api/classes/batch") < pos("POST", "/api/people"));
+        assert!(
+            pos("POST", "/api/classes/batch") < pos("POST", "/api/ledger/accounts/batch"),
+            "the chart goes after the classes (backlog 41af5195)"
+        );
         assert!(
             pos("POST", "/api/locations/batch") < pos("POST", "/api/people"),
             "employees.location is a FK into locations, so the sites land first"
@@ -1735,6 +1841,53 @@ terminal = { outcome = "sponsored" }
             classes_line.contains("received 2, inserted 2"),
             "{classes_line}"
         );
+        let chart_line = lines
+            .iter()
+            .find(|l| l.contains("seeds/chart_of_accounts.toml"))
+            .unwrap();
+        assert!(
+            chart_line.contains("POST /api/ledger/accounts/batch")
+                && chart_line.contains("received 3, inserted 3"),
+            "{chart_line}"
+        );
+    }
+
+    /// A CODE THE STARTER CHART HOLDS IS THE SAME ACCOUNT (backlog
+    /// 41af5195; design 18cf4272). The stub pre-seeds 40-ledger.sql's
+    /// `1000 Cash` and `1010 Cash in Transit`; the tenant declares
+    /// `1000 Bank` and `1010 Stripe balance`. Insert-if-absent keeps
+    /// both under the starter's names and the publish line names the
+    /// field — the tenant adopts the code or chooses another, never a
+    /// silent rename of an account every journal line points at.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_starter_chart_code_is_kept_and_the_differing_name_is_named_in_the_line() {
+        let dir = real_shape("chart-kept");
+        let p = plan(&dir).unwrap();
+        let st = Arc::new(Mutex::new(Stub::default()));
+        {
+            let mut st = st.lock().unwrap();
+            st.accounts.insert("1000".into(), "Cash".into());
+            st.accounts.insert("1010".into(), "Cash in Transit".into());
+        }
+        let base = spawn_stub(st.clone()).await;
+        let lines = run_publish(p, base).await.unwrap();
+        let chart_line = lines
+            .iter()
+            .find(|l| l.contains("seeds/chart_of_accounts.toml"))
+            .unwrap();
+        assert!(
+            chart_line.contains("received 3, inserted 1")
+                && chart_line.contains("1000 (name differs)")
+                && chart_line.contains("1010 (name differs)")
+                && chart_line.contains("adopt the code or choose another"),
+            "{chart_line}"
+        );
+        let st = st.lock().unwrap();
+        assert_eq!(
+            st.accounts["1000"], "Cash",
+            "kept as the starter registered it"
+        );
+        assert_eq!(st.accounts["4200"], "Support revenue");
     }
 
     #[tokio::test(flavor = "multi_thread")]
