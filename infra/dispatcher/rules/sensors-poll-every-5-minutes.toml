@@ -1,0 +1,38 @@
+# ---------------------------------------------------------------------
+# The sensors are polled every five minutes (design 14c9b2ad, decided
+# with David 2026-09-17: "Polling is fine, use a restricted read-only
+# key"; backlog 2d33e111). ONE platform rule for every declared sensor:
+# the `sensor.poll` handler reads the tenant-published registry
+# (GET /api/sensors) and polls each enabled sensor whose own
+# `every_minutes` has elapsed since its last attempt — so a sensor
+# declaring 15 minutes is read every fifteen, and this rule's five is
+# the resolution, not the period. Nothing here names a sensor or a
+# source: WHAT to read and what work to open for it is the sensor
+# row, the company's data.
+#
+# THE FIRST SUB-DAY DISPATCHER RULE. Until this one the schedule runner
+# fired on sim-day boundaries only; `cadence = "every-5-minutes"` rides
+# the clock TICK (schedule_runner's tick path) and fires once per
+# five-minute bucket. Its firings are not packets and not audit events:
+# a reading is telemetry (`sensor_readings`), and the packet the poll
+# opens for a new reading is the audit-log fact.
+#
+# NO DEDUP GUARD, ON PURPOSE. A firing that finds nothing new writes
+# nothing; a firing that finds a sensor unreadable files or refreshes
+# the estate alarm `sensor_unreadable:<id>` (deduped by
+# `estate_finding`, refreshed only when the reason changes) and the
+# next good read closes it. There is no packet this rule could twin.
+[[rule]]
+name = "sensors-poll-every-5-minutes"
+why = """
+A TIMER, the standing exemption: no packet causes "five minutes
+passed", so no Workflow definition can declare it. The condition it
+watches is a standing STATE of a system outside BOSS — what Stripe
+has recorded — which no packet causes and no event reports; polling
+on a clock is the only honest trigger (David 2026-09-17: polling is
+fine). It adds no routing: the handler opens packets of the kind each
+SENSOR ROW declares, and what happens next is that protocol's own row.
+"""
+schedule = { cadence = "every-5-minutes", anchor_date = "2026-09-17" }
+[[rule.do]]
+handler = "sensor.poll"

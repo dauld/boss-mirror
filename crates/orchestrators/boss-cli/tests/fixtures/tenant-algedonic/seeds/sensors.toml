@@ -1,0 +1,13 @@
+# Sensors — what the platform polls for this company and what work a
+# reading opens (design 14c9b2ad, decided 2026-09-17). The credential
+# names a `credentials` registry row; its value lives in the
+# deployment's Secret, never here. Published by `boss tenant publish`
+# to the `sensors` registry, insert-if-absent by id.
+
+[[sensor]]
+id = "stripe-sponsorships"
+source = "stripe"
+credential = "stripe-restricted-read"
+every_minutes = 15
+opens = "receive-a-sponsorship"
+subject_kind = "custom"

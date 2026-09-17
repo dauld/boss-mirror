@@ -21,26 +21,48 @@ use boss_dispatcher::rules::runner::RulesRunner;
 use boss_dispatcher::rules::schedule_runner::{DEFAULT_CATCHUP_CAP, ScheduleRunner};
 use boss_dispatcher::rules::seed::seed_authored_rules;
 use boss_dispatcher_handlers::handlers::{
-    bill_payment_batch::BillPaymentBatch, cadence_silence::CadenceSilenceSweep,
-    commerce_invoice_issue::CommerceInvoiceIssue, credential_issuer,
+    bill_payment_batch::BillPaymentBatch,
+    cadence_silence::CadenceSilenceSweep,
+    commerce_invoice_issue::CommerceInvoiceIssue,
+    credential_issuer,
     credential_rotate_cloudflare_tunnel::CredentialRotateCloudflareTunnel,
-    credential_rotate_forgejo::CredentialRotateForgejo, dns_observe::DnsObserve,
-    estate_alarm::EstateAlarm, estate_compare::EstateCompare, estate_recover::EstateRecover,
-    gate_resolve::GateResolve, inventory_bill_approve::InventoryBillApprove,
+    credential_rotate_forgejo::CredentialRotateForgejo,
+    dns_observe::DnsObserve,
+    estate_alarm::EstateAlarm,
+    estate_compare::EstateCompare,
+    estate_recover::EstateRecover,
+    gate_resolve::GateResolve,
+    inventory_bill_approve::InventoryBillApprove,
     inventory_overhead_absorb::InventoryOverheadAbsorb,
-    inventory_parts_consume::InventoryPartsConsume, inventory_parts_produce::InventoryPartsProduce,
-    inventory_po_place::InventoryPoPlace, inventory_receive::InventoryReceive,
-    jobs_auto_park::JobsAutoPark, jobs_clear_waiting::JobsClearWaiting,
-    jobs_complete_linked_step::JobsCompleteLinkedStep, jobs_complete_step::JobsCompleteStep,
-    jobs_run_car_probes::JobsRunCarProbes, jobs_subjob_resolve::JobsSubjobResolve,
-    ledger_bill_approve::LedgerBillApprove, ledger_keg_deposit_settle::LedgerKegDepositSettle,
-    ledger_payroll_run_submit::LedgerPayrollRunSubmit, ledger_tax_accrue::LedgerTaxAccrue,
-    ledger_tax_remit::LedgerTaxRemit, messages_expire_for_job::MessagesExpireForJob,
-    messages_notify::MessagesNotify, messages_notify_job_terminal::MessagesNotifyJobTerminal,
-    network_census::NetworkCensus, packaging_allocate::PackagingAllocate, people_hire::PeopleHire,
-    people_terminate::PeopleTerminate, products_consume::ProductsConsume,
-    products_consume_from_invoice::ProductsConsumeFromInvoice, products_produce::ProductsProduce,
-    shipping_create::ShippingCreate, sweep_empty_decisions::MaintenanceSweepInspect,
+    inventory_parts_consume::InventoryPartsConsume,
+    inventory_parts_produce::InventoryPartsProduce,
+    inventory_po_place::InventoryPoPlace,
+    inventory_receive::InventoryReceive,
+    jobs_auto_park::JobsAutoPark,
+    jobs_clear_waiting::JobsClearWaiting,
+    jobs_complete_linked_step::JobsCompleteLinkedStep,
+    jobs_complete_step::JobsCompleteStep,
+    jobs_run_car_probes::JobsRunCarProbes,
+    jobs_subjob_resolve::JobsSubjobResolve,
+    ledger_bill_approve::LedgerBillApprove,
+    ledger_keg_deposit_settle::LedgerKegDepositSettle,
+    ledger_payroll_run_submit::LedgerPayrollRunSubmit,
+    ledger_tax_accrue::LedgerTaxAccrue,
+    ledger_tax_remit::LedgerTaxRemit,
+    messages_expire_for_job::MessagesExpireForJob,
+    messages_notify::MessagesNotify,
+    messages_notify_job_terminal::MessagesNotifyJobTerminal,
+    network_census::NetworkCensus,
+    packaging_allocate::PackagingAllocate,
+    people_hire::PeopleHire,
+    people_terminate::PeopleTerminate,
+    products_consume::ProductsConsume,
+    products_consume_from_invoice::ProductsConsumeFromInvoice,
+    products_produce::ProductsProduce,
+    sensor_poll::{CredentialValues, SensorPoll, SensorSource},
+    shipping_create::ShippingCreate,
+    stripe_charges::StripeCharges,
+    sweep_empty_decisions::MaintenanceSweepInspect,
     webhook_notify::WebhookNotify,
 };
 use tokio::net::TcpListener;
@@ -445,6 +467,31 @@ async fn main() -> Result<()> {
                     access_apps,
                     secrets,
                     cfg.dns_declarations_dir.clone(),
+                ));
+            }
+            // The first sensor (design 14c9b2ad, backlog 2d33e111): the
+            // 5-minute platform cadence fires sensor.poll, which reads
+            // the tenant-published sensor registry and, per due sensor,
+            // its source adapter — Stripe's charges, with the restricted
+            // read-only key from the broker's root Secret — recording
+            // readings outside the audit log and opening the declared
+            // packet per new one. An absent key is an alarm naming the
+            // env var, not a silent skip.
+            {
+                let mut sources: std::collections::HashMap<String, Arc<dyn SensorSource>> =
+                    std::collections::HashMap::new();
+                sources.insert(
+                    "stripe".to_string(),
+                    Arc::new(StripeCharges::new(cfg.stripe_api_base.clone())),
+                );
+                handlers.register(SensorPoll::new(
+                    cfg.jobs_api_url.clone(),
+                    sources,
+                    CredentialValues::new().with(
+                        "stripe-restricted-read",
+                        "BOSS_BROKER_STRIPE_KEY",
+                        cfg.broker_stripe_key.clone(),
+                    ),
                 ));
             }
             // Packaging allocation — splits a brewed batch across formats by

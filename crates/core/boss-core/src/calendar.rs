@@ -272,8 +272,12 @@ impl BusinessCalendar {
 /// fire without depending on the calendar SERVICE being up — a
 /// scheduler that stops scheduling because another service is down
 /// would be worse than the duplication this replaces.
+// Serde goes through `token` / `parse` (one spelling, CLAUDE.md §9a):
+// the derive spelled `EveryNMinutes(5)` as `{ every-n-minutes = 5 }`,
+// which no rule file could reasonably write and no DB column ever
+// held; the six day-cadence spellings serialize exactly as before.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
+#[serde(try_from = "String", into = "String")]
 pub enum Cadence {
     Daily,
     Weekly,
@@ -287,6 +291,24 @@ pub enum Cadence {
     /// see "every day"; sub-day resolution belongs to the caller that
     /// has a tick (see the note on [`Cadence::fires_on`]).
     EveryNMinutes(u32),
+}
+
+impl From<Cadence> for String {
+    fn from(c: Cadence) -> Self {
+        c.token()
+    }
+}
+
+impl TryFrom<String> for Cadence {
+    type Error = String;
+    fn try_from(raw: String) -> Result<Self, Self::Error> {
+        Cadence::parse(&raw).ok_or_else(|| {
+            format!(
+                "unknown cadence {raw:?}: daily | weekly | biweekly | monthly | quarterly | \
+                 annually | hourly | every-<1..1440>-minutes"
+            )
+        })
+    }
 }
 
 impl Cadence {
@@ -328,6 +350,18 @@ impl Cadence {
             }
             // Sub-day: every day, resolved finer by the caller.
             Cadence::Hourly | Cadence::EveryNMinutes(_) => true,
+        }
+    }
+
+    /// The period of a sub-day cadence in minutes, or `None` for a
+    /// day-or-coarser one. This is the ONE question a caller with a
+    /// tick asks (the dispatcher's schedule runner since 2026-09-17,
+    /// backlog 2d33e111): a day-granularity caller never needs it.
+    pub fn sub_day_minutes(&self) -> Option<u32> {
+        match self {
+            Cadence::Hourly => Some(60),
+            Cadence::EveryNMinutes(n) => Some(*n),
+            _ => None,
         }
     }
 
@@ -647,6 +681,29 @@ mod tests {
         assert_eq!(Cadence::parse("every-0-minutes"), None);
         assert_eq!(Cadence::parse("every-1441-minutes"), None);
         assert_eq!(Cadence::parse("every-x-minutes"), None);
+    }
+
+    /// The wire spelling IS the token: `cadence = "every-5-minutes"`
+    /// in a rule file and `"every-5-minutes"` on `/api/dispatcher/rules`
+    /// read the way an operator writes them, and the six day-cadence
+    /// spellings are unchanged. Until 2026-09-17 the derive spelled
+    /// the newtype variant `{ every-n-minutes = 5 }`, a shape no rule
+    /// file or DB column ever held (backlog 2d33e111: the first sub-day
+    /// dispatcher rule).
+    #[test]
+    fn serde_uses_the_token_spelling_for_every_variant() {
+        for (c, want) in [
+            (Cadence::Daily, "\"daily\""),
+            (Cadence::Monthly, "\"monthly\""),
+            (Cadence::Hourly, "\"hourly\""),
+            (Cadence::EveryNMinutes(5), "\"every-5-minutes\""),
+        ] {
+            assert_eq!(serde_json::to_string(&c).unwrap(), want);
+            let back: Cadence = serde_json::from_str(want).unwrap();
+            assert_eq!(back, c);
+        }
+        assert!(serde_json::from_str::<Cadence>("\"every-0-minutes\"").is_err());
+        assert!(serde_json::from_str::<Cadence>("\"never\"").is_err());
     }
 
     /// Sub-day cadences answer "every day" at day granularity — the

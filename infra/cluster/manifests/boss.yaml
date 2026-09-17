@@ -501,6 +501,15 @@ spec:
             # naming this variable until the key exists.
             - name: BOSS_BROKER_CLOUDFLARE_TOKEN
               valueFrom: {secretKeyRef: {name: boss-credential-broker-root, key: cloudflare-token, optional: true}}
+            # The first sensor's credential (design 14c9b2ad, backlog
+            # 2d33e111): a RESTRICTED read-only Stripe key (charges,
+            # checkout_sessions, customers: read), a third key in the
+            # SAME root Secret, minted once by David. Same `optional:
+            # true` reasoning; until the key exists the sensor.poll
+            # handler files the sensor_unreadable:<id> alarm naming
+            # this variable instead of failing silently.
+            - name: BOSS_BROKER_STRIPE_KEY
+              valueFrom: {secretKeyRef: {name: boss-credential-broker-root, key: stripe-restricted-read, optional: true}}
             # Bind all interfaces so the Service can reach the gateway;
             # the default 127.0.0.1 is right for systemd+Caddy, wrong here.
             - {name: BOSS_LISTEN, value: "0.0.0.0:4443"}

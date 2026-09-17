@@ -227,3 +227,7 @@ required-features = ["postgres"]
 [[test]]
 name = "surface_opens_pg"
 required-features = ["postgres"]
+
+[[test]]
+name = "sensors_pg"
+required-features = ["postgres"]

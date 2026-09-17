@@ -166,6 +166,18 @@ pub const CONTRACT: &[Entry] = &[
         scaffold: Some(scaffold_business_calendars),
     },
     Entry {
+        paths: &["seeds/sensors.toml"],
+        required: false,
+        read_by: "POST /api/sensors/batch (boss-jobs, insert-if-absent by id) — sent by `boss tenant \
+                  publish` as the tenant's declarations; the dispatcher's `sensor.poll` handler \
+                  reads the registry every 5 minutes and polls each due sensor (design 14c9b2ad)",
+        shape: "`[[sensor]]` rows: id, source (`stripe`), credential (a `credentials` registry id), \
+                every_minutes, opens (the workflow kind one reading opens), subject_kind, \
+                enabled? — validated by `boss_jobs::sensors::load_sensors_toml`",
+        parse: parse_sensors,
+        scaffold: Some(scaffold_sensors),
+    },
+    Entry {
         paths: &["seeds/locations.toml"],
         required: false,
         read_by: "NO READER (measured 2026-09-16): nothing seeds locations from a file, so an \
@@ -370,6 +382,24 @@ fn parse_business_calendars(path: &Path, _: &Ctx) -> Result<String, String> {
         serde_json::from_str(&read(path)?).map_err(|e| e.to_string())?;
     let codes: Vec<&str> = rows.iter().map(|c| c.code.as_str()).collect();
     Ok(format!("{} calendars: {}", rows.len(), codes.join(", ")))
+}
+
+fn parse_sensors(path: &Path, _: &Ctx) -> Result<String, String> {
+    let rows = boss_jobs::sensors::load_sensors_toml(path)?;
+    refuse_if_stray(&read(path)?, "sensor", rows.len())?;
+    Ok(match rows.len() {
+        0 => "0 sensors".to_string(),
+        n => format!(
+            "{n} sensors: {}",
+            rows.iter()
+                .map(|r| format!(
+                    "{} ({} every {}m -> {})",
+                    r.id, r.source, r.every_minutes, r.opens
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    })
 }
 
 /// Conservative row shape for a file with no reader (see the entry):
@@ -907,6 +937,28 @@ fn scaffold_business_calendars(_: &Scaffold) -> String {
         .to_string()
 }
 
+fn scaffold_sensors(s: &Scaffold) -> String {
+    format!(
+        "# {display} — sensors (design 14c9b2ad).\n\
+#\n\
+# A sensor is a reading of the world outside BOSS, polled on a cadence\n\
+# by the platform and turned into a packet of the kind you declare.\n\
+# The product knows how to read a `source`; WHAT to open for it is\n\
+# yours. `credential` names a `credentials` registry row whose value\n\
+# the deployment holds (never this file). Published to the `sensors`\n\
+# registry by `boss tenant publish`, insert-if-absent by id.\n\
+#\n\
+# [[sensor]]\n\
+# id = \"stripe-sponsorships\"\n\
+# source = \"stripe\"\n\
+# credential = \"stripe-restricted-read\"\n\
+# every_minutes = 15\n\
+# opens = \"receive-a-sponsorship\"\n\
+# subject_kind = \"custom\"\n",
+        display = s.display_name
+    )
+}
+
 fn scaffold_locations(s: &Scaffold) -> String {
     format!(
         "# {display} — locations.\n\
@@ -1240,6 +1292,14 @@ terminal = { outcome = "sponsored" }
 "#,
         );
 
+        // The first sensor (design 14c9b2ad), in the real file's shape.
+        write_file(
+            &seeds.join("sensors.toml"),
+            "[[sensor]]\nid = \"stripe-sponsorships\"\nsource = \"stripe\"\n\
+             credential = \"stripe-restricted-read\"\nevery_minutes = 15\n\
+             opens = \"receive-a-sponsorship\"\nsubject_kind = \"custom\"\n",
+        );
+
         let r = check(&dir);
         let agents = status_of(&r, "seeds/agents.toml").expect("agents.toml is reported");
         assert_eq!(agents.status, Status::Unknown, "{agents:?}");
@@ -1248,6 +1308,7 @@ terminal = { outcome = "sponsored" }
             "seeds/classes.json",
             "seeds/employees.json",
             "seeds/locations.toml",
+            "seeds/sensors.toml",
         ] {
             let row = status_of(&r, ok).unwrap_or_else(|| panic!("{ok} is reported"));
             assert_eq!(row.status, Status::Ok, "{row:?}");
@@ -1272,6 +1333,35 @@ terminal = { outcome = "sponsored" }
         assert!(!r.passed());
         // Prose is not a file the contract judges.
         assert!(status_of(&r, "README.md").is_none());
+    }
+
+    /// A sensor declaration is judged by the product's own loader: a
+    /// bad row is INVALID naming the row, and rows under the wrong
+    /// table name parse to nothing and are refused rather than passed.
+    #[test]
+    fn a_bad_sensor_row_is_invalid_by_name() {
+        let dir = scratch_dir("boss-cli-tenant-check-sensors");
+        write_file(&dir.join("tenant.toml"), "[meta]\ntenant_id = \"t\"\n");
+        let seeds = dir.join("seeds");
+        boss_testing::scratch::create_dir(&seeds);
+        write_file(&seeds.join("workflows.toml"), "");
+        write_file(
+            &seeds.join("sensors.toml"),
+            "[[sensor]]\nid = \"stripe-sponsorships\"\nsource = \"stripe\"\n\
+             credential = \"stripe-restricted-read\"\nevery_minutes = 0\n\
+             opens = \"receive-a-sponsorship\"\nsubject_kind = \"custom\"\n",
+        );
+        let r = check(&dir);
+        let row = status_of(&r, "seeds/sensors.toml").unwrap();
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(row.detail.contains("stripe-sponsorships"), "{row:?}");
+        assert!(row.detail.contains("every_minutes"), "{row:?}");
+
+        write_file(&seeds.join("sensors.toml"), "[[sensors]]\nid = \"x\"\n");
+        let r = check(&dir);
+        let row = status_of(&r, "seeds/sensors.toml").unwrap();
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(row.detail.contains("[[sensor]]"), "{row:?}");
     }
 
     #[test]

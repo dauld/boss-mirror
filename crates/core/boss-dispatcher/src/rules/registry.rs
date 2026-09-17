@@ -69,7 +69,9 @@ fn default_version() -> u32 {
 
 /// A clock-driven trigger as written in TOML / stored in the DB. The
 /// dispatcher fires the rule's `do_steps` on each sim-DAY the cadence
-/// selects (postponed onto a business day when a calendar is given).
+/// selects (postponed onto a business day when a calendar is given) —
+/// or, for a sub-day cadence (`hourly`, `every-<n>-minutes`), once per
+/// period from the clock tick (schedule_runner's tick path, 2d33e111).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RawSchedule {
     pub cadence: Cadence,
@@ -82,11 +84,6 @@ pub struct RawSchedule {
     pub business_calendar: Option<String>,
 }
 
-/// Built-in cadence shapes for schedule-triggered rules. Day-granularity
-/// only — the dispatcher fires on sim-DAY boundaries, so there are no
-/// sub-day cadences here (unlike the simulator's `PeriodicEngine`, which
-/// also models `Hourly` / `EveryNMinutes`). Firing math is
-/// [`Cadence::fires_on`], ported from that engine.
 /// THE day-firing decision: does the schedule `sched` fire on sim-day
 /// `day`, given its (optional, already-resolved) business calendar?
 ///

@@ -21,6 +21,21 @@
 //! 3. [`run`] — the shell: fetch + cache calendars, load + persist the
 //!    cursor, consume the clock stream, and for each day-to-fire dispatch
 //!    every schedule rule's `do_steps`.
+//!
+//! SUB-DAY CADENCES RIDE THE TICK, NOT THE DAY (backlog 2d33e111,
+//! 2026-09-17). `Cadence::Hourly` / `EveryNMinutes` existed in core with
+//! the note "sub-day resolution belongs to the caller that has a tick",
+//! and this runner has one — the clock stream ticks every second — but
+//! until the first sensor poll (`sensors-poll`, every five minutes)
+//! nothing in the dispatcher was allowed to run more often than daily.
+//! A sub-day rule is excluded from the midnight path and fires from
+//! [`tick_bucket`] / [`advance_bucket`] instead: the tick's instant is
+//! bucketed by the period, and the rule fires once when its bucket
+//! changes. The bucket cursor is in-memory per rule — a restart
+//! baselines and fires on the next boundary, which for a poll is the
+//! right posture (there is nothing to catch up: it reads the world as
+//! it is now). The anchor date and business calendar still apply
+//! through `Schedule::fires_on` for the tick's day.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -29,7 +44,7 @@ use anyhow::{Context, Result};
 use boss_calendar_client::CalendarClient;
 use boss_clock_client::ClockNow;
 use boss_core::calendar::BusinessCalendar;
-use chrono::{Days, NaiveDate};
+use chrono::{DateTime, Days, NaiveDate, Utc};
 use futures::StreamExt;
 use serde_json::json;
 use tracing::{debug, info, warn};
@@ -141,6 +156,27 @@ pub fn advance_cursor(cursor: Option<NaiveDate>, now: &ClockNow, cap: u64) -> Cu
                 skipped,
             }
         }
+    }
+}
+
+/// The sub-day bucket a tick falls in: the instant's unix seconds
+/// divided by the period. Buckets are anchored at the epoch, so two
+/// dispatcher instances (or a restarted one) compute the same bucket
+/// for the same tick.
+pub fn tick_bucket(now: DateTime<Utc>, every_minutes: u32) -> i64 {
+    now.timestamp().div_euclid(i64::from(every_minutes) * 60)
+}
+
+/// THE sub-day cursor decision — pure. `(fire, new_cursor)`: a first
+/// observation adopts the bucket and fires nothing (the day path's
+/// posture); the same bucket is silent; a LATER bucket fires once and
+/// becomes the cursor however many buckets were skipped — a poll never
+/// backfills; a backward jump re-baselines without firing.
+pub fn advance_bucket(cursor: Option<i64>, bucket: i64) -> (bool, i64) {
+    match cursor {
+        Some(c) if bucket > c => (true, bucket),
+        Some(c) if bucket == c => (false, c),
+        _ => (false, bucket),
     }
 }
 
@@ -287,11 +323,58 @@ impl ScheduleRunner {
         helpers: &dyn super::expr::HelperResolver,
     ) -> (Vec<MatchedRule>, serde_json::Value) {
         let payload = json!({ "_day": day.format("%Y-%m-%d").to_string() });
+        // Day rules only: a sub-day rule fires from the tick path.
+        let matched = Self::matched(registry, calendars, day, &payload, helpers, &|s| {
+            s.cadence.sub_day_minutes().is_none()
+        });
+        (matched, payload)
+    }
+
+    /// The tick-path twin of [`Self::matched_for_day`]: every SUB-DAY
+    /// schedule rule that fires on the tick's day (anchor + calendar,
+    /// the same decision) and that `due` says has crossed a bucket
+    /// boundary — the runner's in-memory cursor, asked by rule name.
+    /// The payload carries `_day` and the tick's instant as `_at`.
+    pub fn matched_for_tick(
+        registry: &Registry,
+        calendars: &HashMap<String, BusinessCalendar>,
+        now: DateTime<Utc>,
+        due: &dyn Fn(&str) -> bool,
+        helpers: &dyn super::expr::HelperResolver,
+    ) -> (Vec<MatchedRule>, serde_json::Value) {
+        let day = now.date_naive();
+        let payload = json!({
+            "_day": day.format("%Y-%m-%d").to_string(),
+            "_at": now.to_rfc3339(),
+        });
+        let matched = Self::matched(registry, calendars, day, &payload, helpers, &|s| {
+            s.cadence.sub_day_minutes().is_some()
+        });
+        (
+            matched.into_iter().filter(|m| due(&m.rule_name)).collect(),
+            payload,
+        )
+    }
+
+    /// The shared evaluation: every schedule rule `selects` admits that
+    /// fires on `day`, with its `when` guard and args evaluated against
+    /// `payload`.
+    fn matched(
+        registry: &Registry,
+        calendars: &HashMap<String, BusinessCalendar>,
+        day: NaiveDate,
+        payload: &serde_json::Value,
+        helpers: &dyn super::expr::HelperResolver,
+        selects: &dyn Fn(&super::registry::Schedule) -> bool,
+    ) -> Vec<MatchedRule> {
         let mut matched = Vec::new();
         for rule in registry.rules() {
             let Some(sched) = rule.schedule() else {
                 continue;
             };
+            if !selects(sched) {
+                continue;
+            }
             let cal = sched
                 .business_calendar
                 .as_deref()
@@ -299,10 +382,7 @@ impl ScheduleRunner {
             if !sched.fires_on(cal, day) {
                 continue;
             }
-            let ctx = super::expr::Context {
-                payload: &payload,
-                helpers,
-            };
+            let ctx = super::expr::Context { payload, helpers };
             if let Some(when) = &rule.when {
                 match super::expr::eval(when, &ctx).map(|v| v.as_bool()) {
                     Ok(Some(true)) => {}
@@ -357,7 +437,69 @@ impl ScheduleRunner {
                 invocations,
             });
         }
-        (matched, payload)
+        matched
+    }
+
+    /// Fire the sub-day rules whose bucket this tick crossed, advancing
+    /// the in-memory bucket cursors. A handler failure is logged and
+    /// the bucket still counts as fired: the next boundary fires again
+    /// regardless, and a poll that failed once must not be re-run every
+    /// second until it succeeds.
+    async fn fire_tick(
+        &self,
+        calendars: &HashMap<String, BusinessCalendar>,
+        now: DateTime<Utc>,
+        buckets: &mut HashMap<String, i64>,
+        live: &crate::liveness::DispatcherLiveness,
+    ) {
+        // Decide every rule's bucket first, so the cursor advances for
+        // a rule the `when` guard then declines (its bucket has passed
+        // either way).
+        let mut fires: HashSet<String> = HashSet::new();
+        for rule in self.registry.rules() {
+            let Some(every) = rule.schedule().and_then(|s| s.cadence.sub_day_minutes()) else {
+                continue;
+            };
+            let bucket = tick_bucket(now, every);
+            let (fire, cursor) = advance_bucket(buckets.get(&rule.name).copied(), bucket);
+            buckets.insert(rule.name.clone(), cursor);
+            if fire {
+                fires.insert(rule.name.clone());
+            }
+        }
+        if fires.is_empty() {
+            return;
+        }
+        let (matched, payload) = Self::matched_for_tick(
+            &self.registry,
+            calendars,
+            now,
+            &|name| fires.contains(name),
+            self.helpers.as_ref(),
+        );
+        if matched.is_empty() {
+            return;
+        }
+        // Provenance: the topic is `clock.tick` and the event id names
+        // the instant, so a packet a poll opens chains back to the tick
+        // that produced it, the way a day-spawn chains to its day.
+        let event_id = format!("clock-tick:{}", now.to_rfc3339());
+        match handler::dispatch(&matched, &self.handlers, &event_id, "clock.tick", &payload).await {
+            Ok(results) => {
+                for r in results {
+                    match &r.outcome {
+                        Ok(()) => {
+                            debug!(rule = %r.rule_name, handler = %r.handler, at = %now, "schedule rule fired (tick)")
+                        }
+                        Err(e) => {
+                            warn!(rule = %r.rule_name, handler = %r.handler, at = %now, error = %e, "schedule rule handler failed (tick)")
+                        }
+                    }
+                }
+                live.record_schedule();
+            }
+            Err(e) => warn!(at = %now, error = %e, "schedule runner: tick dispatch error"),
+        }
     }
 
     /// Consume the clock stream and fire schedule rules on each sim-day
@@ -382,8 +524,18 @@ impl ScheduleRunner {
         );
         live.mark_schedule_running();
 
+        // The sub-day bucket cursors, per rule, in memory (see the
+        // module doc: a restart baselines and fires at the next
+        // boundary). A paused sim clock ticks the same instant and so
+        // never crosses a bucket.
+        let mut buckets: HashMap<String, i64> = HashMap::new();
+
         let mut ticks = Box::pin(boss_clock_client::subscribe_ticks(self.clock_url.clone()));
         while let Some(now) = ticks.next().await {
+            if !now.paused && !now.restart_in_progress {
+                self.fire_tick(&calendars, now.now, &mut buckets, &live)
+                    .await;
+            }
             let advance = advance_cursor(cursor, &now, self.catchup_cap);
             if advance.skipped > 0 {
                 warn!(
@@ -700,6 +852,103 @@ handler = "h"
         let (matched, _) = ScheduleRunner::matched_for_day(&reg, &cals, d(2026, 1, 16), &NoHelpers);
         let names: Vec<&str> = matched.iter().map(|m| m.rule_name.as_str()).collect();
         assert_eq!(names, vec!["daily-sweep"]);
+    }
+
+    // ----- sub-day cadences — the tick path (backlog 2d33e111) -----
+
+    fn sub_day_registry() -> Registry {
+        let toml = r#"
+[[rule]]
+name = "sensors-poll"
+[rule.schedule]
+cadence = "every-5-minutes"
+anchor_date = "2026-09-17"
+[[rule.do]]
+handler = "sensor.poll"
+
+[[rule]]
+name = "daily-sweep"
+[rule.schedule]
+cadence = "daily"
+anchor_date = "2026-01-01"
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"bank-sweep\"", subject_kind = "\"account\"", subject = "_day" }
+"#;
+        Registry::from_toml(toml).unwrap()
+    }
+
+    fn at(s: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    /// A sub-day rule is NOT a day rule: the midnight crossing fires
+    /// the daily rules only, and the tick path fires the sub-day rule
+    /// only.
+    #[test]
+    fn a_sub_day_rule_rides_the_tick_path_not_the_day_path() {
+        let reg = sub_day_registry();
+        let cals = HashMap::new();
+        let (day, _) = ScheduleRunner::matched_for_day(&reg, &cals, d(2026, 9, 18), &NoHelpers);
+        let names: Vec<&str> = day.iter().map(|m| m.rule_name.as_str()).collect();
+        assert_eq!(names, vec!["daily-sweep"]);
+
+        let (tick, payload) = ScheduleRunner::matched_for_tick(
+            &reg,
+            &cals,
+            at("2026-09-18T10:05:00Z"),
+            &|_| true,
+            &NoHelpers,
+        );
+        let names: Vec<&str> = tick.iter().map(|m| m.rule_name.as_str()).collect();
+        assert_eq!(names, vec!["sensors-poll"]);
+        assert_eq!(payload["_day"], "2026-09-18");
+        assert_eq!(payload["_at"], "2026-09-18T10:05:00+00:00");
+    }
+
+    /// The bucket cursor: first observation baselines and fires
+    /// nothing; the same bucket is silent; a later bucket fires ONCE
+    /// however many buckets were missed (no backfill — a poll reads
+    /// the world as it is now).
+    #[test]
+    fn a_bucket_fires_once_when_it_changes_and_never_backfills() {
+        let every = 5;
+        let first = tick_bucket(at("2026-09-18T10:03:00Z"), every);
+        assert_eq!(advance_bucket(None, first), (false, first), "baseline");
+        let same = tick_bucket(at("2026-09-18T10:04:59Z"), every);
+        assert_eq!(advance_bucket(Some(first), same), (false, first));
+        let next = tick_bucket(at("2026-09-18T10:05:00Z"), every);
+        assert_eq!(advance_bucket(Some(first), next), (true, next));
+        let much_later = tick_bucket(at("2026-09-18T12:00:00Z"), every);
+        assert_eq!(advance_bucket(Some(next), much_later), (true, much_later));
+        // A backward jump re-baselines quietly.
+        assert_eq!(advance_bucket(Some(much_later), first), (false, first));
+    }
+
+    /// Before the anchor the rule is silent, and the `due` predicate
+    /// (the runner's bucket cursor) is what gates a firing.
+    #[test]
+    fn the_tick_path_honours_the_anchor_and_the_due_predicate() {
+        let reg = sub_day_registry();
+        let cals = HashMap::new();
+        let (tick, _) = ScheduleRunner::matched_for_tick(
+            &reg,
+            &cals,
+            at("2026-09-16T10:05:00Z"),
+            &|_| true,
+            &NoHelpers,
+        );
+        assert!(tick.is_empty(), "before the anchor");
+        let (tick, _) = ScheduleRunner::matched_for_tick(
+            &reg,
+            &cals,
+            at("2026-09-18T10:05:00Z"),
+            &|_| false,
+            &NoHelpers,
+        );
+        assert!(tick.is_empty(), "not due");
     }
 
     #[test]

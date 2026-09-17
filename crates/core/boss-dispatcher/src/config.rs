@@ -128,6 +128,19 @@ pub struct DispatcherConfig {
     /// (`BOSS_DNS_DECLARATIONS`), `None` leaves the handler registered
     /// but unconfigured so a firing rule dead-letters naming the knob.
     pub dns_declarations_dir: Option<String>,
+    /// The restricted read-only Stripe key the `sensor.poll` handler
+    /// sends as the bearer for a sensor declaring credential
+    /// `stripe-restricted-read` (design 14c9b2ad, backlog 2d33e111).
+    /// Minted once by David into the same `boss-credential-broker-root`
+    /// Secret under key `stripe-restricted-read`. Same posture as the
+    /// two broker roots: `None` leaves the handler registered, and the
+    /// poll files the `sensor_unreadable:<id>` alarm naming the knob
+    /// instead of failing silently. Never logged.
+    #[serde(skip)]
+    pub broker_stripe_key: Option<String>,
+    /// The Stripe API origin the adapter reads (`BOSS_STRIPE_API_BASE`);
+    /// a stub stands in for the tests, the real endpoint is the default.
+    pub stripe_api_base: String,
 }
 
 impl Default for DispatcherConfig {
@@ -185,6 +198,12 @@ impl Default for DispatcherConfig {
                 .ok()
                 .map(|t| t.trim().to_string())
                 .filter(|t| !t.is_empty()),
+            broker_stripe_key: std::env::var("BOSS_BROKER_STRIPE_KEY")
+                .ok()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty()),
+            stripe_api_base: std::env::var("BOSS_STRIPE_API_BASE")
+                .unwrap_or_else(|_| "https://api.stripe.com".to_string()),
         }
     }
 }

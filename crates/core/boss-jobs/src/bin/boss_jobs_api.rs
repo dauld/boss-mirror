@@ -195,6 +195,12 @@ async fn main() -> Result<()> {
         // record — not an audit event, by §Policy & auth.
         let surface_opens: Arc<dyn boss_jobs::surface_opens::SurfaceOpens> =
             Arc::new(boss_jobs::surface_opens::PgSurfaceOpens::new(pool.clone()));
+        // The sensor registry and its readings (design 14c9b2ad, backlog
+        // 2d33e111): what the platform polls, tenant-published; the
+        // readings are telemetry outside the audit log, the packets a
+        // poll opens are the audit fact.
+        let sensors: Arc<dyn boss_jobs::sensors::Sensors> =
+            Arc::new(boss_jobs::sensors::PgSensors::new(pool.clone()));
         // The agents registry (design 6fda05ae): what an agent's login
         // resolves to at this service's door, the way a human's
         // resolves at the gateway's.
@@ -227,6 +233,7 @@ async fn main() -> Result<()> {
             Some(credentials),
             Some(agent_runs),
             Some(surface_opens),
+            Some(sensors),
             agents,
             calendar,
             subject_kinds,
@@ -262,6 +269,7 @@ async fn run_server<R: JobsRepository + 'static>(
     credentials: Option<Arc<dyn boss_jobs::credentials::CredentialsRegistry>>,
     agent_runs: Option<Arc<dyn boss_jobs::agent_runs::AgentRunLog>>,
     surface_opens: Option<Arc<dyn boss_jobs::surface_opens::SurfaceOpens>>,
+    sensors: Option<Arc<dyn boss_jobs::sensors::Sensors>>,
     agents: Arc<dyn boss_jobs::agents::AgentsRegistry>,
     calendar: Option<Arc<dyn boss_calendar_client::CalendarClient>>,
     subject_kinds: Option<Arc<dyn boss_subject_kinds_client::SubjectKindsClient>>,
@@ -372,6 +380,12 @@ async fn run_server<R: JobsRepository + 'static>(
         info!("surface opens mounted at /api/surface-opens (+ /rollup, /sweep)");
         app = app.merge(boss_jobs::surface_opens::http::router(
             boss_jobs::surface_opens::http::SurfaceOpensApiState { repo },
+        ));
+    }
+    if let Some(repo) = sensors {
+        info!("sensors mounted at /api/sensors (+ /batch, /<id>/readings, /<id>/polled, /sweep)");
+        app = app.merge(boss_jobs::sensors::http::router(
+            boss_jobs::sensors::http::SensorsApiState { repo },
         ));
     }
     // Sim-origin middleware: extract x-sim-origin header and set the

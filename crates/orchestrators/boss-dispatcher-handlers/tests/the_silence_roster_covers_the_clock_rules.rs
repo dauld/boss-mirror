@@ -102,6 +102,16 @@ const SPAWNS_NOTHING_ON_PURPOSE: &[(&str, &str)] = &[
          an operator, not by this rule — a sweep keyed by kind would be watching the \
          operator's cadence, not this one's.",
     ),
+    (
+        "sensors-poll-every-5-minutes",
+        "runs `sensor.poll`, which reads every declared sensor's SOURCE and opens a packet \
+         of the kind the SENSOR ROW declares only when the source recorded something new \
+         (design 14c9b2ad, backlog 2d33e111). On a quiet day it produces NOTHING, and that \
+         zero is the healthy reading; the kind it opens is tenant data, not a literal in \
+         the rule, so a sweep keyed by kind could not name it. A sensor it cannot read is \
+         its own loud packet (`sensor_unreadable:<id>`), which is the failure this sweep \
+         would otherwise be for.",
+    ),
 ];
 
 fn shipped() -> (Vec<ClockCadence>, Vec<NotACadence>) {

@@ -97,6 +97,14 @@ async fn serve(pool: PgPool) -> String {
             "/api/subjects/company",
             post(|| async { StatusCode::CREATED }),
         )
+        // The sensors batch (14c9b2ad) — the fixture declares one.
+        .route(
+            "/api/sensors/batch",
+            post(|Json(b): Json<Value>| async move {
+                let n = b["sensors"].as_array().map_or(0, Vec::len);
+                Json(json!({"received": n, "inserted": n}))
+            }),
+        )
         // Already operator-published → the workflow door skips (its own
         // idempotence rule), so no design-Job walk is attempted here.
         .route(

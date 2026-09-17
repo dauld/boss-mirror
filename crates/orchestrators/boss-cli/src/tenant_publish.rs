@@ -135,6 +135,13 @@ pub enum Door {
         owning_team: String,
         kinds: Vec<String>,
     },
+    /// The tenant's sensor declarations (design 14c9b2ad): what the
+    /// platform polls and what kind each reading opens. After the
+    /// Workflows, because a row names one by kind.
+    Sensors {
+        tenant_id: String,
+        rows: Vec<boss_jobs::sensors::SensorInput>,
+    },
 }
 
 impl Door {
@@ -147,6 +154,7 @@ impl Door {
             Door::Policy { .. } => "GET+POST /api/policy/rules",
             Door::People { .. } => "POST /api/people, then PUT manager links",
             Door::Workflows { .. } => "POST /api/jobs (workflow-design), walked to publish",
+            Door::Sensors { .. } => "POST /api/sensors/batch",
         }
     }
 
@@ -170,6 +178,14 @@ impl Door {
                 "{} workflows as owning_team `{owning_team}` ({}) (a kind an authoring Job already published is skipped)",
                 kinds.len(),
                 kinds.join(", ")
+            ),
+            Door::Sensors { rows, .. } => format!(
+                "{} sensors (insert-if-absent by id: {})",
+                rows.len(),
+                rows.iter()
+                    .map(|r| r.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         }
     }
@@ -465,13 +481,22 @@ pub fn plan(dir: &Path) -> Result<Plan> {
             roster: load_hire_rows(p)?,
         })
     })?;
-    // 6. Workflows LAST.
+    // 6. Workflows — after everything a packet needs.
     door(present(dir, &["seeds/workflows.toml"]), &|p| {
         let specs = boss_jobs::seed_loader::load_workflows_with_owning_team(p, &tenant_id)?;
         Ok(Door::Workflows {
             path: p.to_path_buf(),
             owning_team: tenant_id.clone(),
             kinds: specs.iter().map(|s| s.kind.clone()).collect(),
+        })
+    })?;
+    // 7. Sensors LAST (design 14c9b2ad): each row names the workflow
+    //    kind a reading opens, so the kinds go first; the registry row
+    //    is what the platform's 5-minute poll reads.
+    door(present(dir, &["seeds/sensors.toml"]), &|p| {
+        Ok(Door::Sensors {
+            tenant_id: tenant_id.clone(),
+            rows: boss_jobs::sensors::load_sensors_toml(p).map_err(anyhow::Error::msg)?,
         })
     })?;
     // Everything else check saw, in check's order: a required file it
@@ -692,6 +717,22 @@ fn send(client: &Client, bases: &Bases, door: &Door) -> Result<String> {
             )?;
             Ok("ok (published/skipped counts in the log)".to_string())
         }
+        Door::Sensors { tenant_id, rows } => {
+            let u = url(&bases.jobs, "/api/sensors/batch");
+            let resp = refuse(
+                client
+                    .post(&u)
+                    .json(&json!({ "tenant_id": tenant_id, "sensors": rows }))
+                    .send()?,
+                &format!("POST {u}"),
+            )?;
+            let body: Value = resp.json().unwrap_or(Value::Null);
+            Ok(format!(
+                "received {}, inserted {}",
+                body.get("received").and_then(Value::as_u64).unwrap_or(0),
+                body.get("inserted").and_then(Value::as_u64).unwrap_or(0)
+            ))
+        }
     }
 }
 
@@ -835,6 +876,14 @@ terminal = { outcome = "sponsored" }
             "[[agent]]\nid = \"agent-claude\"\ndisplay_name = \"Claude\"\n",
         );
         put(&dir, "seeds/workflows.toml", WORKFLOWS);
+        // The first sensor (design 14c9b2ad): opens the workflow above.
+        put(
+            &dir,
+            "seeds/sensors.toml",
+            "[[sensor]]\nid = \"stripe-sponsorships\"\nsource = \"stripe\"\n\
+             credential = \"stripe-restricted-read\"\nevery_minutes = 15\n\
+             opens = \"receive-a-sponsorship\"\nsubject_kind = \"custom\"\n",
+        );
         dir
     }
 
@@ -870,8 +919,9 @@ terminal = { outcome = "sponsored" }
                 "seeds/policy_rules.toml",
                 "seeds/employees.json",
                 "seeds/workflows.toml",
+                "seeds/sensors.toml",
             ],
-            "classes → calendars → company → policy → people → workflows LAST"
+            "classes → calendars → company → policy → people → workflows → sensors LAST"
         );
         match &step(&p, "seeds/classes.json").action {
             Action::Write(Door::Classes { rows }) => assert_eq!(rows.len(), 2),
@@ -895,6 +945,15 @@ terminal = { outcome = "sponsored" }
             }) => {
                 assert_eq!(owning_team, "acme");
                 assert_eq!(kinds, &["receive-a-sponsorship".to_string()]);
+            }
+            other => panic!("{other:?}"),
+        }
+        match &step(&p, "seeds/sensors.toml").action {
+            Action::Write(Door::Sensors { tenant_id, rows }) => {
+                assert_eq!(tenant_id, "acme");
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].id, "stripe-sponsorships");
+                assert_eq!(rows[0].opens, "receive-a-sponsorship");
             }
             other => panic!("{other:?}"),
         }
@@ -1010,11 +1069,17 @@ terminal = { outcome = "sponsored" }
         people: BTreeMap<String, Value>,
         workflows: BTreeSet<String>,
         jobs: usize,
+        /// Published sensor ids (insert-if-absent, like the door).
+        sensors: BTreeSet<String>,
     }
 
     impl Stub {
         fn writes(&self) -> usize {
-            self.policy.len() + self.people.len() + self.workflows.len() + self.jobs
+            self.policy.len()
+                + self.people.len()
+                + self.workflows.len()
+                + self.jobs
+                + self.sensors.len()
         }
     }
 
@@ -1081,6 +1146,26 @@ terminal = { outcome = "sponsored" }
                 st.workflows.insert(kind);
                 st.jobs += 1;
                 (200, json!({"id": format!("job-{}", st.jobs)}).to_string())
+            }
+            ("POST", "/api/sensors/batch") => {
+                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                assert_eq!(v["tenant_id"], "acme", "the batch names the tenant: {body}");
+                let ids: Vec<String> = v["sensors"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|r| r["id"].as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let inserted = ids
+                    .into_iter()
+                    .filter(|id| st.sensors.insert(id.clone()))
+                    .count();
+                (
+                    200,
+                    json!({"received": v["sensors"].as_array().map_or(0, Vec::len), "inserted": inserted}).to_string(),
+                )
             }
             ("GET", p) if p.starts_with("/api/jobs/") && p.ends_with("/steps") => {
                 // No steps to walk: the bootstrap's own walk is
@@ -1203,6 +1288,15 @@ terminal = { outcome = "sponsored" }
             "the one manager edge is linked"
         );
         assert_eq!(hit("POST", "/api/jobs"), 1, "one design Job per workflow");
+        assert_eq!(
+            hit("POST", "/api/sensors/batch"),
+            1,
+            "one batch for the sensors file"
+        );
+        assert_eq!(
+            st.sensors.iter().collect::<Vec<_>>(),
+            ["stripe-sponsorships"]
+        );
         assert_eq!(st.people["emp-two"]["manager_id"], json!("emp-david"));
         // Order on the wire: classes before people, people before the
         // design Job.
@@ -1214,6 +1308,10 @@ terminal = { outcome = "sponsored" }
         };
         assert!(pos("POST", "/api/classes/batch") < pos("POST", "/api/people"));
         assert!(pos("POST", "/api/people") < pos("POST", "/api/jobs"));
+        assert!(
+            pos("POST", "/api/jobs") < pos("POST", "/api/sensors/batch"),
+            "the sensors name a workflow kind, so the kinds go first"
+        );
         // Identity on every request; no sim chain on any.
         for (m, path, head, _) in &st.log {
             assert!(

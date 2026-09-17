@@ -226,6 +226,25 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
                 "jobs.job.updated",
             ],
         ),
+        // The sensor poll (14c9b2ad): a five-minute clock rule that reads
+        // the sensor registry and each due sensor's SOURCE outside BOSS
+        // (Stripe's charges), records readings outside the audit log,
+        // and OPENS one packet per new reading of the kind the sensor
+        // row declares (`jobs.job.created`) — the audit-log fact. An
+        // unreadable sensor files (`jobs.job.created`) or refreshes
+        // (`jobs.job.updated`) the `sensor_unreadable:<id>` estate alarm
+        // and the next good read closes it through its triage step
+        // (`jobs.step.completed`). Nothing it emits reaches a clock, so
+        // it cannot re-enter its own trigger; the opened packet's own
+        // protocol carries on from there.
+        (
+            "sensor.poll",
+            vec![
+                "jobs.job.created",
+                "jobs.job.updated",
+                "jobs.step.completed",
+            ],
+        ),
         ("messages.notify", vec![]),
         // Tells the filer how their packet ended. A sink, like every
         // other notifier — the message is the end of the cascade, not
