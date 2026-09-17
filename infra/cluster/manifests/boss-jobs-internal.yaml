@@ -26,6 +26,13 @@
 # deferred to the hardening programme. Agents and sensors are mounted
 # on boss-jobs, so the jobs port already carries them.
 #
+# Accounts joined the same day (backlog de0989d2, measured 14:50Z on
+# the first real sponsorship, packet 49cd9cc9): its reconcile step
+# needs an account created through POST /api/people/accounts, which
+# boss-accounts serves on 7550, and no machine door reached it — this
+# Service did not carry the port and the pod's door could not route by
+# path. Same trust class: the jobs API's writes are already here.
+#
 # The ports are boss-ports' prod ports under boss-ports' names, and
 # the all-in-one pod listens on each (generate-configs.sh binds
 # 0.0.0.0), so port == targetPort. Which services, on which port, is
@@ -52,3 +59,4 @@ spec:
     - {port: 7500, targetPort: 7500, name: people}
     - {port: 7800, targetPort: 7800, name: classes}
     - {port: 7820, targetPort: 7820, name: locations}
+    - {port: 7550, targetPort: 7550, name: accounts}

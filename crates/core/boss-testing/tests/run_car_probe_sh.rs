@@ -802,7 +802,8 @@ fn the_reader_takes_a_path_and_refuses_anything_else() {
 // the_machine_door_carries_every_read_surface.rs.
 // =====================================================================
 
-const PORTS_TABLE: &str = "jobs=7900 events=7150 people=7500 classes=7800 locations=7820";
+const PORTS_TABLE: &str =
+    "jobs=7900 events=7150 people=7500 classes=7800 locations=7820 accounts=7550";
 
 fn reader_env<'a>(actor: &'a str, table: Option<&'a str>) -> Vec<(&'a str, &'a str)> {
     let mut env = vec![
@@ -851,6 +852,19 @@ fn the_reader_routes_a_prefixed_path_to_its_services_port() {
             "route-locations",
             "/api/locations/loc-hq",
             "http://sor.invalid:7820/api/locations/loc-hq",
+        ),
+        // boss-accounts mounts under /api/people/ but is its own
+        // service on 7550 (backlog de0989d2): the longer prefix wins
+        // over the people route.
+        (
+            "route-accounts",
+            "/api/people/accounts?limit=1",
+            "http://sor.invalid:7550/api/people/accounts?limit=1",
+        ),
+        (
+            "route-accounts-my-day",
+            "/api/people/my-day/actions",
+            "http://sor.invalid:7550/api/people/my-day/actions",
         ),
     ] {
         let (rc, _, stderr, argv) =

@@ -28,7 +28,17 @@
 //!   * the machine token rides as `X-Boss-Machine-Token` only when its
 //!     file exists (the stub records the header NAME, never a value);
 //!   * a bad method or a missing path is refused with exit 2 before
-//!     curl runs.
+//!     curl runs;
+//!   * the PORT follows the path (backlog de0989d2, 2026-09-17): the
+//!     system of record is several services on one LAN IP, and until
+//!     this the door sent every path to the jobs port, so
+//!     `POST /api/people/accounts` — the first real step of the first
+//!     real sponsorship loop — could not be done through any door. The
+//!     rules are the ONE route function both doors source
+//!     (`infra/forge/probe-bin/sor-routes.sh`); the `name=port` table is
+//!     `BOSS_SOR_PORTS`, else `infra/forge/sor-ports.env` read from
+//!     beside the script; absent both, nothing is routed. A table that
+//!     lacks the routed service is refused before curl.
 
 use boss_testing::{create_dir, repo_root, scratch_dir, write_exec, write_file};
 use std::path::{Path, PathBuf};
@@ -132,6 +142,9 @@ impl Fixture {
             )
             .env_remove("BOSS_ACTOR")
             .env_remove("BOSS_ACTOR_FILE")
+            // The port table comes from the tree's file unless a test
+            // sets it — never from the caller's shell.
+            .env_remove("BOSS_SOR_PORTS")
             .env_remove("STUB_BODY")
             .env_remove("STUB_CODE");
         cmd
@@ -556,4 +569,165 @@ fn a_bad_method_or_a_missing_path_is_refused_before_curl_runs() {
     assert_eq!(r.code, 2, "{}", r.stderr);
     assert!(r.stderr.contains("usage:"), "{}", r.stderr);
     assert!(f.curl_argv().is_empty(), "curl must not run");
+}
+
+// =====================================================================
+// THE PORT FOLLOWS THE PATH (backlog de0989d2, measured 2026-09-17
+// 14:50Z). The reconcile step of the first real sponsorship needs an
+// account created through POST /api/people/accounts, which
+// boss-accounts serves on 7550; this door sent it to the jobs port,
+// where it is a 404 about a surface that exists. The rules are the one
+// route function the forge's probe reader also sources; the port table
+// is BOSS_SOR_PORTS, else infra/forge/sor-ports.env beside the tree.
+// =====================================================================
+
+/// The measured case: a write to an accounts path leaves on the
+/// accounts port, on the same host, with the body and the actor intact.
+#[test]
+fn a_post_to_an_accounts_path_routes_to_the_accounts_port() {
+    let f = Fixture::new("route-accounts");
+    let body = f.root.join("account.json");
+    write_file(&body, r#"{"name":"sponsor"}"#);
+    let r = f.run(
+        &["POST", "/api/people/accounts", body.to_str().expect("utf8")],
+        &[
+            ("STUB_BODY", r#"{"id":"acct-1"}"#),
+            ("BOSS_ACTOR", "agent-x"),
+        ],
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let argv = f.curl_argv();
+    assert_eq!(
+        argv.last().map(String::as_str),
+        Some(
+            format!(
+                "http://sor.test:{}/api/people/accounts",
+                boss_ports::prod("accounts")
+            )
+            .as_str()
+        ),
+        "the host is kept and the port is boss-accounts': {argv:?}"
+    );
+    assert!(
+        argv.iter().any(|a| a == "--data-binary"),
+        "the body still rides: {argv:?}"
+    );
+    assert!(
+        f.header("X-Boss-User")
+            .is_some_and(|u| u.contains(r#""id":"agent-x""#)),
+        "the routed write is still signed: {argv:?}"
+    );
+
+    // A read of the same surface, with a query string, goes the same way.
+    let r = f.run(
+        &["GET", "/api/people/accounts?limit=1"],
+        &[("BOSS_ACTOR", "agent-x")],
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        f.curl_argv().last().map(String::as_str),
+        Some(
+            format!(
+                "http://sor.test:{}/api/people/accounts?limit=1",
+                boss_ports::prod("accounts")
+            )
+            .as_str()
+        )
+    );
+}
+
+/// The jobs API stays where it was, and so does anything the table
+/// does not name — including a prefix that merely resembles a routed
+/// one. Routing adds ports; it never moves the base.
+#[test]
+fn the_jobs_api_and_an_unknown_prefix_stay_on_the_base() {
+    let f = Fixture::new("route-default");
+    for path in [
+        "/api/jobs?kind=pr-train",
+        "/api/yard/status",
+        "/api/peoples/x",
+    ] {
+        let r = f.run(&["GET", path], &[("BOSS_ACTOR", "agent-x")]);
+        assert_eq!(r.code, 0, "{path}: {}", r.stderr);
+        assert_eq!(
+            f.curl_argv().last().map(String::as_str),
+            Some(format!("http://sor.test:7900{path}").as_str()),
+            "{path} is the jobs API, on the base as given"
+        );
+    }
+}
+
+/// A table that exists but lacks the routed service is a defect in the
+/// table, not a reason to send the request to the jobs port: refuse
+/// (exit 2), name the service and the table, and never reach curl.
+/// `BOSS_SOR_PORTS` wins over the file when set, which is also how a
+/// test hands the door a table of its choosing.
+#[test]
+fn a_table_that_lacks_the_service_is_refused_before_curl_and_the_env_table_wins() {
+    let f = Fixture::new("route-missing");
+    let body = f.root.join("account.json");
+    write_file(&body, r#"{"name":"sponsor"}"#);
+    let r = f.run(
+        &["POST", "/api/people/accounts", body.to_str().expect("utf8")],
+        &[
+            ("BOSS_ACTOR", "agent-x"),
+            ("BOSS_SOR_PORTS", "jobs=7900 people=7500"),
+        ],
+    );
+    assert_eq!(
+        r.code, 2,
+        "a table without the service is a refusal: {}",
+        r.stderr
+    );
+    assert!(f.curl_argv().is_empty(), "curl must not run");
+    assert!(r.stdout.is_empty(), "nothing on stdout: {}", r.stdout);
+    assert!(
+        r.stderr.contains("accounts") && r.stderr.contains("jobs=7900 people=7500"),
+        "the refusal names the missing service and the table it read: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains("HTTP:"),
+        "no request was made: {}",
+        r.stderr
+    );
+
+    // The env table, when set, is the table — the file beside the tree
+    // is not consulted.
+    let r = f.run(
+        &["GET", "/api/people/accounts"],
+        &[
+            ("BOSS_ACTOR", "agent-x"),
+            ("BOSS_SOR_PORTS", "jobs=7900 accounts=9999"),
+        ],
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        f.curl_argv().last().map(String::as_str),
+        Some("http://sor.test:9999/api/people/accounts")
+    );
+}
+
+/// NO TABLE, NO ROUTING. A copy of the script with sor-url beside it
+/// but no forge/sor-ports.env two directories up, and no
+/// BOSS_SOR_PORTS, is the door as it was: every path on the base.
+#[test]
+fn without_a_table_every_path_goes_to_the_base_as_before() {
+    let f = Fixture::new("route-no-table");
+    let lone = f.root.join("lone");
+    create_dir(&lone);
+    let script_text = std::fs::read_to_string(repo_root().join(SCRIPT)).expect("read boss-api");
+    write_exec(&lone.join("boss-api"), &script_text);
+    write_file(&lone.join("sor-url"), "http://lone.test:7900\n");
+    let r = Fixture::finish(
+        f.command(&lone.join("boss-api")),
+        &["GET", "/api/people/accounts"],
+        &[("BOSS_ACTOR", "agent-x")],
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        f.curl_argv().last().map(String::as_str),
+        Some("http://lone.test:7900/api/people/accounts"),
+        "absent both tables, the path is not routed"
+    );
 }

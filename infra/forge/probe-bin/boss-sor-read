@@ -71,8 +71,10 @@
 # 404 from the jobs API and the car stayed UNPROVEN, with the fact it
 # needed sitting one port over. The door now carries every read
 # surface on the same IP, and this reader picks the PORT from the
-# path's prefix (the table between the SOR-ROUTES markers below) and
-# a `name=port` table the runner hands it as BOSS_SOR_PORTS. The HOST
+# path's prefix (sor-routes.sh beside this file — the ONE route table,
+# which the pod's door infra/dev/boss-api sources too since backlog
+# de0989d2, so a service joins both doors in one edit) and a
+# `name=port` table the runner hands it as BOSS_SOR_PORTS. The HOST
 # is still BOSS_JOBS_URL's; only the port is swapped. No table means
 # no routing — every path on the base, the jobs port, exactly the
 # reader this was — so nothing changes until the runner carries the
@@ -128,39 +130,30 @@ esac
 
 base="${BOSS_JOBS_URL%/}"
 
-# The service a path belongs to. Prefixes are the ones each service's
-# router mounts (boss-events tail_http.rs, boss-people http.rs,
-# boss-classes http.rs, boss-locations http.rs); the query string is
-# not part of the match. Everything else — jobs, steps, the yard,
-# agents, sensors, workflows — is the jobs API.
-route="${path%%\?*}"
-# SOR-ROUTES-BEGIN
-case "$route" in
-    /api/events/*)                  service=events ;;
-    /api/people|/api/people/*)      service=people ;;
-    /api/classes|/api/classes/*)    service=classes ;;
-    /api/locations|/api/locations/*) service=locations ;;
-    *)                              service=jobs ;;
-esac
-# SOR-ROUTES-END
+# The service a path belongs to, by the one route table both doors
+# share. readlink -f: the runner puts this DIRECTORY on the probe's
+# PATH, and the table sits beside the file.
+routes="$(dirname "$(readlink -f "$0")")/sor-routes.sh"
+[[ -r "$routes" ]] || refuse \
+    "$routes is missing beside this reader — a checkout that carries boss-sor-read
+  without its route table cannot say which port a path belongs to."
+# shellcheck source=sor-routes.sh
+. "$routes"
+service=$(sor_service_for_path "$path")
 
 if [[ -n "${BOSS_SOR_PORTS:-}" && "$service" != jobs ]]; then
-    port=""
-    for entry in $BOSS_SOR_PORTS; do
-        [[ "$entry" == "$service="* ]] && port="${entry#*=}"
-    done
-    case "$port" in
-        ''|*[!0-9]*) refuse \
-            "'$path' is served by $service, and BOSS_SOR_PORTS names no port for it
+    port=$(sor_port_for_service "$service" "$BOSS_SOR_PORTS") || refuse \
+        "'$path' is served by $service, and BOSS_SOR_PORTS names no port for it
   (table: '$BOSS_SOR_PORTS'). Reading it on the jobs port would answer 404 about a
   surface that exists — refusing rather than guessing. The table is
-  infra/forge/sor-ports.env in the runner's checkout, pinned to boss-ports." ;;
-    esac
-    # Swap the port, keep the host: scheme://host[:port][/…] -> scheme://host:port
-    scheme="${base%%://*}"
-    hostport="${base#*://}"
-    hostport="${hostport%%/*}"
-    base="${scheme}://${hostport%%:*}:${port}"
+  infra/forge/sor-ports.env in the runner's checkout, pinned to boss-ports."
+    base=$(sor_base_on_port "$base" "$port")
 fi
 
-exec curl -fsS -H "x-boss-user: ${BOSS_SOR_USER}" "${base}${path}"
+# --connect-timeout: a door port the cluster does not expose yet DROPS
+# rather than refuses (measured 2026-09-17 against 10.20.0.34:7550
+# before its Service line converged: no answer for the full 20 s of a
+# rehearsal). Unbounded, that turns a car's honest not-yet into the
+# runner's 60 s kill — "unreadable" — for every future surface. Ten
+# seconds to connect; the read itself is not cut.
+exec curl -fsS --connect-timeout 10 -H "x-boss-user: ${BOSS_SOR_USER}" "${base}${path}"

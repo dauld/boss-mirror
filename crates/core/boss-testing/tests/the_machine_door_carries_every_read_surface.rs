@@ -23,25 +23,40 @@
 //!      run-car-probe.sh hands the reader as `BOSS_SOR_PORTS` (the forge
 //!      has no cargo and no boss-ports binary, so the table is checked
 //!      in rather than rendered there);
-//!   3. the reader's own path-prefix → service table in
-//!      `infra/forge/probe-bin/boss-sor-read` — which services a probe
-//!      can be routed to at all.
+//!   3. the path-prefix → service table in
+//!      `infra/forge/probe-bin/sor-routes.sh` — which services a path
+//!      can be routed to at all. Until backlog de0989d2 (2026-09-17)
+//!      that table sat inside `boss-sor-read` itself; it moved into a
+//!      sourced file so the pod's door (`infra/dev/boss-api`) routes by
+//!      the SAME rules without a second copy (CLAUDE.md §9a). Both
+//!      scripts source it, and this test reads it from the one place.
 //!
 //! The DEFINITION of a port is `boss-ports`. This test reads all three
-//! copies and holds each equal to the roster: every service the reader
-//! routes to is a boss-ports service, the manifest exposes exactly those
-//! services on their prod ports under their boss-ports names, and the
-//! env table says the same. One test, three readers; a drift in any
+//! copies and holds each equal to the roster: every service the route
+//! table names is a boss-ports service, the manifest exposes exactly
+//! those services on their prod ports under their boss-ports names, and
+//! the env table says the same. One test, three readers; a drift in any
 //! copy names the entry.
+//!
+//! WHY ACCOUNTS IS ON THE DOOR (backlog de0989d2, measured 2026-09-17
+//! 14:50Z). The first real sponsorship's reconcile step needs an account
+//! created through `POST /api/people/accounts`, which boss-accounts
+//! serves on 7550 — and no machine door reached it: the LAN door carried
+//! jobs/events/people/classes/locations and the pod's door had no
+//! routing at all, so the agent could not do the first real step of the
+//! first real loop through any door. Same trust class as design
+//! 28d2bed9: the jobs API's writes are already on this IP.
 
 use boss_testing::repo_root;
 use std::collections::BTreeMap;
 
 const MANIFEST: &str = "infra/cluster/manifests/boss-jobs-internal.yaml";
 const PORTS_ENV: &str = "infra/forge/sor-ports.env";
-const READER: &str = "infra/forge/probe-bin/boss-sor-read";
+const ROUTES: &str = "infra/forge/probe-bin/sor-routes.sh";
 const ROUTES_BEGIN: &str = "# SOR-ROUTES-BEGIN";
 const ROUTES_END: &str = "# SOR-ROUTES-END";
+/// The two doors that must route by the one table, not by a copy.
+const DOORS: [&str; 2] = ["infra/forge/probe-bin/boss-sor-read", "infra/dev/boss-api"];
 
 fn read(rel: &str) -> String {
     let p = repo_root().join(rel);
@@ -110,18 +125,18 @@ fn env_ports() -> BTreeMap<String, u16> {
     out
 }
 
-/// Copy 3 — the services the reader can route a path to, lifted from
-/// between the reader's markers: every `service=<name>` assignment in
-/// its routing `case`. Read out of the script, not asserted as a
-/// literal, so the pin follows an added route instead of going quiet.
+/// Copy 3 — the services a path can be routed to, lifted from between
+/// the route file's markers: every `service=<name>` assignment in its
+/// routing `case`. Read out of the script, not asserted as a literal,
+/// so the pin follows an added route instead of going quiet.
 fn reader_services() -> Vec<String> {
-    let sh = read(READER);
+    let sh = read(ROUTES);
     let block = sh
         .split_once(ROUTES_BEGIN)
-        .unwrap_or_else(|| panic!("{READER} has no {ROUTES_BEGIN} marker"))
+        .unwrap_or_else(|| panic!("{ROUTES} has no {ROUTES_BEGIN} marker"))
         .1
         .split_once(ROUTES_END)
-        .unwrap_or_else(|| panic!("{READER} has no {ROUTES_END} marker"))
+        .unwrap_or_else(|| panic!("{ROUTES} has no {ROUTES_END} marker"))
         .0;
     let mut names: Vec<String> = block
         .split_whitespace()
@@ -132,7 +147,7 @@ fn reader_services() -> Vec<String> {
     names.dedup();
     assert!(
         names.len() > 1,
-        "{READER} routes to {names:?} only — the routing table between the markers is gone"
+        "{ROUTES} routes to {names:?} only — the routing table between the markers is gone"
     );
     names
 }
@@ -155,7 +170,7 @@ fn the_door_the_table_and_the_reader_agree_with_boss_ports() {
     for s in &services {
         assert!(
             roster.contains_key(s),
-            "{READER} routes to `{s}`, which boss-ports does not name — a service that is not \
+            "{ROUTES} routes to `{s}`, which boss-ports does not name — a service that is not \
              on the roster has no port to expose"
         );
     }
@@ -196,6 +211,82 @@ fn the_jobs_api_is_still_on_the_door() {
     );
     assert!(
         reader_services().iter().any(|s| s == "jobs"),
-        "{READER} has no `jobs` route — nothing is left to default to"
+        "{ROUTES} has no `jobs` route — nothing is left to default to"
     );
+}
+
+/// ONE ROUTE TABLE, TWO DOORS. The forge's probe reader and the pod's
+/// `boss-api` both source the route file from beside themselves, and
+/// neither carries a `case` of its own: the prefix rules live in one
+/// file, so a service added to the door reaches both readers in one
+/// edit (backlog de0989d2).
+#[test]
+fn both_doors_source_the_one_route_file_and_carry_no_table_of_their_own() {
+    for door in DOORS {
+        let sh = read(door);
+        assert!(
+            sh.contains("sor-routes.sh"),
+            "{door} does not source {ROUTES} — it must route by the shared table, not a copy"
+        );
+        assert!(
+            !sh.contains(ROUTES_BEGIN),
+            "{door} still carries its own {ROUTES_BEGIN} block — the table lives in {ROUTES} only"
+        );
+    }
+}
+
+/// THE RULES THEMSELVES, run. `sor_service_for_path` is the one
+/// function both doors call; the prefixes are the ones each service's
+/// router mounts (boss-accounts src/*.rs `.route(` lines for accounts,
+/// boss-people http.rs for the rest of `/api/people`, and so on).
+/// Longest prefix wins: `/api/people/accounts` is boss-accounts,
+/// `/api/people/emp-x` is boss-people, and a look-alike
+/// (`/api/people/accountsx`) is NOT accounts. The query string is not
+/// part of the match.
+#[test]
+fn the_route_function_sends_every_boss_accounts_path_to_accounts_and_nothing_else() {
+    let cases = [
+        ("/api/people/accounts", "accounts"),
+        ("/api/people/accounts?limit=1", "accounts"),
+        ("/api/people/accounts/acct-1", "accounts"),
+        ("/api/people/accounts/acct-1/notes/n1", "accounts"),
+        ("/api/people/accounts/risk-scores", "accounts"),
+        ("/api/people/support-cases", "accounts"),
+        ("/api/people/support-cases/sc-1", "accounts"),
+        ("/api/people/account-account-team/batch", "accounts"),
+        ("/api/people/my-day/actions", "accounts"),
+        ("/api/people/my-day/actions?employee_id=emp-x", "accounts"),
+        ("/api/people", "people"),
+        ("/api/people?limit=1", "people"),
+        ("/api/people/emp-david", "people"),
+        ("/api/people/accountsx", "people"),
+        ("/api/people/support-casesx", "people"),
+        ("/api/people/my-day", "people"),
+        ("/api/people/pto", "people"),
+        ("/api/events/tail?limit=1", "events"),
+        ("/api/classes?subject_kind=employee", "classes"),
+        ("/api/locations/loc-hq", "locations"),
+        ("/api/jobs?kind=pr-train", "jobs"),
+        ("/api/yard/status", "jobs"),
+        ("/api/peoples/x", "jobs"),
+        ("/api/eventsource", "jobs"),
+    ];
+    let routes = repo_root().join(ROUTES);
+    for (path, want) in cases {
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(". \"$1\" && sor_service_for_path \"$2\"")
+            .arg("sor-routes")
+            .arg(&routes)
+            .arg(path)
+            .output()
+            .expect("bash runs");
+        assert!(
+            out.status.success(),
+            "sor_service_for_path {path}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let got = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert_eq!(got, want, "sor_service_for_path {path}");
+    }
 }

@@ -35,8 +35,27 @@
 # to read the same file when it lands; until then the pod's
 # /work/tools/bin/boss still carries its own spelling.
 #
+# WHICH PORT — the path decides (backlog de0989d2, measured 2026-09-17
+# 14:50Z). The system of record is several services on one LAN IP
+# (design 28d2bed9, boss-jobs-internal.yaml), and this door sent every
+# path to the jobs port — so `POST /api/people/accounts`, the account
+# the first real sponsorship's reconcile step needs, which
+# boss-accounts serves on 7550, could not be made through any door: the
+# forge's reader is GET-only by design and this one could not route.
+# Now the SERVICE comes from the ONE route table both doors source
+# (../forge/probe-bin/sor-routes.sh, `sor_service_for_path`) and the
+# PORT from a `name=port` table: BOSS_SOR_PORTS when set, else
+# ../forge/sor-ports.env read as data from beside this file — the same
+# file the forge's run-car-probe.sh hands its reader, pinned to
+# boss-ports by the_machine_door_carries_every_read_surface.rs. The host
+# is kept; only the port moves. Absent both tables nothing is routed
+# (the door as it was); a table that lacks the routed service is
+# refused before curl, because a 404 from the wrong port is the defect
+# this removes, not a fallback.
+#
 # The pod-specific constants are env-overridable:
 #   BOSS_JOBS_URL            the base URL; else the line in ./sor-url
+#   BOSS_SOR_PORTS           `name=port …`; else ../forge/sor-ports.env
 #   BOSS_ACTOR               who the call signs as — the id; else the one
 #   BOSS_ACTOR_FILE            line in this file ($HOME/.config/boss/actor,
 #                              as the boss CLI reads it)
@@ -52,12 +71,40 @@ esac
 
 # readlink -f: the pod invokes this through a symlink, and sor-url sits
 # beside the FILE, not the link.
-SOR_URL_FILE="$(dirname "$(readlink -f "$0")")/sor-url"
+HERE="$(dirname "$(readlink -f "$0")")"
+SOR_URL_FILE="$HERE/sor-url"
 BASE=${BOSS_JOBS_URL:-$(head -n1 "$SOR_URL_FILE" 2>/dev/null || true)}
 [ -n "$BASE" ] || {
   echo "boss-api: BOSS_JOBS_URL is unset and $SOR_URL_FILE names no system of record — a copy of this script without its sor-url has no default" >&2
   exit 2
 }
+
+# The port table: BOSS_SOR_PORTS, else the forge's env file read as
+# data (`#` and blank lines dropped, one space-separated line) the way
+# run-car-probe.sh reads it. Absent both, nothing below routes.
+SOR_PORTS_FILE="$HERE/../forge/sor-ports.env"
+SOR_PORTS=${BOSS_SOR_PORTS:-}; SOR_PORTS_FROM=BOSS_SOR_PORTS
+if [ -z "$SOR_PORTS" ] && [ -r "$SOR_PORTS_FILE" ]; then
+  SOR_PORTS=$(grep -Ev '^[[:space:]]*(#|$)' "$SOR_PORTS_FILE" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//' || true)
+  SOR_PORTS_FROM=$SOR_PORTS_FILE
+fi
+if [ -n "$SOR_PORTS" ]; then
+  SOR_ROUTES="$HERE/../forge/probe-bin/sor-routes.sh"
+  [ -r "$SOR_ROUTES" ] || {
+    echo "boss-api: a port table is set ($SOR_PORTS_FROM) but $SOR_ROUTES is missing — a copy of this script without the route table cannot say which port $API_PATH belongs to" >&2
+    exit 2
+  }
+  # shellcheck source=../forge/probe-bin/sor-routes.sh
+  . "$SOR_ROUTES"
+  SERVICE=$(sor_service_for_path "$API_PATH")
+  if [ "$SERVICE" != jobs ]; then
+    PORT=$(sor_port_for_service "$SERVICE" "$SOR_PORTS") || {
+      echo "boss-api: refusing $METHOD $API_PATH: it is served by $SERVICE, and the port table names no port for it (table: '$SOR_PORTS', from $SOR_PORTS_FROM). Sending it to the jobs port would answer 404 about a surface that exists — refusing rather than guessing." >&2
+      exit 2
+    }
+    BASE=$(sor_base_on_port "$BASE" "$PORT")
+  fi
+fi
 
 # Blank and whitespace-only values are NOT answers (identity.rs): an
 # `export BOSS_ACTOR=` or an empty file falls through, never signs as "".
