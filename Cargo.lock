@@ -1084,6 +1084,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "webauthn-rs",
  "webauthn-rs-core",
 ]

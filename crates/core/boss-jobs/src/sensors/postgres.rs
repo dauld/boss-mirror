@@ -9,7 +9,9 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
 use super::port::{Sensors, SensorsError};
-use super::types::{BatchOutcome, NewReading, PollStamp, Reading, SensorInput, SensorRow};
+use super::types::{
+    BatchOutcome, NewReading, PUSH_ONLY_SOURCES, PollStamp, Reading, SensorInput, SensorRow,
+};
 
 const SENSOR_COLUMNS: &str = "id, source, credential, every_minutes, opens_kind, subject_kind, \
                               enabled, tenant_id, published_at, last_polled_at, cursor_at";
@@ -200,10 +202,17 @@ impl Sensors for PgSensors {
     }
 
     async fn sweep(&self, before: DateTime<Utc>) -> Result<u64, SensorsError> {
+        // A polled sensor's reading goes once it is stamped; a
+        // push-only sensor's reading (PUSH_ONLY_SOURCES) owes no
+        // packet and goes by age alone — the page views (0b5c5081)
+        // would otherwise outlive every retention.
         let res = sqlx::query(
-            "DELETE FROM sensor_readings WHERE observed_at < $1 AND packet_id IS NOT NULL",
+            "DELETE FROM sensor_readings r USING sensors s \
+             WHERE r.sensor_id = s.id AND r.observed_at < $1 \
+             AND (r.packet_id IS NOT NULL OR s.source = ANY($2))",
         )
         .bind(before)
+        .bind(PUSH_ONLY_SOURCES)
         .execute(&self.pool)
         .await
         .map_err(storage)?;

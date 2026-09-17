@@ -181,3 +181,48 @@ async fn the_cursor_never_moves_backwards_and_the_sweep_keeps_what_is_owed() {
             .unwrap();
     assert_eq!(left, ["new", "owed"]);
 }
+
+/// A push-only sensor (backlog 0b5c5081): the row lands with no
+/// credential and no period (the schema admits `every_minutes = 0`
+/// since 20260917-a-push-only-sensor-has-no-period), it is never due,
+/// and its readings — which no stamp will ever reach — are swept by
+/// age alone while a polled sensor's owed reading of the same age is
+/// kept.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_push_only_sensor_lands_without_a_period_and_its_readings_are_swept_by_age() {
+    let db = TestDb::new().await;
+    let repo = PgSensors::new(db.pool.clone());
+    let site = SensorInput {
+        id: "www-visits".into(),
+        source: "site".into(),
+        credential: String::new(),
+        every_minutes: 0,
+        opens: "marketing-weekly".into(),
+        subject_kind: "custom".into(),
+        enabled: true,
+    };
+    let out = repo.publish("acme", &[input("s"), site]).await.unwrap();
+    assert_eq!((out.received, out.inserted), (2, 2));
+    let rows = repo.list().await.unwrap();
+    let www = rows.iter().find(|r| r.id == "www-visits").unwrap();
+    assert!(www.is_push_only());
+    assert_eq!(www.every_minutes, 0);
+    assert!(!www.due_at(t(0)), "never due: nothing polls it");
+
+    let old = t(0) - Duration::days(100);
+    repo.record("s", &[reading("owed", old)]).await.unwrap();
+    repo.record(
+        "www-visits",
+        &[reading("view-old", old), reading("view-new", t(0))],
+    )
+    .await
+    .unwrap();
+    let deleted = repo.sweep(t(0) - Duration::days(90)).await.unwrap();
+    assert_eq!(deleted, 1, "the old page view and nothing else");
+    let left: Vec<String> =
+        sqlx::query_scalar("SELECT external_id FROM sensor_readings ORDER BY external_id")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(left, ["owed", "view-new"]);
+}

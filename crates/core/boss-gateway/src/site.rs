@@ -38,6 +38,11 @@
 //! read through the jobs API with the gateway's own identity. It is
 //! the site's one dynamic document, and still session-free: it holds
 //! only what sponsors consented to publish (backlog f200f3d2).
+//!
+//! ONE THING IS COUNTED: a GET answered 200 with HTML is a page view,
+//! recorded as a `www-visits` sensor reading (visits.rs, backlog
+//! 0b5c5081) — path, referrer host, country, UA class, instant; no IP,
+//! no cookie — through a bounded channel the answer never waits on.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -48,14 +53,17 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
 use crate::sponsors::{self, SponsorRoll};
+use crate::visits::{self, Recorder};
 
 /// The site an instance serves: the hostname it answers to and the
-/// directory it answers from — plus the sponsor roll, when wired.
+/// directory it answers from — plus the sponsor roll and the page-view
+/// recorder, when wired.
 #[derive(Clone, Debug)]
 pub struct Site {
     host: String,
     dir: PathBuf,
     sponsors: Option<Arc<SponsorRoll>>,
+    visits: Option<Recorder>,
 }
 
 impl Site {
@@ -80,6 +88,7 @@ impl Site {
             host,
             dir: PathBuf::from(dir),
             sponsors: None,
+            visits: None,
         })
     }
 
@@ -88,6 +97,15 @@ impl Site {
     pub fn with_sponsors(self, roll: SponsorRoll) -> Self {
         Self {
             sponsors: Some(Arc::new(roll)),
+            ..self
+        }
+    }
+
+    /// The site recording one page view per 200 HTML page it serves
+    /// (visits.rs). Unwired, pages are served and nothing is counted.
+    pub fn with_visits(self, recorder: Recorder) -> Self {
+        Self {
+            visits: Some(recorder),
             ..self
         }
     }
@@ -114,7 +132,29 @@ async fn serve(State(site): State<Arc<Site>>, req: Request, next: Next) -> Respo
     if !names_host(req.headers(), &site.host) {
         return next.run(req).await;
     }
-    answer(&site, req.method(), req.uri().path()).await
+    let resp = answer(&site, req.method(), req.uri().path()).await;
+    // A page view is a GET answered 200 with HTML — not a stylesheet,
+    // not a miss, not a HEAD, not the roll. Recorded AFTER the answer
+    // is built and never awaited on: one non-blocking send (visits.rs).
+    if let Some(visits) = &site.visits
+        && req.method() == Method::GET
+        && resp.status() == StatusCode::OK
+        && is_html(resp.headers())
+    {
+        visits.record(&visits::View::of(
+            req.uri().path(),
+            req.headers(),
+            boss_clock_client::wall_now(),
+        ));
+    }
+    resp
+}
+
+fn is_html(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("text/html"))
 }
 
 /// `Host` equals `host`, port stripped, case folded. The one test of
@@ -455,6 +495,62 @@ mod tests {
             Sha256::digest(std::fs::read(&index).unwrap())[..],
             "the hash the converge records equals the hash the publish step records"
         );
+    }
+
+    /// One www-visits reading per 200 HTML page (backlog 0b5c5081),
+    /// through the mounted router: the page's path, the referrer's
+    /// host, the tunnel's country and the UA class — and no reading
+    /// for a stylesheet, a miss, or a HEAD. The cookie the request
+    /// carries reaches no reading.
+    #[tokio::test]
+    async fn a_served_html_page_records_one_view_and_nothing_else_does() {
+        use crate::visits::Recorder;
+        let dir = site_dir("visits");
+        let (recorder, mut rx) = Recorder::channel(16);
+        let site =
+            Site::from_values(HOST, dir.to_str().unwrap()).map(|s| s.with_visits(recorder.clone()));
+        let app = app(site);
+        let send = |method: Method, path: &'static str| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header(header::HOST, HOST)
+                        .header(header::COOKIE, "boss_session=forged")
+                        .header(header::REFERER, "https://lobste.rs/s/abc")
+                        .header("cf-ipcountry", "de")
+                        .header("cf-connecting-ip", "203.0.113.9")
+                        .header(header::USER_AGENT, "Mozilla/5.0 (iPhone) Mobile Safari")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+            }
+        };
+        assert_eq!(send(Method::GET, "/").await, StatusCode::OK);
+        let reading = rx.try_recv().expect("the page view was recorded");
+        assert_eq!(reading["payload"]["path"], "/");
+        assert_eq!(reading["payload"]["referrer_host"], "lobste.rs");
+        assert_eq!(reading["payload"]["country"], "DE");
+        assert_eq!(reading["payload"]["ua_class"], "phone");
+        assert!(!reading.to_string().contains("forged"));
+        assert!(!reading.to_string().contains("203.0.113.9"));
+
+        assert_eq!(send(Method::GET, "/docs/").await, StatusCode::OK);
+        assert_eq!(rx.try_recv().unwrap()["payload"]["path"], "/docs/");
+
+        assert_eq!(send(Method::GET, "/css/site.css").await, StatusCode::OK);
+        assert_eq!(send(Method::GET, "/nope.html").await, StatusCode::NOT_FOUND);
+        assert_eq!(send(Method::HEAD, "/").await, StatusCode::OK);
+        assert!(
+            rx.try_recv().is_err(),
+            "a stylesheet, a miss and a HEAD are not page views"
+        );
+        assert_eq!(recorder.dropped(), 0);
     }
 
     #[test]

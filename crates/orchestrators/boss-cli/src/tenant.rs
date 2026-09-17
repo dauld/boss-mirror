@@ -191,9 +191,13 @@ pub const CONTRACT: &[Entry] = &[
         required: false,
         read_by: "POST /api/sensors/batch (boss-jobs, insert-if-absent by id) — sent by `boss tenant \
                   publish` as the tenant's declarations; the dispatcher's `sensor.poll` handler \
-                  reads the registry every 5 minutes and polls each due sensor (design 14c9b2ad)",
-        shape: "`[[sensor]]` rows: id, source (`stripe`), credential (a `credentials` registry id), \
-                every_minutes, opens (the workflow kind one reading opens), subject_kind, \
+                  reads the registry every 5 minutes and polls each due sensor (design 14c9b2ad); \
+                  a push-only source is never due — the gateway's site surface records one \
+                  `www-visits` reading per page view through POST /api/sensors/{id}/readings \
+                  (backlog 0b5c5081)",
+        shape: "`[[sensor]]` rows: id, source (`stripe` polled; `site` push-only), credential (a \
+                `credentials` registry id; none on a push-only source), every_minutes (none on a \
+                push-only source), opens (the workflow kind one reading opens), subject_kind, \
                 enabled? — validated by `boss_jobs::sensors::load_sensors_toml`",
         parse: parse_sensors,
         scaffold: Some(scaffold_sensors),
@@ -1133,6 +1137,16 @@ fn scaffold_sensors(s: &Scaffold) -> String {
 # credential = \"stripe-restricted-read\"\n\
 # every_minutes = 15\n\
 # opens = \"receive-a-sponsorship\"\n\
+# subject_kind = \"custom\"\n\
+#\n\
+# A push-only source is one nothing polls: the gateway's site surface\n\
+# records one reading per page view on `www-visits` itself, so the\n\
+# row names no credential and no period.\n\
+#\n\
+# [[sensor]]\n\
+# id = \"www-visits\"\n\
+# source = \"site\"\n\
+# opens = \"marketing-weekly\"\n\
 # subject_kind = \"custom\"\n",
         display = s.display_name
     )

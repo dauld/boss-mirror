@@ -50,6 +50,9 @@ argon2 = "0.5"
 # TOML for the credentials file format. workspace = true picks up
 # the same toml crate boss-jobs / boss-sim already use.
 toml = { workspace = true }
+# A fresh v4 per page view: the `external_id` the sensors door dedups
+# a www-visits reading by (visits.rs, backlog 0b5c5081).
+uuid = { workspace = true }
 
 [[bin]]
 # CLI for managing the local-auth credentials file. Used by the

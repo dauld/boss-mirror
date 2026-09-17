@@ -34,6 +34,21 @@
 //! as a bearer. Nothing in this module, its tables or its HTTP surface
 //! carries a secret.
 //!
+//! **Two kinds of source.** A POLLED source (`stripe`) is one the
+//! product reads on the sensor's cadence with the sensor's credential;
+//! its readings each open a packet. A PUSH-ONLY source
+//! ([`PUSH_ONLY_SOURCES`]: `site`, backlog 0b5c5081) is one nothing
+//! reads: the service that observed the world POSTs the readings to
+//! `/api/sensors/{id}/readings` itself — the gateway's site surface
+//! records one `www-visits` reading per page view — so the row
+//! declares no credential and no period, `due_at` is never true, and
+//! the readings owe no packet (a chore reads them in bulk when the
+//! operating model says so). The readings door admits a push to a
+//! polled sensor from its own poll actor ONLY: anyone else pushing
+//! there would open a packet the source never observed, and is told so
+//! (409). The sweep deletes a push-only reading by age alone, since no
+//! stamp will ever come.
+//!
 //! Hexagonal like `surface_opens`: types + port + in-memory adapter +
 //! Pg adapter + HTTP door, plus the one TOML loader `boss tenant check`
 //! and `boss tenant publish` share ([`seed::load_sensors_toml`]).
@@ -52,6 +67,6 @@ pub use port::{Sensors, SensorsError, sweep_retention};
 pub use postgres::PgSensors;
 pub use seed::load_sensors_toml;
 pub use types::{
-    BatchOutcome, NewReading, PollStamp, RETENTION_DAYS, Reading, SensorInput, SensorRow, Sweep,
-    validate_sensor,
+    BatchOutcome, NewReading, PUSH_ONLY_SOURCES, PollStamp, RETENTION_DAYS, Reading, SensorInput,
+    SensorRow, Sweep, is_push_only, sensor_actor, validate_sensor,
 };

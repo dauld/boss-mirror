@@ -63,6 +63,29 @@ subject_kind = "custom"
         assert!(rows[0].enabled);
     }
 
+    /// The tenant's spelling of the page-view sensor (backlog
+    /// 0b5c5081): a push-only source, no credential, no period — the
+    /// row `boss tenant check` passes and `boss tenant publish` sends.
+    #[test]
+    fn a_push_only_row_is_admitted_with_no_credential() {
+        let file = format!(
+            "{FILE}\n[[sensor]]\nid = \"www-visits\"\nsource = \"site\"\n\
+             opens = \"marketing-weekly\"\nsubject_kind = \"custom\"\n"
+        );
+        let rows = parse_sensors_toml(&file).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[1].is_push_only());
+        assert!(rows[1].credential.is_empty());
+        assert_eq!(rows[1].every_minutes, 0);
+        // The same row with a period is refused, named.
+        let with_period = format!("{file}every_minutes = 15\n");
+        let why = parse_sensors_toml(&with_period).unwrap_err();
+        assert!(
+            why.contains("www-visits") && why.contains("push-only"),
+            "{why}"
+        );
+    }
+
     #[test]
     fn a_bad_row_is_refused_by_name_and_a_twin_is_refused() {
         let bad = FILE.replace("every_minutes = 15", "every_minutes = 0");

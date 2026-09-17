@@ -1,7 +1,8 @@
 //! In-memory adapter for `Sensors` — the port-level test double, and
 //! the stated twin of the Pg adapter's semantics: insert-if-absent on
 //! both writes, the first stamp wins, the cursor is monotonic, the
-//! sweep keeps a reading still owed a packet.
+//! sweep keeps a reading still owed a packet and deletes a push-only
+//! sensor's reading by age alone.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -150,9 +151,21 @@ impl Sensors for InMemorySensors {
     }
 
     async fn sweep(&self, before: DateTime<Utc>) -> Result<u64, SensorsError> {
+        // A push-only sensor's reading owes no packet, so age alone
+        // decides it; a polled sensor's reading goes only once stamped.
+        let push_only: Vec<String> = self
+            .sensors
+            .read()
+            .await
+            .iter()
+            .filter(|s| s.is_push_only())
+            .map(|s| s.id.clone())
+            .collect();
         let mut rows = self.readings.write().await;
         let n = rows.len();
-        rows.retain(|r| !(r.observed_at < before && r.packet_id.is_some()));
+        rows.retain(|r| {
+            !(r.observed_at < before && (r.packet_id.is_some() || push_only.contains(&r.sensor_id)))
+        });
         Ok((n - rows.len()) as u64)
     }
 }
@@ -277,5 +290,36 @@ mod tests {
         let deleted = repo.sweep(now - Duration::days(90)).await.unwrap();
         assert_eq!(deleted, 1);
         assert_eq!(repo.readings().await[0].external_id, "owed");
+    }
+
+    /// A push-only sensor's readings owe no packet, so the sweep
+    /// deletes them by age alone (backlog 0b5c5081) — while a polled
+    /// sensor's unstamped reading of the same age is still kept.
+    #[tokio::test]
+    async fn the_sweep_deletes_a_push_only_reading_by_age_alone() {
+        let repo = InMemorySensors::new();
+        let mut site = input("www-visits");
+        site.source = "site".into();
+        site.credential = String::new();
+        site.every_minutes = 0;
+        repo.publish("acme", &[input("a"), site]).await.unwrap();
+        let now = boss_clock_client::wall_now();
+        let old = now - Duration::days(100);
+        repo.record("a", &[reading("owed", old)]).await.unwrap();
+        repo.record(
+            "www-visits",
+            &[reading("view-old", old), reading("view-new", now)],
+        )
+        .await
+        .unwrap();
+        let deleted = repo.sweep(now - Duration::days(90)).await.unwrap();
+        assert_eq!(deleted, 1, "the old page view and nothing else");
+        let left: Vec<String> = repo
+            .readings()
+            .await
+            .into_iter()
+            .map(|r| r.external_id)
+            .collect();
+        assert_eq!(left, ["owed", "view-new"]);
     }
 }

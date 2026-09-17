@@ -16,6 +16,14 @@
 //! `validate_sensor` the TOML loader ran, and refuses the whole batch
 //! (422, deterministic) naming the row: a registry with a half-admitted
 //! tenant is worse than a refusal.
+//!
+//! `POST /api/sensors/{id}/readings` is also the SERVICE-RECORDED
+//! reading's door (backlog 0b5c5081): the gateway's site surface
+//! pushes page views to the push-only `www-visits` sensor through it,
+//! signed as the gateway, in the same array body the poll sends. The
+//! one difference is who it admits: a polled sensor takes readings
+//! from its own poll actor only (409 with the reason for anyone
+//! else), a push-only sensor from any trusted writer.
 
 use std::sync::Arc;
 
@@ -31,7 +39,9 @@ use boss_policy_client::CurrentUser;
 use crate::trust::{can_read, is_trusted};
 
 use super::port::{Sensors, SensorsError, sweep_retention};
-use super::types::{NewReading, PollStamp, SensorBatch, validate_sensor};
+use super::types::{
+    NewReading, PUSH_ONLY_SOURCES, PollStamp, SensorBatch, sensor_actor, validate_sensor,
+};
 
 pub struct SensorsApiState {
     pub repo: Arc<dyn Sensors>,
@@ -144,6 +154,29 @@ async fn record(
             format!(
                 "a reading needs the source's own id (external_id); one observed at {} has none",
                 r.observed_at
+            ),
+        )
+            .into_response();
+    }
+    // A POLLED sensor's readings are its own poll's to record: a push
+    // from any other actor would open a packet the source never
+    // observed. A push-only sensor (PUSH_ONLY_SOURCES) takes them from
+    // whoever observed the world — the gateway, for `site`.
+    let polled_by_someone_else = match state.repo.list().await {
+        Ok(rows) => rows
+            .into_iter()
+            .find(|s| s.id == id)
+            .is_some_and(|s| !s.is_push_only() && user.id != sensor_actor(&id)),
+        Err(e) => return err_response(e),
+    };
+    if polled_by_someone_else {
+        return (
+            StatusCode::CONFLICT,
+            format!(
+                "sensor {id} is polled: its readings are recorded by its own poll, signed {}; \
+                 a service records readings only on a push-only source ({})",
+                sensor_actor(&id),
+                PUSH_ONLY_SOURCES.join(", ")
             ),
         )
             .into_response();
@@ -499,6 +532,95 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    fn gateway() -> Option<String> {
+        Some(header(
+            "automation:gateway",
+            "platform-admin",
+            AccessTier::Operator,
+        ))
+    }
+
+    /// The service-recorded reading (backlog 0b5c5081): the gateway
+    /// pushes page views to the push-only `www-visits` sensor,
+    /// insert-if-absent, and the same door refuses its push to a
+    /// POLLED sensor with a sentence — only that sensor's own poll
+    /// actor records there. The site row lands with no credential and
+    /// no period.
+    #[tokio::test]
+    async fn a_push_lands_on_a_push_only_sensor_and_is_refused_on_a_polled_one() {
+        let repo = Arc::new(InMemorySensors::new());
+        let mut b = batch();
+        b["sensors"].as_array_mut().unwrap().push(json!({
+            "id": "www-visits", "source": "site",
+            "opens": "marketing-weekly", "subject_kind": "custom"
+        }));
+        let (status, body) = send(app(&repo), "POST", "/api/sensors/batch", Some(b), seed()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let view = |id: &str| {
+            json!({
+                "external_id": id, "observed_at": "2026-09-17T10:00:00Z",
+                "payload": {"path": "/", "referrer_host": "", "country": "US",
+                            "ua_class": "desktop", "observed_at": "2026-09-17T10:00:00Z"}
+            })
+        };
+        let (status, body) = send(
+            app(&repo),
+            "POST",
+            "/api/sensors/www-visits/readings",
+            Some(json!([view("v1"), view("v2")])),
+            gateway(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let out: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(out["received"], 2);
+        assert_eq!(out["inserted"], 2);
+        let (status, body) = send(
+            app(&repo),
+            "POST",
+            "/api/sensors/www-visits/readings",
+            Some(json!([view("v1"), view("v3")])),
+            gateway(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let out: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(out["inserted"], 1, "a redelivered view inserts nothing");
+        assert_eq!(repo.unstamped("www-visits").await.unwrap().len(), 3);
+
+        // The gateway pushing to the Stripe sensor: refused, named.
+        let (status, body) = send(
+            app(&repo),
+            "POST",
+            "/api/sensors/stripe-sponsorships/readings",
+            Some(json!([view("ch_forged")])),
+            gateway(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(
+            body.contains("stripe-sponsorships") && body.contains("polled"),
+            "{body}"
+        );
+        assert!(
+            repo.unstamped("stripe-sponsorships")
+                .await
+                .unwrap()
+                .is_empty(),
+            "nothing landed"
+        );
+        // Its own poll actor still records there.
+        let (status, body) = send(
+            app(&repo),
+            "POST",
+            "/api/sensors/stripe-sponsorships/readings",
+            Some(json!([view("ch_1")])),
+            sensor_actor(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
     }
 
     /// The sweep is operator machinery and reports what it did.

@@ -16,6 +16,7 @@ mod site;
 mod sponsors;
 mod static_files;
 mod timing;
+mod visits;
 
 use perf::PerfCollector;
 
@@ -204,13 +205,25 @@ async fn main() -> Result<()> {
     // configured → the router unchanged.
     // The roll (sponsors.rs) rides every site: its one computed
     // document, read from the jobs upstream as the gateway itself.
+    // So does the page-view recorder (visits.rs): one www-visits
+    // reading per HTML page served, drained to the jobs upstream in
+    // batches by its own task — on with the site, off without one.
+    let visits_sensor = visits::Recorder::sensor_from_env();
     let site = site::Site::from_env().map(|s| {
         s.with_sponsors(sponsors::SponsorRoll::new(Arc::new(
             sponsors::JobsApi::from_env(),
         )))
+        .with_visits(visits::Recorder::spawn(
+            Arc::new(visits::JobsApi::from_env()),
+            visits_sensor.clone(),
+        ))
     });
     match &site {
-        Some(s) => tracing::info!(site_host = %s.host(), "tenant site mounted"),
+        Some(s) => tracing::info!(
+            site_host = %s.host(),
+            visits_sensor = %visits_sensor,
+            "tenant site mounted; page views recorded"
+        ),
         None => tracing::info!("no tenant site (BOSS_SITE_HOST / BOSS_SITE_DIR unset)"),
     }
     let site_host = site.as_ref().map(|s| s.host().to_string());

@@ -6,7 +6,9 @@
 //! cadence rule (`sensors-poll-every-5-minutes`) fires this handler; it
 //! reads the sensor registry (`GET /api/sensors`) and, for every
 //! enabled sensor whose `every_minutes` has elapsed since its last
-//! attempt, asks the source adapter for everything since the sensor's
+//! attempt (`SensorRow::due_at` — never true of a push-only source
+//! such as `site`, whose readings the gateway records itself,
+//! 0b5c5081), asks the source adapter for everything since the sensor's
 //! cursor, records the readings (insert-if-absent), opens ONE packet
 //! per reading that still owes one, stamps it, and marks the poll.
 //! The product knows how to read a source; WHAT to open for it is the
@@ -176,9 +178,11 @@ pub fn is_refusal(status: reqwest::StatusCode) -> bool {
 }
 
 /// The actor a sensor's writes sign as. The packet's owner, its
-/// `opened_by`, and the readings' provenance are all this one id.
+/// `opened_by`, and the readings' provenance are all this one id —
+/// spelled once, in boss-jobs, because the readings door admits a
+/// polled sensor's readings from this actor only (0b5c5081).
 pub fn sensor_actor(sensor_id: &str) -> String {
-    format!("automation:sensor:{sensor_id}")
+    boss_jobs::sensors::sensor_actor(sensor_id)
 }
 
 fn sensor_actor_header(sensor_id: &str) -> String {
