@@ -162,8 +162,10 @@ LINK="${BOSS_CLI_LINK:-/usr/local/bin/boss}"
 WRAPPER_SRC="${BOSS_CLI_WRAPPER_SRC:-$SELF_DIR/boss-cli-wrapper.sh}"
 KEEP="${BOSS_CLI_KEEP:-3}"
 PULL_TIMEOUT="${BOSS_CLI_PULL_TIMEOUT:-360}"
-# The deploy runner's tag: `git rev-parse --short` of the merge, seven
-# characters on this history. The full sha is the attestation.
+# The deploy runner's tag: the first seven characters of the merge's
+# full sha (cluster-deploy-runner.sh, HEAD=${HEAD_FULL:0:7} — a fixed
+# substring, never `git rev-parse --short`, whose length moves with the
+# repository; a test pins both). The full sha is the attestation.
 TAG="${SHA:0:7}"
 IMAGE="$IMAGE_REPO:$TAG"
 REGISTRY_HOST="${IMAGE_REPO%%/*}"

@@ -138,7 +138,15 @@ cd "$REPO"
 . "$REPO/infra/forge/checkout-lock.sh"
 STAGE="fetch"
 checkout_git "$REPO" fetch -q forgejo main
-HEAD=$(git rev-parse --short forgejo/main)
+# The image tag is a NAME, seven characters of the full sha — not
+# `git rev-parse --short`, whose length git picks from the object count
+# (core.abbrev auto) and which grew to eight on this history on
+# 2026-09-17: the cluster ran boss:3b73d515 while the CLI installer on
+# boss-gcp pulled boss:3b73d51 (${SHA:0:7}, install-cli-from-image.sh)
+# and every converge there failed its CLI step (backlog 7f4a5a3c). A
+# tag has no ambiguity to resolve; a test pins the two expressions.
+HEAD_FULL=$(git rev-parse forgejo/main)
+HEAD=${HEAD_FULL:0:7}
 LAST=$(cat "$STAMP_FILE" 2>/dev/null || echo none)
 
 if [ "$HEAD" = "$LAST" ]; then
