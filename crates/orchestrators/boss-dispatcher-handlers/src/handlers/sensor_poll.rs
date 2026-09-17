@@ -42,6 +42,24 @@
 //! idiom). A network blip is a `Downstream` error: the firing NAKs, the
 //! poll is NOT marked, and the next tick retries.
 //!
+//! AN UNOPENABLE PACKET IS THE SAME SHAPE, ONE STEP LATER (backlog
+//! f50a9ec1, 2026-09-17). A source that reads fine can still declare a
+//! packet the jobs API refuses — the `opens_kind` not published, its
+//! `subject_kind` unknown to the registry, the described metadata
+//! failing the kind's schema. Until this car that refusal was only
+//! logged: a 400 rode the transient lane and retried every tick, a 422
+//! terminated the whole firing, and nothing on any packet said why the
+//! reading sat unstamped. Now a refusal (a 4xx that is not a miss, a
+//! conflict or a throttle — `is_refusal`) files `sensor_unopenable:<id>`
+//! through the SAME raise / refresh / recover mechanics as the
+//! unreadable alarm, carrying the API's answer verbatim (status + body,
+//! bounded by `REFUSAL_BOUND`) and the reading's id. The reading stays
+//! unstamped, so it is still owed; the poll is marked so the next
+//! attempt waits the period; and the first open that succeeds closes
+//! the alarm. The two are two findings on one sensor, each recovered by
+//! its own later success: a source that reads again closes the
+//! unreadable one on the read even while its packets are still refused.
+//!
 //! THE VALUE IS NEVER READ EXCEPT TO SEND IT. The handler holds the
 //! credential values the deployment handed it by registry id
 //! (`BOSS_BROKER_STRIPE_KEY` for `stripe-restricted-read`, the same
@@ -63,10 +81,98 @@ use super::common::{
     api_client, dispatcher_reader_header, get_json, post_json, sim_origin_value, triage_step,
 };
 
-/// The alarm key one unreadable sensor carries — the `estate_finding`
-/// the dedup lens reads.
-pub fn alarm_key(sensor_id: &str) -> String {
-    format!("sensor_unreadable:{sensor_id}")
+/// The two standing conditions a sensor alarms on. Each is its own
+/// `estate_finding` (so one sensor can carry both at once — a source
+/// that reads but whose packets are refused is exactly the second and
+/// not the first) and each is recovered by its own later success.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Condition {
+    /// The credential or the source cannot be read.
+    Unreadable,
+    /// The source reads, but the packet a reading declares is refused
+    /// by the jobs API (backlog f50a9ec1).
+    Unopenable,
+}
+
+impl Condition {
+    /// The alarm key one sensor carries for this condition — the
+    /// `estate_finding` the dedup lens reads.
+    pub fn key(self, sensor_id: &str) -> String {
+        match self {
+            Self::Unreadable => format!("sensor_unreadable:{sensor_id}"),
+            Self::Unopenable => format!("sensor_unopenable:{sensor_id}"),
+        }
+    }
+
+    /// What a later success proves about this condition, for the
+    /// recovery evidence.
+    fn recovered_by(self) -> &'static str {
+        match self {
+            Self::Unreadable => "read",
+            Self::Unopenable => "opened a packet for",
+        }
+    }
+}
+
+/// How much of a refusal body an alarm carries verbatim. A jobs-API
+/// refusal is one line naming the kind or the field; a few hundred
+/// chars holds all of it, and the bound keeps a proxy's HTML error
+/// page off a packet.
+pub const REFUSAL_BOUND: usize = 400;
+
+/// What one alarm carries: the condition, the reason (what the failing
+/// call answered — never a value), and for an unopenable packet the
+/// reading it was about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Alarm {
+    pub condition: Condition,
+    pub reason: String,
+    pub external_id: Option<String>,
+}
+
+impl Alarm {
+    pub fn unreadable(reason: impl Into<String>) -> Self {
+        Self {
+            condition: Condition::Unreadable,
+            reason: reason.into(),
+            external_id: None,
+        }
+    }
+
+    /// The API's refusal verbatim — status and body — bounded, and
+    /// saying how much was cut when it was. The reading's id is in the
+    /// reason too, so a NEW reading meeting the same refusal reads as a
+    /// changed reason and refreshes the packet once.
+    pub fn unopenable(external_id: &str, status: u16, body: &str) -> Self {
+        let total = body.chars().count();
+        let shown: String = body.chars().take(REFUSAL_BOUND).collect();
+        let body = if total > REFUSAL_BOUND {
+            format!("{shown} …[{total} chars; first {REFUSAL_BOUND} shown]")
+        } else {
+            shown
+        };
+        Self {
+            condition: Condition::Unopenable,
+            reason: format!("reading {external_id}: POST /api/jobs answered {status}: {body}"),
+            external_id: Some(external_id.to_string()),
+        }
+    }
+}
+
+/// Which answers to a packet open are a standing refusal — request
+/// data the API will refuse identically on every retry — and which are
+/// weather. By the house contract on `HandlerError::Permanent`, 404
+/// (not yet projected), 409 (convergent conflict), 408 and 429 stay
+/// retryable; every other 4xx is the API saying no to THIS body.
+pub fn is_refusal(status: reqwest::StatusCode) -> bool {
+    status.is_client_error()
+        && !matches!(
+            status,
+            reqwest::StatusCode::NOT_FOUND
+                | reqwest::StatusCode::REQUEST_TIMEOUT
+                | reqwest::StatusCode::CONFLICT
+                | reqwest::StatusCode::TOO_MANY_REQUESTS
+        )
 }
 
 /// The actor a sensor's writes sign as. The packet's owner, its
@@ -266,33 +372,77 @@ pub fn packet_body(sensor: &SensorRow, r: &Reading, d: &Described) -> Json {
     })
 }
 
-/// The alarm one unreadable sensor files. `reason` is what the read
-/// answered — never a value.
-pub fn alarm_body(sensor: &SensorRow, reason: &str) -> Json {
+/// The alarm one troubled sensor files. The reason is what the failing
+/// call answered — never a value.
+pub fn alarm_body(sensor: &SensorRow, alarm: &Alarm) -> Json {
+    let reason = &alarm.reason;
+    let (title, detail) = match alarm.condition {
+        Condition::Unreadable => (
+            format!(
+                "ESTATE ALARM: sensor {} cannot read its source ({})",
+                sensor.id, sensor.source
+            ),
+            format!(
+                "Raised by sensor.poll (design 14c9b2ad): the sensor `{}` (source {}, credential \
+                 `{}`) could not be read: {reason}. Until it can, no {} packet is opened for \
+                 anything the source records. The poll retries every {} minutes and refreshes \
+                 this packet only when the reason changes; the next good read closes it.",
+                sensor.id,
+                sensor.source,
+                sensor.credential,
+                sensor.opens_kind,
+                sensor.every_minutes
+            ),
+        ),
+        Condition::Unopenable => (
+            format!(
+                "ESTATE ALARM: sensor {} cannot open its {} packet",
+                sensor.id, sensor.opens_kind
+            ),
+            format!(
+                "Raised by sensor.poll (backlog f50a9ec1): the sensor `{}` (source {}) read its \
+                 source and recorded the reading, but the jobs API refused the `{}` packet it \
+                 declares (subject_kind `{}`): {reason}. The reading is recorded and unstamped, \
+                 so it is still owed a packet; the poll retries the open every {} minutes and \
+                 refreshes this packet only when the refusal changes; the first open that \
+                 succeeds closes it. The usual causes: the workflow `{}` is not published, its \
+                 subject_kinds do not admit `{}`, or the described metadata fails its schema.",
+                sensor.id,
+                sensor.source,
+                sensor.opens_kind,
+                sensor.subject_kind,
+                sensor.every_minutes,
+                sensor.opens_kind,
+                sensor.subject_kind,
+            ),
+        ),
+    };
+    let mut metadata = json!({
+        "area": "estate",
+        "estate_finding": alarm.condition.key(&sensor.id),
+        "scope": "sensor",
+        "sensor_id": sensor.id,
+        "source": sensor.source,
+        "credential": sensor.credential,
+        "reason": reason,
+        "detail": detail,
+    });
+    if alarm.condition == Condition::Unopenable
+        && let Some(m) = metadata.as_object_mut()
+    {
+        m.insert("opens_kind".into(), json!(sensor.opens_kind));
+        m.insert("subject_kind".into(), json!(sensor.subject_kind));
+        m.insert("external_id".into(), json!(alarm.external_id));
+    }
     json!({
         "kind": "backlog-item",
-        "title": format!("ESTATE ALARM: sensor {} cannot read its source ({})", sensor.id, sensor.source),
+        "title": title,
         "subject": {"subject_kind": "custom", "id": sensor.id},
         "owner_id": "emp-david",
         "priority": "urgent",
         "status": "open",
         "tags": [],
-        "metadata": {
-            "area": "estate",
-            "estate_finding": alarm_key(&sensor.id),
-            "scope": "sensor",
-            "sensor_id": sensor.id,
-            "source": sensor.source,
-            "credential": sensor.credential,
-            "reason": reason,
-            "detail": format!(
-                "Raised by sensor.poll (design 14c9b2ad): the sensor `{}` (source {}, credential \
-                 `{}`) could not be read: {reason}. Until it can, no {} packet is opened for \
-                 anything the source records. The poll retries every {} minutes and refreshes \
-                 this packet only when the reason changes; the next good read closes it.",
-                sensor.id, sensor.source, sensor.credential, sensor.opens_kind, sensor.every_minutes
-            ),
-        },
+        "metadata": metadata,
     })
 }
 
@@ -335,6 +485,7 @@ pub fn open_alarm(listing: &Json, key: &str) -> Result<Option<(String, String)>,
 pub fn recover_step_body(
     existing: &serde_json::Map<String, Json>,
     sensor_id: &str,
+    condition: Condition,
     at: DateTime<Utc>,
 ) -> Json {
     let mut metadata = existing.clone();
@@ -342,8 +493,9 @@ pub fn recover_step_body(
     metadata.insert(
         "evidence".into(),
         json!(format!(
-            "sensor.poll read sensor `{sensor_id}` successfully at {}; the condition this alarm \
-             carried no longer holds. Closed by machine from the read, not by judgement.",
+            "sensor.poll {} sensor `{sensor_id}` successfully at {}; the condition this alarm \
+             carried no longer holds. Closed by machine from the success, not by judgement.",
+            condition.recovered_by(),
             at.to_rfc3339()
         )),
     );
@@ -381,6 +533,13 @@ pub enum PollOutcome {
     Read { recorded: usize, opened: usize },
     /// The alarm was raised, refreshed, or left as it was.
     Unreadable(&'static str),
+    /// The source read, but a packet open was refused: what happened
+    /// to the alarm, and what was recorded and opened before it.
+    Unopenable {
+        alarm: &'static str,
+        recorded: usize,
+        opened: usize,
+    },
 }
 
 impl SensorPoll {
@@ -423,15 +582,18 @@ impl SensorPoll {
             .map_err(|e| HandlerError::Downstream(format!("GET {url} not JSON: {e}")))
     }
 
-    /// A write signed as the sensor's own actor. Returns the body for
-    /// the one caller that reads it (the packet's id).
-    async fn write(
+    /// A write signed as the sensor's own actor, answered as the API
+    /// answered it: the status and the body, whatever they were. Only
+    /// transport failure is an error here; the caller judges the
+    /// status, because one caller (the packet open) needs to tell a
+    /// refusal from weather and keep the refusal's text.
+    async fn send(
         &self,
         method: reqwest::Method,
         path: &str,
         body: &Json,
         sensor_id: &str,
-    ) -> Result<Json, HandlerError> {
+    ) -> Result<(reqwest::StatusCode, String), HandlerError> {
         let url = format!("{}{path}", self.base());
         let verb = method.to_string();
         let resp = self
@@ -446,6 +608,21 @@ impl SensorPoll {
             .map_err(|e| HandlerError::Downstream(format!("{verb} {url}: {e}")))?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
+        Ok((status, text))
+    }
+
+    /// A write that must succeed. Returns the body for the one caller
+    /// that reads it (the packet's id).
+    async fn write(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: &Json,
+        sensor_id: &str,
+    ) -> Result<Json, HandlerError> {
+        let url = format!("{}{path}", self.base());
+        let verb = method.to_string();
+        let (status, text) = self.send(method, path, body, sensor_id).await?;
         if !status.is_success() {
             return Err(if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
                 HandlerError::Permanent(format!("{verb} {url} returned {status}: {text}"))
@@ -486,23 +663,28 @@ impl SensorPoll {
     }
 
     /// File the alarm, or refresh the open one when the reason moved,
-    /// or leave it when nothing changed.
+    /// or leave it when nothing changed. One mechanism for both
+    /// conditions; the alarm's key is what tells them apart.
     async fn raise_or_refresh(
         &self,
         sensor: &SensorRow,
-        reason: &str,
+        alarm: &Alarm,
     ) -> Result<&'static str, HandlerError> {
-        let key = alarm_key(&sensor.id);
+        let key = alarm.condition.key(&sensor.id);
+        let reason = &alarm.reason;
         match self.open_alarm_for(&key).await? {
-            Some((id, held)) if held == reason => {
+            Some((id, held)) if held == *reason => {
                 tracing::info!(finding = %key, packet = %id, "sensor.poll: alarm already open with this reason");
                 Ok("held")
             }
             Some((id, _)) => {
+                // The fresh body's metadata, whole: a merge on the
+                // packet, so every key the reason moved with (the
+                // detail, the reading's id) moves with it.
                 self.write(
                     reqwest::Method::PATCH,
                     &format!("/api/jobs/{id}/metadata"),
-                    &json!({ "reason": reason, "detail": alarm_body(sensor, reason)["metadata"]["detail"] }),
+                    &alarm_body(sensor, alarm)["metadata"],
                     &sensor.id,
                 )
                 .await?;
@@ -513,7 +695,7 @@ impl SensorPoll {
                 self.write(
                     reqwest::Method::POST,
                     "/api/jobs",
-                    &alarm_body(sensor, reason),
+                    &alarm_body(sensor, alarm),
                     &sensor.id,
                 )
                 .await?;
@@ -523,9 +705,15 @@ impl SensorPoll {
         }
     }
 
-    /// Close the open alarm, if one is, through its triage step.
-    async fn recover(&self, sensor: &SensorRow, at: DateTime<Utc>) -> Result<(), HandlerError> {
-        let key = alarm_key(&sensor.id);
+    /// Close the open alarm for `condition`, if one is, through its
+    /// triage step.
+    async fn recover(
+        &self,
+        sensor: &SensorRow,
+        condition: Condition,
+        at: DateTime<Utc>,
+    ) -> Result<(), HandlerError> {
+        let key = condition.key(&sensor.id);
         let Some((id, _)) = self.open_alarm_for(&key).await? else {
             return Ok(());
         };
@@ -537,11 +725,11 @@ impl SensorPoll {
         self.write(
             reqwest::Method::PUT,
             &format!("/api/jobs/{id}/steps/{step_id}"),
-            &recover_step_body(&existing, &sensor.id, at),
+            &recover_step_body(&existing, &sensor.id, condition, at),
             &sensor.id,
         )
         .await?;
-        tracing::info!(finding = %key, packet = %id, "sensor.poll closed the alarm: the sensor reads again");
+        tracing::info!(finding = %key, packet = %id, "sensor.poll closed the alarm: the condition no longer holds");
         Ok(())
     }
 
@@ -552,7 +740,9 @@ impl SensorPoll {
         now: DateTime<Utc>,
     ) -> Result<PollOutcome, HandlerError> {
         let unreadable = |reason: String| async move {
-            let what = self.raise_or_refresh(sensor, &reason).await?;
+            let what = self
+                .raise_or_refresh(sensor, &Alarm::unreadable(reason))
+                .await?;
             self.mark_polled(sensor, now, None).await?;
             Ok::<_, HandlerError>(PollOutcome::Unreadable(what))
         };
@@ -617,17 +807,43 @@ impl SensorPoll {
             .transpose()
             .map_err(|e| HandlerError::Downstream(format!("readings not in shape: {e}")))?
             .unwrap_or_default();
+        // The cursor is the newest observation whether or not every
+        // packet opens: the readings are recorded, and an owed one is
+        // found by its missing stamp, not by re-reading the source.
+        let cursor = observations.iter().map(|o| o.observed_at).max();
         let mut opened = 0;
         for r in &owed {
             let described = source.describe(&r.payload);
-            let created = self
-                .write(
+            let (status, text) = self
+                .send(
                     reqwest::Method::POST,
                     "/api/jobs",
                     &packet_body(sensor, r, &described),
                     &sensor.id,
                 )
                 .await?;
+            if is_refusal(status) {
+                // The unopenable leg: the same raise / mark as the
+                // unreadable one, one step later. The reading stays
+                // unstamped (still owed), and the source having read
+                // is itself the unreadable alarm's recovery.
+                let alarm = Alarm::unopenable(&r.external_id, status.as_u16(), &text);
+                let what = self.raise_or_refresh(sensor, &alarm).await?;
+                self.mark_polled(sensor, now, cursor).await?;
+                self.recover(sensor, Condition::Unreadable, now).await?;
+                return Ok(PollOutcome::Unopenable {
+                    alarm: what,
+                    recorded,
+                    opened,
+                });
+            }
+            if !status.is_success() {
+                return Err(HandlerError::Downstream(format!(
+                    "POST /api/jobs for reading {} returned {status}: {text}",
+                    r.external_id
+                )));
+            }
+            let created: Json = serde_json::from_str(&text).unwrap_or(Json::Null);
             let packet_id = created
                 .get("id")
                 .or_else(|| created.pointer("/data/id"))
@@ -651,9 +867,9 @@ impl SensorPoll {
             .await?;
             opened += 1;
         }
-        let cursor = observations.iter().map(|o| o.observed_at).max();
         self.mark_polled(sensor, now, cursor).await?;
-        self.recover(sensor, now).await?;
+        self.recover(sensor, Condition::Unreadable, now).await?;
+        self.recover(sensor, Condition::Unopenable, now).await?;
         Ok(PollOutcome::Read { recorded, opened })
     }
 }
@@ -776,7 +992,10 @@ mod tests {
 
     #[test]
     fn the_alarm_is_dedup_keyed_and_carries_the_reason_never_a_value() {
-        let b = alarm_body(&sensor(), "env BOSS_BROKER_STRIPE_KEY is empty");
+        let b = alarm_body(
+            &sensor(),
+            &Alarm::unreadable("env BOSS_BROKER_STRIPE_KEY is empty"),
+        );
         assert_eq!(
             b["metadata"]["estate_finding"],
             "sensor_unreadable:stripe-sponsorships"
@@ -852,6 +1071,9 @@ mod tests {
         sensors: Arc<boss_jobs::sensors::InMemorySensors>,
         /// Open backlog-items, as the listing answers them.
         alarms: Arc<Mutex<Vec<Json>>>,
+        /// When set, every packet open (a POST /api/jobs that is not
+        /// a backlog-item) is answered with this status and body.
+        refuse_opens: Arc<Mutex<Option<(u16, String)>>>,
     }
 
     impl Stub {
@@ -877,14 +1099,22 @@ mod tests {
 
     async fn stub_jobs_api(open_alarms: Vec<Json>) -> Stub {
         use axum::extract::{Path, Query};
+        use axum::response::IntoResponse;
         use axum::{Json as AxJson, Router, routing::get, routing::post};
         use std::collections::HashMap as Map;
 
         let captured: Captured = Default::default();
         let sensors = Arc::new(boss_jobs::sensors::InMemorySensors::new());
         let alarms = Arc::new(Mutex::new(open_alarms));
+        let refuse_opens: Arc<Mutex<Option<(u16, String)>>> = Default::default();
+        let refuse = refuse_opens.clone();
         let (c1, c2, c3) = (captured.clone(), captured.clone(), captured.clone());
-        let (a1, a2, a3) = (alarms.clone(), alarms.clone(), alarms.clone());
+        let (a1, a2, a3, a4) = (
+            alarms.clone(),
+            alarms.clone(),
+            alarms.clone(),
+            alarms.clone(),
+        );
         let app = Router::new()
             .merge(boss_jobs::sensors::http::router(
                 boss_jobs::sensors::http::SensorsApiState {
@@ -906,6 +1136,7 @@ mod tests {
                     move |headers: axum::http::HeaderMap, AxJson(body): AxJson<Json>| {
                         let c = c1.clone();
                         let alarms = a2.clone();
+                        let refuse = refuse.clone();
                         async move {
                             let actor: Json = serde_json::from_str(
                                 headers.get("x-boss-user").unwrap().to_str().unwrap(),
@@ -913,6 +1144,16 @@ mod tests {
                             .unwrap();
                             let mut b = body.clone();
                             b["_actor"] = actor["id"].clone();
+                            let refusal = refuse.lock().unwrap().clone();
+                            if let Some((status, text)) = refusal
+                                && body["kind"] != "backlog-item"
+                            {
+                                c.lock()
+                                    .unwrap()
+                                    .push(("POST /api/jobs (refused)".into(), b));
+                                return (axum::http::StatusCode::from_u16(status).unwrap(), text)
+                                    .into_response();
+                            }
                             c.lock().unwrap().push(("POST /api/jobs".into(), b));
                             let n = c.lock().unwrap().len();
                             let id = format!("job-{n}");
@@ -925,7 +1166,7 @@ mod tests {
                                 ]);
                                 alarms.lock().unwrap().push(row);
                             }
-                            AxJson(json!({ "id": id }))
+                            AxJson(json!({ "id": id })).into_response()
                         }
                     },
                 ),
@@ -963,7 +1204,14 @@ mod tests {
                 axum::routing::put(
                     move |Path((id, sid)): Path<(String, String)>, AxJson(body): AxJson<Json>| {
                         let c = c3.clone();
+                        let alarms = a4.clone();
                         async move {
+                            // A completed triage step closes the
+                            // packet, so it leaves the open listing —
+                            // as the real API's terminal does.
+                            if body["status"] == "completed" {
+                                alarms.lock().unwrap().retain(|r| r["id"] != id);
+                            }
                             c.lock()
                                 .unwrap()
                                 .push((format!("PUT /api/jobs/{id}/steps/{sid}"), body));
@@ -981,6 +1229,7 @@ mod tests {
             captured,
             sensors,
             alarms,
+            refuse_opens,
         }
     }
 
@@ -1212,6 +1461,259 @@ mod tests {
             "existing keys ride"
         );
         assert_eq!(puts[0].1["metadata"]["cleared_by"], "sensor.poll");
+    }
+
+    // ----- the unopenable path (backlog f50a9ec1) -----
+
+    #[test]
+    fn the_two_conditions_are_two_findings_on_one_sensor() {
+        assert_eq!(
+            Condition::Unreadable.key("stripe-sponsorships"),
+            "sensor_unreadable:stripe-sponsorships"
+        );
+        assert_eq!(
+            Condition::Unopenable.key("stripe-sponsorships"),
+            "sensor_unopenable:stripe-sponsorships"
+        );
+    }
+
+    #[test]
+    fn the_unopenable_alarm_carries_the_refusal_verbatim_and_the_readings_id() {
+        let alarm = Alarm::unopenable(
+            "ch_1",
+            400,
+            "unknown or inactive job kind: receive-a-sponsorship",
+        );
+        let b = alarm_body(&sensor(), &alarm);
+        assert_eq!(
+            b["metadata"]["estate_finding"],
+            "sensor_unopenable:stripe-sponsorships"
+        );
+        assert_eq!(b["metadata"]["external_id"], "ch_1");
+        assert_eq!(b["metadata"]["opens_kind"], "receive-a-sponsorship");
+        assert_eq!(b["priority"], "urgent");
+        let reason = b["metadata"]["reason"].as_str().unwrap();
+        assert!(reason.contains("400"), "{reason}");
+        assert!(
+            reason.contains("unknown or inactive job kind: receive-a-sponsorship"),
+            "{reason}"
+        );
+        assert!(reason.contains("ch_1"), "{reason}");
+        assert!(
+            b["title"].as_str().unwrap().contains("cannot open"),
+            "{}",
+            b["title"]
+        );
+        assert!(
+            b["metadata"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("receive-a-sponsorship"),
+            "{}",
+            b["metadata"]["detail"]
+        );
+        // The unreadable body still reads as it did.
+        let b = alarm_body(&sensor(), &Alarm::unreadable("env X is empty"));
+        assert_eq!(
+            b["metadata"]["estate_finding"],
+            "sensor_unreadable:stripe-sponsorships"
+        );
+        assert_eq!(b["metadata"]["reason"], "env X is empty");
+        assert!(b["metadata"].get("external_id").is_none());
+    }
+
+    /// A refusal body is carried verbatim up to a bound; past it the
+    /// reason says how much was cut, so a packet never carries a
+    /// megabyte of HTML error page.
+    #[test]
+    fn the_refusal_is_bounded_to_a_few_hundred_chars_and_says_so() {
+        let short = Alarm::unopenable("ch_1", 422, "bad metadata");
+        assert!(short.reason.ends_with("bad metadata"), "{}", short.reason);
+        let long_body = "x".repeat(5000);
+        let long = Alarm::unopenable("ch_1", 422, &long_body);
+        assert!(
+            long.reason.chars().count() < REFUSAL_BOUND + 120,
+            "{}",
+            long.reason.len()
+        );
+        assert!(long.reason.contains("5000"), "{}", long.reason);
+        assert!(long.reason.contains("422"), "{}", long.reason);
+    }
+
+    /// Which answers to a packet open are a standing refusal (alarmed,
+    /// retried at the sensor's period) and which are weather (NAKed).
+    #[test]
+    fn a_refusal_is_a_4xx_that_is_not_a_conflict_a_miss_or_a_throttle() {
+        for s in [400u16, 401, 403, 422] {
+            assert!(is_refusal(reqwest::StatusCode::from_u16(s).unwrap()), "{s}");
+        }
+        for s in [404u16, 408, 409, 429, 500, 502, 503] {
+            assert!(
+                !is_refusal(reqwest::StatusCode::from_u16(s).unwrap()),
+                "{s}"
+            );
+        }
+    }
+
+    /// The source reads, the reading is recorded, but the jobs API
+    /// refuses the packet (the declared kind is not published): the
+    /// alarm `sensor_unopenable:<id>` is filed carrying the refusal
+    /// and the reading's id, the reading stays unstamped, the poll is
+    /// marked (the next attempt waits the period, and the cursor
+    /// advances past what was recorded). The same refusal next period
+    /// holds the packet; a changed refusal refreshes it; the first
+    /// open that succeeds stamps the reading and closes the alarm
+    /// through triage.
+    #[tokio::test]
+    async fn a_refused_packet_open_alarms_with_the_refusal_and_the_next_good_open_recovers() {
+        let stub = stub_jobs_api(vec![]).await;
+        declare(&stub).await;
+        let source = InMemorySource::answering(vec![obs("ch_1", "2026-09-17T09:00:00Z", 500)]);
+        let h = handler(&stub, source.clone(), Some("rk_test_x"));
+        *stub.refuse_opens.lock().unwrap() = Some((
+            400,
+            "unknown or inactive job kind: receive-a-sponsorship".into(),
+        ));
+
+        h.invoke(&[], &ctx()).await.unwrap();
+        let packets = stub.packets();
+        assert_eq!(packets.len(), 1, "{packets:#?}");
+        assert_eq!(packets[0]["kind"], "backlog-item");
+        assert_eq!(
+            packets[0]["metadata"]["estate_finding"],
+            "sensor_unopenable:stripe-sponsorships"
+        );
+        assert_eq!(packets[0]["metadata"]["external_id"], "ch_1");
+        let reason = packets[0]["metadata"]["reason"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(reason.contains("400"), "{reason}");
+        assert!(reason.contains("unknown or inactive job kind"), "{reason}");
+        assert_eq!(
+            packets[0]["_actor"],
+            "automation:sensor:stripe-sponsorships"
+        );
+        assert_eq!(stub.writes("POST /api/jobs (refused)").len(), 1);
+        let readings = stub.sensors.readings().await;
+        assert_eq!(readings.len(), 1, "the reading was recorded");
+        assert_eq!(readings[0].packet_id, None, "and stays unstamped");
+        let row = &stub.sensors.list().await.unwrap()[0];
+        assert_eq!(row.last_polled_at, Some(at("2026-09-17T10:05:00Z")));
+        assert_eq!(row.cursor_at, Some(at("2026-09-17T09:00:00Z")));
+
+        // Same refusal, next period: the open is attempted again (the
+        // reading is still owed), refused again, the alarm held.
+        h.invoke(&[], &ctx_at("2026-09-17T10:20:00+00:00"))
+            .await
+            .unwrap();
+        assert_eq!(stub.packets().len(), 1, "not twinned");
+        assert_eq!(stub.writes("POST /api/jobs (refused)").len(), 2);
+        assert!(stub.writes("PATCH").is_empty(), "not patched");
+
+        // A different refusal (the kind is now published but the
+        // metadata is refused): refreshed, not twinned.
+        *stub.refuse_opens.lock().unwrap() =
+            Some((422, "metadata: amount_cents must be an integer".into()));
+        h.invoke(&[], &ctx_at("2026-09-17T10:35:00+00:00"))
+            .await
+            .unwrap();
+        assert_eq!(stub.packets().len(), 1);
+        let patches = stub.writes("PATCH");
+        assert_eq!(patches.len(), 1, "{patches:?}");
+        let reason = patches[0].1["reason"].as_str().unwrap();
+        assert!(reason.contains("422"), "{reason}");
+        assert!(reason.contains("amount_cents"), "{reason}");
+        assert_eq!(patches[0].1["external_id"], "ch_1");
+
+        // The open succeeds: the packet opens, the reading is stamped,
+        // the alarm is closed through its triage step.
+        *stub.refuse_opens.lock().unwrap() = None;
+        h.invoke(&[], &ctx_at("2026-09-17T10:50:00+00:00"))
+            .await
+            .unwrap();
+        let packets = stub.packets();
+        assert_eq!(packets.len(), 2, "{packets:#?}");
+        assert_eq!(packets[1]["kind"], "receive-a-sponsorship");
+        assert_eq!(packets[1]["subject"]["id"], "ch_1");
+        let readings = stub.sensors.readings().await;
+        assert!(readings[0].packet_id.is_some(), "{readings:?}");
+        // job-1 was the refused open; the alarm is job-2.
+        let puts = stub.writes("PUT /api/jobs/job-2/steps/job-2-triage");
+        assert_eq!(puts.len(), 1, "{:?}", stub.writes("PUT"));
+        assert_eq!(puts[0].1["status"], "completed");
+        assert_eq!(puts[0].1["metadata"]["disposition"], "stale");
+        assert_eq!(puts[0].1["metadata"]["cleared_by"], "sensor.poll");
+        assert!(
+            puts[0].1["metadata"]["evidence"]
+                .as_str()
+                .unwrap()
+                .contains("opened"),
+            "{}",
+            puts[0].1["metadata"]["evidence"]
+        );
+
+        // Nothing more to open, nothing more to close.
+        h.invoke(&[], &ctx_at("2026-09-17T11:05:00+00:00"))
+            .await
+            .unwrap();
+        assert_eq!(stub.packets().len(), 2);
+        assert_eq!(stub.writes("PUT").len(), 1);
+    }
+
+    /// A 5xx / 409 from the open is weather, exactly as it was: the
+    /// firing NAKs, no alarm, the poll is not marked.
+    #[tokio::test]
+    async fn a_transient_answer_to_the_open_naks_without_an_alarm() {
+        let stub = stub_jobs_api(vec![]).await;
+        declare(&stub).await;
+        let source = InMemorySource::answering(vec![obs("ch_1", "2026-09-17T09:00:00Z", 1)]);
+        let h = handler(&stub, source, Some("k"));
+        *stub.refuse_opens.lock().unwrap() =
+            Some((503, "subject existence check unavailable".into()));
+        let err = h.invoke(&[], &ctx()).await.unwrap_err();
+        assert!(matches!(err, HandlerError::Downstream(_)), "{err}");
+        assert!(stub.packets().is_empty(), "{:?}", stub.packets());
+        assert_eq!(stub.sensors.list().await.unwrap()[0].last_polled_at, None);
+    }
+
+    /// The two alarms are two findings: a source that reads again
+    /// closes the unreadable one on the read even while its packets
+    /// are still refused, and the unopenable one stands until an open
+    /// succeeds.
+    #[tokio::test]
+    async fn a_good_read_whose_open_is_refused_closes_only_the_unreadable_alarm() {
+        let stub = stub_jobs_api(vec![]).await;
+        declare(&stub).await;
+        let source = InMemorySource::answering(vec![obs("ch_1", "2026-09-17T09:00:00Z", 1)]);
+        // First: no key, unreadable alarm.
+        let h = handler(&stub, source.clone(), None);
+        h.invoke(&[], &ctx()).await.unwrap();
+        assert_eq!(
+            stub.packets()[0]["metadata"]["estate_finding"],
+            "sensor_unreadable:stripe-sponsorships"
+        );
+        // Then: a key, but the open is refused. The unreadable alarm
+        // closes (the source read), the unopenable one is raised.
+        *stub.refuse_opens.lock().unwrap() = Some((400, "unknown or inactive job kind".into()));
+        let h2 = handler(&stub, source.clone(), Some("k"));
+        h2.invoke(&[], &ctx_at("2026-09-17T10:20:00+00:00"))
+            .await
+            .unwrap();
+        let packets = stub.packets();
+        assert_eq!(packets.len(), 2, "{packets:#?}");
+        assert_eq!(
+            packets[1]["metadata"]["estate_finding"],
+            "sensor_unopenable:stripe-sponsorships"
+        );
+        let puts = stub.writes("PUT /api/jobs/job-1/steps/job-1-triage");
+        assert_eq!(puts.len(), 1, "the unreadable alarm closed on the read");
+        assert_eq!(
+            stub.writes("PUT").len(),
+            1,
+            "the unopenable one stands: {:?}",
+            stub.writes("PUT")
+        );
     }
 
     /// A source the product has no adapter for is unreadable by that

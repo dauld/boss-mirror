@@ -631,6 +631,16 @@ pub async fn run(all: bool) -> Result<()> {
                 for line in orphan_lines(&orphans, ORPHANS_SHOWN, all) {
                     println!("{line}");
                 }
+                // A car that landed before a database switch is recorded
+                // in the ARCHIVE, where the arrival sweep never looks, so
+                // its branch stays an orphan forever (dfd83788: 50 of them
+                // on 2026-09-17). The door that reads the archive's
+                // records and applies the sweep's own rule is a forge
+                // verb; name it here, or the operator deletes by hand.
+                println!(
+                    "    landed before a database switch? the archive decides: \
+                     boss ops forge sweep-archive-branches --wait -- --dry-run boss <archive-db>"
+                );
             }
             // RESIDUE (L3, acedf981): the inverse cross-ref. Orphans are
             // forge heads no packet claims; residue is open car packets
