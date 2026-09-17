@@ -1,0 +1,25 @@
+{
+  "about": "MUTATING (--for-real) — evict the example tenants' migration-seeded reference rows from ONE instance's database where nothing references them (infra/forge/retire-example-reference-rows.sh <mode> <namespace>). Backlog 718ac982; design e2580840 car 3, decided by David 2026-09-17, folding 83a873e8; the eviction shape from the cutover (e652c7c6). 01-registries.sql and 40-ledger.sql seed the used-device shop's 26 roles and ten departments, the brewery's location kinds, account types, equipment categories and two production sites, the brewery-shaped starter chart and a companies row each, on EVERY instance — measured on prod 2026-09-17 ('Brewery Taproom' in the company's own /api/locations). Applied migrations are history (migrate.sh refuses a changed checksum), so on an instance that already booted the rows leave through this verb, never a migration and never by hand. THE CANDIDATES ARE READ, NEVER TYPED: infra/postgres/example-reference-rows.sh derives them from the example tenants' own seeds in the checkout (examples/*/seeds/classes.*, locations.toml, chart_of_accounts.toml, tenant.toml) — the same derivation boss-init runs on a fresh instance's first start. THE BOUNDS, each a refusal that changes nothing: the arguments (boss-dev refused); the instance must be a company's — infra/cluster/instances.toml names the namespace with a tenant_repo; an image-sourced example instance (the playground) is refused because its engine's prepare does not republish locations or the chart; the database is read off Secret boss-secrets key database-url with THE PASSWORD IS NEVER PRINTED (the switch-instance-database shape, a test asserts it) and the host must be the instance's postgres Service; and DELETABLE ONLY WHEN UNREFERENCED — a read-only psql exec'd in the postgres container (SET default_transaction_read_only = on) judges every candidate: an employee wearing the role or department, a policy grant naming the role, a location wearing the kind, an account of the type, an asset model in the category, a vendor/product/invoice line/document/account-team row wearing the code, a child class; an employee, requisition or product inventory at the location, a location under it, a job about it; a job about the company; a journal line or daily balance on the account, a tax kind or filing naming it, a registry posting rule naming it, a child account. A referenced row is KEPT and NAMED with its reasons. --dry-run (default) prints the plan and deletes nothing; --for-real deletes in ONE TRANSACTION PER TABLE (companies, locations with their subjects projection rows, gl_accounts, classes), each re-judging from the live state, then reads the plan back as the verdict. The verdict line prints FIRST, then the one JSON record, then the kept rows with reasons and the per-table counts. Exit 2 refused, 1 cannot answer or a table's transaction failed (the record says which completed). Own timeout: two full plan queries plus four transactions through kubectl exec.",
+  "hosts": [
+    "forge"
+  ],
+  "argv": [
+    "infra/forge/retire-example-reference-rows.sh",
+    "{1}",
+    "{2}"
+  ],
+  "params": [
+    {
+      "name": "mode",
+      "one_of": [
+        "--dry-run",
+        "--for-real"
+      ]
+    },
+    {
+      "name": "namespace",
+      "pattern": "^boss(-[a-z0-9]+)*$"
+    }
+  ],
+  "timeout": 300
+}

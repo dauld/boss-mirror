@@ -32,7 +32,11 @@
 # record carries `df` of the data directory before and after, and the
 # blobs themselves are reclaimed by Forgejo's own cleanup cron once no
 # version references them — the operator reads the difference on the
-# packet, this script does not guess it.
+# packet, this script does not guess it. Measured on the first real
+# prune (backlog ea67ad87, 2026-09-17): 1,337 deleted, df moved 724 KB
+# — the cron had not run yet. Its cadence, [cron.cleanup_packages] in
+# app.ini, is not in this tree; the record reads it off the forge's
+# own app.ini at run time (`cleanup_cron`) or says it could not.
 #
 # THE KEEP SET, derived — never a list typed here — and a half that
 # cannot be derived is a REFUSAL that deletes nothing:
@@ -103,7 +107,13 @@
 # also a file on the forge (BOSS_PRUNE_LIST_DIR/<stamp>.txt) the record
 # names — written before the first DELETE, and a file that cannot be
 # written is a refusal. A verb whose verdict is the last line must fit
-# in the runner's window; this one no longer relies on that.
+# in the runner's window; this one no longer relies on that. And the
+# per-version lines a REAL run prints carry the outcome as the verb
+# (DELETED / GONE / FAILED <code> / KEPT), joined from the plan and the
+# outcomes before printing; only --dry-run prints `would DELETE`
+# (backlog ea67ad87: the first real run printed the plan file as-is
+# and appended the outcomes after the runner's cut, so the packet read
+# 898 conditionals under a verdict that said OK).
 #
 # ENV (test seams — the ops-runner passes no packet-supplied environment,
 # only an argv built from the allowlist, so a packet cannot set these)
@@ -121,7 +131,9 @@
 #                              (default: <checkout owner>/.boss-last-built)
 #   BOSS_PRUNE_KEEP_HOURS      the freshness window (default: 24)
 #   BOSS_PRUNE_DF_PATH         the directory df measures (default:
-#                              /opt/forgejo/data; unmeasured if absent)
+#                              /opt/forgejo/data; unmeasured if absent);
+#                              Forgejo's app.ini is read under it at
+#                              gitea/conf/app.ini for the cleanup cadence
 #   BOSS_PRUNE_LIST_DIR        where the full per-version list is written
 #                              (default: /var/backups/boss/registry-prune,
 #                              beside the second stack's capture; the ops
@@ -526,6 +538,41 @@ disk_avail_kb() { # -> KB free where the registry lives, or "null"
 DF_BEFORE=$(disk_avail_kb)
 [ "$DF_BEFORE" != null ] || say "df: $DF_PATH is not here, so the bytes are unmeasured"
 
+# --- Forgejo's cleanup cadence: read off its app.ini, never typed ---------
+# Backlog ea67ad87, measured on the first real prune (ops-request
+# 973beaa2, 2026-09-17 13:41Z): 1,337 deleted and df moved 724 KB. The
+# blobs are freed by Forgejo's own [cron.cleanup_packages], so the
+# disk_tight:forge alarm clears only when that cron runs — and its
+# cadence is NOT in this tree: the forge's compose file and data
+# directory are unversioned (OPERATIONS.md), so app.ini is read here,
+# on the host, under the data dir — the same file publish-github-pr.sh
+# reads [repository] ROOT from — and the record carries what was found
+# with where it came from. An unreadable file or an unset key is said
+# as such; Forgejo's default is named as documented, never as read.
+APP_INI="$DF_PATH/gitea/conf/app.ini"
+ini_key() { # <file> <section> <key> -> the value, or nothing
+    awk -v sec="[$2]" -v key="$3" '
+        /^[[:space:]]*\[/ { s = $0; sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); next }
+        s == sec && index($0, key) && $0 ~ ("^[[:space:]]*" key "[[:space:]]*=") {
+            sub(/^[^=]*=[[:space:]]*/, ""); sub(/[[:space:]]+$/, ""); print; exit
+        }' "$1"
+}
+CRON_SOURCE="unread: $APP_INI is not readable here"
+CRON_ENABLED=""; CRON_SCHEDULE=""; CRON_OLDER=""; CRON_NOTE=""
+if [ -r "$APP_INI" ]; then
+    CRON_SOURCE="$APP_INI"
+    CRON_ENABLED=$(ini_key "$APP_INI" cron.cleanup_packages ENABLED)
+    CRON_SCHEDULE=$(ini_key "$APP_INI" cron.cleanup_packages SCHEDULE)
+    CRON_OLDER=$(ini_key "$APP_INI" cron.cleanup_packages OLDER_THAN)
+    [ -n "$CRON_SCHEDULE" ] && [ -n "$CRON_OLDER" ] \
+        || CRON_NOTE="unset in app.ini, so Forgejo's built-in default applies (documented as SCHEDULE @midnight, OLDER_THAN 24h; not read from anything here)"
+fi
+case "$CRON_SOURCE" in
+    unread:*) CRON_SENTENCE="[cron.cleanup_packages] cadence $CRON_SOURCE" ;;
+    *) CRON_SENTENCE="[cron.cleanup_packages] per $APP_INI: schedule ${CRON_SCHEDULE:-unset}, older_than ${CRON_OLDER:-unset}${CRON_ENABLED:+, enabled $CRON_ENABLED}${CRON_NOTE:+; $CRON_NOTE}" ;;
+esac
+say "cleanup: $CRON_SENTENCE"
+
 # --- the deletes (--for-real only): tags first, then children ---------------
 # Tags first so that a run that dies part-way leaves untagged children
 # (collectable as orphans next pass) rather than a tag whose index
@@ -601,15 +648,21 @@ jq -n -c \
     --argjson packages "$PACKAGES_JSON" --argjson planned "$PLANNED_TOTAL" --argjson deleted "$DELETED_TOTAL" \
     --arg write_scope "$WRITE_SCOPE" --arg refused "$REFUSED_SCOPE" --arg fail "$FAIL_CODE" \
     --argjson df_before "$DF_BEFORE" --argjson df_after "$DF_AFTER" --arg df_path "$DF_PATH" \
+    --arg cron_source "$CRON_SOURCE" --arg cron_enabled "$CRON_ENABLED" --arg cron_schedule "$CRON_SCHEDULE" \
+    --arg cron_older "$CRON_OLDER" --arg cron_note "$CRON_NOTE" \
     --arg list_file "$LIST_FILE" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+    def or_null: if . == "" then null else . end;
     { verb: $verb, dry_run: $dry, registry: $registry, owner: $owner, packages_read: ($pkgs | split(" ")),
       keep: { live_main: $live_main, live: $live, stamp: $stamp, landed_trains: $landed,
               keep_trains: $keep_trains, trains_read: $lookback, latest: true, newer_than_hours: $hours },
       listed: $listed, forge_total: (if $total == "" then null else ($total | tonumber? // $total) end),
       packages: $packages, planned: $planned, deleted: $deleted,
       declared_bytes: null,
-      bytes_note: "the packages API declares no sizes (files[].size is null, Forgejo 16.0.2); blobs are freed by Forgejo cleanup once unreferenced — read df on the packet",
+      bytes_note: "the packages API declares no sizes (files[].size is null, Forgejo 16.0.2); blobs are freed by Forgejo [cron.cleanup_packages] once unreferenced (cleanup_cron, read off app.ini) — read df on the packet after it has run",
       disk_path: $df_path, disk_avail_kb_before: $df_before, disk_avail_kb_after: $df_after,
+      cleanup_cron: ({ source: $cron_source, enabled: ($cron_enabled | or_null),
+                       schedule: ($cron_schedule | or_null), older_than: ($cron_older | or_null) }
+                     + (if $cron_note == "" then {} else { note: $cron_note } end)),
       list_file: $list_file, write_scope: $write_scope }
     + (if $refused == "" then {} else { refused: $refused } end)
     + (if $fail == "" then {} else { failed_http: $fail } end)
@@ -630,8 +683,36 @@ elif [ -n "$FAIL_CODE" ]; then
     say "  deleted $DELETED_TOTAL of $PLANNED_TOTAL planned before the failure (HTTP $FAIL_CODE); the rest stay for the next pass."
     RC=1
 else
-    say "OK — deleted $DELETED_TOTAL of $PLANNED_TOTAL planned version(s) across $PACKAGES; df $DF_PATH before ${DF_BEFORE} KB, after ${DF_AFTER} KB free. The blobs are Forgejo's to free (its cleanup cron), so the difference lands later; read df on this packet, not a claim here."
+    say "OK — deleted $DELETED_TOTAL of $PLANNED_TOTAL planned version(s) across $PACKAGES; df $DF_PATH before ${DF_BEFORE} KB, after ${DF_AFTER} KB free. The blobs are Forgejo's to free — $CRON_SENTENCE — so the difference lands when that runs (measured 2026-09-17: 724 KB on 1,337 deletions, then the cron); read df on this packet, not a claim here."
 fi
-say "list: every line of $LIST_FILE follows; the runner may cut it, the file is whole"
-sed "s/^/$ME: /" "$LIST_FILE" >&2
+# A REAL RUN'S LINE CARRIES ITS OUTCOME AS THE VERB (backlog ea67ad87,
+# measured on the first real prune, ops-request 973beaa2, 2026-09-17
+# 13:41Z, 1,337 of 1,337 deleted): the file was printed as-is and the
+# outcomes appended after it, so the 898 lines the runner kept all read
+# `would DELETE` under a verdict that said OK — a real run described in
+# the conditional. Now the plan and the outcomes are joined here, by
+# name, before anything is printed: DELETED (204) / GONE (404) / FAILED
+# <code> / KEPT (never attempted because the run stopped, or
+# unclassified). Only a dry run prints `would DELETE`. The file keeps
+# the plan and the appended outcomes, unchanged.
+outcome_lines() { # --for-real: one line per planned version, then per unclassified one
+    awk -F'\t' -v fail="$FAIL_CODE" '
+        FILENAME == ARGV[1] { done[$1 "\t" $2] = $3; next }
+        $3 == "delete" {
+            o = done[$1 "\t" $2]
+            if (o == "deleted")     printf "DELETED %s:%s — %s\n", $1, $2, $4
+            else if (o == "gone")   printf "GONE %s:%s — %s (404: already gone)\n", $1, $2, $4
+            else if (o == "failed") printf "FAILED %s %s:%s — %s\n", fail, $1, $2, $4
+            else                    printf "KEPT %s:%s — %s (not attempted: the run stopped)\n", $1, $2, $4
+        }
+        $3 == "unclassified" { printf "KEPT %s:%s — unclassified: %s\n", $1, $2, $4 }
+    ' "$TMP/deleted.tsv" "$TMP/classes.tsv"
+}
+if [ "$DRY" = 1 ]; then
+    say "list: every line of $LIST_FILE follows; the runner may cut it, the file is whole"
+    sed "s/^/$ME: /" "$LIST_FILE" >&2
+else
+    say "list: every planned version follows with its outcome as the verb (DELETED / GONE / FAILED <code> / KEPT); the runner may cut it, $LIST_FILE is whole"
+    { head -n 1 "$LIST_FILE"; outcome_lines; } | sed "s/^/$ME: /" >&2
+fi
 exit "$RC"

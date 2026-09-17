@@ -69,6 +69,10 @@ events_retention_days = 90
 # ---------------------------------------------------------------------------
 
 [modules]
+# A module is ON only when listed true here (ce68f137, 2026-09-17):
+# a missing key is off, the same as false. The names the SPA reads are
+# documented in docs/tenant-contract.md (the tenant.toml row).
+#
 # Always-on for every tenant.
 jobs        = true
 people      = true

@@ -680,5 +680,180 @@
     "display_name": "Prepaid",
     "member_attribute": "payment_terms",
     "sort_order": 40
+  },
+  {
+    "subject_kind": "employee",
+    "code": "executive",
+    "display_name": "Executive",
+    "member_attribute": "department",
+    "sort_order": 10
+  },
+  {
+    "subject_kind": "employee",
+    "code": "sales",
+    "display_name": "Sales",
+    "member_attribute": "department",
+    "sort_order": 20
+  },
+  {
+    "subject_kind": "employee",
+    "code": "qa",
+    "display_name": "QA",
+    "member_attribute": "department",
+    "sort_order": 50
+  },
+  {
+    "subject_kind": "employee",
+    "code": "warehouse",
+    "display_name": "Warehouse",
+    "member_attribute": "department",
+    "sort_order": 60
+  },
+  {
+    "subject_kind": "employee",
+    "code": "finance",
+    "display_name": "Finance",
+    "member_attribute": "department",
+    "sort_order": 70
+  },
+  {
+    "subject_kind": "employee",
+    "code": "people",
+    "display_name": "People",
+    "member_attribute": "department",
+    "sort_order": 80
+  },
+  {
+    "subject_kind": "employee",
+    "code": "marketing",
+    "display_name": "Marketing",
+    "member_attribute": "department",
+    "sort_order": 100
+  },
+  {
+    "subject_kind": "location",
+    "code": "taproom",
+    "display_name": "Taproom",
+    "member_attribute": "kind",
+    "sort_order": 30
+  },
+  {
+    "subject_kind": "location",
+    "code": "brewhouse",
+    "display_name": "Brewhouse",
+    "member_attribute": "kind",
+    "sort_order": 31
+  },
+  {
+    "subject_kind": "location",
+    "code": "distribution-route",
+    "display_name": "Distribution Route",
+    "member_attribute": "kind",
+    "sort_order": 32
+  },
+  {
+    "subject_kind": "account",
+    "code": "wholesale-distributor",
+    "display_name": "Wholesale Distributor",
+    "member_attribute": "type",
+    "sort_order": 10
+  },
+  {
+    "subject_kind": "account",
+    "code": "bar-restaurant",
+    "display_name": "Bar / Restaurant",
+    "member_attribute": "type",
+    "sort_order": 11
+  },
+  {
+    "subject_kind": "account",
+    "code": "chain-retail",
+    "display_name": "Chain Retail",
+    "member_attribute": "type",
+    "sort_order": 12
+  },
+  {
+    "subject_kind": "account",
+    "code": "corporate-event",
+    "display_name": "Corporate / Event",
+    "member_attribute": "type",
+    "sort_order": 13
+  },
+  {
+    "subject_kind": "account",
+    "code": "wholesale",
+    "display_name": "Wholesale",
+    "member_attribute": "type",
+    "sort_order": 14
+  },
+  {
+    "subject_kind": "account",
+    "code": "wholesale-prospect",
+    "display_name": "Wholesale Prospect",
+    "member_attribute": "type",
+    "sort_order": 15
+  },
+  {
+    "subject_kind": "account",
+    "code": "direct-consumer",
+    "display_name": "Direct Consumer",
+    "member_attribute": "type",
+    "sort_order": 16
+  },
+  {
+    "subject_kind": "account",
+    "code": "taproom-direct",
+    "display_name": "Taproom Direct",
+    "member_attribute": "type",
+    "sort_order": 17
+  },
+  {
+    "subject_kind": "asset",
+    "code": "brewhouse-vessel",
+    "display_name": "Brewhouse Vessel",
+    "member_attribute": "category",
+    "sort_order": 40
+  },
+  {
+    "subject_kind": "asset",
+    "code": "brewhouse-utility",
+    "display_name": "Brewhouse Utility",
+    "member_attribute": "category",
+    "sort_order": 41
+  },
+  {
+    "subject_kind": "asset",
+    "code": "fermentation-vessel",
+    "display_name": "Fermentation Vessel",
+    "member_attribute": "category",
+    "sort_order": 42
+  },
+  {
+    "subject_kind": "asset",
+    "code": "conditioning-vessel",
+    "display_name": "Conditioning Vessel",
+    "member_attribute": "category",
+    "sort_order": 43
+  },
+  {
+    "subject_kind": "asset",
+    "code": "utility",
+    "display_name": "Utility",
+    "member_attribute": "category",
+    "sort_order": 44
+  },
+  {
+    "subject_kind": "asset",
+    "code": "packaging",
+    "display_name": "Packaging",
+    "member_attribute": "category",
+    "sort_order": 45
+  },
+  {
+    "subject_kind": "asset",
+    "code": "barrel",
+    "display_name": "Barrel",
+    "member_attribute": "category",
+    "sort_order": 46
   }
 ]

@@ -1,0 +1,220 @@
+# The brewery's chart of accounts — one [[account]] per row of the
+# ledger's `gl_accounts` table, published through the tenant contract
+# (docs/tenant-contract.md, "The chart of accounts is the tenant's":
+# POST /api/ledger/accounts/batch, insert-if-absent by code).
+#
+# Until 2026-09-17 these rows were the product's: 40-ledger.sql seeded
+# them as the "starter chart" on every instance, brewery-shaped (beer
+# revenue lines, keg deposits, excise), so a company that is not a
+# brewery booted with a brewer's books and could only adopt or dodge
+# the codes (backlog 41af5195, design 18cf4272). Backlog 718ac982
+# (design e2580840 car 3) moved them here: the migrations keep
+# seeding them on the instances that already ran (applied history is
+# never edited), a fresh instance whose tenant is not an example
+# evicts them at boot before any service starts, and the bounded
+# forge verb retire-example-reference-rows evicts the unreferenced
+# residue from an instance that is already running. The set below is
+# the migrations' rows verbatim — code, name, kind, normal balance —
+# so the playground publishes exactly what it used to inherit.
+#
+# Fields (boss_ledger::chart::AccountInput): code, name, kind
+# (asset|liability|equity|revenue|expense), normal_balance
+# (debit|credit), parent? (a code declared earlier in this file).
+
+[[account]]
+code = "1000"
+name = "Cash"
+kind = "asset"
+normal_balance = "debit"
+
+[[account]]
+code = "1010"
+name = "Cash in Transit"
+kind = "asset"
+normal_balance = "debit"
+
+[[account]]
+code = "1100"
+name = "Accounts Receivable"
+kind = "asset"
+normal_balance = "debit"
+
+[[account]]
+code = "1300"
+name = "Inventory — Raw Materials"
+kind = "asset"
+normal_balance = "debit"
+
+[[account]]
+code = "1310"
+name = "Inventory — Work in Process"
+kind = "asset"
+normal_balance = "debit"
+
+[[account]]
+code = "1320"
+name = "Inventory — Finished Goods"
+kind = "asset"
+normal_balance = "debit"
+
+[[account]]
+code = "1500"
+name = "Fixed Assets"
+kind = "asset"
+normal_balance = "debit"
+
+[[account]]
+code = "1510"
+name = "Accumulated Depreciation"
+kind = "asset"
+normal_balance = "credit"
+
+[[account]]
+code = "2100"
+name = "Accounts Payable"
+kind = "liability"
+normal_balance = "credit"
+
+[[account]]
+code = "2110"
+name = "Goods Received Not Invoiced"
+kind = "liability"
+normal_balance = "credit"
+
+[[account]]
+code = "2150"
+name = "Payroll Liability"
+kind = "liability"
+normal_balance = "credit"
+
+[[account]]
+code = "2200"
+name = "Deferred Revenue"
+kind = "liability"
+normal_balance = "credit"
+
+[[account]]
+code = "2300"
+name = "Sales Tax Payable"
+kind = "liability"
+normal_balance = "credit"
+
+[[account]]
+code = "2310"
+name = "Income Tax Payable"
+kind = "liability"
+normal_balance = "credit"
+
+[[account]]
+code = "2320"
+name = "Excise Tax Payable"
+kind = "liability"
+normal_balance = "credit"
+
+[[account]]
+code = "2400"
+name = "Keg Deposits Payable"
+kind = "liability"
+normal_balance = "credit"
+
+[[account]]
+code = "3000"
+name = "Retained Earnings"
+kind = "equity"
+normal_balance = "credit"
+
+[[account]]
+code = "4100"
+name = "Revenue — Wholesale Beer Sales"
+kind = "revenue"
+normal_balance = "credit"
+
+[[account]]
+code = "4110"
+name = "Revenue — Direct-to-Consumer"
+kind = "revenue"
+normal_balance = "credit"
+
+[[account]]
+code = "4120"
+name = "Revenue — Taproom"
+kind = "revenue"
+normal_balance = "credit"
+
+[[account]]
+code = "4130"
+name = "Revenue — Seasonal & Specialty"
+kind = "revenue"
+normal_balance = "credit"
+
+[[account]]
+code = "4140"
+name = "Revenue — Distribution Contracts"
+kind = "revenue"
+normal_balance = "credit"
+
+[[account]]
+code = "4150"
+name = "Keg Deposit Forfeitures"
+kind = "revenue"
+normal_balance = "credit"
+
+[[account]]
+code = "5100"
+name = "COGS — Beer Production"
+kind = "expense"
+normal_balance = "debit"
+
+[[account]]
+code = "5200"
+name = "COGS — Packaging"
+kind = "expense"
+normal_balance = "debit"
+
+[[account]]
+code = "6100"
+name = "Operating Expense — Payroll"
+kind = "expense"
+normal_balance = "debit"
+
+[[account]]
+code = "6200"
+name = "Operating Expense — Rent"
+kind = "expense"
+normal_balance = "debit"
+
+[[account]]
+code = "6300"
+name = "Operating Expense — General"
+kind = "expense"
+normal_balance = "debit"
+
+[[account]]
+code = "6400"
+name = "Payroll Taxes & Benefits"
+kind = "expense"
+normal_balance = "debit"
+
+[[account]]
+code = "6500"
+name = "Income Tax Expense"
+kind = "expense"
+normal_balance = "debit"
+
+[[account]]
+code = "6550"
+name = "Excise Tax Expense"
+kind = "expense"
+normal_balance = "debit"
+
+[[account]]
+code = "6700"
+name = "Bad Debt Expense"
+kind = "expense"
+normal_balance = "debit"
+
+[[account]]
+code = "6900"
+name = "Depreciation Expense"
+kind = "expense"
+normal_balance = "debit"

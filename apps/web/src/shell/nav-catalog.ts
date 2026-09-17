@@ -26,8 +26,8 @@
 // second half.
 
 import type { RouteName } from '@boss/web-kit/session/permissions';
-import type { AppId, AppTab } from '@boss/web-kit/nav';
-import { DEPARTMENTS, HOME_APP, SIMULATOR_APP } from '@boss/web-kit/nav';
+import type { AppId, AppTab, Department } from '@boss/web-kit/nav';
+import { HOME_APP, SIMULATOR_APP } from '@boss/web-kit/nav';
 
 export type { AppId, AppTab };
 
@@ -113,7 +113,7 @@ export const ROUTE_CATALOG: Readonly<Record<RouteName | UngatedSurfaceId, NavIte
   vendors:   { id: 'vendors',   label: 'Vendors',          path: '/ux/vendors',   permKey: 'vendors',   app: 'finance' },
   people:    { id: 'people',    label: 'Employees',        path: '/ux/people',    permKey: 'people',    app: 'people' },
   assets:    { id: 'assets',    label: 'Assets',           path: '/ux/assets',    permKey: 'assets',    module: 'equipment', app: 'maintenance' },
-  shop:      { id: 'shop',      label: 'Shop',             path: '/ux/shop',      permKey: 'shop',      app: 'sales' },
+  shop:      { id: 'shop',      label: 'Shop',             path: '/ux/shop',      permKey: 'shop',      module: 'shop',    app: 'sales' },
   inbox:     { id: 'inbox',     label: 'Inbox',            path: '/ux/inbox',     permKey: 'inbox',     app: 'home' },
   views:     { id: 'views',     label: 'Views',            path: '/ux/views',     permKey: 'views',     app: 'home' },
   'marketing-assets': { id: 'marketing-assets', label: 'Marketing assets', path: '/ux/marketing-assets', permKey: 'marketing-assets', module: 'marketing-assets', app: 'marketing' },
@@ -167,61 +167,58 @@ export const ROUTE_CATALOG: Readonly<Record<RouteName | UngatedSurfaceId, NavIte
   'auth-admin':              { id: 'auth-admin',              label: 'Auth admin',          path: '/it/auth-admin',   permKey: 'auth-admin',              app: 'it' },
 };
 
-/// The apps this host offers: Home, Simulator, and one per department
-/// that actually owns a surface.
+/// The apps this host offers: Home, Simulator when the tenant has one,
+/// and one per department the tenant's Class registry declares.
 ///
-/// DERIVED, not listed. The previous version was a hand-maintained
-/// `DEPARTMENT_APP` map from each department to one of eight invented
-/// apps, and its own comment predicted this change — "the app list
-/// probably wants DERIVING from the Class registry rather than
-/// hand-listing". It does, and now it is: an app exists because a
-/// department owns a surface, so adding a surface with a new `app`
-/// creates the tab and nothing here changes (CLAUDE.md §9).
+/// DERIVED, not listed, and since ce68f137 derived from the REGISTRY:
+/// the departments are the `(employee, *, department)` rows the SPA
+/// loads at boot, in their sort order, so a tenant adds a tab by
+/// adding a Class row (CLAUDE.md §9). The previous version filtered a
+/// hardcoded list down to the departments owning a catalog surface,
+/// which read one tenant's org chart and left Algedonic's
+/// `operations` with no tab at all.
 ///
-/// Departments with NO surface get no tab, deliberately. Algedonic
-/// Ales has packaging, taproom and audit employees and not one screen
-/// built for them yet; a tab opening an empty sidebar would claim
-/// otherwise. `departmentsWithoutSurfaces()` reports them so the gap
-/// stays visible instead of silently reading as covered.
+/// A department with no surface of its own still gets its tab — that
+/// is the org chart, and the tenant declared it — and lands on All
+/// jobs, the one surface every department's work appears in. A
+/// department-scoped jobs list is the honest next step for that tab;
+/// `departmentsWithoutSurfaces()` reports which departments are
+/// waiting on it so the gap stays visible instead of reading as
+/// covered.
 const OWNED = new Set<string>(
   Object.values(ROUTE_CATALOG)
     .map((e) => e.app)
     .filter((a): a is AppId => a !== undefined && a !== 'home' && a !== 'simulator'),
 );
 
-/// Departments that own at least one surface, in registry order.
-export const DEPARTMENT_APPS: ReadonlyArray<AppTab> = DEPARTMENTS.filter((d) =>
-  OWNED.has(d.code),
-).map((d) => ({
-  id: d.code,
-  label: d.label,
-  // The department's landing page is its first surface in catalog
-  // order — the same order the sidebar lists them in, so the tab opens
-  // on the row the sidebar shows first rather than an arbitrary pick.
-  href:
-    Object.values(ROUTE_CATALOG).find((e) => e.app === d.code)?.path ?? '/',
-}));
-
-/// The full tab list, left to right.
-export const APPS: ReadonlyArray<AppTab> = [
-  HOME_APP,
-  SIMULATOR_APP,
-  ...DEPARTMENT_APPS,
-];
-
-/// Departments with no surface of their own. Not an error — a report.
-export function departmentsWithoutSurfaces(): ReadonlyArray<string> {
-  return DEPARTMENTS.filter((d) => !OWNED.has(d.code)).map((d) => d.code);
+/// Where a department's tab lands: its first surface in catalog order
+/// — the same order the sidebar lists them in, so the tab opens on the
+/// row the sidebar shows first — or All jobs when it owns none.
+function departmentHref(code: string): string {
+  return Object.values(ROUTE_CATALOG).find((e) => e.app === code)?.path ?? ROUTE_CATALOG.jobs.path;
 }
 
-/// Which app an employee of `department` lands in.
-///
-/// Identity now that apps are departments, except that a department
-/// with no surface falls back to Home rather than a tab that does not
-/// exist. That fallback is the honest one: Home is personal work
-/// whichever department it belongs to.
-export function appForDepartment(department: string): AppId {
-  return OWNED.has(department) ? (department as AppId) : 'home';
+/// One tab per declared department, in registry order.
+export function departmentApps(departments: ReadonlyArray<Department>): ReadonlyArray<AppTab> {
+  return departments.map((d) => ({ id: d.code, label: d.label, href: departmentHref(d.code) }));
+}
+
+/// The full tab list, left to right. Simulator is a tab only for a
+/// tenant whose manifest lists the `sim` module (ce68f137): it drives
+/// the playground's model, and a company running on BOSS has no
+/// simulation to drive.
+export function appsFor(
+  departments: ReadonlyArray<Department>,
+  opts: Readonly<{ simulator: boolean }>,
+): ReadonlyArray<AppTab> {
+  return [HOME_APP, ...(opts.simulator ? [SIMULATOR_APP] : []), ...departmentApps(departments)];
+}
+
+/// Departments with no surface of their own. Not an error — a report.
+export function departmentsWithoutSurfaces(
+  departments: ReadonlyArray<Department>,
+): ReadonlyArray<string> {
+  return departments.filter((d) => !OWNED.has(d.code)).map((d) => d.code);
 }
 
 /// Which app a surface belongs to, looked up by the `activeSection`

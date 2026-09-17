@@ -195,3 +195,331 @@ code = "auditor"
 display_name = "Auditor"
 metadata = { department = "finance", is_management = false }
 sort_order = 400
+
+# ---------------------------------------------------------------------------
+# Employee — roles, departments; Account — types; Location — one kind.
+#
+# These were the product's until 2026-09-17: 01-registries.sql seeded
+# them on every instance as "the used-device-shop example" (26 roles
+# with their department roll-ups, the ten departments, three account
+# types, the warehouse-zone location kind), so a company that is not a
+# device shop booted with a refurb shop's org chart. Backlog 718ac982
+# (design e2580840 car 3) made them this tenant's rows: the migrations
+# keep seeding them on instances that already ran, a fresh instance
+# whose tenant is not an example evicts them at boot, and the bounded
+# forge verb retire-example-reference-rows evicts the unreferenced
+# residue from a running one. Verbatim from the migration — code,
+# display name, metadata, sort order — so nothing this tenant's roster
+# wears changes. The generic rows stay the platform's: the
+# `platform-admin` / `audit-readonly` / `owner` / `smoke-tester` roles,
+# the `it` department, employment types and statuses, the
+# `unspecified` account type, and the kinds the platform's default
+# locations wear (`remote`, `hq`, `field-region`) — loc-hq is where the
+# operator baseline hires.
+# ---------------------------------------------------------------------------
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "ceo"
+display_name = "CEO"
+metadata = { department = "executive", is_management = true, is_executive = true }
+sort_order = 10
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "cto"
+display_name = "CTO"
+metadata = { department = "executive", is_management = true, is_executive = true }
+sort_order = 11
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "coo"
+display_name = "COO"
+metadata = { department = "executive", is_management = true, is_executive = true }
+sort_order = 12
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "cfo"
+display_name = "CFO"
+metadata = { department = "executive", is_management = true, is_executive = true }
+sort_order = 13
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "vp-sales"
+display_name = "VP Sales"
+metadata = { department = "sales", is_management = true }
+sort_order = 20
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "sales-mgr"
+display_name = "Sales Manager"
+metadata = { department = "sales", is_management = true }
+sort_order = 21
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "sales-rep"
+display_name = "Sales Rep"
+metadata = { department = "sales", is_management = false }
+sort_order = 22
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "service-mgr"
+display_name = "Service Manager"
+metadata = { department = "service", is_management = true }
+sort_order = 30
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "service-tech"
+display_name = "Service Tech"
+metadata = { department = "service", is_management = false }
+sort_order = 31
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "refurb-supervisor"
+display_name = "Refurb Supervisor"
+metadata = { department = "refurb", is_management = true }
+sort_order = 40
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "refurb-tech"
+display_name = "Refurb Tech"
+metadata = { department = "refurb", is_management = false }
+sort_order = 41
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "qa-lead"
+display_name = "QA Lead"
+metadata = { department = "qa", is_management = true }
+sort_order = 50
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "qa-tech"
+display_name = "QA Tech"
+metadata = { department = "qa", is_management = false }
+sort_order = 51
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "warehouse-mgr"
+display_name = "Warehouse Manager"
+metadata = { department = "warehouse", is_management = true }
+sort_order = 60
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "warehouse-clerk"
+display_name = "Warehouse Clerk"
+metadata = { department = "warehouse", is_management = false }
+sort_order = 61
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "parts-buyer"
+display_name = "Parts Buyer"
+metadata = { department = "warehouse", is_management = false }
+sort_order = 62
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "controller"
+display_name = "Controller"
+metadata = { department = "finance", is_management = true }
+sort_order = 70
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "ap-specialist"
+display_name = "AP Specialist"
+metadata = { department = "finance", is_management = false }
+sort_order = 71
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "hr-generalist"
+display_name = "HR Generalist"
+metadata = { department = "people", is_management = false }
+sort_order = 80
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "recruiter"
+display_name = "Recruiter"
+metadata = { department = "people", is_management = false }
+sort_order = 81
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "support-specialist"
+display_name = "Support Specialist"
+metadata = { department = "support", is_management = false }
+sort_order = 90
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "it-manager"
+display_name = "IT Manager"
+metadata = { department = "people", is_management = true }
+sort_order = 91
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "marketing-mgr"
+display_name = "Marketing Manager"
+metadata = { department = "marketing", is_management = true }
+sort_order = 100
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "marketing-specialist"
+display_name = "Marketing Specialist"
+metadata = { department = "marketing", is_management = false }
+sort_order = 101
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "content-writer"
+display_name = "Content Writer"
+metadata = { department = "marketing", is_management = false }
+sort_order = 102
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "brand-designer"
+display_name = "Brand Designer"
+metadata = { department = "marketing", is_management = false }
+sort_order = 103
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "department"
+code = "executive"
+display_name = "Executive"
+sort_order = 10
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "department"
+code = "sales"
+display_name = "Sales"
+sort_order = 20
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "department"
+code = "service"
+display_name = "Service"
+sort_order = 30
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "department"
+code = "refurb"
+display_name = "Refurb"
+sort_order = 40
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "department"
+code = "qa"
+display_name = "QA"
+sort_order = 50
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "department"
+code = "warehouse"
+display_name = "Warehouse"
+sort_order = 60
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "department"
+code = "finance"
+display_name = "Finance"
+sort_order = 70
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "department"
+code = "people"
+display_name = "People"
+sort_order = 80
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "department"
+code = "support"
+display_name = "Support"
+sort_order = 90
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "department"
+code = "marketing"
+display_name = "Marketing"
+sort_order = 100
+
+[[class]]
+subject_kind = "account"
+member_attribute = "type"
+code = "service-account"
+display_name = "Service Account"
+sort_order = 20
+
+[[class]]
+subject_kind = "account"
+member_attribute = "type"
+code = "lab"
+display_name = "Laboratory"
+sort_order = 21
+
+[[class]]
+subject_kind = "account"
+member_attribute = "type"
+code = "clinic"
+display_name = "Clinic"
+sort_order = 22
+
+[[class]]
+subject_kind = "location"
+member_attribute = "kind"
+code = "warehouse-zone"
+display_name = "Warehouse Zone"
+sort_order = 22

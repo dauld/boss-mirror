@@ -16,17 +16,62 @@
 // surface is stranded in an app with no tab.
 
 import { describe, it, expect } from 'bun:test';
-import { DEPARTMENTS, type AppId } from '@boss/web-kit/nav';
+import type { AppId, Department } from '@boss/web-kit/nav';
 import {
-  APPS,
   APP_SUBJECT_KINDS,
   ROUTE_CATALOG,
-  appForDepartment,
   appForSection,
+  appsFor,
   departmentsWithoutSurfaces,
   type NavItem,
 } from './nav-catalog';
 import { readFileSync } from 'node:fs';
+
+/// Department Classes, read from the files that seed them rather
+/// than restated here — restating is the drift this test exists to
+/// catch.
+///
+/// They come from TWO places, which is itself worth knowing: the
+/// platform ships eleven (`01-registries.sql`), and the playground
+/// tenant adds its own (`examples/brewery/seeds/classes.json`). Since
+/// ce68f137 the SPA reads them from `/api/classes` at boot, so these
+/// tests hand the seeded set to `appsFor` the way the shell hands it
+/// the fetched one.
+function registryDepartments(): ReadonlyArray<string> {
+  const core = readFileSync(
+    new URL('../../../../infra/postgres/schema/01-registries.sql', import.meta.url),
+    'utf8',
+  );
+  const coreCodes = [
+    ...core.matchAll(/\(\s*'employee',\s*'([a-z-]+)',\s*'[^']*',\s*'department'/g),
+  ].map((m) => m[1]!);
+
+  const tenant = JSON.parse(
+    readFileSync(
+      new URL('../../../../examples/brewery/seeds/classes.json', import.meta.url),
+      'utf8',
+    ),
+  ) as ReadonlyArray<{ member_attribute?: string; code?: string }>;
+  const tenantCodes = tenant
+    .filter((c) => c.member_attribute === 'department' && c.code)
+    .map((c) => c.code!);
+
+  const all = [...new Set([...coreCodes, ...tenantCodes])];
+  // A parser that silently matched nothing would make every
+  // assertion below vacuous.
+  expect(coreCodes.length).toBeGreaterThan(10);
+  expect(tenantCodes.length).toBeGreaterThan(0);
+  return all;
+}
+
+const SEEDED: ReadonlyArray<Department> = registryDepartments().map((code) => ({
+  code,
+  label: code,
+}));
+
+/// The bar the playground tenant gets: every seeded department, and
+/// the Simulator because its manifest lists `sim = true`.
+const APPS = appsFor(SEEDED, { simulator: true });
 
 /// Verbatim copy of AppShell.svelte's deleted `MODEL_ROUTES`. These
 /// surfaces have now moved wholesale from the retired `model` app
@@ -253,13 +298,17 @@ describe('nav catalog — app assignment', () => {
     expect(ids.indexOf('it')).toBeGreaterThan(ids.indexOf('simulator'));
   });
 
-  it('every domain app owns at least one surface', () => {
-    // A tab that renders an empty sidebar is a dead end. Simulator is
-    // exempt: it is a separate SPA with no surfaces in this catalog.
+  it('a department app that owns no surface lands on All jobs, not an empty page', () => {
+    // A tab that renders an empty sidebar is a dead end. Since the tabs
+    // are the registry's (ce68f137), a department can own nothing here;
+    // its tab then opens the cross-cutting queue. Simulator is exempt:
+    // it is a separate SPA with no surfaces in this catalog.
     const owned = new Set(entries.map(([, v]) => v.app));
     for (const app of APPS) {
-      if (app.id === 'simulator') continue;
-      expect(owned.has(app.id), `app "${app.id}" has a tab but owns no surface`).toBe(true);
+      if (app.id === 'simulator' || owned.has(app.id)) continue;
+      expect(app.href, `app "${app.id}" owns no surface and lands on ${app.href}`).toBe(
+        ROUTE_CATALOG.jobs.path,
+      );
     }
   });
 });
@@ -291,57 +340,19 @@ describe('appForSection — the App.svelte tab derivation', () => {
 });
 
 describe('departments map to apps', () => {
-  /// Department Classes, read from the files that seed them rather
-  /// than restated here — restating is the drift this test exists to
-  /// catch.
-  ///
-  /// They come from TWO places, which is itself worth knowing: the
-  /// platform ships twelve (`01-registries.sql`), and the tenant adds
-  /// its own (`examples/brewery/seeds/classes.json` adds production,
-  /// packaging, taproom, maintenance, distribution, it, admin, audit).
-  /// So `apps/web` — which is core — has to map departments a tenant
-  /// invented. That works while one tenant ships in-tree; a second
-  /// tenant with its own departments needs a real extension point.
-  function registryDepartments(): ReadonlyArray<string> {
-    const core = readFileSync(
-      new URL('../../../../infra/postgres/schema/01-registries.sql', import.meta.url),
-      'utf8',
-    );
-    const coreCodes = [
-      ...core.matchAll(/\(\s*'employee',\s*'([a-z-]+)',\s*'[^']*',\s*'department'/g),
-    ].map((m) => m[1]!);
-
-    const tenant = JSON.parse(
-      readFileSync(
-        new URL('../../../../examples/brewery/seeds/classes.json', import.meta.url),
-        'utf8',
-      ),
-    ) as ReadonlyArray<{ member_attribute?: string; code?: string }>;
-    const tenantCodes = tenant
-      .filter((c) => c.member_attribute === 'department' && c.code)
-      .map((c) => c.code!);
-
-    const all = [...new Set([...coreCodes, ...tenantCodes])];
-    // A parser that silently matched nothing would make every
-    // assertion below vacuous.
-    expect(coreCodes.length).toBeGreaterThan(10);
-    expect(tenantCodes.length).toBeGreaterThan(0);
-    return all;
-  }
-
-  it('the DEPARTMENTS vocabulary matches the Class registry exactly', () => {
-    // web-kit hardcodes the department list because the chrome bar
-    // cannot wait on a fetch to know what tabs exist. This is the
-    // equality test that keeps the copy honest in BOTH directions
-    // (CLAUDE.md §9a) — it is what named `admin` the moment that
-    // department was folded into finance.
-    const registry: string[] = [...registryDepartments()].sort();
-    const vocabulary: string[] = DEPARTMENTS.map((d) => d.code as string).sort();
+  it('every catalog app names a seeded department', () => {
+    // The other half of "apps are departments": the tabs are the
+    // registry's now, so a catalog entry assigned to an app the
+    // registry does not declare would render under no tab at all.
+    const codes = new Set(SEEDED.map((d) => d.code));
+    const invented = entries
+      .map(([, v]) => v.app)
+      .filter((a): a is string => a !== undefined && a !== 'home' && a !== 'simulator')
+      .filter((a) => !codes.has(a));
     expect(
-      vocabulary,
-      'DEPARTMENTS in libs/web-kit/src/nav.ts has drifted from the Class registry ' +
-        '(infra/postgres/schema/01-registries.sql + examples/brewery/seeds/classes.json)',
-    ).toEqual(registry);
+      [...new Set(invented)],
+      `these catalog apps name no department in 01-registries.sql or the playground seed: ${invented.join(', ')}`,
+    ).toEqual([]);
   });
 
   it('every app is a department, except Home and Simulator', () => {
@@ -349,9 +360,9 @@ describe('departments map to apps', () => {
     // example. The only exception to the department-based apps is the
     // Simulator." Home is the second exception — personal work belongs
     // to whoever is doing it, not to a department.
-    const codes = new Set(DEPARTMENTS.map((d) => d.code));
+    const codes = new Set(SEEDED.map((d) => d.code));
     const invented = APPS.map((a) => a.id).filter(
-      (id) => id !== 'home' && id !== 'simulator' && !codes.has(id as never),
+      (id) => id !== 'home' && id !== 'simulator' && !codes.has(id),
     );
     expect(
       invented,
@@ -359,36 +370,47 @@ describe('departments map to apps', () => {
     ).toEqual([]);
   });
 
-  it('every department app has at least one surface behind it', () => {
+  it('every seeded department has a tab, in registry order', () => {
+    // A tab per department the tenant declares (ce68f137). `audit`
+    // once mapped to no app at all and nothing failed; a second
+    // tenant's `operations` had no tab because a hardcoded list did
+    // not know it.
+    const tabbed = APPS.filter((a) => a.id !== 'home' && a.id !== 'simulator').map((a) => a.id);
+    expect(tabbed).toEqual(SEEDED.map((d) => d.code));
+  });
+
+  it('every department tab lands on a real surface', () => {
+    // Its first owned surface in catalog order, or All jobs when it
+    // owns none — never an empty page.
+    const paths = new Set(entries.map(([, v]) => v.path));
     for (const app of APPS) {
       if (app.id === 'home' || app.id === 'simulator') continue;
-      const owns = Object.values(ROUTE_CATALOG).some((e) => e.app === app.id);
-      expect(owns, `app "${app.id}" has a tab but owns no surface`).toBe(true);
+      expect(paths.has(app.href), `app "${app.id}" lands on ${app.href}, which no surface answers`).toBe(true);
+      const owned = entries.find(([, v]) => v.app === app.id);
+      expect(app.href).toBe(owned ? owned[1].path : ROUTE_CATALOG.jobs.path);
     }
   });
 
-  it('an employee of any seeded department lands somewhere real', () => {
-    // `audit` once mapped to no app at all and nothing failed. Every
-    // department must resolve — to its own app if it owns a surface,
-    // to Home if it does not.
-    const tabbed = new Set(APPS.map((a) => a.id));
-    for (const d of registryDepartments()) {
-      expect(tabbed.has(appForDepartment(d)), `department "${d}" lands nowhere`).toBe(true);
-    }
+  it('a tenant with no departments gets Home alone, not a crash', () => {
+    expect(appsFor([], { simulator: false }).map((a) => a.id)).toEqual(['home']);
+  });
+
+  it('the Simulator tab is the sim module, not a fixture of the bar', () => {
+    expect(appsFor(SEEDED, { simulator: false }).map((a) => a.id)).not.toContain('simulator');
+    expect(appsFor(SEEDED, { simulator: true }).map((a) => a.id)).toContain('simulator');
   });
 
   it('reports the departments with no surface of their own', () => {
     // Not a failure — a report, so the gap is visible rather than
     // reading as covered. These are real departments with real people
-    // and no screen built for them yet; they land on Home.
-    const bare = [...departmentsWithoutSurfaces()].sort();
+    // and no screen built for them yet; their tab lands on All jobs.
+    const bare = [...departmentsWithoutSurfaces(SEEDED)].sort();
     // `refurb` joined this list on 2026-08-28 when the /ux/refurb route
     // was removed from the shared shell (feedback 96c37dbe): it was a
     // device-shop surface every other tenant saw as an empty list, and
     // David's reason was that tenants connect at the boundary through
     // agreed protocols rather than sharing one multi-tenant shell. The
-    // DEPARTMENT still exists and its people still exist — they just
-    // land on Home, which is what this report is for.
+    // DEPARTMENT still exists and its people still exist.
     expect(bare).toEqual(['audit', 'packaging', 'refurb', 'taproom']);
   });
 });
@@ -471,7 +493,7 @@ describe('every concrete Subject kind is claimed by an app', () => {
   it('claims nothing the registry does not define', () => {
     const known = new Set(taxonomy().map((r) => r.kind));
     const stale = [...new Set(Object.values(APP_SUBJECT_KINDS).flat())].filter(
-      (k) => !known.has(k),
+      (k): k is string => k !== undefined && !known.has(k),
     );
     expect(stale, `claimed but not a registered kind: ${stale.join(', ')}`).toEqual([]);
   });

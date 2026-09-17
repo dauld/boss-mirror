@@ -1,8 +1,14 @@
-//! `boss-ledger-api` — read-only HTTP surface over the GL projection.
+//! `boss-ledger-api` — HTTP surface over the GL projection, plus the
+//! live fact subscriber.
 //!
 //! Posting happens inside the domain write transactions (boss-commerce +
 //! boss-inventory call `boss_ledger::post_fact_in_tx`). This binary is for
-//! queries: chart, trial balance, entry lookups for drill-down.
+//! queries: chart, trial balance, entry lookups for drill-down — and,
+//! since backlog 5621d166, for the facts whose ONLY writer is the
+//! `gl_fact_projection_rules` registry: a durable consumer on the
+//! platform event stream (`boss_ledger::live_facts`) projects and posts
+//! each such event as it lands, so the journal follows the work within
+//! seconds instead of at the next facts rebuild.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -74,22 +80,35 @@ async fn main() -> Result<()> {
     );
     info!(%clock_url, "clock client wired");
 
-    let publisher = match &cfg.nats_url {
+    // One NATS connection: the publisher's bus is also the bus the live
+    // fact subscriber binds its durable consumer through.
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let (publisher, live_facts_task) = match &cfg.nats_url {
         Some(url) => {
-            let bus = boss_nats::NatsEventBus::connect(url)
-                .await
-                .with_context(|| format!("connecting to NATS at {url}"))?;
-            let p = boss_core::publisher::DomainPublisher::new(Arc::new(bus), "ledger")
+            let bus = Arc::new(
+                boss_nats::NatsEventBus::connect(url)
+                    .await
+                    .with_context(|| format!("connecting to NATS at {url}"))?,
+            );
+            let p = boss_core::publisher::DomainPublisher::new(bus.clone(), "ledger")
                 .with_audit(Arc::new(boss_events::PgAuditWriter::new(pool.clone())))
                 .with_sim_probe(Arc::new(boss_clock_client::ClockSimProbe::new(
                     clock.clone(),
                 )));
             info!(nats_url = %url, "domain event publishing + audit trail enabled (with sim probe)");
-            Some(Arc::new(p))
+            let task = tokio::spawn(boss_ledger::live_facts::run(
+                bus,
+                pool.clone(),
+                cancel_rx.clone(),
+            ));
+            (Some(Arc::new(p)), Some(task))
         }
         None => {
-            info!("no nats_url configured — ledger events will not be published");
-            None
+            info!(
+                "no nats_url configured — ledger events will not be published and \
+                 registry-only facts reach the ledger at the next facts rebuild"
+            );
+            (None, None)
         }
     };
 
@@ -123,6 +142,26 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("binding HTTP listener on {http_addr}"))?;
     info!(addr = %http_addr, "boss-ledger-api listening");
-    axum::serve(listener, app).await?;
+    let mut http_cancel = cancel_rx.clone();
+    let shutdown = async move {
+        let _ = http_cancel.changed().await;
+    };
+    let http_task = tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown)
+            .await
+        {
+            tracing::error!(error = %e, "HTTP server exited with error");
+        }
+    });
+
+    tokio::signal::ctrl_c().await.ok();
+    info!("shutdown signal received");
+    let _ = cancel_tx.send(true);
+    let _ = http_task.await;
+    if let Some(task) = live_facts_task {
+        let _ = task.await;
+    }
+    info!("boss-ledger-api shut down cleanly");
     Ok(())
 }

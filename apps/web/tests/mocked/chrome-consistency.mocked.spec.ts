@@ -13,24 +13,30 @@
 import { test, expect } from '@playwright/test';
 import { mountPage } from '../smoke/_helpers';
 import { AA_FLOOR, describeUnreadable, measureContrast } from './_contrast';
+import { DEPARTMENT_CLASSES } from './_smokeMocks';
 
 /// Surfaces that render the chrome through different code paths:
 /// a normal AppShell route, the full-page step route (rendered
 /// OUTSIDE AppShell), and an IT surface.
 const SURFACES = ['/ux/jobs', '/it', '/ux/views'] as const;
 
+/// The playground tenant: named, and with a simulation to drive — a
+/// module is on only when listed true (ce68f137), and the Simulator
+/// tab is the `sim` module.
 const MANIFEST = {
   display_name: 'Algedonic Ales',
   tenant_id: 'brewery',
-  modules: {},
+  modules: { sim: true },
   labels: {},
 };
 
 test.describe('chrome bar', () => {
   test.beforeEach(async ({ page }) => {
     // `mountPage` does not install the smoke-mock backend, so the
-    // manifest is mocked here — the brand comes from it now.
+    // manifest is mocked here — the brand comes from it now — and so
+    // are the department Classes the bar derives its tabs from.
     await page.route(/\/api\/tenant\/manifest$/, (r) => r.fulfill({ json: MANIFEST }));
+    await page.route(/\/api\/classes(\?|$)/, (r) => r.fulfill({ json: DEPARTMENT_CLASSES }));
   });
 
   for (const path of SURFACES) {
@@ -41,6 +47,11 @@ test.describe('chrome bar', () => {
       const bar = page.locator('.perspective-tabs').first();
       await expect(bar).toContainText('Algedonic');
       await expect(bar).toContainText('Ales');
+      // The document follows the same manifest as the wordmark: the
+      // served index.html says BOSS, and the tenant names the tab
+      // once its manifest is read (ce68f137).
+      await expect(page).toHaveTitle('Algedonic Ales');
+      await expect(bar.locator('a[href="/simulator"]')).toHaveCount(1);
     });
   }
 
@@ -118,7 +129,8 @@ test.describe('chrome bar', () => {
 
   test('falls back to BOSS when the tenant has not named itself', async ({ page }) => {
     // A deployment with no [meta] in tenant.toml should read "BOSS",
-    // not blank and not a brewery's name.
+    // not blank and not a brewery's name — and with no `sim` module
+    // listed, no Simulator tab either (ce68f137).
     await page.route(/\/api\/tenant\/manifest$/, (r) =>
       r.fulfill({ json: { modules: {}, labels: {} } }),
     );
@@ -126,5 +138,7 @@ test.describe('chrome bar', () => {
     const bar = page.locator('.perspective-tabs').first();
     await expect(bar).toContainText('BOSS');
     await expect(bar).not.toContainText('Algedonic');
+    await expect(bar.locator('a[href="/simulator"]')).toHaveCount(0);
+    await expect(page).toHaveTitle('BOSS');
   });
 });

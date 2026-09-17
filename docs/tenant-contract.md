@@ -98,7 +98,7 @@ stating plainly:
 <!-- contract-table:begin -->
 | file | required | read by | shape | `init` writes it |
 |---|---|---|---|---|
-| `tenant.toml` or `seeds/tenant.toml` | yes | boss-gateway `/api/tenant/manifest` (+ inlined into index.html) via `boss_core::tenant_manifest::TenantToml`, path `BOSS_TENANT_MANIFEST_TOML`; boss-sim `TenantConfig` reads the same file with sim-only sections (`seed`, `start_date`, `[job_rates]`) for a tenant that has an engine | `[meta] tenant_id` (required by check: it is every workflow's `owning_team`), `display_name`; `[modules] <module> = bool`; `[labels] <dotted.key> = str` | yes |
+| `tenant.toml` or `seeds/tenant.toml` | yes | boss-gateway `/api/tenant/manifest` (+ inlined into index.html) via `boss_core::tenant_manifest::TenantToml`, path `BOSS_TENANT_MANIFEST_TOML`; boss-sim `TenantConfig` reads the same file with sim-only sections (`seed`, `start_date`, `[job_rates]`) for a tenant that has an engine | `[meta] tenant_id` (required by check: it is every workflow's `owning_team`), `display_name` (the tab title and wordmark); `[modules] <module> = bool` — a module is ON only when listed true, a missing key is off (ce68f137); the SPA reads `calendar`, `equipment`, `exec`, `finance`, `marketing-assets`, `parts`, `qa`, `shipping`, `shop`, `sim`, `support`, `warehouse`; `[labels] <dotted.key> = str` | yes |
 | `seeds/workflows.toml` | yes | boss-jobs `seed_loader::load_workflows_with_owning_team` + the viability lint (the tenant prepare publishes each row); infra/lint/the-live-protocols-are-the-authored-protocols.sh; infra/gcp/publish-workflow.sh | `[[workflow]]` rows (kind, label, category, subject_kinds, description, metadata) each with flat `[[workflow.step]]` rows whose `ready_when` predicates imply the DAG; >= 1 trigger and >= 1 terminal per workflow | yes |
 | `seeds/policy_rules.toml` | no | boss-policy-bootstrap / `boss_policy::bootstrap::publish_policy_rules` via `boss_policy_client::seed_loader::load_policy_rules` (the tenant prepare, first boot) | `[[grants]]` rows: `role` or `roles`, `resource` or `resources`, `action` or `actions`, `scope` (all/self/team/territory/none/department:<name>); expanded to one rule per role x resource x action | yes |
 | `seeds/classes.json` or `seeds/classes.toml` | no | POST /api/classes/batch, one boss-classes `http::ClassInput` per row — sent by the tenant prepare (brewery: classes.json; used-device-shop: classes.toml `[[class]]`) and infra/postgres/reset-to-baseline.sh | JSON array (or TOML `[[class]]` rows) of {subject_kind, code, display_name, parent_code?, member_attribute?, metadata?, sort_order?} | yes |
@@ -172,8 +172,14 @@ had a door, `gl_accounts` came from the product: 40-ledger.sql seeds
 the brewery's chart (1000 Cash … 2200 Deferred Revenue, the excise
 accounts) and `GET /api/ledger/accounts` was the only way in, so a
 tenant that is not a brewery could not name its own accounts without a
-migration. The starter chart stays as the **OSS default** the demo
-tenant runs on; a tenant's chart is published over it, insert-if-absent
+migration. The starter chart is the **brewery's** — declared in
+`examples/brewery/seeds/chart_of_accounts.toml` since backlog
+`718ac982` (2026-09-17) and example residue everywhere else: a fresh
+company instance evicts it on its first start and an existing one
+through the forge verb `retire-example-reference-rows`, so a company's
+books hold only what its tenant declares (the decision is in
+docs/architecture-decisions.md §OSS posture). On an instance that still
+carries it, a tenant's chart is published over it, insert-if-absent
 by code, through `POST /api/ledger/accounts/batch` — the batch-door
 shape the classes, locations and agents doors share — and every row
 the batch inserts leaves one `ledger.account.declared` fact on the

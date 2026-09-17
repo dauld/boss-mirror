@@ -1208,6 +1208,7 @@ dependencies = [
  "boss-testing",
  "chrono",
  "clap",
+ "futures",
  "hex",
  "http-body-util",
  "rust_decimal",

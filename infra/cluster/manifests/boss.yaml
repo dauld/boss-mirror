@@ -373,8 +373,20 @@ spec:
             - name: BOSS_BOOTSTRAP_ADMIN_PASSWORD
               valueFrom: {secretKeyRef: {name: boss-secrets, key: admin-password}}
             - {name: BOSS_AUTH_FILE, value: /var/lib/boss/auth/credentials.toml}
+            # THE SAME TENANT DIRECTORY the boss container reads (below,
+            # substituted per instance by render-instance.sh): on the
+            # FIRST start of a fresh database boss-init evicts the
+            # example tenants' migration-seeded reference rows when the
+            # tenant it names is not an example (backlog 718ac982), and
+            # keeps them for an image-sourced example instance. Unset,
+            # init keeps the rows — never a silent eviction.
+            - {name: BOSS_TENANT_DIR, value: /opt/boss/tenant}
           volumeMounts:
             - {name: boss-auth, mountPath: /var/lib/boss/auth}
+            # The delivered tenant, read-only, so boss-init can read its
+            # manifest's tenant_id (the boss-tenant volume above; empty
+            # on an image-sourced instance, whose tenant is in the image).
+            - {name: boss-tenant, mountPath: /opt/boss/tenant/seeds, readOnly: true}
       containers:
         - name: boss
           image: 10.20.0.15:3000/david/boss:b2814ef

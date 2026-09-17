@@ -215,8 +215,8 @@ pub async fn rebuild_facts(pool: &PgPool) -> Result<RebuildFactsReport, LedgerEr
 pub async fn rebuild_facts_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<RebuildFactsReport, LedgerError> {
-    let rules = load_rules_in_tx(tx).await?;
-    let event_kinds: Vec<String> = rules.keys().cloned().collect();
+    let rules = ProjectionRules::load_in_tx(tx).await?;
+    let event_kinds = rules.event_kinds();
 
     // TRUNCATE-then-replay model. financial_facts is a pure
     // projection of audit_log; no row may live here that doesn't
@@ -274,13 +274,9 @@ pub async fn rebuild_facts_in_tx(
         let kind: String = row.get("kind");
         let payload: Value = row.get("payload");
 
-        let Some(candidates) = rules.get(&kind) else {
-            continue;
-        };
-
-        // One event kind may carry several rules (one per `when`);
-        // every rule whose filter matches fires.
-        for rule in candidates.iter().filter(|r| r.when_matches(&payload)) {
+        // Every rule whose (kind, `when`) matches fires — the same
+        // `matching` the live subscriber applies to a delivery.
+        for rule in rules.matching(&kind, &payload) {
             let projected = match project_event(rule, timestamp, &source, &payload) {
                 Ok(p) => p,
                 Err(ProjectionError::MissingField { .. }) => {
@@ -316,7 +312,7 @@ pub async fn rebuild_facts_in_tx(
     let supersedes_applied = replay_supersede_events_in_tx(tx).await?;
 
     Ok(RebuildFactsReport {
-        rules_loaded: rules.values().map(Vec::len).sum::<usize>() as u64,
+        rules_loaded: rules.len() as u64,
         events_scanned,
         facts_written,
         events_skipped_missing_field,
@@ -404,15 +400,74 @@ async fn rebuild_inert_received_facts_in_tx(
     Ok(written)
 }
 
-/// The registry grouped by event kind, each group in registry order.
-async fn load_rules_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> Result<HashMap<String, Vec<ProjectionRule>>, LedgerError> {
-    let mut out: HashMap<String, Vec<ProjectionRule>> = HashMap::new();
-    for rule in crate::posting_rules::load_projection_rules_in_tx(tx).await? {
-        out.entry(rule.event_kind.clone()).or_default().push(rule);
+/// The registry grouped by event kind, each group in registry order —
+/// the ONE reading of `gl_fact_projection_rules` both the rebuild's
+/// per-row loop and the live subscriber (`live_facts`, backlog
+/// 5621d166) match against, so "which rules fire on this event" has a
+/// single definition: kind equality, then the rule's `when`.
+#[derive(Debug, Clone, Default)]
+pub struct ProjectionRules {
+    by_kind: HashMap<String, Vec<ProjectionRule>>,
+}
+
+impl ProjectionRules {
+    pub fn new(rules: Vec<ProjectionRule>) -> Self {
+        let mut by_kind: HashMap<String, Vec<ProjectionRule>> = HashMap::new();
+        for rule in rules {
+            by_kind
+                .entry(rule.event_kind.clone())
+                .or_default()
+                .push(rule);
+        }
+        Self { by_kind }
     }
-    Ok(out)
+
+    pub async fn load_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<Self, LedgerError> {
+        Ok(Self::new(
+            crate::posting_rules::load_projection_rules_in_tx(tx).await?,
+        ))
+    }
+
+    /// Every rule that fires on an event of `kind` with `payload`. One
+    /// event kind may carry several rules (one per `when`); every rule
+    /// whose filter matches fires.
+    pub fn matching<'a>(
+        &'a self,
+        kind: &str,
+        payload: &'a Value,
+    ) -> impl Iterator<Item = &'a ProjectionRule> + 'a {
+        self.by_kind
+            .get(kind)
+            .into_iter()
+            .flatten()
+            .filter(move |r| r.when_matches(payload))
+    }
+
+    /// The distinct event kinds the registry names, sorted.
+    pub fn event_kinds(&self) -> Vec<String> {
+        let mut kinds: Vec<String> = self.by_kind.keys().cloned().collect();
+        kinds.sort();
+        kinds
+    }
+
+    /// The subject families a durable consumer filters on to see every
+    /// event kind here: the dispatcher's coarse collapse (one
+    /// non-overlapping `<token>.>` per first token), matched precisely
+    /// again by [`Self::matching`] on delivery.
+    pub fn filter_subjects(&self) -> Vec<String> {
+        boss_nats::durable::coarse_filter_subjects(&self.event_kinds())
+    }
+
+    /// Number of rules loaded.
+    pub fn len(&self) -> usize {
+        self.by_kind.values().map(Vec::len).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// Strip the publisher-injected event-envelope keys (`_actor`,

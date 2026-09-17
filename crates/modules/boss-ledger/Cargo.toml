@@ -40,6 +40,7 @@ tracing-subscriber = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
+futures = { workspace = true }
 clap = { workspace = true }
 toml = { workspace = true }
 sqlx = { version = "0.8", default-features = false, features = ["macros", "runtime-tokio", "postgres", "chrono", "json", "rust_decimal", "uuid"], optional = true }
@@ -90,6 +91,10 @@ required-features = ["postgres"]
 
 [[test]]
 name = "http_api"
+required-features = ["postgres"]
+
+[[test]]
+name = "live_facts_e2e"
 required-features = ["postgres"]
 
 [[test]]

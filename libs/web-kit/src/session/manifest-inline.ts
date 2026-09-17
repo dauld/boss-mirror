@@ -52,3 +52,36 @@ export function manifestFromInline(raw: unknown): ManifestState | null {
   return readyFrom(body as ManifestBody);
 }
 
+/// Is `module_id` on for this tenant? ON only when the manifest lists
+/// it `true` (ce68f137). The previous rule — off only on an explicit
+/// `false` — meant a tenant that listed nothing got everything: on
+/// 2026-09-17 prod's `modules = {}` was showing Algedonic, LLC the
+/// playground's Simulator tab, storefront and QA hub. A tenant now
+/// declares what it uses; the names are in docs/tenant-contract.md.
+///
+/// A manifest that is still loading or unreachable hides nothing.
+/// That is a deployment fault, not a tenant decision, and a blank
+/// shell would hide the fault instead of showing it; the gateway
+/// inlines the manifest into index.html, so on a served page this
+/// state does not reach the first paint.
+export function moduleOn(state: ManifestState, module_id: string): boolean {
+  if (state.kind !== 'ready') return true;
+  return state.modules[module_id] === true;
+}
+
+/// The tab title: the tenant's own name, or the product's until the
+/// tenant has named itself (ce68f137). index.html ships the same
+/// neutral default so a cold load before the manifest is never the
+/// playground tenant.
+export function documentTitleFor(state: ManifestState): string {
+  if (state.kind !== 'ready' || !state.displayName) return 'BOSS';
+  return state.displayName;
+}
+
+/// The meta description, in the same two shapes as the title.
+export function documentDescriptionFor(state: ManifestState): string {
+  const product = 'BOSS — software for modeling systems as state machines';
+  if (state.kind !== 'ready' || !state.displayName) return `${product}.`;
+  return `${state.displayName}, running on ${product}.`;
+}
+

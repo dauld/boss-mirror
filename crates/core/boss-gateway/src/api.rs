@@ -313,6 +313,37 @@ mod tests {
         assert_eq!(wholesale.label, "Wholesale beer");
     }
 
+    /// The document carries the tenant (ce68f137): what the static
+    /// server inlines into index.html is this value serialized, so the
+    /// SPA can title the tab from `display_name` before its first
+    /// fetch, and a `[modules]` block reaches it as written — the SPA
+    /// reads a missing key as off, so the block must survive intact.
+    #[tokio::test]
+    async fn the_inlined_manifest_carries_the_tenants_name_and_modules() {
+        let _serial = TENANT_TOML_LOCK.lock().await;
+        let _tmp = write_tenant_toml(
+            r#"
+[meta]
+tenant_id = "algedonic-llc"
+display_name = "Algedonic, LLC"
+
+[modules]
+finance = true
+sim = false
+"#,
+        );
+        let json = serde_json::to_string(&tenant_manifest_now()).unwrap();
+        let html = crate::static_files::inline_tenant_manifest("<head></head>", &json);
+        assert!(
+            html.contains(r#""display_name":"Algedonic, LLC""#),
+            "the inlined manifest names the tenant: {html}"
+        );
+        assert!(
+            html.contains(r#""modules":{"finance":true,"sim":false}"#),
+            "the modules block rides as written: {html}"
+        );
+    }
+
     #[tokio::test]
     async fn revenue_categories_empty_when_tenant_has_no_named_categories() {
         let _serial = TENANT_TOML_LOCK.lock().await;

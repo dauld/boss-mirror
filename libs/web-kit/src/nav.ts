@@ -67,42 +67,48 @@ export function href(relative: string): string {
 // the model rather than doing work inside it.
 // ---------------------------------------------------------------------------
 
-/// The department vocabulary, in registry sort order.
-///
-/// This is the Class registry's `(employee, *, department)` rows —
-/// core's in infra/postgres/schema/01-registries.sql plus the tenant's
-/// in the seed. It is duplicated here because the chrome bar cannot
-/// wait on a fetch to know what tabs exist, so it is pinned by an
-/// equality test against both sources (CLAUDE.md §9a): add a
-/// department to either registry and the test names it until it
-/// appears here.
-export const DEPARTMENTS = [
-  { code: 'it', label: 'IT' },
-  { code: 'executive', label: 'Executive' },
-  { code: 'sales', label: 'Sales' },
-  { code: 'service', label: 'Service' },
-  { code: 'refurb', label: 'Refurb' },
-  { code: 'qa', label: 'QA' },
-  { code: 'warehouse', label: 'Warehouse' },
-  { code: 'finance', label: 'Finance' },
-  { code: 'people', label: 'People' },
-  { code: 'support', label: 'Support' },
-  { code: 'marketing', label: 'Marketing' },
-  { code: 'production', label: 'Production' },
-  { code: 'packaging', label: 'Packaging' },
-  { code: 'distribution', label: 'Distribution' },
-  { code: 'maintenance', label: 'Maintenance' },
-  { code: 'taproom', label: 'Taproom' },
-  { code: 'audit', label: 'Audit' },
-] as const;
+/// One department, as the chrome bar needs it: the Class code and the
+/// registry's display name.
+export type Department = Readonly<{ code: string; label: string }>;
 
-export type DepartmentCode = (typeof DEPARTMENTS)[number]['code'];
+/// The shape of a Class row this reader needs; the full row is the
+/// classes client's (`session/classes.svelte.ts`).
+export type DepartmentRow = Readonly<{
+  code: string;
+  display_name: string;
+  member_attribute: string;
+  sort_order: number;
+  retired_at: string | null;
+}>;
+
+/// The department vocabulary — departments-from-registry, in registry
+/// sort order (ce68f137).
+///
+/// It is the Class registry's `(employee, *, department)` rows: core's
+/// in infra/postgres/schema/01-registries.sql plus whatever the tenant
+/// seeds. Until 2026-09-17 this file carried a copy of that list,
+/// pinned by an equality test against the playground's seeds — which
+/// is exactly why a second tenant's department (Algedonic's
+/// `operations`) had no tab: the copy knew one tenant's org chart. The
+/// SPA already fetches `employee` classes once at boot, so the bar
+/// reads the same rows every other taxonomy reader does. An empty or
+/// unloaded registry is no department tabs, not a crash.
+export function departmentsFromRegistry(
+  rows: ReadonlyArray<DepartmentRow>,
+): ReadonlyArray<Department> {
+  return rows
+    .filter((r) => r.member_attribute === 'department' && r.retired_at === null)
+    .slice()
+    .sort((a, b) => a.sort_order - b.sort_order)
+    .map((r) => ({ code: r.code, label: r.display_name }));
+}
 
 /// Every app: the two that are not departments, plus one per
-/// department. `AppId` stays a closed union so a typo in a catalog
-/// entry is a compile error rather than a surface that renders under
-/// no tab.
-export type AppId = 'home' | 'simulator' | DepartmentCode;
+/// department. Open, because the departments are registry data: the
+/// closed union died with the hardcoded list, and a catalog entry's
+/// `app` is pinned against the seeded registries by the catalog's own
+/// test instead.
+export type AppId = 'home' | 'simulator' | (string & {});
 
 export type AppTab = Readonly<{
   id: AppId;
@@ -132,6 +138,6 @@ export const SIMULATOR_APP: AppTab = {
 export const APPS: ReadonlyArray<AppTab> = [HOME_APP, SIMULATOR_APP];
 
 /// The label for a department code, or the code itself if unknown.
-export function departmentLabel(code: string): string {
-  return DEPARTMENTS.find((d) => d.code === code)?.label ?? code;
+export function departmentLabel(code: string, departments: ReadonlyArray<Department>): string {
+  return departments.find((d) => d.code === code)?.label ?? code;
 }

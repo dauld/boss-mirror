@@ -49,6 +49,15 @@
 //!     summary precede the per-version list in the runner's combined
 //!     capture, and the full list is a file on the forge the record
 //!     names — refused before any DELETE when it cannot be written.
+//!   * A REAL RUN'S LINE CARRIES ITS OUTCOME (backlog ea67ad87, measured
+//!     on the first real prune, ops-request 973beaa2, 2026-09-17
+//!     13:41Z): the packet read 898 `would DELETE` lines under a verdict
+//!     that said OK. Now DELETED / GONE / FAILED <code> / KEPT, and only
+//!     a dry run says `would DELETE`; the file on disk is unchanged.
+//!   * THE CLEANUP CADENCE IS READ, NOT TYPED: df moved 724 KB on 1,337
+//!     deletions because Forgejo's `[cron.cleanup_packages]` frees the
+//!     blobs, and its app.ini is not in this tree — the record carries
+//!     what the verb read off the forge's app.ini, or that it could not.
 
 use boss_testing::{repo_root, scratch_dir, write_exec, write_file};
 use std::path::PathBuf;
@@ -990,7 +999,22 @@ fn the_verdict_precedes_the_per_version_list_and_the_list_is_a_named_file() {
     if !has("jq") {
         return;
     }
-    for (mode, summary) in [("--dry-run", "DRY RUN"), ("--for-real", "OK —")] {
+    // The per-version verb differs by mode (backlog ea67ad87): a dry
+    // run plans, a real run reports.
+    for (mode, summary, delete_verb, unclassified_line) in [
+        (
+            "--dry-run",
+            "DRY RUN",
+            "would DELETE ",
+            "unclassified boss:v1",
+        ),
+        (
+            "--for-real",
+            "OK —",
+            "DELETED ",
+            "KEPT boss:v1 — unclassified",
+        ),
+    ] {
         let c = Case::new(&format!("verdict-first{mode}"));
         let (rc, out) = c.run_combined(&[mode]);
         assert_eq!(rc, 0, "{mode}: {out}");
@@ -999,13 +1023,13 @@ fn the_verdict_precedes_the_per_version_list_and_the_list_is_a_named_file() {
                 .unwrap_or_else(|| panic!("{mode}: no `{needle}` in:\n{out}"))
         };
         let record_at = at(r#"{"verb":"prune-registry-versions""#);
-        let first_delete = at("would DELETE ");
-        let first_unclassified = at("unclassified boss");
+        let first_delete = at(delete_verb);
+        let first_unclassified = at(unclassified_line);
         let summary_at = at(summary);
         assert!(
             record_at < first_delete && record_at < first_unclassified,
             "{mode}: the record follows a per-version line (record at {record_at}, \
-             first would DELETE at {first_delete}, first unclassified at {first_unclassified}):\n{out}"
+             first {delete_verb} at {first_delete}, first unclassified at {first_unclassified}):\n{out}"
         );
         assert!(
             summary_at < first_delete,
@@ -1015,13 +1039,13 @@ fn the_verdict_precedes_the_per_version_list_and_the_list_is_a_named_file() {
             record_at < 4096,
             "{mode}: the record starts at byte {record_at}, outside the first 4 KB:\n{out}"
         );
-        // Every plan line is still printed, after the verdict.
+        // Every per-version line is still printed, after the verdict.
         contains_all(
             &out,
             &[
-                "would DELETE boss:01d0001",
-                &format!("would DELETE boss-ci:{}", digest("ci-old1")),
-                "unclassified boss:v1",
+                &format!("{delete_verb}boss:01d0001"),
+                &format!("{delete_verb}boss-ci:{}", digest("ci-old1")),
+                unclassified_line,
             ],
             mode,
         );
@@ -1068,6 +1092,209 @@ fn the_verdict_precedes_the_per_version_list_and_the_list_is_a_named_file() {
             assert!(!list.contains("deleted boss"), "a dry run deleted: {list}");
         }
     }
+}
+
+/// Backlog ea67ad87 (measured on the first real prune, ops-request
+/// 973beaa2, 2026-09-17 13:41Z, deleted 1,337 of 1,337): the verdict
+/// said `OK — deleted`, and every per-version line after it — the 898
+/// the runner kept — read `would DELETE <tag> — older than the keep
+/// set`, because the plan file was printed as-is and the outcomes were
+/// appended after the runner had cut the output. A real run described
+/// in the conditional. Now a real run's per-version line carries its
+/// OUTCOME as the verb — DELETED / GONE / FAILED <code> / KEPT — and
+/// only a dry run says `would DELETE`. The file on disk is unchanged:
+/// the plan, then the outcomes appended after the deletes.
+#[test]
+fn a_real_run_prints_each_planned_version_with_its_outcome_as_the_verb() {
+    if !has("jq") {
+        return;
+    }
+    let c = Case::new("outcome-verbs");
+    let (rc, out) = c.run_combined(&["--for-real"]);
+    assert_eq!(rc, 0, "{out}");
+    assert!(
+        !out.contains("would DELETE"),
+        "a real run printed a conditional per-version line:\n{out}"
+    );
+    contains_all(
+        &out,
+        &[
+            "DELETED boss:01d0001 — older than the keep set",
+            "DELETED boss:deadbee — older than the keep set",
+            &format!(
+                "DELETED boss:{} — child of a deleted tag (01d0001)",
+                digest("old1")
+            ),
+            &format!(
+                "DELETED boss:{} — orphan: referenced by no tag",
+                digest("orphan-old")
+            ),
+            &format!(
+                "DELETED boss-ci:{} — older than the keep set",
+                forty("01d0001")
+            ),
+            "KEPT boss:v1 — unclassified: tag is not a sha",
+            "KEPT boss-ci:rust1.96 — unclassified: tag is not a sha",
+        ],
+        "the real run's per-version lines",
+    );
+    // Still in the runner's order: the record, then the verdict, then
+    // the first outcome line.
+    let at = |needle: &str| {
+        out.find(needle)
+            .unwrap_or_else(|| panic!("no `{needle}` in:\n{out}"))
+    };
+    let record_at = at(r#"{"verb":"prune-registry-versions""#);
+    let verdict_at = at("OK —");
+    let first_outcome = at("DELETED ");
+    assert!(
+        record_at < verdict_at && verdict_at < first_outcome,
+        "record at {record_at}, verdict at {verdict_at}, first DELETED at {first_outcome}:\n{out}"
+    );
+    // The file keeps the plan and the appended outcomes, as before.
+    let r = c.record(&out);
+    let list = std::fs::read_to_string(r["list_file"].as_str().unwrap()).unwrap();
+    contains_all(
+        &list,
+        &[
+            "would DELETE boss:01d0001 — older than the keep set",
+            "deleted boss:01d0001",
+        ],
+        "the list file",
+    );
+
+    // A dry run is unchanged: the conditional, and no outcome verb.
+    let c = Case::new("outcome-verbs-dry");
+    let (rc, out) = c.run_combined(&["--dry-run"]);
+    assert_eq!(rc, 0, "{out}");
+    contains_all(
+        &out,
+        &[
+            "would DELETE boss:01d0001 — older than the keep set",
+            "unclassified boss:v1 — tag is not a sha (kept)",
+        ],
+        "the dry run's per-version lines",
+    );
+    assert!(
+        !out.contains("DELETED ") && !out.contains("KEPT "),
+        "a dry run claimed an outcome:\n{out}"
+    );
+}
+
+/// A run that stops part-way names the failure on the version's own
+/// line, with the code, and every planned version it never reached
+/// reads KEPT with the reason it was not attempted — not `would
+/// DELETE`, which would be the same conditional the packet above
+/// misread.
+#[test]
+fn a_stopped_real_run_says_failed_with_the_code_and_kept_for_the_rest() {
+    if !has("jq") {
+        return;
+    }
+    let c = Case::new("outcome-verbs-fail");
+    write_file(&c.stub.join("delete-fail-on"), "deadbee");
+    let (rc, out) = c.run_combined(&["--for-real"]);
+    assert_eq!(rc, 1, "{out}");
+    assert!(!out.contains("would DELETE"), "{out}");
+    contains_all(
+        &out,
+        &[
+            "DELETED boss:01d0001 — older than the keep set",
+            "FAILED 500 boss:deadbee — older than the keep set",
+            &format!(
+                "KEPT boss-ci:{} — older than the keep set (not attempted: the run stopped)",
+                forty("01d0001")
+            ),
+            &format!(
+                "KEPT boss:{} — child of a deleted tag (01d0001) (not attempted: the run stopped)",
+                digest("old1")
+            ),
+        ],
+        "the stopped run's per-version lines",
+    );
+}
+
+/// The second observation on ea67ad87: df before/after moved 724 KB on
+/// 1,337 deletions — the blobs are freed by Forgejo's own
+/// `[cron.cleanup_packages]`, so the disk alarm clears only when that
+/// runs. Its app.ini is NOT in this tree (the forge's compose file and
+/// data directory are unversioned, infra/forge/OPERATIONS.md), so the
+/// verb reads the cadence off the host's app.ini at run time — the
+/// same file under the data dir that publish-github-pr.sh reads
+/// `[repository] ROOT` from — and the record says what it found and
+/// where, or that it could not read it. Never a value typed here.
+#[test]
+fn the_record_carries_forgejo_cleanup_cadence_read_off_app_ini_or_says_it_could_not() {
+    if !has("jq") {
+        return;
+    }
+    // Set in app.ini: the record and the verdict carry the values.
+    let c = Case::new("cleanup-cron-set");
+    let conf = c.df_path.join("gitea/conf");
+    std::fs::create_dir_all(&conf).unwrap();
+    write_file(
+        &conf.join("app.ini"),
+        "[repository]\nROOT = /data/git/repositories\n\n[cron.cleanup_packages]\nENABLED = true\nRUN_AT_START = false\nSCHEDULE = @every 6h\nOLDER_THAN = 48h\n\n[cron.other]\nSCHEDULE = @weekly\n",
+    );
+    let (rc, out) = c.run(&["--for-real"]);
+    assert_eq!(rc, 0, "{out}");
+    let r = c.record(&out);
+    let cron = &r["cleanup_cron"];
+    assert_eq!(cron["schedule"], "@every 6h", "{r}");
+    assert_eq!(cron["older_than"], "48h", "{r}");
+    assert_eq!(cron["enabled"], "true", "{r}");
+    assert_eq!(
+        cron["source"],
+        conf.join("app.ini").to_string_lossy().as_ref(),
+        "{r}"
+    );
+    contains_all(
+        &out,
+        &["cleanup_packages", "@every 6h", "48h"],
+        "the verdict names the cadence it read",
+    );
+
+    // Readable, section absent: said as unset, with Forgejo's default
+    // named as documented, not as read.
+    let c = Case::new("cleanup-cron-unset");
+    let conf = c.df_path.join("gitea/conf");
+    std::fs::create_dir_all(&conf).unwrap();
+    write_file(
+        &conf.join("app.ini"),
+        "[repository]\nROOT = /data/git/repositories\n",
+    );
+    let (rc, out) = c.run(&["--dry-run"]);
+    assert_eq!(rc, 0, "{out}");
+    let r = c.record(&out);
+    let cron = &r["cleanup_cron"];
+    assert!(cron["schedule"].is_null(), "{r}");
+    assert!(cron["older_than"].is_null(), "{r}");
+    assert!(
+        cron["note"]
+            .as_str()
+            .is_some_and(|n| n.contains("unset") && n.contains("@midnight")),
+        "{r}"
+    );
+
+    // No app.ini where the data dir says it should be: said, not
+    // guessed.
+    let c = Case::new("cleanup-cron-unread");
+    let (rc, out) = c.run(&["--for-real"]);
+    assert_eq!(rc, 0, "{out}");
+    let r = c.record(&out);
+    let cron = &r["cleanup_cron"];
+    assert!(cron["schedule"].is_null(), "{r}");
+    assert!(
+        cron["source"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("unread: ") && s.contains("app.ini")),
+        "{r}"
+    );
+    contains_all(
+        &out,
+        &["unread"],
+        "the verdict says the cadence was not read",
+    );
 }
 
 /// The file is written BEFORE the first DELETE, and a file that cannot
@@ -1132,12 +1359,13 @@ fn a_tag_whose_index_cannot_be_read_is_kept_and_so_are_all_orphans() {
         deleted.iter().any(|d| d.contains(&digest("old1"))),
         "{deleted:?}"
     );
+    // A real run's line is the outcome (backlog ea67ad87): kept, and why.
     contains_all(
         &out,
         &[
-            "unclassified boss:deadbee",
-            "404",
-            "unclassified boss:sha256:",
+            "KEPT boss:deadbee — unclassified: index unreadable (HTTP 404)",
+            "KEPT boss:sha256:",
+            "unclassified: referenced by no readable index while 1 index(es) were unreadable",
         ],
         "the unreadable index is named",
     );
@@ -1216,6 +1444,17 @@ fn the_verb_file_is_a_mutating_forge_verb_with_mode_and_an_optional_keep_count()
     assert!(about.contains("David"), "about names who authorized it");
     assert!(about.contains("9789a827"), "about names the packet");
     assert!(about.contains("--dry-run"), "about names the rehearsal");
+    // Backlog ea67ad87: a real run's lines carry the outcome, and the
+    // cleanup cadence is read off the forge's app.ini, not typed.
+    assert!(
+        about.contains("ea67ad87"),
+        "about names the outcome-verb packet"
+    );
+    assert!(about.contains("DELETED"), "about names the real run's verb");
+    assert!(
+        about.contains("cleanup_cron"),
+        "about names the record's cadence field"
+    );
     assert!(
         about.contains("read:package") && about.contains("write:package"),
         "about names the scopes"

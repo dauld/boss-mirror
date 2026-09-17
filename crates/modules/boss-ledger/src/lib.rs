@@ -39,6 +39,8 @@ pub mod events;
 #[cfg(feature = "postgres")]
 pub mod http;
 #[cfg(feature = "postgres")]
+pub mod live_facts;
+#[cfg(feature = "postgres")]
 pub mod payroll;
 #[cfg(feature = "postgres")]
 pub mod periods;
@@ -76,8 +78,8 @@ pub use rebuild::{RebuildReport, rebuild};
 
 #[cfg(feature = "postgres")]
 pub use rebuild_facts::{
-    ProjectedFact, ProjectionError, ProjectionRule, RebuildFactsReport, project_event,
-    rebuild_facts, rebuild_facts_in_tx,
+    ProjectedFact, ProjectionError, ProjectionRule, ProjectionRules, RebuildFactsReport,
+    project_event, rebuild_facts, rebuild_facts_in_tx,
 };
 
 #[cfg(feature = "postgres")]

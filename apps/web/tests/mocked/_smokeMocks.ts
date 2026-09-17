@@ -16,6 +16,29 @@ import type { Page, Route } from '@playwright/test';
 const json = (r: Route, body: unknown, status = 200): Promise<void> =>
   r.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
 
+/// Every module id the SPA gates on (nav-catalog `module`, App.svelte's
+/// routeRequiredModule, the Simulator tab and DebugGear), all on — the
+/// playground tenant's manifest, in the shape the tenant contract
+/// documents.
+export const MODULES_ON: Readonly<Record<string, boolean>> = {
+  calendar: true, equipment: true, exec: true, finance: true, 'marketing-assets': true,
+  parts: true, qa: true, shipping: true, support: true, warehouse: true, shop: true, sim: true,
+};
+
+/// The platform's department Classes (01-registries.sql) as `/api/classes`
+/// rows: the chrome bar derives its tabs from `(employee, *, department)`
+/// since ce68f137, so a mock with no departments is a bar with no
+/// department tabs. Shared with the chrome specs that mock no other
+/// backend.
+export const DEPARTMENT_CLASSES: ReadonlyArray<Record<string, unknown>> = [
+  ['it', 'IT'], ['executive', 'Executive'], ['sales', 'Sales'], ['service', 'Service'],
+  ['refurb', 'Refurb'], ['qa', 'QA'], ['warehouse', 'Warehouse'], ['finance', 'Finance'],
+  ['people', 'People'], ['support', 'Support'], ['marketing', 'Marketing'],
+].map(([code, display_name], i) => ({
+  subject_kind: 'employee', code, display_name, parent_code: null, member_attribute: 'department',
+  metadata: {}, sort_order: (i + 1) * 10, retired_at: null,
+}));
+
 // Persona: one employee, role ceo ⇒ every route is visible.
 const EMP = {
   id: 'emp-001', name: 'Demo CEO', email: 'ceo@demo', role: 'ceo',
@@ -109,9 +132,11 @@ export async function installSmokeMocks(page: Page): Promise<void> {
     { kind: 'person', label: 'Person', parent_kind: null, description: null, owning_team: 'platform', metadata: {}, sort_order: 1, retired_at: null },
     { kind: 'employee', label: 'Employee', parent_kind: 'person', description: null, owning_team: 'platform', metadata: {}, sort_order: 1, retired_at: null },
   ]));
-  // Class row with `retired_at` OMITTED (adversarial).
+  // Class row with `retired_at` OMITTED (adversarial), plus the
+  // platform's own department rows (the chrome bar's tabs).
   await page.route(/\/api\/classes(\?|$)/, (r) => json(r, [
     { subject_kind: 'employee', code: 'ceo', display_name: 'CEO', parent_code: null, member_attribute: 'role', metadata: {}, sort_order: 1 },
+    ...DEPARTMENT_CLASSES,
   ]));
 
   // Gateway perf histogram (PerfPage iterates `.endpoints`).
@@ -133,12 +158,14 @@ export async function installSmokeMocks(page: Page): Promise<void> {
   // so the ceiling warning is exercised rather than only the happy path.
   // The tenant manifest now carries the tenant's own name, which the
   // chrome bar renders. Mocked so the brand assertions below have
-  // something deterministic to read.
+  // something deterministic to read. A module is on only when listed
+  // true (ce68f137), so the playground persona lists every module the
+  // SPA gates — the crawl has to reach the pages behind them.
   await page.route(/\/api\/tenant\/manifest$/, (r) =>
     json(r, {
       display_name: 'Algedonic Ales',
       tenant_id: 'brewery',
-      modules: {},
+      modules: MODULES_ON,
       labels: {},
     }),
   );

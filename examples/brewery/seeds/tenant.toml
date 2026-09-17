@@ -158,6 +158,10 @@ events_retention_days = 90
 "finance.revenue_category.uncategorized" = "Uncategorized"
 
 [modules]
+# A module is ON only when listed true here (ce68f137, 2026-09-17):
+# a missing key is off, the same as false. The names the SPA reads are
+# documented in docs/tenant-contract.md (the tenant.toml row).
+#
 # Always-on for every tenant — fundamental to running a business.
 jobs        = true   # Jobs + Steps; the coordination primitive
 people      = true   # Employees + Accounts + Vendors

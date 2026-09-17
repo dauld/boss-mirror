@@ -14,6 +14,8 @@
 // `loadClasses('<subject_kind>')` from their mount and read via
 // `classesFor('<subject_kind>', '<member_attribute>')`.
 
+import { departmentsFromRegistry, type Department } from '../nav';
+
 type ClassRow = Readonly<{
   subject_kind: string;
   code: string;
@@ -57,10 +59,15 @@ export async function loadClasses(subject_kind: string): Promise<void> {
     const r = await fetch(
       `/api/classes?subject_kind=${encodeURIComponent(subject_kind)}`,
     );
-    if (r.ok) {
+    // An answer that is not a list is an error, not a registry: since
+    // the chrome bar reads departments from here on every page
+    // (ce68f137), a `{data: [], total: 0}` envelope from a wrong
+    // endpoint used to throw inside a derived and take the shell down.
+    const body: unknown = r.ok ? await r.json() : null;
+    if (Array.isArray(body)) {
       classes.value = {
         ...classes.value,
-        [subject_kind]: { kind: 'ready', rows: (await r.json()) as ClassRow[] },
+        [subject_kind]: { kind: 'ready', rows: body as ClassRow[] },
       };
     } else {
       requested.delete(subject_kind);
@@ -70,6 +77,16 @@ export async function loadClasses(subject_kind: string): Promise<void> {
     requested.delete(subject_kind);
     classes.value = { ...classes.value, [subject_kind]: { kind: 'error' } };
   }
+}
+
+/// The tenant's departments, for the chrome bar and the sidebar's
+/// group labels — `(employee, *, department)` in registry order, read
+/// through the same cache as every other taxonomy (ce68f137). Empty
+/// until `loadClasses('employee')` has answered; the bar then carries
+/// Home (and Simulator) alone, which is the honest state of a shell
+/// that does not yet know the org chart.
+export function departments(): ReadonlyArray<Department> {
+  return departmentsFromRegistry(classesFor('employee', 'department'));
 }
 
 /// Active (non-retired) Class rows for a (subject_kind, member_attribute),

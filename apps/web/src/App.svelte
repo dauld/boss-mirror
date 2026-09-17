@@ -10,12 +10,12 @@
   import { parseRoute, type Route } from './router';
   import { goToLogin } from '@boss/web-kit/session/deadSession';
   import { loadSession } from '@boss/web-kit/session/session.svelte';
-  import { loadManifest } from '@boss/web-kit/session/manifest.svelte';
+  import { loadManifest, manifest, reflectTenantOnDocument } from '@boss/web-kit/session/manifest.svelte';
   import { loadStepTypeRegistry } from './steps/surfaceRegistry.svelte';
-  import { loadClasses } from '@boss/web-kit/session/classes.svelte';
+  import { loadClasses, departments } from '@boss/web-kit/session/classes.svelte';
   import AppShell from './shell/AppShell.svelte';
   import UpdateBar from './shell/UpdateBar.svelte';
-  import { APPS, appForSection, APP_SUBJECT_KINDS, type AppId } from './shell/nav-catalog';
+  import { appsFor, appForSection, APP_SUBJECT_KINDS, type AppId } from './shell/nav-catalog';
   import { SECTION_FOR_ROUTE } from './shell/sections';
   import { makeSurfaceOpenRecorder, postSurfaceOpen, routePattern } from './shell/surface-opens';
   import StepFocusPage from './steps/StepFocusPage.svelte';
@@ -134,6 +134,10 @@
       case 'asset':           return { id: 'equipment', label: 'Equipment' };
       case 'shop':
       case 'shopProduct':     return { id: 'shop',      label: 'Shop' };
+      // The QA hub is written for the playground tenant (its own
+      // manifest says so beside `qa = true`); a tenant that has not
+      // listed the module gets the module-off page, not its copy.
+      case 'qa':              return { id: 'qa',       label: 'QA' };
       case 'exec':            return { id: 'exec',      label: 'Exec' };
       default:                return null;
     }
@@ -231,6 +235,19 @@
   // `searchAppKinds`, so global search silently lost its app scoping
   // on exactly the surface built for focused reading.
   let appKinds: ReadonlyArray<string> = $derived(APP_SUBJECT_KINDS[perspective] ?? []);
+
+  // The tab list is the tenant's: one tab per department its Class
+  // registry declares (loaded above with `employee`), plus Simulator
+  // only when its manifest lists the `sim` module (ce68f137).
+  let apps = $derived(appsFor(departments(), { simulator: moduleEnabled('sim') }));
+
+  // The document follows the same manifest as the wordmark: index.html
+  // ships a neutral title, and the tenant names the tab once its
+  // manifest is read — re-applied whenever it settles (ce68f137).
+  $effect(() => {
+    void manifest.value;
+    reflectTenantOnDocument();
+  });
 </script>
 
 <!-- Every route, every state: a stale tab is stale regardless of
@@ -244,10 +261,10 @@
   <!-- Outside AppShell on purpose: a full-page step surface has no
        sidebar. The chrome bar stays — you can still switch apps —
        but everything below it belongs to the step. -->
-  <PerspectiveTabs active={perspective} apps={APPS} searchAppKinds={appKinds} />
+  <PerspectiveTabs active={perspective} {apps} searchAppKinds={appKinds} />
   <StepFocusPage jobId={route.jobId} stepId={route.stepId} from={route.from} fromLabel={route.fromLabel} />
 {:else}
-  <PerspectiveTabs active={perspective} apps={APPS} searchAppKinds={appKinds} />
+  <PerspectiveTabs active={perspective} {apps} searchAppKinds={appKinds} />
 <AppShell {activeSection} {perspective}>
   {#if blockedModule}
     <ModuleDisabled module={blockedModule.id} label={blockedModule.label} />

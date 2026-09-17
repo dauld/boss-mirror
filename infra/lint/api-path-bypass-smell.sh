@@ -121,6 +121,15 @@ ALLOWLIST=(
     # manifest entries a database has applied. Permanent — DDL's ledger is
     # control-plane by nature (docs/design/schema-migrations.md).
     "infra/postgres/migrate.sh::schema_migrations bookkeeping — control-plane, the migration runner itself"
+    # The undoing of a migration's own INSERTs, not domain data: the example
+    # tenants' reference rows that 01-registries.sql / 40-ledger.sql seeded
+    # into every database arrived by DDL-time SQL with no event behind them,
+    # so no API ever created them and none can remove them; the eviction
+    # (boss-init's first start, the retire-example-reference-rows verb)
+    # deletes only rows nothing references, one transaction per table
+    # (backlog 718ac982). A tenant's OWN rows still arrive through the
+    # batch doors.
+    "infra/postgres/example-reference-rows.sh::eviction of migration-seeded example reference rows — control-plane, undoing DDL-time INSERTs no event backs"
 )
 
 allowlisted() {  # $1 = "file:line:content"

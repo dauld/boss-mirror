@@ -1,0 +1,530 @@
+//! The eviction's SQL, RUN against the real schema — the half
+//! example_reference_rows_sh.rs cannot pin without a database
+//! (backlog 718ac982; design e2580840 car 3).
+//!
+//! A TestDb IS a fresh instance the moment migrate.sh has run: every
+//! migration applied, no tenant published — so it holds exactly the
+//! reference rows 01-registries.sql, 40-ledger.sql and the keg
+//! migration seed, and nothing referencing them. That is the state
+//! boss-init's first-start step sees. Two things are pinned here:
+//!
+//!   * WHAT THE PLATFORM KEEPS IS EXACTLY WHAT THE PLATFORM NAMES. After
+//!     an eviction on the bare schema, the rows left in the taxonomies
+//!     the migrations seeded for the examples (employee roles and
+//!     departments, location kinds, account types, asset categories,
+//!     locations, accounts, companies) are compared to a set DERIVED
+//!     from the platform's own files: the system roles the migration
+//!     flags as such, the roles the platform Workflow bundle names, the
+//!     bootstrap admin's and the operator baseline's row, the kinds the
+//!     platform's default locations wear, the account_type column
+//!     default, the accounts the tax kinds reference. One generic row
+//!     (`owner`, the sole-proprietor role) is named by hand with its
+//!     reason. A migration that seeds a new example row, or an example
+//!     seed that stops carrying one, moves this line.
+//!   * DELETABLE ONLY WHEN UNREFERENCED. A fixture wearing the rows — an
+//!     employee with the role, department and location; an account of
+//!     the type; a policy grant naming a role; a job about the company
+//!     and one about a location; a child class — keeps each of them,
+//!     named with the column that points at it, and the run deletes
+//!     the rest.
+//!
+//! Never against production: TestDb refuses a server hosting a database
+//! named `boss` (test_db.rs).
+
+use boss_testing::{TestDb, repo_root};
+use std::collections::BTreeSet;
+use std::io::Write;
+use std::process::{Command, Stdio};
+
+fn derive(mode: &str) -> String {
+    let out = Command::new("bash")
+        .arg(repo_root().join("infra/postgres/example-reference-rows.sh"))
+        .arg(mode)
+        .output()
+        .expect("bash runs");
+    assert!(
+        out.status.success(),
+        "{mode}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// psql with the SQL on stdin, the way boss-init and the verb send it.
+fn psql(url: &str, sql: &str, read_only: bool) -> String {
+    let mut child = Command::new("psql")
+        .args([url, "-X", "-q", "-At", "-v", "ON_ERROR_STOP=1"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("psql on PATH");
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        if read_only {
+            stdin
+                .write_all(b"SET default_transaction_read_only = on;\n")
+                .unwrap();
+        }
+        stdin.write_all(sql.as_bytes()).unwrap();
+    }
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "psql: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+fn plan(url: &str) -> serde_json::Value {
+    let out = psql(url, &derive("plan-sql"), true);
+    serde_json::from_str(out.trim())
+        .unwrap_or_else(|e| panic!("plan is one JSON line ({e}): {out}"))
+}
+
+fn evict(url: &str) -> Vec<serde_json::Value> {
+    psql(url, &derive("delete-sql"), false)
+        .lines()
+        .map(|l| {
+            serde_json::from_str(l).unwrap_or_else(|e| panic!("one JSON line per table ({e}): {l}"))
+        })
+        .collect()
+}
+
+async fn set(db: &TestDb, sql: &str) -> BTreeSet<String> {
+    sqlx::query_scalar::<_, String>(sql)
+        .fetch_all(&db.pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect()
+}
+
+fn s(v: &[&str]) -> BTreeSet<String> {
+    v.iter().map(|x| x.to_string()).collect()
+}
+
+fn keys(v: &serde_json::Value) -> BTreeSet<String> {
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k.as_str().unwrap().to_string())
+        .collect()
+}
+
+fn kept(v: &serde_json::Value) -> Vec<(String, Vec<String>)> {
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|k| {
+            (
+                k["key"].as_str().unwrap().to_string(),
+                k["reasons"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r.as_str().unwrap().to_string())
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// Every role the platform Workflow bundle names: any `role`,
+/// `owner_role` or `authority_role` string and any `sign_offs_required`
+/// entry, wherever it sits in infra/platform/workflows/*.toml.
+fn platform_workflow_roles() -> BTreeSet<String> {
+    fn walk(v: &toml::Value, out: &mut BTreeSet<String>) {
+        match v {
+            toml::Value::Table(t) => {
+                for (k, v) in t {
+                    match (k.as_str(), v) {
+                        ("role" | "owner_role" | "authority_role", toml::Value::String(s)) => {
+                            out.insert(s.clone());
+                        }
+                        ("sign_offs_required", toml::Value::Array(a)) => {
+                            for s in a.iter().filter_map(|s| s.as_str()) {
+                                out.insert(s.to_string());
+                            }
+                        }
+                        _ => walk(v, out),
+                    }
+                }
+            }
+            toml::Value::Array(a) => a.iter().for_each(|v| walk(v, out)),
+            _ => {}
+        }
+    }
+    let mut out = BTreeSet::new();
+    for e in std::fs::read_dir(repo_root().join("infra/platform/workflows")).unwrap() {
+        let p = e.unwrap().path();
+        if p.extension().is_some_and(|x| x == "toml") {
+            let v: toml::Value = toml::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+            walk(&v, &mut out);
+        }
+    }
+    out
+}
+
+/// The operator baseline's rows: the bootstrap admin (boss-people
+/// operator_baseline.rs) and every hire in operator_hires.toml, as
+/// (field, value).
+fn operator_baseline() -> Vec<(String, String)> {
+    let root = repo_root();
+    let mut rows = Vec::new();
+    let src =
+        std::fs::read_to_string(root.join("crates/modules/boss-people/src/operator_baseline.rs"))
+            .unwrap();
+    let body = src
+        .split("pub fn bootstrap_admin_row")
+        .nth(1)
+        .unwrap()
+        .split("\n}")
+        .next()
+        .unwrap();
+    for field in [
+        "role",
+        "department",
+        "location",
+        "employment_type",
+        "status",
+    ] {
+        let v = body.split(&format!("{field}: Some(\"")).nth(1).unwrap();
+        rows.push((field.to_string(), v.split('"').next().unwrap().to_string()));
+    }
+    let hires: toml::Value = toml::from_str(
+        &std::fs::read_to_string(root.join("infra/operator-baseline/operator_hires.toml")).unwrap(),
+    )
+    .unwrap();
+    for h in hires["hire"].as_array().unwrap() {
+        for field in [
+            "role",
+            "department",
+            "location",
+            "employment_type",
+            "status",
+        ] {
+            rows.push((field.to_string(), h[field].as_str().unwrap().to_string()));
+        }
+    }
+    rows
+}
+
+fn baseline(field: &str) -> BTreeSet<String> {
+    operator_baseline()
+        .into_iter()
+        .filter(|(f, _)| f == field)
+        .map(|(_, v)| v)
+        .collect()
+}
+
+const CLASSES: &str =
+    "SELECT code FROM classes WHERE subject_kind = $1 AND member_attribute = $2 ORDER BY code";
+
+async fn classes(db: &TestDb, kind: &str, attr: &str) -> BTreeSet<String> {
+    sqlx::query_scalar::<_, String>(CLASSES)
+        .bind(kind)
+        .bind(attr)
+        .fetch_all(&db.pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn on_a_fresh_schema_what_remains_is_exactly_what_the_platform_names() {
+    let db = TestDb::new().await;
+    let url = db.url();
+
+    let roles_before = classes(&db, "employee", "role").await;
+    let employment_before = classes(&db, "employee", "employment_type").await;
+    let status_before = classes(&db, "employee", "status").await;
+    let phases_before = classes(&db, "asset", "phase").await;
+
+    // The plan on the bare schema: every present candidate is deletable
+    // but the accounts the tax kinds point at.
+    let p = plan(&url);
+    let tax_accounts = set(&db, "SELECT liability_account FROM tax_kinds UNION SELECT expense_account FROM tax_kinds WHERE expense_account IS NOT NULL").await;
+    assert!(
+        !tax_accounts.is_empty(),
+        "40-ledger.sql seeds tax kinds naming accounts"
+    );
+    let gl_kept: BTreeSet<String> = kept(&p["gl_accounts"]["kept"])
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect();
+    assert_eq!(
+        gl_kept, tax_accounts,
+        "the accounts kept on a bare schema are exactly the tax kinds' — the tax tables have no tenant seed yet"
+    );
+    for (_, reasons) in kept(&p["gl_accounts"]["kept"]) {
+        assert_eq!(reasons, ["tax_kinds"]);
+    }
+    for t in ["companies", "locations", "classes"] {
+        assert_eq!(
+            p[t]["kept"].as_array().unwrap().len(),
+            0,
+            "{t}: nothing references a row on a bare schema"
+        );
+        assert!(
+            p[t]["present"].as_u64().unwrap() > 0,
+            "{t}: the migrations seeded candidates"
+        );
+        assert_eq!(
+            p[t]["present"].as_u64().unwrap(),
+            p[t]["deletable"].as_array().unwrap().len() as u64
+        );
+    }
+    assert!(
+        p["classes"]["present"].as_u64().unwrap() < p["classes"]["candidates"].as_u64().unwrap(),
+        "the seeds carry more than the migrations did (the tenants' own rows)"
+    );
+
+    // The run.
+    let runs = evict(&url);
+    let tables: Vec<&str> = runs.iter().map(|r| r["table"].as_str().unwrap()).collect();
+    assert_eq!(tables, ["companies", "locations", "gl_accounts", "classes"]);
+    for r in &runs {
+        let t = r["table"].as_str().unwrap();
+        assert_eq!(
+            keys(&r["deleted"]),
+            keys(&p[t]["deletable"]),
+            "{t}: the run deleted what the plan said"
+        );
+    }
+    let after = plan(&url);
+    for t in ["companies", "locations", "gl_accounts", "classes"] {
+        assert_eq!(
+            after[t]["deletable"].as_array().unwrap().len(),
+            0,
+            "{t}: nothing left to delete"
+        );
+    }
+    // A second run is a no-op.
+    for r in evict(&url) {
+        assert_eq!(r["deleted"].as_array().unwrap().len(), 0);
+    }
+
+    // --- what remains, against what the platform names -------------------
+    // employee roles: the rows the migration flags as the system's, the
+    // roles the platform bundle names that the migrations seed, the
+    // baseline's roles, and `owner` (01-registries.sql: the generic
+    // sole-proprietor / founder role, cross-tenant by design).
+    let system = set(&db, "SELECT code FROM classes WHERE subject_kind = 'employee' AND member_attribute = 'role' AND (metadata->>'is_system_role' = 'true' OR metadata->>'is_test_fixture' = 'true')").await;
+    let named: BTreeSet<String> = platform_workflow_roles()
+        .intersection(&roles_before)
+        .cloned()
+        .collect();
+    let mut expected_roles: BTreeSet<String> = system.union(&named).cloned().collect();
+    expected_roles.extend(baseline("role"));
+    expected_roles.insert("owner".into());
+    assert_eq!(
+        classes(&db, "employee", "role").await,
+        expected_roles,
+        "employee roles kept = system rows + platform-named + baseline + owner"
+    );
+    assert!(
+        named.contains("platform-admin"),
+        "the bundle names platform-admin and the migration seeds it"
+    );
+    // Every role the platform names is either kept here or carried by an
+    // example seed (publish-request's owner_role = shift-lead is the
+    // brewery's, in its classes.json — a leak this line makes visible).
+    let seeds: serde_json::Value = serde_json::from_str(derive("seeds").trim()).unwrap();
+    let seeded_roles: BTreeSet<String> = seeds["classes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["subject_kind"] == "employee" && c["member_attribute"] == "role")
+        .map(|c| c["code"].as_str().unwrap().to_string())
+        .collect();
+    let policy_roles = s(&["workflow-approver"]); // a policy grant role, never an employee class
+    for r in platform_workflow_roles() {
+        assert!(
+            expected_roles.contains(&r) || seeded_roles.contains(&r) || policy_roles.contains(&r),
+            "the platform bundle names role {r}, which no instance carries"
+        );
+    }
+
+    assert_eq!(
+        classes(&db, "employee", "department").await,
+        baseline("department"),
+        "departments kept = the operator baseline's (it)"
+    );
+    assert_eq!(
+        classes(&db, "employee", "employment_type").await,
+        employment_before,
+        "employment types are the platform's vocabulary, untouched"
+    );
+    assert_eq!(classes(&db, "employee", "status").await, status_before);
+    assert_eq!(
+        classes(&db, "asset", "phase").await,
+        phases_before,
+        "module-tier vocabularies are untouched"
+    );
+
+    let locations = set(&db, "SELECT id FROM locations ORDER BY id").await;
+    assert!(
+        locations.is_superset(&baseline("location")),
+        "the baseline hires at loc-hq, which stays"
+    );
+    assert_eq!(
+        locations,
+        s(&["loc-field-default", "loc-hq", "loc-remote-default"]),
+        "locations kept = the platform's three defaults (01-registries.sql: HQ, the field bucket, the remote bucket)"
+    );
+    let worn = set(&db, "SELECT DISTINCT kind FROM locations").await;
+    assert_eq!(
+        classes(&db, "location", "kind").await,
+        worn,
+        "location kinds kept = exactly the kinds the platform's default locations wear"
+    );
+
+    let dflt = set(&db, "SELECT trim(both '''' from split_part(column_default, '::', 1)) FROM information_schema.columns WHERE table_name = 'accounts' AND column_name = 'account_type'").await;
+    assert_eq!(
+        classes(&db, "account", "type").await,
+        dflt,
+        "account types kept = the column's default (unspecified)"
+    );
+    assert_eq!(
+        classes(&db, "asset", "category").await,
+        BTreeSet::new(),
+        "every asset category was an example's"
+    );
+    assert_eq!(
+        set(&db, "SELECT id FROM companies").await,
+        BTreeSet::new(),
+        "both companies rows were examples'"
+    );
+    assert_eq!(
+        set(&db, "SELECT code FROM gl_accounts").await,
+        tax_accounts,
+        "accounts kept = the tax kinds' five, and nothing else of the starter chart"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_referenced_row_is_kept_and_named_and_the_rest_go() {
+    let db = TestDb::new().await;
+    let url = db.url();
+    sqlx::raw_sql(
+        "INSERT INTO employees (id, name, role, department, location) VALUES ('emp-f', 'F', 'ceo', 'sales', 'loc-brewery-taproom');
+         INSERT INTO accounts (id, name, account_type) VALUES ('acc-f', 'Clinic F', 'clinic');
+         INSERT INTO policy_rules (id, role, resource, action, scope) VALUES ('service-tech:job:read', 'service-tech', 'job', 'read', 'self');
+         INSERT INTO classes (subject_kind, code, display_name, member_attribute, parent_code) VALUES ('account', 'wholesale-west', 'Wholesale West', 'type', 'wholesale');
+         INSERT INTO workflows (kind, version, status, label, category, subject_kinds, steps, owning_team)
+             VALUES ('org-thing', 1, 'active', 'Org thing', 'ops', '[\"company\", \"location\"]', '[]', 'acme');
+         INSERT INTO jobs (id, kind, subject_kind, subject_id, title, owner_id, status, priority, opened_on, partition)
+             VALUES ('11111111-1111-1111-1111-111111111111', 'org-thing', 'company', 'brewery', 'about the company', 'emp-f', 'open', 'standard', '2026-09-17', 'real'),
+                    ('22222222-2222-2222-2222-222222222222', 'org-thing', 'location', 'loc-brewery-brewhouse', 'about the site', 'emp-f', 'closed', 'standard', '2026-09-17', 'simulated');",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("fixture rows");
+
+    let p = plan(&url);
+    let want = |p: &serde_json::Value, t: &str, key: &str, reasons: &[&str]| {
+        let k = kept(&p[t]["kept"]);
+        let (_, got) = k
+            .iter()
+            .find(|(kk, _)| kk == key)
+            .unwrap_or_else(|| panic!("{t}: {key} should be kept; kept = {k:?}"));
+        assert_eq!(got, reasons, "{t}: {key}");
+    };
+    want(&p, "classes", "employee:ceo", &["employees.role"]);
+    want(&p, "classes", "employee:sales", &["employees.department"]);
+    want(
+        &p,
+        "classes",
+        "employee:service-tech",
+        &["policy_rules.role"],
+    );
+    want(&p, "classes", "account:clinic", &["accounts.account_type"]);
+    want(&p, "classes", "account:wholesale", &["classes.parent_code"]);
+    want(
+        &p,
+        "locations",
+        "loc-brewery-taproom",
+        &["employees.location"],
+    );
+    want(
+        &p,
+        "locations",
+        "loc-brewery-brewhouse",
+        &["jobs.subject_id"],
+    );
+    want(&p, "companies", "brewery", &["jobs.subject_id"]);
+    assert_eq!(
+        kept(&p["classes"]["kept"]).len(),
+        5,
+        "and nothing else is kept among the classes"
+    );
+    assert_eq!(kept(&p["locations"]["kept"]).len(), 2);
+    assert_eq!(kept(&p["companies"]["kept"]).len(), 1);
+    // The brewery's taproom kind is not kept for the kept location: the
+    // migration's row wears 'retail', which no class names. But a
+    // location the run would keep DOES keep its kind — pin that with
+    // the tenant's own kind on the kept row.
+    sqlx::query("UPDATE locations SET kind = 'taproom' WHERE id = 'loc-brewery-taproom'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let p = plan(&url);
+    want(&p, "classes", "location:taproom", &["locations.kind"]);
+    assert!(
+        !kept(&p["classes"]["kept"])
+            .iter()
+            .any(|(k, _)| k == "location:brewhouse"),
+        "a kind worn only by a location the run evicts is itself deletable — the plan predicts the run"
+    );
+
+    let runs = evict(&url);
+    let deleted: BTreeSet<String> = runs.iter().flat_map(|r| keys(&r["deleted"])).collect();
+    for k in [
+        "employee:ceo",
+        "employee:sales",
+        "employee:service-tech",
+        "account:clinic",
+        "account:wholesale",
+        "location:taproom",
+        "loc-brewery-taproom",
+        "loc-brewery-brewhouse",
+        "brewery",
+    ] {
+        assert!(!deleted.contains(k), "{k} was referenced and must survive");
+    }
+    for k in [
+        "employee:cto",
+        "employee:refurb",
+        "account:lab",
+        "asset:barrel",
+        "location:brewhouse",
+        "used-device-shop",
+        "1000",
+    ] {
+        assert!(
+            deleted.contains(k),
+            "{k} was unreferenced and must go: {deleted:?}"
+        );
+    }
+    assert_eq!(set(&db, "SELECT id FROM companies").await, s(&["brewery"]));
+    assert_eq!(
+        set(
+            &db,
+            "SELECT id FROM locations WHERE id LIKE 'loc-brewery-%'"
+        )
+        .await,
+        s(&["loc-brewery-brewhouse", "loc-brewery-taproom"])
+    );
+    // The subjects projection rows of evicted locations/companies go with them.
+    let subjects_deleted: i64 = runs
+        .iter()
+        .filter_map(|r| r["subjects_deleted"].as_i64())
+        .sum();
+    assert_eq!(
+        subjects_deleted, 0,
+        "no subjects rows existed on the bare schema"
+    );
+}

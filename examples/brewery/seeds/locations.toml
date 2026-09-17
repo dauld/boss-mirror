@@ -5,13 +5,21 @@
 #   name        — human label (shown in pickers, headers)
 #   kind        — Class registry code under
 #                 (subject_kind='location', member_attribute='kind').
-#                 Boss core already seeds the OSS-playground kinds:
-#                 'taproom' (Boss Brewery customer-facing locations),
-#                 'brewhouse' (Boss Brewery production locations),
-#                 'distribution-route' (Boss Brewery distribution
-#                 routes), plus the generic 'remote'. v0 reuses
-#                 these codes; renaming them to brewery-flavored
-#                 codes is a schema lift for a follow-up wave.
+#                 The three kinds used here — 'taproom', 'brewhouse',
+#                 'distribution-route' — are THIS tenant's rows in
+#                 seeds/classes.json (since 2026-09-17, backlog
+#                 718ac982; 01-registries.sql seeded them for every
+#                 instance before that). The platform keeps only the
+#                 generic 'remote' and the kinds its default
+#                 locations wear.
+#                 Two of the ids below (loc-brewery-taproom,
+#                 loc-brewery-brewhouse) are also seeded by
+#                 01-registries.sql as 'Brewery Taproom' / 'Brewery
+#                 Brewhouse' with kinds 'retail' / 'production' —
+#                 rows no Class names. On an instance that ran that
+#                 migration the batch door keeps the registered row
+#                 (insert-if-absent by id), so those names show until
+#                 the rows are evicted; this file is the declaration.
 #   parent_id   — optional self-FK for hierarchy
 #   timezone    — required (TZ database name)
 #   latitude    — optional, decimal degrees

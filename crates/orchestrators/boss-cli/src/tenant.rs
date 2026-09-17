@@ -99,7 +99,10 @@ pub const CONTRACT: &[Entry] = &[
                   boss-sim `TenantConfig` reads the same file with sim-only sections \
                   (`seed`, `start_date`, `[job_rates]`) for a tenant that has an engine",
         shape: "`[meta] tenant_id` (required by check: it is every workflow's `owning_team`), \
-                `display_name`; `[modules] <module> = bool`; `[labels] <dotted.key> = str`",
+                `display_name` (the tab title and wordmark); `[modules] <module> = bool` — a module \
+                is ON only when listed true, a missing key is off (ce68f137); the SPA reads \
+                `calendar`, `equipment`, `exec`, `finance`, `marketing-assets`, `parts`, `qa`, \
+                `shipping`, `shop`, `sim`, `support`, `warehouse`; `[labels] <dotted.key> = str`",
         parse: parse_manifest,
         scaffold: Some(scaffold_manifest),
     },
@@ -1036,7 +1039,8 @@ tenant_id = \"{name}\"\n\
 # What the SPA calls this deployment.\n\
 display_name = \"{display}\"\n\
 \n\
-# Which SPA modules to show. Absent = all shown; set one to false to hide it.\n\
+# Which SPA modules to show. A module is on only when listed true here;\n\
+# absent is off. The names: docs/tenant-contract.md, the tenant.toml row.\n\
 [modules]\n\
 \n\
 # Display strings keyed by dotted path, e.g.\n\

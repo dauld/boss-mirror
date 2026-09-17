@@ -8,11 +8,13 @@
   // is the only fixed furniture. 44px tall — each app's shell offsets
   // its own chrome below it.
   //
-  // The tab list is APPS from @boss/web-kit/nav, so the bar and the
-  // surface-to-app mapping cannot disagree about which apps exist.
-  // Tabs are plain anchors: Simulator is served by a different piece
-  // (boss-simulator) so switching to it is a real navigation, and for
-  // the same-SPA apps the router picks the change up on popstate.
+  // The tab list is the host's: apps/web derives it from the tenant's
+  // Class registry and manifest (one tab per declared department,
+  // Simulator only when the `sim` module is on — ce68f137), and
+  // apps/simulator uses the default. Tabs are plain anchors: Simulator
+  // is served by a different piece (boss-simulator) so switching to it
+  // is a real navigation, and for the same-SPA apps the router picks
+  // the change up on popstate.
   import SystemTime from './SystemTime.svelte';
   import SignInControl from './SignInControl.svelte';
   import GlobalSearch from './GlobalSearch.svelte';
@@ -74,17 +76,17 @@
 
   // Which tabs sit on the bar, and which fold into "More".
   //
-  // There are as many department apps as the tenant has departments
-  // with surfaces — eleven for Algedonic Ales — and a bar of eleven
-  // tabs is a bar nobody reads. But hiding your OWN department behind
-  // a menu is worse.
+  // There are as many department apps as the tenant declares
+  // departments — seventeen for the playground tenant — and a bar of
+  // seventeen tabs is a bar nobody reads. But hiding your OWN
+  // department behind a menu is worse.
   //
-  // So the bar carries exactly Home, Simulator and your department, on
-  // every surface, always. It does NOT pin the app you happen to be
-  // in: that was the first attempt and it made the tab set change as
-  // you navigated, which is precisely the drift
-  // `chrome-consistency.mocked.spec.ts` exists to catch — a bar you
-  // cannot build muscle memory against.
+  // So the bar carries exactly Home, Simulator (when the tenant has
+  // one) and your department, on every surface, always. It does NOT
+  // pin the app you happen to be in: that was the first attempt and
+  // it made the tab set change as you navigated, which is precisely
+  // the drift `chrome-consistency.mocked.spec.ts` exists to catch — a
+  // bar you cannot build muscle memory against.
   //
   // Orientation instead comes from the More control, which shows where
   // you are when where you are is inside it. The set stays fixed; only

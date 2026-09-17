@@ -679,11 +679,15 @@ TEXT currency column on every money-bearing row; `Currency` lives
 in `boss-core::money`; column prefixes (`amount_`, `price_`,
 `cost_`) distinguish kind, not currency.
 
-**The chart of accounts is tenant data; the starter chart is the OSS
-default.** (Backlog `41af5195`; design `18cf4272`, David 2026-09-17.)
-40-ledger.sql seeds the brewery's chart and that seed stays as the
-default every deployment boots with, so the demo tenant and the
-posting rules that name its codes keep working untouched. A tenant
+**The chart of accounts is tenant data; the starter chart is the
+brewery's.** (Backlog `41af5195`; design `18cf4272`, David 2026-09-17;
+amended by `718ac982` the same day.) 40-ledger.sql seeds the brewery's
+chart, and since `718ac982` that chart is declared in
+`examples/brewery/seeds/chart_of_accounts.toml` and treated as example
+residue everywhere else: a fresh company instance evicts it at first
+boot and an existing one through `retire-example-reference-rows`
+(§OSS posture), so a company's books start empty and hold only what
+its tenant declares. A tenant
 declares its own accounts in `seeds/chart_of_accounts.toml` and `boss
 tenant publish` sends them through `POST /api/ledger/accounts/batch`
 after the classes — insert-if-absent by code, the batch-door shape the
@@ -770,8 +774,27 @@ projection is `(event_kind, when)`, and `step.done.<kind>` carries
 `workflow_kind` beside `spec_slug` for it. Both registries are
 published through insert-if-absent batch doors that record one
 `.declared` fact per landed row and name a kept row whose declaration
-differs. The projection runs at the facts rebuild today; a live tail
-from `audit_log` into `financial_facts` is the open half.
+differs. **The projection runs live as well as at rebuild** (backlog
+5621d166, 2026-09-17): `boss-ledger-api` binds a durable consumer
+(`ledger-facts`) on the platform event stream over the subject families
+the rule set names, re-reads the registry every 60 s, and for each
+delivered event runs the SAME `project_event` and `post_fact_in_tx` the
+rebuild and the domain writers run — one definition of the fact, one of
+the entry. Idempotence makes the two halves one system: the fact's id
+is UUIDv5 over `(kind, source_table, source_id)` and the entry is unique
+on `(fact_id, rule_version_id)`, so a redelivery writes nothing twice
+and a rebuild after a live projection reproduces the same rows; the
+live path posts only the fact it inserted, because a pre-existing fact
+was handled by whoever wrote it — including an operator's supersede,
+which drops the entry that a re-post would resurrect. A
+projection that fails deterministically (a missing field, a locked
+period, no posting rule) is logged with its event id and acknowledged;
+only a storage failure asks for redelivery. The nightly
+`maintenance-ledger-replay` chore — `boss-ledger-replay-check --deep`,
+a read-only replay comparison — remains the reconciliation that names
+what the live path missed. Events on families the stream does not
+ingest (`products.*`, whose facts boss-products writes in-tx) are
+named at start rather than silently dead air.
 
 ## Policy & auth
 
@@ -1091,6 +1114,51 @@ answer is a Workflow (`docs/design/seed-vs-emergent-state.md`,
 enforced by `seed-bypass-smell.sh`); the canonical demo world is
 **built live, not migrated**: the install starts the sim and it
 generates 365 simulated days of events against the live API.
+
+**A real instance carries only what its tenant declares plus what the
+platform needs; example data reaches an instance only through its
+tenant contract; a bounded verb evicts residue.** (Backlog `718ac982`;
+design `e2580840` car 3, David 2026-09-17, folding `83a873e8`.)
+01-registries.sql and 40-ledger.sql seeded the two worked examples'
+reference rows on every instance — the used-device shop's 26 roles and
+ten departments, the brewery's location kinds, account types,
+equipment categories and two production sites, the brewery-shaped
+starter chart (33 accounts) and a `companies` row each — and on
+2026-09-17 the company's own instance answered "Brewery Taproom" from
+`/api/locations`. Those rows are now the example tenants' seeds
+(`examples/brewery/seeds/classes.json`, `locations.toml`, the new
+`chart_of_accounts.toml`; `examples/used-device-shop/seeds/classes.toml`),
+published through the same contract every tenant uses. The migrations
+are not edited — an applied file is history and `migrate.sh` refuses
+a changed checksum — so the rows still land in every database the
+converge creates, and they leave by two doors that read ONE
+derivation, `infra/postgres/example-reference-rows.sh`, whose
+candidate set is read from the example seeds and never typed: on a
+fresh instance's FIRST start `boss-init` evicts them before any
+service starts when the declared tenant (`BOSS_TENANT_DIR`, the same
+directory the launcher publishes) is not an example — an example
+tenant keeps its own rows, an undeclared tenant keeps them too; and
+on an instance that has already booted the forge verb
+`retire-example-reference-rows <mode> <namespace>` evicts them with
+the record on the ops-request packet, `--dry-run` the plan, `--for-real`
+one transaction per table, refused for an image-sourced instance.
+**Deletable only when unreferenced**: a row anything points at — an
+employee wearing the role, a location wearing the kind, a journal line
+on the account, a tax kind naming it, a job about the company — is kept
+and named with the reason, so an instance that adopted an example code
+keeps it. What the platform keeps is exactly what the platform names,
+and a test derives that line rather than listing it: the roles
+flagged `is_system_role` (`platform-admin`, `audit-readonly`), the
+bootstrap admin's and the operator baseline's row (the `it`
+department, `loc-hq`), the kinds the platform's three default
+locations wear, the `unspecified` account type the column defaults
+to, employment types and statuses, the module-tier vocabularies, and
+the five accounts the tax kinds reference — the sales-tax and tax-kind
+tables have no tenant seed yet and stay the product's until they do.
+The starter chart is therefore no longer an OSS default a company
+adopts by collision: a fresh company instance has no chart until its
+tenant declares one, and the rows below about a colliding code apply
+only to an instance that ran the migration before the eviction.
 
 ## Deployment, the forge, and the cluster
 

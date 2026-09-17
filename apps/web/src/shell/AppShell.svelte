@@ -12,6 +12,7 @@
   import { canSeeRoute, type RouteName, type Role } from '@boss/web-kit/session/permissions';
   import { workForRole } from '@boss/web-kit/session/work-by-role';
   import { departmentLabel } from '@boss/web-kit/nav';
+  import { departments } from '@boss/web-kit/session/classes.svelte';
   import { href, navigate } from '../router';
   import {
     ROUTE_CATALOG,
@@ -128,10 +129,11 @@
     people: ['people'],
   };
 
-  // The group header is the department's own label — derived, because
-  // a second spelling of "Finance" is a second thing to keep in step.
+  // The group header is the department's own label — the Class
+  // registry's display name, because a second spelling of "Finance" is
+  // a second thing to keep in step.
   function appGroupLabel(app: AppId): string {
-    return app === 'home' || app === 'simulator' ? '' : departmentLabel(app);
+    return app === 'home' || app === 'simulator' ? '' : departmentLabel(app, departments());
   }
 
   // Work group is role-keyed: each role gets a tailored 3-5 item

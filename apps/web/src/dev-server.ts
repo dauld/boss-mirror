@@ -217,7 +217,10 @@ function serveTenantManifest(): Response {
     }
     if (!section || !line) continue;
     if (section === 'modules') {
-      const m = line.match(/^([a-zA-Z_]+)\s*=\s*(true|false)\s*$/);
+      // Hyphenated keys too (`marketing-assets`): a module is on only
+      // when listed true (ce68f137), so a key this parser dropped was
+      // a module the dev server silently switched off.
+      const m = line.match(/^([a-zA-Z0-9_-]+)\s*=\s*(true|false)\s*$/);
       if (m && m[1] && m[2]) modules[m[1]] = m[2] === 'true';
     } else if (section === 'labels') {
       // labels are TOML strings: `key = "value"` (double-quoted).

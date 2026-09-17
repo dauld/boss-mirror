@@ -18,6 +18,7 @@
   // the SPA gear and the CLI tooling share one privilege model.
 
   import { session } from '@boss/web-kit/session/session.svelte';
+  import { moduleEnabled } from '@boss/web-kit/session/manifest.svelte';
   import { debugState, setDebugMode } from './debugMode.svelte';
   import {
     showSimClock,
@@ -89,19 +90,28 @@
   // operator-only debug land. The always-visible top-right
   // Simulator panel now carries only the universal controls
   // (clock, view-as-of, reset loop, pause/resume) that apply to
-  // every tenant. Buttons here are brewery-shaped — they hardcode
-  // brewery Workflows (direct-shop-order / wholesale-keg-order /
-  // vendor-delay-anomaly). A future "Open Job…" picker that lists
-  // active Workflows from the registry would let any tenant
-  // exercise its own flows without per-tenant SPA code.
-  const sims: ReadonlyArray<{ label: string; run: (l: SimLogger) => Promise<void> }> = [
+  // every tenant. The four packet-opening buttons are shaped for the
+  // playground tenant — they hardcode its Workflows (direct-shop-order
+  // / wholesale-keg-order / vendor-delay-anomaly / hiring), so they
+  // ride behind its `sim` module (ce68f137): a company running on
+  // BOSS has no simulation to drive and must never be offered a
+  // button that files another tenant's packets. A future "Open Job…"
+  // picker that lists active Workflows from the registry would let
+  // any tenant exercise its own flows without per-tenant SPA code.
+  type Sim = { label: string; run: (l: SimLogger) => Promise<void> };
+  const UNIVERSAL: ReadonlyArray<Sim> = [
     { label: 'Show sim clock', run: showSimClock },
     { label: 'Reset to baseline (host instructions)', run: showResetInstructions },
+  ];
+  const PLAYGROUND: ReadonlyArray<Sim> = [
     { label: 'Hire an employee', run: runHire },
     { label: 'Place direct-shop order', run: placeShopOrder },
     { label: 'Place wholesale order', run: placeWholesaleOrder },
     { label: 'Trigger anomaly', run: triggerAnomaly },
   ];
+  let sims = $derived<ReadonlyArray<Sim>>(
+    moduleEnabled('sim') ? [...UNIVERSAL, ...PLAYGROUND] : UNIVERSAL,
+  );
 
   async function runSim(
     label: string,
