@@ -43,8 +43,10 @@ pub fn sensor_actor(sensor_id: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SensorInput {
     pub id: String,
-    /// Which adapter reads it — `stripe` is the first — or a
-    /// push-only source ([`PUSH_ONLY_SOURCES`]) nothing reads.
+    /// Which adapter reads it — `stripe` (succeeded charges) and
+    /// `stripe-payouts` (paid payouts) are the two the dispatcher
+    /// binary registers — or a push-only source ([`PUSH_ONLY_SOURCES`])
+    /// nothing reads.
     pub source: String,
     /// The `credentials` registry id the poller sends the value of.
     /// Empty (the default) is admitted only for a push-only source.

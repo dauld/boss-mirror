@@ -1665,6 +1665,126 @@ mod tests {
         assert_eq!(stub.writes("PUT").len(), 1);
     }
 
+    /// The payouts source (backlog 21eb9516) through the whole handler:
+    /// a `stripe-payouts` sensor row, the real adapter against the stub
+    /// Stripe, the same credential row as the sponsorships. The tenant
+    /// has not published `receive-a-payout` yet: the reading is
+    /// recorded, the open is refused, `sensor_unopenable:stripe-payouts`
+    /// is filed naming the reading, and the cursor is the arrival date.
+    /// Once the kind is published the same reading opens the packet
+    /// `describe` says — title, amount, arrival, payout id, provenance.
+    #[tokio::test]
+    async fn a_payouts_sensor_whose_kind_is_not_published_alarms_and_opens_once_it_is() {
+        use super::super::stripe_payouts::{StripePayouts, stub};
+
+        let stub_jobs = stub_jobs_api(vec![]).await;
+        stub_jobs
+            .sensors
+            .publish(
+                "acme",
+                &[boss_jobs::sensors::SensorInput {
+                    id: "stripe-payouts".into(),
+                    source: "stripe-payouts".into(),
+                    credential: "stripe-restricted-read".into(),
+                    every_minutes: 60,
+                    opens: "receive-a-payout".into(),
+                    subject_kind: "custom".into(),
+                    enabled: true,
+                }],
+            )
+            .await
+            .unwrap();
+        // 1_789_430_400 is 2026-09-15T00:00:00Z — inside the readings'
+        // 90-day retention from the firing, so the sweep that rides
+        // every firing leaves the reading to be read back.
+        let (stripe, seen) = stub::stub_stripe(
+            200,
+            Some(vec![stub::payout("po_1", 1_789_430_400, "paid", 250_075)]),
+        )
+        .await;
+        let mut sources: HashMap<String, Arc<dyn SensorSource>> = HashMap::new();
+        sources.insert(
+            "stripe-payouts".into(),
+            Arc::new(StripePayouts::new(stripe)),
+        );
+        let h = SensorPoll::new(
+            stub_jobs.base.clone(),
+            sources,
+            CredentialValues::new().with(
+                "stripe-restricted-read",
+                "BOSS_BROKER_STRIPE_KEY",
+                Some("rk_test_good".into()),
+            ),
+        );
+        *stub_jobs.refuse_opens.lock().unwrap() =
+            Some((400, "unknown or inactive job kind: receive-a-payout".into()));
+
+        h.invoke(&[], &ctx()).await.unwrap();
+        let packets = stub_jobs.packets();
+        assert_eq!(packets.len(), 1, "{packets:#?}");
+        assert_eq!(packets[0]["kind"], "backlog-item");
+        assert_eq!(
+            packets[0]["metadata"]["estate_finding"],
+            "sensor_unopenable:stripe-payouts"
+        );
+        assert_eq!(packets[0]["metadata"]["opens_kind"], "receive-a-payout");
+        assert_eq!(packets[0]["metadata"]["external_id"], "po_1");
+        assert!(
+            packets[0]["metadata"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("unknown or inactive job kind: receive-a-payout")
+        );
+        assert_eq!(packets[0]["_actor"], "automation:sensor:stripe-payouts");
+        let readings = stub_jobs.sensors.readings().await;
+        assert_eq!(readings.len(), 1);
+        assert_eq!(readings[0].packet_id, None, "still owed");
+        assert_eq!(readings[0].payload["amount_cents"], 250_075);
+        let row = &stub_jobs.sensors.list().await.unwrap()[0];
+        assert_eq!(
+            row.cursor_at,
+            Some(at("2026-09-15T00:00:00Z")),
+            "the cursor is the arrival date"
+        );
+        assert_eq!(
+            seen.lock().unwrap()[0].0,
+            "Bearer rk_test_good",
+            "the same credential row, sent as the bearer"
+        );
+
+        // The tenant publishes the kind: the owed reading opens the
+        // packet describe says, and the alarm closes.
+        *stub_jobs.refuse_opens.lock().unwrap() = None;
+        h.invoke(&[], &ctx_at("2026-09-17T11:05:00+00:00"))
+            .await
+            .unwrap();
+        let packets = stub_jobs.packets();
+        assert_eq!(packets.len(), 2, "{packets:#?}");
+        let p = &packets[1];
+        assert_eq!(p["kind"], "receive-a-payout");
+        assert_eq!(p["title"], "Payout: 2500.75 USD arriving 2026-09-15");
+        assert_eq!(
+            p["subject"],
+            json!({"subject_kind": "custom", "id": "po_1"})
+        );
+        assert_eq!(p["metadata"]["amount_cents"], 250_075);
+        assert_eq!(p["metadata"]["currency"], "usd");
+        assert_eq!(p["metadata"]["arrival_date"], "2026-09-15");
+        assert_eq!(p["metadata"]["stripe_payout_id"], "po_1");
+        assert_eq!(p["metadata"]["sensor_id"], "stripe-payouts");
+        assert_eq!(p["metadata"]["sensor_source"], "stripe-payouts");
+        assert_eq!(p["_actor"], "automation:sensor:stripe-payouts");
+        assert!(stub_jobs.sensors.readings().await[0].packet_id.is_some());
+        let puts = stub_jobs.writes("PUT /api/jobs/job-2/steps/job-2-triage");
+        assert_eq!(
+            puts.len(),
+            1,
+            "the alarm closed: {:?}",
+            stub_jobs.writes("PUT")
+        );
+        assert_eq!(puts[0].1["metadata"]["disposition"], "stale");
+    }
+
     /// A 5xx / 409 from the open is weather, exactly as it was: the
     /// firing NAKs, no alarm, the poll is not marked.
     #[tokio::test]

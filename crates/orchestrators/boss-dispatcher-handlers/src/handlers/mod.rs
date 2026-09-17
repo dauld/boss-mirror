@@ -58,6 +58,7 @@ pub mod sensor_poll;
 pub mod shipping_create;
 pub mod spool;
 pub mod stripe_charges;
+pub mod stripe_payouts;
 pub mod sweep_deploy_convergence;
 pub mod sweep_empty_decisions;
 pub mod webhook_notify;

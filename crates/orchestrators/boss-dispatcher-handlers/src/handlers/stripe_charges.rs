@@ -39,14 +39,28 @@
 //! session is read, and the billing name is never the roll name: the
 //! consent is the sponsor's to give, in that field, or not at all.
 //!
-//! A SESSION READ THAT FAILS IS NOT A FAILED POLL. Consent is optional;
-//! the payment is not. A 401/403 on the session listing (a restricted
-//! key without `checkout_sessions: read`) is a standing condition:
-//! named ONCE per poll — one log line, and the same
-//! [`SPONSOR_ROLL_NOTE`] on every reading it left null — and not asked
-//! again until the next poll. Any other non-2xx or transport failure
-//! is weather on that one charge: the reading carries null and a note
-//! naming the status, and the next charge is asked.
+//! THE FEE RIDES THE BALANCE TRANSACTION (backlog 21eb9516, decided
+//! by design 18cf4272). A charge states the gross; what Stripe kept
+//! and what reached the balance are on the balance transaction it
+//! created. So for every charge with a `balance_transaction`, one
+//! more read — `GET /v1/balance_transactions/<id>` — and its `fee`
+//! and `net` go onto the reading under [`FEE_CENTS`] and
+//! [`NET_CENTS`] (null when the charge has no transaction yet), and
+//! from there onto the packet, where the tenant's posting rule reads
+//! `/metadata/fee_cents` for the fee lines.
+//!
+//! A SECONDARY READ THAT FAILS IS NOT A FAILED POLL. Consent and the
+//! fee are optional; the payment is not. A 401/403 on the session
+//! listing (a restricted key without `checkout_sessions: read`) or on
+//! the transaction read (without `balance_transactions: read`) is a
+//! standing condition: named ONCE per poll — one log line, and the
+//! same note ([`SPONSOR_ROLL_NOTE`], [`BALANCE_TRANSACTION_NOTE`]) on
+//! every reading it left null — and not asked again until the next
+//! poll. The two standings are separate: a key with one scope and not
+//! the other still reads everything the scope it has allows. Any
+//! other non-2xx or transport failure is weather on that one charge:
+//! the reading carries null and a note naming the status, and the
+//! next charge is asked.
 //!
 //! ERRORS. 401 and 403 on the charges listing are UNREADABLE (the key
 //! is wrong, revoked, or lacks `charges: read`) — a standing condition
@@ -78,6 +92,19 @@ pub const SPONSOR_ROLL_FIELD: &str = "sponsor_roll_name";
 /// listing answered it (a status and the path, never the key).
 pub const SPONSOR_ROLL_NOTE: &str = "sponsor_roll_name_note";
 
+/// The fee Stripe kept on the charge, and what reached the balance
+/// (`amount - fee`), in the smallest currency unit — the keys the
+/// reading and the packet carry them under. Read from the charge's
+/// balance transaction (backlog 21eb9516): the tenant's posting rule
+/// for `finance.sponsorship.received` posts `/metadata/fee_cents` to
+/// the fee expense, so the recognize step needs the fee on the packet.
+pub const FEE_CENTS: &str = "fee_cents";
+pub const NET_CENTS: &str = "net_cents";
+
+/// On a reading whose fee could not be read: why, as the transaction
+/// read answered it (a status and the path, never the key).
+pub const BALANCE_TRANSACTION_NOTE: &str = "balance_transaction_note";
+
 pub struct StripeCharges {
     client: reqwest::Client,
     base: String,
@@ -86,18 +113,57 @@ pub struct StripeCharges {
 /// `GET /v1/charges` and `GET /v1/checkout/sessions` both list this
 /// way (Stripe API reference, "Pagination").
 #[derive(Debug, Deserialize)]
-struct ChargePage {
-    data: Vec<Json>,
+pub(crate) struct ChargePage {
+    pub(crate) data: Vec<Json>,
     #[serde(default)]
-    has_more: bool,
+    pub(crate) has_more: bool,
 }
 
-/// Why one session read gave no name.
-enum SessionMiss {
+/// Why one secondary read — the session for a consent, the balance
+/// transaction for a fee — gave nothing.
+enum Miss {
     /// 401/403: the key lacks the scope — standing for the whole poll.
     Refused(String),
     /// Anything else — this one charge's weather.
     Failed(String),
+}
+
+/// One refusal, remembered for the rest of a poll: the first 401/403
+/// a secondary read meets is logged once and carried as the note on
+/// every later reading it leaves null, and that read is not asked
+/// again until the next poll.
+#[derive(Default)]
+struct Standing(Option<String>);
+
+impl Standing {
+    /// `read` once, unless this poll already met the refusal: `Ok` is
+    /// the value (or its honest absence), `Err` the note to carry.
+    async fn ask<T, F>(&mut self, what: &str, id: &str, read: F) -> Result<Option<T>, String>
+    where
+        F: std::future::Future<Output = Result<Option<T>, Miss>>,
+    {
+        if let Some(note) = &self.0 {
+            return Err(note.clone());
+        }
+        match read.await {
+            Ok(v) => Ok(v),
+            Err(Miss::Refused(note)) => {
+                tracing::warn!(charge = %id, note = %note, "stripe: {what} unread this poll");
+                self.0 = Some(note.clone());
+                Err(note)
+            }
+            Err(Miss::Failed(note)) => Err(note),
+        }
+    }
+}
+
+/// The fee and the net of a balance transaction, as Stripe states
+/// them (`fee`, `net`; both in the smallest currency unit) — `None`
+/// when either is missing. The shape is Stripe's balance transaction
+/// object (https://docs.stripe.com/api/balance_transactions/object),
+/// pinned by the `balance_transaction` fixture in the tests below.
+pub fn fee_and_net(txn: &Json) -> Option<(i64, i64)> {
+    Some((txn.get("fee")?.as_i64()?, txn.get("net")?.as_i64()?))
 }
 
 /// The trimmed `text.value` of the custom field keyed
@@ -120,13 +186,16 @@ pub fn sponsor_roll_name(sessions: &Json) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Put the consent onto a reading's payload: the name (or null) always,
-/// the note only when a read failed.
-fn annotate(payload: &mut Json, name: Option<String>, note: Option<&str>) {
+/// Put one secondary read's result onto a reading's payload: the
+/// `fields` (or null) always, the note under `note_key` only when the
+/// read failed.
+fn annotate(payload: &mut Json, fields: &[(&str, Json)], note_key: &str, note: Option<&str>) {
     if let Some(m) = payload.as_object_mut() {
-        m.insert(SPONSOR_ROLL_FIELD.into(), json!(name));
+        for (k, v) in fields {
+            m.insert((*k).into(), v.clone());
+        }
         if let Some(n) = note {
-            m.insert(SPONSOR_ROLL_NOTE.into(), json!(n));
+            m.insert(note_key.into(), json!(n));
         }
     }
 }
@@ -181,6 +250,47 @@ impl StripeCharges {
             .map_err(|e| SourceError::Transient(format!("GET {url}: not a charge page: {e}")))
     }
 
+    /// One secondary read beside the charge — `GET {path}` with the
+    /// key as bearer — as JSON, or why not. `named` is the endpoint as
+    /// the note says it (the path without any id, so one refusal's
+    /// note reads the same on every reading it is carried by); `scope`
+    /// is the restricted-key permission a 401/403 means is missing,
+    /// and `what` is what the reading goes without.
+    async fn secondary(
+        &self,
+        key: &str,
+        path: &str,
+        named: &str,
+        query: &[(&str, &str)],
+        scope: &str,
+        what: &str,
+    ) -> Result<Json, Miss> {
+        let url = format!("{}{path}", self.base);
+        let resp = self
+            .client
+            .get(&url)
+            .bearer_auth(key)
+            .query(query)
+            .send()
+            .await
+            .map_err(|e| Miss::Failed(format!("GET {named}: {e}")))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(Miss::Refused(format!(
+                "stripe answered {status} to GET {named}: the restricted key lacks {scope}, \
+                 so {what} could not be read"
+            )));
+        }
+        if !status.is_success() {
+            return Err(Miss::Failed(format!(
+                "stripe answered {status} to GET {named}"
+            )));
+        }
+        resp.json()
+            .await
+            .map_err(|e| Miss::Failed(format!("GET {named}: not JSON: {e}")))
+    }
+
     /// The consent on the Checkout Session that produced
     /// `payment_intent` (Stripe API reference, "List all Checkout
     /// Sessions": `payment_intent` returns the one session for that
@@ -190,35 +300,39 @@ impl StripeCharges {
         &self,
         key: &str,
         payment_intent: &str,
-    ) -> Result<Option<String>, SessionMiss> {
+    ) -> Result<Option<String>, Miss> {
         let path = "/v1/checkout/sessions";
-        let url = format!("{}{path}", self.base);
-        let query = [("payment_intent", payment_intent), ("limit", "1")];
-        let resp = self
-            .client
-            .get(&url)
-            .bearer_auth(key)
-            .query(&query)
-            .send()
-            .await
-            .map_err(|e| SessionMiss::Failed(format!("GET {path}: {e}")))?;
-        let status = resp.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(SessionMiss::Refused(format!(
-                "stripe answered {status} to GET {path}: the restricted key lacks \
-                 checkout_sessions: read, so the sponsor's consent could not be read"
-            )));
-        }
-        if !status.is_success() {
-            return Err(SessionMiss::Failed(format!(
-                "stripe answered {status} to GET {path}"
-            )));
-        }
-        let listing: Json = resp
-            .json()
-            .await
-            .map_err(|e| SessionMiss::Failed(format!("GET {path}: not a session listing: {e}")))?;
+        let listing = self
+            .secondary(
+                key,
+                path,
+                path,
+                &[("payment_intent", payment_intent), ("limit", "1")],
+                "checkout_sessions: read",
+                "the sponsor's consent",
+            )
+            .await?;
         Ok(sponsor_roll_name(&listing))
+    }
+
+    /// The fee and net on the charge's balance transaction (Stripe API
+    /// reference, "Retrieve a balance transaction"). A body without
+    /// them is this charge's weather, named, not a silent zero.
+    async fn balance_transaction(&self, key: &str, id: &str) -> Result<Option<(i64, i64)>, Miss> {
+        let named = "/v1/balance_transactions";
+        let txn = self
+            .secondary(
+                key,
+                &format!("{named}/{id}"),
+                named,
+                &[],
+                "balance_transactions: read",
+                "the fee",
+            )
+            .await?;
+        fee_and_net(&txn)
+            .map(Some)
+            .ok_or_else(|| Miss::Failed(format!("GET {named}: no fee and net on {id}")))
     }
 }
 
@@ -273,9 +387,15 @@ pub fn describe_charge(charge: &Json) -> Described {
         // The sponsor's consent as `read` put it on the reading — null
         // for a reading recorded before consent was read at all.
         SPONSOR_ROLL_FIELD: charge.get(SPONSOR_ROLL_FIELD).cloned().unwrap_or(Json::Null),
+        // The fee and net as `read` put them on the reading — null for
+        // a reading recorded before the fee was read at all.
+        FEE_CENTS: charge.get(FEE_CENTS).cloned().unwrap_or(Json::Null),
+        NET_CENTS: charge.get(NET_CENTS).cloned().unwrap_or(Json::Null),
     });
-    if let Some(note) = charge.get(SPONSOR_ROLL_NOTE).filter(|n| !n.is_null()) {
-        metadata[SPONSOR_ROLL_NOTE] = note.clone();
+    for note_key in [SPONSOR_ROLL_NOTE, BALANCE_TRANSACTION_NOTE] {
+        if let Some(note) = charge.get(note_key).filter(|n| !n.is_null()) {
+            metadata[note_key] = note.clone();
+        }
     }
     Described { title, metadata }
 }
@@ -289,30 +409,66 @@ impl SensorSource for StripeCharges {
     ) -> Result<Vec<Observation>, SourceError> {
         let mut out = Vec::new();
         let mut after: Option<String> = None;
-        // The one refusal this poll has seen: named once, carried on
-        // every reading it leaves null, never asked again this read.
-        let mut refused: Option<String> = None;
+        // The one refusal each secondary read has met this poll: named
+        // once, carried on every reading it leaves null, never asked
+        // again this read. Two reads, two standings — a key with
+        // `balance_transactions: read` but not `checkout_sessions:
+        // read` still reads every fee.
+        let mut sessions = Standing::default();
+        let mut txns = Standing::default();
         for _ in 0..MAX_PAGES {
             let page = self.page(credential, since, after.as_deref()).await?;
             for charge in &page.data {
                 let Some(mut obs) = observation(charge) else {
                     continue;
                 };
-                let intent = charge.get("payment_intent").and_then(Json::as_str);
-                let (name, note) = match (intent, &refused) {
-                    (None, _) => (None, None),
-                    (Some(_), Some(note)) => (None, Some(note.clone())),
-                    (Some(pi), None) => match self.session_consent(credential, pi).await {
+                let id = obs.external_id.clone();
+                if let Some(pi) = charge.get("payment_intent").and_then(Json::as_str) {
+                    let (name, note) = match sessions
+                        .ask("consent", &id, self.session_consent(credential, pi))
+                        .await
+                    {
                         Ok(name) => (name, None),
-                        Err(SessionMiss::Refused(note)) => {
-                            tracing::warn!(charge = %obs.external_id, note = %note, "stripe: consent unread this poll");
-                            refused = Some(note.clone());
-                            (None, Some(note))
-                        }
-                        Err(SessionMiss::Failed(note)) => (None, Some(note)),
-                    },
-                };
-                annotate(&mut obs.payload, name, note.as_deref());
+                        Err(note) => (None, Some(note)),
+                    };
+                    annotate(
+                        &mut obs.payload,
+                        &[(SPONSOR_ROLL_FIELD, json!(name))],
+                        SPONSOR_ROLL_NOTE,
+                        note.as_deref(),
+                    );
+                } else {
+                    annotate(
+                        &mut obs.payload,
+                        &[(SPONSOR_ROLL_FIELD, Json::Null)],
+                        SPONSOR_ROLL_NOTE,
+                        None,
+                    );
+                }
+                if let Some(txn) = charge.get("balance_transaction").and_then(Json::as_str) {
+                    let (fee_net, note) = match txns
+                        .ask("fee", &id, self.balance_transaction(credential, txn))
+                        .await
+                    {
+                        Ok(v) => (v, None),
+                        Err(note) => (None, Some(note)),
+                    };
+                    let (fee, net) =
+                        fee_net.map_or((Json::Null, Json::Null), |(f, n)| (json!(f), json!(n)));
+                    annotate(
+                        &mut obs.payload,
+                        &[(FEE_CENTS, fee), (NET_CENTS, net)],
+                        BALANCE_TRANSACTION_NOTE,
+                        note.as_deref(),
+                    );
+                } else {
+                    annotate(
+                        &mut obs.payload,
+                        &[(FEE_CENTS, Json::Null), (NET_CENTS, Json::Null)],
+                        BALANCE_TRANSACTION_NOTE,
+                        None,
+                    );
+                }
                 out.push(obs);
             }
             let last = page
@@ -422,6 +578,67 @@ mod tests {
         json!({"object": "list", "has_more": false, "data": data})
     }
 
+    /// One balance transaction as `GET /v1/balance_transactions/{id}`
+    /// answers it, trimmed to what the adapter reads. The shape is
+    /// Stripe's API reference for the balance transaction object
+    /// (https://docs.stripe.com/api/balance_transactions/object):
+    /// `amount`, `fee` and `net` in the smallest currency unit with
+    /// `net = amount - fee`; `fee_details[]` itemises the fee; `source`
+    /// is the charge it was created by.
+    fn balance_transaction(id: &str, amount: i64, fee: i64) -> Json {
+        json!({
+            "id": id, "object": "balance_transaction", "amount": amount,
+            "available_on": 1_700_100_000, "created": 1_700_000_000, "currency": "usd",
+            "description": "Sponsorship", "exchange_rate": null, "fee": fee,
+            "fee_details": [{"amount": fee, "application": null, "currency": "usd",
+                             "description": "Stripe processing fees", "type": "stripe_fee"}],
+            "net": amount - fee, "reporting_category": "charge", "source": "ch_1",
+            "status": "available", "type": "charge"
+        })
+    }
+
+    #[test]
+    fn the_fee_and_net_are_the_transactions_fee_and_net() {
+        assert_eq!(
+            fee_and_net(&balance_transaction("txn_1", 2550, 104)),
+            Some((104, 2446))
+        );
+        assert_eq!(
+            fee_and_net(&json!({"id": "txn_1", "fee": 1})),
+            None,
+            "no net"
+        );
+        assert_eq!(
+            fee_and_net(&json!({"id": "txn_1", "net": 1})),
+            None,
+            "no fee"
+        );
+    }
+
+    #[test]
+    fn the_packet_carries_the_fee_and_net_from_the_reading_and_null_without_them() {
+        let mut c = charge("ch_1", 1, "succeeded", 2550);
+        let d = describe_charge(&c);
+        assert_eq!(
+            d.metadata[FEE_CENTS],
+            Json::Null,
+            "a reading recorded before the fee read has no key: null, not absent"
+        );
+        assert_eq!(d.metadata[NET_CENTS], Json::Null);
+        assert!(d.metadata.get(BALANCE_TRANSACTION_NOTE).is_none());
+        c[FEE_CENTS] = json!(104);
+        c[NET_CENTS] = json!(2446);
+        c[BALANCE_TRANSACTION_NOTE] = json!("x");
+        let d = describe_charge(&c);
+        assert_eq!(d.metadata[FEE_CENTS], 104);
+        assert_eq!(d.metadata[NET_CENTS], 2446);
+        assert_eq!(d.metadata[BALANCE_TRANSACTION_NOTE], "x");
+        assert_eq!(
+            d.metadata["amount_cents"], 2550,
+            "the gross is still the gross"
+        );
+    }
+
     #[test]
     fn the_sponsor_roll_name_is_the_named_custom_fields_text_trimmed() {
         let s = list(vec![session(
@@ -486,8 +703,24 @@ mod tests {
         Answer(u16),
     }
 
+    /// What the stub's `/v1/balance_transactions/{id}` answers.
+    #[derive(Clone)]
+    enum Txns {
+        /// The transaction for each id asked; an id not here is 404,
+        /// as Stripe answers an unknown id.
+        Listing(std::collections::HashMap<String, Json>),
+        /// Every transaction read answers this status.
+        Answer(u16),
+    }
+
     async fn stub_stripe(answer: u16) -> (String, Seen) {
-        let (base, charges, _) = stub_stripe_with(answer, None, Sessions::Answer(200)).await;
+        let (base, charges, _, _) = stub_stripe_with(
+            answer,
+            None,
+            Sessions::Answer(200),
+            Txns::Listing(Default::default()),
+        )
+        .await;
         (base, charges)
     }
 
@@ -496,8 +729,9 @@ mod tests {
         answer: u16,
         charges: Option<Vec<Json>>,
         sessions: Sessions,
-    ) -> (String, Seen, Seen) {
-        use axum::extract::Query;
+        txns: Txns,
+    ) -> (String, Seen, Seen, Seen) {
+        use axum::extract::{Path, Query};
         use axum::http::{HeaderMap, StatusCode};
         use axum::{Json as AxJson, Router, routing::get};
         use std::collections::HashMap;
@@ -506,6 +740,8 @@ mod tests {
         let s = seen.clone();
         let seen_sessions: Seen = Default::default();
         let ss = seen_sessions.clone();
+        let seen_txns: Seen = Default::default();
+        let st = seen_txns.clone();
         let app = Router::new()
             .route(
                 "/v1/charges",
@@ -581,11 +817,184 @@ mod tests {
                         }
                     },
                 ),
+            )
+            .route(
+                "/v1/balance_transactions/{id}",
+                get(move |headers: HeaderMap, Path(id): Path<String>| {
+                    let st = st.clone();
+                    let txns = txns.clone();
+                    async move {
+                        let auth = headers
+                            .get("authorization")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+                        let mut q = HashMap::new();
+                        q.insert("id".to_string(), id.clone());
+                        st.lock().unwrap().push((auth, q));
+                        match txns {
+                            Txns::Answer(code) => (
+                                StatusCode::from_u16(code).unwrap(),
+                                AxJson(json!({"error": {"type": "invalid_request_error",
+                                    "message": "This API key does not have the required permissions"}})),
+                            ),
+                            Txns::Listing(by_id) => match by_id.get(&id) {
+                                Some(body) => (StatusCode::OK, AxJson(body.clone())),
+                                None => (
+                                    StatusCode::NOT_FOUND,
+                                    AxJson(json!({"error": {"type": "invalid_request_error",
+                                        "message": format!("No such balance transaction: '{id}'")}})),
+                                ),
+                            },
+                        }
+                    }
+                }),
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        (format!("http://{addr}"), seen, seen_sessions)
+        (format!("http://{addr}"), seen, seen_sessions, seen_txns)
+    }
+
+    /// A charge with the `balance_transaction` its fee is read from.
+    fn settled_charge(id: &str, created: i64, txn: &str) -> Json {
+        let mut c = charge(id, created, "succeeded", 2550);
+        c["balance_transaction"] = json!(txn);
+        c
+    }
+
+    fn fee(obs: &[Observation], id: &str) -> (Json, Json, Option<Json>) {
+        let o = obs.iter().find(|o| o.external_id == id).unwrap();
+        (
+            o.payload[FEE_CENTS].clone(),
+            o.payload[NET_CENTS].clone(),
+            o.payload.get(BALANCE_TRANSACTION_NOTE).cloned(),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_charge_with_a_balance_transaction_reads_its_fee_and_net_onto_the_reading() {
+        let txns = [("txn_1", balance_transaction("txn_1", 2550, 104))]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let charges = vec![
+            settled_charge("ch_1", 1_700_000_100, "txn_1"),
+            settled_charge("ch_2", 1_700_000_200, "txn_missing"),
+            charge("ch_3", 1_700_000_300, "succeeded", 300),
+            charge("ch_4", 1_700_000_400, "pending", 400),
+        ];
+        let (base, _, _, seen) = stub_stripe_with(
+            200,
+            Some(charges),
+            Sessions::Answer(200),
+            Txns::Listing(txns),
+        )
+        .await;
+        let obs = StripeCharges::new(base)
+            .read("rk_test_good", None)
+            .await
+            .unwrap();
+        assert_eq!(obs.len(), 3, "the pending charge is still not a reading");
+        assert_eq!(
+            fee(&obs, "ch_1"),
+            (json!(104), json!(2446), None),
+            "fee and net from the transaction"
+        );
+        let (f, n, note) = fee(&obs, "ch_2");
+        assert_eq!((f, n), (Json::Null, Json::Null));
+        let note = note.unwrap();
+        let note = note.as_str().unwrap();
+        assert!(
+            note.contains("404") && note.contains("/v1/balance_transactions"),
+            "an unknown transaction is this charge's weather, named: {note}"
+        );
+        assert_eq!(
+            fee(&obs, "ch_3"),
+            (Json::Null, Json::Null, None),
+            "no balance_transaction: no read, null, no note"
+        );
+        assert_eq!(
+            obs.iter()
+                .find(|o| o.external_id == "ch_1")
+                .unwrap()
+                .payload["amount"],
+            2550,
+            "the charge rides whole beside the fee"
+        );
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen.iter()
+                .map(|(_, q)| q["id"].as_str())
+                .collect::<Vec<_>>(),
+            ["txn_1", "txn_missing"],
+            "one transaction read per charge with one, none for ch_3 / ch_4"
+        );
+        assert!(seen.iter().all(|(auth, _)| auth == "Bearer rk_test_good"));
+    }
+
+    #[tokio::test]
+    async fn a_refused_transaction_read_is_still_a_reading_with_a_note_once_per_poll() {
+        let charges = vec![
+            settled_charge("ch_1", 1_700_000_100, "txn_1"),
+            settled_charge("ch_2", 1_700_000_200, "txn_2"),
+            charge("ch_3", 1_700_000_300, "succeeded", 300),
+        ];
+        let (base, _, _, seen) =
+            stub_stripe_with(200, Some(charges), Sessions::Answer(200), Txns::Answer(403)).await;
+        let obs = StripeCharges::new(base)
+            .read("rk_test_good", None)
+            .await
+            .expect("the fee is optional; the payment is not");
+        assert_eq!(obs.len(), 3);
+        let (f, n, note) = fee(&obs, "ch_1");
+        assert_eq!((f, n), (Json::Null, Json::Null));
+        let note = note.unwrap();
+        let note = note.as_str().unwrap();
+        assert!(
+            note.contains("403") && note.contains("/v1/balance_transactions"),
+            "{note}"
+        );
+        assert!(note.contains("balance_transactions: read"), "{note}");
+        assert!(!note.contains("rk_test_good"), "{note}");
+        assert_eq!(
+            fee(&obs, "ch_2"),
+            (Json::Null, Json::Null, Some(json!(note))),
+            "the same note on each"
+        );
+        assert_eq!(
+            fee(&obs, "ch_3"),
+            (Json::Null, Json::Null, None),
+            "no transaction: nothing was refused"
+        );
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "a refusal is standing: named once, the rest of the poll does not ask again"
+        );
+    }
+
+    #[tokio::test]
+    async fn any_other_failed_transaction_read_notes_the_status_and_keeps_the_reading() {
+        let charges = vec![
+            settled_charge("ch_1", 1_700_000_100, "txn_1"),
+            settled_charge("ch_2", 1_700_000_200, "txn_2"),
+        ];
+        let (base, _, _, seen) =
+            stub_stripe_with(200, Some(charges), Sessions::Answer(200), Txns::Answer(503)).await;
+        let obs = StripeCharges::new(base)
+            .read("rk_test_good", None)
+            .await
+            .unwrap();
+        assert_eq!(obs.len(), 2);
+        let (f, _, note) = fee(&obs, "ch_1");
+        assert_eq!(f, Json::Null);
+        assert!(note.unwrap().as_str().unwrap().contains("503"));
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            2,
+            "weather is not a refusal: the next charge is asked"
+        );
     }
 
     fn roll(obs: &[Observation], id: &str) -> (Json, Option<Json>) {
@@ -636,8 +1045,13 @@ mod tests {
             charge("ch_5", 1_700_000_500, "succeeded", 500),
             charge("ch_6", 1_700_000_600, "pending", 600),
         ];
-        let (base, _, seen) =
-            stub_stripe_with(200, Some(charges), Sessions::Listing(sessions)).await;
+        let (base, _, seen, _) = stub_stripe_with(
+            200,
+            Some(charges),
+            Sessions::Listing(sessions),
+            Txns::Listing(Default::default()),
+        )
+        .await;
         let obs = StripeCharges::new(base)
             .read("rk_test_good", None)
             .await
@@ -693,7 +1107,13 @@ mod tests {
             paid_charge("ch_2", 1_700_000_200, "pi_2"),
             charge("ch_3", 1_700_000_300, "succeeded", 300),
         ];
-        let (base, _, seen) = stub_stripe_with(200, Some(charges), Sessions::Answer(403)).await;
+        let (base, _, seen, _) = stub_stripe_with(
+            200,
+            Some(charges),
+            Sessions::Answer(403),
+            Txns::Listing(Default::default()),
+        )
+        .await;
         let obs = StripeCharges::new(base)
             .read("rk_test_good", None)
             .await
@@ -731,7 +1151,13 @@ mod tests {
             paid_charge("ch_1", 1_700_000_100, "pi_1"),
             paid_charge("ch_2", 1_700_000_200, "pi_2"),
         ];
-        let (base, _, seen) = stub_stripe_with(200, Some(charges), Sessions::Answer(503)).await;
+        let (base, _, seen, _) = stub_stripe_with(
+            200,
+            Some(charges),
+            Sessions::Answer(503),
+            Txns::Listing(Default::default()),
+        )
+        .await;
         let obs = StripeCharges::new(base)
             .read("rk_test_good", None)
             .await

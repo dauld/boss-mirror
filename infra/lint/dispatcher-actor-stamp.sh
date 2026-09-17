@@ -42,12 +42,13 @@ ASSIGNMENT=crates/core/boss-dispatcher/src
 #   actor or sim-origin to present. The broker HANDLER's jobs-api
 #   calls live in credential_rotate_forgejo.rs, which stays covered.
 #
-#   stripe_charges.rs — the first sensor's EXTERNAL adapter (design
-#   14c9b2ad, 2026-09-17): Stripe's API, authenticated by the
-#   restricted read-only key as a bearer. Not a BOSS service. The
-#   sensor HANDLER's jobs-api calls live in sensor_poll.rs, which
-#   stays covered.
-ALLOW="webhook_notify.rs credential_issuer.rs stripe_charges.rs"
+#   stripe_charges.rs, stripe_payouts.rs — the sensor's EXTERNAL
+#   adapters (design 14c9b2ad, 2026-09-17; the payouts source from
+#   backlog 21eb9516): Stripe's API, authenticated by the restricted
+#   read-only key as a bearer. Not a BOSS service. The sensor
+#   HANDLER's jobs-api calls live in sensor_poll.rs, which stays
+#   covered.
+ALLOW="webhook_notify.rs credential_issuer.rs stripe_charges.rs stripe_payouts.rs"
 
 failures=""
 
