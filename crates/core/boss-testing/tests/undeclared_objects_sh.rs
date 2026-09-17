@@ -395,6 +395,65 @@ fn list_names_a_genuine_orphan_on_stdout() {
     );
 }
 
+/// The converge GENERATES ConfigMap/<ns>/boss-tenant for every
+/// repo-sourced instance (instances.toml `tenant_repo`, f4f5c387). No
+/// manifest declares it and it is absent whenever that instance was
+/// skipped, so it is exempt WHEN PRESENT and never stale when absent —
+/// derived from the instance list, not typed into $EXEMPT. Measured
+/// 2026-09-16 23:55Z: the first converge after the prod flip rolled prod
+/// and then failed its own orphan check on exactly this object (d7d23650).
+#[test]
+fn a_repo_sourced_instances_delivered_tenant_is_exempt_by_derivation_and_never_stale() {
+    let c = Case::new(
+        "derived-tenant",
+        &[("ConfigMap", "boss", "boss-tenant", "")],
+    );
+    // Without an instance list the object is an orphan: nothing derives it.
+    let (rc, stdout, all) = c.run(&["--list"]);
+    assert_eq!(rc, 0, "{all}");
+    assert_eq!(stdout.trim(), "ConfigMap\tboss\tboss-tenant", "{all}");
+    let (rc, derived, _) = c.run(&["--exemptions-derived"]);
+    assert_eq!(
+        (rc, derived.trim()),
+        (0, ""),
+        "no instance list, nothing derived"
+    );
+
+    // With prod declared repo-sourced and the playground image-sourced,
+    // exactly prod's delivered ConfigMap is derived — and the object
+    // reads clean.
+    std::fs::write(
+        c.tree.join("infra/cluster/instances.toml"),
+        "source = \"prod\"\n\n[prod]\nnamespace = \"boss\"\ntenant_repo = \"david/algedonic-llc\"\ntenant_ref = \"main\"\nsim = false\nhostname = \"h.example\"\nguest = false\n\n[playground]\nnamespace = \"boss-playground\"\ntenant_dir = \"examples/brewery\"\nsim = true\nhostname = \"p.example\"\nguest = true\n",
+    )
+    .unwrap();
+    let (rc, derived, all) = c.run(&["--exemptions-derived"]);
+    assert_eq!(rc, 0, "{all}");
+    assert_eq!(derived.trim(), "ConfigMap/boss/boss-tenant");
+    let (rc, hand, _) = c.run(&["--exemptions"]);
+    assert_eq!(rc, 0);
+    assert!(
+        !hand.contains("boss-tenant"),
+        "a derived exemption is not a hand entry, so the lint's stale check never asks the \
+         cluster for it: {hand}"
+    );
+    let (rc, stdout, all) = c.run(&["--list"]);
+    assert_eq!(rc, 0, "{all}");
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "the delivered tenant is not an orphan:\n{all}"
+    );
+    // Only the repo-sourced instance derives one: the image-sourced
+    // playground is not in the derived list (a boss-tenant there would
+    // be an orphan in a tree that manages its namespace).
+    assert_eq!(
+        derived.lines().count(),
+        1,
+        "one derived exemption, prod's: {derived}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // A manifest that will not parse. The defect this file was written for.
 // ---------------------------------------------------------------------------

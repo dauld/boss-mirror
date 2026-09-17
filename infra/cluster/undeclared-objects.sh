@@ -106,6 +106,10 @@
 #       exit 4 when any manifest would not parse: a declared set missing
 #       a file is not a smaller declared set, it is no answer.
 #   undeclared-objects.sh --exemptions
+#   undeclared-objects.sh --exemptions-derived
+#       the generated per-instance objects (ConfigMap/<ns>/boss-tenant
+#       for every tenant_repo instance in instances.toml) — exempt when
+#       present, never stale when absent
 #       the exemption entries, as `Kind/ns/name` or `Kind/name`.
 #   undeclared-objects.sh --kubectl
 #       the resolved kubectl argv, so a caller needing its own kubectl
@@ -189,6 +193,31 @@ EXEMPT=(
     # the gate Job cannot run run.sh out of the clone it is about to make.
     "ConfigMap/boss-dev/gate-runner-script"
 )
+
+# DERIVED EXEMPTIONS — the objects the converge GENERATES per instance,
+# read off the instance list rather than typed here. A repo-sourced
+# instance (`tenant_repo` in infra/cluster/instances.toml, f4f5c387)
+# gets its tenant delivered as ConfigMap/<namespace>/boss-tenant; no
+# manifest declares it, and it is absent whenever the converge skipped
+# that instance (its source unreadable), so unlike $EXEMPT above it is
+# exempt WHEN PRESENT and never stale when absent. Measured 2026-09-16
+# 23:55Z: the first converge after the prod flip applied and rolled prod,
+# then failed its own orphan check on ConfigMap/boss/boss-tenant
+# (d7d23650) — a hand entry could not be added earlier because the lint
+# refuses an exemption for an object the cluster does not hold yet. Read
+# with awk the way render-instance.sh reads the file (one key per line).
+derived_exemptions() {
+    local f="$TREE/infra/cluster/instances.toml"
+    [ -f "$f" ] || return 0
+    awk '
+        function flush() { if (ns != "" && repo != "") print "ConfigMap/" ns "/boss-tenant"; ns = ""; repo = "" }
+        /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+        /^\[/ { flush(); next }
+        $1 == "namespace"   { sub(/^[^=]*=[[:space:]]*/, ""); gsub(/"/, ""); ns = $0; next }
+        $1 == "tenant_repo" { sub(/^[^=]*=[[:space:]]*/, ""); gsub(/"/, ""); repo = $0; next }
+        END { flush() }
+    ' "$f"
+}
 
 # --- the kubectl this run uses ---------------------------------------------
 # ONE resolution, shared with callers through `--kubectl`, because a
@@ -293,7 +322,7 @@ PY
 }
 
 case "${1:-}" in
-    --list|--declared|--exemptions|--kubectl) MODE="$1" ;;
+    --list|--declared|--exemptions|--exemptions-derived|--kubectl) MODE="$1" ;;
     --objects-of)
         MODE="--objects-of"
         TARGET="${2:-}"
@@ -306,7 +335,7 @@ case "${1:-}" in
         [ -n "$TARGET" ] || { say "--check needs <Kind>/<namespace>/<name>"; exit 1; }
         ;;
     *)
-        say "usage: $ME --list | --check <Kind>/<ns>/<name> | --declared | --exemptions | --kubectl | --objects-of <json>"
+        say "usage: $ME --list | --check <Kind>/<ns>/<name> | --declared | --exemptions | --exemptions-derived | --kubectl | --objects-of <json>"
         exit 1
         ;;
 esac
@@ -323,6 +352,10 @@ fi
 
 if [ "$MODE" = "--exemptions" ]; then
     printf '%s\n' "${EXEMPT_ANY_NS[@]}" "${EXEMPT[@]}"
+    exit 0
+fi
+if [ "$MODE" = "--exemptions-derived" ]; then
+    derived_exemptions
     exit 0
 fi
 
@@ -413,8 +446,12 @@ is_exempt() { # kind ns name
     for e in ${EXEMPT+"${EXEMPT[@]}"}; do
         [ "$e" = "$1/$2/$3" ] && return 0
     done
+    for e in $DERIVED_EXEMPT; do
+        [ "$e" = "$1/$2/$3" ] && return 0
+    done
     return 1
 }
+DERIVED_EXEMPT=$(derived_exemptions)
 
 is_excluded_kind() { # kind
     local k

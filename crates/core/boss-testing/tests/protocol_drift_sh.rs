@@ -28,6 +28,8 @@ use std::process::{Child, Command, Stdio};
 
 const DRIFTED_KIND: &str = "backlog-item";
 const LIVE_ONLY_KIND: &str = "zeta-live-only";
+/// A kind a delivered tenant admitted, owned by that tenant (see registry_fixture).
+const DELIVERED_TENANT_KIND: &str = "receive-a-sponsorship";
 const JOB_ID: &str = "0123456789abcdef";
 
 /// "I could not answer." `infra/lint/lib/git-answer.sh` carries the
@@ -169,6 +171,20 @@ fn registry_fixture() -> (String, usize) {
         "owning_team": "platform",
         "description": "Published live through POST /api/workflows and never written back."
     }));
+    // A DELIVERED TENANT'S protocol (2026-09-17): admitted by `boss
+    // tenant publish` with the tenant's own owning_team, authored in the
+    // tenant's repo the tree declares as prod's source (instances.toml
+    // tenant_repo). Not unauthored — a team this tree authors nothing
+    // for, on a tree with a repo-sourced instance, is that tenant's.
+    rows.push(serde_json::json!({
+        "kind": DELIVERED_TENANT_KIND,
+        "version": 1,
+        "status": "active",
+        "label": "Receive a sponsorship",
+        "category": "sales",
+        "owning_team": "algedonic",
+        "description": "Authored in david/algedonic-llc seeds/workflows.toml, delivered as the boss-tenant ConfigMap."
+    }));
     (serde_json::to_string(&rows).unwrap(), files.len())
 }
 
@@ -307,8 +323,8 @@ fn file_patches_measured_and_drift_onto_the_open_packet() {
     );
     assert_eq!(
         m["live_admitted"].as_u64(),
-        Some(bundle_files as u64 + 1),
-        "every bundle kind plus the live-only one: {m}"
+        Some(bundle_files as u64 + 2),
+        "every bundle kind, the live-only one and the delivered tenant's: {m}"
     );
     assert_eq!(
         m["fields_compared"].as_u64(),
@@ -392,9 +408,20 @@ fn row_prints_the_measurement_and_files_nothing() {
     let row: serde_json::Value = serde_json::from_str(&out).expect("row prints JSON");
     assert_eq!(
         row["drift"]["unauthored"],
-        serde_json::json!([LIVE_ONLY_KIND])
+        serde_json::json!([LIVE_ONLY_KIND]),
+        "the platform kind nobody wrote down is unauthored; the delivered tenant's kind \
+         ({DELIVERED_TENANT_KIND}, owning_team algedonic, prod's tenant_repo) is not"
     );
     assert_eq!(row["drift"]["fields"].as_array().map(Vec::len), Some(1));
+    assert!(
+        !row["drift"]["unauthored"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k == DELIVERED_TENANT_KIND),
+        "the delivered tenant's kind is not unauthored: {}",
+        row["drift"]
+    );
     assert!(
         stub.patches().is_empty(),
         "row filed something:\n{}",

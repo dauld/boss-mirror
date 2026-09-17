@@ -1050,11 +1050,46 @@ wrong surface, or an error body; either way nothing read the registry"
     *) skip "could not read kinds from the response" ;;
 esac
 
+# A DELIVERED TENANT'S PROTOCOLS ARE AUTHORED — IN THAT TENANT'S REPO.
+# Since 2026-09-16 (the prod flip, f4f5c387 + ee7b62bb) an instance may
+# take its tenant from a repo the converge checks out (instances.toml
+# `tenant_repo`), and `boss tenant publish` admits that tenant's
+# workflows.toml with `owning_team = <its tenant_id>`. Those rows have a
+# file, a diff and a second reader — in the tenant's own repository,
+# which this tree does not carry and must not (business specifics never
+# enter the product repo: fcc1d57b). Measured 2026-09-17 00:0xZ, the
+# first pre-flight after the flip: `receive-a-sponsorship`
+# (owning_team algedonic) read UNAUTHORED and would have reddened every
+# gate. So when the tree declares at least one repo-sourced instance, a
+# live kind whose owning_team names no team this tree authors for is
+# read as that tenant's, not as unauthored; it is listed, never
+# silently passed. A tree with no repo-sourced instance keeps the old
+# reading in full.
+repo_tenants=$(awk '/^[[:space:]]*#/ { next } $1 == "tenant_repo" { sub(/^[^=]*=[[:space:]]*/, ""); gsub(/"/, ""); print }' infra/cluster/instances.toml 2>/dev/null | LC_ALL=C sort -u)
+delivered_tenant_kinds=""
+if [ -n "$repo_tenants" ]; then
+    delivered_tenant_kinds=$(python3 - "$body" <(printf '%s\n' "$authored") <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+rows = doc.get("workflows") if isinstance(doc, dict) else doc
+authored = set(l.strip() for l in open(sys.argv[2]) if l.strip())
+rows = [r for r in rows if r.get("status", "active") == "active" and "kind" in r]
+tree_teams = {r.get("owning_team") for r in rows if r["kind"] in authored}
+print("\n".join(sorted(r["kind"] for r in rows if r["kind"] not in authored and r.get("owning_team") and r.get("owning_team") not in tree_teams)))
+PY
+)
+fi
+
 unauthored=$(
     LC_ALL=C comm -23 <(printf '%s\n' "$live_kinds") <(printf '%s\n' "$authored") \
         | { if [ ${#EXEMPT[@]} -gt 0 ]; then LC_ALL=C grep -vxF -f <(printf '%s\n' "${EXEMPT[@]}"); else cat; fi; } \
+        | { if [ -n "$delivered_tenant_kinds" ]; then LC_ALL=C grep -vxF -f <(printf '%s\n' "$delivered_tenant_kinds"); else cat; fi; } \
         | LC_ALL=C sed '/^$/d'
 )
+if [ -n "$delivered_tenant_kinds" ]; then
+    n=$(printf '%s\n' "$delivered_tenant_kinds" | wc -l | tr -d ' ')
+    echo "$NAME: $n kind(s) authored by a delivered tenant (instances.toml tenant_repo: $(printf '%s' "$repo_tenants" | tr '\n' ' ')), read from the tenant's own repo, not this tree: $(printf '%s' "$delivered_tenant_kinds" | tr '\n' ' ')"
+fi
 
 # A stale exemption in the other direction: named here, not admitted
 # live. Same reason as the authored check above — it would excuse a
