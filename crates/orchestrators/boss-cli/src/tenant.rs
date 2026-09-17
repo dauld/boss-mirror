@@ -196,8 +196,9 @@ pub const CONTRACT: &[Entry] = &[
                   a push-only source is never due — the gateway's site surface records one \
                   `www-visits` reading per page view through POST /api/sensors/{id}/readings \
                   (backlog 0b5c5081)",
-        shape: "`[[sensor]]` rows: id, source (`stripe` polled; `site` push-only), credential (a \
-                `credentials` registry id; none on a push-only source), every_minutes (none on a \
+        shape: "`[[sensor]]` rows: id, source (`stripe` for succeeded charges and `stripe-payouts` \
+                for paid payouts, both polled on the same credential; `site` push-only), credential \
+                (a `credentials` registry id; none on a push-only source), every_minutes (none on a \
                 push-only source), opens (the workflow kind one reading opens), subject_kind, \
                 enabled? — validated by `boss_jobs::sensors::load_sensors_toml`",
         parse: parse_sensors,

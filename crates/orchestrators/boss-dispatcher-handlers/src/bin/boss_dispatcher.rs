@@ -63,6 +63,7 @@ use boss_dispatcher_handlers::handlers::{
     sensor_poll::{CredentialValues, SensorPoll, SensorSource},
     shipping_create::ShippingCreate,
     stripe_charges::StripeCharges,
+    stripe_payouts::StripePayouts,
     sweep_empty_decisions::MaintenanceSweepInspect,
     webhook_notify::WebhookNotify,
 };
@@ -484,13 +485,19 @@ async fn main() -> Result<()> {
             // read-only key from the broker's root Secret — recording
             // readings outside the audit log and opening the declared
             // packet per new one. An absent key is an alarm naming the
-            // env var, not a silent skip.
+            // env var, not a silent skip. The second source (backlog
+            // 21eb9516) reads the same account's paid payouts with the
+            // same key; a sensor row picks one by its `source`.
             {
                 let mut sources: std::collections::HashMap<String, Arc<dyn SensorSource>> =
                     std::collections::HashMap::new();
                 sources.insert(
                     "stripe".to_string(),
                     Arc::new(StripeCharges::new(cfg.stripe_api_base.clone())),
+                );
+                sources.insert(
+                    "stripe-payouts".to_string(),
+                    Arc::new(StripePayouts::new(cfg.stripe_api_base.clone())),
                 );
                 handlers.register(SensorPoll::new(
                     cfg.jobs_api_url.clone(),
