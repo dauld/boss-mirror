@@ -624,7 +624,7 @@ fn the_runner_records_the_connector_on_the_packet_after_the_roll() {
 /// The runner's `instances_skipped` field as the apply loop builds it —
 /// the ONE string the packet carries, the manifests check is handed,
 /// and now the renderer reads (one definition, three readers).
-const SKIPPED: &str = "boss-playground (secrets absent: boss-secrets, boss-tls)";
+const SKIPPED: &str = "boss-playground (secrets absent: boss-secrets, boss-oidc)";
 const SOURCE_GATEWAY: &str = "http://boss-gateway.boss.svc.cluster.local:80";
 const SKIP_COMMENT: &str =
     "# [playground] skipped: secrets absent — served by boss until provisioned";
@@ -725,7 +725,7 @@ fn the_source_cannot_be_skipped_and_the_committed_file_is_never_the_skip_render(
     let (rc, _, err) = run_render_env(
         &repo_root(),
         &[],
-        &[("BOSS_INSTANCES_SKIPPED", "boss (secrets absent: boss-tls)")],
+        &[("BOSS_INSTANCES_SKIPPED", "boss (secrets absent: boss-oidc)")],
     );
     assert_eq!(rc, REFUSED, "{err}");
     assert!(err.contains("source") && err.contains("[prod]"), "{err}");

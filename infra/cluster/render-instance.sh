@@ -28,7 +28,7 @@
 # current cluster, and both prod (namespace boss) and the playground
 # converge on every train. Every manifest under infra/cluster/manifests/
 # hard-codes `namespace: boss`, one tenant path, BOSS_SIM_ENABLED=false
-# and one TLS-front hostname. A second namespace as a second copy of the
+# and one public hostname. A second namespace as a second copy of the
 # YAML is the pair CLAUDE.md §9a bans — twenty-one files that would
 # drift on the first car that edits one directory and not the other.
 #
@@ -46,8 +46,8 @@
 #   * `namespace: <source>` on every object, and the Namespace object's
 #     own name;
 #   * `.<source>.svc.cluster.local` — the in-cluster DNS names by which
-#     the chores reach the instance's jobs door and the TLS front reaches
-#     the instance's gateway;
+#     the chores reach the instance's jobs door and the tunnel connector
+#     reaches the instance's gateway;
 #   * the tenant directory under /opt/boss/ — BOSS_TENANT_DIR on the boss
 #     container (backlog f4f5c387): /opt/boss/<tenant_dir> for a
 #     directory the image ships, /opt/boss/tenant for a `tenant_repo`
@@ -58,7 +58,9 @@
 #     reads (backlog 0d2d7daa, 2026-09-16: anonymous read-only sessions
 #     are right for the public example and wrong for the operating
 #     company's site, so each instance says);
-#   * the TLS front's hostname, everywhere the source's appears;
+#   * the public hostname (BOSS_PUBLIC_URL — since 21c17ebc, 2026-09-17,
+#     there is no TLS front: Cloudflare terminates TLS at the edge and
+#     the tunnel proxies to the gateway), everywhere the source's appears;
 #   * and the LoadBalancer IP pins (io.cilium/lb-ipam-ips,
 #     metallb.universe.tf/loadBalancerIPs, spec.loadBalancerIP) are
 #     COMMENTED OUT — only one Service on the LAN can hold an address,
@@ -244,7 +246,7 @@ guest_of() {
     printf '%s\n' "$v"
 }
 check_hostname() {
-    [[ "$1" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]] || refuse "hostname \`$1\`: a TLS-front hostname is a lowercase DNS name with at least one dot"
+    [[ "$1" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]] || refuse "hostname \`$1\`: a public hostname is a lowercase DNS name with at least one dot"
 }
 # shares_with_ns <section> — the namespace of the instance <section>
 # declares `shares_with`, empty when it declares none. The converge
@@ -290,7 +292,7 @@ load_source() {
     grep -qF -- "BOSS_GUEST_ACCESS, value: \"$(guest_value "$SRC_GUEST")\"" "${files[@]}" \
         || refuse "source guest \`$SRC_GUEST\` is not the BOSS_GUEST_ACCESS value (\"$(guest_value "$SRC_GUEST")\") in the instance manifests — ${INSTANCES#"$TREE"/} [$SRC] has drifted from the files"
     grep -qF -- "$SRC_HOST" "${files[@]}" \
-        || refuse "source hostname \`$SRC_HOST\` appears in no instance manifest — ${INSTANCES#"$TREE"/} [$SRC] has drifted from the files (the TLS front's vhost is what it must be)"
+        || refuse "source hostname \`$SRC_HOST\` appears in no instance manifest — ${INSTANCES#"$TREE"/} [$SRC] has drifted from the files (BOSS_PUBLIC_URL is what it must be)"
 }
 
 re_escape() { printf '%s' "$1" | sed -e 's,[][\.*^$/|],\\&,g'; }

@@ -70,8 +70,6 @@ EXEMPT=(
     "boss-dev.yaml	part (3) of 5234cda4, and it is worse than the hard set: the dev container needs SETGID/SETUID for the ssh door, so it can never reach drop-ALL — only baseline compliance. A car editing this file rolls the dev pod on converge and ends the live operator session, so it lands only at a David-timed restart (boss-dev-manifest-cars-restart-the-session)."
     "boss.yaml	holds THREE workloads with three different answers: the SoR postgres StatefulSet (the gate-runner car had to read /proc to establish postgres runs as 999), the nats StatefulSet, and the SoR app Deployment whose strategy is Recreate — so any roll of it is a full outage of :7900. Carries fsGroup: 1500 today, which is the volume half of the answer and not the user half. One car each, measured."
     "boss-backup.yaml	the documented trap: its ship-key is defaultMode 0400 and only ever succeeded because the pod runs as root, so runAsNonRoot breaks the offsite leg and reports it as an SSH failure. Also carries a postgres container and a google/cloud-sdk container, each with its own uid answer."
-    "boss-tls.yaml	goacme/lego writes ACME account + certificate material, and alpine/k8s shells kubectl; neither uid has been measured."
-    "boss-tls-front.yaml	caddy:2.8-alpine, whose data/config dir uid has not been measured."
     "boss-estate-observe.yaml	alpine/k8s, uid unmeasured — and a separate car is holding this file, so declaring it here would collide rather than land."
 )
 

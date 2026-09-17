@@ -38,7 +38,7 @@ const RUN_SUMMARY: &str = "infra/run-summary.sh";
 
 /// The runner's `instances_skipped` field as the loop builds it — the
 /// one string the packet carries and the check is handed.
-const SKIPPED: &str = "boss-playground (secrets absent: boss-secrets, boss-tls)";
+const SKIPPED: &str = "boss-playground (secrets absent: boss-secrets, boss-oidc)";
 
 /// A fixture tree the renderer accepts (source prod + a playground, two
 /// instance manifests, one pipeline manifest), plus a stub kubectl that
@@ -61,7 +61,8 @@ impl Case {
         write_file(&tree.join("examples/fixture/seeds/tenant.toml"), "");
         // The source values the renderer checks the files for: the
         // namespace, the tenant path, the sim flag, the guest flag
-        // (0d2d7daa) and the hostname.
+        // (0d2d7daa) and the hostname (BOSS_PUBLIC_URL — the one place
+        // it appears since the TLS front left, 21c17ebc).
         write_file(
             &dir.join("boss.yaml"),
             "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: boss\n---\n\
@@ -70,12 +71,12 @@ impl Case {
              \x20       - {name: BOSS_SIM_ENABLED, value: \"false\"}\n\
              \x20       - {name: BOSS_GUEST_ACCESS, value: \"1\"}\n\
              \x20       - {name: BOSS_TENANT_DIR, value: /opt/boss/examples/fixture}\n\
+             \x20       - {name: BOSS_PUBLIC_URL, value: \"https://boss.algedonic.dev\"}\n\
              ---\napiVersion: v1\nkind: Service\nmetadata:\n  name: boss-gateway\n  namespace: boss\n",
         );
         write_file(
-            &dir.join("boss-tls-front.yaml"),
-            "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: boss-tls-front\n  namespace: boss\n\
-             spec:\n  template:\n    spec:\n      containers:\n      - name: caddy\n        args: [boss.algedonic.dev]\n",
+            &dir.join("boss-jobs-internal.yaml"),
+            "apiVersion: v1\nkind: Service\nmetadata:\n  name: boss-jobs-internal\n  namespace: boss\n",
         );
         write_file(
             &dir.join("boss-conductor.yaml"),
@@ -83,7 +84,7 @@ impl Case {
         );
         write_file(
             &tree.join("infra/cluster/instance-manifests.txt"),
-            "boss.yaml instance\nboss-tls-front.yaml instance\nboss-conductor.yaml pipeline\n",
+            "boss.yaml instance\nboss-jobs-internal.yaml instance\nboss-conductor.yaml pipeline\n",
         );
         write_file(
             &tree.join("infra/cluster/instances.toml"),
@@ -138,7 +139,7 @@ exit 0
             v.push(format!("Namespace/{ns}/"));
             v.push(format!("Deployment/boss/{ns}"));
             v.push(format!("Service/boss-gateway/{ns}"));
-            v.push(format!("Deployment/boss-tls-front/{ns}"));
+            v.push(format!("Service/boss-jobs-internal/{ns}"));
         }
         v
     }

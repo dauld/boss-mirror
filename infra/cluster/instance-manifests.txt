@@ -9,7 +9,7 @@
 # `instance` manifest once per entry in infra/cluster/instances.toml —
 # the directory IS the prod instance, and an instance is that directory
 # with four parameters substituted (namespace, tenant manifest, sim
-# flag, TLS-front hostname) plus the namespace-scoped DNS names — and it
+# flag, public hostname) plus the namespace-scoped DNS names — and it
 # copies every `pipeline` manifest once, as written, into prod's render.
 # A manifest in the directory that this file does not classify REFUSES
 # the render, by name; so does an entry here with no file behind it, or
@@ -24,16 +24,17 @@
 # that gets flipped by the next person who reads only the table.
 #
 # WHAT `instance` MEANS. The object holds state or serves traffic for ONE
-# BOSS instance: its Postgres and NATS, the boss Deployment and its
-# Services, the TLS front on its hostname, and the chores that maintain
-# ITS database and open their packets on ITS jobs door. Rendered per
+# BOSS instance: its Postgres and NATS, the boss Deployment (carrying
+# its public hostname as BOSS_PUBLIC_URL) and its Services, and the
+# chores that maintain ITS database and open their packets on ITS jobs
+# door. Rendered per
 # instance; each instance gets its own PVCs through the StatefulSets'
 # volumeClaimTemplates and its own PersistentVolumeClaims.
 #
 # WHAT `pipeline` MEANS. The object runs the trains and gates, or is
 # pinned to prod for a stated reason: it exists exactly once, in prod,
 # exactly as the file says. The conductor, the dev pod and its access,
-# the credential broker, the gate seed, break-glass — and three
+# the credential broker, the gate seed, break-glass — and two
 # instance-SHAPED objects held back for the reasons on their lines.
 
 # --- instance: rendered once per entry in instances.toml ----------------
@@ -52,12 +53,16 @@ boss-jobs-internal.yaml instance
 boss-clock-internal.yaml instance
 boss-dispatcher-internal.yaml instance
 
-# Caddy terminating the instance's hostname (the 4th parameter) and
-# proxying to the instance's own gateway. Its `boss-tls` Secret is
-# minted out of band per namespace (README: secrets never live here);
-# until it exists the front's pod waits, and the instance is reachable
-# through the gateway Service only.
-boss-tls-front.yaml instance
+# There is no TLS front per instance. Until 2026-09-17 boss-tls-front.yaml
+# (Caddy terminating the instance's hostname with a lego-issued
+# `boss-tls` Secret) was rendered here, and every instance whose
+# namespace lacked that Secret was SKIPPED on every converge — the
+# playground, from the day it was declared. Let's Encrypt left the
+# cluster with backlog 21c17ebc (design 4c565f8c, David 2026-09-16):
+# Cloudflare terminates TLS at the edge and the tunnel connector
+# (cloudflared.yaml, a pipeline manifest below) proxies each instance's
+# hostname straight to its gateway Service in plain HTTP. The hostname
+# parameter now lands only on the boss Deployment's BOSS_PUBLIC_URL.
 
 # The chores: each reads DATABASE_URL from the namespace's boss-secrets
 # and opens its packet on the namespace's boss-jobs-internal, so each
@@ -113,10 +118,3 @@ boss-estate-observe.yaml pipeline
 # reproducible from examples/brewery/seeds plus the sim. A per-instance
 # backup that names its dumps by instance is its own car.
 boss-backup.yaml pipeline
-#
-# boss-tls: one-shot Jobs in the cert-manager namespace — a Cloudflare
-# A record for `boss` and a lego certificate for boss.algedonic.dev,
-# published as the `boss-tls` Secret. The Jobs' names would collide in
-# cert-manager on a second render, and the playground's DNS record and
-# certificate are David's DNS going live (car 2), not a converge's.
-boss-tls.yaml pipeline

@@ -67,8 +67,9 @@ zone = "algedonic.dev"
 # the production gateway, which is why the flip waited, and why it now
 # rides an interlock instead of a hand. That Job is one-shot and
 # completed; re-run, its A upsert would be refused by Cloudflare (a
-# CNAME shares its name with nothing), and 974d2015 retires it with
-# the Let's Encrypt path once boss. answers through the edge.
+# CNAME shares its name with nothing), and it left the tree with the
+# whole Let's Encrypt path on 2026-09-17 (backlog 21c17ebc), once
+# boss. answered through the edge (this record read MATCH).
 [[record]]
 name = "boss.algedonic.dev"
 type = "CNAME"

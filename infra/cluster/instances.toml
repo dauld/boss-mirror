@@ -20,10 +20,10 @@
 # say: the renderer refuses a source value it cannot find in the
 # instance manifests, because a prod entry that drifted from the files
 # would turn every other instance's substitution into a no-op that
-# answers instead of erroring. When prod's TLS front moves to
-# www.algedonic.dev (car 2, after David's DNS), the file and this line
-# change together, and the byte-identity test in
-# crates/core/boss-testing/tests/render_instance_sh.rs holds them equal.
+# answers instead of erroring. When prod's hostname moves (www, say),
+# boss.yaml's BOSS_PUBLIC_URL and this line change together, and the
+# byte-identity test in crates/core/boss-testing/tests/render_instance_sh.rs
+# holds them equal.
 #
 # THE FIVE PARAMETERS
 #   namespace  the Kubernetes namespace; `boss` or `boss-<name>`. boss-dev
@@ -35,9 +35,11 @@
 #   sim        BOSS_SIM_ENABLED — whether the tenant's tick daemon
 #              generates packets. Parked on prod 2026-09-05 (packet
 #              59f063de); the playground is where it runs from now.
-#   hostname   the TLS front's vhost (boss-tls-front.yaml). Its cert is
-#              the `boss-tls` Secret in the instance's namespace, minted
-#              out of band.
+#   hostname   the instance's public hostname — BOSS_PUBLIC_URL on the
+#              boss container, and the ingress rule the tunnel connector
+#              routes to the instance's gateway (render-tunnel-config.sh).
+#              TLS is the edge's: since 21c17ebc (2026-09-17) no TLS
+#              front and no certificate exist in the cluster.
 #   guest      BOSS_GUEST_ACCESS — whether an anonymous visitor gets a
 #              synthetic read-only session (the "Browse as a guest"
 #              button; the gateway reads "1" as on, anything else as
@@ -106,7 +108,9 @@
 # (cluster-deploy-lib.sh manifest_secrets — every secretKeyRef, secret
 # volume and imagePullSecret not marked optional; measured 2026-09-16
 # for the playground: boss-oidc, boss-secrets, boss-session-key,
-# boss-tls, forgejo-registry, resend). PROVISIONING MINTS THEM (backlog
+# forgejo-registry, resend — and boss-tls, until its last reference
+# left with the TLS front on 2026-09-17, 21c17ebc). PROVISIONING MINTS
+# THEM (backlog
 # dc1bc724; David 2026-09-16: no hand work unless absolutely required):
 # on the first converge that finds one absent the runner creates the
 # instance's Namespace and then, per Secret and by its class
@@ -124,8 +128,10 @@
 #             gateway then boots guest-only (its OidcConfig reads empty
 #             as "no OIDC"), and registering the Kanidm client is the
 #             ceremony that fills it
-#   by hand   anything else — boss-tls until 974d2015 removes its
-#             reference
+#   by hand   anything else. Nothing today: boss-tls was the one, and
+#             the playground was skipped on every converge for want of
+#             it until the TLS front left (21c17ebc, 2026-09-17). After
+#             that the playground needs only its boss-oidc filled.
 #
 # The packet records the line as `instance_secrets_minted`. Then the
 # secret gate asks the cluster again: an instance still missing any

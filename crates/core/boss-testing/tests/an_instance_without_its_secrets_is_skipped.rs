@@ -81,7 +81,8 @@ impl Case {
 "#,
         );
         // A chore shaped like the CronJobs': a block-form optional ref
-        // beside a required one, and the TLS front's volume.
+        // beside a required one, and a plain secret volume (the shape the
+        // TLS front carried until 21c17ebc; the name is fixture data).
         write_file(
             &manifests.join("boss-chore.yaml"),
             r#"{"kind":"CronJob","metadata":{"name":"chore","namespace":"boss-x"},"spec":{"jobTemplate":{"spec":{"template":{"spec":{

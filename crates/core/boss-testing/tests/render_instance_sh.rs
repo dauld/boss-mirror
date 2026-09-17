@@ -8,7 +8,7 @@
 //! on the current cluster, and both it and prod converge on every
 //! train. Every manifest under infra/cluster/manifests/ hard-codes
 //! `namespace: boss`, one tenant path, `BOSS_SIM_ENABLED=false` and one
-//! TLS-front hostname; a second namespace as a second copy of the YAML
+//! public hostname; a second namespace as a second copy of the YAML
 //! would be the §9a pair that drifts. So there is ONE source — the
 //! directory, which IS the prod instance — and an instance is rendered
 //! from it at converge time with four parameters substituted, in the
@@ -364,18 +364,18 @@ fn the_playground_render_substitutes_the_four_parameters() {
         boss_yaml.contains("io.cilium/lb-ipam-ips"),
         "the pin is commented, not erased — the record of what prod holds stays readable"
     );
-    let front = std::fs::read_to_string(play.join("boss-tls-front.yaml")).unwrap();
+    // The hostname parameter lands on the gateway's own public URL:
+    // since 21c17ebc (2026-09-17) there is no TLS front — Cloudflare
+    // terminates TLS at the edge and the tunnel connector proxies each
+    // hostname to the instance's gateway Service in plain HTTP — so the
+    // one place an instance's hostname appears is BOSS_PUBLIC_URL.
     assert!(
-        front.contains("https://playground.algedonic.dev:443 {"),
-        "the TLS front terminates the playground's hostname"
+        boss_yaml.contains("BOSS_PUBLIC_URL, value: \"https://playground.algedonic.dev\""),
+        "the gateway's public URL is the playground's hostname"
     );
     assert!(
-        front.contains("reverse_proxy boss-gateway.boss-playground.svc.cluster.local:80"),
-        "the TLS front proxies to the playground's own gateway"
-    );
-    assert!(
-        !front.contains("boss.algedonic.dev"),
-        "no prod hostname survives into the playground's front"
+        !boss_yaml.contains("boss.algedonic.dev"),
+        "no prod hostname survives into the playground's boss.yaml"
     );
     // The chores open their packets on the playground's own jobs door.
     let chore = std::fs::read_to_string(play.join("boss-audit-integrity.yaml")).unwrap();
@@ -418,6 +418,51 @@ fn the_playground_render_substitutes_the_four_parameters() {
     );
     assert_eq!(rc, 0, "{err}");
     assert!(stream.contains("BOSS_TENANT_DIR, value: /opt/boss/tenant}"));
+}
+
+#[test]
+fn no_manifest_references_the_boss_tls_secret_or_the_lego_jobs() {
+    // Let's Encrypt left the cluster (backlog 21c17ebc; design 4c565f8c,
+    // decided 2026-09-16): Cloudflare terminates TLS at the edge and
+    // every public hostname reaches an instance's gateway through the
+    // tunnel, so the lego DNS-01 Jobs, the Caddy front and the `boss-tls`
+    // Secret they existed for are gone. Measured 2026-09-17: the
+    // playground was SKIPPED on every converge for want of that Secret
+    // (`instances_skipped: boss-playground (secrets absent: boss-tls)`)
+    // because boss-tls-front.yaml still mounted it. The converge DERIVES
+    // an instance's required Secrets from its rendered manifests, so the
+    // skip ends exactly when the last reference does — this pins that no
+    // reference comes back.
+    let dir = repo_root().join(MANIFESTS);
+    for gone in ["boss-tls.yaml", "boss-tls-front.yaml"] {
+        assert!(
+            !dir.join(gone).exists(),
+            "{MANIFESTS}/{gone} is back — Let's Encrypt left the cluster with 21c17ebc"
+        );
+    }
+    let roster = roster_of(&repo_root());
+    assert!(
+        !roster
+            .iter()
+            .any(|(f, _)| f == "boss-tls.yaml" || f == "boss-tls-front.yaml"),
+        "{ROSTER} still classifies a TLS manifest the directory no longer holds"
+    );
+    for name in yaml_names(&dir) {
+        let text = std::fs::read_to_string(dir.join(&name)).unwrap();
+        for (n, line) in text.lines().enumerate() {
+            let t = line.trim_start();
+            if t.starts_with('#') {
+                continue;
+            }
+            assert!(
+                !line.contains("boss-tls") && !line.contains("goacme/lego"),
+                "{MANIFESTS}/{name}:{}: references the retired TLS machinery — a `boss-tls` \
+                 reference makes the converge skip every instance whose namespace lacks a \
+                 Secret nothing mints: {line}",
+                n + 1
+            );
+        }
+    }
 }
 
 #[test]

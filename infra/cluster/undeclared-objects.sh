@@ -58,10 +58,14 @@
 #     Cilium, cert-manager and Longhorn; the tree declares four.
 #     Sweeping them would report the cluster's own furniture as BOSS's
 #     orphans.
-#   * NAMESPACES THE TREE DOES NOT OWN. `boss-tls.yaml` puts two
-#     one-shot Jobs into `cert-manager`, which cert-manager owns and
-#     fills with its own work. "The tree declares something here" is
-#     not "the tree manages this namespace".
+#   * NAMESPACES THE TREE DOES NOT OWN. Until 2026-09-17 (21c17ebc)
+#     `boss-tls.yaml` put two one-shot Jobs into `cert-manager`, which
+#     cert-manager owns and fills with its own work. "The tree declares
+#     something here" is not "the tree manages this namespace" — and
+#     those two completed Jobs are exactly what this sweep will NOT
+#     name now that their manifest is gone; property A of
+#     a-deleted-manifest-leaves-no-object (the tree's own deletions,
+#     read from git) is what does.
 #   * KINDS THE TREE DECLARES NOTHING OF in that namespace — Pod,
 #     ReplicaSet, Endpoints, EndpointSlice, ControllerRevision, Event.
 #     There is no declared set to compare them against, so every one of

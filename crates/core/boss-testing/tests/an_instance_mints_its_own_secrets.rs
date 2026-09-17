@@ -30,9 +30,13 @@
 //!             ref is not `optional`). So the object is created with the
 //!             key present and empty, the way ensure_declared_secrets
 //!             creates a broker Secret empty — and a ceremony fills it
-//!   by hand   boss-tls — the lego certificate; its reference leaves
-//!             with 974d2015 (everything behind the tunnel), so this
-//!             car mints nothing for it and the gate still names it
+//!   by hand   anything no recipe knows — the converge mints nothing
+//!             for it and the gate still names it. The measured one
+//!             was boss-tls, the lego certificate the Caddy front
+//!             mounted; its last reference left the tree on 2026-09-17
+//!             (backlog 21c17ebc: Let's Encrypt left the cluster, TLS
+//!             is the edge's), so the fixture below stands in with a
+//!             name no manifest carries and the class keeps its test
 //!
 //! What each case pins: the classification; an absent internal Secret
 //! is minted with every key the manifests read, from random bytes, the
@@ -90,7 +94,9 @@ const RESEND_VALUE: &str = "RESEND-API-KEY-VALUE";
 /// --dry-run=client -o json` echoes back — the idiom the secret gate's
 /// own test uses), shaped like the playground's render: the postgres
 /// StatefulSet the URL is composed from, the boss Deployment with every
-/// reference form, and the TLS front's volume.
+/// reference form, and one workload mounting a Secret no recipe knows
+/// (`something-new` — the by-hand class; boss-tls was the real one
+/// until 21c17ebc).
 fn manifests(dir: &std::path::Path, ns: &str) {
     write_file(
         &dir.join("boss.yaml"),
@@ -118,10 +124,10 @@ fn manifests(dir: &std::path::Path, ns: &str) {
         ),
     );
     write_file(
-        &dir.join("boss-tls-front.yaml"),
+        &dir.join("boss-something.yaml"),
         &format!(
-            r#"{{"kind":"Deployment","metadata":{{"name":"boss-tls-front","namespace":"{ns}"}},"spec":{{"template":{{"spec":{{
-  "containers":[{{"name":"caddy"}}],"volumes":[{{"name":"tls","secret":{{"secretName":"boss-tls"}}}}]}}}}}}}}
+            r#"{{"kind":"Deployment","metadata":{{"name":"boss-something","namespace":"{ns}"}},"spec":{{"template":{{"spec":{{
+  "containers":[{{"name":"something"}}],"volumes":[{{"name":"new","secret":{{"secretName":"something-new"}}}}]}}}}}}}}
 "#
         ),
     );
@@ -272,7 +278,8 @@ fn manifests_into(dir: &std::path::Path) {
     manifests(dir, "boss-x");
 }
 
-const ALL_SIX: &str = "boss-oidc boss-secrets boss-session-key boss-tls forgejo-registry resend";
+const ALL_SIX: &str =
+    "boss-oidc boss-secrets boss-session-key forgejo-registry resend something-new";
 
 fn is_hex(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit())
@@ -287,7 +294,6 @@ fn the_six_secrets_the_playground_needs_are_classified() {
         ("forgejo-registry", "shared"),
         ("resend", "shared"),
         ("boss-oidc", "root"),
-        ("boss-tls", "by-hand"),
         ("something-new", "by-hand"),
     ] {
         let (rc, out, err) = c.run(&format!("instance_secret_class {name}"), &[]);
@@ -313,7 +319,7 @@ fn an_absent_instance_is_provisioned_with_values_that_never_reach_the_log() {
         out.trim(),
         "minted boss-secrets, boss-session-key | copied forgejo-registry, resend from boss \
          | empty boss-oidc (guest sessions only until a Kanidm client exists — root ceremony) \
-         | by hand boss-tls",
+         | by hand something-new",
         "the packet line: every absent Secret classified and what was done for it"
     );
     assert_eq!(
@@ -325,7 +331,7 @@ fn an_absent_instance_is_provisioned_with_values_that_never_reach_the_log() {
             "forgejo-registry",
             "resend"
         ],
-        "five created; boss-tls is a person's (its reference leaves with 974d2015)"
+        "five created; something-new is a person's — no recipe knows it"
     );
 
     // INTERNAL: boss-secrets carries every key the manifests read, from
@@ -433,7 +439,7 @@ fn only_the_absent_secrets_are_touched() {
         "boss-oidc",
         "forgejo-registry",
         "resend",
-        "boss-tls",
+        "something-new",
     ]);
     let (rc, out, err) = c.run(
         r#"provision_instance_secrets "$K" "$K" "$K" boss-x "$M" boss "boss-session-key""#,
@@ -554,7 +560,7 @@ fn a_create_that_fails_is_named_and_a_key_without_a_recipe_refuses() {
 fn the_quiet_read_answers_absent_names_and_cannot_tell_apart() {
     require_jq();
     let c = Case::new("absent");
-    c.present(&["boss-secrets", "boss-tls"]);
+    c.present(&["boss-secrets", "something-new"]);
     let (rc, out, err) = c.run(r#"instance_secrets_absent "$K" "$K" boss-x "$M""#, &[]);
     assert_eq!(rc, 0, "{err}");
     assert_eq!(
