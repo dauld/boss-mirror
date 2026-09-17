@@ -636,6 +636,27 @@ fn a_post_to_an_accounts_path_routes_to_the_accounts_port() {
     );
 }
 
+/// The ledger and the dispatcher joined the door on 2026-09-17
+/// (backlog 77fd7b5a + 4145d2c1): a journal entry posts to boss-ledger
+/// on its port, and the rule registry reads from the dispatcher on
+/// its own — neither is the jobs port any longer.
+#[test]
+fn a_ledger_path_and_a_dispatcher_path_route_to_their_own_ports() {
+    let f = Fixture::new("route-ledger-dispatcher");
+    for (path, service) in [
+        ("/api/ledger/journal-entries", "ledger"),
+        ("/api/dispatcher/rules", "dispatcher"),
+    ] {
+        let r = f.run(&["GET", path], &[("BOSS_ACTOR", "agent-x")]);
+        assert_eq!(r.code, 0, "{path}: {}", r.stderr);
+        assert_eq!(
+            f.curl_argv().last().map(String::as_str),
+            Some(format!("http://sor.test:{}{path}", boss_ports::prod(service)).as_str()),
+            "{path} leaves on {service}'s port, host kept"
+        );
+    }
+}
+
 /// The jobs API stays where it was, and so does anything the table
 /// does not name — including a prefix that merely resembles a routed
 /// one. Routing adds ports; it never moves the base.

@@ -9,6 +9,11 @@
 //! `metadata` and onto the payload root — as `spec_slug` — for a rule
 //! like `spec_slug == "merged"` to match.
 //!
+//! `workflow_kind` — the parent job's kind — rides beside it for the
+//! same reason: a slug repeats across workflows, and a consumer that
+//! must name ONE workflow's step (the ledger's projection `when`,
+//! backlog a40541cb) reads it here.
+//!
 //! Two halves, both pinned here, mirroring the `notify_on_done`
 //! rationale one field over:
 //!
@@ -210,6 +215,15 @@ async fn a_completed_workflow_step_publishes_its_slug_on_step_done() {
         scope_done[0].payload["spec_slug"], "scope",
         "step.done must carry the slug so a rule can route on WHICH step \
          of a kind completed"
+    );
+    // ...and the workflow it belongs to: a slug repeats across
+    // workflows (`recognize` on receive-a-sponsorship and on
+    // close-the-month), and the ledger's projection `when` picks ONE
+    // workflow's step out of `step.done.task` by this field
+    // (backlog a40541cb).
+    assert_eq!(
+        scope_done[0].payload["workflow_kind"], "ship-a-change",
+        "step.done must carry the parent job's kind"
     );
 }
 

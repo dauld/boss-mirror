@@ -802,8 +802,8 @@ fn the_reader_takes_a_path_and_refuses_anything_else() {
 // the_machine_door_carries_every_read_surface.rs.
 // =====================================================================
 
-const PORTS_TABLE: &str =
-    "jobs=7900 events=7150 people=7500 classes=7800 locations=7820 accounts=7550";
+const PORTS_TABLE: &str = "jobs=7900 events=7150 people=7500 classes=7800 locations=7820 \
+                           accounts=7550 ledger=7080 dispatcher=7950";
 
 fn reader_env<'a>(actor: &'a str, table: Option<&'a str>) -> Vec<(&'a str, &'a str)> {
     let mut env = vec![
@@ -865,6 +865,18 @@ fn the_reader_routes_a_prefixed_path_to_its_services_port() {
             "route-accounts-my-day",
             "/api/people/my-day/actions",
             "http://sor.invalid:7550/api/people/my-day/actions",
+        ),
+        // The ledger (7080) and the dispatcher's rule registry (7950)
+        // joined the door on 2026-09-17 (backlog 77fd7b5a + 4145d2c1).
+        (
+            "route-ledger",
+            "/api/ledger/trial-balance",
+            "http://sor.invalid:7080/api/ledger/trial-balance",
+        ),
+        (
+            "route-dispatcher",
+            "/api/dispatcher/rules",
+            "http://sor.invalid:7950/api/dispatcher/rules",
         ),
     ] {
         let (rc, _, stderr, argv) =

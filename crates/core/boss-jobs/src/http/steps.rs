@@ -869,13 +869,14 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
         // extra fetch. (Read before the write; the step update
         // doesn't touch the job row.)
         if !step.kind.is_empty() {
-            let (subject_kind, subject_id) = if let Some(job) = &parent_job {
+            let (subject_kind, subject_id, workflow_kind) = if let Some(job) = &parent_job {
                 (
                     boss_core::primitives::Subject::kind(&job.subject).to_string(),
                     boss_core::primitives::Subject::id(&job.subject).to_string(),
+                    job.kind.clone(),
                 )
             } else {
-                (String::new(), String::new())
+                (String::new(), String::new(), String::new())
             };
             step_events.push(stamp.event(
                 &format!("step.done.{}", step.kind),
@@ -885,6 +886,12 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
                     "kind": step.kind,
                     "subject_kind": subject_kind,
                     "subject_id": subject_id,
+                    // The parent job's kind, always present ("" when the
+                    // job could not be read, like the subject fields): a
+                    // `spec_slug` repeats across workflows, and the
+                    // ledger's projection `when` picks ONE workflow's step
+                    // out of `step.done.task` by this (backlog a40541cb).
+                    "workflow_kind": workflow_kind,
                     "completed_on": step.completed_on,
                     "metadata": step.metadata,
                     // `notify_on_done` and `spec_slug` are BOTH hoisted

@@ -105,6 +105,10 @@ name = "posting_e2e"
 required-features = ["postgres"]
 
 [[test]]
+name = "posting_rules_e2e"
+required-features = ["postgres"]
+
+[[test]]
 name = "rebuild_bank_settlements_e2e"
 required-features = ["postgres"]
 

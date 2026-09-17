@@ -28,6 +28,7 @@ mod facts;
 mod keg_deposits;
 mod payroll;
 mod periods;
+mod posting_rules;
 mod revenue;
 mod statements;
 mod tax;
@@ -39,6 +40,7 @@ use facts::*;
 use keg_deposits::*;
 use payroll::*;
 use periods::*;
+use posting_rules::*;
 use revenue::*;
 use statements::*;
 use tax::*;
@@ -246,6 +248,23 @@ pub fn router(state: LedgerApiState) -> Router {
             get(list_excise_rate_schedules).put(upsert_excise_rate_schedule),
         )
         .route("/api/ledger/tax-liability", get(tax_liability_summary))
+        // Posting rules and event→fact projections as registry data
+        // (backlog a40541cb): the doors `boss tenant publish` sends
+        // seeds/posting_rules.toml and seeds/fact_projection_rules.toml
+        // through, insert-if-absent, one `.declared` fact per landed row.
+        .route("/api/ledger/posting-rules", get(list_posting_rules_handler))
+        .route(
+            "/api/ledger/posting-rules/batch",
+            axum::routing::post(publish_posting_rules_handler),
+        )
+        .route(
+            "/api/ledger/fact-projection-rules",
+            get(list_projection_rules_handler),
+        )
+        .route(
+            "/api/ledger/fact-projection-rules/batch",
+            axum::routing::post(publish_projection_rules_handler),
+        )
         .route(
             "/api/ledger/revenue-schedules",
             axum::routing::post(create_revenue_schedule),

@@ -3,9 +3,10 @@
 //! `post_fact_in_tx` is the single entry point domain crates call from
 //! inside their write transaction. It:
 //!
-//! 1. Evaluates the active rule for the fact (RuleSet v1 today; a hardcoded
-//!    dispatch for now — v2 will look up the active row in
-//!    `gl_rule_versions` at startup).
+//! 1. Evaluates the active rule for the fact: the newest `gl_posting_rules`
+//!    row for its kind when a tenant published one, the code rules
+//!    (`BossRuleSet`) otherwise — `DataRuleSet` is that one decision
+//!    (backlog a40541cb).
 //! 2. Auto-creates the monthly `gl_periods` row if one doesn't yet exist.
 //! 3. Resolves draft account codes to chart UUIDs.
 //! 4. Inserts `gl_journal_entries` + `gl_journal_lines` rows.
@@ -19,17 +20,36 @@ use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::error::LedgerError;
-use crate::rules::{BossRuleSet, evaluate, is_gl_inert};
+use crate::posting_rules::{DataRuleSet, load_newest_rule_in_tx};
+use crate::rules::{evaluate, is_gl_inert};
 use crate::types::{FactRef, JournalEntryDraft};
 
 /// Fixed UUID of the active BOSS RuleSet — matches the seed in
 /// `schema/40-ledger.sql`. A future shape change introduces a sibling
 /// `RULE_SET_V2_ID` + RuleSet impl alongside this one and historical
 /// rows stay pinned to their original `rule_version_id`.
+///
+/// A DATA rule does not move this. `gl_rule_versions` names the
+/// interpreter that ran (`DataRuleSet` over `BossRuleSet` reports the
+/// same version); a tenant's `gl_posting_rules` version is its edition
+/// of one fact kind's lines, recorded in the entry's memo, and a newer
+/// edition re-projects open periods on rebuild exactly as the code
+/// rules do (`OPEN_PERIOD_FACTS_SQL`) — never a locked one.
 pub const RULE_SET_ID: Uuid = Uuid::from_u128(0x0000_0000_0000_0000_0000_0000_0000_0001);
 
-fn evaluate_active(fact: &FactRef<'_>) -> Result<(JournalEntryDraft, Uuid), LedgerError> {
-    let draft = evaluate(&BossRuleSet, fact)?;
+/// The one construction site of the active RuleSet: one primary-key
+/// read for the fact's kind, then the pure evaluation.
+async fn evaluate_active(
+    tx: &mut Transaction<'_, Postgres>,
+    fact: &FactRef<'_>,
+) -> Result<(JournalEntryDraft, Uuid), LedgerError> {
+    let rules = DataRuleSet::new(
+        load_newest_rule_in_tx(tx, fact.kind)
+            .await?
+            .into_iter()
+            .collect(),
+    );
+    let draft = evaluate(&rules, fact)?;
     Ok((draft, RULE_SET_ID))
 }
 
@@ -55,7 +75,7 @@ pub async fn post_fact_in_tx(
     if is_gl_inert(fact.kind) {
         return Ok(());
     }
-    let (draft, rule_version_id) = evaluate_active(fact)?;
+    let (draft, rule_version_id) = evaluate_active(tx, fact).await?;
 
     // Early-return if a row already exists for this (fact, ruleset). Saves
     // a period-lookup and chart-lookup on replay.

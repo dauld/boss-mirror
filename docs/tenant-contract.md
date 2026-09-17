@@ -21,7 +21,8 @@ Three verbs make the contract usable:
   own loaders** — `boss_jobs::seed_loader` for `workflows.toml` (with
   its viability lint), `boss_policy_client`'s grant loader, the classes
   and locations batch endpoints' row types, the agents and sensors
-  loaders in `boss_jobs`, `boss_people::Employee`,
+  loaders in `boss_jobs`, the posting-rule and projection loaders in
+  `boss_ledger`, `boss_people::Employee`,
   `boss_core`'s `BusinessCalendar` and the gateway's `TenantToml` — and reports one
   line per file: **OK** / **MISSING** (a required file) / **INVALID**
   (with the loader's own error, never rephrased) / **UNKNOWN** (a file
@@ -32,7 +33,8 @@ Three verbs make the contract usable:
   doors the tenant engines' prepare compose** (backlog `ee7b62bb`):
   classes → locations → business calendars → the company Subject →
   policy grants → people (two passes) → agents → Workflows, after a
-  barrier on the people projection → sensors last. Idempotent (insert-if-absent, upsert, 409 swallowed, a
+  barrier on the people projection → sensors → the ledger's posting
+  rules → its event→fact projections last. Idempotent (insert-if-absent, upsert, 409 swallowed, a
   kind an authoring Job already published is skipped), signed as
   `automation:tenant-seed` and **not** as a sim chain. One line per
   file present: the door and a count, or `skipped: <why>` for a file
@@ -101,6 +103,8 @@ stating plainly:
 | `seeds/business_calendars.json` | no | POST /api/calendar/business-calendars/batch as `Vec<boss_core::calendar::BusinessCalendar>` (the brewery engine's prepare); the dispatcher's timing triggers and the sim resolve business days from it | JSON array of {code, name, weekend: [0..6 Mon=0], closed: [YYYY-MM-DD]} | yes |
 | `seeds/sensors.toml` | no | POST /api/sensors/batch (boss-jobs, insert-if-absent by id) — sent by `boss tenant publish` as the tenant's declarations; the dispatcher's `sensor.poll` handler reads the registry every 5 minutes and polls each due sensor (design 14c9b2ad) | `[[sensor]]` rows: id, source (`stripe`), credential (a `credentials` registry id), every_minutes, opens (the workflow kind one reading opens), subject_kind, enabled? — validated by `boss_jobs::sensors::load_sensors_toml` | yes |
 | `seeds/agents.toml` | no | POST /api/agents/batch (boss-jobs, insert-if-absent by id and by alias) — sent by `boss tenant publish` BEFORE the Workflows (a step's audience may name an agent); a row the platform already registered is kept and the publish line names any field the declaration differs on; the jobs API's login door resolves each alias to the id (design 6fda05ae; backlog f56155f0) | `[[agent]]` rows: id (`agent-<slug>`), display_name, default_model (a rate-card model, e.g. `opus-5[1m]`), aliases? (the logins that sign as it), hourly_budget_usd_micros?, max_concurrent_runs? — the `agents` table's columns and nothing else; validated by `boss_jobs::agents::load_agents_toml` | yes |
+| `seeds/posting_rules.toml` | no | POST /api/ledger/posting-rules/batch (boss-ledger, insert-if-absent by fact_kind + version, source = tenant:<id>) — sent by `boss tenant publish` AFTER the Workflows; the posting path evaluates a fact by the newest registry rule for its kind and by the code rules otherwise (backlog a40541cb) | `[[posting_rule]]` rows: fact_kind, version? (1), basis (cash|accrual), lines = [{account_code, side (debit|credit), amount_path (a JSON pointer into the fact payload, integer cents), memo?}] — the debit pointers and the credit pointers must be the same multiset (balanced for every fact); validated by `boss_ledger::posting_rules::load_posting_rules_toml` | yes |
+| `seeds/fact_projection_rules.toml` | no | POST /api/ledger/fact-projection-rules/batch (boss-ledger, insert-if-absent by event_kind + when) — sent by `boss tenant publish` after the posting rules; the ledger's facts rebuild projects every matching audit_log event into a financial_fact (backlog a40541cb) | `[[projection]]` rows: event_kind (an audit_log kind), when? (a table of {"/pointer" = value}, every pointer equal for the rule to fire), fact_kind, source_table, source_id_path, happened_on_path?, created_by_path? — the `gl_fact_projection_rules` columns; validated by `boss_ledger::posting_rules::load_projection_rules_toml` | yes |
 | `seeds/locations.toml` | no | POST /api/locations/batch, one boss-locations `http::LocationInput` per row (insert-if-absent by id) — sent by `boss tenant publish` BEFORE the roster, because an `employees.json` `location` is a foreign key into the registry (backlog 1ec8312a; until 2026-09-17 nothing read this file) | `[[location]]` rows: id, name, kind, timezone (+ parent_id, latitude, longitude, address, account_id, metadata) — the `locations` table's columns | yes |
 | `seeds/subject_kinds.toml` | no | NO READER (measured 2026-09-16). Check parses the rows conservatively | `[[subject_kind]]` rows: kind, label, description, owning_team, sort_order | no |
 | `seeds/accounts.toml` | no | boss-brewery-engine, `include_str!` at compile time from examples/brewery/seeds — a copy in a tenant directory is never read | brewery engine data (`names`, `[[city]]`); check parses TOML only | no |
@@ -148,6 +152,69 @@ stating plainly:
   platform already registered (prod's `agent-claude` came from
   migration `20260915212644`) is kept as registered, and the publish
   line names any field the declaration differs on.
+
+## The ledger's two rule files — a worked example
+
+A company's own revenue line needs one more posting rule than the
+product ships, and until backlog `a40541cb` (2026-09-17) that meant a
+fork of `boss-ledger`'s `BossRuleSet`. Two files now carry it as data,
+published by `boss tenant publish` after the sensors: posting rules
+land in the `gl_posting_rules` registry (`POST
+/api/ledger/posting-rules/batch`, insert-if-absent by fact_kind +
+version, `source = tenant:<id>`), projections in
+`gl_fact_projection_rules` (`POST /api/ledger/fact-projection-rules/batch`,
+insert-if-absent by event_kind + `when`). Both are append-only: a
+changed rule is the next `version`, a changed projection is a new row.
+Each row landed records a `ledger.posting_rule.declared` /
+`ledger.fact_projection_rule.declared` fact with `declared_by`.
+
+Algedonic's sponsorship receipt is the first case. The
+`receive-a-sponsorship` workflow's `recognize` step is a `task`, so its
+completion is a `step.done.task` event — the same kind every task step
+of every workflow emits. **Measured shape of that event** (boss-jobs,
+`http/steps.rs`): `{job_id, step_id, kind, subject_kind, subject_id,
+workflow_kind, completed_on, metadata, notify_on_done, spec_slug}`.
+`jobs.step.completed` — the packet's first guess — carries only
+`{job_id, step_id}` and cannot name a workflow; `workflow_kind` (the
+parent job's kind) was added to `step.done.<kind>` by this change
+beside `spec_slug` (the step's slug), and those two are the pointers a
+projection filters on. The amounts live in the step's `metadata`, so
+the recognize step's `fields` carry `amount_cents` and `fee_cents` (a
+`string` field is integer cents; the ledger reads a numeric string):
+
+```toml
+# seeds/fact_projection_rules.toml
+[[projection]]
+event_kind = "step.done.task"
+when = { "/workflow_kind" = "receive-a-sponsorship", "/spec_slug" = "recognize" }
+fact_kind = "finance.sponsorship.received"
+source_table = "jobs"
+source_id_path = "/job_id"          # one fact per job: the id is UUIDv5 over (kind, source_table, source_id)
+happened_on_path = "/completed_on"  # the step's completion date, YYYY-MM-DD
+
+# seeds/posting_rules.toml — cash basis, recognized on receipt
+# (David, 2026-09-16: a sponsorship is a gift, no term, no obligation)
+[[posting_rule]]
+fact_kind = "finance.sponsorship.received"
+basis = "cash"
+lines = [
+  { account_code = "1010", side = "debit",  amount_path = "/metadata/amount_cents", memo = "Sponsorship {/job_id}" },
+  { account_code = "4100", side = "credit", amount_path = "/metadata/amount_cents" },
+  { account_code = "6100", side = "debit",  amount_path = "/metadata/fee_cents",    memo = "Stripe fee" },
+  { account_code = "1010", side = "credit", amount_path = "/metadata/fee_cents" },
+]
+```
+
+`/metadata/amount_cents` appears once on each side and so does
+`/metadata/fee_cents`, which is what makes the rule admissible: the
+entry balances for every fact, not for the one someone tried. A fact
+`{amount_cents: 100, fee_cents: 33}` posts DR 1010 100 / CR 4100 100 /
+DR 6100 33 / CR 1010 33 with the memo `finance.sponsorship.received —
+posting rule v1`; a fee of 0 omits both fee lines. A rule that drops
+the last line is refused by `check` (INVALID, naming
+`finance.sponsorship.received v1`) and by the door (422) with the same
+words. The files above are the tenant's commit, not the product's;
+`boss tenant init` writes both as commented templates.
 
 ## What `check` found on the first real tenant
 

@@ -196,6 +196,36 @@ pub const CONTRACT: &[Entry] = &[
         scaffold: Some(scaffold_agents),
     },
     Entry {
+        paths: &["seeds/posting_rules.toml"],
+        required: false,
+        read_by: "POST /api/ledger/posting-rules/batch (boss-ledger, insert-if-absent by fact_kind + \
+                  version, source = tenant:<id>) — sent by `boss tenant publish` AFTER the \
+                  Workflows; the posting path evaluates a fact by the newest registry rule for \
+                  its kind and by the code rules otherwise (backlog a40541cb)",
+        shape: "`[[posting_rule]]` rows: fact_kind, version? (1), basis (cash|accrual), lines = \
+                [{account_code, side (debit|credit), amount_path (a JSON pointer into the fact \
+                payload, integer cents), memo?}] — the debit pointers and the credit pointers must \
+                be the same multiset (balanced for every fact); validated by \
+                `boss_ledger::posting_rules::load_posting_rules_toml`",
+        parse: parse_posting_rules,
+        scaffold: Some(scaffold_posting_rules),
+    },
+    Entry {
+        paths: &["seeds/fact_projection_rules.toml"],
+        required: false,
+        read_by: "POST /api/ledger/fact-projection-rules/batch (boss-ledger, insert-if-absent by \
+                  event_kind + when) — sent by `boss tenant publish` after the posting rules; the \
+                  ledger's facts rebuild projects every matching audit_log event into a \
+                  financial_fact (backlog a40541cb)",
+        shape: "`[[projection]]` rows: event_kind (an audit_log kind), when? (a table of \
+                {\"/pointer\" = value}, every pointer equal for the rule to fire), fact_kind, \
+                source_table, source_id_path, happened_on_path?, created_by_path? — the \
+                `gl_fact_projection_rules` columns; validated by \
+                `boss_ledger::posting_rules::load_projection_rules_toml`",
+        parse: parse_projection_rules,
+        scaffold: Some(scaffold_projection_rules),
+    },
+    Entry {
         paths: &["seeds/locations.toml"],
         required: false,
         read_by: "POST /api/locations/batch, one boss-locations `http::LocationInput` per row \
@@ -414,6 +444,50 @@ fn parse_sensors(path: &Path, _: &Ctx) -> Result<String, String> {
                 .map(|r| format!(
                     "{} ({} every {}m -> {})",
                     r.id, r.source, r.every_minutes, r.opens
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    })
+}
+
+fn parse_posting_rules(path: &Path, _: &Ctx) -> Result<String, String> {
+    let rows = boss_ledger::posting_rules::load_posting_rules_toml(path)?;
+    refuse_if_stray(&read(path)?, "posting_rule", rows.len())?;
+    Ok(match rows.len() {
+        0 => "0 posting rules".to_string(),
+        n => format!(
+            "{n} posting rules: {}",
+            rows.iter()
+                .map(|r| format!(
+                    "{} v{} ({}, {} lines)",
+                    r.fact_kind,
+                    r.version,
+                    r.basis,
+                    r.lines.len()
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    })
+}
+
+fn parse_projection_rules(path: &Path, _: &Ctx) -> Result<String, String> {
+    let rows = boss_ledger::posting_rules::load_projection_rules_toml(path)?;
+    refuse_if_stray(&read(path)?, "projection", rows.len())?;
+    Ok(match rows.len() {
+        0 => "0 projections".to_string(),
+        n => format!(
+            "{n} projections: {}",
+            rows.iter()
+                .map(|r| format!(
+                    "{}{} -> {}",
+                    r.event_kind,
+                    r.when
+                        .as_ref()
+                        .map(|w| format!(" when {w}"))
+                        .unwrap_or_default(),
+                    r.fact_kind
                 ))
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -988,6 +1062,60 @@ fn scaffold_sensors(s: &Scaffold) -> String {
     )
 }
 
+fn scaffold_posting_rules(s: &Scaffold) -> String {
+    format!(
+        "# {display} — posting rules (backlog a40541cb).\n\
+#\n\
+# A posting rule turns one kind of financial fact into journal lines.\n\
+# The product's code rules cover invoices, bills, payroll and the rest;\n\
+# a fact kind that is YOURS is declared here and evaluated by the\n\
+# newest version of its rule (a change is the next version, never an\n\
+# edit). `amount_path` is a JSON pointer into the fact's payload,\n\
+# integer cents; the debit pointers and the credit pointers must match\n\
+# as a multiset, so the entry balances for every fact. `basis` is the\n\
+# accounting basis you declare (cash | accrual), recorded, not a code\n\
+# path. Published to the ledger by `boss tenant publish`\n\
+# (POST /api/ledger/posting-rules/batch, insert-if-absent by\n\
+# fact_kind + version, source = tenant:<id>).\n\
+#\n\
+# [[posting_rule]]\n\
+# fact_kind = \"finance.sponsorship.received\"\n\
+# basis = \"cash\"\n\
+# lines = [\n\
+#   {{ account_code = \"1010\", side = \"debit\",  amount_path = \"/metadata/amount_cents\", memo = \"Sponsorship {{/job_id}}\" }},\n\
+#   {{ account_code = \"4100\", side = \"credit\", amount_path = \"/metadata/amount_cents\" }},\n\
+#   {{ account_code = \"6100\", side = \"debit\",  amount_path = \"/metadata/fee_cents\" }},\n\
+#   {{ account_code = \"1010\", side = \"credit\", amount_path = \"/metadata/fee_cents\" }},\n\
+# ]\n",
+        display = s.display_name
+    )
+}
+
+fn scaffold_projection_rules(s: &Scaffold) -> String {
+    format!(
+        "# {display} — event -> fact projections (backlog a40541cb).\n\
+#\n\
+# A projection turns an audit_log event into a financial fact the\n\
+# posting rules then post. `when` is a table of {{\"/pointer\" = value}}\n\
+# and every pointer must equal its value for the rule to fire — how ONE\n\
+# workflow's completed step is picked out of the `step.done.task` every\n\
+# workflow emits (a step.done payload carries workflow_kind, spec_slug,\n\
+# job_id, completed_on and the step's metadata). Published to the\n\
+# ledger by `boss tenant publish` (POST\n\
+# /api/ledger/fact-projection-rules/batch, insert-if-absent by\n\
+# event_kind + when).\n\
+#\n\
+# [[projection]]\n\
+# event_kind = \"step.done.task\"\n\
+# when = {{ \"/workflow_kind\" = \"receive-a-sponsorship\", \"/spec_slug\" = \"recognize\" }}\n\
+# fact_kind = \"finance.sponsorship.received\"\n\
+# source_table = \"jobs\"\n\
+# source_id_path = \"/job_id\"\n\
+# happened_on_path = \"/completed_on\"\n",
+        display = s.display_name
+    )
+}
+
 fn scaffold_agents(s: &Scaffold) -> String {
     format!(
         "# {display} — registered agents (design 6fda05ae; backlog f56155f0).\n\
@@ -1442,6 +1570,62 @@ terminal = { outcome = "sponsored" }
         let row = status_of(&r, "seeds/sensors.toml").unwrap();
         assert_eq!(row.status, Status::Invalid, "{row:?}");
         assert!(row.detail.contains("[[sensor]]"), "{row:?}");
+    }
+
+    /// The two ledger rule files (backlog a40541cb) are judged by the
+    /// ledger's own loaders: an unbalanced posting rule is INVALID
+    /// naming the rule, a projection whose `when` key is not a pointer
+    /// is INVALID naming the key, and a stray table name is refused.
+    #[test]
+    fn a_bad_ledger_rule_row_is_invalid_by_name() {
+        let dir = scratch_dir("boss-cli-tenant-check-ledger-rules");
+        write_file(&dir.join("tenant.toml"), "[meta]\ntenant_id = \"t\"\n");
+        let seeds = dir.join("seeds");
+        boss_testing::scratch::create_dir(&seeds);
+        write_file(&seeds.join("workflows.toml"), "");
+        write_file(
+            &seeds.join("posting_rules.toml"),
+            "[[posting_rule]]\nfact_kind = \"finance.sponsorship.received\"\nbasis = \"cash\"\n\
+             lines = [\n\
+               { account_code = \"1010\", side = \"debit\", amount_path = \"/amount_cents\" },\n\
+               { account_code = \"4100\", side = \"credit\", amount_path = \"/amount_cents\" },\n\
+               { account_code = \"6100\", side = \"debit\", amount_path = \"/fee_cents\" },\n\
+             ]\n",
+        );
+        write_file(
+            &seeds.join("fact_projection_rules.toml"),
+            "[[projection]]\nevent_kind = \"step.done.task\"\n\
+             when = { \"spec_slug\" = \"recognize\" }\n\
+             fact_kind = \"finance.sponsorship.received\"\nsource_table = \"jobs\"\n\
+             source_id_path = \"/job_id\"\n",
+        );
+        let r = check(&dir);
+        let row = status_of(&r, "seeds/posting_rules.toml").unwrap();
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(
+            row.detail.contains("finance.sponsorship.received v1"),
+            "{row:?}"
+        );
+        assert!(row.detail.contains("not balanced"), "{row:?}");
+        let row = status_of(&r, "seeds/fact_projection_rules.toml").unwrap();
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(row.detail.contains("spec_slug"), "{row:?}");
+
+        write_file(
+            &seeds.join("posting_rules.toml"),
+            "[[posting_rules]]\nfact_kind = \"x\"\n",
+        );
+        write_file(
+            &seeds.join("fact_projection_rules.toml"),
+            "[[projections]]\nevent_kind = \"x\"\n",
+        );
+        let r = check(&dir);
+        let row = status_of(&r, "seeds/posting_rules.toml").unwrap();
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(row.detail.contains("[[posting_rule]]"), "{row:?}");
+        let row = status_of(&r, "seeds/fact_projection_rules.toml").unwrap();
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(row.detail.contains("[[projection]]"), "{row:?}");
     }
 
     #[test]

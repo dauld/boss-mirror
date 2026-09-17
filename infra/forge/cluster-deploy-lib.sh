@@ -859,6 +859,131 @@ observe_connector() {
     echo "cluster-deploy-runner: cloudflared: $connector (observed on $observed_on)"
 }
 
+# EVERY TICK OBSERVES THE SITE, beside the connector (backlog e114238a;
+# design b64c4377). Site ops by protocol — the tenant workflow
+# publish-the-landing-page in david/algedonic-llc — closes its loop on
+# the converge's RECORD of what it served, never on a belief: the
+# publish step records `site_hash` = sha256 of site/index.html at the
+# merge, and the dispatcher rule jobs.complete_step_matching completes
+# the `live` step when a closed converge's run step carries the same
+# value at `steps.run.site.hash`. So the converge reads the page the
+# way a visitor's request reaches the gateway — `/` with `Host:
+# <site>`, the header the tunnel connector forwards unchanged — and
+# hashes the BODY it received, byte for byte. That equality holds
+# because the gateway serves the file's bytes as read and rewrites
+# nothing (boss-gateway site.rs `answer`, pinned by its own test), and
+# because the body goes to a FILE here, never through a shell variable
+# that would strip a trailing newline or choke on a NUL.
+#
+# THE REACH is measured, not assumed: the instance's gateway Service
+# is a LoadBalancer (boss.yaml; prod pinned to 10.20.0.30, another
+# instance's assigned by the pool), and its address is read off the
+# live object — the same LAN the watchdog reaches the jobs API over
+# (cluster-watchdog.sh, 10.20.0.34). Nothing here goes through the
+# tunnel: an observation of the edge would be an observation of
+# Cloudflare, and the fact the loop rests on is what the GATEWAY
+# serves.
+#
+# NEVER FATAL, NEVER FAKED. The site is not what a train delivers, so
+# an unreachable gateway records `unreachable (<curl's own words>)` and
+# the tick goes on; a 404 (a tenant with no site/ yet) records the 404
+# and the hash of THAT body — the status is the reader's to judge. An
+# instance the secret gate skipped has no gateway running and is
+# recorded unreachable for the reason the packet already names.
+#
+# site_reach K NS — `ip:port` of Service boss-gateway in NS, or nothing
+#   and rc 1 when the Service has no LoadBalancer address (not yet
+#   assigned, not created, or a read the credential could not make —
+#   none of which is an address the runner may guess).
+site_reach() {
+    local k="$1" ns="$2" addr
+    addr=$($k get svc boss-gateway -n "$ns" \
+        -o 'jsonpath={.status.loadBalancer.ingress[0].ip}:{.spec.ports[0].port}' 2>/dev/null) || addr=""
+    case "$addr" in
+        '' | :*) return 1 ;;
+    esac
+    printf '%s\n' "$addr"
+}
+
+# site_read ADDR SITE NS — one GET of `/` at ADDR with `Host: SITE`,
+#   bounded to ten seconds, the body to a file. Prints ONE JSON object:
+#     {host, namespace, http_status, bytes, hash, observed_at}   an answer
+#     {host, namespace, unreachable, observed_at}                no answer,
+#                                        `unreachable` being curl's words
+site_read() {
+    local addr="$1" site="$2" ns="$3" body code why rc=0 observed_at
+    body=$(mktemp -t site-body.XXXXXX)
+    observed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    code=$(curl -sS --max-time 10 -o "$body" -w '%{http_code}' \
+        -H "Host: $site" "http://$addr/" 2>"$body.err") || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        why=$(tr '\n' ' ' <"$body.err" | sed 's/[[:space:]]*$//')
+        jq -nc --arg h "$site" --arg n "$ns" --arg u "${why:-curl exited $rc}" --arg t "$observed_at" \
+            '{host: $h, namespace: $n, unreachable: $u, observed_at: $t}'
+    else
+        jq -nc --arg h "$site" --arg n "$ns" --arg s "$code" --arg b "$(wc -c <"$body")" \
+            --arg x "$(sha256sum <"$body" | cut -d' ' -f1)" --arg t "$observed_at" \
+            '{host: $h, namespace: $n, http_status: ($s | tonumber), bytes: ($b | tonumber), hash: $x, observed_at: $t}'
+    fi
+    rm -f "$body" "$body.err"
+}
+
+# site_unreachable SITE NS WHY — the same object for an instance that
+#   was never asked.
+site_unreachable() {
+    jq -nc --arg h "$1" --arg n "$2" --arg u "$3" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{host: $h, namespace: $n, unreachable: $u, observed_at: $t}'
+}
+
+# observe_sites K INSTANCES SOURCE_NS SKIPPED
+#   For every instance row (render-instance.sh --instances) whose ninth
+#   column declares a site, reads it and records, through the run
+#   summary:
+#     site        the object above, for the SOURCE instance's site —
+#                 the one the tenant rule reads as steps.run.site.* —
+#                 or the first declared when the source declares none
+#     sites       every declared site's object, keyed by host — only
+#                 when more than one instance declares one
+#     site_line   one line per instance, `; `-joined, in row order:
+#                 `<site> → <ns>: HTTP <status>, <bytes> bytes, sha256
+#                 <hash>` or `<site> → <ns>: unreachable (<why>)`
+#   Records nothing when no instance declares a site, and returns 0 in
+#   every case. SKIPPED is the packet's own `instances_skipped` string,
+#   parsed by the one parser (instances-skipped.lib.sh).
+observe_sites() {
+    local k="$1" instances="$2" source_ns="$3" skipped="$4"
+    local iname ins_ns _t _s _h _share _r _f site addr obj reason
+    local line="" sites='{}' first="" source_obj="" n=0
+    # shellcheck source=infra/cluster/instances-skipped.lib.sh
+    . "$(dirname "${BASH_SOURCE[0]}")/../cluster/instances-skipped.lib.sh"
+    while IFS="$IFS_ROW" read -r iname ins_ns _t _s _h _share _r _f site; do
+        [ -n "$site" ] || continue
+        n=$((n + 1))
+        reason=$(BOSS_INSTANCES_SKIPPED="$skipped" skip_reason "$ins_ns")
+        if [ -n "$reason" ]; then
+            obj=$(site_unreachable "$site" "$ins_ns" "$ins_ns skipped ($reason)")
+        elif addr=$(site_reach "$k" "$ins_ns"); then
+            obj=$(site_read "$addr" "$site" "$ins_ns")
+        else
+            obj=$(site_unreachable "$site" "$ins_ns" "no LoadBalancer address on Service boss-gateway in $ins_ns")
+        fi
+        sites=$(printf '%s' "$sites" | jq -c --argjson o "$obj" '. + {($o.host): $o}')
+        line="${line:+$line; }$(printf '%s' "$obj" | jq -r '
+            "\(.host) → \(.namespace): " + (if .unreachable then "unreachable (\(.unreachable))"
+                else "HTTP \(.http_status), \(.bytes) bytes, sha256 \(.hash)" end)')"
+        [ "$ins_ns" = "$source_ns" ] && source_obj="$obj"
+        [ -n "$first" ] || first="$obj"
+    done <<< "$(instance_rows "$instances")"
+    if [ "$n" -eq 0 ]; then
+        echo "cluster-deploy-runner: site: no instance declares a site — nothing observed"
+        return 0
+    fi
+    run_summary_json site "${source_obj:-$first}"
+    if [ "$n" -gt 1 ]; then run_summary_json sites "$sites"; fi
+    run_summary_field site_line "$line"
+    echo "cluster-deploy-runner: site: $line"
+}
+
 # A DECLARED BROKER SECRET IS CREATED EMPTY WHEN IT IS ABSENT (backlog
 # 51c98681; David 2026-09-16: no hand work unless absolutely required,
 # and an empty object declared in the registry is not a credential).

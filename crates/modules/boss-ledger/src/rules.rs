@@ -1255,7 +1255,7 @@ fn payload_err(kind: &str, reason: &str) -> LedgerError {
 /// Parse an integer-cents amount from a JSON payload. Accepts both signed
 /// and unsigned JSON integers; a string "12345" also works for adapters
 /// that stringify large numbers.
-fn cents_from_payload(v: Option<&serde_json::Value>) -> Option<i64> {
+pub(crate) fn cents_from_payload(v: Option<&serde_json::Value>) -> Option<i64> {
     let v = v?;
     if let Some(n) = v.as_i64() {
         return Some(n);

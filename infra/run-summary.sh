@@ -47,11 +47,31 @@
 # arm that needs the patient is not an arm). A failure warns on stderr,
 # which lands in the journal beside the work.
 
-# One key, one value, merged in immediately. Strings only: these land in
-# step metadata, where every field is authored as a string.
+# One key, one value, merged in immediately. Strings: these land in
+# step metadata, where a field is authored as a string — except the
+# one shape below.
 run_summary_field() { # <key> <value>
     [ -n "${BOSS_RUN_SUMMARY_FILE:-}" ] || return 0
     _run_summary_apply --arg k "$1" --arg v "${2-}" '. + {($k): $v}'
+}
+
+# One key, one JSON value — an OBJECT a reader walks into. The cluster
+# converge records what the tenant site served as `site: {host,
+# http_status, bytes, hash, observed_at}` (backlog e114238a), because
+# the dispatcher rule that closes the tenant's publish packet reads
+# `steps.run.site.hash` off the closed converge
+# (jobs.complete_step_matching) and a fact with five parts is one
+# record, not five prose fields a reader re-joins. boss-step.sh merges
+# the summary onto the step with jq's `*`, so the object arrives as an
+# object. A value that is not JSON is refused here, named on stderr,
+# and nothing is recorded: a wrong record is worse than a missing one.
+run_summary_json() { # <key> <json>
+    [ -n "${BOSS_RUN_SUMMARY_FILE:-}" ] || return 0
+    if ! printf '%s' "${2-}" | jq -e . >/dev/null 2>&1; then
+        echo "run-summary: $1 is not JSON — not recorded: ${2-}" >&2
+        return 0
+    fi
+    _run_summary_apply --arg k "$1" --argjson v "${2-}" '. + {($k): $v}'
 }
 
 # An anomaly, VERBATIM, appended to `anomalies` — a SKIP, a warning, a

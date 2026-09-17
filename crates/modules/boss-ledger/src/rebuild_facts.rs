@@ -1,11 +1,15 @@
 //! Rebuild `financial_facts` from `audit_log` via the
 //! `gl_fact_projection_rules` registry.
 //!
-//! Each rule maps one real-world `audit_log.kind` 1:1 to one
-//! `financial_facts.kind`. The projection extracts `source_id`,
-//! `happened_on`, and `created_by` from `event.payload` via JSON
-//! pointers (RFC 6901), passes the payload through verbatim, and
-//! upserts via `record_fact_in_tx` — idempotent on the natural key
+//! Each rule maps one real-world `audit_log.kind` to one
+//! `financial_facts.kind`, optionally only for the events whose
+//! payload matches the rule's `when` (`{"/pointer": value}`, every
+//! pointer equal) — which is how ONE workflow's completed step becomes
+//! a fact out of a `step.done.task` every workflow emits (backlog
+//! a40541cb). The projection extracts `source_id`, `happened_on`, and
+//! `created_by` from `event.payload` via JSON pointers (RFC 6901),
+//! passes the payload through verbatim, and upserts via
+//! `record_fact_in_tx` — idempotent on the natural key
 //! `(kind, source_table, source_id)`.
 //!
 //! Determinism: `fact_id` derivation lives in `record_fact_in_tx`
@@ -35,15 +39,9 @@ use crate::supersede::replay_supersede_events_in_tx;
 /// serializes concurrent ledger-rebuilds.
 const REBUILD_FACTS_LOCK_KEY: i64 = boss_core::rebuild::lock_key("ledger-facts");
 
-#[derive(Debug, Clone)]
-pub struct ProjectionRule {
-    pub event_kind: String,
-    pub fact_kind: String,
-    pub source_table: String,
-    pub source_id_path: String,
-    pub happened_on_path: Option<String>,
-    pub created_by_path: Option<String>,
-}
+/// The registry row, shared with the tenant loader and the batch door
+/// (one definition, CLAUDE.md §9a). Carries `when`.
+pub use crate::posting_rules::ProjectionRule;
 
 #[derive(Debug, Clone)]
 pub struct RebuildFactsReport {
@@ -276,21 +274,25 @@ pub async fn rebuild_facts_in_tx(
         let kind: String = row.get("kind");
         let payload: Value = row.get("payload");
 
-        let Some(rule) = rules.get(&kind) else {
+        let Some(candidates) = rules.get(&kind) else {
             continue;
         };
 
-        let projected = match project_event(rule, timestamp, &source, &payload) {
-            Ok(p) => p,
-            Err(ProjectionError::MissingField { .. }) => {
-                events_skipped_missing_field += 1;
-                continue;
-            }
-            Err(e) => return Err(LedgerError::Storage(e.to_string())),
-        };
+        // One event kind may carry several rules (one per `when`);
+        // every rule whose filter matches fires.
+        for rule in candidates.iter().filter(|r| r.when_matches(&payload)) {
+            let projected = match project_event(rule, timestamp, &source, &payload) {
+                Ok(p) => p,
+                Err(ProjectionError::MissingField { .. }) => {
+                    events_skipped_missing_field += 1;
+                    continue;
+                }
+                Err(e) => return Err(LedgerError::Storage(e.to_string())),
+            };
 
-        record_fact_in_tx(tx, projected.as_write()).await?;
-        facts_written += 1;
+            record_fact_in_tx(tx, projected.as_write()).await?;
+            facts_written += 1;
+        }
     }
 
     // GL-inert reprojection pass — kept OFF the `gl_fact_projection_rules`
@@ -314,7 +316,7 @@ pub async fn rebuild_facts_in_tx(
     let supersedes_applied = replay_supersede_events_in_tx(tx).await?;
 
     Ok(RebuildFactsReport {
-        rules_loaded: rules.len() as u64,
+        rules_loaded: rules.values().map(Vec::len).sum::<usize>() as u64,
         events_scanned,
         facts_written,
         events_skipped_missing_field,
@@ -402,29 +404,13 @@ async fn rebuild_inert_received_facts_in_tx(
     Ok(written)
 }
 
+/// The registry grouped by event kind, each group in registry order.
 async fn load_rules_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> Result<HashMap<String, ProjectionRule>, LedgerError> {
-    let rows = sqlx::query(
-        "SELECT event_kind, fact_kind, source_table, source_id_path, \
-                happened_on_path, created_by_path \
-         FROM gl_fact_projection_rules",
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|e| LedgerError::Storage(e.to_string()))?;
-
-    let mut out = HashMap::with_capacity(rows.len());
-    for row in &rows {
-        let rule = ProjectionRule {
-            event_kind: row.get("event_kind"),
-            fact_kind: row.get("fact_kind"),
-            source_table: row.get("source_table"),
-            source_id_path: row.get("source_id_path"),
-            happened_on_path: row.get("happened_on_path"),
-            created_by_path: row.get("created_by_path"),
-        };
-        out.insert(rule.event_kind.clone(), rule);
+) -> Result<HashMap<String, Vec<ProjectionRule>>, LedgerError> {
+    let mut out: HashMap<String, Vec<ProjectionRule>> = HashMap::new();
+    for rule in crate::posting_rules::load_projection_rules_in_tx(tx).await? {
+        out.entry(rule.event_kind.clone()).or_default().push(rule);
     }
     Ok(out)
 }
@@ -472,6 +458,7 @@ mod tests {
             source_id_path: "/id".into(),
             happened_on_path: Some("/issued_on".into()),
             created_by_path: None,
+            when: None,
         }
     }
 

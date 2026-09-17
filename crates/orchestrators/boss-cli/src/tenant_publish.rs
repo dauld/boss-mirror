@@ -28,7 +28,10 @@
 //! step's audience may name one; backlog f56155f0) → Workflows, after
 //! a barrier on the people projection (a publish opens design Jobs
 //! whose role-bearing steps are assigned against the roster) →
-//! sensors LAST. Every file present in the directory
+//! sensors → the ledger's posting rules → its event→fact projections
+//! LAST (a projection names the fact kind a rule posts and the
+//! workflow whose step it reads; backlog a40541cb). Every file present
+//! in the directory
 //! gets a line: a door and a count when publish writes it, `skipped:
 //! <why>` when nothing reads it — never silence. `--dry-run` prints
 //! that plan and makes no HTTP call.
@@ -85,6 +88,7 @@ pub struct Bases {
     pub policy: String,
     pub people: String,
     pub jobs: String,
+    pub ledger: String,
 }
 
 impl Bases {
@@ -102,6 +106,7 @@ impl Bases {
             policy: resolve("policy"),
             people: resolve("people"),
             jobs: resolve("jobs"),
+            ledger: resolve("ledger"),
         }
     }
 
@@ -160,6 +165,17 @@ pub enum Door {
         tenant_id: String,
         rows: Vec<boss_jobs::sensors::SensorInput>,
     },
+    /// The tenant's posting rules (backlog a40541cb): fact kind →
+    /// journal lines, landed with `source = tenant:<id>`.
+    PostingRules {
+        tenant_id: String,
+        rows: Vec<boss_ledger::posting_rules::PostingRuleInput>,
+    },
+    /// The tenant's event→fact projections, after the posting rules
+    /// (a projection names the fact kind a rule posts).
+    ProjectionRules {
+        rows: Vec<boss_ledger::posting_rules::ProjectionRule>,
+    },
 }
 
 impl Door {
@@ -175,6 +191,8 @@ impl Door {
             Door::Agents { .. } => "POST /api/agents/batch",
             Door::Workflows { .. } => "POST /api/jobs (workflow-design), walked to publish",
             Door::Sensors { .. } => "POST /api/sensors/batch",
+            Door::PostingRules { .. } => "POST /api/ledger/posting-rules/batch",
+            Door::ProjectionRules { .. } => "POST /api/ledger/fact-projection-rules/batch",
         }
     }
 
@@ -220,6 +238,22 @@ impl Door {
                 rows.len(),
                 rows.iter()
                     .map(|r| r.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Door::PostingRules { rows, .. } => format!(
+                "{} posting rules (insert-if-absent by fact_kind + version: {}; a differing row under a kept version is named)",
+                rows.len(),
+                rows.iter()
+                    .map(|r| format!("{} v{}", r.fact_kind, r.version))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Door::ProjectionRules { rows } => format!(
+                "{} projections (insert-if-absent by event_kind + when: {})",
+                rows.len(),
+                rows.iter()
+                    .map(|r| r.event_kind.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -558,13 +592,31 @@ pub fn plan(dir: &Path) -> Result<Plan> {
             kinds: specs.iter().map(|s| s.kind.clone()).collect(),
         })
     })?;
-    // 9. Sensors LAST (design 14c9b2ad): each row names the workflow
-    //    kind a reading opens, so the kinds go first; the registry row
-    //    is what the platform's 5-minute poll reads.
+    // 9. Sensors (design 14c9b2ad): each row names the workflow kind
+    //    a reading opens, so the kinds go first; the registry row is
+    //    what the platform's 5-minute poll reads.
     door(present(dir, &["seeds/sensors.toml"]), &|p| {
         Ok(Door::Sensors {
             tenant_id: tenant_id.clone(),
             rows: boss_jobs::sensors::load_sensors_toml(p).map_err(anyhow::Error::msg)?,
+        })
+    })?;
+    // 10. Posting rules (backlog a40541cb): fact kind → journal lines,
+    //     landed with the tenant as their source.
+    door(present(dir, &["seeds/posting_rules.toml"]), &|p| {
+        Ok(Door::PostingRules {
+            tenant_id: tenant_id.clone(),
+            rows: boss_ledger::posting_rules::load_posting_rules_toml(p)
+                .map_err(anyhow::Error::msg)?,
+        })
+    })?;
+    // 11. Event→fact projections LAST: a projection names the fact kind
+    //     a posting rule posts and (through `when`) the workflow whose
+    //     step it reads, so both go first.
+    door(present(dir, &["seeds/fact_projection_rules.toml"]), &|p| {
+        Ok(Door::ProjectionRules {
+            rows: boss_ledger::posting_rules::load_projection_rules_toml(p)
+                .map_err(anyhow::Error::msg)?,
         })
     })?;
     // Everything else check saw, in check's order: a required file it
@@ -822,7 +874,41 @@ fn send(client: &Client, bases: &Bases, door: &Door) -> Result<String> {
                 body.get("inserted").and_then(Value::as_u64).unwrap_or(0)
             ))
         }
+        Door::PostingRules { tenant_id, rows } => {
+            let u = url(&bases.ledger, "/api/ledger/posting-rules/batch");
+            let resp = refuse(
+                client
+                    .post(&u)
+                    .json(&json!({ "tenant_id": tenant_id, "rules": rows }))
+                    .send()?,
+                &format!("POST {u}"),
+            )?;
+            rules_outcome(resp, &u)
+        }
+        Door::ProjectionRules { rows } => {
+            let u = url(&bases.ledger, "/api/ledger/fact-projection-rules/batch");
+            let resp = refuse(
+                client.post(&u).json(&json!({ "rules": rows })).send()?,
+                &format!("POST {u}"),
+            )?;
+            rules_outcome(resp, &u)
+        }
     }
+}
+
+/// The ledger doors' own outcome: counts, plus every kept row whose
+/// declaration differs from the registry's — named on the line, so an
+/// edit under a kept version never reads as "nothing to do".
+fn rules_outcome(resp: reqwest::blocking::Response, u: &str) -> Result<String> {
+    let out: boss_ledger::posting_rules::BatchOutcome = resp
+        .json()
+        .with_context(|| format!("POST {u}: the outcome did not parse"))?;
+    let mut line = format!("received {}, inserted {}", out.received, out.inserted);
+    if !out.differs.is_empty() {
+        line.push_str("; differs: ");
+        line.push_str(&out.differs.join("; "));
+    }
+    Ok(line)
 }
 
 /// Run the plan against `bases`, one line per step through `out` as
@@ -975,6 +1061,26 @@ terminal = { outcome = "sponsored" }
              credential = \"stripe-restricted-read\"\nevery_minutes = 15\n\
              opens = \"receive-a-sponsorship\"\nsubject_kind = \"custom\"\n",
         );
+        // The ledger's two rule files (backlog a40541cb): the
+        // sponsorship's posting rule and the projection that turns the
+        // recognize step's completion into that fact.
+        put(
+            &dir,
+            "seeds/posting_rules.toml",
+            "[[posting_rule]]\nfact_kind = \"finance.sponsorship.received\"\nbasis = \"cash\"\n\
+             lines = [\n\
+               { account_code = \"1010\", side = \"debit\", amount_path = \"/metadata/amount_cents\" },\n\
+               { account_code = \"4100\", side = \"credit\", amount_path = \"/metadata/amount_cents\" },\n\
+             ]\n",
+        );
+        put(
+            &dir,
+            "seeds/fact_projection_rules.toml",
+            "[[projection]]\nevent_kind = \"step.done.task\"\n\
+             when = { \"/workflow_kind\" = \"receive-a-sponsorship\", \"/spec_slug\" = \"recognize\" }\n\
+             fact_kind = \"finance.sponsorship.received\"\nsource_table = \"jobs\"\n\
+             source_id_path = \"/job_id\"\nhappened_on_path = \"/completed_on\"\n",
+        );
         dir
     }
 
@@ -1013,8 +1119,10 @@ terminal = { outcome = "sponsored" }
                 "seeds/agents.toml",
                 "seeds/workflows.toml",
                 "seeds/sensors.toml",
+                "seeds/posting_rules.toml",
+                "seeds/fact_projection_rules.toml",
             ],
-            "classes → locations → calendars → company → policy → people → agents → workflows → sensors LAST"
+            "classes → locations → calendars → company → policy → people → agents → workflows → sensors → posting rules → projections LAST"
         );
         // The agents door (backlog f56155f0): the declarations as the
         // batch endpoint's rows, before the Workflows whose steps may
@@ -1070,6 +1178,26 @@ terminal = { outcome = "sponsored" }
                 assert_eq!(rows.len(), 1);
                 assert_eq!(rows[0].id, "stripe-sponsorships");
                 assert_eq!(rows[0].opens, "receive-a-sponsorship");
+            }
+            other => panic!("{other:?}"),
+        }
+        // The ledger doors (backlog a40541cb): the rows as the batch
+        // endpoints take them, the tenant named as the rule's source.
+        match &step(&p, "seeds/posting_rules.toml").action {
+            Action::Write(Door::PostingRules { tenant_id, rows }) => {
+                assert_eq!(tenant_id, "acme");
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].fact_kind, "finance.sponsorship.received");
+                assert_eq!(rows[0].version, 1);
+                assert_eq!(rows[0].basis, "cash");
+            }
+            other => panic!("{other:?}"),
+        }
+        match &step(&p, "seeds/fact_projection_rules.toml").action {
+            Action::Write(Door::ProjectionRules { rows }) => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].event_kind, "step.done.task");
+                assert_eq!(rows[0].when.as_ref().unwrap()["/spec_slug"], "recognize");
             }
             other => panic!("{other:?}"),
         }
@@ -1220,6 +1348,10 @@ terminal = { outcome = "sponsored" }
         /// the stub's "migration" pre-registers agent-claude under
         /// the platform's own name, as the real schema does).
         agents: BTreeMap<String, String>,
+        /// Published posting rules, "fact_kind v<n>" (insert-if-absent).
+        posting_rules: BTreeSet<String>,
+        /// Published projections, "event_kind when" (insert-if-absent).
+        projections: BTreeSet<String>,
     }
 
     impl Stub {
@@ -1231,6 +1363,8 @@ terminal = { outcome = "sponsored" }
                 + self.sensors.len()
                 + self.locations.len()
                 + self.agents.len()
+                + self.posting_rules.len()
+                + self.projections.len()
         }
     }
 
@@ -1354,6 +1488,35 @@ terminal = { outcome = "sponsored" }
                 (
                     200,
                     json!({"received": v["sensors"].as_array().map_or(0, Vec::len), "inserted": inserted}).to_string(),
+                )
+            }
+            ("POST", "/api/ledger/posting-rules/batch") => {
+                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                assert_eq!(v["tenant_id"], "acme", "the batch names the tenant: {body}");
+                let rows = v["rules"].as_array().cloned().unwrap_or_default();
+                let inserted = rows
+                    .iter()
+                    .map(|r| format!("{} v{}", r["fact_kind"], r["version"]))
+                    .filter(|k| st.posting_rules.insert(k.clone()))
+                    .count();
+                (
+                    200,
+                    json!({"received": rows.len(), "inserted": inserted, "differs": []})
+                        .to_string(),
+                )
+            }
+            ("POST", "/api/ledger/fact-projection-rules/batch") => {
+                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                let rows = v["rules"].as_array().cloned().unwrap_or_default();
+                let inserted = rows
+                    .iter()
+                    .map(|r| format!("{} {}", r["event_kind"], r["when"]))
+                    .filter(|k| st.projections.insert(k.clone()))
+                    .count();
+                (
+                    200,
+                    json!({"received": rows.len(), "inserted": inserted, "differs": []})
+                        .to_string(),
                 )
             }
             ("GET", p) if p.starts_with("/api/jobs/") && p.ends_with("/steps") => {
@@ -1498,6 +1661,13 @@ terminal = { outcome = "sponsored" }
             st.sensors.iter().collect::<Vec<_>>(),
             ["stripe-sponsorships"]
         );
+        assert_eq!(hit("POST", "/api/ledger/posting-rules/batch"), 1);
+        assert_eq!(
+            st.posting_rules.iter().collect::<Vec<_>>(),
+            ["\"finance.sponsorship.received\" v1"]
+        );
+        assert_eq!(hit("POST", "/api/ledger/fact-projection-rules/batch"), 1);
+        assert_eq!(st.projections.len(), 1);
         assert_eq!(st.people["emp-two"]["manager_id"], json!("emp-david"));
         // Order on the wire: classes before people, people before the
         // design Job.
@@ -1520,6 +1690,11 @@ terminal = { outcome = "sponsored" }
         assert!(
             pos("POST", "/api/jobs") < pos("POST", "/api/sensors/batch"),
             "the sensors name a workflow kind, so the kinds go first"
+        );
+        assert!(
+            pos("POST", "/api/ledger/posting-rules/batch")
+                < pos("POST", "/api/ledger/fact-projection-rules/batch"),
+            "a projection names the fact kind a posting rule posts, so the rules go first"
         );
         // Identity on every request; no sim chain on any.
         for (m, path, head, _) in &st.log {

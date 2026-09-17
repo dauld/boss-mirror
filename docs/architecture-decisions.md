@@ -717,6 +717,38 @@ writer on the 1320 credit; a module reaching into another module's
 projection with direct SQL (the invoice-issue path once UPDATEd
 `finished_product_inventory` in place) is the prohibited shape.
 
+**Posting rules are registry data; the code rules are the fallback.**
+(Backlog a40541cb on design 18cf4272, 2026-09-17.) `gl_posting_rules`
+is an append-only registry keyed `(fact_kind, version)`: `lines` is
+`[{account_code, side, amount_path, memo?}]` with each amount an RFC
+6901 pointer into the fact payload (integer cents), `basis` is the
+tenant's declared accounting basis (cash | accrual — recorded, never a
+code path), `source` is `NULL` or `tenant:<id>`. `DataRuleSet` is the
+one active RuleSet: it evaluates a fact by the NEWEST registry rule for
+its kind and by `BossRuleSet` when there is none, so a tenant's own
+fact kinds are rows in `seeds/posting_rules.toml` (the tenant contract)
+and the product's kinds keep their tested code rules. A data rule is
+admitted only when its debit pointers and its credit pointers are the
+same multiset — balanced for EVERY payload, a decidable check at
+publish, refused 422 naming the rule — and the balanced-draft check
+runs again at evaluation; that language is narrower than the code
+rules' (payroll's `gross = net + withheld` stays in code) on purpose.
+**A data rule's version is not a `gl_rule_versions` row.** That table
+names the interpreter that ran and `gl_journal_entries.rule_version_id`
+keeps pointing at it (BOSS RuleSet v1); a tenant's `version` is its
+edition of one kind's lines, written into the entry's memo, and a
+newer edition re-projects OPEN periods on rebuild exactly as the code
+rules do under `OPEN_PERIOD_FACTS_SQL`, never a locked one. The
+event→fact half gained `when` — `{"/pointer": value}`, every pointer
+equal for the rule to fire — so ONE workflow's step can become a fact
+out of the `step.done.task` every workflow emits; identity of a
+projection is `(event_kind, when)`, and `step.done.<kind>` carries
+`workflow_kind` beside `spec_slug` for it. Both registries are
+published through insert-if-absent batch doors that record one
+`.declared` fact per landed row and name a kept row whose declaration
+differs. The projection runs at the facts rebuild today; a live tail
+from `audit_log` into `financial_facts` is the open half.
+
 ## Policy & auth
 
 Every write passes `boss-policy` via the `PolicyClient` port.

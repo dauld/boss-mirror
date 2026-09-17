@@ -33,6 +33,13 @@
 # Service did not carry the port and the pod's door could not route by
 # path. Same trust class: the jobs API's writes are already here.
 #
+# The ledger and the dispatcher followed (backlog 77fd7b5a + 4145d2c1,
+# 2026-09-17): the same sponsorship's recognize step needs a journal
+# entry posted through POST /api/ledger/journal-entries (boss-ledger,
+# 7080), and the agent reads the rule registry it edits through
+# GET /api/dispatcher/rules (boss-dispatcher, 7950). Neither port was
+# here, so neither could be done through a door.
+#
 # The ports are boss-ports' prod ports under boss-ports' names, and
 # the all-in-one pod listens on each (generate-configs.sh binds
 # 0.0.0.0), so port == targetPort. Which services, on which port, is
@@ -60,3 +67,5 @@ spec:
     - {port: 7800, targetPort: 7800, name: classes}
     - {port: 7820, targetPort: 7820, name: locations}
     - {port: 7550, targetPort: 7550, name: accounts}
+    - {port: 7080, targetPort: 7080, name: ledger}
+    - {port: 7950, targetPort: 7950, name: dispatcher}

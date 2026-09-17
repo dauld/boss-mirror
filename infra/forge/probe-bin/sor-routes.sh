@@ -36,8 +36,12 @@
 # (accounts, support-cases, account-account-team, my-day/actions —
 # crates/modules/boss-accounts/src/*.rs `.route(` lines) and is its own
 # service on its own port; every other /api/people path is
-# boss-people. Everything unlisted — jobs, steps, the yard, agents,
-# sensors, workflows — is the jobs API.
+# boss-people. The ledger (boss-ledger http.rs, all under /api/ledger/)
+# and the dispatcher's rule registry (boss-dispatcher http.rs, all
+# under /api/dispatcher/) joined on 2026-09-17 (backlog 77fd7b5a +
+# 4145d2c1): the first real sponsorship sat at recognize with no door
+# to post a journal entry through. Everything unlisted — jobs, steps,
+# the yard, agents, sensors, workflows — is the jobs API.
 sor_service_for_path() {
     local route="${1%%\?*}" service
     # SOR-ROUTES-BEGIN
@@ -50,6 +54,8 @@ sor_service_for_path() {
         /api/people|/api/people/*)                             service=people ;;
         /api/classes|/api/classes/*)                           service=classes ;;
         /api/locations|/api/locations/*)                       service=locations ;;
+        /api/ledger/*)                                         service=ledger ;;
+        /api/dispatcher/*)                                     service=dispatcher ;;
         *)                                                     service=jobs ;;
     esac
     # SOR-ROUTES-END

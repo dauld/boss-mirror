@@ -184,6 +184,12 @@ if [ "$HEAD" = "$LAST" ]; then
         exit 1
     }
     observe_connector "$K" "$KO" "$SOURCE_NS" "/manifests/$SOURCE_NS/cloudflared.yaml" cloudflared "$SKIPPED" unchanged
+    # And the tenant site, for the same reason (backlog e114238a): the
+    # tenant's publish loop closes on the newest converge's record of
+    # what the gateway serves, and a fact that exists only when a train
+    # ships is the wrong shape for it. `get svc` is the one kubectl
+    # read; the page itself is read over HTTP, never through the tunnel.
+    observe_sites "$K" "$("$REPO/infra/cluster/render-instance.sh" --instances)" "$SOURCE_NS" "$SKIPPED"
     rm -rf "$OBSERVE_DIR"
     OUTCOME="converged=$HEAD (unchanged)"
     exit 0
@@ -922,6 +928,17 @@ _stage_done ingress_s
 STAGE="tunnel connector"
 observe_connector "$K" "$KM" "$SOURCE_NS" "/manifests/$SOURCE_NS/cloudflared.yaml" cloudflared "$INSTANCES_SKIPPED" deploy
 rm -rf "$APPLY_DIR"
+
+# THE SITE, read after the roll (backlog e114238a; design b64c4377):
+# prod is rolled and its boss-site ConfigMap applied above, so what
+# the gateway serves for `/` under the site hostname NOW is this
+# converge's — `site.hash` on this packet is the sha256 of the body it
+# got, the value the tenant's publish-the-landing-page rule matches
+# against its own `site_hash` to mark the page live. Same lib function
+# as the unchanged tick; same bound: never fatal, never faked. Needs
+# no manifest mount, so it follows the apply directory's discard.
+STAGE="observe site"
+observe_sites "$K" "$INSTANCES" "$SOURCE_NS" "$INSTANCES_SKIPPED"
 STAGE="verify manifests"
 
 # THE CONVERGE VERIFIES WHAT IT APPLIED (60690755). Everything above

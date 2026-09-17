@@ -266,6 +266,15 @@ fn the_route_function_sends_every_boss_accounts_path_to_accounts_and_nothing_els
         ("/api/events/tail?limit=1", "events"),
         ("/api/classes?subject_kind=employee", "classes"),
         ("/api/locations/loc-hq", "locations"),
+        // The ledger and the dispatcher joined on 2026-09-17 (backlog
+        // 77fd7b5a + 4145d2c1): the agent posts a journal entry and reads
+        // the rule registry through the door, each on its own port.
+        ("/api/ledger/trial-balance", "ledger"),
+        ("/api/ledger/journal-entries?limit=1", "ledger"),
+        ("/api/dispatcher/rules", "dispatcher"),
+        ("/api/dispatcher/rules/auto-assign/versions", "dispatcher"),
+        ("/api/ledgers/x", "jobs"),
+        ("/api/dispatchers", "jobs"),
         ("/api/jobs?kind=pr-train", "jobs"),
         ("/api/yard/status", "jobs"),
         ("/api/peoples/x", "jobs"),

@@ -16,6 +16,7 @@
 
 pub mod error;
 pub mod excise;
+pub mod posting_rules;
 pub mod recognize;
 pub mod rules;
 pub mod types;
@@ -60,6 +61,7 @@ pub mod supersede;
 pub mod tax_filings;
 
 pub use error::LedgerError;
+pub use posting_rules::{DataRuleSet, PostingRule, PostingRuleInput};
 pub use rules::{BossRuleSet, RuleSet, evaluate, revenue_accounts_map};
 pub use types::{
     AccountCode, AccountKind, FactRef, JournalEntryDraft, JournalLineDraft, NormalSide,

@@ -7,11 +7,13 @@ use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
 mod api;
+mod inquiries;
 mod perf;
 mod plugin_files;
 mod proxy;
 mod role_headers;
 mod site;
+mod sponsors;
 mod static_files;
 mod timing;
 
@@ -200,16 +202,39 @@ async fn main() -> Result<()> {
     // the instance's site hostname is answered from the site directory
     // before the session middleware above ever sees it. No site
     // configured → the router unchanged.
-    let site = site::Site::from_env();
+    // The roll (sponsors.rs) rides every site: its one computed
+    // document, read from the jobs upstream as the gateway itself.
+    let site = site::Site::from_env().map(|s| {
+        s.with_sponsors(sponsors::SponsorRoll::new(Arc::new(
+            sponsors::JobsApi::from_env(),
+        )))
+    });
     match &site {
         Some(s) => tracing::info!(site_host = %s.host(), "tenant site mounted"),
         None => tracing::info!("no tenant site (BOSS_SITE_HOST / BOSS_SITE_DIR unset)"),
     }
+    let site_host = site.as_ref().map(|s| s.host().to_string());
     let app = site::mount(app, site);
+
+    // The site's one write (inquiries.rs), outside the read-only site
+    // layer: `POST /site/inquiries` on the site host opens a
+    // receive-an-inquiry packet through the accounts and jobs doors.
+    // No site → no door.
+    let door = site_host
+        .as_deref()
+        .map(|host| inquiries::Door::new(host, Arc::new(inquiries::Services::from_env())));
+    let app = inquiries::mount(app, door);
 
     tracing::info!(listen = %listen, static_dir = %static_files::static_dir(), "boss-gateway starting");
     let listener = TcpListener::bind(&listen).await?;
-    axum::serve(listener, app).await?;
+    // With the peer address on every request: the inquiry door's
+    // rate limit falls back to it when the tunnel sends no
+    // `CF-Connecting-IP`.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }
