@@ -460,3 +460,72 @@ fn stream_covers_every_rule_topic() {
         );
     }
 }
+
+/// A TENANT'S RULE IS NOT THE TREE'S TO RETIRE (backlog 458971ef,
+/// 2026-09-17). "Retire what the tree no longer authors" was written
+/// when the authored directory was the only source of rules, and it
+/// reads every enforced row as the product's: a rule a tenant
+/// publishes through `boss tenant publish` — its own reactor, its own
+/// protocol data — would die at the next converge, silently, in the
+/// `retired` list of a boot log nobody reads. The row now says whose
+/// it is: `source` is NULL for a row the authored directory owns and
+/// `tenant:<tenant_id>` for one a tenant declared, and the seed
+/// retires ONLY the first kind. The product-sourced half of the
+/// contract is unchanged, and this test holds both halves in one
+/// registry: a tenant row with no file survives; a product row with
+/// no file does not.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tenant_sourced_rule_survives_a_seed_that_names_no_file_for_it() {
+    let db = TestDb::new().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = authored_copy(&tmp);
+
+    let tenant_rule = "complete-site-live-on-converge-closed";
+    sqlx::query(
+        "INSERT INTO dispatcher_rules (name, version, status, on_event, when_expr, do_steps, source) \
+         VALUES ($1, 1, 'active', 'jobs.job.closed', 'kind = \"maintenance-cluster-converge\"', \
+                 '[{\"handler\":\"messages.notify\",\"args\":{}}]'::jsonb, 'tenant:acme')",
+    )
+    .bind(tenant_rule)
+    .execute(&db.pool)
+    .await
+    .expect("publish a tenant-sourced rule the way the dispatcher API does");
+    assert!(
+        !dir.join(format!("{tenant_rule}.toml")).exists(),
+        "the fixture registry must not author the tenant's rule, or this test proves nothing"
+    );
+    // The control: a PRODUCT row with no file is still retired.
+    let product_rule = "forward-handoff-done-to-webhook";
+    std::fs::remove_file(dir.join(format!("{product_rule}.toml"))).expect("delete the rule file");
+
+    let report = seed_authored_rules(&db.pool, &dir)
+        .await
+        .expect("seed the fixture registry");
+
+    assert_eq!(
+        active_version(&db.pool, tenant_rule).await,
+        Some(1),
+        "a tenant-sourced rule no file names must stay enforced — reported: {report:?}"
+    );
+    assert!(
+        !report.retired.iter().any(|n| n == tenant_rule),
+        "the seed must not even NAME the tenant's rule as retired: {:?}",
+        report.retired
+    );
+    assert_eq!(
+        active_version(&db.pool, product_rule).await,
+        None,
+        "a product-sourced rule no file names is still retired — reported: {report:?}"
+    );
+    assert!(report.retired.iter().any(|n| n == product_rule));
+    // And the row still says whose it is, so a reader of the registry
+    // can tell whose reaction it is.
+    let source: Option<String> = sqlx::query_scalar(
+        "SELECT source FROM dispatcher_rules WHERE name = $1 AND status = 'active'",
+    )
+    .bind(tenant_rule)
+    .fetch_one(&db.pool)
+    .await
+    .expect("read the source back");
+    assert_eq!(source.as_deref(), Some("tenant:acme"));
+}

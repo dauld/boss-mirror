@@ -134,9 +134,13 @@ if [[ "$START" -eq 1 ]]; then
     # generate-configs.sh requires boss-ports-list on PATH; bare-metal
     # builds put it at target/release/, not /usr/local/bin like the
     # docker image. Prepend so the script finds it.
+    # The generator writes [demo_agents] only for the brewery, read
+    # from the tenant manifest — the same one the gateway is handed
+    # below — so a local stack keeps its /ops demo mode (b03f38de).
     PATH="$REPO_ROOT/target/release:$PATH" \
         DATABASE_URL="postgres://boss:boss@127.0.0.1/boss" \
         BOSS_NATS_URL="nats://127.0.0.1:4222" \
+        BOSS_TENANT_MANIFEST_TOML="$REPO_ROOT/examples/brewery/seeds/tenant.toml" \
         ETC_DIR="$CONFIG_DIR" \
         "$REPO_ROOT/infra/oss-quickstart/generate-configs.sh"
 

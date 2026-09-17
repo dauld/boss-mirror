@@ -147,11 +147,15 @@ for r in rules:
     if not isinstance(r, dict) or "name" not in r:
         continue
     v = r.get("version")
-    out.append((r["name"], "" if v is None else str(v), "true" if r.get("authored") else "false"))
+    # `source` (backlog 458971ef): "product" for a row the authored
+    # directory owns, "tenant:<id>" for a tenant's own rule. An older
+    # dispatcher serves no field; every row of one is the product's.
+    source = r.get("source") or "product"
+    out.append((r["name"], "" if v is None else str(v), "true" if r.get("authored") else "false", str(source)))
 if not out:
     sys.exit(5)
-for name, v, authored in sorted(out):
-    print("RULE\t%s\t%s\t%s" % (name, v, authored))
+for name, v, authored, source in sorted(out):
+    print("RULE\t%s\t%s\t%s\t%s" % (name, v, authored, source))
 PY
 )
 case "$?" in
@@ -179,6 +183,11 @@ registry_count=$(printf '%s\n' "$registry_line" | cut -f3)
 registry_error=$(printf '%s\n' "$registry_line" | cut -f4)
 
 live_rules=$(printf '%s\n' "$read_out" | LC_ALL=C grep '^RULE' || true)
+# A tenant's rule (source tenant:<id>) is authored in the TENANT's
+# directory, which this tree cannot see and the product's seed never
+# retires; it is neither "unauthored" nor "retiring" here, only named.
+tenant_rules=$(printf '%s\n' "$live_rules" | LC_ALL=C awk -F'\t' '$5 != "product" { print $2 " (" $5 ")" }')
+live_rules=$(printf '%s\n' "$live_rules" | LC_ALL=C awk -F'\t' '$5 == "product"')
 live_names=$(printf '%s\n' "$live_rules" | cut -f2)
 
 # ---------------------------------------------------------------------------
@@ -245,4 +254,5 @@ pending=$(LC_ALL=C comm -13 <(printf '%s\n' "$live_names") <(printf '%s\n' "$tre
 retiring=$(LC_ALL=C comm -23 <(printf '%s\n' "$live_names") <(printf '%s\n' "$tree_names") || true)
 [ -z "$pending" ] || printf '  authored in this tree, not yet enforced (awaiting converge + seed): %s\n' "$(printf '%s\n' $pending | tr '\n' ' ')"
 [ -z "$retiring" ] || printf '  no longer authored in this tree, still enforced (the next converge retires): %s\n' "$(printf '%s\n' $retiring | tr '\n' ' ')"
+[ -z "$tenant_rules" ] || printf '  declared by a tenant, outside this tree (never retired by the seed): %s\n' "$(printf '%s\n' "$tenant_rules" | tr '\n' ' ')"
 exit 0

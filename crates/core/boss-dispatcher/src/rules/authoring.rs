@@ -54,6 +54,13 @@ pub struct RuleVersion {
     #[serde(rename = "do")]
     pub do_steps: Vec<RawDoStep>,
     pub delay: Option<String>,
+    /// Who declared this row (backlog 458971ef): `None` for the
+    /// product's authored directory — the seed, a migration, the
+    /// SPA's editor — and `tenant:<tenant_id>` for a rule a tenant
+    /// declared through `boss tenant publish`. The boot seed retires
+    /// only `None`-sourced rules no file names; see `seed.rs`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -104,7 +111,7 @@ fn store<E: std::fmt::Display>(e: E) -> AuthoringError {
 }
 
 const SELECT_COLS: &str = "name, version, status, on_event, when_expr, do_steps, delay, \
-     schedule_cadence, schedule_anchor, schedule_calendar, created_at";
+     schedule_cadence, schedule_anchor, schedule_calendar, source, created_at";
 
 /// Parse a draft through the SAME `Rule::from_raw` the runtime uses, so an
 /// authoring error (bad topic / `when` / arg expr) surfaces before persist.
@@ -148,6 +155,7 @@ fn row_to_version(row: &sqlx::postgres::PgRow) -> Result<RuleVersion, AuthoringE
         when: row.try_get("when_expr").map_err(store)?,
         do_steps,
         delay: row.try_get("delay").map_err(store)?,
+        source: row.try_get("source").map_err(store)?,
         created_at: row.try_get("created_at").map_err(store)?,
     })
 }
@@ -182,6 +190,24 @@ pub async fn get_version(
     row_to_version(&row)
 }
 
+/// `name -> source` for every ACTIVE row some source other than the
+/// product declared — the join the read surface makes against the
+/// rules it serves, so a tenant's rule reads as the tenant's. Product
+/// rows (`source IS NULL`) are absent; the reader labels an absent name
+/// with [`source_label`].
+pub async fn enforced_sources(
+    pool: &PgPool,
+) -> Result<std::collections::BTreeMap<String, String>, AuthoringError> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT name, source FROM dispatcher_rules \
+         WHERE status = 'active' AND source IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(store)?;
+    Ok(rows.into_iter().collect())
+}
+
 /// The active version of a rule, or `NotFound` if none is active.
 pub async fn get_active(pool: &PgPool, name: &str) -> Result<RuleVersion, AuthoringError> {
     let sql =
@@ -195,20 +221,66 @@ pub async fn get_active(pool: &PgPool, name: &str) -> Result<RuleVersion, Author
     row_to_version(&row)
 }
 
-/// Append a new draft version of `raw.name`. Validates first (a draft that
-/// can't load is rejected with `Invalid`, no row written), assigns
-/// `max(version) + 1`, status = `draft`.
-pub async fn create_draft(pool: &PgPool, raw: &RawRule) -> Result<RuleVersion, AuthoringError> {
+/// The name a source prints as: `None` is the product's authored
+/// directory. One spelling, shared by the refusal below and every
+/// report that names an owner, so two readers cannot describe the same
+/// owner two ways.
+pub fn source_label(source: Option<&str>) -> &str {
+    source.unwrap_or("product")
+}
+
+/// Append a new draft version of `raw.name`, declared by `source`
+/// (`None` = the product; see [`RuleVersion::source`]). Validates first
+/// (a draft that can't load is rejected with `Invalid`, no row written),
+/// status = `draft`.
+///
+/// THE VERSION IS `max(raw.version, MAX(version) + 1)` (backlog
+/// 458971ef). It was `MAX + 1` alone, the body's `version` ignored: a
+/// tenant file saying `version = 3` over a live v1 landed a v2 the file
+/// never named, and the next `boss tenant publish` — comparing the
+/// file's 3 against a registry at 2 — published it again. The seed
+/// already lands product rules at the version their FILE declares; the
+/// door now does the same, and a body declaring nothing newer (the
+/// SPA's editor sends the default, 1) still takes `MAX + 1`, so a
+/// version is never walked back.
+///
+/// A NAME BELONGS TO WHOEVER PUBLISHED IT FIRST. The table is one
+/// namespace with one active row per name, and publish retires the
+/// incumbent whatever its source: a tenant drafting
+/// `auto-park-on-gate-green` v2 would put its reaction in the product's
+/// slot. So a draft whose `source` differs from the name's existing
+/// rows is refused, naming both owners, and writes nothing.
+pub async fn create_draft(
+    pool: &PgPool,
+    raw: &RawRule,
+    source: Option<&str>,
+) -> Result<RuleVersion, AuthoringError> {
     validate(raw).map_err(|e| AuthoringError::Invalid(e.to_string()))?;
     let do_json = serde_json::to_value(&raw.do_steps).map_err(store)?;
     let mut tx = pool.begin().await.map_err(store)?;
-    let next: i32 = sqlx::query_scalar(
+    let owners: Vec<Option<String>> =
+        sqlx::query_scalar("SELECT DISTINCT source FROM dispatcher_rules WHERE name = $1")
+            .bind(&raw.name)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(store)?;
+    if let Some(owner) = owners.iter().find(|o| o.as_deref() != source) {
+        return Err(AuthoringError::Invalid(format!(
+            "rule `{}` is owned by {}; a draft from {} cannot supersede it (one name, one \
+             owner — declare the rule under a name of your own)",
+            raw.name,
+            source_label(owner.as_deref()),
+            source_label(source)
+        )));
+    }
+    let next_free: i32 = sqlx::query_scalar(
         "SELECT COALESCE(MAX(version), 0) + 1 FROM dispatcher_rules WHERE name = $1",
     )
     .bind(&raw.name)
     .fetch_one(&mut *tx)
     .await
     .map_err(store)?;
+    let next = next_free.max(i32::try_from(raw.version).unwrap_or(i32::MAX));
     // Decompose the schedule into its columns (all NULL for an event rule).
     let sched_cadence = raw.schedule.as_ref().map(|s| s.cadence.token());
     let sched_anchor = raw.schedule.as_ref().map(|s| s.anchor_date);
@@ -219,8 +291,8 @@ pub async fn create_draft(pool: &PgPool, raw: &RawRule) -> Result<RuleVersion, A
     sqlx::query(
         "INSERT INTO dispatcher_rules \
             (name, version, status, on_event, when_expr, do_steps, delay, \
-             schedule_cadence, schedule_anchor, schedule_calendar) \
-         VALUES ($1, $2, 'draft', $3, $4, $5, $6, $7, $8, $9)",
+             schedule_cadence, schedule_anchor, schedule_calendar, source) \
+         VALUES ($1, $2, 'draft', $3, $4, $5, $6, $7, $8, $9, $10)",
     )
     .bind(&raw.name)
     .bind(next)
@@ -231,6 +303,7 @@ pub async fn create_draft(pool: &PgPool, raw: &RawRule) -> Result<RuleVersion, A
     .bind(sched_cadence)
     .bind(sched_anchor)
     .bind(sched_calendar)
+    .bind(source)
     .execute(&mut *tx)
     .await
     .map_err(store)?;
@@ -321,6 +394,7 @@ mod tests {
                 args: Default::default(),
             }],
             delay: None,
+            source: None,
             created_at: chrono::Utc.with_ymd_and_hms(2026, 8, 13, 0, 0, 0).unwrap(),
         }
     }

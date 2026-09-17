@@ -40,7 +40,7 @@ pub struct RawRegistry {
 /// A rule is triggered EITHER by an incoming event (`on_event`) OR by
 /// a schedule (`schedule`) — exactly one of the two. `from_raw`
 /// enforces the XOR; a rule with both or neither is a load error.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RawRule {
     pub name: String,
     /// The NATS topic this rule listens for. Mutually exclusive with
@@ -111,7 +111,7 @@ pub fn schedule_fires_on(
     boss_core::calendar::fires_on_with_calendar(sched.cadence, sched.anchor_date, cal, day)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RawDoStep {
     pub handler: String,
     #[serde(default)]
@@ -226,25 +226,67 @@ pub fn parse_raw_dir(dir: &Path) -> Result<RawRegistry, RegistryError> {
                 ),
             });
         }
-        let why = why_in(&src, &stem).map_err(|reason| RegistryError::RuleFile {
-            file: file_str.clone(),
-            reason,
-        })?;
-        if why.is_none() {
-            return Err(RegistryError::RuleFile {
-                file: file_str,
-                reason: format!(
-                    "rule `{stem}` has no `why`. A dispatcher rule is a reaction the \
-                     protocol definition could not express (protocol-policy-publish.md): \
-                     say in a `why = \"\"\"…\"\"\"` field which standing exemption it \
-                     claims — timer, external ingress/glue, or cross-protocol reactor — \
-                     or declare it in the Workflow definition instead"
-                ),
-            });
-        }
+        require_why(&src, &stem, &file_str)?;
         rules.extend(parsed.rules);
     }
     Ok(RawRegistry { rules })
+}
+
+/// Parse ONE file holding any number of `[[rule]]` rows, each saying
+/// why it exists — a tenant's own registry, `seeds/rules.toml`
+/// (backlog 458971ef). The same serde shape and the same `why` check
+/// as [`parse_raw_dir`], so the tenant contract is the product file's
+/// contract and cannot drift from it (CLAUDE.md §9a); what a directory
+/// pins by construction — one name per file — is checked here instead,
+/// because two rows under one name would be two rows racing for one
+/// active slot. An empty file is zero rules: a tenant with no reactors
+/// is a tenant, not a wrong path (the directory reader's refusal is
+/// about a DIRECTORY that must not read as empty).
+pub fn parse_raw_file(path: &Path) -> Result<RawRegistry, RegistryError> {
+    let file_str = path.display().to_string();
+    let src = read_rule_text(path)?;
+    let parsed = parse_raw(&src).map_err(|e| RegistryError::RuleFile {
+        file: file_str.clone(),
+        reason: e.to_string(),
+    })?;
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for rule in &parsed.rules {
+        if !seen.insert(rule.name.as_str()) {
+            return Err(RegistryError::RuleFile {
+                file: file_str,
+                reason: format!(
+                    "rule `{}` is declared twice; one name is one rule (bump `version` to \
+                     change it)",
+                    rule.name
+                ),
+            });
+        }
+        require_why(&src, &rule.name, &file_str)?;
+    }
+    Ok(parsed)
+}
+
+/// The `why` guard, ONE definition for the directory and the file
+/// reader: rule `name` in `src` (at `file`, for the error) must record
+/// a non-empty `why`.
+fn require_why(src: &str, name: &str, file: &str) -> Result<(), RegistryError> {
+    let why = why_in(src, name).map_err(|reason| RegistryError::RuleFile {
+        file: file.to_string(),
+        reason,
+    })?;
+    if why.is_none() {
+        return Err(RegistryError::RuleFile {
+            file: file.to_string(),
+            reason: format!(
+                "rule `{name}` has no `why`. A dispatcher rule is a reaction the \
+                 protocol definition could not express (protocol-policy-publish.md): \
+                 say in a `why = \"\"\"…\"\"\"` field which standing exemption it \
+                 claims — timer, external ingress/glue, or cross-protocol reactor — \
+                 or declare it in the Workflow definition instead"
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn read_rule_text(path: &Path) -> Result<String, RegistryError> {
@@ -1738,6 +1780,74 @@ handler = "h"
         std::fs::write(dir.path().join("blank.toml"), rule_file("blank", "   ")).unwrap();
         let e = parse_raw_path(dir.path()).unwrap_err().to_string();
         assert!(e.contains("blank.toml") && e.contains("why"), "{e}");
+    }
+
+    /// A TENANT'S REGISTRY IS ONE FILE OF MANY RULES (backlog 458971ef):
+    /// `seeds/rules.toml`, in the product file's own `[[rule]]` shape,
+    /// read by the SAME serde shape and the SAME `why` check as the
+    /// product's directory — one parser, so the contract cannot drift
+    /// from the product's (CLAUDE.md §9a). What differs is only what a
+    /// directory pins by construction: a rule is named in the file
+    /// rather than by it, so names must be unique, and every rule
+    /// still says why it exists. An empty file is zero rules, not an
+    /// error — a tenant with no reactors is a tenant, not a typo.
+    #[test]
+    fn a_rule_file_of_many_rules_loads_each_with_its_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rules.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "{}{}",
+                rule_file(
+                    "complete-site-live-on-converge-closed",
+                    "a cross-protocol reactor"
+                ),
+                rule_file("thank-a-sponsor-on-sponsored", "external glue")
+            ),
+        )
+        .unwrap();
+        let raw = parse_raw_file(&path).expect("a multi-rule file loads");
+        let names: Vec<&str> = raw.rules.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "complete-site-live-on-converge-closed",
+                "thank-a-sponsor-on-sponsored"
+            ]
+        );
+
+        std::fs::write(&path, "# no reactors yet\n").unwrap();
+        assert!(parse_raw_file(&path).unwrap().rules.is_empty());
+
+        // The why guard, per rule and by name.
+        std::fs::write(
+            &path,
+            format!(
+                "{}[[rule]]\nname = \"mute\"\non_event = \"x.y\"\n[[rule.do]]\nhandler = \"noop\"\n",
+                rule_file("said", "a timer")
+            ),
+        )
+        .unwrap();
+        let e = parse_raw_file(&path).unwrap_err().to_string();
+        assert!(
+            e.contains("rules.toml") && e.contains("`mute`") && e.contains("why"),
+            "{e}"
+        );
+
+        // Two rules under one name would be two rows racing for one
+        // active slot; refused by name.
+        std::fs::write(
+            &path,
+            format!(
+                "{}{}",
+                rule_file("twin", "a timer"),
+                rule_file("twin", "a timer")
+            ),
+        )
+        .unwrap();
+        let e = parse_raw_file(&path).unwrap_err().to_string();
+        assert!(e.contains("`twin`") && e.contains("twice"), "{e}");
     }
 
     /// A registry directory with no rule files is a wrong path, not an

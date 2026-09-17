@@ -663,20 +663,23 @@ fn build_router(local_auth_state: Option<Arc<LocalAuthState>>) -> axum::Router<A
             "/api/calendar/{*rest}",
             axum::routing::any(|s, r| proxy::handle(s, r, &proxy::CALENDAR)),
         )
-        // Observability aggregator — the SPA's Operations page reads
-        // /api/snapshot for the cybernetics rollup. Two strict matchers
-        // (no trailing path) plus a wildcard for any future sub-paths.
-        // Public read so the unauth landing-page mode keeps working;
-        // there's no per-tenant data here yet, just synthetic agent
-        // activity from the demo_agents config (or real cross-VM
-        // rollups when [[vms]] is populated).
+        // Observability aggregator — /api/snapshot is the cybernetics
+        // rollup (and /api/snapshot/capabilities the startup census).
+        // Two strict matchers (no trailing path) plus a wildcard for
+        // sub-paths. Session-gated like every other read since
+        // 2026-09-17 (backlog b03f38de): it was public for the unauth
+        // landing-page mode, which no longer reads it — nothing in
+        // apps/web fetches this path — so the pin's only effect in
+        // prod was to answer anyone with the demo-agents figures and
+        // `demo_mode: true`. Pinned by
+        // `the_snapshot_refuses_a_sessionless_caller` below.
         .route(
             "/api/snapshot",
-            axum::routing::get(|s, r| proxy::handle_public(s, r, &proxy::OBSERVABILITY)),
+            axum::routing::get(|s, r| proxy::handle(s, r, &proxy::OBSERVABILITY)),
         )
         .route(
             "/api/snapshot/{*rest}",
-            axum::routing::get(|s, r| proxy::handle_public(s, r, &proxy::OBSERVABILITY)),
+            axum::routing::get(|s, r| proxy::handle(s, r, &proxy::OBSERVABILITY)),
         )
         // The IT Monitoring page probes /api/<port-name>/health for
         // every PORTS entry. boss-observability exposes its routes
@@ -1166,6 +1169,28 @@ mod routing_tests {
     #[tokio::test]
     async fn the_agent_run_reads_refuse_a_sessionless_caller() {
         for path in ["/api/agent-runs", "/api/agent-runs/cost"] {
+            let (status, body) = get(app(), path).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "`{path}` must be gated by the session proxy: {body}"
+            );
+            assert!(
+                !body.contains(MISS),
+                "`{path}` reached the /api catch-all: {body}"
+            );
+        }
+    }
+
+    /// The observability snapshot needs a session like every other read
+    /// (backlog b03f38de, 2026-09-17). It was pinned public for the
+    /// unauth landing-page mode, which no longer reads it — no SPA
+    /// consumer is left — so the pin's only effect in prod was to hand
+    /// anyone the demo-agents figures with `demo_mode: true`. Same
+    /// discriminator as the agent-run reads: 401 before any upstream.
+    #[tokio::test]
+    async fn the_snapshot_refuses_a_sessionless_caller() {
+        for path in ["/api/snapshot", "/api/snapshot/capabilities"] {
             let (status, body) = get(app(), path).await;
             assert_eq!(
                 status,

@@ -24,7 +24,8 @@ Three verbs make the contract usable:
   `chart::AccountInput` + `validate` for the chart of accounts, the
   agents and sensors loaders in `boss_jobs`, the posting-rule and
   projection loaders in `boss_ledger`, `boss_people::Employee`,
-  `boss_core`'s `BusinessCalendar` and the gateway's `TenantToml` — and reports one
+  `boss_core`'s `BusinessCalendar`, the gateway's `TenantToml` and the
+  dispatcher's own `[[rule]]` parser + publish gate for `rules.toml` — and reports one
   line per file: **OK** / **MISSING** (a required file) / **INVALID**
   (with the loader's own error, never rephrased) / **UNKNOWN** (a file
   the contract does not name). Exit 0 when nothing is MISSING or
@@ -35,8 +36,10 @@ Three verbs make the contract usable:
   classes → the chart of accounts → locations → business calendars →
   the company Subject → policy grants → people (two passes) → agents →
   Workflows, after a barrier on the people projection → sensors → the
-  ledger's posting rules → its event→fact projections last. Idempotent (insert-if-absent, upsert, 409 swallowed, a
-  kind an authoring Job already published is skipped), signed as
+  ledger's posting rules → its event→fact projections → dispatcher
+  rules last. Idempotent (insert-if-absent, upsert, 409 swallowed, a
+  kind an authoring Job already published is skipped, a rule at its
+  file's version is `present`), signed as
   `automation:tenant-seed` and **not** as a sim chain. One line per
   file present: the door and a count, or `skipped: <why>` for a file
   nothing reads — never silence. It refuses a directory that fails
@@ -108,6 +111,7 @@ stating plainly:
 | `seeds/posting_rules.toml` | no | POST /api/ledger/posting-rules/batch (boss-ledger, insert-if-absent by fact_kind + version, source = tenant:<id>) — sent by `boss tenant publish` AFTER the Workflows; the posting path evaluates a fact by the newest registry rule for its kind and by the code rules otherwise (backlog a40541cb) | `[[posting_rule]]` rows: fact_kind, version? (1), basis (cash|accrual), lines = [{account_code, side (debit|credit), amount_path (a JSON pointer into the fact payload, integer cents), memo?}] — the debit pointers and the credit pointers must be the same multiset (balanced for every fact); validated by `boss_ledger::posting_rules::load_posting_rules_toml` | yes |
 | `seeds/fact_projection_rules.toml` | no | POST /api/ledger/fact-projection-rules/batch (boss-ledger, insert-if-absent by event_kind + when) — sent by `boss tenant publish` after the posting rules; the ledger's facts rebuild projects every matching audit_log event into a financial_fact (backlog a40541cb) | `[[projection]]` rows: event_kind (an audit_log kind), when? (a table of {"/pointer" = value}, every pointer equal for the rule to fire), fact_kind, source_table, source_id_path, happened_on_path?, created_by_path? — the `gl_fact_projection_rules` columns; validated by `boss_ledger::posting_rules::load_projection_rules_toml` | yes |
 | `seeds/locations.toml` | no | POST /api/locations/batch, one boss-locations `http::LocationInput` per row (insert-if-absent by id) — sent by `boss tenant publish` BEFORE the roster, because an `employees.json` `location` is a foreign key into the registry (backlog 1ec8312a; until 2026-09-17 nothing read this file) | `[[location]]` rows: id, name, kind, timezone (+ parent_id, latitude, longitude, address, account_id, metadata) — the `locations` table's columns | yes |
+| `seeds/rules.toml` | no | POST /api/dispatcher/rules/_validate, then POST /api/dispatcher/rules (a draft carrying `source = tenant:<tenant_id>`) + POST /api/dispatcher/rules/{name}/publish per rule (boss-dispatcher) — sent by `boss tenant publish` LAST, after the Workflows a rule reacts on; append-only: an unchanged version is a no-op (the line says `present`), a higher version supersedes, a live version ahead of the file is left alone, and a name another source owns is refused; the dispatcher's boot seed retires only product-sourced rules no file names, so a tenant's rule survives every converge (backlog 458971ef) | `[[rule]]` rows in the product rule file's own shape (infra/dispatcher/rules/*.toml): name, why, version, on_event or schedule, when?, delay?, `[[rule.do]]` handler + args — parsed by `boss_dispatcher::rules::registry::parse_raw_file`, validated by the publish door's own `authoring::validate`, handler names checked against `cascade::handler_emits` (this build's roster) | yes |
 | `seeds/subject_kinds.toml` | no | NO READER (measured 2026-09-16). Check parses the rows conservatively | `[[subject_kind]]` rows: kind, label, description, owning_team, sort_order | no |
 | `seeds/accounts.toml` | no | boss-brewery-engine, `include_str!` at compile time from examples/brewery/seeds — a copy in a tenant directory is never read | brewery engine data (`names`, `[[city]]`); check parses TOML only | no |
 | `seeds/vendors.toml` | no | boss-brewery-engine, `include_str!` at compile time — never read from a tenant directory | brewery engine data (`[[vendor]]`); check parses TOML only | no |
@@ -117,6 +121,7 @@ stating plainly:
 | `seeds/parts.toml` | no | boss-brewery-engine `load_parts` (raw-materials catalog + opening balances) | brewery engine data (`[[parts]]`); check parses TOML only | no |
 | `seeds/products.toml` | no | NO READER (measured 2026-09-16): the brewery's finished-product catalog is hardcoded in its prepare, which says to keep it in sync with this file | brewery engine data (`[[products]]`); check parses TOML only | no |
 <!-- contract-table:end -->
+
 
 ## Two spellings the table accepts
 
@@ -338,6 +343,103 @@ the last line is refused by `check` (INVALID, naming
 `finance.sponsorship.received v1`) and by the door (422) with the same
 words. The files above are the tenant's commit, not the product's;
 `boss tenant init` writes both as commented templates.
+
+## A tenant's own reactors — `seeds/rules.toml`
+
+A dispatcher rule is a reaction the platform runs when an event lands
+(or on a schedule): the same `[[rule]]` shape the product's own rules
+take under `infra/dispatcher/rules/` — `name`, a `why` naming which
+standing exemption it claims (timer, threshold, external glue,
+cross-protocol reactor; see that directory's README), `version`,
+`on_event` or `schedule`, an optional `when` predicate, and one or
+more `[[rule.do]]` handler invocations. A tenant's reactors are the
+tenant's protocol data, not the product's, so they live in the
+tenant's directory (backlog `458971ef`, decided by design `b64c4377`).
+
+**One parser, two doors.** `check` reads the file with the
+dispatcher's own reader (`registry::parse_raw_file` — the product's
+serde shape and the product's per-rule `why` guard, plus a
+uniqueness check on names that a one-file-per-rule directory pins by
+construction), runs every rule through the publish door's own
+`authoring::validate` (topic, predicate, arg expressions, the
+trigger XOR), and checks each handler name against
+`cascade::handler_emits`, the roster the product's own rules are held
+to. Handler names are otherwise opaque to the dispatcher until
+dispatch, so this is where a tenant learns *before* publishing that a
+rule names a handler its build does not carry — INVALID, naming the
+rule and the handler.
+
+**Published append-only, through the dispatcher's own door.** For each
+rule, `publish` asks the running dispatcher's
+`POST /api/dispatcher/rules/_validate` first (the deployed rule
+language, not the CLI's build; a refusal is its words and no draft is
+left armed), reads the name's versions, and then:
+
+- a live version **above** the file's is left alone and the line says
+  `registry ahead at vN, left alone` — a version is never walked back;
+- the file's version **present**, at any status, is a no-op — the line
+  says `present (active)`; if the stored content differs from the
+  file's, the line names the field and says to bump `version`, so a
+  silent edit under an unchanged version cannot read as `present`
+  forever;
+- otherwise a **draft** is created carrying `source = tenant:<tenant_id>`
+  and lands at the file's version (the door takes
+  `max(declared, MAX + 1)`, so the SPA's editor, which sends no
+  version, still gets `MAX + 1`), then **published** — the line says
+  `published` or `published, superseding vN`, and the promoted row is
+  checked to be the one just drafted.
+
+**A name belongs to whoever published it first.** `dispatcher_rules`
+is one namespace with one active row per name, so a tenant drafting
+`auto-park-on-gate-green` v2 would put its reaction in the product's
+slot. The door refuses a draft whose `source` differs from the name's
+existing rows, naming both owners; `publish` reads the versions first
+and refuses the same way before drafting. Choose names of your own.
+
+**The product's boot seed leaves a tenant's rule alone.** The seed
+that derives `dispatcher_rules` from `infra/dispatcher/rules/` retires
+every enforced rule no file there names — and until this column it
+read every row as the product's, so a tenant's rule died at the next
+converge. A row's `source` now says whose it is: NULL is the product's
+(the seed, a migration, the SPA's editor — a live rule with no file is
+still retired, unchanged), `tenant:<tenant_id>` is a tenant's, and only
+NULL-sourced rows are ever retired. `GET /api/dispatcher/rules` reports
+`source` per rule, so a tenant's row — `authored: false` by
+construction, no product file can name it — does not read as the drift
+that flag exists to show.
+
+**The worked example — what Algedonic's tenant declares.** The landing
+page (`publish-the-landing-page`) has a `live` step whose evidence is
+the converge that shipped the site's hash; no single workflow can
+express "complete my step when *that other* packet closes", which is
+the cross-protocol exemption. The tenant's `seeds/rules.toml`:
+
+```toml
+[[rule]]
+name = "complete-site-live-on-converge-closed"
+why = """
+A cross-protocol reactor: the landing page's `live` step is proven by
+the converge packet that shipped its site hash, and a step completing
+from another protocol's record is exactly what a workflow cannot say.
+"""
+version = 1
+on_event = "jobs.job.closed"
+when = 'kind = "maintenance-cluster-converge"'
+[[rule.do]]
+handler = "jobs.complete_step_matching"
+args = { kind = '"publish-the-landing-page"', step = '"live"', match_step = '"publish"', match_field = '"site_hash"', event_path = '"steps.run.site.hash"', evidence_key = '"converge"', "done_metadata.converged_by" = "id" }
+```
+
+`jobs.complete_step_matching` is being built by a sibling car: it
+finds the open `publish-the-landing-page` packet whose `publish`
+step's `site_hash` equals the closed converge's `steps.run.site.hash`,
+completes its `live` step, and writes the converge's identity under
+`evidence.converge` in the step's done metadata (the arg names above
+are that handler's; read its file under `infra/dispatcher/rules/` or
+its doc once it lands). Until that car lands and the CLI is rebuilt,
+`check` reports this rule INVALID by handler name — which is the honest
+answer — and the contract's own test fixture proves the mechanics with
+`messages.notify`, a handler every build has.
 
 ## What `check` found on the first real tenant
 

@@ -31,12 +31,14 @@
 //! a barrier on the people projection (a publish opens design Jobs
 //! whose role-bearing steps are assigned against the roster) →
 //! sensors → the ledger's posting rules → its event→fact projections
-//! LAST (a projection names the fact kind a rule posts and the
-//! workflow whose step it reads; backlog a40541cb). Every file present
-//! in the directory
-//! gets a line: a door and a count when publish writes it, `skipped:
-//! <why>` when nothing reads it — never silence. `--dry-run` prints
-//! that plan and makes no HTTP call.
+//! (a projection names the fact kind a rule posts and the workflow
+//! whose step it reads; backlog a40541cb) → dispatcher rules LAST (the
+//! tenant's own reactors, backlog 458971ef; a rule fires on the
+//! protocols published before it, and its args may name the projection
+//! rules too). Every file present in the directory gets a line: a door
+//! and a count when publish writes it, `skipped: <why>` when nothing
+//! reads it — never silence. `--dry-run` prints that plan and makes no
+//! HTTP call.
 //!
 //! IT REFUSES BEFORE IT WRITES. The plan is built on [`tenant::check`]
 //! and a directory with a MISSING or INVALID file is refused whole,
@@ -51,7 +53,8 @@
 //! the calendar batch replaces by code; the company Subject upserts;
 //! policy GETs each rule before it POSTs; a 409 on an employee is
 //! "already there"; the workflow publish skips a kind an authoring Job
-//! already published. A second run writes nothing new.
+//! already published; a dispatcher rule at its file's version is
+//! `present`. A second run writes nothing new.
 //!
 //! SIGNED, NOT SIMULATED. Every write carries `x-boss-user` as
 //! `automation:tenant-seed` (platform-admin / operator — the tier the
@@ -91,6 +94,9 @@ pub struct Bases {
     pub policy: String,
     pub people: String,
     pub jobs: String,
+    /// The rule-authoring door (backlog 458971ef); the gateway proxies
+    /// `/api/dispatcher/*` to it, the launcher path is its own port.
+    pub dispatcher: String,
 }
 
 impl Bases {
@@ -109,6 +115,7 @@ impl Bases {
             policy: resolve("policy"),
             people: resolve("people"),
             jobs: resolve("jobs"),
+            dispatcher: resolve("dispatcher"),
         }
     }
 
@@ -184,6 +191,15 @@ pub enum Door {
     ProjectionRules {
         rows: Vec<boss_ledger::posting_rules::ProjectionRule>,
     },
+    /// The tenant's dispatcher rules (backlog 458971ef): its own
+    /// reactors, in the product rule file's shape, published through
+    /// the dispatcher's authoring door one rule at a time, each row
+    /// carrying `source = tenant:<tenant_id>`. Last of all — a reactor
+    /// fires on the protocols published before it.
+    Rules {
+        tenant_id: String,
+        rules: Vec<boss_dispatcher::rules::registry::RawRule>,
+    },
 }
 
 impl Door {
@@ -202,6 +218,9 @@ impl Door {
             Door::Sensors { .. } => "POST /api/sensors/batch",
             Door::PostingRules { .. } => "POST /api/ledger/posting-rules/batch",
             Door::ProjectionRules { .. } => "POST /api/ledger/fact-projection-rules/batch",
+            Door::Rules { .. } => {
+                "POST /api/dispatcher/rules/_validate, GET versions, then draft + publish per rule"
+            }
         }
     }
 
@@ -271,6 +290,15 @@ impl Door {
                 rows.len(),
                 rows.iter()
                     .map(|r| r.event_kind.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Door::Rules { tenant_id, rules } => format!(
+                "{} rules as source tenant:{tenant_id} ({}) (append-only: an unchanged version is a no-op, a higher one supersedes)",
+                rules.len(),
+                rules
+                    .iter()
+                    .map(|r| format!("{} v{}", r.name, r.version))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -637,13 +665,24 @@ pub fn plan(dir: &Path) -> Result<Plan> {
                 .map_err(anyhow::Error::msg)?,
         })
     })?;
-    // 11. Event→fact projections LAST: a projection names the fact kind
-    //     a posting rule posts and (through `when`) the workflow whose
+    // 11. Event→fact projections: a projection names the fact kind a
+    //     posting rule posts and (through `when`) the workflow whose
     //     step it reads, so both go first.
     door(present(dir, &["seeds/fact_projection_rules.toml"]), &|p| {
         Ok(Door::ProjectionRules {
             rows: boss_ledger::posting_rules::load_projection_rules_toml(p)
                 .map_err(anyhow::Error::msg)?,
+        })
+    })?;
+    // 12. Rules LAST (backlog 458971ef): a reactor's `when` and args
+    //     name the kinds and steps of protocols above (and the fact
+    //     kinds the projections above turn them into), and a rule live
+    //     before its protocol would fire on nothing or on the wrong
+    //     packet. Read with the dispatcher's own parser, as check did.
+    door(present(dir, &["seeds/rules.toml"]), &|p| {
+        Ok(Door::Rules {
+            tenant_id: tenant_id.clone(),
+            rules: boss_dispatcher::rules::registry::parse_raw_file(p)?.rules,
         })
     })?;
     // Everything else check saw, in check's order: a required file it
@@ -932,6 +971,14 @@ fn send(client: &Client, bases: &Bases, door: &Door) -> Result<String> {
             )?;
             rules_outcome(resp, &u)
         }
+        Door::Rules { tenant_id, rules } => {
+            let source = format!("tenant:{tenant_id}");
+            let lines = rules
+                .iter()
+                .map(|rule| publish_rule(client, &bases.dispatcher, &source, rule))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(lines.join("; "))
+        }
     }
 }
 
@@ -948,6 +995,137 @@ fn rules_outcome(resp: reqwest::blocking::Response, u: &str) -> Result<String> {
         line.push_str(&out.differs.join("; "));
     }
     Ok(line)
+}
+
+/// One rule through the dispatcher's authoring door (backlog
+/// 458971ef), the seed's own contract for product rules applied at the
+/// tenant's: `_validate` first (the dispatcher's rule language, not
+/// this build's — a refusal is its words and no draft exists to sit
+/// armed for the next publish), then the name's versions, then:
+///
+/// - a version above the file's → left alone, said so (never walked
+///   back; an operator's live edit survives);
+/// - the file's version present, at any status → no-op, said so — and
+///   if the stored content differs from the file's, the field is named
+///   with "bump `version`", because a silent edit under an unchanged
+///   version would otherwise read as `present` forever;
+/// - otherwise → draft + publish, at the file's version, `source`
+///   riding the draft; the promoted row is checked to be the one just
+///   drafted (publish promotes the NEWEST draft, and an operator's
+///   armed draft would be it otherwise).
+///
+/// A name another source owns is refused by the door (400, naming
+/// both owners) — read here from the versions first, so the refusal
+/// names the owner before a draft is even attempted.
+fn publish_rule(
+    client: &Client,
+    dispatcher_base: &str,
+    source: &str,
+    rule: &boss_dispatcher::rules::registry::RawRule,
+) -> Result<String> {
+    use boss_dispatcher::rules::authoring::source_label;
+    let name = rule.name.as_str();
+    let want = u64::from(rule.version);
+
+    let u = url(dispatcher_base, "/api/dispatcher/rules/_validate");
+    let resp = refuse(
+        client.post(&u).json(rule).send()?,
+        &format!("POST {u} ({name})"),
+    )?;
+    let verdict: Value = resp
+        .json()
+        .with_context(|| format!("POST {u} ({name}): the verdict did not parse"))?;
+    if verdict["ok"] != Value::Bool(true) {
+        bail!(
+            "{name}: the dispatcher refused the rule: {}",
+            verdict["error"].as_str().unwrap_or("(no error given)")
+        );
+    }
+
+    let u = url(
+        dispatcher_base,
+        &format!("/api/dispatcher/rules/{name}/versions"),
+    );
+    let resp = refuse(client.get(&u).send()?, &format!("GET {u}"))?;
+    let versions: Vec<Value> = resp
+        .json()
+        .with_context(|| format!("GET {u}: the versions did not parse"))?;
+    if let Some(other) = versions
+        .iter()
+        .find(|v| v["source"].as_str() != Some(source))
+    {
+        bail!(
+            "{name}: owned by {}; a rule from {source} cannot supersede it — declare it under a \
+             name of your own",
+            source_label(other["source"].as_str())
+        );
+    }
+    let max = versions.iter().filter_map(|v| v["version"].as_u64()).max();
+    if let Some(max) = max.filter(|m| *m > want) {
+        return Ok(format!(
+            "{name} v{want}: registry ahead at v{max}, left alone"
+        ));
+    }
+    if let Some(stored) = versions.iter().find(|v| v["version"] == json!(want)) {
+        let status = stored["status"].as_str().unwrap_or("?");
+        let file = serde_json::to_value(rule).unwrap_or(Value::Null);
+        let differs: Vec<&str> = ["on_event", "schedule", "when", "do", "delay"]
+            .into_iter()
+            .filter(|f| {
+                file.get(f).cloned().unwrap_or(Value::Null)
+                    != stored.get(f).cloned().unwrap_or(Value::Null)
+            })
+            .collect();
+        return Ok(if differs.is_empty() {
+            format!("{name} v{want}: present ({status})")
+        } else {
+            format!(
+                "{name} v{want}: present ({status}), differs on {} — kept as published; bump \
+                 `version` to supersede",
+                differs.join(", ")
+            )
+        });
+    }
+
+    let mut draft = serde_json::to_value(rule).unwrap_or(Value::Null);
+    if let Some(obj) = draft.as_object_mut() {
+        obj.insert("source".into(), Value::String(source.to_string()));
+    }
+    let u = url(dispatcher_base, "/api/dispatcher/rules");
+    let resp = refuse(
+        client.post(&u).json(&draft).send()?,
+        &format!("POST {u} ({name})"),
+    )?;
+    let drafted: Value = resp
+        .json()
+        .with_context(|| format!("POST {u} ({name}): the draft did not parse"))?;
+    if drafted["version"] != json!(want) {
+        bail!(
+            "{name}: the draft landed at v{} where the file says v{want} — refusing to publish \
+             a version the file does not name",
+            drafted["version"]
+        );
+    }
+    let u = url(
+        dispatcher_base,
+        &format!("/api/dispatcher/rules/{name}/publish"),
+    );
+    let resp = refuse(client.post(&u).send()?, &format!("POST {u}"))?;
+    let promoted: Value = resp
+        .json()
+        .with_context(|| format!("POST {u}: the promoted row did not parse"))?;
+    if promoted["version"] != json!(want) || promoted["status"] != json!("active") {
+        bail!(
+            "{name}: publish promoted v{} ({}) rather than the v{want} just drafted — an armed \
+             draft from another author?",
+            promoted["version"],
+            promoted["status"]
+        );
+    }
+    Ok(match max {
+        Some(prev) => format!("{name} v{want}: published, superseding v{prev}"),
+        None => format!("{name} v{want}: published"),
+    })
 }
 
 /// Run the plan against `bases`, one line per step through `out` as
@@ -1131,7 +1309,22 @@ terminal = { outcome = "sponsored" }
              fact_kind = \"finance.sponsorship.received\"\nsource_table = \"jobs\"\n\
              source_id_path = \"/job_id\"\nhappened_on_path = \"/completed_on\"\n",
         );
+        // The first reactor (backlog 458971ef), at v2 so the door's
+        // "the file's version, not MAX + 1" is exercised. The real
+        // tenant's rule names the sibling car's handler; the fixture
+        // uses one every build has, to prove the mechanics.
+        put(&dir, "seeds/rules.toml", &rules_toml(2, "messages.notify"));
         dir
+    }
+
+    fn rules_toml(version: u32, handler: &str) -> String {
+        format!(
+            "[[rule]]\nname = \"complete-site-live-on-converge-closed\"\n\
+             why = \"\"\"\nA cross-protocol reactor: the converge packet's close is the site's evidence.\n\"\"\"\n\
+             version = {version}\non_event = \"jobs.job.closed\"\n\
+             when = 'kind = \"maintenance-cluster-converge\"'\n\
+             [[rule.do]]\nhandler = \"{handler}\"\n"
+        )
     }
 
     fn step<'a>(p: &'a Plan, path: &str) -> &'a Step {
@@ -1172,8 +1365,9 @@ terminal = { outcome = "sponsored" }
                 "seeds/sensors.toml",
                 "seeds/posting_rules.toml",
                 "seeds/fact_projection_rules.toml",
+                "seeds/rules.toml",
             ],
-            "classes → chart of accounts → locations → calendars → company → policy → people → agents → workflows → sensors → posting rules → projections LAST"
+            "classes → chart of accounts → locations → calendars → company → policy → people → agents → workflows → sensors → posting rules → projections → rules LAST"
         );
         // The chart door (backlog 41af5195): the rows as the ledger
         // door's own type, after the classes.
@@ -1183,6 +1377,20 @@ terminal = { outcome = "sponsored" }
                 assert_eq!(rows[0].code, "1000");
                 assert_eq!(rows[1].parent.as_deref(), Some("1000"));
                 assert_eq!(rows[2].kind, "revenue");
+            }
+            other => panic!("{other:?}"),
+        }
+        // The rules door (backlog 458971ef): the declarations as the
+        // dispatcher's own RawRule, last of all — a reactor fires on
+        // the protocols published before it.
+        match &step(&p, "seeds/rules.toml").action {
+            Action::Write(Door::Rules { tenant_id, rules }) => {
+                assert_eq!(tenant_id, "acme");
+                assert_eq!(rules.len(), 1);
+                assert_eq!(rules[0].name, "complete-site-live-on-converge-closed");
+                assert_eq!(rules[0].version, 2);
+                assert_eq!(rules[0].on_event.as_deref(), Some("jobs.job.closed"));
+                assert_eq!(rules[0].do_steps[0].handler, "messages.notify");
             }
             other => panic!("{other:?}"),
         }
@@ -1419,6 +1627,10 @@ terminal = { outcome = "sponsored" }
         /// code; a test pre-seeds the starter's rows the way
         /// 40-ledger.sql does).
         accounts: BTreeMap<String, String>,
+        /// The dispatcher's rule registry, one row per (name, version):
+        /// the stored draft/active/retired rows with their `source`,
+        /// the append-only shape `dispatcher_rules` has.
+        rules: Vec<Value>,
     }
 
     impl Stub {
@@ -1433,6 +1645,95 @@ terminal = { outcome = "sponsored" }
                 + self.posting_rules.len()
                 + self.projections.len()
                 + self.accounts.len()
+                + self.rules.len()
+        }
+
+        fn active_rule(&self, name: &str) -> Option<&Value> {
+            self.rules
+                .iter()
+                .find(|r| r["name"] == name && r["status"] == "active")
+        }
+    }
+
+    /// The dispatcher's authoring door, as the real one behaves
+    /// (boss_dispatcher::rules::authoring): `_validate` answers
+    /// `{ok, error}`; a draft lands at max(declared, MAX + 1) carrying
+    /// its `source`, refused when another source owns the name;
+    /// publish promotes the newest draft and retires the incumbent.
+    fn route_dispatcher(st: &mut Stub, method: &str, path: &str, body: &str) -> (u16, String) {
+        let seg = |i: usize| path.split('/').nth(i).unwrap_or("").to_string();
+        match (method, path) {
+            ("POST", "/api/dispatcher/rules/_validate") => {
+                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                let when = v["when"].as_str().unwrap_or("");
+                if when.contains("(") {
+                    (
+                        200,
+                        json!({"ok": false, "error": format!("rule {}: when: unbalanced parenthesis", v["name"])}).to_string(),
+                    )
+                } else {
+                    (200, json!({"ok": true, "error": null}).to_string())
+                }
+            }
+            ("POST", "/api/dispatcher/rules") => {
+                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                let name = v["name"].as_str().unwrap_or("").to_string();
+                let source = v["source"].clone();
+                if let Some(other) = st
+                    .rules
+                    .iter()
+                    .find(|r| r["name"] == name && r["source"] != source)
+                {
+                    return (
+                        400,
+                        format!(
+                            "invalid rule: rule `{name}` is owned by {}; a draft from {} cannot supersede it",
+                            other["source"].as_str().unwrap_or("product"),
+                            source.as_str().unwrap_or("product")
+                        ),
+                    );
+                }
+                let max = st
+                    .rules
+                    .iter()
+                    .filter(|r| r["name"] == name)
+                    .filter_map(|r| r["version"].as_u64())
+                    .max()
+                    .unwrap_or(0);
+                let version = (max + 1).max(v["version"].as_u64().unwrap_or(1));
+                let mut row = v.clone();
+                row["version"] = json!(version);
+                row["status"] = json!("draft");
+                row["created_at"] = json!("2026-09-17T00:00:00Z");
+                st.rules.push(row.clone());
+                (201, row.to_string())
+            }
+            ("GET", p) if p.starts_with("/api/dispatcher/rules/") && p.ends_with("/versions") => {
+                let name = seg(4);
+                let rows: Vec<&Value> = st.rules.iter().filter(|r| r["name"] == name).collect();
+                (200, serde_json::to_string(&rows).unwrap())
+            }
+            ("POST", p) if p.starts_with("/api/dispatcher/rules/") && p.ends_with("/publish") => {
+                let name = seg(4);
+                let Some(draft_at) = st
+                    .rules
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| r["name"] == name && r["status"] == "draft")
+                    .max_by_key(|(_, r)| r["version"].as_u64())
+                    .map(|(i, _)| i)
+                else {
+                    return (404, format!("not found: no draft to publish for {name}"));
+                };
+                for r in st.rules.iter_mut() {
+                    if r["name"] == name && r["status"] == "active" {
+                        r["status"] = json!("retired");
+                    }
+                }
+                st.rules[draft_at]["status"] = json!("active");
+                (200, st.rules[draft_at].to_string())
+            }
+            _ => (500, format!("stub: unrouted {method} {path}")),
         }
     }
 
@@ -1618,6 +1919,7 @@ terminal = { outcome = "sponsored" }
                 // reached with the right identity.
                 (200, "[]".into())
             }
+            (_, p) if p.starts_with("/api/dispatcher/") => route_dispatcher(st, method, path, body),
             _ => (500, format!("stub: unrouted {method} {path}")),
         }
     }
@@ -1770,6 +2072,29 @@ terminal = { outcome = "sponsored" }
         );
         assert_eq!(hit("POST", "/api/ledger/fact-projection-rules/batch"), 1);
         assert_eq!(st.projections.len(), 1);
+        // The rules door (backlog 458971ef): validate, read the
+        // versions, draft, publish — one row, active, at the FILE's
+        // version, carrying the tenant's identity as its source.
+        assert_eq!(hit("POST", "/api/dispatcher/rules/_validate"), 1);
+        assert_eq!(hit("POST", "/api/dispatcher/rules"), 1);
+        assert_eq!(
+            hit(
+                "POST",
+                "/api/dispatcher/rules/complete-site-live-on-converge-closed/publish"
+            ),
+            1
+        );
+        let live = st
+            .active_rule("complete-site-live-on-converge-closed")
+            .expect("the tenant's rule is active");
+        assert_eq!(live["version"], 2, "the file's version, not MAX + 1");
+        assert_eq!(live["source"], "tenant:acme");
+        assert_eq!(live["on_event"], "jobs.job.closed");
+        assert_eq!(live["do"][0]["handler"], "messages.notify");
+        assert!(
+            live.get("why").is_none(),
+            "why is authoring metadata and never rides the wire: {live}"
+        );
         assert_eq!(st.people["emp-two"]["manager_id"], json!("emp-david"));
         // Order on the wire: classes before people, people before the
         // design Job.
@@ -1801,6 +2126,15 @@ terminal = { outcome = "sponsored" }
             pos("POST", "/api/ledger/posting-rules/batch")
                 < pos("POST", "/api/ledger/fact-projection-rules/batch"),
             "a projection names the fact kind a posting rule posts, so the rules go first"
+        );
+        assert!(
+            pos("POST", "/api/ledger/fact-projection-rules/batch")
+                < pos("POST", "/api/dispatcher/rules"),
+            "a reactor may name the fact kind a projection produces, so the projections go before the rules"
+        );
+        assert!(
+            pos("POST", "/api/sensors/batch") < pos("POST", "/api/dispatcher/rules"),
+            "a reactor fires on the protocols published before it, so the rules go last"
         );
         // Identity on every request; no sim chain on any.
         for (m, path, head, _) in &st.log {
@@ -1849,6 +2183,14 @@ terminal = { outcome = "sponsored" }
             chart_line.contains("POST /api/ledger/accounts/batch")
                 && chart_line.contains("received 3, inserted 3"),
             "{chart_line}"
+        );
+        let rules_line = lines
+            .iter()
+            .find(|l| l.contains("seeds/rules.toml"))
+            .unwrap();
+        assert!(
+            rules_line.contains("complete-site-live-on-converge-closed v2: published"),
+            "{rules_line}"
         );
     }
 
@@ -1933,6 +2275,175 @@ terminal = { outcome = "sponsored" }
             people_line.contains("0 posted, 2 already there"),
             "{people_line}"
         );
+        // An unchanged rule version is a no-op, and the line says so:
+        // validated and read, no draft, no publish.
+        assert_eq!(posts("/api/dispatcher/rules"), 0, "no second draft");
+        assert_eq!(
+            posts("/api/dispatcher/rules/complete-site-live-on-converge-closed/publish"),
+            0
+        );
+        let rules_line = lines
+            .iter()
+            .find(|l| l.contains("seeds/rules.toml"))
+            .unwrap();
+        assert!(
+            rules_line.contains("complete-site-live-on-converge-closed v2: present (active)"),
+            "{rules_line}"
+        );
+    }
+
+    /// A BUMPED VERSION SUPERSEDES; A LIVE VERSION AHEAD OF THE FILE IS
+    /// LEFT ALONE; A NAME ANOTHER SOURCE OWNS IS REFUSED (backlog
+    /// 458971ef) — the seed's own contract for product rules, at the
+    /// tenant's door. Each answer is in the line, by rule name.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rule_version_bump_supersedes_and_a_registry_ahead_is_left_alone() {
+        let dir = real_shape("rule-versions");
+        let st = Arc::new(Mutex::new(Stub::default()));
+        let base = spawn_stub(st.clone()).await;
+        run_publish(plan(&dir).unwrap(), base.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            st.lock()
+                .unwrap()
+                .active_rule("complete-site-live-on-converge-closed")
+                .unwrap()["version"],
+            2
+        );
+
+        // Bump: v3 supersedes v2, which is retired, not deleted.
+        put(&dir, "seeds/rules.toml", &rules_toml(3, "messages.notify"));
+        let lines = run_publish(plan(&dir).unwrap(), base.clone())
+            .await
+            .unwrap();
+        {
+            let st = st.lock().unwrap();
+            let live = st
+                .active_rule("complete-site-live-on-converge-closed")
+                .unwrap();
+            assert_eq!(live["version"], 3);
+            assert_eq!(live["source"], "tenant:acme");
+            let retired: Vec<u64> = st
+                .rules
+                .iter()
+                .filter(|r| r["status"] == "retired")
+                .filter_map(|r| r["version"].as_u64())
+                .collect();
+            assert_eq!(retired, [2], "append-only: v2 is retired, not deleted");
+        }
+        let line = lines
+            .iter()
+            .find(|l| l.contains("seeds/rules.toml"))
+            .unwrap();
+        assert!(line.contains("v3: published, superseding v2"), "{line}");
+
+        // The file walks back to v1: the registry is ahead, left alone
+        // and SAID so — never silently "present".
+        put(&dir, "seeds/rules.toml", &rules_toml(1, "messages.notify"));
+        let lines = run_publish(plan(&dir).unwrap(), base.clone())
+            .await
+            .unwrap();
+        let line = lines
+            .iter()
+            .find(|l| l.contains("seeds/rules.toml"))
+            .unwrap();
+        assert!(
+            line.contains("v1: registry ahead at v3, left alone"),
+            "{line}"
+        );
+        assert_eq!(
+            st.lock()
+                .unwrap()
+                .active_rule("complete-site-live-on-converge-closed")
+                .unwrap()["version"],
+            3
+        );
+
+        // The same version, different content: kept as published, and
+        // the line names the field, so a silent edit cannot hide
+        // behind "present".
+        put(
+            &dir,
+            "seeds/rules.toml",
+            &rules_toml(3, "messages.notify").replace("jobs.job.closed", "jobs.job.created"),
+        );
+        let lines = run_publish(plan(&dir).unwrap(), base.clone())
+            .await
+            .unwrap();
+        let line = lines
+            .iter()
+            .find(|l| l.contains("seeds/rules.toml"))
+            .unwrap();
+        assert!(
+            line.contains("v3: present (active), differs on on_event") && line.contains("bump"),
+            "{line}"
+        );
+
+        // A name the product owns: the door refuses, the publish fails
+        // naming both owners, nothing is written.
+        st.lock().unwrap().rules.push(json!({
+            "name": "auto-park-on-gate-green", "version": 1, "status": "active",
+            "on_event": "step.done.gate-verdict", "when": null,
+            "do": [{"handler": "jobs.auto-park", "args": {}}], "delay": null,
+            "created_at": "2026-09-10T00:00:00Z"
+        }));
+        put(
+            &dir,
+            "seeds/rules.toml",
+            &rules_toml(2, "messages.notify").replace(
+                "complete-site-live-on-converge-closed",
+                "auto-park-on-gate-green",
+            ),
+        );
+        let err = run_publish(plan(&dir).unwrap(), base).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("auto-park-on-gate-green"), "{msg}");
+        assert!(
+            msg.contains("owned by product") && msg.contains("tenant:acme"),
+            "{msg}"
+        );
+        let st = st.lock().unwrap();
+        assert_eq!(
+            st.rules
+                .iter()
+                .filter(|r| r["name"] == "auto-park-on-gate-green")
+                .count(),
+            1,
+            "no draft was written under the product's name"
+        );
+    }
+
+    /// THE DISPATCHER'S `_validate` IS ASKED FIRST, and its refusal
+    /// fails the publish in its own words — before a draft exists to
+    /// sit armed for the next publish (memory: publish promotes any
+    /// draft). `check` catches this offline too; this pins that the
+    /// wire's gate is consulted, since the deployed dispatcher's rule
+    /// language may differ from the CLI's build.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rule_the_dispatcher_refuses_fails_the_publish_before_any_draft() {
+        let dir = real_shape("rule-refused");
+        let p = plan(&dir).unwrap();
+        let st = Arc::new(Mutex::new(Stub::default()));
+        let base = spawn_stub_with(st.clone(), |st, m, path, body| {
+            if m == "POST" && path == "/api/dispatcher/rules/_validate" {
+                return (
+                    200,
+                    json!({"ok": false, "error": "rule complete-site-live-on-converge-closed: when: unknown field `kind`"}).to_string(),
+                );
+            }
+            route(st, m, path, body)
+        })
+        .await;
+        let err = run_publish(p, base).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("rules.toml"), "{msg}");
+        assert!(
+            msg.contains("unknown field `kind`"),
+            "the dispatcher's own words: {msg}"
+        );
+        let st = st.lock().unwrap();
+        assert!(st.rules.is_empty(), "no draft was written: {:?}", st.rules);
     }
 
     /// A REGISTERED AGENT IS KEPT, AND THE LINE SAYS HOW THE DECLARATION

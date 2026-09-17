@@ -62,6 +62,18 @@ row already at the authored version is left exactly as it is, whatever its
 status, so an operator who retires a misbehaving rule in an incident keeps
 it off. What the tree owns is which rules EXIST and what each one says.
 
+**What the tree owns is its OWN rules — a tenant's are the tenant's**
+(backlog 458971ef, 2026-09-17). A row's `source` says whose it is: NULL
+for everything this directory, a migration or the SPA's editor wrote;
+`tenant:<tenant_id>` for a rule a tenant declared in its own
+`seeds/rules.toml` and published through `boss tenant publish` (the
+tenant contract, docs/tenant-contract.md). The seed retires only
+NULL-sourced rows no file here names, so a tenant's reactor survives
+every converge; the namespace is still one, so a file here under a name
+a tenant owns is `rejected` by name, the same refusal the API door makes
+of a tenant draft under a product name. `GET /api/dispatcher/rules`
+reports `source` per rule.
+
 **Publishing live and stopping there is still the defect it was.** The
 same change owes a file here, or the next converge retires the rule and
 the next reader cannot ask why the system was doing what it did. Measured

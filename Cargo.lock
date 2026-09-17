@@ -735,6 +735,7 @@ dependencies = [
  "boss-classes",
  "boss-clock-client",
  "boss-core",
+ "boss-dispatcher",
  "boss-events",
  "boss-jobs",
  "boss-ledger",

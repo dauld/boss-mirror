@@ -26,8 +26,13 @@ export type DispatcherRule = Readonly<{
    *  it — check `authored` before reading that as "no reason given". */
   why?: string | null;
   /** Whether the authored registry holds a file for this rule at all.
-   *  `false` = a reaction the system enforces that nobody wrote down. */
+   *  `false` = a reaction the system enforces that nobody wrote down —
+   *  unless `source` names a tenant, whose rules no product file can. */
   authored?: boolean;
+  /** Who declared the row: `"product"` (the authored directory, a
+   *  migration, this editor) or `"tenant:<tenant_id>"` (a tenant's own
+   *  `seeds/rules.toml`, backlog 458971ef). */
+  source?: string;
 }>;
 
 /** Where the `why` values came from, so `why: null` everywhere can be

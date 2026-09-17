@@ -56,14 +56,22 @@
 //!   `POST /api/dispatcher/rules` is still supported — that is what
 //!   "registry data, editable without a deploy" means. A live version
 //!   AHEAD of the tree is reported and left alone.
-//! - **Retire what the tree no longer authors.** Without this the tree
-//!   would define adding and changing a rule but not REMOVING one,
-//!   leaving retirement to a migration: two homes for one operation,
-//!   which is the half-collapse §9a records as worse than the pin. It
-//!   also closes the hole the live-rules lint was written for — four
-//!   rules authored live through the API and never written down
-//!   (backlog 8d471ec5) — mechanically rather than by a check someone
-//!   has to read.
+//! - **Retire what the tree no longer authors — of what the tree OWNS.**
+//!   Without this the tree would define adding and changing a rule but
+//!   not REMOVING one, leaving retirement to a migration: two homes for
+//!   one operation, which is the half-collapse §9a records as worse
+//!   than the pin. It also closes the hole the live-rules lint was
+//!   written for — four rules authored live through the API and never
+//!   written down (backlog 8d471ec5) — mechanically rather than by a
+//!   check someone has to read. A row's `source` says whose it is
+//!   (backlog 458971ef, 2026-09-17): NULL is the tree's — the seed, a
+//!   migration, the SPA's editor — and `tenant:<tenant_id>` is a rule a
+//!   tenant declared in its own `seeds/rules.toml` and published
+//!   through `boss tenant publish`. The tree can only ever name its
+//!   own, so only NULL-sourced rows are retired; a tenant's reactor is
+//!   the tenant's protocol data and survives every converge. The
+//!   namespace is still one: a product file under a tenant-owned name
+//!   is `rejected` by name, the same refusal the API door makes.
 //! - **An unreadable directory writes NOTHING.** `parse_raw_path` errors
 //!   on an absent, unreadable or rule-less directory, and this function
 //!   propagates that before its first write. A wrong `BOSS_DISPATCHER_RULES`
@@ -134,20 +142,37 @@ pub async fn seed_authored_rules(
     // error here, never an empty authored set.
     let authored = parse_raw_path(dir)?;
 
-    let rows: Vec<(String, i32, String)> =
-        sqlx::query_as("SELECT name, version, status FROM dispatcher_rules")
+    let rows: Vec<(String, i32, String, Option<String>)> =
+        sqlx::query_as("SELECT name, version, status, source FROM dispatcher_rules")
             .fetch_all(pool)
             .await
             .map_err(store)?;
 
     let mut have: HashSet<(String, i32)> = HashSet::new();
     let mut versions: HashMap<String, BTreeSet<i32>> = HashMap::new();
+    // The enforced rows THE TREE OWNS — `source IS NULL` — and only
+    // those (backlog 458971ef, 2026-09-17). A row a tenant declared
+    // (`tenant:<tenant_id>`, published through `boss tenant publish`)
+    // is the tenant's protocol data; no file in this directory can name
+    // it, and reading it as "a rule the tree no longer authors" retired
+    // every tenant rule at the next converge, in a boot log's `retired`
+    // list. The insert half above still sees every row: the namespace
+    // is one, and a tenant row ahead of a product file is `behind`, not
+    // overwritten.
     let mut active: HashMap<String, i32> = HashMap::new();
-    for (name, version, status) in rows {
+    // `name -> source` for every name some OTHER source owns a row of.
+    let mut foreign_owner: HashMap<String, String> = HashMap::new();
+    for (name, version, status, source) in rows {
         have.insert((name.clone(), version));
         versions.entry(name.clone()).or_default().insert(version);
-        if status == "active" {
-            active.insert(name, version);
+        match source {
+            None if status == "active" => {
+                active.insert(name, version);
+            }
+            None => {}
+            Some(owner) => {
+                foreign_owner.insert(name, owner);
+            }
         }
     }
 
@@ -188,6 +213,21 @@ pub async fn seed_authored_rules(
             report.present.push(rule.name.clone());
             continue;
         }
+        // The door's own rule, applied here too: a name a tenant
+        // declared is the tenant's, and a product file arriving under
+        // it would retire the tenant's row into the product's slot.
+        // Refused by name, like a file that would not load.
+        if let Some(owner) = foreign_owner.get(&rule.name) {
+            report.rejected.push((
+                rule.name.clone(),
+                format!(
+                    "rule `{}` is owned by {owner}; the authored directory cannot supersede \
+                     it (one name, one owner)",
+                    rule.name
+                ),
+            ));
+            continue;
+        }
         match insert_active(pool, rule, want).await {
             Ok(true) => report.inserted.push((rule.name.clone(), rule.version)),
             // A concurrent seed (a second dispatcher replica booting)
@@ -203,7 +243,7 @@ pub async fn seed_authored_rules(
         }
         match sqlx::query(
             "UPDATE dispatcher_rules SET status = 'retired' \
-             WHERE name = $1 AND status = 'active'",
+             WHERE name = $1 AND status = 'active' AND source IS NULL",
         )
         .bind(&name)
         .execute(pool)

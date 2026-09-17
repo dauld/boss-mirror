@@ -1,0 +1,32 @@
+-- 20260917161501-a-dispatcher-rule-says-whose-it-is.sql — a
+-- `dispatcher_rules` row carries the SOURCE that declared it.
+--
+-- Origin: backlog 458971ef (decided by design b64c4377), 2026-09-17.
+-- Dispatcher rules are registry data, editable through
+-- /api/dispatcher/rules with no deploy — and boss-dispatcher's boot
+-- seed (rules::seed::seed_authored_rules) RETIRES every enforced rule
+-- no file under infra/dispatcher/rules/ names, because until this
+-- column the authored directory was the only source of rules there
+-- was and every row was read as the product's. A tenant's own
+-- reactors — the landing page's `live` step completing from the
+-- converge record; later, a sponsorship's thank-you — are the
+-- TENANT'S protocol data, declared in its own directory
+-- (seeds/rules.toml, published by `boss tenant publish`), and the
+-- product tree cannot name them. Without this column each one would
+-- die at the next converge, in the `retired` list of a boot log.
+--
+-- NULL means the product's authored directory owns the row: every
+-- row the seed inserts, every row a migration inserted, and every
+-- row the SPA's editor authors live (the case the README calls "the
+-- defect it was": a live rule with no file is retired at the next
+-- converge, unchanged). `tenant:<tenant_id>` means a tenant declared
+-- it. The seed retires ONLY NULL-sourced rows no file names; a draft
+-- whose source differs from the name's existing rows is refused at
+-- the door, so a tenant cannot supersede `auto-park-on-gate-green`
+-- and the product cannot supersede a tenant's rule.
+--
+-- Not part of the content the runtime compares: `rules_fingerprint`
+-- hashes what the dispatcher ENFORCES, and who declared a rule does
+-- not change what it does.
+
+ALTER TABLE dispatcher_rules ADD COLUMN IF NOT EXISTS source TEXT;

@@ -31,9 +31,10 @@
 //! batch endpoint's `LocationInput`, the ledger's `chart::AccountInput`
 //! + `validate` for the chart of accounts (backlog 41af5195),
 //! `boss_people`'s `Employee`, `boss_core`'s `BusinessCalendar` and
-//! `TenantToml`. A second parser would be a second contract that
-//! drifts. Where a file has no reader, the parse is conservative and
-//! the table names that.
+//! `TenantToml`, the dispatcher's own `[[rule]]` parser + publish-door
+//! `validate` for `rules.toml` (backlog 458971ef). A second parser
+//! would be a second contract that drifts. Where a file has no reader,
+//! the parse is conservative and the table names that.
 //!
 //! WHAT A VERDICT CARRIES. Per file: OK / MISSING (required) / INVALID
 //! (the loader's own error, never rephrased) / UNKNOWN (a file the
@@ -258,6 +259,25 @@ pub const CONTRACT: &[Entry] = &[
                 longitude, address, account_id, metadata) — the `locations` table's columns",
         parse: parse_locations,
         scaffold: Some(scaffold_locations),
+    },
+    Entry {
+        paths: &["seeds/rules.toml"],
+        required: false,
+        read_by: "POST /api/dispatcher/rules/_validate, then POST /api/dispatcher/rules (a draft \
+                  carrying `source = tenant:<tenant_id>`) + POST /api/dispatcher/rules/{name}/publish \
+                  per rule (boss-dispatcher) — sent by `boss tenant publish` LAST, after the \
+                  Workflows a rule reacts on; append-only: an unchanged version is a no-op \
+                  (the line says `present`), a higher version supersedes, a live version ahead \
+                  of the file is left alone, and a name another source owns is refused; the \
+                  dispatcher's boot seed retires only product-sourced rules no file names, so a \
+                  tenant's rule survives every converge (backlog 458971ef)",
+        shape: "`[[rule]]` rows in the product rule file's own shape (infra/dispatcher/rules/*.toml): \
+                name, why, version, on_event or schedule, when?, delay?, `[[rule.do]]` handler + args \
+                — parsed by `boss_dispatcher::rules::registry::parse_raw_file`, validated by the \
+                publish door's own `authoring::validate`, handler names checked against \
+                `cascade::handler_emits` (this build's roster)",
+        parse: parse_rules,
+        scaffold: Some(scaffold_rules),
     },
     Entry {
         paths: &["seeds/subject_kinds.toml"],
@@ -583,6 +603,58 @@ fn parse_locations(path: &Path, _: &Ctx) -> Result<String, String> {
         .map(|l| format!("{} ({}, {}, {})", l.id, l.name, l.kind, l.timezone))
         .collect();
     Ok(format!("{} locations: {}", rows.len(), rows.join("; ")))
+}
+
+/// The dispatcher's own reader (backlog 458971ef): the product
+/// `[[rule]]` parser with its per-rule `why` guard, the publish door's
+/// `validate` (topic, predicate, arg expressions, the trigger XOR), and
+/// the handler roster the product's rules are pinned to. Handler names
+/// are otherwise opaque to the dispatcher until dispatch, where an
+/// unknown one is a loud `UnknownHandler` — so this is the one place a
+/// tenant learns BEFORE publishing that its rule names a handler this
+/// build does not carry (the real tenant's first rule names one a
+/// sibling car is building, and reads INVALID here until it lands).
+fn parse_rules(path: &Path, _: &Ctx) -> Result<String, String> {
+    use boss_dispatcher::rules::{authoring, registry};
+    let raw = registry::parse_raw_file(path).map_err(|e| e.to_string())?;
+    refuse_if_stray(&read(path)?, "rule", raw.rules.len())?;
+    let known = boss_dispatcher::cascade::handler_emits();
+    let mut lines = Vec::new();
+    for rule in &raw.rules {
+        authoring::validate(rule).map_err(|e| e.to_string())?;
+        for step in &rule.do_steps {
+            if !known.contains_key(step.handler.as_str()) {
+                return Err(format!(
+                    "rule `{}` names handler `{}`, which this build of BOSS does not have \
+                     (boss_dispatcher::cascade::handler_emits lists {} handlers); the publish \
+                     door would accept it and the dispatcher would refuse it at dispatch as \
+                     UnknownHandler",
+                    rule.name,
+                    step.handler,
+                    known.len()
+                ));
+            }
+        }
+        let trigger = match (&rule.on_event, &rule.schedule) {
+            (Some(topic), _) => topic.clone(),
+            (None, Some(s)) => format!("schedule {}", s.cadence.token()),
+            (None, None) => "no trigger".to_string(),
+        };
+        lines.push(format!(
+            "{} v{} ({trigger} -> {})",
+            rule.name,
+            rule.version,
+            rule.do_steps
+                .iter()
+                .map(|d| d.handler.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    Ok(match lines.len() {
+        0 => "0 rules".to_string(),
+        n => format!("{n} rules: {}", lines.join("; ")),
+    })
 }
 
 fn parse_subject_kinds(path: &Path, _: &Ctx) -> Result<String, String> {
@@ -1231,6 +1303,38 @@ fn scaffold_agents(s: &Scaffold) -> String {
     )
 }
 
+fn scaffold_rules(s: &Scaffold) -> String {
+    format!(
+        "# {display} — dispatcher rules (backlog 458971ef).\n\
+#\n\
+# A rule is a reaction the platform runs for you when an event lands\n\
+# (or on a schedule): the same [[rule]] shape the product's own rules\n\
+# take under infra/dispatcher/rules/, with a `why` naming which\n\
+# standing exemption it claims — timer, threshold, external glue, or\n\
+# cross-protocol reactor. If the reaction belongs to ONE protocol,\n\
+# declare it in that workflow instead. Published by `boss tenant\n\
+# publish` through the dispatcher's own door, append-only: bump\n\
+# `version` to change a rule; an unchanged version is a no-op. Each\n\
+# row lands as source = tenant:{name}, which the product's boot seed\n\
+# leaves alone — a rule declared here survives every converge.\n\
+#\n\
+# [[rule]]\n\
+# name = \"complete-site-live-on-converge-closed\"\n\
+# why = \"\"\"\n\
+# A cross-protocol reactor: the site's `live` step completes from the\n\
+# converge packet's record, which no single workflow can express.\n\
+# \"\"\"\n\
+# version = 1\n\
+# on_event = \"jobs.job.closed\"\n\
+# when = 'kind = \"maintenance-cluster-converge\"'\n\
+# [[rule.do]]\n\
+# handler = \"jobs.complete_step_matching\"\n\
+# args = {{ kind = '\"publish-the-landing-page\"', step = '\"live\"' }}\n",
+        display = s.display_name,
+        name = s.name,
+    )
+}
+
 fn scaffold_locations(s: &Scaffold) -> String {
     format!(
         "# {display} — locations.\n\
@@ -1576,6 +1680,19 @@ terminal = { outcome = "sponsored" }
              opens = \"receive-a-sponsorship\"\nsubject_kind = \"custom\"\n",
         );
 
+        // The tenant's own reactor (backlog 458971ef), in the product
+        // rule file's shape. The real tenant's rule names the sibling
+        // car's `jobs.complete_step_matching`; this fixture proves the
+        // mechanics with a handler every build has.
+        write_file(
+            &seeds.join("rules.toml"),
+            "[[rule]]\nname = \"complete-site-live-on-converge-closed\"\n\
+             why = \"\"\"\nA cross-protocol reactor: the converge packet's close is the site's evidence.\n\"\"\"\n\
+             version = 2\non_event = \"jobs.job.closed\"\n\
+             when = 'kind = \"maintenance-cluster-converge\"'\n\
+             [[rule.do]]\nhandler = \"messages.notify\"\n",
+        );
+
         let r = check(&dir);
         for ok in [
             "tenant.toml",
@@ -1584,10 +1701,20 @@ terminal = { outcome = "sponsored" }
             "seeds/employees.json",
             "seeds/locations.toml",
             "seeds/sensors.toml",
+            "seeds/rules.toml",
         ] {
             let row = status_of(&r, ok).unwrap_or_else(|| panic!("{ok} is reported"));
             assert_eq!(row.status, Status::Ok, "{row:?}");
         }
+        let rules = status_of(&r, "seeds/rules.toml").unwrap();
+        assert!(
+            rules
+                .detail
+                .contains("complete-site-live-on-converge-closed v2")
+                && rules.detail.contains("jobs.job.closed")
+                && rules.detail.contains("messages.notify"),
+            "{rules:?}"
+        );
         let agents = status_of(&r, "seeds/agents.toml").unwrap();
         assert!(
             agents.detail.contains("agent-claude") && agents.detail.contains("opus-5[1m]"),
@@ -1785,6 +1912,73 @@ terminal = { outcome = "sponsored" }
         let row = status_of(&row, "seeds/chart_of_accounts.toml").unwrap();
         assert_eq!(row.status, Status::Invalid, "{row:?}");
         assert!(row.detail.contains("[[account]]"), "{row:?}");
+    }
+
+    /// A RULE DECLARATION IS JUDGED BY THE DISPATCHER'S OWN READER
+    /// (backlog 458971ef): the product's `[[rule]]` parser, the same
+    /// `validate` the publish door applies, and the handler roster the
+    /// product's own rules are held to (`cascade::handler_emits`). Each
+    /// refusal names the rule and the field, in the loader's words;
+    /// the rows under a wrong table name parse to nothing and are
+    /// refused rather than passed.
+    #[test]
+    fn a_bad_rule_row_is_invalid_by_name() {
+        let dir = scratch_dir("boss-cli-tenant-check-rules");
+        write_file(&dir.join("tenant.toml"), "[meta]\ntenant_id = \"t\"\n");
+        let seeds = dir.join("seeds");
+        boss_testing::scratch::create_dir(&seeds);
+        write_file(&seeds.join("workflows.toml"), "");
+        let rules = |body: &str| {
+            write_file(&seeds.join("rules.toml"), body);
+            let r = check(&dir);
+            status_of(&r, "seeds/rules.toml").unwrap().clone()
+        };
+
+        // A handler no build of BOSS has. (This row first named
+        // jobs.complete_step_matching, "the sibling car's handler,
+        // not yet landed" — it landed on #423 while this car waited,
+        // and the row read OK: a fixture must not depend on what a
+        // sibling car has not yet done.)
+        let row = rules(
+            "[[rule]]\nname = \"site-live\"\nwhy = \"\"\"\na reactor\n\"\"\"\n\
+             on_event = \"jobs.job.closed\"\n[[rule.do]]\nhandler = \"jobs.no_such_handler\"\n",
+        );
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(
+            row.detail.contains("site-live") && row.detail.contains("jobs.no_such_handler"),
+            "{row:?}"
+        );
+        assert!(row.detail.contains("handler_emits"), "{row:?}");
+
+        // No why: the product's own guard, in its words.
+        let row = rules(
+            "[[rule]]\nname = \"mute\"\non_event = \"jobs.job.closed\"\n\
+             [[rule.do]]\nhandler = \"messages.notify\"\n",
+        );
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(
+            row.detail.contains("`mute`") && row.detail.contains("why"),
+            "{row:?}"
+        );
+
+        // A predicate that will not parse: the publish door's own gate.
+        let row = rules(
+            "[[rule]]\nname = \"broken\"\nwhy = \"\"\"\na reactor\n\"\"\"\n\
+             on_event = \"jobs.job.closed\"\nwhen = \"kind = (\"\n\
+             [[rule.do]]\nhandler = \"messages.notify\"\n",
+        );
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(row.detail.contains("broken"), "{row:?}");
+
+        // The wrong table name parses to zero rules; refused, naming both.
+        let row = rules("[[rules]]\nname = \"x\"\n");
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(row.detail.contains("[[rule]]"), "{row:?}");
+
+        // Empty is a tenant with no reactors, not a defect.
+        let row = rules("# none yet\n");
+        assert_eq!(row.status, Status::Ok, "{row:?}");
+        assert!(row.detail.contains("0 rules"), "{row:?}");
     }
 
     #[test]

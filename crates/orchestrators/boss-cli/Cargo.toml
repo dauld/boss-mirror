@@ -33,6 +33,12 @@ boss-policy-client = { path = "../../core/boss-policy-client" }
 # boss-jobs' bootstrap are those doors. default-features=false keeps
 # the policy service's sqlx/axum tree out of the CLI, as the engines do.
 boss-policy = { path = "../../core/boss-policy", default-features = false }
+# `seeds/rules.toml` (backlog 458971ef) is read with the dispatcher's
+# OWN rule parser and validated by the same `authoring::validate` the
+# publish door applies, and its handler names are checked against the
+# same `cascade::handler_emits` roster the product's rules are — a
+# second parser would be a second contract.
+boss-dispatcher = { path = "../../core/boss-dispatcher" }
 toml = { workspace = true }
 boss-assets = { path = "../../modules/boss-assets", features = ["postgres"] }
 boss-clock-client = { path = "../../core/boss-clock-client" }

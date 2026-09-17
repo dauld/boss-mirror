@@ -159,6 +159,35 @@ nats_url = "nats://localhost:4222"
         ));
     }
 
+    /// An absent `[demo_agents]` block is OFF: no synthetic snapshot,
+    /// no telemetry loop (the binary spawns it only on `Some`). Pinned
+    /// on 2026-09-17 (backlog b03f38de) when the generator stopped
+    /// writing the block for every tenant — the whole fix rests on
+    /// "absent means off" being a property of the parse, not a habit.
+    #[test]
+    fn demo_agents_is_off_unless_the_block_is_present() {
+        let off: Config = toml::from_str(
+            r#"
+bind = "0.0.0.0:7800"
+nats_url = "nats://localhost:4222"
+"#,
+        )
+        .unwrap();
+        off.validate().unwrap();
+        assert!(off.demo_agents.is_none());
+
+        let on: Config = toml::from_str(
+            r#"
+bind = "0.0.0.0:7800"
+nats_url = "nats://localhost:4222"
+
+[demo_agents]
+"#,
+        )
+        .unwrap();
+        assert_eq!(on.demo_agents.map(|d| d.tick_seconds), Some(8));
+    }
+
     #[test]
     fn static_dir_is_optional() {
         let cfg = r#"

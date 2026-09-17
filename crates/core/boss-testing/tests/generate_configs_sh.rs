@@ -1,0 +1,135 @@
+//! The demo-agents block is the BREWERY's, not every instance's
+//! (backlog b03f38de, car 1 of e2580840; measured 2026-09-17).
+//!
+//! infra/oss-quickstart/generate-configs.sh wrote `[demo_agents]` into
+//! boss-observability's config unconditionally, so prod — whose tenant
+//! is Algedonic, LLC, not the brewery — ran the synthetic telemetry
+//! loop, ticking "Hop sourcing scout" spend figures every 8 s into its
+//! log and answering `demo_mode: true` on /api/snapshot. The block is
+//! the brewery playground's: it exists so `/ops` shows what agent
+//! oversight LOOKS like before a real boss-cybernetics is wired in.
+//!
+//! Now the generator reads the tenant from the manifest the launcher
+//! already derived for it (BOSS_TENANT_MANIFEST_TOML, from
+//! BOSS_TENANT_DIR) and writes the block only when `[meta] tenant_id`
+//! is `brewery`; absent, unreadable, or any other tenant means no
+//! block — and boss-observability treats an absent block as off. The
+//! generator is RUN here against the tree's own two tenant manifests
+//! and a stub `boss-ports-list`, so each verdict is one it reached.
+
+use boss_testing::{repo_root, scratch_dir, write_exec};
+use std::path::Path;
+use std::process::Command;
+
+const GENERATOR: &str = "infra/oss-quickstart/generate-configs.sh";
+const BREWERY: &str = "examples/brewery/seeds/tenant.toml";
+const NOT_BREWERY: &str = "examples/used-device-shop/seeds/tenant.toml";
+
+/// Every name the generator's `p` and `PORT[...]` lookups ask for,
+/// with made-up ports: the script refuses an unknown name (`:?`), so a
+/// missing entry here fails loudly rather than skipping a file.
+const STUB_PORTS: &str = "#!/usr/bin/env bash
+case \"${1:-}\" in
+  --paired)
+    for n in shipping messages inventory commerce people accounts assets catalog calendar jobs; do
+      echo \"$n:7000:8000\"
+    done ;;
+  --solo)
+    for n in ml ledger content policy classes locations subject-kinds events products campaigns customers observability; do
+      echo \"$n:7100\"
+    done ;;
+  *) echo \"stub boss-ports-list: unknown flag ${1:-}\" >&2; exit 2 ;;
+esac
+";
+
+/// Run the generator into a scratch ETC_DIR with the given manifest
+/// path (None: the variable unset) and return boss-observability.toml.
+fn observability_config(case: &str, manifest: Option<&Path>) -> String {
+    let root = scratch_dir(&format!("generate-configs-{case}"));
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    write_exec(&bin.join("boss-ports-list"), STUB_PORTS);
+    let etc = root.join("etc");
+    std::fs::create_dir_all(&etc).unwrap();
+    let mut cmd = Command::new("bash");
+    cmd.arg(repo_root().join(GENERATOR))
+        .env_clear()
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("ETC_DIR", &etc);
+    if let Some(m) = manifest {
+        cmd.env("BOSS_TENANT_MANIFEST_TOML", m);
+    }
+    let out = cmd.output().expect("bash runs the generator");
+    assert!(
+        out.status.success(),
+        "generate-configs.sh ({case}) refused: {}\n{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let path = etc.join("boss-observability.toml");
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    // Whatever the tenant, the file must still be the config the
+    // service parses — a block dropped by breaking the heredoc would
+    // pass a "no demo_agents" assertion for the wrong reason.
+    let parsed: toml::Value = toml::from_str(&text)
+        .unwrap_or_else(|e| panic!("{} is not TOML: {e}\n{text}", path.display()));
+    assert_eq!(
+        parsed.get("bind").and_then(|v| v.as_str()),
+        Some("0.0.0.0:7100"),
+        "{case}: bind comes from the port table: {text}"
+    );
+    text
+}
+
+#[test]
+fn the_brewery_gets_the_demo_agents_block() {
+    let text = observability_config("brewery", Some(&repo_root().join(BREWERY)));
+    assert!(
+        text.contains("[demo_agents]"),
+        "the brewery's config carries the synthetic-agent block: {text}"
+    );
+}
+
+#[test]
+fn another_tenant_gets_no_demo_agents_block() {
+    let text = observability_config("not-brewery", Some(&repo_root().join(NOT_BREWERY)));
+    assert!(
+        !text.contains("demo_agents"),
+        "a non-brewery tenant's config must not run the demo loop: {text}"
+    );
+}
+
+#[test]
+fn no_manifest_means_no_demo_agents_block() {
+    // The default is OFF: a deployment that names no tenant (bare
+    // generate-configs, the N-1 launcher with nothing set) gets the
+    // real aggregator path, never synthetic figures.
+    let text = observability_config("no-manifest", None);
+    assert!(!text.contains("demo_agents"), "{text}");
+    let missing = scratch_dir("generate-configs-missing-manifest").join("absent/tenant.toml");
+    let text = observability_config("missing-manifest", Some(&missing));
+    assert!(
+        !text.contains("demo_agents"),
+        "an unreadable manifest is not the brewery: {text}"
+    );
+}
+
+/// The tree's manifests are the fixtures above, so the verdicts depend
+/// on their ids reading the way this test assumes; pin both.
+#[test]
+fn the_fixture_manifests_name_the_tenants_this_test_assumes() {
+    let id = |rel: &str| {
+        std::fs::read_to_string(repo_root().join(rel))
+            .unwrap()
+            .lines()
+            .find_map(|l| {
+                l.strip_prefix("tenant_id = \"")?
+                    .strip_suffix('"')
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| panic!("{rel} has no [meta] tenant_id line"))
+    };
+    assert_eq!(id(BREWERY), "brewery");
+    assert_ne!(id(NOT_BREWERY), "brewery");
+}

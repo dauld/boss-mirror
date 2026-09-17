@@ -101,10 +101,16 @@ async fn readyz(State(state): State<HttpState>) -> Json<serde_json::Value> {
 ///   exists to show: a reaction the system is enforcing that the
 ///   authored registry does not record, and therefore one the `why`
 ///   guard (`dispatcher-rules-ratchet.sh`, `parse_raw_dir`) never saw.
+/// - `source` — who declared the row (backlog 458971ef): `product`
+///   for the authored directory's own, `tenant:<tenant_id>` for a rule
+///   a tenant declared in its `seeds/rules.toml`. A tenant's rule is
+///   `authored: false` by construction — no product file can name it —
+///   and `source` is what keeps that from reading as the drift above.
 fn rule_views(
     rules: &[RawRule],
     status: &str,
     why: &BTreeMap<String, String>,
+    sources: &BTreeMap<String, String>,
 ) -> Vec<serde_json::Value> {
     rules
         .iter()
@@ -127,6 +133,12 @@ fn rule_views(
             obj.insert(
                 "authored".into(),
                 serde_json::Value::Bool(why.contains_key(&r.name)),
+            );
+            obj.insert(
+                "source".into(),
+                serde_json::Value::String(
+                    authoring::source_label(sources.get(&r.name).map(String::as_str)).into(),
+                ),
             );
             serde_json::Value::Object(obj)
         })
@@ -194,10 +206,23 @@ async fn rules(State(state): State<HttpState>) -> Json<serde_json::Value> {
         }
     };
     let (why, authored_registry) = authored_whys(state.authored_rules_dir.as_deref());
+    // Not best-effort: a failed read here would leave every row reading
+    // `product`, well-formed and wrong about a tenant's rule (CLAUDE.md
+    // §Doors), so it fails the way a failed rule load does.
+    let sources = match authoring::enforced_sources(&state.pool).await {
+        Ok(sources) => sources,
+        Err(e) => {
+            return Json(serde_json::json!({
+                "error": format!("load dispatcher_rules sources: {e}"),
+                "rules": [], "authored_registry": null,
+                "handler_emits": {}, "system_edges": [],
+            }));
+        }
+    };
     let mut out = serde_json::Map::new();
     out.insert(
         "rules".into(),
-        serde_json::Value::Array(rule_views(&raw.rules, ENFORCED_STATUS, &why)),
+        serde_json::Value::Array(rule_views(&raw.rules, ENFORCED_STATUS, &why, &sources)),
     );
     out.insert("authored_registry".into(), authored_registry);
     out.insert(
@@ -228,12 +253,28 @@ fn authoring_err(e: AuthoringError) -> Response {
     (code, e.to_string()).into_response()
 }
 
+/// The draft door's body: the rule spec, plus who declares it.
+/// `source` is absent from the SPA's editor (the product's own) and
+/// `tenant:<tenant_id>` from `boss tenant publish` (backlog 458971ef).
+/// Flattened so the rule's shape on the wire is exactly [`RawRule`].
+#[derive(Debug, serde::Deserialize)]
+struct DraftBody {
+    #[serde(flatten)]
+    rule: RawRule,
+    #[serde(default)]
+    source: Option<String>,
+}
+
 /// `POST /api/dispatcher/rules` — append a new draft version of a rule.
-/// Body is the rule spec (name, on_event, when?, do[], delay?). The draft is
-/// validated (must load via `Rule::from_raw`) before it persists; `201` on
-/// success returns the stored draft.
-async fn create_rule_draft(State(state): State<HttpState>, Json(raw): Json<RawRule>) -> Response {
-    match authoring::create_draft(&state.pool, &raw).await {
+/// Body is the rule spec (name, on_event, when?, do[], delay?, version?)
+/// plus an optional `source` ([`DraftBody`]). The draft is validated
+/// (must load via `Rule::from_raw`) before it persists; `201` on success
+/// returns the stored draft. A name another source owns is refused 400.
+async fn create_rule_draft(
+    State(state): State<HttpState>,
+    Json(body): Json<DraftBody>,
+) -> Response {
+    match authoring::create_draft(&state.pool, &body.rule, body.source.as_deref()).await {
         Ok(v) => (StatusCode::CREATED, Json(v)).into_response(),
         Err(e) => authoring_err(e),
     }
@@ -315,7 +356,12 @@ mod tests {
             "converge-on-merge".to_string(),
             "a cross-protocol reactor".to_string(),
         )]);
-        let views = rule_views(&[rule("converge-on-merge")], ENFORCED_STATUS, &why);
+        let views = rule_views(
+            &[rule("converge-on-merge")],
+            ENFORCED_STATUS,
+            &why,
+            &BTreeMap::new(),
+        );
 
         let v = &views[0];
         assert_eq!(v["name"], "converge-on-merge");
@@ -326,6 +372,58 @@ mod tests {
         assert_eq!(v["do"][0]["handler"], "jobs.spawn");
         assert_eq!(v["why"], "a cross-protocol reactor");
         assert_eq!(v["authored"], serde_json::Value::Bool(true));
+        assert_eq!(
+            v["source"], "product",
+            "a row no tenant declared is the product's, and says so"
+        );
+    }
+
+    /// A TENANT'S RULE READS AS THE TENANT'S (backlog 458971ef). It has
+    /// no file in the product's authored registry — `authored: false`,
+    /// `why: null` — which without `source` is indistinguishable from
+    /// the §9a drift the row below it reports. The source is what tells
+    /// a reader "this is a tenant's reactor, declared in its own
+    /// directory" from "someone published live and never wrote it down".
+    #[test]
+    fn a_tenant_sourced_rule_names_its_tenant_in_the_view() {
+        let sources = BTreeMap::from([(
+            "complete-site-live-on-converge-closed".to_string(),
+            "tenant:acme".to_string(),
+        )]);
+        let views = rule_views(
+            &[
+                rule("complete-site-live-on-converge-closed"),
+                rule("auto-park-on-gate-green"),
+            ],
+            ENFORCED_STATUS,
+            &BTreeMap::new(),
+            &sources,
+        );
+        assert_eq!(views[0]["source"], "tenant:acme");
+        assert_eq!(views[0]["authored"], serde_json::Value::Bool(false));
+        assert_eq!(views[1]["source"], "product");
+    }
+
+    /// The draft door's body is the rule plus WHO declares it: the
+    /// SPA's editor sends the rule alone (the product's), `boss tenant
+    /// publish` adds `source`. Flattened, so the rule's own shape on
+    /// the wire is unchanged.
+    #[test]
+    fn a_draft_body_is_the_rule_with_an_optional_source() {
+        let plain: DraftBody = serde_json::from_str(
+            r#"{"name":"r","on_event":"a.b","do":[{"handler":"jobs.spawn","args":{}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(plain.rule.name, "r");
+        assert_eq!(plain.rule.version, 1, "the default the editor sends");
+        assert!(plain.source.is_none());
+
+        let sourced: DraftBody = serde_json::from_str(
+            r#"{"name":"r","version":4,"on_event":"a.b","do":[{"handler":"jobs.spawn","args":{}}],"source":"tenant:acme"}"#,
+        )
+        .unwrap();
+        assert_eq!(sourced.rule.version, 4);
+        assert_eq!(sourced.source.as_deref(), Some("tenant:acme"));
     }
 
     /// A rule the system enforces that NO authored file records reads as
@@ -338,6 +436,7 @@ mod tests {
         let views = rule_views(
             &[rule("auto-park-on-gate-green")],
             ENFORCED_STATUS,
+            &BTreeMap::new(),
             &BTreeMap::new(),
         );
 

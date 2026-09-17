@@ -50,7 +50,7 @@ async fn create_publish_retire_lifecycle() {
     let db = TestDb::new().await;
 
     // create draft v1
-    let d1 = create_draft(&db.pool, &rule("r1", "step.done.x", None))
+    let d1 = create_draft(&db.pool, &rule("r1", "step.done.x", None), None)
         .await
         .unwrap();
     assert_eq!(d1.version, 1);
@@ -66,7 +66,7 @@ async fn create_publish_retire_lifecycle() {
     assert_eq!(get_active(&db.pool, "r1").await.unwrap().version, 1);
 
     // create draft v2 + publish → v2 active, v1 retired, still exactly one active
-    create_draft(&db.pool, &rule("r1", "step.done.y", None))
+    create_draft(&db.pool, &rule("r1", "step.done.y", None), None)
         .await
         .unwrap();
     let a2 = publish(&db.pool, "r1").await.unwrap();
@@ -103,7 +103,7 @@ async fn validate_rejects_unloadable_rule_and_create_draft_persists_nothing() {
     // create_draft rejects an invalid rule and writes no row
     let db = TestDb::new().await;
     assert!(
-        create_draft(&db.pool, &rule("bad", "step..x", None))
+        create_draft(&db.pool, &rule("bad", "step..x", None), None)
             .await
             .is_err()
     );
@@ -118,4 +118,96 @@ async fn validate_rejects_unloadable_rule_and_create_draft_persists_nothing() {
 async fn publish_without_draft_errors() {
     let db = TestDb::new().await;
     assert!(publish(&db.pool, "nonexistent").await.is_err());
+}
+
+/// A DRAFT LANDS AT THE VERSION ITS BODY DECLARES when that is above
+/// the registry's (backlog 458971ef). `create_draft` assigned
+/// `MAX(version) + 1` and ignored the body's `version` outright, so a
+/// tenant file saying `version = 3` over a live v1 would have landed a
+/// v2 the file never named — and the next publish would compare the
+/// file's 3 against a registry at 2 and publish AGAIN. The seed already
+/// honours the file's version for product rules ("insert what is
+/// absent, at the version the FILE declares"); the API door now does
+/// the same. The SPA's editor sends no version (the default, 1), so
+/// its drafts still take `MAX + 1` — `max(declared, MAX + 1)` never
+/// walks a version back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_draft_lands_at_the_declared_version_when_it_is_ahead_of_the_registry() {
+    let db = TestDb::new().await;
+    let mut v1 = rule("declared", "step.done.x", None);
+    v1.version = 1;
+    create_draft(&db.pool, &v1, Some("tenant:acme"))
+        .await
+        .unwrap();
+    publish(&db.pool, "declared").await.unwrap();
+
+    let mut v3 = rule("declared", "step.done.y", None);
+    v3.version = 3;
+    let d = create_draft(&db.pool, &v3, Some("tenant:acme"))
+        .await
+        .unwrap();
+    assert_eq!(d.version, 3, "the declared version, not MAX + 1");
+    assert_eq!(d.source.as_deref(), Some("tenant:acme"));
+    let a = publish(&db.pool, "declared").await.unwrap();
+    assert_eq!((a.version, a.status.as_str()), (3, "active"));
+    assert_eq!(
+        status_of(&db, "declared", 1).await.as_deref(),
+        Some("retired")
+    );
+
+    // The SPA's shape: no version in the body (the default is 1),
+    // which is BELOW the registry — the draft takes MAX + 1 as before.
+    let unversioned = rule("declared", "step.done.z", None);
+    assert_eq!(unversioned.version, 1, "the default the editor sends");
+    let d = create_draft(&db.pool, &unversioned, Some("tenant:acme"))
+        .await
+        .unwrap();
+    assert_eq!(d.version, 4, "MAX + 1 when the body declares nothing newer");
+}
+
+/// A RULE NAME BELONGS TO WHOEVER PUBLISHED IT FIRST. `dispatcher_rules`
+/// is one namespace with one active row per name; a tenant drafting
+/// `auto-park-on-gate-green` v2 and publishing it would retire the
+/// product's auto-park and put the tenant's reaction in its slot. The
+/// door refuses a draft whose `source` differs from the name's existing
+/// rows — by name, naming the owner — and writes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_name_another_source_owns_is_refused_at_the_draft() {
+    let db = TestDb::new().await;
+    // The product's row: published with no source, as the authored
+    // directory's seed and the SPA's editor both do.
+    create_draft(&db.pool, &rule("owned", "step.done.x", None), None)
+        .await
+        .unwrap();
+    publish(&db.pool, "owned").await.unwrap();
+
+    let mut hijack = rule("owned", "step.done.y", None);
+    hijack.version = 2;
+    let err = create_draft(&db.pool, &hijack, Some("tenant:acme"))
+        .await
+        .expect_err("a tenant cannot draft over a product-owned name");
+    let msg = err.to_string();
+    assert!(msg.contains("owned"), "names the rule: {msg}");
+    assert!(
+        msg.contains("product") && msg.contains("tenant:acme"),
+        "names both owners: {msg}"
+    );
+    assert_eq!(
+        list_versions(&db.pool, "owned").await.unwrap().len(),
+        1,
+        "the refusal wrote no row"
+    );
+    // And the other direction: the product (no source) cannot take
+    // over a tenant's name either.
+    create_draft(
+        &db.pool,
+        &rule("theirs", "step.done.x", None),
+        Some("tenant:acme"),
+    )
+    .await
+    .unwrap();
+    let err = create_draft(&db.pool, &rule("theirs", "step.done.y", None), None)
+        .await
+        .expect_err("the product cannot draft over a tenant-owned name");
+    assert!(err.to_string().contains("tenant:acme"), "{err}");
 }
