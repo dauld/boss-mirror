@@ -3,11 +3,12 @@
 
 use async_trait::async_trait;
 use boss_core::primitives::{Class, ClassRef};
+use boss_core::publisher::EventStamp;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::PgPool;
 
-use crate::port::{ClassError, ClassRepository};
+use crate::port::{ClassError, ClassRepository, declared_event};
 
 pub struct PgClasses {
     pool: PgPool,
@@ -148,14 +149,18 @@ impl ClassRepository for PgClasses {
         Ok(exists)
     }
 
-    async fn batch_upsert(&self, rows: &[Class]) -> Result<u64, ClassError> {
+    async fn batch_upsert(&self, rows: &[Class], stamp: &EventStamp) -> Result<u64, ClassError> {
         // One `ON CONFLICT DO NOTHING` per row inside a single
         // transaction, mirroring the idempotent semantics of the seed
         // `classes.sql`. `created_at` / `updated_at` default in the
         // table; `retired_at` is intentionally not seeded (rows arrive
         // active). Row-at-a-time keeps the bind logic trivial — the
         // registry is tiny (≤ a few hundred rows) so a multi-row VALUES
-        // batch would buy nothing.
+        // batch would buy nothing — and is what lets `rows_affected`
+        // say, per row, whether THIS one was inserted: only those
+        // stage a `class.declared` on the outbox, in the same
+        // transaction, so the fact and the row commit or roll back
+        // together (backlog d9409039).
         let mut tx = self
             .pool
             .begin()
@@ -189,7 +194,12 @@ impl ClassRepository for PgClasses {
                 }
                 ClassError::Storage(e.to_string())
             })?;
-            inserted += result.rows_affected();
+            if result.rows_affected() == 1 {
+                boss_events::outbox::record_event_in_tx(&mut tx, &declared_event(stamp, r)?)
+                    .await
+                    .map_err(ClassError::Storage)?;
+                inserted += 1;
+            }
         }
         tx.commit()
             .await

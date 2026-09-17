@@ -18,8 +18,13 @@
 //! only reads — because the question is whether the DATABASE refuses.
 
 use boss_core::actor::ActorId;
+use boss_core::publisher::EventStamp;
 use boss_jobs::agents::{AgentsRegistry, PgAgents};
 use boss_testing::TestDb;
+
+fn stamp() -> EventStamp {
+    EventStamp::new("jobs", ActorId::Automation("tenant-seed".into()))
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_seeded_alias_resolves_and_an_unknown_login_does_not() {
@@ -127,15 +132,18 @@ async fn a_batch_registers_new_agents_keeps_the_migrations_row_and_names_what_di
     };
 
     let out = registry
-        .publish(&[
-            // The migration's row, declared with the tenant's own name.
-            declared(
-                "agent-claude",
-                "Claude (engineering)",
-                "claude@algedonic.dev",
-            ),
-            declared("agent-scout", "Scout", "scout@example.test"),
-        ])
+        .publish(
+            &[
+                // The migration's row, declared with the tenant's own name.
+                declared(
+                    "agent-claude",
+                    "Claude (engineering)",
+                    "claude@algedonic.dev",
+                ),
+                declared("agent-scout", "Scout", "scout@example.test"),
+            ],
+            &stamp(),
+        )
         .await
         .expect("the batch lands");
     assert_eq!((out.received, out.inserted), (2, 1));
@@ -164,7 +172,10 @@ async fn a_batch_registers_new_agents_keeps_the_migrations_row_and_names_what_di
 
     // A second, identical publish inserts nothing and differs nowhere.
     let again = registry
-        .publish(&[declared("agent-scout", "Scout", "scout@example.test")])
+        .publish(
+            &[declared("agent-scout", "Scout", "scout@example.test")],
+            &stamp(),
+        )
         .await
         .unwrap();
     assert_eq!((again.received, again.inserted), (1, 0));
@@ -175,7 +186,10 @@ async fn a_batch_registers_new_agents_keeps_the_migrations_row_and_names_what_di
     let mut unpriced = declared("agent-unpriced", "U", "u@example.test");
     unpriced.default_model = "claude-opus-5".into();
     let err = registry
-        .publish(&[unpriced, declared("agent-later", "L", "l@example.test")])
+        .publish(
+            &[declared("agent-later", "L", "l@example.test"), unpriced],
+            &stamp(),
+        )
         .await
         .unwrap_err();
     match err {
@@ -185,6 +199,26 @@ async fn a_batch_registers_new_agents_keeps_the_migrations_row_and_names_what_di
     let after = registry.list().await.unwrap();
     assert!(
         !after.iter().any(|r| r.id == "agent-later"),
-        "one transaction: nothing after the refused row landed"
+        "one transaction: nothing before the refused row stays landed"
     );
+
+    // The fact rides the insert's transaction (backlog d9409039): of
+    // everything above, exactly one row was inserted and committed —
+    // agent-scout — so exactly one `agent.declared` is staged. The
+    // kept agent-claude staged nothing, the re-run staged nothing, and
+    // agent-later's fact rolled back with its row.
+    let staged: Vec<(String, serde_json::Value)> =
+        sqlx::query_as("SELECT source, payload FROM event_outbox WHERE kind = $1")
+            .bind(boss_jobs::agents::AGENT_DECLARED)
+            .fetch_all(&db.pool)
+            .await
+            .expect("outbox reads");
+    assert_eq!(staged.len(), 1, "{staged:?}");
+    assert_eq!(staged[0].0, "jobs");
+    assert_eq!(staged[0].1["id"], "agent-scout");
+    assert_eq!(
+        staged[0].1["aliases"],
+        serde_json::json!(["scout@example.test"])
+    );
+    assert_eq!(staged[0].1["declared_by"], "automation:tenant-seed");
 }

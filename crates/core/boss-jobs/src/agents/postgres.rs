@@ -10,9 +10,10 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
+use boss_core::publisher::EventStamp;
 use sqlx::PgPool;
 
-use super::port::{AgentsError, AgentsRegistry};
+use super::port::{AgentsError, AgentsRegistry, declared_event};
 use super::types::{AgentInput, AgentRow, AgentsBatchOutcome, KeptAgent};
 
 pub struct PgAgents {
@@ -102,7 +103,11 @@ impl AgentsRegistry for PgAgents {
         Ok(rows.into_iter().map(|r| to_row(r, &aliases)).collect())
     }
 
-    async fn publish(&self, declared: &[AgentInput]) -> Result<AgentsBatchOutcome, AgentsError> {
+    async fn publish(
+        &self,
+        declared: &[AgentInput],
+        stamp: &EventStamp,
+    ) -> Result<AgentsBatchOutcome, AgentsError> {
         let mut tx = self.pool.begin().await.map_err(storage)?;
         let mut inserted = 0usize;
         let mut kept_ids: Vec<&AgentInput> = Vec::new();
@@ -123,6 +128,14 @@ impl AgentsRegistry for PgAgents {
             .map_err(|e| insert_error(e, &a.default_model))?
             .rows_affected();
             if n == 1 {
+                // The fact rides the insert's transaction (backlog
+                // d9409039): a row that lands stages its
+                // `agent.declared` on the outbox here, so the row and
+                // the fact commit or roll back together; a kept row
+                // is already named in the outcome and records nothing.
+                boss_events::outbox::record_event_in_tx(&mut tx, &declared_event(stamp, a)?)
+                    .await
+                    .map_err(AgentsError::Storage)?;
                 inserted += 1;
             } else {
                 kept_ids.push(a);

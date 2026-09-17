@@ -82,7 +82,16 @@ async fn publish(
     if let Some(why) = rows.iter().find_map(|a| validate_agent(a).err()) {
         return (StatusCode::UNPROCESSABLE_ENTITY, why).into_response();
     }
-    match state.registry.publish(&rows).await {
+    // Same envelope construction as the credentials door: the actor
+    // the request signed with rides as `_actor` (and is named again
+    // as `declared_by` on each inserted row's fact), the stamp is
+    // wall-clock, and the source is `jobs` — this service is the one
+    // recording. A trusted sibling with no identity is the platform.
+    let actor = user
+        .ambient_actor()
+        .unwrap_or_else(|| boss_core::actor::ActorId::Automation("platform".into()));
+    let stamp = boss_core::publisher::EventStamp::new("jobs", actor);
+    match state.registry.publish(&rows, &stamp).await {
         Ok(out) => Json(out).into_response(),
         Err(e) => err_response(e),
     }
@@ -218,6 +227,68 @@ mod tests {
         assert_eq!(
             rows[0].display_name, "Claude (engineering)",
             "kept as registered"
+        );
+    }
+
+    /// The fact a declaration leaves (backlog d9409039, 2026-09-17):
+    /// one `agent.declared` per row INSERTED — the row as inserted plus
+    /// `declared_by`, the actor the request signed with — and nothing
+    /// for the row the registry already held, nothing for the batch.
+    #[tokio::test]
+    async fn a_batch_records_one_declared_event_per_inserted_row_and_none_for_a_kept_row() {
+        let registry = Arc::new(InMemoryAgents::new().with_agent("agent-claude", []));
+        let mut rows = batch();
+        rows.as_array_mut().unwrap().push(json!({
+            "id": "agent-scout", "display_name": "Scout",
+            "default_model": "opus-5[1m]", "aliases": ["scout@algedonic.dev"]
+        }));
+        rows.as_array_mut().unwrap().push(json!({
+            "id": "agent-clerk", "display_name": "Clerk", "default_model": "opus-5[1m]",
+            "max_concurrent_runs": 2
+        }));
+        let (status, body) = send(
+            app(&registry),
+            "POST",
+            "/api/agents/batch",
+            Some(rows),
+            seed(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let out: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(out["inserted"], 2);
+        assert_eq!(out["kept"][0]["id"], "agent-claude");
+
+        let events = registry.recorded_events();
+        assert_eq!(
+            events.len(),
+            2,
+            "one event per inserted row, none for the kept agent-claude"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| e.kind == super::super::AGENT_DECLARED),
+            "{events:?}"
+        );
+        assert!(events.iter().all(|e| e.source == "jobs"), "{events:?}");
+        let ids: Vec<&str> = events
+            .iter()
+            .map(|e| e.payload["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["agent-scout", "agent-clerk"]);
+        assert_eq!(events[0].payload["display_name"], json!("Scout"));
+        assert_eq!(events[0].payload["default_model"], json!("opus-5[1m]"));
+        assert_eq!(events[0].payload["aliases"], json!(["scout@algedonic.dev"]));
+        assert_eq!(events[1].payload["max_concurrent_runs"], json!(2));
+        assert_eq!(
+            events[0].payload["declared_by"],
+            json!("automation:tenant-seed"),
+            "the actor the request signed with, named on the fact"
+        );
+        assert_eq!(
+            events[0].payload["_actor"], events[0].payload["declared_by"],
+            "declared_by and the stamp's actor are one value"
         );
     }
 

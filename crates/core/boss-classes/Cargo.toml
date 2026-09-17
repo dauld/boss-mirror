@@ -17,11 +17,12 @@ required-features = ["postgres"]
 # guard. Same fix shape as boss-docs / boss-policy / boss-products
 # / boss-content (2026-05-05).
 default = ["postgres"]
-postgres = ["dep:sqlx"]
+postgres = ["dep:sqlx", "boss-events/postgres"]
 
 [dependencies]
 boss-core = { path = "../boss-core" }
 boss-policy-client = { path = "../boss-policy-client" }
+boss-events = { path = "../boss-events" }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }

@@ -14,11 +14,12 @@ required-features = ["postgres"]
 # in default the workspace build produces an in-memory binary that
 # crashes on the require_postgres_or_explicit_inmemory guard.
 default = ["postgres"]
-postgres = ["dep:sqlx"]
+postgres = ["dep:sqlx", "boss-events/postgres"]
 
 [dependencies]
 boss-core = { path = "../boss-core" }
 boss-policy-client = { path = "../boss-policy-client" }
+boss-events = { path = "../boss-events" }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }

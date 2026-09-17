@@ -9,8 +9,34 @@
 //! proved — so `list` and `publish` were added beside it.
 
 use async_trait::async_trait;
+use boss_core::event::Event;
+use boss_core::publisher::EventStamp;
 
 use super::types::{AgentInput, AgentRow, AgentsBatchOutcome};
+
+/// The fact a tenant's declaration leaves: one per agent row the
+/// batch INSERTED (backlog d9409039, 2026-09-17). Never per kept row
+/// — a row the registry already held changed nothing, and the kept
+/// row is already named in the batch's answer — and never per batch:
+/// the rebuilders reproduce rows, not requests.
+pub const AGENT_DECLARED: &str = "agent.declared";
+
+/// Build the `agent.declared` event for one inserted row: the
+/// declaration as inserted (id, name, model, caps, and the aliases
+/// landed with it), plus `declared_by` — the actor the request signed
+/// with, read from the stamp so it is the same value `_actor`
+/// carries. One builder for both adapters, so the in-memory double
+/// records exactly what the Pg adapter stages on the outbox.
+pub fn declared_event(stamp: &EventStamp, row: &AgentInput) -> Result<Event, AgentsError> {
+    let mut payload = serde_json::to_value(row).map_err(|e| AgentsError::Storage(e.to_string()))?;
+    if let serde_json::Value::Object(map) = &mut payload {
+        map.insert(
+            "declared_by".to_string(),
+            serde_json::Value::String(stamp.actor().to_string()),
+        );
+    }
+    Ok(stamp.event(AGENT_DECLARED, payload))
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum AgentsError {
@@ -41,5 +67,14 @@ pub trait AgentsRegistry: Send + Sync {
     /// insert-if-absent by alias, one transaction. Rows arrive already
     /// validated (`validate_agent`); an unpriced `default_model` is
     /// the one refusal the registry itself makes.
-    async fn publish(&self, rows: &[AgentInput]) -> Result<AgentsBatchOutcome, AgentsError>;
+    ///
+    /// Every row inserted records one [`AGENT_DECLARED`] event built
+    /// from `stamp` ([`declared_event`]) in that same transaction; a
+    /// kept row records nothing (backlog d9409039 — until then a
+    /// tenant's agents left no audit-log fact).
+    async fn publish(
+        &self,
+        rows: &[AgentInput],
+        stamp: &EventStamp,
+    ) -> Result<AgentsBatchOutcome, AgentsError>;
 }

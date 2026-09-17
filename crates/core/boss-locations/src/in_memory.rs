@@ -2,10 +2,12 @@
 //! service startup before the postgres feature is wired in.
 
 use async_trait::async_trait;
+use boss_core::event::Event;
 use boss_core::primitives::Location;
+use boss_core::publisher::EventStamp;
 use std::sync::RwLock;
 
-use crate::port::{LocationError, LocationRepository};
+use crate::port::{LocationError, LocationRepository, declared_event};
 
 /// Trivial in-memory store. Holds a snapshot of `Location` rows;
 /// lookups are linear scans because the registry is tiny in
@@ -14,13 +16,21 @@ use crate::port::{LocationError, LocationRepository};
 #[derive(Debug, Default)]
 pub struct InMemoryLocations {
     rows: RwLock<Vec<Location>>,
+    events: RwLock<Vec<Event>>,
 }
 
 impl InMemoryLocations {
     pub fn new(rows: Vec<Location>) -> Self {
         Self {
             rows: RwLock::new(rows),
+            events: RwLock::new(Vec::new()),
         }
+    }
+
+    /// Every event recorded through this adapter, in order — what a
+    /// Pg deployment would find on the outbox.
+    pub fn recorded_events(&self) -> Vec<Event> {
+        self.events.read().expect("rwlock poisoned").clone()
     }
 }
 
@@ -58,14 +68,21 @@ impl LocationRepository for InMemoryLocations {
         Ok(out)
     }
 
-    async fn batch_upsert(&self, incoming: &[Location]) -> Result<u64, LocationError> {
+    async fn batch_upsert(
+        &self,
+        incoming: &[Location],
+        stamp: &EventStamp,
+    ) -> Result<u64, LocationError> {
         // Mirror the Postgres `ON CONFLICT (id) DO NOTHING`: an id
-        // already present is left untouched; only new rows append.
+        // already present is left untouched; only new rows append,
+        // and only they record a `location.declared`.
         let mut rows = self.rows.write().expect("rwlock poisoned");
+        let mut events = self.events.write().expect("rwlock poisoned");
         let mut inserted: u64 = 0;
         for r in incoming {
             if !rows.iter().any(|l| l.id == r.id) {
                 rows.push(r.clone());
+                events.push(declared_event(stamp, r)?);
                 inserted += 1;
             }
         }
@@ -186,11 +203,18 @@ mod tests {
     #[tokio::test]
     async fn batch_upsert_inserts_if_absent_and_counts_only_new_rows() {
         let repo = InMemoryLocations::new(vec![loc("loc-hq", "HQ", "hq", None, false)]);
+        let stamp = EventStamp::new(
+            "locations",
+            boss_core::actor::ActorId::Automation("tenant-seed".into()),
+        );
         let inserted = repo
-            .batch_upsert(&[
-                loc("loc-hq", "HQ renamed", "hq", None, false),
-                loc("loc-lab", "Lab", "office", Some("loc-hq"), false),
-            ])
+            .batch_upsert(
+                &[
+                    loc("loc-hq", "HQ renamed", "hq", None, false),
+                    loc("loc-lab", "Lab", "office", Some("loc-hq"), false),
+                ],
+                &stamp,
+            )
             .await
             .unwrap();
         assert_eq!(inserted, 1, "the existing id is left untouched");

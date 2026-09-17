@@ -311,6 +311,16 @@ impl EventStamp {
         }
     }
 
+    /// The actor every event this stamp builds is attributed to —
+    /// what `_actor` will read on the payload. For a write whose
+    /// record names the caller in its own words (`declared_by` on a
+    /// tenant's `*.declared` events, backlog d9409039), so the named
+    /// field and `_actor` are ONE value read from one place, never
+    /// two arguments that can disagree.
+    pub fn actor(&self) -> &ActorId {
+        &self.actor
+    }
+
     /// Override the minted wall timestamp. For deterministic tests
     /// and replay-shaped fixtures ONLY — production write paths never
     /// call this: the record stamp is wall time by decision (David,

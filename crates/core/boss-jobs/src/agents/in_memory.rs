@@ -12,8 +12,10 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use boss_core::event::Event;
+use boss_core::publisher::EventStamp;
 
-use super::port::{AgentsError, AgentsRegistry};
+use super::port::{AgentsError, AgentsRegistry, declared_event};
 use super::types::{AgentInput, AgentRow, AgentsBatchOutcome, KeptAgent};
 
 #[derive(Default)]
@@ -45,11 +47,18 @@ impl Rows {
 #[derive(Default)]
 pub struct InMemoryAgents {
     rows: Mutex<Rows>,
+    events: Mutex<Vec<Event>>,
 }
 
 impl InMemoryAgents {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Every event recorded through this adapter, in order — what a
+    /// Pg deployment would find on the outbox.
+    pub fn recorded_events(&self) -> Vec<Event> {
+        self.events.lock().expect("events lock").clone()
     }
 
     /// Register `agent_id` with the logins it may sign as.
@@ -91,8 +100,13 @@ impl AgentsRegistry for InMemoryAgents {
         Ok(rows.agents.values().map(|a| rows.row(a)).collect())
     }
 
-    async fn publish(&self, declared: &[AgentInput]) -> Result<AgentsBatchOutcome, AgentsError> {
+    async fn publish(
+        &self,
+        declared: &[AgentInput],
+        stamp: &EventStamp,
+    ) -> Result<AgentsBatchOutcome, AgentsError> {
         let mut rows = self.rows.lock().expect("agents lock");
+        let mut events = self.events.lock().expect("events lock");
         let mut inserted = 0usize;
         let mut kept = Vec::new();
         for a in declared {
@@ -101,6 +115,7 @@ impl AgentsRegistry for InMemoryAgents {
                 let mut stored = a.clone();
                 stored.aliases.clear();
                 rows.agents.insert(a.id.clone(), stored);
+                events.push(declared_event(stamp, a)?);
                 inserted += 1;
             }
             for alias in &a.aliases {

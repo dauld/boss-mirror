@@ -57,7 +57,7 @@ pub mod types;
 
 pub use door::{LoginDoor, Resolution, UNRESOLVED_LOGIN, decide, resolve_login};
 pub use in_memory::InMemoryAgents;
-pub use port::{AgentsError, AgentsRegistry};
+pub use port::{AGENT_DECLARED, AgentsError, AgentsRegistry};
 #[cfg(feature = "postgres")]
 pub use postgres::PgAgents;
 pub use seed::{load_agents_toml, parse_agents_toml};

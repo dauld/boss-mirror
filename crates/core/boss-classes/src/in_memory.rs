@@ -2,10 +2,12 @@
 //! startup before the postgres feature is wired in.
 
 use async_trait::async_trait;
+use boss_core::event::Event;
 use boss_core::primitives::{Class, ClassRef};
+use boss_core::publisher::EventStamp;
 use std::sync::RwLock;
 
-use crate::port::{ClassError, ClassRepository};
+use crate::port::{ClassError, ClassRepository, declared_event};
 
 /// Trivial in-memory store. Holds a snapshot of `Class` rows; lookups
 /// are linear scans because the registry is tiny (≤ 100 rows in
@@ -13,13 +15,21 @@ use crate::port::{ClassError, ClassRepository};
 #[derive(Debug, Default)]
 pub struct InMemoryClasses {
     rows: RwLock<Vec<Class>>,
+    events: RwLock<Vec<Event>>,
 }
 
 impl InMemoryClasses {
     pub fn new(rows: Vec<Class>) -> Self {
         Self {
             rows: RwLock::new(rows),
+            events: RwLock::new(Vec::new()),
         }
+    }
+
+    /// Every event recorded through this adapter, in order — what a
+    /// Pg deployment would find on the outbox.
+    pub fn recorded_events(&self) -> Vec<Event> {
+        self.events.read().expect("rwlock poisoned").clone()
     }
 }
 
@@ -88,12 +98,18 @@ impl ClassRepository for InMemoryClasses {
         }
     }
 
-    async fn batch_upsert(&self, incoming: &[Class]) -> Result<u64, ClassError> {
+    async fn batch_upsert(
+        &self,
+        incoming: &[Class],
+        stamp: &EventStamp,
+    ) -> Result<u64, ClassError> {
         // Mirror the Postgres `ON CONFLICT (subject_kind, code) DO
         // NOTHING`: a row whose composite key already exists is left
-        // untouched; only genuinely-new rows are appended. Returns the
-        // count actually inserted.
+        // untouched; only genuinely-new rows are appended, and only
+        // they record a `class.declared`. Returns the count actually
+        // inserted.
         let mut rows = self.rows.write().expect("rwlock poisoned");
+        let mut events = self.events.write().expect("rwlock poisoned");
         let mut inserted: u64 = 0;
         for r in incoming {
             let exists = rows
@@ -101,6 +117,7 @@ impl ClassRepository for InMemoryClasses {
                 .any(|c| c.subject_kind == r.subject_kind && c.code == r.code);
             if !exists {
                 rows.push(r.clone());
+                events.push(declared_event(stamp, r)?);
                 inserted += 1;
             }
         }

@@ -175,7 +175,17 @@ async fn batch_upsert(
         return (StatusCode::FORBIDDEN, "operator tier required").into_response();
     }
     let locations: Vec<Location> = rows.into_iter().map(Into::into).collect();
-    match state.locations.batch_upsert(&locations).await {
+    // The fact each inserted row leaves is stamped with the actor the
+    // request signed with; a sim-chain caller with no identity is
+    // this service's own automation, never anonymous. Publisher-less
+    // stamp (the classes door's shape): the adapter stages the event
+    // on the outbox inside the insert's transaction and the relay
+    // moves it on, so this service needs no bus of its own.
+    let actor = user
+        .ambient_actor()
+        .unwrap_or_else(|| boss_core::actor::ActorId::Automation("locations".into()));
+    let stamp = boss_core::publisher::EventStamp::new("locations", actor);
+    match state.locations.batch_upsert(&locations, &stamp).await {
         Ok(inserted) => Json(serde_json::json!({
             "received": locations.len(),
             "inserted": inserted,
@@ -399,6 +409,61 @@ mod tests {
         assert_eq!(v["received"], json!(2));
         assert_eq!(v["inserted"], json!(1), "the existing id is left untouched");
         assert_eq!(repo.get("loc-t-hq").await.unwrap().unwrap().name, "HQ");
+    }
+
+    /// The fact a declaration leaves (backlog d9409039, 2026-09-17):
+    /// one `location.declared` per row INSERTED — the row as inserted
+    /// plus `declared_by`, the actor the request signed with — and
+    /// nothing for the row the registry already held, nothing for the
+    /// batch.
+    #[tokio::test]
+    async fn batch_records_one_declared_event_per_inserted_row_and_none_for_a_kept_row() {
+        let repo = Arc::new(InMemoryLocations::new(vec![loc(
+            "loc-t-hq", "HQ", "office", None,
+        )]));
+        let app = router(LocationsApiState {
+            locations: repo.clone(),
+        });
+        let mut rows = hq_rows();
+        rows.as_array_mut().unwrap().push(json!(
+            {"id": "loc-t-yard", "name": "Yard", "kind": "office", "timezone": "UTC"}
+        ));
+        let resp = app
+            .oneshot(batch_request(Some(&operator_header()), rows))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = repo.recorded_events();
+        assert_eq!(
+            events.len(),
+            2,
+            "one event per inserted row, none for the kept loc-t-hq"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| e.kind == crate::port::LOCATION_DECLARED),
+            "{events:?}"
+        );
+        assert!(events.iter().all(|e| e.source == "locations"), "{events:?}");
+        let ids: Vec<&str> = events
+            .iter()
+            .map(|e| e.payload["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["loc-t-lab", "loc-t-yard"]);
+        assert_eq!(events[0].payload["parent_id"], json!("loc-t-hq"));
+        assert_eq!(events[0].payload["timezone"], json!("UTC"));
+        assert_eq!(events[0].payload["metadata"], json!({"floor": 2}));
+        assert_eq!(
+            events[0].payload["declared_by"],
+            json!("automation:tenant-seed"),
+            "the actor the request signed with, named on the fact"
+        );
+        assert_eq!(
+            events[0].payload["_actor"], events[0].payload["declared_by"],
+            "declared_by and the stamp's actor are one value"
+        );
     }
 
     #[tokio::test]

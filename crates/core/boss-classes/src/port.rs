@@ -2,7 +2,32 @@
 //! from the Class registry's persistence layer.
 
 use async_trait::async_trait;
+use boss_core::event::Event;
 use boss_core::primitives::{Class, ClassRef};
+use boss_core::publisher::EventStamp;
+
+/// The fact a tenant's declaration leaves: one per Class row the
+/// batch INSERTED (backlog d9409039, 2026-09-17). Never per kept row
+/// — a row the registry already held changed nothing, so there is
+/// nothing to record — and never per batch: the rebuilders reproduce
+/// rows, not requests.
+pub const CLASS_DECLARED: &str = "class.declared";
+
+/// Build the `class.declared` event for one inserted row: the row as
+/// inserted, plus `declared_by` — the actor the request signed with,
+/// read from the stamp so it is the same value `_actor` carries. One
+/// builder for both adapters, so the in-memory double records exactly
+/// what the Pg adapter stages on the outbox.
+pub fn declared_event(stamp: &EventStamp, row: &Class) -> Result<Event, ClassError> {
+    let mut payload = serde_json::to_value(row).map_err(|e| ClassError::Storage(e.to_string()))?;
+    if let serde_json::Value::Object(map) = &mut payload {
+        map.insert(
+            "declared_by".to_string(),
+            serde_json::Value::String(stamp.actor().to_string()),
+        );
+    }
+    Ok(stamp.event(CLASS_DECLARED, payload))
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClassError {
@@ -55,10 +80,16 @@ pub trait ClassRepository: Send + Sync {
     /// rows are left untouched. Returns the number of rows that were
     /// newly inserted (conflicts excluded).
     ///
-    /// `classes` is a plain reference table — it is *not* event-sourced
-    /// and `boss-rebuild-all` never rebuilds or truncates it — so this
-    /// write goes straight to the table without emitting an event.
-    async fn batch_upsert(&self, rows: &[Class]) -> Result<u64, ClassError>;
+    /// Every row inserted records one [`CLASS_DECLARED`] event built
+    /// from `stamp` ([`declared_event`]) in the same transaction as
+    /// the insert; a kept row records nothing. Until backlog d9409039
+    /// (2026-09-17) this write left no audit-log fact at all, on the
+    /// reasoning that `classes` is a reference table the rebuilders
+    /// never touch — but "every state-changing operation publishes an
+    /// event" (CLAUDE.md §Events) has no reference-table exception,
+    /// and a tenant's declarations are exactly the state an operator
+    /// later asks "when did this appear, and who put it there" about.
+    async fn batch_upsert(&self, rows: &[Class], stamp: &EventStamp) -> Result<u64, ClassError>;
 
     /// Replace an existing Class's editable body — display name,
     /// parent, member attribute, metadata, sort order. Returns `false`

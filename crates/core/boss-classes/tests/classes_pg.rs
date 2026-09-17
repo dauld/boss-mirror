@@ -4,9 +4,17 @@
 //! database — and the batch adapter surfaces WHICH kind offended
 //! instead of a generic storage error.
 
-use boss_classes::port::{ClassError, ClassRepository};
+use boss_classes::port::{CLASS_DECLARED, ClassError, ClassRepository};
 use boss_classes::postgres::PgClasses;
+use boss_core::publisher::EventStamp;
 use boss_testing::TestDb;
+
+fn stamp() -> EventStamp {
+    EventStamp::new(
+        "classes",
+        boss_core::actor::ActorId::Automation("tenant-seed".into()),
+    )
+}
 
 fn class_row(subject_kind: &str, code: &str) -> boss_core::primitives::Class {
     boss_core::primitives::Class {
@@ -27,19 +35,37 @@ async fn class_for_registered_kind_lands_and_unregistered_aborts_with_the_kind_n
     let repo = PgClasses::new(db.pool.clone());
 
     // Registered kind (platform seed) → lands.
-    repo.batch_upsert(&[class_row("employee", "test-role")])
+    repo.batch_upsert(&[class_row("employee", "test-role")], &stamp())
         .await
         .expect("registered kind must land");
 
     // Unregistered kind → aborts with the kind named, not Storage.
     let err = repo
-        .batch_upsert(&[class_row("made-up-kind", "whatever")])
+        .batch_upsert(&[class_row("made-up-kind", "whatever")], &stamp())
         .await
         .expect_err("unregistered kind must abort");
     match err {
         ClassError::UnregisteredKind(kind) => assert_eq!(kind, "made-up-kind"),
         other => panic!("expected UnregisteredKind, got {other:?}"),
     }
+
+    // The fact rides the insert's transaction (backlog d9409039): the
+    // row that landed staged one `class.declared` on the outbox, the
+    // refused row staged nothing, and a re-run of the landed row —
+    // kept, not inserted — stages nothing either.
+    repo.batch_upsert(&[class_row("employee", "test-role")], &stamp())
+        .await
+        .expect("a re-run is a no-op");
+    let staged: Vec<(String, serde_json::Value)> =
+        sqlx::query_as("SELECT source, payload FROM event_outbox WHERE kind = $1")
+            .bind(CLASS_DECLARED)
+            .fetch_all(&db.pool)
+            .await
+            .expect("outbox reads");
+    assert_eq!(staged.len(), 1, "{staged:?}");
+    assert_eq!(staged[0].0, "classes");
+    assert_eq!(staged[0].1["code"], "test-role");
+    assert_eq!(staged[0].1["declared_by"], "automation:tenant-seed");
 }
 
 /// The retire path against the real adapter: stamp once, hold the
@@ -50,7 +76,7 @@ async fn class_for_registered_kind_lands_and_unregistered_aborts_with_the_kind_n
 async fn retire_stamps_once_and_the_read_primitives_agree() {
     let db = TestDb::new().await;
     let repo = PgClasses::new(db.pool.clone());
-    repo.batch_upsert(&[class_row("employee", "retire-me")])
+    repo.batch_upsert(&[class_row("employee", "retire-me")], &stamp())
         .await
         .expect("seed row");
     let cref = boss_core::primitives::ClassRef::new("employee", "retire-me");

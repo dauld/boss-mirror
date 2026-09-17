@@ -223,7 +223,18 @@ async fn batch_upsert(
     }
 
     let classes: Vec<Class> = rows.into_iter().map(Into::into).collect();
-    match state.classes.batch_upsert(&classes).await {
+    // The fact each inserted row leaves is stamped with the actor the
+    // request signed with (`x-boss-user`, the id `boss tenant publish`
+    // sends); a sim-chain caller with no identity is this service's
+    // own automation, never anonymous. The stamp is publisher-less
+    // (the credentials door's shape): the adapter stages the event on
+    // the outbox inside the insert's transaction and the relay moves
+    // it on, so this service needs no bus of its own.
+    let actor = user
+        .ambient_actor()
+        .unwrap_or_else(|| boss_core::actor::ActorId::Automation("classes".into()));
+    let stamp = boss_core::publisher::EventStamp::new("classes", actor);
+    match state.classes.batch_upsert(&classes, &stamp).await {
         Ok(inserted) => Json(serde_json::json!({
             "received": classes.len(),
             "inserted": inserted,
@@ -549,6 +560,57 @@ mod tests {
         assert_eq!(
             repo.list_for_subject_kind("employee").await.unwrap().len(),
             2
+        );
+    }
+
+    /// The fact a declaration leaves (backlog d9409039, 2026-09-17):
+    /// one `class.declared` per row INSERTED — the row as inserted plus
+    /// `declared_by`, the actor the request signed with — and nothing
+    /// for the row the registry already held, nothing for the batch.
+    #[tokio::test]
+    async fn batch_records_one_declared_event_per_inserted_row_and_none_for_a_kept_row() {
+        let repo = Arc::new(InMemoryClasses::new(vec![employee("clerk", 32)]));
+        let app = router(ClassesApiState {
+            classes: repo.clone(),
+        });
+        let body = json!([
+            {"subject_kind": "employee", "code": "clerk", "display_name": "Clerk", "member_attribute": "role", "sort_order": 32},
+            {"subject_kind": "employee", "code": "scheduler", "display_name": "Scheduler", "member_attribute": "role", "sort_order": 33},
+            {"subject_kind": "employee", "code": "auditor", "display_name": "Auditor", "member_attribute": "role", "sort_order": 34},
+        ]);
+        let resp = app
+            .oneshot(batch_request(Some(&operator_header()), body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = repo.recorded_events();
+        assert_eq!(
+            events.len(),
+            2,
+            "one event per inserted row, none for the kept `clerk`"
+        );
+        assert!(
+            events.iter().all(|e| e.kind == crate::port::CLASS_DECLARED),
+            "{events:?}"
+        );
+        assert!(events.iter().all(|e| e.source == "classes"), "{events:?}");
+        let codes: Vec<&str> = events
+            .iter()
+            .map(|e| e.payload["code"].as_str().unwrap())
+            .collect();
+        assert_eq!(codes, ["scheduler", "auditor"]);
+        assert_eq!(events[0].payload["subject_kind"], json!("employee"));
+        assert_eq!(events[0].payload["display_name"], json!("Scheduler"));
+        assert_eq!(events[0].payload["sort_order"], json!(33));
+        assert_eq!(
+            events[0].payload["declared_by"],
+            json!("automation:test-seed"),
+            "the actor the request signed with, named on the fact"
+        );
+        assert_eq!(
+            events[0].payload["_actor"], events[0].payload["declared_by"],
+            "declared_by and the stamp's actor are one value"
         );
     }
 

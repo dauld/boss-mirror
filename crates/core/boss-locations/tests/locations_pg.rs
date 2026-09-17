@@ -5,9 +5,17 @@
 //! DEFERRABLE and the batch is one transaction.
 
 use boss_core::primitives::Location;
-use boss_locations::port::LocationRepository;
+use boss_core::publisher::EventStamp;
+use boss_locations::port::{LOCATION_DECLARED, LocationRepository};
 use boss_locations::postgres::PgLocations;
 use boss_testing::TestDb;
+
+fn stamp() -> EventStamp {
+    EventStamp::new(
+        "locations",
+        boss_core::actor::ActorId::Automation("tenant-seed".into()),
+    )
+}
 
 fn row(id: &str, name: &str, parent_id: Option<&str>) -> Location {
     Location {
@@ -33,10 +41,13 @@ async fn a_batch_inserts_if_absent_and_a_second_run_keeps_the_first_rows() {
     // The child is listed BEFORE its parent: one transaction, the
     // deferred FK, both land.
     let inserted = repo
-        .batch_upsert(&[
-            row("loc-t-desk", "Desk", Some("loc-t-hq")),
-            row("loc-t-hq", "HQ", None),
-        ])
+        .batch_upsert(
+            &[
+                row("loc-t-desk", "Desk", Some("loc-t-hq")),
+                row("loc-t-hq", "HQ", None),
+            ],
+            &stamp(),
+        )
         .await
         .expect("the batch lands");
     assert_eq!(inserted, 2);
@@ -46,10 +57,13 @@ async fn a_batch_inserts_if_absent_and_a_second_run_keeps_the_first_rows() {
     // A re-run with one edited name and one new row: the edit is NOT
     // applied (insert-if-absent), the new row is.
     let inserted = repo
-        .batch_upsert(&[
-            row("loc-t-hq", "HQ renamed", None),
-            row("loc-t-lab", "Lab", Some("loc-t-hq")),
-        ])
+        .batch_upsert(
+            &[
+                row("loc-t-hq", "HQ renamed", None),
+                row("loc-t-lab", "Lab", Some("loc-t-hq")),
+            ],
+            &stamp(),
+        )
         .await
         .expect("the second batch lands");
     assert_eq!(inserted, 1, "only the new row counts");
@@ -58,4 +72,28 @@ async fn a_batch_inserts_if_absent_and_a_second_run_keeps_the_first_rows() {
     let kids = repo.children_of(Some("loc-t-hq")).await.unwrap();
     let ids: Vec<&str> = kids.iter().map(|l| l.id.as_str()).collect();
     assert_eq!(ids, ["loc-t-desk", "loc-t-lab"]);
+
+    // The fact rides the insert's transaction (backlog d9409039):
+    // three rows inserted across the two batches, three
+    // `location.declared` staged on the outbox — none for the kept
+    // `loc-t-hq` of the second batch — each the row as inserted plus
+    // who declared it.
+    let staged: Vec<(String, serde_json::Value)> =
+        sqlx::query_as("SELECT source, payload FROM event_outbox WHERE kind = $1 ORDER BY id")
+            .bind(LOCATION_DECLARED)
+            .fetch_all(&db.pool)
+            .await
+            .expect("outbox reads");
+    let staged_ids: Vec<&str> = staged
+        .iter()
+        .map(|(_, p)| p["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(staged_ids, ["loc-t-desk", "loc-t-hq", "loc-t-lab"]);
+    assert!(staged.iter().all(|(s, _)| s == "locations"));
+    assert_eq!(
+        staged[1].1["name"], "HQ",
+        "the row as inserted, not as re-declared"
+    );
+    assert_eq!(staged[2].1["parent_id"], "loc-t-hq");
+    assert_eq!(staged[2].1["declared_by"], "automation:tenant-seed");
 }
