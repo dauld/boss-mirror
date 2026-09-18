@@ -757,8 +757,9 @@ fn a_converted_lint_stays_converted() {
 /// subshell's `/proc/<pid>/io`: a 50-line, 141-byte variable leaves
 /// `printf '%s\n'` in 3 write() calls, a 5000-line one in 686, an array
 /// in one write per element, a loop in one per iteration. `printf '%s'`
-/// of one line is a single write that the reader must have consumed
-/// before it can match, so it is deliberately not the idiom.
+/// of a variable is ONE write and is not this idiom — but one write is
+/// still SIGPIPEd once it is longer than the pipe (measured 2026-09-18,
+/// below), so under `pipefail` the producer check owns that shape too.
 ///
 /// The early-exiting readers are `grep -q` / `grep -m` (stop at a
 /// match), `head` (stops at N lines) and a lone `read` (stops at one).
@@ -906,7 +907,7 @@ fn the_shape_check_reads_the_line_that_fired_and_not_its_repair() {
 }
 
 // ---------------------------------------------------------------------
-// The second SIGPIPE class: an EXTERNAL producer on the left
+// The second SIGPIPE class: ANY producer on the left, under pipefail
 // ---------------------------------------------------------------------
 
 /// The line with every quoted character masked to `_`, indices kept, so
@@ -1026,9 +1027,8 @@ fn reader_exits_early(stage: &str) -> bool {
     }
 }
 
-/// An EXTERNAL producer (a command that is not the shell's own `printf`
-/// or `echo`) on the left of a `|` whose reader on the right exits before
-/// the producer is done.
+/// A producer on the left of a `|` whose reader on the right exits
+/// before the producer is done.
 ///
 /// The first class (`is_a_list_piped_into_an_early_exiting_reader`) is a
 /// shell variable the builtin emits in several writes. This is the second
@@ -1044,14 +1044,26 @@ fn reader_exits_early(stage: &str) -> bool {
 /// there: a lint that refuses a clean tree, or with `|| continue` /
 /// `if !` passes a real finding, by chance.
 ///
+/// The builtins are not exempt (backlog 2c257761, measured 2026-09-18 on
+/// this pod, 200 runs per size): `printf '%s' "$out" | grep -q needle`
+/// with the needle on the first line of `$out` is one write() and 0/200
+/// up to 65 KB; from 70 to 96 KB a coin (1–2/50 per size; 0/50 at 97,
+/// 100 and 112 KB — the window is not monotone); and 200/200 exit 141
+/// at 128 KB and 512 KB — a `write()` longer than the pipe blocks until
+/// the reader drains it, the reader has matched and gone, and the
+/// writer is SIGPIPEd for the rest. A self-test that captures a whole lint's
+/// output into `$out` and asks `printf '%s' "$out" | grep -q` has no
+/// bound on that length; 47 such sites stood in infra/lint alone. The
+/// here-string (`grep -q … <<< "$out"`) is written to a temp file
+/// before grep starts, so nothing is left to SIGPIPE: 0/200 at every
+/// size.
+///
 /// Every pipe on the line is a producer/reader pair (`grep -n … |
 /// grep -v '^#' | head -1` is caught at its second pipe, where the
-/// filter is the producer). `printf` and `echo` of one line are one
-/// write the reader consumed before it could match, and are not this
-/// class. A comment quoting the idiom, or prose inside quotes, is not
-/// the idiom. Drainers (`while read`, `sort`, `wc`, `grep -c`, `awk`)
-/// are never refused.
-fn is_an_external_producer_piped_into_an_early_exiting_reader(line: &str) -> bool {
+/// filter is the producer). A comment quoting the idiom, or prose inside
+/// quotes, is not the idiom. Drainers (`while read`, `sort`, `wc`,
+/// `grep -c`, `awk`) are never refused.
+fn is_a_producer_piped_into_an_early_exiting_reader(line: &str) -> bool {
     let l = line.trim_start();
     if l.starts_with('#') {
         return false;
@@ -1075,10 +1087,7 @@ fn is_an_external_producer_piped_into_an_early_exiting_reader(line: &str) -> boo
         }
         let (left, right) = (&masked[..i], &masked[i + 1..]);
         let producer = producer_word(left);
-        if !producer.is_empty()
-            && !matches!(producer, "printf" | "echo")
-            && reader_exits_early(right)
-        {
+        if !producer.is_empty() && reader_exits_early(right) {
             return true;
         }
         i += 1;
@@ -1107,13 +1116,20 @@ fn pipefail_per_line(body: &str, is_library: bool) -> Vec<bool> {
         .collect()
 }
 
+/// Shells whose `printf '%s' "$x" | grep -q` sites were left for the car
+/// that owns the file: cdf2d959 is editing no-wallclock.sh's allowlists
+/// on the same day (2026-09-18) as this pin widened, so its seven sites
+/// ride that car. Delete the entry with the conversion; an empty list
+/// here is the destination.
+const PRODUCER_COIN_LEFT_FOR_CDF2D959: &[&str] = &["infra/lint/no-wallclock.sh"];
+
 /// The second class, refused across every shell under infra/ that runs
 /// the line under `pipefail` (the ONE place this shape is defined, §9a).
 /// Repairs: capture first (`out=$(git ls-files …)`, then `grep -q … <<<
 /// "$out"`), drain (`grep -c`, `awk 'END'`), or `set +o pipefail` around
 /// the one pipeline with a comment naming why.
 #[test]
-fn no_shell_under_infra_pipes_an_external_producer_into_an_early_exiting_reader() {
+fn no_shell_under_infra_pipes_a_producer_into_an_early_exiting_reader() {
     let root = repo_root();
     let mut offenders = Vec::new();
     for path in shell_scripts_under(&root.join("infra")) {
@@ -1124,34 +1140,37 @@ fn no_shell_under_infra_pipes_an_external_producer_into_an_early_exiting_reader(
             .unwrap_or(&path)
             .display()
             .to_string();
+        if PRODUCER_COIN_LEFT_FOR_CDF2D959.contains(&rel.as_str()) {
+            continue;
+        }
         let is_library = rel.contains("/lib/") || rel.ends_with("lib.sh");
         let pipefail = pipefail_per_line(&body, is_library);
         for (i, line) in body.lines().enumerate() {
-            if pipefail[i] && is_an_external_producer_piped_into_an_early_exiting_reader(line) {
+            if pipefail[i] && is_a_producer_piped_into_an_early_exiting_reader(line) {
                 offenders.push(format!("  {rel}:{}\n      {}", i + 1, line.trim()));
             }
         }
     }
     assert!(
         offenders.is_empty(),
-        "{} line(s) pipe an EXTERNAL producer into a reader that exits \
-         early, under `set -o pipefail`. `grep -q` / `head` / `read` exit \
-         at their match; a producer still writing (a tree larger than a \
-         pipe buffer, a per-line flush, a loop) is SIGPIPE, and the \
-         pipeline reports 141 for a needle that IS there — a false red, \
-         or with `|| continue` / `if !` a false GREEN (backlog 76d04429; \
-         the variable class is 9840e529). Capture first and read the \
-         capture (`out=$(cmd)`; `grep -q … <<< \"$out\"`), use a reader \
-         that drains (`grep -c`, `awk`), or `set +o pipefail` around the \
-         one pipeline with a comment naming why. no-external-producer-coin: \
-         the offenders are\n{}",
+        "{} line(s) pipe a producer into a reader that exits early, under \
+         `set -o pipefail`. `grep -q` / `head` / `read` exit at their \
+         match; a producer still writing (a tree larger than a pipe \
+         buffer, a per-line flush, a loop, a `printf '%s' \"$out\"` longer \
+         than 64 KB) is SIGPIPE, and the pipeline reports 141 for a \
+         needle that IS there — a false red, or with `|| continue` / \
+         `if !` a false GREEN (backlog 76d04429 and 2c257761; the \
+         variable-list class is 9840e529). Read a capture through a \
+         here-string (`grep -q … <<< \"$out\"`), use a reader that drains \
+         (`grep -c`, `awk`), or `set +o pipefail` around the one pipeline \
+         with a comment naming why. no-producer-coin: the offenders are\n{}",
         offenders.len(),
         offenders.join("\n")
     );
 }
 
 #[test]
-fn the_external_producer_check_reads_the_pipe_and_not_the_prose() {
+fn the_producer_check_reads_the_pipe_and_not_the_prose() {
     for coin in [
         // The packet's named shapes.
         r#"    if git ls-files -- 'infra/*.sh' | grep -q 'x'; then"#,
@@ -1173,18 +1192,19 @@ fn the_external_producer_check_reads_the_pipe_and_not_the_prose() {
         r#"    sed -n "${line},$((line + 2))p" "$MANIFEST" | grep -qE 'valueFrom' && ok"#,
         r#"    ls -d "$WORKDIR"/boss-backup-* | IFS= read -r first"#,
         r#"    systemctl --no-pager status caddy | head -n 10 || true"#,
-    ] {
-        assert!(
-            is_an_external_producer_piped_into_an_early_exiting_reader(coin),
-            "an external producer piped into a reader that exits early must be caught: {coin}"
-        );
-    }
-    for not_refused in [
-        // One write of one line; the first class owns the `\n` list idiom.
+        // The builtins: one write, but a write longer than the pipe is
+        // SIGPIPEd once the reader has matched (200/200 at 128 KB).
         r#"    if printf '%s' "$out" | grep -q "VIOLATION"; then"#,
         r#"    if echo "$line_content" | grep -qE 'NOW\s*\(\s*\)'; then"#,
         r#"    || ! printf '%s' "$post" | grep -qF -- "BOSS_JOBS_URL=$sor "; then"#,
         r#"    printf '%s\n' "$BEFORE" | grep -qxF "$kind	$field" && continue"#,
+    ] {
+        assert!(
+            is_a_producer_piped_into_an_early_exiting_reader(coin),
+            "a producer piped into a reader that exits early must be caught: {coin}"
+        );
+    }
+    for not_refused in [
         // The repairs: a here-string is not a pipe; a capture is read whole.
         r#"    grep -q 'x' <<< "$files" || continue"#,
         r#"    files=$(git ls-files -- 'infra/*.sh')"#,
@@ -1206,14 +1226,14 @@ fn the_external_producer_check_reads_the_pipe_and_not_the_prose() {
         r#"    | grep -q '"ready":[[:space:]]*true'; then"#,
     ] {
         assert!(
-            !is_an_external_producer_piped_into_an_early_exiting_reader(not_refused),
-            "a shape that cannot SIGPIPE an external writer must not be refused: {not_refused}"
+            !is_a_producer_piped_into_an_early_exiting_reader(not_refused),
+            "a shape that cannot SIGPIPE its writer must not be refused: {not_refused}"
         );
     }
 }
 
 #[test]
-fn the_external_producer_check_honours_a_pipefail_window() {
+fn the_producer_check_honours_a_pipefail_window() {
     let body = "set -euo pipefail\nfind . | head -1\n# why: one line wanted\nset +o pipefail\nfind . | head -1\nset -o pipefail\nfind . | head -1\n";
     assert_eq!(
         pipefail_per_line(body, false),

@@ -66,7 +66,7 @@ spool_count() {
 # spool sorts into the order the readings were taken.
 spool_put() {
     mkdir -p "$SPOOL_DIR"
-    at=$(printf '%s' "$1" | sed -n 's/.*"observed_at":"\([^"]*\)".*/\1/p' | head -n 1)
+    at=$(sed -n 's/.*"observed_at":"\([^"]*\)".*/\1/;T;p;q' <<<"$1")
     [ -n "$at" ] || at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     printf '%s' "$1" > "$SPOOL_DIR/$at.json"
     while [ "$(spool_count)" -gt "$SPOOL_MAX" ]; do

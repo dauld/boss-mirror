@@ -148,7 +148,7 @@ $out"
     || fail "an unreadable TIMERS source exited $rc; EX_CONFIG (78) is what this script
     already uses for 'nothing to watch is a config fault':
 $out"
-printf '%s' "$out" | grep -q "does-not-exist.sh" \
+grep -q "does-not-exist.sh" <<<"$out" \
     || fail "the refusal does not name the file it could not read:
 $out"
 
@@ -181,7 +181,7 @@ done
 role_want=0
 for stem in $in_role; do
     src="$repo/infra"
-    row=$(printf '%s\n' $rows | grep -m1 "^$stem:") || continue
+    row=$(grep -m1 "^$stem:" <<<"$rows") || continue
     sub="${row##*:}"
     [ "$sub" = "." ] || src="$repo/infra/$sub"
     [ -f "$src/$stem.service" ] && [ -f "$src/$stem.timer" ] || continue

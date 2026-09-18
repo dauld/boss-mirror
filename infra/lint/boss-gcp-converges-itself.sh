@@ -517,7 +517,7 @@ if out=$(resolve "$mirror"); then
     mirror. The mirror lags the forge by a publish and is never the source of truth; a
     converge that reads it installs yesterday's units and says it converged."
 fi
-printf '%s' "$out" | grep -qi "github" \
+grep -qi "github" <<<"$out" \
     || fail "the refusal does not name the mirror it refused: $out"
 
 # 4c. an explicit override is honoured; a bogus one is refused.
@@ -588,7 +588,7 @@ grep -q "local edit nobody committed" "$dirty/file" \
     || fail "the converge DISCARDED an uncommitted local change — it must refuse, never clobber"
 [ ! -s "$tmp/calls.log" ] \
     || fail "the converge installed units from a dirty tree: $(cat "$tmp/calls.log")"
-printf '%s' "$out" | grep -q "$dirty" \
+grep -q "$dirty" <<<"$out" \
     || fail "the refusal does not name the checkout an operator has to look at:
 $out"
 
@@ -625,10 +625,10 @@ grep -q "sha=$want" "$tmp/calls.log" \
     || fail "the converge did not hand the CLI step the converged sha $want (calls: $(cat "$tmp/calls.log"))"
 [ "$(head -n 1 "$tmp/calls.log")" = "stub installer: args=units roles=legacy-stack,ml-batch-host,off-cluster-observer,wireguard-bastion" ] \
     || fail "the CLI step must run after the units, never instead of them (calls: $(cat "$tmp/calls.log"))"
-printf '%s' "$out" | grep -q "${want:0:8}" \
+grep -q "${want:0:8}" <<<"$out" \
     || fail "the converge does not say which commit it converged on:
 $out"
-printf '%s' "$out" | grep -q "14 timer unit pair" \
+grep -q "14 timer unit pair" <<<"$out" \
     || fail "the installer's own summary is not in the converge's output — print what it did:
 $out"
 
@@ -646,7 +646,7 @@ grep -q "args=units" "$tmp/calls.log" \
 #     row, and says so, instead of stopping the converge.
 grep -q "roles=legacy-stack,ml-batch-host,off-cluster-observer,wireguard-bastion" "$tmp/calls.log" \
     || fail "the converge did not hand boss-gcp's declared roles to the installer as BOSS_NODE_ROLES (calls: $(cat "$tmp/calls.log"))"
-printf '%s' "$out" | grep -q "declares roles: legacy-stack" \
+grep -q "declares roles: legacy-stack" <<<"$out" \
     || fail "the converge does not say which roles it read:
 $out"
 : >"$tmp/calls.log"
@@ -667,7 +667,7 @@ out=$(CONVERGE_NODES_URL="file://$tmp/no-such-registry.json" run_converge "$clea
 $out"
 grep -q "roles=$" "$tmp/calls.log" \
     || fail "w-1's cached declaration is EMPTY (it declares no roles), so a dark tick installs every row as its last read did (calls: $(cat "$tmp/calls.log"))"
-printf '%s' "$out" | grep -q "cached declaration" \
+grep -q "cached declaration" <<<"$out" \
     || fail "the converge does not say w-1's empty roles came from the cache:
 $out"
 : >"$tmp/calls.log"
@@ -681,7 +681,7 @@ out=$(CONVERGE_NODE_ID=boss-gcp CONVERGE_ROLES_CACHE="$tmp/roles.cache.gcp" CONV
 $out"
 grep -q "roles=legacy-stack,ml-batch-host,off-cluster-observer,wireguard-bastion" "$tmp/calls.log" \
     || fail "a dark registry must drive the installer with the CACHED declaration (calls: $(cat "$tmp/calls.log"))"
-printf '%s' "$out" | grep -q "cached declaration" \
+grep -q "cached declaration" <<<"$out" \
     || fail "the converge does not say the roles came from the cache:
 $out"
 : >"$tmp/calls.log"
@@ -690,7 +690,7 @@ out=$(CONVERGE_NODE_ID=boss-gcp CONVERGE_ROLES_CACHE="$tmp/roles.cache.none" CON
 $out"
 grep -q "roles=registry-unread" "$tmp/calls.log" \
     || fail "a dark registry with no cache must install [always] only (roles=registry-unread), never every row (calls: $(cat "$tmp/calls.log"))"
-printf '%s' "$out" | grep -q "did not answer" \
+grep -q "did not answer" <<<"$out" \
     || fail "the converge does not say the registry did not answer:
 $out"
 
@@ -700,11 +700,11 @@ if out=$(run_converge "$clean" "$tmp/bin/installer-bad"); then
     fail "the converge reported success over an installer that exited 3:
 $out"
 fi
-printf '%s' "$out" | grep -q "DISTINCTIVE-FAILURE-DETAIL" \
+grep -q "DISTINCTIVE-FAILURE-DETAIL" <<<"$out" \
     || fail "the failure output does not carry what the installer said. A tail, a -q or a
     digest suppresses OUTPUT, not work: capture to a file and print it ALL on failure.
 $out"
-printf '%s' "$out" | grep -q "LINE-ONE-OF-MANY" \
+grep -q "LINE-ONE-OF-MANY" <<<"$out" \
     || fail "only part of the installer's output survived — no tails (CLAUDE.md §Diagnosis)
 $out"
 

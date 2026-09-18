@@ -173,9 +173,9 @@ SECTION=$(awk -v ns="$NS" '
     END { if (want) print block }' "$INSTANCES")
 [ -n "$SECTION" ] || refuse "no section of infra/cluster/instances.toml names namespace $NS"
 INSTANCE_NAME=$(printf '%s\n' "$SECTION" | sed -n '1s/^\[\([A-Za-z0-9_-]*\)\]$/\1/p')
-TENANT_REPO=$(printf '%s\n' "$SECTION" | sed -n 's/^tenant_repo *= *"\([^"]*\)".*/\1/p' | head -1)
-TENANT_REF=$(printf '%s\n' "$SECTION" | sed -n 's/^tenant_ref *= *"\([^"]*\)".*/\1/p' | head -1)
-TENANT_DIR=$(printf '%s\n' "$SECTION" | sed -n 's/^tenant_dir *= *"\([^"]*\)".*/\1/p' | head -1)
+TENANT_REPO=$(sed -n 's/^tenant_repo *= *"\([^"]*\)".*/\1/;T;p;q' <<<"$SECTION")
+TENANT_REF=$(sed -n 's/^tenant_ref *= *"\([^"]*\)".*/\1/;T;p;q' <<<"$SECTION")
+TENANT_DIR=$(sed -n 's/^tenant_dir *= *"\([^"]*\)".*/\1/;T;p;q' <<<"$SECTION")
 if [ -z "$TENANT_REPO" ]; then
     refuse "instance $NS is image-sourced (tenant_dir = \"${TENANT_DIR:-?}\") — an example tenant's own rows are not residue there, and its engine's prepare does not republish locations or the chart. Only a tenant_repo instance is retired"
 fi

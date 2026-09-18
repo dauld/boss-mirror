@@ -218,7 +218,7 @@ EOF
     if [ "$rc" -eq 0 ]; then
         echo "SELF-TEST FAIL: planted backward edge (memory -> apps) was not caught"
         fails=$((fails+1))
-    elif ! printf '%s' "$out" | grep -q 'VIOLATION \[order\]'; then
+    elif ! grep -q 'VIOLATION \[order\]' <<<"$out"; then
         echo "SELF-TEST FAIL: backward edge caught but not reported as an order violation"
         fails=$((fails+1))
     fi

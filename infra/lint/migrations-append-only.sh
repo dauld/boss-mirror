@@ -167,7 +167,7 @@ self_test() {
     out=$( cd "$tmp" && SCHEMA_DIR="$SCHEMA_DIR" LINT="$LINT" bash -c "$(declare -f is_allowed check_against resolve_merge_base git_answer _git_answer_refuse); ALLOW=''; check_against main" 2>&1 ) && rc=0 || rc=$?
     if [ "$rc" -eq 0 ]; then
         echo "SELF-TEST FAIL: a modified migration was not caught"; fails=$((fails+1))
-    elif ! printf '%s' "$out" | grep -q "VIOLATION"; then
+    elif ! grep -q "VIOLATION" <<<"$out"; then
         echo "SELF-TEST FAIL: modification caught but not reported as a VIOLATION"; fails=$((fails+1))
     fi
 
@@ -244,7 +244,7 @@ if ! self_test_out=$(self_test 2>&1); then
     # driven through the same `git_answer`, so one git call failing
     # mid-fixture reaches here as a self-test failure. Told apart by the
     # marker the refusal carries, not by guessing.
-    if printf '%s' "$self_test_out" | grep -qF "$LINT_CANNOT_ANSWER_MARKER"; then
+    if grep -qF "$LINT_CANNOT_ANSWER_MARKER" <<<"$self_test_out"; then
         echo "$LINT: CANNOT ANSWER — the self-test's git fixtures could not be built," >&2
         echo "  so the detectors were never proven and the tree was never read." >&2
         printf '%s\n' "$self_test_out" | sed 's/^/  /' >&2

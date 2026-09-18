@@ -249,7 +249,7 @@ printf '{"units_installed":"14","anomalies":"SKIP boss-backup\\nand why"}' >"$rs
 rs_out=$(SERVICE_RESULT=success EXIT_STATUS=0 BOSS_STEP_DRY_RUN=1 \
     BOSS_JOBS_URL=http://example.invalid BOSS_RUN_SUMMARY_FILE="$rs_file" \
     bash infra/boss-step.sh maintenance-selftest run 2>/dev/null)
-if ! printf '%s' "$rs_out" | grep -q 'units_installed'; then
+if ! grep -q 'units_installed' <<<"$rs_out"; then
     echo "timers-leave-a-packet: boss-step.sh ignores \$BOSS_RUN_SUMMARY_FILE, so a unit that" >&2
     echo "    recorded what it did cannot get those facts onto its own packet. Got: $rs_out" >&2
     problems=$((problems + 1))
@@ -263,7 +263,7 @@ fi
 rs_out=$(SERVICE_RESULT=exit-code EXIT_STATUS=1 BOSS_STEP_DRY_RUN=1 \
     BOSS_JOBS_URL=http://example.invalid BOSS_RUN_SUMMARY_FILE="$rs_dir/never-written.json" \
     bash infra/boss-step.sh maintenance-selftest run 2>/dev/null)
-if ! printf '%s' "$rs_out" | grep -q 'summary_absent'; then
+if ! grep -q 'summary_absent' <<<"$rs_out"; then
     echo "timers-leave-a-packet: a run that left NO summary records nothing about that." >&2
     echo "    'the run left no summary' is a finding; silence makes the packet look like" >&2
     echo "    every other packet. Got: $rs_out" >&2
@@ -323,8 +323,8 @@ for row in $gcp_rows; do
     grep -qxF -- "$kind" <<< "$cluster_kinds" && continue  # the cluster runs it; this copy is a vestige
     pre=$(grep -E '^ExecStartPre=' "$unit" | grep 'boss-maintenance-wrap' | sed -n 1p)
     post=$(grep -E '^ExecStopPost=' "$unit" | grep 'boss-step\.sh' | sed -n 1p)
-    if ! printf '%s' "$pre" | grep -qF -- "BOSS_JOBS_URL=$sor " \
-        || ! printf '%s' "$post" | grep -qF -- "BOSS_JOBS_URL=$sor "; then
+    if ! grep -qF -- "BOSS_JOBS_URL=$sor " <<<"$pre" \
+        || ! grep -qF -- "BOSS_JOBS_URL=$sor " <<<"$post"; then
         echo "timers-leave-a-packet: $name opens '$kind', a kind only the platform bundle defines," >&2
         echo "    but does not pin the system of record on both its Exec lines. deploy-services'" >&2
         echo "    drop-in points it at the local instance, which has never heard of that kind:" >&2
@@ -334,7 +334,7 @@ for row in $gcp_rows; do
         echo "      ExecStopPost=-/usr/bin/env BOSS_JOBS_URL=$sor /opt/boss/infra/boss-step.sh $kind run" >&2
         problems=$((problems + 1)); continue
     fi
-    if ! printf '%s' "$pre" | grep -q '^ExecStartPre=-'; then
+    if ! grep -q '^ExecStartPre=-' <<<"$pre"; then
         echo "timers-leave-a-packet: $name opens its packet from a HARD ExecStartPre. The packet is" >&2
         echo "    visibility, not a precondition: an API that answers 400 must not stop the" >&2
         echo "    chore (boss-ml-inference-batch lost 23 nights to exactly that). Prefix it:" >&2
@@ -589,7 +589,7 @@ done
 # Reduce to the maximum per kind, then compare with the declaration.
 for kind in $(printf '%s' "$expected" | awk '{print $1}' | sort -u); do
     want=$(printf '%s' "$expected" | awk -v k="$kind" '$1 == k {print $2}' | sort -n | tail -1)
-    got=$(printf '%s\n' "$declared" | awk -v k="$kind" '$1 == k {print $2}' | head -1)
+    got=$(awk -v k="$kind" '$1 == k { print $2; exit }' <<<"$declared")
     if [ -z "$got" ]; then
         echo "timers-leave-a-packet: a timer opens '$kind' every $want minutes, but the" >&2
         echo "    cadence-silence-sweep-daily rule does not declare it — so nothing notices" >&2

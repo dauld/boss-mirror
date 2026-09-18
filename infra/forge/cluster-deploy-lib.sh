@@ -289,7 +289,7 @@ instance_secret_gate() {
         done <<< "$keys"
         if [ -n "$literals" ]; then
             echo "    kubectl -n $ns create secret generic $name$literals" >&2
-        elif [ "$name" = forgejo-registry ] || printf '%s' "$name" | grep -q 'registry'; then
+        elif [ "$name" = forgejo-registry ] || grep -q 'registry' <<<"$name"; then
             echo "    kubectl -n $ns create secret docker-registry $name --docker-server=... --docker-username=... --docker-password=..." >&2
         else
             echo "    kubectl -n $ns create secret generic $name --from-file=<key>=<file>   # keys: kubectl -n boss get secret $name -o jsonpath='{.data}' | jq keys" >&2

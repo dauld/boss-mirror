@@ -159,7 +159,7 @@ fi
 # The allowlist's pattern, applied again here: the runner is one reader
 # of it and this script is another, and a script that trusts its caller
 # is a script that is one caller away from `../`.
-if ! printf '%s' "$KIND" | grep -Eqx -- '^[a-z][a-z0-9-]{1,60}$'; then
+if ! grep -Eqx -- '^[a-z][a-z0-9-]{1,60}$' <<<"$KIND"; then
     echo "$NAME: usage: kind '$KIND' is not a workflow kind (^[a-z][a-z0-9-]{1,60}$)" >&2
     exit 2
 fi

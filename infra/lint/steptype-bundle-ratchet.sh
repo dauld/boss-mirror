@@ -164,7 +164,7 @@ while IFS=$'\t' read -r kind field ftype freq; do
         fi
         continue
     fi
-    head_row=$(printf '%s\n' "$head_rows" | awk -F'\t' -v k="$kind" -v f="$field" '$1==k && $2==f' | head -1)
+    head_row=$(awk -F'\t' -v k="$kind" -v f="$field" '$1==k && $2==f { print; exit }' <<<"$head_rows")
     if [ -z "$head_row" ]; then
         say "steptype-bundle-ratchet: field \`$field\` on kind \`$kind\` exists on the trunk and is removed here — a bundle contract change with no version to pin against."
         continue

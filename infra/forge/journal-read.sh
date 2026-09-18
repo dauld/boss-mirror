@@ -236,7 +236,7 @@ else
         "${machine:0:200}"
 fi
 
-field() { printf '%s' "$machine" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([0-9]*\)\".*/\1/p" | head -1; }
+field() { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([0-9]*\)\".*/\1/;T;p;q" <<<"$machine"; }
 cut_to="$(field cutoff_to_realtime)"
 cut_from="$(field cutoff_from_realtime)"
 [ -n "$cut_to" ] || skip "NOT A JOURNAL GATEWAY" \

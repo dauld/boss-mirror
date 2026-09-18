@@ -226,7 +226,7 @@ while IFS=$'\t' read -r file kind name ns; do
                 fi
                 ;;
         esac
-    elif printf '%s' "$out" | grep -qiE 'forbidden|cannot list|cannot get'; then
+    elif grep -qiE 'forbidden|cannot list|cannot get' <<<"$out"; then
         # Not visible to THIS credential. Say so; never count it green.
         echo "  skip    $kind/$name${ns:+ (ns $ns)} — not readable by this credential"
         unreadable=$((unreadable + 1))

@@ -193,7 +193,7 @@ put_body=$(grep "^PUT	http://stub/api/jobs/$DEAD/" "$tmp/log-settle" | cut -f3-)
     || fail "the verdict written is not \`lost\` (body: $put_body)"
 receipt=$(printf '%s' "$put_body" | jq -r '.metadata.receipt')
 for must in 'gate-docs-a-probe-shape-f-x8c5q' 'BackoffLimitExceeded' '2026-09-11T19:20:30Z'; do
-    printf '%s' "$receipt" | grep -qF "$must" \
+    grep -qF "$must" <<<"$receipt" \
         || fail "the receipt does not name '$must' — a verdict must name what failed and when (receipt: $receipt)"
 done
 grep -q "$REPORTED" "$tmp/log-settle" && grep -q "^PUT	http://stub/api/jobs/$REPORTED" "$tmp/log-settle" \

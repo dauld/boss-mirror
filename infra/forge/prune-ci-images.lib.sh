@@ -151,7 +151,7 @@ prune_ci_images() {
         # Only a per-train sha tag is a candidate. CI stamps the full
         # 40-char sha; the 7-char short form is what the deploy images
         # carry, and admitting both costs nothing.
-        if ! printf '%s' "$tag" | grep -qE '^[0-9a-f]{7,40}$'; then
+        if ! grep -qE '^[0-9a-f]{7,40}$' <<<"$tag"; then
             kept_named=$((kept_named + 1))
             continue
         fi

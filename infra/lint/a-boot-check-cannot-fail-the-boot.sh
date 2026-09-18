@@ -82,7 +82,7 @@ judge() {
             inside { print }
             inside && /\{[[:space:]]*$/ { exit }
         ' "$api")
-        if printf '%s' "$sig" | grep -q -- '->'; then
+        if grep -q -- '->' <<<"$sig"; then
             echo "$fn declares a return type"
             return 0
         fi
@@ -93,7 +93,7 @@ judge() {
             inside { print }
             started && /^\}/ { exit }
         ' "$api" | sed 's://.*::')
-        if printf '%s' "$body" | grep -qE "$FATAL"; then
+        if grep -qE "$FATAL" <<<"$body"; then
             echo "$fn can end the process: $(printf '%s' "$body" | grep -oE "$FATAL" | sort -u | tr '\n' ' ')"
             return 0
         fi

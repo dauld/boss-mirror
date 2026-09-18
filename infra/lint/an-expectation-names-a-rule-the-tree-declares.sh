@@ -622,7 +622,7 @@ fn why() {
 RS
     out="$(scan_tree "$tmp/clean" 2>&1)"; rc=$?
     [ "$rc" -eq 0 ] || st_fail "the clean tree was refused: $out"
-    printf '%s' "$out" | grep -q "OK — 7 declared rules (0 declared since the collapse, by file alone), 2 retired" \
+    grep -q "OK — 7 declared rules (0 declared since the collapse, by file alone), 2 retired" <<<"$out" \
         || st_fail "the clean tree's OK line does not state what it compared: $out"
 
     # 2. INCIDENT 31e1d207 — a test names `design-review-level-sweep`
@@ -637,11 +637,11 @@ const SPAWNS_NOTHING_ON_PURPOSE: &[(&str, &str)] = &[
 RS
     out="$(scan_tree "$tmp/stale-name" 2>&1)"; rc=$?
     [ "$rc" -eq 1 ] || st_fail "a test naming a retired rule was not refused (rc=$rc): $out"
-    printf '%s' "$out" | grep -q 'design-review-level-sweep' \
+    grep -q 'design-review-level-sweep' <<<"$out" \
         || st_fail "the refusal does not name the rule: $out"
-    printf '%s' "$out" | grep -q 'crates/t/tests/pin.rs:3' \
+    grep -q 'crates/t/tests/pin.rs:3' <<<"$out" \
         || st_fail "the refusal does not name the referencing file and line: $out"
-    printf '%s' "$out" | grep -q "retired in $SCHEMA_REL/200-retire.sql" \
+    grep -q "retired in $SCHEMA_REL/200-retire.sql" <<<"$out" \
         || st_fail "the refusal does not say where the rule went: $out"
 
     # 3. INCIDENT aecdaa07 / the gate's catch — a count pin expecting
@@ -653,9 +653,9 @@ RS
 RS
     out="$(scan_tree "$tmp/stale-count" 2>&1)"; rc=$?
     [ "$rc" -eq 1 ] || st_fail "a stale count pin was not refused (rc=$rc): $out"
-    printf '%s' "$out" | grep -q 'pins `maintenance-sweep-\*-daily` = 8, but the tree declares 6' \
+    grep -q 'pins `maintenance-sweep-\*-daily` = 8, but the tree declares 6' <<<"$out" \
         || st_fail "the refusal does not state expected vs actual: $out"
-    printf '%s' "$out" | grep -q 'maintenance-sweep-disk-daily' \
+    grep -q 'maintenance-sweep-disk-daily' <<<"$out" \
         || st_fail "the refusal does not list what the glob matched: $out"
 
     # 4. A pin whose glob matches nothing passes forever — refused, for
@@ -664,7 +664,7 @@ RS
     printf '// rule-registry-pin: design-review-* = 2\n' > "$tmp/empty-pin/crates/t/tests/pin.rs"
     out="$(scan_tree "$tmp/empty-pin" 2>&1)"; rc=$?
     [ "$rc" -eq 1 ] || st_fail "a pin matching no rule was not refused (rc=$rc): $out"
-    printf '%s' "$out" | grep -q 'no rule in .* matches that glob' \
+    grep -q 'no rule in .* matches that glob' <<<"$out" \
         || st_fail "the empty-pin refusal does not say the glob matched nothing: $out"
 
     # 5. THE POST-COLLAPSE SHAPE: a rule declared by its file alone, no
@@ -674,7 +674,7 @@ RS
     printf '[[rule]]\nname = "spawn-nothing-daily"\n' > "$tmp/unseeded/$RULES_REL/spawn-nothing-daily.toml"
     out="$(scan_tree "$tmp/unseeded" 2>&1)"; rc=$?
     [ "$rc" -eq 0 ] || st_fail "a rule declared by file alone (the post-collapse shape) was refused (rc=$rc): $out"
-    printf '%s' "$out" | grep -q "OK — 8 declared rules (1 declared since the collapse, by file alone)" \
+    grep -q "OK — 8 declared rules (1 declared since the collapse, by file alone)" <<<"$out" \
         || st_fail "the OK line does not count the file-only rule: $out"
 
     # 5b. NON-VACUITY, what remains of it: a scrape that finds NONE of the
@@ -685,7 +685,7 @@ RS
     rm -f "$tmp/blind/$SCHEMA_REL/200-retire.sql"
     out="$(scan_tree "$tmp/blind" 2>&1)"; rc=$?
     [ "$rc" -eq 1 ] || st_fail "a scrape that found no declared rule was read as clean (rc=$rc): $out"
-    printf '%s' "$out" | grep -q 'found NONE' \
+    grep -q 'found NONE' <<<"$out" \
         || st_fail "the broken-scrape refusal does not say so: $out"
 
     # 6. An empty or wrong rule directory is a wrong path, never a clean
@@ -708,12 +708,12 @@ RS
     printf 'const MOVED: &str = "publish-to-github-daily";\n' > "$tmp/moved/crates/t/tests/pin.rs"
     out="$(scan_tree "$tmp/moved" 2>&1)"; rc=$?
     [ "$rc" -eq 0 ] || st_fail "a name an example tenant's seeds/rules.toml declares was read as retired (rc=$rc): $out"
-    printf '%s' "$out" | grep -q "1 declared by an example tenant's seeds/rules.toml" \
+    grep -q "1 declared by an example tenant's seeds/rules.toml" <<<"$out" \
         || st_fail "the OK line does not count the tenant-declared name: $out"
     rm -f "$tmp/moved/examples/acme/seeds/rules.toml"
     out="$(scan_tree "$tmp/moved" 2>&1)"; rc=$?
     [ "$rc" -eq 1 ] || st_fail "without the tenant file the moved name must read as retired (rc=$rc): $out"
-    printf '%s' "$out" | grep -q 'publish-to-github-daily' \
+    grep -q 'publish-to-github-daily' <<<"$out" \
         || st_fail "the control refusal does not name the rule: $out"
 
     # 7. THIS SCRIPT MUST NOT READ STDIN, and the cost of getting that

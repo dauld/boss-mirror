@@ -301,7 +301,7 @@ sweep_json() {
         rm -f "$err"
         return 0
     fi
-    jq -n --arg why "POST /api/surface-opens/sweep failed (curl exit $rc): $(tr '\n' ' ' <"$err") $(printf '%s' "$out" | head -c 500)" \
+    jq -n --arg why "POST /api/surface-opens/sweep failed (curl exit $rc): $(tr '\n' ' ' <"$err") ${out:0:500}" \
         '{swept: null, error: $why}'
     rm -f "$err"
     return 1

@@ -173,7 +173,7 @@ posted="$tmp/posted-refused.json"
     || fail "an unreachable dispatcher reported dispatcher=$(jq -c .dispatcher "$posted") — a failed read must be null, never a number and never a silent omission"
 why=$(jq -r '.dispatcher_unread // empty' "$posted")
 [[ -n "$why" ]] || fail "an unreachable dispatcher left no dispatcher_unread on the observation — estate.compare would read the null as an observer that never looked, not one that was refused"
-printf '%s' "$why" | grep -q 'Connection refused' \
+grep -q 'Connection refused' <<<"$why" \
     || fail "dispatcher_unread does not carry curl's own reason (got: $why) — a verdict must name what failed"
 [[ "$(jq -r '.nodes[0].disk_free_gb' "$posted")" == "390" ]] || fail "the node fields were lost when the dispatcher read failed"
 grep -q 'Connection refused' "$tmp/out-refused" \

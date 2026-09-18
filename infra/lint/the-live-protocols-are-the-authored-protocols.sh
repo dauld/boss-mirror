@@ -1174,12 +1174,12 @@ fi
 case "$fields_rc" in
     0) ;;
     3) fail "the live answer could not be read for the field comparison: \
-$(printf '%s' "$fields_out" | head -1)"
+$(head -1 <<<"$fields_out")"
        echo "" >&2
        echo "  The kind comparison above read this same body, so this is a shape" >&2
        echo "  change, not an unreachable registry. Nothing was compared." >&2 ;;
     6) fail "a bundle file under $BUNDLE could not be read: \
-$(printf '%s' "$fields_out" | head -1)"
+$(head -1 <<<"$fields_out")"
        echo "" >&2
        echo "  One [[workflow]] per file, named for the kind — the loader pins" >&2
        echo "  it (platform_bundle.rs) and this reader needs it too." >&2 ;;
@@ -1190,11 +1190,11 @@ $(printf '%s' "$fields_out" | head -1)"
        echo "  agreement. Either the bundle reader broke or the registry is" >&2
        echo "  answering about a different world; in both cases a green here" >&2
        echo "  would be the confident wrong answer (CLAUDE.md §Doors)." >&2 ;;
-    *) fail "the field comparison exited $fields_rc: $(printf '%s' "$fields_out" | head -1)" ;;
+    *) fail "the field comparison exited $fields_rc: $(head -1 <<<"$fields_out")" ;;
 esac
 
 drift_lines=$(printf '%s\n' "$fields_out" | LC_ALL=C sed -n 's/^DRIFT\t//p')
-fields_compared=$(printf '%s\n' "$fields_out" | LC_ALL=C sed -n 's/.*\tcompared=\([0-9]*\).*/\1/p' | head -1)
+fields_compared=$(LC_ALL=C sed -n 's/.*\tcompared=\([0-9]*\).*/\1/;T;p;q' <<<"$fields_out")
 fields_compared=${fields_compared:-0}
 drift_n=0
 if [ -n "$drift_lines" ]; then
