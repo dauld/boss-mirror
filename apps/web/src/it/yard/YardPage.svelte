@@ -1010,6 +1010,11 @@
           <div class="yard-entity-sub">
             landed, not yet stamped proven — the arrival rule files one run-car-probe request per probed car and the forge drains it; a car leaves when its `proven` step is stamped
           </div>
+          <!-- Reds that were flakes, by check: a gate re-gated at an
+               UNCHANGED head that came back green stamps `flake_of` on
+               the gate-run (backlog 36cc4913). Read off the packets the
+               page holds; one line either way (yard-shed.ts). -->
+          <div class="yard-entity-sub yard-mono">{floor.machines.inspection.flakeLabel}</div>
           <div class="yard-steps">
             {#each shedRows as w (w.id)}
               <button type="button" class="yard-step yard-step-btn" onclick={() => select(`car:${w.id}`)}>

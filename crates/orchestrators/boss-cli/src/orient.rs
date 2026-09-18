@@ -177,8 +177,23 @@ pub(crate) const GATE_RUN_PAGE: i64 = 1000;
 pub(crate) fn held_gate_runs_query() -> String {
     format!("/api/jobs?kind=gate-run&metadata_has=hold&limit={GATE_RUN_PAGE}")
 }
+/// The week the stranded read is windowed in — and the week the FLAKES
+/// line counts over, since it reads the same page (one query, one
+/// window, one number in both sentences).
+pub(crate) const GATE_RUN_WINDOW_DAYS: i64 = 7;
 pub(crate) fn stranded_gate_runs_query() -> String {
-    format!("/api/jobs?kind=gate-run&closed_within=7&limit={GATE_RUN_PAGE}")
+    format!("/api/jobs?kind=gate-run&closed_within={GATE_RUN_WINDOW_DAYS}&limit={GATE_RUN_PAGE}")
+}
+
+/// The FLAKES section: how many times each check went red then green
+/// at one head this week, read off gate-runs the green stamped
+/// `flake_of` (`boss_jobs::flake`, backlog 36cc4913). One line either
+/// way — the count is the point, and a zero is a stated zero.
+pub(crate) fn flakes_line(gate_runs: &[Value]) -> String {
+    format!(
+        "\n  {}",
+        boss_jobs::flake::line(&boss_jobs::flake::tally(gate_runs), GATE_RUN_WINDOW_DAYS)
+    )
 }
 
 /// `Some("<read> of <total>")` when the record held more rows than the
@@ -788,6 +803,14 @@ pub async fn run(all: bool) -> Result<()> {
     }
     if let Some(cut) = &held_cut {
         println!("    (read {cut} held gate-runs — the rest were not cross-referenced)");
+    }
+
+    // Flakes: reds that went green at the same head, by check — read
+    // off the week of gate-runs already fetched above, so the count
+    // costs no second read and names the same window (36cc4913).
+    println!("{}", flakes_line(&gate_runs));
+    if let Some(cut) = &stranded_cut {
+        println!("    (read {cut} gate-runs in the week — the rest were not counted)");
     }
 
     // Orphans: forge heads no packet claims (281f9842 — 60 of 80 the
@@ -1465,6 +1488,46 @@ mod tests {
                 .and_then(|(_, v)| v.parse::<i64>().ok());
             assert_eq!(limit, Some(GATE_RUN_PAGE), "{q}");
         }
+    }
+
+    /// Backlog 36cc4913: the flakiest check is a number, not a memory.
+    /// The FLAKES line is read over the SAME week of gate-runs the
+    /// stranded lane reads — one query, one window — counting the
+    /// checks on runs a green-after-red stamped `flake_of`, and it is
+    /// one line either way.
+    #[test]
+    fn the_flakes_line_counts_checks_over_the_weeks_gate_runs_and_says_none() {
+        let runs = vec![
+            gate_run(
+                "fix/a",
+                json!({ "flake_of": "p1", "flaky_checks": ["test"] }),
+                "green",
+            ),
+            gate_run(
+                "fix/b",
+                json!({ "flake_of": "p2", "flaky_checks": ["test", "fmt"] }),
+                "green",
+            ),
+            gate_run(
+                "fix/c",
+                json!({ "regate_of": "p3", "prior_failed": ["clippy"] }),
+                "failed",
+            ),
+            gate_run("fix/d", json!({}), "green"),
+        ];
+        let line = flakes_line(&runs);
+        assert_eq!(
+            line,
+            "\n  FLAKES — 2 check(s) red then green at the same head in the last 7 days: test: 2, fmt: 1"
+        );
+        assert_eq!(
+            flakes_line(&[]),
+            "\n  FLAKES — none: no gate went red then green at the same head in the last 7 days"
+        );
+        // The window the line names is the window the read narrows on.
+        let q = stranded_gate_runs_query();
+        assert!(params(&q).contains(&("closed_within", "7")), "{q}");
+        assert!(line.contains("last 7 days"), "{line}");
     }
 
     /// The truncation note is a reading of `total` against the page, and

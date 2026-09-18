@@ -25,6 +25,7 @@ pub mod escalation;
 pub mod estate_seed;
 pub mod events;
 pub mod experiments;
+pub mod flake;
 pub mod http;
 pub mod human_only;
 pub mod in_memory;

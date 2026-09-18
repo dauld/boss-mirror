@@ -43,6 +43,8 @@ import {
   type YardState,
 } from './yard';
 import {
+  flakeLabel,
+  flakeTally,
   inspectionShed,
   runAt,
   shedCounts,
@@ -50,6 +52,7 @@ import {
   shedLamp,
   shedStatus,
   shedTone,
+  type FlakeCount,
   type ShedPlace,
 } from './yard-shed';
 import {
@@ -260,6 +263,12 @@ export type Machines = Readonly<{
     notYet: number;
     onEvent: number;
     noProbe: number;
+    /** Reds that were flakes, by check — a green after a red at the
+     *  same head, read off the gate-runs the page holds (yard-shed.ts
+     *  `flakeTally`, backlog 36cc4913). The shed's line for it is
+     *  `flakeLabel`, a stated none when empty. */
+    flakes: readonly FlakeCount[];
+    flakeLabel: string;
   }>;
   conductor: ConductorMachine;
   runner: RunnerMachine;
@@ -781,6 +790,9 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
     });
   });
   const shedTally = shedCounts(shed);
+  // The flake tally rides the shed machine: reds that went green at the
+  // same head, by check, off the gate-run window the page already reads.
+  const flakes = flakeTally(yard.packets.gateRuns);
 
   // THE ARRIVALS YARD — four sidings, one per delivery channel, landed
   // cars newest first along each. A car lands on the siding of its channel (design c6bd173e, car 1):
@@ -1257,7 +1269,7 @@ export function scene(yard: YardState, status: YardStatus | null, nowMs: number,
       garage: { label: garageCount > 0 ? `${garageCount} gated red` : 'empty', count: garageCount },
       arrivals: { label: `${landedRecently} landed · 24h`, landed: landedRecently },
       cancelled: { label: withdrawnCount > 0 ? `${withdrawnCount} withdrawn` : 'empty', count: withdrawnCount },
-      inspection: { label: shedLabel(shedTally), ...shedTally },
+      inspection: { label: shedLabel(shedTally), ...shedTally, flakes, flakeLabel: flakeLabel(flakes) },
       conductor: conductorMachine(status?.conductor ?? null),
       runner: feeds.runner,
       cluster: feeds.cluster,
