@@ -586,7 +586,12 @@ picking up any work:
 
 **`boss orient` runs steps 2–4 for you** — trains in transit, gates
 running, stranded greens with rescue guidance, the dock, and the task
-queue, one read (needs `BOSS_JOBS_URL`, like every SoR verb). Run it
+queue, one read (needs `BOSS_JOBS_URL`, like every SoR verb). Its
+**MY WORK** section is the actor's own queue — every ready/active
+step assigned to the id the verb signs as or to any alias the agents
+registry ties to it, grouped by kind, oldest first — because 25 such
+steps sat on the agent's alias unseen while it read only the backlog
+station (65a89769). Run it
 first; this section is the checklist behind it, and the reason each
 line exists. On its first live run it named three stranded greens —
 one of which was rescued onto the next train instead of rebuilt blind.

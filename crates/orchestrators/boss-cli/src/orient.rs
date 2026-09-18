@@ -424,6 +424,198 @@ pub(crate) fn half_done_rerail(
     ))
 }
 
+// ---- MY WORK ----------------------------------------------------------
+//
+// THE CASE (65a89769). Measured 2026-09-18 03:10Z: 25 ready steps sat
+// on `claude@algedonic.dev` — the four daily sweep inspections, the
+// publish-to-github measure, a user-feedback triage the founder did
+// himself, cadence-silent and estate-alarm triages, every landed car's
+// proven step — nominated by the dispatcher and never read, because the
+// agent's standing order reads the backlog station and this verb
+// printed everything about the pipeline except the actor's own queue.
+// The section below is that queue: the ready + active steps assigned to
+// the actor this process signs as, or to any id the agents registry
+// ties to it. Two identities, because the dispatcher nominates to the
+// ALIAS while a box may be named by the agent's id (25 on the alias, 0
+// on `agent-claude`, the same morning).
+
+/// How many characters of a title a MY WORK line shows.
+pub(crate) const MY_WORK_TITLE_CHARS: usize = 60;
+
+/// The identities one MY WORK read asks for: the caller first, then
+/// every id the agents registry ties to it — the aliases when the
+/// caller is an agent's id, the id and sibling aliases when the caller
+/// IS an alias. A caller the registry does not know is read alone.
+pub(crate) fn my_work_identities(caller: &str, agents: &[Value]) -> Vec<String> {
+    let mut out = vec![caller.to_string()];
+    for agent in agents {
+        let id = agent.get("id").and_then(Value::as_str).unwrap_or_default();
+        let aliases: Vec<&str> = agent
+            .get("aliases")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        if id != caller && !aliases.contains(&caller) {
+            continue;
+        }
+        for candidate in std::iter::once(id).chain(aliases) {
+            if !candidate.is_empty() && !out.iter().any(|o| o == candidate) {
+                out.push(candidate.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// What a step of this shape IS, for an actor deciding what to do
+/// with it — one clause per (workflow, slug) the section knows. A
+/// slug it does not know gets no hint rather than a wrong one.
+fn my_work_hint(workflow: &str, slug: &str) -> Option<String> {
+    let text = match (workflow, slug) {
+        (_, "triage") => "a decision the agent makes: measure the claim, choose a route",
+        ("ship-a-change", "proven") => {
+            "a probe to run: the forge runs it via run-car-probe (boss prove --recheck re-runs it)"
+        }
+        ("maintenance-sweep", "inspect") => {
+            "a measurement to record: findings + measured on the step, action_needed on the job"
+        }
+        ("user-feedback", "design-review") => {
+            "file the design that answers it: boss design ... --answers <feedback id>"
+        }
+        (_, "build") => "a change to build: branch, gate, park (boss brief <packet>)",
+        (_, "measure") => "a measurement to record on the checklist",
+        _ => return None,
+    };
+    Some(format!("{slug} = {text}"))
+}
+
+/// The MY WORK listing lines: rows deduplicated by step id (one step
+/// answers once however many identities it was read under), grouped
+/// by workflow, groups and rows both oldest first, each group headed
+/// by its count and closed by one hint line. Pure so the shape is
+/// testable; the caller prints the section heading from the count.
+pub(crate) fn my_work_lines(rows: &[Value], now: chrono::DateTime<chrono::Utc>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut keyed: Vec<(Option<chrono::NaiveDate>, &Value)> = rows
+        .iter()
+        .filter(|r| {
+            let step_id = r
+                .pointer("/step/id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            seen.insert(step_id)
+        })
+        .map(|r| {
+            let opened = r
+                .get("opened_on")
+                .and_then(Value::as_str)
+                .and_then(|d| d.parse::<chrono::NaiveDate>().ok());
+            (opened, r)
+        })
+        .collect();
+    // Unknown ages sort last: an older server's row is still listed,
+    // never mistaken for today's.
+    keyed.sort_by_key(|(opened, r)| {
+        (
+            opened.is_none(),
+            *opened,
+            r.get("job_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        )
+    });
+    // Groups in order of their oldest row.
+    let mut groups: Vec<(&str, Vec<(Option<chrono::NaiveDate>, &Value)>)> = Vec::new();
+    for (opened, r) in keyed {
+        let kind = r.get("workflow").and_then(Value::as_str).unwrap_or("?");
+        match groups.iter_mut().find(|(k, _)| *k == kind) {
+            Some((_, rows)) => rows.push((opened, r)),
+            None => groups.push((kind, vec![(opened, r)])),
+        }
+    }
+    let mut out = Vec::new();
+    for (kind, rows) in groups {
+        out.push(format!("    {kind} — {}", rows.len()));
+        let mut slugs: Vec<&str> = Vec::new();
+        for (opened, r) in rows {
+            let job = r.get("job_id").and_then(Value::as_str).unwrap_or("");
+            let id8 = &job[..8.min(job.len())];
+            let slug = r
+                .pointer("/step/spec_slug")
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            if !slugs.contains(&slug) {
+                slugs.push(slug);
+            }
+            let title: String = r
+                .get("job_title")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .chars()
+                .take(MY_WORK_TITLE_CHARS)
+                .collect();
+            let age = match opened {
+                Some(d) => format!("{}d", crate::census::age_days(d, now)),
+                None => "age ?".to_string(),
+            };
+            out.push(format!(
+                "      {id8} {kind} {slug} {} ({age})",
+                title.trim_end()
+            ));
+        }
+        let hints: Vec<String> = slugs.iter().filter_map(|s| my_work_hint(kind, s)).collect();
+        if !hints.is_empty() {
+            out.push(format!("      → {}", hints.join("; ")));
+        }
+    }
+    out
+}
+
+/// The whole section as printed. `None` for the identities is the
+/// unnamed caller: the read is REFUSED rather than made under
+/// `operator:unidentified`, which would answer 0 and read as an empty
+/// queue — the wrong-target trap (CLAUDE.md §Doors), with the two ways
+/// to name yourself on the line.
+pub(crate) fn my_work_section(
+    identities: Option<&[String]>,
+    rows: &[Value],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<String> {
+    let Some(ids) = identities else {
+        return vec![format!(
+            "  MY WORK — REFUSED: nothing names the actor running this command, so its own \
+             queue cannot be read (an unidentified read answers 0, not an error). Name \
+             yourself with `export {}=<your id>` or by writing that id into {}.",
+            crate::identity::ACTOR_ENV,
+            crate::identity::actor_file_display()
+        )];
+    };
+    let who = match ids {
+        [] => "nobody".to_string(),
+        [one] => one.clone(),
+        [first, rest @ ..] => format!("{first} (+ {})", rest.join(", ")),
+    };
+    let lines = my_work_lines(rows, now);
+    if lines.is_empty() {
+        return vec![format!(
+            "  MY WORK — nothing: no ready/active step is assigned to {who}"
+        )];
+    }
+    let count = lines
+        .iter()
+        .filter(|l| l.starts_with("      ") && !l.starts_with("      →"))
+        .count();
+    let mut out = vec![format!(
+        "  MY WORK — {count} ready/active step(s) assigned to {who} — yours to move, oldest first"
+    )];
+    out.extend(lines);
+    out
+}
+
 pub async fn run(all: bool) -> Result<()> {
     let http = reqwest::Client::new();
 
@@ -726,6 +918,34 @@ pub async fn run(all: bool) -> Result<()> {
         for (branch, reason) in &held {
             println!("    {branch}  —  {reason}");
         }
+    }
+
+    // MY WORK — the actor's own queue, after the dock (65a89769). One
+    // read of the agents registry for the aliases, one assignments read
+    // per identity; a caller nobody named is refused here and the rest
+    // of the approach still prints (identity's read/write split).
+    let identities = match crate::identity::caller() {
+        Some(c) => {
+            let agents = rows(api(&http, reqwest::Method::GET, "/api/agents", None).await?);
+            Some(my_work_identities(&c.id, &agents))
+        }
+        None => None,
+    };
+    let mut my_rows: Vec<Value> = Vec::new();
+    for id in identities.iter().flatten() {
+        my_rows.extend(rows(
+            api(
+                &http,
+                reqwest::Method::GET,
+                &format!("/api/jobs/assignments?assignee_id={id}&limit=1000"),
+                None,
+            )
+            .await?,
+        ));
+    }
+    println!();
+    for line in my_work_section(identities.as_deref(), &my_rows, now) {
+        println!("{line}");
     }
 
     // FRESHNESS (L2, acedf981) — parked and stranded branches whose
@@ -1403,5 +1623,188 @@ mod tests {
         let boarded = car("fix/boarded", "open", "completed", held.clone());
         let closed = car("fix/closed", "closed", "ready", held.clone());
         assert!(held_dock_cars(&[boarded, closed]).is_empty());
+    }
+
+    // ---- MY WORK (65a89769) --------------------------------------------
+
+    fn agents() -> Vec<Value> {
+        vec![json!({
+            "id": "agent-claude",
+            "aliases": ["claude@algedonic.dev"],
+            "display_name": "Claude (engineering)",
+        })]
+    }
+
+    /// One assignment row as `/api/jobs/assignments` answers it (the
+    /// measured shape, 2026-09-18): the packet's identity beside the
+    /// step, and the admission date this car adds to the row.
+    fn asg(job: &str, workflow: &str, slug: &str, title: &str, opened: &str, step: &str) -> Value {
+        json!({
+            "job_id": job,
+            "job_title": title,
+            "workflow": workflow,
+            "opened_on": opened,
+            "priority": "standard",
+            "step": { "id": step, "spec_slug": slug, "kind": "task", "status": "ready" },
+        })
+    }
+
+    /// The pod signs as the ALIAS (`BOSS_ACTOR=claude@algedonic.dev`)
+    /// while the dispatcher nominates to the alias too — but a box
+    /// named by the agent's id would read 0 (measured: 25 on the alias,
+    /// 0 on `agent-claude`, 2026-09-18). So the read asks for the
+    /// caller AND every id the registry ties to it, from either end.
+    #[test]
+    fn my_work_reads_for_the_caller_and_every_registry_alias() {
+        assert_eq!(
+            my_work_identities("agent-claude", &agents()),
+            vec![
+                "agent-claude".to_string(),
+                "claude@algedonic.dev".to_string()
+            ]
+        );
+        assert_eq!(
+            my_work_identities("claude@algedonic.dev", &agents()),
+            vec![
+                "claude@algedonic.dev".to_string(),
+                "agent-claude".to_string()
+            ]
+        );
+        // Nobody in the registry: the caller alone, never nothing.
+        assert_eq!(
+            my_work_identities("emp-david", &agents()),
+            vec!["emp-david".to_string()]
+        );
+    }
+
+    #[test]
+    fn my_work_groups_by_kind_oldest_first_with_one_hint_per_group() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-18T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let rows = vec![
+            asg(
+                "2604d814-0000-4000-8000-000000000000",
+                "backlog-item",
+                "build",
+                "DECISION: 37 orphan forge branches are provably landed (forge PR ancestry); 13 have no merged PR",
+                "2026-09-16",
+                "s-build",
+            ),
+            asg(
+                "9e627310-0000-4000-8000-000000000000",
+                "backlog-item",
+                "triage",
+                "CADENCE SILENT: maintenance-conservation-invariants",
+                "2026-09-11",
+                "s-triage",
+            ),
+            asg(
+                "f827bd78-0000-4000-8000-000000000000",
+                "maintenance-sweep",
+                "inspect",
+                "Disk headroom sweep",
+                "2026-09-17",
+                "s-inspect",
+            ),
+            asg(
+                "3c1f843f-0000-4000-8000-000000000000",
+                "ship-a-change",
+                "proven",
+                "The Stripe sensor adapter",
+                "2026-09-18",
+                "s-proven",
+            ),
+            // The same step answered under a second identity: one line.
+            asg(
+                "f827bd78-0000-4000-8000-000000000000",
+                "maintenance-sweep",
+                "inspect",
+                "Disk headroom sweep",
+                "2026-09-17",
+                "s-inspect",
+            ),
+        ];
+        let lines = my_work_lines(&rows, now);
+        let all = lines.join("\n");
+        assert_eq!(
+            lines.len(),
+            3 + 4 + 3,
+            "3 headers + 4 rows + 3 hints:\n{all}"
+        );
+        // Groups oldest-first, rows oldest-first inside each.
+        let header_at = |kind: &str| {
+            lines
+                .iter()
+                .position(|l| l.starts_with(&format!("    {kind} — ")))
+                .unwrap()
+        };
+        assert!(header_at("backlog-item") < header_at("maintenance-sweep"));
+        assert!(header_at("maintenance-sweep") < header_at("ship-a-change"));
+        assert_eq!(lines[0], "    backlog-item — 2");
+        assert_eq!(
+            lines[1],
+            "      9e627310 backlog-item triage CADENCE SILENT: maintenance-conservation-invariants (7d)"
+        );
+        // The title is cut at 60 characters; the age is whole days.
+        assert_eq!(
+            lines[2],
+            "      2604d814 backlog-item build DECISION: 37 orphan forge branches are provably landed (forg (2d)"
+        );
+        // One hint line per group, naming what the step IS.
+        assert!(lines[3].contains("triage = a decision"), "{}", lines[3]);
+        assert!(lines[3].contains("build = "), "{}", lines[3]);
+        assert!(all.contains("inspect = a measurement to record"), "{all}");
+        assert!(all.contains("run-car-probe"), "{all}");
+        // A step with no opened_on (an older server) reads as unknown,
+        // never as 0d.
+        let mut bare = asg(
+            "aaaaaaaa-0000-4000-8000-000000000000",
+            "user-feedback",
+            "design-review",
+            "Feedback on /it/estate",
+            "2026-09-18",
+            "s-dr",
+        );
+        bare.as_object_mut().unwrap().remove("opened_on");
+        let l = my_work_lines(&[bare], now).join("\n");
+        assert!(l.contains("(age ?)"), "{l}");
+        assert!(l.contains("--answers"), "{l}");
+    }
+
+    /// The whole section, as printed: the count and who it read for;
+    /// "nothing" when empty; a loud refusal when nobody is named —
+    /// a MY WORK read under `operator:unidentified` would answer 0
+    /// and read as an empty queue (CLAUDE.md §Doors: a wrong target
+    /// answers instead of erroring).
+    #[test]
+    fn my_work_section_counts_says_nothing_and_refuses_the_unnamed() {
+        let now = chrono::Utc::now();
+        let ids = vec![
+            "claude@algedonic.dev".to_string(),
+            "agent-claude".to_string(),
+        ];
+        let one = vec![asg(
+            "f827bd78-0000-4000-8000-000000000000",
+            "maintenance-sweep",
+            "inspect",
+            "Disk headroom sweep",
+            "2026-09-17",
+            "s",
+        )];
+        let full = my_work_section(Some(&ids), &one, now).join("\n");
+        assert!(
+            full.starts_with(
+                "  MY WORK — 1 ready/active step(s) assigned to claude@algedonic.dev (+ agent-claude)"
+            ),
+            "{full}"
+        );
+        let empty = my_work_section(Some(&ids), &[], now).join("\n");
+        assert!(empty.contains("MY WORK — nothing"), "{empty}");
+        assert!(empty.contains("claude@algedonic.dev"), "{empty}");
+        let refused = my_work_section(None, &[], now).join("\n");
+        assert!(refused.contains("MY WORK — REFUSED"), "{refused}");
+        assert!(refused.contains("BOSS_ACTOR"), "{refused}");
+        assert!(refused.contains(".config/boss/actor"), "{refused}");
     }
 }

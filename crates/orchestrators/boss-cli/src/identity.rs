@@ -123,13 +123,20 @@ pub(crate) fn caller() -> Option<Caller> {
     resolve_from(std::env::var(ACTOR_ENV).ok(), file)
 }
 
+/// The actor file's location on THIS machine, for a message that
+/// names it — the resolved path when a home is known, the spelling of
+/// the rule when it is not.
+pub(crate) fn actor_file_display() -> String {
+    actor_file_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "$HOME/.config/boss/actor".to_string())
+}
+
 /// What a refused write says. A refusal that does not say how to fix
 /// it is a wall; this names both doors and the file's location on
 /// THIS machine.
 pub(crate) fn refusal(method: &str, path: &str) -> String {
-    let file = actor_file_path()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "$HOME/.config/boss/actor".to_string());
+    let file = actor_file_display();
     format!(
         "refusing to sign {method} {path}: nothing names the actor running this command, \
          and signing it as `{CONDUCTOR}` would credit the train automation with your act \

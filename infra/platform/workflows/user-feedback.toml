@@ -64,10 +64,51 @@ name = "finding"
 field_type = "string"
 required = false
 
+# THE DESIGN ROUTE OPENS THE DRAFT FIRST (backlog f90ca046, 2026-09-18).
+# Measured on 54f0ab33 (Feedback on /it/estate): David triaged it
+# `design` and the version before this one made `design-review` READY
+# on the spot — an answer-question for platform-admin with an empty
+# verdict and no design filed — so the founder got a decision with
+# nothing to decide (his bug 4f6019d7 again: "There is no question,
+# just a statement"). The rule
+# complete-feedback-design-review-on-design-doc-published closes it only
+# once a design carrying an `answers` edge publishes, so the step sat
+# open, empty, on the one person, until an agent filed the design by
+# hand.
+#
+# So the design IS the work between the route and the decision, and it
+# is a step: this task files it. `authority_role = "platform-admin"` on
+# a TASK is the executor lane — the dispatcher's DECIDES-vs-EXECUTES
+# rule (291a73a7) nominates the configured executor for a platform-admin
+# step that is not decision-shaped, which is how `build` below reaches
+# the agent today (54f0ab33's build step is assigned to it); a
+# decision-shaped step goes to the founder. The bundle names no
+# tenant's role or agent (e2580840): who the executor is stays a
+# deployment fact.
+#
+# `design_id` is required at done: `boss design --answers <this packet>`
+# files the design, writes the review's question, and completes this
+# step with the id — the record is the verb's, not retyped. The review
+# below is `ready_when = steps.draft-design.done`, so the founder
+# decides on the design's questions, once, and the publish rule
+# completes it exactly as before.
+[[workflow.step]]
+title = "draft-design"
+kind = "task"
+ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"design\") OR (steps.investigate.done AND steps.investigate.metadata.disposition = \"design\")"
+title_template = "Draft the design"
+authority_role = "platform-admin"
+metadata_defaults = { procedure = "File the design-doc that answers this feedback: `boss design <title> --markdown <file> --question 'Qn|title|proposal' ... --answers <this packet>`. The verb writes the design's id here as design_id and completes this step; the founder's design-review opens on it, asking for that design at /it/design." }
+[[workflow.step.fields]]
+name = "design_id"
+field_type = "string"
+required = true
+
 [[workflow.step]]
 title = "design-review"
 kind = "answer-question"
-ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"design\") OR (steps.investigate.done AND steps.investigate.metadata.disposition = \"design\")"
+# Only once there is a design to decide — see `draft-design` above.
+ready_when = "steps.draft-design.done"
 title_template = "Decide the design"
 authority_role = "platform-admin"
 metadata_defaults = { verdict = "" }

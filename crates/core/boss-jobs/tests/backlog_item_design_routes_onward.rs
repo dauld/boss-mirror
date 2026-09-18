@@ -235,6 +235,12 @@ fn review(verdict: &str) -> serde_json::Value {
     serde_json::json!({ "verdict": verdict, "answer": "The route the answer carries." })
 }
 
+/// What `boss design --answers <item>` records on the draft step: the
+/// design it filed.
+fn drafted() -> serde_json::Value {
+    serde_json::json!({ "design_id": "5fc71f03-db4f-4be2-9839-484ccf29781a" })
+}
+
 /// HALF ONE of the fix. Routing to design must leave `build` PENDING.
 ///
 /// This is where the work was lost, and it was lost at TRIAGE time —
@@ -242,6 +248,14 @@ fn review(verdict: &str) -> serde_json::Value {
 /// `triage`; with `triage` terminal and the predicate false, the
 /// skip rule (registry.rs, `refs_all_terminal`) had every right to
 /// mark it Skipped, and did. A skipped step never comes back.
+///
+/// AND THE REVIEW WAITS ON THE DRAFT (backlog f90ca046, 2026-09-18).
+/// Until then routing to design made `design-review` ready at once —
+/// an `answer-question` for the founder with no design filed, so a
+/// decision with nothing to decide (David's bug 4f6019d7 again,
+/// measured on user-feedback 54f0ab33). The route now opens the
+/// executor's `draft-design` task, and the review is `ready_when =
+/// steps.draft-design.done`; the same shape as user-feedback's.
 #[tokio::test]
 async fn routing_to_design_leaves_build_pending_not_skipped() {
     let app = app();
@@ -259,15 +273,40 @@ async fn routing_to_design_leaves_build_pending_not_skipped() {
         step_of(&after, "build")["status"],
         after["steps"]
     );
-    let review_status = step_of(&after, "design-review")["status"].clone();
+    let draft = step_of(&after, "draft-design");
     assert!(
-        review_status == "ready" || review_status == "active",
-        "the review must be actionable — it is `{review_status}`"
+        draft["status"] == "ready" || draft["status"] == "active",
+        "the draft must be actionable — it is `{}`. Steps: {:#?}",
+        draft["status"],
+        after["steps"]
+    );
+    assert_eq!(draft["kind"], "task", "a draft is work, not a verdict");
+    assert_eq!(
+        draft["metadata"]["authority_role"], "platform-admin",
+        "the executor lane — a platform-admin TASK is what the dispatcher nominates \
+         the configured executor for"
+    );
+    assert_eq!(
+        step_of(&after, "design-review")["status"],
+        "pending",
+        "the review waits on the design that answers it — ready with none filed is the \
+         measured defect. Steps: {:#?}",
+        after["steps"]
     );
     assert_ne!(
         after["status"], "closed",
         "routing to design must not close"
     );
+
+    // The draft done — naming the design — is what opens the review.
+    complete(&app, &job_id, &after, "draft-design", drafted()).await;
+    let after = read(&app, &job_id).await;
+    let review_status = step_of(&after, "design-review")["status"].clone();
+    assert!(
+        review_status == "ready" || review_status == "active",
+        "the review must be actionable once the draft is done — it is `{review_status}`"
+    );
+    assert_eq!(step_of(&after, "build")["status"], "pending");
 }
 
 /// HALF TWO. An APPROVED review is a decision to build, so `build`
@@ -281,6 +320,8 @@ async fn an_approved_review_makes_build_ready_and_does_not_close() {
 
     let job = read(&app, &job_id).await;
     complete(&app, &job_id, &job, "triage", triage_design()).await;
+    let job = read(&app, &job_id).await;
+    complete(&app, &job_id, &job, "draft-design", drafted()).await;
     let job = read(&app, &job_id).await;
     complete(&app, &job_id, &job, "design-review", review("approved")).await;
 
@@ -327,6 +368,8 @@ async fn an_answered_review_skips_build_and_closes_the_item() {
     let job = read(&app, &job_id).await;
     complete(&app, &job_id, &job, "triage", triage_design()).await;
     let job = read(&app, &job_id).await;
+    complete(&app, &job_id, &job, "draft-design", drafted()).await;
+    let job = read(&app, &job_id).await;
     complete(&app, &job_id, &job, "design-review", review("answered")).await;
 
     let after = read(&app, &job_id).await;
@@ -354,6 +397,8 @@ async fn a_declined_review_closes_without_action_and_does_not_race_closed() {
 
     let job = read(&app, &job_id).await;
     complete(&app, &job_id, &job, "triage", triage_design()).await;
+    let job = read(&app, &job_id).await;
+    complete(&app, &job_id, &job, "draft-design", drafted()).await;
     let job = read(&app, &job_id).await;
     complete(&app, &job_id, &job, "design-review", review("declined")).await;
 
@@ -494,7 +539,13 @@ fn an_absent_verdict_closes_the_item_rather_than_wedging_it() {
         "the design route keeps build alive"
     );
 
-    // The review completes carrying no verdict at all.
+    // The draft is filed, which is what opens the review (f90ca046)…
+    steps[idx("draft-design")].status = StepStatus::Completed;
+    steps[idx("draft-design")].metadata = drafted();
+    reevaluate(&spec, &mut steps, &subject, &job_metadata);
+    assert_eq!(steps[idx("design-review")].status, StepStatus::Ready);
+
+    // …and the review completes carrying no verdict at all.
     steps[idx("design-review")].status = StepStatus::Completed;
     steps[idx("design-review")].metadata = serde_json::json!({});
     reevaluate(&spec, &mut steps, &subject, &job_metadata);

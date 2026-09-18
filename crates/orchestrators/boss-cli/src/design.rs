@@ -166,6 +166,92 @@ pub(crate) fn design_review_step_metadata(
     Value::Object(md)
 }
 
+/// Where a packet stands on its design route, as `--answers` needs it:
+/// the `design-review` step the question goes onto, and the
+/// `draft-design` step this verb completes when the route has one.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DesignRoute {
+    pub review: Value,
+    pub draft: Option<Value>,
+}
+
+fn step_by_slug<'a>(packet: &'a Value, slug: &str) -> Option<&'a Value> {
+    packet
+        .get("steps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some(slug))
+}
+
+fn is_open(step: &Value) -> bool {
+    matches!(
+        step.get("status").and_then(Value::as_str),
+        Some("ready" | "active")
+    )
+}
+
+/// Can a design be filed against this packet, and what does the verb
+/// then write? Pure, so the two shapes it must accept are pinned.
+///
+/// Two protocol versions are live at once (in-flight packets keep
+/// theirs). Before f90ca046, routing to `design` opened
+/// `design-review` directly, so an OPEN review is the whole test.
+/// Since it, the route opens the executor's `draft-design` and the
+/// review is `ready_when = steps.draft-design.done` — so an open
+/// DRAFT is the other way in, and the verb completes it with the
+/// design's id after filing. Neither open is a refusal that names the
+/// fix: triage the packet to `design`, or it was already decided.
+pub(crate) fn answerable(packet: &Value) -> std::result::Result<DesignRoute, String> {
+    let short = packet
+        .get("id")
+        .and_then(Value::as_str)
+        .map(|id| &id[..8.min(id.len())])
+        .unwrap_or("?");
+    let kind = packet.get("kind").and_then(Value::as_str).unwrap_or("?");
+    let review = step_by_slug(packet, "design-review").ok_or_else(|| {
+        format!(
+            "packet {short} ({kind}) has no design-review step — only a user-feedback or \
+             backlog-item routed to design can be answered by a design"
+        )
+    })?;
+    if is_open(review) {
+        return Ok(DesignRoute {
+            review: review.clone(),
+            draft: None,
+        });
+    }
+    let draft = step_by_slug(packet, "draft-design");
+    if let Some(draft) = draft.filter(|d| is_open(d)) {
+        return Ok(DesignRoute {
+            review: review.clone(),
+            draft: Some(draft.clone()),
+        });
+    }
+    let status = review.get("status").and_then(Value::as_str).unwrap_or("?");
+    Err(format!(
+        "packet {short}'s design-review is {status} and its draft-design is {} — triage it \
+         to `design` first (or it was already decided); a design filed against it would \
+         complete nothing when it closes",
+        draft
+            .and_then(|d| d.get("status"))
+            .and_then(Value::as_str)
+            .unwrap_or("absent")
+    ))
+}
+
+/// The draft-design completion: `design_id` laid over the step's own
+/// metadata (PATCH-on-PUT replaces `metadata` wholesale, and
+/// `authority_role` lives there), status done.
+pub(crate) fn draft_done_body(existing: &Value, design_id: &str) -> Value {
+    let mut md = match existing {
+        Value::Object(m) => m.clone(),
+        _ => serde_json::Map::new(),
+    };
+    md.insert("design_id".to_string(), json!(design_id));
+    json!({ "status": "completed", "metadata": Value::Object(md) })
+}
+
 /// The review step's own copy. The tracker reads the STEP, so a doc
 /// whose questions live only on the Job renders empty — which is
 /// exactly how this defect presented.
@@ -208,10 +294,10 @@ pub async fn run(
 
     // `--answers`: the feedback (or backlog item) this design decides.
     // Read BEFORE filing — the edge needs the full id, and the packet
-    // must have an open design-review to give a question to; a design
-    // filed for a packet nobody routed to design would carry an edge
-    // the close rule can act on nothing with. Refusing here keeps the
-    // filer on the line, where the fix is one triage away.
+    // must be on its design route (`answerable`); a design filed for a
+    // packet nobody routed to design would carry an edge the close
+    // rule can act on nothing with. Refusing here keeps the filer on
+    // the line, where the fix is one triage away.
     let answered = match answers.as_deref() {
         Some(given) => {
             let id = crate::job::fetch_and_resolve(&http, given).await?;
@@ -223,32 +309,8 @@ pub async fn run(
             )
             .await?
             .with_context(|| format!("--answers: reading packet {id}"))?;
-            let review = packet
-                .get("steps")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some("design-review"))
-                .cloned()
-                .with_context(|| {
-                    format!(
-                        "--answers: packet {} ({}) has no design-review step — only a \
-                         user-feedback or backlog-item routed to design can be answered by a \
-                         design",
-                        &id[..8],
-                        packet.get("kind").and_then(Value::as_str).unwrap_or("?")
-                    )
-                })?;
-            let status = review.get("status").and_then(Value::as_str).unwrap_or("");
-            if !matches!(status, "ready" | "active") {
-                bail!(
-                    "--answers: packet {}'s design-review is {status}, not open — triage it to \
-                     `design` first (or it was already decided); a design filed against it \
-                     would complete nothing when it closes",
-                    &id[..8]
-                );
-            }
-            Some((id, review))
+            let route = answerable(&packet).map_err(|e| anyhow::anyhow!("--answers: {e}"))?;
+            Some((id, route))
         }
         None => None,
     };
@@ -283,7 +345,8 @@ pub async fn run(
     // design is what the close rule follows; this is what the person
     // assigned that step reads. Merged over the step's own metadata —
     // PATCH-on-PUT replaces it wholesale.
-    if let Some((feedback, review)) = &answered {
+    if let Some((feedback, route)) = &answered {
+        let review = &route.review;
         let sid = review
             .get("id")
             .and_then(Value::as_str)
@@ -303,6 +366,33 @@ pub async fn run(
                 &feedback[..8]
             )
         })?;
+        // The draft step is done BY THIS VERB, carrying the id it just
+        // got back (f90ca046): the record is copied from the filing,
+        // never retyped, and completing it is what opens the review —
+        // which by now already asks its question, so it is never ready
+        // and empty.
+        if let Some(draft) = &route.draft {
+            let did = draft
+                .get("id")
+                .and_then(Value::as_str)
+                .context("the answered packet's draft-design step has no id")?;
+            let existing = draft.get("metadata").cloned().unwrap_or_else(|| json!({}));
+            api(
+                &http,
+                reqwest::Method::PUT,
+                &format!("/api/jobs/{feedback}/steps/{did}"),
+                Some(draft_done_body(&existing, &id)),
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "completing {}'s draft-design with design_id {short} (the design is \
+                     filed, the edge and the question are written; only the draft's record \
+                     is missing)",
+                    &feedback[..8]
+                )
+            })?;
+        }
         println!(
             "boss design: {short} answers {} — its design-review now asks for this design, \
              and deciding the design completes it",
@@ -547,5 +637,91 @@ mod tests {
             !q.contains("c6bd173e-3dc9"),
             "the short id, not the full one — this is prose a person reads"
         );
+    }
+
+    fn packet(steps: Vec<Value>) -> Value {
+        json!({
+            "id": "54f0ab33-335e-46a7-a49f-d9afd3107d54",
+            "kind": "user-feedback",
+            "steps": steps,
+        })
+    }
+
+    fn step(slug: &str, status: &str) -> Value {
+        json!({ "id": format!("s-{slug}"), "spec_slug": slug, "status": status,
+                "metadata": { "authority_role": "platform-admin" } })
+    }
+
+    /// Backlog f90ca046: the design route opens the executor's draft
+    /// first, and the review waits on it. The verb must take BOTH
+    /// shapes — a packet in flight under the version before (review
+    /// open, no draft step at all) and one under it (draft open,
+    /// review pending) — and in the second complete the draft. What
+    /// it refuses is a packet on neither: not routed to design, or
+    /// already decided.
+    #[test]
+    fn a_packet_is_answerable_at_its_open_review_or_at_its_open_draft() {
+        // The shape before f90ca046, still live for in-flight packets.
+        let v1 = packet(vec![
+            step("triage", "completed"),
+            step("design-review", "ready"),
+        ]);
+        let route = answerable(&v1).expect("an open review is answerable");
+        assert_eq!(route.review["spec_slug"], json!("design-review"));
+        assert!(route.draft.is_none(), "no draft to complete");
+
+        // The shape since: the draft is open and the review pending.
+        let v2 = packet(vec![
+            step("triage", "completed"),
+            step("draft-design", "ready"),
+            step("design-review", "pending"),
+        ]);
+        let route = answerable(&v2).expect("an open draft is answerable");
+        assert_eq!(route.review["status"], json!("pending"));
+        assert_eq!(
+            route.draft.as_ref().map(|d| d["spec_slug"].clone()),
+            Some(json!("draft-design")),
+            "the verb completes the draft it stands at"
+        );
+
+        // The draft done by hand and the review open: the review is
+        // the target, and the draft is not touched again.
+        let drafted = packet(vec![
+            step("draft-design", "completed"),
+            step("design-review", "active"),
+        ]);
+        assert!(answerable(&drafted).expect("open review").draft.is_none());
+
+        // Not routed to design (both pending), or already decided.
+        for (draft, review) in [("pending", "pending"), ("completed", "completed")] {
+            let err = answerable(&packet(vec![
+                step("draft-design", draft),
+                step("design-review", review),
+            ]))
+            .expect_err("nothing open on the design route");
+            assert!(
+                err.contains("54f0ab33") && err.contains(review) && err.contains(draft),
+                "the refusal names the packet and both statuses: {err}"
+            );
+        }
+        // A kind with no design route at all.
+        let err = answerable(&json!({ "id": "abc", "kind": "ship-a-change", "steps": [] }))
+            .expect_err("no design-review step");
+        assert!(err.contains("ship-a-change"), "{err}");
+    }
+
+    /// The draft's completion carries the id the filing returned —
+    /// copied, never retyped — over the step's own keys.
+    #[test]
+    fn the_draft_is_completed_with_the_filed_id_and_keeps_its_own_keys() {
+        let existing = json!({ "authority_role": "platform-admin", "procedure": "file it" });
+        let body = draft_done_body(&existing, "5fc71f03-db4f-4be2-9839-484ccf29781a");
+        assert_eq!(body["status"], json!("completed"));
+        assert_eq!(
+            body["metadata"]["design_id"],
+            json!("5fc71f03-db4f-4be2-9839-484ccf29781a")
+        );
+        assert_eq!(body["metadata"]["authority_role"], json!("platform-admin"));
+        assert_eq!(body["metadata"]["procedure"], json!("file it"));
     }
 }

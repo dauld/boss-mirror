@@ -379,6 +379,13 @@ pub struct AssignmentRow {
     /// without a second fetch.
     pub job_title: String,
     pub due_on: Option<chrono::NaiveDate>,
+    /// The day the packet was admitted, so a personal queue can say
+    /// how long each step has waited without a second fetch — the
+    /// same argument as `job_title`. `boss orient`'s MY WORK section
+    /// is the first reader (65a89769: 25 ready steps sat on the
+    /// agent's alias unseen, and a list with no age hides which of
+    /// them has been waiting a week).
+    pub opened_on: chrono::NaiveDate,
     pub workflow: String,
     /// The protocol version this packet was admitted under. Rides on
     /// the row so an executor can resolve the step's spec (its
@@ -996,6 +1003,7 @@ pub trait JobsRepository: Send + Sync {
                         job_id: job.id,
                         job_title: job.title.clone(),
                         due_on: job.due_on,
+                        opened_on: job.opened_on,
                         workflow: job.kind.clone(),
                         workflow_version: job.workflow_version,
                         subject_kind: boss_core::primitives::Subject::kind(&job.subject)
@@ -1052,6 +1060,7 @@ pub trait JobsRepository: Send + Sync {
                     job_id: job.id,
                     job_title: job.title.clone(),
                     due_on: job.due_on,
+                    opened_on: job.opened_on,
                     workflow: job.kind.clone(),
                     workflow_version: job.workflow_version,
                     subject_kind: boss_core::primitives::Subject::kind(&job.subject).to_string(),

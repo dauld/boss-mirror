@@ -4495,11 +4495,13 @@ mod tests {
             vec![
                 "Triage feedback.disposition".to_string(),
                 "Reproduce and investigate.disposition".to_string(),
+                "Draft the design.design_id".to_string(),
                 "Decide the design.verdict".to_string(),
             ],
-            "the feedback flow collects a disposition at each deciding step and a \
-             verdict at the design review, nothing else; anything else here is a \
-             step no surface can complete"
+            "the feedback flow collects a disposition at each deciding step, the id of \
+             the design the draft filed (`boss design --answers` writes it, f90ca046), \
+             and a verdict at the design review, nothing else; anything else here is \
+             a step no surface can complete"
         );
     }
 
@@ -4512,7 +4514,9 @@ mod tests {
     fn each_disposition_names_the_branch_it_opened() {
         for (disposition, slug, terminal) in [
             ("reproduce", "investigate", false),
-            ("design", "design-review", false),
+            // The route opens the executor's draft; the founder's
+            // design-review waits on it (f90ca046).
+            ("design", "draft-design", false),
             ("build", "build", false),
             ("needs-info", "needs-info", false),
             ("duplicate", "duplicate", true),

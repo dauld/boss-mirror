@@ -1620,6 +1620,15 @@ Three things that deletion established, worth keeping:
   (its subject is the literal `boss-platform`), so the station's real
   packets rendered nowhere. It renders the queue now.
 
+**A feedback or backlog item routed to `design` opens the executor's
+`draft-design` task first, and the founder's `design-review` waits on
+the design that answers it** (`ready_when = steps.draft-design.done`;
+backlog `f90ca046`, 2026-09-18, measured on 54f0ab33 where the review
+went ready with no design filed — an empty decision, 4f6019d7 again) —
+`boss design --answers <packet>` files the design, writes the review's
+question, and completes the draft with the `design_id`, and the publish
+rule closes the review exactly as before.
+
 ## Open findings — where two live decisions disagree
 
 Flattening surfaced three places where a settled decision conflicts

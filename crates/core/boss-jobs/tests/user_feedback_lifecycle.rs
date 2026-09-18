@@ -401,17 +401,236 @@ async fn an_investigation_can_route_the_packet_onward_instead_of_ending_it() {
         .filter_map(|s| s["spec_slug"].as_str().map(|slug| (slug, s)))
         .collect();
 
-    let review = by_slug["design-review"];
+    // Since f90ca046 the design route opens the DRAFT first: the
+    // investigation's `design` reaches the executor's draft-design
+    // task, and the founder's design-review waits on the design that
+    // answers it (`routing_to_design_opens_the_draft_first…` below).
+    let draft = by_slug["draft-design"];
     assert!(
-        review["status"] == "ready" || review["status"] == "active",
-        "the investigation routed to `design`, so design-review must be actionable — \
+        draft["status"] == "ready" || draft["status"] == "active",
+        "the investigation routed to `design`, so draft-design must be actionable — \
          it is `{}`. Steps: {:#?}",
-        review["status"],
+        draft["status"],
+        after["steps"]
+    );
+    assert_eq!(
+        by_slug["design-review"]["status"], "pending",
+        "the review waits on the draft. Steps: {:#?}",
         after["steps"]
     );
     assert_ne!(
         after["status"], "closed",
         "finishing an investigation that routed onward must NOT close the packet — \
          that is how 3f5f7f63's recommendation was lost"
+    );
+}
+
+/// A feedback triaged to `design` reaches the founder only once there
+/// is a design to decide (backlog f90ca046).
+///
+/// Measured 2026-09-18 on 54f0ab33 (Feedback on /it/estate): David
+/// completed triage with `disposition = design` and the v1 Workflow
+/// made `design-review` READY — an `answer-question` with an empty
+/// verdict, audience platform-admin — before any design existed, so
+/// the founder got a decision with nothing to decide (his bug
+/// 4f6019d7 again: "There is no question, just a statement"). The
+/// rule `complete-feedback-design-review-on-design-doc-published`
+/// only closes it once a design with an `answers` edge publishes.
+///
+/// So the route is two steps now. `draft-design` is a task for the
+/// executor — the dispatcher's DECIDES-vs-EXECUTES rule nominates the
+/// configured executor for a platform-admin TASK, the lane `build`
+/// already rides (measured on 54f0ab33: its build step is assigned to
+/// the executor) — and `design-review` is `ready_when =
+/// steps.draft-design.done`, so the founder decides on the design's
+/// questions, once, and the rule completes the review on publish
+/// exactly as before. The draft records `design_id` at done: `boss
+/// design --answers <packet>` writes it.
+#[tokio::test]
+async fn routing_to_design_opens_the_draft_first_and_the_review_waits_on_it() {
+    let app = app();
+
+    let (status, job) = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/jobs")
+            .header("content-type", "application/json")
+            .header("x-boss-user", admin_header())
+            .body(Body::from(submit_feedback_body()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create rejected: {job}");
+    let job_id = job["id"].as_str().expect("job id").to_string();
+
+    async fn read(app: &axum::Router, job_id: &str) -> serde_json::Value {
+        let (status, body) = send(
+            app,
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/jobs/{job_id}"))
+                .header("x-boss-user", admin_header())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "read failed: {body}");
+        body
+    }
+
+    fn step_of<'a>(job: &'a serde_json::Value, slug: &str) -> &'a serde_json::Value {
+        job["steps"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|s| s["spec_slug"] == slug)
+            .unwrap_or_else(|| panic!("no step `{slug}` on the packet: {job:#?}"))
+    }
+
+    /// PUT a completion, merging `extra` over the step's current
+    /// metadata — never replacing, because `authority_role` shares
+    /// that object. Returns the response so a refusal can be asserted.
+    async fn put_done(
+        app: &axum::Router,
+        job_id: &str,
+        step: &serde_json::Value,
+        extra: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut metadata = step["metadata"].clone();
+        for (k, v) in extra.as_object().into_iter().flatten() {
+            metadata[k] = v.clone();
+        }
+        send(
+            app,
+            Request::builder()
+                .method("PUT")
+                .uri(format!(
+                    "/api/jobs/{job_id}/steps/{}",
+                    step["id"].as_str().expect("step id")
+                ))
+                .header("content-type", "application/json")
+                .header("x-boss-user", admin_header())
+                .body(Body::from(
+                    serde_json::json!({ "status": "completed", "metadata": metadata }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+    }
+
+    async fn complete(
+        app: &axum::Router,
+        job_id: &str,
+        current: &serde_json::Value,
+        slug: &str,
+        extra: serde_json::Value,
+    ) {
+        let step = step_of(current, slug);
+        assert!(
+            step["status"] == "ready" || step["status"] == "active",
+            "step `{slug}` is `{}`, not actionable",
+            step["status"]
+        );
+        let (status, body) = put_done(app, job_id, step, extra).await;
+        assert!(
+            status.is_success(),
+            "completing `{slug}` failed {status}: {body}"
+        );
+    }
+
+    let current = read(&app, &job_id).await;
+    complete(
+        &app,
+        &job_id,
+        &current,
+        "triage",
+        serde_json::json!({ "disposition": "design" }),
+    )
+    .await;
+
+    // The draft is the executor's, and it is the only thing open.
+    let after = read(&app, &job_id).await;
+    let draft = step_of(&after, "draft-design");
+    assert!(
+        draft["status"] == "ready" || draft["status"] == "active",
+        "triage routed to `design`, so draft-design must be actionable — it is `{}`. \
+         Steps: {:#?}",
+        draft["status"],
+        after["steps"]
+    );
+    assert_eq!(draft["kind"], "task", "a draft is work, not a verdict");
+    assert_eq!(
+        draft["metadata"]["authority_role"], "platform-admin",
+        "the executor lane: a platform-admin TASK is what the dispatcher nominates the \
+         configured executor for (the lane `build` rides)"
+    );
+    assert!(
+        draft["fields"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|f| f["name"] == "design_id" && f["required"] == true),
+        "the draft records the design it filed: {:#?}",
+        draft["fields"]
+    );
+    assert_eq!(
+        step_of(&after, "design-review")["status"],
+        "pending",
+        "the founder's review waits on the design — a ready review with no design is \
+         the measured defect. Steps: {:#?}",
+        after["steps"]
+    );
+    assert_eq!(
+        step_of(&after, "build")["status"],
+        "pending",
+        "build stays alive across the route"
+    );
+    assert_ne!(after["status"], "closed");
+
+    // The draft cannot complete without naming the design…
+    let (status, body) = put_done(&app, &job_id, draft, serde_json::json!({})).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a draft done without design_id must be refused: {body}"
+    );
+
+    // …and once it does, the review opens and nothing else moves.
+    let current = read(&app, &job_id).await;
+    complete(
+        &app,
+        &job_id,
+        &current,
+        "draft-design",
+        serde_json::json!({ "design_id": "5fc71f03-db4f-4be2-9839-484ccf29781a" }),
+    )
+    .await;
+    let after = read(&app, &job_id).await;
+    let review = step_of(&after, "design-review");
+    assert!(
+        review["status"] == "ready" || review["status"] == "active",
+        "the draft is done, so design-review must be actionable — it is `{}`. Steps: {:#?}",
+        review["status"],
+        after["steps"]
+    );
+    assert_eq!(step_of(&after, "build")["status"], "pending");
+    assert_ne!(after["status"], "closed");
+
+    // The verdict the publish rule writes still opens the build.
+    complete(
+        &app,
+        &job_id,
+        &after,
+        "design-review",
+        serde_json::json!({ "verdict": "approved", "answer": "design decided" }),
+    )
+    .await;
+    let after = read(&app, &job_id).await;
+    let build = step_of(&after, "build");
+    assert!(
+        build["status"] == "ready" || build["status"] == "active",
+        "an approved review is a decision to build — `build` is `{}`",
+        build["status"]
     );
 }

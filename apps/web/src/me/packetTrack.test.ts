@@ -37,6 +37,14 @@ describe('stopOf', () => {
     ).toBe('working');
   });
 
+  test('drafting the design a feedback asked for is work in hand', () => {
+    // f90ca046: the design route opens the executor's draft before the
+    // founder's review; both are "working" from the visitor's side.
+    expect(
+      stopOf(packet({ steps: [step('draft-design', 'ready'), step('design-review', 'pending')] })),
+    ).toBe('working');
+  });
+
   test('waiting on the reporter is still "being read", not progress', () => {
     // From the visitor's side the honest statement is that someone is
     // reading it and wants more — not that it advanced.

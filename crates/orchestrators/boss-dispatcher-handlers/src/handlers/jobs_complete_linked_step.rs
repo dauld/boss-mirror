@@ -1947,6 +1947,98 @@ mod tests {
         );
     }
 
+    /// A user-feedback packet in the shape f90ca046 gives the design
+    /// route (2026-09-18): triage routed to `design`, the executor's
+    /// `draft-design` task done carrying the id of the design it
+    /// filed, and `design-review` — `ready_when =
+    /// steps.draft-design.done` — open with the verb's question.
+    fn feedback_drafted_for_design(draft_status: &str, review_status: &str) -> serde_json::Value {
+        let draft_metadata = if draft_status == "completed" {
+            json!({ "authority_role": "platform-admin", "design_id": DESIGN })
+        } else {
+            json!({ "authority_role": "platform-admin" })
+        };
+        json!({
+            "id": PACKET,
+            "kind": "user-feedback",
+            "title": "Feedback on /it/estate",
+            "status": "open",
+            "metadata": { "submitted_by": "emp-david" },
+            "steps": [
+                { "id": "s-triage", "spec_slug": "triage", "status": "completed",
+                  "metadata": { "disposition": "design" } },
+                { "id": "s-draft", "spec_slug": "draft-design", "status": draft_status,
+                  "metadata": draft_metadata },
+                { "id": REVIEW_STEP, "spec_slug": "design-review", "status": review_status,
+                  "metadata": { "authority_role": "platform-admin", "verdict": "",
+                                "question": "Decide design 'A car lands where its change goes live' (c6bd173e)" } },
+                { "id": BRANCH_STEP, "spec_slug": "build", "status": "pending", "metadata": {} },
+            ],
+        })
+    }
+
+    /// Backlog f90ca046: the design route now opens the executor's
+    /// draft first and the founder's review waits on it. The rule is
+    /// unchanged — it names `design-review` and follows `answers` —
+    /// so a published design must still close the review it was
+    /// filed for, now that the review opens one step later. Measured
+    /// 2026-09-18 on 54f0ab33: the design (5fc71f03) was filed by hand
+    /// against a review that had been ready, empty, for the founder
+    /// since triage.
+    #[tokio::test]
+    async fn a_published_design_still_closes_the_review_that_waited_on_its_draft() {
+        let (base, puts, patches) = mock_jobs(vec![
+            design(json!({ "answers": PACKET, "title": "A car lands where its change goes live" })),
+            feedback_drafted_for_design("completed", "ready"),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let mut ctx = ctx(design_close_marker());
+        ctx.rule_name = "complete-feedback-design-review-on-design-doc-published".into();
+        h.invoke(&design_rule_args(), &ctx).await.expect("runs");
+
+        let calls = puts.lock().unwrap().clone();
+        assert_eq!(
+            calls.len(),
+            1,
+            "exactly the design-review completes — never the draft: {calls:?}"
+        );
+        let (step_id, body) = &calls[0];
+        assert_eq!(step_id, REVIEW_STEP);
+        assert_eq!(body["status"], "completed");
+        assert_eq!(body["metadata"]["verdict"], "approved");
+        assert_eq!(body["metadata"]["decided_by"]["car"], DESIGN);
+        assert!(patches.lock().unwrap().is_empty(), "nothing to note");
+    }
+
+    /// The other half of the same shape: a design that publishes while
+    /// the draft is still open — the executor filed it without
+    /// `--answers`, say, and completed nothing — finds the review
+    /// PENDING and writes nothing. A pending review is one the route
+    /// has not opened, and completing it would fabricate the draft's
+    /// record; the handler notes the noop on both ends instead, and
+    /// the draft stays with the executor.
+    #[tokio::test]
+    async fn a_design_published_before_its_draft_is_done_completes_nothing() {
+        let (base, puts, patches) = mock_jobs(vec![
+            design(json!({ "answers": PACKET })),
+            feedback_drafted_for_design("ready", "pending"),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let mut ctx = ctx(design_close_marker());
+        ctx.rule_name = "complete-feedback-design-review-on-design-doc-published".into();
+        h.invoke(&design_rule_args(), &ctx).await.expect("runs");
+        assert!(
+            puts.lock().unwrap().is_empty(),
+            "a pending review is never completed, and the draft is not the rule's to touch"
+        );
+        assert!(
+            !patches.lock().unwrap().is_empty(),
+            "the noop is noted rather than silent — the draft is still open"
+        );
+    }
+
     /// The person decided the feedback step first (the order the bug
     /// report describes). The design's close then finds it completed
     /// and writes nothing — their verdict stands, and no noop note is

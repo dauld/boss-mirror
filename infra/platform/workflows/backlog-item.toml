@@ -63,6 +63,27 @@ ready_when = "steps.triage.done AND steps.triage.metadata.disposition = \"verify
 title_template = "Re-measure the claim"
 authority_role = "platform-admin"
 
+# THE DESIGN ROUTE OPENS THE DRAFT FIRST (backlog f90ca046, 2026-09-18)
+# — the same shape as user-feedback's, and for the same measured
+# reason: routing to `design` made `design-review` READY with no design
+# filed, a decision for the founder with nothing to decide (4f6019d7).
+# A platform-admin TASK rides the executor lane (the dispatcher's
+# DECIDES-vs-EXECUTES rule, 291a73a7 — how `build` reaches the agent);
+# the bundle names no tenant's role or agent (e2580840). `boss design
+# --answers <this item>` files the design, writes the review's
+# question, and completes this step with `design_id`.
+[[workflow.step]]
+title = "draft-design"
+kind = "task"
+ready_when = "steps.triage.done AND steps.triage.metadata.disposition = \"design\""
+title_template = "Draft the design"
+audience = { role = "platform-admin" }
+metadata_defaults = { procedure = "File the design-doc that answers this item: `boss design <title> --markdown <file> --question 'Qn|title|proposal' ... --answers <this packet>`. The verb writes the design's id here as design_id and completes this step; the founder's design-review opens on it, asking for that design at /it/design." }
+[[workflow.step.fields]]
+name = "design_id"
+field_type = "string"
+required = true
+
 [[workflow.step]]
 title = "design-review"
 # answer-question, not task: the decision surface (question, the
@@ -73,7 +94,8 @@ title = "design-review"
 # and proposed from this step, then the packet, then the triage step
 # that routed here.
 kind = "answer-question"
-ready_when = "steps.triage.done AND steps.triage.metadata.disposition = \"design\""
+# Only once there is a design to decide — see `draft-design` above.
+ready_when = "steps.draft-design.done"
 title_template = "Decide the design"
 # Declared once — see `triage` above (f5ebd2e1 car 1). The projected
 # `authority_role` is what routes this to the platform-admin holder

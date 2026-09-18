@@ -119,6 +119,7 @@ struct AssignmentRowSql {
     step: StepRow,
     job_title: String,
     due_on: Option<chrono::NaiveDate>,
+    opened_on: chrono::NaiveDate,
     workflow: String,
     workflow_version: i32,
     subject_kind: String,
@@ -1469,7 +1470,7 @@ impl JobsRepository for PgJobs {
                     s.sort_order, s.blocked_by, s.sign_offs_required, s.assurance_required, s.sign_offs, \
                     s.fields, s.completed_on, s.metadata, s.notes, s.completed_by, s.completed_at, \
                     s.step_plugin_version, s.embedded_job, \
-                    j.title AS job_title, j.due_on, j.kind AS workflow, j.workflow_version, \
+                    j.title AS job_title, j.due_on, j.opened_on, j.kind AS workflow, j.workflow_version, \
                     j.subject_kind, j.subject_id, j.priority, \
                     j.partition, j.tags, j.metadata -> 'red_trains' AS red_trains \
              FROM steps s \
@@ -1496,6 +1497,7 @@ impl JobsRepository for PgJobs {
                     job_id: JobId::from_uuid(r.step.job_id),
                     job_title: r.job_title,
                     due_on: r.due_on,
+                    opened_on: r.opened_on,
                     workflow: r.workflow,
                     workflow_version: r.workflow_version,
                     subject_kind: r.subject_kind,
@@ -1520,7 +1522,7 @@ impl JobsRepository for PgJobs {
                     s.sort_order, s.blocked_by, s.sign_offs_required, s.assurance_required, s.sign_offs, \
                     s.fields, s.completed_on, s.metadata, s.notes, s.completed_by, s.completed_at, \
                     s.step_plugin_version, s.embedded_job, \
-                    j.title AS job_title, j.due_on, j.kind AS workflow, j.workflow_version, \
+                    j.title AS job_title, j.due_on, j.opened_on, j.kind AS workflow, j.workflow_version, \
                     j.subject_kind, j.subject_id, j.priority, \
                     j.partition, j.tags, j.metadata -> 'red_trains' AS red_trains \
              FROM steps s \
@@ -1541,6 +1543,7 @@ impl JobsRepository for PgJobs {
                     job_id: JobId::from_uuid(r.step.job_id),
                     job_title: r.job_title,
                     due_on: r.due_on,
+                    opened_on: r.opened_on,
                     workflow: r.workflow,
                     workflow_version: r.workflow_version,
                     subject_kind: r.subject_kind,

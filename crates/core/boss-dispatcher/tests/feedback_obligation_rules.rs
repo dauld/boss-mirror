@@ -398,14 +398,39 @@ async fn every_branch_the_rule_names_is_a_live_non_terminal_feedback_branch() {
     .map(|b| (b.slug, b.terminal))
     .collect();
 
+    // …and the step each of those opens in turn. Since f90ca046 the
+    // `design` route is two steps deep: triage opens the executor's
+    // `draft-design`, and the founder's `design-review` is
+    // `ready_when = steps.draft-design.done`. A merged car still
+    // completes the review — a packet in-flight under the version
+    // before this one has it disposition-opened, and a v2 packet
+    // reaches it once the design is filed — so the rule keeps naming
+    // it, and this test follows the route one hop to find it.
+    let feedback = seedable_platform_workflows()
+        .into_iter()
+        .find(|w| w.kind == "user-feedback")
+        .expect("user-feedback is a shipped platform Workflow");
+    let downstream: Vec<(String, bool)> = feedback
+        .steps
+        .iter()
+        .filter(|s| {
+            all_branches
+                .iter()
+                .any(|(b, _)| s.ready_when == format!("steps.{b}.done"))
+        })
+        .map(|s| (s.title.clone(), s.terminal.is_some()))
+        .collect();
+    let on_the_route: Vec<(String, bool)> =
+        all_branches.iter().chain(&downstream).cloned().collect();
+
     for slug in &listed {
-        let branch = all_branches
+        let branch = on_the_route
             .iter()
             .find(|(s, _)| s == slug)
             .unwrap_or_else(|| {
                 panic!(
                     "the rule names branch `{slug}`, which no `user-feedback` disposition \
-                     opens. Live branches: {all_branches:?}"
+                     opens, directly or one hop on. Live branches: {on_the_route:?}"
                 )
             });
         assert!(
@@ -418,8 +443,13 @@ async fn every_branch_the_rule_names_is_a_live_non_terminal_feedback_branch() {
     // And the other direction: a branch added to the Workflow must be
     // a decision someone makes, not an omission nobody notices.
     // `needs-info` is deliberately excluded — a change landing does
-    // not answer a question asked of the reporter.
-    let mut expected: Vec<String> = all_branches
+    // not answer a question asked of the reporter. So is
+    // `draft-design` (f90ca046): a car landing does not draft the
+    // design that was asked for — the draft records `design_id`,
+    // which a car cannot supply. A packet at the draft when a car
+    // merges is left there, noted on both ends by the handler, for
+    // the executor to file the design or re-route.
+    let mut expected: Vec<String> = on_the_route
         .iter()
         .filter(|(_, terminal)| !*terminal)
         .map(|(s, _)| s.clone())
@@ -427,6 +457,7 @@ async fn every_branch_the_rule_names_is_a_live_non_terminal_feedback_branch() {
     expected.sort();
     let mut covered: Vec<String> = listed.clone();
     covered.push("needs-info".to_string());
+    covered.push("draft-design".to_string());
     covered.sort();
     covered.dedup();
     assert_eq!(
@@ -434,6 +465,6 @@ async fn every_branch_the_rule_names_is_a_live_non_terminal_feedback_branch() {
         "the `user-feedback` fork grew (or shrank) a non-terminal branch. Decide \
          whether a shipped change satisfies it: add it to the rule row's `steps` \
          arg, or add it to this test's deliberate-exclusion list alongside \
-         `needs-info`."
+         `needs-info` and `draft-design`."
     );
 }

@@ -1609,6 +1609,10 @@ mod tests {
         assert!(!titles.contains(&"Stale bill"), "closed-job step excluded");
         assert_eq!(rows.len(), 4);
         assert!(rows.iter().all(|r| r.workflow == "ingredient-restock"));
+        // The row carries the packet's admission date: a personal queue
+        // reads "how long has this waited" off the row alone (65a89769,
+        // `boss orient` MY WORK), as it reads the title and priority.
+        assert!(rows.iter().all(|r| r.opened_on == job.opened_on));
     }
 
     #[tokio::test]

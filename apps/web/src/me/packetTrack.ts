@@ -66,6 +66,7 @@ const STOP_OF_STEP: Readonly<Record<string, StopKey>> = {
   triage: 'reading',
   'needs-info': 'reading',
   investigate: 'working',
+  'draft-design': 'working',
   'design-review': 'working',
   build: 'building',
 };
