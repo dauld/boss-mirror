@@ -54,10 +54,11 @@
 
 use anyhow::{Context, Result};
 use boss_core::actor::ActorId;
-use boss_jobs::registry::{PgWorkflows, WorkflowRegistry};
+use boss_jobs::registry::PgWorkflows;
 use boss_jobs::seed_loader::{SeedLoaderError, load_stations, load_step_plugins, load_workflows};
 use boss_jobs::station_seed::{seed_stations, stations_beside};
 use boss_jobs::step_plugin_seed::{seed_step_plugins, step_plugins_beside};
+use boss_jobs::workflow_seed::seed_workflows;
 use boss_jobs::{PgStations, PgStepPlugins, StationSpec, StepPluginSpec};
 use clap::Parser;
 use std::path::{Path, PathBuf};
@@ -206,34 +207,17 @@ async fn main() -> Result<()> {
         std::sync::Arc::new(boss_clock_client::WallClockClient);
     let now = boss_clock_client::now_from(&clock).await;
 
-    let (mut inserted, mut present) = (0usize, 0usize);
-    for spec in specs {
-        let kind = spec.kind.clone();
-        // Present means present. Any active row for this kind — a
-        // version an operator published, or one an earlier run of this
-        // binary inserted — is left exactly as it is.
-        if registry.get_active(&kind).await.is_ok() {
-            present += 1;
-            println!("  {kind}: already present, untouched");
-            continue;
-        }
-        if cli.dry_run {
-            inserted += 1;
-            println!("  {kind}: WOULD insert (dry run)");
-            continue;
-        }
-        registry
-            .create_draft(spec, &actor, now)
+    // Present means ANY version — the decision is `bundle_seed`'s, the
+    // same table the stations and step plugins below read. Until
+    // 2026-09-18 (backlog 8b2eaff2) it was an inline loop here that
+    // read "present" as "an active row exists", and re-published the
+    // kind an operator had retired twenty-two minutes earlier.
+    if !specs.is_empty() {
+        let report = seed_workflows(&registry, &specs, &actor, now, cli.dry_run)
             .await
-            .with_context(|| format!("drafting {kind}"))?;
-        registry
-            .publish(&kind, &actor, now)
-            .await
-            .with_context(|| format!("publishing {kind} — the viability lint refused it"))?;
-        inserted += 1;
-        println!("  {kind}: inserted");
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        println!("{report}");
     }
-    println!("platform-workflow-seed: {inserted} inserted, {present} already present");
 
     // A refusal is collected for every row before anything is written,
     // and it is the boot's to see: the row the tree declares and the

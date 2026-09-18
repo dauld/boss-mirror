@@ -303,7 +303,7 @@ require_headroom "to start"
 #            test guarding the file being edited — which this very car
 #            would have done to itself.
 #            infra/lint/* ALSO implies boss-cli (added with backlog
-#            294bb7c9): train.rs's `the_roster_is_the_lint_directory
+#            294bb7c9): train/consist.rs's `the_roster_is_the_lint_directory
 #            _itself` reads infra/lint/ and asserts every lint the
 #            delivery policy excuses is STILL a file there, so deleting
 #            or renaming a lint reddens the conductor's consist check.
@@ -689,7 +689,7 @@ scope_self_test() {
     _case "a protocol-only car still has a crate" "boss-jobs" \
         "infra/platform/workflows/ship-a-change.toml"
     _case "two files, one crate" "boss-cli" \
-        "crates/orchestrators/boss-cli/src/train.rs" \
+        "crates/orchestrators/boss-cli/src/train/conductor.rs" \
         "crates/orchestrators/boss-cli/src/gate.rs"
     # The tier segment must not be mistaken for the crate name.
     _case "tier is not the crate" "boss-people" "crates/modules/boss-people/src/http.rs"
@@ -1185,7 +1185,7 @@ check() {
 # information its source does not is a merge conflict waiting to
 # happen. Adding a lint is now dropping a file in infra/lint/; this
 # file does not change. The conductor's consist check reads the same
-# directory and asks THIS SCRIPT what to leave out (train.rs
+# directory and asks THIS SCRIPT what to leave out (train/consist.rs
 # `gate_exclusions` runs `gate.sh --exclusions` in the assembled
 # tree), so the two readers agree by construction rather than by
 # being kept in step.

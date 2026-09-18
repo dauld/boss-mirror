@@ -7,7 +7,7 @@
 //! policy) will need it twice more. The table, the report, the refusal
 //! and the classify-then-write discipline are the same for every
 //! registry that has a name, a version and an active row — only the
-//! three reads and the one write differ, and those are the
+//! one read and the one write differ, and those are the
 //! [`BundleRegistry`] port. A fact that lived twice would have been
 //! pinned by an equality test (CLAUDE.md §9a); a function that lives
 //! once needs no pin.
@@ -17,11 +17,37 @@
 //! | live registry                                   | outcome                 |
 //! |-------------------------------------------------|-------------------------|
 //! | no row of this name                             | insert, active          |
+//! | rows of this name, NONE active                  | retired — left alone    |
 //! | active row at a LOWER version                   | publish; retire the old |
 //! | row at (name, version) active and EQUAL         | present — untouched     |
 //! | row at (name, version) active and DIFFERENT     | REFUSED, by field       |
 //! | row at (name, version) exists but is not active | superseded — untouched  |
 //! | no row at (name, version); active row is HIGHER | behind — untouched      |
+//!
+//! PRESENT MEANS ANY VERSION (backlog 8b2eaff2, 2026-09-18). The
+//! second row is the one every registry got wrong, because "present"
+//! was read as "an active row exists": the operator retired
+//! `maintenance-deploy-confirm` at 12:20Z and the next boot's Workflow
+//! seed published it again at 12:42Z as v3, active — the seed
+//! reverting an operator's decision, on every boot, for as long as the
+//! file was in the tree. A lineage with no active row is a kind
+//! someone RETIRED, and re-activation is an explicit publish, never a
+//! boot. So the first question is asked of the whole lineage, once,
+//! here, for every registry that seeds from a bundle; the version
+//! comparison below it is asked only of a lineage that has an active
+//! row.
+//!
+//! THE WORKFLOW BUNDLE IS UNVERSIONED. A station or step-plugin file
+//! declares its `version`; a Workflow file does not — the registry
+//! assigns max+1 at `create_draft`, and the file is what a FRESH
+//! database gets. So a registry says which table it reads with
+//! [`BundleRegistry::VERSIONED`]: the Workflow seed stops at the first
+//! two rows (absent → insert; retired → left alone; anything active →
+//! present) and never compares, refuses or supersedes — "present means
+//! present" is protocols-as-data Q1 as David answered it. Until this
+//! car the Workflow seed's decision was an inline copy in the binary
+//! (and a second inline copy in its test) — the §9a pair the packet
+//! names, collapsed here.
 //!
 //! Insert-if-missing and nothing else, as the Workflow seed is: a row
 //! an operator published lives on, and this never rewrites one. The
@@ -53,8 +79,8 @@ pub trait Declared: Clone + Serialize + Send + Sync {
     fn status(&self) -> WorkflowStatus;
 }
 
-/// What a bundle seed needs of a registry: two reads by key, and the
-/// one write that lands a row at ITS OWN declared version.
+/// What a bundle seed needs of a registry: one read of a name's whole
+/// lineage, and the one write that lands a row.
 #[async_trait]
 pub trait BundleRegistry: Send + Sync {
     type Spec: Declared;
@@ -64,18 +90,20 @@ pub trait BundleRegistry: Send + Sync {
     const LABEL: &'static str;
     /// Where a row is edited — `infra/platform/stations/<name>.toml`.
     const BUNDLE: &'static str;
+    /// Whether a bundle row declares its own `version` (stations, step
+    /// plugins) or the registry assigns one at publish (workflows).
+    /// An unversioned bundle is decided by lineage alone — see the
+    /// module doc.
+    const VERSIONED: bool;
 
-    /// The live ACTIVE row of this name, or `None`.
-    async fn live_active(&self, name: &str) -> Result<Option<Self::Spec>, Self::Error>;
-    /// The live row at exactly this (name, version), any status, or
-    /// `None`.
-    async fn live_version(
-        &self,
-        name: &str,
-        version: i32,
-    ) -> Result<Option<Self::Spec>, Self::Error>;
+    /// Every live row of this name, any status, any order — the whole
+    /// lineage, so "present" is answered from all of it. Empty when
+    /// the registry has never held the name.
+    async fn live_versions(&self, name: &str) -> Result<Vec<Self::Spec>, Self::Error>;
     /// Retire any active row of the same name and insert `spec` active
-    /// at `spec.version()`, recording the registry's published event.
+    /// — at `spec.version()` for a versioned bundle, at the registry's
+    /// next version otherwise — recording the registry's published
+    /// event.
     async fn publish_declared(
         &self,
         spec: Self::Spec,
@@ -93,12 +121,20 @@ pub enum SeedOutcome {
     /// A lower version was active; the declared version was published
     /// over it and the old one retired.
     Published { superseded: i32 },
-    /// The live active row IS this declaration, every column.
+    /// The live active row IS this declaration, every column (a
+    /// versioned bundle) — or the name has an active row at all (an
+    /// unversioned one).
     Present,
+    /// The name has live rows and NONE is active: an operator retired
+    /// it (or a draft is still being authored — the same rule, since
+    /// publishing over someone's draft is the same revert). `newest`
+    /// is the highest live version. Untouched: re-activation is an
+    /// explicit publish, never a boot.
+    Retired { newest: i32 },
     /// The declared (name, version) exists live but is not the active
     /// row: the live lineage moved past it (an operator published a
-    /// later version). Untouched.
-    Superseded { live_active: Option<i32> },
+    /// later version, `live_active`). Untouched.
+    Superseded { live_active: i32 },
     /// No row at the declared version and the live active row is a
     /// HIGHER version: the bundle is behind the deployment. Untouched,
     /// and worth a version bump in the tree.
@@ -111,14 +147,13 @@ impl std::fmt::Display for SeedOutcome {
             Self::Inserted => write!(f, "inserted"),
             Self::Published { superseded } => write!(f, "published, retiring v{superseded}"),
             Self::Present => write!(f, "already present, untouched"),
-            Self::Superseded {
-                live_active: Some(v),
-            } => write!(f, "superseded live by v{v}, untouched"),
-            Self::Superseded { live_active: None } => {
-                write!(
-                    f,
-                    "exists live but is not active (no active row), untouched"
-                )
+            Self::Retired { newest } => write!(
+                f,
+                "retired (left alone): no live version is active, newest is v{newest} \
+                 — an operator's decision; re-activation is an explicit publish"
+            ),
+            Self::Superseded { live_active } => {
+                write!(f, "superseded live by v{live_active}, untouched")
             }
             Self::Behind { live_active } => {
                 write!(
@@ -130,11 +165,13 @@ impl std::fmt::Display for SeedOutcome {
     }
 }
 
-/// One row's line in the report.
+/// One row's line in the report. `version` is what the bundle
+/// declared — `None` for an unversioned bundle, whose rows are
+/// reported by name alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeedRow {
     pub name: String,
-    pub version: i32,
+    pub version: Option<i32>,
     pub outcome: SeedOutcome,
 }
 
@@ -162,16 +199,19 @@ impl std::fmt::Display for SeedReport {
                 SeedOutcome::Inserted | SeedOutcome::Published { .. } => would,
                 _ => "",
             };
-            writeln!(f, "  {}@v{}: {verb}{}", row.name, row.version, row.outcome)?;
+            let at = row.version.map(|v| format!("@v{v}")).unwrap_or_default();
+            writeln!(f, "  {}{at}: {verb}{}", row.name, row.outcome)?;
         }
         let inserted = self.count(|o| matches!(o, SeedOutcome::Inserted));
         let published = self.count(|o| matches!(o, SeedOutcome::Published { .. }));
         let present = self.count(|o| matches!(o, SeedOutcome::Present));
-        let untouched = self.rows.len() - inserted - published - present;
+        let retired = self.count(|o| matches!(o, SeedOutcome::Retired { .. }));
+        let untouched = self.rows.len() - inserted - published - present - retired;
         write!(
             f,
             "{}: {inserted} inserted, {published} published, \
-             {present} already present, {untouched} left to the live lineage{}",
+             {present} already present, {retired} retired (left alone), \
+             {untouched} left to the live lineage{}",
             self.label,
             if self.dry_run { " (dry run)" } else { "" }
         )
@@ -201,8 +241,12 @@ pub enum BundleSeedError<E> {
         bundle: &'static str,
         rows: Vec<Refusal>,
     },
+    /// The registry failed on one row — reading its lineage, or
+    /// publishing it (a Workflow the viability lint refuses lands
+    /// here). Names the row: a boot that fails must say which kind.
     Registry {
         seed: &'static str,
+        row: String,
         error: E,
     },
 }
@@ -213,7 +257,7 @@ impl<E: std::fmt::Display> std::fmt::Display for BundleSeedError<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Refused { seed, bundle, rows } => f.write_str(&refusal_text(seed, bundle, rows)),
-            Self::Registry { seed, error } => write!(f, "{seed}: {error}"),
+            Self::Registry { seed, row, error } => write!(f, "{seed}: {row}: {error}"),
         }
     }
 }
@@ -262,40 +306,67 @@ pub fn differing_fields<S: Declared>(a: &S, b: &S) -> Vec<String> {
         .collect()
 }
 
+/// What a name's live lineage says before any version is compared:
+/// nothing, rows nobody has active, or the active row.
+enum Lineage<'a, S> {
+    Absent,
+    Retired { newest: i32 },
+    Active(&'a S),
+}
+
+fn lineage<S: Declared>(live: &[S]) -> Lineage<'_, S> {
+    match live.iter().find(|r| r.status() == WorkflowStatus::Active) {
+        Some(active) => Lineage::Active(active),
+        None => match live.iter().map(Declared::version).max() {
+            Some(newest) => Lineage::Retired { newest },
+            None => Lineage::Absent,
+        },
+    }
+}
+
+/// The decision table as a pure function of the live lineage and the
+/// bundle row. `versioned` selects the table: the whole of it when the
+/// bundle declares the row's version, its first two rows when the
+/// registry assigns one.
+pub fn decide<S: Declared>(live: &[S], spec: &S, versioned: bool) -> Result<SeedOutcome, Refusal> {
+    let active = match lineage(live) {
+        Lineage::Absent => return Ok(SeedOutcome::Inserted),
+        Lineage::Retired { newest } => return Ok(SeedOutcome::Retired { newest }),
+        Lineage::Active(_) if !versioned => return Ok(SeedOutcome::Present),
+        Lineage::Active(active) => active,
+    };
+    match live.iter().find(|r| r.version() == spec.version()) {
+        Some(live) if live.status() != WorkflowStatus::Active => Ok(SeedOutcome::Superseded {
+            live_active: active.version(),
+        }),
+        Some(live) => {
+            let fields = differing_fields(live, spec);
+            if fields.is_empty() {
+                Ok(SeedOutcome::Present)
+            } else {
+                Err(Refusal {
+                    name: spec.name().to_string(),
+                    version: spec.version(),
+                    fields,
+                })
+            }
+        }
+        None if active.version() < spec.version() => Ok(SeedOutcome::Published {
+            superseded: active.version(),
+        }),
+        None => Ok(SeedOutcome::Behind {
+            live_active: active.version(),
+        }),
+    }
+}
+
 /// Classify one bundle row against the live registry. Reads only.
 async fn classify<R: BundleRegistry + ?Sized>(
     registry: &R,
     spec: &R::Spec,
 ) -> Result<Result<SeedOutcome, Refusal>, R::Error> {
-    let active = registry.live_active(spec.name()).await?;
-    match registry.live_version(spec.name(), spec.version()).await? {
-        Some(live) => {
-            if live.status() != WorkflowStatus::Active {
-                return Ok(Ok(SeedOutcome::Superseded {
-                    live_active: active.map(|a| a.version()),
-                }));
-            }
-            let fields = differing_fields(&live, spec);
-            if fields.is_empty() {
-                Ok(Ok(SeedOutcome::Present))
-            } else {
-                Ok(Err(Refusal {
-                    name: spec.name().to_string(),
-                    version: spec.version(),
-                    fields,
-                }))
-            }
-        }
-        None => Ok(Ok(match active {
-            None => SeedOutcome::Inserted,
-            Some(a) if a.version() < spec.version() => SeedOutcome::Published {
-                superseded: a.version(),
-            },
-            Some(a) => SeedOutcome::Behind {
-                live_active: a.version(),
-            },
-        })),
-    }
+    let live = registry.live_versions(spec.name()).await?;
+    Ok(decide(&live, spec, R::VERSIONED))
 }
 
 /// Publish `specs` into `registry` by the decision table in the
@@ -309,17 +380,21 @@ pub async fn seed_bundle<R: BundleRegistry + ?Sized>(
     now: DateTime<Utc>,
     dry_run: bool,
 ) -> Result<SeedReport, BundleSeedError<R::Error>> {
-    let registry_error = |error| BundleSeedError::Registry {
+    let registry_error = |spec: &R::Spec, error| BundleSeedError::Registry {
         seed: R::LABEL,
+        row: spec.name().to_string(),
         error,
     };
     let mut rows = Vec::with_capacity(specs.len());
     let mut refusals = Vec::new();
     for spec in specs {
-        match classify(registry, spec).await.map_err(registry_error)? {
+        match classify(registry, spec)
+            .await
+            .map_err(|e| registry_error(spec, e))?
+        {
             Ok(outcome) => rows.push(SeedRow {
                 name: spec.name().to_string(),
-                version: spec.version(),
+                version: R::VERSIONED.then(|| spec.version()),
                 outcome,
             }),
             Err(refusal) => refusals.push(refusal),
@@ -341,7 +416,7 @@ pub async fn seed_bundle<R: BundleRegistry + ?Sized>(
                 registry
                     .publish_declared(spec.clone(), actor, now)
                     .await
-                    .map_err(registry_error)?;
+                    .map_err(|e| registry_error(spec, e))?;
             }
         }
     }

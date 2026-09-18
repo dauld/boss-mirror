@@ -15,23 +15,59 @@
 //! deploy-runner), and neither the knob nor the scripts are named by
 //! the conductor or its manifest again.
 //!
-//! Read from the tree, never a typed roster: the two files that held
-//! the knob are named; the scripts are the ones #443 deleted.
+//! Read from the tree, never a typed roster: the two places that held
+//! the knob are named; the scripts are the ones #443 deleted. The
+//! conductor is a directory module since consolidation H1 (5cb0bddb,
+//! 2026-09-18), so it is read as every `.rs` file under it — a single
+//! file would narrow the check to whichever region the knob landed in.
 
 use boss_testing::repo_root;
 
-const CONDUCTOR: &str = "crates/orchestrators/boss-cli/src/train.rs";
+const CONDUCTOR: &str = "crates/orchestrators/boss-cli/src/train/";
 const MANIFEST: &str = "infra/cluster/manifests/boss-conductor.yaml";
+
+/// Every file `path` names: itself, or, for a directory, each `.rs`
+/// under it (recursively), as repo-relative paths in a stable order.
+fn files_of(path: &str) -> Vec<String> {
+    let abs = repo_root().join(path);
+    if !abs.is_dir() {
+        return vec![path.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut stack = vec![abs];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+            let p = entry.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                let rel = p.strip_prefix(repo_root()).unwrap();
+                out.push(rel.to_string_lossy().into_owned());
+            }
+        }
+    }
+    out.sort();
+    assert!(
+        !out.is_empty(),
+        "{path}: no .rs file under it — a pin that reads nothing passes for nothing"
+    );
+    out
+}
 
 /// Lines of `path` (comments included: a comment that documents a
 /// knob invites the next reader to set it) containing `needle`.
 fn lines_naming(path: &str, needle: &str) -> Vec<String> {
-    std::fs::read_to_string(repo_root().join(path))
-        .unwrap_or_else(|e| panic!("{path}: {e}"))
-        .lines()
-        .enumerate()
-        .filter(|(_, l)| l.contains(needle))
-        .map(|(i, l)| format!("{path}:{}: {}", i + 1, l.trim()))
+    files_of(path)
+        .into_iter()
+        .flat_map(|file| {
+            std::fs::read_to_string(repo_root().join(&file))
+                .unwrap_or_else(|e| panic!("{file}: {e}"))
+                .lines()
+                .enumerate()
+                .filter(|(_, l)| l.contains(needle))
+                .map(|(i, l)| format!("{file}:{}: {}", i + 1, l.trim()))
+                .collect::<Vec<_>>()
+        })
         .collect()
 }
 

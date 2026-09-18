@@ -36,6 +36,7 @@ mod receipt;
 mod rerail;
 mod running;
 mod script;
+mod steps;
 mod tenant;
 mod tenant_publish;
 mod train;
@@ -615,6 +616,8 @@ enum Commands {
     Receipt(receipt::Cmd),
     #[command(flatten)]
     Running(running::Cmd),
+    #[command(flatten)]
+    Steps(steps::Cmd),
     #[command(flatten)]
     Tenant(tenant::Cmd),
     #[command(flatten)]
@@ -1408,6 +1411,7 @@ async fn main() -> Result<()> {
         Commands::Merged(cmd) => merged::dispatch(cmd),
         Commands::Receipt(cmd) => receipt::dispatch(cmd).await,
         Commands::Running(cmd) => running::dispatch(cmd),
+        Commands::Steps(cmd) => steps::dispatch(cmd).await,
         Commands::Tenant(cmd) => tenant::dispatch(cmd).await,
         Commands::Estate(cmd) => estate::dispatch(cmd),
     }
@@ -1632,7 +1636,7 @@ mod tests {
         for expected in [
             "doctor", "emit", "upgrade", "script", "assets", "sim", "ledger", "inspect", "train",
             "gate", "park", "merged", "receipt", "running", "workflow", "job", "prove", "publish",
-            "queue", "packet", "audit",
+            "queue", "packet", "audit", "triage", "fold", "hold", "release",
         ] {
             assert!(
                 names.contains(&expected),

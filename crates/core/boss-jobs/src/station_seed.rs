@@ -16,7 +16,7 @@
 //! The decision table, the report and the refusal live in
 //! [`crate::bundle_seed`] since car 2 (step plugins) needed them a
 //! second time; this module is the station half of the port — the
-//! three reads and the one write — plus where the bundle is.
+//! one read of the lineage and the one write — plus where the bundle is.
 
 use std::path::Path;
 
@@ -78,25 +78,10 @@ impl<'a> BundleRegistry for dyn StationRegistry + 'a {
     type Error = StationError;
     const LABEL: &'static str = "platform-station-seed";
     const BUNDLE: &'static str = "infra/platform/stations/<name>.toml";
+    const VERSIONED: bool = true;
 
-    async fn live_active(&self, name: &str) -> Result<Option<StationSpec>, StationError> {
-        match self.get_active(name).await {
-            Ok(row) => Ok(Some(row)),
-            Err(StationError::NotFound(_)) => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
-    async fn live_version(
-        &self,
-        name: &str,
-        version: i32,
-    ) -> Result<Option<StationSpec>, StationError> {
-        match self.get_version(name, version).await {
-            Ok(row) => Ok(Some(row)),
-            Err(StationError::NotFound(_)) => Ok(None),
-            Err(e) => Err(e),
-        }
+    async fn live_versions(&self, name: &str) -> Result<Vec<StationSpec>, StationError> {
+        self.list_versions(name).await
     }
 
     async fn publish_declared(
@@ -274,14 +259,44 @@ mod tests {
             .expect("an operator's later version is not the bundle's problem");
         assert_eq!(
             report.rows[0].outcome,
-            SeedOutcome::Superseded {
-                live_active: Some(4)
-            }
+            SeedOutcome::Superseded { live_active: 4 }
         );
         assert_eq!(
             registry.get_active("dock").await.expect("dock").title,
             "Operator's dock"
         );
+    }
+
+    /// The Workflow seed's 12:42Z revert (backlog 8b2eaff2), on the
+    /// versioned table: an operator retires a station and the bundle
+    /// — at the retired version OR a version the registry never held
+    /// — must not bring it back. Present means any version.
+    #[tokio::test]
+    async fn a_retired_lineage_is_left_retired_whatever_the_bundle_declares() {
+        let registry = seeded(&[spec("dock", 3)]).await;
+        registry
+            .retire("dock", &actor(), now())
+            .await
+            .expect("the operator's retire");
+        let before = registry.recorded_events().len();
+        let report = seed_stations(&registry, &[spec("dock", 3)], &actor(), now(), false)
+            .await
+            .expect("seed");
+        assert_eq!(report.rows[0].outcome, SeedOutcome::Retired { newest: 3 });
+        let report = seed_stations(&registry, &[spec("dock", 4)], &actor(), now(), false)
+            .await
+            .expect("seed");
+        assert_eq!(
+            report.rows[0].outcome,
+            SeedOutcome::Retired { newest: 3 },
+            "a version bump in the bundle is not a re-activation either: {report}"
+        );
+        assert!(
+            report.to_string().contains("dock@v4: retired (left alone)"),
+            "{report}"
+        );
+        assert!(registry.get_active("dock").await.is_err());
+        assert_eq!(registry.recorded_events().len(), before, "nothing written");
     }
 
     #[tokio::test]

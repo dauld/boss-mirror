@@ -241,5 +241,9 @@ name = "the_stations_bundle_is_the_migrations_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "the_seed_leaves_a_retired_kind_retired_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "the_step_plugins_bundle_is_the_migrations_pg"
 required-features = ["postgres"]

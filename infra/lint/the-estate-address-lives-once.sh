@@ -80,7 +80,11 @@ crates/orchestrators/boss-cli/src/prove.rs	#[cfg(test)] probe fixture
 crates/orchestrators/boss-cli/src/publish.rs	#[cfg(test)] clone-URL fixture
 crates/orchestrators/boss-cli/src/queue.rs	#[cfg(test)] assertion that a refusal names the record
 crates/orchestrators/boss-cli/src/running.rs	the CLI's BOSS_JOBS_URL default (reads env as before)
-crates/orchestrators/boss-cli/src/train.rs	BOSS_TRAIN_FORGE_URL defaults, refusal prose and #[cfg(test)] fixtures
+crates/orchestrators/boss-cli/src/train/forge.rs	the Forgejo adapter's BOSS_TRAIN_FORGE_URL default (the CLI reads env as before)
+crates/orchestrators/boss-cli/src/train/jobs_api.rs	#[cfg(test)] fixture: the transport error a blip classifies
+crates/orchestrators/boss-cli/src/train/mod.rs	the conductor Config's BOSS_TRAIN_FORGE_URL default (the CLI reads env as before)
+crates/orchestrators/boss-cli/src/train/preflight.rs	refusal prose and #[cfg(test)] fixtures for the forge/adapter mismatch
+crates/orchestrators/boss-cli/src/train/red_verdict.rs	#[cfg(test)] fixtures: the forge target_url a red check carries
 crates/orchestrators/boss-dispatcher-handlers/src/handlers/estate_compare.rs	#[cfg(test)] estate fixtures
 infra/cluster/manifests/boss-audit-integrity.yaml	a CronJob's image: the kubelet pulls it; a manifest reads no host file (the registry as a render parameter is a later car)
 infra/cluster/manifests/boss-backup.yaml	CronJob images, as above

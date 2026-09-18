@@ -28,7 +28,7 @@
 //!
 //! The decision table, the report and the refusal are
 //! [`crate::bundle_seed`]'s; this module is the plugin half of the
-//! port — three reads, one write — plus where the bundle is.
+//! port — one read of the lineage, one write — plus where the bundle is.
 
 use std::path::{Path, PathBuf};
 
@@ -91,25 +91,10 @@ impl<'a> BundleRegistry for dyn StepPluginRegistry + 'a {
     type Error = StepPluginError;
     const LABEL: &'static str = "platform-step-plugin-seed";
     const BUNDLE: &'static str = "infra/platform/step-plugins/<kind>.toml";
+    const VERSIONED: bool = true;
 
-    async fn live_active(&self, kind: &str) -> Result<Option<StepPluginSpec>, StepPluginError> {
-        match self.get_active(kind).await {
-            Ok(row) => Ok(Some(row)),
-            Err(StepPluginError::NotFound(_)) => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
-    async fn live_version(
-        &self,
-        kind: &str,
-        version: i32,
-    ) -> Result<Option<StepPluginSpec>, StepPluginError> {
-        match self.get_version(kind, version).await {
-            Ok(row) => Ok(Some(row)),
-            Err(StepPluginError::NotFound(_)) => Ok(None),
-            Err(e) => Err(e),
-        }
+    async fn live_versions(&self, kind: &str) -> Result<Vec<StepPluginSpec>, StepPluginError> {
+        self.list_versions(kind).await
     }
 
     async fn publish_declared(

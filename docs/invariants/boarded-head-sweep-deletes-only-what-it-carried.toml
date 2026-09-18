@@ -1,8 +1,8 @@
 [[invariant]]
 id = "boarded-head-sweep-deletes-only-what-it-carried"
 claim = "The sweep now deletes only what it can prove it carried: the head recorded at ASSEMBLY time must still be the branch's head."
-source = "crates/orchestrators/boss-cli/src/train.rs"
+source = "crates/orchestrators/boss-cli/src/train/sweep.rs"
 enforcement = "enforced"
-mechanism = "crates/orchestrators/boss-cli/src/train.rs"
+mechanism = "crates/orchestrators/boss-cli/src/train/sweep.rs"
 last_verified = ""
 note = "`sweep_guard` is a pure decision function over (recorded, current) heads, so the four outcomes (Delete / Moved / NoRecord / Gone) are each unit-tested. Asking the forge FIRST is part of the invariant: record-first conflated 'we cannot vouch for this branch' with 'there is no such branch'. Provenance: car 23923b40 lost unmerged commits pushed after boarding."

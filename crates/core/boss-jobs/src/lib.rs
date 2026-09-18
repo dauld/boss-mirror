@@ -56,6 +56,7 @@ pub mod stranded;
 pub mod trust;
 pub mod workflow_lint;
 pub mod workflow_quarantine;
+pub mod workflow_seed;
 pub mod yard;
 // Platform Workflows live in `infra/platform/workflows/<kind>.toml`
 // (`registry::platform_workflows()`, the Rust roster, is empty since

@@ -1,8 +1,8 @@
 [[invariant]]
 id = "a-verdict-the-system-recorded-is-not-the-verdict-now"
 claim = "Any state read once and stamped onto a terminal step must be re-read for decisions, and a change in it must be reported."
-source = "crates/orchestrators/boss-cli/src/train.rs (verdict_drift, ci_overdue, auto_cancel_reason)"
+source = "crates/orchestrators/boss-cli/src/train/verdicts.rs (verdict_drift, ci_overdue, auto_cancel_reason)"
 enforcement = "checked"
-mechanism = "crates/orchestrators/boss-cli/src/train.rs — `verdict_drift` reports a CI verdict that moved after the `ci` step recorded it, and `ci_overdue` reports a PR that CI never answered within BOSS_TRAIN_CI_HOURS (2, roughly twice the measured p90). Seven tests. Not `enforced` because it holds for the CI verdict only; nothing generalises it to the next value stamped on a terminal step."
+mechanism = "crates/orchestrators/boss-cli/src/train/verdicts.rs — `verdict_drift` reports a CI verdict that moved after the `ci` step recorded it, and `ci_overdue` reports a PR that CI never answered within BOSS_TRAIN_CI_HOURS (2, roughly twice the measured p90). Seven tests. Not `enforced` because it holds for the CI verdict only; nothing generalises it to the next value stamped on a terminal step."
 last_verified = "2026-08-15"
 note = "Train 20260815-0621 sat red for 45 minutes after a repair with the system reporting nothing, and was found by querying the forge by hand. The `ci` step completes once and is never revisited, so a repaired train's second verdict was recorded nowhere — the repair loop, the path most in need of feedback, had none. The obvious fix is impossible: `update_step_at` freezes status, completed_on AND metadata on a terminal row, which is `no-protocol-step-needs-un-completing` seen from the other side. So the moving fact lives on the train job's metadata beside the immutable record of what the verdict was when it settled. Both are true; they are different facts. The threshold is measured, not guessed: 22 trains, pr->ci median ~33m, p90 ~56m, range 10-169m, and no correlation with car count."

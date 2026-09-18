@@ -175,7 +175,7 @@ ALLOWED_FILES=(
   # in the brewery's simulated calendar, and the Job it writes to is
   # non-simulated. Rule 1 is untouched — this is a payload field, and
   # the record stamp is still minted by EventStamp.
-  "crates/orchestrators/boss-cli/src/train.rs"
+  "crates/orchestrators/boss-cli/src/train/conductor.rs"
   # The sim binary's `went_live=` marker on the regenerate-deployment
   # backfill step: when did this regen actually go live, in real time.
   # Deployment bookkeeping on a real Job, not a brewery business date

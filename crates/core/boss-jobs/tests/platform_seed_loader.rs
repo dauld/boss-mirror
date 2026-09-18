@@ -6,58 +6,48 @@
 //! goes away deliberately: it is the feature that reverts operator
 //! edits." Both halves are load-bearing and both are asserted here —
 //! the insert, and the not-touching.
+//!
+//! This exercises `boss_jobs::workflow_seed::seed_workflows` — the
+//! function the binary calls. Until 2026-09-18 (backlog 8b2eaff2) it
+//! carried its own inline copy of the seed's loop, which asserted the
+//! same wrong reading of "present" the binary had and so passed while
+//! the binary reverted an operator's retire on every boot. A test that
+//! restates the logic it tests pins nothing.
 
 use boss_core::actor::ActorId;
-use boss_jobs::registry::{PgWorkflows, WorkflowRegistry, WorkflowStatus};
+use boss_jobs::registry::{PgWorkflows, WorkflowRegistry, WorkflowStatus, platform_bundle_path};
 use boss_jobs::seed_loader::load_workflows;
+use boss_jobs::workflow_seed::{SeedOutcome, SeedReport, seed_workflows};
 use boss_testing::TestDb;
-
-const BUNDLE: &str = "../../../infra/platform/workflows";
 
 fn seed_actor() -> ActorId {
     ActorId::Automation("platform-workflow-seed".into())
 }
 
-/// The logic the binary runs, exercised directly so the contract is
-/// tested rather than the argument parsing.
-async fn seed(registry: &PgWorkflows) -> (usize, usize) {
-    let now = chrono::Utc::now();
-    let (mut inserted, mut present) = (0, 0);
-    for spec in load_workflows(BUNDLE).expect("bundle parses") {
-        let kind = spec.kind.clone();
-        if registry.get_active(&kind).await.is_ok() {
-            present += 1;
-            continue;
-        }
-        registry
-            .create_draft(spec, &seed_actor(), now)
-            .await
-            .expect("draft");
-        registry
-            .publish(&kind, &seed_actor(), now)
-            .await
-            .expect("publish");
-        inserted += 1;
-    }
-    (inserted, present)
+/// The seed as the binary runs it, minus the argument parsing.
+async fn seed(registry: &PgWorkflows) -> SeedReport {
+    let bundle = load_workflows(platform_bundle_path()).expect("bundle parses");
+    seed_workflows(registry, &bundle, &seed_actor(), chrono::Utc::now(), false)
+        .await
+        .expect("the platform bundle seeds")
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_seed_inserts_the_bundle_then_stops() {
     let db = TestDb::new().await;
     let registry = PgWorkflows::new(db.pool.clone());
-    let bundled = load_workflows(BUNDLE).expect("bundle parses");
+    let bundled = load_workflows(platform_bundle_path()).expect("bundle parses");
     assert!(!bundled.is_empty(), "an empty bundle would prove nothing");
 
     // The schema seeds no platform workflows, so a fresh deployment
     // starts without them and the first run must supply every one.
-    let (inserted, present) = seed(&registry).await;
+    let report = seed(&registry).await;
     assert_eq!(
-        inserted,
+        report.count(|o| *o == SeedOutcome::Inserted),
         bundled.len(),
-        "first run inserts the whole bundle"
+        "first run inserts the whole bundle: {report}"
     );
-    assert_eq!(present, 0);
+    assert_eq!(report.count(|o| *o == SeedOutcome::Present), 0);
 
     for spec in &bundled {
         let live = registry
@@ -77,16 +67,20 @@ async fn the_seed_inserts_the_bundle_then_stops() {
     // the half that matters — a seed that "helpfully" republishes is
     // bootstrap_reconcile again, and reverting operator edits is the
     // behaviour being removed.
-    let (inserted, present) = seed(&registry).await;
-    assert_eq!(inserted, 0, "a second run must insert nothing");
-    assert_eq!(present, bundled.len());
+    let report = seed(&registry).await;
+    assert_eq!(
+        report.count(|o| *o == SeedOutcome::Inserted),
+        0,
+        "a second run must insert nothing: {report}"
+    );
+    assert_eq!(report.count(|o| *o == SeedOutcome::Present), bundled.len());
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_seed_leaves_an_operator_edit_alone() {
     let db = TestDb::new().await;
     let registry = PgWorkflows::new(db.pool.clone());
-    let bundled = load_workflows(BUNDLE).expect("bundle parses");
+    let bundled = load_workflows(platform_bundle_path()).expect("bundle parses");
     let target = bundled.first().expect("bundle has a row").clone();
 
     seed(&registry).await;
@@ -107,8 +101,12 @@ async fn the_seed_leaves_an_operator_edit_alone() {
         .expect("publish");
 
     // Booting again must not undo it.
-    let (inserted, _) = seed(&registry).await;
-    assert_eq!(inserted, 0, "the kind is present — nothing to insert");
+    let report = seed(&registry).await;
+    assert_eq!(
+        report.count(|o| *o == SeedOutcome::Inserted),
+        0,
+        "the kind is present — nothing to insert: {report}"
+    );
     let live = registry
         .get_active(&target.kind)
         .await

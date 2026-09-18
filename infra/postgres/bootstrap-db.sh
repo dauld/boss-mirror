@@ -176,7 +176,7 @@ if PLATFORM_WF_BIN="$(find_boss_bin boss-platform-workflow-seed)"; then
         if SEED_OUT="$("$PLATFORM_WF_BIN" \
             --database-url "$BUILD_URL" \
             --seed-path "$PLATFORM_WF_DIR" 2>&1)"; then
-            printf '%s\n' "$SEED_OUT" | grep -E "inserted|already present|seed:" || true
+            printf '%s\n' "$SEED_OUT" | grep -E "inserted|already present|retired|seed:" || true
         else
             echo "  WARNING: platform Workflow bundle seed FAILED — full output follows" >&2
             printf '%s\n' "$SEED_OUT" >&2
