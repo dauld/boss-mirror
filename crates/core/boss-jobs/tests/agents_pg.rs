@@ -113,12 +113,14 @@ async fn the_schema_refuses_an_alias_to_nothing_and_a_mis_shaped_id() {
 }
 
 /// The tenant's batch against the real tables (backlog f56155f0,
-/// 2026-09-17): insert-if-absent by id, aliases insert-if-absent by
-/// alias, a row the migration already registered is KEPT and the batch
-/// names which declared fields differ, and an unpriced default model is
-/// refused as `Unpriced` naming the model — not as a storage error.
+/// 2026-09-17; the rule since 09887242): a row the registry lacks is
+/// inserted, a row the migration already registered is UPDATED to the
+/// declaration and the batch names each change from → to, a re-run of
+/// the same declaration changes nothing, an alias the tenant does not
+/// declare is kept, and an unpriced default model is refused as
+/// `Unpriced` naming the model — not as a storage error.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_batch_registers_new_agents_keeps_the_migrations_row_and_names_what_differs() {
+async fn a_batch_registers_new_agents_and_updates_the_migrations_row_to_the_declaration() {
     use boss_jobs::agents::{AgentInput, AgentsError};
     let db = TestDb::new().await;
     let registry = PgAgents::new(db.pool.clone());
@@ -131,6 +133,13 @@ async fn a_batch_registers_new_agents_keeps_the_migrations_row_and_names_what_di
         max_concurrent_runs: None,
     };
 
+    // A login an operator added by hand, which the tenant's file does
+    // not list — the rule keeps it.
+    sqlx::query("INSERT INTO actor_aliases (alias, actor_id) VALUES ($1, 'agent-claude')")
+        .bind("ops-added@algedonic.dev")
+        .execute(&db.pool)
+        .await
+        .unwrap();
     let out = registry
         .publish(
             &[
@@ -146,19 +155,26 @@ async fn a_batch_registers_new_agents_keeps_the_migrations_row_and_names_what_di
         )
         .await
         .expect("the batch lands");
-    assert_eq!((out.received, out.inserted), (2, 1));
-    assert_eq!(out.kept.len(), 1);
-    assert_eq!(out.kept[0].id, "agent-claude");
-    assert_eq!(out.kept[0].differs, ["display_name"]);
+    assert_eq!((out.received, out.inserted, out.unchanged), (2, 1, 0));
+    assert_eq!(out.updated.len(), 1);
+    assert_eq!(out.updated[0].id, "agent-claude");
+    assert_eq!(
+        out.updated[0].render(),
+        "agent-claude (display_name Claude (Claude Code sessions on the dev pod) → Claude (engineering))"
+    );
 
     let rows = registry.list().await.expect("list");
     let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
     assert_eq!(ids, ["agent-claude", "agent-scout"]);
     assert_eq!(
-        rows[0].display_name, "Claude (Claude Code sessions on the dev pod)",
-        "the migration's row is kept as registered, never overwritten"
+        rows[0].display_name, "Claude (engineering)",
+        "the tenant's declaration wins on the declared field"
     );
-    assert_eq!(rows[0].aliases, ["claude@algedonic.dev"]);
+    assert_eq!(
+        rows[0].aliases,
+        ["claude@algedonic.dev", "ops-added@algedonic.dev"],
+        "the undeclared alias is kept"
+    );
     assert_eq!(rows[1].aliases, ["scout@example.test"]);
     assert_eq!(
         registry
@@ -170,16 +186,23 @@ async fn a_batch_registers_new_agents_keeps_the_migrations_row_and_names_what_di
         "the declared alias resolves through the login door"
     );
 
-    // A second, identical publish inserts nothing and differs nowhere.
+    // A second, identical publish inserts nothing and changes nothing.
     let again = registry
         .publish(
-            &[declared("agent-scout", "Scout", "scout@example.test")],
+            &[
+                declared(
+                    "agent-claude",
+                    "Claude (engineering)",
+                    "claude@algedonic.dev",
+                ),
+                declared("agent-scout", "Scout", "scout@example.test"),
+            ],
             &stamp(),
         )
         .await
         .unwrap();
-    assert_eq!((again.received, again.inserted), (1, 0));
-    assert_eq!(again.kept[0].differs, Vec::<String>::new());
+    assert_eq!((again.received, again.inserted, again.unchanged), (2, 0, 2));
+    assert!(again.updated.is_empty(), "{:?}", again.updated);
 
     // A default model the rate card does not price is refused by name,
     // and the whole batch rolls back (agent-later never lands).
@@ -202,11 +225,12 @@ async fn a_batch_registers_new_agents_keeps_the_migrations_row_and_names_what_di
         "one transaction: nothing before the refused row stays landed"
     );
 
-    // The fact rides the insert's transaction (backlog d9409039): of
+    // The facts ride the batch's transaction (backlog d9409039): of
     // everything above, exactly one row was inserted and committed —
-    // agent-scout — so exactly one `agent.declared` is staged. The
-    // kept agent-claude staged nothing, the re-run staged nothing, and
-    // agent-later's fact rolled back with its row.
+    // agent-scout — so exactly one `agent.declared` is staged, and
+    // exactly one row was changed — agent-claude, once — so exactly
+    // one `agent.updated`. The re-run staged nothing, and agent-later's
+    // fact rolled back with its row.
     let staged: Vec<(String, serde_json::Value)> =
         sqlx::query_as("SELECT source, payload FROM event_outbox WHERE kind = $1")
             .bind(boss_jobs::agents::AGENT_DECLARED)
@@ -221,4 +245,19 @@ async fn a_batch_registers_new_agents_keeps_the_migrations_row_and_names_what_di
         serde_json::json!(["scout@example.test"])
     );
     assert_eq!(staged[0].1["declared_by"], "automation:tenant-seed");
+    let changed: Vec<(String, serde_json::Value)> =
+        sqlx::query_as("SELECT source, payload FROM event_outbox WHERE kind = $1")
+            .bind(boss_jobs::agents::AGENT_UPDATED)
+            .fetch_all(&db.pool)
+            .await
+            .expect("outbox reads");
+    assert_eq!(changed.len(), 1, "{changed:?}");
+    assert_eq!(changed[0].1["id"], "agent-claude");
+    assert_eq!(changed[0].1["display_name"], "Claude (engineering)");
+    assert_eq!(changed[0].1["changes"][0]["field"], "display_name");
+    assert_eq!(
+        changed[0].1["changes"][0]["from"],
+        "Claude (Claude Code sessions on the dev pod)"
+    );
+    assert_eq!(changed[0].1["updated_by"], "automation:tenant-seed");
 }

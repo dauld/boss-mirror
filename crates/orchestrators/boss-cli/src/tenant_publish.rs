@@ -51,10 +51,28 @@
 //!
 //! IDEMPOTENT, LIKE THE ENGINES. The classes batch inserts if absent;
 //! the calendar batch replaces by code; the company Subject upserts;
-//! policy GETs each rule before it POSTs; a 409 on an employee is
-//! "already there"; the workflow publish skips a kind an authoring Job
-//! already published; a dispatcher rule at its file's version is
-//! `present`. A second run writes nothing new.
+//! policy GETs each rule before it POSTs; an employee's 409 is
+//! followed by a GET and a PUT only where the declaration differs; the
+//! agents batch updates only where it differs; the workflow publish
+//! skips a kind an authoring Job already published; a dispatcher rule
+//! at its file's version is `present`. A second run writes nothing
+//! new.
+//!
+//! THE TENANT'S DECLARATION WINS ON DECLARED FIELDS (backlog 09887242,
+//! 2026-09-17). Measured on prod that day: `emp-david` read `loc-hq`
+//! while the tenant's employees.json declared `loc-algedonic-hq`, and
+//! `agent-claude` read the migration's display name while agents.toml
+//! declared another — each the value of the FIRST publish (or the
+//! migration), kept by every publish since, because "already there"
+//! and "insert-if-absent" both stopped at the row's existence. The
+//! tenant OWNS its people and its agents, so for a row the tenant
+//! declares, the declared fields are applied (an update of exactly
+//! those columns, through the door's own evented update), what the
+//! tenant does not declare is kept, and the line names each change:
+//! `updated 1: emp-david (location loc-hq → loc-algedonic-hq)`. A row
+//! the tenant does not declare is never deleted. One rule, both
+//! halves of the roster; the contract states it in
+//! docs/tenant-contract.md.
 //!
 //! SIGNED, NOT SIMULATED. Every write carries `x-boss-user` as
 //! `automation:tenant-seed` (platform-admin / operator — the tier the
@@ -68,6 +86,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use boss_core::tenant_manifest::TenantToml;
+use boss_jobs::agents::{FieldChange, UpdatedRow, render_updated};
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
 use tracing::{info, warn};
@@ -212,7 +231,9 @@ impl Door {
             Door::Calendars { .. } => "POST /api/calendar/business-calendars/batch",
             Door::Company { .. } => "POST /api/subjects/company",
             Door::Policy { .. } => "GET+POST /api/policy/rules",
-            Door::People { .. } => "POST /api/people, then PUT manager links",
+            Door::People { .. } => {
+                "POST /api/people, PUT a row there that differs, then PUT manager links"
+            }
             Door::Agents { .. } => "POST /api/agents/batch",
             Door::Workflows { .. } => "POST /api/jobs (workflow-design), walked to publish",
             Door::Sensors { .. } => "POST /api/sensors/batch",
@@ -250,12 +271,12 @@ impl Door {
                 format!("{rules} rules (each GET first; an existing rule is kept)")
             }
             Door::People { roster } => format!(
-                "{} people, {} manager links (409 = already there)",
+                "{} people, {} manager links (a row already there is updated on the declared fields that differ, the rest kept)",
                 roster.len(),
                 manager_split(roster.clone()).1.len()
             ),
             Door::Agents { rows } => format!(
-                "{} agents (insert-if-absent by id: {}; a registered row is kept and a differing field is named)",
+                "{} agents (by id: {}; a registered row is updated on the declared fields that differ, an undeclared alias kept)",
                 rows.len(),
                 rows.iter()
                     .map(|a| a.id.as_str())
@@ -734,9 +755,32 @@ fn refuse(resp: reqwest::blocking::Response, what: &str) -> Result<reqwest::bloc
     }
 }
 
-/// POST every roster row, then PUT the manager edges back. 409 on a
-/// duplicate id is "already there"; any other refusal fails the
-/// publish — the Workflows published next assign work to this roster.
+/// The declared keys of `declared` that `current` (the row as the
+/// people API holds it) reads differently — what applying the
+/// declaration would change. A key the API's row does not carry is
+/// one the door cannot hold (the real tenant's `github_username`),
+/// dropped by the POST already, so it is not a difference: comparing
+/// it would name a change no PUT can make, on every publish, forever.
+fn declared_changes(current: &Value, declared: &Value) -> Vec<FieldChange> {
+    let (Some(cur), Some(decl)) = (current.as_object(), declared.as_object()) else {
+        return Vec::new();
+    };
+    decl.iter()
+        .filter_map(|(k, want)| {
+            let have = cur.get(k)?;
+            (have != want).then(|| FieldChange {
+                field: k.clone(),
+                from: have.clone(),
+                to: want.clone(),
+            })
+        })
+        .collect()
+}
+
+/// POST every roster row; a row already there is UPDATED on the
+/// declared fields that differ; then PUT the manager edges back. Any
+/// refusal fails the publish — the Workflows published next assign
+/// work to this roster.
 ///
 /// A 409 IS "ALREADY THERE" ONLY WHEN THE ROW IS (backlog 0d2d7daa,
 /// 2026-09-16). The people API answers 409 for every
@@ -747,10 +791,30 @@ fn refuse(resp: reqwest::blocking::Response, what: &str) -> Result<reqwest::bloc
 /// have published the Workflows against an empty roster. So a 409 is
 /// followed by GET /api/people/{id}: 200 is already there; anything
 /// else is the refusal it was, with the API's words.
+///
+/// THE TENANT'S DECLARATION WINS ON DECLARED FIELDS (backlog 09887242,
+/// 2026-09-17). "Already there" used to end the story, and measured on
+/// prod that day it had left `emp-david` at `loc-hq` — the FIRST
+/// publish's value — while the tenant's employees.json had declared
+/// `loc-algedonic-hq` since the day before: the 409's GET checked only
+/// that the row existed and threw the body away. The tenant OWNS its
+/// people, so the GET body is now compared key by key against the
+/// declaration ([`declared_changes`]); a declared key that differs is
+/// applied through the door's own update — the GET body with the
+/// declared keys overlaid, PUT back, which is the manager-link idiom
+/// below and records the door's `people.employee.updated` — so a
+/// column the tenant does not declare (a salary set out of band) rides
+/// the PUT unchanged. An explicit `null` in the file IS a declaration
+/// (the tenant says: no location); to leave a column alone, omit the
+/// key. A refused update fails the publish with the API's words, the
+/// same as a refused POST. Idempotent: a row that compares equal is
+/// counted `already as declared` and not written, and a manager edge
+/// already in place is not re-PUT.
 fn seed_people(client: &Client, people_base: &str, roster: &[Value]) -> Result<String> {
     let (rows, links) = manager_split(roster.to_vec());
     let post_url = url(people_base, "/api/people");
-    let (mut posted, mut already) = (0usize, 0usize);
+    let (mut posted, mut same) = (0usize, 0usize);
+    let mut updated: Vec<UpdatedRow> = Vec::new();
     for emp in &rows {
         let resp = client
             .post(&post_url)
@@ -761,21 +825,45 @@ fn seed_people(client: &Client, people_base: &str, roster: &[Value]) -> Result<S
         match resp.status().as_u16() {
             409 => {
                 let row_url = url(people_base, &format!("/api/people/{id}"));
-                let exists = client
+                let got = client
                     .get(&row_url)
                     .send()
-                    .with_context(|| format!("GET {row_url} after a 409"))?
-                    .status()
-                    .is_success();
-                if exists {
-                    already += 1;
-                } else {
+                    .with_context(|| format!("GET {row_url} after a 409"))?;
+                if !got.status().is_success() {
                     bail!(
                         "POST {post_url} ({id}) → 409 {} — and GET {row_url} says the row is \
                          not there, so this is a refusal, not a duplicate",
                         resp.text().unwrap_or_default()
                     );
                 }
+                let mut current: Value = got
+                    .json()
+                    .with_context(|| format!("GET {row_url}: the row did not parse"))?;
+                let changes = declared_changes(&current, emp);
+                if changes.is_empty() {
+                    same += 1;
+                    continue;
+                }
+                if let (Some(cur), Some(decl)) = (current.as_object_mut(), emp.as_object()) {
+                    for (k, v) in decl {
+                        cur.insert(k.clone(), v.clone());
+                    }
+                }
+                refuse(
+                    client.put(&row_url).json(&current).send()?,
+                    &format!(
+                        "PUT {row_url} (applying the declaration: {})",
+                        changes
+                            .iter()
+                            .map(FieldChange::render)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                )?;
+                updated.push(UpdatedRow {
+                    id: id.to_string(),
+                    changes,
+                });
             }
             s if (200..300).contains(&s) => posted += 1,
             _ => {
@@ -784,7 +872,8 @@ fn seed_people(client: &Client, people_base: &str, roster: &[Value]) -> Result<S
         }
     }
     // Manager links are best-effort per edge — a failed link degrades
-    // the org chart, not the publish (the engines' rule).
+    // the org chart, not the publish (the engines' rule). An edge
+    // already in place counts as linked and is not written again.
     let mut linked = 0usize;
     for (emp_id, mgr_id) in &links {
         let row_url = url(people_base, &format!("/api/people/{emp_id}"));
@@ -798,6 +887,10 @@ fn seed_people(client: &Client, people_base: &str, roster: &[Value]) -> Result<S
             warn!(%emp_id, "GET employee for manager link failed; edge not linked");
             continue;
         };
+        if body.get("manager_id").and_then(Value::as_str) == Some(mgr_id.as_str()) {
+            linked += 1;
+            continue;
+        }
         if let Some(obj) = body.as_object_mut() {
             obj.insert("manager_id".into(), Value::String(mgr_id.clone()));
         }
@@ -807,10 +900,16 @@ fn seed_people(client: &Client, people_base: &str, roster: &[Value]) -> Result<S
             Err(e) => warn!(%emp_id, error = %e, "PUT manager link transport error"),
         }
     }
-    Ok(format!(
-        "{posted} posted, {already} already there, {linked}/{} linked",
-        links.len()
-    ))
+    let mut line = format!("{posted} posted");
+    if !updated.is_empty() {
+        line.push_str(", ");
+        line.push_str(&render_updated(&updated));
+    }
+    if same > 0 {
+        line.push_str(&format!(", {same} already as declared"));
+    }
+    line.push_str(&format!(", {linked}/{} linked", links.len()));
+    Ok(line)
 }
 
 /// Block until the people read-model holds at least the roster just
@@ -1760,19 +1859,25 @@ terminal = { outcome = "sponsored" }
                 )
             }
             ("POST", "/api/agents/batch") => {
-                // Insert-if-absent by id; a kept row reports which
-                // declared fields differ (here: display_name only).
+                // Insert by id; a held row is updated on the declared
+                // field that differs (here: display_name only) and the
+                // change is named from → to, as the real door answers.
                 let rows = serde_json::from_str::<Vec<Value>>(body).unwrap_or_default();
                 let mut inserted = 0usize;
-                let mut kept = Vec::new();
+                let mut unchanged = 0usize;
+                let mut updated = Vec::new();
                 for r in &rows {
                     let id = r["id"].as_str().unwrap_or("").to_string();
                     let name = r["display_name"].as_str().unwrap_or("").to_string();
-                    match st.agents.get(&id) {
-                        Some(have) => kept.push(json!({
-                            "id": id,
-                            "differs": if *have == name { json!([]) } else { json!(["display_name"]) }
-                        })),
+                    match st.agents.get(&id).cloned() {
+                        Some(have) if have == name => unchanged += 1,
+                        Some(have) => {
+                            updated.push(json!({
+                                "id": id,
+                                "changes": [{"field": "display_name", "from": have, "to": name}]
+                            }));
+                            st.agents.insert(id, name);
+                        }
                         None => {
                             st.agents.insert(id, name);
                             inserted += 1;
@@ -1781,7 +1886,11 @@ terminal = { outcome = "sponsored" }
                 }
                 (
                     200,
-                    json!({"received": rows.len(), "inserted": inserted, "kept": kept}).to_string(),
+                    json!({
+                        "received": rows.len(), "inserted": inserted,
+                        "updated": updated, "unchanged": unchanged
+                    })
+                    .to_string(),
                 )
             }
             ("POST", "/api/ledger/accounts/batch") => {
@@ -2164,7 +2273,7 @@ terminal = { outcome = "sponsored" }
             .find(|l| l.contains("seeds/employees.json"))
             .unwrap();
         assert!(
-            people_line.contains("2 posted, 0 already there, 1/1 linked"),
+            people_line.contains("2 posted, 1/1 linked"),
             "{people_line}"
         );
         let classes_line = lines
@@ -2267,13 +2376,31 @@ terminal = { outcome = "sponsored" }
             "an operator-published kind is skipped, no new design Job"
         );
         assert_eq!(posts("/api/people"), 2, "the roster is re-POSTed and 409s");
+        assert_eq!(
+            second
+                .iter()
+                .filter(|(m, p, _, _)| m == "PUT" && p.starts_with("/api/people/"))
+                .count(),
+            0,
+            "every row and every manager edge is already as declared, so nothing is PUT \
+             (backlog 09887242): {second:?}"
+        );
         let people_line = lines
             .iter()
             .find(|l| l.contains("seeds/employees.json"))
             .unwrap();
         assert!(
-            people_line.contains("0 posted, 2 already there"),
+            people_line.contains("0 posted, 2 already as declared, 1/1 linked")
+                && !people_line.contains("updated 1"),
             "{people_line}"
+        );
+        let agents_line = lines
+            .iter()
+            .find(|l| l.contains("seeds/agents.toml"))
+            .unwrap();
+        assert!(
+            agents_line.contains("received 1, inserted 0, 1 already as declared"),
+            "{agents_line}"
         );
         // An unchanged rule version is a no-op, and the line says so:
         // validated and read, no draft, no publish.
@@ -2446,15 +2573,16 @@ terminal = { outcome = "sponsored" }
         assert!(st.rules.is_empty(), "no draft was written: {:?}", st.rules);
     }
 
-    /// A REGISTERED AGENT IS KEPT, AND THE LINE SAYS HOW THE DECLARATION
-    /// DIFFERS (backlog f56155f0). The platform's migration registered
-    /// `agent-claude` under its own display name; the tenant declares
-    /// the same id under another. Insert-if-absent keeps the row, and
-    /// the publish line names the field — never a silent "already
-    /// there".
+    /// A REGISTERED AGENT IS UPDATED TO THE DECLARATION, AND THE LINE
+    /// NAMES THE CHANGE (backlog 09887242; the door f56155f0 opened).
+    /// The platform's migration registered `agent-claude` under its own
+    /// display name; the tenant declares the same id under another. The
+    /// tenant owns its agents: the declared field is applied, the line
+    /// reads `updated 1: agent-claude (display_name <from> → <to>)`, and
+    /// the next publish says `already as declared`.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_registered_agent_is_kept_and_the_differing_field_is_named_in_the_line() {
-        let dir = real_shape("agent-kept");
+    async fn a_registered_agent_is_updated_to_the_declaration_and_the_change_is_named() {
+        let dir = real_shape("agent-updated");
         let p = plan(&dir).unwrap();
         let st = Arc::new(Mutex::new(Stub::default()));
         st.lock().unwrap().agents.insert(
@@ -2462,21 +2590,122 @@ terminal = { outcome = "sponsored" }
             "Claude (Claude Code sessions on the dev pod)".into(),
         );
         let base = spawn_stub(st.clone()).await;
-        let lines = run_publish(p, base).await.unwrap();
+        let lines = run_publish(p.clone(), base.clone()).await.unwrap();
         let agents_line = lines
             .iter()
             .find(|l| l.contains("seeds/agents.toml"))
             .unwrap();
         assert!(
             agents_line.contains("POST /api/agents/batch")
-                && agents_line.contains("received 1, inserted 0")
-                && agents_line.contains("agent-claude (display_name differs)"),
+                && agents_line.contains(
+                    "received 1, inserted 0, updated 1: agent-claude (display_name Claude \
+                     (Claude Code sessions on the dev pod) → Claude (engineering))"
+                ),
             "{agents_line}"
         );
-        let st = st.lock().unwrap();
         assert_eq!(
-            st.agents["agent-claude"], "Claude (Claude Code sessions on the dev pod)",
-            "kept as the platform registered it"
+            st.lock().unwrap().agents["agent-claude"],
+            "Claude (engineering)",
+            "the declaration wins on the declared field"
+        );
+        let lines = run_publish(p, base).await.unwrap();
+        let agents_line = lines
+            .iter()
+            .find(|l| l.contains("seeds/agents.toml"))
+            .unwrap();
+        assert!(
+            agents_line.contains("received 1, inserted 0, 1 already as declared")
+                && !agents_line.contains("updated 1"),
+            "{agents_line}"
+        );
+    }
+
+    /// AN EMPLOYEE ALREADY THERE IS UPDATED ON THE DECLARED FIELDS THAT
+    /// DIFFER, AND THE REST IS KEPT (backlog 09887242). Measured
+    /// 2026-09-17 on prod: emp-david read `loc-hq` — the first publish's
+    /// value — while the tenant's employees.json had said
+    /// `loc-algedonic-hq` for a day, because the 409 on the re-POST was
+    /// counted as "already there" and nothing compared the row. Now the
+    /// 409's GET is compared key by key against the declaration: a
+    /// declared key that differs is PUT (the door's own
+    /// `people.employee.updated`), a column the tenant does not declare
+    /// (here a salary set out of band) rides the PUT unchanged, the line
+    /// names the change, and the next publish PUTs nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_employee_already_there_is_updated_on_declared_fields_and_the_rest_kept() {
+        let dir = real_shape("employee-updated");
+        // The tenant declares the founder at its own site and does not
+        // declare a salary at all.
+        put(
+            &dir,
+            "seeds/employees.json",
+            r#"[{"id": "emp-david", "name": "David Auld", "email": "david@acme.example",
+  "role": "founder", "department": "engineering", "skill_level": null,
+  "hire_date": "2026-09-16", "location": "loc-acme-hq", "manager_id": null,
+  "employment_type": "full-time", "status": "active", "skills": [], "certifications": []}]"#,
+        );
+        let p = plan(&dir).unwrap();
+        let st = Arc::new(Mutex::new(Stub::default()));
+        // What prod held: the first publish's row, at the platform's
+        // loc-hq, plus a salary an operator set through the people API.
+        st.lock().unwrap().people.insert(
+            "emp-david".into(),
+            json!({"id": "emp-david", "name": "David Auld", "email": "david@acme.example",
+                "role": "founder", "department": "engineering", "skill_level": null,
+                "hire_date": "2026-09-16", "location": "loc-hq", "manager_id": null,
+                "employment_type": "full-time", "status": "active", "skills": [],
+                "certifications": [], "annual_salary_cents": 12_000_000}),
+        );
+        let base = spawn_stub(st.clone()).await;
+        let lines = run_publish(p.clone(), base.clone()).await.unwrap();
+        let people_line = lines
+            .iter()
+            .find(|l| l.contains("seeds/employees.json"))
+            .unwrap();
+        assert!(
+            people_line.contains(
+                "0 posted, updated 1: emp-david (location loc-hq → loc-acme-hq), 0/0 linked"
+            ),
+            "{people_line}"
+        );
+        {
+            let st = st.lock().unwrap();
+            let row = &st.people["emp-david"];
+            assert_eq!(
+                row["location"], "loc-acme-hq",
+                "the declared field is applied"
+            );
+            assert_eq!(
+                row["annual_salary_cents"], 12_000_000,
+                "the column the tenant did not declare is kept"
+            );
+            assert_eq!(
+                st.log
+                    .iter()
+                    .filter(|(m, p, _, _)| m == "PUT" && p == "/api/people/emp-david")
+                    .count(),
+                1,
+                "one PUT, through the people door's own update"
+            );
+        }
+        // Idempotent: the same declaration again compares equal and
+        // PUTs nothing.
+        let first_len = st.lock().unwrap().log.len();
+        let lines = run_publish(p, base).await.unwrap();
+        let people_line = lines
+            .iter()
+            .find(|l| l.contains("seeds/employees.json"))
+            .unwrap();
+        assert!(
+            people_line.contains("0 posted, 1 already as declared, 0/0 linked")
+                && !people_line.contains("updated 1"),
+            "{people_line}"
+        );
+        let st = st.lock().unwrap();
+        assert!(
+            !st.log[first_len..].iter().any(|(m, _, _, _)| m == "PUT"),
+            "the second publish updated nothing: {:?}",
+            &st.log[first_len..]
         );
     }
 

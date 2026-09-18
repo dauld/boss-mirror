@@ -12,14 +12,23 @@ use async_trait::async_trait;
 use boss_core::event::Event;
 use boss_core::publisher::EventStamp;
 
-use super::types::{AgentInput, AgentRow, AgentsBatchOutcome};
+use super::types::{AgentInput, AgentRow, AgentsBatchOutcome, FieldChange};
 
 /// The fact a tenant's declaration leaves: one per agent row the
-/// batch INSERTED (backlog d9409039, 2026-09-17). Never per kept row
-/// — a row the registry already held changed nothing, and the kept
-/// row is already named in the batch's answer — and never per batch:
-/// the rebuilders reproduce rows, not requests.
+/// batch INSERTED (backlog d9409039, 2026-09-17). Never per batch:
+/// the rebuilders reproduce rows, not requests. A row the registry
+/// already held records [`AGENT_UPDATED`] when the declaration moved
+/// it, and nothing when it was already as declared.
 pub const AGENT_DECLARED: &str = "agent.declared";
+
+/// The fact a declaration leaves when it CHANGES a row the registry
+/// already held (backlog 09887242, 2026-09-17): the row as it reads
+/// after, the `changes` (field, from, to) the declaration made, and
+/// `updated_by`. Until this kind the batch was insert-if-absent, so a
+/// tenant that renamed its agent after the first publish read the
+/// old name forever — the same defect as the roster's `emp-david`
+/// keeping the first publish's location.
+pub const AGENT_UPDATED: &str = "agent.updated";
 
 /// Build the `agent.declared` event for one inserted row: the
 /// declaration as inserted (id, name, model, caps, and the aliases
@@ -36,6 +45,30 @@ pub fn declared_event(stamp: &EventStamp, row: &AgentInput) -> Result<Event, Age
         );
     }
     Ok(stamp.event(AGENT_DECLARED, payload))
+}
+
+/// Build the `agent.updated` event for one row a declaration changed:
+/// the row as it now reads (its aliases included), the changes, and
+/// `updated_by` from the stamp — the same one-value rule as
+/// `declared_by`.
+pub fn updated_event(
+    stamp: &EventStamp,
+    after: &AgentRow,
+    changes: &[FieldChange],
+) -> Result<Event, AgentsError> {
+    let mut payload =
+        serde_json::to_value(after).map_err(|e| AgentsError::Storage(e.to_string()))?;
+    if let serde_json::Value::Object(map) = &mut payload {
+        map.insert(
+            "changes".to_string(),
+            serde_json::to_value(changes).map_err(|e| AgentsError::Storage(e.to_string()))?,
+        );
+        map.insert(
+            "updated_by".to_string(),
+            serde_json::Value::String(stamp.actor().to_string()),
+        );
+    }
+    Ok(stamp.event(AGENT_UPDATED, payload))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -61,17 +94,22 @@ pub trait AgentsRegistry: Send + Sync {
     /// Every registered agent with its aliases, ordered by id.
     async fn list(&self) -> Result<Vec<AgentRow>, AgentsError>;
 
-    /// Land a tenant's declarations: insert-if-absent by id (a row the
-    /// platform already registered is KEPT, never overwritten, and the
-    /// outcome names which declared fields differ), aliases
-    /// insert-if-absent by alias, one transaction. Rows arrive already
-    /// validated (`validate_agent`); an unpriced `default_model` is
-    /// the one refusal the registry itself makes.
+    /// Land a tenant's declarations, one transaction: a row the
+    /// registry does not hold is inserted; a row it holds is UPDATED
+    /// on every declared field that differs — the tenant's declaration
+    /// wins on declared fields (backlog 09887242), and a declaration
+    /// is the whole row, since [`AgentInput`] is the table's columns —
+    /// with the outcome naming each change; a declared alias lands
+    /// under the declared id (moved, if another agent held it), and
+    /// an alias the tenant does not declare is kept. Rows arrive
+    /// already validated (`validate_agent`); an unpriced
+    /// `default_model` is the one refusal the registry itself makes.
     ///
-    /// Every row inserted records one [`AGENT_DECLARED`] event built
-    /// from `stamp` ([`declared_event`]) in that same transaction; a
-    /// kept row records nothing (backlog d9409039 — until then a
-    /// tenant's agents left no audit-log fact).
+    /// Every row inserted records one [`AGENT_DECLARED`] event and
+    /// every row changed one [`AGENT_UPDATED`] event, both built from
+    /// `stamp` in that same transaction; a row already as declared
+    /// records nothing (backlog d9409039 — until then a tenant's
+    /// agents left no audit-log fact).
     async fn publish(
         &self,
         rows: &[AgentInput],

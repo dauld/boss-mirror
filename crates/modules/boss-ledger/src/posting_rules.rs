@@ -215,11 +215,44 @@ fn expand(side: &BTreeMap<&str, usize>) -> Vec<String> {
         .collect()
 }
 
+/// The subject family of `event_kind` (`<first token>.>`) when the
+/// platform stream does NOT ingest it, `None` when it does. One
+/// definition of "is this family streamed", read off
+/// `boss_nats::durable::stream_subjects` — the list `ensure_stream`
+/// reconciles the live broker against — through the same first-token
+/// collapse a durable consumer filters with.
+///
+/// A projection on an un-streamed family is dead air: a durable
+/// consumer may legally filter on a subject the stream never stores,
+/// and the result is zero deliveries with zero errors (the class
+/// `stream_subjects` documents). The rebuild still projects such a
+/// rule from `audit_log`, so its fact exists — at the next rebuild,
+/// never live. The two `products.*` rows 40-ledger.sql seeds are that
+/// case today: harmless, because boss-products writes those facts
+/// in-tx and the rule only reproduces them on rebuild. They are in the
+/// registry because the schema inserted them; this check runs at the
+/// two DOORS (`boss tenant check`, the batch) and refuses a NEW rule on
+/// such a family until the family is streamed (backlog 94f20e76).
+pub fn unstreamed_family(event_kind: &str) -> Option<String> {
+    let stream = boss_nats::durable::stream_subjects();
+    boss_nats::durable::coarse_filter_subjects(std::slice::from_ref(&event_kind.to_string()))
+        .into_iter()
+        .find(|family| !stream.contains(family))
+}
+
 /// Why a projection rule is refused.
 pub fn validate_projection_rule(r: &ProjectionRule) -> Result<(), String> {
     let name = format!("projection {} -> {}", r.event_kind, r.fact_kind);
     if r.event_kind.trim().is_empty() {
         return Err("a projection needs an event_kind (an audit_log kind)".into());
+    }
+    if let Some(family) = unstreamed_family(&r.event_kind) {
+        return Err(format!(
+            "{name}: the platform event stream does not ingest `{family}`, so a live \
+             projection on `{}` would fire never (dead air) — add the family to \
+             boss_nats::durable::stream_subjects first",
+            r.event_kind
+        ));
     }
     if r.fact_kind.trim().is_empty() {
         return Err(format!("{name}: fact_kind is required"));
@@ -963,6 +996,36 @@ happened_on_path = "/completed_on"
                 .unwrap_err()
                 .contains("twice")
         );
+    }
+
+    #[test]
+    fn a_projection_on_an_unstreamed_family_is_refused_naming_it() {
+        // `products.>` is not a family the platform stream ingests, so a
+        // live subscriber filtering on it hears nothing — the silent
+        // dead-air class (backlog 94f20e76). The check refuses the rule
+        // at both doors and names the family and the fix.
+        let bad = PROJECTION.replace(
+            "event_kind = \"step.done.task\"",
+            "event_kind = \"products.consumed\"",
+        );
+        let why = parse_projection_rules_toml(&bad).unwrap_err();
+        assert!(why.contains("products.consumed"), "{why}");
+        assert!(why.contains("products.>"), "{why}");
+        assert!(why.contains("stream_subjects"), "{why}");
+        // Every family the stream lists passes; the seeded platform
+        // rows on `products.*` never come through this check (40-ledger.sql
+        // inserts them), which is the only reason they are in the registry.
+        assert_eq!(
+            unstreamed_family("products.consumed").as_deref(),
+            Some("products.>")
+        );
+        for kind in [
+            "step.done.task",
+            "commerce.invoice.created",
+            "inventory.overhead.absorbed",
+        ] {
+            assert_eq!(unstreamed_family(kind), None, "{kind}");
+        }
     }
 
     #[test]

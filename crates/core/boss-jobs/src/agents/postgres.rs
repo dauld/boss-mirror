@@ -3,9 +3,11 @@
 //! a handful of rows and the lookup is indexed; if the door's cost ever
 //! shows up, a short TTL cache in front of this adapter is the fix, not
 //! a wider read), the roster read, and the tenant batch (backlog
-//! f56155f0): one transaction of `ON CONFLICT DO NOTHING` inserts on
-//! `agents` and `actor_aliases`, so a registered row is kept and a
-//! refused row lands nothing.
+//! f56155f0): one transaction — an insert-if-absent on `agents`, an
+//! UPDATE of the declared columns where the row was already there and
+//! differs (backlog 09887242), and an upsert on `actor_aliases` that
+//! lands each declared alias under the declared id — so a refused row
+//! lands nothing and a declaration lands whole.
 
 use std::collections::BTreeMap;
 
@@ -13,8 +15,8 @@ use async_trait::async_trait;
 use boss_core::publisher::EventStamp;
 use sqlx::PgPool;
 
-use super::port::{AgentsError, AgentsRegistry, declared_event};
-use super::types::{AgentInput, AgentRow, AgentsBatchOutcome, KeptAgent};
+use super::port::{AgentsError, AgentsRegistry, declared_event, updated_event};
+use super::types::{AgentInput, AgentRow, AgentsBatchOutcome, UpdatedRow};
 
 pub struct PgAgents {
     pool: PgPool,
@@ -84,6 +86,31 @@ fn to_row(r: AgentDbRow, aliases: &BTreeMap<String, Vec<String>>) -> AgentRow {
 const SELECT: &str = "SELECT id, display_name, default_model, hourly_budget_usd_micros, \
                       max_concurrent_runs FROM agents";
 
+/// One agent's row with its aliases (`None` when the registry does
+/// not hold the id), read inside the batch's transaction so the
+/// writes just made are seen.
+async fn row_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: &str,
+) -> Result<Option<AgentRow>, AgentsError> {
+    let row: Option<AgentDbRow> = sqlx::query_as(&format!("{SELECT} WHERE id = $1"))
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(storage)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let aliases: Vec<String> =
+        sqlx::query_scalar("SELECT alias FROM actor_aliases WHERE actor_id = $1 ORDER BY alias")
+            .bind(id)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(storage)?;
+    let by_actor = BTreeMap::from([(id.to_string(), aliases)]);
+    Ok(Some(to_row(row, &by_actor)))
+}
+
 #[async_trait]
 impl AgentsRegistry for PgAgents {
     async fn resolve_login(&self, login: &str) -> Result<Option<String>, AgentsError> {
@@ -110,13 +137,31 @@ impl AgentsRegistry for PgAgents {
     ) -> Result<AgentsBatchOutcome, AgentsError> {
         let mut tx = self.pool.begin().await.map_err(storage)?;
         let mut inserted = 0usize;
-        let mut kept_ids: Vec<&AgentInput> = Vec::new();
+        let mut updated = Vec::new();
+        let mut unchanged = 0usize;
         for a in declared {
-            let n = sqlx::query(
+            // What the registry held before this declaration, so the
+            // outcome can say what moved — read first, inside the
+            // transaction.
+            let before = row_in_tx(&mut tx, &a.id).await?;
+            // The declaration is the whole row (AgentInput is the
+            // table's columns), so a held row takes every declared
+            // column; the WHERE keeps an identical declaration from
+            // touching the row at all.
+            sqlx::query(
                 "INSERT INTO agents \
                  (id, display_name, default_model, hourly_budget_usd_micros, max_concurrent_runs) \
                  VALUES ($1, $2, $3, $4, $5) \
-                 ON CONFLICT (id) DO NOTHING",
+                 ON CONFLICT (id) DO UPDATE SET \
+                   display_name = EXCLUDED.display_name, \
+                   default_model = EXCLUDED.default_model, \
+                   hourly_budget_usd_micros = EXCLUDED.hourly_budget_usd_micros, \
+                   max_concurrent_runs = EXCLUDED.max_concurrent_runs \
+                 WHERE (agents.display_name, agents.default_model, \
+                        agents.hourly_budget_usd_micros, agents.max_concurrent_runs) \
+                       IS DISTINCT FROM \
+                       (EXCLUDED.display_name, EXCLUDED.default_model, \
+                        EXCLUDED.hourly_budget_usd_micros, EXCLUDED.max_concurrent_runs)",
             )
             .bind(&a.id)
             .bind(&a.display_name)
@@ -125,25 +170,15 @@ impl AgentsRegistry for PgAgents {
             .bind(a.max_concurrent_runs)
             .execute(&mut *tx)
             .await
-            .map_err(|e| insert_error(e, &a.default_model))?
-            .rows_affected();
-            if n == 1 {
-                // The fact rides the insert's transaction (backlog
-                // d9409039): a row that lands stages its
-                // `agent.declared` on the outbox here, so the row and
-                // the fact commit or roll back together; a kept row
-                // is already named in the outcome and records nothing.
-                boss_events::outbox::record_event_in_tx(&mut tx, &declared_event(stamp, a)?)
-                    .await
-                    .map_err(AgentsError::Storage)?;
-                inserted += 1;
-            } else {
-                kept_ids.push(a);
-            }
+            .map_err(|e| insert_error(e, &a.default_model))?;
+            // A declared alias signs as the declared id — moved when
+            // another agent held it; an alias the tenant does not
+            // declare is not touched.
             for alias in &a.aliases {
                 sqlx::query(
                     "INSERT INTO actor_aliases (alias, actor_id) VALUES ($1, $2) \
-                     ON CONFLICT (alias) DO NOTHING",
+                     ON CONFLICT (alias) DO UPDATE SET actor_id = EXCLUDED.actor_id \
+                     WHERE actor_aliases.actor_id <> EXCLUDED.actor_id",
                 )
                 .bind(alias)
                 .bind(&a.id)
@@ -151,21 +186,33 @@ impl AgentsRegistry for PgAgents {
                 .await
                 .map_err(storage)?;
             }
-        }
-        // What the kept rows hold, read inside the same transaction so
-        // the aliases just landed are seen.
-        let mut kept = Vec::with_capacity(kept_ids.len());
-        if !kept_ids.is_empty() {
-            let aliases = aliases_by_actor(&mut *tx).await?;
-            for a in kept_ids {
-                let row: AgentDbRow = sqlx::query_as(&format!("{SELECT} WHERE id = $1"))
-                    .bind(&a.id)
-                    .fetch_one(&mut *tx)
+            let Some(before) = before else {
+                // The fact rides the insert's transaction (backlog
+                // d9409039): a row that lands stages its
+                // `agent.declared` on the outbox here, so the row and
+                // the fact commit or roll back together.
+                boss_events::outbox::record_event_in_tx(&mut tx, &declared_event(stamp, a)?)
                     .await
-                    .map_err(storage)?;
-                kept.push(KeptAgent {
+                    .map_err(AgentsError::Storage)?;
+                inserted += 1;
+                continue;
+            };
+            let after = row_in_tx(&mut tx, &a.id)
+                .await?
+                .ok_or_else(|| AgentsError::Storage(format!("{} vanished mid-batch", a.id)))?;
+            let changes = before.changes_to(&after);
+            if changes.is_empty() {
+                unchanged += 1;
+            } else {
+                boss_events::outbox::record_event_in_tx(
+                    &mut tx,
+                    &updated_event(stamp, &after, &changes)?,
+                )
+                .await
+                .map_err(AgentsError::Storage)?;
+                updated.push(UpdatedRow {
                     id: a.id.clone(),
-                    differs: to_row(row, &aliases).differs_from(a),
+                    changes,
                 });
             }
         }
@@ -173,7 +220,8 @@ impl AgentsRegistry for PgAgents {
         Ok(AgentsBatchOutcome {
             received: declared.len(),
             inserted,
-            kept,
+            updated,
+            unchanged,
         })
     }
 }

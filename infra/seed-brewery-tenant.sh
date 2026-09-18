@@ -9,6 +9,12 @@
 #
 # Called by both quickstart launchers (bare-metal bootstrap-local.sh
 # and docker services-launcher.sh) just before the brewery sim starts.
+# Under the container launcher it runs AFTER `boss tenant publish`
+# (seed-tenant.sh, the door every tenant takes; backlog b644d727,
+# 2026-09-17), so prepare's own classes post, calendars batch, company
+# mint, policy publish, people posts and workflow walk find their rows
+# already there and land nothing new — what it still owns is the sim
+# data below and the reset-baseline stamp.
 # None of this is carried by the audit_log any more — the demo builds
 # itself live from an empty log — so the live sim needs these entities
 # to exist up front or its job/invoice posts 404 and the playground

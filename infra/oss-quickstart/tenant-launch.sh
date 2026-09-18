@@ -67,42 +67,57 @@ tenant_id_of() {
     done
 }
 
-# Publish the platform operator baseline and the tenant. Both go
+# Publish the tenant, then the platform operator baseline, then — for
+# a tenant with an engine — what only the engine seeds. All of it goes
 # through the public API. Non-zero means the tenant is NOT published.
 #
-# WHICH publish is the tenant's to say (ee7b62bb, 2026-09-16). Until
-# then seed-brewery-tenant.sh ran unconditionally, so a deployment
-# pointed at a tenant with no engine — Algedonic, LLC — would still
-# have seeded the brewery. The brewery keeps its script because its
-# engine seeds what the sim needs and stamps the sim's reset baseline;
-# every other tenant is `boss tenant publish <dir>` through the shared
-# doors (seed-tenant.sh), with no baseline stamp.
+# ONE DOOR FOR EVERY TENANT (tenant-publish-for-every-tenant; backlog
+# b644d727, 2026-09-17). Until ee7b62bb (2026-09-16) seed-brewery-
+# tenant.sh ran unconditionally, so a deployment pointed at a tenant
+# with no engine — Algedonic, LLC — would still have seeded the
+# brewery; that car chose the script by `[meta] tenant_id`, and the
+# brewery kept its engine's prepare as its ONLY publish. Measured
+# 2026-09-17: that prepare POSTs classes.json but never
+# seeds/locations.toml nor seeds/chart_of_accounts.toml — the
+# playground inherited its sites and its chart from the migrations —
+# and nothing published the brewery's own seeds/rules.toml at all, so
+# an instance whose product files no longer carry those reactors ran
+# the brewery with none. Now `boss tenant publish <dir>`
+# (seed-tenant.sh) runs FIRST for every tenant, brewery included, and
+# the engine script runs LAST for the sim data (accounts, vendors,
+# products, parts, opening balances), the operator hires and the
+# reset-baseline stamp. Both are idempotent against each other, in
+# this order: the engine's own classes post is insert-if-absent
+# (inserted 0), its calendars batch replaces the same rows by code,
+# its company mint upserts, its policy publish GETs first, its people
+# posts answer 409 on the roster the door just landed, and its
+# workflow walk skips every kind an authoring Job already published —
+# which also stamps the brewery's Workflows with owning_team
+# `brewery` (the contract's rule: the manifest's tenant_id), where the
+# engine wrote `brewery-bootstrap`. The reverse order is NOT safe once
+# a fresh instance evicts the migrations' example rows (backlog
+# 718ac982): the engine's people posts count a 409 as "already there",
+# so a roster whose `location` no door had seeded would be skipped in
+# silence.
 #
-# WHICH GOES FIRST differs too (backlog 0d2d7daa, 2026-09-16). The
-# baseline injects emp-bootstrap-admin for BOSS_BOOTSTRAP_ADMIN_EMAIL
-# unless the roster already holds that email, and a real company's
-# roster declares its founder with exactly that address: baseline
-# first gave a fresh instance the bootstrap row and then refused the
-# founder on the LOWER(email) unique index. So a tenant with no engine
-# is published BEFORE the baseline, and the baseline (which asks the
-# people API before injecting) sees the founder and injects nothing.
-# The brewery keeps baseline-first: its engine's prepare expects the
-# bootstrap admin to exist, and its roster does not carry the
-# operator's address. A failed tenant publish returns at once — the
+# THE BASELINE GOES SECOND for every tenant (backlog 0d2d7daa,
+# 2026-09-16). It injects emp-bootstrap-admin for
+# BOSS_BOOTSTRAP_ADMIN_EMAIL unless the roster already holds that
+# email, and a real company's roster declares its founder with exactly
+# that address: baseline first gave a fresh instance the bootstrap row
+# and then refused the founder on the LOWER(email) unique index. The
+# brewery's engine expects the bootstrap admin to exist, so the engine
+# runs after the baseline. A failed publish returns at once — the
 # DEGRADED loop retries this function whole — so the baseline never
-# reads the empty roster the tenant was about to fill.
+# reads the empty roster the tenant was about to fill, and the engine
+# never seeds against a half-published one.
 publish_tenant() {
     local dir
     dir="$(tenant_dir)"
+    BOSS_TENANT_DIR="$dir" "$BOSS_INFRA_DIR/seed-tenant.sh" || return $?
+    "$BOSS_INFRA_DIR/seed-operator-baseline.sh" || return $?
     case "$(tenant_id_of "$dir")" in
-        brewery)
-            "$BOSS_INFRA_DIR/seed-operator-baseline.sh" || return $?
-            "$BOSS_INFRA_DIR/seed-brewery-tenant.sh"
-            ;;
-        *)
-            BOSS_TENANT_DIR="$dir" "$BOSS_INFRA_DIR/seed-tenant.sh" || return $?
-            "$BOSS_INFRA_DIR/seed-operator-baseline.sh"
-            ;;
+        brewery) "$BOSS_INFRA_DIR/seed-brewery-tenant.sh" ;;
     esac
 }
 

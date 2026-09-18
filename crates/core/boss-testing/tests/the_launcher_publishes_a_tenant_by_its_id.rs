@@ -1,17 +1,26 @@
-//! The launcher chooses HOW to publish the tenant from the tenant's own
-//! manifest, and a tenant with no engine is published by the generic
-//! script (backlog ee7b62bb, 2026-09-16).
+//! Every tenant reaches an instance through ONE door — `boss tenant
+//! publish <dir>` (infra/seed-tenant.sh) — and a tenant with an engine
+//! runs its engine's prepare AFTER that, for what only the engine does
+//! (backlog b644d727, 2026-09-17; ee7b62bb before it).
 //!
-//! Until this, `publish_tenant` in infra/oss-quickstart/tenant-launch.sh
+//! Until ee7b62bb, `publish_tenant` in infra/oss-quickstart/tenant-launch.sh
 //! ran seed-brewery-tenant.sh unconditionally — `boss-brewery-sim
 //! prepare` plus the sim's reset-baseline stamp — so a deployment whose
 //! BOSS_TENANT_DIR pointed at Algedonic, LLC would still have seeded
-//! the brewery. Now: `[meta] tenant_id == "brewery"` keeps that script
-//! (its engine seeds what the sim needs), anything else runs
-//! infra/seed-tenant.sh, which is `boss tenant publish <dir>` with
-//! retries and NO baseline stamp. Both are exercised here under stubs,
-//! the way infra/lint/a-failed-prepare-degrades-the-pod.sh exercises
-//! the degrade contract — no API, no binaries, no /opt/boss.
+//! the brewery. That car chose by `[meta] tenant_id`: the brewery kept
+//! its engine script and everything else ran the generic publish.
+//! Measured 2026-09-17 (backlog b644d727): the engine's prepare POSTs
+//! classes.json but never seeds/locations.toml nor
+//! seeds/chart_of_accounts.toml — the playground inherited both from
+//! the migrations — and nothing published the brewery's own
+//! seeds/rules.toml at all. Now the generic publish runs FIRST for every
+//! tenant, brewery included; the operator baseline follows it; and the
+//! brewery's engine script runs LAST, for the sim data, the reset
+//! baseline and the rows only it seeds (its own classes post and
+//! workflow walk become no-ops: insert-if-absent, and a kind an
+//! authoring Job already published is skipped). Exercised here under
+//! stubs, the way infra/lint/a-failed-prepare-degrades-the-pod.sh
+//! exercises the degrade contract — no API, no binaries, no /opt/boss.
 
 use boss_testing::{create_dir, repo_root, scratch_dir, write_exec, write_file};
 use std::path::{Path, PathBuf};
@@ -97,23 +106,53 @@ fn s(p: &Path) -> String {
 }
 
 #[test]
-fn the_brewery_keeps_its_engine_script_chosen_by_its_manifests_tenant_id() {
+fn the_brewery_is_published_through_the_generic_door_before_its_engine_seeds_the_rest() {
     let fx = Fixture::new("brewery");
     // The N-1 deployment shape: BOSS_TENANT_MANIFEST_TOML at the seeds/
-    // spelling, no BOSS_TENANT_DIR.
+    // spelling, no BOSS_TENANT_DIR — the tenant dir is one above.
     let brewery = fx.tenant("brewery", "seeds/tenant.toml", "brewery");
     let manifest = brewery.join("seeds/tenant.toml");
     let (rc, out) = fx.publish(&[("BOSS_TENANT_MANIFEST_TOML", &s(&manifest))]);
     assert_eq!(rc, 0, "{out}");
+    // The same door every tenant takes, handed the brewery's directory:
+    // locations, the chart, the rules and everything else the contract
+    // names reach the instance through it, not through the engine. The
+    // engine runs LAST, after the baseline it expects (the bootstrap
+    // admin), for the sim data and the reset-baseline stamp.
+    let scripts: Vec<&str> = out.lines().take_while(|l| !l.starts_with("---")).collect();
+    let generic = format!("seed-tenant.sh tenant_dir={}", s(&brewery));
+    assert_eq!(
+        scripts,
+        vec![
+            generic.as_str(),
+            "seed-operator-baseline.sh tenant_dir=unset",
+            "seed-brewery-tenant.sh tenant_dir=unset",
+        ],
+        "publish first, then the baseline, then the engine for what only it does:\n{out}"
+    );
+}
+
+#[test]
+fn a_failed_brewery_publish_stops_before_the_baseline_and_the_engine() {
+    // The degrade contract is the same for the brewery: a publish that
+    // did not land is the verdict, and neither the baseline nor the
+    // engine's prepare runs against the rows it was about to declare —
+    // the engine counts a 409 as "already there" (its people posts
+    // predate backlog 0d2d7daa's GET-after-409), so a location no door
+    // seeded would read as a duplicate and the sim would start on a
+    // half-published tenant.
+    let fx = Fixture::new("brewery-fails");
+    let brewery = fx.tenant("brewery", "seeds/tenant.toml", "brewery");
+    let (rc, out) = fx.publish(&[("BOSS_TENANT_DIR", &s(&brewery)), ("STUB_EXIT", "3")]);
+    assert_eq!(rc, 3, "the generic publish's exit is the verdict:\n{out}");
     assert!(
-        out.starts_with("seed-operator-baseline.sh"),
-        "the operator baseline still goes first:\n{out}"
+        out.starts_with(&format!("seed-tenant.sh tenant_dir={}", s(&brewery))),
+        "{out}"
     );
     assert!(
-        out.contains("\nseed-brewery-tenant.sh"),
-        "tenant_id brewery → seed-brewery-tenant.sh:\n{out}"
+        !out.contains("seed-operator-baseline.sh") && !out.contains("seed-brewery-tenant.sh"),
+        "nothing runs after a failed publish:\n{out}"
     );
-    assert!(!out.contains("seed-tenant.sh"), "{out}");
 }
 
 #[test]

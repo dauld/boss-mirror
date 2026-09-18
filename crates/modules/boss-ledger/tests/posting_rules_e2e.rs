@@ -387,3 +387,50 @@ async fn a_projection_with_when_fires_on_one_workflows_step_only() {
     .unwrap();
     assert_eq!(n, 1);
 }
+
+/// Backlog 94f20e76: a projection on an event family the platform
+/// stream does not ingest is dead air live — the subscriber's filter
+/// hears nothing, with no error. The door refuses the whole batch (422)
+/// naming the family, and the registry keeps only what the schema
+/// seeded on that family (the two `products.*` rows boss-products
+/// writes in-tx anyway).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_projection_on_an_unstreamed_family_is_refused_at_the_door() {
+    let db = TestDb::new().await;
+    let seeded: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM gl_fact_projection_rules WHERE event_kind LIKE 'products.%'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(seeded.0, 2, "40-ledger.sql seeds two products.* rows");
+
+    let dead_air = json!({
+        "event_kind": "products.returned",
+        "fact_kind": "finance.return.recognized",
+        "source_table": "products_return",
+        "source_id_path": "/source_id",
+        "happened_on_path": "/happened_on",
+    });
+    let (status, out) = send(
+        make_router(&db),
+        "POST",
+        "/api/ledger/fact-projection-rules/batch",
+        json!({"rules": [dead_air]}),
+        OPERATOR,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{out}");
+    let why = out.as_str().unwrap_or_default().to_string();
+    assert!(why.contains("products.>"), "{why}");
+    assert!(why.contains("products.returned"), "{why}");
+    assert!(why.contains("stream_subjects"), "{why}");
+
+    let after: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM gl_fact_projection_rules WHERE event_kind LIKE 'products.%'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(after.0, 2, "nothing landed; the seeded rows are untouched");
+}

@@ -290,6 +290,16 @@ pub fn seed(people_base: &str, seed_path: &Path) -> Result<Summary> {
     // other external caller. The actor identity is a dedicated
     // platform-admin automation identity — these are founding
     // platform operators, not tenant employees.
+    //
+    // SIGNED, NOT SIMULATED (backlog 09887242, 2026-09-17). Until then
+    // the client also sent `x-sim-origin: true`, from the initial
+    // commit, with no reason recorded — and it was not load-bearing:
+    // POST /api/people has no policy gate, and the tier above holds
+    // every grant. Its effect was that emp-audit, the platform's own
+    // auditor (the audit-readonly reader every projection admits),
+    // was prod's one `_simulated: true` employee, in the set the
+    // cutover TRIMS. The rows this seed lands are the platform's, and
+    // real.
     let user_header = serde_json::json!({
         "id": "automation:operator-baseline",
         "role": "platform-admin",
@@ -304,10 +314,6 @@ pub fn seed(people_base: &str, seed_path: &Path) -> Result<Summary> {
         "x-boss-user",
         reqwest::header::HeaderValue::from_str(&user_header)
             .with_context(|| "x-boss-user header value")?,
-    );
-    headers.insert(
-        "x-sim-origin",
-        reqwest::header::HeaderValue::from_static("true"),
     );
     headers.insert(
         reqwest::header::CONTENT_TYPE,

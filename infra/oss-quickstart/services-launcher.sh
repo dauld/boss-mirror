@@ -148,13 +148,14 @@ cleanup() {
 }
 trap cleanup TERM INT
 
-# Seed the platform operator-baseline (emp-audit + the bootstrap-admin)
-# and then the brewery tenant (Workflows + policy + accounts/vendors/data)
-# before the sim starts. Both go through the public API — and boss-init
-# can't do them (the API isn't up during init), so they run here, just
-# before the sim opens its first Job. operator-baseline FIRST so the
-# platform-admin login + emp-audit exist before the brewery seed + sim.
-# Shared with bare-metal bootstrap-local.sh.
+# Publish the tenant (`boss tenant publish`, the door every tenant
+# takes — brewery included since backlog b644d727), then the platform
+# operator-baseline (emp-audit + the bootstrap-admin), then the
+# brewery's engine prepare (the sim data + the reset baseline) before
+# the sim starts. All of it goes through the public API — and
+# boss-init can't do it (the API isn't up during init), so it runs
+# here, just before the sim opens its first Job; the order and its
+# reasons are on publish_tenant in tenant-launch.sh.
 #
 # A FAILED PREPARE DEGRADES THE POD, IT DOES NOT END IT. The publish and
 # the sim start live in tenant-launch.sh: on failure the APIs stay up,

@@ -13,7 +13,9 @@
 //! 5. The deferred trigger checks the double-entry invariant at commit.
 //!
 //! Idempotency: `gl_journal_entries` has a `UNIQUE (fact_id, rule_version_id)`
-//! constraint. A re-post of the same fact is a no-op.
+//! constraint. A re-post of the same fact is a no-op — and so is a post
+//! of a SUPERSEDED fact, whose entry the supersede dropped on purpose
+//! (backlog 94f20e76; the guard is in `post_fact_in_tx`).
 
 use chrono::{Datelike, NaiveDate};
 use sqlx::{Postgres, Transaction};
@@ -73,6 +75,28 @@ pub async fn post_fact_in_tx(
     // every fact row, and an inert kind has no RuleSet arm; without this
     // guard it would hit `UnknownFactKind` and fail the whole rebuild.
     if is_gl_inert(fact.kind) {
+        return Ok(());
+    }
+    // A superseded fact posts nothing. `apply_supersede_in_tx` marks the
+    // row and DROPS its entry, and until 2026-09-17 (backlog 94f20e76)
+    // this function never read the mark: any caller that re-posted an
+    // existing fact — a domain writer's retry, whose `record_fact_in_tx`
+    // resolves the kept row's id; a NAK redelivery — found no entry
+    // under the UNIQUE key below and resurrected the retraction. The
+    // rebuild and replay paths filter superseded rows in SQL
+    // (`OPEN_PERIOD_FACTS_SQL`); the live projector posts only the fact
+    // it inserted; THIS is the guard every caller shares. A no-op, not
+    // an error: the operator retired the fact deliberately, and the
+    // domain write that re-posts it is otherwise idempotent and must
+    // stay so. Logged, because a silent no-op is the one forbidden
+    // failure mode (superseded-fact-posts-nothing).
+    if let Some(reason) = supersede_reason_of(tx, fact.id).await? {
+        tracing::warn!(
+            fact_id = %fact.id,
+            kind = fact.kind,
+            supersede_reason = %reason,
+            "superseded-fact-posts-nothing: re-post of a retired fact left no journal entry"
+        );
         return Ok(());
     }
     let (draft, rule_version_id) = evaluate_active(tx, fact).await?;
@@ -162,6 +186,23 @@ pub async fn post_fact_in_tx(
     )
     .await?;
     Ok(())
+}
+
+/// The fact's `supersede_reason`, `Some` iff the row is retired
+/// (supersede.rs's convention). A fact with no row yet reads as live:
+/// the entry insert's FK on `financial_facts(id)` is the one that
+/// speaks to a missing row, and this read must not pre-empt it.
+async fn supersede_reason_of(
+    tx: &mut Transaction<'_, Postgres>,
+    fact_id: Uuid,
+) -> Result<Option<String>, LedgerError> {
+    let row: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT supersede_reason FROM financial_facts WHERE id = $1")
+            .bind(fact_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|e| LedgerError::Storage(e.to_string()))?;
+    Ok(row.and_then(|(reason,)| reason))
 }
 
 /// The fact kind emitted when an accounting period is closed.

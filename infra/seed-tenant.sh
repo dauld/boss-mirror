@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-# seed-tenant.sh — publish a tenant that has NO engine onto a running
-# BOSS stack: `boss tenant publish <dir>` through the shared doors
-# (classes, business calendars, the company Subject, policy grants,
-# people, Workflows), retried while the stack finishes binding. The
-# generic sibling of seed-brewery-tenant.sh (backlog ee7b62bb,
+# seed-tenant.sh — publish a tenant onto a running BOSS stack: `boss
+# tenant publish <dir>` through the shared doors (classes, the chart,
+# locations, business calendars, the company Subject, policy grants,
+# people, agents, Workflows, sensors, posting rules, dispatcher rules),
+# retried while the stack finishes binding (backlog ee7b62bb,
 # 2026-09-16).
 #
-# Chosen by tenant-launch.sh's publish_tenant for any tenant whose
-# manifest is not the brewery's. The brewery keeps its own script
-# because its engine seeds what the sim needs (accounts, vendors,
-# opening balances) and stamps the sim's reset baseline. This script
-# stamps NO baseline — a real company's log is never trimmed back to
-# "seeded day 0" — and needs no engine binary, only `boss`, which the
-# image ships in /usr/local/bin with every other workspace binary.
+# Run by tenant-launch.sh's publish_tenant for EVERY tenant, first
+# (backlog b644d727, 2026-09-17): a tenant with an engine — the
+# brewery — has its engine script run after this one, for what only
+# the engine seeds (accounts, vendors, opening balances) and the sim's
+# reset-baseline stamp. This script stamps NO baseline — a real
+# company's log is never trimmed back to "seeded day 0" — and needs no
+# engine binary, only `boss`, which the image ships in /usr/local/bin
+# with every other workspace binary.
 #
 # Idempotent + retry-safe: every door is insert-if-absent / upsert /
 # 409-swallowed, so an attempt that failed on the first unreachable

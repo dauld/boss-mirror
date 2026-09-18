@@ -15,6 +15,7 @@
 
 use boss_core::actor::REGISTERED_AGENT_PREFIX;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// One agent as a tenant declares it and as `POST /api/agents/batch`
 /// takes it.
@@ -97,70 +98,148 @@ pub struct AgentRow {
     pub aliases: Vec<String>,
 }
 
+/// One field a declaration changed on a row the registry already
+/// held: the column, what it read, what it reads now. `from`/`to` are
+/// JSON so a string, a number, a null and a list render the same way
+/// everywhere ([`FieldChange::render`]), and so the fact recording the
+/// change carries the values, not a rendering of them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldChange {
+    pub field: String,
+    pub from: Value,
+    pub to: Value,
+}
+
+/// A value on a publish line: a string bare, everything else as JSON.
+fn show(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+impl FieldChange {
+    pub fn new(field: &str, from: impl Serialize, to: impl Serialize) -> Self {
+        Self {
+            field: field.to_string(),
+            from: serde_json::to_value(from).unwrap_or(Value::Null),
+            to: serde_json::to_value(to).unwrap_or(Value::Null),
+        }
+    }
+
+    /// `location loc-hq → loc-algedonic-hq`.
+    pub fn render(&self) -> String {
+        format!("{} {} → {}", self.field, show(&self.from), show(&self.to))
+    }
+}
+
+/// A row a publish UPDATED to the tenant's declaration (backlog
+/// 09887242, 2026-09-17): the id and every field that changed. The
+/// shape is the agents batch's answer AND the shape `boss tenant
+/// publish` names an updated employee by — one rule, one rendering,
+/// for both halves of the roster.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdatedRow {
+    pub id: String,
+    pub changes: Vec<FieldChange>,
+}
+
+impl UpdatedRow {
+    /// `emp-david (location loc-hq → loc-algedonic-hq)`.
+    pub fn render(&self) -> String {
+        format!(
+            "{} ({})",
+            self.id,
+            self.changes
+                .iter()
+                .map(FieldChange::render)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+/// `updated 2: emp-david (location loc-hq → loc-algedonic-hq); emp-two
+/// (department it → ops)` — the publish line's tail for the rows a
+/// declaration changed. Empty when nothing was.
+pub fn render_updated(rows: &[UpdatedRow]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    format!(
+        "updated {}: {}",
+        rows.len(),
+        rows.iter()
+            .map(UpdatedRow::render)
+            .collect::<Vec<_>>()
+            .join("; ")
+    )
+}
+
 impl AgentRow {
-    /// The fields where `declared` disagrees with this row — what a
-    /// publish names when it keeps a row the platform already
-    /// registered (insert-if-absent never overwrites). `aliases`
-    /// differs when a declared alias does not resolve to this id.
-    pub fn differs_from(&self, declared: &AgentInput) -> Vec<String> {
+    /// Every field where `after` reads differently from this row —
+    /// what a publish that applied a declaration over it changed. Both
+    /// alias lists are sorted, so they compare as sets.
+    pub fn changes_to(&self, after: &AgentRow) -> Vec<FieldChange> {
         let mut out = Vec::new();
-        if self.display_name != declared.display_name {
-            out.push("display_name".to_string());
+        if self.display_name != after.display_name {
+            out.push(FieldChange::new(
+                "display_name",
+                &self.display_name,
+                &after.display_name,
+            ));
         }
-        if self.default_model != declared.default_model {
-            out.push("default_model".to_string());
+        if self.default_model != after.default_model {
+            out.push(FieldChange::new(
+                "default_model",
+                &self.default_model,
+                &after.default_model,
+            ));
         }
-        if self.hourly_budget_usd_micros != declared.hourly_budget_usd_micros {
-            out.push("hourly_budget_usd_micros".to_string());
+        if self.hourly_budget_usd_micros != after.hourly_budget_usd_micros {
+            out.push(FieldChange::new(
+                "hourly_budget_usd_micros",
+                self.hourly_budget_usd_micros,
+                after.hourly_budget_usd_micros,
+            ));
         }
-        if self.max_concurrent_runs != declared.max_concurrent_runs {
-            out.push("max_concurrent_runs".to_string());
+        if self.max_concurrent_runs != after.max_concurrent_runs {
+            out.push(FieldChange::new(
+                "max_concurrent_runs",
+                self.max_concurrent_runs,
+                after.max_concurrent_runs,
+            ));
         }
-        if declared.aliases.iter().any(|a| !self.aliases.contains(a)) {
-            out.push("aliases".to_string());
+        if self.aliases != after.aliases {
+            out.push(FieldChange::new("aliases", &self.aliases, &after.aliases));
         }
         out
     }
 }
 
-/// A declared row the registry already held: kept as registered, with
-/// the fields the declaration disagrees on named (empty = identical).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct KeptAgent {
-    pub id: String,
-    pub differs: Vec<String>,
-}
-
-/// What a batch did: rows received, rows inserted, and the rows kept
-/// as the platform registered them.
+/// What a batch did: rows received, rows inserted, rows the registry
+/// already held that were UPDATED to the declaration (each change
+/// named), and rows already registered exactly as declared.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentsBatchOutcome {
     pub received: usize,
     pub inserted: usize,
-    pub kept: Vec<KeptAgent>,
+    pub updated: Vec<UpdatedRow>,
+    pub unchanged: usize,
 }
 
 impl AgentsBatchOutcome {
-    /// One line for a publish report: counts, then each kept row that
-    /// differs, by field — so a tenant whose declaration disagrees with
-    /// the registry reads it in the plan line, never in silence.
+    /// One line for a publish report: counts, then each updated row
+    /// with its changes — so a declaration that moved the registry is
+    /// read in the plan line field by field, never as a bare count.
     pub fn summary(&self) -> String {
         let mut s = format!("received {}, inserted {}", self.received, self.inserted);
-        let differing: Vec<String> = self
-            .kept
-            .iter()
-            .filter(|k| !k.differs.is_empty())
-            .map(|k| format!("{} ({} differs)", k.id, k.differs.join(", ")))
-            .collect();
-        let same = self.kept.len() - differing.len();
-        if same > 0 {
-            s.push_str(&format!(", {same} already registered as declared"));
+        if !self.updated.is_empty() {
+            s.push_str(", ");
+            s.push_str(&render_updated(&self.updated));
         }
-        if !differing.is_empty() {
-            s.push_str(&format!(
-                "; kept as the platform registered, not as declared: {}",
-                differing.join("; ")
-            ));
+        if self.unchanged > 0 {
+            s.push_str(&format!(", {} already as declared", self.unchanged));
         }
         s
     }
@@ -224,9 +303,14 @@ mod tests {
         assert_eq!(ok.hourly_budget_usd_micros, None);
     }
 
+    /// A row updated to the declaration names every field that moved,
+    /// with what it read and what it reads now (backlog 09887242): the
+    /// line is `updated N: id (field from → to, …)`, strings bare,
+    /// nulls and lists as JSON — and a row already as declared is a
+    /// count, never a silent nothing.
     #[test]
-    fn a_kept_row_names_the_fields_the_declaration_disagrees_on() {
-        let row = AgentRow {
+    fn an_updated_row_names_each_field_from_and_to() {
+        let before = AgentRow {
             id: "agent-claude".into(),
             display_name: "Claude (Claude Code sessions on the dev pod)".into(),
             default_model: "opus-5[1m]".into(),
@@ -234,38 +318,55 @@ mod tests {
             max_concurrent_runs: None,
             aliases: vec!["claude@algedonic.dev".into()],
         };
-        assert_eq!(row.differs_from(&input()), ["display_name"]);
-        let mut same = input();
-        same.display_name = row.display_name.clone();
-        assert!(row.differs_from(&same).is_empty());
-        let mut more = input();
-        more.aliases.push("other@algedonic.dev".into());
-        assert_eq!(more.aliases.len(), 2);
-        assert_eq!(row.differs_from(&more), ["display_name", "aliases"]);
+        let mut after = before.clone();
+        after.display_name = "Claude (engineering)".into();
+        let changes = before.changes_to(&after);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].field, "display_name");
+        assert_eq!(
+            changes[0].render(),
+            "display_name Claude (Claude Code sessions on the dev pod) → Claude (engineering)"
+        );
+        assert!(before.changes_to(&before).is_empty());
+
+        after.max_concurrent_runs = Some(2);
+        after.aliases.push("other@algedonic.dev".into());
+        let changes = before.changes_to(&after);
+        let fields: Vec<&str> = changes.iter().map(|c| c.field.as_str()).collect();
+        assert_eq!(fields, ["display_name", "max_concurrent_runs", "aliases"]);
+        assert_eq!(changes[1].render(), "max_concurrent_runs null → 2");
+        assert_eq!(
+            changes[2].render(),
+            "aliases [\"claude@algedonic.dev\"] → [\"claude@algedonic.dev\",\"other@algedonic.dev\"]"
+        );
 
         let out = AgentsBatchOutcome {
             received: 2,
             inserted: 1,
-            kept: vec![KeptAgent {
+            updated: vec![UpdatedRow {
                 id: "agent-claude".into(),
-                differs: vec!["display_name".into()],
+                changes: vec![FieldChange::new(
+                    "display_name",
+                    "Claude (Claude Code sessions on the dev pod)",
+                    "Claude (engineering)",
+                )],
             }],
+            unchanged: 0,
         };
         assert_eq!(
             out.summary(),
-            "received 2, inserted 1; kept as the platform registered, not as declared: agent-claude (display_name differs)"
+            "received 2, inserted 1, updated 1: agent-claude (display_name Claude (Claude Code sessions on the dev pod) → Claude (engineering))"
         );
         let out = AgentsBatchOutcome {
             received: 1,
             inserted: 0,
-            kept: vec![KeptAgent {
-                id: "agent-claude".into(),
-                differs: vec![],
-            }],
+            updated: vec![],
+            unchanged: 1,
         };
         assert_eq!(
             out.summary(),
-            "received 1, inserted 0, 1 already registered as declared"
+            "received 1, inserted 0, 1 already as declared"
         );
+        assert_eq!(render_updated(&[]), "");
     }
 }

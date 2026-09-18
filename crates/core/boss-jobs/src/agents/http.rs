@@ -13,9 +13,12 @@
 //! classes and locations batch shape), validates every row with the
 //! same `validate_agent` the TOML loader ran, refuses the whole batch
 //! (422, deterministic) naming the row, and answers what it did —
-//! including which registered rows it KEPT and how the declaration
-//! differs from them, so a disagreement between the tenant's file and
-//! the registry is read in the publish line, never in silence.
+//! rows inserted, rows the registry held that the declaration UPDATED
+//! with each change named (field, from, to; backlog 09887242), rows
+//! already as declared — so what a publish moved is read in the
+//! publish line, never in silence. This batch IS the tenant's update
+//! door: the declaration is the whole row, so a per-row PUT would only
+//! repeat it.
 
 use std::sync::Arc;
 
@@ -180,8 +183,10 @@ mod tests {
     }
 
     /// The tenant batch lands, the roster lists it with its alias, a
-    /// second publish inserts nothing, and a declaration that disagrees
-    /// with a registered row is kept as registered and NAMED.
+    /// declaration that disagrees with a registered row UPDATES it and
+    /// names each change (backlog 09887242), a re-run of the same
+    /// declaration changes nothing and says so, and an alias the
+    /// tenant did not declare is kept.
     #[tokio::test]
     async fn a_tenant_publishes_and_the_roster_lists_the_agent() {
         let registry = Arc::new(InMemoryAgents::new());
@@ -196,7 +201,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         let out: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(out["inserted"], 1);
-        assert_eq!(out["kept"], json!([]));
+        assert_eq!(out["updated"], json!([]));
+        assert_eq!(out["unchanged"], 0);
 
         let (status, body) = send(app(&registry), "GET", "/api/agents", None, probe_reader()).await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -209,8 +215,45 @@ mod tests {
             json!(["claude@algedonic.dev"])
         );
 
+        // An operator-added login the tenant's file does not list.
+        let registry =
+            Arc::new(InMemoryAgents::new().with_agent("agent-claude", ["ops-added@algedonic.dev"]));
         let mut renamed = batch();
         renamed[0]["display_name"] = json!("Claude (renamed)");
+        let (_, body) = send(
+            app(&registry),
+            "POST",
+            "/api/agents/batch",
+            Some(renamed.clone()),
+            seed(),
+        )
+        .await;
+        let out: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(out["inserted"], 0, "a held row is not inserted twice");
+        assert_eq!(out["unchanged"], 0);
+        assert_eq!(out["updated"][0]["id"], "agent-claude");
+        let fields: Vec<&str> = out["updated"][0]["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["field"].as_str().unwrap())
+            .collect();
+        assert_eq!(fields, ["display_name", "default_model", "aliases"]);
+        assert_eq!(out["updated"][0]["changes"][0]["from"], "agent-claude");
+        assert_eq!(out["updated"][0]["changes"][0]["to"], "Claude (renamed)");
+        let rows = registry.list().await.unwrap();
+        assert_eq!(
+            rows[0].display_name, "Claude (renamed)",
+            "the declaration wins on the declared field"
+        );
+        assert_eq!(
+            rows[0].aliases,
+            ["claude@algedonic.dev", "ops-added@algedonic.dev"],
+            "the declared alias landed and the undeclared one is kept"
+        );
+
+        // The same declaration again: nothing moves, and the answer
+        // says so rather than naming a phantom update.
         let (_, body) = send(
             app(&registry),
             "POST",
@@ -220,22 +263,30 @@ mod tests {
         )
         .await;
         let out: Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(out["inserted"], 0, "a second publish inserts nothing");
-        assert_eq!(out["kept"][0]["id"], "agent-claude");
-        assert_eq!(out["kept"][0]["differs"], json!(["display_name"]));
-        let rows = registry.list().await.unwrap();
+        assert_eq!(out["inserted"], 0);
+        assert_eq!(out["updated"], json!([]));
+        assert_eq!(out["unchanged"], 1);
+        let events = registry.recorded_events();
         assert_eq!(
-            rows[0].display_name, "Claude (engineering)",
-            "kept as registered"
+            events.len(),
+            1,
+            "one agent.updated for the change, none for the re-run: {events:?}"
         );
+        assert_eq!(events[0].kind, super::super::AGENT_UPDATED);
+        assert_eq!(events[0].payload["id"], "agent-claude");
+        assert_eq!(events[0].payload["display_name"], "Claude (renamed)");
+        assert_eq!(events[0].payload["changes"][0]["field"], "display_name");
+        assert_eq!(events[0].payload["updated_by"], "automation:tenant-seed");
+        assert_eq!(events[0].payload["_actor"], events[0].payload["updated_by"]);
     }
 
     /// The fact a declaration leaves (backlog d9409039, 2026-09-17):
     /// one `agent.declared` per row INSERTED — the row as inserted plus
-    /// `declared_by`, the actor the request signed with — and nothing
-    /// for the row the registry already held, nothing for the batch.
+    /// `declared_by`, the actor the request signed with — one
+    /// `agent.updated` for the row the registry already held and the
+    /// declaration moved, nothing for the batch.
     #[tokio::test]
-    async fn a_batch_records_one_declared_event_per_inserted_row_and_none_for_a_kept_row() {
+    async fn a_batch_records_one_declared_event_per_inserted_row_and_one_updated_for_a_held_row() {
         let registry = Arc::new(InMemoryAgents::new().with_agent("agent-claude", []));
         let mut rows = batch();
         rows.as_array_mut().unwrap().push(json!({
@@ -257,21 +308,25 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         let out: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(out["inserted"], 2);
-        assert_eq!(out["kept"][0]["id"], "agent-claude");
+        assert_eq!(out["updated"][0]["id"], "agent-claude");
 
-        let events = registry.recorded_events();
+        let all = registry.recorded_events();
+        assert!(all.iter().all(|e| e.source == "jobs"), "{all:?}");
+        let kinds: Vec<&str> = all.iter().map(|e| e.kind.as_str()).collect();
         assert_eq!(
-            events.len(),
-            2,
-            "one event per inserted row, none for the kept agent-claude"
+            kinds,
+            [
+                super::super::AGENT_UPDATED,
+                super::super::AGENT_DECLARED,
+                super::super::AGENT_DECLARED
+            ],
+            "one agent.updated for the held agent-claude, one agent.declared per inserted row"
         );
-        assert!(
-            events
-                .iter()
-                .all(|e| e.kind == super::super::AGENT_DECLARED),
-            "{events:?}"
-        );
-        assert!(events.iter().all(|e| e.source == "jobs"), "{events:?}");
+        assert_eq!(all[0].payload["id"], "agent-claude");
+        let events: Vec<_> = all
+            .into_iter()
+            .filter(|e| e.kind == super::super::AGENT_DECLARED)
+            .collect();
         let ids: Vec<&str> = events
             .iter()
             .map(|e| e.payload["id"].as_str().unwrap())

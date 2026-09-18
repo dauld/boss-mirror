@@ -47,12 +47,18 @@
 //! lands and that the location is there before the employee — the
 //! foreign key is the machine's own proof of the order. Backlog
 //! f56155f0 (same day) added the agents seed: the same case proves the
-//! tenant's `agent-claude` meets the migration's row, is KEPT as the
-//! platform registered it, and the publish line names the field the
-//! declaration differs on (`display_name`) instead of a silent "already
-//! there" — the fixture's agents.toml is the contract's shape, which is
-//! the real tenant's @ 20f3a9e minus the `role` and `department` the
-//! registry cannot hold (check refuses those by name).
+//! tenant's `agent-claude` meets the migration's row and — since
+//! backlog 09887242, the same day — is UPDATED to the declaration with
+//! the change named from → to, instead of a silent "already there" or
+//! a kept row: the fixture's agents.toml is the contract's shape, which
+//! is the real tenant's @ 20f3a9e minus the `role` and `department` the
+//! registry cannot hold (check refuses those by name). The third case
+//! runs the rule at the people door: a changed employees.json updates
+//! the founder's declared field, keeps a column the file does not
+//! declare, leaves one `people.employee.updated`, and a re-run writes
+//! nothing. The second case also pins emp-audit as REAL: the baseline
+//! seed carried `x-sim-origin: true` from the initial commit, which
+//! made the platform's own auditor prod's one simulated employee.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -137,11 +143,18 @@ async fn serve(pool: PgPool) -> String {
             "/api/workflows/{kind}",
             get(|| async { Json(json!({"authoring_job_id": "outside-this-proof"})) }),
         );
+    // The same request-context layer boss-people-api mounts: it is
+    // what turns a caller's `x-sim-origin` into a `_simulated` stamp
+    // on the facts the door records — so the provenance a seed leaves
+    // is proven here, not assumed.
     let app = people_router
         .merge(locations_router)
         .merge(agents_router)
         .merge(policy_router)
-        .merge(outside_this_proof);
+        .merge(outside_this_proof)
+        .layer(axum::middleware::from_fn(
+            boss_policy_client::request_context_middleware,
+        ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -272,11 +285,12 @@ async fn the_real_tenant_verbatim_lands_its_location_before_its_founder() {
         "the founder sits at the tenant's own site, not the platform's loc-hq"
     );
 
-    // The agent (backlog f56155f0): the migration registered
-    // agent-claude under the platform's own display name; the tenant
-    // declares it under its own. Insert-if-absent keeps the migration's
-    // row, the publish line NAMES the field that differs, the declared
-    // alias resolves, and the agents door went before the Workflows.
+    // The agent (backlog f56155f0; the rule since 09887242): the
+    // migration registered agent-claude under the platform's own
+    // display name; the tenant declares it under its own. The tenant's
+    // declaration wins on the declared field: the row is UPDATED, the
+    // publish line names the change from → to, the declared alias
+    // resolves, and the agents door went before the Workflows.
     assert!(
         line_of("seeds/agents.toml") < line_of("seeds/workflows.toml"),
         "the agents are sent before the Workflows:\n{out}"
@@ -287,8 +301,10 @@ async fn the_real_tenant_verbatim_lands_its_location_before_its_founder() {
         .unwrap();
     assert!(
         agents_line.contains("POST /api/agents/batch")
-            && agents_line.contains("received 1, inserted 0")
-            && agents_line.contains("agent-claude (display_name differs)"),
+            && agents_line.contains(
+                "received 1, inserted 0, updated 1: agent-claude (display_name Claude \
+                 (Claude Code sessions on the dev pod) → Claude (engineering))"
+            ),
         "{agents_line}"
     );
     let agent: Option<(String, String)> =
@@ -298,8 +314,8 @@ async fn the_real_tenant_verbatim_lands_its_location_before_its_founder() {
             .unwrap();
     let (display_name, default_model) = agent.expect("the agent row is there");
     assert_eq!(
-        display_name, "Claude (Claude Code sessions on the dev pod)",
-        "kept as the migration registered it, never overwritten"
+        display_name, "Claude (engineering)",
+        "the tenant's declaration wins on the declared field"
     );
     assert_eq!(
         default_model, "opus-5[1m]",
@@ -324,6 +340,112 @@ async fn the_real_tenant_verbatim_lands_its_location_before_its_founder() {
         locations_line.contains("received 1, inserted 0"),
         "{locations_line}"
     );
+    let line = |file: &str| out.lines().find(|l| l.contains(file)).unwrap().to_string();
+    assert!(
+        line("seeds/employees.json").contains("0 posted, 1 already as declared"),
+        "{}",
+        line("seeds/employees.json")
+    );
+    assert!(
+        line("seeds/agents.toml").contains("received 1, inserted 0, 1 already as declared"),
+        "{}",
+        line("seeds/agents.toml")
+    );
+}
+
+/// THE TENANT'S DECLARATION WINS ON DECLARED FIELDS, AT THE REAL DOOR
+/// (backlog 09887242). Prod's shape, run forward: the founder is
+/// published at one site, the tenant's file then declares another —
+/// here the platform's own `loc-hq`, so no locations row is needed —
+/// and the next publish applies it through the people door's PUT,
+/// leaving one `people.employee.updated` with the full row; the salary
+/// the file does not declare is kept; a third publish updates nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_changed_declaration_updates_the_founder_at_the_real_door_and_keeps_what_it_does_not_declare()
+ {
+    let db = TestDb::new().await;
+    let base = serve(db.pool.clone()).await;
+    let dir = tenant_copy("declaration-wins");
+    let (ok, out) = boss_tenant_publish(&dir, &base);
+    assert!(ok, "the first publish:\n{out}");
+
+    // A salary set out of band, which the tenant's file does not
+    // declare, and the file moved to the platform's site.
+    sqlx::query("UPDATE employees SET annual_salary_cents = 12000000 WHERE id = $1")
+        .bind(FOUNDER_ID)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let path = dir.join("seeds/employees.json");
+    let mut roster: Vec<Value> =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    roster[0]["location"] = json!("loc-hq");
+    roster[0]
+        .as_object_mut()
+        .unwrap()
+        .remove("annual_salary_cents");
+    std::fs::write(&path, serde_json::to_string_pretty(&roster).unwrap()).unwrap();
+
+    let (ok, out) = boss_tenant_publish(&dir, &base);
+    assert!(ok, "the second publish:\n{out}");
+    let people_line = out
+        .lines()
+        .find(|l| l.contains("seeds/employees.json"))
+        .unwrap();
+    assert!(
+        people_line.contains(
+            "0 posted, updated 1: emp-david (location loc-algedonic-hq → loc-hq), 0/0 linked"
+        ),
+        "{people_line}"
+    );
+    let row: (Option<String>, Option<i64>) =
+        sqlx::query_as("SELECT location, annual_salary_cents FROM employees WHERE id = $1")
+            .bind(FOUNDER_ID)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        row.0.as_deref(),
+        Some("loc-hq"),
+        "the declared field applied"
+    );
+    assert_eq!(
+        row.1,
+        Some(12_000_000),
+        "the column the tenant did not declare is kept"
+    );
+    let updates: Vec<Value> = sqlx::query_scalar(
+        "SELECT payload FROM event_outbox WHERE kind = 'people.employee.updated' \
+         AND payload->>'id' = $1",
+    )
+    .bind(FOUNDER_ID)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(updates.len(), 1, "one update fact: {updates:?}");
+    assert_eq!(updates[0]["location"], "loc-hq");
+    assert_ne!(updates[0]["_simulated"], json!(true));
+
+    // Idempotent at the real door: the same file again writes nothing.
+    let (ok, out) = boss_tenant_publish(&dir, &base);
+    assert!(ok, "the third publish:\n{out}");
+    let people_line = out
+        .lines()
+        .find(|l| l.contains("seeds/employees.json"))
+        .unwrap();
+    assert!(
+        people_line.contains("0 posted, 1 already as declared, 0/0 linked"),
+        "{people_line}"
+    );
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM event_outbox WHERE kind = 'people.employee.updated' \
+         AND payload->>'id' = $1",
+    )
+    .bind(FOUNDER_ID)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 1, "no second update fact");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -336,7 +458,7 @@ async fn tenant_then_baseline_leaves_one_founder_row_and_no_bootstrap_admin() {
     let (ok, out) = boss_tenant_publish(&dir, &base);
     assert!(ok, "boss tenant publish:\n{out}");
     assert!(
-        out.contains("1 posted, 0 already there"),
+        out.contains("1 posted, 0/0 linked"),
         "the founder was POSTed, not skipped:\n{out}"
     );
     let after_tenant = holders_of(&db.pool, FOUNDER_EMAIL).await;
@@ -383,6 +505,26 @@ async fn tenant_then_baseline_leaves_one_founder_row_and_no_bootstrap_admin() {
             .await
             .unwrap();
     assert_eq!(audit.as_deref(), Some("emp-audit"));
+    // emp-audit is the PLATFORM's own row — the audit-readonly reader
+    // every projection admits, the recorded-probe identity — and it is
+    // real (backlog 09887242): measured 2026-09-17 it was prod's one
+    // `_simulated: true` employee, because the baseline seed sent
+    // `x-sim-origin: true` since the initial commit with no reason
+    // recorded, and the cutover TRIMS simulated rows. The fact the
+    // hire left carries no simulated marker.
+    let audit_fact: Option<Value> = sqlx::query_scalar(
+        "SELECT payload FROM event_outbox WHERE kind = 'people.employee.created' \
+         AND payload->>'id' = 'emp-audit'",
+    )
+    .fetch_optional(&db.pool)
+    .await
+    .unwrap();
+    let audit_fact = audit_fact.expect("the hire left a people.employee.created fact");
+    assert_ne!(
+        audit_fact["_simulated"],
+        json!(true),
+        "the platform's auditor is real, never a sim row the cutover trims: {audit_fact}"
+    );
     // Q7 owner resolution keys on the platform-admin ROLE for
     // automation-owned platform Jobs (41 platform workflows say
     // owner_role = platform-admin): the fresh instance has exactly one

@@ -42,9 +42,20 @@
 //! ([`seed::load_agents_toml`]). Until that car the registry's rows
 //! arrived by migration only (the rate-card precedent: a wrong identity
 //! is harder to notice than a missing one), which left the company's
-//! own agent declared nowhere the product read; the batch is
-//! insert-if-absent by id, so a migration-registered row is kept and
-//! the publish names any field the tenant's declaration differs on.
+//! own agent declared nowhere the product read.
+//!
+//! THE TENANT'S DECLARATION WINS ON DECLARED FIELDS (backlog 09887242,
+//! 2026-09-17). The batch was insert-if-absent by id at first, naming
+//! a kept row's differing fields; measured on prod the same day, that
+//! left `agent-claude` under the migration's display name through
+//! every publish — the tenant's file said `Claude (engineering)` and
+//! nothing could apply it short of a migration. The tenant OWNS its
+//! agents, so a row the registry holds is now UPDATED on the declared
+//! fields that differ (one `agent.updated` naming each change), a row
+//! already as declared is counted, and nothing the tenant does not
+//! declare — an alias it did not list, an agent it did not name — is
+//! deleted. The same rule, decided once, governs the roster's
+//! employees in `boss tenant publish`.
 
 pub mod door;
 pub mod http;
@@ -57,8 +68,11 @@ pub mod types;
 
 pub use door::{LoginDoor, Resolution, UNRESOLVED_LOGIN, decide, resolve_login};
 pub use in_memory::InMemoryAgents;
-pub use port::{AGENT_DECLARED, AgentsError, AgentsRegistry};
+pub use port::{AGENT_DECLARED, AGENT_UPDATED, AgentsError, AgentsRegistry};
 #[cfg(feature = "postgres")]
 pub use postgres::PgAgents;
 pub use seed::{load_agents_toml, parse_agents_toml};
-pub use types::{AgentInput, AgentRow, AgentsBatchOutcome, KeptAgent, validate_agent};
+pub use types::{
+    AgentInput, AgentRow, AgentsBatchOutcome, FieldChange, UpdatedRow, render_updated,
+    validate_agent,
+};

@@ -4,9 +4,11 @@
 //! under a registered agent (`actor_aliases.actor_id` is a foreign key
 //! into `agents`), so the builder takes the agent and its logins
 //! together and there is no way to register a login to nothing; and a
-//! publish is insert-if-absent by id and by alias, so a registered row
-//! is kept and the outcome names what the declaration differs on. The
-//! rate-card FK is NOT mirrored (the Pg test proves that refusal).
+//! publish inserts a row the registry lacks, UPDATES a held row on the
+//! declared fields that differ (a declared alias lands under the
+//! declared id, an undeclared alias is kept), and names each change in
+//! the outcome. The rate-card FK is NOT mirrored (the Pg test proves
+//! that refusal).
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -15,8 +17,8 @@ use async_trait::async_trait;
 use boss_core::event::Event;
 use boss_core::publisher::EventStamp;
 
-use super::port::{AgentsError, AgentsRegistry, declared_event};
-use super::types::{AgentInput, AgentRow, AgentsBatchOutcome, KeptAgent};
+use super::port::{AgentsError, AgentsRegistry, declared_event, updated_event};
+use super::types::{AgentInput, AgentRow, AgentsBatchOutcome, UpdatedRow};
 
 #[derive(Default)]
 struct Rows {
@@ -108,33 +110,41 @@ impl AgentsRegistry for InMemoryAgents {
         let mut rows = self.rows.lock().expect("agents lock");
         let mut events = self.events.lock().expect("events lock");
         let mut inserted = 0usize;
-        let mut kept = Vec::new();
+        let mut updated = Vec::new();
+        let mut unchanged = 0usize;
         for a in declared {
-            let is_new = !rows.agents.contains_key(&a.id);
-            if is_new {
-                let mut stored = a.clone();
-                stored.aliases.clear();
-                rows.agents.insert(a.id.clone(), stored);
+            let before = rows.agents.get(&a.id).map(|held| rows.row(held));
+            let mut stored = a.clone();
+            stored.aliases.clear();
+            rows.agents.insert(a.id.clone(), stored);
+            // A declared alias signs as the declared id — moved when
+            // another agent held it; one the tenant did not declare
+            // stays where it is.
+            for alias in &a.aliases {
+                rows.aliases.insert(alias.clone(), a.id.clone());
+            }
+            let Some(before) = before else {
                 events.push(declared_event(stamp, a)?);
                 inserted += 1;
-            }
-            for alias in &a.aliases {
-                rows.aliases
-                    .entry(alias.clone())
-                    .or_insert_with(|| a.id.clone());
-            }
-            if !is_new {
-                let row = rows.row(&rows.agents[&a.id]);
-                kept.push(KeptAgent {
+                continue;
+            };
+            let after = rows.row(&rows.agents[&a.id]);
+            let changes = before.changes_to(&after);
+            if changes.is_empty() {
+                unchanged += 1;
+            } else {
+                events.push(updated_event(stamp, &after, &changes)?);
+                updated.push(UpdatedRow {
                     id: a.id.clone(),
-                    differs: row.differs_from(a),
+                    changes,
                 });
             }
         }
         Ok(AgentsBatchOutcome {
             received: declared.len(),
             inserted,
-            kept,
+            updated,
+            unchanged,
         })
     }
 }

@@ -161,9 +161,12 @@ pub const CONTRACT: &[Entry] = &[
     Entry {
         paths: &["seeds/employees.json"],
         required: false,
-        read_by: "POST /api/people, one `boss_people::Employee` per row (the brewery engine's \
-                  prepare reads it at the FIXED path /opt/boss/examples/brewery/seeds/, \
-                  not from the bundle; used-device-shop reads data/employees.json instead)",
+        read_by: "POST /api/people, one `boss_people::Employee` per row; a row already there is \
+                  PUT on the declared fields that differ and the rest kept — the tenant's \
+                  declaration wins on declared fields (backlog 09887242) — sent by `boss \
+                  tenant publish` (the brewery engine's prepare reads it at the FIXED path \
+                  /opt/boss/examples/brewery/seeds/, not from the bundle; used-device-shop \
+                  reads data/employees.json instead)",
         shape: "JSON array of Employee rows: id, name, email, role, department, hire_date, \
                 location, manager_id, employment_type, status, skills[], certifications[], \
                 annual_salary_cents; role/department/location are validated against the \
@@ -210,11 +213,13 @@ pub const CONTRACT: &[Entry] = &[
     Entry {
         paths: &["seeds/agents.toml"],
         required: false,
-        read_by: "POST /api/agents/batch (boss-jobs, insert-if-absent by id and by alias) — sent by \
-                  `boss tenant publish` BEFORE the Workflows (a step's audience may name an agent); \
-                  a row the platform already registered is kept and the publish line names any \
-                  field the declaration differs on; the jobs API's login door resolves each alias \
-                  to the id (design 6fda05ae; backlog f56155f0)",
+        read_by: "POST /api/agents/batch (boss-jobs) — sent by `boss tenant publish` BEFORE the \
+                  Workflows (a step's audience may name an agent); a row the registry lacks is \
+                  inserted, a row it holds is updated on the declared fields that differ and the \
+                  publish line names each change from → to, an alias the tenant does not declare \
+                  is kept — the tenant's declaration wins on declared fields (backlog 09887242); \
+                  the jobs API's login door resolves each alias to the id (design 6fda05ae; \
+                  backlog f56155f0)",
         shape: "`[[agent]]` rows: id (`agent-<slug>`), display_name, default_model (a rate-card \
                 model, e.g. `opus-5[1m]`), aliases? (the logins that sign as it), \
                 hourly_budget_usd_micros?, max_concurrent_runs? — the `agents` table's columns \
@@ -244,10 +249,12 @@ pub const CONTRACT: &[Entry] = &[
                   event_kind + when) — sent by `boss tenant publish` after the posting rules; the \
                   ledger's facts rebuild projects every matching audit_log event into a \
                   financial_fact (backlog a40541cb)",
-        shape: "`[[projection]]` rows: event_kind (an audit_log kind), when? (a table of \
-                {\"/pointer\" = value}, every pointer equal for the rule to fire), fact_kind, \
-                source_table, source_id_path, happened_on_path?, created_by_path? — the \
-                `gl_fact_projection_rules` columns; validated by \
+        shape: "`[[projection]]` rows: event_kind (an audit_log kind whose family the platform \
+                event stream ingests — `boss_nats::durable::stream_subjects`; a rule on any other \
+                family would fire never live, so it is refused naming the family, backlog \
+                94f20e76), when? (a table of {\"/pointer\" = value}, every pointer equal for the \
+                rule to fire), fact_kind, source_table, source_id_path, happened_on_path?, \
+                created_by_path? — the `gl_fact_projection_rules` columns; validated by \
                 `boss_ledger::posting_rules::load_projection_rules_toml`",
         parse: parse_projection_rules,
         scaffold: Some(scaffold_projection_rules),
@@ -1831,6 +1838,20 @@ terminal = { outcome = "sponsored" }
         let row = status_of(&r, "seeds/fact_projection_rules.toml").unwrap();
         assert_eq!(row.status, Status::Invalid, "{row:?}");
         assert!(row.detail.contains("spec_slug"), "{row:?}");
+
+        // A projection on a family the platform stream does not ingest
+        // is dead air live (backlog 94f20e76): INVALID naming the family.
+        write_file(
+            &seeds.join("fact_projection_rules.toml"),
+            "[[projection]]\nevent_kind = \"products.returned\"\n\
+             fact_kind = \"finance.return.recognized\"\nsource_table = \"products_return\"\n\
+             source_id_path = \"/source_id\"\n",
+        );
+        let r = check(&dir);
+        let row = status_of(&r, "seeds/fact_projection_rules.toml").unwrap();
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(row.detail.contains("products.>"), "{row:?}");
+        assert!(row.detail.contains("stream_subjects"), "{row:?}");
 
         write_file(
             &seeds.join("posting_rules.toml"),

@@ -251,3 +251,74 @@ async fn rebuild_replays_supersede_event_from_audit_log() {
     .unwrap();
     assert_eq!(entries.0, 0, "rebuild must not re-project superseded facts");
 }
+
+/// Backlog 94f20e76: `post_fact_in_tx` did not read `supersede_reason`
+/// while `apply_supersede_in_tx` drops the entry, so any caller that
+/// re-posts an existing fact — a domain writer's retry
+/// (`record_fact_in_tx` resolves the kept row's id, then posts it), a
+/// NAK redelivery — resurrected the retracted entry. The shared
+/// function is the guard: a superseded fact posts nothing, whoever
+/// calls.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_superseded_fact_posts_nothing_when_re_posted() {
+    let db = TestDb::new().await;
+    seed_invoice_fact(&db, "inv-supersede-004").await;
+
+    let req = SupersedeRequest {
+        kind: "finance.invoice.issued".into(),
+        source_table: Some("invoices".into()),
+        source_id: Some("inv-supersede-004".into()),
+        reason: "retracted; the re-post must not bring it back".into(),
+        superseded_by: None,
+    };
+    let mut tx = db.pool.begin().await.unwrap();
+    let outcome = apply_supersede_in_tx(&mut tx, &req).await.unwrap();
+    tx.commit().await.unwrap();
+    assert!(
+        matches!(outcome, SupersedeOutcome::Applied { .. }),
+        "{outcome:?}"
+    );
+
+    // The domain writer's retry shape: the fact write resolves to the
+    // kept (now superseded) row, and the post follows with its id.
+    let (id, kind, happened_on, payload): (Uuid, String, chrono::NaiveDate, Value) =
+        sqlx::query_as(
+            "SELECT id, kind, happened_on, payload FROM financial_facts \
+             WHERE source_id = 'inv-supersede-004'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let mut tx = db.pool.begin().await.unwrap();
+    boss_ledger::post_fact_in_tx(
+        &mut tx,
+        &boss_ledger::FactRef {
+            id,
+            kind: &kind,
+            happened_on,
+            payload: &payload,
+        },
+    )
+    .await
+    .expect("a re-post of a superseded fact is a no-op, not an error");
+    tx.commit().await.unwrap();
+
+    let entries: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM gl_journal_entries WHERE fact_id = $1")
+            .bind(id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(entries.0, 0, "the re-post resurrected the retracted entry");
+
+    // And a journal rebuild after the supersede reproduces no entry
+    // either — the same guard, reached through the rebuild's loop.
+    rebuild(&db.pool).await.unwrap();
+    let entries: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM gl_journal_entries WHERE fact_id = $1")
+            .bind(id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(entries.0, 0, "rebuild re-projected a superseded fact");
+}

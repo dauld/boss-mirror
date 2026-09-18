@@ -16,6 +16,17 @@
 //! a registry with a half-admitted tenant is worse than a refusal. A
 //! row that lands records its `.declared` fact on the outbox in the
 //! same transaction; a kept row records nothing.
+//!
+//! A projection whose event family the platform stream does not
+//! ingest (`boss_nats::durable::stream_subjects`) is refused the same
+//! way, naming the family (backlog 94f20e76): a live subscriber
+//! filtering on such a family hears nothing and errors never — dead
+//! air — and only a rebuild would ever project the rule. The two
+//! `products.*` rows the schema seeds (40-ledger.sql) predate the check
+//! and never came through this door; they stay because boss-products
+//! writes their facts in-tx and the rule only reproduces them on
+//! rebuild. A NEW rule on `products.*` is refused here until the
+//! family is streamed.
 
 use std::sync::Arc;
 
