@@ -175,6 +175,10 @@ fn the_measured_clock_cadences_are_on_the_roster() {
         "maintenance-sweep/stale-build-caches",
         "maintenance-sweep/cluster-conformance",
         "publish-to-github/github-mirror",
+        // Added 2026-09-18 (1dffde5d): the platform retro, weekly, off
+        // the `department-retros-weekly` rule's platform half. It was
+        // a cadence_rules row before, which NO sweep watched.
+        "protocol-retro/infra/protocol-retro",
     ] {
         assert!(
             labels.contains(want),

@@ -15,7 +15,7 @@ import {
   uniqueTags,
   wagonTag,
 } from './yard-floor';
-import { carRow, type ApproachRow, type CarProof, type CarRow, type TrainRow, type YardState } from './yard';
+import { carRow, type ApproachRow, type CarProof, type CarRow, type JobLite, type TrainRow, type YardState } from './yard';
 import type { YardStatus } from './yard-status';
 
 // The floor is the testable half of the map: where every wagon stands,
@@ -992,6 +992,8 @@ describe('the inspection shed', () => {
       notYet: 0,
       onEvent: 1,
       noProbe: 1,
+      flakes: [],
+      flakeLabel: 'no flakes in the runs read',
     });
     expect(scene(yardOf(), statusOf(), NOW).machines.inspection).toEqual({
       label: 'clear',
@@ -1000,7 +1002,26 @@ describe('the inspection shed', () => {
       notYet: 0,
       onEvent: 0,
       noProbe: 0,
+      flakes: [],
+      flakeLabel: 'no flakes in the runs read',
     });
+  });
+
+  // Backlog 36cc4913: the shed lists reds-that-were-flakes by check,
+  // read off the gate-run packets the page holds — the same stamps
+  // `boss orient`'s FLAKES line counts.
+  test('the shed machine carries the flake tally off the gate-runs read', () => {
+    const flaked: JobLite = {
+      id: 'g1',
+      kind: 'gate-run',
+      title: 'Gate: fix/x',
+      status: 'closed',
+      opened_on: '2026-09-18',
+      metadata: { branch: 'fix/x', sha: 'abc', flake_of: 'p1', flaky_checks: ['test'] },
+    };
+    const s = scene(yardOf({ packets: { trains: [], gateRuns: [flaked] } }), statusOf(), NOW);
+    expect(s.machines.inspection.flakes).toEqual([{ check: 'test', count: 1 }]);
+    expect(s.machines.inspection.flakeLabel).toBe('flakes · test: 1');
   });
 
   test('the board names each place and does not call an unproven car landed', () => {

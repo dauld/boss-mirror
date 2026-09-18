@@ -539,7 +539,7 @@ pub async fn station(name: &str, raw: bool) -> Result<()> {
 /// percent-encoded. A `--where` document goes into ONE query value, so
 /// the `{ " : , /` of its JSON, and any `&` or `+` inside a value, must
 /// not be read as query syntax on the far side.
-const QUERY_VALUE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+pub(crate) const QUERY_VALUE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
     .remove(b'-')
     .remove(b'.')
     .remove(b'_')

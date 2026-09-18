@@ -713,6 +713,15 @@ pub(crate) fn admit(probe: &str, from_car: bool) -> Admission {
              can run, or record it as --park-proof-event."
         ));
     }
+    if from_car && let Some(var) = boss_jobs::probe::names_an_actor(probe) {
+        warnings.push(format!(
+            "boss prove: NOTE — this car's recorded probe assigns `{var}`, which would name \
+             an actor for the `boss` verbs it runs on the forge, and a probe proves, it \
+             does not act (infra/forge/host-absent-tools.txt, the `boss` block). Here it \
+             runs as you, so proving by hand is fine; `boss gate --park-probe` refuses this \
+             text, so re-park the car with the assignment dropped."
+        ));
+    }
     warnings.extend(shape_warnings(probe).map(|w| format!("boss prove: {w}")));
     Admission { refusal, warnings }
 }
@@ -2754,6 +2763,29 @@ mod tests {
             .expect("the forge cannot run this car's probe");
         assert!(w.contains("kubectl"), "{w}");
         assert!(w.contains("forge"), "{w}");
+    }
+
+    /// A car-carried probe that ASSIGNS AN ACTOR is named at this door
+    /// too (8a1fcd22): the forge will run that text, and an actor is the
+    /// one thing that would let its `boss` verbs write. Named, not
+    /// refused, for the same reason as the absent tool above — the hand
+    /// run here is the operator's, already signed as them; what needs
+    /// fixing is the probe the car recorded, which `boss gate` refuses.
+    #[test]
+    fn a_car_carried_probe_that_names_an_actor_is_named_but_not_refused() {
+        let a = admit(
+            "BOSS_ACTOR=emp-david boss job close 1234 && echo closed",
+            true,
+        );
+        assert!(a.refusal.is_none(), "{:?}", a.refusal);
+        let w = a.warnings.first().expect("the actor assignment is named");
+        assert!(w.contains("BOSS_ACTOR"), "{w}");
+        assert!(w.contains("does not act"), "{w}");
+        let hand = admit(
+            "BOSS_ACTOR=emp-david boss job close 1234 && echo closed",
+            false,
+        );
+        assert!(hand.warnings.is_empty(), "{:?}", hand.warnings);
     }
 
     /// A named read is not this rule's business, and a MENTION is not a

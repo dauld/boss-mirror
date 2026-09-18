@@ -55,6 +55,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::audience::Audience;
+use crate::cadence::{CadenceRuleRow, CadenceRuleSpec};
 use crate::registry::{StepSpec, Terminal, WorkflowSpec, WorkflowStatus};
 use crate::station_queue::{DisciplineKey, StationPredicate, default_discipline};
 use crate::stations::{StationCapability, StationKind, StationLens, StationSpec, StationUpstream};
@@ -258,32 +259,54 @@ pub fn bundle_files(dir: &Path) -> Result<Vec<PathBuf>, SeedLoaderError> {
     Ok(files)
 }
 
-fn load_workflow_dir(
+/// The rule every bundle directory shares: one `<key>.toml` per row,
+/// holding exactly one `[[<header>]]` whose `<key>` column is the
+/// file's stem — so `ls` answers "which rows does a deployment seed",
+/// and two cars adding rows touch no shared line. Written once here
+/// (workflows, stations, step plugins and cadence rules all read it)
+/// rather than once per registry, which is how car 3 of 393d3234 found
+/// it living three times.
+fn load_bundle_dir<T>(
     dir: &Path,
-    default_owner: &str,
-) -> Result<Vec<WorkflowSpec>, SeedLoaderError> {
+    header: &str,
+    key: &str,
+    load_file: impl Fn(&Path) -> Result<Vec<T>, SeedLoaderError>,
+    key_of: fn(&T) -> &str,
+) -> Result<Vec<T>, SeedLoaderError> {
     let mut specs = Vec::new();
     for file in bundle_files(dir)? {
-        let file_str = file.display().to_string();
         let stem = file
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or_default()
             .to_string();
-        let loaded = load_workflow_file(&file, default_owner)?;
-        let kinds: Vec<&str> = loaded.iter().map(|s| s.kind.as_str()).collect();
-        if kinds != [stem.as_str()] {
+        let loaded = load_file(&file)?;
+        let keys: Vec<&str> = loaded.iter().map(key_of).collect();
+        if keys != [stem.as_str()] {
             return Err(SeedLoaderError::Parse(
-                file_str,
+                file.display().to_string(),
                 format!(
-                    "a kind file holds exactly one [[workflow]] named after the file \
-                     (expected kind `{stem}`, found {kinds:?})"
+                    "a {header} file holds exactly one [[{header}]] named after the file \
+                     (expected {key} `{stem}`, found {keys:?})"
                 ),
             ));
         }
         specs.extend(loaded);
     }
     Ok(specs)
+}
+
+fn load_workflow_dir(
+    dir: &Path,
+    default_owner: &str,
+) -> Result<Vec<WorkflowSpec>, SeedLoaderError> {
+    load_bundle_dir(
+        dir,
+        "workflow",
+        "kind",
+        |file| load_workflow_file(file, default_owner),
+        |s| &s.kind,
+    )
 }
 
 /// Parse TOML text directly. Useful for inline tests; the file
@@ -461,28 +484,7 @@ pub fn load_stations(path: impl AsRef<Path>) -> Result<Vec<StationSpec>, SeedLoa
     if !path_ref.is_dir() {
         return load_station_file(path_ref);
     }
-    let mut specs = Vec::new();
-    for file in bundle_files(path_ref)? {
-        let file_str = file.display().to_string();
-        let stem = file
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_string();
-        let loaded = load_station_file(&file)?;
-        let names: Vec<&str> = loaded.iter().map(|s| s.name.as_str()).collect();
-        if names != [stem.as_str()] {
-            return Err(SeedLoaderError::Parse(
-                file_str,
-                format!(
-                    "a station file holds exactly one [[station]] named after the file \
-                     (expected name `{stem}`, found {names:?})"
-                ),
-            ));
-        }
-        specs.extend(loaded);
-    }
-    Ok(specs)
+    load_bundle_dir(path_ref, "station", "name", load_station_file, |s| &s.name)
 }
 
 fn load_station_file(path: &Path) -> Result<Vec<StationSpec>, SeedLoaderError> {
@@ -620,28 +622,13 @@ pub fn load_step_plugins(path: impl AsRef<Path>) -> Result<Vec<StepPluginSpec>, 
     if !path_ref.is_dir() {
         return load_step_plugin_file(path_ref);
     }
-    let mut specs = Vec::new();
-    for file in bundle_files(path_ref)? {
-        let file_str = file.display().to_string();
-        let stem = file
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_string();
-        let loaded = load_step_plugin_file(&file)?;
-        let kinds: Vec<&str> = loaded.iter().map(|s| s.kind.as_str()).collect();
-        if kinds != [stem.as_str()] {
-            return Err(SeedLoaderError::Parse(
-                file_str,
-                format!(
-                    "a step-plugin file holds exactly one [[step_plugin]] named after the \
-                     file (expected kind `{stem}`, found {kinds:?})"
-                ),
-            ));
-        }
-        specs.extend(loaded);
-    }
-    Ok(specs)
+    load_bundle_dir(
+        path_ref,
+        "step_plugin",
+        "kind",
+        load_step_plugin_file,
+        |s| &s.kind,
+    )
 }
 
 fn load_step_plugin_file(path: &Path) -> Result<Vec<StepPluginSpec>, SeedLoaderError> {
@@ -699,6 +686,139 @@ fn step_plugin_toml_to_spec(
         frontend_url: toml.frontend_url,
         owning_team: toml.owning_team,
         authoring_job_id: None,
+        // Not a declaration — see `station_toml_to_spec`.
+        created_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Cadence rules — the platform cadence bundle (infra/platform/cadence/)
+// ---------------------------------------------------------------------------
+
+/// Serde mirror of [`CadenceRuleSpec`] for a bundle row: every column
+/// of `cadence_rules` (114-cadence-rules.sql, widened by 202608282135)
+/// but `created_at`, which the seed's clock stamps. A basis's unused
+/// columns are simply absent from the file — TOML has no null — and
+/// read as NULL, which is what the table's per-basis CHECK requires of
+/// them. `anchor_date` is a `"YYYY-MM-DD"` string, not a TOML date,
+/// because the row's `NaiveDate` reads a string and a TOML date is a
+/// different serde shape.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CadenceRuleToml {
+    name: String,
+    version: i32,
+    /// Carried rather than implied for the same reason a station's is:
+    /// the equality pin compares every column, and anything but
+    /// `active` is refused below.
+    status: WorkflowStatus,
+    verb: String,
+    basis: String,
+    #[serde(default)]
+    every_minutes: Option<i32>,
+    #[serde(default)]
+    at_times: Option<serde_json::Value>,
+    #[serde(default)]
+    min_dock_depth: Option<i32>,
+    #[serde(default)]
+    cooldown_minutes: Option<i32>,
+    #[serde(default)]
+    cadence: Option<String>,
+    #[serde(default)]
+    anchor_date: Option<chrono::NaiveDate>,
+    #[serde(default)]
+    business_calendar: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CadenceRulesFile {
+    #[serde(rename = "cadence_rule", default)]
+    cadence_rules: Vec<CadenceRuleToml>,
+}
+
+/// Load the platform cadence bundle: a DIRECTORY of `<name>.toml`
+/// files, each holding exactly one `[[cadence_rule]]` whose `name` is
+/// the file's stem — the same rules as [`load_stations`], for the same
+/// reason. A single file is accepted too.
+///
+/// Since 2026-09-18 (backlog 393d3234, consolidation H4, car 3) this
+/// bundle is where a cadence rule is DECLARED — the baseline a fresh
+/// deployment gets. Nine migrations were the only home before; they
+/// stay as history, and migrations newer than the cutover stamp in
+/// `infra/lint/migrations-declare-schema-only.sh` may not insert one.
+/// `crate::cadence_seed::seed_cadence_rules` publishes the bundle
+/// insert-if-missing by (name, version) at every start; the live table
+/// stays editable, and a live row ahead of its file is reported, not
+/// refused.
+pub fn load_cadence_rules(path: impl AsRef<Path>) -> Result<Vec<CadenceRuleSpec>, SeedLoaderError> {
+    let path_ref = path.as_ref();
+    if !path_ref.is_dir() {
+        return load_cadence_file(path_ref);
+    }
+    load_bundle_dir(path_ref, "cadence_rule", "name", load_cadence_file, |s| {
+        s.name()
+    })
+}
+
+fn load_cadence_file(path: &Path) -> Result<Vec<CadenceRuleSpec>, SeedLoaderError> {
+    let path_str = path.display().to_string();
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| SeedLoaderError::Io(path_str.clone(), e.to_string()))?;
+    parse_cadence_rules(&text, &path_str)
+}
+
+/// Parse TOML text directly — the file loader is a thin wrapper.
+pub fn parse_cadence_rules(
+    text: &str,
+    source: &str,
+) -> Result<Vec<CadenceRuleSpec>, SeedLoaderError> {
+    let file: CadenceRulesFile = toml::from_str(text)
+        .map_err(|e| SeedLoaderError::Parse(source.to_string(), e.to_string()))?;
+    file.cadence_rules
+        .into_iter()
+        .map(|r| cadence_toml_to_spec(r, source))
+        .collect()
+}
+
+fn cadence_toml_to_spec(
+    toml: CadenceRuleToml,
+    source: &str,
+) -> Result<CadenceRuleSpec, SeedLoaderError> {
+    if toml.status != WorkflowStatus::Active {
+        return Err(SeedLoaderError::Parse(
+            source.to_string(),
+            format!(
+                "cadence rule `{}` declares status `{}`; a bundle row is what a fresh \
+                 deployment gets, and that is an active row — retiring is a live verb",
+                toml.name,
+                toml.status.as_str()
+            ),
+        ));
+    }
+    if toml.version < 1 {
+        return Err(SeedLoaderError::Parse(
+            source.to_string(),
+            format!(
+                "cadence rule `{}` declares version {}; versions start at 1",
+                toml.name, toml.version
+            ),
+        ));
+    }
+    Ok(CadenceRuleSpec {
+        version: toml.version,
+        status: toml.status,
+        row: CadenceRuleRow {
+            name: toml.name,
+            verb: toml.verb,
+            basis: toml.basis,
+            every_minutes: toml.every_minutes,
+            at_times: toml.at_times,
+            min_dock_depth: toml.min_dock_depth,
+            cooldown_minutes: toml.cooldown_minutes,
+            cadence: toml.cadence,
+            anchor_date: toml.anchor_date,
+            business_calendar: toml.business_calendar,
+        },
         // Not a declaration — see `station_toml_to_spec`.
         created_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
     })

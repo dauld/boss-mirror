@@ -72,9 +72,11 @@ CUTOVER="20260918112134"
 # stations: car 1 (infra/platform/stations/). step_plugins: car 2
 # (infra/platform/step-plugins/ — the newest insert it replaces,
 # 202609082130-sign-off-plugin-v3.sql, is older than the cutover, so
-# the stamp did not move). Cars 3–4 of 393d3234 add cadence_rules and
+# the stamp did not move). cadence_rules: car 3 (infra/platform/cadence/
+# — newest insert 202609042110-a-lone-car-still-ships.sql, older than
+# the cutover; the stamp stays). Car 4 of 393d3234 adds
 # delivery_policy.
-REGISTRY_TABLES="stations step_plugins"
+REGISTRY_TABLES="stations step_plugins cadence_rules"
 
 # --- the scanner -------------------------------------------------------
 # One file's findings, as `<line>\t<table>`. Empty output = clean. The
@@ -147,8 +149,12 @@ self_test() {
     printf 'insert into\tpublic.stations (name)\nSELECT %s\n' "'x'"        >"$t/bad2.sql"
     printf 'INSERT   INTO   Stations (name) VALUES (%s);\n' "'x'"          >"$t/bad3.sql"
     printf 'INSERT INTO step_plugins (\n    kind, version\n) VALUES (%s, 1)\n' "'x'" >"$t/bad4.sql"
+    # The retire-by-name supersede idiom (202609032030): the INSERT's
+    # rows come from a SELECT, not a VALUES list.
+    printf 'INSERT INTO cadence_rules\n    (name, version, status, verb, basis)\nSELECT %s, COALESCE(MAX(version), 0) + 1, %s, %s, %s\n  FROM cadence_rules WHERE name = %s;\n' \
+        "'x'" "'active'" "'board'" "'queue-depth'" "'x'" >"$t/bad5.sql"
     local f
-    for f in bad1.sql bad2.sql bad3.sql bad4.sql; do
+    for f in bad1.sql bad2.sql bad3.sql bad4.sql bad5.sql; do
         [ -n "$(findings_in "$t/$f")" ] || {
             echo "$NAME: self-test FAILED — the scanner passed:" >&2
             sed 's/^/    /' "$t/$f" >&2
@@ -169,7 +175,7 @@ self_test() {
         echo "$NAME: self-test FAILED — the cutover comparison answers wrongly" >&2
         return 1
     }
-    echo "$NAME: self-test ok — schema statements, prose, an UPDATE and a prefixed table name pass; four spellings of INSERT INTO a registry table are refused; the cutover splits history from new"
+    echo "$NAME: self-test ok — schema statements, prose, an UPDATE and a prefixed table name pass; five spellings of INSERT INTO a registry table are refused; the cutover splits history from new"
 }
 
 if [ "${1:-}" = "--self-test" ]; then self_test; exit $?; fi
@@ -215,6 +221,11 @@ the seed publishes insert-if-missing at every start:
     plugin, every column of the row; the JS it names stays at
     infra/step-plugins/<frontend_url>. Same seed, same sibling lookup,
     same refusal, same edit path.
+  * cadence_rules — infra/platform/cadence/<name>.toml, one file per
+    rule, every column of the row. Same seed, same sibling lookup, same
+    refusal, same edit path. The table stays live-editable: a rule
+    re-versioned live is reported as ahead of its file, never rewritten,
+    and a rule the operator retired stays retired.
 
 Leave the migration to its ALTERs and put the row in the bundle. The
 historical inserts before the cutover are history and stay as they are.

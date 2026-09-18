@@ -6,21 +6,38 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 
-use super::port::{CadenceError, CadenceRepository};
-use super::types::{CadenceRuleRow, LastFiring, NewFiring};
+use super::port::{CadenceError, CadenceRegistry, CadenceRepository};
+use super::types::{CadenceRuleRow, CadenceRuleSpec, LastFiring, NewFiring};
+use crate::registry::WorkflowStatus;
 
 #[derive(Default)]
 pub struct InMemoryCadence {
-    rules: Vec<CadenceRuleRow>,
+    /// The whole lineage, every version of every name — what
+    /// `active_rules` filters and the registry half reads and writes,
+    /// so a rule the seed publishes is a rule the conductor's read
+    /// then serves, as in Postgres.
+    rules: RwLock<Vec<CadenceRuleSpec>>,
     firings: RwLock<HashMap<String, NewFiring>>,
 }
 
 impl InMemoryCadence {
+    /// Each row lands as version 1, active — the shape a fresh
+    /// deployment's first migration gave every rule.
     pub fn new(rules: Vec<CadenceRuleRow>) -> Self {
+        let lineage = rules
+            .into_iter()
+            .map(|row| CadenceRuleSpec {
+                version: 1,
+                status: WorkflowStatus::Active,
+                row,
+                created_at: DateTime::<Utc>::UNIX_EPOCH,
+            })
+            .collect();
         Self {
-            rules,
+            rules: RwLock::new(lineage),
             firings: RwLock::new(HashMap::new()),
         }
     }
@@ -34,7 +51,14 @@ impl InMemoryCadence {
 #[async_trait]
 impl CadenceRepository for InMemoryCadence {
     async fn active_rules(&self) -> Result<Vec<CadenceRuleRow>, CadenceError> {
-        let mut out = self.rules.clone();
+        let mut out: Vec<CadenceRuleRow> = self
+            .rules
+            .read()
+            .await
+            .iter()
+            .filter(|r| r.status == WorkflowStatus::Active)
+            .map(|r| r.row.clone())
+            .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
     }
@@ -90,6 +114,51 @@ impl CadenceRepository for InMemoryCadence {
             }
         }
         Ok(())
+    }
+}
+
+#[async_trait]
+impl CadenceRegistry for InMemoryCadence {
+    async fn live_versions(&self, name: &str) -> Result<Vec<CadenceRuleSpec>, CadenceError> {
+        let mut out: Vec<CadenceRuleSpec> = self
+            .rules
+            .read()
+            .await
+            .iter()
+            .filter(|r| r.name() == name)
+            .cloned()
+            .collect();
+        out.sort_by_key(|r| r.version);
+        Ok(out)
+    }
+
+    async fn publish_declared(
+        &self,
+        mut spec: CadenceRuleSpec,
+        _actor: &boss_core::actor::ActorId,
+        now: DateTime<Utc>,
+    ) -> Result<CadenceRuleSpec, CadenceError> {
+        let mut rules = self.rules.write().await;
+        if rules
+            .iter()
+            .any(|r| r.name() == spec.name() && r.version == spec.version)
+        {
+            return Err(CadenceError::Conflict(format!(
+                "row already exists: {}@{}",
+                spec.name(),
+                spec.version
+            )));
+        }
+        // Mirrors the Pg adapter: retire by name, then insert.
+        for r in rules.iter_mut() {
+            if r.name() == spec.name() && r.status == WorkflowStatus::Active {
+                r.status = WorkflowStatus::Retired;
+            }
+        }
+        spec.status = WorkflowStatus::Active;
+        spec.created_at = now;
+        rules.push(spec.clone());
+        Ok(spec)
     }
 }
 

@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  flakeLabel,
+  flakeTally,
   inspectionShed,
   probeRun,
   shedCounts,
@@ -416,5 +418,43 @@ describe('the shed as a whole', () => {
       metadata: { branch: 'feat/g', proof_probe: 'x', proof_attempt: { exit: 75, why: 'NOT YET: …' } },
     };
     expect(readCarProof(j)?.attempt?.notYet).toBe(true);
+  });
+});
+
+// Backlog 36cc4913: a red gate re-gated at an UNCHANGED head that comes
+// back green is a flake, and the record says so — `flake_of` names the
+// prior run, `flaky_checks` its failing checks. The shed lists the count
+// by check, read off the gate-run packets the page already holds, so the
+// flakiest check is a number here as it is on `boss orient`.
+describe('the flake tally', () => {
+  const run = (id: string, md: Record<string, unknown>): JobLite => ({
+    id,
+    kind: 'gate-run',
+    title: `Gate: ${id}`,
+    status: 'closed',
+    opened_on: '2026-09-18',
+    metadata: { branch: `fix/${id}`, sha: 'abc', ...md },
+  });
+
+  test('counts each check on flake-stamped runs, most flaky first, and ignores the rest', () => {
+    const runs = [
+      run('a', { flake_of: 'p1', flaky_checks: ['test'] }),
+      run('b', { flake_of: 'p2', flaky_checks: ['test', 'fmt'] }),
+      run('c', { flake_of: 'p3', flaky_checks: [] }),
+      // A re-gate that stayed red is the branch's, not a flake.
+      run('d', { regate_of: 'p4', prior_failed: ['clippy'] }),
+      run('e', {}),
+    ];
+    expect(flakeTally(runs)).toEqual([
+      { check: 'test', count: 2 },
+      { check: '(no check named)', count: 1 },
+      { check: 'fmt', count: 1 },
+    ]);
+    expect(flakeLabel(flakeTally(runs))).toBe('flakes · test: 2 · (no check named): 1 · fmt: 1');
+  });
+
+  test('none is a stated none, one line', () => {
+    expect(flakeTally([])).toEqual([]);
+    expect(flakeLabel([])).toBe('no flakes in the runs read');
   });
 });

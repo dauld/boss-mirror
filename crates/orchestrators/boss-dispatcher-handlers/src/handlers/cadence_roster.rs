@@ -90,10 +90,30 @@ use boss_core::calendar::Cadence;
 use boss_dispatcher::rules::helpers_inventory::PUBLISH_JOB_KIND;
 use boss_dispatcher::rules::registry::RawRule;
 
-/// The one handler that opens a packet from a schedule. A clock rule
-/// whose `do` names anything else is not declaring that a packet of some
-/// identity arrives (see the module doc's two worked exclusions).
+/// The handler that opens a packet from a schedule. A clock rule whose
+/// `do` names anything else is not declaring that a packet of some
+/// identity arrives (see the module doc's two worked exclusions) — with
+/// one exception, [`RETRO_OPEN`].
 pub const JOBS_SPAWN: &str = "jobs.spawn";
+
+/// The second scheduled spawner (1dffde5d): the weekly retro rule opens
+/// one department-retro per department the classes registry holds —
+/// identities read at fire time, not rosterable — AND the platform's
+/// own retro, whose `(kind, subject)` its `platform_kind` /
+/// `platform_subject` args fix. That half is a declared cadence the
+/// sweep can watch, read here the way a `jobs.spawn`'s `kind` /
+/// `subject` are.
+pub const RETRO_OPEN: &str = "retro.open";
+
+/// The `(kind, subject)` arg pair a spawning step fixes its packet's
+/// identity with, per handler.
+fn identity_args(handler: &str) -> Option<(&'static str, &'static str)> {
+    match handler {
+        JOBS_SPAWN => Some(("kind", "subject")),
+        RETRO_OPEN => Some(("platform_kind", "platform_subject")),
+        _ => None,
+    }
+}
 
 /// The question a clock rule's `when` guard asks, normalized.
 ///
@@ -258,15 +278,19 @@ pub fn clock_cadences(rules: &[RawRule]) -> (Vec<ClockCadence>, Vec<NotACadence>
         let Some(schedule) = &rule.schedule else {
             continue;
         };
-        let Some(spawn) = rule.do_steps.iter().find(|d| d.handler == JOBS_SPAWN) else {
+        let Some((spawn, (kind_key, subject_key))) = rule
+            .do_steps
+            .iter()
+            .find_map(|d| identity_args(&d.handler).map(|keys| (d, keys)))
+        else {
             skipped.push(NotACadence::SpawnsNothing {
                 rule: rule.name.clone(),
                 handlers: rule.do_steps.iter().map(|d| d.handler.clone()).collect(),
             });
             continue;
         };
-        let kind_arg = spawn.args.get("kind").cloned().unwrap_or_default();
-        let subject_arg = spawn.args.get("subject").cloned().unwrap_or_default();
+        let kind_arg = spawn.args.get(kind_key).cloned().unwrap_or_default();
+        let subject_arg = spawn.args.get(subject_key).cloned().unwrap_or_default();
         let (Some(kind), Some(subject)) = (string_literal(&kind_arg), string_literal(&subject_arg))
         else {
             skipped.push(NotACadence::ComputedIdentity {
@@ -362,6 +386,68 @@ mod tests {
             }]
         );
         assert_eq!(cadences[0].label(), "maintenance-sweep/image-freshness");
+    }
+
+    /// The weekly retro rule (1dffde5d) runs `retro.open`, not
+    /// `jobs.spawn`: its department half opens packets whose identity is
+    /// tenant data read at fire time (not rosterable, the sensors-poll
+    /// argument), but its PLATFORM half names a fixed `(kind, subject)`
+    /// in the args, and that is a declared weekly cadence the sweep can
+    /// watch — protocol-retro had none while it was a cadence_rules row.
+    #[test]
+    fn the_retro_rules_platform_half_is_a_weekly_cadence() {
+        let mut rule = daily(
+            "department-retros-weekly",
+            None,
+            vec![RawDoStep {
+                handler: RETRO_OPEN.to_string(),
+                args: [
+                    ("department_kind", r#""department-retro""#),
+                    ("platform_kind", r#""protocol-retro""#),
+                    ("platform_subject", r#""infra/protocol-retro""#),
+                ]
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect::<HashMap<String, String>>(),
+            }],
+        );
+        if let Some(s) = rule.schedule.as_mut() {
+            s.cadence = Cadence::Weekly;
+        }
+        let (cadences, skipped) = clock_cadences(&[rule]);
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(
+            cadences,
+            vec![ClockCadence {
+                rule: "department-retros-weekly".into(),
+                kind: "protocol-retro".into(),
+                subject: "infra/protocol-retro".into(),
+                interval_min: 10_080,
+                guard: None,
+            }]
+        );
+        // Without the platform half the rule spawns nothing rosterable
+        // and says so — it is not silently dropped.
+        let mut departments_only = daily(
+            "department-retros-weekly",
+            None,
+            vec![RawDoStep {
+                handler: RETRO_OPEN.to_string(),
+                args: [("department_kind", r#""department-retro""#)]
+                    .iter()
+                    .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                    .collect::<HashMap<String, String>>(),
+            }],
+        );
+        if let Some(s) = departments_only.schedule.as_mut() {
+            s.cadence = Cadence::Weekly;
+        }
+        let (cadences, skipped) = clock_cadences(&[departments_only]);
+        assert!(cadences.is_empty());
+        assert!(
+            matches!(&skipped[..], [NotACadence::ComputedIdentity { rule, .. }] if rule == "department-retros-weekly"),
+            "{skipped:?}"
+        );
     }
 
     /// Seven rules share the kind `maintenance-sweep`. A kind-level

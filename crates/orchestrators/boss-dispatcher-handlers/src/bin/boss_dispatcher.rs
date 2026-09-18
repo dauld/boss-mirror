@@ -61,6 +61,7 @@ use boss_dispatcher_handlers::handlers::{
     products_consume::ProductsConsume,
     products_consume_from_invoice::ProductsConsumeFromInvoice,
     products_produce::ProductsProduce,
+    retro_open::RetroOpen,
     sensor_poll::{CredentialValues, SensorPoll, SensorSource},
     shipping_create::ShippingCreate,
     stripe_charges::StripeCharges,
@@ -334,6 +335,18 @@ async fn main() -> Result<()> {
                 platform_owner.clone(),
             ));
             handlers.register(JobsAutoPark::new(
+                cfg.jobs_api_url.clone(),
+                cfg.clock_api_url.clone(),
+                platform_owner.clone(),
+            ));
+            // The week's retros (design 3613f0af, backlog 1dffde5d):
+            // one department-retro per department the classes registry
+            // holds, read at fire time through GET /api/departments, and
+            // the platform's own protocol-retro under the same ISO-week
+            // window. Needs the clock for the firing day the window is
+            // judged against. Inert until a scheduled rule names it
+            // (infra/dispatcher/rules/department-retros-weekly.toml).
+            handlers.register(RetroOpen::new(
                 cfg.jobs_api_url.clone(),
                 cfg.clock_api_url.clone(),
                 platform_owner.clone(),

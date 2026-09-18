@@ -1211,3 +1211,56 @@ fn a_migration_beside_a_crate_change_scopes_both() {
         "no migration changed, so schema_change.paths must be empty: {receipt}"
     );
 }
+
+/// THE PACKET (backlog f532c345). The platform bundle grew two more
+/// registries on 2026-09-18 — `infra/platform/stations/` (H4 car 1) and
+/// `infra/platform/step-plugins/` (car 3), each held equal to the
+/// migrations by a `*_bundle_is_the_migrations_pg.rs` pin in boss-jobs —
+/// and the gate's `path_shapes` still named only `workflows/`. Measured
+/// on main at #452 through the gate's own `path_map`:
+/// `infra/platform/stations/repair.toml` and
+/// `infra/platform/step-plugins/sign-off.toml` each derived NO crate,
+/// while `infra/platform/workflows/gate-run.toml` derived boss-jobs. The
+/// three bundle cars gated `boss-cli boss-jobs boss-testing` (receipts on
+/// gate-runs dd939905, 531ab449, 0c6e6ac9) only because each also
+/// changed Rust; a bundle-ONLY car — the ordinary kind, once the bundle
+/// is the registry — would have gated lints-only and never run the pin
+/// that exists to reject it (the class "a green gate only covers what it
+/// runs"). Same hole, same fix as the tenant bundle (b59efe54): the
+/// shape is derived from the DIRECTORY, so this walks `infra/platform/`
+/// and gates one scratch row in each bundle it finds — a fourth bundle
+/// is covered the day its directory appears, and a bundle the map
+/// forgets names itself here.
+#[test]
+fn a_platform_bundle_edit_scopes_the_crate_whose_pins_hold_it_to_the_migrations() {
+    let root = repo_root();
+    let mut bundles: Vec<String> = std::fs::read_dir(root.join("infra/platform"))
+        .expect("infra/platform/ is the platform bundle")
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    bundles.sort();
+    assert!(
+        bundles.len() >= 3,
+        "infra/platform/ holds fewer bundle directories ({bundles:?}) than the three that \
+         existed when this test was written — a walk that finds nothing pins nothing"
+    );
+    for bundle in &bundles {
+        let scratch = format!("infra/platform/{bundle}/zz-a-scratch-row.toml");
+        let (stdout, receipt) = auto_scope_of(&format!("gate-scope-bundle-{bundle}"), &[&scratch]);
+        let scope = scope_of(&receipt);
+        assert!(
+            scope.iter().any(|c| c == "boss-jobs"),
+            "a car that only edits {scratch} must scope boss-jobs — that crate holds \
+             the bundle equal to the migrations, and a bundle-only car that gates \
+             lints-only never runs the one test that can reject it.\n\
+             scope: {scope:?}\nstdout: {stdout}"
+        );
+        assert!(
+            stdout.contains("--auto scoping to"),
+            "the gate must say it scoped for {scratch}, not fall to lints-only.\n\
+             stdout: {stdout}"
+        );
+    }
+}

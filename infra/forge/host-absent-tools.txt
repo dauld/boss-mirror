@@ -17,7 +17,10 @@
 # compares basenames, so `kubectl` also catches `/usr/bin/kubectl`.
 # Only tools MEASURED absent: a line here refuses a builder's gate, and
 # a guess that refuses is worse than the failure it prevents. Blank
-# lines and `#` comments are ignored.
+# lines and `#` comments are ignored. A tool LEAVES the list the same
+# way it joined: on a measurement, dated, with the car that made it —
+# a line that outlives the absence it recorded refuses correct probes
+# for a fact that is no longer true on the forge.
 #
 # kubectl — measured 2026-09-09, backlog f9304366. The auto-proof
 # loop's first live run: a train arrived, the rule filed an
@@ -30,18 +33,51 @@
 # `--park-proof-event`.
 kubectl
 
-# boss — measured 2026-09-09 05:5x, from a live arrival probe on the
-# forge, recorded verbatim on the ops-request the arrival rule filed:
+# boss — RETIRED 2026-09-18 (backlog 8a1fcd22). Listed 2026-09-09
+# from a live arrival probe on the forge, recorded verbatim on the
+# ops-request the arrival rule filed:
 #
 #   run-car-probe: 235157a5  $ boss rerail --help
 #   NOT PROVEN 235157a5 — the probe exited 127
 #   stderr: bash: line 1: boss: command not found
 #
-# The forge host runs the probe as david in the converged checkout; it
-# has git, grep and the rest of a working tree, and no BOSS binary.
-# A probe that wants a verb's own answer belongs on the pod, run by
-# `boss prove` by hand, or is rewritten against the checkout the forge
-# does have.
+# Then H8 car 1 (backlog 9f00a805, train #450) had this host's own
+# converge (infra/forge/install.sh, through
+# infra/estate/install-cli-from-image.sh) install the CLI from the
+# cluster image at /usr/local/bin/boss on every tick, and car
+# 9ec955c3's recorded probe proved it here: /usr/local/bin/boss is the
+# tree's CLI at the converged sha. The list must state what is true on
+# the forge, so the line came off the same day the proof landed.
+#
+# A probe may now shell to the CLI in command position. Two things to
+# know before writing one:
+#
+#   - A PROBE PROVES, IT DOES NOT ACT: no `boss` verb in a probe may
+#     write. What holds that is not a list of read-safe verbs — the CLI
+#     keeps no read/write classification of its subcommands (the only
+#     MUTATING roster in the tree is `boss ops`'s forge verb allowlist,
+#     which classifies ops verbs, not `boss` subcommands), and the split
+#     runs by flag as often as by verb (`boss prove` writes a proof;
+#     `boss job get` reads while `boss job` also has writers) — so a
+#     list here would be a second copy of a classification nothing
+#     holds, held by nobody (CLAUDE.md §9a). What holds it is the
+#     ACTOR. run-car-probe.sh gives the probe exactly BOSS_JOBS_URL,
+#     BOSS_PROBE_NOTFOUND, BOSS_SOR_USER, BOSS_SOR_PORTS and PATH; no
+#     BOSS_ACTOR, and nothing in the tree writes david's actor file on
+#     this host (derived, not measured: `grep -rn config/boss/actor
+#     infra/` names only the pod's own manifest and a filer script). The
+#     CLI refuses an unnamed WRITE by its own rule (boss-cli
+#     identity.rs, backlog 5083d6f5), naming the fix — which a probe
+#     must not apply. So `boss gate --park-probe` refuses a probe text
+#     that assigns BOSS_ACTOR or BOSS_ACTOR_FILE (boss_jobs::probe::
+#     names_an_actor), because the probe's text is the one place an
+#     actor could come from.
+#
+#   - An unnamed `boss` READ goes out signed `operator:unidentified`
+#     under the CLI's header, whose role is platform-admin — a
+#     whole-world read, unlike the header-less curl the next block
+#     refuses. It prints one line on stderr saying so; that is
+#     expected, not a defect in the probe.
 #
 # NOT listed, and now for a stated reason: `boss-api`. Asked properly
 # on 2026-09-10 (61085a9e), and the honest answer is that it is still
@@ -67,7 +103,6 @@ kubectl
 # It also stopped mattering. A probe no longer needs boss-api, or any
 # hand-installed tool, to read the system of record — see the next
 # block.
-boss
 
 # WHAT ELSE `boss gate --park-probe` REFUSES, and why it is here: this
 # file is where the gate's refusals send a builder, so the other one

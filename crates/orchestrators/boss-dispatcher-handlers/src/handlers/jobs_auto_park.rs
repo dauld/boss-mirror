@@ -155,6 +155,25 @@ struct AutoParkInputs {
     /// `proof_*` keys (28ac45ab) — the same copy-don't-rebuild rule the
     /// receipt lives by. Empty for a car whose builder recorded none.
     proof: serde_json::Map<String, Value>,
+    /// THE FLAKE THIS GREEN PROVED, if it re-gated a red at the same
+    /// head: `flake_of` + `flaky_checks` (`boss_jobs::flake`), carried
+    /// onto the car beside its receipt so the record of the car says
+    /// its first red was not its own. Empty for a plain green — absent,
+    /// never nulled, so a refresh does not strip an earlier stamp.
+    flake: serde_json::Map<String, Value>,
+}
+
+/// PURE: what a green verdict stamps on a gate-run that re-gated a red
+/// at the same head — `None` for a red (a persistent red is the
+/// branch's) and for a green that re-gated nothing. Backlog 36cc4913:
+/// the relationship is the fact that turns a flake into a count, and
+/// the verdict is the only thing that settles it. Decided by the
+/// record, never by the check's name.
+fn flake_stamp(gate_run: &Value, verdict_meta: &serde_json::Map<String, Value>) -> Option<Value> {
+    if verdict_meta.get("verdict").and_then(Value::as_str) != Some("green") {
+        return None;
+    }
+    boss_jobs::flake::flake_patch(gate_run.get("metadata")?)
 }
 
 /// PURE: the metadata patch a re-gate writes onto the car already at
@@ -173,6 +192,7 @@ fn refresh_patch(inputs: &AutoParkInputs, note: &str) -> Value {
     let mut patch = car::regate_patch(&inputs.receipt, note, inputs.delivery_channel.as_deref());
     if let Some(m) = patch.as_object_mut() {
         m.extend(inputs.proof.clone());
+        m.extend(inputs.flake.clone());
         m.extend(car::regate_prose(
             &inputs.summary,
             &inputs.excludes,
@@ -267,6 +287,10 @@ fn auto_park_inputs(
             md.get("park_expect").and_then(Value::as_str),
             md.get("park_proof_event").and_then(Value::as_str),
         ),
+        // The verdict is green by the guard at the top of this function.
+        flake: flake_stamp(gate_run, verdict_meta)
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_default(),
     })
 }
 
@@ -417,6 +441,7 @@ fn adopt_patch(car: &Value, inputs: &AutoParkInputs) -> Value {
     let mut patch = serde_json::Map::new();
     patch.extend(inputs.proof.clone());
     patch.extend(inputs.item_provenance.clone());
+    patch.extend(inputs.flake.clone());
     patch.extend(clear_stale_item_answer(car, inputs));
     if let Some(dc) = inputs.delivery_channel.as_deref() {
         patch.insert("delivery_channel".to_string(), json!(dc));
@@ -661,6 +686,7 @@ fn car_body_with_proof(inputs: &AutoParkInputs, owner: &str) -> Value {
     if let Some(md) = body.get_mut("metadata").and_then(Value::as_object_mut) {
         md.extend(inputs.proof.clone());
         md.extend(inputs.item_provenance.clone());
+        md.extend(inputs.flake.clone());
     }
     body
 }
@@ -724,6 +750,37 @@ impl Handler for JobsAutoPark {
             &ctx.rule_name,
         )
         .await?;
+
+        // A GREEN AFTER A RED AT THE SAME HEAD IS A FLAKE, and this is
+        // the one actor that reads every green verdict, so it is where
+        // the record says so (backlog 36cc4913). `boss gate` stamped
+        // `regate_of` at launch; the green settles it. On the GATE-RUN
+        // first, before the park-intent gate below: a builder's plain
+        // re-gate — no `--park-*` — proves a flake exactly as a parking
+        // one does, and the count on `boss orient` reads gate-runs, not
+        // cars. Best effort: a failed stamp costs the count one row, and
+        // must not cost the car its filing.
+        if let Some(stamp) = flake_stamp(&gate_run, ev.metadata) {
+            let prior = stamp[boss_jobs::flake::FLAKE_OF]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            match write_json(
+                &self.client,
+                reqwest::Method::PATCH,
+                &format!("{}/api/jobs/{}/metadata", self.base(), ev.job_id),
+                &stamp,
+                &ctx.rule_name,
+            )
+            .await
+            {
+                Ok(()) => tracing::info!(rule = %ctx.rule_name, gate_run = %ev.job_id,
+                    flake_of = %prior, "green at the head {prior} was red on — recorded as a flake"),
+                Err(e) => tracing::warn!(rule = %ctx.rule_name, gate_run = %ev.job_id,
+                    "could not stamp flake_of={prior} on the gate-run: {e} — the flake count \
+                     is one short; PATCH /api/jobs/{}/metadata with the stamp", ev.job_id),
+            }
+        }
 
         let Some(inputs) = auto_park_inputs(&gate_run, ev.metadata) else {
             // Green, but no park intent — a manual gate. Nothing to do.
@@ -1112,6 +1169,56 @@ mod tests {
         assert_eq!(patch["regate_summary"], "only a summary.");
         assert!(patch.get("regate_test").is_none(), "{patch}");
         assert!(patch.get("regate_verified").is_none(), "{patch}");
+    }
+
+    /// Backlog 36cc4913: a GREEN gate-run carrying `regate_of` (the red
+    /// it re-gated at the same head) is the definition of a flake. The
+    /// stamp names the prior and copies its failing checks, on the
+    /// gate-run and on the car — filed fresh or refreshed at the dock.
+    #[test]
+    fn a_green_after_a_red_at_the_same_head_stamps_flake_of_on_the_run_and_the_car() {
+        let gr = gate_run(json!({
+            "park_summary": "s", "park_excludes": "e", "park_test": "t", "park_verified": "v",
+            "regate_of": "aaaa1111-0000", "prior_failed": ["test"],
+        }));
+        let meta = green_step_meta();
+        assert_eq!(
+            flake_stamp(&gr, &meta),
+            Some(json!({ "flake_of": "aaaa1111-0000", "flaky_checks": ["test"] }))
+        );
+        let inputs = auto_park_inputs(&gr, &meta).expect("parks");
+        let body = car_body_with_proof(&inputs, "emp-owner");
+        assert_eq!(body["metadata"]["flake_of"], "aaaa1111-0000");
+        assert_eq!(body["metadata"]["flaky_checks"], json!(["test"]));
+        let patch = refresh_patch(&inputs, "re-gated in place");
+        assert_eq!(patch["flake_of"], "aaaa1111-0000");
+        assert_eq!(patch["flaky_checks"], json!(["test"]));
+    }
+
+    /// A red after a red is the branch's: nothing is stamped. And a
+    /// green that re-gated nothing carries no flake keys at all — absent,
+    /// never null, so a car's earlier stamp is not stripped.
+    #[test]
+    fn a_red_after_a_red_and_a_plain_green_stamp_nothing() {
+        let regated = gate_run(json!({
+            "park_summary": "s", "park_excludes": "e", "park_test": "t", "park_verified": "v",
+            "regate_of": "aaaa1111-0000", "prior_failed": ["test"],
+        }));
+        let mut red = green_step_meta();
+        red.insert("verdict".into(), json!("failed"));
+        assert_eq!(
+            flake_stamp(&regated, &red),
+            None,
+            "a persistent red is the branch's"
+        );
+        let plain = gate_run(json!({
+            "park_summary": "s", "park_excludes": "e", "park_test": "t", "park_verified": "v",
+        }));
+        assert_eq!(flake_stamp(&plain, &green_step_meta()), None);
+        let inputs = auto_park_inputs(&plain, &green_step_meta()).expect("parks");
+        let body = car_body_with_proof(&inputs, "emp-owner");
+        assert!(body["metadata"].get("flake_of").is_none(), "{body}");
+        assert!(refresh_patch(&inputs, "n").get("flake_of").is_none());
     }
 
     #[test]
@@ -1927,6 +2034,7 @@ mod building_car_tests {
                 mode: "full".into(),
             },
             proof: car::proof_intent(Some("echo hi"), Some("hi"), None),
+            flake: serde_json::Map::new(),
         };
         let now = chrono::DateTime::parse_from_rfc3339("2026-09-10T18:30:00Z")
             .unwrap()
@@ -1984,6 +2092,7 @@ mod building_car_tests {
                 mode: "full".into(),
             },
             proof: serde_json::Map::new(),
+            flake: serde_json::Map::new(),
         };
         let patch = adopt_patch(&building(), &inputs);
         assert_eq!(
@@ -2036,6 +2145,7 @@ mod building_car_tests {
                 mode: "full".into(),
             },
             proof: serde_json::Map::new(),
+            flake: serde_json::Map::new(),
         };
         let patch = adopt_patch(&opened, &inputs);
         assert_explicit_null!(
@@ -2102,6 +2212,7 @@ mod building_car_tests {
                 mode: "full".into(),
             },
             proof: serde_json::Map::new(),
+            flake: serde_json::Map::new(),
         };
 
         // ONE PIECE, stated at open and confirmed at the gate.
@@ -2173,6 +2284,7 @@ mod building_car_tests {
                     mode: "full".into(),
                 },
                 proof: serde_json::Map::new(),
+                flake: serde_json::Map::new(),
             }
         };
         let opened = |key: &str, value: &str| {
@@ -2244,6 +2356,7 @@ mod building_car_tests {
                     mode: "full".into(),
                 },
                 proof: serde_json::Map::new(),
+                flake: serde_json::Map::new(),
             }
         };
         // The gate names the closing edge too: agreement, not conflict.
@@ -2293,6 +2406,7 @@ mod building_car_tests {
                 mode: "full".into(),
             },
             proof: car::proof_intent(Some("echo hi"), Some("hi"), None),
+            flake: serde_json::Map::new(),
         };
         let patch = adopt_patch(&building(), &inputs);
         assert!(

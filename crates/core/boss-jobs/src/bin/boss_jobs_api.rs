@@ -319,6 +319,12 @@ async fn run_server<R: JobsRepository + 'static>(
     let scheduling_publisher = publisher.clone();
     let door_publisher = publisher.clone();
 
+    // The department reads below share the jobs repo, the workflow
+    // registry and the sensor registry with the main router and the
+    // sensors door; clone the Arcs before the state takes them.
+    let department_jobs: Arc<dyn JobsRepository> = jobs.clone();
+    let department_kinds = kind_registry.clone();
+    let department_sensors = sensors.clone();
     let state = JobsApiState {
         job_edges,
         stations,
@@ -409,7 +415,32 @@ async fn run_server<R: JobsRepository + 'static>(
     app = app.merge(boss_jobs::agents::http::router(
         boss_jobs::agents::http::AgentsApiState {
             registry: agents.clone(),
+            classes: agent_classes.clone(),
+        },
+    ));
+    // The departments the classes registry holds, and which of the six
+    // template parts each has (design 3613f0af, backlog 1dffde5d) —
+    // every part read from a live registry, never a seed. The rules
+    // part reads the dispatcher's own surface (`/api/dispatcher/rules`,
+    // what is FIRING); the all-in-one pod serves it on boss-ports'
+    // dispatcher port, overridable the way the people URL is.
+    let dispatcher_url =
+        std::env::var("BOSS_DISPATCHER_URL").unwrap_or_else(|_| boss_ports::url("dispatcher"));
+    let department_rules: Arc<dyn boss_jobs::department::rules::DispatcherRules> = Arc::new(
+        boss_jobs::department::rules::ReqwestDispatcherRules::new(dispatcher_url.clone()),
+    );
+    info!(
+        class_backed = agent_classes.is_some(),
+        %dispatcher_url,
+        "departments mounted at /api/departments (+ /<code>/readiness)"
+    );
+    app = app.merge(boss_jobs::department::http::router(
+        boss_jobs::department::http::DepartmentsApiState {
             classes: agent_classes,
+            kinds: department_kinds,
+            jobs: department_jobs,
+            sensors: department_sensors,
+            rules: Some(department_rules),
         },
     ));
     // Sim-origin middleware: extract x-sim-origin header and set the

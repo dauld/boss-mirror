@@ -97,7 +97,14 @@ is the one scheduling its own migration:
    silent redirect the maintenance wrappers already paid for.*
 4. **Retire `cadence_rules`** once no reader remains, and fold its
    rows in as `[[cadence]]` entries under the same ratchet as
-   `[[rule]]`.
+   `[[rule]]`. *Half a step, 2026-09-18 (backlog 393d3234, consolidation
+   H4, car 3): the rows are now DECLARED in the tree, one
+   `infra/platform/cadence/<name>.toml` per rule, published
+   insert-if-missing by the platform seed — the same one-file-per-row
+   shape `infra/dispatcher/rules/` has — and nine migrations stopped
+   being their only home. The table and its one reader are unchanged;
+   the fold, when it comes, moves files between two directories rather
+   than rows out of a migration history.*
 5. **Then Q4's claim CAS**, which is a separate change and strictly
    later: a window packet claimed like a step only makes sense once
    the window is emitted from the registry the dispatcher serves.

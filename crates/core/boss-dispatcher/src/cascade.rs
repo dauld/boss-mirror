@@ -100,6 +100,12 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         ("people.terminate", vec!["people.employee.updated"]),
         ("shipping.create", vec!["shipping.shipment.created"]),
         ("jobs.spawn", vec!["jobs.job.created"]),
+        // The week's retros (1dffde5d): one department-retro per
+        // department the classes registry holds, plus the platform's
+        // protocol-retro, each a POST /api/jobs — so the only emit is
+        // the packet it creates, the same as jobs.spawn. The dedup
+        // reads are GETs and a skip is a no-op.
+        ("retro.open", vec!["jobs.job.created"]),
         // Files one ops-request per probed car aboard an arrived
         // train (28ac45ab); the probe itself runs on the forge and
         // writes back through the jobs API as its own actor, so the

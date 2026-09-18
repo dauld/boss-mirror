@@ -55,6 +55,32 @@ pub struct CadenceRuleRow {
     pub business_calendar: Option<String>,
 }
 
+/// One row of `cadence_rules` as DECLARED — the wire row plus the
+/// two columns the conductor never reads (`version`, `status`) and
+/// the one the seed stamps (`created_at`). This is what the platform
+/// bundle (`infra/platform/cadence/<name>.toml`) declares and what
+/// `CadenceRegistry::live_versions` reads back, so the equality pin
+/// compares the same shape on both sides. The columns live ONCE, in
+/// [`CadenceRuleRow`], flattened here rather than repeated (CLAUDE.md
+/// §9a): a basis column added to the row is added to the declaration
+/// by construction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CadenceRuleSpec {
+    pub version: i32,
+    pub status: crate::registry::WorkflowStatus,
+    #[serde(flatten)]
+    pub row: CadenceRuleRow,
+    /// When the deployment was built — stamped by the seed's clock on
+    /// the row it writes; never part of the declaration.
+    pub created_at: DateTime<Utc>,
+}
+
+impl CadenceRuleSpec {
+    pub fn name(&self) -> &str {
+        &self.row.name
+    }
+}
+
 /// The most recent recorded firing of a rule — what the conductor's
 /// evaluation compares a candidate window against.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

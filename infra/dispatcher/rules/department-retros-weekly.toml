@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------------
+# Every department's retro, weekly, from ONE rule (design 3613f0af,
+# backlog 1dffde5d; David, 2026-09-18: "Let's do retros weekly instead
+# of monthly, but otherwise yes").
+#
+# Fires on the sim-day boundary of every Monday (00:00Z — the anchor
+# is a Monday and `weekly` fires on the anchor's weekday). The
+# `retro.open` handler reads the department list from the classes
+# registry AT FIRE TIME (`GET /api/departments`, the jobs API's
+# classes-backed read) and opens one `department-retro` per
+# department, so this is one file and not one per department: the
+# registry is the one definition of which departments exist, and a
+# department declared on Tuesday has its first retro on Monday with no
+# edit here. `jobs.spawn` could not do this — it opens exactly one
+# packet from literal args, and a rule's `when` cannot iterate.
+#
+# NO `when` GUARD, DELIBERATELY. `NOT open_job_exists(...)` retires a
+# cadence the first time a packet is left open (measured 2026-09-10:
+# nineteen days of no mirror check behind one undrained publish packet
+# — a-dedup-guard-silently-retires-a-cadence), and a retro parked at
+# `review` for a fortnight is exactly the packet that would do it. The
+# dedup lives in the handler as a WEEK WINDOW per (kind, department):
+# a packet opened in the firing day's ISO week suppresses, whatever its
+# status; an older one, open or not, suppresses nothing. That also makes
+# a NAK'd retry idempotent and collapses a catch-up burst to one packet.
+#
+# THE PLATFORM'S OWN RETRO RIDES THE SAME FIRING. `protocol-retro` was
+# opened daily by a `cadence_rules` row (`protocol-retro-daily`, verb
+# `open:protocol-retro`, migration 202608282140 — "I actually want
+# protocol-retro daily anyways for now. We are learning too fast."),
+# authored when the dispatcher could not yet schedule a packet. It can,
+# and this is its sanctioned shape: `platform_kind` / `platform_subject`
+# name it here under the same week window, keeping the subject the
+# cadence loop files under (`infra/protocol-retro`) so the loop's
+# single-open check sees this packet while its row is still active.
+# The row is retired by the operator (there is no write door on
+# `/api/cadence/rules`, and a migration may not carry a registry row);
+# once it is, the loop's `open:` verb has no user and can go.
+#
+# The silence sweep derives this rule's platform cadence from these
+# args (`cadence_roster::clock_cadences` reads `retro.open` the way it
+# reads `jobs.spawn`); the per-department half is tenant data and is
+# not on the roster by construction, the sensors-poll argument.
+[[rule]]
+name = "department-retros-weekly"
+why = """
+A TIMER, the standing exemption: no packet causes "a week passed", so no
+Workflow definition can declare it — a retro's whole point is to run
+when the week's work is done, whether or not anything fired. It adds no
+routing: one firing opens one department-retro per department the
+classes registry holds (and the platform's protocol-retro), and what
+happens next is those protocols' own rows. The department list is READ
+from the registry at fire time rather than declared here, which is why
+this is one rule and not one per department.
+"""
+schedule = { cadence = "weekly", anchor_date = "2026-09-21" }
+[[rule.do]]
+handler = "retro.open"
+args = { department_kind = "\"department-retro\"", platform_kind = "\"protocol-retro\"", platform_subject = "\"infra/protocol-retro\"" }

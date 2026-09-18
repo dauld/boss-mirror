@@ -237,6 +237,10 @@ name = "sensors_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "department_readiness_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "the_stations_bundle_is_the_migrations_pg"
 required-features = ["postgres"]
 
@@ -246,4 +250,8 @@ required-features = ["postgres"]
 
 [[test]]
 name = "the_step_plugins_bundle_is_the_migrations_pg"
+required-features = ["postgres"]
+
+[[test]]
+name = "the_cadence_rules_bundle_is_the_migrations_pg"
 required-features = ["postgres"]

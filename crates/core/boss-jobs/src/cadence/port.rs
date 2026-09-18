@@ -8,13 +8,18 @@
 //! queryable one.
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 
-use super::types::{CadenceRuleRow, LastFiring, NewFiring};
+use super::types::{CadenceRuleRow, CadenceRuleSpec, LastFiring, NewFiring};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CadenceError {
     #[error("bad request: {0}")]
     BadRequest(String),
+    /// A declared (name, version) the registry already holds — the
+    /// seed publishes only what is absent, never over a row.
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("storage: {0}")]
     Storage(String),
 }
@@ -44,4 +49,40 @@ pub trait CadenceRepository: Send + Sync {
         rc: i32,
         runtime_secs: u64,
     ) -> Result<(), CadenceError>;
+}
+
+/// The registry half — what DECLARES a rule, as distinct from what
+/// fires one. Two operations, the same two every platform bundle seed
+/// needs (`crate::bundle_seed::BundleRegistry`): read a name's whole
+/// lineage, and land a declared version.
+///
+/// WHY A SECOND TRAIT AND NOT TWO MORE METHODS ON THE ONE ABOVE
+/// (backlog 393d3234, consolidation H4, car 3, 2026-09-18). Until this
+/// car the only writer of `cadence_rules` was a migration: nine of
+/// them, the last six re-versioning one rule, each a contended
+/// timestamped file that a fresh instance could only reproduce by
+/// replaying. The conductor never writes a rule and never reads a
+/// retired one, so its port stays the four verbs it has; the seed's
+/// two land here, and a test double of the conductor's port owes
+/// nothing to the seed. No outbox event on publish, for the reason the
+/// module doc gives: no migration ever recorded one, and
+/// `cadence_firings` is the record of what a rule DID.
+#[async_trait]
+pub trait CadenceRegistry: Send + Sync {
+    /// Every row of this name, any status, any order — the whole
+    /// lineage. Empty when the registry has never held the name.
+    async fn live_versions(&self, name: &str) -> Result<Vec<CadenceRuleSpec>, CadenceError>;
+
+    /// Retire any active row of the same name, then insert `spec` at
+    /// its declared version, active, stamped `now` — in that order,
+    /// because `cadence_rules_one_active_per_name` is a plain partial
+    /// unique index enforced per statement (the class
+    /// `registry-bump-retires-first` guards in migrations). A row
+    /// already at (name, version) is a conflict, not an overwrite.
+    async fn publish_declared(
+        &self,
+        spec: CadenceRuleSpec,
+        actor: &boss_core::actor::ActorId,
+        now: DateTime<Utc>,
+    ) -> Result<CadenceRuleSpec, CadenceError>;
 }

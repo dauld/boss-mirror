@@ -1,0 +1,35 @@
+# ---------------------------------------------------------------------------
+# train-board-on-dock-depth — board a train as soon as the loading dock
+# holds `min_dock_depth` parked ready cars, at most once per
+# `cooldown_minutes`.
+#
+# Version 6 is the row the migrations produced, and the six-file
+# history of this one rule is the argument for this bundle: 114 seeded
+# v1 (depth 4), 123 v2 (8 — reconciling the record to what actually
+# ran), 131 v3 (12), 147 v4 (4), 202609031515 tried 3 and silently
+# no-op'd (a version-keyed retire missed the live row), 202609032030
+# v5 (3, the retire-by-name idiom) and 202609042110 v6 (1, cooldown 45:
+# a lone car still ships — David, 2026-09-04). Every one a contended
+# timestamped file to change one integer. Declared here since
+# 2026-09-18 (backlog 393d3234, consolidation H4, car 3); see
+# train-reconcile.toml for what that means.
+#
+# `queue-depth` basis: the loop probes the dock each tick and fires
+# `board` when the depth reaches the threshold and the last firing that
+# DID work is older than the cooldown — a firing that boarded nothing
+# does not hold the cooldown (2026-09-04, two hours of a threshold-met
+# dock). This threshold is the number an operator has changed most
+# often; the table stays live-editable, and a version published live
+# supersedes this file (the seed reports "behind", never rewrites).
+#
+# To change this rule, bump `version`.
+# ---------------------------------------------------------------------------
+
+[[cadence_rule]]
+name = "train-board-on-dock-depth"
+version = 6
+status = "active"
+verb = "board"
+basis = "queue-depth"
+min_dock_depth = 1
+cooldown_minutes = 45

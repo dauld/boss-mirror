@@ -41,6 +41,7 @@ pub fn router(state: CadenceApiState) -> Router {
 fn err_response(e: CadenceError) -> Response {
     match e {
         CadenceError::BadRequest(m) => (StatusCode::BAD_REQUEST, m).into_response(),
+        CadenceError::Conflict(m) => (StatusCode::CONFLICT, m).into_response(),
         CadenceError::Storage(m) => (StatusCode::INTERNAL_SERVER_ERROR, m).into_response(),
     }
 }

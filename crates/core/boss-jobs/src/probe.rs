@@ -114,6 +114,44 @@ pub fn needs_absent_tool(probe: &str) -> Option<&'static str> {
         .find_map(|c| absent.iter().find(|a| **a == c).copied())
 }
 
+/// The two variables the CLI reads to learn WHO is running it
+/// (boss-cli `identity.rs`: the env var, then the file the second
+/// names). Spelled here rather than imported because that crate is an
+/// orchestrator this one cannot depend on; the CLI's own test on the
+/// pair is the pin.
+const ACTOR_VARS: [&str; 2] = ["BOSS_ACTOR", "BOSS_ACTOR_FILE"];
+
+/// A PROBE PROVES, IT DOES NOT ACT — and the variable a probe would
+/// have to set to act, if it spells one.
+///
+/// `boss` left the forge's absence list on 2026-09-18 (H8 car 1,
+/// 9f00a805, installed the CLI there; backlog 8a1fcd22 retired the
+/// line), so a recorded probe may shell to a verb. What keeps that a
+/// READ is not a list of read-safe verbs — the CLI holds no such
+/// classification of its subcommands, and the split runs by flag as
+/// often as by verb — but an actor: the probe's env names none
+/// (`infra/forge/run-car-probe.sh` exports exactly `BOSS_JOBS_URL`,
+/// `BOSS_PROBE_NOTFOUND`, [`SOR_USER_VAR`], `BOSS_SOR_PORTS` and
+/// `PATH`), and the CLI refuses an unnamed WRITE by its own rule while
+/// an unnamed READ goes out signed `operator:unidentified` under the
+/// header's platform-admin role — a whole-world read, not the
+/// header-less narrowed one 61085a9e measured. So the probe's TEXT is
+/// the only place an actor could come from, and a text that assigns
+/// one is refused naming the variable. A mention is not an assignment:
+/// the CLI's own refusal names `BOSS_ACTOR`, and a probe may grep for
+/// it.
+pub fn names_an_actor(probe: &str) -> Option<&'static str> {
+    probe
+        .split_whitespace()
+        .map(|w| w.trim_start_matches(['"', '\'', '(', '{', ';', '&', '|']))
+        .find_map(|w| {
+            ACTOR_VARS
+                .iter()
+                .find(|v| w.strip_prefix(*v).is_some_and(|rest| rest.starts_with('=')))
+                .copied()
+        })
+}
+
 /// HOW A PROBE READS THE SYSTEM OF RECORD — `infra/forge/probe-bin`,
 /// first on the probe's PATH, holding exactly this one reader.
 ///
@@ -630,23 +668,76 @@ mod tests {
         }
     }
 
-    /// And the invocation it was added for is still caught. Measured
-    /// on the forge the same day: `boss rerail --help` exited 127 with
-    /// `bash: line 1: boss: command not found`, on a car the arrival
-    /// rule had probed unattended.
+    /// And an invocation of a listed tool is still caught, in every
+    /// position the shell would run it from. Pinned on `kubectl`, the
+    /// tool still measured absent (f9304366), since 2026-09-18: until
+    /// then this test ran on `boss`, which left the list that day.
     #[test]
-    fn invoking_the_boss_binary_on_the_forge_is_refused() {
+    fn invoking_an_absent_tool_on_the_forge_is_refused() {
         for probe in [
-            "boss rerail --help",
-            "cd /home/david/boss && boss receipt main",
-            "echo x $(boss orient)",
+            "kubectl -n boss get deploy boss-jobs",
+            "cd /home/david/boss && kubectl get pods -A",
+            "echo x $(kubectl get nodes)",
         ] {
             assert_eq!(
                 needs_absent_tool(probe),
-                Some("boss"),
-                "the forge has no boss binary: {probe}"
+                Some("kubectl"),
+                "the forge has no kubectl: {probe}"
             );
         }
+    }
+
+    /// `boss` LEFT the list on 2026-09-18 (backlog 8a1fcd22): H8 car 1
+    /// (9f00a805) had the forge's converge install the CLI from the
+    /// cluster image at /usr/local/bin/boss, and car 9ec955c3's probe
+    /// proved it there at the converged sha. A probe may now shell to
+    /// the CLI in command position — that is what the next H8 cars
+    /// (shell twins retiring one verb at a time) need to write.
+    #[test]
+    fn invoking_the_boss_cli_on_the_forge_is_accepted() {
+        for probe in [
+            "boss receipt main",
+            "cd /home/david/boss && boss merged feat/x && echo merged:ok",
+            "echo x $(boss orient)",
+            "/usr/local/bin/boss --version >/dev/null && echo cli:ok",
+        ] {
+            assert_eq!(
+                needs_absent_tool(probe),
+                None,
+                "the forge has the CLI since 9f00a805: {probe}"
+            );
+        }
+    }
+
+    /// A PROBE PROVES, IT DOES NOT ACT. The one thing that turns the
+    /// forge's `boss` into a writer is an actor: the probe's env names
+    /// none (run-car-probe.sh exports exactly BOSS_JOBS_URL,
+    /// BOSS_PROBE_NOTFOUND, BOSS_SOR_USER, BOSS_SOR_PORTS and PATH), and
+    /// the CLI refuses an unnamed write by its own rule
+    /// (boss-cli identity.rs). So the probe's TEXT is the only place an
+    /// actor could come from, and a text that spells one is refused
+    /// naming the variable — in either spelling the CLI reads.
+    #[test]
+    fn a_probe_that_names_an_actor_is_seen() {
+        assert_eq!(
+            names_an_actor("BOSS_ACTOR=emp-david boss job close x"),
+            Some("BOSS_ACTOR")
+        );
+        assert_eq!(
+            names_an_actor("export BOSS_ACTOR_FILE=/tmp/a; boss gate x"),
+            Some("BOSS_ACTOR_FILE")
+        );
+        assert_eq!(
+            names_an_actor("env BOSS_ACTOR=\"$BOSS_SOR_USER\" boss receipt main"),
+            Some("BOSS_ACTOR")
+        );
+        // A MENTION is not an assignment: the CLI's own refusal text
+        // names the variable, and a probe may grep for it.
+        assert_eq!(
+            names_an_actor("boss receipt main 2>&1 | grep -c BOSS_ACTOR"),
+            None
+        );
+        assert_eq!(names_an_actor("boss-sor-read /api/yard/status"), None);
     }
 
     /// Every spelling the measured instances used: the env var, the

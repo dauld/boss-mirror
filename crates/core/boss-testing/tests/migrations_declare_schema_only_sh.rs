@@ -8,7 +8,8 @@
 //! step_plugins (7), cadence_rules (9) and delivery_policy (2). Car 1
 //! moved stations to `infra/platform/stations/` and wrote the cutover
 //! stamp into the lint; car 2 moved step plugins to
-//! `infra/platform/step-plugins/` and added the table beside it. The
+//! `infra/platform/step-plugins/` and added the table beside it; car 3
+//! moved cadence rules to `infra/platform/cadence/` the same way. The
 //! lint is what keeps every LATER migration from re-opening the old
 //! home, and this file is what keeps the lint honest.
 //!
@@ -151,6 +152,27 @@ INSERT INTO step_plugins (
 ) ON CONFLICT (kind, version) DO NOTHING;
 ";
 
+/// A migration newer than the cutover that re-versions a cadence rule
+/// — car 3's table, in the retire-by-name supersede spelling
+/// 202609032030 and 202609042110 used (the INSERT's rows from a
+/// SELECT, so the table name is followed by a newline and a column
+/// list rather than VALUES).
+const NEW_CADENCE: &str = "20261001000003-a-cadence-rule-the-old-way.sql";
+const NEW_CADENCE_SQL: &str = "\
+-- 20261001000003 — a boarding threshold declared where it no longer lives.
+UPDATE cadence_rules
+   SET status = 'retired'
+ WHERE name = 'train-board-on-dock-depth'
+   AND status = 'active';
+INSERT INTO cadence_rules
+    (name, version, status, verb, basis, every_minutes, at_times, min_dock_depth, cooldown_minutes)
+SELECT 'train-board-on-dock-depth',
+       COALESCE(MAX(version), 0) + 1,
+       'active', 'board', 'queue-depth', NULL, NULL, 2, 45
+  FROM cadence_rules
+ WHERE name = 'train-board-on-dock-depth';
+";
+
 /// The scanner proves itself on every invocation and SAYS so.
 #[test]
 fn the_scanner_proves_itself_on_every_invocation() {
@@ -266,6 +288,40 @@ fn a_post_cutover_step_plugin_insert_is_refused_naming_its_bundle() {
     }
 }
 
+/// BEHAVIOUR 2, car 3 — a post-cutover `INSERT INTO cadence_rules` in
+/// the retire-by-name spelling is refused, the verdict names the
+/// cadence bundle as the door, and the retiring UPDATE before it is
+/// not what is named (an UPDATE is still a migration's business).
+#[test]
+fn a_post_cutover_cadence_insert_is_refused_naming_its_bundle() {
+    let tree = Tree::new("violating-cadence");
+    tree.migration(HISTORY, HISTORY_SQL)
+        .migration(NEW_CADENCE, NEW_CADENCE_SQL);
+    let out = tree.run();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a violating tree must exit 1:\n{}",
+        text(&out)
+    );
+    let msg = text(&out);
+    for expect in [
+        &format!("{SCHEMA}/{NEW_CADENCE}:6"),
+        "inserts into cadence_rules",
+        "infra/platform/cadence/",
+        "live-editable",
+    ] {
+        assert!(
+            msg.contains(expect),
+            "the verdict must name {expect:?}:\n{msg}"
+        );
+    }
+    assert!(
+        !msg.contains(&format!("{SCHEMA}/{NEW_CADENCE}:2")),
+        "the retiring UPDATE is not a finding:\n{msg}"
+    );
+}
+
 /// A schema directory with nothing in it is red, not clean: a lint that
 /// scanned nothing certifies nothing (lib/scanned.sh, backlog cdf2d959).
 #[test]
@@ -337,8 +393,10 @@ fn the_cutover_is_one_fourteen_digit_stamp() {
         .expect("the registry list is declared once, on one line");
     let tables: Vec<&str> = tables.split_whitespace().collect();
     assert!(
-        tables.contains(&"stations") && tables.contains(&"step_plugins"),
-        "the registry list names stations (car 1) and step_plugins (car 2), and is \
-         where cars 3–4 add theirs: {tables:?}"
+        tables.contains(&"stations")
+            && tables.contains(&"step_plugins")
+            && tables.contains(&"cadence_rules"),
+        "the registry list names stations (car 1), step_plugins (car 2) and \
+         cadence_rules (car 3), and is where car 4 adds delivery_policy: {tables:?}"
     );
 }

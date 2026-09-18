@@ -1,0 +1,29 @@
+# ---------------------------------------------------------------------------
+# train-reconcile — the conductor's ten-minute early-warning pass:
+# CI verdicts, merges, arrival reports, stall checks, branch sweeps.
+# No boarding.
+#
+# Version 1 is the row 114-cadence-rules.sql seeded on 2026-08-12 and
+# no migration re-versioned since. Declared here since 2026-09-18
+# (backlog 393d3234, consolidation H4, car 3): a cadence rule's home is
+# this bundle, published insert-if-missing by boss-platform-workflow-
+# seed, and migrations newer than the cutover stamp in
+# infra/lint/migrations-declare-schema-only.sh declare schema only.
+#
+# `wall` basis: fires every `every_minutes` on the wall clock, the
+# window stamp a pure function of (rule, window) so a restarted loop
+# cannot double-fire. The loop reads boss-clock time, never the host's.
+#
+# To change this rule, bump `version` — the seed refuses a row that
+# differs from the live active row of the same (name, version). A rule
+# re-versioned LIVE (the table is editable by design) leaves this file
+# behind; the seed reports it and leaves the live row alone.
+# ---------------------------------------------------------------------------
+
+[[cadence_rule]]
+name = "train-reconcile"
+version = 1
+status = "active"
+verb = "reconcile"
+basis = "wall"
+every_minutes = 10

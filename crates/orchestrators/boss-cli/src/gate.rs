@@ -860,7 +860,8 @@ pub struct ParkIntent {
 /// describing this one. Re-exported under their local names so this
 /// module's callers and tests read unchanged.
 pub use boss_jobs::probe::{
-    SOR_READER, SOR_USER_VAR, needs_absent_tool as probe_needs_absent_tool,
+    SOR_READER, SOR_USER_VAR, names_an_actor as probe_names_an_actor,
+    needs_absent_tool as probe_needs_absent_tool,
     reads_the_sor_unidentified as probe_reads_the_sor_unidentified,
 };
 
@@ -982,6 +983,23 @@ impl ParkIntent {
                  own journal, the converged checkout — or, if only the cluster can show it, \
                  record the car as --park-proof-event and prove it by hand.\n\n\
                  The absence list is infra/forge/host-absent-tools.txt."
+            );
+        }
+        if let Some(probe) = &self.probe
+            && let Some(var) = probe_names_an_actor(probe)
+        {
+            anyhow::bail!(
+                "--park-probe assigns `{var}`, which would name an actor for the `boss` \
+                 verbs it runs — and a probe proves, it does not act.\n\n\
+                 The forge runs a recorded probe with NO actor in its env, on purpose: the \
+                 CLI there refuses an unnamed write by its own rule, and that refusal is \
+                 what keeps a probe a read. A `boss` READ needs no actor — it goes out \
+                 signed operator:unidentified under the CLI's own platform-admin header, \
+                 which reads the whole world (one stderr line says so). Drop the \
+                 assignment; if the claim needs a write to be observed, it is not a probe \
+                 but an event — record the car as --park-proof-event.\n\n\
+                 The rule is stated with the forge's tool list, \
+                 infra/forge/host-absent-tools.txt (the `boss` block)."
             );
         }
         if let Some(probe) = &self.probe
@@ -1549,6 +1567,63 @@ async fn observe_landing(http: &reqwest::Client, branch: &str, sha: &str) -> Opt
 /// Best-effort by design: the refusal is the primary fact and must
 /// surface either way; a failed close is reported beside it rather than
 /// replacing it.
+/// The read behind a re-gate's stamp: closed gate-runs at exactly this
+/// branch and head, narrowed at the server by the containment door
+/// (`metadata=`, url-encoded the way `boss job list --where` sends it —
+/// one encoder, `job::QUERY_VALUE`). Closed only: an open run at the
+/// head is still running, and `reusable_packet` attaches to it instead.
+/// A head is gated a handful of times at most, so the page is small.
+pub(crate) fn prior_runs_query(branch: &str, sha: &str) -> String {
+    let doc = json!({ "branch": branch, "sha": sha }).to_string();
+    format!(
+        "/api/jobs?kind=gate-run&status=closed&metadata={}&limit=20",
+        percent_encoding::utf8_percent_encode(&doc, crate::job::QUERY_VALUE)
+    )
+}
+
+/// THE RED THIS LAUNCH RE-GATES, if any: the newest closed gate-run at
+/// the same branch and sha, judged `failed` or `lost` —
+/// `boss_jobs::flake::prior_red`, the one definition. Backlog
+/// 36cc4913: 4 of 11 red gates in two days were not the branch's
+/// fault, and each was recorded exactly like an author's red, so the
+/// flakiest check was a memory. A re-gate at an UNCHANGED head is the
+/// operator saying "the branch did not move; judge it again", and the
+/// relationship between the two runs is what turns a flake into a
+/// count — stamped here at launch as `regate_of`, and settled by the
+/// verdict: a green stamps `flake_of` (the auto-park handler, which
+/// reads every green), a red stamps nothing.
+///
+/// Never an automatic retry: a retry hides the flake; a named re-gate
+/// records it. BEST EFFORT: an unreadable record is `None` with a note,
+/// never a refusal — this is a stamp, not a gate condition, and a dark
+/// SoR must not stop a launch that `wait_for_verdict` is built to
+/// survive.
+async fn observe_prior_red(
+    http: &reqwest::Client,
+    base: &str,
+    branch: &str,
+    sha: &str,
+) -> Option<boss_jobs::flake::PriorRed> {
+    match api_at(
+        http,
+        base,
+        reqwest::Method::GET,
+        &prior_runs_query(branch, sha),
+        None,
+    )
+    .await
+    {
+        Ok(body) => boss_jobs::flake::prior_red(&rows(body), branch, sha),
+        Err(e) => {
+            eprintln!(
+                "boss gate: could not read earlier gate-runs at this head ({e:#}) — the gate \
+                 runs anyway; a green here will not be recorded as a flake of anything"
+            );
+            None
+        }
+    }
+}
+
 async fn close_refused(http: &reqwest::Client, packet: &str, reason: &str) {
     let result = async {
         let job = api(
@@ -2225,6 +2300,20 @@ pub async fn run(
         crate::freshness::BaseGuard::Refuse(why) => bail!("{why}"),
     }
 
+    // A RE-GATE AT AN UNCHANGED HEAD RECORDS WHAT IT RE-GATES. Read
+    // here, AFTER the sha is final (a `--rebase` moves it, and a moved
+    // head is the author's fix, not a re-gate), and before the packet,
+    // so the operator reads the line beside the launch. See
+    // `observe_prior_red`.
+    let prior_red = if dry {
+        None
+    } else {
+        observe_prior_red(&http, &jobs_base()?, branch, &sha).await
+    };
+    if let Some(p) = &prior_red {
+        println!("{}", boss_jobs::flake::launch_line(&sha, p));
+    }
+
     // EVERY REFUSAL IS DECIDED HERE, BEFORE A PACKET EXISTS (fd217c65).
     // The bound, the queue cap, the legacy-workspace law and an
     // unfillable manifest all used to fire AFTER the packet was filed
@@ -2338,6 +2427,25 @@ pub async fn run(
         eprintln!(
             "boss gate: could not stamp the base onto the gate-run ({e:#}) — the gate \
              runs anyway, but this receipt will not say which main it was taken against."
+        );
+    }
+    // THE RE-GATE'S RELATIONSHIP, the same way as the base: a merging
+    // PATCH, best effort, a record and not an instruction. What acts on
+    // it is the green verdict — `jobs.auto-park` reads `regate_of` off
+    // the gate-run and stamps `flake_of` (backlog 36cc4913).
+    if let Some(p) = prior_red.as_ref().filter(|_| !dry)
+        && let Err(e) = api(
+            &http,
+            reqwest::Method::PATCH,
+            &format!("/api/jobs/{packet}/metadata"),
+            Some(boss_jobs::flake::regate_patch(p)),
+        )
+        .await
+    {
+        eprintln!(
+            "boss gate: could not stamp regate_of onto the gate-run ({e:#}) — the gate runs \
+             anyway, but a green here will not be recorded as a flake of {}",
+            &p.id[..8.min(p.id.len())]
         );
     }
 
@@ -2925,6 +3033,11 @@ async fn wait_for_verdict(
                         .and_then(Value::as_str)
                         .unwrap_or("<branch unrecorded>")
                 );
+            }
+            // A green that re-gated a red at the same head: say what the
+            // record now holds, where the operator is looking (36cc4913).
+            if let Some(note) = job.get("metadata").and_then(boss_jobs::flake::green_note) {
+                println!("{note}");
             }
             return Ok(());
         }
@@ -3790,23 +3903,55 @@ mod tests {
         }
     }
 
-    /// And the invocation it was added for is still caught. Measured
-    /// on the forge the same day: `boss rerail --help` exited 127 with
-    /// `bash: line 1: boss: command not found`, on a car the arrival
-    /// rule had probed unattended.
+    /// And an invocation of a listed tool is still caught in every
+    /// position the shell would run it from — pinned on `kubectl`, the
+    /// tool still measured absent (f9304366). Until 2026-09-18 this ran
+    /// on `boss`, which left the list that day.
     #[test]
-    fn invoking_the_boss_binary_on_the_forge_is_refused() {
+    fn invoking_an_absent_tool_on_the_forge_is_refused() {
         for probe in [
-            "boss rerail --help",
-            "cd /home/david/boss && boss receipt main",
-            "echo x $(boss orient)",
+            "kubectl -n boss get deploy boss-jobs",
+            "cd /home/david/boss && kubectl get pods -A",
+            "echo x $(kubectl get nodes)",
         ] {
             assert_eq!(
                 probe_needs_absent_tool(probe),
-                Some("boss"),
-                "the forge has no boss binary: {probe}"
+                Some("kubectl"),
+                "the forge has no kubectl: {probe}"
             );
         }
+    }
+
+    /// THE CLI IS ON THE FORGE (H8 car 1, 9f00a805; proven by car
+    /// 9ec955c3's probe; `boss` retired from the list under 8a1fcd22).
+    /// A park intent whose probe shells to a `boss` verb is complete —
+    /// which is what every later H8 car, a shell twin retiring one verb
+    /// at a time, needs to be able to record.
+    #[test]
+    fn a_probe_that_shells_to_the_cli_is_accepted_at_gate_time() {
+        let mut p = park_full();
+        p.probe = Some(
+            "cli=/usr/local/bin/boss; test -x \"$cli\" || exit 75; \"$cli\" --version \
+             >/dev/null 2>&1 && echo cli:ok"
+                .into(),
+        );
+        p.expect = Some("cli:ok".into());
+        assert!(p.require_complete().is_ok(), "{:?}", p.require_complete());
+    }
+
+    /// A PROBE PROVES, IT DOES NOT ACT. With the CLI reachable, the one
+    /// thing that would let a probe WRITE is an actor, and the probe's
+    /// env carries none — so a probe text that assigns one is refused
+    /// here, naming the variable and the rule.
+    #[test]
+    fn a_probe_that_names_an_actor_is_refused_at_gate_time() {
+        let mut p = park_full();
+        p.probe = Some("BOSS_ACTOR=emp-david boss job close 1234 && echo closed".into());
+        p.expect = Some("closed".into());
+        let e = p.require_complete().unwrap_err().to_string();
+        assert!(e.contains("BOSS_ACTOR"), "{e}");
+        assert!(e.contains("does not act"), "{e}");
+        assert!(e.contains("host-absent-tools.txt"), "{e}");
     }
 
     /// A PROBE READS THE SYSTEM OF RECORD AS A NAMED READER (61085a9e).
@@ -5853,15 +5998,15 @@ kind: Job\n\
     }
 }
 
+/// A one-shot HTTP stub that hands back the request head it read —
+/// the seam the wire tests go through, shared by the signing tests
+/// (the head is where `x-boss-user` lives) and the re-gate read (the
+/// head is where the query lives).
 #[cfg(test)]
-mod signing_tests {
-    use super::*;
-    use crate::identity::Signature;
-
-    /// A one-shot HTTP stub that hands back the request head it read.
-    /// The head is where the answer lives: `x-boss-user` is what the
-    /// system of record stamps into `completed_by`.
-    async fn one_request(body: &'static str) -> (String, tokio::task::JoinHandle<Option<String>>) {
+mod stub {
+    pub(super) async fn one_request(
+        body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<Option<String>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -5889,6 +6034,13 @@ mod signing_tests {
         });
         (format!("http://{addr}"), handle)
     }
+}
+
+#[cfg(test)]
+mod signing_tests {
+    use super::stub::one_request;
+    use super::*;
+    use crate::identity::Signature;
 
     /// Backlog 5083d6f5, at the wire: the step PUT a `boss prove`
     /// makes must arrive carrying the operator who ran it.
@@ -5971,5 +6123,94 @@ mod signing_tests {
             "an unnamed read must say so; head was:\n{head}"
         );
         assert!(!head.contains(crate::identity::CONDUCTOR), "{head}");
+    }
+}
+
+#[cfg(test)]
+mod regate_tests {
+    use super::stub::one_request;
+    use super::*;
+
+    fn red_run(id: &str, branch: &str, sha: &str) -> String {
+        json!({
+            "id": id, "kind": "gate-run", "status": "closed", "opened_on": "2026-09-18",
+            "metadata": { "branch": branch, "sha": sha, "opened_at": "2026-09-18T10:00:00Z" },
+            "steps": [{ "spec_slug": "record-verdict", "metadata": {
+                "verdict": "failed",
+                "receipt": "{\"verdict\":\"failed\",\"checks\":[{\"name\":\"test\",\"result\":\"FAIL\",\"seconds\":9}]}"
+            }}]
+        })
+        .to_string()
+    }
+
+    fn page(run: String) -> &'static str {
+        Box::leak(format!(r#"{{"data":[{run}],"total":1}}"#).into_boxed_str())
+    }
+
+    /// The read is narrowed AT THE SERVER to the branch and head — the
+    /// containment door, url-encoded the way `boss job list --where`
+    /// sends it — and to closed runs, since an open one is still
+    /// running. Pinned as the string the wire carries.
+    #[test]
+    fn the_prior_read_narrows_on_branch_head_and_closed() {
+        let q = prior_runs_query("fix/x", "abc123");
+        assert!(
+            q.starts_with("/api/jobs?kind=gate-run&status=closed&"),
+            "{q}"
+        );
+        assert!(
+            q.contains("metadata=%7B%22branch%22%3A%22fix%2Fx%22%2C%22sha%22%3A%22abc123%22%7D"),
+            "{q}"
+        );
+    }
+
+    /// Backlog 36cc4913: a red at this head, re-gated at the SAME head.
+    /// The prior is read off the system of record and the stamp names
+    /// it and its failing check.
+    #[tokio::test]
+    async fn a_prior_red_at_the_same_head_is_read_off_the_record() {
+        let (base, stub) = one_request(page(red_run("aaaa1111-0000", "fix/x", "abc123"))).await;
+        let http = reqwest::Client::new();
+        let prior = observe_prior_red(&http, &base, "fix/x", "abc123")
+            .await
+            .expect("a closed red at the same head is the prior");
+        assert_eq!(prior.id, "aaaa1111-0000");
+        assert_eq!(prior.failed, vec!["test".to_string()]);
+        let head = stub.await.unwrap().expect("the stub read a request");
+        assert!(head.contains("kind=gate-run"), "{head}");
+        assert!(
+            head.contains("metadata=%7B%22branch%22"),
+            "the read narrows: {head}"
+        );
+        assert_eq!(
+            boss_jobs::flake::regate_patch(&prior),
+            json!({ "regate_of": "aaaa1111-0000", "prior_failed": ["test"] })
+        );
+    }
+
+    /// A moved head is the author's fix, not a re-gate. The stub hands
+    /// back a red at ANOTHER sha — what a server that ignored the
+    /// `metadata=` parameter would do — and nothing is stamped.
+    #[tokio::test]
+    async fn a_red_at_another_head_is_not_a_regate_even_when_the_server_sends_it() {
+        let (base, _stub) = one_request(page(red_run("aaaa1111-0000", "fix/x", "def456"))).await;
+        let http = reqwest::Client::new();
+        assert!(
+            observe_prior_red(&http, &base, "fix/x", "abc123")
+                .await
+                .is_none()
+        );
+    }
+
+    /// An unreadable record is not a prior: the gate runs, the stamp is
+    /// simply absent — a dark SoR must not refuse a launch.
+    #[tokio::test]
+    async fn an_unreachable_record_stamps_nothing_and_refuses_nothing() {
+        let http = reqwest::Client::new();
+        assert!(
+            observe_prior_red(&http, "http://127.0.0.1:9", "fix/x", "abc123")
+                .await
+                .is_none()
+        );
     }
 }

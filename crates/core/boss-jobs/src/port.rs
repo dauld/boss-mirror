@@ -287,6 +287,19 @@ fn cycle_days_sample(job: &Job) -> Option<f64> {
         .map(|closed| (closed - job.opened_on).num_days() as f64)
 }
 
+/// Pure selection behind [`JobsRepository::newest_closed_job`]: the
+/// closed packet with the greatest `closed_on`, then the greatest
+/// `opened_on`. `jobs` arrives newest-opened first from `list_jobs`,
+/// and a stable max keeps that order as the last tie-break.
+pub fn newest_closed_from_jobs(jobs: Vec<Job>) -> Option<Job> {
+    jobs.into_iter()
+        .filter(|j| j.status == JobStatus::Closed)
+        .fold(None, |best: Option<Job>, j| match best {
+            Some(b) if (b.closed_on, b.opened_on) >= (j.closed_on, j.opened_on) => Some(b),
+            _ => Some(j),
+        })
+}
+
 /// Pure aggregation behind [`JobsRepository::workflow_terminal_report`]
 /// — a function of the packets, so any adapter's answer is checkable
 /// against it. Versions sort newest first.
@@ -1107,6 +1120,26 @@ pub trait JobsRepository: Send + Sync {
         };
         let (jobs, _total) = self.list_jobs(&filter, i64::MAX, 0).await?;
         Ok(terminal_report_from_jobs(&jobs, since))
+    }
+
+    /// The most recently CLOSED packet of `kind` — the newest terminal
+    /// a department's readiness read reports per protocol (backlog
+    /// 1dffde5d). Newest by `closed_on`, ties broken newest-opened
+    /// first; `None` when no packet of the kind has closed. Cancelled
+    /// packets are terminal but not closed, so they do not count — the
+    /// same line `workflow_terminal_report` draws.
+    ///
+    /// The default impl is the pure [`newest_closed_from_jobs`] over
+    /// every closed packet of the kind — honest but O(packets); the
+    /// Postgres adapter answers with one ordered `LIMIT 1`.
+    async fn newest_closed_job(&self, kind: &str) -> Result<Option<Job>, JobsError> {
+        let filter = JobFilter {
+            kind: Some(kind.to_string()),
+            status: Some(JobStatus::Closed),
+            ..Default::default()
+        };
+        let (jobs, _total) = self.list_jobs(&filter, i64::MAX, 0).await?;
+        Ok(newest_closed_from_jobs(jobs))
     }
 
     /// Every outstanding obligation in `scope` — `ready` / `active`

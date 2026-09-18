@@ -22,6 +22,17 @@
 //! the same word in `category`, but `category` is the registry's
 //! DISPLAY grouping (the platform bundle's is `platform`, which is no
 //! department), and one declaration is one fewer to keep in step.
+//!
+//! The same join answers `GET /api/departments/<code>/readiness`
+//! (`readiness`, `http`; design 3613f0af, backlog 1dffde5d): a
+//! department's protocols are the kinds declaring it, and everything
+//! else the read reports — sensors, rules, the newest retro — hangs
+//! off that kind set. `GET /api/departments` lists what the classes
+//! registry holds, which is what the weekly retro rule iterates.
+
+pub mod http;
+pub mod readiness;
+pub mod rules;
 
 use crate::registry::WorkflowSpec;
 

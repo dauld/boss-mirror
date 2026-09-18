@@ -55,6 +55,7 @@ pub mod people_terminate;
 pub mod products_consume;
 pub mod products_consume_from_invoice;
 pub mod products_produce;
+pub mod retro_open;
 pub mod sensor_poll;
 pub mod shipping_create;
 pub mod spool;

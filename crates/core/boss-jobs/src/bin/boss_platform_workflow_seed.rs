@@ -51,11 +51,23 @@
 //! table (`boss_jobs::bundle_seed`). The JS itself still reaches the
 //! cluster as the step-plugins ConfigMap the converge runner builds
 //! from `infra/step-plugins/*.js`; this binary publishes the ROW.
+//!
+//! CADENCE RULES RIDE IT TOO (car 3). The conductor's schedule —
+//! `infra/platform/cadence/`, the sibling again, `--cadence-path` to
+//! override — is published after the step plugins by
+//! `boss_jobs::cadence_seed::seed_cadence_rules`, the same table. The
+//! difference this registry carries: it is live-editable by design, so
+//! a row an operator re-versioned live is reported as ahead of its
+//! file and left alone, and a rule the operator retired stays retired.
 
 use anyhow::{Context, Result};
 use boss_core::actor::ActorId;
+use boss_jobs::cadence::{CadenceRuleSpec, PgCadence};
+use boss_jobs::cadence_seed::{cadence_beside, seed_cadence_rules};
 use boss_jobs::registry::PgWorkflows;
-use boss_jobs::seed_loader::{SeedLoaderError, load_stations, load_step_plugins, load_workflows};
+use boss_jobs::seed_loader::{
+    SeedLoaderError, load_cadence_rules, load_stations, load_step_plugins, load_workflows,
+};
 use boss_jobs::station_seed::{seed_stations, stations_beside};
 use boss_jobs::step_plugin_seed::{seed_step_plugins, step_plugins_beside};
 use boss_jobs::workflow_seed::seed_workflows;
@@ -91,6 +103,12 @@ struct Cli {
     /// (`infra/platform/step-plugins` for the in-tree default).
     #[arg(long)]
     step_plugins_path: Option<PathBuf>,
+
+    /// The cadence bundle: a directory of `<name>.toml` files.
+    /// Defaults to the `cadence` directory BESIDE `--seed-path`
+    /// (`infra/platform/cadence` for the in-tree default).
+    #[arg(long)]
+    cadence_path: Option<PathBuf>,
 
     /// Report what would be inserted and write nothing.
     #[arg(long)]
@@ -163,6 +181,18 @@ fn load_step_plugin_bundle(cli: &Cli) -> Result<Option<(PathBuf, Vec<StepPluginS
     )
 }
 
+fn load_cadence_bundle(cli: &Cli) -> Result<Option<(PathBuf, Vec<CadenceRuleSpec>)>> {
+    load_sibling_bundle(
+        cli,
+        "platform-cadence-seed",
+        "cadence",
+        "--cadence-path",
+        &cli.cadence_path,
+        cadence_beside,
+        |dir| load_cadence_rules(dir),
+    )
+}
+
 /// Who the platform seed publishes as.
 ///
 /// Machine-shaped on purpose. It is not `bootstrap`: that string is
@@ -178,12 +208,13 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let specs = load_workflows(&cli.seed_path)
         .with_context(|| format!("reading {}", cli.seed_path.display()))?;
-    // Read BOTH bundles before touching the database: a station bundle
+    // Read EVERY bundle before touching the database: a station bundle
     // that does not parse refuses the whole run before any workflow is
     // published, so a half-seeded deployment is not a state this binary
     // can leave behind.
     let stations = load_station_bundle(&cli)?;
     let step_plugins = load_step_plugin_bundle(&cli)?;
+    let cadence = load_cadence_bundle(&cli)?;
     if specs.is_empty() {
         println!("platform-workflow-seed: bundle is empty, nothing to do");
     }
@@ -246,8 +277,23 @@ async fn main() -> Result<()> {
                 dir.display()
             );
         } else {
-            let registry = PgStepPlugins::new(pool);
+            let registry = PgStepPlugins::new(pool.clone());
             let report = seed_step_plugins(&registry, &plugin_specs, &actor, now, cli.dry_run)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("{report}");
+        }
+    }
+
+    if let Some((dir, cadence_specs)) = cadence {
+        if cadence_specs.is_empty() {
+            println!(
+                "platform-cadence-seed: bundle at {} is empty",
+                dir.display()
+            );
+        } else {
+            let registry = PgCadence::new(pool);
+            let report = seed_cadence_rules(&registry, &cadence_specs, &actor, now, cli.dry_run)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("{report}");

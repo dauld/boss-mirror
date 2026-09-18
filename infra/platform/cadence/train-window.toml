@@ -1,0 +1,25 @@
+# ---------------------------------------------------------------------------
+# train-window — the two daily boarding windows: reconcile, then board
+# whatever is parked ready on the dock.
+#
+# Version 2 is the row the migrations produced: 114 seeded v1 at
+# 06:00 / 18:00 UTC; 134 retired it and published v2 at 06:05 / 18:05
+# so the window never coincides with the ten-minute reconcile's grid.
+# Declared here since 2026-09-18 (backlog 393d3234, consolidation H4,
+# car 3); see train-reconcile.toml for what that means.
+#
+# `clock` basis: fires at each `at_times` (UTC, "HH:MM"). `run` is
+# reconcile-then-board — one of the two verbs that put a train on the
+# track (boss_jobs::cadence::departs_a_train), which is why the yard
+# describes THIS rule as "Boards at 06:05 / 18:05 UTC".
+#
+# To change this rule, bump `version`.
+# ---------------------------------------------------------------------------
+
+[[cadence_rule]]
+name = "train-window"
+version = 2
+status = "active"
+verb = "run"
+basis = "clock"
+at_times = ["06:05", "18:05"]

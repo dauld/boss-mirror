@@ -327,12 +327,15 @@ barely seeded — two platform `batch` rows, no authoring API — so
 "every executor has one" is the design, not today's data.
 
 **A platform station is declared in `infra/platform/stations/`, a
-step plugin's row in `infra/platform/step-plugins/`, and a migration
-newer than 20260918112134 declares schema only** (2026-09-18, backlog
-393d3234, consolidation H4, the first two of four registries to make
-this move — cadence_rules and delivery_policy follow). Measured on
-that day, seven migrations were the only place a platform station
-existed, and seven the only place a step plugin's row did, and a
+step plugin's row in `infra/platform/step-plugins/`, a cadence rule in
+`infra/platform/cadence/`, and a migration newer than 20260918112134
+declares schema only** (2026-09-18, backlog 393d3234, consolidation
+H4, the first three of four registries to make this move —
+delivery_policy follows). Measured on that day, seven migrations were
+the only place a platform station existed, seven the only place a
+step plugin's row did, and nine the only place a cadence rule did
+(six of the nine re-versioning one integer, the boarding threshold,
+and one of those a silent no-op), and a
 migration is the wrong home for a registry row: it runs once, a fresh
 instance cannot re-declare the row without replaying history, nothing
 drift-checks it against the live row, and every edit is a contended
@@ -355,7 +358,21 @@ the image copies `infra/platform` whole and the JS reaches the cluster
 as a ConfigMap built from `*.js`, so a row beside the JS would have
 needed a Dockerfile COPY, a seed flag and an init.sh edit to be found
 at all. `infra/lint/step-plugin-bundle-exists.sh` holds the row to its
-JS across the two directories.
+JS across the two directories. The cadence bundle differs in one
+posture the table's design demands: `cadence_rules` is live-editable
+protocol data (measure, experiment, update — without a deploy), so the
+bundle is the declared BASELINE, not a lock — a rule an operator
+re-versions live is reported as ahead of its file and left alone, a
+rule the operator retired stays retired, and only the one refusal
+every bundle has (a file edited at the same (name, version) the live
+row holds) stops a boot. The conductor's loop reads the live table
+over `/api/cadence/rules` and did not change. The bundle carries three
+of the four rules the migrations seed: `protocol-retro-daily` is
+retired by decision the same day (the weekly department retro opens
+IT's retro through a dispatcher clock rule), and the equality pin
+compares the bundle to the migrations' active rows minus a
+`RETIRED_BY_DECISION` list that names it and why — a bundle must not
+carry a row the operator is retiring.
 
 **Priority becomes Class-registry data.** The `CHECK` constraint,
 the closed Rust enum and the TS union retire together in favour of

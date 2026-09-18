@@ -249,3 +249,52 @@ export function shedLamp(s: ShedCar): 'ok' | 'working' | 'warn' | 'err' | 'off' 
 export function runAt(r: ProbeRun): string | null {
   return r.kind === 'waiting' ? null : r.at;
 }
+
+// THE FLAKE TALLY — reds that were not the branch's, by check.
+//
+// Retro 27fad542 counted 4 of 11 red car gates in two days that were not
+// the branch's fault, each recorded exactly like an author's red, so the
+// flakiest check was a memory (backlog 36cc4913). The rule lives in
+// `boss_jobs::flake` and is decided by the record, never by a check's
+// name: `boss gate` re-run at an UNCHANGED head stamps `regate_of` (the
+// prior red) on the fresh gate-run, and a GREEN verdict there stamps
+// `flake_of` + `flaky_checks` (the prior's failing checks). This tally
+// reads those stamps off the gate-run packets the page already holds —
+// the same window the signals read — so the shed lists the same number
+// `boss orient`'s FLAKES line prints. A stamped run whose prior named no
+// check (a lost run, a refusal) counts under NO_CHECK_NAMED rather than
+// vanishing.
+
+/** The tally key for a flake whose prior run named no check —
+ *  `boss_jobs::flake::NO_CHECK_NAMED`, spelled once there and once here. */
+export const NO_CHECK_NAMED = '(no check named)';
+
+export type FlakeCount = Readonly<{ check: string; count: number }>;
+
+const strings = (v: unknown): readonly string[] =>
+  Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : [];
+
+/** How many times each check went red then green at one head, over the
+ *  gate-runs given — most flaky first, ties by name. Runs without a
+ *  `flake_of` stamp (a plain green, a re-gate that stayed red) do not
+ *  count: a persistent red is the branch's. */
+export function flakeTally(gateRuns: readonly JobLite[]): readonly FlakeCount[] {
+  const counts = new Map<string, number>();
+  gateRuns.forEach(r => {
+    const m = md(r);
+    if (text(m.flake_of) === null) return;
+    const checks = strings(m.flaky_checks);
+    (checks.length > 0 ? checks : [NO_CHECK_NAMED]).forEach(c => counts.set(c, (counts.get(c) ?? 0) + 1));
+  });
+  return [...counts.entries()]
+    .map(([check, count]) => ({ check, count }))
+    .sort((a, b) => b.count - a.count || (a.check < b.check ? -1 : a.check > b.check ? 1 : 0));
+}
+
+/** The tally's one line: the checks by count, or a stated none. The
+ *  page reads a WINDOW of gate-runs, so a none is "in the runs read". */
+export function flakeLabel(tally: readonly FlakeCount[]): string {
+  return tally.length === 0
+    ? 'no flakes in the runs read'
+    : ['flakes', ...tally.map(f => `${f.check}: ${f.count}`)].join(' · ');
+}

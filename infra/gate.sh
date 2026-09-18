@@ -649,7 +649,7 @@ path_shapes() {
            -e 's|^infra/lint/.*|boss-cli boss-testing|p' \
            -e 's|^\.forgejo/workflows/ci\.yml$|boss-testing|p' \
            -e 's|^infra/dispatcher/rules/[^/]*\.toml$|boss-brewery-engine boss-dispatcher|p' \
-           -e 's|^infra/platform/workflows/[^/]*\.toml$|boss-jobs|p' \
+           -e 's|^infra/platform/[^/]*/[^/]*\.toml$|boss-jobs|p' \
            -e 's|^examples/\([^/]*\)/seeds/workflows\.toml$|boss-jobs boss-\1-engine|p' \
            -e 's|^examples/\([^/]*\)/seeds/tenant\.toml$|boss-sim boss-\1-engine|p' \
            -e 's|^examples/\([^/]*\)/seeds/policy_rules\.toml$|boss-policy-client boss-\1-engine|p' \
@@ -658,7 +658,7 @@ path_shapes() {
 
 
 scope_self_test() {
-    local fails=0 label want got seeds tenant
+    local fails=0 label want got seeds tenant bundle_dir
     _case() {
         label="$1"; want="$2"; shift 2
         got=$(printf '%s\n' "$@" | path_map); got="${got% }"
@@ -688,6 +688,33 @@ scope_self_test() {
     # gate would not have run that lint at all.
     _case "a protocol-only car still has a crate" "boss-jobs" \
         "infra/platform/workflows/ship-a-change.toml"
+    # THE THIRD RE-PIN (backlog f532c345). The line above was written
+    # when infra/platform/ held one registry, and the shape it pinned
+    # named `workflows/`. On 2026-09-18 the bundle grew stations/ and
+    # step-plugins/ (H4 cars 1 and 3), each held equal to the migrations
+    # by a `*_bundle_is_the_migrations_pg.rs` pin in boss-jobs — and a
+    # row in either derived NO crate (measured on main at #452:
+    # stations/repair.toml -> [], step-plugins/sign-off.toml -> []), so
+    # a bundle-only car gated lints + fmt and never ran the pin. The
+    # three bundle cars gated boss-jobs only because each also changed
+    # Rust. Same hole as the tenant bundle two cases down, same fix: the
+    # shape is now `infra/platform/<registry>/*.toml` — the directory,
+    # not a list of names — and this loop walks the directory so a
+    # fourth registry is pinned the day it appears. A fictional row, not
+    # a real one, so the answer is the shape's alone and not the
+    # file-input index's.
+    for bundle_dir in infra/platform/*/; do
+        [ -d "$bundle_dir" ] || continue
+        bundle_dir="${bundle_dir%/}"
+        _case "a row in ${bundle_dir} implies boss-jobs" "boss-jobs" \
+            "${bundle_dir}/zz-a-scratch-row.toml"
+    done
+    # …and the bundle's prose does not: a README beside the rows is read
+    # by nobody a compile can reach, so it must not cost a boss-jobs
+    # build. The shape is keyed on `.toml`, and this is the case that
+    # keeps it so.
+    _case "a README in a platform bundle implies no crate" "" \
+        "infra/platform/stations/README.md"
     _case "two files, one crate" "boss-cli" \
         "crates/orchestrators/boss-cli/src/train/conductor.rs" \
         "crates/orchestrators/boss-cli/src/gate.rs"

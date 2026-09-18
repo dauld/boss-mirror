@@ -537,6 +537,23 @@ impl JobsRepository for PgJobs {
         Ok(row.map(row_to_job))
     }
 
+    /// One ordered `LIMIT 1` instead of the default's walk over every
+    /// closed packet of the kind: `closed_on` is a DATE, so the
+    /// admission instant then id break the tie the way `list_jobs`
+    /// does, and the answer is deterministic on a busy day.
+    async fn newest_closed_job(&self, kind: &str) -> Result<Option<Job>, JobsError> {
+        let row = sqlx::query_as::<_, JobRow>(
+            "SELECT id, kind, workflow_version, subject_kind, subject_id, title, owner_id, status, priority, opened_on, due_on, closed_on, metadata, tags, partition \
+             FROM jobs WHERE kind = $1 AND status = 'closed' \
+             ORDER BY closed_on DESC NULLS LAST, opened_on DESC, created_at DESC, id LIMIT 1",
+        )
+        .bind(kind)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| JobsError::Storage(e.to_string()))?;
+        Ok(row.map(row_to_job))
+    }
+
     async fn resolve_job_id_prefix(&self, prefix: &str) -> Result<Vec<JobId>, JobsError> {
         // LIKE on the canonical text form; LIMIT 2 is all the caller
         // needs to tell one match from many, and keeps a short prefix

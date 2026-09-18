@@ -1889,21 +1889,11 @@ fn gate_run_receipt(steps: &[Step]) -> Option<Value> {
 
 /// The failed checks a receipt names, in its order (see
 /// [`failing_check`] for the two shapes). `None` when neither shape is
-/// present.
+/// present. ONE definition, in `crate::flake`, since 2026-09-18: the
+/// re-gate that records a flake names the prior's checks off the same
+/// read the garage names them with (36cc4913).
 fn failing_checks(receipt: &Value) -> Option<Vec<String>> {
-    Some(match receipt.get("checks").and_then(Value::as_array) {
-        Some(checks) => checks
-            .iter()
-            .filter(|c| c.get("result").and_then(Value::as_str) != Some("pass"))
-            .filter_map(|c| c.get("name").and_then(Value::as_str).map(str::to_string))
-            .collect(),
-        None => receipt
-            .get("fails")
-            .and_then(Value::as_array)?
-            .iter()
-            .filter_map(|f| f.as_str().map(str::to_string))
-            .collect(),
-    })
+    crate::flake::failing_checks(receipt)
 }
 
 /// Longest `failed_line` the garage will carry, in chars. It is a

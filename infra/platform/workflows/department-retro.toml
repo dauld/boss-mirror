@@ -1,0 +1,133 @@
+# ---------------------------------------------------------------------------
+# department-retro — the scientific method's review step, applied to
+# ONE department a week (design 3613f0af, backlog 1dffde5d; David,
+# 2026-09-18: "Let's do retros weekly instead of monthly, but otherwise
+# yes").
+#
+# The SAME steps as protocol-retro — collect → analyze → gaps → report →
+# review, `cancelled` for a week with nothing to say — parameterised by
+# `department` on the packet (`metadata_schema` below requires it; the
+# value is a department Class code, an `employee` row whose
+# `member_attribute` is `department`). protocol-retro counts what IT
+# did by hand over the platform's protocols; this counts what a
+# department did by hand over ITS protocols, read from the same doors:
+# the kinds whose active workflow row declares `metadata.department =
+# <code>` (`GET /api/jobs?department=<code>` is that join, landed
+# 2026-09-18), each kind's terminal-report, the sensors whose readings
+# open those kinds, the department's ops-requests, and
+# `GET /api/departments/<code>/readiness` — which of the six template
+# parts (surfaces, sensor, rule, protocol, probe, retro) the
+# department has, computed from live registries and never a seed.
+#
+# One packet per department per ISO week, opened by the
+# `department-retros-weekly` clock rule (infra/dispatcher/rules/): the
+# handler reads the department list from the classes registry at fire
+# time, so a department declared on Tuesday has its first retro on
+# Monday with no edit anywhere. The dedup is a WEEK window on the
+# newest packet, not `NOT open_job_exists` — one retro left open must
+# not kill every later week (a-dedup-guard-silently-retires-a-cadence,
+# measured 2026-09-10: nineteen days of no mirror check behind one
+# undrained packet).
+#
+# `owning_team` records the platform; the bundle loader stamps every
+# row with `platform` and ignores the key.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "department-retro"
+label = "Department retrospective"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Weekly review of how ONE department's work actually ran: the terminal reports of its protocols, the readings its sensors produced and the packets they opened, and — the point — what was done by hand that should have been a protocol step. Same steps as protocol-retro, parameterised by `department` (a department Class code). The Subject is the department; `metadata.department` carries the same code for the readiness read and the dedup.\n\nTHE TEST IS A COUNT, NOT A FEELING (protocol-retro v3, and it holds here unchanged). How many times was this done by hand this week? Something done ten times with no protocol is a gap however easy each instance felt; something done once is usually not, however badly it went. Difficulty makes work memorable, frequency makes it expensive, and the retro exists to stop the first from crowding out the second.\n\nWHY PER DEPARTMENT (design 3613f0af, 2026-09-18). IT was filled out in one order and it worked: in / working / out surfaces, then a sensor, a rule, a protocol, a probe, a retro. That order IS the scientific method applied to a department, and nothing about it is IT-specific — yet on the day of the design only IT had a retro, and product, support and hosting had no protocol at all. This kind is the review step of that template, one instance per department, so a department nobody reviews is a department whose readiness read says so.\n\nA department with nothing to say this week takes the `cancelled` exit after `collect` — with the counts that say why, because an empty week is a reading too."
+metadata_schema = { type = "object", required = ["department"], properties = { department = { type = "string", description = "The department Class code (subject_kind employee, member_attribute department) this retro reviews." } } }
+metadata = { surfaces = ["system-design"] }
+
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+title_template = "Retro window opens"
+
+[[workflow.step]]
+title = "collect"
+kind = "task"
+ready_when = "steps.opened.done"
+title_template = "Collect the department's numbers"
+# WHO THE WORK STEPS ARE FOR, declared (design f5ebd2e1): the platform
+# operator's queue, agent-workable (`human_only = false`) — the agent
+# drafts, the founder decides at `review`. protocol-retro's collect /
+# analyze / report predate the declaration and sit on the orphan pin
+# (no_orphan_steps_pg); a new kind does not add to it.
+audience = { role = "platform-admin" }
+metadata_defaults = { human_only = false, procedure = "Gather NUMBERS for THIS department, not impressions. The department is `metadata.department` on this packet; every source below already answers for it:\n  - GET /api/departments/{department}/readiness - which of the six template parts the department has (surfaces, sensors, rules, protocols, probes, retro), each computed from a live registry. `protocols` names every kind whose active workflow row declares this department, with its packet count and newest terminal. Start here: a part that reads `false` is a finding before any packet is opened.\n  - GET /api/workflows/{kind}/terminal-report for each kind the readiness read named - per workflow VERSION: total packets, status split, cycle time (median and p90 with a sample count) and the outcome breakdown. This is how a procedure change is compared against the versions before it instead of argued about.\n  - GET /api/jobs?department={department} - the department's packets, the join over the kinds declaring it. Add status=open for what is still in flight and closed_since=<week start> for what finished this week.\n  - The department's sensors (the readiness read names them): GET /api/sensors and each one's readings - how many readings arrived, how many opened a packet, and any `sensor_unreadable:<id>` alarm, which is a reading that could not be taken.\n  - GET /api/jobs?kind=ops-request&metadata={\"department\":\"{department}\"} - the verbs run on the department's behalf this week.\n  - Packets carrying a `correction`, `proof_note` or `awaiting_proof` field - errors and caveats recorded against the packet they belong to, so they can be counted instead of remembered.\n\nCOUNT THE HAND ACTS. What did a person do for this department this week that no packet records - a reply typed outside a protocol, a row edited by hand, a reading looked up in a dashboard? The audit log holds what the system did; the hand acts are what it could not see, and naming them in `sources` is the one thing only a retro can record.\n\nSTATE THE WINDOW AND WHAT IS NOT COUNTABLE. A department with no sensor has no readings to count, and saying so is the finding, not a gap in the report." }
+fields = [
+  { name = "window", field_type = "string", required = true },
+  { name = "packets_covered", field_type = "string", required = true },
+  { name = "sources", field_type = "string" },
+]
+
+[[workflow.step]]
+title = "analyze"
+kind = "task"
+ready_when = "steps.collect.done"
+title_template = "Assess bottlenecks"
+audience = { role = "platform-admin" }
+metadata_defaults = { human_only = false, procedure = "Find where the department's time and correctness actually went. Two questions:\n\nWHERE IS THE BOTTLENECK? Cycle times per kind across the window (the terminal reports' median and p90), not the worst single memory. A packet that sat at one step for the whole week names its step; a kind whose p90 is a multiple of its median has a slow path nobody has looked at.\n\nCLASSIFY THE ERRORS, because the distribution is the finding and it is never what recall says. The classification protocol-retro uses on 2026-08-28, over fourteen errors in one session, applies to a department's week unchanged:\n  A. an ad-hoc check answered confidently and WRONGLY\n  B. a value typed instead of read\n  C. acted on state that was never declared\n  D. asserted about another environment without checking\n  E. a test whose assertion was wrong\nNote the DIRECTION of each failure: a check that fails closed reads as a finding; one that fails open reads as success. Both are worse than an error.\n\nAND NOTE WHERE THEY HAPPENED. A hand act outside any protocol, or a step inside one? If every error this week happened outside a protocol step, that is the single most useful fact this retro produces, and the `gaps` step turns it into filed work." }
+fields = [
+  { name = "bottleneck", field_type = "string", required = true },
+  { name = "cycle_times", field_type = "string", required = true },
+  { name = "error_classes", field_type = "string" },
+]
+
+[[workflow.step]]
+title = "gaps"
+kind = "task"
+ready_when = "steps.analyze.done"
+title_template = "Protocol gaps in this window"
+authority_role = "platform-admin"
+metadata_defaults = { human_only = false, procedure = "FREQUENCY DECIDES, NOT MEMORABILITY. The standing question is: what did this department do by hand, and how many times? Count it, rank it, and let the top of the list choose itself. The most annoying task and the most repeated task are rarely the same one, and only the second is worth a protocol step.\n\nTHE OUTPUT IS FILED WORK, NOT PROSE. For each candidate, file a backlog-item carrying the COUNT and the failure it caused, with `metadata.department` set to this department's code, and record the ids in `protocol_updates`. A retro whose proposals live only in its own report is a retro nobody acts on.\n\nREAD THE READINESS READ AS A LIST OF GAPS. A department with no sensor observes nothing; with no rule, its readings become nobody's work; with no protocol, its work has no terminal and no evidence; with no probe, its changes are believed rather than proven. Each `false` is a candidate, and the first protocol a department needs is the smallest loop from its sensor to a terminal (design 3613f0af names one per department).\n\nPREFER FIXING AN EXISTING PROTOCOL TO ADDING ONE. The registry is supposed to shrink too. Before proposing a new kind, check whether one already covers it and is merely undescribed or untriggered.\n\nASK WHAT COULD NOT BE MEASURED, and file that too. An unmeasurable failure class stays unmeasured until someone builds the instrument; naming it is how that gets prioritised." }
+fields = [
+  { name = "repeated_manual_work", field_type = "string", required = true },
+  { name = "protocol_gaps", field_type = "string", required = true },
+  { name = "protocol_updates", field_type = "string", required = true },
+  { name = "verbs_filed", field_type = "string" },
+]
+
+[[workflow.step]]
+title = "report"
+kind = "task"
+ready_when = "steps.gaps.done"
+title_template = "Write the retro report"
+audience = { role = "platform-admin" }
+metadata_defaults = { human_only = false, procedure = "Write what a reader who was not there needs: the department, the window, the numbers, the classification, and the filed ids. Quote counts rather than adjectives - 'three of the week's five inquiries were answered by hand' survives being reread in a month; 'support was busy' does not.\n\nSEPARATE WHAT IS ALREADY DONE FROM WHAT IS BEING ASKED FOR. The sign-off that follows is a person's time, and it is wasted re-reading decisions that were already taken and shipped during the window.\n\nTHEN WRITE `context_md` ONTO THE `review` STEP. This is not optional: the UI renders THE STEP THE READER IS ON, so a sign-off step carrying only `authority_role` is an empty screen, whatever the work steps hold. protocol-retro reached David empty three times running before this rule was written into it (2026-08-28), and this kind inherits the rule whole.\n\nWHAT context_md MUST CONTAIN, so the reviewer can decide without opening anything else: which department, what they are signing off, the finding in one line, the numbers, what was already done during the window versus what is being asked for, and the filed ids. If the honest answer is 'nothing needs deciding except the sign-off itself', say that first.\n\nTHE CONSTRAINT LIVES HERE, NOT ON THE SIGN-OFF. `sign_off_context` is REQUIRED on THIS step, so this step cannot complete without it - and `review` only becomes ready once this completes. The reviewer therefore cannot be handed an empty packet, because the packet cannot reach them until the context exists. Required metadata is validated AT COMPLETION, which is useless on the sign-off step itself and exactly right one step earlier." }
+fields = [
+  { name = "report", field_type = "string", required = true },
+  { name = "proposed_changes", field_type = "string", required = true },
+  { name = "sign_off_context", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "review"
+kind = "sign-off"
+ready_when = "steps.report.done"
+title_template = "Ratify or decline the proposals"
+authority_role = "platform-admin"
+metadata_defaults = { procedure = "A HUMAN READS THIS STEP AND NOTHING ELSE. Whatever the packet's other steps hold, the reviewer sees what is on THIS one - so it must arrive carrying `context_md`, written by the `report` step before this becomes ready.\n\nIF YOU ARE LOOKING AT THIS STEP AND IT IS EMPTY, that is a defect in the `report` step's completion, not the retro: the content is on the collect/analyze/gaps/report steps; read it there, and say so." }
+fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
+
+[[workflow.step]]
+title = "recorded"
+kind = "outcome"
+ready_when = "steps.review.done"
+title_template = "Recorded"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "recorded" }
+
+[[workflow.step]]
+title = "cancelled"
+kind = "outcome"
+ready_when = "steps.collect.done AND job.metadata.cancelled = \"true\""
+title_template = "Cancelled"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "cancelled" }
