@@ -516,3 +516,76 @@ async fn metadata_has_and_contains_narrow_the_rows_and_the_total() {
     let (rows, total) = repo.list_jobs(&both, 100, 0).await.unwrap();
     assert_eq!((rows.len(), total), (0, 0));
 }
+
+/// `kinds` — the kind SET the department listing narrows on — at the
+/// Postgres layer, asserted on the count query as well as the list
+/// query, since the two are written separately in the adapter.
+///
+/// The claim behind cc76f755 (2026-09-18): a packet carries no
+/// department, its workflow does, so `?department=sales` resolves to
+/// the kinds declaring `sales` and asks for exactly those. The leg
+/// that matters most is the EMPTY set: `kind = ANY('{}')` must be a
+/// real bind matching nothing, because a department nobody declares
+/// that answered the unfiltered count is the trap the packet was
+/// filed on (prod answered 1944 for a param it never read).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kind_set_narrows_the_rows_and_the_total_and_an_empty_set_is_none() {
+    let db = TestDb::new().await;
+    let repo = boss_jobs::PgJobs::new(db.pool.clone());
+    let co = Subject::new("custom", "algedonic");
+
+    for (id, kind) in [
+        ("00000000-0000-0000-0000-0000000000d1", "receive-an-inquiry"),
+        (
+            "00000000-0000-0000-0000-0000000000d2",
+            "receive-a-sponsorship",
+        ),
+        (
+            "00000000-0000-0000-0000-0000000000d3",
+            "publish-the-landing-page",
+        ),
+        ("00000000-0000-0000-0000-0000000000d4", "backlog-item"),
+    ] {
+        repo.create_job(&job(id, kind, co.clone())).await.unwrap();
+    }
+
+    let sales = JobFilter {
+        kinds: Some(vec![
+            "receive-an-inquiry".into(),
+            "receive-a-sponsorship".into(),
+        ]),
+        ..Default::default()
+    };
+    let (rows, total) = repo.list_jobs(&sales, 100, 0).await.unwrap();
+    assert_eq!(rows.len(), 2, "two packets are of the two sales kinds");
+    assert_eq!(
+        total, 2,
+        "the count query must carry the same kind-set clause as the list query"
+    );
+    assert!(rows.iter().all(|j| j.kind.starts_with("receive-")));
+
+    // The control leg: an EMPTY set is no packet, not every packet.
+    let nobody = JobFilter {
+        kinds: Some(vec![]),
+        ..Default::default()
+    };
+    let (rows, total) = repo.list_jobs(&nobody, 100, 0).await.unwrap();
+    assert_eq!(
+        (rows.len(), total),
+        (0, 0),
+        "an empty kind set must not fall through"
+    );
+
+    // And `None` is still no filter.
+    let (rows, total) = repo.list_jobs(&JobFilter::default(), 100, 0).await.unwrap();
+    assert_eq!((rows.len(), total), (4, 4));
+
+    // Composes with `kind` as an intersection.
+    let both = JobFilter {
+        kind: Some("backlog-item".into()),
+        kinds: Some(vec!["receive-an-inquiry".into()]),
+        ..Default::default()
+    };
+    let (rows, total) = repo.list_jobs(&both, 100, 0).await.unwrap();
+    assert_eq!((rows.len(), total), (0, 0));
+}

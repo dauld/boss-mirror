@@ -918,6 +918,12 @@ impl JobsRepository for PgJobs {
               -- packets are simulated, so a post-fetch filter returns
               -- a nearly empty page and a wrong total.
               AND ($14::text IS NULL OR partition = $14)
+              -- $16 is a SET of kinds (the department listing resolves
+              -- a department to the kinds whose workflow declares it).
+              -- An empty array is a real bind, not NULL, so a
+              -- department nobody declares answers zero packets
+              -- instead of every packet (cc76f755).
+              AND ($16::text[] IS NULL OR kind = ANY($16))
               -- opened_on is a DATE: a busy day is one big tie, and a
               -- LIMIT over an arbitrary order returns an arbitrary
               -- subset (2026-09-07 held 398 closed pr-trains; the
@@ -945,6 +951,7 @@ impl JobsRepository for PgJobs {
             .bind(filter.closed_since)
             .bind(filter.partition.map(Partition::as_str))
             .bind(filter.metadata_has.as_deref())
+            .bind(filter.kinds.as_deref())
             .fetch_all(&self.pool)
             .await
             .map_err(|e| JobsError::Storage(e.to_string()))?;
@@ -983,6 +990,9 @@ impl JobsRepository for PgJobs {
               -- Same key-existence clause as the list query, for the
               -- same reason.
               AND ($13::text IS NULL OR metadata ? $13::text)
+              -- Same kind-set clause as the list query, for the same
+              -- reason.
+              AND ($14::text[] IS NULL OR kind = ANY($14))
             "#,
         )
         .bind(filter.kind.as_deref())
@@ -998,6 +1008,7 @@ impl JobsRepository for PgJobs {
         .bind(filter.closed_since)
         .bind(filter.partition.map(Partition::as_str))
         .bind(filter.metadata_has.as_deref())
+        .bind(filter.kinds.as_deref())
         .fetch_one(&self.pool)
         .await
         .map_err(|e| JobsError::Storage(e.to_string()))?;

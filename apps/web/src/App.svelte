@@ -15,8 +15,8 @@
   import { loadClasses, departments } from '@boss/web-kit/session/classes.svelte';
   import AppShell from './shell/AppShell.svelte';
   import UpdateBar from './shell/UpdateBar.svelte';
-  import { appsFor, appForSection, APP_SUBJECT_KINDS, type AppId } from './shell/nav-catalog';
-  import { SECTION_FOR_ROUTE } from './shell/sections';
+  import { appsFor, APP_SUBJECT_KINDS, type AppId } from './shell/nav-catalog';
+  import { SECTION_FOR_ROUTE, appForRoute } from './shell/sections';
   import { makeSurfaceOpenRecorder, postSurfaceOpen, routePattern } from './shell/surface-opens';
   import StepFocusPage from './steps/StepFocusPage.svelte';
   import PerspectiveTabs from '@boss/web-kit/PerspectiveTabs.svelte';
@@ -45,6 +45,7 @@
   import NewJournalEntryPage from './finance/NewJournalEntryPage.svelte';
   import HrPage from './hr/HrPage.svelte';
   import QaPage from './qa/QaPage.svelte';
+  import DepartmentJobsPage from './departments/DepartmentJobsPage.svelte';
   // SimPage retired 2026-05-03 — boss-sim-api is gone (HumanWorker
   // generator retirement step 9b). Tenant runners are CLI tools now.
   import ItKnowledgeBasePage from './it/ItKnowledgeBasePage.svelte';
@@ -220,15 +221,18 @@
   // ROUTE_CATALOG key.
   let activeSection = $derived(SECTION_FOR_ROUTE[route.kind]);
 
-  // Which app tab is active. Derived from `activeSection` via the
-  // catalog's `app` field.
+  // Which app tab is active. Derived from the route: through
+  // `activeSection` and the catalog's `app` field for every surface
+  // with a static owner, and from the route's own code for the
+  // department jobs view, whose department is registry data
+  // (cc76f755).
   //
   // This replaced a MODEL_KINDS set of Route['kind']s maintained here
   // alongside a MODEL_ROUTES set of RouteNames in AppShell.svelte.
   // Two lists in two vocabularies answering one question, which had
   // to agree for every routed surface: miss one and the page rendered
   // with the wrong tab highlighted and the wrong sidebar, silently.
-  let perspective: AppId = $derived(appForSection(activeSection));
+  let perspective: AppId = $derived(appForRoute(route));
 
   // Both chrome render sites read this. They previously repeated the
   // prop list, and drifted: the step-focus bar shipped without
@@ -314,6 +318,8 @@
         initialStatus="open"
         pageTitle="Sales pipeline"
       />
+    {:else if route.kind === 'department'}
+      <DepartmentJobsPage code={route.code} />
     {:else if route.kind === 'assets'}
       <AssetsList />
     {:else if route.kind === 'asset'}

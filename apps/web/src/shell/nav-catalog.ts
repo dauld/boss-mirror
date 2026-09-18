@@ -179,23 +179,32 @@ export const ROUTE_CATALOG: Readonly<Record<RouteName | UngatedSurfaceId, NavIte
 /// `operations` with no tab at all.
 ///
 /// A department with no surface of its own still gets its tab — that
-/// is the org chart, and the tenant declared it — and lands on All
-/// jobs, the one surface every department's work appears in. A
-/// department-scoped jobs list is the honest next step for that tab;
-/// `departmentsWithoutSurfaces()` reports which departments are
-/// waiting on it so the gap stays visible instead of reading as
-/// covered.
+/// is the org chart, and the tenant declared it — and lands on its
+/// own jobs view: the packets whose workflow declares the department,
+/// as in / working / out (cc76f755, 2026-09-18). Until then it landed
+/// on All jobs with Home highlighted, which read as "this department
+/// has no work" for Algedonic's operations, sales, finance and
+/// marketing. `departmentsWithoutSurfaces()` still reports which
+/// departments have no built surface, so the gap stays visible
+/// instead of reading as covered.
 const OWNED = new Set<string>(
   Object.values(ROUTE_CATALOG)
     .map((e) => e.app)
     .filter((a): a is AppId => a !== undefined && a !== 'home' && a !== 'simulator'),
 );
 
+/// The department jobs view's path — one surface for every declared
+/// department, keyed by its Class code. The router's `department`
+/// route is the other half of this spelling.
+export function departmentJobsPath(code: string): string {
+  return `/ux/departments/${encodeURIComponent(code)}`;
+}
+
 /// Where a department's tab lands: its first surface in catalog order
 /// — the same order the sidebar lists them in, so the tab opens on the
-/// row the sidebar shows first — or All jobs when it owns none.
+/// row the sidebar shows first — or its jobs view when it owns none.
 function departmentHref(code: string): string {
-  return Object.values(ROUTE_CATALOG).find((e) => e.app === code)?.path ?? ROUTE_CATALOG.jobs.path;
+  return Object.values(ROUTE_CATALOG).find((e) => e.app === code)?.path ?? departmentJobsPath(code);
 }
 
 /// One tab per declared department, in registry order.

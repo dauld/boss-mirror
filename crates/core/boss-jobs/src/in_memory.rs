@@ -77,6 +77,13 @@ fn matches_filter(job: &Job, filter: &JobFilter) -> bool {
     {
         return false;
     }
+    // A set of kinds, empty set included: `Some(vec![])` matches no
+    // packet, the same as the SQL adapter's `kind = ANY('{}')`.
+    if let Some(ref kinds) = filter.kinds
+        && !kinds.contains(&job.kind)
+    {
+        return false;
+    }
     // The retention window replaces the status equality when set:
     // "live OR closed on/after this date". Same contract as the SQL
     // adapter, which expresses it as a CASE over the same two columns
@@ -1251,6 +1258,52 @@ mod tests {
         let (jobs, total) = repo.list_jobs(&filter, 100, 0).await.unwrap();
         assert_eq!(total, 1);
         assert_eq!(jobs[0].kind, "refurb");
+    }
+
+    /// `kinds` is a SET of kinds, and an empty set is an empty answer.
+    /// The department listing (cc76f755, 2026-09-18) resolves a
+    /// department to the kinds whose workflow declares it and asks for
+    /// exactly those; a department nobody declares resolves to no
+    /// kinds, and that must answer zero packets rather than fall
+    /// through to every packet — the trap the packet was filed on
+    /// (`?department=sales` answered the unfiltered 1944).
+    #[tokio::test]
+    async fn kinds_keeps_only_packets_of_the_named_kinds_and_none_for_no_kinds() {
+        let repo = InMemoryJobs::new();
+        for kind in ["receive-an-inquiry", "receive-a-sponsorship", "pr-train"] {
+            repo.create_job(&make_job(kind)).await.unwrap();
+        }
+
+        let sales = JobFilter {
+            kinds: Some(vec![
+                "receive-an-inquiry".into(),
+                "receive-a-sponsorship".into(),
+            ]),
+            ..Default::default()
+        };
+        let (jobs, total) = repo.list_jobs(&sales, 100, 0).await.unwrap();
+        assert_eq!(total, 2);
+        assert!(jobs.iter().all(|j| j.kind.starts_with("receive-")));
+
+        let nobody = JobFilter {
+            kinds: Some(vec![]),
+            ..Default::default()
+        };
+        let (jobs, total) = repo.list_jobs(&nobody, 100, 0).await.unwrap();
+        assert_eq!(
+            (jobs.len(), total),
+            (0, 0),
+            "no kinds is no packets, not every packet"
+        );
+
+        // Composes with `kind` as an intersection, not a union.
+        let both = JobFilter {
+            kind: Some("pr-train".into()),
+            kinds: Some(vec!["receive-an-inquiry".into()]),
+            ..Default::default()
+        };
+        let (_, total) = repo.list_jobs(&both, 100, 0).await.unwrap();
+        assert_eq!(total, 0);
     }
 
     // `opened_on` is a DATE. On 2026-09-07 one day held 398 closed

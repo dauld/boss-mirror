@@ -43,6 +43,16 @@ pub struct JobFilter {
     /// span related registry kinds (e.g. `refurb-used` + `refurb-oem-new`
     /// both match `kind_prefix = "refurb"`).
     pub kind_prefix: Option<String>,
+    /// Keep only packets whose `kind` is IN this set — and `Some(vec![])`
+    /// keeps NOTHING. The department listing's filter (backlog
+    /// cc76f755, 2026-09-18): jobs carry no department column; the
+    /// workflow row does (`metadata.department`), so the HTTP handler
+    /// resolves a department to the kinds declaring it and asks for
+    /// exactly those. An empty set answering the unfiltered count
+    /// would be the trap the packet was filed on — measured on prod,
+    /// `?department=sales` answered 1944, the unfiltered total,
+    /// because nothing read the parameter at all.
+    pub kinds: Option<Vec<String>>,
     pub status: Option<JobStatus>,
     /// A retention window on TERMINAL packets: keep everything still
     /// live, plus anything closed on or after this date. Drop

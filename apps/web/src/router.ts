@@ -131,6 +131,11 @@ export type Route =
   | { kind: 'myCalendar' }
   | { kind: 'schedule' }
   | { kind: 'exec' }
+  /// A department's own jobs — its in / working / out over the
+  /// packets whose workflow declares it (cc76f755). The code is Class
+  /// registry data, so the route carries it; the router knows no
+  /// department by name.
+  | { kind: 'department'; code: string }
   | { kind: 'warehouse' }
   | { kind: 'catalog' }
   | { kind: 'device'; sku: string }
@@ -262,6 +267,8 @@ export function parseRoute(pathname: string): Route {
   if (p === '/calendar') return { kind: 'calendar' };
   if (p === '/service/schedule') return { kind: 'schedule' };
   if (p === '/exec') return { kind: 'exec' };
+  const deptM = p.match(/^\/departments\/([^/]+)$/);
+  if (deptM) return { kind: 'department', code: decodeURIComponent(deptM[1]!) };
   if (p === '/warehouse') return { kind: 'warehouse' };
   if (p === '/catalog') return { kind: 'catalog' };
   const catM = p.match(/^\/catalog\/(.+)$/);

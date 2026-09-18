@@ -19,6 +19,7 @@ pub mod car;
 pub mod credentials;
 pub mod decision_record;
 pub mod delivery;
+pub mod department;
 pub mod escalation;
 pub mod events;
 pub mod experiments;

@@ -104,6 +104,12 @@ export const ROUTES: ReadonlyArray<string> = [
   // bordered failure line per lane rather than an idle pipeline — the
   // same failed-never-empty bar as the estate row above.
   '/it/crew',
+  // A department's jobs view — in / working / out (cc76f755). One
+  // surface for every department the Class registry declares, so it
+  // has no catalog entry and is crawled here by one code; the mock's
+  // `[]` catch-all for `/api/jobs?department=sales` renders the "no
+  // jobs in Sales" state, and the outage renders `load-failed`.
+  '/ux/departments/sales',
 ];
 
 /// The ONE class a surface puts on a line that says "this read failed".

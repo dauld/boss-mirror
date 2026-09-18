@@ -16,6 +16,7 @@
   import { href, navigate } from '../router';
   import {
     ROUTE_CATALOG,
+    departmentJobsPath,
     type AppId,
     type NavItem,
     type NavGroup,
@@ -199,6 +200,14 @@
     },
   ]);
 
+  // Every department group ends on its Jobs row — the department's in
+  // / working / out over the packets whose workflow declares it
+  // (cc76f755, 2026-09-18). PermKey-less like the Audit Log link: the
+  // listing behind it is policy-scoped by the server, and a permKey
+  // would widen the RouteName vocabulary for a row every department
+  // has. For a department that owns no surface it is the whole group,
+  // which is the point: the tab used to open All jobs under Home with
+  // an empty sidebar here. IT keeps its own three thirds.
   let MAIN = $derived<ReadonlyArray<NavGroup>>(
     activeApp === 'it'
       ? IT_GROUPS
@@ -207,9 +216,10 @@
         : [
             {
               label: appGroupLabel(activeApp),
-              items: (APP_SURFACES[activeApp] ?? []).map(
-                (r: RouteName) => ROUTE_CATALOG[r],
-              ),
+              items: [
+                ...(APP_SURFACES[activeApp] ?? []).map((r: RouteName) => ROUTE_CATALOG[r]),
+                { id: 'department-jobs', label: 'Jobs', path: departmentJobsPath(activeApp) },
+              ],
             },
           ],
   );

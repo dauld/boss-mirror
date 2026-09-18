@@ -57,6 +57,11 @@ describe('parseRoute — every specific path matches its specific case', () => {
     ['/ux/service/schedule', { kind: 'schedule' }],
     // Exec (User Experiences)
     ['/ux/exec', { kind: 'exec' }],
+    // A department's own jobs view — the tab landing for a department
+    // that declares no surface (cc76f755). The code is registry data,
+    // so the route carries it rather than the router knowing it.
+    ['/ux/departments/sales', { kind: 'department', code: 'sales' }],
+    ['/ux/departments/operations', { kind: 'department', code: 'operations' }],
     // System Model perspective — IT surfaces re-rooted under /system/*.
     // The consolidated IT department (1f6d55e0): six surfaces,
     // families as tabs, /system gone.

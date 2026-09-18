@@ -22,9 +22,11 @@ import {
   ROUTE_CATALOG,
   appForSection,
   appsFor,
+  departmentJobsPath,
   departmentsWithoutSurfaces,
   type NavItem,
 } from './nav-catalog';
+import { parseRoute } from '../router';
 import { readFileSync } from 'node:fs';
 
 /// Department Classes, read from the files that seed them rather
@@ -298,18 +300,27 @@ describe('nav catalog — app assignment', () => {
     expect(ids.indexOf('it')).toBeGreaterThan(ids.indexOf('simulator'));
   });
 
-  it('a department app that owns no surface lands on All jobs, not an empty page', () => {
+  it('a department app that owns no surface lands on its own jobs view, not All jobs', () => {
     // A tab that renders an empty sidebar is a dead end. Since the tabs
     // are the registry's (ce68f137), a department can own nothing here;
-    // its tab then opens the cross-cutting queue. Simulator is exempt:
-    // it is a separate SPA with no surfaces in this catalog.
+    // its tab then opens the department's jobs view — in / working /
+    // out over the packets whose workflow declares it (cc76f755). It
+    // used to open All jobs with Home highlighted, which read as "this
+    // department has no work". Simulator is exempt: it is a separate
+    // SPA with no surfaces in this catalog.
     const owned = new Set(entries.map(([, v]) => v.app));
+    let checked = 0;
     for (const app of APPS) {
       if (app.id === 'simulator' || owned.has(app.id)) continue;
+      checked += 1;
       expect(app.href, `app "${app.id}" owns no surface and lands on ${app.href}`).toBe(
-        ROUTE_CATALOG.jobs.path,
+        departmentJobsPath(app.id),
       );
+      expect(app.href).not.toBe(ROUTE_CATALOG.jobs.path);
+      // And the router answers that path with the department itself.
+      expect(parseRoute(app.href)).toEqual({ kind: 'department', code: app.id });
     }
+    expect(checked, 'the seeded registry has surface-less departments to check').toBeGreaterThan(0);
   });
 });
 
@@ -380,14 +391,29 @@ describe('departments map to apps', () => {
   });
 
   it('every department tab lands on a real surface', () => {
-    // Its first owned surface in catalog order, or All jobs when it
-    // owns none — never an empty page.
+    // Its first owned surface in catalog order, or its own jobs view
+    // when it owns none — never an empty page, and never the
+    // catch-all.
     const paths = new Set(entries.map(([, v]) => v.path));
     for (const app of APPS) {
       if (app.id === 'home' || app.id === 'simulator') continue;
-      expect(paths.has(app.href), `app "${app.id}" lands on ${app.href}, which no surface answers`).toBe(true);
       const owned = entries.find(([, v]) => v.app === app.id);
-      expect(app.href).toBe(owned ? owned[1].path : ROUTE_CATALOG.jobs.path);
+      if (owned) {
+        expect(paths.has(app.href), `app "${app.id}" lands on ${app.href}, which no surface answers`).toBe(true);
+        expect(app.href).toBe(owned[1].path);
+      } else {
+        expect(app.href).toBe(departmentJobsPath(app.id));
+      }
+      expect(parseRoute(app.href).kind, `app "${app.id}" lands on the catch-all`).not.toBe('home');
+    }
+  });
+
+  it('the department jobs path round-trips through the router, code included', () => {
+    // The path is the one spelling both halves share: the tab (and
+    // the sidebar row) build it here, the router parses it. A code
+    // with a character the URL would eat must survive the trip.
+    for (const code of ['sales', 'operations', 'front of house']) {
+      expect(parseRoute(departmentJobsPath(code))).toEqual({ kind: 'department', code });
     }
   });
 
