@@ -485,11 +485,13 @@ spec:
             # with the CURRENT key bytes (see the volume comment); a new
             # key signs everyone out on the roll.
             - {name: BOSS_SESSION_KEY, value: /etc/boss/session-key/session.key}
-            # Collections loop: dispatcher pushes step.done.<kind> to the
-            # sim's webhook on the same loopback host:port. Both must agree
-            # or zero collections fire and AR balloons.
-            - {name: BOSS_EVENT_WEBHOOK_URL, value: "http://127.0.0.1:7099/callback"}
-            - {name: BOSS_SIM_CALLBACK_BIND, value: "127.0.0.1:7099"}
+            # The dispatcher's event webhook URL and the sim's callback
+            # bind are NOT set here (backlog 18d6a6c9, 2026-09-17): the
+            # pair is the sim engine's loopback wiring, and the
+            # launcher derives both when the sim runs (tenant-modules.sh).
+            # On an instance whose sim is parked, or whose tenant has no
+            # engine, they were dead config — the dispatcher forwarded
+            # every step.done to a port nothing listened on.
             # PARKED: the brewery sim tick daemon is off on the cluster
             # (2026-09-05, park packet 59f063de — the sim is paused behind
             # IT delivery reliability). The tenant is still published, so

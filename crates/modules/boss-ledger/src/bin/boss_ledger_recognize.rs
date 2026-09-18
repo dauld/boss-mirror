@@ -93,6 +93,16 @@ async fn main() -> Result<()> {
         errors = summary.errors.len(),
         "tick done"
     );
+    // What the run DID, for the packet — not only that it ran
+    // (backlog 18d6a6c9): boss-step.sh merges this onto the `run` step
+    // so a tick over an empty table reads `recognized=0`, distinguishable
+    // from one that posted a year. Unset path = hand run = no file.
+    let summary_path = std::env::var_os("BOSS_RUN_SUMMARY_FILE").map(PathBuf::from);
+    if let Err(e) = recognize::write_run_summary(summary_path.as_deref(), &summary) {
+        // Visibility is never a precondition (infra/run-summary.sh): the
+        // recognition itself succeeded, so say so and keep the verdict.
+        error!(error = %e, "could not write the run summary; the packet will carry result alone");
+    }
 
     // Exit non-zero on any per-schedule error so systemd surfaces the
     // degraded state via `systemctl is-failed`. Individual errors are

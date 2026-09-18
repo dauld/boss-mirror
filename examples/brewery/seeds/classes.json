@@ -4,70 +4,165 @@
     "code": "head-of-distribution",
     "display_name": "Head of Distribution",
     "member_attribute": "role",
-    "sort_order": 20
+    "sort_order": 20,
+    "metadata": {
+      "surfaces": [
+        "exec",
+        "shipping",
+        "jobs",
+        "people",
+        "policy",
+        "workflows"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "head-of-marketing",
     "display_name": "Head of Marketing",
     "member_attribute": "role",
-    "sort_order": 21
+    "sort_order": 21,
+    "metadata": {
+      "surfaces": [
+        "exec",
+        "marketing-assets",
+        "calendar",
+        "jobs",
+        "people",
+        "policy",
+        "workflows"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "head-of-people",
     "display_name": "Head of People",
     "member_attribute": "role",
-    "sort_order": 22
+    "sort_order": 22,
+    "metadata": {
+      "surfaces": [
+        "exec",
+        "people",
+        "jobs",
+        "policy",
+        "workflows"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "head-of-sales",
     "display_name": "Head of Sales",
     "member_attribute": "role",
-    "sort_order": 23
+    "sort_order": 23,
+    "metadata": {
+      "surfaces": [
+        "exec",
+        "sales",
+        "accounts",
+        "jobs",
+        "people",
+        "policy",
+        "workflows"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "head-brewer",
     "display_name": "Head Brewer",
     "member_attribute": "role",
-    "sort_order": 30
+    "sort_order": 30,
+    "metadata": {
+      "surfaces": [
+        "exec",
+        "jobs",
+        "parts",
+        "products",
+        "qa",
+        "people",
+        "schedule"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "senior-brewer",
     "display_name": "Senior Brewer",
     "member_attribute": "role",
-    "sort_order": 31
+    "sort_order": 31,
+    "metadata": {
+      "surfaces": [
+        "jobs",
+        "parts",
+        "products",
+        "qa",
+        "schedule"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "brewer",
     "display_name": "Brewer",
     "member_attribute": "role",
-    "sort_order": 32
+    "sort_order": 32,
+    "metadata": {
+      "surfaces": [
+        "jobs",
+        "parts",
+        "products",
+        "schedule"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "cellar-tech",
     "display_name": "Cellar Tech",
     "member_attribute": "role",
-    "sort_order": 33
+    "sort_order": 33,
+    "metadata": {
+      "surfaces": [
+        "jobs",
+        "parts",
+        "products",
+        "schedule"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "shift-lead",
     "display_name": "Shift Lead",
     "member_attribute": "role",
-    "sort_order": 34
+    "sort_order": 34,
+    "metadata": {
+      "surfaces": [
+        "jobs",
+        "parts",
+        "products",
+        "schedule",
+        "people"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "packaging-mgr",
     "display_name": "Packaging Manager",
     "member_attribute": "role",
-    "sort_order": 40
+    "sort_order": 40,
+    "metadata": {
+      "surfaces": [
+        "jobs",
+        "warehouse",
+        "shipping",
+        "people",
+        "schedule"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
@@ -81,35 +176,74 @@
     "code": "packaging-tech",
     "display_name": "Packaging Tech",
     "member_attribute": "role",
-    "sort_order": 41
+    "sort_order": 41,
+    "metadata": {
+      "surfaces": [
+        "jobs",
+        "warehouse",
+        "schedule"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "palletizer",
     "display_name": "Palletizer",
     "member_attribute": "role",
-    "sort_order": 42
+    "sort_order": 42,
+    "metadata": {
+      "surfaces": [
+        "jobs",
+        "warehouse"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "qa-supervisor",
     "display_name": "QA Supervisor",
     "member_attribute": "role",
-    "sort_order": 50
+    "sort_order": 50,
+    "metadata": {
+      "surfaces": [
+        "jobs",
+        "qa",
+        "parts",
+        "products",
+        "people"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "qa-tech",
     "display_name": "QA Tech",
     "member_attribute": "role",
-    "sort_order": 51
+    "sort_order": 51,
+    "metadata": {
+      "surfaces": [
+        "catalog",
+        "assets",
+        "parts",
+        "products",
+        "qa"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "lab-tech",
     "display_name": "Lab Tech",
     "member_attribute": "role",
-    "sort_order": 52
+    "sort_order": 52,
+    "metadata": {
+      "surfaces": [
+        "jobs",
+        "qa",
+        "parts",
+        "products"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
@@ -123,21 +257,42 @@
     "code": "forklift-operator",
     "display_name": "Forklift Operator",
     "member_attribute": "role",
-    "sort_order": 60
+    "sort_order": 60,
+    "metadata": {
+      "surfaces": [
+        "warehouse",
+        "parts",
+        "products",
+        "shipping"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "inventory-clerk",
     "display_name": "Inventory Clerk",
     "member_attribute": "role",
-    "sort_order": 61
+    "sort_order": 61,
+    "metadata": {
+      "surfaces": [
+        "warehouse",
+        "parts",
+        "products"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "shipping-clerk",
     "display_name": "Shipping Clerk",
     "member_attribute": "role",
-    "sort_order": 62
+    "sort_order": 62,
+    "metadata": {
+      "surfaces": [
+        "warehouse",
+        "shipping"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
@@ -151,35 +306,74 @@
     "code": "distribution-driver",
     "display_name": "Distribution Driver",
     "member_attribute": "role",
-    "sort_order": 70
+    "sort_order": 70,
+    "metadata": {
+      "surfaces": [
+        "shipping",
+        "jobs",
+        "schedule"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "maintenance-mgr",
     "display_name": "Maintenance Manager",
     "member_attribute": "role",
-    "sort_order": 80
+    "sort_order": 80,
+    "metadata": {
+      "surfaces": [
+        "jobs",
+        "parts",
+        "products",
+        "people",
+        "schedule"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "electrician",
     "display_name": "Electrician",
     "member_attribute": "role",
-    "sort_order": 81
+    "sort_order": 81,
+    "metadata": {
+      "surfaces": [
+        "jobs",
+        "parts",
+        "products",
+        "schedule"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "mechanic",
     "display_name": "Mechanic",
     "member_attribute": "role",
-    "sort_order": 82
+    "sort_order": 82,
+    "metadata": {
+      "surfaces": [
+        "jobs",
+        "parts",
+        "products",
+        "schedule"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "account-manager",
     "display_name": "Account Manager",
     "member_attribute": "role",
-    "sort_order": 90
+    "sort_order": 90,
+    "metadata": {
+      "surfaces": [
+        "sales",
+        "accounts",
+        "jobs"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
@@ -193,35 +387,68 @@
     "code": "brand-manager",
     "display_name": "Brand Manager",
     "member_attribute": "role",
-    "sort_order": 100
+    "sort_order": 100,
+    "metadata": {
+      "surfaces": [
+        "exec",
+        "marketing-assets",
+        "calendar",
+        "jobs"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "events-coord",
     "display_name": "Events Coordinator",
     "member_attribute": "role",
-    "sort_order": 101
+    "sort_order": 101,
+    "metadata": {
+      "surfaces": [
+        "calendar",
+        "jobs",
+        "marketing-assets"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "social-media-coord",
     "display_name": "Social Media Coord",
     "member_attribute": "role",
-    "sort_order": 102
+    "sort_order": 102,
+    "metadata": {
+      "surfaces": [
+        "marketing-assets",
+        "calendar"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "bartender",
     "display_name": "Bartender",
     "member_attribute": "role",
-    "sort_order": 110
+    "sort_order": 110,
+    "metadata": {
+      "surfaces": [
+        "calendar",
+        "schedule"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "taproom-server",
     "display_name": "Taproom Server",
     "member_attribute": "role",
-    "sort_order": 111
+    "sort_order": 111,
+    "metadata": {
+      "surfaces": [
+        "calendar",
+        "schedule"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
@@ -235,63 +462,141 @@
     "code": "bookkeeper",
     "display_name": "Bookkeeper",
     "member_attribute": "role",
-    "sort_order": 120
+    "sort_order": 120,
+    "metadata": {
+      "surfaces": [
+        "finance",
+        "accounts",
+        "vendors",
+        "jobs"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "ar-clerk",
     "display_name": "A/R Clerk",
     "member_attribute": "role",
-    "sort_order": 121
+    "sort_order": 121,
+    "metadata": {
+      "surfaces": [
+        "finance",
+        "accounts",
+        "jobs"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "ap-clerk",
     "display_name": "A/P Clerk",
     "member_attribute": "role",
-    "sort_order": 122
+    "sort_order": 122,
+    "metadata": {
+      "surfaces": [
+        "finance",
+        "vendors",
+        "parts",
+        "products",
+        "jobs"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "fp-analyst",
     "display_name": "FP&A Analyst",
     "member_attribute": "role",
-    "sort_order": 123
+    "sort_order": 123,
+    "metadata": {
+      "surfaces": [
+        "finance",
+        "exec",
+        "jobs"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "payroll-mgr",
     "display_name": "Payroll Manager",
     "member_attribute": "role",
-    "sort_order": 124
+    "sort_order": 124,
+    "metadata": {
+      "surfaces": [
+        "finance",
+        "people",
+        "jobs"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "benefits-coord",
     "display_name": "Benefits Coordinator",
     "member_attribute": "role",
-    "sort_order": 130
+    "sort_order": 130,
+    "metadata": {
+      "surfaces": [
+        "people",
+        "jobs"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "it-director",
     "display_name": "IT Director",
     "member_attribute": "role",
-    "sort_order": 140
+    "sort_order": 140,
+    "metadata": {
+      "surfaces": [
+        "exec",
+        "system-monitoring",
+        "system-kb",
+        "system-step-plugins",
+        "system-dispatcher",
+        "system-dispatcher-rules",
+        "system-dispatcher-rule",
+        "system-subjects",
+        "system-design",
+        "jobs"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "sysadmin",
     "display_name": "Sysadmin",
     "member_attribute": "role",
-    "sort_order": 141
+    "sort_order": 141,
+    "metadata": {
+      "surfaces": [
+        "system-monitoring",
+        "system-kb",
+        "system-step-plugins",
+        "system-dispatcher",
+        "system-dispatcher-rules",
+        "system-dispatcher-rule",
+        "system-subjects",
+        "system-design",
+        "jobs"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "helpdesk",
     "display_name": "Help Desk",
     "member_attribute": "role",
-    "sort_order": 142
+    "sort_order": 142,
+    "metadata": {
+      "surfaces": [
+        "system-monitoring",
+        "system-kb",
+        "jobs"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
@@ -382,7 +687,20 @@
     "code": "cfo",
     "display_name": "Chief Financial Officer",
     "member_attribute": "role",
-    "sort_order": 320
+    "sort_order": 320,
+    "metadata": {
+      "surfaces": [
+        "exec",
+        "accounts",
+        "assets",
+        "sales",
+        "finance",
+        "people",
+        "parts",
+        "products",
+        "vendors"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
@@ -403,35 +721,73 @@
     "code": "controller",
     "display_name": "Controller",
     "member_attribute": "role",
-    "sort_order": 350
+    "sort_order": 350,
+    "metadata": {
+      "surfaces": [
+        "exec",
+        "accounts",
+        "sales",
+        "finance",
+        "parts",
+        "products",
+        "vendors"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "hr-generalist",
     "display_name": "HR Generalist",
     "member_attribute": "role",
-    "sort_order": 360
+    "sort_order": 360,
+    "metadata": {
+      "surfaces": [
+        "people"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "recruiter",
     "display_name": "Recruiter",
     "member_attribute": "role",
-    "sort_order": 370
+    "sort_order": 370,
+    "metadata": {
+      "surfaces": [
+        "people"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "sales-rep",
     "display_name": "Sales Rep",
     "member_attribute": "role",
-    "sort_order": 380
+    "sort_order": 380,
+    "metadata": {
+      "surfaces": [
+        "catalog",
+        "accounts",
+        "sales"
+      ]
+    }
   },
   {
     "subject_kind": "employee",
     "code": "warehouse-mgr",
     "display_name": "Warehouse Manager",
     "member_attribute": "role",
-    "sort_order": 390
+    "sort_order": 390,
+    "metadata": {
+      "surfaces": [
+        "parts",
+        "products",
+        "people",
+        "warehouse",
+        "vendors",
+        "shipping"
+      ]
+    }
   },
   {
     "subject_kind": "vendor",

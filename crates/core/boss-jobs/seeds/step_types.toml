@@ -28,6 +28,19 @@
 #    straight off that string by both the validator and the sim's
 #    faker. There is no second hint field describing the same
 #    values — nothing to keep in sync, nothing to forget.
+#
+#  - **`required_roles` names no tenant's roles.** It is the
+#    dispatcher's NOMINATION fallback for a step whose Workflow row
+#    declares no `authority_role` (first listed role with a holder;
+#    no holder at all dead-letters), and half of `is_marker`. Nothing
+#    reads it at the claim. Until 2026-09-17 (backlog 18d6a6c9) 39
+#    kinds listed 33 roles — 31 the brewery's, two in no registry —
+#    so every instance's platform registry carried one tenant's org
+#    chart. Only roles the platform seeds as system roles
+#    (`is_system_role` in infra/postgres/schema/01-registries.sql)
+#    may appear here; a tenant says who does its work on the
+#    Workflow row. Pinned by crates/core/boss-testing/tests/
+#    the_step_type_registry_names_no_tenant_role.rs.
 
 # =============================================================
 # Coordination
@@ -44,7 +57,7 @@ version = 1
 description = "Authority agreement on a step in its current shape — approve/reject decisions and regulatory sign-offs. Stamps are collected via POST .../sign-offs; who must stamp is the step's sign_offs_required, policy decides who may."
 typical_duration_hours = 0.5
 typical_duration_jitter = 0.3
-required_roles = ["qa-supervisor", "service-mgr", "controller", "production-lead", "head-brewer"]
+required_roles = []
 
   # The old per-metadata sign-off relics (authority_role / signed_by /
   # signed_at) are gone: requirements live on the step
@@ -185,13 +198,13 @@ covers every outcome. Used by the brewery morning-brew family.
 """
 typical_duration_hours = 0.25
 typical_duration_jitter = 0.3
-required_roles = ["head-brewer"]
+required_roles = []
 # Agent-executed: the dispatcher reads finished-goods stock and stamps the
 # brew/oversupply outcome at computer speed on step.ready, instead of the
 # gate waiting on a head-brewer to pull it (which throttled it at warp and
 # put a system decision inside the sim). See
-# docs/architecture-decisions.md. The role above is retained as
-# the human fallback / "who owns this" attribution.
+# docs/architecture-decisions.md. "Who owns this" is the Workflow
+# row's authority_role, not a role listed here (18d6a6c9).
 completion = "agent"
 
   [[step_type.fields]]
@@ -253,7 +266,7 @@ fork_keys) — no tenant constants in code. See architecture-decisions.md
 """
 typical_duration_hours = 0.25
 typical_duration_jitter = 0.3
-required_roles = ["head-brewer"]
+required_roles = []
 completion = "agent"
 
   [[step_type.fields]]
@@ -313,7 +326,7 @@ version = 1
 description = "Set of sub-items to verify. All checked → auto-complete."
 typical_duration_hours = 1.0
 typical_duration_jitter = 0.4
-required_roles = ["shift-lead", "service-tech", "warehouse-lead"]
+required_roles = []
 
   [[step_type.fields]]
   name = "items"
@@ -331,7 +344,7 @@ version = 1
 description = "Transfer responsibility between teams or locations."
 typical_duration_hours = 0.5
 typical_duration_jitter = 0.3
-required_roles = ["shift-lead", "warehouse-lead", "packaging-lead", "service-tech"]
+required_roles = []
 
   [[step_type.fields]]
   name = "from_id"
@@ -389,7 +402,7 @@ version = 1
 description = "Physical repair, assembly, or calibration work."
 typical_duration_hours = 8.0
 typical_duration_jitter = 0.5
-required_roles = ["mechanic", "electrician", "service-tech"]
+required_roles = []
 
   [[step_type.fields]]
   name = "asset_id"
@@ -446,7 +459,7 @@ version = 1
 description = "QA check, triage, or preventive maintenance verification with measurements."
 typical_duration_hours = 1.5
 typical_duration_jitter = 0.4
-required_roles = ["qa-tech", "lab-tech", "qa-supervisor"]
+required_roles = []
 
   [[step_type.fields]]
   name = "asset_id"
@@ -498,7 +511,7 @@ description = "Goods receipt — confirm arrival against a PO."
 # (the open-PO visibility issue from #131).
 typical_duration_hours = 120.0
 typical_duration_jitter = 0.4
-required_roles = ["inventory-clerk", "shipping-clerk", "warehouse-lead"]
+required_roles = []
 
   [[step_type.fields]]
   name = "po_id"
@@ -535,7 +548,7 @@ version = 1
 description = "Physical-unit intake — log arrival of a system and open its refurb lineage."
 typical_duration_hours = 0.25
 typical_duration_jitter = 0.3
-required_roles = ["inventory-clerk", "service-tech", "shipping-clerk"]
+required_roles = []
 
   [[step_type.fields]]
   name = "asset_id"
@@ -582,7 +595,7 @@ description = "Communication to a account, vendor, or contact."
 # response cycles in B2B are 24-48h in a healthy pipeline.
 typical_duration_hours = 24.0
 typical_duration_jitter = 0.5
-required_roles = ["sales-rep", "account-manager", "sales-lead"]
+required_roles = []
 
   [[step_type.fields]]
   name = "channel"
@@ -648,7 +661,7 @@ description = "Evaluate a lead or opportunity against criteria."
 # Quals span a few days of discovery in a B2B context.
 typical_duration_hours = 48.0
 typical_duration_jitter = 0.5
-required_roles = ["sales-rep", "account-manager", "sales-lead"]
+required_roles = []
 
   [[step_type.fields]]
   name = "opportunity_id"
@@ -683,7 +696,7 @@ version = 1
 description = "Prepare and deliver a pricing proposal."
 typical_duration_hours = 4.0
 typical_duration_jitter = 0.5
-required_roles = ["sales-rep", "account-manager", "sales-lead"]
+required_roles = []
 
   [[step_type.fields]]
   name = "account_id"
@@ -739,7 +752,7 @@ description = "Issue an invoice or financial transaction."
 # few hours but not minutes.
 typical_duration_hours = 4.0
 typical_duration_jitter = 0.4
-required_roles = ["ar-clerk", "bookkeeper"]
+required_roles = []
 # Agent-executed: issuing an invoice is software, not human labor — the
 # dispatcher auto-completes it on step.ready (the Workflow defaults the
 # required account_id / amount_cents / currency / line_items) and the
@@ -809,7 +822,7 @@ description = "Approve a vendor bill for payment."
 # controller review. Half a day in normal operations.
 typical_duration_hours = 12.0
 typical_duration_jitter = 0.4
-required_roles = ["controller", "ap-clerk", "bookkeeper"]
+required_roles = []
 
   [[step_type.fields]]
   name = "vendor_id"
@@ -850,7 +863,7 @@ version = 1
 description = "Settle every approved vendor invoice on the run date — one HTTP batch."
 typical_duration_hours = 0.5
 typical_duration_jitter = 0.3
-required_roles = ["controller", "ap-clerk", "bookkeeper"]
+required_roles = []
 
   [[step_type.fields]]
   name = "paid_on"
@@ -893,7 +906,7 @@ description = "Approve a general operating bill (rent, utilities, …) — route
 # Lighter than bill-approval's 3-way PO match — there's no receipt to match.
 typical_duration_hours = 4.0
 typical_duration_jitter = 0.4
-required_roles = ["bookkeeper", "ap-clerk", "controller"]
+required_roles = []
 
   [[step_type.fields]]
   name = "bill_category"
@@ -931,7 +944,7 @@ version = 1
 description = "Settle every approved ledger bill on the run date — one HTTP batch. Posts DR 2100 A/P / CR 1000 Cash per bill."
 typical_duration_hours = 0.5
 typical_duration_jitter = 0.3
-required_roles = ["bookkeeper", "ap-clerk", "controller"]
+required_roles = []
 
   [[step_type.fields]]
   name = "paid_on"
@@ -954,7 +967,7 @@ version = 1
 description = "Submit and remit a tax filing for a closed period."
 typical_duration_hours = 1.0
 typical_duration_jitter = 0.4
-required_roles = ["bookkeeper"]
+required_roles = []
 
   [[step_type.fields]]
   name = "kind"
@@ -987,7 +1000,7 @@ version = 1
 description = "Release a closed payroll period — server-side synthesis from the live employee roster, then post the compound journal entry."
 typical_duration_hours = 0.5
 typical_duration_jitter = 0.3
-required_roles = ["bookkeeper"]
+required_roles = []
 
   [[step_type.fields]]
   name = "period_start"
@@ -1021,7 +1034,7 @@ version = 1
 description = "Drain raw ingredients consumed by a production batch."
 typical_duration_hours = 0.1
 typical_duration_jitter = 0.2
-required_roles = ["production-tech", "production-lead", "brewer", "head-brewer"]
+required_roles = []
 
   [[step_type.fields]]
   name = "ingredients_consumed"
@@ -1050,7 +1063,7 @@ version = 1
 description = "Mint finished product from a production batch — the brewing line's last step packages the brew into kegs / cans / bottles. The done-transition fires `products.produce` and the boss-products API increments finished_product_inventory at the producing location."
 typical_duration_hours = 0.1
 typical_duration_jitter = 0.2
-required_roles = ["production-tech", "production-lead", "packaging-tech", "brewer", "head-brewer"]
+required_roles = []
 
   [[step_type.fields]]
   name = "produces_products"
@@ -1088,7 +1101,7 @@ version = 1
 description = "Onboarding sign-off step. Done-transition fires `people.hire`, which POSTs the new-hire payload to /api/people. Hiring-manager approval is per-Workflow via authority_role metadata; required_roles here is the generic assignee pool."
 typical_duration_hours = 1.0
 typical_duration_jitter = 0.5
-required_roles = ["head-of-people", "hr-generalist"]
+required_roles = []
 
   [[step_type.fields]]
   name = "hire"
@@ -1105,7 +1118,7 @@ version = 1
 description = "Offboarding sign-off step. Done-transition fires `people.terminate`, which PUTs status=terminated to /api/people/{id}/status. Used by brewery-terminate."
 typical_duration_hours = 0.5
 typical_duration_jitter = 0.3
-required_roles = ["head-of-people"]
+required_roles = []
 
   [[step_type.fields]]
   name = "terminate"
@@ -1130,7 +1143,7 @@ description = "Order parts, materials, or services from a vendor."
 # vendor acknowledged" lag is 4-8h in normal operations.
 typical_duration_hours = 6.0
 typical_duration_jitter = 0.4
-required_roles = ["inventory-clerk", "warehouse-lead", "controller"]
+required_roles = []
 
   [[step_type.fields]]
   name = "vendor_id"
@@ -1181,7 +1194,7 @@ description = "Move physical assets between locations."
 # carries enough "in-transit" volume to be informative.
 typical_duration_hours = 36.0
 typical_duration_jitter = 0.4
-required_roles = ["shipping-clerk", "warehouse-lead", "distribution-lead"]
+required_roles = []
 
   [[step_type.fields]]
   name = "direction"
@@ -1254,7 +1267,7 @@ version = 1
 description = "Coordinate people, systems, and locations for a time."
 typical_duration_hours = 0.25
 typical_duration_jitter = 0.3
-required_roles = ["distribution-lead", "shift-lead", "service-mgr"]
+required_roles = []
 
   [[step_type.fields]]
   name = "location"
@@ -1411,7 +1424,7 @@ version = 1
 description = "Confirm receipt or understanding of a policy or document."
 typical_duration_hours = 0.25
 typical_duration_jitter = 0.5
-required_roles = ["sales-rep", "service-tech", "shift-lead"]
+required_roles = []
 
   [[step_type.fields]]
   name = "document_title"
@@ -1440,7 +1453,7 @@ version = 1
 description = "Cross-department alignment brief with a body, target audience, and per-employee acknowledgement tracker. Used early in marketing motions when a campaign or launch needs explicit sign-off from each adjacent function (sales, support, ops) before downstream work fans out."
 typical_duration_hours = 2.0
 typical_duration_jitter = 0.5
-required_roles = ["brand-manager", "head-of-marketing"]
+required_roles = []
 
   [[step_type.fields]]
   name = "brief_md"
@@ -1475,7 +1488,7 @@ version = 1
 description = "Service-request diagnostic triage — confirm failure mode and decide between dispatch, remote, or parts-only resolution. Used at the front of any field-service or break-fix workflow where a triage outcome shapes the rest of the step graph."
 typical_duration_hours = 0.5
 typical_duration_jitter = 0.5
-required_roles = ["service-mgr", "qa-supervisor"]
+required_roles = []
 
   [[step_type.fields]]
   name = "account_id"
@@ -1534,7 +1547,7 @@ version = 1
 description = "Scheduled video/phone session with an account contact to diagnose a failure or walk through a fix. Carries the call's channel, join URL, attendees, and the technician's outcome notes so the parent Job inherits the diagnosis decision."
 typical_duration_hours = 0.5
 typical_duration_jitter = 0.3
-required_roles = ["service-tech", "service-mgr"]
+required_roles = []
 
   [[step_type.fields]]
   name = "scheduled_for"
@@ -1599,7 +1612,7 @@ version = 1
 description = "Calendar-visible launch date for a marketing motion. Dedicated kind (separate from generic `scheduling`) so the launch-calendar projection can query by step kind and the launch-calendar UX plugin has a stable mount point."
 typical_duration_hours = 2.0
 typical_duration_jitter = 0.5
-required_roles = ["brand-manager", "events-coord", "head-of-marketing"]
+required_roles = []
 
   [[step_type.fields]]
   name = "launch_date"
@@ -1628,7 +1641,7 @@ version = 1
 description = "Open measurement window after a marketing launch — tracks the configured measurement period, what closed it, and the analyst's close-out notes. Dedicated kind so the attribution UX plugin has a stable mount point and the motion-attribution rollup can query by step kind."
 typical_duration_hours = 2.0
 typical_duration_jitter = 0.5
-required_roles = ["brand-manager", "head-of-marketing"]
+required_roles = []
 
   [[step_type.fields]]
   name = "measurement_days"
@@ -1657,7 +1670,7 @@ version = 1
 description = "Complete a training module or certification."
 typical_duration_hours = 8.0
 typical_duration_jitter = 0.5
-required_roles = ["hr-generalist", "head-of-people"]
+required_roles = []
 
   [[step_type.fields]]
   name = "course_name"
@@ -1710,7 +1723,7 @@ version = 1
 description = "Produce, collect, review, or approve a document."
 typical_duration_hours = 0.5
 typical_duration_jitter = 0.4
-required_roles = ["bookkeeper", "ar-clerk", "ap-clerk", "controller", "head-of-people", "platform-admin"]
+required_roles = ["platform-admin"]
 
   [[step_type.fields]]
   name = "doc_type"
@@ -1767,7 +1780,7 @@ version = 1
 description = "Scraper configuration for a vendor-catalog-refresh Job. Lets procurement tune selectors + rate limits without touching code."
 typical_duration_hours = 0.5
 typical_duration_jitter = 0.3
-required_roles = ["sysadmin", "it-director"]
+required_roles = []
 
   [[step_type.fields]]
   name = "vendor_crawl_target_id"
@@ -1808,7 +1821,7 @@ version = 1
 description = "Publish a WorkflowSpec into the registry. Terminal step of `workflow-design` Jobs."
 typical_duration_hours = 0.05
 typical_duration_jitter = 0.0
-required_roles = ["it-director", "platform-admin"]
+required_roles = ["platform-admin"]
 
   [[step_type.fields]]
   name = "workflow_spec"
@@ -1831,7 +1844,7 @@ version = 1
 description = "Open a sales-order Job and confirm its line items, delivery window, and customer-facing terms. The brewery + DTC-shop counterpart to the device-shop's physical-unit `intake` step — no `asset_id` because there's no physical asset being received, just an order being opened."
 typical_duration_hours = 0.5
 typical_duration_jitter = 0.4
-required_roles = ["sales-rep", "bookkeeper"]
+required_roles = []
 # Agent-executed: confirming an order from a feed/system is computer-speed
 # automation, not human labor. The dispatcher auto-completes it on
 # step.ready so high-volume order flow (wholesale 48/day) doesn't queue

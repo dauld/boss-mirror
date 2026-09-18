@@ -28,6 +28,18 @@
 //!   * THE REAL RUN streams the four-transaction eviction, records each
 //!     table's deleted keys, reads the plan back, and reports a failed
 //!     transaction as FAILED with exit 1.
+//!   * THE INSTANCE'S OWN TENANT IS NEVER TOUCHED (backlog 86835bf9;
+//!     measured 2026-09-18 on the first --for-real run, ops-request
+//!     8522ad76: four departments Algedonic declares under the device
+//!     shop's codes — finance, marketing, sales, support — were
+//!     unreferenced and deleted with the residue). The verb reads the
+//!     tenant checkout the converge stages for the instance
+//!     (`<tenants dir>/<instance name>`, cluster-deploy-runner.sh
+//!     converge_tenant), hands it to the derivation so every id/code the
+//!     tenant declares leaves the candidate set, records them as
+//!     `declared_by_tenant` with a `kept … declared by tenant:<id>` line
+//!     each, and REFUSES when the checkout cannot be read — never a plan
+//!     without it.
 //!   * THE VERB FILE serves the forge, is MUTATING, names David, takes
 //!     mode/namespace, and declares a timeout.
 
@@ -36,6 +48,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SCRIPT: &str = "infra/forge/retire-example-reference-rows.sh";
+/// The fixture tenant's classes: the device shop's `sales` department
+/// under the tenant's own name — the measured collision — beside a row
+/// no example declares.
+const TENANT_CLASSES: &str = r#"[
+  {"subject_kind": "employee", "code": "sales", "display_name": "Sales", "member_attribute": "department"},
+  {"subject_kind": "employee", "code": "engineering", "display_name": "Engineering", "member_attribute": "department"}
+]"#;
 const PASSWORD: &str = "s3cretpw0123";
 const URL: &str = "postgres://boss:s3cretpw0123@postgres.boss.svc.cluster.local:5432/algedonic";
 
@@ -49,6 +68,10 @@ struct Case {
     log: PathBuf,
     stdin_log: PathBuf,
     tree: PathBuf,
+    /// The converge's tenant checkouts, beside the tree the way
+    /// `$(dirname "$REPO")/tenants` sits beside the forge checkout —
+    /// `<tenants>/prod` is the instance's.
+    tenants: PathBuf,
 }
 
 impl Case {
@@ -73,6 +96,15 @@ impl Case {
             &tree.join("infra/cluster/instances.toml"),
             "source = \"prod\"\n\n[prod]\nnamespace = \"boss\"\ntenant_repo = \"david/algedonic-llc\"\ntenant_ref = \"main\"\nsim = false\nhostname = \"boss.algedonic.dev\"\n\n[playground]\nnamespace = \"boss-playground\"\ntenant_dir = \"examples/brewery\"\nsim = true\nhostname = \"playground.algedonic.dev\"\n",
         );
+        // The tenant checkout the converge staged for prod: the repo's
+        // shape (tenant.toml at the root, seeds/ beside it).
+        let tenants = root.join("tenants");
+        create_dir(&tenants.join("prod/seeds"));
+        write_file(
+            &tenants.join("prod/tenant.toml"),
+            "[meta]\ntenant_id = \"algedonic\"\ndisplay_name = \"Algedonic, LLC\"\n",
+        );
+        write_file(&tenants.join("prod/seeds/classes.json"), TENANT_CLASSES);
         // The stub kubectl: argv appended to $STUB_LOG; `get secret`
         // prints the URL base64-encoded; `exec -i … psql` reads stdin
         // whole, appends it to $STUB_STDIN, and answers by the first
@@ -117,6 +149,7 @@ exit 1
             log,
             stdin_log,
             tree,
+            tenants,
         }
     }
 
@@ -140,6 +173,7 @@ exit 1
             )
             .env("BOSS_KUBECTL", self.bin.join("kubectl"))
             .env("BOSS_RETIRE_TREE", &self.tree)
+            .env("BOSS_FORGE_TENANTS_DIR", &self.tenants)
             .env("STUB_LOG", &self.log)
             .env("STUB_STDIN", &self.stdin_log)
             .env("STUB_ANSWERS", &self.answers);
@@ -175,7 +209,7 @@ fn a_dry_run_prints_the_verdict_first_and_deletes_nothing() {
     let mut lines = out.lines();
     assert_eq!(
         lines.next().unwrap(),
-        "retire-example-reference-rows: dry-run namespace=boss db=algedonic candidates=196 present=95 deletable=6 kept=3 deleted=0",
+        "retire-example-reference-rows: dry-run namespace=boss db=algedonic tenant=algedonic declared=1 candidates=196 present=95 deletable=6 kept=3 deleted=0",
         "the verdict is the first line:\n{out}"
     );
     let record: serde_json::Value =
@@ -186,6 +220,22 @@ fn a_dry_run_prints_the_verdict_first_and_deletes_nothing() {
     assert_eq!(record["deleted"], 0);
     assert_eq!(record["plan"]["classes"]["kept"][0]["key"], "employee:ceo");
     assert!(record["read_back"].is_null());
+    // The tenant's own declarations (86835bf9): named, and out of the
+    // candidate set the SQL judges.
+    assert_eq!(record["tenant"], "algedonic");
+    assert_eq!(
+        record["tenant_checkout"],
+        c.tenants.join("prod").to_str().unwrap()
+    );
+    assert_eq!(
+        record["declared_by_tenant"],
+        serde_json::json!({"classes": ["employee:sales"], "locations": [], "gl_accounts": [], "companies": []}),
+        "what the tenant declares under an example's key, and only that:\n{out}"
+    );
+    assert!(
+        out.contains("kept classes employee:sales: declared by tenant:algedonic"),
+        "the subtracted row is named like a kept one:\n{out}"
+    );
     assert!(
         out.contains("kept classes employee:ceo: employees.role, policy_rules.role"),
         "kept rows are named with their reasons:\n{out}"
@@ -206,6 +256,14 @@ fn a_dry_run_prints_the_verdict_first_and_deletes_nothing() {
         "{stdin}"
     );
     assert!(!stdin.contains(":delete "), "a dry run streams no delete");
+    assert!(
+        !stdin.contains(r#"{"subject_kind":"employee","code":"sales""#),
+        "the tenant's department is in no candidate list the SQL judges:\n{stdin}"
+    );
+    assert!(
+        stdin.contains(r#"{"subject_kind":"employee","code":"cto""#),
+        "the residue still is"
+    );
     let log = std::fs::read_to_string(&c.log).unwrap();
     assert!(
         log.contains("-n\nboss\nget\nsecret\nboss-secrets\n"),
@@ -305,12 +363,16 @@ fn a_real_run_evicts_per_table_and_reads_the_plan_back() {
     let mut lines = out.lines();
     assert_eq!(
         lines.next().unwrap(),
-        "retire-example-reference-rows: for-real namespace=boss db=algedonic candidates=196 present=95 deletable=6 kept=3 deleted=6",
+        "retire-example-reference-rows: for-real namespace=boss db=algedonic tenant=algedonic declared=1 candidates=196 present=95 deletable=6 kept=3 deleted=6",
         "{out}"
     );
     let record: serde_json::Value = serde_json::from_str(lines.next().unwrap()).unwrap();
     assert_eq!(record["mode"], "for-real");
     assert_eq!(record["deleted"], 6);
+    assert_eq!(
+        record["declared_by_tenant"]["classes"],
+        serde_json::json!(["employee:sales"])
+    );
     let tables: Vec<&str> = record["deleted_by_table"]
         .as_array()
         .unwrap()
@@ -335,6 +397,10 @@ fn a_real_run_evicts_per_table_and_reads_the_plan_back() {
     assert!(
         !evict.contains("default_transaction_read_only"),
         "the eviction session is not read-only"
+    );
+    assert!(
+        !evict.contains(r#"{"subject_kind":"employee","code":"sales""#),
+        "the eviction judges the same subtracted set as the plan"
     );
     let tags: Vec<&str> = evict
         .lines()
@@ -391,6 +457,60 @@ fn a_failed_transaction_is_failed_with_the_completed_tables_recorded() {
 }
 
 #[test]
+fn an_instance_whose_tenant_checkout_cannot_be_read_is_refused() {
+    // No checkout staged for the instance: the converge has not run
+    // since the flip, or the tenants directory is elsewhere.
+    let c = Case::new("no-checkout");
+    std::fs::remove_dir_all(c.tenants.join("prod")).unwrap();
+    let (rc, out) = c.run(&["--for-real", "boss"]);
+    assert_eq!(rc, 2, "{out}");
+    assert!(
+        out.contains("REFUSED")
+            && out.contains("tenant checkout")
+            && out.contains(c.tenants.join("prod").to_str().unwrap()),
+        "names the checkout it could not read:\n{out}"
+    );
+    assert!(out.contains("Nothing was changed."));
+    assert!(c.stdin().is_empty(), "nothing was read, nothing deleted");
+    no_password(&out);
+
+    // A directory that is not a tenant (no manifest) is the same refusal.
+    let c = Case::new("no-manifest");
+    std::fs::remove_file(c.tenants.join("prod/tenant.toml")).unwrap();
+    let (rc, out) = c.run(&["--dry-run", "boss"]);
+    assert_eq!(rc, 2, "{out}");
+    assert!(
+        out.contains("REFUSED") && out.contains("tenant.toml"),
+        "{out}"
+    );
+    assert!(c.stdin().is_empty());
+
+    // A seed that cannot be parsed: the derivation cannot answer, and
+    // the verb does not plan without it.
+    let c = Case::new("broken-seed");
+    write_file(
+        &c.tenants.join("prod/seeds/classes.json"),
+        "[{\"subject_kind\": \"employee\"",
+    );
+    let (rc, out) = c.run(&["--dry-run", "boss"]);
+    assert_ne!(rc, 0, "{out}");
+    assert!(out.contains("Nothing was changed."), "{out}");
+    assert!(c.stdin().is_empty());
+
+    // The delivered spelling (a ConfigMap-shaped checkout: tenant.toml
+    // under seeds/) reads the same.
+    let c = Case::new("delivered-spelling");
+    std::fs::rename(
+        c.tenants.join("prod/tenant.toml"),
+        c.tenants.join("prod/seeds/tenant.toml"),
+    )
+    .unwrap();
+    let (rc, out) = c.run(&["--dry-run", "boss"]);
+    assert_eq!(rc, 0, "{out}");
+    assert!(out.contains("tenant=algedonic declared=1"), "{out}");
+}
+
+#[test]
 fn the_verb_file_is_bounded_and_authorized() {
     let root = repo_root();
     let verb: serde_json::Value = serde_json::from_str(
@@ -412,6 +532,10 @@ fn the_verb_file_is_bounded_and_authorized() {
     assert!(
         about.contains("PASSWORD IS NEVER PRINTED")
             && about.contains("DELETABLE ONLY WHEN UNREFERENCED")
+    );
+    assert!(
+        about.contains("86835bf9") && about.contains("declared_by_tenant"),
+        "the verb says the instance's own tenant is subtracted first, and names the record key"
     );
     let params = verb["params"].as_array().unwrap();
     assert_eq!(params[0]["name"], "mode");

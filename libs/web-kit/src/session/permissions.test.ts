@@ -1,41 +1,100 @@
-// Route-visibility matrix. Run via `bun test`.
+// Route visibility — the role's Class row says what a role sees; the
+// SPA carries no org chart (backlog 18d6a6c9, 2026-09-17). Run via
+// `bun test`.
 
 import { describe, expect, test } from 'bun:test';
-import { canSeeRoute, ROUTE_ACCESS, type RouteName } from './permissions';
+import { canSeeRoute, declaredSurfaces, ROUTES, type RouteName } from './permissions';
 
-describe('canSeeRoute — platform-admin is the super-admin and sees every surface', () => {
-  // Regression: `platform-admin` was missing from ROUTE_ACCESS, so the
-  // sidebar collapsed to the always-on routes only — even though the
-  // policy layer grants it Scope::All on every resource, and it's the
-  // role the workflow-design approve step requires. It must surface the
-  // full set (esp. the admin/KB surfaces an operator needs to author).
+const row = (code: string, metadata: Record<string, unknown>) => ({ code, metadata });
+
+describe('canSeeRoute — a role with no declared surfaces sees every surface', () => {
+  // Measured on prod (2026-09-17): the matrix this replaced knew 33
+  // brewery roles and 26 device-shop roles, and a role it did not know
+  // — every role of the company's own tenant — saw only the six
+  // ungated routes. The modules are the tenant's statement of what
+  // exists (missing = off since ce68f137) and policy is enforced at
+  // the endpoints, so an undeclared role's sidebar is the tenant's
+  // modules, not nothing.
   const surfaces: RouteName[] = [
     'workflows', 'policy', 'system-kb', 'system-design', 'system-step-plugins',
     'people', 'catalog', 'accounts', 'finance', 'exec', 'auth-admin',
   ];
   for (const r of surfaces) {
-    test(`platform-admin can see "${r}"`, () => {
-      expect(canSeeRoute('platform-admin', r)).toBe(true);
+    test(`platform-admin (no surfaces declared) can see "${r}"`, () => {
+      expect(canSeeRoute('platform-admin', r, row('platform-admin', { is_system_role: true }))).toBe(true);
     });
   }
-
-  test('platform-admin gets the same full grant as the C-suite', () => {
-    expect(ROUTE_ACCESS['platform-admin']).toEqual(ROUTE_ACCESS['ceo']);
+  test('a role the registry has not answered for yet sees everything, not nothing', () => {
+    expect(canSeeRoute('founder', 'exec', undefined)).toBe(true);
+    expect(canSeeRoute('founder', 'finance', undefined)).toBe(true);
+  });
+  test('a row with metadata that says nothing about surfaces is the same', () => {
+    expect(canSeeRoute('sales-rep', 'finance', row('sales-rep', { department: 'sales' }))).toBe(true);
   });
 });
 
-describe('canSeeRoute — unknown roles fall through safely', () => {
-  test('an unrecognized role sees only the always-on routes', () => {
-    // The defensive default, which is the point of this test: a role
-    // with no ROUTE_ACCESS entry gets nothing it was not explicitly
-    // given. `exec` is gated, so it must be refused.
-    expect(canSeeRoute('totally-made-up-role', 'exec')).toBe(false);
-    expect(canSeeRoute('totally-made-up-role', 'finance')).toBe(false);
+describe('canSeeRoute — a role whose Class row declares surfaces sees exactly those', () => {
+  // The brewery's classes.json carries each role's former matrix entry
+  // as `metadata.surfaces`, so the playground renders as before — from
+  // the tenant's own data.
+  const brewer = row('brewer', { surfaces: ['jobs', 'parts', 'products', 'schedule'] });
+  test('a declared surface is visible', () => {
+    expect(canSeeRoute('brewer', 'parts', brewer)).toBe(true);
+    expect(canSeeRoute('brewer', 'schedule', brewer)).toBe(true);
+  });
+  test('an undeclared surface is not', () => {
+    expect(canSeeRoute('brewer', 'exec', brewer)).toBe(false);
+    expect(canSeeRoute('brewer', 'finance', brewer)).toBe(false);
+    expect(canSeeRoute('brewer', 'policy', brewer)).toBe(false);
+  });
+  test('the always-on routes stay visible regardless — what they READ is policed by the endpoints', () => {
+    for (const r of ['shop', 'inbox', 'workflows', 'system-experiments', 'views', 'system-feedback'] as RouteName[]) {
+      expect(canSeeRoute('brewer', r, brewer)).toBe(true);
+    }
+  });
+  test('an empty declaration is a declaration: only the always-on routes', () => {
+    const none = row('bartender', { surfaces: [] });
+    expect(canSeeRoute('bartender', 'calendar', none)).toBe(false);
+    expect(canSeeRoute('bartender', 'inbox', none)).toBe(true);
+  });
+});
 
-    // The always-on routes stay visible to everyone by design - they
-    // are ungated at the top of canSeeRoute, and what they can READ is
-    // policed by the endpoints behind them, not here.
-    expect(canSeeRoute('totally-made-up-role', 'workflows')).toBe(true);
-    expect(canSeeRoute('totally-made-up-role', 'inbox')).toBe(true);
+describe('declaredSurfaces — reads metadata.surfaces defensively', () => {
+  test('absent row, absent key, or a non-list is "nothing declared"', () => {
+    expect(declaredSurfaces(undefined)).toBeUndefined();
+    expect(declaredSurfaces(row('x', {}))).toBeUndefined();
+    expect(declaredSurfaces(row('x', { surfaces: 'jobs' }))).toBeUndefined();
+    expect(declaredSurfaces(row('x', { surfaces: null }))).toBeUndefined();
+  });
+  test('non-string entries are dropped, not crashed on', () => {
+    expect(declaredSurfaces(row('x', { surfaces: ['jobs', 3, null, 'exec'] }))).toEqual(['jobs', 'exec']);
+  });
+  test('ROUTES is every gated RouteName once — the vocabulary a declaration is checked against', () => {
+    expect(new Set(ROUTES).size).toBe(ROUTES.length);
+    expect(ROUTES).toContain('finance');
+    expect(ROUTES).not.toContain('inbox');
+  });
+});
+
+describe('the brewery seed declares its surfaces in the vocabulary the SPA reads', () => {
+  // The matrix moved verbatim into examples/brewery/seeds/classes.json;
+  // a route renamed in libs/web-kit without the seed following is a
+  // role that silently loses a sidebar entry, so the seed is checked
+  // against ROUTES here rather than trusted.
+  test('every metadata.surfaces entry is a gated RouteName', async () => {
+    const path = new URL('../../../../examples/brewery/seeds/classes.json', import.meta.url);
+    const rows = (await Bun.file(path).json()) as ReadonlyArray<{
+      subject_kind: string; code: string; member_attribute?: string; metadata?: Record<string, unknown>;
+    }>;
+    const roles = rows.filter((r) => r.subject_kind === 'employee' && r.member_attribute === 'role');
+    const declared = roles.filter((r) => declaredSurfaces({ code: r.code, metadata: r.metadata ?? {} }) !== undefined);
+    expect(declared.length).toBeGreaterThan(30);
+    const known = new Set<string>(ROUTES);
+    const bad = declared.flatMap((r) =>
+      (declaredSurfaces({ code: r.code, metadata: r.metadata ?? {} }) ?? [])
+        .filter((s) => !known.has(s))
+        .map((s) => `${r.code}: ${s}`),
+    );
+    expect(bad).toEqual([]);
   });
 });

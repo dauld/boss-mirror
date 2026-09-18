@@ -859,6 +859,10 @@ title = "place-order"
 kind = "procurement"
 ready_when = "steps.audit-stock.done"
 title_template = "Place order — {subject.id}"
+# Who does it, declared HERE (18d6a6c9, 2026-09-17): until then this
+# step relied on the platform StepType's required_roles for its
+# nomination — the brewery's org chart in the platform's registry.
+authority_role = "inventory-clerk"
 # po_id is shared with the bill-approval step so the vendor
 # invoice's po_id FK lines up with the PO this step creates.
 # `inventory.po.place` (StepType-level side effect) reads this
@@ -881,6 +885,10 @@ title = "inbound-shipment"
 kind = "shipment"
 ready_when = "steps.place-order.done"
 title_template = "Inbound shipment from {subject.id}"
+# Who does it, declared HERE (18d6a6c9, 2026-09-17): until then this
+# step relied on the platform StepType's required_roles for its
+# nomination — the brewery's org chart in the platform's registry.
+authority_role = "shipping-clerk"
 # Vendor ASN → in-transit → arrived-at-dock. The shipment
 # StepType's side effect (`shipping.create`) drops a row into
 # `boss-shipping` so the dock has a tracker before pallets
@@ -892,6 +900,10 @@ title = "receive-delivery"
 kind = "receiving"
 ready_when = "steps.inbound-shipment.done"
 title_template = "Receive delivery"
+# Who does it, declared HERE (18d6a6c9, 2026-09-17): until then this
+# step relied on the platform StepType's required_roles for its
+# nomination — the brewery's org chart in the platform's registry.
+authority_role = "inventory-clerk"
 # Receiving clerk confirms via the receiving step itself
 # (which fires inventory.receive on completion). No exec
 # sign-off required in real brewery ops — that gate was
@@ -1014,6 +1026,10 @@ title = "service-parts"
 kind = "repair"
 ready_when = "steps.inspect-diagnose.done"
 title_template = "Service / replace parts"
+# Who does it, declared HERE (18d6a6c9, 2026-09-17): until then this
+# step relied on the platform StepType's required_roles for its
+# nomination — the brewery's org chart in the platform's registry.
+authority_role = "mechanic"
 # Default parts drawdown so inventory.parts.consume emits real
 # consumption rows on step.done. Per-Job derivation (from the
 # inspection step's failure_mode_code) is the faker hook in

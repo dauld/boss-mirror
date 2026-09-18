@@ -47,6 +47,25 @@
 # the bare schema, what remains is exactly what the platform's own
 # baseline, workflows and schema defaults name.
 #
+# THE INSTANCE'S OWN TENANT IS SUBTRACTED FIRST (backlog 86835bf9).
+# Measured 2026-09-18 on the first --for-real run on prod (ops-request
+# 8522ad76): the candidate set is derived from the example seeds BY
+# CODE, and Algedonic declares four employee departments — finance,
+# marketing, sales, support — under codes the device shop also uses.
+# No employee held them yet, so they were unreferenced, and they went
+# with the residue. A row the instance's own tenant declares is not
+# residue whatever its code, so `plan-sql` and `delete-sql` take the
+# tenant directory (the one the launcher publishes — BOSS_TENANT_DIR
+# on a pod, the converge's checkout on the forge), read its
+# declarations with the same readers (seeds/classes.*, locations.toml,
+# chart_of_accounts.toml, the manifest's tenant_id), and remove every
+# matching key from the candidate set BEFORE the judgement — before,
+# not as a reason, so a tenant-declared child keeps its example parent
+# (the parent_code / parent_id reasons skip children that are
+# themselves candidates). `seeds <dir>` names what was subtracted as
+# `declared_by_tenant`. A tenant directory that cannot be read is a
+# refusal (exit 4): the verb never plans without it.
+#
 # DELETABLE ONLY WHEN UNREFERENCED. A row is kept, and named with the
 # reason, when anything points at it: an employee wearing the role /
 # department, a location wearing the kind, an account of the type, an
@@ -68,23 +87,32 @@
 # between the plan and the run is deleted.
 #
 # USAGE
-#   example-reference-rows.sh seeds          the candidate set, one JSON line
-#   example-reference-rows.sh plan-sql       the read-only judgement: one
-#                                            SELECT printing one JSON line
-#   example-reference-rows.sh delete-sql     the eviction: one transaction per
-#                                            table, each printing one JSON line
-#   example-reference-rows.sh boot <dir>     for init.sh: exit 0 and say `evict:
-#                                            tenant <id>` when <dir> is a tenant
-#                                            directory whose id is not an
-#                                            example's; exit 3 and say why
-#                                            otherwise (no dir, no manifest, an
-#                                            example tenant). Nothing else.
+#   example-reference-rows.sh seeds [<dir>]     the candidate set, one JSON
+#                                               line; with the tenant <dir>,
+#                                               after subtracting its
+#                                               declarations, named under
+#                                               `declared_by_tenant`
+#   example-reference-rows.sh plan-sql <dir>    the read-only judgement: one
+#                                               SELECT printing one JSON line
+#   example-reference-rows.sh delete-sql <dir>  the eviction: one transaction
+#                                               per table, each printing one
+#                                               JSON line
+#   example-reference-rows.sh boot <dir>        for init.sh: exit 0 and say
+#                                               `evict: tenant <id>` when <dir>
+#                                               is a tenant directory whose id
+#                                               is not an example's; exit 3
+#                                               and say why otherwise (no dir,
+#                                               no manifest, an example
+#                                               tenant). Nothing else.
+#   <dir> is the instance's OWN tenant directory: tenant.toml or
+#   seeds/tenant.toml, and seeds/ (docs/tenant-contract.md).
 #
 # EXIT
 #   0  answered
 #   3  boot: keep the rows (the reason is on stdout)
 #   4  cannot answer — a seed could not be read, a set came out empty,
-#      or a seed names a member_attribute this script cannot judge
+#      a seed names a member_attribute this script cannot judge, or the
+#      tenant directory is not one / cannot be read
 #   2  usage
 #
 # ENV
@@ -102,11 +130,15 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SELF_DIR/../.." && pwd)"
 EXAMPLES="${BOSS_EXAMPLES_DIR:-$REPO/examples}"
 
+USAGE="usage: $ME seeds [<tenant-dir>] | plan-sql <tenant-dir> | delete-sql <tenant-dir> | boot <tenant-dir>"
 MODE="${1:-}"
+TENANT="${2:-}"
 case "$MODE" in
-    seeds|plan-sql|delete-sql) [ "$#" -eq 1 ] || { say "usage: $ME seeds | plan-sql | delete-sql | boot <tenant-dir>"; exit 2; } ;;
-    boot) [ "$#" -eq 2 ] || { say "usage: $ME boot <tenant-dir>"; exit 2; } ;;
-    *) say "usage: $ME seeds | plan-sql | delete-sql | boot <tenant-dir>"; exit 2 ;;
+    seeds) [ "$#" -le 2 ] || { say "$USAGE"; exit 2; } ;;
+    # The tenant directory is REQUIRED for the SQL: a plan without it is
+    # the plan that deleted Algedonic's departments (86835bf9).
+    plan-sql|delete-sql|boot) [ "$#" -eq 2 ] || { say "$USAGE"; exit 2; } ;;
+    *) say "$USAGE"; exit 2 ;;
 esac
 
 command -v jq >/dev/null 2>&1 || { say "CANNOT ANSWER — jq is not on PATH"; exit "$CANNOT_ANSWER"; }
@@ -156,35 +188,38 @@ example_dirs() {
     done
 }
 
-seed_sets() {
-    local d id classes='[]' locations='[]' accounts='[]' companies='[]' sources='[]' n
-    while IFS= read -r d; do
-        [ -n "$d" ] || continue
-        id=$(tenant_id_of "$d")
-        companies=$(jq -c --arg id "$id" '. + [$id]' <<<"$companies")
-        if [ -f "$d/seeds/classes.json" ]; then
-            n=$(jq -c 'map({subject_kind, code, member_attribute: (.member_attribute // null)})' "$d/seeds/classes.json") || return 1
-            classes=$(jq -c --argjson n "$n" '. + $n' <<<"$classes")
-            sources=$(jq -c --arg s "${d#"$EXAMPLES"/}/seeds/classes.json" '. + [$s]' <<<"$sources")
-        fi
-        if [ -f "$d/seeds/classes.toml" ]; then
-            n=$(toml_blocks "$d/seeds/classes.toml" class | jq -c 'map({subject_kind, code, member_attribute: (.member_attribute // null)})') || return 1
-            classes=$(jq -c --argjson n "$n" '. + $n' <<<"$classes")
-            sources=$(jq -c --arg s "${d#"$EXAMPLES"/}/seeds/classes.toml" '. + [$s]' <<<"$sources")
-        fi
-        if [ -f "$d/seeds/locations.toml" ]; then
-            n=$(toml_blocks "$d/seeds/locations.toml" location | jq -c 'map(.id)') || return 1
-            locations=$(jq -c --argjson n "$n" '. + $n' <<<"$locations")
-            sources=$(jq -c --arg s "${d#"$EXAMPLES"/}/seeds/locations.toml" '. + [$s]' <<<"$sources")
-        fi
-        if [ -f "$d/seeds/chart_of_accounts.toml" ]; then
-            n=$(toml_blocks "$d/seeds/chart_of_accounts.toml" account | jq -c 'map(.code)') || return 1
-            accounts=$(jq -c --argjson n "$n" '. + $n' <<<"$accounts")
-            sources=$(jq -c --arg s "${d#"$EXAMPLES"/}/seeds/chart_of_accounts.toml" '. + [$s]' <<<"$sources")
-        fi
-    done < <(example_dirs)
+# The key sets ONE tenant directory declares, as one JSON object
+# {classes, locations, gl_accounts, companies, sources} — the same
+# reader for an example (whose rows are the candidates) and for the
+# instance's own tenant (whose rows are subtracted). `sources` names
+# each file read, relative to <base>. Returns 1 when a seed cannot be
+# parsed — a refusal upstream, never a smaller set.
+dir_sets() { # <tenant dir> <base for source names>
+    local d="$1" base="$2" id classes='[]' locations='[]' accounts='[]' companies='[]' sources='[]' n
+    id=$(tenant_id_of "$d")
+    companies=$(jq -c --arg id "$id" '. + [$id]' <<<"$companies")
+    if [ -f "$d/seeds/classes.json" ]; then
+        n=$(jq -c 'map({subject_kind, code, member_attribute: (.member_attribute // null)})' "$d/seeds/classes.json") || return 1
+        classes=$(jq -c --argjson n "$n" '. + $n' <<<"$classes")
+        sources=$(jq -c --arg s "${d#"$base"/}/seeds/classes.json" '. + [$s]' <<<"$sources")
+    fi
+    if [ -f "$d/seeds/classes.toml" ]; then
+        n=$(toml_blocks "$d/seeds/classes.toml" class | jq -c 'map({subject_kind, code, member_attribute: (.member_attribute // null)})') || return 1
+        classes=$(jq -c --argjson n "$n" '. + $n' <<<"$classes")
+        sources=$(jq -c --arg s "${d#"$base"/}/seeds/classes.toml" '. + [$s]' <<<"$sources")
+    fi
+    if [ -f "$d/seeds/locations.toml" ]; then
+        n=$(toml_blocks "$d/seeds/locations.toml" location | jq -c 'map(.id)') || return 1
+        locations=$(jq -c --argjson n "$n" '. + $n' <<<"$locations")
+        sources=$(jq -c --arg s "${d#"$base"/}/seeds/locations.toml" '. + [$s]' <<<"$sources")
+    fi
+    if [ -f "$d/seeds/chart_of_accounts.toml" ]; then
+        n=$(toml_blocks "$d/seeds/chart_of_accounts.toml" account | jq -c 'map(.code)') || return 1
+        accounts=$(jq -c --argjson n "$n" '. + $n' <<<"$accounts")
+        sources=$(jq -c --arg s "${d#"$base"/}/seeds/chart_of_accounts.toml" '. + [$s]' <<<"$sources")
+    fi
     # Every row must carry its key, or the extraction is broken, not
-    # the seed. Duplicates across tenants (both carry `ceo`) collapse.
+    # the seed.
     jq -n -c \
         --argjson classes "$classes" --argjson locations "$locations" \
         --argjson accounts "$accounts" --argjson companies "$companies" --argjson sources "$sources" '
@@ -192,13 +227,57 @@ seed_sets() {
         then error("a classes row without subject_kind or code") else . end
         | if ($locations | map(select(. == null)) | length) > 0 then error("a location row without id") else . end
         | if ($accounts | map(select(. == null)) | length) > 0 then error("an account row without code") else . end
+        | {classes: $classes, locations: $locations, gl_accounts: $accounts, companies: $companies, sources: $sources}'
+}
+
+seed_sets() {
+    local d all='[]' one
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        one=$(dir_sets "$d" "$EXAMPLES") || return 1
+        all=$(jq -c --argjson one "$one" '. + [$one]' <<<"$all")
+    done < <(example_dirs)
+    # Duplicates across tenants (both carry `ceo`) collapse.
+    jq -c '{
+        classes: (map(.classes) | add | unique_by([.subject_kind, .code]) | sort_by([.subject_kind, .code])),
+        locations: (map(.locations) | add | unique | sort),
+        gl_accounts: (map(.gl_accounts) | add | unique | sort),
+        companies: (map(.companies) | add | unique | sort),
+        sources: (map(.sources) | add)
+    }' <<<"$all"
+}
+
+# The candidate set with the instance's own tenant subtracted
+# (86835bf9): every (subject_kind, code), location id, account code
+# and company id the tenant declares leaves the set, and what left is
+# named under `declared_by_tenant` so the record can say `kept …
+# declared by tenant:<id>`. Exit 4 when the directory is not a tenant
+# directory or a seed of its cannot be read — never a set without it.
+subtract_tenant() { # <candidate JSON> <tenant dir> -> JSON
+    local seed="$1" dir="$2" id declared
+    [ -d "$dir" ] || { say "CANNOT ANSWER — the instance's tenant directory $dir is not a directory, so its own declarations cannot be subtracted; nothing is planned without them"; return "$CANNOT_ANSWER"; }
+    id=$(tenant_id_of "$dir")
+    [ -n "$id" ] || { say "CANNOT ANSWER — $dir holds no tenant.toml or seeds/tenant.toml with [meta] tenant_id, so it is not a tenant directory; its declarations cannot be subtracted"; return "$CANNOT_ANSWER"; }
+    declared=$(dir_sets "$dir" "$dir") || { say "CANNOT ANSWER — a seed under $dir could not be read (above), so the tenant's declarations cannot be subtracted"; return "$CANNOT_ANSWER"; }
+    jq -c --argjson t "$declared" --arg id "$id" --arg dir "$dir" '
+        ($t.classes | map("\(.subject_kind):\(.code)")) as $tc
+        | ($t.locations) as $tl | ($t.gl_accounts) as $ta | ($t.companies) as $tco
         | {
-            classes: ($classes | unique_by([.subject_kind, .code]) | sort_by([.subject_kind, .code])),
-            locations: ($locations | unique | sort),
-            gl_accounts: ($accounts | unique | sort),
-            companies: ($companies | unique | sort),
-            sources: $sources
-          }'
+            classes: (.classes | map(select(("\(.subject_kind):\(.code)") as $k | $tc | index($k) | not))),
+            locations: (.locations | map(select(. as $k | $tl | index($k) | not))),
+            gl_accounts: (.gl_accounts | map(select(. as $k | $ta | index($k) | not))),
+            companies: (.companies | map(select(. as $k | $tco | index($k) | not))),
+            sources,
+            declared_by_tenant: {
+                tenant: $id,
+                directory: $dir,
+                classes: (.classes | map("\(.subject_kind):\(.code)") | map(select(. as $k | $tc | index($k))) | unique),
+                locations: (.locations | map(select(. as $k | $tl | index($k))) | unique),
+                gl_accounts: (.gl_accounts | map(select(. as $k | $ta | index($k))) | unique),
+                companies: (.companies | map(select(. as $k | $tco | index($k))) | unique),
+                sources: $t.sources
+            }
+          }' <<<"$seed"
 }
 
 # --- boot: the decision init.sh takes ---------------------------------------
@@ -234,10 +313,19 @@ if [ -n "$empty" ]; then
     say "CANNOT ANSWER — a seed key set came out empty, which is an extraction defect, not an answer: $(printf '%s' "$empty" | tr '\n' ' ')"
     exit "$CANNOT_ANSWER"
 fi
+# The instance's own tenant, subtracted before anything is judged
+# (86835bf9). `seeds` without a directory is the raw example set — the
+# tests' independent count; the SQL modes never run without one.
+if [ -n "$TENANT" ] || [ "$MODE" != seeds ]; then
+    SEED_JSON=$(subtract_tenant "$SEED_JSON" "$TENANT") || exit "$CANNOT_ANSWER"
+fi
 if [ "$MODE" = seeds ]; then
     printf '%s\n' "$SEED_JSON"
     exit 0
 fi
+# What the SQL embeds is the candidate set alone: the subtracted keys
+# must not appear in the document the judgement reads, on any path.
+SEED_JSON=$(jq -c 'del(.declared_by_tenant)' <<<"$SEED_JSON")
 case "$SEED_JSON" in
     *'$seed$'*) say "CANNOT ANSWER — a seed value contains the literal tag \$seed\$"; exit "$CANNOT_ANSWER" ;;
 esac

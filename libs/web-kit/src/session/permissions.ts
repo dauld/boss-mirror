@@ -1,21 +1,30 @@
-// Role-based permissions — verbatim port of
-// apps/web/src/session/permissions.ts, minus the MyScope wiring
-// which is stubbed for phase 1.
+// Route visibility — which top-level sections a role's sidebar shows.
 //
-// Two layers today:
-//   1. ROUTE_ACCESS — static matrix of which top-level sections a
-//      role can even see.
-//   2. can(action, resource) — finer-grained checks inside a view.
-// Phase 2 brings back the policy-scope overlay from the React app.
+// This is SPA visibility, not authority: what a surface can READ is
+// policed by the endpoints behind it (boss-policy, row-level), and
+// the policy-scope overlay from the React app is still phase 2.
+//
+// WHO SAYS. A role is a Class (subject_kind=employee,
+// member_attribute=role), tenant reference data the SPA reads at boot
+// via `classesFor('employee', 'role')`. The role's Class row is where a
+// tenant narrows that role's sidebar: `metadata.surfaces = [...]`, a
+// list of the RouteNames below. A role whose row declares none — or
+// a role the registry has not answered for yet — sees every surface
+// the tenant's modules turn on (a module is on only when the manifest
+// lists it true, ce68f137), which is the tenant's own statement of
+// what exists.
+//
+// Until 2026-09-17 (backlog 18d6a6c9) this file carried ROUTE_ACCESS:
+// a hand-curated matrix of 33 brewery roles and 26 device-shop roles
+// and what each could see. Measured on prod, the company's own roles
+// were in it nowhere, so their sidebars collapsed to the six ungated
+// routes — one tenant's org chart, compiled into every deployment.
+// The brewery's entries moved VERBATIM to its classes.json as
+// `metadata.surfaces`, so the playground renders as before, from the
+// tenant's data; a role that wants a narrower sidebar declares it on
+// its own row.
 
-// A role code. Roles are tenant-extensible reference data owned by the
-// Class registry (subject_kind=employee, member_attribute=role); the
-// SPA reads the live list + labels via `classesFor('employee', 'role')`
-// rather than re-declaring them here, so adding a tenant role no longer
-// needs a TS bundle rebuild. The maps below (ROUTE_ACCESS, WORK_BY_ROLE)
-// are SPA route-visibility *policy*, not the role vocabulary — they stay
-// hand-curated and key on this open string. A role with no entry falls
-// through to the defensive defaults in `canSeeRoute` / `workForRole`.
+// A role code — an open string, the Class registry's `code`.
 export type Role = string;
 
 export type RouteName =
@@ -52,7 +61,10 @@ export type RouteName =
   | 'system-experiments'
   | 'workflows';
 
-const ALL: ReadonlyArray<RouteName> = [
+/// Every gated RouteName, once — the vocabulary a Class row's
+/// `metadata.surfaces` is written in (the always-on routes below are
+/// not in it; they need no declaring).
+export const ROUTES: ReadonlyArray<RouteName> = [
   'shop', 'exec', 'catalog', 'accounts', 'assets', 'sales', 'service',
   'parts', 'products', 'finance', 'people', 'qa', 'warehouse', 'support', 'system-monitoring',
   'shipping', 'vendors', 'marketing-assets', 'calendar',
@@ -60,148 +72,31 @@ const ALL: ReadonlyArray<RouteName> = [
   'policy', 'workflows', 'system-step-plugins', 'system-dispatcher',
   'system-dispatcher-rules', 'system-dispatcher-rule', 'system-design', 'system-yard', 'system-estate', 'system-subjects', 'system-kb', 'auth-admin',
   'system-experiments',
-  'workflows',
 ];
 
-export const ROUTE_ACCESS: Record<Role, ReadonlyArray<RouteName>> = {
-  ceo: ALL,
-  cto: ALL,
-  coo: ALL,
-  // Platform super-admin. The policy layer grants `platform-admin`
-  // Scope::All on every resource (boss-policy-client defaults), so the
-  // sidebar should surface every section — same rationale as
-  // `audit-readonly` below; server-side enforces the real grants. This
-  // is also the role the `workflow-design` approve step requires, so the
-  // operator authoring a Workflow lands here and needs the full surface.
-  'platform-admin': ALL,
-  cfo: ['exec', 'accounts', 'assets', 'sales', 'finance', 'people', 'parts', 'products', 'vendors'],
-  'vp-sales': ['exec', 'catalog', 'accounts', 'assets', 'sales', 'people'],
-  'sales-mgr': ['catalog', 'accounts', 'assets', 'sales', 'people'],
-  'sales-rep': ['catalog', 'accounts', 'sales'],
-  'service-mgr': ['exec', 'catalog', 'accounts', 'assets', 'service', 'parts', 'products', 'vendors', 'people', 'support', 'shipping', 'schedule'],
-  'service-tech': ['catalog', 'accounts', 'assets', 'service', 'parts', 'products', 'schedule'],
-  'refurb-supervisor': ['catalog', 'assets', 'parts', 'products', 'people', 'qa'],
-  'refurb-tech': ['catalog', 'assets', 'parts', 'products'],
-  'qa-lead': ['catalog', 'assets', 'parts', 'products', 'people', 'qa'],
-  'qa-tech': ['catalog', 'assets', 'parts', 'products', 'qa'],
-  'warehouse-mgr': ['parts', 'products', 'people', 'warehouse', 'vendors', 'shipping'],
-  'warehouse-clerk': ['parts', 'products', 'warehouse', 'shipping'],
-  'parts-buyer': ['parts', 'products', 'warehouse', 'vendors', 'shipping'],
-  controller: ['exec', 'accounts', 'sales', 'finance', 'parts', 'products', 'vendors'],
-  'ap-specialist': ['parts', 'products', 'accounts', 'vendors', 'finance'],
-  'hr-generalist': ['people'],
-  recruiter: ['people'],
-  'support-specialist': ['accounts', 'service', 'support'],
-  // IT roles maintain the platform itself: monitoring, KB, step
-  // plugins (JS bundles for custom step UX), simulator runs to
-  // validate workflow changes before deploy. They do NOT get
-  // policy or workflows — those belong to dept heads + COO who
-  // model what their dept's work looks like (per the
-  // "modeling-not-building" frame).
-  'it-manager': ['exec', 'system-monitoring', 'system-kb',
-    'system-step-plugins', 'system-dispatcher', 'system-dispatcher-rules', 'system-dispatcher-rule', 'system-subjects',
-    'system-design', 'system-estate', 'jobs'],
-  auditor: ['finance', 'accounts', 'assets'],
-  // Audit-readonly is the system audit account — Read on every
-  // resource via the policy gate, so the sidebar surfaces every
-  // section. The actual gating is enforced server-side; this
-  // table just controls what's visible.
-  'audit-readonly': ALL,
-  owner: ALL,
-  'smoke-tester': ALL,
+/// The shape of a role's Class row this reader needs; the full row is
+/// the classes client's (`session/classes.svelte.ts`).
+export type RoleRow = Readonly<{
+  code: string;
+  metadata: Readonly<Record<string, unknown>>;
+}>;
 
-  // ----- Brewery roles -----
-  // Each brewery role gets the surfaces it actually needs to do
-  // its job. The corresponding WORK_BY_ROLE entry then picks the
-  // 2-4 it spends most time in for the personal "Work" group.
+/// The surfaces a role's Class row declares (`metadata.surfaces`), or
+/// `undefined` when it declares none — an absent row, an absent key, or
+/// a value that is not a list all read as "nothing declared", never as
+/// a crash and never as an empty list (an empty list IS a declaration:
+/// the always-on routes alone).
+export function declaredSurfaces(row: RoleRow | undefined): ReadonlyArray<string> | undefined {
+  const v = row?.metadata?.['surfaces'];
+  if (!Array.isArray(v)) return undefined;
+  return v.filter((s): s is string => typeof s === 'string');
+}
 
-  // Production
-  'head-brewer':   ['exec', 'jobs', 'parts', 'products', 'qa', 'people', 'schedule'],
-  'senior-brewer': ['jobs', 'parts', 'products', 'qa', 'schedule'],
-  brewer:          ['jobs', 'parts', 'products', 'schedule'],
-  'cellar-tech':   ['jobs', 'parts', 'products', 'schedule'],
-  'shift-lead':    ['jobs', 'parts', 'products', 'schedule', 'people'],
-
-  // Packaging
-  'packaging-mgr':  ['jobs', 'warehouse', 'shipping', 'people', 'schedule'],
-  'packaging-tech': ['jobs', 'warehouse', 'schedule'],
-  palletizer:       ['jobs', 'warehouse'],
-
-  // QA / lab
-  'qa-supervisor': ['jobs', 'qa', 'parts', 'products', 'people'],
-  'lab-tech':      ['jobs', 'qa', 'parts', 'products'],
-
-  // Warehouse
-  'forklift-operator': ['warehouse', 'parts', 'products', 'shipping'],
-  'inventory-clerk':   ['warehouse', 'parts', 'products'],
-  'shipping-clerk':    ['warehouse', 'shipping'],
-
-  // Distribution
-  'distribution-driver': ['shipping', 'jobs', 'schedule'],
-
-  // Maintenance
-  'maintenance-mgr': ['jobs', 'parts', 'products', 'people', 'schedule'],
-  electrician:       ['jobs', 'parts', 'products', 'schedule'],
-  mechanic:          ['jobs', 'parts', 'products', 'schedule'],
-
-  // Sales
-  'account-manager': ['sales', 'accounts', 'jobs'],
-
-  // Marketing
-  'brand-manager':        ['exec', 'marketing-assets', 'calendar', 'jobs'],
-  'events-coord':         ['calendar', 'jobs', 'marketing-assets'],
-  'social-media-coord':   ['marketing-assets', 'calendar'],
-  'marketing-mgr':        ['exec', 'marketing-assets', 'calendar', 'jobs'],
-  'marketing-specialist': ['marketing-assets', 'calendar', 'jobs'],
-  'content-writer':       ['marketing-assets'],
-  'brand-designer':       ['marketing-assets'],
-
-  // Taproom
-  bartender:        ['calendar', 'schedule'],
-  'taproom-server': ['calendar', 'schedule'],
-
-  // Finance
-  bookkeeper:    ['finance', 'accounts', 'vendors', 'jobs'],
-  'ar-clerk':    ['finance', 'accounts', 'jobs'],
-  'ap-clerk':    ['finance', 'vendors', 'parts', 'products', 'jobs'],
-  'fp-analyst':  ['finance', 'exec', 'jobs'],
-  'payroll-mgr': ['finance', 'people', 'jobs'],
-
-  // People (HR)
-  'benefits-coord': ['people', 'jobs'],
-
-  // IT
-  // IT-team roles own the platform's runtime: monitoring,
-  // knowledge base, step plugins, simulator. They don't author
-  // policy or Workflows — that authority belongs to dept heads
-  // + COO (the people whose work the Workflow models) per the
-  // "engineers are operators like anyone else" framing.
-  'it-director': ['exec', 'system-monitoring', 'system-kb',
-    'system-step-plugins', 'system-dispatcher', 'system-dispatcher-rules', 'system-dispatcher-rule', 'system-subjects',
-    'system-design', 'jobs'],
-  sysadmin:      ['system-monitoring', 'system-kb',
-    'system-step-plugins', 'system-dispatcher', 'system-dispatcher-rules', 'system-dispatcher-rule', 'system-subjects',
-    'system-design', 'jobs'],
-  helpdesk:      ['system-monitoring', 'system-kb', 'jobs'],
-
-  // Heads of department.
-  //
-  // Dept heads + the COO are the only roles outside the C-suite
-  // catch-all (CEO/CTO/COO = ALL) that get `policy` and
-  // `workflows`. Rationale: these surfaces author *the company's
-  // model of its own work* — what work types exist, what
-  // role-scoped permissions apply. That authority belongs to
-  // operational leaders, not the IT team that maintains the
-  // platform. Server-side scope checks gate edits to the dept
-  // head's own department; the SPA grant just controls what's
-  // visible.
-  'head-of-distribution': ['exec', 'shipping', 'jobs', 'people', 'policy', 'workflows'],
-  'head-of-marketing':    ['exec', 'marketing-assets', 'calendar', 'jobs', 'people', 'policy', 'workflows'],
-  'head-of-people':       ['exec', 'people', 'jobs', 'policy', 'workflows'],
-  'head-of-sales':        ['exec', 'sales', 'accounts', 'jobs', 'people', 'policy', 'workflows'],
-};
-
-export function canSeeRoute(role: Role, route: RouteName): boolean {
+/// Whether `role` sees `route`. `row` is the role's Class row from the
+/// registry (`classesFor('employee', 'role')`), or undefined before it
+/// has loaded.
+export function canSeeRoute(role: Role, route: RouteName, row?: RoleRow): boolean {
+  void role;
   if (route === 'shop' || route === 'inbox' || route === 'workflows' || route === 'system-experiments') return true;
   // Views are personal by construction — everyone has their own, so
   // there is nothing to gate. What a View can READ is still policed
@@ -210,9 +105,6 @@ export function canSeeRoute(role: Role, route: RouteName): boolean {
   // Feedback triage is IT work; the board itself is readable by any
   // operator, and the Job/step writes behind it are policy-gated.
   if (route === 'system-feedback') return true;
-  // Defensive default: a role we don't know about (a freshly-added
-  // class registry entry the SPA hasn't been re-bundled for) sees
-  // nothing rather than crashing on `.includes` of undefined.
-  const access = ROUTE_ACCESS[role];
-  return access ? access.includes(route) : false;
+  const declared = declaredSurfaces(row);
+  return declared ? declared.includes(route) : true;
 }

@@ -27,19 +27,41 @@
 //!     and one about a location; a child class — keeps each of them,
 //!     named with the column that points at it, and the run deletes
 //!     the rest.
+//!   * A ROW THE INSTANCE'S OWN TENANT DECLARES IS NOT A CANDIDATE
+//!     (backlog 86835bf9; measured 2026-09-18, ops-request 8522ad76:
+//!     four departments Algedonic declares under the device shop's
+//!     codes were unreferenced and deleted). With the tenant directory
+//!     given, a re-declared department, location and account survive
+//!     the plan and the run — and because the subtraction happens
+//!     BEFORE the judgement, a re-declared child keeps its example
+//!     parent (`locations.parent_id`), which a reason added after the
+//!     fact could not.
 //!
 //! Never against production: TestDb refuses a server hosting a database
 //! named `boss` (test_db.rs).
 
-use boss_testing::{TestDb, repo_root};
+use boss_testing::{TestDb, create_dir, repo_root, scratch_dir, write_file};
 use std::collections::BTreeSet;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-fn derive(mode: &str) -> String {
+/// A company's tenant declaring nothing an example does — what every
+/// case not about the subtraction hands the derivation.
+fn plain_tenant() -> PathBuf {
+    let t = scratch_dir("example-reference-rows-sql-tenant");
+    write_file(
+        &t.join("tenant.toml"),
+        "[meta]\ntenant_id = \"acme\"\ndisplay_name = \"Acme\"\n",
+    );
+    t
+}
+
+fn derive(mode: &str, tenant: &Path) -> String {
     let out = Command::new("bash")
         .arg(repo_root().join("infra/postgres/example-reference-rows.sh"))
         .arg(mode)
+        .arg(tenant)
         .output()
         .expect("bash runs");
     assert!(
@@ -77,19 +99,27 @@ fn psql(url: &str, sql: &str, read_only: bool) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
-fn plan(url: &str) -> serde_json::Value {
-    let out = psql(url, &derive("plan-sql"), true);
+fn plan_for(url: &str, tenant: &Path) -> serde_json::Value {
+    let out = psql(url, &derive("plan-sql", tenant), true);
     serde_json::from_str(out.trim())
         .unwrap_or_else(|e| panic!("plan is one JSON line ({e}): {out}"))
 }
 
-fn evict(url: &str) -> Vec<serde_json::Value> {
-    psql(url, &derive("delete-sql"), false)
+fn plan(url: &str) -> serde_json::Value {
+    plan_for(url, &plain_tenant())
+}
+
+fn evict_for(url: &str, tenant: &Path) -> Vec<serde_json::Value> {
+    psql(url, &derive("delete-sql", tenant), false)
         .lines()
         .map(|l| {
             serde_json::from_str(l).unwrap_or_else(|e| panic!("one JSON line per table ({e}): {l}"))
         })
         .collect()
+}
+
+fn evict(url: &str) -> Vec<serde_json::Value> {
+    evict_for(url, &plain_tenant())
 }
 
 async fn set(db: &TestDb, sql: &str) -> BTreeSet<String> {
@@ -332,7 +362,8 @@ async fn on_a_fresh_schema_what_remains_is_exactly_what_the_platform_names() {
     // Every role the platform names is either kept here or carried by an
     // example seed (publish-request's owner_role = shift-lead is the
     // brewery's, in its classes.json — a leak this line makes visible).
-    let seeds: serde_json::Value = serde_json::from_str(derive("seeds").trim()).unwrap();
+    let seeds: serde_json::Value =
+        serde_json::from_str(derive("seeds", &plain_tenant()).trim()).unwrap();
     let seeded_roles: BTreeSet<String> = seeds["classes"]
         .as_array()
         .unwrap()
@@ -526,5 +557,118 @@ async fn a_referenced_row_is_kept_and_named_and_the_rest_go() {
     assert_eq!(
         subjects_deleted, 0,
         "no subjects rows existed on the bare schema"
+    );
+}
+
+/// The measured hole (backlog 86835bf9, ops-request 8522ad76): the
+/// tenant's own declarations under example codes. Fresh schema, nothing
+/// referencing anything — exactly the state in which the four
+/// departments were deleted on prod — and a tenant re-declaring the
+/// device shop's `sales` department, the brewery's taproom and its
+/// `1100` account, plus a route location under the brewhouse.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_the_tenant_declares_survives_the_plan_and_the_run() {
+    let db = TestDb::new().await;
+    let url = db.url();
+    let tenant = scratch_dir("example-reference-rows-sql-redeclares");
+    write_file(
+        &tenant.join("tenant.toml"),
+        "[meta]\ntenant_id = \"algedonic\"\ndisplay_name = \"Algedonic, LLC\"\n",
+    );
+    create_dir(&tenant.join("seeds"));
+    write_file(
+        &tenant.join("seeds/classes.json"),
+        r#"[{"subject_kind": "employee", "code": "sales", "display_name": "Sales", "member_attribute": "department"}]"#,
+    );
+    write_file(
+        &tenant.join("seeds/locations.toml"),
+        "[[location]]\nid = \"loc-brewery-taproom\"\nname = \"Taproom\"\nkind = \"hq\"\ntimezone = \"UTC\"\n\n[[location]]\nid = \"loc-brewery-route-mission\"\nname = \"Mission route\"\nkind = \"hq\"\nparent_id = \"loc-brewery-brewhouse\"\ntimezone = \"UTC\"\n",
+    );
+    write_file(
+        &tenant.join("seeds/chart_of_accounts.toml"),
+        "[[account]]\ncode = \"1100\"\nname = \"AR\"\nkind = \"asset\"\nnormal_balance = \"debit\"\n",
+    );
+    // The route the tenant re-declares is on the instance already
+    // (published by an earlier tenant publish), under the brewery's
+    // brewhouse — a candidate whose parent is a candidate.
+    sqlx::raw_sql(
+        "INSERT INTO locations (id, name, kind, parent_id, timezone) VALUES ('loc-brewery-route-mission', 'Mission route', 'distribution-route', 'loc-brewery-brewhouse', 'UTC')",
+    )
+    .execute(&db.pool)
+    .await
+    .expect("fixture row");
+
+    let without = plan(&url);
+    let p = plan_for(&url, &tenant);
+    assert_eq!(
+        p["classes"]["candidates"].as_u64().unwrap(),
+        without["classes"]["candidates"].as_u64().unwrap() - 1,
+        "the re-declared department is not a candidate"
+    );
+    assert!(
+        !keys(&p["classes"]["deletable"]).contains("employee:sales"),
+        "{p}"
+    );
+    assert!(
+        !kept(&p["classes"]["kept"])
+            .iter()
+            .any(|(k, _)| k == "employee:sales"),
+        "not kept either — it was never judged"
+    );
+    assert!(keys(&without["classes"]["deletable"]).contains("employee:sales"));
+    assert!(!keys(&p["gl_accounts"]["deletable"]).contains("1100"));
+    assert!(keys(&without["gl_accounts"]["deletable"]).contains("1100"));
+    assert!(!keys(&p["locations"]["deletable"]).contains("loc-brewery-taproom"));
+    // Subtracted BEFORE judging: the brewhouse keeps its example row
+    // because a location the tenant declares sits under it.
+    let k = kept(&p["locations"]["kept"]);
+    let (_, reasons) = k
+        .iter()
+        .find(|(kk, _)| kk == "loc-brewery-brewhouse")
+        .unwrap_or_else(|| panic!("the brewhouse is kept for the tenant's route under it: {k:?}"));
+    assert_eq!(reasons, &["locations.parent_id"]);
+    assert!(
+        keys(&without["locations"]["deletable"]).contains("loc-brewery-brewhouse"),
+        "without the tenant, the route is a candidate too and the brewhouse goes with it"
+    );
+
+    let runs = evict_for(&url, &tenant);
+    let deleted: BTreeSet<String> = runs.iter().flat_map(|r| keys(&r["deleted"])).collect();
+    for k in [
+        "employee:sales",
+        "1100",
+        "loc-brewery-taproom",
+        "loc-brewery-route-mission",
+        "loc-brewery-brewhouse",
+    ] {
+        assert!(!deleted.contains(k), "{k} is the tenant's and must survive");
+    }
+    for k in ["employee:finance", "employee:cto", "1000", "brewery"] {
+        assert!(
+            deleted.contains(k),
+            "{k} is residue and must go: {deleted:?}"
+        );
+    }
+    assert!(
+        classes(&db, "employee", "department")
+            .await
+            .contains("sales"),
+        "the department the tenant declares is still on the instance"
+    );
+    assert_eq!(
+        set(&db, "SELECT code FROM gl_accounts WHERE code = '1100'").await,
+        s(&["1100"])
+    );
+    assert_eq!(
+        set(
+            &db,
+            "SELECT id FROM locations WHERE id LIKE 'loc-brewery-%'"
+        )
+        .await,
+        s(&[
+            "loc-brewery-brewhouse",
+            "loc-brewery-route-mission",
+            "loc-brewery-taproom"
+        ])
     );
 }

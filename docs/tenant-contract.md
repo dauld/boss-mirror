@@ -88,6 +88,16 @@ stating plainly:
   sections that only a tenant with an engine carries. The contract is
   the platform's (gateway) reading; `check` requires `[meta]
   tenant_id` because it is every workflow's `owning_team`.
+- **The container launcher reads `[modules]` too, the SPA's way.**
+  infra/oss-quickstart/tenant-modules.sh starts a module's service only
+  when the manifest lists that module true — `sim` (the /simulator UX,
+  and the brewery tick daemon's `BOSS_SIM_ENABLED` when the deployment
+  did not set it), `equipment` (boss-catalog-api, boss-assets-api),
+  `warehouse` (boss-inventory-api), `shipping` (boss-shipping-api) —
+  and derives the sim's loopback pair (`BOSS_SIM_CALLBACK_BIND`,
+  `BOSS_EVENT_WEBHOOK_URL`) only when the sim runs (backlog 18d6a6c9).
+  `boss-launch --plan` prints the decision per service. A deployment
+  with no manifest path keeps the full roster.
 - **Half the brewery bundle is its engine's data, not the platform's.**
   `accounts.toml`, `vendors.toml`, `messages.toml` and
   `bulletins.toml` are `include_str!`'d into `boss-brewery-engine` at

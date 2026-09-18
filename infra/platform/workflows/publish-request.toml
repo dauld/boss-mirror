@@ -20,10 +20,17 @@
 # retyped; the seed is insert-if-missing, so the live lineage keeps its
 # own version and this file is what a FRESH database gets.
 #
-# `owning_team` below records the live row's value. The bundle loader
-# stamps every row it reads with the bundle's default (`platform`) and
-# ignores the key, so a fresh database gets `platform` — the one field
-# of the row the tree cannot currently express.
+# `owning_team` and `owner_role` are the platform's. Until 2026-09-17
+# (backlog 18d6a6c9) this file recorded the live row's values verbatim
+# — a bootstrap team and an owner role that both belonged to the demo
+# tenant's org chart, authored live in that era. The bundle loader
+# ignores owning_team (it stamps `platform`), but owner_role is READ:
+# it is the first role owner-resolution tries when a packet of this
+# kind opens, so on a tenant without that role every publish-request
+# fell through to the step's role. Now both say what every other
+# platform row says; crates/core/boss-testing/tests/
+# the_platform_workflows_belong_to_the_platform.rs holds the bundle
+# to it.
 # ---------------------------------------------------------------------------
 
 [[workflow]]
@@ -31,9 +38,9 @@ kind = "publish-request"
 label = "Publish a pod-built car branch"
 category = "platform"
 subject_kinds = ["employee", "account", "vendor", "location", "asset", "purchase_order", "campaign", "company"]
-owning_team = "brewery-bootstrap"
+owning_team = "platform"
 description = "Q5-compatible delivery: a workspace with no push credential files the branch AS A PACKET (bundle riding metadata), and the conductor - the one actor that publishes - verifies and pushes it. 0b1b32f9."
-metadata = { owner_role = "shift-lead" }
+metadata = { owner_role = "platform-admin" }
 metadata_schema = { properties = { base_sha = { type = "string" }, branch = { type = "string" }, bundle_b64 = { type = "string" }, head_sha = { type = "string" }, requested_by = { type = "string" } }, required = ["branch", "head_sha", "base_sha", "bundle_b64"], type = "object" }
 
 [[workflow.step]]

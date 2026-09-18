@@ -140,7 +140,11 @@ RUN --mount=type=cache,id=boss-cargo-target,target=/build/target \
         \( -name 'boss' -o -name 'boss-*' \) ! -name '*.d' \
         -exec cp {} /out/ \; && \
     test -x /out/boss-gateway || (echo "FATAL: boss-gateway missing in /out" >&2; ls /out >&2; exit 1) && \
-    test -x /out/boss-brewery-sim || (echo "FATAL: boss-brewery-sim missing in /out" >&2; ls /out >&2; exit 1)
+    # The brewery's engine is one tenant's binary, not the platform's
+    # (backlog 18d6a6c9, 2026-09-17): the launcher SKIPs it when absent
+    # and starts it only for a tenant that declares the sim. Said out
+    # loud, never fatal.
+    (test -x /out/boss-brewery-sim || echo "WARN: boss-brewery-sim missing in /out — the image ships without the brewery's engine" >&2)
 
 # ---------------------------------------------------------------------------
 # Stage 3 — SPA build.
@@ -353,6 +357,7 @@ COPY infra/oss-quickstart/services-launcher.sh /usr/local/bin/boss-launch
 # (it never builds the image), so infra/lint/the-image-carries-what-
 # the-launcher-sources.sh pins this pairing instead.
 COPY infra/oss-quickstart/tenant-launch.sh /usr/local/bin/tenant-launch.sh
+COPY infra/oss-quickstart/tenant-modules.sh /usr/local/bin/tenant-modules.sh
 # The maintenance-packet wrap scripts, so in-cluster CronJob chores
 # (boss-search-reindex first) open and complete their packets the same
 # way the boss-gcp timers do — one script pair, both hosts (jq above

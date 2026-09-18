@@ -17,7 +17,12 @@ cp "$src/services-launcher.sh" "$tmp/boss-launch"; chmod +x "$tmp/boss-launch"
 out="$(bash "$tmp/boss-launch" --check 2>&1)"; rc=$?
 [[ $rc -ne 0 ]] || { echo "FAIL: --check passed with tenant-launch.sh missing:"; echo "$out"; exit 1; } >&2
 grep -q "tenant-launch.sh is missing" <<<"$out" || { echo "FAIL: --check did not name the missing file:"; echo "$out"; exit 1; } >&2
-cp "$src/tenant-launch.sh" "$tmp/tenant-launch.sh"
+# Every file the launcher's own SOURCED list names (tenant-launch.sh
+# and, since 18d6a6c9, tenant-modules.sh) — read from the launcher, so
+# a third library does not fail here for want of a hardcoded name.
+for lib in $(grep -oE '^SOURCED=\([^)]*\)' "$src/services-launcher.sh" | sed -E 's/^SOURCED=\(//; s/\)$//'); do
+    cp "$src/$lib" "$tmp/$lib"
+done
 out="$(bash "$tmp/boss-launch" --check 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] || { echo "FAIL: --check failed with the library beside the launcher:"; echo "$out"; exit 1; } >&2
 grep -q "launcher check: ok" <<<"$out" || { echo "FAIL: no ok line:"; echo "$out"; exit 1; } >&2

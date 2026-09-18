@@ -12,6 +12,14 @@ Type=oneshot
 # entries will race v2-tagged ones.
 Environment=RUST_LOG=info
 Environment=BOSS_LEDGER_RULESET=2
+# What the run DID reaches its packet (backlog 18d6a6c9, 2026-09-17):
+# the binary writes {considered, recognized, closed, locked_skips,
+# errors} here and the ExecStopPost closer merges it onto the run
+# step under result=. Declared once so both Exec lines agree on the
+# path (infra/run-summary.sh). Until this the packet said result=ok
+# alone, so a tick over an empty revenue_schedules table read exactly
+# like one that recognized a year.
+Environment=BOSS_RUN_SUMMARY_FILE=/run/boss-ledger-recognize.summary.json
 ExecStartPre=/opt/boss/infra/boss-maintenance-wrap.sh maintenance-ledger-recognize "Revenue-recognition run"
 ExecStart=/usr/local/bin/boss-ledger-recognize --config /etc/boss-ledger-api.toml
 ExecStopPost=-/opt/boss/infra/boss-step.sh maintenance-ledger-recognize run

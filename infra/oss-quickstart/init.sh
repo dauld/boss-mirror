@@ -180,6 +180,15 @@ fi
 # already booted; nothing here names a row. On a fresh database nothing
 # references the rows, so every candidate goes; the SQL still judges
 # each one, so a row something already points at is kept and named.
+# THE TENANT'S OWN DECLARATIONS ARE NOT CANDIDATES (backlog 86835bf9):
+# the same directory `boot` decided on is handed to `delete-sql`, which
+# subtracts every id/code the tenant declares before judging. Measured
+# 2026-09-18: without it a fresh instance whose tenant re-declares an
+# example code (Algedonic's finance / marketing / sales / support
+# departments, under the device shop's codes) lost those rows here and
+# got them back only because the tenant publish runs after this step
+# and inserts-if-absent — self-healing for classes, locations and the
+# chart, but a record that said "evicted" about rows the tenant owns.
 # Loud and non-fatal: a failure here leaves residue the forge verb can
 # evict later, and a dead init would take the whole instance down
 # (CLAUDE.md §Diagnosis: a boot guard that refuses to start takes the
@@ -188,7 +197,7 @@ echo "==> [3/5] example reference rows: keep or evict (first start, by tenant)"
 DERIVE="$REPO/infra/postgres/example-reference-rows.sh"
 if decision=$(BOSS_EXAMPLES_DIR="$REPO/examples" bash "$DERIVE" boot "${BOSS_TENANT_DIR:-}"); then
     echo "    $decision"
-    if evicted=$(BOSS_EXAMPLES_DIR="$REPO/examples" bash "$DERIVE" delete-sql | psql -X -q -At -v ON_ERROR_STOP=1); then
+    if evicted=$(BOSS_EXAMPLES_DIR="$REPO/examples" bash "$DERIVE" delete-sql "$BOSS_TENANT_DIR" | psql -X -q -At -v ON_ERROR_STOP=1); then
         printf '%s\n' "$evicted" | sed 's/^/    /'
         echo "    ✓ example reference rows evicted — this instance carries only what its tenant declares plus what the platform needs"
     else

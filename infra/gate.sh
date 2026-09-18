@@ -712,8 +712,11 @@ scope_self_test() {
     # engine parses it again in its layer-1 lint test — so a bundle-only
     # car that scoped to no crate ran neither, and a broken predicate or
     # a missing terminal would have gated GREEN on its way to the live
-    # registry.
-    _case "a tenant seed bundle still has a crate" "boss-brewery-engine boss-jobs" \
+    # registry. boss-testing since 2026-09-17 (backlog 18d6a6c9):
+    # the_step_type_registry_names_no_tenant_role.rs reads this bundle
+    # to hold the four steps that once relied on the platform's
+    # required_roles to their own authority_role.
+    _case "a tenant seed bundle still has a crate" "boss-brewery-engine boss-jobs boss-testing" \
         "examples/brewery/seeds/workflows.toml"
     # Derived from the directory, not a list of tenants: the
     # used-device-shop bundle declares 36 kinds and must be covered by
@@ -742,7 +745,7 @@ scope_self_test() {
     # A bundle edit beside a boss-jobs edit must name boss-jobs ONCE:
     # these rules emit more than one crate, so the split has to happen
     # before the dedupe.
-    _case "a crate named twice is named once" "boss-brewery-engine boss-jobs" \
+    _case "a crate named twice is named once" "boss-brewery-engine boss-jobs boss-testing" \
         "examples/brewery/seeds/workflows.toml" \
         "crates/core/boss-jobs/src/seed_loader.rs"
     # What is deliberately NOT mapped: everything in examples/ outside a

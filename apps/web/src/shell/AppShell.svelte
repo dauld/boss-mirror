@@ -20,6 +20,7 @@
     type NavItem,
     type NavGroup,
   } from './nav-catalog';
+  import { classesFor } from '@boss/web-kit/session/classes.svelte';
 
   // NavItem / NavGroup / ROUTE_CATALOG live in ./nav-catalog so both
   // this shell and App.svelte read the same registry — and so the
@@ -51,6 +52,11 @@
     session.value.kind === 'ready' ? session.value.user : null,
   );
   let role = $derived((user?.role ?? null) as Role | null);
+  // The role's Class row: where a tenant narrows this role's sidebar
+  // (`metadata.surfaces`, 18d6a6c9). Loaded at boot with the other
+  // employee classes; undefined until then, which canSeeRoute reads as
+  // "nothing declared" — every module-on surface, never an empty bar.
+  let roleRow = $derived(classesFor('employee', 'role').find((r) => r.code === role));
 
   // Unread badge on Inbox (David, feedback 8c020e6d: "I can't see new
   // inbox messages").
@@ -224,7 +230,7 @@
   function visible(items: ReadonlyArray<NavItem>): ReadonlyArray<NavItem> {
     if (!role) return [];
     return items.filter((i) => {
-      const policyOk = i.permKey === undefined || canSeeRoute(role, i.permKey);
+      const policyOk = i.permKey === undefined || canSeeRoute(role, i.permKey, roleRow);
       const moduleOk = i.module === undefined || moduleEnabled(i.module);
       return policyOk && moduleOk && inPerspective(i);
     });

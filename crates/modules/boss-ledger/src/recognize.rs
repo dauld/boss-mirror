@@ -183,6 +183,37 @@ pub struct TickSummary {
     pub errors: Vec<String>,
 }
 
+/// The tick as the maintenance packet records it — the counts, flat,
+/// under the names an operator reads (`recognized` is the periods
+/// posted). Measured 2026-09-17 (backlog 18d6a6c9): on an instance
+/// with no revenue schedules the nightly run considered 0, posted 0
+/// and its packet said `result=ok` and nothing else, so "ran over
+/// nothing" and "recognized a year of revenue" were the same record.
+/// `errors` is a count here; each error's text is in the journal
+/// beside the run, and the exit status carries the verdict.
+pub fn run_summary_json(s: &TickSummary) -> serde_json::Value {
+    serde_json::json!({
+        "considered": s.schedules_considered,
+        "recognized": s.periods_posted,
+        "closed": s.schedules_closed,
+        "locked_skips": s.locked_skips,
+        "errors": s.errors.len(),
+    })
+}
+
+/// Leave the summary where the packet's closer reads it: the path the
+/// unit declares ONCE as `BOSS_RUN_SUMMARY_FILE` (infra/run-summary.sh
+/// — both the run and boss-step.sh's `ExecStopPost=` inherit it, and
+/// boss-step.sh merges the object onto the step and deletes the file).
+/// `None` — no path declared, a hand run outside a packet — writes
+/// nothing, deliberately.
+pub fn write_run_summary(path: Option<&std::path::Path>, s: &TickSummary) -> std::io::Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    std::fs::write(path, run_summary_json(s).to_string())
+}
+
 #[cfg(feature = "postgres")]
 /// Run one tick of the scheduler against the given pool.
 ///
@@ -608,6 +639,50 @@ mod tests {
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    // --- run summary (what the packet records) -----------------------------
+
+    #[test]
+    fn the_run_summary_says_what_the_tick_did_including_nothing() {
+        // On an empty revenue_schedules table the tick considers 0 and
+        // recognizes 0 — and the packet must say so, not just "ok".
+        let s = TickSummary::default();
+        assert_eq!(
+            run_summary_json(&s),
+            serde_json::json!({
+                "considered": 0, "recognized": 0, "closed": 0,
+                "locked_skips": 0, "errors": 0
+            })
+        );
+        let s = TickSummary {
+            schedules_considered: 3,
+            periods_posted: 2,
+            schedules_closed: 1,
+            locked_skips: 1,
+            errors: vec!["sched-9: boom".into()],
+        };
+        assert_eq!(
+            run_summary_json(&s),
+            serde_json::json!({
+                "considered": 3, "recognized": 2, "closed": 1,
+                "locked_skips": 1, "errors": 1
+            })
+        );
+    }
+
+    #[test]
+    fn the_run_summary_file_is_written_only_when_a_path_is_declared() {
+        let dir = boss_testing::scratch_dir("ledger-recognize-run-summary");
+        let path = dir.join("summary.json");
+        let s = TickSummary::default();
+        write_run_summary(None, &s).unwrap();
+        assert!(!path.exists());
+        write_run_summary(Some(path.as_path()), &s).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(body["recognized"], 0);
+        assert_eq!(body["considered"], 0);
     }
 
     // --- num_periods ------------------------------------------------------

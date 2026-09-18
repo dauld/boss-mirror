@@ -66,6 +66,13 @@ spec:
                   value: info
                 - name: BOSS_LEDGER_RULESET
                   value: "2"
+                # What the run DID reaches its packet (backlog 18d6a6c9):
+                # the binary writes {considered, recognized, closed,
+                # locked_skips, errors} here and boss-step.sh above merges
+                # it onto the run step under result=ok. Same contract as
+                # the systemd unit (infra/boss-ledger-recognize.service).
+                - name: BOSS_RUN_SUMMARY_FILE
+                  value: /tmp/boss-ledger-recognize.summary.json
                 - name: DATABASE_URL
                   valueFrom:
                     secretKeyRef:

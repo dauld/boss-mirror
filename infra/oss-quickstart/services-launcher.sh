@@ -88,7 +88,7 @@ SERVICES=(
 # `--check` is how the converge proves it did before rolling the
 # cluster (2026-09-05: it had not, and the pod crash-looped for hours).
 HERE="$(dirname "${BASH_SOURCE[0]}")"
-SOURCED=(tenant-launch.sh)
+SOURCED=(tenant-launch.sh tenant-modules.sh)
 if [[ "${1:-}" == "--check" ]]; then
     missing=0
     for f in "${SOURCED[@]}"; do
@@ -168,8 +168,36 @@ for f in "${SOURCED[@]}"; do
     . "$HERE/$f"
 done
 
+# WHAT THE TENANT ASKED FOR (backlog 18d6a6c9, 2026-09-17). A module's
+# service starts only when the tenant manifest lists that module true
+# (tenant-modules.sh — the SPA's rule since ce68f137, read from the
+# same file); BOSS_SIM_ENABLED derives from `sim` when the deployment
+# did not set it; the sim's loopback pair (BOSS_SIM_CALLBACK_BIND +
+# BOSS_EVENT_WEBHOOK_URL) is exported only when the sim runs, and
+# before the dispatcher — which reads the URL once, at boot — starts.
+# `--plan` prints the decision per service and exits without starting
+# anything: the door the shell test uses, and what an operator asks
+# when a service is missing from a pod ("was it skipped, and why?").
+# (Called in THIS shell, not a subshell: it exports.)
+echo "==> tenant modules:"
+derive_sim_env
+if [[ "${1:-}" == "--plan" ]]; then
+    for svc in "${SERVICES[@]}"; do
+        if service_wanted "$svc"; then
+            echo "start $svc"
+        else
+            echo "skip $svc ($SERVICE_SKIP_REASON)"
+        fi
+    done
+    exit 0
+fi
+
 echo "==> boss-launch starting ${#SERVICES[@]} services"
 for svc in "${SERVICES[@]}"; do
+    if ! service_wanted "$svc"; then
+        echo "    SKIP: $svc ($SERVICE_SKIP_REASON)"
+        continue
+    fi
     # Just before the sim — which posts jobs immediately — make sure the
     # brewery Workflows + policy grants exist (the jobs-api it needs is up
     # by now, having been started earlier in this loop).

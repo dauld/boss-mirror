@@ -25,6 +25,15 @@
 //!     default.
 //!   * A SEED ATTRIBUTE THE SCRIPT CANNOT JUDGE IS A REFUSAL (exit 4),
 //!     not a delete on a guess.
+//!   * THE INSTANCE'S OWN TENANT IS SUBTRACTED BEFORE JUDGING (backlog
+//!     86835bf9, measured 2026-09-18 on the first real run, ops-request
+//!     8522ad76: four departments Algedonic declares under codes the
+//!     device shop also uses — finance, marketing, sales, support — were
+//!     unreferenced and went with the residue). `plan-sql` and
+//!     `delete-sql` take the tenant directory, every id/code it declares
+//!     leaves the candidate set, `seeds <dir>` names what left as
+//!     `declared_by_tenant`, and a tenant that cannot be read is a
+//!     refusal (exit 4), never a plan without it.
 //!   * THE SQL SHAPES: the plan is one read-only SELECT tagged for the
 //!     forge verb's stub; the eviction is one transaction per table in
 //!     dependency order, each printing one JSON line.
@@ -56,6 +65,18 @@ fn run(args: &[&str], examples: Option<&Path>) -> (i32, String, String) {
 fn write(path: &Path, body: &str) {
     create_dir(path.parent().unwrap());
     write_file(path, body);
+}
+
+/// A company's tenant directory declaring nothing an example does —
+/// the tenant `plan-sql` / `delete-sql` are given when the case is
+/// about something else.
+fn plain_tenant(name: &str) -> PathBuf {
+    let t = scratch_dir(&format!("example-reference-rows-tenant-{name}"));
+    write(
+        &t.join("tenant.toml"),
+        "[meta]\ntenant_id = \"acme\"\ndisplay_name = \"Acme\"\n",
+    );
+    t
 }
 
 fn toml_headers(p: &Path, header: &str) -> usize {
@@ -326,16 +347,20 @@ fn an_attribute_the_script_cannot_judge_is_a_refusal() {
     );
     let (rc, out, _) = run(&["seeds"], Some(&examples));
     assert_eq!(rc, 0, "seeds reads the set: {out}");
-    let (rc, _, err) = run(&["plan-sql"], Some(&examples));
+    let tenant = plain_tenant("unmapped");
+    let tenant = tenant.to_str().unwrap();
+    let (rc, _, err) = run(&["plan-sql", tenant], Some(&examples));
     assert_eq!(rc, 4, "an unmapped attribute cannot be judged: {err}");
     assert!(err.contains("widget|colour"), "names the attribute: {err}");
-    let (rc, _, err) = run(&["delete-sql"], Some(&examples));
+    let (rc, _, err) = run(&["delete-sql", tenant], Some(&examples));
     assert_eq!(rc, 4, "{err}");
 }
 
 #[test]
 fn the_sql_shapes_are_a_read_only_plan_and_one_transaction_per_table() {
-    let (rc, plan, err) = run(&["plan-sql"], None);
+    let tenant = plain_tenant("shapes");
+    let tenant = tenant.to_str().unwrap();
+    let (rc, plan, err) = run(&["plan-sql", tenant], None);
     assert_eq!(rc, 0, "{err}");
     assert!(
         plan.starts_with("-- retire-example-reference-rows:plan\n"),
@@ -349,7 +374,7 @@ fn the_sql_shapes_are_a_read_only_plan_and_one_transaction_per_table() {
         "one SELECT printing one document"
     );
 
-    let (rc, del, err) = run(&["delete-sql"], None);
+    let (rc, del, err) = run(&["delete-sql", tenant], None);
     assert_eq!(rc, 0, "{err}");
     let tags: Vec<&str> = del
         .lines()
@@ -418,8 +443,8 @@ fn the_two_doors_call_the_one_derivation() {
         "init.sh asks `boot` about BOSS_TENANT_DIR — the launcher's tenant directory"
     );
     assert!(
-        first_start.contains("delete-sql | psql"),
-        "init.sh streams delete-sql into psql"
+        first_start.contains("delete-sql \"$BOSS_TENANT_DIR\" | psql"),
+        "init.sh streams delete-sql into psql WITH the tenant directory, so the tenant's own declarations are subtracted (86835bf9)"
     );
     assert!(
         !init
@@ -455,8 +480,9 @@ fn the_two_doors_call_the_one_derivation() {
         "the forge verb reads the same derivation"
     );
     assert!(
-        verb.contains("\"$DERIVE\" plan-sql") && verb.contains("\"$DERIVE\" delete-sql"),
-        "plan and delete both come from it"
+        verb.contains("\"$DERIVE\" plan-sql \"$TENANT_CHECKOUT\"")
+            && verb.contains("\"$DERIVE\" delete-sql \"$TENANT_CHECKOUT\""),
+        "plan and delete both come from it, with the instance's tenant checkout (86835bf9)"
     );
     let dockerfile = std::fs::read_to_string(root.join("infra/oss-quickstart/Dockerfile")).unwrap();
     assert!(
@@ -474,4 +500,167 @@ fn the_two_doors_call_the_one_derivation() {
         mode & 0o111 != 0,
         "the derivation is executable (init.sh and the verb exec it)"
     );
+}
+
+/// The measured hole (86835bf9): a tenant declaring a code an example
+/// also declares. The fixture re-declares the device shop's `sales`
+/// department, the brewery's taproom location and its `1100` account
+/// — beside its own rows, which are no example's and change nothing.
+fn redeclaring_tenant(name: &str) -> PathBuf {
+    let t = scratch_dir(&format!("example-reference-rows-redeclares-{name}"));
+    write(
+        &t.join("tenant.toml"),
+        "[meta]\ntenant_id = \"algedonic\"\ndisplay_name = \"Algedonic, LLC\"\n",
+    );
+    write(
+        &t.join("seeds/classes.json"),
+        r#"[
+  {"subject_kind": "employee", "code": "sales", "display_name": "Sales", "member_attribute": "department"},
+  {"subject_kind": "employee", "code": "engineering", "display_name": "Engineering", "member_attribute": "department"}
+]"#,
+    );
+    write(
+        &t.join("seeds/locations.toml"),
+        "[[location]]\nid = \"loc-brewery-taproom\"\nname = \"The taproom we bought\"\nkind = \"hq\"\ntimezone = \"UTC\"\n\n[[location]]\nid = \"loc-algedonic-hq\"\nname = \"HQ\"\nkind = \"hq\"\ntimezone = \"UTC\"\n",
+    );
+    write(
+        &t.join("seeds/chart_of_accounts.toml"),
+        "[[account]]\ncode = \"1100\"\nname = \"Accounts receivable\"\nkind = \"asset\"\nnormal_balance = \"debit\"\n\n[[account]]\ncode = \"7100\"\nname = \"Hosting\"\nkind = \"expense\"\nnormal_balance = \"debit\"\n",
+    );
+    t
+}
+
+fn strs(v: &serde_json::Value, k: &str) -> Vec<String> {
+    v[k].as_array()
+        .unwrap_or_else(|| panic!("{k} is a list in {v}"))
+        .iter()
+        .map(|s| s.as_str().unwrap().to_string())
+        .collect()
+}
+
+fn class_keys(v: &serde_json::Value) -> Vec<String> {
+    v["classes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            format!(
+                "{}:{}",
+                c["subject_kind"].as_str().unwrap(),
+                c["code"].as_str().unwrap()
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_row_the_tenant_declares_leaves_the_candidate_set_and_is_named() {
+    let tenant = redeclaring_tenant("seeds");
+    let tenant = tenant.to_str().unwrap();
+    let (rc, plain, err) = run(&["seeds"], None);
+    assert_eq!(rc, 0, "{err}");
+    let plain: serde_json::Value = serde_json::from_str(plain.trim()).unwrap();
+    let (rc, out, err) = run(&["seeds", tenant], None);
+    assert_eq!(rc, 0, "{err}");
+    let v: serde_json::Value = serde_json::from_str(out.trim()).expect("one JSON line");
+
+    assert!(class_keys(&plain).contains(&"employee:sales".to_string()));
+    assert!(
+        !class_keys(&v).contains(&"employee:sales".to_string()),
+        "the department the tenant declares is not a candidate: {out}"
+    );
+    assert_eq!(
+        class_keys(&v).len(),
+        class_keys(&plain).len() - 1,
+        "and only that row left the classes"
+    );
+    assert!(!strs(&v, "locations").contains(&"loc-brewery-taproom".to_string()));
+    assert!(strs(&v, "locations").contains(&"loc-brewery-brewhouse".to_string()));
+    assert!(!strs(&v, "gl_accounts").contains(&"1100".to_string()));
+    assert!(strs(&v, "gl_accounts").contains(&"1000".to_string()));
+    assert_eq!(strs(&v, "companies"), strs(&plain, "companies"));
+
+    let d = &v["declared_by_tenant"];
+    assert_eq!(
+        d["tenant"], "algedonic",
+        "the record names the tenant: {out}"
+    );
+    assert_eq!(
+        strs(d, "classes"),
+        ["employee:sales"],
+        "what was subtracted, and only that — the tenant's own rows are no example's"
+    );
+    assert_eq!(strs(d, "locations"), ["loc-brewery-taproom"]);
+    assert_eq!(strs(d, "gl_accounts"), ["1100"]);
+    assert_eq!(strs(d, "companies"), Vec::<String>::new());
+    assert_eq!(d["directory"], tenant);
+    assert!(
+        plain["declared_by_tenant"].is_null(),
+        "without a tenant, seeds is the raw example set"
+    );
+
+    // The SQL embeds the subtracted set: the row is in no candidate
+    // list the judgement reads, so nothing can delete it.
+    let (rc, plan, err) = run(&["plan-sql", tenant], None);
+    assert_eq!(rc, 0, "{err}");
+    let (rc, del, err) = run(&["delete-sql", tenant], None);
+    assert_eq!(rc, 0, "{err}");
+    for sql in [&plan, &del] {
+        assert!(
+            !sql.contains(r#"{"subject_kind":"employee","code":"sales""#),
+            "employee:sales is not a candidate in the SQL"
+        );
+        assert!(sql.contains(r#"{"subject_kind":"employee","code":"cto""#));
+        assert!(!sql.contains(r#""loc-brewery-taproom""#));
+        assert!(!sql.contains(r#""1100""#));
+    }
+    // A tenant declaring nothing an example does leaves the set whole.
+    let plain_t = plain_tenant("whole");
+    let (rc, out, _) = run(&["seeds", plain_t.to_str().unwrap()], None);
+    assert_eq!(rc, 0);
+    let w: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(w["classes"], plain["classes"]);
+    assert_eq!(
+        strs(&w["declared_by_tenant"], "classes"),
+        Vec::<String>::new()
+    );
+    assert_eq!(w["declared_by_tenant"]["tenant"], "acme");
+}
+
+#[test]
+fn a_tenant_that_cannot_be_read_is_a_refusal_not_a_plan_without_it() {
+    for mode in ["plan-sql", "delete-sql"] {
+        let (rc, out, err) = run(&[mode], None);
+        assert_eq!(
+            rc, 2,
+            "{mode} without a tenant directory is usage, never a plan without one: {err}"
+        );
+        assert!(out.is_empty(), "no SQL printed: {out}");
+        let (rc, out, err) = run(&[mode, "/nonexistent/tenant"], None);
+        assert_eq!(rc, 4, "{mode}: {err}");
+        assert!(
+            err.contains("CANNOT ANSWER") && err.contains("/nonexistent/tenant"),
+            "names the directory: {err}"
+        );
+        assert!(out.is_empty(), "{out}");
+        let empty = scratch_dir(&format!("example-reference-rows-no-manifest-{mode}"));
+        let (rc, _, err) = run(&[mode, empty.to_str().unwrap()], None);
+        assert_eq!(rc, 4, "{mode}: {err}");
+        assert!(err.contains("tenant.toml"), "{err}");
+    }
+    let (rc, _, err) = run(&["seeds", "/nonexistent/tenant"], None);
+    assert_eq!(rc, 4, "{err}");
+    // A seed the tenant carries that cannot be parsed is the same refusal.
+    let broken = scratch_dir("example-reference-rows-broken-tenant");
+    write(
+        &broken.join("tenant.toml"),
+        "[meta]\ntenant_id = \"acme\"\n",
+    );
+    write(
+        &broken.join("seeds/classes.json"),
+        "[{\"subject_kind\": \"employee\"",
+    );
+    let (rc, _, err) = run(&["plan-sql", broken.to_str().unwrap()], None);
+    assert_eq!(rc, 4, "{err}");
+    assert!(err.contains("CANNOT ANSWER"), "{err}");
 }

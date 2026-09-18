@@ -78,7 +78,7 @@ export type UngatedSurfaceId =
   // above, and for the same reason — it is a read-only observation
   // surface over the delivery pipeline, readable by any operator, and
   // adding a permKey would mean widening the RouteName vocabulary in
-  // libs/web-kit and hand-editing four role entries in ROUTE_ACCESS.
+  // libs/web-kit and every tenant's declared `surfaces` lists.
   | 'system-crew'
   // 'system-codebase' (the Codebase row): the department's own numbers,
   // readable by any operator — same shape as the Crew Board, and for
