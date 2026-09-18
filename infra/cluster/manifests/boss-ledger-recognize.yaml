@@ -58,9 +58,7 @@ spec:
                 - |
                   set -euo pipefail
                   /usr/local/bin/boss-generate-configs
-                  /usr/local/bin/boss-maintenance-wrap.sh maintenance-ledger-recognize "Revenue-recognition run"
-                  /usr/local/bin/boss-ledger-recognize --config /etc/boss-ledger-api.toml
-                  /usr/local/bin/boss-step.sh maintenance-ledger-recognize run result=ok
+                  /usr/local/bin/boss-chore.sh maintenance-ledger-recognize "Revenue-recognition run" -- /usr/local/bin/boss-ledger-recognize --config /etc/boss-ledger-api.toml
               env:
                 - name: RUST_LOG
                   value: info
@@ -68,9 +66,10 @@ spec:
                   value: "2"
                 # What the run DID reaches its packet (backlog 18d6a6c9):
                 # the binary writes {considered, recognized, closed,
-                # locked_skips, errors} here and boss-step.sh above merges
-                # it onto the run step under result=ok. Same contract as
-                # the systemd unit (infra/boss-ledger-recognize.service).
+                # locked_skips, errors} here and boss-step.sh (run by
+                # boss-chore.sh above, after the binary) merges it onto
+                # the run step under result=. Same contract as the
+                # systemd unit (infra/boss-ledger-recognize.service).
                 - name: BOSS_RUN_SUMMARY_FILE
                   value: /tmp/boss-ledger-recognize.summary.json
                 - name: DATABASE_URL

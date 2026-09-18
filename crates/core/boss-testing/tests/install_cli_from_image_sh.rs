@@ -1,4 +1,4 @@
-//! `infra/gcp/install-cli-from-image.sh` is RUN, not read — against a
+//! `infra/estate/install-cli-from-image.sh` is RUN, not read — against a
 //! stubbed `curl` that serves a small but REAL OCI image out of fixture
 //! files (a token endpoint, an index, a platform manifest and gzip-tar
 //! layer blobs), and records every URL it is asked for. The image's
@@ -44,6 +44,24 @@
 //! the converge itself, the units still install and report when the
 //! CLI step fails.
 //!
+//! WHY IT LIVES UNDER infra/estate/ (backlog 9f00a805, consolidation
+//! H8, car 1). Measured 2026-09-18 on #448: infra/forge/*.sh is 32
+//! scripts / 9,790 lines, the largest of them shell twins of CLI verbs
+//! (run-car-probe.sh for `boss prove --from-car`, tenant-census.sh for
+//! `boss tenant`, …), each with its own pin — because the forge had no
+//! `boss` binary. boss-gcp had solved exactly that on 2026-09-15, so the
+//! installer moved from infra/gcp/ to the directory the roles installer
+//! reads (infra/estate/roles.toml, node-roles.sh), and BOTH converges
+//! call it: boss-gcp's unchanged, and the forge's install.sh for the
+//! `cluster-operator` role — the host cluster management runs on, whose
+//! tooling (talosctl, kubectl) the CLI joins. The forge cases at the end
+//! pin that path: the sha the converge hands over is installed and
+//! recorded as `cli_sha`; a tag the deploy runner has not built YET is
+//! `not yet`, exit 0 — the forge converges every ten minutes and builds
+//! the image on the same host a few minutes after each train, so a red
+//! there would be a red on every train; and a real refusal still reds
+//! the converge with the units installed and reported.
+//!
 //! Nothing here touches a host or a registry. `curl` is a stub on
 //! every path.
 
@@ -51,7 +69,7 @@ use boss_testing::{create_dir, repo_root, scratch_dir, write_exec, write_file};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const SCRIPT: &str = "infra/gcp/install-cli-from-image.sh";
+const SCRIPT: &str = "infra/estate/install-cli-from-image.sh";
 const CONVERGE: &str = "infra/gcp/boss-gcp-converge.sh";
 const REGISTRY_HOST: &str = "registry.invalid:3000";
 const REPO_IMAGE: &str = "registry.invalid:3000/david/boss";
@@ -112,7 +130,7 @@ impl Case {
     }
 
     fn with_image(name: &str, image: Image) -> Self {
-        let root = scratch_dir(&format!("boss-gcp-cli-{name}"));
+        let root = scratch_dir(&format!("install-cli-{name}"));
         let bin = root.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let fix = root.join("registry");
@@ -590,16 +608,21 @@ fn a_binary_that_names_another_commit_is_not_confirmed_and_the_previous_generati
 }
 
 /// A tag the registry does not have — the deploy runner builds the
-/// image a few minutes after a train lands — is refused naming the URL
-/// and the HTTP code, with the registry's body printed whole.
+/// image a few minutes after a train lands — is `not yet`, exit 75,
+/// naming the URL and the HTTP code with the registry's body printed
+/// whole. A distinct exit, since 2026-09-18 (9f00a805): on the forge
+/// the converge that installs the CLI runs on the host that builds the
+/// image, so this is the ordinary state of the first tick after every
+/// train, and the caller decides whether it is red (boss-gcp, every
+/// half hour) or a wait for the next tick (the forge).
 #[test]
-fn a_tag_the_registry_lacks_is_refused_naming_the_url_and_the_http_code() {
+fn a_tag_the_registry_lacks_is_not_yet_naming_the_url_and_the_http_code() {
     if !tools() {
         return;
     }
     let c = Case::new("no-tag");
     let (rc, out) = c.run(SHA_D, &[]);
-    assert_ne!(rc, 0, "{out}");
+    assert_eq!(rc, 75, "not yet is exit 75, distinct from a refusal: {out}");
     let murl = format!(
         "http://{REGISTRY_HOST}/v2/david/boss/manifests/{}",
         &SHA_D[..7]
@@ -620,7 +643,10 @@ fn a_tag_the_registry_lacks_is_refused_naming_the_url_and_the_http_code() {
         "a first install that failed leaves the link alone: {out}"
     );
     let result = c.summary("cli_result");
-    assert!(result.starts_with("refused"), "{result}");
+    assert!(
+        result.starts_with("not yet"),
+        "the verdict is not yet, never refused: {result}"
+    );
     assert!(
         result.contains("HTTP 404") && result.contains(&murl),
         "the packet's cli_result carries the URL and the code: {result}"
@@ -1070,5 +1096,302 @@ fn a_cli_failure_does_not_stop_the_units_converge_and_is_on_the_packet() {
     assert!(
         out.contains("the CLI step FAILED"),
         "the converge names which step failed: {out}"
+    );
+}
+
+/// boss-gcp's converge is UNCHANGED by the not-yet exit (9f00a805 car
+/// 1 moved the installer and retargeted nothing else): a tag the
+/// registry lacks is still a failed converge there, healed by its next
+/// half-hourly tick, and the packet says which state it is in.
+#[test]
+fn the_gcp_converge_still_reds_on_a_tag_the_registry_lacks() {
+    if !tools() || !has("git") {
+        return;
+    }
+    let cv = Converge::new("not-yet");
+    // Forget the image for the commit the tree converges to.
+    write_file(&cv.case.fix.join("tags"), "");
+    let (rc, out) = cv.run(&[]);
+    assert_ne!(rc, 0, "{out}");
+    assert!(cv.installer_calls().contains("args=units"), "{out}");
+    assert_eq!(cv.case.summary("cli_sha"), cv.want);
+    assert!(
+        cv.case.summary("cli_result").starts_with("not yet"),
+        "{}",
+        cv.case.summary("cli_result")
+    );
+    assert!(out.contains("the CLI step FAILED"), "{out}");
+}
+
+// ---------------------------------------------------------------------------
+// Through the forge's installer (backlog 9f00a805, consolidation H8,
+// car 1): infra/forge/install.sh installs the CLI for the
+// cluster-operator role, at the sha forge-converge hands it, from the
+// registry the rendered address file names — and never reds the
+// converge for an image the deploy runner has not built yet.
+// ---------------------------------------------------------------------------
+
+const FORGE_INSTALL: &str = "infra/forge/install.sh";
+const FORGE_CONVERGE: &str = "infra/forge/forge-converge.sh";
+
+/// The forge installer, driven into a scratch root the way
+/// infra/lint/forge-install-covers-the-ops-runner.sh drives it: a stub
+/// systemctl, no kubectl/talosctl download, the address file rendered
+/// into scratch — plus this file's stub registry on PATH and the
+/// generation store under scratch.
+struct ForgeInstall {
+    case: Case,
+    etc: PathBuf,
+    sor_env: PathBuf,
+}
+
+impl ForgeInstall {
+    fn new(name: &str) -> Self {
+        let case = Case::new(&format!("forge-{name}"));
+        let etc = case.root.join("etc-systemd");
+        std::fs::create_dir_all(&etc).unwrap();
+        write_exec(
+            &case.bin.join("systemctl"),
+            "#!/usr/bin/env bash\necho \"systemctl $*\" >>\"$STUB_SYSTEMCTL_LOG\"\n[ \"${1:-}\" = is-active ] && echo active\nexit 0\n",
+        );
+        let sor_env = case.root.join("sor.env");
+        Self { case, etc, sor_env }
+    }
+
+    /// Run install.sh with the given roles and converged sha (`None`
+    /// leaves BOSS_CONVERGE_SHA unset — a hand run outside the
+    /// converge).
+    fn run(&self, roles: &str, sha: Option<&str>, extra: &[(&str, String)]) -> (i32, String) {
+        let mut cmd = Command::new("bash");
+        cmd.arg(repo_root().join(FORGE_INSTALL));
+        self.case.env(&mut cmd, extra);
+        // The registry host is NOT named here: the installer must take
+        // it from the address file install.sh renders, the way the
+        // boss-gcp installer does (forge-defaults.sh over sor.sh).
+        cmd.env_remove("BOSS_CLI_IMAGE_REPO");
+        cmd.env("HOME", self.case.root.join("home"))
+            .env("INSTALL_ETC", &self.etc)
+            .env("INSTALL_SYSTEMCTL", self.case.bin.join("systemctl"))
+            .env("INSTALL_KUBECTL", "0")
+            .env("INSTALL_TALOSCTL", "0")
+            .env("INSTALL_SOR_ENV", &self.sor_env)
+            .env("BOSS_SOR_ENV", &self.sor_env)
+            .env("BOSS_NODE_ROLES", roles)
+            .env("STUB_SYSTEMCTL_LOG", self.case.root.join("systemctl.log"));
+        if let Some(sha) = sha {
+            cmd.env("BOSS_CONVERGE_SHA", sha);
+        }
+        let out = cmd.output().expect("install.sh runs");
+        (out.status.code().unwrap_or(-1), text(&out))
+    }
+
+    /// The registry host the rendered address file names — the one
+    /// tree source, read back rather than spelled here.
+    fn registry_host(&self) -> String {
+        std::fs::read_to_string(&self.sor_env)
+            .unwrap_or_default()
+            .lines()
+            .find_map(|l| l.strip_prefix("BOSS_FORGE_REGISTRY_HOST="))
+            .map(str::to_string)
+            .unwrap_or_default()
+    }
+
+    fn units_installed(&self) -> bool {
+        self.etc.join("forge-converge.service").is_file()
+            && self.etc.join("boss-ops-runner.service").is_file()
+    }
+}
+
+#[test]
+fn the_forge_installs_the_cli_for_cluster_operator_at_the_converged_sha_from_the_registry_the_address_file_names()
+ {
+    if !tools() {
+        return;
+    }
+    let f = ForgeInstall::new("ok");
+    let (rc, out) = f.run("cluster-operator", Some(SHA_A), &[]);
+    assert_eq!(rc, 0, "{out}");
+    assert!(f.units_installed(), "the units converge as before: {out}");
+    let c = &f.case;
+    assert_eq!(
+        c.summary("cli_sha"),
+        SHA_A,
+        "cli_sha on the forge's converge packet is the sha it was handed: {out}"
+    );
+    assert_eq!(c.summary("cli_result"), "ok", "{out}");
+    assert_eq!(c.summary("cli_action"), "installed", "{out}");
+    let host = f.registry_host();
+    assert!(
+        !host.is_empty(),
+        "the rendered address file names the registry host"
+    );
+    assert_eq!(
+        c.summary("cli_image"),
+        format!("{host}/david/boss:{}", &SHA_A[..7]),
+        "the image repo comes from the rendered address file, never a literal: {out}"
+    );
+    assert!(
+        c.requests()
+            .iter()
+            .any(|u| u == &format!("http://{host}/v2/david/boss/manifests/{}", &SHA_A[..7])),
+        "the registry the address file names is the one asked: {:?}",
+        c.requests()
+    );
+    let (_, v) = c.version_through_link();
+    assert!(
+        v.contains(&format!("built from {SHA_A}")),
+        "the forge's boss names the converged commit: {v}"
+    );
+    assert!(
+        out.contains("  cli: "),
+        "the CLI step's every line is printed under its own prefix: {out}"
+    );
+}
+
+#[test]
+fn a_host_without_the_role_installs_no_cli_and_says_so() {
+    if !tools() {
+        return;
+    }
+    let f = ForgeInstall::new("no-role");
+    let (rc, out) = f.run("off-cluster-observer", Some(SHA_A), &[]);
+    assert_eq!(rc, 0, "{out}");
+    assert!(f.units_installed(), "{out}");
+    assert!(
+        f.case.requests().is_empty(),
+        "no registry request without the role: {:?}",
+        f.case.requests()
+    );
+    assert!(!f.case.link.exists(), "{out}");
+    assert!(
+        out.contains("cluster-operator not among this host's roles"),
+        "{out}"
+    );
+}
+
+/// The ordinary state of the first tick after a train: the checkout is
+/// at the merge, the deploy runner on this same host has not pushed the
+/// image for it yet. Not a red — the converge says so, records it, and
+/// the next tick retries. The previous CLI stays.
+#[test]
+fn an_image_the_deploy_runner_has_not_built_yet_is_not_a_red_converge_on_the_forge() {
+    if !tools() {
+        return;
+    }
+    let f = ForgeInstall::new("not-yet");
+    let (rc, out) = f.run("cluster-operator", Some(SHA_A), &[]);
+    assert_eq!(rc, 0, "{out}");
+    let _ = std::fs::remove_file(&f.case.summary);
+
+    let (rc, out) = f.run("cluster-operator", Some(SHA_D), &[]);
+    assert_eq!(
+        rc, 0,
+        "a tag the deploy runner has not built yet must not red the forge converge: {out}"
+    );
+    assert!(f.units_installed(), "{out}");
+    let c = &f.case;
+    assert_eq!(
+        c.summary("cli_sha"),
+        SHA_D,
+        "the sha it tried is recorded: {out}"
+    );
+    assert!(
+        c.summary("cli_result").starts_with("not yet"),
+        "{}",
+        c.summary("cli_result")
+    );
+    assert!(
+        c.summary("cli_result").contains("HTTP 404"),
+        "the URL and the code ride the packet: {}",
+        c.summary("cli_result")
+    );
+    assert!(
+        out.contains("not in the registry yet") && out.contains("next tick"),
+        "the installer says what it is waiting for: {out}"
+    );
+    assert!(
+        !out.contains("FAILED"),
+        "nothing about a failure — this is a wait, not a fault: {out}"
+    );
+    assert_eq!(
+        c.current().as_deref(),
+        Some(SHA_A),
+        "the previous generation stays linked: {out}"
+    );
+    let (_, v) = c.version_through_link();
+    assert!(v.contains(&format!("built from {SHA_A}")), "{v}");
+}
+
+/// A REAL refusal — the registry unreachable, a digest mismatch — is
+/// still a failed converge on the forge, as on boss-gcp: the units are
+/// installed and reported first, the CLI step's exit rides the packet.
+#[test]
+fn a_real_cli_refusal_still_reds_the_forge_converge_with_the_units_installed() {
+    if !tools() {
+        return;
+    }
+    let f = ForgeInstall::new("refused");
+    let (rc, out) = f.run(
+        "cluster-operator",
+        Some(SHA_A),
+        &[("STUB_TOKEN_DOWN", "1".into())],
+    );
+    assert_ne!(rc, 0, "{out}");
+    assert!(f.units_installed(), "the units installed regardless: {out}");
+    assert!(
+        std::fs::read_to_string(f.case.root.join("systemctl.log"))
+            .unwrap_or_default()
+            .contains("enable --now forge-converge.timer"),
+        "and their timers were enabled before the CLI verdict reddened the run: {out}"
+    );
+    let c = &f.case;
+    assert_eq!(c.summary("cli_sha"), SHA_A);
+    assert!(
+        c.summary("cli_result").starts_with("refused"),
+        "{}",
+        c.summary("cli_result")
+    );
+    assert_eq!(c.summary("cli_exit"), "1", "{out}");
+    assert!(
+        out.contains("DISTINCTIVE-CONNECTION-REFUSED") && out.contains("the CLI step FAILED"),
+        "{out}"
+    );
+}
+
+/// A hand run of install.sh (no converge around it) has no sha to
+/// install for; it says so on the packet and installs no CLI rather
+/// than guessing one.
+#[test]
+fn a_hand_run_without_a_converged_sha_installs_no_cli_and_says_so() {
+    if !tools() {
+        return;
+    }
+    let f = ForgeInstall::new("no-sha");
+    let (rc, out) = f.run("cluster-operator", None, &[]);
+    assert_eq!(rc, 0, "{out}");
+    assert!(f.case.requests().is_empty(), "{:?}", f.case.requests());
+    assert!(
+        f.case.summary("cli_result").starts_with("skipped"),
+        "{}",
+        f.case.summary("cli_result")
+    );
+    assert!(out.contains("BOSS_CONVERGE_SHA"), "the fix is named: {out}");
+}
+
+/// forge-converge.sh hands install.sh the sha it converged to under the
+/// name install.sh reads — the loop itself needs root and a checkout
+/// owner (runuser), so the handoff is pinned by text.
+#[test]
+fn the_forge_converge_hands_the_installer_the_sha_it_converged_to() {
+    let converge = std::fs::read_to_string(repo_root().join(FORGE_CONVERGE)).unwrap();
+    let install = std::fs::read_to_string(repo_root().join(FORGE_INSTALL)).unwrap();
+    assert!(
+        converge.contains("export BOSS_CONVERGE_SHA"),
+        "{FORGE_CONVERGE}: exports BOSS_CONVERGE_SHA for install.sh"
+    );
+    assert!(
+        install.contains("${BOSS_CONVERGE_SHA:-}")
+            && install.contains("estate/install-cli-from-image.sh"),
+        "{FORGE_INSTALL}: reads BOSS_CONVERGE_SHA and runs the estate installer"
     );
 }

@@ -82,14 +82,17 @@ spec:
               args:
                 - |
                   set -euo pipefail
-                  /usr/local/bin/boss-maintenance-wrap.sh maintenance-conservation-invariants "Conservation-invariant sweep"
-                  # psql reads DATABASE_URL directly — no config file needed.
-                  /opt/boss/infra/lint/conservation-invariants.sh
-                  # The tenant's own sweep, when the image ships one for this instance's tenant directory.
-                  if [ -f "$BOSS_TENANT_DIR/conservation-invariants.sh" ]; then
-                      bash "$BOSS_TENANT_DIR/conservation-invariants.sh"
-                  fi
-                  /usr/local/bin/boss-step.sh maintenance-conservation-invariants run result=ok
+                  # The check is two sweeps under one verdict: the platform's,
+                  # then the tenant's own when the image ships one for this
+                  # instance's tenant directory. psql reads DATABASE_URL
+                  # directly — no config file needed. A violated invariant
+                  # exits nonzero and the wrapper records the run as failed
+                  # — the point of the sweep (480e183c).
+                  /usr/local/bin/boss-chore.sh maintenance-conservation-invariants "Conservation-invariant sweep" -- bash -euo pipefail -c '
+                    /opt/boss/infra/lint/conservation-invariants.sh
+                    if [ -f "$BOSS_TENANT_DIR/conservation-invariants.sh" ]; then
+                        bash "$BOSS_TENANT_DIR/conservation-invariants.sh"
+                    fi'
               env:
                 - name: DATABASE_URL
                   valueFrom:

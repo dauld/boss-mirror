@@ -367,8 +367,12 @@ COPY infra/oss-quickstart/tenant-modules.sh /usr/local/bin/tenant-modules.sh
 # The maintenance-packet wrap scripts, so in-cluster CronJob chores
 # (boss-search-reindex first) open and complete their packets the same
 # way the boss-gcp timers do — one script pair, both hosts (jq above
-# is theirs).
-COPY infra/boss-maintenance-wrap.sh infra/boss-step.sh infra/boss-api-curl.sh /usr/local/bin/
+# is theirs) — and boss-chore.sh, the CronJob's ExecStopPost: it runs
+# the pair around a check and records ok AND failed (480e183c), and
+# finds the pair next to itself, which is why all four share this line.
+# crates/core/boss-testing/tests/a_chore_records_ok_and_failed.rs pins
+# the pairing; the gate never builds the image.
+COPY infra/boss-maintenance-wrap.sh infra/boss-step.sh infra/boss-api-curl.sh infra/boss-chore.sh /usr/local/bin/
 # The platform's conservation-invariant sweep and the helper it sources,
 # for the hourly boss-conservation-invariants CronJob (H12, backlog
 # 236529aa) — the brewery's own sweep rides in with `COPY examples`

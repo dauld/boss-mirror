@@ -1,0 +1,38 @@
+# ---------------------------------------------------------------------------
+# scope-declaration — the ship-a-change boundary declaration: what the car
+# DOES and what it deliberately does NOT do, with the branch, the packet it
+# answers and the gate receipt.
+#
+# Version 1 is the row 156-scope-declaration-plugin.sql seeded. Declared
+# here since 2026-09-18 (backlog 393d3234, consolidation H4, car 2 of 4): a
+# step plugin's ROW lives in this bundle beside the Workflow and station
+# bundles, published insert-if-missing by boss-platform-workflow-seed, and
+# migrations newer than the cutover stamp in
+# infra/lint/migrations-declare-schema-only.sh declare schema only. The JS
+# it points at is infra/step-plugins/<frontend_url>, which the converge
+# runner mounts as the step-plugins ConfigMap;
+# infra/lint/step-plugin-bundle-exists.sh holds the two together.
+#
+# To change this row, bump `version` — the seed refuses a row that differs
+# from the live active row of the same (kind, version).
+# ---------------------------------------------------------------------------
+
+[[step_plugin]]
+kind = "scope-declaration"
+version = 1
+status = "active"
+label = "Scope declaration"
+description = "Asks a car's author what the change does and what it deliberately does not do, with the reason the second question is required, then records summary + excludes and completes the step. Shows the branch (the Job's Subject id), the backlog packet the change answers, and the gate receipt when the gate step is already complete."
+category = "platform"
+frontend_url = "scope-declaration.js"
+owning_team = "platform"
+
+[step_plugin.metadata_schema]
+type = "object"
+required = ["summary", "excludes"]
+
+[step_plugin.metadata_schema.properties.excludes]
+type = "string"
+
+[step_plugin.metadata_schema.properties.summary]
+type = "string"

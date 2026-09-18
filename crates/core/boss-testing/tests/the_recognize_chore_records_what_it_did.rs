@@ -56,15 +56,20 @@ fn the_cluster_cronjob_declares_the_summary_path_and_closes_after_the_run() {
         yaml.contains("name: BOSS_RUN_SUMMARY_FILE"),
         "{CRONJOB} must hand the chore container BOSS_RUN_SUMMARY_FILE"
     );
-    let run = yaml
-        .find("/usr/local/bin/boss-ledger-recognize --config")
-        .expect("the CronJob runs the binary");
-    let close = yaml
-        .find("/usr/local/bin/boss-step.sh maintenance-ledger-recognize run")
-        .expect("the CronJob closes the packet through boss-step.sh");
+    // Since 480e183c the CronJob hands the binary to boss-chore.sh,
+    // which runs boss-step.sh AFTER the check on both legs — so the
+    // summary file exists when it is read, and a tick that failed
+    // still records what it counted. The ordering is the wrapper's
+    // (a_chore_records_ok_and_failed.rs); here it is enough that the
+    // binary is the wrapper's check.
+    let line = yaml
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("/usr/local/bin/boss-chore.sh maintenance-ledger-recognize "))
+        .expect("the CronJob records through boss-chore.sh under the recognize kind");
     assert!(
-        run < close,
-        "boss-step.sh must run AFTER the binary, so the summary file exists when it reads it"
+        line.contains(" -- /usr/local/bin/boss-ledger-recognize --config"),
+        "the binary is the wrapper's check, after the `--`: {line}"
     );
 }
 

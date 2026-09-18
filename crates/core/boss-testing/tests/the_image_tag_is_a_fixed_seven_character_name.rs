@@ -15,7 +15,7 @@
 use boss_testing::repo_root;
 
 const RUNNER: &str = "infra/forge/cluster-deploy-runner.sh";
-const INSTALLER: &str = "infra/gcp/install-cli-from-image.sh";
+const INSTALLER: &str = "infra/estate/install-cli-from-image.sh";
 
 fn read(rel: &str) -> String {
     std::fs::read_to_string(repo_root().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))

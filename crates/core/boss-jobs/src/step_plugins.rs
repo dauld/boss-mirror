@@ -149,6 +149,30 @@ pub trait StepPluginRegistry: Send + Sync {
         actor: &boss_core::actor::ActorId,
         now: DateTime<Utc>,
     ) -> Result<(), StepPluginError>;
+
+    /// Publish `spec` at ITS OWN declared version — the platform
+    /// bundle's write (`crate::step_plugin_seed`, backlog 393d3234).
+    ///
+    /// `create_draft` + `publish` assign `max(version) + 1`, which is
+    /// right for an author and wrong for a bundle: a bundle row
+    /// carries its version (a version bump is the edit path), and a
+    /// fresh deployment must land `sign-off` at v3 — the version the
+    /// migrations produced and every open step's
+    /// `step_plugin_version` names — not at v1 with two versions of
+    /// history nobody wrote.
+    ///
+    /// In one transaction: retire any active row of the same kind,
+    /// INSERT the row active at `spec.version` with `created_at =
+    /// now`, record `jobs.step_plugin.published` (payload = the row
+    /// written). `Conflict` when (kind, version) already exists — the
+    /// caller decides what an existing row means, this never
+    /// overwrites one.
+    async fn publish_declared(
+        &self,
+        spec: StepPluginSpec,
+        actor: &boss_core::actor::ActorId,
+        now: DateTime<Utc>,
+    ) -> Result<StepPluginSpec, StepPluginError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -346,6 +370,37 @@ impl StepPluginRegistry for InMemoryStepPlugins {
             ));
         }
         Ok(())
+    }
+
+    async fn publish_declared(
+        &self,
+        mut spec: StepPluginSpec,
+        actor: &boss_core::actor::ActorId,
+        now: DateTime<Utc>,
+    ) -> Result<StepPluginSpec, StepPluginError> {
+        let mut rows = self.rows.lock().unwrap();
+        let key = (spec.kind.clone(), spec.version);
+        if rows.contains_key(&key) {
+            return Err(StepPluginError::Conflict(format!(
+                "row already exists: {}@{}",
+                spec.kind, spec.version
+            )));
+        }
+        for ((k, _), row) in rows.iter_mut() {
+            if *k == spec.kind && row.status == WorkflowStatus::Active {
+                row.status = WorkflowStatus::Retired;
+            }
+        }
+        spec.status = WorkflowStatus::Active;
+        spec.created_at = now;
+        rows.insert(key, spec.clone());
+        drop(rows);
+        self.record(crate::events::step_plugin_registry_event(
+            crate::events::STEP_PLUGIN_PUBLISHED,
+            actor,
+            &spec,
+        ));
+        Ok(spec)
     }
 }
 
@@ -646,6 +701,82 @@ mod pg {
                 .await
                 .map_err(|e| StepPluginError::Storage(e.to_string()))?;
             Ok(())
+        }
+
+        async fn publish_declared(
+            &self,
+            mut spec: StepPluginSpec,
+            actor: &boss_core::actor::ActorId,
+            now: DateTime<Utc>,
+        ) -> Result<StepPluginSpec, StepPluginError> {
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|e| StepPluginError::Storage(e.to_string()))?;
+
+            let exists: Option<(i32,)> =
+                sqlx::query_as("SELECT version FROM step_plugins WHERE kind = $1 AND version = $2")
+                    .bind(&spec.kind)
+                    .bind(spec.version)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| StepPluginError::Storage(e.to_string()))?;
+            if exists.is_some() {
+                return Err(StepPluginError::Conflict(format!(
+                    "row already exists: {}@{}",
+                    spec.kind, spec.version
+                )));
+            }
+
+            // RETIRE FIRST, THEN INSERT: `step_plugins_one_active_per_kind`
+            // is a plain partial unique index, enforced per statement,
+            // so the order is load-bearing (registry-bump-retires-first.sh
+            // holds the migrations to the same order).
+            sqlx::query(
+                "UPDATE step_plugins SET status = 'retired'
+                 WHERE kind = $1 AND status = 'active'",
+            )
+            .bind(&spec.kind)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StepPluginError::Storage(e.to_string()))?;
+
+            spec.status = WorkflowStatus::Active;
+            spec.created_at = now;
+            sqlx::query(
+                "INSERT INTO step_plugins
+                    (kind, version, status, label, description, category,
+                     metadata_schema, frontend_url, owning_team, authoring_job_id, created_at)
+                 VALUES ($1, $2, 'active', $3, $4, $5, $6, $7, $8, $9, $10)",
+            )
+            .bind(&spec.kind)
+            .bind(spec.version)
+            .bind(&spec.label)
+            .bind(&spec.description)
+            .bind(&spec.category)
+            .bind(&spec.metadata_schema)
+            .bind(&spec.frontend_url)
+            .bind(&spec.owning_team)
+            .bind(spec.authoring_job_id)
+            .bind(spec.created_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StepPluginError::Storage(e.to_string()))?;
+
+            let event = crate::events::step_plugin_registry_event(
+                crate::events::STEP_PLUGIN_PUBLISHED,
+                actor,
+                &spec,
+            );
+            boss_events::outbox::record_event_in_tx(&mut tx, &event)
+                .await
+                .map_err(StepPluginError::Storage)?;
+
+            tx.commit()
+                .await
+                .map_err(|e| StepPluginError::Storage(e.to_string()))?;
+            Ok(spec)
         }
     }
 }

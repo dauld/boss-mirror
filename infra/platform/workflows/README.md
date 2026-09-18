@@ -25,11 +25,17 @@ into data and registry configurations. That is hunting leakage between
 the layers too" — CLAUDE.md's own test: "a protocol that cannot be
 replaced without a deploy has leaked into the substrate".
 
-Three of the four registries carrying the operating model already seed
-as data (dispatcher_rules, stations, step_plugins). `workflows` did
-not: its kinds were Rust literals in `platform_workflows()`, and an
-API publish of one is REVERTED on the next boot because
-bootstrap_reconcile republishes the code default (68331085).
+Three of the four registries carrying the operating model now seed as
+data the same way this one does: dispatcher_rules from
+`infra/dispatcher/rules/` (2026-09-11), stations from `../stations/`
+and step_plugins from `../step-plugins/` (both 2026-09-18, backlog
+393d3234 — until that day each of those two was declared only by
+migration inserts, which is a seed nothing can re-run or drift-check;
+the JS under `infra/step-plugins/` was data, the row naming it was
+not). `workflows` was the last out: its kinds were Rust literals in
+`platform_workflows()`, and an API publish of one is REVERTED on the
+next boot because bootstrap_reconcile republishes the code default
+(68331085).
 
 **`platform_workflows()` is EMPTY as of 2026-09-11**, so this directory
 is the whole platform protocol set. The last four out were

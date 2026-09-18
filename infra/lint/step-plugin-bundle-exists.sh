@@ -7,6 +7,15 @@
 # written in different languages, land in different directories, and
 # neither one fails to load if the other is absent.
 #
+# WHERE A ROW IS DECLARED. Since 2026-09-18 (backlog 393d3234,
+# consolidation H4, car 2) a row lives in the platform bundle,
+# `infra/platform/step-plugins/<kind>.toml`, which the seed publishes
+# insert-if-missing at every start; the seven migrations that declared
+# rows before that day stay as history and still produce rows on a
+# fresh database. Both are read here: a bundle file whose JS is missing
+# is the same broken step as a migration's, and a migration row whose
+# JS was deleted is still live on every deployment that ran it.
+#
 # WHAT THE FAILURE LOOKS LIKE. The SPA prefers a plugin over its
 # built-in surface whenever the registry has an active row for a step's
 # kind (`apps/web/src/steps/StepSurface.svelte` → `hasActivePluginFor`).
@@ -32,20 +41,32 @@ cd "$(dirname "$0")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
 . infra/lint/lib/scanned.sh
 SCHEMA="infra/postgres/schema"
+ROWS="infra/platform/step-plugins"
 BUNDLES="infra/step-plugins"
 [ -d "$SCHEMA" ] || { echo "step-plugin-bundle-exists: $SCHEMA not found" >&2; exit 1; }
+[ -d "$ROWS" ] || { echo "step-plugin-bundle-exists: $ROWS not found" >&2; exit 1; }
 [ -d "$BUNDLES" ] || { echo "step-plugin-bundle-exists: $BUNDLES not found" >&2; exit 1; }
 
-# Pull the frontend_url from every INSERT INTO step_plugins. The seeds
+# Pull the frontend_url from every INSERT INTO step_plugins (the seeds
 # are hand-written with the value list on its own lines, so the bundle
-# name is the lone single-quoted token ending in .js.
-urls=$(grep -rhoE "'[A-Za-z0-9._/-]+\.js'" "$SCHEMA"/*.sql 2>/dev/null \
-    | tr -d "'" | sort -u)
+# name is the lone single-quoted token ending in .js) and from every
+# bundle row's `frontend_url = "<name>.js"` line.
+urls=$( {
+    grep -rhoE "'[A-Za-z0-9._/-]+\.js'" "$SCHEMA"/*.sql 2>/dev/null | tr -d "'"
+    grep -hoE '^frontend_url *= *"[A-Za-z0-9._/-]+\.js"' "$ROWS"/*.toml 2>/dev/null \
+        | sed -E 's/^frontend_url *= *"//; s/"$//'
+} | sort -u)
 
 count=$(printf '%s\n' "$urls" | grep -c . || true)
 if [ "$count" -lt 1 ]; then
-    echo "step-plugin-bundle-exists: found no .js references in $SCHEMA —" >&2
+    echo "step-plugin-bundle-exists: found no .js references in $SCHEMA or $ROWS —" >&2
     echo "  the scrape broke, so a green result would mean nothing." >&2
+    exit 1
+fi
+declared=$(grep -lE '^frontend_url *= *"' "$ROWS"/*.toml 2>/dev/null | wc -l | tr -d ' ')
+if [ "$declared" -lt 1 ]; then
+    echo "step-plugin-bundle-exists: no bundle row under $ROWS declares a frontend_url —" >&2
+    echo "  the TOML scrape broke, so a green result would mean nothing." >&2
     exit 1
 fi
 
@@ -64,7 +85,8 @@ if [ -n "$missing" ]; then
     echo "  The SPA prefers a registered plugin over its built-in surface, so" >&2
     echo "  this does not degrade gracefully — the step renders broken on the" >&2
     echo "  one surface someone needs to act on, and only once deployed." >&2
-    echo "  Either add the bundle or drop the row." >&2
+    echo "  Either add the bundle or drop the row (a row lives in" >&2
+    echo "  $ROWS/<kind>.toml; a migration's is history)." >&2
     exit 1
 fi
 

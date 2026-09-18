@@ -179,7 +179,21 @@ fi
 #     mode 0600; anything else is reported on the converge packet as
 #     absent-or-wrong until fixed. The estate's own converge never
 #     writes a credential.
+#   * The tree's `boss` CLI, since 2026-09-18 (backlog 9f00a805,
+#     consolidation H8, car 1) — taken out of the cluster image built
+#     for the commit this converge checked out, by the same installer
+#     boss-gcp has run since 2026-09-15 (infra/estate/
+#     install-cli-from-image.sh; the store is /opt/boss-cli, the link
+#     /usr/local/bin/boss, `cli_sha` beside `converge_sha` on the
+#     packet). Measured on #448: infra/forge/*.sh was 32 scripts and
+#     9,790 lines, the largest of them shell twins of CLI verbs
+#     (run-car-probe.sh for `boss prove --from-car`, tenant-census.sh
+#     for `boss tenant`, …) each with its own pin, because this host
+#     had no binary to shell to. The role that brings it is the one
+#     the verbs serve: cluster management runs here. The CLI step runs
+#     below, after the credential check.
 . "${HERE}/../estate/node-roles.sh"
+cli_rc=0
 if has_role cluster-operator; then
     TALOSCTL_VERSION="v1.13.8"
     TALOSCTL_SHA256="406b56f9e4ff03b1557cc941b1f163aec8a6ebb36e28f0bbbe6d083589529261"
@@ -210,8 +224,53 @@ if has_role cluster-operator; then
         echo "install.sh: cluster-operator credentials present (root:root 600)"
         if declare -F run_summary_field >/dev/null; then run_summary_field ops_credentials "present"; fi
     fi
+
+    # THE CLI, FROM THE IMAGE AT THE SHA THIS CONVERGE CHECKED OUT.
+    # forge-converge.sh hands the sha over as BOSS_CONVERGE_SHA (root
+    # cannot read the owner's clone); a hand run has none and installs
+    # no CLI rather than guessing one. The installer records its own
+    # facts (cli_sha, cli_result, cli_action, cli_image) through the
+    # run summary; its output is captured and printed whole under its
+    # own prefix, like boss-gcp's converge prints it.
+    #
+    # THREE VERDICTS, NOT TWO. Exit 0 is the CLI confirmed at the sha.
+    # Exit 75 is `not yet`: the registry answered and has no image for
+    # this commit's tag — the deploy runner on THIS host builds it a
+    # few minutes after each train, and this converge fetched main ten
+    # minutes after the last one, so the first tick after every train
+    # lands here. That is a wait, recorded on the packet, retried next
+    # tick, and NOT a red: a converge that failed on every train would
+    # be an alarm nobody could read (CLAUDE.md §Diagnosis). Anything
+    # else is a real refusal — the registry dark, a digest mismatch, a
+    # binary that names another commit — and reds the run the way it
+    # reds boss-gcp's: after the units below are installed, enabled and
+    # reported, with the exit on the packet. The installer leaves
+    # /usr/local/bin/boss at whatever the previous confirmed generation
+    # was in every non-zero case.
+    if [ "${INSTALL_CLI:-1}" = "1" ]; then
+        if [ -z "${BOSS_CONVERGE_SHA:-}" ]; then
+            echo "install.sh: no converged sha in the environment (BOSS_CONVERGE_SHA, set by forge-converge.sh) — a hand run installs no CLI; the next converge tick does"
+            run_summary_field cli_result "skipped: no BOSS_CONVERGE_SHA (hand run)"
+        else
+            cli_log="$(mktemp -t forge-install-cli.XXXXXX)"
+            bash "${HERE}/../estate/install-cli-from-image.sh" "$BOSS_CONVERGE_SHA" >"$cli_log" 2>&1 || cli_rc=$?
+            sed 's/^/  cli: /' "$cli_log"
+            rm -f "$cli_log"
+            case "$cli_rc" in
+                0) echo "install.sh: the CLI is the tree's at ${BOSS_CONVERGE_SHA:0:8} (cluster-operator)" ;;
+                75)
+                    echo "install.sh: the image for ${BOSS_CONVERGE_SHA:0:8} is not in the registry yet — the deploy runner builds it after each train; the next tick retries, and /usr/local/bin/boss stays whatever the previous converge confirmed (cli_result on the packet)"
+                    cli_rc=0 ;;
+                *)
+                    echo "install.sh: the CLI step FAILED (exit $cli_rc) at ${BOSS_CONVERGE_SHA:0:8} — its complete" >&2
+                    echo "    output is above. Every unit still converges below; /usr/local/bin/boss is" >&2
+                    echo "    whatever the previous converge confirmed (cli_result on the packet says why)." >&2
+                    run_summary_field cli_exit "$cli_rc" ;;
+            esac
+        fi
+    fi
 else
-    echo "install.sh: cluster-operator not among this host's roles (${BOSS_NODE_ROLES:-none}) — no Talos client installed"
+    echo "install.sh: cluster-operator not among this host's roles (${BOSS_NODE_ROLES:-none}) — no Talos client installed, no CLI"
 fi
 
 # The per-unit `jobs-url.conf` drop-in that used to carry the system of
@@ -275,4 +334,13 @@ if [ "$ops_runner_rc" -ne 0 ]; then
     echo "    what failed above, and the run summary carries it. Every other unit converged;" >&2
     echo "    this host cannot answer an ops-request until that is fixed." >&2
     exit "$ops_runner_rc"
+fi
+# The CLI verdict last, for the same reason the ops runner's is: a
+# refused pull deserves a red unit and a packet on `failed` — the host
+# has not converged on the tree until its CLI is the tree's — but never
+# at the price of a unit left uninstalled or a timer left disabled.
+if [ "$cli_rc" -ne 0 ]; then
+    echo "install.sh: the CLI did NOT install (exit $cli_rc) — cli_result on the packet says why." >&2
+    echo "    Every unit converged; /usr/local/bin/boss is whatever the previous converge confirmed." >&2
+    exit "$cli_rc"
 fi

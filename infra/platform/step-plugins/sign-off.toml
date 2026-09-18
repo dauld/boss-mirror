@@ -1,0 +1,35 @@
+# ---------------------------------------------------------------------------
+# sign-off — the case being decided, the roster of roles that must stamp,
+# and the stamp ceremony; v3 makes the signature FOLLOW the decision
+# (feedback 221b4b5c, 2026-09-05: the surface's own re-save made its own
+# stamp stale).
+#
+# Version 3 is the row 202609082130-sign-off-plugin-v3.sql produced (135
+# seeded v1 and that file retires it; v2 was published live through the API
+# on 2026-08-19 and has no migration). Declared here since 2026-09-18
+# (backlog 393d3234, consolidation H4, car 2 of 4): a step plugin's ROW
+# lives in this bundle beside the Workflow and station bundles, published
+# insert-if-missing by boss-platform-workflow-seed, and migrations newer
+# than the cutover stamp in infra/lint/migrations-declare-schema-only.sh
+# declare schema only. The JS it points at is
+# infra/step-plugins/<frontend_url>, which the converge runner mounts as
+# the step-plugins ConfigMap; infra/lint/step-plugin-bundle-exists.sh holds
+# the two together.
+#
+# To change this row, bump `version` — the seed refuses a row that differs
+# from the live active row of the same (kind, version).
+# ---------------------------------------------------------------------------
+
+[[step_plugin]]
+kind = "sign-off"
+version = 3
+status = "active"
+label = "Sign off"
+description = "Custom Step UX for sign-off steps, v3: the signature follows the decision. One gesture for a single signer — decision saved, then the signer's own stamp (passkey ceremony when presence is required), then completion — with each stage shown as it lands and any refusal verbatim. Never writes metadata after a signature exists: a decision a signature already covers is not re-saved (2026-09-05: the surface's own re-save with a fresh decided_at made its own stamp stale and the completion answered 409); a changed decision is saved before the re-signature and the roster names the stamps that made stale. Keeps v2's case rendering (context_md, else the packet's briefing or filed message), declared-field contract, the Approve/Reject/Request-changes trio, and per-role signature buttons for multi-party steps."
+category = "coordination"
+frontend_url = "sign-off.js"
+owning_team = "platform"
+
+[step_plugin.metadata_schema]
+type = "object"
+properties = {}

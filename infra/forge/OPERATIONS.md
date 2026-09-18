@@ -31,6 +31,7 @@ the only filesystem that matters, and every consumer below shares it.
 | rootless docker daemon | David's user daemon (data-root `/home/david/.local/share/docker`) | the daemon `cluster-deploy-runner` builds the cluster image on | its own image and build cache |
 | WireGuard | `wg-quick@wg0.service` | the tunnel to boss-gcp and the hub; the pod reaches this host over the LAN, not the tunnel | — |
 | journal gateway | `systemd-journal-gatewayd.socket` on `:19531`, enabled by `install.sh` | the read door: any unit's journal over HTTP from the pod, plus anything a script logs with `\| systemd-cat -t <tag>`. **Read it through `infra/forge/journal-read.sh`, never raw curl** — see below | the distro's units (`systemd-journal-remote`); converged since 2026-09-10 |
+| the `boss` CLI | `/usr/local/bin/boss`, a link to the wrapper in `/opt/boss-cli`, installed by `install.sh` for the `cluster-operator` role from the cluster image built for the converged commit (`infra/estate/install-cli-from-image.sh`, since 2026-09-18) | the tree's own CLI on this host — `boss --version` names the converged commit; the packet records `cli_sha` beside `converge_sha`. The first converge tick after a train usually finds no image yet (`cli_result: not yet`) and installs it on the next | one directory per generation under `/opt/boss-cli`, newest 3 kept; nothing else on the host shells to it yet (the forge's shell twins of CLI verbs retire onto it one car at a time, backlog 9f00a805) |
 
 ## The BOSS units
 

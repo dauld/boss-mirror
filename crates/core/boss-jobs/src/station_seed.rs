@@ -13,36 +13,22 @@
 //! (`infra/platform/workflows/`, `boss-platform-workflow-seed`). This
 //! is the same move for stations, on the same seed path.
 //!
-//! THE DECISION TABLE, per bundle row `(name, version)`:
-//!
-//! | live registry                                   | outcome                 |
-//! |-------------------------------------------------|-------------------------|
-//! | no row of this name                             | insert, active          |
-//! | active row at a LOWER version                   | publish; retire the old |
-//! | row at (name, version) active and EQUAL         | present — untouched     |
-//! | row at (name, version) active and DIFFERENT     | REFUSED, by field       |
-//! | row at (name, version) exists but is not active | superseded — untouched  |
-//! | no row at (name, version); active row is HIGHER | behind — untouched      |
-//!
-//! Insert-if-missing and nothing else, as the Workflow seed is: a row
-//! an operator published lives on, and this never rewrites one. The
-//! refusal is what makes editing safe — a bundle file changed without
-//! a version bump would otherwise silently disagree with every
-//! deployment that already has the row, which is the drift this car
-//! exists to remove. A version bump is the edit path: the seed
-//! publishes the new version and retires the live one, exactly as
-//! `POST /api/stations/{name}/publish` would.
-//!
-//! Every refusal is collected before anything is written, so a
-//! refused seed writes nothing and names every offending row at once.
+//! The decision table, the report and the refusal live in
+//! [`crate::bundle_seed`] since car 2 (step plugins) needed them a
+//! second time; this module is the station half of the port — the
+//! three reads and the one write — plus where the bundle is.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
+use crate::bundle_seed::{BundleRegistry, BundleSeedError, Declared, seed_bundle};
+use crate::registry::WorkflowStatus;
 use crate::seed_loader::{SeedLoaderError, load_stations};
 use crate::stations::{StationError, StationRegistry, StationSpec};
+
+pub use crate::bundle_seed::{Refusal, SeedOutcome, SeedReport, SeedRow, differing_fields};
 
 /// The in-tree platform station bundle, resolved from this crate — a
 /// DIRECTORY, one `<name>.toml` per station, beside the Workflow
@@ -74,204 +60,61 @@ pub fn load_stations_beside(workflows: &Path) -> Option<Result<Vec<StationSpec>,
     dir.is_dir().then(|| load_stations(&dir))
 }
 
-/// What the seed did — or, on a dry run, would do — with one row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SeedOutcome {
-    /// No row of this name existed; the declared version was inserted
-    /// active.
-    Inserted,
-    /// A lower version was active; the declared version was published
-    /// over it and the old one retired.
-    Published { superseded: i32 },
-    /// The live active row IS this declaration, every column.
-    Present,
-    /// The declared (name, version) exists live but is not the active
-    /// row: the live lineage moved past it (an operator published a
-    /// later version). Untouched.
-    Superseded { live_active: Option<i32> },
-    /// No row at the declared version and the live active row is a
-    /// HIGHER version: the bundle is behind the deployment. Untouched,
-    /// and worth a version bump in the tree.
-    Behind { live_active: i32 },
+impl Declared for StationSpec {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn version(&self) -> i32 {
+        self.version
+    }
+    fn status(&self) -> WorkflowStatus {
+        self.status
+    }
 }
 
-impl std::fmt::Display for SeedOutcome {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Inserted => write!(f, "inserted"),
-            Self::Published { superseded } => write!(f, "published, retiring v{superseded}"),
-            Self::Present => write!(f, "already present, untouched"),
-            Self::Superseded {
-                live_active: Some(v),
-            } => write!(f, "superseded live by v{v}, untouched"),
-            Self::Superseded { live_active: None } => {
-                write!(
-                    f,
-                    "exists live but is not active (no active row), untouched"
-                )
-            }
-            Self::Behind { live_active } => {
-                write!(
-                    f,
-                    "behind the live lineage (v{live_active} active), untouched"
-                )
-            }
+#[async_trait]
+impl<'a> BundleRegistry for dyn StationRegistry + 'a {
+    type Spec = StationSpec;
+    type Error = StationError;
+    const LABEL: &'static str = "platform-station-seed";
+    const BUNDLE: &'static str = "infra/platform/stations/<name>.toml";
+
+    async fn live_active(&self, name: &str) -> Result<Option<StationSpec>, StationError> {
+        match self.get_active(name).await {
+            Ok(row) => Ok(Some(row)),
+            Err(StationError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
         }
     }
-}
 
-/// One row's line in the report.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SeedRow {
-    pub name: String,
-    pub version: i32,
-    pub outcome: SeedOutcome,
-}
-
-/// What a seed run did, row by row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SeedReport {
-    pub dry_run: bool,
-    pub rows: Vec<SeedRow>,
-}
-
-impl SeedReport {
-    /// How many rows had an outcome the predicate accepts.
-    pub fn count(&self, pred: impl Fn(&SeedOutcome) -> bool) -> usize {
-        self.rows.iter().filter(|r| pred(&r.outcome)).count()
-    }
-}
-
-impl std::fmt::Display for SeedReport {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let would = if self.dry_run { "WOULD be " } else { "" };
-        for row in &self.rows {
-            let verb = match row.outcome {
-                SeedOutcome::Inserted | SeedOutcome::Published { .. } => would,
-                _ => "",
-            };
-            writeln!(f, "  {}@v{}: {verb}{}", row.name, row.version, row.outcome)?;
+    async fn live_version(
+        &self,
+        name: &str,
+        version: i32,
+    ) -> Result<Option<StationSpec>, StationError> {
+        match self.get_version(name, version).await {
+            Ok(row) => Ok(Some(row)),
+            Err(StationError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
         }
-        let inserted = self.count(|o| matches!(o, SeedOutcome::Inserted));
-        let published = self.count(|o| matches!(o, SeedOutcome::Published { .. }));
-        let present = self.count(|o| matches!(o, SeedOutcome::Present));
-        let untouched = self.rows.len() - inserted - published - present;
-        write!(
-            f,
-            "platform-station-seed: {inserted} inserted, {published} published, \
-             {present} already present, {untouched} left to the live lineage{}",
-            if self.dry_run { " (dry run)" } else { "" }
-        )
+    }
+
+    async fn publish_declared(
+        &self,
+        spec: StationSpec,
+        actor: &boss_core::actor::ActorId,
+        now: DateTime<Utc>,
+    ) -> Result<StationSpec, StationError> {
+        StationRegistry::publish_declared(self, spec, actor, now).await
     }
 }
 
-/// A bundle row the live registry contradicts at the same (name,
-/// version): the columns that differ, in column order.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Refusal {
-    pub name: String,
-    pub version: i32,
-    pub fields: Vec<String>,
-}
+pub type StationSeedError = BundleSeedError<StationError>;
 
-#[derive(Debug, thiserror::Error)]
-pub enum StationSeedError {
-    /// One or more bundle rows differ from the live ACTIVE row of the
-    /// same (name, version). Nothing was written.
-    #[error("{}", refusal_text(.0))]
-    Refused(Vec<Refusal>),
-    #[error("station registry: {0}")]
-    Registry(#[from] StationError),
-}
-
-fn refusal_text(refusals: &[Refusal]) -> String {
-    let mut out = String::from(
-        "platform-station-seed REFUSED — a bundle row differs from the live active row \
-         of the same (name, version), and this seed never rewrites a live row:\n",
-    );
-    for r in refusals {
-        out.push_str(&format!(
-            "  {}@v{}: differs in {}\n",
-            r.name,
-            r.version,
-            r.fields.join(", ")
-        ));
-    }
-    out.push_str(
-        "A version bump is the edit path: raise `version` in infra/platform/stations/<name>.toml \
-         and the seed publishes the new version, retiring the live one. Nothing was written.",
-    );
-    out
-}
-
-/// A row as a DECLARATION: every column but `created_at`, which is
-/// when the deployment was built rather than what the station is.
-fn declaration(spec: &StationSpec) -> BTreeMap<String, serde_json::Value> {
-    let mut map: BTreeMap<String, serde_json::Value> = serde_json::to_value(spec)
-        .ok()
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
-    map.remove("created_at");
-    map
-}
-
-/// The columns on which two rows disagree as declarations, sorted.
-pub fn differing_fields(a: &StationSpec, b: &StationSpec) -> Vec<String> {
-    let (da, db) = (declaration(a), declaration(b));
-    da.keys()
-        .chain(db.keys())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .filter(|k| da.get(*k) != db.get(*k))
-        .cloned()
-        .collect()
-}
-
-/// Classify one bundle row against the live registry. Reads only.
-async fn classify(
-    registry: &dyn StationRegistry,
-    spec: &StationSpec,
-) -> Result<Result<SeedOutcome, Refusal>, StationSeedError> {
-    let active = match registry.get_active(&spec.name).await {
-        Ok(row) => Some(row),
-        Err(StationError::NotFound(_)) => None,
-        Err(e) => return Err(e.into()),
-    };
-    match registry.get_version(&spec.name, spec.version).await {
-        Ok(live) => {
-            if live.status != crate::registry::WorkflowStatus::Active {
-                return Ok(Ok(SeedOutcome::Superseded {
-                    live_active: active.map(|a| a.version),
-                }));
-            }
-            let fields = differing_fields(&live, spec);
-            if fields.is_empty() {
-                Ok(Ok(SeedOutcome::Present))
-            } else {
-                Ok(Err(Refusal {
-                    name: spec.name.clone(),
-                    version: spec.version,
-                    fields,
-                }))
-            }
-        }
-        Err(StationError::NotFound(_)) => Ok(Ok(match active {
-            None => SeedOutcome::Inserted,
-            Some(a) if a.version < spec.version => SeedOutcome::Published {
-                superseded: a.version,
-            },
-            Some(a) => SeedOutcome::Behind {
-                live_active: a.version,
-            },
-        })),
-        Err(e) => Err(e.into()),
-    }
-}
-
-/// Publish `specs` into `registry` by the decision table in the
-/// module doc. Classifies every row first and refuses whole if any
-/// row contradicts its live twin; only then writes. `dry_run` reports
-/// what would be written and writes nothing.
+/// Publish `specs` into `registry` by the decision table in
+/// [`crate::bundle_seed`]. Classifies every row first and refuses
+/// whole if any row contradicts its live twin; only then writes.
+/// `dry_run` reports what would be written and writes nothing.
 pub async fn seed_stations(
     registry: &dyn StationRegistry,
     specs: &[StationSpec],
@@ -279,32 +122,7 @@ pub async fn seed_stations(
     now: DateTime<Utc>,
     dry_run: bool,
 ) -> Result<SeedReport, StationSeedError> {
-    let mut rows = Vec::with_capacity(specs.len());
-    let mut refusals = Vec::new();
-    for spec in specs {
-        match classify(registry, spec).await? {
-            Ok(outcome) => rows.push(SeedRow {
-                name: spec.name.clone(),
-                version: spec.version,
-                outcome,
-            }),
-            Err(refusal) => refusals.push(refusal),
-        }
-    }
-    if !refusals.is_empty() {
-        return Err(StationSeedError::Refused(refusals));
-    }
-    if !dry_run {
-        for (row, spec) in rows.iter().zip(specs) {
-            if matches!(
-                row.outcome,
-                SeedOutcome::Inserted | SeedOutcome::Published { .. }
-            ) {
-                registry.publish_declared(spec.clone(), actor, now).await?;
-            }
-        }
-    }
-    Ok(SeedReport { dry_run, rows })
+    seed_bundle(registry, specs, actor, now, dry_run).await
 }
 
 #[cfg(test)]
@@ -399,7 +217,7 @@ mod tests {
         let err = seed_stations(&registry, &[edited, also], &actor(), now(), false)
             .await
             .expect_err("refused");
-        let StationSeedError::Refused(refusals) = err else {
+        let StationSeedError::Refused { rows: refusals, .. } = err else {
             panic!("expected a refusal");
         };
         assert_eq!(refusals.len(), 2, "every offending row is named at once");

@@ -203,33 +203,42 @@ no build step:
 That's the whole plugin. ~70 lines, no build, no framework
 runtime, no host-side changes.
 
-### 3. Register it in the StepPlugin registry
+### 3. Declare the row
 
-A registry row needs `kind`, `frontend_url` (the bundle filename,
-e.g. `pour-quality-check.js` — the gateway resolves it under
-`/var/lib/boss/step-plugins/`), `label`, `category`, and a
-`metadata_schema`. Two ways to add one:
+A registry row needs `kind`, `version`, `status = "active"`, `label`,
+`category`, `owning_team`, a `metadata_schema`, and `frontend_url` —
+the bundle filename, e.g. `pour-quality-check.js`, which the gateway
+resolves under `/var/lib/boss/step-plugins/`. Since 2026-09-18
+(backlog 393d3234, consolidation H4) the row is DATA in the platform
+bundle: create `infra/platform/step-plugins/pour-quality-check.toml`
+holding one `[[step_plugin]]` named for the file, mirroring
+`checklist.toml` there. `boss-platform-workflow-seed` publishes the
+directory insert-if-missing by (kind, version) at every start, so a
+fresh instance gets the row without replaying history; editing a row
+is bumping its `version` (an unbumped edit is refused, naming the
+field). Two lints hold the row to its JS:
+`infra/lint/step-plugin-bundle-exists.sh` and the
+`platform_step_plugins_bundle` test. Before that day the row's only
+home was an `INSERT INTO step_plugins` in a migration; the seven that
+did so are history and
+`infra/lint/migrations-declare-schema-only.sh` refuses a new one.
 
-**A. Via the API:**
-`POST /api/jobs/step-plugins` with that body. The row lands in the
-`step_plugins` table; on the next SPA load, any step with
-`kind=pour-quality-check` mounts your plugin. `/system/step-plugins`
-lists the active rows (read-only — there's no create form there yet).
-
-**B. Via SQL seed (canonical / testing flows):**
-Add an `INSERT INTO step_plugins ... ON CONFLICT DO NOTHING` to
-`infra/postgres/schema/03-jobs.sql`, mirroring the `checklist` seed.
+A row can also be published live — `POST /api/jobs/step-plugins`
+then `.../{kind}/publish` — which is how `sign-off` v2 arrived on
+2026-08-19. The seed never rewrites a live row: an operator's later
+version supersedes the file's, and the seed reports it.
+`/system/step-plugins` lists the active rows.
 
 ### 4. Deploy
 
-```bash
-sudo cp infra/step-plugins/pour-quality-check.js \
-       /var/lib/boss/step-plugins/
-```
-
-No service restart. The gateway re-reads the file on the next
-request. The SPA picks up the new plugin on the next load (the
-plugin registry is fetched at boot; a hard refresh forces it).
+Land the car. The converge runner rebuilds the `step-plugins`
+ConfigMap from this directory's `*.js` on every deploy
+(`infra/forge/cluster-deploy-runner.sh`), and the seed publishes the
+row on the next start. The SPA picks up the new plugin on the next
+load (the plugin registry is fetched at boot; a hard refresh forces
+it). Off-cluster, the gateway serves whatever is under
+`/var/lib/boss/step-plugins/` (override via `BOSS_PLUGINS_DIR`) and
+re-reads a file on the next request.
 
 ### 5. Use it
 
@@ -240,14 +249,17 @@ the generic typed-fields form.
 
 ---
 
-## Deploy any plugin in this directory
+## Where each half lives
 
-```bash
-sudo cp infra/step-plugins/*.js /var/lib/boss/step-plugins/
-```
+| Artefact | Home | Reaches a deployment by |
+|---|---|---|
+| the JS bundle | `infra/step-plugins/<name>.js` (this directory) | the `step-plugins` ConfigMap the converge runner builds from `*.js` |
+| the registry row | `infra/platform/step-plugins/<kind>.toml` | `boss-platform-workflow-seed`, insert-if-missing by (kind, version) |
 
-The gateway serves from `/var/lib/boss/step-plugins/` (override
-via `BOSS_PLUGINS_DIR`). No restart required.
+The two directories differ because the launchers already read them
+differently: the image copies `infra/platform` whole and the seed runs
+inside it, while the JS is mounted, not copied. `step-plugin-bundle-
+exists.sh` refuses a row whose JS is absent from this directory.
 
 ---
 

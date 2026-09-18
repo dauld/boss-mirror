@@ -65,9 +65,7 @@ spec:
               args:
                 - |
                   set -euo pipefail
-                  /usr/local/bin/boss-maintenance-wrap.sh maintenance-views-catchup "event_facts catch-up"
-                  /usr/local/bin/boss-views-catchup
-                  /usr/local/bin/boss-step.sh maintenance-views-catchup run result=ok
+                  /usr/local/bin/boss-chore.sh maintenance-views-catchup "event_facts catch-up" -- /usr/local/bin/boss-views-catchup
               env:
                 - name: RUST_LOG
                   value: info

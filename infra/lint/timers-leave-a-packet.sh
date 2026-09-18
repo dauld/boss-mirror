@@ -326,7 +326,10 @@ rm -rf "$rs_dir"
 # forge-converge) read the file OPTIONALLY (`EnvironmentFile=-`): they
 # are the arm that renders it, and must start on a host that has none.
 sor_env_line='EnvironmentFile=/etc/boss/sor.env'
-cluster_kinds=$(grep -ohE 'boss-maintenance-wrap\.sh maintenance-[a-z-]+' infra/cluster/manifests/*.yaml 2>/dev/null \
+# A cluster chore opens its packet through boss-chore.sh (which runs the
+# wrap) since 480e183c; boss-backup.yaml's multi-image Pod still calls
+# the wrap itself. Both spellings name the kind second.
+cluster_kinds=$(grep -ohE 'boss-(maintenance-wrap|chore)\.sh maintenance-[a-z-]+' infra/cluster/manifests/*.yaml 2>/dev/null \
     | awk '{print $2}' | sort -u)
 gcp_rows=$(BOSS_REPO_ROOT="$PWD" bash "$INSTALLER" rows 2>/dev/null | grep -E '^[a-z0-9-]+:[^:]+$')
 for row in $gcp_rows; do
@@ -384,18 +387,28 @@ done
 # indistinguishable from this one — CLAUDE.md §Diagnosis, a check nobody
 # can read is a check that is not running.
 #
-# WHAT IT CHECKS, per manifest holding a CronJob: it calls
-# boss-maintenance-wrap.sh with a kind, calls boss-step.sh with the SAME
-# kind, and that kind is a real Workflow — or its name is listed below
-# with the reason it files its visibility some other way.
+# WHAT IT CHECKS, per manifest holding a CronJob: it opens a packet of a
+# kind, records a verdict on the SAME kind, and that kind is a real
+# Workflow — or its name is listed below with the reason it files its
+# visibility some other way. Two spellings open and record:
 #
-# WHAT IT DELIBERATELY DOES NOT CHECK YET: that the packet-opening call
-# cannot fail the chore. boss-backup.yaml swallows it (the packet is
-# visibility, never a precondition — check 7 states the same rule for
-# boss-gcp units), but the seven siblings open theirs inside
-# `set -euo pipefail`, so an API answering 400 would stop them. That is
-# the boss-ml-inference-batch shape one layer over, and fixing seven
-# working chores belongs in its own change rather than riding this one.
+#   boss-chore.sh <kind> "<title>" -- <check>   ONE call is both halves.
+#       The wrapper (infra/boss-chore.sh, 480e183c) opens best-effort,
+#       runs the check, and records `ok` OR `failed` — the CronJob's
+#       ExecStopPost. Every single-container boss-image chore uses it;
+#       crates/core/boss-testing/tests/a_chore_records_ok_and_failed.rs
+#       is the ratchet that keeps the old three-line dance out.
+#   boss-maintenance-wrap.sh <kind> … boss-step.sh <kind> run   the
+#       pair, in SEPARATE containers: boss-backup.yaml's multi-image
+#       Pod, whose verdict is the Pod's own structure (the closer is the
+#       one main container, so it runs iff every init leg passed).
+#
+# Until 480e183c the eight siblings carried the pair in ONE `bash -c`
+# block under `set -euo pipefail`: a failing check ended the script
+# before boss-step ran, so a violated invariant left an OPEN packet that
+# read as a run in progress — the check-3b defect one layer over — and a
+# wrap refused by the API stopped the check from running at all. The
+# wrapper does both legs best-effort and exits with the check's status.
 CLUSTER_MANIFESTS="infra/cluster/manifests"
 # A CronJob whose visibility is its own, with the reason. Adding a name
 # here is a decision; the default is that a scheduled run leaves a
@@ -429,18 +442,23 @@ if [ -d "$CLUSTER_MANIFESTS" ]; then
                 ;;
         esac
 
+        # The wrapper's one call is both halves; the pair's two calls are
+        # read separately so a Pod that opens and never records is seen.
+        chore_kind=$(grep -oE 'boss-chore\.sh [a-z-]+' "$file" | awk '{print $2}' | sed -n 1p)
         open_kind=$(grep -oE 'boss-maintenance-wrap\.sh [a-z-]+' "$file" | awk '{print $2}' | sed -n 1p)
         done_kind=$(grep -oE 'boss-step\.sh [a-z-]+' "$file" | awk '{print $2}' | sed -n 1p)
+        open_kind="${open_kind:-$chore_kind}"
+        done_kind="${done_kind:-$chore_kind}"
 
         if [ -z "$open_kind" ]; then
             echo "timers-leave-a-packet: CronJob $cname ($file) runs with no packet." >&2
-            echo "    Add a boss-image container that calls" >&2
-            echo "      boss-maintenance-wrap.sh <kind> \"<label>\"   before the work, and" >&2
-            echo "      boss-step.sh <kind> run result=ok            after it," >&2
-            echo "    with BOSS_JOBS_URL pointing at the in-cluster jobs API. Seven siblings" >&2
-            echo "    under $CLUSTER_MANIFESTS show the shape; boss-backup.yaml shows it for a" >&2
-            echo "    multi-image Pod. A scheduled run the system of record cannot see is a" >&2
-            echo "    run whose silence means nothing." >&2
+            echo "    Add a boss-image container that runs the check through" >&2
+            echo "      boss-chore.sh <kind> \"<label>\" -- <check>" >&2
+            echo "    with BOSS_JOBS_URL pointing at the in-cluster jobs API. Eight siblings" >&2
+            echo "    under $CLUSTER_MANIFESTS show the shape; boss-backup.yaml shows the" >&2
+            echo "    wrap/boss-step pair in separate containers for a multi-image Pod. A" >&2
+            echo "    scheduled run the system of record cannot see is a run whose silence" >&2
+            echo "    means nothing." >&2
             problems=$((problems + 1)); continue
         fi
         if [ -z "$done_kind" ]; then

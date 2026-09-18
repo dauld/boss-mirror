@@ -57,10 +57,8 @@ spec:
               args:
                 - |
                   set -euo pipefail
-                  /usr/local/bin/boss-maintenance-wrap.sh maintenance-audit-integrity "Audit-log integrity check"
                   # The binary reads DATABASE_URL directly — no config file needed.
-                  /usr/local/bin/boss-audit-integrity-check
-                  /usr/local/bin/boss-step.sh maintenance-audit-integrity run result=ok
+                  /usr/local/bin/boss-chore.sh maintenance-audit-integrity "Audit-log integrity check" -- /usr/local/bin/boss-audit-integrity-check
               env:
                 - name: RUST_LOG
                   value: info

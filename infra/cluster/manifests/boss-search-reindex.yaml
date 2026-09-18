@@ -74,9 +74,7 @@ spec:
               args:
                 - |
                   set -euo pipefail
-                  /usr/local/bin/boss-maintenance-wrap.sh maintenance-search-reindex "search_index rebuild"
-                  /usr/local/bin/boss-search-reindex
-                  /usr/local/bin/boss-step.sh maintenance-search-reindex run result=ok
+                  /usr/local/bin/boss-chore.sh maintenance-search-reindex "search_index rebuild" -- /usr/local/bin/boss-search-reindex
               env:
                 - name: RUST_LOG
                   value: info

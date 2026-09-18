@@ -81,8 +81,14 @@ runuser -l "$OWNER" -c "cd '$REPO' && . infra/forge/checkout-lock.sh && checkout
 
 # WHICH COMMIT THIS HOST'S UNITS NOW COME FROM, read as the checkout's
 # owner for the same reason every git call above is: root cannot even READ
-# a clone it does not own.
-run_summary_field converge_sha "$(runuser -l "$OWNER" -c "git -C '$REPO' rev-parse HEAD")"
+# a clone it does not own. Handed to install.sh as BOSS_CONVERGE_SHA:
+# the CLI it installs for the cluster-operator role is taken out of the
+# cluster image built for exactly this commit (infra/estate/
+# install-cli-from-image.sh, backlog 9f00a805), and install.sh, running
+# as root, cannot read the sha off the owner's clone itself.
+BOSS_CONVERGE_SHA="$(runuser -l "$OWNER" -c "git -C '$REPO' rev-parse HEAD")"
+export BOSS_CONVERGE_SHA
+run_summary_field converge_sha "$BOSS_CONVERGE_SHA"
 
 # WHAT THIS HOST IS FOR, read off the system of record the same way
 # boss-gcp reads it (infra/estate/node-roles.sh, one definition). The

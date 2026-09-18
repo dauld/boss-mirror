@@ -31,7 +31,7 @@
 //!     carries the fourteen, and the brewery sim validation runs BOTH
 //!     so the regen gate keeps its 22;
 //!   * the CronJob is the audit-integrity chore's shape (same
-//!     securityContext, wrap -> script -> boss-step), is classified an
+//!     securityContext, boss-chore.sh around the script), is classified an
 //!     `instance` manifest so prod and the playground each sweep their
 //!     own database, runs the tenant directory's own sweep when the
 //!     image ships one (the playground's brewery), and its hourly
@@ -368,23 +368,24 @@ fn the_cronjob_is_the_audit_integrity_chores_shape_on_every_instance() {
         ),
         "so is the container's"
     );
-    let wrap = yaml
+    // One wrapper call opens the packet, runs the check, and records
+    // ok OR failed (480e183c) — the check is both sweeps, platform then
+    // tenant, as one `bash -c` after the `--` so one verdict covers
+    // both. a_chore_records_ok_and_failed.rs pins the wrapper itself.
+    let chore = yaml
         .find(&format!(
-            "/usr/local/bin/boss-maintenance-wrap.sh {KIND} \"Conservation-invariant sweep\""
+            "/usr/local/bin/boss-chore.sh {KIND} \"Conservation-invariant sweep\" -- bash -euo pipefail -c '"
         ))
-        .expect("opens the packet through the wrap");
+        .expect("opens, runs and records through boss-chore.sh, the check under bash -e");
     let run = yaml
         .find("/opt/boss/infra/lint/conservation-invariants.sh")
         .expect("runs the platform sweep from where the image carries it");
     let tenant = yaml
         .find("$BOSS_TENANT_DIR/conservation-invariants.sh")
         .expect("runs the tenant directory's own sweep when it ships one");
-    let close = yaml
-        .find(&format!("/usr/local/bin/boss-step.sh {KIND} run result=ok"))
-        .expect("closes the packet through boss-step");
     assert!(
-        wrap < run && run < tenant && tenant < close,
-        "wrap, platform, tenant, close — in that order"
+        chore < run && run < tenant,
+        "wrapper, platform, tenant — in that order"
     );
     for env in [
         "- name: DATABASE_URL\n                  valueFrom:\n                    secretKeyRef:\n                      name: boss-secrets\n                      key: database-url",

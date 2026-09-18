@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # generation.sh — the ONE definition of the deploy generation store.
-# Sourced (not executed) by infra/gcp/install-cli-from-image.sh — and,
+# Sourced (not executed) by infra/estate/install-cli-from-image.sh — and,
 # until the bare-metal deploy path was deleted on 2026-09-18, by the
 # three deploy scripts — so the paths and the atomic-flip mechanics cannot
 # drift between the three (CLAUDE.md §9a — a fact that lives twice).

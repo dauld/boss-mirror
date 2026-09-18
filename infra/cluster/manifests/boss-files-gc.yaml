@@ -58,13 +58,11 @@ spec:
                 - |
                   set -euo pipefail
                   /usr/local/bin/boss-generate-configs
-                  /usr/local/bin/boss-maintenance-wrap.sh maintenance-files-gc "file_refs garbage collection"
                   # file_refs has never been configured on (no [files] block), so
                   # this no-ops today — which is the honest result: the SoR's
                   # files are off, and the packet records a run that had
                   # nothing to collect.
-                  /usr/local/bin/boss-files-gc --config /etc/boss-content-api.toml
-                  /usr/local/bin/boss-step.sh maintenance-files-gc run result=ok
+                  /usr/local/bin/boss-chore.sh maintenance-files-gc "file_refs garbage collection" -- /usr/local/bin/boss-files-gc --config /etc/boss-content-api.toml
               env:
                 - name: RUST_LOG
                   value: info

@@ -1,0 +1,36 @@
+# ---------------------------------------------------------------------------
+# correction-verdict — the correct-the-record gate: the false claim beside
+# the measurement that contradicts it, each verdict labelled with what it
+# causes.
+#
+# Version 1 is the row 146-correction-verdict-plugin.sql seeded. Declared
+# here since 2026-09-18 (backlog 393d3234, consolidation H4, car 2 of 4): a
+# step plugin's ROW lives in this bundle beside the Workflow and station
+# bundles, published insert-if-missing by boss-platform-workflow-seed, and
+# migrations newer than the cutover stamp in
+# infra/lint/migrations-declare-schema-only.sh declare schema only. The JS
+# it points at is infra/step-plugins/<frontend_url>, which the converge
+# runner mounts as the step-plugins ConfigMap;
+# infra/lint/step-plugin-bundle-exists.sh holds the two together.
+#
+# To change this row, bump `version` — the seed refuses a row that differs
+# from the live active row of the same (kind, version).
+# ---------------------------------------------------------------------------
+
+[[step_plugin]]
+kind = "correction-verdict"
+version = 1
+status = "active"
+label = "Correction verdict"
+description = "Renders a correct-the-record correction as claim-versus-measurement with the consequence of each verdict spelled out, then records verdict=accepted|unfounded and completes the step. Reads claim/measured/method/where from the sibling evidence step and corrects/corrects_title from the Job."
+category = "platform"
+frontend_url = "correction-verdict.js"
+owning_team = "platform"
+
+[step_plugin.metadata_schema]
+type = "object"
+required = ["verdict"]
+
+[step_plugin.metadata_schema.properties.verdict]
+type = "string"
+enum = ["accepted", "unfounded"]

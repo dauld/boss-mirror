@@ -58,9 +58,7 @@ spec:
                 - |
                   set -euo pipefail
                   /usr/local/bin/boss-generate-configs
-                  /usr/local/bin/boss-maintenance-wrap.sh maintenance-ledger-replay "Ledger replay check"
-                  /usr/local/bin/boss-ledger-replay-check --deep --config /etc/boss-ledger-api.toml
-                  /usr/local/bin/boss-step.sh maintenance-ledger-replay run result=ok
+                  /usr/local/bin/boss-chore.sh maintenance-ledger-replay "Ledger replay check" -- /usr/local/bin/boss-ledger-replay-check --deep --config /etc/boss-ledger-api.toml
               env:
                 - name: RUST_LOG
                   value: info

@@ -72,7 +72,7 @@
 # a fresh database seeds are one definition (§9a); a shell re-derivation
 # of that loader would be a second copy of it. The binary on boss-gcp is
 # the one boss-gcp-converge installs at /usr/local/bin/boss out of the
-# cluster image (infra/gcp/install-cli-from-image.sh); a missing one is
+# cluster image (infra/estate/install-cli-from-image.sh); a missing one is
 # a configuration refusal naming that, never an ENOENT dressed as a
 # verdict.
 #

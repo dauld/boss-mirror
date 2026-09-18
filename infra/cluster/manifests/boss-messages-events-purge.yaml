@@ -58,9 +58,7 @@ spec:
                 - |
                   set -euo pipefail
                   /usr/local/bin/boss-generate-configs
-                  /usr/local/bin/boss-maintenance-wrap.sh maintenance-messages-purge "messages_events retention sweep"
-                  /usr/local/bin/boss-messages-events-purge --config /etc/boss-messages-api.toml
-                  /usr/local/bin/boss-step.sh maintenance-messages-purge run result=ok
+                  /usr/local/bin/boss-chore.sh maintenance-messages-purge "messages_events retention sweep" -- /usr/local/bin/boss-messages-events-purge --config /etc/boss-messages-api.toml
               env:
                 - name: RUST_LOG
                   value: info

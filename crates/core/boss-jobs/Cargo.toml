@@ -239,3 +239,7 @@ required-features = ["postgres"]
 [[test]]
 name = "the_stations_bundle_is_the_migrations_pg"
 required-features = ["postgres"]
+
+[[test]]
+name = "the_step_plugins_bundle_is_the_migrations_pg"
+required-features = ["postgres"]

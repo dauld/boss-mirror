@@ -1,0 +1,51 @@
+# ---------------------------------------------------------------------------
+# review-design — the design-doc review surface: the open questions off the
+# packet, a resolution recorded per question, and completion gated on every
+# question having one.
+#
+# Version 1 is the row 03-jobs.sql seeded. Its description still names the
+# corpus indexer and `### Qn:` headings deleted on 2026-09-10
+# (design-docs-are-packets); the pin holds this file equal to the live row,
+# so correcting the prose is a version bump here, not an edit. Declared
+# here since 2026-09-18 (backlog 393d3234, consolidation H4, car 2 of 4): a
+# step plugin's ROW lives in this bundle beside the Workflow and station
+# bundles, published insert-if-missing by boss-platform-workflow-seed, and
+# migrations newer than the cutover stamp in
+# infra/lint/migrations-declare-schema-only.sh declare schema only. The JS
+# it points at is infra/step-plugins/<frontend_url>, which the converge
+# runner mounts as the step-plugins ConfigMap;
+# infra/lint/step-plugin-bundle-exists.sh holds the two together.
+#
+# To change this row, bump `version` — the seed refuses a row that differs
+# from the live active row of the same (kind, version).
+# ---------------------------------------------------------------------------
+
+[[step_plugin]]
+kind = "review-design"
+version = 1
+status = "active"
+label = "Review Design"
+description = "Renders open questions parsed from a docs/design/*.md file, gates step completion on every question having a recorded resolution. Backs tier 0 of design-doc-review."
+category = "platform"
+frontend_url = "review-design.js"
+owning_team = "platform"
+
+[step_plugin.metadata_schema]
+type = "object"
+required = ["doc_path"]
+
+[step_plugin.metadata_schema.properties.doc_path]
+type = "string"
+
+[step_plugin.metadata_schema.properties.resolutions]
+type = "array"
+
+[step_plugin.metadata_schema.properties.resolutions.items]
+type = "object"
+required = ["anchor", "decision"]
+
+[step_plugin.metadata_schema.properties.resolutions.items.properties.anchor]
+type = "string"
+
+[step_plugin.metadata_schema.properties.resolutions.items.properties.decision]
+type = "string"

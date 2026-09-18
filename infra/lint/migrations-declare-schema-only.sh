@@ -68,10 +68,13 @@ SCHEMA_DIR="infra/postgres/schema"
 # schema only.
 CUTOVER="20260918112134"
 
-# One table per line, each the registry whose rows now live in a
-# bundle. Cars 2–4 of 393d3234 add theirs: step_plugins, cadence_rules,
+# The registries whose rows now live in a bundle, space-separated.
+# stations: car 1 (infra/platform/stations/). step_plugins: car 2
+# (infra/platform/step-plugins/ — the newest insert it replaces,
+# 202609082130-sign-off-plugin-v3.sql, is older than the cutover, so
+# the stamp did not move). Cars 3–4 of 393d3234 add cadence_rules and
 # delivery_policy.
-REGISTRY_TABLES="stations"
+REGISTRY_TABLES="stations step_plugins"
 
 # --- the scanner -------------------------------------------------------
 # One file's findings, as `<line>\t<table>`. Empty output = clean. The
@@ -143,8 +146,9 @@ self_test() {
     printf 'INSERT INTO stations (name, version) VALUES (%s, 1)\n' "'x'"   >"$t/bad1.sql"
     printf 'insert into\tpublic.stations (name)\nSELECT %s\n' "'x'"        >"$t/bad2.sql"
     printf 'INSERT   INTO   Stations (name) VALUES (%s);\n' "'x'"          >"$t/bad3.sql"
+    printf 'INSERT INTO step_plugins (\n    kind, version\n) VALUES (%s, 1)\n' "'x'" >"$t/bad4.sql"
     local f
-    for f in bad1.sql bad2.sql bad3.sql; do
+    for f in bad1.sql bad2.sql bad3.sql bad4.sql; do
         [ -n "$(findings_in "$t/$f")" ] || {
             echo "$NAME: self-test FAILED — the scanner passed:" >&2
             sed 's/^/    /' "$t/$f" >&2
@@ -165,7 +169,7 @@ self_test() {
         echo "$NAME: self-test FAILED — the cutover comparison answers wrongly" >&2
         return 1
     }
-    echo "$NAME: self-test ok — schema statements, prose, an UPDATE and a prefixed table name pass; three spellings of INSERT INTO a registry table are refused; the cutover splits history from new"
+    echo "$NAME: self-test ok — schema statements, prose, an UPDATE and a prefixed table name pass; four spellings of INSERT INTO a registry table are refused; the cutover splits history from new"
 }
 
 if [ "${1:-}" = "--self-test" ]; then self_test; exit $?; fi
@@ -207,6 +211,10 @@ the seed publishes insert-if-missing at every start:
     directory beside its --seed-path and publishes it by (name, version);
     a row that differs from the live active row of the same (name,
     version) is refused, and a version bump is the edit path.
+  * step_plugins — infra/platform/step-plugins/<kind>.toml, one file per
+    plugin, every column of the row; the JS it names stays at
+    infra/step-plugins/<frontend_url>. Same seed, same sibling lookup,
+    same refusal, same edit path.
 
 Leave the migration to its ALTERs and put the row in the bundle. The
 historical inserts before the cutover are history and stay as they are.

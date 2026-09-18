@@ -3,6 +3,18 @@
 # install-cli-from-image — put the tree's `boss` CLI on this host, taken
 # out of the cluster image built for the commit the host converged to.
 #
+# ONE INSTALLER FOR EVERY MANAGED HOST (backlog 9f00a805, consolidation
+# H8, car 1, 2026-09-18). Written for boss-gcp under infra/gcp/, it
+# lives here — beside roles.toml and node-roles.sh, what a host reads
+# to know what it is for — because the forge needed the same thing.
+# Measured on #448: infra/forge/*.sh is 32 scripts, 9,790 lines, the
+# largest of them shell twins of CLI verbs (run-car-probe.sh for `boss
+# prove --from-car`, tenant-census.sh for `boss tenant`, …), each with
+# its own pin, for the one reason that the forge had no `boss` binary.
+# Two callers now: infra/gcp/boss-gcp-converge.sh after its units, and
+# infra/forge/install.sh for the `cluster-operator` role. The twins
+# retire one verb at a time in the cars after this one.
+#
 # WHY THIS EXISTS (backlog 6f58e9a1; David chose option (b), 2026-09-15).
 # boss-gcp's /usr/local/bin/boss had NO refresh path. Only a human
 # `deploy-services.sh prod` — a full deploy of the second, older stack
@@ -101,7 +113,13 @@
 # expected (CLAUDE.md §Diagnosis: a digest or a tail throws away the
 # only copy). The one failure that heals by itself is a tag the deploy
 # runner has not built yet — it builds the image a few minutes after
-# each train lands — which the next converge tick picks up.
+# each train lands — which the next converge tick picks up. That one is
+# NOT a refusal: it exits 75 with `cli_result` = `not yet: …`, so the
+# caller can tell a wait from a fault. On the forge the converge that
+# installs the CLI runs on the host that builds the image, ten minutes
+# apart, so the first tick after every train lands in this state; a
+# red there would be a red on every train (infra/forge/install.sh
+# waits; boss-gcp's converge, every half hour, still reds and heals).
 #
 # IDEMPOTENT AND CHEAP WHEN NOTHING MOVED: a tick whose `current`
 # already names the sha re-verifies through the wrapper and fetches
@@ -137,6 +155,8 @@
 #   0  the CLI at <sha> is confirmed on the host path
 #   1  refused / not confirmed — cli_result on the packet says which
 #   2  usage
+#   75 not yet — the registry has no image for <sha>'s tag (the deploy
+#      runner has not built it); nothing changed, the next tick retries
 set -uo pipefail
 
 NAME="install-cli-from-image"
@@ -198,13 +218,15 @@ run_summary_field cli_image "$IMAGE"
 
 # One exit path for every verdict that is not "ok": the packet carries
 # the verdict, the journal carries the paragraph, and `current` is
-# whatever it was.
+# whatever it was. A `not yet:` verdict exits 75 — the wait, not the
+# fault — and every other exits 1.
 refuse() { # <cli_result> <message...>
     local result="$1"; shift
     printf '%s: %s — %s\n    %s\n' "$NAME" "$(printf '%s' "${result%%:*}" | tr '[:lower:]' '[:upper:]')" "${result#*: }" "$*" >&2
     run_summary_field cli_result "$result"
     run_summary_note "$NAME: $result — $*"
     [ -n "${stage:-}" ] && rm -rf "$stage"
+    case "$result" in "not yet:"*) exit 75 ;; esac
     exit 1
 }
 
@@ -332,8 +354,16 @@ else
     accept='application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json'
     murl="$REGISTRY_URL/v2/$REPO_PATH/manifests/$TAG"
     code="$(http_get "$murl" "$pull/tag.json" "$pull/tag.hdr" "$accept")"; rc=$?
+    if [ "$rc" -eq 0 ] && [ "$code" = 404 ]; then
+        # The registry answered, and has no such tag: the deploy runner
+        # has not built the image for this commit yet. The body is
+        # printed whole like any other answer; the verdict is a wait.
+        echo "$NAME: no image $IMAGE yet — $murl answered HTTP 404; the body in full:" >&2
+        sed 's/^/    body: /' "$pull/tag.json" >&2
+        refuse "not yet: no image $IMAGE — HTTP 404 from $murl" "the tag is the deploy runner's short sha of the train that landed (cluster-deploy-runner.sh), and it builds the image a few minutes after each train; the next converge tick retries. Nothing was installed; $LINK is whatever the previous converge confirmed."
+    fi
     if [ "$rc" -ne 0 ] || [ "$code" != 200 ]; then
-        hint="the tag is the deploy runner's short sha of the train that landed (cluster-deploy-runner.sh); a 404 a few minutes after a train lands is the image not built YET and heals on the next tick; anything else is the forge. Nothing was installed; $LINK is whatever the previous converge confirmed."
+        hint="the tag is the deploy runner's short sha of the train that landed (cluster-deploy-runner.sh); a 404 is answered above as not yet, so this is the forge or the LAN. Nothing was installed; $LINK is whatever the previous converge confirmed."
         refuse_http "no image $IMAGE" "$murl" "$code" "$rc" "$pull/tag.json" "$hint"
     fi
     kind="$(jq -r '.mediaType // empty' "$pull/tag.json")"

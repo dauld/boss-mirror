@@ -58,6 +58,7 @@ use crate::audience::Audience;
 use crate::registry::{StepSpec, Terminal, WorkflowSpec, WorkflowStatus};
 use crate::station_queue::{DisciplineKey, StationPredicate, default_discipline};
 use crate::stations::{StationCapability, StationKind, StationLens, StationSpec, StationUpstream};
+use crate::step_plugins::StepPluginSpec;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SeedLoaderError {
@@ -563,6 +564,142 @@ fn station_toml_to_spec(toml: StationToml, source: &str) -> Result<StationSpec, 
         // The epoch here is a sentinel nothing reads before the seed
         // overwrites it — never `Utc::now()` in a loader
         // (infra/lint/no-wallclock.sh).
+        created_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Step plugins — the platform step-plugin bundle (infra/platform/step-plugins/)
+// ---------------------------------------------------------------------------
+
+/// Serde mirror of [`StepPluginSpec`] for a bundle row. Every column
+/// of `step_plugins` (03-jobs.sql) but two: `created_at`, which the
+/// seed's clock stamps, and `authoring_job_id`, which is the packet an
+/// operator authored a row FROM — a bundle row is authored in the
+/// tree, so it has none. `metadata_schema` is the JSON Schema as a
+/// TOML table, which reads as the same object.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StepPluginToml {
+    kind: String,
+    version: i32,
+    /// Carried rather than implied for the same reason a station's is:
+    /// the equality pin compares every column, and anything but
+    /// `active` is refused below.
+    status: WorkflowStatus,
+    label: String,
+    #[serde(default)]
+    description: Option<String>,
+    category: String,
+    metadata_schema: serde_json::Value,
+    frontend_url: String,
+    owning_team: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StepPluginsFile {
+    #[serde(rename = "step_plugin", default)]
+    step_plugins: Vec<StepPluginToml>,
+}
+
+/// Load the platform step-plugin bundle: a DIRECTORY of `<kind>.toml`
+/// files, each holding exactly one `[[step_plugin]]` whose `kind` is
+/// the file's stem — the same rules as [`load_stations`], for the same
+/// reason. A single file is accepted too.
+///
+/// Since 2026-09-18 (backlog 393d3234, consolidation H4, car 2) this
+/// bundle is where a step plugin's ROW is declared; the JS it names
+/// stays under `infra/step-plugins/`. Seven migrations were the only
+/// home before; they stay as history, and migrations newer than the
+/// cutover stamp in `infra/lint/migrations-declare-schema-only.sh` may
+/// not insert one. `crate::step_plugin_seed::seed_step_plugins`
+/// publishes the bundle insert-if-missing by (kind, version) at every
+/// start.
+pub fn load_step_plugins(path: impl AsRef<Path>) -> Result<Vec<StepPluginSpec>, SeedLoaderError> {
+    let path_ref = path.as_ref();
+    if !path_ref.is_dir() {
+        return load_step_plugin_file(path_ref);
+    }
+    let mut specs = Vec::new();
+    for file in bundle_files(path_ref)? {
+        let file_str = file.display().to_string();
+        let stem = file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let loaded = load_step_plugin_file(&file)?;
+        let kinds: Vec<&str> = loaded.iter().map(|s| s.kind.as_str()).collect();
+        if kinds != [stem.as_str()] {
+            return Err(SeedLoaderError::Parse(
+                file_str,
+                format!(
+                    "a step-plugin file holds exactly one [[step_plugin]] named after the \
+                     file (expected kind `{stem}`, found {kinds:?})"
+                ),
+            ));
+        }
+        specs.extend(loaded);
+    }
+    Ok(specs)
+}
+
+fn load_step_plugin_file(path: &Path) -> Result<Vec<StepPluginSpec>, SeedLoaderError> {
+    let path_str = path.display().to_string();
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| SeedLoaderError::Io(path_str.clone(), e.to_string()))?;
+    parse_step_plugins(&text, &path_str)
+}
+
+/// Parse TOML text directly — the file loader is a thin wrapper.
+pub fn parse_step_plugins(
+    text: &str,
+    source: &str,
+) -> Result<Vec<StepPluginSpec>, SeedLoaderError> {
+    let file: StepPluginsFile = toml::from_str(text)
+        .map_err(|e| SeedLoaderError::Parse(source.to_string(), e.to_string()))?;
+    file.step_plugins
+        .into_iter()
+        .map(|s| step_plugin_toml_to_spec(s, source))
+        .collect()
+}
+
+fn step_plugin_toml_to_spec(
+    toml: StepPluginToml,
+    source: &str,
+) -> Result<StepPluginSpec, SeedLoaderError> {
+    if toml.status != WorkflowStatus::Active {
+        return Err(SeedLoaderError::Parse(
+            source.to_string(),
+            format!(
+                "step plugin `{}` declares status `{}`; a bundle row is what a fresh \
+                 deployment gets, and that is an active row — retiring is a live verb",
+                toml.kind,
+                toml.status.as_str()
+            ),
+        ));
+    }
+    if toml.version < 1 {
+        return Err(SeedLoaderError::Parse(
+            source.to_string(),
+            format!(
+                "step plugin `{}` declares version {}; versions start at 1",
+                toml.kind, toml.version
+            ),
+        ));
+    }
+    Ok(StepPluginSpec {
+        kind: toml.kind,
+        version: toml.version,
+        status: toml.status,
+        label: toml.label,
+        description: toml.description,
+        category: toml.category,
+        metadata_schema: toml.metadata_schema,
+        frontend_url: toml.frontend_url,
+        owning_team: toml.owning_team,
+        authoring_job_id: None,
+        // Not a declaration — see `station_toml_to_spec`.
         created_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
     })
 }

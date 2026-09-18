@@ -197,7 +197,7 @@ async fn a_bundle_row_that_differs_from_the_live_row_is_refused_by_field() {
         .await
         .expect_err("a drifted bundle row is refused");
     match &err {
-        StationSeedError::Refused(refusals) => {
+        StationSeedError::Refused { rows: refusals, .. } => {
             assert_eq!(refusals.len(), 1, "{err}");
             assert_eq!(refusals[0].name, "repair");
             assert_eq!(refusals[0].version, 1);

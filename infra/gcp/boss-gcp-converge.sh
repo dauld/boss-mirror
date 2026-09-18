@@ -40,7 +40,9 @@
 # unit files only.)
 #
 # ONE BINARY IS THE EXCEPTION, since 2026-09-15: the `boss` CLI. After
-# the units, the converge runs infra/gcp/install-cli-from-image.sh with
+# the units, the converge runs infra/estate/install-cli-from-image.sh
+# (host-neutral since 2026-09-18, backlog 9f00a805: the forge's
+# install.sh runs the same file for its cluster-operator role) with
 # the sha it just converged to, which takes /usr/local/bin/boss out of
 # the cluster image built for that commit (backlog 6f58e9a1, David's
 # option (b)). Nothing else refreshed that binary — `prod` is a deploy of
@@ -186,7 +188,7 @@ trap 'rm -f "$BOSS_GCP_CONVERGE_SNAPSHOT"' EXIT
 INSTALLER="${BOSS_GCP_CONVERGE_INSTALLER:-$REPO/infra/gcp/install-units.sh}"
 # Read from $REPO AFTER the fast-forward below, like the installer: the
 # step that runs is the one the converged tree carries.
-CLI_INSTALLER="${BOSS_GCP_CONVERGE_CLI_INSTALLER:-$REPO/infra/gcp/install-cli-from-image.sh}"
+CLI_INSTALLER="${BOSS_GCP_CONVERGE_CLI_INSTALLER:-$REPO/infra/estate/install-cli-from-image.sh}"
 
 # WHAT THIS RUN LEAVES FOR ITS OWN PACKET.
 #

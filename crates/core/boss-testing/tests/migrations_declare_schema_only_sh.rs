@@ -7,9 +7,10 @@
 //! the only home a platform station had; the same was true of
 //! step_plugins (7), cadence_rules (9) and delivery_policy (2). Car 1
 //! moved stations to `infra/platform/stations/` and wrote the cutover
-//! stamp into the lint; the lint is what keeps every LATER migration
-//! from re-opening the old home, and this file is what keeps the lint
-//! honest.
+//! stamp into the lint; car 2 moved step plugins to
+//! `infra/platform/step-plugins/` and added the table beside it. The
+//! lint is what keeps every LATER migration from re-opening the old
+//! home, and this file is what keeps the lint honest.
 //!
 //! WHY THIS TEST AND NOT ONLY THE LINT'S `--self-test`: the self-test
 //! owns "the SCANNER still matches" and "the cutover comparison answers
@@ -136,6 +137,20 @@ SELECT 'new-station', 1, 'active', 'New', 'batch', '{}'::jsonb
  WHERE NOT EXISTS (SELECT 1 FROM stations WHERE name = 'new-station');
 ";
 
+/// A migration newer than the cutover that inserts a step-plugin row —
+/// car 2's table, the spelling 03-jobs.sql and six `*-plugin.sql`
+/// files used.
+const NEW_PLUGIN: &str = "20261001000002-a-plugin-row-the-old-way.sql";
+const NEW_PLUGIN_SQL: &str = "\
+-- 20261001000002 — a step plugin declared where it no longer lives.
+INSERT INTO step_plugins (
+    kind, version, status, label, description, category,
+    metadata_schema, frontend_url, owning_team
+) VALUES (
+    'new-plugin', 1, 'active', 'New', 'x', 'platform', '{}', 'new-plugin.js', 'platform'
+) ON CONFLICT (kind, version) DO NOTHING;
+";
+
 /// The scanner proves itself on every invocation and SAYS so.
 #[test]
 fn the_scanner_proves_itself_on_every_invocation() {
@@ -222,6 +237,35 @@ fn a_post_cutover_insert_is_refused_by_file_line_and_table() {
     );
 }
 
+/// BEHAVIOUR 2, car 2 — a post-cutover `INSERT INTO step_plugins` is
+/// refused the same way, and the verdict names the step-plugin bundle
+/// as the door.
+#[test]
+fn a_post_cutover_step_plugin_insert_is_refused_naming_its_bundle() {
+    let tree = Tree::new("violating-plugin");
+    tree.migration(HISTORY, HISTORY_SQL)
+        .migration(NEW_PLUGIN, NEW_PLUGIN_SQL);
+    let out = tree.run();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a violating tree must exit 1:\n{}",
+        text(&out)
+    );
+    let msg = text(&out);
+    for expect in [
+        &format!("{SCHEMA}/{NEW_PLUGIN}:2"),
+        "inserts into step_plugins",
+        "infra/platform/step-plugins/",
+        "infra/step-plugins/",
+    ] {
+        assert!(
+            msg.contains(expect),
+            "the verdict must name {expect:?}:\n{msg}"
+        );
+    }
+}
+
 /// A schema directory with nothing in it is red, not clean: a lint that
 /// scanned nothing certifies nothing (lib/scanned.sh, backlog cdf2d959).
 #[test]
@@ -286,9 +330,15 @@ fn the_cutover_is_one_fourteen_digit_stamp() {
         "the cutover is a fourteen-digit `date -u +%Y%m%d%H%M%S` stamp: {}",
         stamps[0]
     );
+    let tables = body
+        .lines()
+        .find_map(|l| l.strip_prefix("REGISTRY_TABLES=\""))
+        .and_then(|rest| rest.strip_suffix('"'))
+        .expect("the registry list is declared once, on one line");
+    let tables: Vec<&str> = tables.split_whitespace().collect();
     assert!(
-        body.lines()
-            .any(|l| l.starts_with("REGISTRY_TABLES=\"") && l.contains("stations")),
-        "the registry list names stations (car 1) and is where cars 2–4 add theirs"
+        tables.contains(&"stations") && tables.contains(&"step_plugins"),
+        "the registry list names stations (car 1) and step_plugins (car 2), and is \
+         where cars 3–4 add theirs: {tables:?}"
     );
 }

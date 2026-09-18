@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# boss — the BOSS CLI on boss-gcp, as installed by boss-gcp-converge.
+# boss — the BOSS CLI on a managed host, as installed by its converge
+# (boss-gcp-converge on boss-gcp; forge-converge's install.sh on the
+# forge, for the cluster-operator role — backlog 9f00a805).
 #
 # This file is copied to <store>/boss (the store is /opt/boss-cli on the
 # host) and /usr/local/bin/boss is a symlink to it. It execs the CLI of
@@ -23,16 +25,17 @@
 # infra/dev/boss reads its sor-url: /usr/local/bin/boss is a symlink
 # here, and readlink -f follows it to the store.
 #
-# It does not default BOSS_JOBS_URL: every unit on this host pins the
-# system of record inline with env(1) (the ops runner's drop-in, the
-# converge's Exec lines) because this host's 127.0.0.1 is the legacy
-# second stack, and a default here would be a second spelling of the
-# system of record that could point at the wrong one. A bare `boss` verb
-# with no BOSS_JOBS_URL refuses and names the fix, which is right.
+# It does not default BOSS_JOBS_URL: every unit on a managed host reads
+# the system of record from /etc/boss/sor.env with EnvironmentFile=
+# (the ops runner's included, so a verb it runs inherits the address),
+# and a default here would be a second spelling of the system of record
+# that could point at the wrong one — on boss-gcp, 127.0.0.1 was the
+# legacy second stack. A bare `boss` verb with no BOSS_JOBS_URL refuses
+# and names the fix, which is right.
 store="$(dirname "$(readlink -f "$0")")"
 gen="$(readlink -f "$store/current" 2>/dev/null)"
 if [ -z "$gen" ] || [ ! -x "$gen/boss" ]; then
-    echo "boss: no CLI generation is linked at $store/current — boss-gcp-converge installs one from the cluster image on each tick and records cli_result on its packet (maintenance-boss-gcp-converge); that packet says why there is none" >&2
+    echo "boss: no CLI generation is linked at $store/current — this host's converge installs one from the cluster image on each tick and records cli_result on its packet (maintenance-boss-gcp-converge on boss-gcp, maintenance-forge-converge on the forge); that packet says why there is none" >&2
     exit 127
 fi
 exec env BOSS_BUILD_COMMIT="$(basename "$gen")" "$gen/boss" "$@"
