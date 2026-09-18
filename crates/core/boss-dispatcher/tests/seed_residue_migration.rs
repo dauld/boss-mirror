@@ -53,7 +53,13 @@ const RESIDUE_MIGRATION: &str = "20260918022108-seed-residue-is-not-a-retirement
 /// with the packet that retired it when the completeness check below
 /// names it; the migration itself is applied history and is never
 /// edited (the checksum guard in migrate.sh refuses it).
-const RETIRED_BY_DECISION_SINCE: &[&str] = &[];
+const RETIRED_BY_DECISION_SINCE: &[&str] = &[
+    // 2026-09-18, backlog 18df96c4: the stale-build-caches sweep measured
+    // with a disk-report on the forge, blind to the dev pod's cargo
+    // targets; the hourly maintenance-dev-scratch-reclaim packet answers
+    // that question on the host where the caches live.
+    "maintenance-sweep-build-caches-daily",
+];
 
 fn schema_dir() -> PathBuf {
     repo_root().join("infra/postgres/schema")
@@ -228,11 +234,21 @@ async fn a_fresh_database_carries_no_seed_residue() {
     let report = seed_authored_rules(&db.pool, dispatcher_rules_dir())
         .await
         .expect("seed the authored registry");
+    // A name retired BY DECISION after the residue migration was written
+    // is the one thing a fresh database's first seed still retires: the
+    // historical insert is applied history, a retirement is deleting the
+    // file and never a migration (infra/lint/no-migration-writes-a-
+    // dispatcher-rule.sh), so the seed's retired row IS the record.
+    let unexpected: Vec<&String> = report
+        .retired
+        .iter()
+        .filter(|n| !RETIRED_BY_DECISION_SINCE.contains(&n.as_str()))
+        .collect();
     assert!(
-        report.retired.is_empty(),
-        "with the residue gone, a fresh database's first seed has nothing to retire — it \
-         retired {:?}",
-        report.retired
+        unexpected.is_empty(),
+        "with the residue gone, a fresh database's first seed retires only the names a \
+         decision retired after the migration (RETIRED_BY_DECISION_SINCE) — it retired \
+         {unexpected:?} as well"
     );
     assert!(
         report.rejected.is_empty(),

@@ -172,7 +172,12 @@ fn the_measured_clock_cadences_are_on_the_roster() {
         "maintenance-sweep/disk-headroom",
         "maintenance-sweep/empty-decisions",
         "maintenance-sweep/deploy-convergence",
-        "maintenance-sweep/stale-build-caches",
+        // `maintenance-sweep/stale-build-caches` left this list on
+        // 2026-09-18: backlog 18df96c4 retired
+        // `maintenance-sweep-build-caches-daily`, whose measurement was a
+        // disk-report on the forge (blind to a cargo target dir on the dev
+        // pod) and whose question the hourly maintenance-dev-scratch-reclaim
+        // packet answers on the host where the caches live.
         "maintenance-sweep/cluster-conformance",
         "publish-to-github/github-mirror",
         // Added 2026-09-18 (1dffde5d): the platform retro, weekly, off

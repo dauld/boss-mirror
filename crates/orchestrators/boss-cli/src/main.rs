@@ -39,6 +39,7 @@ mod script;
 mod steps;
 mod tenant;
 mod tenant_publish;
+mod tenant_stamp;
 mod train;
 mod train_gate;
 mod upgrade;

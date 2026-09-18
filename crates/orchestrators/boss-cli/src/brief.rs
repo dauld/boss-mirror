@@ -204,6 +204,7 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
     let scratch = "crates/core/boss-testing/src/scratch.rs";
     let gate = "infra/gate.sh";
     let freshness = "crates/orchestrators/boss-cli/src/freshness.rs";
+    let probe_rules = "crates/core/boss-jobs/src/probe.rs";
 
     let (uid, gid) = gate_ids(&read(repo, manifest)?)
         .with_context(|| format!("{manifest} does not name the gate container's uid and gid"))?;
@@ -292,6 +293,24 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 format!("{} pre-flight lints, then: {}", lints, phases.join(", ")),
                 "Derived from the gate's own `check` call sites and `--roster`, so this".into(),
                 "list cannot fall behind the gate that judges the car.".into(),
+            ],
+        },
+        // The tokens come from the constant the refusal reads, not from
+        // prose: a brief that named a token the gate does not refuse is
+        // the drift §9a is about (c0ac92b8).
+        Invariant {
+            name: "probe time",
+            authority: probe_rules.to_string(),
+            lines: vec![
+                format!(
+                    "boss_jobs::probe::reads_git_time_with_an_offset refuses {} in a --park-probe",
+                    boss_jobs::probe::GIT_TIME_WITH_AN_OFFSET.join(" / ")
+                ),
+                "A -07:00 committer date compared as a STRING against the SoR's UTC".into(),
+                "timestamps answered FAILED for a not-yet (car 746a1fac). Compare epochs:".into(),
+                "git log -1 --format=%ct on one side, date -u -d \"$ts\" +%s on the other,".into(),
+                "-gt between them — and guard the empty case FIRST, because date -d ''".into(),
+                "answers midnight rather than an error.".into(),
             ],
         },
     ];
@@ -648,6 +667,28 @@ mod tests {
         let job = json!({"metadata": {"claim": "first line\nsecond line"}});
         let out = packet_section(&job);
         assert!(out.contains("    first line\n    second line\n"), "{out}");
+    }
+
+    /// THE PROBE-TIME RULE IS SAID WHERE BUILDERS READ (c0ac92b8): the
+    /// line names the refusing function and the tokens it refuses,
+    /// taken from the constant itself rather than retyped, so the brief
+    /// cannot say a token the gate does not refuse.
+    #[test]
+    fn the_probe_time_invariant_names_the_refusal_and_its_tokens_from_the_constant() {
+        let invs = invariants(&repo()).expect("the invariants derive");
+        let inv = invs
+            .iter()
+            .find(|i| i.name == "probe time")
+            .expect("a probe-time invariant");
+        assert_eq!(inv.authority, "crates/core/boss-jobs/src/probe.rs");
+        let text = inv.lines.join("\n");
+        assert!(text.contains("reads_git_time_with_an_offset"), "{text}");
+        for token in boss_jobs::probe::GIT_TIME_WITH_AN_OFFSET {
+            assert!(text.contains(token), "{token} missing from: {text}");
+        }
+        assert!(text.contains("--format=%ct"), "{text}");
+        assert!(text.contains("date -u -d"), "{text}");
+        assert!(text.contains("midnight"), "{text}");
     }
 
     #[test]

@@ -37,10 +37,12 @@
 # VOCABULARY compared per application: `type`, `session_duration`, and
 # the policy set — each declared policy by `name` with its `decision`
 # and the e-mails its `include.emails` lists, against the live policy's
-# include rules read as `{email: {email: ...}}`. Only e-mail includes
-# are declared here today; a live rule of another kind (everyone, an
-# e-mail domain, a group, a country) reads as DRIFT with the live rule
-# printed, which is how the next car learns the vocabulary to add.
+# include rules read as `{email: {email: ...}}` — unless the policy is
+# `include.unmanaged = true`, when its members are the dashboard's and
+# only name and decision are compared. Otherwise only e-mail includes
+# (and `everyone`) are declared here today; a live rule of another kind
+# (an e-mail domain, a group, a country) reads as DRIFT with the live
+# rule printed, which is how the next car learns the vocabulary to add.
 
 # The account is the one that holds this zone (resolved from
 # `GET /zones?name=` — the zone object carries its account id, so no
@@ -96,10 +98,18 @@ type = "self_hosted"
 session_duration = "24h"
 why = "public example tenant; the four visitors admitted at onboarding stay admitted"
 
+# UNMANAGED: the four visitors are individuals admitted by personal
+# address, and this file is published to the public mirror. The tree
+# declares the policy and its decision; who it includes is the
+# dashboard's, neither declared nor compared, and the policy is never
+# created from here (67e754cc, found by the publish-to-github review of
+# 2026-09-18). infra/lint/no-personal-address-in-infra.sh refuses a
+# personal address anywhere under infra/ so the next one stops at
+# pre-flight.
 [[application.policy]]
 name = "Allow emails policy created by onboarding: 4/25/2026"
 decision = "allow"
-include.emails = ["dhauld@gmail.com", "emilyhiskes@gmail.com", "richard@saouma.ch", "tommy@mrp.io"]
+include.unmanaged = true
 
 [[application.policy]]
 name = "visitors"

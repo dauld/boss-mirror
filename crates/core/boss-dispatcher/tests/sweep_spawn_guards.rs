@@ -72,14 +72,18 @@ async fn every_sweep_spawner_guards_on_its_own_subject() {
             );
         }
     }
-    // SIX since 2026-09-10, down from seven: the seventh was
-    // `maintenance-sweep-doc-status-daily`, retired with the design-doc
-    // flush pipeline (backlog f5da586c). Its whole content was the
-    // drifted-status report — `GET /api/design/stale-statuses`, which
-    // that deletion removed — and a packet's status IS its status, so
-    // there is no drifted doc left to sweep for. The six are
-    // build-caches, cluster-conformance, converge-lag, disk,
-    // empty-decisions and image-freshness.
+    // FIVE since 2026-09-18, down from six: the sixth was
+    // `maintenance-sweep-build-caches-daily`, retired by backlog 18df96c4.
+    // Its measurement was a `disk-report` on the forge, which cannot see
+    // a cargo target dir on the dev pod, and its question is answered
+    // hourly by the maintenance-dev-scratch-reclaim packet on the host
+    // where the caches live (stale_targets_reclaimed, targets_removed_mib,
+    // worktrees_kept_*) — where no ops-runner runs. Before that, SIX
+    // since 2026-09-10, down from seven: `maintenance-sweep-doc-status-
+    // daily`, retired with the design-doc flush pipeline (backlog
+    // f5da586c) — its whole content was the drifted-status report, and a
+    // packet's status IS its status. The five are cluster-conformance,
+    // converge-lag, disk, empty-decisions and image-freshness.
     //
     // The floor is what this pin is for: a sweep rule that loses its
     // guard still spawns, so it is still counted here and still fails
@@ -99,14 +103,14 @@ async fn every_sweep_spawner_guards_on_its_own_subject() {
     // is the point, and the lint names the file and line when it does
     // not.
     //
-    // rule-registry-pin: maintenance-sweep-*-daily = 6
+    // rule-registry-pin: maintenance-sweep-*-daily = 5
     assert!(
-        checked >= 6,
-        "expected the six daily sweep spawners (build-caches, \
-         cluster-conformance, converge-lag, disk, empty-decisions, \
-         image-freshness), found {checked} — a sweep went missing. If one \
+        checked >= 5,
+        "expected the five daily sweep spawners (cluster-conformance, \
+         converge-lag, disk, empty-decisions, image-freshness), found \
+         {checked} — a sweep went missing. If one \
          was retired on purpose, lower this pin AND say which and why, \
-         the way the doc-status sweep's retirement is recorded above; if \
+         the way the build-caches sweep's retirement is recorded above; if \
          not, a sweep stopped running and nobody noticed."
     );
 }

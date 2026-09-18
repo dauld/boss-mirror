@@ -666,14 +666,32 @@ pub(crate) fn attempt_json(
 /// thing: [`failure_diagnosis`] here, and run-car-probe.sh's `why`.
 pub(crate) const OVERRIDE_FLAG: &str = "--probe-anyway";
 
-pub(crate) use boss_jobs::probe::{UNIDENTIFIED_RULE, override_record};
+pub(crate) use boss_jobs::probe::{GIT_TIME_RULE, UNIDENTIFIED_RULE, override_record};
+
+/// Why a probe must not run: the rule that refused it — recorded when
+/// an operator overrides it, so `--recheck` and every later reader find
+/// the argument against the rule it was actually made against — and
+/// the wording this door says. Two rules refuse here since c0ac92b8;
+/// until then the override always recorded [`UNIDENTIFIED_RULE`]
+/// because it was the only one.
+#[derive(Debug)]
+pub(crate) struct Refusal {
+    pub rule: &'static str,
+    pub text: String,
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
 
 /// What this door makes of a probe: a reason not to run it, things the
 /// operator should know, or neither.
 #[derive(Debug, Default)]
 pub(crate) struct Admission {
     /// Why the probe must not run, unless the operator overrides it.
-    pub refusal: Option<String>,
+    pub refusal: Option<Refusal>,
     /// Things worth saying that do not stop the probe. A list because
     /// they are independent findings and a probe can trip more than one
     /// — the measured 18-hour probe (4fccc595) tripped two, and showing
@@ -684,7 +702,7 @@ pub(crate) struct Admission {
 /// Judge a probe at this door. `from_car` says the text came from the
 /// car's `proof_probe`, which means the forge will run it too.
 pub(crate) fn admit(probe: &str, from_car: bool) -> Admission {
-    let refusal = boss_jobs::probe::reads_the_sor_unidentified(probe).map(|client| {
+    let unidentified = boss_jobs::probe::reads_the_sor_unidentified(probe).map(|client| {
         format!(
             "THE PROBE READS THE SYSTEM OF RECORD WITH `{client}` AND NO IDENTITY, so it \
              reads as operator:unidentified — and an unidentified reader is answered with a \
@@ -702,6 +720,37 @@ pub(crate) fn admit(probe: &str, from_car: bool) -> Admission {
             reader = boss_jobs::probe::SOR_READER,
         )
     });
+    // The git-date rule (c0ac92b8) fails open the same way — a string
+    // compare of mixed-offset timestamps can pass for an event that
+    // never happened — so it refuses at this door as at the gate, with
+    // the same evidence and the same rewrite.
+    let git_time = boss_jobs::probe::reads_git_time_with_an_offset(probe).map(|token| {
+        format!(
+            "THE PROBE READS A GIT DATE WITH `{token}`, which carries the committer's UTC \
+             offset — and a probe that compares that string against the system of record's \
+             UTC timestamps lies in BOTH directions. What this verb could record is a proof \
+             of nothing.\n\n{evidence}\n\n\
+             This refuses the TOKEN, not the compare: whether the string reaches a \
+             `[ ... \\> ... ]` would take a shell parser to know honestly, and the fix is the \
+             same either way — `git log -1 --format=%ct` on one side, `date -u -d \"$ts\" +%s` \
+             on the other after the empty guard, `-gt` between them. `boss gate --park-probe` \
+             refuses this text too, so a car carrying it needs re-parking.\n\n\
+             If the date is only printed and never compared, say so and it runs: \
+             {OVERRIDE_FLAG} '<reason>'. The reason is recorded in the proof.",
+            evidence = boss_jobs::probe::GIT_TIME_STRING_EVIDENCE,
+        )
+    });
+    let refusal = unidentified
+        .map(|text| Refusal {
+            rule: UNIDENTIFIED_RULE,
+            text,
+        })
+        .or_else(|| {
+            git_time.map(|text| Refusal {
+                rule: GIT_TIME_RULE,
+                text,
+            })
+        });
     let mut warnings: Vec<String> = Vec::new();
     if from_car && let Some(tool) = boss_jobs::probe::needs_absent_tool(probe) {
         warnings.push(format!(
@@ -1616,13 +1665,13 @@ pub(crate) async fn run(
     }
     let overridden = match (&admission.refusal, overriding) {
         (Some(r), None) => bail!("{r}"),
-        (Some(_), Some(reason)) => {
+        (Some(r), Some(reason)) => {
             println!(
                 "boss prove: running a probe this door refuses, on your stated reason — \
                  {reason}\n  It is recorded in the proof as `overridden`, so a later reader \
                  (and `--recheck`) sees the claim was argued past rather than clean."
             );
-            Some(override_record(UNIDENTIFIED_RULE, reason))
+            Some(override_record(r.rule, reason))
         }
         (None, Some(_)) => {
             eprintln!(
@@ -2706,7 +2755,10 @@ mod tests {
             "wget -qO- http://10.20.0.34:7900/api/stations/loading-dock/queue | grep -q x",
         ] {
             let a = admit(probe, false);
-            let r = a.refusal.unwrap_or_else(|| panic!("admitted: {probe}"));
+            let r = a
+                .refusal
+                .unwrap_or_else(|| panic!("admitted: {probe}"))
+                .text;
             assert!(r.contains("unidentified"), "{r}");
             assert!(
                 r.contains(OVERRIDE_FLAG),
@@ -2728,6 +2780,39 @@ mod tests {
             a.refusal.is_some(),
             "a car-carried probe gets the same rule"
         );
+    }
+
+    /// A GIT DATE READ WITH ITS OFFSET IS REFUSED HERE TOO (c0ac92b8):
+    /// the string compare it feeds lies in both directions, so this
+    /// door — hand-run or `--from-car` — says what the gate says, from
+    /// the one evidence text, and names its OWN rule id so an override
+    /// is recorded against the rule that refused, not the other one.
+    #[test]
+    fn a_probe_that_reads_a_git_date_with_an_offset_is_refused_by_the_hand_verb() {
+        let probe = "since=$(git log -1 --format=%cI HEAD); \
+                     last=$(boss-api GET /api/audit | jq -r '.data[0].at'); \
+                     [ \"$last\" \\> \"$since\" ] && echo retire:after-landing";
+        for from_car in [false, true] {
+            let a = admit(probe, from_car);
+            let r = a
+                .refusal
+                .unwrap_or_else(|| panic!("admitted (from_car={from_car}): {probe}"));
+            assert_eq!(r.rule, boss_jobs::probe::GIT_TIME_RULE);
+            assert!(r.text.contains("`%cI`"), "{}", r.text);
+            assert!(r.text.contains("--format=%ct"), "{}", r.text);
+            assert!(
+                r.text.contains(boss_jobs::probe::GIT_TIME_STRING_EVIDENCE),
+                "{}",
+                r.text
+            );
+            assert!(r.text.contains(OVERRIDE_FLAG), "{}", r.text);
+        }
+        // And the unidentified read still records ITS rule.
+        let a = admit(
+            "curl -fsS $BOSS_JOBS_URL/api/yard/status | grep -q x",
+            false,
+        );
+        assert_eq!(a.refusal.map(|r| r.rule), Some(UNIDENTIFIED_RULE));
     }
 
     /// AND THE RULE THAT DOES NOT. `host-absent-tools.txt` says what the

@@ -17,5 +17,5 @@
       "@boss/web-kit/*": ["../../libs/web-kit/src/*"]
     }
   },
-  "include": ["src/**/*.ts", "src/**/*.svelte", "../../libs/web-kit/src/**/*"]
+  "include": ["src/**/*.ts", "src/**/*.svelte", "scripts/**/*.ts", "../../libs/web-kit/src/**/*"]
 }

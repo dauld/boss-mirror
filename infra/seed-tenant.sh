@@ -38,11 +38,22 @@ if ! command -v boss >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "    publishing tenant $TENANT_DIR (boss tenant publish)"
+# BOSS_TENANT_TAKE names the registries this publish OVERWRITES from
+# the files — car 1's `--take` (design e187198f), set on the deployment
+# for one boot; the launcher publishes over its stamp when it is set
+# (backlog 6a8d4972). Unset, every door is insert-if-absent and the
+# argv is exactly what it was.
+PUBLISH=(boss tenant publish "$TENANT_DIR")
+if [[ -n "${BOSS_TENANT_TAKE:-}" ]]; then
+    PUBLISH+=(--take "$BOSS_TENANT_TAKE")
+    echo "    publishing tenant $TENANT_DIR (boss tenant publish --take $BOSS_TENANT_TAKE)"
+else
+    echo "    publishing tenant $TENANT_DIR (boss tenant publish)"
+fi
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 for attempt in $(seq 1 "$ATTEMPTS"); do
-    if boss tenant publish "$TENANT_DIR" >"$log" 2>&1; then
+    if "${PUBLISH[@]}" >"$log" 2>&1; then
         cat "$log"
         echo "    ✓ tenant published ($TENANT_DIR)"
         exit 0

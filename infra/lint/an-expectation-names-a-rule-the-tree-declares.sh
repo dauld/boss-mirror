@@ -163,6 +163,7 @@ set -uo pipefail
 
 NAME="an-expectation-names-a-rule-the-tree-declares"
 SELF_REL="infra/lint/$NAME.sh"
+DECISIONS_REL="crates/core/boss-dispatcher/tests/seed_residue_migration.rs"
 RULES_REL="infra/dispatcher/rules"
 SCHEMA_REL="infra/postgres/schema"
 TENANT_RULES_GLOB="examples/*/seeds/rules.toml"
@@ -295,6 +296,14 @@ EOF
 #   $SELF_REL     this script. Its self-test fixtures spell real retired
 #                 names on purpose (the brief's "use today's incidents"),
 #                 and a fixture heredoc is not a comment.
+#   $DECISIONS_REL the seed-residue pin. Its RETIRED_BY_DECISION_SINCE
+#                 list is, by construction, the names a migration
+#                 inserted that a DECISION later retired from the tree —
+#                 each with the packet that retired it. A retired name
+#                 is what that list is FOR (the first, 2026-09-18,
+#                 backlog 18df96c4: maintenance-sweep-build-caches-
+#                 daily), so it is the same shape as a retirement
+#                 migration: a record, not an expectation.
 candidate_files() {
     local tree="$1" top="" listing
     top="$(git -C "$tree" rev-parse --show-toplevel 2>/dev/null)"
@@ -305,9 +314,10 @@ candidate_files() {
             \( -name .git -o -name target -o -name node_modules -o -name .claude -o -name dist \) -prune -o \
             -type f -print 2>/dev/null | sed 's#^\./##')"
     fi
-    printf '%s\n' "$listing" | LC_ALL=C awk -v schema="$SCHEMA_REL/" -v rules="$RULES_REL/" -v self="$SELF_REL" '
+    printf '%s\n' "$listing" | LC_ALL=C awk -v schema="$SCHEMA_REL/" -v rules="$RULES_REL/" -v self="$SELF_REL" -v decisions="$DECISIONS_REL" '
         $0 == "" { next }
         $0 == self { next }
+        $0 == decisions { next }
         index($0, schema) == 1 { next }
         index($0, rules) == 1 { next }
         index($0, "docs/") == 1 { next }

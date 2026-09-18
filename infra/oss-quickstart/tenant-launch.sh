@@ -146,12 +146,69 @@ tenant_id_of() {
 # host's roles off /api/estate/nodes and the observer that compares
 # declared against observed want it before anything else, so it runs
 # first; its failure is the verdict like the others'.
+#
+# ONCE PER DATABASE (backlog 6a8d4972, design e187198f car 2,
+# 2026-09-18). Until this car the tenant publish ran at EVERY services
+# start with no guard, so a converge's ConfigMap rebuild implied a
+# publish and — until car 1 made every door insert-if-absent — four
+# doors overwrote a live row on each boot. Now the publish reads the
+# stamp a successful `boss tenant publish` leaves in the database
+# (`boss tenant published`, tenant_publishes) and runs only while it
+# is absent — a fresh instance: the OSS quickstart, the playground, a
+# switched database — or when BOSS_TENANT_TAKE names registries, car
+# 1's `--take` for one boot. A running instance's launcher prints ONE
+# line and moves on. The estate, the baseline and the engine are not
+# the tenant publish and keep running: each is idempotent, the engine
+# owns the sim's reset baseline, and the baseline's operator hires are
+# the platform's, not the tenant's. The verb run by an operator reads
+# no stamp — `boss tenant publish <dir>` after the stamp still inserts
+# absent rows (car 1's behaviour), which is how a row authored in the
+# repo reaches a running instance; the stamp gates only THIS automatic
+# publish.
+tenant_publish_wanted() {
+    if [[ -n "${BOSS_TENANT_TAKE:-}" ]]; then
+        echo "    tenant publish: BOSS_TENANT_TAKE=${BOSS_TENANT_TAKE} — publishing with --take over any stamp (the operator's decision for this boot)"
+        return 0
+    fi
+    if [[ -z "${BOSS_POSTGRES_URL:-}" ]]; then
+        echo "    WARN: tenant publish stamp not read — BOSS_POSTGRES_URL is unset in this container; publishing (insert-if-absent) as before the stamp existed" >&2
+        return 0
+    fi
+    local stamp rc err reason
+    # The verb: 0 stamped (the date is the first word of its one
+    # stdout line), 1 no stamp, 2 the database could not be read; its
+    # stderr is the reason, kept apart so a warning never becomes the
+    # date.
+    err="$(mktemp)"
+    stamp="$(boss tenant published 2>"$err")"
+    rc=$?
+    reason="$(tr '
+' ' ' <"$err")"
+    rm -f "$err"
+    case "$rc" in
+        0)
+            echo "    tenant published ${stamp%% *}; the instance is the truth; publish --take to overwrite (a new repo row lands through an operator's boss tenant publish, insert-if-absent, or one boot with BOSS_TENANT_TAKE=<registries>)"
+            return 1
+            ;;
+        1)
+            echo "    ${stamp} — publishing"
+            return 0
+            ;;
+        *)
+            echo "    WARN: tenant publish stamp unreadable (exit ${rc}: ${reason}${stamp}) — publishing (insert-if-absent) rather than guessing the database is stamped" >&2
+            return 0
+            ;;
+    esac
+}
+
 publish_tenant() {
     local dir
     dir="$(tenant_dir)"
     "$BOSS_INFRA_DIR/seed-estate.sh" || return $?
     BOSS_TENANT_DIR="$dir" "$BOSS_INFRA_DIR/seed-operator-baseline.sh" || return $?
-    BOSS_TENANT_DIR="$dir" "$BOSS_INFRA_DIR/seed-tenant.sh" || return $?
+    if tenant_publish_wanted; then
+        BOSS_TENANT_DIR="$dir" "$BOSS_INFRA_DIR/seed-tenant.sh" || return $?
+    fi
     case "$(tenant_id_of "$dir")" in
         brewery) "$BOSS_INFRA_DIR/seed-brewery-tenant.sh" ;;
     esac

@@ -3,13 +3,21 @@
 //! six inspections a day each began with a hand-fetched measurement;
 //! David: "love it").
 //!
-//! The three disk-backed sweeps — disk-headroom, image-freshness,
-//! stale-build-caches — each carry a rule that fires on THEIR OWN
-//! `Inspect` checklist becoming ready and spawns an ops-request
-//! `disk-report` to the forge, linked back by `metadata.for_sweep`.
-//! Pinned over the shipped rule directory, not a copy: each rule fires
-//! for exactly its sweep's subject, spawns the read verb, and carries
-//! the link the inspector follows.
+//! The two forge-measured daily sweeps — disk-headroom and
+//! image-freshness — each carry a rule that fires on THEIR OWN
+//! `Inspect` checklist becoming ready and spawns an ops-request for
+//! the read verb that answers ITS question (`disk-report`,
+//! `ci-image-report`) to the forge, linked back by
+//! `metadata.for_sweep`. Pinned over the shipped rule directory, not a
+//! copy: each rule fires for exactly its sweep's subject, spawns its
+//! own verb, and carries the link the inspector follows.
+//!
+//! Until 2026-09-18 (backlog 18df96c4) image-freshness and a third
+//! sweep, stale-build-caches, filed `disk-report` too — a verb that
+//! cannot judge image age or a cargo target dir on the dev pod. The
+//! first now files `ci-image-report`; the second was retired, its
+//! question answered hourly by maintenance-dev-scratch-reclaim on the
+//! host where the caches live.
 
 use boss_dispatcher::rules::expr::{NoHelpers, Value};
 use boss_dispatcher::rules::registry::{Registry, match_event};
@@ -51,9 +59,12 @@ fn arg<'a>(args: &'a [(String, Value)], k: &str) -> Option<&'a Value> {
 }
 
 #[test]
-fn each_disk_backed_sweep_files_a_disk_report_for_itself_when_its_inspect_becomes_ready() {
+fn each_forge_measured_sweep_files_its_own_verb_for_itself_when_its_inspect_becomes_ready() {
     let reg = shipped_rules();
-    for target in ["disk-headroom", "image-freshness", "stale-build-caches"] {
+    for (target, verb) in [
+        ("disk-headroom", "disk-report"),
+        ("image-freshness", "ci-image-report"),
+    ] {
         let hits = match_event(
             &reg,
             "step.ready.checklist",
@@ -79,8 +90,8 @@ fn each_disk_backed_sweep_files_a_disk_report_for_itself_when_its_inspect_become
         );
         let vals: Vec<&Value> = a.iter().map(|(_, v)| v).collect();
         assert!(
-            vals.contains(&&Value::String("disk-report".into())),
-            "{target}: the verb rides the spawn: {a:?}"
+            vals.contains(&&Value::String(verb.into())),
+            "{target}: the verb `{verb}` rides the spawn: {a:?}"
         );
         assert!(
             vals.contains(&&Value::String(format!("sweep-{target}"))),
@@ -96,6 +107,10 @@ fn a_sweep_without_a_disk_measurement_files_no_disk_report() {
         "deploy-convergence",
         "empty-decisions",
         "cluster-conformance",
+        // Its own verb since 18df96c4: a clean disk said nothing about it.
+        "image-freshness",
+        // Retired by 18df96c4: nothing measures it any more.
+        "stale-build-caches",
     ] {
         let hits = match_event(
             &reg,

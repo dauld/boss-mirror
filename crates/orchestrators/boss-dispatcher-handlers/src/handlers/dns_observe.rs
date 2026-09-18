@@ -85,8 +85,8 @@ use super::common::{
     owner_for_filing, post_json, sim_origin_value, write_json,
 };
 use super::credential_issuer::{
-    AccessApp, AccessAppSpec, AccessApps, AccessPolicySpec, SecretStore, ZoneRecordSpec,
-    ZoneRecords, installed_tunnel_id,
+    AccessApp, AccessAppSpec, AccessApps, AccessPolicy, AccessPolicySpec, SecretStore,
+    ZoneRecordSpec, ZoneRecords, installed_tunnel_id,
 };
 
 /// The packet kind this handler completes a step of.
@@ -220,6 +220,15 @@ pub struct DeclaredInclude {
     /// includes somebody, so it passes the includes-nobody check.
     #[serde(default)]
     pub everyone: bool,
+    /// The policy's members are the DASHBOARD's, not the tree's: the
+    /// declaration names the policy and its decision, and the include
+    /// set is neither declared nor compared. For a policy that admits
+    /// individuals by personal address — the playground's onboarding
+    /// visitors — in a file the public mirror publishes (67e754cc,
+    /// 2026-09-18). Such a policy is never created by the handler: a
+    /// policy created with no include matches nobody.
+    #[serde(default)]
+    pub unmanaged: bool,
 }
 
 impl DeclaredInclude {
@@ -285,7 +294,14 @@ pub fn parse_access_declaration(text: &str, zone: &str) -> Result<AccessDeclarat
             ));
         }
         for policy in &app.policy {
-            if policy.include.emails.is_empty() && !policy.include.everyone {
+            let inc = &policy.include;
+            if inc.unmanaged && (!inc.emails.is_empty() || inc.everyone) {
+                return Err(format!(
+                    "{ACCESS_DECLARATION}: application {:?} policy {:?} is unmanaged AND lists who it includes — the members are the dashboard's or the tree's, not both",
+                    app.domain, policy.name
+                ));
+            }
+            if inc.emails.is_empty() && !inc.everyone && !inc.unmanaged {
                 return Err(format!(
                     "{ACCESS_DECLARATION}: application {:?} policy {:?} includes nobody (include.emails is empty) — a policy that matches nobody is not a declaration",
                     app.domain, policy.name
@@ -324,7 +340,20 @@ fn declared_policy_json(p: &DeclaredPolicy) -> Json {
     if p.include.everyone {
         j["everyone"] = json!(true);
     }
+    if p.include.unmanaged {
+        j["unmanaged"] = json!(true);
+    }
     j
+}
+
+/// A declared policy against a live one of the same name: the
+/// decision, and — unless the members are the dashboard's — the
+/// include set in the canonical spelling.
+fn policy_matches(p: &DeclaredPolicy, l: &AccessPolicy) -> bool {
+    l.name == p.name
+        && l.decision == p.decision
+        && (p.include.unmanaged
+            || include_rules(&l.include).as_ref() == Some(&p.include.canonical()))
 }
 
 fn live_app_json(a: &AccessApp) -> Json {
@@ -366,27 +395,31 @@ pub fn compare_access(declared: &[DeclaredApp], live: &[AccessApp]) -> Vec<Json>
                 return entry;
             };
             entry["live"] = live_app_json(app);
-            let absent: Vec<&str> = d
+            let (unmanaged_absent, absent): (Vec<&DeclaredPolicy>, Vec<&DeclaredPolicy>) = d
                 .policy
                 .iter()
                 .filter(|p| !app.policies.iter().any(|l| l.name == p.name))
-                .map(|p| p.name.as_str())
-                .collect();
+                .partition(|p| p.include.unmanaged);
+            let absent: Vec<&str> = absent.iter().map(|p| p.name.as_str()).collect();
+            let unmanaged_absent: Vec<&str> =
+                unmanaged_absent.iter().map(|p| p.name.as_str()).collect();
             let policies_match = absent.is_empty()
+                && unmanaged_absent.is_empty()
                 && app.policies.len() == d.policy.len()
-                && d.policy.iter().all(|p| {
-                    app.policies.iter().any(|l| {
-                        l.name == p.name
-                            && l.decision == p.decision
-                            && include_rules(&l.include).as_ref() == Some(&p.include.canonical())
-                    })
-                });
+                && d.policy
+                    .iter()
+                    .all(|p| app.policies.iter().any(|l| policy_matches(p, l)));
             let matches = app.app_type == d.app_type
                 && app.session_duration == d.session_duration
                 && policies_match;
             entry["verdict"] = json!(if matches { "MATCH" } else { "DRIFT" });
             if !absent.is_empty() {
                 entry["policies_absent"] = json!(absent);
+            }
+            // Reported, never created: a policy whose members live in
+            // the dashboard has to be made there, members and all.
+            if !unmanaged_absent.is_empty() {
+                entry["policies_unmanaged_absent"] = json!(unmanaged_absent);
             }
             entry
         })
@@ -1775,6 +1808,7 @@ mod tests {
                 include: DeclaredInclude {
                     emails: emails.iter().map(|e| e.to_string()).collect(),
                     everyone: false,
+                    unmanaged: false,
                 },
             }],
         }
@@ -1848,14 +1882,25 @@ mod tests {
                     .starts_with("Allow emails policy created by onboarding")
             })
             .expect("the onboarding policy is declared as the account holds it");
-        assert_eq!(onboarding.include.emails.len(), 4);
-        assert!(
-            onboarding
-                .include
-                .emails
-                .iter()
-                .any(|e| e == "tommy@mrp.io")
-        );
+        // Its members are the dashboard's, not the tree's (67e754cc,
+        // 2026-09-18): the four visitors admitted at onboarding are
+        // individuals' personal addresses, and this file is public.
+        assert!(onboarding.include.unmanaged, "{onboarding:?}");
+        assert!(onboarding.include.emails.is_empty());
+        // No declared address anywhere in the file belongs to a person
+        // outside the company — the whole point of `unmanaged`.
+        for app in &dec.application {
+            for policy in &app.policy {
+                for e in &policy.include.emails {
+                    assert!(
+                        e.ends_with("@algedonic.dev"),
+                        "a personal address is declared in a public file: {e} ({}/{})",
+                        app.domain,
+                        policy.name
+                    );
+                }
+            }
+        }
         let auth = dec
             .application
             .iter()
@@ -1934,6 +1979,21 @@ include.emails = []
 "#;
         let err = parse_access_declaration(nobody, "z.dev").unwrap_err();
         assert!(err.contains("nobody"), "{err}");
+        // `unmanaged` is a declaration that somebody is included and
+        // the dashboard holds who — it passes the nobody check alone
+        // and is refused beside an e-mail list (which of the two would
+        // the comparison read?).
+        let unmanaged = nobody.replace("include.emails = []", "include.unmanaged = true");
+        let dec =
+            parse_access_declaration(&unmanaged, "z.dev").expect("unmanaged includes somebody");
+        assert!(dec.application[0].policy[0].include.unmanaged);
+        assert!(dec.application[0].policy[0].include.rules().is_empty());
+        let both = nobody.replace(
+            "include.emails = []",
+            "include.emails = [\"a@z.dev\"]\ninclude.unmanaged = true",
+        );
+        let err = parse_access_declaration(&both, "z.dev").unwrap_err();
+        assert!(err.contains("unmanaged"), "{err}");
         let elsewhere = r#"
 account_zone = "z.dev"
 [[application]]
@@ -2027,6 +2087,47 @@ why = "x"
             vec![a]
         };
         assert_eq!(compare_access(&declared, &session)[0]["verdict"], "DRIFT");
+    }
+
+    /// An `unmanaged` policy is compared by name and decision only: its
+    /// members are the dashboard's, so any include set reads MATCH, and
+    /// a group rule the declaration has no word for is not drift here.
+    /// When the policy is absent the application reads DRIFT, but the
+    /// policy is NOT in `policies_absent` — the one list the handler
+    /// creates from — because a policy created with no include matches
+    /// nobody; it is named under `policies_unmanaged_absent` instead.
+    #[test]
+    fn an_unmanaged_policy_is_matched_by_name_and_decision_and_never_created() {
+        let mut d = declared_app("playground.algedonic.dev", "onboarding", &[]);
+        d.policy[0].include.unmanaged = true;
+        let declared = vec![d];
+        let four = vec![live_app(
+            "playground.algedonic.dev",
+            vec![allow(
+                "onboarding",
+                &["a@x.dev", "b@y.dev", "c@z.dev", "d@w.dev"],
+            )],
+        )];
+        let v = compare_access(&declared, &four);
+        assert_eq!(v[0]["verdict"], "MATCH", "{v:?}");
+        let mut group = allow("onboarding", &[]);
+        group.include = vec![json!({"group": {"id": "g1"}})];
+        let grouped = vec![live_app("playground.algedonic.dev", vec![group])];
+        assert_eq!(compare_access(&declared, &grouped)[0]["verdict"], "MATCH");
+        let mut deny = allow("onboarding", &["a@x.dev"]);
+        deny.decision = "deny".into();
+        let denied = vec![live_app("playground.algedonic.dev", vec![deny])];
+        assert_eq!(compare_access(&declared, &denied)[0]["verdict"], "DRIFT");
+        let none = vec![live_app("playground.algedonic.dev", vec![])];
+        let v = compare_access(&declared, &none);
+        assert_eq!(v[0]["verdict"], "DRIFT");
+        assert!(v[0].get("policies_absent").is_none(), "{v:?}");
+        assert_eq!(v[0]["policies_unmanaged_absent"], json!(["onboarding"]));
+        assert_eq!(
+            v[0]["declared"]["policies"][0]["unmanaged"],
+            json!(true),
+            "the verdict says why no e-mails are listed"
+        );
     }
 
     #[test]

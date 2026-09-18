@@ -1,0 +1,45 @@
+# The image-freshness sweep is judged by its own measurement. Its
+# measure rule (measure-image-freshness-sweep-on-inspect-ready) files a
+# `ci-image-report` ops-request the moment the sweep's Inspect checklist
+# becomes ready, linked back as metadata.for_sweep; the forge's
+# ops-runner answers it, and ci-image-report.sh ends its output with
+# ONE verdict line judged by comparing the runner's floating boss-ci
+# tag against the digest the registry serves for it — `verdict: clean`,
+# `verdict: image_stale local=1bee89bbb5df registry=9c0ffee0ffee
+# age=31h`, or `verdict: unanswered (...)` when the daemon or the
+# registry could not be read. This rule fires when that ops-request
+# closes `answered`: the handler reads the report, follows for_sweep,
+# and — for an image-freshness sweep whose Inspect step is still open —
+# completes the checklist on a clean verdict (findings none, measured,
+# the verdict copied as `reading`, the report's id as `source`, and
+# action_needed=false so the sweep routes to Clear), or writes the
+# finding onto the still-open step so the agent reads it where they are
+# assigned. Backlog 18df96c4, in the exact shape of
+# judge-disk-headroom-sweep-on-report-answered (970c0c94).
+[[rule]]
+name = "judge-image-freshness-sweep-on-report-answered"
+why = """
+A CROSS-PROTOCOL REACTOR closing the loop measure-image-freshness-
+sweep-on-inspect-ready opened: ops-request -> maintenance-sweep, which
+no single Workflow consequence can express — the ops-request's protocol
+cannot know which sweep asked, and the sweep's cannot read another
+packet's step. Measured 2026-09-18 (backlog 18df96c4): the sweep's
+measure rule filed disk-report, a verb whose verdict is the disk floor
+and cannot judge image age, so the judge rules of 970c0c94 deliberately
+left this sweep out and its Inspect step stayed on the agent with a
+clean DISK reading on another packet. Now the sweep files the verb that
+answers its own question and this rule reads that verb's verdict. No
+authority widened: the only writes are the sweep's own checklist and
+its routing key, and only on a verdict the verb judged by comparing the
+runner's local tag digest against the registry's (ci-image-report.sh,
+pinned by ci_image_report_sh.rs). An unclean reading — stale, or
+unanswered — completes nothing; the judgement of a finding stays a
+person's; and a report with no verdict line writes nothing.
+Self-filters to this one sweep by the (target, verb) pair, which
+sweep_verdict_rules.rs pins to the pair the measure rule files.
+"""
+on_event = "jobs.job.closed"
+when = 'kind = "ops-request" AND outcome = "answered"'
+[[rule.do]]
+handler = "maintenance.sweep.judge"
+args = { target = "\"image-freshness\"", verb = "\"ci-image-report\"" }

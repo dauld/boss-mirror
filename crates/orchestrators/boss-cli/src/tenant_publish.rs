@@ -173,6 +173,12 @@ impl Take {
         self.0.is_empty()
     }
 
+    /// What was named, in name order — recorded on the publish
+    /// stamp (tenant_stamp::Stamp::took).
+    pub fn names(&self) -> Vec<String> {
+        self.0.iter().cloned().collect()
+    }
+
     /// For the report header.
     pub fn describe(&self) -> String {
         if self.is_empty() {
@@ -241,6 +247,12 @@ impl BatchAnswer {
 /// rows" is the provenance the audit log should read, the same
 /// reasoning as the engines' `automation:<tenant>-seed` identities.
 pub const SEED_USER: &str = r#"{"id":"automation:tenant-seed","role":"platform-admin","access_tier":"operator","territory_account_ids":[],"direct_report_ids":[],"department":"platform"}"#;
+
+/// The id inside [`SEED_USER`] — what the publish stamp records as
+/// `published_by` when no caller is named (the launcher's case), so
+/// the stamp and the audit log name the same actor. Pinned equal to
+/// the header by `the_seed_actor_is_the_seed_users_id`.
+pub const SEED_ACTOR: &str = "automation:tenant-seed";
 
 /// Where each door lives. `--gateway` routes every `/api` prefix
 /// through one base; the default is each service's own localhost port
@@ -530,7 +542,7 @@ impl Plan {
         self.refusals().is_empty()
     }
 
-    fn write_count(&self) -> usize {
+    pub fn write_count(&self) -> usize {
         self.steps
             .iter()
             .filter(|s| matches!(s.action, Action::Write(_)))
@@ -1590,6 +1602,23 @@ mod tests {
     use boss_testing::scratch::{create_dir, scratch_dir, write_file};
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
+
+    /// One actor in two spellings: the header every door sees and the
+    /// id the stamp records.
+    #[test]
+    fn the_seed_actor_is_the_seed_users_id() {
+        let user: Value = serde_json::from_str(SEED_USER).unwrap();
+        assert_eq!(user["id"].as_str(), Some(SEED_ACTOR));
+    }
+
+    #[test]
+    fn take_names_what_it_was_given_in_name_order() {
+        assert_eq!(
+            Take::parse(Some("workflows,agents")).unwrap().names(),
+            vec!["agents".to_string(), "workflows".to_string()]
+        );
+        assert!(Take::parse(None).unwrap().names().is_empty());
+    }
 
     // ------------------------------------------------------------------
     // A fixture in the real tenant's shape (its names swapped for a

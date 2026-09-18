@@ -858,10 +858,13 @@ pub struct ParkIntent {
 /// 23b2dffa filed: the gate refused both shapes, the hand verb refused
 /// neither, and the rule's only trace at the second door was a comment
 /// describing this one. Re-exported under their local names so this
-/// module's callers and tests read unchanged.
+/// module's callers and tests read unchanged. The git-date rule
+/// (c0ac92b8) joined them the same way: predicate and evidence in
+/// `boss_jobs::probe`, the refusal's wording at each door.
 pub use boss_jobs::probe::{
     SOR_READER, SOR_USER_VAR, names_an_actor as probe_names_an_actor,
     needs_absent_tool as probe_needs_absent_tool,
+    reads_git_time_with_an_offset as probe_reads_git_time_with_an_offset,
     reads_the_sor_unidentified as probe_reads_the_sor_unidentified,
 };
 
@@ -1028,6 +1031,24 @@ impl ParkIntent {
                  actor the runner supplies (audit-readonly — Read everywhere, write \
                  nowhere).",
                 boss_jobs::probe::UNIDENTIFIED_READ_EVIDENCE,
+            );
+        }
+        if let Some(probe) = &self.probe
+            && let Some(token) = probe_reads_git_time_with_an_offset(probe)
+        {
+            anyhow::bail!(
+                "--park-probe reads a git date with `{token}`, which carries the committer's \
+                 UTC offset — and a probe that compares that string against the system of \
+                 record's UTC timestamps lies in BOTH directions.\n\n\
+                 {}\n\n\
+                 This check refuses the TOKEN, not the compare: whether the string reaches a \
+                 `[ ... \\> ... ]` would take a shell parser to know honestly, and the fix is \
+                 the same either way. Read the commit time as an epoch (`git log -1 \
+                 --format=%ct`), turn the other side into one (`date -u -d \"$ts\" +%s`) \
+                 after guarding the empty case, and compare the two integers with `-gt`.\n\n\
+                 The rule is boss_jobs::probe::reads_git_time_with_an_offset, and `boss prove` \
+                 refuses the same text.",
+                boss_jobs::probe::GIT_TIME_STRING_EVIDENCE,
             );
         }
         let missing: Vec<&str> = [
@@ -3991,6 +4012,45 @@ mod tests {
             assert!(e.contains("unidentified"), "{e}");
             assert!(e.contains("BOSS_SOR_USER"), "{e}");
         }
+    }
+
+    /// A PROBE COMPARES EPOCHS, NEVER ISO STRINGS WITH MIXED OFFSETS
+    /// (c0ac92b8). Car 746a1fac's probe compared `git log --format=%cI`
+    /// — a -07:00 committer date — against UTC audit timestamps as
+    /// strings and answered FAILED for a not-yet; with the offsets the
+    /// other way it answers PASS for nothing. Refused here, naming the
+    /// token, the evidence, and the epoch rewrite with its empty guard
+    /// — the same text `boss prove` says, from the one definition.
+    #[test]
+    fn a_probe_that_reads_a_git_date_with_an_offset_is_refused_at_gate_time() {
+        let mut p = park_full();
+        p.probe = Some(
+            "since=$(git log -1 --format=%cI HEAD); last=$(boss-sor-read /api/audit | jq -r '.data[0].at'); \
+             [ \"$last\" \\> \"$since\" ] && echo retire:after-landing"
+                .into(),
+        );
+        p.expect = Some("retire:after-landing".into());
+        let e = p.require_complete().unwrap_err().to_string();
+        assert!(e.contains("`%cI`"), "names the token: {e}");
+        assert!(e.contains("--format=%ct"), "names the epoch format: {e}");
+        assert!(
+            e.contains("date -u -d"),
+            "names the other side's epoch: {e}"
+        );
+        assert!(e.contains("midnight"), "names the empty-case hazard: {e}");
+        assert!(e.contains("not the compare"), "says what it refuses: {e}");
+        assert!(
+            e.contains(boss_jobs::probe::GIT_TIME_STRING_EVIDENCE),
+            "quotes the one evidence text: {e}"
+        );
+        // The rewrite it names is admitted.
+        p.probe = Some(
+            "commit=$(git log -1 --format=%ct HEAD); last=$(boss-sor-read /api/audit | jq -r '.data[0].at // empty'); \
+             [ -n \"$last\" ] || { echo 'not yet: no retire'; exit 75; }; \
+             [ \"$(date -u -d \"$last\" +%s)\" -gt \"$commit\" ] && echo retire:after-landing"
+                .into(),
+        );
+        p.require_complete().expect("epochs compare");
     }
 
     /// THE SHAPE THAT COULD NOT PASS, NAMED AT THE DOOR THAT ADMITTED IT

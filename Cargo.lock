@@ -1712,6 +1712,7 @@ dependencies = [
  "boss-ports",
  "http-body-util",
  "proc-macro2",
+ "regex",
  "serde",
  "serde_json",
  "sqlx",

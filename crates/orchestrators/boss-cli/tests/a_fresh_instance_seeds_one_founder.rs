@@ -725,3 +725,149 @@ async fn baseline_then_tenant_reads_the_declared_roster_and_leaves_one_founder_r
     .unwrap();
     assert_eq!(admins, vec![FOUNDER_ID.to_string()]);
 }
+
+/// The shipped binary with the services container's environment:
+/// `BOSS_POSTGRES_URL` naming the database the doors serve from.
+fn boss_with_database(db: &TestDb, args: &[&str], take: Option<&str>) -> (i32, String) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_boss"));
+    // Unnamed, as the launcher runs: the stamp then records the id
+    // the writes were signed with, not whoever runs this test.
+    cmd.args(args)
+        .env("BOSS_POSTGRES_URL", db.url())
+        .env_remove("BOSS_ACTOR")
+        .env(
+            "BOSS_ACTOR_FILE",
+            scratch_dir("tenant-stamp-unnamed").join("no-actor-file"),
+        );
+    if let Some(t) = take {
+        cmd.args(["--take", t]);
+    }
+    let out = cmd.output().expect("boss runs");
+    (
+        out.status.code().unwrap_or(-1),
+        format!(
+            "--- stdout\n{}--- stderr\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    )
+}
+
+/// A SUCCESSFUL PUBLISH LEAVES A STAMP IN THE DATABASE IT PUBLISHED
+/// INTO, AND `boss tenant published` READS IT (backlog 6a8d4972, design
+/// e187198f car 2). The launcher publishes only while the stamp is
+/// absent; the verb itself never reads it — an operator's own publish
+/// after the stamp still inserts absent rows (car 1's insert-if-absent
+/// stays) and records a second row with what it took.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_successful_publish_stamps_the_database_once_per_run_and_published_reads_it() {
+    let db = TestDb::new().await;
+    let base = serve(db.pool.clone()).await;
+    let dir = tenant_copy("stamp");
+
+    // No database to read is exit 2 — distinct from "no stamp", so
+    // the launcher publishes on 1 and says why on 2.
+    let out = Command::new(env!("CARGO_BIN_EXE_boss"))
+        .args(["tenant", "published"])
+        .env_remove("BOSS_POSTGRES_URL")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("BOSS_POSTGRES_URL is unset"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // A fresh database holds no stamp: exit 1, the line says so.
+    let (code, out) = boss_with_database(&db, &["tenant", "published"], None);
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("no tenant publish stamped in this database"),
+        "{out}"
+    );
+
+    // A dry run stamps nothing.
+    let dir_s = dir.display().to_string();
+    let (code, out) = boss_with_database(
+        &db,
+        &["tenant", "publish", &dir_s, "--gateway", &base, "--dry-run"],
+        None,
+    );
+    assert_eq!(code, 0, "{out}");
+    let (code, _) = boss_with_database(&db, &["tenant", "published"], None);
+    assert_eq!(code, 1, "a dry run leaves no stamp");
+
+    // Without the URL the publish lands and SAYS it left no stamp.
+    let (ok, out) = boss_tenant_publish(&dir, &base);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("not stamped: BOSS_POSTGRES_URL is unset"),
+        "the publish names the missing URL rather than staying silent:\n{out}"
+    );
+    let (code, _) = boss_with_database(&db, &["tenant", "published"], None);
+    assert_eq!(code, 1, "a publish with no database URL leaves no stamp");
+
+    // With it, the publish records one row; `published` prints the
+    // date first (the launcher's contract) and exits 0.
+    let (code, out) = boss_with_database(
+        &db,
+        &["tenant", "publish", &dir_s, "--gateway", &base],
+        None,
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains("stamped: tenant algedonic publish recorded in tenant_publishes at "),
+        "{out}"
+    );
+    let (code, out) = boss_with_database(&db, &["tenant", "published"], None);
+    assert_eq!(code, 0, "{out}");
+    let line = out.lines().nth(1).unwrap_or_default();
+    let date = line.split(' ').next().unwrap_or_default();
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(date).is_ok(),
+        "the first word is the stamp date: {line}"
+    );
+    assert!(
+        line.contains("tenant algedonic published by automation:tenant-seed (boss ")
+            && line.ends_with(&format!("; 1 publish, last {date}")),
+        "{line}"
+    );
+
+    // A republish under --take is recorded as a second row with what
+    // it took; the FIRST row stays the stamp.
+    let (code, out) = boss_with_database(
+        &db,
+        &["tenant", "publish", &dir_s, "--gateway", &base],
+        Some("agents"),
+    );
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("; took agents"), "{out}");
+    let rows: Vec<(String, String, Vec<String>)> = sqlx::query_as(
+        "SELECT tenant_id, published_by, took FROM tenant_publishes ORDER BY published_at, id",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "algedonic".to_string(),
+                "automation:tenant-seed".to_string(),
+                vec![]
+            ),
+            (
+                "algedonic".to_string(),
+                "automation:tenant-seed".to_string(),
+                vec!["agents".to_string()]
+            ),
+        ]
+    );
+    let (code, out) = boss_with_database(&db, &["tenant", "published"], None);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.contains(&format!("{date} tenant algedonic")) && out.contains("; 2 publishes, last "),
+        "the first publish stays the stamp:\n{out}"
+    );
+}

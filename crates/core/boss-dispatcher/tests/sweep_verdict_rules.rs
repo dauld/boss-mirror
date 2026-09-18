@@ -11,13 +11,19 @@
 //! files, read off that rule's spawn args. Two rules name one verb for
 //! one sweep; the pin names whichever drifts (CLAUDE.md §9a).
 //!
-//! Deliberately NOT judged (yet): image-freshness and stale-build-caches.
-//! Their measure rules file `disk-report` — a copy of disk-headroom's —
-//! whose verdict is the disk floor and says nothing about image age or
-//! cargo caches. A clean disk must not complete a sweep it does not
-//! measure, so no judge rule names them until each has a verb that
-//! answers its own question; `a_sweep_whose_verb_does_not_judge_its_
-//! question_has_no_judge` holds that line.
+//! Three sweeps are judged: disk-headroom by `disk-report`,
+//! cluster-conformance by `conformance-report`, and — since backlog
+//! 18df96c4 (2026-09-18) — image-freshness by `ci-image-report`, the
+//! verb that reads the runner's floating boss-ci tag against the
+//! registry's. Until then image-freshness and stale-build-caches filed
+//! `disk-report`, a copy of disk-headroom's, whose verdict is the disk
+//! floor and says nothing about image age or cargo caches; a clean disk
+//! must not complete a sweep it does not measure, so neither had a
+//! judge. The stale-build-caches sweep was RETIRED by the same car: its
+//! question (cargo targets on the dev pod) is answered hourly by the
+//! maintenance-dev-scratch-reclaim packet on the host where the caches
+//! live, where no ops-runner runs. `the_retired_stale_build_caches_
+//! sweep_is_neither_measured_nor_judged` holds that line.
 
 use boss_dispatcher::rules::expr::{NoHelpers, Value};
 use boss_dispatcher::rules::registry::{Registry, match_event};
@@ -102,10 +108,10 @@ fn measured_verb(reg: &Registry, target: &str) -> Option<String> {
 }
 
 #[test]
-fn the_disk_headroom_and_cluster_conformance_sweeps_are_judged_by_the_verb_that_measures_them() {
+fn each_measured_sweep_is_judged_by_the_verb_that_measures_it() {
     let reg = shipped_rules();
     let judged = judges(&reg);
-    for target in ["disk-headroom", "cluster-conformance"] {
+    for target in ["disk-headroom", "cluster-conformance", "image-freshness"] {
         let ours: Vec<_> = judged.iter().filter(|(_, t, _)| t == target).collect();
         assert_eq!(
             ours.len(),
@@ -127,25 +133,41 @@ fn the_disk_headroom_and_cluster_conformance_sweeps_are_judged_by_the_verb_that_
     }
 }
 
-/// The measure rules for image-freshness and stale-build-caches file
-/// `disk-report` — which judges the disk floor, not their question. No
-/// judge rule may name them until they have a verb of their own.
+/// The image-freshness sweep's question is the runner's floating
+/// boss-ci tag against the registry's — a question `disk-report` never
+/// answered (its verdict is the disk floor). The verb that judges it
+/// is its own, and the measure rule files that one, not disk-report.
 #[test]
-fn a_sweep_whose_verb_does_not_judge_its_question_has_no_judge() {
+fn image_freshness_is_measured_by_its_own_verb_not_the_disk_floor() {
     let reg = shipped_rules();
+    assert_eq!(
+        measured_verb(&reg, "image-freshness").as_deref(),
+        Some("ci-image-report"),
+        "measure-image-freshness-sweep-on-inspect-ready must file the verb that reads \
+         image freshness; disk-report judges the disk floor, not this question"
+    );
+}
+
+/// Retired 2026-09-18 (backlog 18df96c4): the stale-build-caches sweep
+/// measured with `disk-report`, which cannot see a cargo target dir on
+/// the dev pod, and the question it asked is answered hourly by the
+/// maintenance-dev-scratch-reclaim packet (stale_targets_reclaimed,
+/// targets_removed_mib, worktrees_kept_*) on the host where the caches
+/// live. Nothing files a report for it and nothing judges one.
+#[test]
+fn the_retired_stale_build_caches_sweep_is_neither_measured_nor_judged() {
+    let reg = shipped_rules();
+    assert_eq!(
+        measured_verb(&reg, "stale-build-caches"),
+        None,
+        "a retired sweep files no measurement"
+    );
     let judged = judges(&reg);
-    for target in ["image-freshness", "stale-build-caches"] {
-        let verb = measured_verb(&reg, target).unwrap_or_default();
-        let ours: Vec<_> = judged.iter().filter(|(_, t, _)| t == target).collect();
-        if verb == "disk-report" {
-            assert!(
-                ours.is_empty(),
-                "{target} is measured by disk-report, whose verdict is the disk floor and not \
-                 this sweep's question — a judge rule on it would complete a sweep nothing \
-                 measured: {ours:?}"
-            );
-        }
-    }
+    let ours: Vec<_> = judged
+        .iter()
+        .filter(|(_, t, _)| t == "stale-build-caches")
+        .collect();
+    assert!(ours.is_empty(), "a retired sweep has no judge: {ours:?}");
 }
 
 /// A refused ops-request carries no verdict: nothing judges it. Nor

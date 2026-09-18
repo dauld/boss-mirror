@@ -417,15 +417,6 @@ type Gap = Readonly<{ route: string; control: string; chrome?: true; why: string
 const CHROME_ROUTE = '/ux/me';
 
 const KNOWN_GAPS: ReadonlyArray<Gap> = [
-  // JobsListPage's "Create Ad Hoc Job" opens the form with kind
-  // 'ad-hoc' preselected — a kind the registry must carry for the
-  // select to show it. Under a registry without it (the smoke mock's,
-  // or any tenant's that never registered one) the click changes
-  // nothing visible once the form is already open. One component,
-  // three routes.
-  { route: '/ux/jobs', control: 'Create Ad Hoc Job', why: 'no observable response: presumes a registered ad-hoc kind' },
-  { route: '/ux/service', control: 'Create Ad Hoc Job', why: 'no observable response: presumes a registered ad-hoc kind' },
-  { route: '/ux/sales', control: 'Create Ad Hoc Job', why: 'no observable response: presumes a registered ad-hoc kind' },
   // The codebase page paints "0 codebase-metrics packets exist and none
   // carries a measurement" with the FAILURE_MARKER class under a read
   // that succeeded and answered empty. The marker means "this read

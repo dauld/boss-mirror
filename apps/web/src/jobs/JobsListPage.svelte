@@ -14,6 +14,7 @@
   import { session } from '@boss/web-kit/session/session.svelte';
   import WriteGate from '@boss/web-kit/ui/WriteGate.svelte';
   import { appToday } from '@boss/web-kit/sim-clock';
+  import { registeredAdHoc } from './adHoc';
 
   let userId = $derived(
     session.value.kind === 'ready' ? session.value.user.id : '',
@@ -125,13 +126,14 @@
   // --- New Job creation ---
   // Two entry points: "Start a new Job" pops the picker with no
   // kind preselected; "Create Ad Hoc" preselects the `ad-hoc`
-  // Workflow (every BOSS tenant ships one — brewery + device-shop
-  // seeds both register it under operations, accepting every
-  // platform Subject kind). #92 added the brewery's ad-hoc row
-  // and broadened the device-shop's to the full platform subject
-  // set so the button works the same way regardless of tenant.
-  // Both share the same inline form — no modal library, just a
-  // collapsible section under the page header so the surface
+  // Workflow (both shipped tenants register one — brewery +
+  // device-shop seeds, under operations, accepting every platform
+  // Subject kind; #92). The registry is data, though, so the button
+  // renders only when the loaded registry carries the row: with no
+  // row the click preselected a kind the select could not show and
+  // changed nothing visible (backlog a399613d, interaction crawl
+  // f2b8a01c). Both share the same inline form — no modal library,
+  // just a collapsible section under the page header so the surface
   // mirrors the rest of the catalog UI.
 
   type StepSpecRow = {
@@ -158,6 +160,9 @@
 
   let newJobOpen = $state(false);
   let kinds = $state<WorkflowRow[]>([]);
+  /** The registered ad-hoc Workflow, once the registry has loaded;
+   *  null until then and null for a tenant that registers none. */
+  const adHoc = $derived(registeredAdHoc(kinds));
   let kindsLoading = $state(false);
   let owners = $state<Owner[]>([]);
   let formKind = $state('');
@@ -488,9 +493,11 @@
       <button type="button" class="btn-primary" onclick={() => openNewJob()}>
         Start a new Job
       </button>
-      <button type="button" class="btn-secondary" onclick={() => openNewJob({ kind: 'ad-hoc' })}>
-        Create Ad Hoc Job
-      </button>
+      {#if adHoc}
+        <button type="button" class="btn-secondary" onclick={() => openNewJob({ kind: adHoc.kind })}>
+          Create Ad Hoc Job
+        </button>
+      {/if}
     </WriteGate>
   </div>
 

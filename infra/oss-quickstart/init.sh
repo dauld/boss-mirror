@@ -89,7 +89,8 @@ FIRST_START=true
 if [[ -n "$SUBJECT_KINDS_EXISTS" ]]; then
     FIRST_START=false
     echo "==> existing database (schema present) — converging it, first-start seeds skipped"
-    echo "    boss-services re-seeds the tenant on every up; clean restart:"
+    echo "    boss-services publishes the tenant once per database (tenant_publishes"
+    echo "    stamp; boss tenant publish <dir> lands a new repo row); clean restart:"
     echo "    docker compose down -v  &&  docker compose up"
 fi
 

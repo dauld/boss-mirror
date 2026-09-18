@@ -250,15 +250,26 @@ How it lands.
   differs on a facet the drift lint compares (label, description,
   category, step count, titles, required fields, title templates) is
   published as a new version that supersedes the live one.
+- **The launcher publishes once per database.** A successful publish
+  records itself in `tenant_publishes` (through `BOSS_POSTGRES_URL`;
+  `boss tenant published` reads it, the date first), and the services
+  launcher publishes only while that stamp is absent — a fresh
+  instance: the OSS quickstart, the playground, a switched database —
+  or when `BOSS_TENANT_TAKE` names registries for one boot. A running
+  instance's boot prints one line: `tenant published <date>; the
+  instance is the truth; publish --take to overwrite`. The verb an
+  operator runs reads no stamp: `boss tenant publish <dir>` after it
+  still inserts absent rows, which is how a row authored in the repo
+  reaches a running instance (backlog `6a8d4972`).
 - **A row the tenant does not declare is never deleted**, under either
   mode, and a second publish of an unchanged directory writes nothing
   and names nothing.
 
-The playground publishes its example tenant at every boot; with
-insert-if-absent as the default that publish changes nothing on a
-running instance, which is the point. Running the publish once per
-database (a stamp) is the next car; `boss tenant export`, which writes
-the live registries back into this shape, the one after.
+The playground published its example tenant at every boot until the
+stamp (car 2); with insert-if-absent as the default that publish
+changed nothing on a running instance, and now it does not run at all
+there. `boss tenant export`, which writes the live registries back into
+this shape, is the car after.
 <!-- contract-truth:end -->
 
 ## The chart of accounts is the tenant's

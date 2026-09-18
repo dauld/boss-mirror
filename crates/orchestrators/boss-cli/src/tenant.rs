@@ -155,15 +155,26 @@ How it lands.
   differs on a facet the drift lint compares (label, description,
   category, step count, titles, required fields, title templates) is
   published as a new version that supersedes the live one.
+- **The launcher publishes once per database.** A successful publish
+  records itself in `tenant_publishes` (through `BOSS_POSTGRES_URL`;
+  `boss tenant published` reads it, the date first), and the services
+  launcher publishes only while that stamp is absent — a fresh
+  instance: the OSS quickstart, the playground, a switched database —
+  or when `BOSS_TENANT_TAKE` names registries for one boot. A running
+  instance's boot prints one line: `tenant published <date>; the
+  instance is the truth; publish --take to overwrite`. The verb an
+  operator runs reads no stamp: `boss tenant publish <dir>` after it
+  still inserts absent rows, which is how a row authored in the repo
+  reaches a running instance (backlog `6a8d4972`).
 - **A row the tenant does not declare is never deleted**, under either
   mode, and a second publish of an unchanged directory writes nothing
   and names nothing.
 
-The playground publishes its example tenant at every boot; with
-insert-if-absent as the default that publish changes nothing on a
-running instance, which is the point. Running the publish once per
-database (a stamp) is the next car; `boss tenant export`, which writes
-the live registries back into this shape, the one after.
+The playground published its example tenant at every boot until the
+stamp (car 2); with insert-if-absent as the default that publish
+changed nothing on a running instance, and now it does not run at all
+there. `boss tenant export`, which writes the live registries back into
+this shape, is the car after.
 "#;
 
 /// The contract. Measured 2026-09-16 by grepping every reader of
@@ -1577,6 +1588,25 @@ pub enum TenantAction {
         #[arg(long, value_name = "REGISTRY[,REGISTRY]")]
         take: Option<String>,
     },
+    /// Has a tenant been published into THIS database? Reads the stamp
+    /// a successful publish leaves (tenant_publishes, through
+    /// BOSS_POSTGRES_URL) and prints one line, the date first. Exit 0
+    /// stamped, 1 no stamp, 2 the database could not be read — the
+    /// launcher publishes on 1 and says why on 2 (backlog 6a8d4972).
+    Published,
+}
+
+/// The stamp store the verb runs against: the database BOSS_POSTGRES_URL
+/// names, or none — an operator's workstation publishes through the
+/// gateway and holds no database, and that is a printed fact, not an
+/// error (tenant_stamp::stamp_after_publish).
+async fn stamps_from_env() -> Result<Option<crate::tenant_stamp::PgStamps>> {
+    match std::env::var("BOSS_POSTGRES_URL") {
+        Ok(url) if !url.trim().is_empty() => Ok(Some(
+            crate::tenant_stamp::PgStamps::connect(url.trim()).await?,
+        )),
+        _ => Ok(None),
+    }
 }
 
 pub async fn dispatch(cmd: Cmd) -> Result<()> {
@@ -1640,12 +1670,72 @@ pub async fn dispatch(cmd: Cmd) -> Result<()> {
             // a plain main); under this async main they run on a
             // blocking thread, printing each line as it lands so a
             // launcher log shows where a cold stack is holding.
-            tokio::task::spawn_blocking(move || {
+            let took = take.names();
+            let plan = tokio::task::spawn_blocking(move || {
                 crate::tenant_publish::publish(&plan, &bases, &take, &mut |l| println!("{l}"))?;
                 println!("{}", plan.render_footer());
-                Ok(())
+                Ok::<_, anyhow::Error>(plan)
             })
-            .await?
+            .await??;
+            // THE STAMP, after every door landed (backlog 6a8d4972):
+            // the launcher's once-per-database guard reads it, so a
+            // publish that failed midway leaves none and the DEGRADED
+            // retry publishes again — idempotently. Signed as the
+            // writes were: the caller when one is named, else the
+            // seed identity every door saw.
+            let stamps = stamps_from_env().await?;
+            let stamp = crate::tenant_stamp::Stamp {
+                tenant_id: plan.tenant_id.clone(),
+                // The one real clock: the stamp is a record's own
+                // timestamp ("when was this database published"), the
+                // wall_now() case the no-wallclock lint sanctions.
+                published_at: boss_clock_client::wall_now(),
+                published_by: crate::identity::caller()
+                    .map(|c| c.id)
+                    .unwrap_or_else(|| crate::tenant_publish::SEED_ACTOR.to_string()),
+                boss_commit: crate::built_from::built_from().to_string(),
+                took,
+                writes: plan.write_count() as i32,
+            };
+            let line = crate::tenant_stamp::stamp_after_publish(
+                stamps
+                    .as_ref()
+                    .map(|s| s as &dyn crate::tenant_stamp::PublishStamps),
+                &stamp,
+            )
+            .await?;
+            println!("{line}");
+            Ok(())
+        }
+        Cmd::Tenant(TenantAction::Published) => {
+            // Exit 2 for every "could not read" — no URL, no
+            // connection, no table — so the launcher's guard can tell
+            // an unreadable stamp (it publishes, and says why) from an
+            // absent one (exit 1).
+            let verdict = async {
+                let Some(stamps) = stamps_from_env().await? else {
+                    bail!(
+                        "BOSS_POSTGRES_URL is unset — the stamp is a row in the instance's \
+                         database (tenant_publishes) and can only be read there"
+                    );
+                };
+                crate::tenant_stamp::published_verdict(&stamps).await
+            }
+            .await;
+            match verdict {
+                Ok((line, 0)) => {
+                    println!("{line}");
+                    Ok(())
+                }
+                Ok((line, code)) => {
+                    println!("{line}");
+                    std::process::exit(code)
+                }
+                Err(e) => {
+                    eprintln!("boss tenant published: could not read the stamp: {e:#}");
+                    std::process::exit(2)
+                }
+            }
         }
     }
 }

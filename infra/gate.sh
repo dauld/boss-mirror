@@ -1631,11 +1631,63 @@ run_preflight() {
     fi
 }
 
+# THE PRE-FLIGHT CERTIFIES ONLY A TREE ITS LINTS CAN READ.
+#
+# Every git-based lint — `pattern_scan`, `git_answer … ls-files`, `git
+# grep` — reads the INDEX. An untracked file is not in it, so a dirty
+# tree with a NEW file is clean here and red at the gate, which checks
+# out the pushed commit where the file IS tracked. MEASURED 2026-09-18
+# (backlog a5efc919): the H12 builder's `--quick` said clean, and gate
+# a3b26113 went red on `the-estate-address-lives-once` over a manifest
+# the pre-flight had never been able to see.
+#
+# ONE refusal here, not `--others` taught to every reader: the readers
+# are many (lib/pattern-scan.sh, lib/git-answer.sh, no-secrets's own
+# `ls-files -z`, and the lints nobody has written yet), the refusal is
+# one place, and a builder has to `git add` the file before committing
+# anyway — this only moves that step in front of the read that depends
+# on it. The roots the lints scan are the WHOLE tree (`no-secrets` and
+# `the-estate-address-lives-once` read every tracked path), so the
+# question is exactly `git ls-files --others --exclude-standard`: a
+# tracked-but-modified file is read from the working copy and is fine;
+# an ignored file never reaches the gate workspace either and is fine.
+#
+# A REFUSAL, not a failed check (exit 2, the disk floor's shape): the
+# lints did not run, so there is no verdict on the branch to record.
+# ONLY the pre-flight modes ask it: the runner's workspace is a fresh
+# checkout of the pushed sha, and `--auto` is exercised on scratch trees
+# that carry untracked files by design (gate_sh.rs `auto_scope_of`).
+# Pinned by boss-testing's
+# a_quick_preflight_refuses_an_untracked_file.rs, which runs THIS
+# script against synthetic trees.
+refuse_untracked_files() {
+    local untracked status
+    untracked=$(git ls-files --others --exclude-standard 2>&1)
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        echo "gate: cannot tell which files are untracked (git ls-files exited ${status}: ${untracked}) — refusing rather than certifying a tree the lints may not have read." >&2
+        GATE_REFUSAL="git ls-files --others exited ${status}"
+        write_receipt "refused"
+        exit 2
+    fi
+    [ -n "$untracked" ] || return 0
+    echo "gate: the tree holds untracked files the lints cannot see. Refusing to certify it." >&2
+    printf '%s\n' "$untracked" | sed 's/^/  /' >&2
+    echo "  Every git-based lint reads the index, so an untracked file is clean here and" >&2
+    echo "  red at the gate, which checks out the pushed commit (backlog a5efc919)." >&2
+    echo "  remediation: git add <file>   # the gate will read it once it is tracked" >&2
+    echo "            or add it to .gitignore, if it is scratch that must never ship" >&2
+    GATE_REFUSAL="$(printf '%s\n' "$untracked" | grep -c '[^[:space:]]') untracked file(s) the lints cannot read"
+    write_receipt "refused"
+    exit 2
+}
+
 # `--quick` stops here. It is a PRE-FLIGHT, not a gate, and says so:
 # nothing compiles, so it cannot see a clippy error, a failing test or a
 # broken build. Its whole claim is "you will not lose a gate to a lint
 # or a formatting slip", which is the class of red it is answering.
 if [ "$QUICK" -eq 1 ]; then
+    refuse_untracked_files
     run_preflight
     echo ""
     if [ "${#FAILED[@]}" -gt 0 ]; then
@@ -1671,6 +1723,7 @@ fi
 # a DB-backed test cannot run here at all. This narrows the red-gate
 # classes by one; it does not replace the gate.
 if [ "$LINT" -eq 1 ]; then
+    refuse_untracked_files
     run_preflight
     LINT_CRATES=$(crates_from_paths)
     if [ -n "$LINT_CRATES" ]; then

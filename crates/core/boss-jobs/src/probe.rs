@@ -32,7 +32,11 @@
 //! closed — `boss prove` records nothing on a nonzero exit, so the worst
 //! it does is strand a car and misdescribe why (18 hours of that,
 //! 4fccc595) — and because its detectors are coarse text scans a
-//! false refusal would be too expensive for.
+//! false refusal would be too expensive for. The one third-kind shape
+//! that REFUSES is a git date read with its offset
+//! ([`reads_git_time_with_an_offset`]): a string compare of
+//! mixed-offset timestamps lies in both directions (c0ac92b8), so it
+//! is judged the way the second question is.
 //!
 //! The predicates below are shared; the wording of a refusal or a
 //! warning belongs to the door, because what to do instead differs by
@@ -597,10 +601,78 @@ fn guards_against_a_non_number(probe: &str) -> bool {
         || (packed.contains("=~") && packed.contains("[0-9]"))
 }
 
+/// WHEN A PROBE READS GIT TIME AS A STRING WITH AN OFFSET — the fifth
+/// shape, and unlike the three before it one that fails OPEN, so it is
+/// REFUSED where they are warned about.
+///
+/// THE DEFECT (backlog c0ac92b8, measured 2026-09-18 on car 746a1fac).
+/// The arrival probe asked whether the newest `retire` in the audit
+/// tail came AFTER the train's commit, and asked it as a string
+/// compare: `git log --format=%cI` on one side, the audit row's
+/// timestamp on the other. The conductor writes the train commit with
+/// a -07:00 offset (`2026-09-18T07:43:00-07:00`) and the audit log
+/// writes UTC (`2026-09-18T12:18:29+00:00`), so `12:18` read as later
+/// than `07:43` — though 07:43-07:00 is 14:43Z, two hours LATER. The
+/// probe ran 17 s before the operator's retire, saw only a retire that
+/// predated the fix, and should have said not-yet; it said FAILED, and
+/// the car stood red in the shed until an operator re-ran it by hand.
+/// With the offsets the other way round the same compare answers PASS
+/// for an event that never happened — a string compare of mixed-offset
+/// timestamps lies in BOTH directions, which is why this is a refusal
+/// and not a warning: it can record a proof of nothing.
+///
+/// Returns the first offset-bearing git date spelling in the text.
+/// DELIBERATELY THE TOKEN, NOT THE COMPARE: whether the string reaches
+/// a `[ … \> … ]` would take a shell parser to know honestly, and the
+/// fix is the same either way — `git log --format=%ct` is already an
+/// epoch, `date -u -d "$ts" +%s` makes the other side one, and two
+/// integers compare with `-gt`. Guard the empty case FIRST: `date -d ''`
+/// answers today's midnight, not an error (the reclaim-refs builder hit
+/// that sibling on the same day).
+pub fn reads_git_time_with_an_offset(probe: &str) -> Option<&'static str> {
+    GIT_TIME_WITH_AN_OFFSET
+        .iter()
+        .copied()
+        .find(|t| probe.contains(t))
+}
+
+/// The `git log` spellings that print a timestamp carrying the
+/// committer's or author's UTC offset — ISO strict (`%cI`), ISO-like
+/// (`%ci`), their author twins, and the `--date=` forms that make `%cd`
+/// / `%ad` print the same (`iso`, `iso-strict`, `iso8601`, `rfc2822`).
+/// `%ct` / `%at` and `--date=unix` print epoch seconds and are not here.
+pub const GIT_TIME_WITH_AN_OFFSET: [&str; 6] =
+    ["%cI", "%ci", "%aI", "%ai", "--date=iso", "--date=rfc"];
+
+/// The measured evidence for [`reads_git_time_with_an_offset`], in one
+/// copy, quoted by every door that refuses on it. The doors differ in
+/// what to do instead; they must not differ on what happened
+/// (CLAUDE.md §9a).
+pub const GIT_TIME_STRING_EVIDENCE: &str = "\
+Measured 2026-09-18 (c0ac92b8, car 746a1fac): the arrival probe compared `git log \
+--format=%cI` — the train commit's committer date, which the conductor writes with a \
+-07:00 offset (2026-09-18T07:43:00-07:00) — against the audit tail's UTC timestamps as \
+STRINGS, so 12:18Z read as later than 07:43(-07:00), which is 14:43Z. The probe ran 17 s \
+before the operator's act, saw a retire that predated the fix, and answered FAILED where \
+not-yet was true; the car stood red in the shed until an operator re-ran it. With the \
+offsets the other way round the same compare answers PASS for an event that never \
+happened.\n\
+Compare epochs, never ISO strings with mixed offsets:\n  \
+commit=$(git log -1 --format=%ct HEAD)\n  \
+ts=$(boss-sor-read '/api/...' | jq -r '... // empty')\n  \
+[ -n \"$ts\" ] || { echo 'not yet: no <event> recorded'; exit 75; }\n  \
+seen=$(date -u -d \"$ts\" +%s)\n  \
+[ \"$seen\" -gt \"$commit\" ] && echo claim:ok\n\
+The empty guard comes FIRST: `date -d ''` answers today's midnight, not an error.";
+
 /// The rule id a door records when an operator overrides a refusal on
 /// it. Short, stable, and greppable across recorded proofs — an
 /// override nobody can find later is the defect it was meant to avoid.
 pub const UNIDENTIFIED_RULE: &str = "reads-the-sor-unidentified";
+
+/// The rule id for [`reads_git_time_with_an_offset`], recorded the same
+/// way when overridden.
+pub const GIT_TIME_RULE: &str = "reads-git-time-with-an-offset";
 
 /// The override a door records when it ran a probe its own rule
 /// refused: which rule, and the operator's stated reason. Recorded in
@@ -1134,6 +1206,64 @@ echo "ONE-HOME-FOR-A-DISPATCHER-RULE""#;
                 None,
                 "not the shape: {probe}"
             );
+        }
+    }
+
+    /// THE PROBE THAT ANSWERED FAILED FOR A NOT-YET (c0ac92b8, car
+    /// 746a1fac), and its spellings: the committer date with an offset,
+    /// the author's, and the `--date=` forms that make `%cd` print the
+    /// same. Each is named back so the refusal can say which token.
+    #[test]
+    fn a_probe_that_reads_a_git_date_with_an_offset_is_seen_by_its_token() {
+        for (probe, token) in [
+            (
+                "since=$(git log -1 --format=%cI HEAD); \
+                 last=$(boss-sor-read '/api/audit?kind=class.retired&limit=1' | jq -r '.data[0].at // empty'); \
+                 [ \"$last\" \\> \"$since\" ] && echo retire:after-landing",
+                "%cI",
+            ),
+            (
+                "git log -1 --format='%ci' | grep -q 2026 && echo claim:ok",
+                "%ci",
+            ),
+            (
+                "git log -1 --format=%aI | grep -q T && echo claim:ok",
+                "%aI",
+            ),
+            (
+                "git log -1 --pretty=%ai | grep -q T && echo claim:ok",
+                "%ai",
+            ),
+            (
+                "git log -1 --date=iso-strict --format=%cd | grep -q T && echo claim:ok",
+                "--date=iso",
+            ),
+            (
+                "git log -1 --date=rfc2822 --format=%cd | grep -q 2026 && echo claim:ok",
+                "--date=rfc",
+            ),
+        ] {
+            assert_eq!(reads_git_time_with_an_offset(probe), Some(token), "{probe}");
+        }
+    }
+
+    /// The rewrite the refusal names — epochs on both sides, the empty
+    /// case guarded first — is clean, and so is a probe that reads no
+    /// git date at all, or reads one as an integer.
+    #[test]
+    fn a_probe_that_compares_epochs_is_not_reported() {
+        for probe in [
+            "commit=$(git log -1 --format=%ct HEAD); \
+             ts=$(boss-sor-read '/api/audit?kind=class.retired&limit=1' | jq -r '.data[0].at // empty'); \
+             [ -n \"$ts\" ] || { echo 'not yet: no retire recorded'; exit 75; }; \
+             seen=$(date -u -d \"$ts\" +%s); \
+             [ \"$seen\" -gt \"$commit\" ] && echo retire:after-landing",
+            "git log -1 --format=%at | grep -q . && echo claim:ok",
+            "git log -1 --date=unix --format=%cd | grep -q . && echo claim:ok",
+            "git show HEAD:infra/gate.sh | grep -c 'integer expression' && echo claim:ok",
+            "boss-sor-read /api/yard/status | jq -e '.dock_depth == 1' >/dev/null && echo claim:ok",
+        ] {
+            assert_eq!(reads_git_time_with_an_offset(probe), None, "clean: {probe}");
         }
     }
 

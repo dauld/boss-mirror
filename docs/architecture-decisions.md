@@ -1155,6 +1155,41 @@ admits may abort**, the ordinary claim rule and no separate permission;
 a viewer without it sees the control disabled with the role named.
 Built as `7a98040e`.
 
+**Every page is audited as a packet, and the march is a protocol**
+(design `0e07ce64`, David 2026-09-18, all four questions accepted as
+proposed). Measured on #451: 45 routes in the nav catalog; the mocked
+Playwright crawl rendered 26 of them and checked only that the shell
+painted; behaviour was exercised on ~10; a 35-spec live suite under
+`apps/web/tests/smoke` had been run by nothing since 2026-06-18 and
+read as coverage; nothing asked whether a page shows what its
+department needs. Decided: (1) a platform kind **`page-audit`**
+(`infra/platform/workflows/page-audit.toml`), one packet per
+catalogued route with `route` and `department` required on the packet,
+walking **measure** (the controls inventory beside the department's
+in / working / out needs, the gap as a list) → **file** (every gap a
+backlog-item carrying route + department; 'none' with a reason) →
+**test** (a mocked spec pinning every control — links land on
+catalogued routes, buttons answer honestly, back returns, an empty
+backend paints an honest empty state, a refused write shows the
+refusal — and the reviewer's brief) → **review** (the founder reads
+the gap list, the inventory and the page's words; specs and styling
+are the agent's) → **styled**, deferred by design as a marker the
+machine completes, because the visual redesign lands on pages whose
+behaviour is already pinned → **audited**; (2) the opener is a Bun
+script, `apps/web/scripts/open-page-audits.ts`, because the ONE
+roster is `ROUTE_CATALOG` in `nav-catalog.ts` — TypeScript with no
+JSON twin, so a Rust verb could read it only through a second list —
+and it opens one packet per route idempotently (open or audited =
+skip) in the decided order: the departments whose first protocols
+land first (support, sales, product, finance, marketing, hosting),
+then the rest, Home's surfaces carried as `it`, IT's own last; (3) a
+generic gated interaction crawl over the catalog is the mechanical
+half, and the dead live suite is deleted in favour of one nightly
+chore crawling the playground whose reds are packets — each its own
+car. Tooling stays mocked Playwright — hermetic, gated, already in
+the image; "more thorough" is more assertions per page, not a
+different tool.
+
 ## OSS posture & tier boundaries
 
 Two install paths: single-VM bare metal (`infra/oss-quickstart/`)

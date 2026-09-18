@@ -1,0 +1,11 @@
+{
+  "about": "READ-ONLY: is the CI runner's local boss-ci image the one the registry serves? The image-freshness sweep's own measurement (backlog 18df96c4): until 2026-09-18 its measure rule filed disk-report, whose verdict is the disk floor and says nothing about image age, so the sweep's Inspect step could never be judged by rule. Compares the SYSTEM docker daemon's repo digest for the floating boss-ci tag (the one build.sh and build-image push and the runner's cache can serve stale — forge train #1 ran a 31-hour-old image while the registry held a newer one; per-commit tags cannot drift, the runner has never seen them) against the digest the registry serves for that tag over its own HTTP API, anonymous pull token, and reports the local image's age from {{.Created}} the way prune-ci-images.lib.sh reads it. Ends with ONE verdict line the judging rule reads (judge-image-freshness-sweep-on-report-answered): `verdict: clean`, `verdict: image_stale local=<digest> registry=<digest> age=<h>h`, or `verdict: unanswered (...)` when the daemon or the registry could not be read — never clean about an image it did not see. Nothing mutated; sudo -n docker for the daemon the Actions jobs run in, like disk-report.",
+  "hosts": [
+    "forge"
+  ],
+  "argv": [
+    "infra/forge/ci-image-report.sh"
+  ],
+  "params": [],
+  "timeout": 90
+}
