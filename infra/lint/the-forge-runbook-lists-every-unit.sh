@@ -17,6 +17,8 @@
 # fails this loudly, so the runbook cannot fall behind the host.
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 INSTALL="infra/forge/install.sh"
 RUNBOOK="infra/forge/OPERATIONS.md"
@@ -49,4 +51,5 @@ if [ -n "$missing" ]; then
     exit 1
 fi
 count=$(printf '%s\n' "$installed" | grep -c .)
+lint_scanned the-forge-runbook-lists-every-unit "$count" "unit(s) the forge installer installs"
 echo "the-forge-runbook-lists-every-unit: ok — all $count installed units are in the runbook"

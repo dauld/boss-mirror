@@ -46,6 +46,8 @@
 
 # shellcheck source=infra/lint/lib/git-answer.sh
 . "$(dirname "${BASH_SOURCE[0]}")/git-answer.sh"
+# shellcheck source=infra/lint/lib/scanned.sh
+. "$(dirname "${BASH_SOURCE[0]}")/scanned.sh"
 
 pattern_scan() {
     local pattern="$1"; shift
@@ -84,6 +86,15 @@ pattern_scan() {
     done <<EOF
 $tracked
 EOF
+
+    # How many tracked files the grep below will read: the same
+    # pathspecs and the same exclusions, asked of `git ls-files`. The
+    # line goes to STDERR because stdout is the hit list the caller
+    # captures; a zero exits 1 inside this substitution, and the
+    # caller's `|| exit $?` carries it out (lib/scanned.sh).
+    local scanned
+    scanned=$(git_answer "$name" 0 ls-files -- "$@" "${excludes[@]}") || return "$LINT_CANNOT_ANSWER"
+    lint_scanned "$name" "$(printf '%s\n' "$scanned" | grep -c '[^[:space:]]')" "tracked file(s) under $*" >&2
 
     # 0 = hits, 1 = no hits, anything else = the scan did not happen.
     local hits status

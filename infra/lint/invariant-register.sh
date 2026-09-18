@@ -63,6 +63,8 @@
 
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 REGISTER_DIR="docs/invariants"
 REQUIRED_KEYS="id claim source enforcement mechanism last_verified note"
@@ -678,6 +680,7 @@ main_scan() {
         exit 1
     fi
 
+    lint_scanned invariant-register "$files" "invariant file(s) under $REGISTER_DIR"
     echo "invariant-register: ok — ${files} invariants declared (${enforced} enforced, ${checked} checked, ${unenforced} unenforced)"
 }
 

@@ -53,6 +53,14 @@ set -uo pipefail
 
 NAME="a-dead-code-allowance-needs-a-reason"
 cd "$(dirname "$0")/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
+
+# The files under judgement: every .rs under $1 outside tests/ and
+# target/. One definition, read by the scan and by the scanned count.
+rust_files() { # root
+    find "$1" -name '*.rs' -type f -not -path '*/tests/*' -not -path '*/target/*' | LC_ALL=C sort
+}
 
 # Every refused attribute under $1, one `file:line:kind` per line where
 # kind is `allow` or `expect-without-reason`; line is the attribute's
@@ -104,7 +112,7 @@ scan() { # root
             }
         ' "$f"
     done <<EOF
-$(find "$root" -name '*.rs' -type f -not -path '*/tests/*' -not -path '*/target/*' | LC_ALL=C sort)
+$(rust_files "$root")
 EOF
     echo "$NAME: $judged Rust file(s) judged" >&2
 }
@@ -182,6 +190,7 @@ rm -rf "$tmp/crate"
 # ---------------------------------------------------------------------------
 [ -d crates ] || { echo "$NAME: crates/ does not exist" >&2; exit 1; }
 hits="$(scan crates)"
+lint_scanned "$NAME" "$(rust_files crates | wc -l | tr -d ' ')" "Rust file(s) under crates/ outside tests/"
 if [ -n "$hits" ]; then
     while IFS=: read -r f line kind; do
         [ -n "$f" ] || continue

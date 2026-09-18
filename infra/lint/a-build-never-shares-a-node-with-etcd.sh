@@ -29,6 +29,8 @@
 # Runs on every gate; needs nothing but the tree.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 # The workloads that build: each writes tens of GB per run.
 BUILD_WORKLOADS=(
@@ -67,6 +69,8 @@ for f in "${BUILD_WORKLOADS[@]}"; do
         fail=1
     fi
 done
-[ "$checked" -ge 1 ] || { echo "a-build-never-shares-a-node-with-etcd: every build workload is exempt — the lint has no subject" >&2; fail=1; }
 if [ "$fail" -ne 0 ]; then exit 1; fi
+# "every build workload is exempt — the lint has no subject" is the
+# zero-scan refusal; lib/scanned.sh says it once for every lint.
+lint_scanned a-build-never-shares-a-node-with-etcd "$checked" "build workload(s)"
 echo "a-build-never-shares-a-node-with-etcd: ok — $checked build workload(s) forbid control-plane nodes by a required term (${#EXEMPT[@]} exempt, each with a reason and the car it owes)"

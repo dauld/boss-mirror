@@ -172,6 +172,8 @@
 set -uo pipefail
 
 cd "$(dirname "$0")/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 BUNDLE="infra/platform/workflows"
 TENANT_GLOB="examples/*/seeds/workflows.toml"
@@ -1287,6 +1289,7 @@ else
     msg="$NAME: $live_n admitted kinds, $authored_n authored — $drift_n field(s) or step facet(s) adrift across $fields_compared compared (named above; REPORTED, not failed)"
 fi
 [ ${#EXEMPT[@]} -eq 0 ] || msg="$msg, ${#EXEMPT[@]} exempt (${EXEMPT[*]})"
+lint_scanned "$NAME" "$authored_n" "authored kind(s) compared against $live_n admitted"
 echo "$msg"
 
 # Neither line below is a failure. A platform kind with no live row is

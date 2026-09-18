@@ -29,6 +29,8 @@
 set -uo pipefail
 
 cd "$(dirname "$0")/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 SCHEMA="infra/postgres/schema"
 BUNDLES="infra/step-plugins"
 [ -d "$SCHEMA" ] || { echo "step-plugin-bundle-exists: $SCHEMA not found" >&2; exit 1; }
@@ -66,4 +68,5 @@ if [ -n "$missing" ]; then
     exit 1
 fi
 
+lint_scanned step-plugin-bundle-exists "$count" "registered bundle path(s)"
 echo "step-plugin-bundle-exists: $count registered bundle(s), all present"

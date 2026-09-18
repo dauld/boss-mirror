@@ -56,6 +56,8 @@
 set -uo pipefail
 
 cd "$(dirname "$0")/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 # The collapse landed 2026-09-11. Migrations at or after this prefix are
 # checked; everything before it is applied history.
@@ -188,6 +190,7 @@ if ! check_dir "$SCHEMA_DIR"; then
 fi
 
 checked=$(find "$SCHEMA_DIR" -maxdepth 1 -name '*.sql' -type f | wc -l | tr -d ' ')
+lint_scanned no-migration-writes-a-dispatcher-rule "$checked" "migration(s) under $SCHEMA_DIR"
 echo "no-migration-writes-a-dispatcher-rule: self-test ok — applied history, DDL and a DELETE pass, a post-cutover rule insert or update is refused by name and line"
 echo "no-migration-writes-a-dispatcher-rule: clean — no migration at or after $CUTOVER writes dispatcher-rule rows ($checked migrations)"
 exit 0

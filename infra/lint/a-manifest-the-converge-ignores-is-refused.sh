@@ -66,6 +66,8 @@ set -uo pipefail
 
 NAME="a-manifest-the-converge-ignores-is-refused"
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 DIR="infra/cluster/manifests"
 LIB="infra/forge/cluster-deploy-lib.sh"
@@ -133,5 +135,6 @@ if [ "${#applied[@]}" -lt "$MIN_MANIFESTS" ]; then
 fi
 
 [ "$fail" = 0 ] || exit 1
+lint_scanned "$NAME" "${#applied[@]}" "manifest(s) under $DIR"
 echo "$NAME: OK — $DIR holds ${#applied[@]} manifests the converge applies, and nothing it would ignore"
 exit 0

@@ -42,12 +42,12 @@
 
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 DIR="infra/step-plugins"
-[ -d "$DIR" ] || {
-    echo "step-plugins-own-their-keys: $DIR not found — skipping"
-    exit 0
-}
+# A missing directory used to be a skip that exited 0 — a green on a
+# tree nothing read. lib/scanned.sh refuses it below instead.
 
 # name|extended-regex, matched per line so the failure says what was
 # found, not just where.
@@ -84,4 +84,5 @@ if [ "$fails" -gt 0 ]; then
     exit 1
 fi
 
+lint_scanned step-plugins-own-their-keys "$(find "$DIR" -maxdepth 1 -name '*.js' -type f 2>/dev/null | wc -l | tr -d ' ')" "plugin bundle(s) under $DIR"
 echo "step-plugins-own-their-keys: clean — no plugin re-sends the page-load metadata snapshot"

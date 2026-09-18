@@ -42,6 +42,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 # Files permitted to carry accumulating mutations, with the reason.
 #
@@ -109,4 +111,7 @@ MSG
     exit 1
 fi
 
+# Files READ, not sites found: the day the last accumulating write is
+# made absolute, the tree is clean and the search still ran.
+lint_scanned idempotence-ratchet "$(find crates -name '*.rs' -type f | wc -l | tr -d ' ')" "Rust file(s) under crates/, against ${#ALLOWED[@]} reviewed file(s)"
 echo "idempotence-ratchet: clean (${#ALLOWED[@]} reviewed sites)"

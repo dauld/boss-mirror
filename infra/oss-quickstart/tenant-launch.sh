@@ -67,7 +67,7 @@ tenant_id_of() {
     done
 }
 
-# Publish the tenant, then the platform operator baseline, then — for
+# The platform operator baseline, then the tenant publish, then — for
 # a tenant with an engine — what only the engine seeds. All of it goes
 # through the public API. Non-zero means the tenant is NOT published.
 #
@@ -83,10 +83,11 @@ tenant_id_of() {
 # and nothing published the brewery's own seeds/rules.toml at all, so
 # an instance whose product files no longer carry those reactors ran
 # the brewery with none. Now `boss tenant publish <dir>`
-# (seed-tenant.sh) runs FIRST for every tenant, brewery included, and
-# the engine script runs LAST for the sim data (accounts, vendors,
-# products, parts, opening balances), the operator hires and the
-# reset-baseline stamp. Both are idempotent against each other, in
+# (seed-tenant.sh) runs for every tenant, brewery included — after
+# the operator baseline, see below — and the engine script runs LAST
+# for the sim data (accounts, vendors, products, parts, opening
+# balances), the operator hires and the reset-baseline stamp. Both
+# are idempotent against each other, in
 # this order: the engine's own classes post is insert-if-absent
 # (inserted 0), its calendars batch replaces the same rows by code,
 # its company mint upserts, its policy publish GETs first, its people
@@ -100,22 +101,44 @@ tenant_id_of() {
 # so a roster whose `location` no door had seeded would be skipped in
 # silence.
 #
-# THE BASELINE GOES SECOND for every tenant (backlog 0d2d7daa,
-# 2026-09-16). It injects emp-bootstrap-admin for
-# BOSS_BOOTSTRAP_ADMIN_EMAIL unless the roster already holds that
-# email, and a real company's roster declares its founder with exactly
-# that address: baseline first gave a fresh instance the bootstrap row
-# and then refused the founder on the LOWER(email) unique index. The
-# brewery's engine expects the bootstrap admin to exist, so the engine
-# runs after the baseline. A failed publish returns at once — the
-# DEGRADED loop retries this function whole — so the baseline never
-# reads the empty roster the tenant was about to fill, and the engine
-# never seeds against a half-published one.
+# THE BASELINE GOES FIRST, handed the tenant dir (backlog 1ee28274,
+# 2026-09-18). Two constraints pull on this order, and the file the
+# publish is about to send satisfies both:
+#
+#   Q7 — the baseline's injected emp-bootstrap-admin is the ONLY
+#   platform-admin on an example instance, and owner resolution needs
+#   a human platform-admin before ANY platform Job can open. With the
+#   baseline second (b644d727, 2026-09-17) the fresh playground's
+#   publish 400ed at seeds/workflows.toml — "no responsible human
+#   resolvable for owner automation:bootstrap (owner_role
+#   platform-admin)" — and the pod ran DEGRADED, sim down, retrying
+#   every 300 s: 0 tenant rules, 0 workflow-design packets (read
+#   through pod-logs, 2026-09-18 04:42Z).
+#
+#   0d2d7daa (2026-09-16) — a real company's roster declares its
+#   founder with exactly the BOSS_BOOTSTRAP_ADMIN_EMAIL address, and a
+#   baseline that injects first gives the fresh instance the bootstrap
+#   row and then refuses the founder on the LOWER(email) unique index.
+#   That is why the baseline was moved second in the first place.
+#
+# The resolution: boss-operator-baseline-seed reads the tenant's
+# DECLARED roster from the seed file — BOSS_TENANT_DIR/seeds/
+# employees.json, not the API, which is empty until the publish — and
+# skips the bootstrap-admin injection when that file declares the
+# email ("declared by the tenant's roster; the publish lands it"),
+# while still seeding the other operator hires. A roster that does not
+# declare it (the brewery's) gets the injection as before, and the
+# publish then finds its platform-admin. The brewery's engine expects
+# the bootstrap admin to exist, so it runs last. Each step returns at
+# once on failure — the DEGRADED loop retries this function whole — so
+# the publish never runs against an instance that cannot open a
+# platform Job, and the engine never seeds against a half-published
+# tenant.
 publish_tenant() {
     local dir
     dir="$(tenant_dir)"
+    BOSS_TENANT_DIR="$dir" "$BOSS_INFRA_DIR/seed-operator-baseline.sh" || return $?
     BOSS_TENANT_DIR="$dir" "$BOSS_INFRA_DIR/seed-tenant.sh" || return $?
-    "$BOSS_INFRA_DIR/seed-operator-baseline.sh" || return $?
     case "$(tenant_id_of "$dir")" in
         brewery) "$BOSS_INFRA_DIR/seed-brewery-tenant.sh" ;;
     esac

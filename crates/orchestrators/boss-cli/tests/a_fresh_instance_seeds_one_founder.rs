@@ -205,18 +205,23 @@ fn boss_tenant_publish(dir: &Path, base: &str) -> (bool, String) {
     )
 }
 
-/// The operator baseline, as the launcher runs it after the tenant:
-/// BOSS_BOOTSTRAP_ADMIN_EMAIL names the founder's address.
+/// The operator baseline, with BOSS_BOOTSTRAP_ADMIN_EMAIL naming the
+/// founder's address. `tenant_dir` is what the launcher hands it since
+/// backlog 1ee28274 (the declared roster file); `None` is the shape
+/// reset-to-baseline still runs, where only the live roster answers.
 async fn operator_baseline(
     base: String,
+    tenant_dir: Option<PathBuf>,
 ) -> anyhow::Result<boss_people::operator_baseline::Summary> {
     // SAFETY: a process-wide env var, set to the one value every case
     // in this file wants, before the only reader (the seed) runs.
     unsafe { std::env::set_var("BOSS_BOOTSTRAP_ADMIN_EMAIL", FOUNDER_EMAIL) };
     let seeds = repo_root().join(OPERATOR_HIRES);
-    tokio::task::spawn_blocking(move || boss_people::operator_baseline::seed(&base, &seeds))
-        .await
-        .unwrap()
+    tokio::task::spawn_blocking(move || {
+        boss_people::operator_baseline::seed(&base, &seeds, tenant_dir.as_deref())
+    })
+    .await
+    .unwrap()
 }
 
 /// `(id, role)` of every employee holding `email`, case-insensitively
@@ -478,9 +483,9 @@ async fn tenant_then_baseline_leaves_one_founder_row_and_no_bootstrap_admin() {
     assert_eq!(after_tenant.len(), 1, "one row after the tenant");
     assert_eq!(after_tenant[0].0, FOUNDER_ID);
 
-    // 2. The operator baseline, after — the launcher's order for a
-    //    tenant with no engine.
-    let summary = operator_baseline(base.clone())
+    // 2. The operator baseline, after, with no roster file to read —
+    //    the shape reset-to-baseline runs; the live roster answers.
+    let summary = operator_baseline(base.clone(), None)
         .await
         .expect("baseline seeds");
     match &summary.injection {
@@ -578,4 +583,68 @@ async fn tenant_then_baseline_leaves_one_founder_row_and_no_bootstrap_admin() {
         tenant_rules, 0,
         "the tenant's policy file grants nothing (its decision); every rule is core's"
     );
+}
+
+/// THE LAUNCHER'S ORDER SINCE BACKLOG 1ee28274 (2026-09-18): baseline
+/// FIRST, handed the tenant dir, then the publish. The baseline reads
+/// the declared roster off the seed file — the API holds nobody yet —
+/// finds the founder's email there, skips the injection and says so;
+/// emp-audit still lands. The publish then POSTs the founder, who is
+/// refused by nothing: one row holds the email, no bootstrap admin
+/// exists, and the founder is the active platform-admin.
+#[tokio::test(flavor = "multi_thread")]
+async fn baseline_then_tenant_reads_the_declared_roster_and_leaves_one_founder_row() {
+    let db = TestDb::new().await;
+    let base = serve(db.pool.clone()).await;
+    let dir = tenant_copy("baseline-first");
+
+    // 1. The baseline, before anyone is on the roster.
+    let summary = operator_baseline(base.clone(), Some(dir.clone()))
+        .await
+        .expect("baseline seeds");
+    match &summary.injection {
+        boss_people::operator_baseline::Injection::DeclaredByTenant { email, path } => {
+            assert_eq!(email, FOUNDER_EMAIL);
+            assert_eq!(path, &dir.join("seeds/employees.json"));
+        }
+        other => panic!("the roster file declares the founder; got {other:?}"),
+    }
+    assert_eq!(summary.inserted, 1, "emp-audit landed");
+    assert!(
+        holders_of(&db.pool, FOUNDER_EMAIL).await.is_empty(),
+        "nobody holds the email before the publish"
+    );
+
+    // 2. The tenant, verbatim, through the shipped verb.
+    let (ok, out) = boss_tenant_publish(&dir, &base);
+    assert!(ok, "boss tenant publish:\n{out}");
+    assert!(
+        out.contains("1 posted, 0/0 linked"),
+        "the founder was POSTed, not refused on the unique email:\n{out}"
+    );
+
+    // 3. Read the database back.
+    let holders = holders_of(&db.pool, FOUNDER_EMAIL).await;
+    assert_eq!(
+        holders.len(),
+        1,
+        "exactly ONE employee holds {FOUNDER_EMAIL}: {holders:?}"
+    );
+    assert_eq!(holders[0].0, FOUNDER_ID, "and it is the tenant's founder");
+    let bootstrap: Option<String> =
+        sqlx::query_scalar("SELECT id FROM employees WHERE id = 'emp-bootstrap-admin'")
+            .fetch_optional(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        bootstrap, None,
+        "no bootstrap admin was injected ahead of the founder"
+    );
+    let admins: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM employees WHERE role = 'platform-admin' AND status = 'active'",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(admins, vec![FOUNDER_ID.to_string()]);
 }

@@ -44,6 +44,8 @@
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
+# shellcheck source=infra/lint/lib/scanned.sh
+. "$here/lib/scanned.sh"
 observer="$repo/infra/estate/observe-units.sh"
 deploy="$repo/infra/deploy-services.sh"
 unit="$repo/infra/estate/boss-estate-observe-units.service"
@@ -210,5 +212,6 @@ $sentinel_roster"
     a dark registry must narrow the watch to [always], never widen it:
 $sentinel_roster"
 
+lint_scanned the-host-observer-watches-what-is-installed "$got" "unit(s) derived from deploy-services.sh's TIMERS"
 echo "the-host-observer-watches-what-is-installed: ok — the host-units roster is derived from deploy-services.sh's TIMERS ($got units, both halves of $((got / 2)) pairs, $n_excl justified exclusions), boss-ml-inference-batch.timer among them, the unit file holds no second copy, an unreadable source refuses with EX_CONFIG instead of answering a smaller question, and under boss-gcp's roles the roster is the installer's in-role set ($role_got units)"
 exit 0

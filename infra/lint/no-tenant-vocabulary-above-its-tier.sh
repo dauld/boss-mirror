@@ -88,6 +88,8 @@ set -uo pipefail
 
 LINT=no-tenant-vocabulary-above-its-tier
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 BASELINE="infra/lint/tenant-vocabulary.baseline"
 
@@ -322,4 +324,9 @@ if [ "$fell" -gt 0 ]; then
 fi
 
 echo
+# The files the greps above read — the same seven extensions under the
+# same tier roots, test files included (they are read and dropped after,
+# as the count comment says). Files LOOKED AT, not files carrying a hit:
+# a clean tree has none of the second and that is not a zero scan.
+lint_scanned "$LINT" "$(find "${TIERS[@]}" -type f \( -name '*.rs' -o -name '*.ts' -o -name '*.svelte' -o -name '*.toml' -o -name '*.sql' -o -name '*.sh' -o -name '*.yaml' \) 2>/dev/null | wc -l | tr -d ' ')" "file(s) read across ${#TIERS[@]} tier(s)"
 echo "$LINT: clean (every tier at its baseline)"

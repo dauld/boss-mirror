@@ -73,6 +73,8 @@
 set -uo pipefail
 
 cd "$(dirname "$0")/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 RULES_DIR="infra/dispatcher/rules"
 BASE="${BOSS_DISPATCHER_URL:-http://boss-dispatcher-internal.boss.svc.cluster.local:7950}"
@@ -244,6 +246,7 @@ fi
 
 [ "$problems" -eq 0 ] || exit 1
 
+lint_scanned the-live-rules-are-the-authored-rules "${#files[@]}" "authored rule file(s) compared against the deployed registry"
 echo "the-live-rules-are-the-authored-rules: OK — $(printf '%s\n' "$live_names" | wc -l | tr -d ' ') enforced rules, ${#files[@]} authored in this tree, ${registry_count} in the deployed one"
 
 # Neither direction is a failure: both are THIS tree differing from the

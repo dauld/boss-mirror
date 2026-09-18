@@ -19,8 +19,25 @@
 //! transport error fails the run, and the caller
 //! (infra/seed-operator-baseline.sh) retries while the API binds. No
 //! evidence is not a pass.
+//!
+//! WHY THE DECLARED ROSTER IS READ FROM THE SEED FILE FIRST (backlog
+//! 1ee28274, 2026-09-18). The API's answer is only worth asking after
+//! the tenant has published — and the baseline must run BEFORE the
+//! publish: it is what creates the only platform-admin on an example
+//! instance, and Q7 owner resolution needs one before ANY platform Job
+//! can open. Publish-first (b644d727) left the fresh playground
+//! DEGRADED at seeds/workflows.toml ("no responsible human resolvable
+//! for owner automation:bootstrap"), 0 tenant rules, sim down. So the
+//! file the publish is about to send — `<tenant dir>/seeds/
+//! employees.json` — is read first: when it declares the bootstrap
+//! email, the injection is skipped ("the publish lands it"), the other
+//! operator hires still seed, and the API is not asked. A tenant dir
+//! with no roster file, or no tenant dir at all, is the behaviour
+//! before this car; a roster that cannot be parsed is a refusal naming
+//! the file, because injecting over an unreadable declaration is how a
+//! real tenant's founder gets refused on the unique email.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use reqwest::blocking::Client;
@@ -49,6 +66,11 @@ pub enum Injection {
     Injected { email: String },
     /// The seed file itself lists the email; nothing injected.
     InSeedFile { email: String },
+    /// The tenant's declared roster (`<tenant dir>/seeds/employees.json`,
+    /// at `path`) carries the email: the publish that follows the
+    /// baseline lands that row, so nothing is injected and the API is
+    /// not asked.
+    DeclaredByTenant { email: String, path: PathBuf },
     /// The roster already holds the email — a tenant declared the
     /// person — so nothing is injected. `role` is carried because a
     /// holder who is NOT a platform-admin leaves the deployment with no
@@ -212,6 +234,81 @@ pub fn holder_of_email(
     Ok(rows.into_iter().next().map(|e| (e.id, e.role)))
 }
 
+/// The roster file's relative path inside a tenant directory — the
+/// file `boss tenant publish` POSTs to /api/people.
+pub const ROSTER_FILE: &str = "seeds/employees.json";
+
+/// What the tenant's declared roster says about the bootstrap email.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Roster {
+    /// No tenant dir, or no roster file in it: the behaviour before
+    /// backlog 1ee28274 — the API alone decides.
+    NoFile,
+    /// The file at `path` declares an employee with the email.
+    Declares { path: PathBuf },
+    /// The file at `path` parses and nobody in it carries the email.
+    Silent { path: PathBuf },
+}
+
+/// Read `<tenant_dir>/seeds/employees.json` and say whether any
+/// declared employee carries `email` (case-insensitively — the
+/// schema's unique index is on LOWER(email)). Only the `email` field
+/// is read; the file's other fields are the people API's business at
+/// publish time. A file that exists but cannot be read or parsed is an
+/// Err naming it, never `Silent`.
+pub fn tenant_roster_holds(tenant_dir: Option<&Path>, email: &str) -> Result<Roster> {
+    #[derive(Deserialize)]
+    struct Declared {
+        #[serde(default)]
+        email: Option<String>,
+    }
+    let Some(dir) = tenant_dir else {
+        return Ok(Roster::NoFile);
+    };
+    let path = dir.join(ROSTER_FILE);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Roster::NoFile),
+        Err(e) => {
+            return Err(e).with_context(|| format!("reading the tenant roster {}", path.display()));
+        }
+    };
+    let rows: Vec<Declared> = serde_json::from_str(&raw)
+        .with_context(|| format!("parsing the tenant roster {}", path.display()))?;
+    let declared = rows.iter().any(|r| {
+        r.email
+            .as_deref()
+            .is_some_and(|e| e.trim().eq_ignore_ascii_case(email))
+    });
+    Ok(if declared {
+        Roster::Declares { path }
+    } else {
+        Roster::Silent { path }
+    })
+}
+
+/// The whole decision: the declared roster answers first, and only
+/// when it does not is the live roster asked through `holder_of`.
+/// Mutates `seed` only in the `Injected` case.
+pub fn injection_for(
+    seed: &mut OperatorSeed,
+    email: Option<String>,
+    roster: &Roster,
+    holder_of: impl FnOnce(&str) -> Result<Option<(String, Option<String>)>>,
+) -> Result<Injection> {
+    let Some(email) = email else {
+        return Ok(Injection::NoEmail);
+    };
+    if let Roster::Declares { path } = roster {
+        return Ok(Injection::DeclaredByTenant {
+            email,
+            path: path.clone(),
+        });
+    }
+    let holder = holder_of(&email)?;
+    Ok(decide_injection(seed, Some(email), holder))
+}
+
 /// The decision, pure: given the resolved email (if any) and who holds
 /// it on the roster (if anyone), inject or not. Mutates `seed` only in
 /// the `Injected` case.
@@ -255,6 +352,11 @@ fn log_injection(injection: &Injection) {
             email = %email,
             "bootstrap-admin email already present in operator_hires.toml; no injection"
         ),
+        Injection::DeclaredByTenant { email, path } => info!(
+            email = %email,
+            roster = %path.display(),
+            "bootstrap-admin email is declared by the tenant's roster; the publish lands it — no injection"
+        ),
         Injection::HeldBy { email, id, role } => {
             info!(
                 email = %email,
@@ -277,14 +379,23 @@ fn log_injection(injection: &Injection) {
     }
 }
 
-/// Read the seed file, decide the injection against the live roster,
-/// and POST every hire. 409 on a duplicate id is "already hired";
-/// any other failure fails the run.
-pub fn seed(people_base: &str, seed_path: &Path) -> Result<Summary> {
+/// Read the seed file, decide the injection — the tenant's declared
+/// roster under `tenant_dir` first, then the live roster — and POST
+/// every hire. 409 on a duplicate id is "already hired"; any other
+/// failure fails the run.
+pub fn seed(people_base: &str, seed_path: &Path, tenant_dir: Option<&Path>) -> Result<Summary> {
     let raw = std::fs::read_to_string(seed_path)
         .with_context(|| format!("reading operator-baseline seed at {}", seed_path.display()))?;
     let mut seed: OperatorSeed =
         toml::from_str(&raw).with_context(|| format!("parsing {}", seed_path.display()))?;
+
+    // Before the API check: the file is what the publish is about to
+    // send, and the API's roster is empty until it has.
+    let email = resolve_bootstrap_admin_email();
+    let roster = match &email {
+        Some(e) => tenant_roster_holds(tenant_dir, e)?,
+        None => Roster::NoFile,
+    };
 
     // The operator-baseline loads AS the public API like every
     // other external caller. The actor identity is a dedicated
@@ -325,12 +436,9 @@ pub fn seed(people_base: &str, seed_path: &Path) -> Result<Summary> {
         .build()
         .with_context(|| "building reqwest client")?;
 
-    let email = resolve_bootstrap_admin_email();
-    let holder = match &email {
-        Some(e) => holder_of_email(&client, people_base, e)?,
-        None => None,
-    };
-    let injection = decide_injection(&mut seed, email, holder);
+    let injection = injection_for(&mut seed, email, &roster, |e| {
+        holder_of_email(&client, people_base, e)
+    })?;
     log_injection(&injection);
 
     let url = format!("{}/api/people", people_base.trim_end_matches('/'));
@@ -497,5 +605,149 @@ password_hash = "y"
         let mut seed = audit_only();
         assert_eq!(decide_injection(&mut seed, None, None), Injection::NoEmail);
         assert_eq!(seed.hire.len(), 1);
+    }
+
+    // -----------------------------------------------------------------
+    // The tenant's declared roster, read from the seed FILE before the
+    // baseline asks the API (backlog 1ee28274, 2026-09-18): the
+    // baseline runs BEFORE the publish now, so the roster the API holds
+    // is empty at that moment and only the file can say whether the
+    // tenant is about to land the bootstrap email itself.
+    // -----------------------------------------------------------------
+
+    use boss_testing::{create_dir, scratch_dir, write_file};
+
+    const FOUNDER_ROSTER: &str = r#"[{"id": "emp-david", "name": "David Auld",
+  "email": "David@Algedonic.dev", "github_username": "dauld", "role": "founder",
+  "department": "operations", "skill_level": null, "hire_date": "2026-09-16",
+  "location": "loc-algedonic-hq", "manager_id": null, "employment_type": "full-time",
+  "status": "active", "skills": [], "certifications": [], "annual_salary_cents": 0}]"#;
+
+    fn tenant_with_roster(name: &str, roster: &str) -> std::path::PathBuf {
+        let dir = scratch_dir(&format!("operator-baseline-roster-{name}"));
+        create_dir(&dir.join("seeds"));
+        write_file(&dir.join("seeds/employees.json"), roster);
+        dir
+    }
+
+    /// A roster lookup that must NOT be consulted: when the file has
+    /// already answered, the API is not asked (it is empty before the
+    /// publish anyway).
+    fn never_asked(_: &str) -> Result<Option<(String, Option<String>)>> {
+        panic!("the roster file answered; the API must not be asked")
+    }
+
+    /// The real tenant's case: the roster declares the founder with
+    /// the bootstrap email (case differs — the schema's unique index
+    /// is on LOWER(email)), so the baseline SKIPS the injection, says
+    /// who declares it, and the publish that follows lands the row.
+    #[test]
+    fn a_roster_file_declaring_the_email_stops_the_injection() {
+        let dir = tenant_with_roster("declared", FOUNDER_ROSTER);
+        let roster = tenant_roster_holds(Some(&dir), "david@algedonic.dev").unwrap();
+        let path = dir.join("seeds/employees.json");
+        assert_eq!(roster, Roster::Declares { path: path.clone() });
+
+        let mut seed = audit_only();
+        let got = injection_for(
+            &mut seed,
+            Some("david@algedonic.dev".into()),
+            &roster,
+            never_asked,
+        )
+        .unwrap();
+        assert_eq!(
+            got,
+            Injection::DeclaredByTenant {
+                email: "david@algedonic.dev".into(),
+                path,
+            }
+        );
+        assert_eq!(seed.hire.len(), 1, "the other operator hires still seed");
+        assert!(seed.hire.iter().all(|h| h.id != BOOTSTRAP_ID));
+    }
+
+    /// The playground's case: the example tenant's roster does not
+    /// carry the operator's address, so the baseline asks the API as
+    /// before and, nobody holding it, injects the platform-admin — the
+    /// row Q7 owner resolution needs before the publish can open its first
+    /// platform Job.
+    #[test]
+    fn a_roster_file_without_the_email_leaves_the_injection_alone() {
+        let dir = tenant_with_roster(
+            "silent",
+            r#"[{"id": "emp-aa-001", "email": "ceo@example.test", "role": "ceo"}]"#,
+        );
+        let roster = tenant_roster_holds(Some(&dir), "david@algedonic.dev").unwrap();
+        assert_eq!(
+            roster,
+            Roster::Silent {
+                path: dir.join("seeds/employees.json")
+            }
+        );
+        let mut seed = audit_only();
+        let got = injection_for(
+            &mut seed,
+            Some("david@algedonic.dev".into()),
+            &roster,
+            |_| Ok(None),
+        )
+        .unwrap();
+        assert_eq!(
+            got,
+            Injection::Injected {
+                email: "david@algedonic.dev".into()
+            }
+        );
+        assert_eq!(seed.hire[0].id, BOOTSTRAP_ID);
+    }
+
+    /// No tenant dir, or a dir with no roster file, is today's
+    /// behaviour: nothing to read, the API decides.
+    #[test]
+    fn no_tenant_dir_or_no_roster_file_reads_as_absent() {
+        assert_eq!(
+            tenant_roster_holds(None, "david@algedonic.dev").unwrap(),
+            Roster::NoFile
+        );
+        let dir = scratch_dir("operator-baseline-roster-no-file");
+        create_dir(&dir.join("seeds"));
+        assert_eq!(
+            tenant_roster_holds(Some(&dir), "david@algedonic.dev").unwrap(),
+            Roster::NoFile
+        );
+        let missing = dir.join("no-such-tenant");
+        assert_eq!(
+            tenant_roster_holds(Some(&missing), "david@algedonic.dev").unwrap(),
+            Roster::NoFile
+        );
+        // And the API's holder still wins, as before this car.
+        let mut seed = audit_only();
+        let got = injection_for(
+            &mut seed,
+            Some("david@algedonic.dev".into()),
+            &Roster::NoFile,
+            |_| Ok(Some(("emp-david".into(), Some("platform-admin".into())))),
+        )
+        .unwrap();
+        assert!(matches!(got, Injection::HeldBy { .. }), "{got:?}");
+    }
+
+    /// A roster the binary cannot read is NOT "nobody declares it":
+    /// injecting over it would hand a real tenant the very duplicate
+    /// this check exists to prevent. Refuse, naming the file.
+    #[test]
+    fn a_malformed_roster_file_is_a_refusal_naming_the_file() {
+        let dir = tenant_with_roster("malformed", "[{\"id\": \"emp-x\", ");
+        let err = tenant_roster_holds(Some(&dir), "david@algedonic.dev").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(&dir.join("seeds/employees.json").display().to_string()),
+            "names the file: {msg}"
+        );
+        // An object where the roster's array should be is malformed too.
+        let dir = tenant_with_roster("not-employees", "{\"employees\": []}");
+        let err = tenant_roster_holds(Some(&dir), "david@algedonic.dev").unwrap_err();
+        assert!(format!("{err:#}").contains("employees.json"), "{err:#}");
     }
 }

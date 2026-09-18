@@ -33,6 +33,8 @@
 # namespace, not the file.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 ROOTS=(infra/cluster/manifests infra/gate-runner)
 
@@ -44,4 +46,5 @@ if [ -n "$hits" ]; then
     exit 1
 fi
 n="$(find "${ROOTS[@]}" -name '*.yaml' | wc -l | tr -d ' ')"
+lint_scanned no-manifest-mounts-a-hostpath "$n" "manifest(s) under ${ROOTS[*]}"
 echo "no-manifest-mounts-a-hostpath: ok — $n manifest(s), no hostPath volume"

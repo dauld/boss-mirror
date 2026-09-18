@@ -36,6 +36,8 @@
 # here refuses to report clean on nothing.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 MANIFESTS="infra/cluster/manifests"
 DECLARATION="infra/cluster/dns/access.toml"
@@ -92,6 +94,10 @@ if [ -z "$urls" ]; then
     echo "a-public-url-names-a-registered-oidc-redirect: no BOSS_PUBLIC_URL in $MANIFESTS/*.yaml — the lint has lost its subject" >&2
     exit 1
 fi
+
+# "no BOSS_PUBLIC_URL in the manifests" is refused above; this is the
+# same fact stated in the one shape every scanner states it.
+lint_scanned a-public-url-names-a-registered-oidc-redirect "$(printf '%s\n' "$urls" | grep -c '[^[:space:]]')" "BOSS_PUBLIC_URL value(s) across $MANIFESTS/*.yaml"
 
 status=0
 while IFS=$'\t' read -r file url; do

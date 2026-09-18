@@ -54,6 +54,8 @@
 set -uo pipefail
 
 cd "$(dirname "$0")/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 DEPLOY="infra/deploy-services.sh"
 # The FORGE host's own installer, added 2026-08-17. This lint read
@@ -614,4 +616,5 @@ if [ "$problems" -gt 0 ]; then
     echo "  $problems scheduled run(s) without working Job visibility." >&2
     exit 1
 fi
+lint_scanned timers-leave-a-packet "$((count + ${cron_count:-0}))" "scheduled run(s): $count timers and ${cron_count:-0} cluster CronJobs"
 echo "timers-leave-a-packet: $count timers and ${cron_count:-0} cluster CronJobs, each opens and completes a defined Job"

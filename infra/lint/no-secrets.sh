@@ -57,6 +57,8 @@ LINT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$LINT_DIR/../.." || exit 1
 # shellcheck source=infra/lint/lib/git-answer.sh
 . "$LINT_DIR/lib/git-answer.sh"
+# shellcheck source=infra/lint/lib/scanned.sh
+. "$LINT_DIR/lib/scanned.sh"
 
 LINT=no-secrets
 REPO_ALLOW_FILE="infra/lint/no-secrets-allow.txt"
@@ -288,6 +290,9 @@ main_scan() {
         exit "$LINT_CANNOT_ANSWER"
     fi
     scan_paths "$REPO_ALLOW_FILE" "$viol" "$supp" < "$paths"
+    # The statement that was missing when git refused (above): how many
+    # tracked files this run actually read. -z paths, so count NULs.
+    lint_scanned "$LINT" "$(tr -cd '\0' < "$paths" | wc -c | tr -d ' ')" "tracked file(s)"
     rm -f "$paths"
 
     supp_count=$(wc -l < "$supp" | tr -d ' ')

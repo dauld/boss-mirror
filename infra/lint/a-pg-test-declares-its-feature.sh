@@ -21,6 +21,8 @@
 # "postgres". Reads the tree only; runs on every gate.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 fail=0
 checked=0
@@ -51,4 +53,5 @@ while IFS= read -r toml; do
 done < <(find crates -name Cargo.toml -not -path '*/target/*')
 
 [ "$fail" -eq 0 ] || exit 1
+lint_scanned a-pg-test-declares-its-feature "$checked" "Postgres-reaching test target(s)"
 echo "a-pg-test-declares-its-feature: ok — $checked Postgres-reaching test(s) declare required-features = [\"postgres\"]"

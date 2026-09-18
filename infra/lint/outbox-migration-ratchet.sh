@@ -40,6 +40,8 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 EMIT_PATTERN='\.emit_at\(|\.emit_with_actor_at\(|\.emit_simulated_at\(|\.emit_with_actor_simulated_at\('
 
@@ -67,6 +69,7 @@ list_sites() {
 }
 
 fail=0
+crates_scanned=0
 
 echo "outbox-migration-ratchet: post-commit publisher emits (flat ban)"
 echo
@@ -76,6 +79,7 @@ while IFS= read -r cargo_toml; do
   dir=$(dirname "$cargo_toml")
   crate=$(basename "$dir")
   [ -d "$dir/src" ] || continue
+  crates_scanned=$((crates_scanned + 1))
   n=$(count_sites "$dir/src")
   if [ "$n" -ne 0 ]; then
     echo "  [FAIL] $crate has $n post-commit emit site(s):"
@@ -93,4 +97,5 @@ if [ "$fail" -ne 0 ]; then
   echo "outbox-migration-ratchet: FAIL"
   exit 1
 fi
+lint_scanned outbox-migration-ratchet "$crates_scanned" "crate src tree(s) under crates/"
 echo "outbox-migration-ratchet: OK"

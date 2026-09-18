@@ -42,6 +42,8 @@ set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAME=the-image-carries-what-build-scripts-read
 cd "$here/../.."
+# shellcheck source=infra/lint/lib/scanned.sh
+. "$here/lib/scanned.sh"
 
 DOCKERFILE=infra/oss-quickstart/Dockerfile
 [ -f "$DOCKERFILE" ] || { echo "$NAME: $DOCKERFILE does not exist" >&2; exit 1; }
@@ -93,4 +95,5 @@ for path in $(reaches); do
 done
 
 [ "$fail" -eq 0 ] || exit 1
+lint_scanned "$NAME" "$carried" "out-of-crate path(s) read at build time"
 echo "$NAME: every out-of-crate path read at build time ($carried) is carried into the image"

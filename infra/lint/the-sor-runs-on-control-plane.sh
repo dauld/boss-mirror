@@ -9,6 +9,9 @@
 # the invariant so an unpinned boss workload cannot creep back in — a
 # config-channel check the software gate would otherwise miss.
 set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 f="infra/cluster/manifests/boss.yaml"
 [ -f "$f" ] || { echo "sor-control-plane: $f is missing"; exit 1; }
 
@@ -23,4 +26,5 @@ if [ "$pinned" -lt "$workloads" ]; then
     echo "        node-role.kubernetes.io/control-plane: \"\""
     exit 1
 fi
+lint_scanned the-sor-runs-on-control-plane "$workloads" "workload(s) in $f"
 echo "sor-control-plane: OK — all $workloads boss workload(s) pin to control-plane"

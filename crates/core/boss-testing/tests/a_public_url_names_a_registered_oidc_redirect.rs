@@ -55,6 +55,7 @@ fn fixture(case: &str, public_url: Option<&str>, redirects: &[(&str, bool)]) -> 
     let dst = tree.join(LINT_REL);
     boss_testing::create_dir(dst.parent().unwrap());
     std::fs::copy(repo_root().join(LINT_REL), &dst).expect("copy the lint into the fixture");
+    boss_testing::copy_lint_libs(&tree);
     tree
 }
 

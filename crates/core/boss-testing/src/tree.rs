@@ -76,6 +76,36 @@ pub fn dispatcher_rules_dir() -> PathBuf {
     repo_root().join("infra/dispatcher/rules")
 }
 
+/// Copy the shared lint library — every file under `infra/lint/lib/` —
+/// into a fixture tree at `<fixture>/infra/lint/lib/`, so a lint copied
+/// into that fixture finds what it sources the way it does in the repo.
+///
+/// One definition of "what a copied lint needs beside it". Until
+/// 2026-09-18 each fixture test copied the one or two libs its lint
+/// happened to source, and adding a sourced helper to a lint
+/// (`lib/scanned.sh`, backlog cdf2d959) broke four fixtures at once:
+/// the copied lint ran, failed to source, and the failure read as a
+/// verdict about the fixture. The directory is the definition
+/// (CLAUDE.md §9a), so a lib added tomorrow is carried without this
+/// function changing.
+pub fn copy_lint_libs(fixture: &Path) {
+    let src = repo_root().join("infra/lint/lib");
+    let dst = fixture.join("infra/lint/lib");
+    std::fs::create_dir_all(&dst).unwrap_or_else(|e| panic!("create {}: {e}", dst.display()));
+    let entries = std::fs::read_dir(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
+    let mut copied = 0;
+    for entry in entries {
+        let path = entry.expect("a lib entry").path();
+        if path.extension().is_some_and(|e| e == "sh") {
+            let to = dst.join(path.file_name().expect("a file name"));
+            std::fs::copy(&path, &to)
+                .unwrap_or_else(|e| panic!("copy {} -> {}: {e}", path.display(), to.display()));
+            copied += 1;
+        }
+    }
+    assert!(copied > 0, "{} holds no .sh to copy", src.display());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

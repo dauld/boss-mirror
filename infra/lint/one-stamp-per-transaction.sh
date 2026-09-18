@@ -60,6 +60,8 @@
 
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 GRANDFATHERED='crates/core/boss-jobs/src/http/steps.rs: fn update_step
 crates/core/boss-jobs/src/http/jobs.rs: fn create_job'
@@ -129,4 +131,5 @@ if [ -n "$new_violations" ]; then
 fi
 
 count=$(printf '%s' "$violations" | grep -c . || true)
+lint_scanned one-stamp-per-transaction "$(find crates -name '*.rs' -not -path '*/target/*' -not -path '*/tests/*' | wc -l | tr -d ' ')" "Rust file(s) under crates/ outside tests/"
 echo "one-stamp-per-transaction: clean — no NEW function body mints two stamps ($count grandfathered, adjudication on c1475969)"

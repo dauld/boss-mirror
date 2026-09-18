@@ -31,6 +31,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 RUNNER="infra/postgres/migrate.sh"
 FAIL=0
@@ -78,4 +80,5 @@ if [ "$FAIL" -ne 0 ]; then
     exit 1
 fi
 
+lint_scanned schema-converge "${#PATHS[@]}" "deploy path(s)"
 echo "schema-converge: ok — ${#PATHS[@]} deploy paths converge the schema from the tree"

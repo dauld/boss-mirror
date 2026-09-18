@@ -13483,6 +13483,11 @@ mod tests {
             .join("../../../infra/lint/migration-numbers-unique.sh");
         std::fs::copy(&real, lint.join("migration-numbers-unique.sh"))
             .unwrap_or_else(|e| panic!("copy {}: {e}", real.display()));
+        // And what the lint sources: every lint reads infra/lint/lib/
+        // (lib/scanned.sh since 2026-09-18), so a fixture carrying the
+        // script without the lib runs a lint that cannot start, and the
+        // verdict is about the fixture, not the tree.
+        boss_testing::copy_lint_libs(&root);
         for m in migrations {
             std::fs::write(schema.join(m), "-- fixture\n").expect("write migration");
         }

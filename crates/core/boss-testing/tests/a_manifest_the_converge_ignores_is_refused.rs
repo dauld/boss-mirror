@@ -65,6 +65,7 @@ fn fixture(case: &str, count: usize) -> PathBuf {
         std::fs::copy(repo_root().join(rel), &dst)
             .unwrap_or_else(|e| panic!("copy {rel} into the fixture: {e}"));
     }
+    boss_testing::copy_lint_libs(&tree);
     tree
 }
 

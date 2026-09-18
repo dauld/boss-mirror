@@ -41,6 +41,8 @@
 
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 hits=$(grep -rn --include='*.svelte' --include='*.ts' \
     -E '_at\.slice\(0, ?10\)' apps/ libs/ 2>/dev/null || true)
@@ -58,6 +60,7 @@ fi
 
 count=$(grep -rn --include='*.svelte' --include='*.ts' \
     -E '\.slice\(0, ?10\)' apps/ libs/ 2>/dev/null | wc -l | tr -d ' ')
+lint_scanned one-date-format "$(find apps libs -type f \( -name '*.svelte' -o -name '*.ts' \) -not -path '*/node_modules/*' | wc -l | tr -d ' ')" "web source file(s) under apps/ and libs/"
 echo "one-date-format: clean — no timestamp field is sliced for display"
 echo "  (${count} other .slice(0, 10) uses remain: list truncations and"
 echo "  YYYY-MM-DD keys, both deliberate — see the header of this lint)"

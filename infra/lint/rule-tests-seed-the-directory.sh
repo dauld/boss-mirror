@@ -56,6 +56,8 @@ set -uo pipefail
 
 NAME="rule-tests-seed-the-directory"
 cd "$(dirname "$0")/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 LOAD="load_active_rules"
 SEED="seed_authored_rules"
@@ -228,6 +230,7 @@ MSG
     exit 1
 fi
 
+lint_scanned "$NAME" "$(find crates -path '*/tests/*' -name '*.rs' -type f -not -path '*/target/*' | wc -l | tr -d ' ')" "test file(s) under crates/"
 echo "$NAME: self-test ok — a seeded helper, a prose mention and a src/ caller pass; an unseeded test load is refused by file; an inline copy of an authored rule is refused by file:line"
 echo "$NAME: ok — every test file that calls $LOAD seeds the authored directory in the same file, and none carries an inline copy of an authored rule"
 exit 0

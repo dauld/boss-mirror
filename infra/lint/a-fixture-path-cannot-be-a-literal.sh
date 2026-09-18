@@ -128,6 +128,8 @@ set -uo pipefail
 NAME="a-fixture-path-cannot-be-a-literal"
 LINT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$LINT_DIR/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. "$LINT_DIR/lib/scanned.sh"
 
 # The shared helper when the tree has it, an equivalent inline when it
 # does not. The car that adds lib/git-answer.sh is in flight alongside
@@ -481,5 +483,6 @@ MSG
     exit 1
 fi
 
+lint_scanned "$NAME" "$scanned" "Rust file(s)"
 echo "$NAME: ok — $scanned Rust file(s) read, none builds a fixture at a fixed path under a shared temp directory"
 exit 0

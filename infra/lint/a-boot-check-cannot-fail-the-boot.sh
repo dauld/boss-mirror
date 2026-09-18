@@ -175,12 +175,21 @@ self_test() {
     [ "$r" != ok ] || { echo "self-test FAILED: a binary that refuses to start passed" >&2; return 1; }
 
     echo "$NAME: self-test ok — a returning check, an exit, a panicking module, an empty file and a refusal to start are each refused"
+    # A RETURN trap set inside a function is restored for later
+    # FUNCTION returns but not for a later `.`-sourced file: bash fires
+    # it again when that file finishes, by which time $fx is out of
+    # scope and `set -u` aborts the lint ("fx: unbound variable", found
+    # the day lib/scanned.sh was sourced below this call, 2026-09-18).
+    # Clean up here, once, and drop the trap with it.
+    rm -rf "$fx"; trap - RETURN
 }
 
 if [ "${1:-}" = "--self-test" ]; then self_test; exit $?; fi
 self_test || exit 1
 
 cd "$here/../.."
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 API=crates/core/boss-jobs/src/bin/boss_jobs_api.rs
 verdict=$(judge "$API" crates/core/boss-jobs/src)
 if [ "$verdict" != ok ]; then
@@ -191,4 +200,5 @@ if [ "$verdict" != ok ]; then
 fi
 
 n=$(grep -oE 'async fn verify_[a-z_]*_viability' "$API" | sort -u | wc -l | tr -d ' ')
+lint_scanned "$NAME" "$n" "boot check(s) in $API"
 echo "$NAME: $n boot check(s) return nothing and cannot end the process"

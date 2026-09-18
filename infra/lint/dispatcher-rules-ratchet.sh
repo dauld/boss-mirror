@@ -43,6 +43,9 @@
 
 set -euo pipefail
 
+# shellcheck source=infra/lint/lib/scanned.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/scanned.sh"
+
 RULES_DIR="infra/dispatcher/rules"
 
 if [ ! -d "$RULES_DIR" ]; then
@@ -110,4 +113,5 @@ if [ "$problems" -ne 0 ]; then
     exit 1
 fi
 
+lint_scanned dispatcher-rules-ratchet "${#files[@]}" "rule file(s) under $RULES_DIR"
 echo "dispatcher-rules-ratchet: OK (${#files[@]} rules, each saying why it exists)"

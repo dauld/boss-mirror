@@ -22,6 +22,10 @@ repo=sys.argv[1]; v=json.loads(sys.argv[2])["verbs"]
 # defect; a verb that declares itself MUTATING is the one definition.
 mutating=sorted(n for n,s in v.items() if "MUTATING" in s.get("about",""))
 len(mutating) >= 8 or sys.exit(f"FAIL: only {len(mutating)} verb(s) declare MUTATING — the roster derivation broke: {mutating}")
+# The scanned line every scanner prints (infra/lint/lib/scanned.sh),
+# from here because the count lives in this program; the floor above
+# is its refusal on zero.
+print(f"the-controls-are-bounded-verbs: scanned {len(mutating)} MUTATING verb(s) of {len(v)} under infra/ops/verbs")
 for name in mutating:
     spec=v[name]
     # argv[0] is repo-relative (66077f9c); the runner resolves it against

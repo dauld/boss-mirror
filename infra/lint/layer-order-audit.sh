@@ -69,6 +69,8 @@
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 # --- the layer map ---------------------------------------------------------
 # Rank order. A crate may depend downward and sideways, never upward.
@@ -279,6 +281,7 @@ check_order crates || total=$((total+$?))
 check_shape crates || total=$((total+$?))
 
 if [ "$total" -eq 0 ]; then
+    lint_scanned layer-order-audit "$(find crates -name Cargo.toml -type f | wc -l | tr -d ' ')" "Cargo.toml(s) under crates/"
     echo "layer-order-audit: clean (order + shape); $allow_count known shape exception(s) allow-listed"
     exit 0
 fi

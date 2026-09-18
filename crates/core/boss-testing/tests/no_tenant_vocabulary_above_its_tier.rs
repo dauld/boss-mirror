@@ -68,6 +68,7 @@ impl Tree {
         }
         let body = std::fs::read_to_string(lint()).expect("read the lint under test");
         scratch::write_exec(&root.join(LINT), &body);
+        boss_testing::copy_lint_libs(&root);
         Tree(root)
     }
 

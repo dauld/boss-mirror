@@ -169,6 +169,8 @@ TENANT_RULES_GLOB="examples/*/seeds/rules.toml"
 PIN_TOKEN="rule-registry-pin:"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=infra/lint/lib/scanned.sh
+. "$REPO_ROOT/infra/lint/lib/scanned.sh"
 
 # ---------------------------------------------------------------------------
 # The sets
@@ -532,6 +534,7 @@ EOF
     nretired="$(LC_ALL=C grep -c . < "$tmp/retired" || true)"
     ntenant="$(LC_ALL=C grep -c . < "$tmp/tenant" || true)"
     npins="$(cd "$tree" && LC_ALL=C grep -lF -- "$PIN_TOKEN" /dev/null $(tr '\n' ' ' < "$tmp/files") 2>/dev/null | LC_ALL=C grep -c . || true)"
+    lint_scanned "$NAME" "$(LC_ALL=C grep -c . < "$tmp/declared")" "declared rule(s), each checked against every code file in the tree"
     echo "$NAME: OK — $(LC_ALL=C grep -c . < "$tmp/declared") declared rules ($nunseeded declared since the collapse, by file alone), $nretired retired and referenced nowhere in code, $npins file(s) carrying a $PIN_TOKEN pin, $ntenant declared by an example tenant's seeds/rules.toml"
     return 0
 }

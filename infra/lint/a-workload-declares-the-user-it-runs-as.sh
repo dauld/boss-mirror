@@ -61,6 +61,8 @@
 # roster that has drifted from its directory (CLAUDE.md §9a).
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 DIR="infra/cluster/manifests"
 
@@ -156,4 +158,5 @@ if [ "$checked" -lt "$MIN_CHECKED" ]; then
 fi
 
 [ "$fail" = 0 ] || exit 1
+lint_scanned a-workload-declares-the-user-it-runs-as "$checked" "workload(s) under $DIR"
 echo "workload-declares-user: OK — $checked workload(s) declare the uid they run as (${#EXEMPT[@]} exempt, each with a reason)"

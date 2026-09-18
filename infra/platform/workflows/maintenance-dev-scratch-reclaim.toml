@@ -1,0 +1,46 @@
+# The dev pod's `reclaim` sidecar (infra/cluster/manifests/boss-dev.yaml,
+# infra/cluster/dev-scratch-reclaim.sh) — filed by the script itself,
+# not by a systemd timer: the sidecar loops in-process, so there is no
+# ExecStartPre/ExecStopPost pair to hang the wrap and boss-step on.
+[[workflow]]
+kind = "maintenance-dev-scratch-reclaim"
+label = "Dev pod scratch reclaim"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Hourly on the dev pod: removes git worktrees whose branch is gone from the forge (clean, git-quiet for a grace period) with the cargo target each kept alive, retires sibling targets by age, and below a floor trims the regenerable build cache. Files a packet only for a pass that reclaimed something or left a floor unmet, carrying the totals and the dirty worktrees it kept, by name (backlog 1933db9e: 203 worktrees, 175 of their branches gone, 364 GB on a 77%-full disk, and nothing that could see it)."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Pass fired"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "reclaim-sidecar" }
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Run to completion"
+authority_role = "platform-admin"
+fields = [{ name = "result", field_type = "string", required = true }]
+
+[[workflow.step]]
+title = "completed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
+title_template = "Maintenance completed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }
+
+# A pass that reclaimed what it could and still left a floor unmet, or
+# could not remove a target it named, lands here with `problems` on the
+# run step — the loud exit the sidecar log used to be the only reader of.
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }

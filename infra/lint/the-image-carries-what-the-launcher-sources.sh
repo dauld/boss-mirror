@@ -59,11 +59,17 @@ self_test() {
     printf 'echo hello\n' >"$fx/launcher.sh"
     [[ -z "$(sourced_files "$fx/launcher.sh")" ]] || { echo "the-image-carries-what-the-launcher-sources: self-test FAILED — read sources from a launcher that declares none" >&2; return 1; }
     echo "the-image-carries-what-the-launcher-sources: self-test ok — planted other-lib.sh caught, tenant-launch.sh copied beside the launcher passes"
+    # A RETURN trap set inside a function fires again when a later
+    # `.`-sourced file finishes, with $fx out of scope and `set -u`
+    # aborting the lint (lib/scanned.sh is sourced below, 2026-09-18).
+    rm -rf "$fx"; trap - RETURN
 }
 if [[ "${1:-}" == "--self-test" ]]; then self_test; exit $?; fi
 self_test || exit 1
 
 repo="$(cd "$here/../.." && pwd)"
+# shellcheck source=infra/lint/lib/scanned.sh
+. "$here/lib/scanned.sh"
 launcher="$repo/infra/oss-quickstart/services-launcher.sh"
 df="$repo/infra/oss-quickstart/Dockerfile"
 if [[ -z "$(sourced_files "$launcher")" ]]; then
@@ -77,5 +83,6 @@ if [[ -n "$m" ]]; then
     echo "  Add a Dockerfile copy line for each, next to the services-launcher.sh line in infra/oss-quickstart/Dockerfile; a launcher that cannot find what it sources crash-loops the pod before any API starts (2026-09-05)." >&2
     exit 1
 fi
+lint_scanned the-image-carries-what-the-launcher-sources "$(sourced_files "$launcher" | wc -l | tr -d ' ')" "file(s) the launcher sources"
 echo "the-image-carries-what-the-launcher-sources: $(sourced_files "$launcher" | wc -l | tr -d ' ') sourced file(s), every one copied beside the launcher"
 exit 0

@@ -39,6 +39,8 @@
 set -uo pipefail
 
 cd "$(dirname "$0")/../.."
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 SCHEMA=infra/postgres/schema
 fail=0
 
@@ -103,4 +105,5 @@ done
 if [ "$fail" -ne 0 ]; then
     exit 1
 fi
+lint_scanned registry-bump-retires-first "$(find "$SCHEMA" -maxdepth 1 -name '*.sql' -type f | wc -l | tr -d ' ')" "migration(s) against ${#TABLES[@]} one-active-per-name table(s)"
 echo "registry-bump-retires-first: clean — every superseding registry write retires before it inserts"

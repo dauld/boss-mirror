@@ -51,6 +51,8 @@
 set -uo pipefail
 
 cd "$(dirname "$0")/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 DIR="infra/postgres/schema"
 [ -d "$DIR" ] || { echo "migration-numbers-unique: $DIR not found" >&2; exit 1; }
 
@@ -98,4 +100,5 @@ if [ -n "$dupes" ]; then
     exit 1
 fi
 
+lint_scanned migration-numbers-unique "$count" "prefixed migration(s) under $DIR"
 echo "migration-numbers-unique: $count migrations, no shared prefixes"

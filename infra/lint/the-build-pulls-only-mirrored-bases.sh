@@ -36,6 +36,8 @@
 # NOT covered: they are the operator's deployment, not the pipeline.
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 REGISTRY="10.20.0.15:3000"
 FORGE_BASE="$REGISTRY/david"
@@ -285,5 +287,6 @@ if [ "$rc" -ne 0 ]; then
 fi
 n=$(( $(ci_images "$WORKFLOW" | wc -l) + $(dockerfile_refs "$DOCKERFILE" | wc -l) ))
 for m in "${MANIFESTS[@]}"; do n=$(( n + $(manifest_images "$m" | wc -l) )); done
+lint_scanned the-build-pulls-only-mirrored-bases "$n" "image ref(s) across $WORKFLOW, $DOCKERFILE and ${#MANIFESTS[@]} gate-runner manifest(s)"
 echo "the-build-pulls-only-mirrored-bases: self-test ok — a public ref, an inline container ref, a public services image, a public manifest image and an unmirrored forge tag are refused by name and line; $n ref(s) across $WORKFLOW, $DOCKERFILE and ${#MANIFESTS[@]} gate-runner manifest(s) are forge tags the mirror list carries or this pipeline builds"
 exit 0

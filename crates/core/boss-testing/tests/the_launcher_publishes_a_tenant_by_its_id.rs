@@ -13,14 +13,18 @@
 //! classes.json but never seeds/locations.toml nor
 //! seeds/chart_of_accounts.toml — the playground inherited both from
 //! the migrations — and nothing published the brewery's own
-//! seeds/rules.toml at all. Now the generic publish runs FIRST for every
-//! tenant, brewery included; the operator baseline follows it; and the
-//! brewery's engine script runs LAST, for the sim data, the reset
-//! baseline and the rows only it seeds (its own classes post and
-//! workflow walk become no-ops: insert-if-absent, and a kind an
-//! authoring Job already published is skipped). Exercised here under
-//! stubs, the way infra/lint/a-failed-prepare-degrades-the-pod.sh
-//! exercises the degrade contract — no API, no binaries, no /opt/boss.
+//! seeds/rules.toml at all. Now the operator baseline runs FIRST for
+//! every tenant, handed the tenant dir (backlog 1ee28274, 2026-09-18:
+//! it creates the platform-admin the publish's first platform Job
+//! needs, and reads the tenant's declared roster file so a real
+//! tenant's founder is not injected ahead of the publish); the generic
+//! publish follows it, brewery included; and the brewery's engine
+//! script runs LAST, for the sim data, the reset baseline and the rows
+//! only it seeds (its own classes post and workflow walk become
+//! no-ops: insert-if-absent, and a kind an authoring Job already
+//! published is skipped). Exercised here under stubs, the way
+//! infra/lint/a-failed-prepare-degrades-the-pod.sh exercises the
+//! degrade contract — no API, no binaries, no /opt/boss.
 
 use boss_testing::{create_dir, repo_root, scratch_dir, write_exec, write_file};
 use std::path::{Path, PathBuf};
@@ -33,6 +37,8 @@ struct Fixture {
     root: PathBuf,
     /// Stands in for /opt/boss/infra: three stub seed scripts, each
     /// appending its name and the tenant dir it was handed to `log`.
+    /// `STUB_EXIT` is every stub's exit; `STUB_FAIL=<script>` makes
+    /// that one script alone exit 3.
     infra: PathBuf,
     log: PathBuf,
 }
@@ -53,6 +59,7 @@ impl Fixture {
                 &format!(
                     "#!/usr/bin/env bash\n\
                      echo \"{script} tenant_dir=${{BOSS_TENANT_DIR:-unset}}\" >>\"{}\"\n\
+                     [[ \"${{STUB_FAIL:-}}\" == \"{script}\" ]] && exit 3\n\
                      exit \"${{STUB_EXIT:-0}}\"\n",
                     log.display()
                 ),
@@ -114,44 +121,82 @@ fn the_brewery_is_published_through_the_generic_door_before_its_engine_seeds_the
     let manifest = brewery.join("seeds/tenant.toml");
     let (rc, out) = fx.publish(&[("BOSS_TENANT_MANIFEST_TOML", &s(&manifest))]);
     assert_eq!(rc, 0, "{out}");
-    // The same door every tenant takes, handed the brewery's directory:
+    // THE BASELINE GOES FIRST (backlog 1ee28274, 2026-09-18): it is
+    // what creates the only platform-admin on an example instance, and
+    // Q7 owner resolution needs one before the publish can open ANY
+    // platform Job — publish-first left the playground DEGRADED at
+    // seeds/workflows.toml ("no responsible human resolvable for owner
+    // automation:bootstrap"). It is handed the tenant dir so it can
+    // read the declared roster and skip the bootstrap row a real
+    // tenant is about to land itself (the 0d2d7daa constraint). Then
+    // the same door every tenant takes, handed the brewery's directory:
     // locations, the chart, the rules and everything else the contract
     // names reach the instance through it, not through the engine. The
-    // engine runs LAST, after the baseline it expects (the bootstrap
-    // admin), for the sim data and the reset-baseline stamp.
+    // engine runs LAST, for the sim data and the reset-baseline stamp.
     let scripts: Vec<&str> = out.lines().take_while(|l| !l.starts_with("---")).collect();
+    let baseline = format!("seed-operator-baseline.sh tenant_dir={}", s(&brewery));
     let generic = format!("seed-tenant.sh tenant_dir={}", s(&brewery));
     assert_eq!(
         scripts,
         vec![
+            baseline.as_str(),
             generic.as_str(),
-            "seed-operator-baseline.sh tenant_dir=unset",
             "seed-brewery-tenant.sh tenant_dir=unset",
         ],
-        "publish first, then the baseline, then the engine for what only it does:\n{out}"
+        "baseline first, then the publish, then the engine for what only it does:\n{out}"
     );
 }
 
 #[test]
-fn a_failed_brewery_publish_stops_before_the_baseline_and_the_engine() {
+fn a_failed_brewery_publish_stops_before_the_engine() {
     // The degrade contract is the same for the brewery: a publish that
-    // did not land is the verdict, and neither the baseline nor the
-    // engine's prepare runs against the rows it was about to declare —
-    // the engine counts a 409 as "already there" (its people posts
-    // predate backlog 0d2d7daa's GET-after-409), so a location no door
-    // seeded would read as a duplicate and the sim would start on a
+    // did not land is the verdict, and the engine's prepare does not
+    // run against the rows the publish was about to declare — the
+    // engine counts a 409 as "already there" (its people posts predate
+    // backlog 0d2d7daa's GET-after-409), so a location no door seeded
+    // would read as a duplicate and the sim would start on a
     // half-published tenant.
     let fx = Fixture::new("brewery-fails");
     let brewery = fx.tenant("brewery", "seeds/tenant.toml", "brewery");
-    let (rc, out) = fx.publish(&[("BOSS_TENANT_DIR", &s(&brewery)), ("STUB_EXIT", "3")]);
+    let (rc, out) = fx.publish(&[
+        ("BOSS_TENANT_DIR", &s(&brewery)),
+        ("STUB_FAIL", "seed-tenant.sh"),
+    ]);
     assert_eq!(rc, 3, "the generic publish's exit is the verdict:\n{out}");
     assert!(
-        out.starts_with(&format!("seed-tenant.sh tenant_dir={}", s(&brewery))),
+        out.contains(&format!("\nseed-tenant.sh tenant_dir={}", s(&brewery))),
         "{out}"
     );
     assert!(
-        !out.contains("seed-operator-baseline.sh") && !out.contains("seed-brewery-tenant.sh"),
-        "nothing runs after a failed publish:\n{out}"
+        !out.contains("seed-brewery-tenant.sh"),
+        "the engine does not run after a failed publish:\n{out}"
+    );
+}
+
+#[test]
+fn a_failed_baseline_stops_before_the_publish_and_is_the_verdict() {
+    // The baseline is what the publish needs (the platform-admin Q7
+    // owner resolution names), so a baseline that did not land is the
+    // verdict and nothing publishes against an instance that cannot
+    // open a platform Job; the DEGRADED loop retries the whole
+    // function.
+    let fx = Fixture::new("baseline-fails");
+    let brewery = fx.tenant("brewery", "seeds/tenant.toml", "brewery");
+    let (rc, out) = fx.publish(&[
+        ("BOSS_TENANT_DIR", &s(&brewery)),
+        ("STUB_FAIL", "seed-operator-baseline.sh"),
+    ]);
+    assert_eq!(rc, 3, "the baseline's exit is the verdict:\n{out}");
+    assert!(
+        out.starts_with(&format!(
+            "seed-operator-baseline.sh tenant_dir={}",
+            s(&brewery)
+        )),
+        "{out}"
+    );
+    assert!(
+        !out.contains("seed-tenant.sh") && !out.contains("seed-brewery-tenant.sh"),
+        "nothing runs after a failed baseline:\n{out}"
     );
 }
 
@@ -166,38 +211,41 @@ fn any_other_tenant_runs_the_generic_publish_with_its_directory() {
         "tenant_id acme → seed-tenant.sh handed BOSS_TENANT_DIR:\n{out}"
     );
     assert!(!out.contains("seed-brewery-tenant.sh"), "{out}");
-    // THE TENANT GOES FIRST for a tenant with no engine (backlog
-    // 0d2d7daa, 2026-09-16). The baseline injects the bootstrap admin
-    // for BOSS_BOOTSTRAP_ADMIN_EMAIL unless the roster already holds
-    // that email, and a real company's roster declares its founder
-    // with exactly that address: baseline-first gave the fresh
-    // instance emp-bootstrap-admin and then refused the founder on
-    // the LOWER(email) unique index. Publish the people the tenant
-    // declares, then let the baseline see them.
+    // THE BASELINE GOES FIRST for every tenant, handed the tenant dir
+    // (backlog 1ee28274, 2026-09-18). Tenant-first (0d2d7daa) existed
+    // so a real company's founder, declared with the bootstrap email,
+    // was not refused on the LOWER(email) unique index behind an
+    // injected emp-bootstrap-admin — but it left a fresh instance with
+    // no platform-admin at the moment the publish needed one. Now the
+    // baseline reads the declared roster from the tenant's seed file
+    // and skips the injection when the email is declared there, so
+    // the founder still lands once and the publish still finds its
+    // owner.
     assert!(
-        out.starts_with("seed-tenant.sh"),
-        "the tenant is published before the operator baseline:\n{out}"
+        out.starts_with(&format!(
+            "seed-operator-baseline.sh tenant_dir={}",
+            s(&acme)
+        )),
+        "the operator baseline runs first, handed the tenant dir:\n{out}"
     );
     assert!(
-        out.contains("\nseed-operator-baseline.sh"),
-        "the operator baseline still runs, after the tenant:\n{out}"
+        out.contains("\nseed-tenant.sh"),
+        "the tenant is published after the baseline:\n{out}"
     );
 }
 
 #[test]
-fn a_failed_generic_publish_stops_before_the_baseline_and_is_the_verdict() {
-    // The DEGRADED loop retries publish_tenant whole, so a tenant that
-    // did not land must not be followed by a baseline that then reads
-    // an empty roster and injects the admin the tenant was about to
-    // declare — the very duplicate the tenant-first order exists to
-    // prevent.
+fn a_failed_generic_baseline_stops_before_the_publish_and_is_the_verdict() {
+    // The DEGRADED loop retries publish_tenant whole, so a baseline
+    // that did not land must not be followed by a publish whose first
+    // platform Job has no owner to resolve.
     let fx = Fixture::new("generic-fails");
     let acme = fx.tenant("acme", "tenant.toml", "acme");
     let (rc, out) = fx.publish(&[("BOSS_TENANT_DIR", &s(&acme)), ("STUB_EXIT", "3")]);
-    assert_eq!(rc, 3, "the tenant script's exit is the verdict:\n{out}");
+    assert_eq!(rc, 3, "the baseline's exit is the verdict:\n{out}");
     assert!(
-        !out.contains("seed-operator-baseline.sh"),
-        "the baseline did not run after a failed tenant publish:\n{out}"
+        !out.contains("seed-tenant.sh"),
+        "the publish did not run after a failed baseline:\n{out}"
     );
 }
 

@@ -59,6 +59,12 @@ import json, os, re, sys, glob
 
 repo = sys.argv[1]
 verbs = json.loads(sys.argv[2])["verbs"]
+# The scanned line every scanner prints (infra/lint/lib/scanned.sh);
+# printed from here because the count lives in this program, with the
+# same refusal on zero the shell helper makes.
+if not verbs:
+    sys.exit("a-verb-declares-the-hosts-it-serves: scanned 0 verb(s) under infra/ops/verbs — refusing rather than passing vacuously (lib/scanned.sh; backlog cdf2d959)")
+print(f"a-verb-declares-the-hosts-it-serves: scanned {len(verbs)} verb(s) under infra/ops/verbs")
 
 # ---- the hosts that EXIST, derived from the estate registry's seeds.
 # `nodes` is the estate registry's table; its id is what an ops-request

@@ -18,6 +18,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 violations=0
 for toml in $(find crates/core -name Cargo.toml -type f); do
@@ -55,6 +57,7 @@ if [ -d "$SCHEMA_DIR" ]; then
 fi
 
 if [ "$violations" -eq 0 ]; then
+  lint_scanned tier-import-audit "$(find crates/core -name Cargo.toml | wc -l | tr -d ' ')" "core crate(s)"
   echo "tier-import-audit: clean ($(find crates/core -name Cargo.toml | wc -l) core crates; no cross-tier crate imports or core->module schema FKs)"
   exit 0
 else

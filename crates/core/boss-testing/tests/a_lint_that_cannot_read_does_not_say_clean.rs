@@ -10,7 +10,7 @@
 //! | `no-session-paths`             | `clean`, exit 0                      |
 //! | `one-palette`                  | `clean`, exit 0                      |
 //! | `a-new-style-has-a-caller`     | `no trunk ref found — skipping`, 0   |
-//! | `a-kind-bundle-does-not-tighten` | the same, exit 0                   |
+//! | `a-kind-bundle-does-not-tighten` | the same, exit 0 (deleted 2026-09-18: a twin of `steptype-bundle-ratchet`, backlog cdf2d959) |
 //! | `migrations-append-only`       | `no trunk ref found … Fetch the trunk`, 1 |
 //! | `steptype-bundle-ratchet`      | the same, exit 1                     |
 //!
@@ -116,7 +116,13 @@ impl Fixture {
                 &dir.join("infra/lint").join(format!("{lint}.sh")),
             );
         }
-        for lib in ["git-answer.sh", "trunk-ref.sh", "pattern-scan.sh"] {
+        for lib in [
+            "git-answer.sh",
+            "trunk-ref.sh",
+            "pattern-scan.sh",
+            "scanned.sh",
+            "allowlist.sh",
+        ] {
             copy(
                 &root.join("infra/lint/lib").join(lib),
                 &dir.join("infra/lint/lib").join(lib),
@@ -267,7 +273,6 @@ const LINTS: &[&str] = &[
     "migrations-append-only",
     "steptype-bundle-ratchet",
     "a-new-style-has-a-caller",
-    "a-kind-bundle-does-not-tighten",
 ];
 
 /// The refusal's four facts, each of which was re-derived by hand during
@@ -601,39 +606,6 @@ fn a_new_style_has_a_caller_reads_the_tree_or_says_it_could_not() {
         ("rev-parse", "git rev-parse"),
         ("merge-base", "git merge-base"),
         ("ls-tree", "git ls-tree"),
-        ("show", "git show"),
-    ] {
-        let (code, out) = fx.run(lint, broken, false);
-        assert_refusal(lint, code, &out, named, SHIM_SAID);
-        assert!(
-            !out.contains("skipping"),
-            "a git that could not answer is reported as a skip, and a \
-             skip exits 0:\n{out}"
-        );
-    }
-    let (code, out) = fx.run(lint, "", true);
-    assert_refusal(lint, code, &out, "git rev-parse", OWNER_SAID);
-}
-
-#[test]
-fn a_kind_bundle_does_not_tighten_reads_the_tree_or_says_it_could_not() {
-    let fx = Fixture::new("a-kind-bundle-does-not-tighten");
-    let lint = "a-kind-bundle-does-not-tighten";
-
-    let (code, out) = fx.run(lint, "", false);
-    assert_eq!(code, 0, "a clean fixture must pass:\n{out}");
-
-    let bundle_path = fx.dir.join("crates/core/boss-jobs/seeds/step_types.toml");
-    let bundle = std::fs::read_to_string(&bundle_path).expect("the bundle is readable");
-    let tightened = bundle.replacen("required = false", "required = true", 1);
-    boss_testing::write_file(&bundle_path, &tightened);
-    fx.commit("tighten a bundle field");
-    let (code, out) = fx.run(lint, "", false);
-    assert_eq!(code, 1, "a newly required field must fail:\n{out}");
-
-    for (broken, named) in [
-        ("rev-parse", "git rev-parse"),
-        ("merge-base", "git merge-base"),
         ("show", "git show"),
     ] {
         let (code, out) = fx.run(lint, broken, false);

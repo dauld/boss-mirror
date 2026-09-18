@@ -20,6 +20,8 @@
 # allow-list, non-zero exit on anything new.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 HANDLERS=crates/orchestrators/boss-dispatcher-handlers/src/handlers
 # The assignment dispatcher lives in the core crate and carries its
@@ -51,6 +53,7 @@ ASSIGNMENT=crates/core/boss-dispatcher/src
 ALLOW="webhook_notify.rs credential_issuer.rs stripe_charges.rs stripe_payouts.rs"
 
 failures=""
+scanned=0
 
 # Walk BOTH trees recursively, never one directory of them. The
 # assignment path was added here after it leaked sim-origin, and a
@@ -65,6 +68,7 @@ while IFS= read -r path; do
         if [ "$(basename "$path")" = "$allowed" ]; then skip=1; fi
     done
     if [ "$skip" -eq 1 ]; then continue; fi
+    scanned=$((scanned + 1))
 
     # `.post(&url)` / `.get(&url)` — a request aimed at a URL variable.
     # The builder chain runs until `.send()`; the headers must appear
@@ -117,4 +121,5 @@ if [ -n "$failures" ]; then
     exit 1
 fi
 
+lint_scanned dispatcher-actor-stamp "$scanned" "Rust file(s) under $HANDLERS and $ASSIGNMENT"
 echo "ok: every dispatcher downstream call stamps its actor and its origin"

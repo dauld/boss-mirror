@@ -18,6 +18,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 pattern='(TODO|TODO\.md) #[0-9]+'
 
@@ -31,6 +33,7 @@ violations=$(grep -rEon "$pattern" crates/ apps/ \
   2>/dev/null || true)
 
 if [ -z "$violations" ]; then
+  lint_scanned no-todo-citation "$(find crates apps -type f \( -name '*.rs' -o -name '*.ts' -o -name '*.svelte' \) | wc -l | tr -d ' ')" "source file(s) under crates/ and apps/"
   echo "no-todo-citation: clean"
   exit 0
 fi

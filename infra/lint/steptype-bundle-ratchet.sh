@@ -54,13 +54,17 @@ LINT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$LINT_DIR/../.." || exit 1
 # shellcheck source=infra/lint/lib/trunk-ref.sh
 . "$LINT_DIR/lib/trunk-ref.sh"
+# shellcheck source=infra/lint/lib/scanned.sh
+. "$LINT_DIR/lib/scanned.sh"
 
 LINT=steptype-bundle-ratchet
 BUNDLE="crates/core/boss-jobs/seeds/step_types.toml"
 [ -f "$BUNDLE" ] || { echo "$LINT: $BUNDLE not found" >&2; exit 1; }
 
-# Trunk resolution is lib/trunk-ref.sh, shared with the other three
-# baseline-comparing lints. Absent trunk refs are a refusal here, not a
+# Trunk resolution is lib/trunk-ref.sh, shared with the other two
+# baseline-comparing lints (a third, a-kind-bundle-does-not-tighten,
+# checked a strict subset of this ratchet and was deleted on 2026-09-18,
+# backlog cdf2d959). Absent trunk refs are a refusal here, not a
 # silent pass — a ratchet that cannot see the trunk certifies nothing.
 # A git that could not ANSWER is a different refusal, and saying "fetch
 # the trunk" at it is a wrong remediation: measured on 2026-09-11 in a
@@ -197,4 +201,5 @@ if [ "$problems" -gt 0 ]; then
     echo "steptype-bundle-ratchet: $problems tightening(s) refused — the bundle is the unversioned half of the completion contract." >&2
     exit 1
 fi
+lint_scanned "$LINT" "$base_kinds" "step kind(s) at the merge-base with $trunk"
 echo "steptype-bundle-ratchet: bundle only loosened or grew optional fields ($base_kinds kinds checked against $trunk)"

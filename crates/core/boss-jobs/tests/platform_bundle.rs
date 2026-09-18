@@ -88,13 +88,18 @@ fn every_bundled_workflow_is_viable() {
     }
 }
 
-/// Is this a maintenance kind a systemd unit runs?
+/// Is this a maintenance kind a machine runs to a verdict?
 ///
 /// The selector for the rule below, and it asks about the EXECUTOR
 /// rather than the name. A unit-run kind's trigger declares
 /// `trigger_name = "systemd-timer"`, which is what the unit's
 /// `boss-maintenance-wrap.sh` call puts there — so this is the same
-/// fact the timer lint reads, not a second guess at it.
+/// fact the timer lint reads, not a second guess at it. Since
+/// 2026-09-18 the dev pod's reclaim sidecar (`reclaim-sidecar`,
+/// backlog 1933db9e) is the second machine executor: it loops
+/// in-process rather than under systemd, but it opens and completes
+/// its packet through the same wrap + boss-step pair with the same
+/// `result` routing, so the verdict rule covers it the same way.
 ///
 /// `kind.starts_with("maintenance-")` was the selector until
 /// 2026-09-10, and it was a PROXY for this: it happened to be exact
@@ -109,10 +114,12 @@ fn every_bundled_workflow_is_viable() {
 fn is_unit_run(w: &WorkflowSpec) -> bool {
     w.kind.starts_with("maintenance-")
         && w.steps.iter().any(|s| {
-            s.metadata_defaults
-                .get("trigger_name")
-                .and_then(|v| v.as_str())
-                == Some("systemd-timer")
+            matches!(
+                s.metadata_defaults
+                    .get("trigger_name")
+                    .and_then(|v| v.as_str()),
+                Some("systemd-timer" | "reclaim-sidecar")
+            )
         })
 }
 

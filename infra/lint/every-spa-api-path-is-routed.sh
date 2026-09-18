@@ -26,6 +26,8 @@ set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/strip-comments.sh
 . "$here/lib/strip-comments.sh"
+# shellcheck source=infra/lint/lib/scanned.sh
+. "$here/lib/scanned.sh"
 export -f strip_comments
 # The product sources this lint reads, one path per line.
 sources() {
@@ -60,7 +62,8 @@ unrouted() { comm -23 <(fetched "$1") <(answered "$1"); }
 
 self_test() {
     local fx; fx="$(mktemp -d)"
-    trap 'rm -rf "$fx"' RETURN
+    # Not a RETURN trap: one set here fires again when a later
+    # `.`-sourced file finishes, with $fx out of scope (2026-09-18).
     mkdir -p "$fx/crates/core/boss-gateway/src" "$fx/apps/web/src/it" "$fx/libs/web-kit/src" "$fx/apps/simulator/src"
     cat >"$fx/crates/core/boss-gateway/src/proxy.rs" <<'RS'
 pub static JOBS: ProxyConfig = ProxyConfig::new("jobs");
@@ -97,6 +100,7 @@ TS
     local nl; nl="$(strip_comments "$fx/apps/web/src/it/crew.ts" | wc -l | tr -d ' ')"
     [[ "$nl" == "$(wc -l <"$fx/apps/web/src/it/crew.ts" | tr -d ' ')" ]] || { echo "every-spa-api-path-is-routed: self-test FAILED — stripping comments changed the line count ($nl)" >&2; return 1; }
     echo "every-spa-api-path-is-routed: self-test ok — planted /api/yard caught; jobs, subject-kinds (via subject_kinds), policy (via with_fallback), auth (gateway route) answered; a test's /api/things and the dev server's aliases ignored; four /api/ghost-* mentions in a docstring, a line comment, a block comment and an HTML comment not counted as fetches, a URL's // not read as a comment, and the line count preserved"
+    rm -rf "$fx"
 }
 
 if [[ "${1:-}" == "--self-test" ]]; then self_test; exit $?; fi
@@ -117,5 +121,6 @@ if [[ -n "$missing" ]]; then
     echo "  Add it to the gateway's proxy table (crates/core/boss-gateway/src/proxy.rs) or route it there; a fetch the gateway cannot answer is an empty panel in production." >&2
     exit 1
 fi
+lint_scanned every-spa-api-path-is-routed "$count" "/api segment(s) fetched by the SPA"
 echo "every-spa-api-path-is-routed: ${count} /api segments fetched by the SPA, every one answered by the gateway"
 exit 0

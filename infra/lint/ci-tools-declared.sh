@@ -31,6 +31,8 @@
 set -uo pipefail
 
 cd "$(dirname "$0")/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 WORKFLOW=".forgejo/workflows/ci.yml"
 # The image required-tools.txt describes, matched by REPO not tag. The
@@ -167,4 +169,5 @@ fi
 if [ "$problems" -gt 0 ]; then
     exit 1
 fi
+lint_scanned ci-tools-declared "$count" "distinct command(s) invoked by $WORKFLOW"
 echo "ci-tools-declared: $count distinct commands, all declared"

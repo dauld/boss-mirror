@@ -34,10 +34,27 @@
 #
 # Wire into CI alongside tier-import-audit.sh. Exit 0 = clean,
 # 1 = unexpected violation (allowlisted entries don't count).
+#
+# THIS LINT SCANNED NOTHING FROM 2026-06-26 TO 2026-09-18 (backlog
+# cdf2d959, audit H2). The awk that lists a Cargo.toml's dependency
+# names matched them with `\s*=`, and mawk — the awk on this pod and
+# in the gate image — has no `\s`: it reads a literal `s`, so no line
+# matched, "0 dep declarations scanned" was printed under `clean` on
+# every run, and the six-entry allowlist below was never compared to
+# anything. The class is `[[:space:]]`, which every awk has; the count
+# is now a verdict (lib/scanned.sh) and the allowlist's two staleness
+# checks are the shared ones (lib/allowlist.sh).
 
 set -euo pipefail
 
-cd "$(dirname "$0")/../.."
+LINT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$LINT_DIR/../.."
+# shellcheck source=infra/lint/lib/scanned.sh
+. "$LINT_DIR/lib/scanned.sh"
+# shellcheck source=infra/lint/lib/allowlist.sh
+. "$LINT_DIR/lib/allowlist.sh"
+
+LINT=sim-boundary-audit
 
 # Sim-side crates: anything that drives the system from outside.
 # Find them by location convention:
@@ -104,7 +121,7 @@ is_allowlisted() {
 
 violations=0
 unexpected_violations=()
-allowlisted_seen=0
+allowlisted_used=""
 total_deps_audited=0
 
 for crate_path in "${SIM_SIDE_CRATES[@]}"; do
@@ -117,7 +134,7 @@ for crate_path in "${SIM_SIDE_CRATES[@]}"; do
             if [[ "$dep" == "$banned" ]]; then
                 key="$crate_path::$banned"
                 if is_allowlisted "$key"; then
-                    allowlisted_seen=$((allowlisted_seen + 1))
+                    allowlisted_used="$allowlisted_used"$'\n'"$key"
                 else
                     unexpected_violations+=("$crate_name → $banned (in $toml)")
                     violations=$((violations + 1))
@@ -141,7 +158,7 @@ for crate_path in "${SIM_SIDE_CRATES[@]}"; do
         done
     done < <(awk -F= '
         /^\[/  { in_deps = ($0 ~ /^\[(dependencies|dev-dependencies|build-dependencies)/); next }
-        in_deps && /^[a-zA-Z0-9_-]+\s*=/ {
+        in_deps && /^[a-zA-Z0-9_-]+[[:space:]]*=/ {
             name=$1
             gsub(/[[:space:]]/, "", name)
             print name
@@ -149,25 +166,20 @@ for crate_path in "${SIM_SIDE_CRATES[@]}"; do
     ' "$toml")
 done
 
-# Detect stale allowlist entries (allowlisted violation no longer
-# present in source). Either the migration moved forward and the
-# entry should be removed, or the dep was renamed and the entry is
-# misspelled. Either way, surface it.
-stale_entries=()
+# The scan is the evidence: three crates and their dependency lines.
+# Zero lines is the defect this lint carried for three months, and it
+# is refused here before any verdict is printed.
+lint_scanned "$LINT" "$total_deps_audited" "dep declaration(s) across ${#SIM_SIDE_CRATES[@]} sim-side crate(s)"
+
+# Stale allowlist entries: each names a crate that must exist, and each
+# must have excused a dependency THIS run — an entry whose dep was
+# migrated to *-client, or whose crate was renamed, is removed in the
+# same change. Both checks are lib/allowlist.sh's.
+allowlist_paths=()
 for entry in "${ALLOWLIST[@]}"; do
-    IFS='::' read -r crate_path banned <<<"${entry//::/$'\x01'}"
-    # The above split is fragile because `::` is the entry separator
-    # AND a literal in the entry. Simpler: rsplit on the last `::`.
-    crate_path="${entry%::*}"
-    banned="${entry##*::}"
-    if [[ ! -f "$crate_path/Cargo.toml" ]]; then
-        stale_entries+=("$entry (crate path doesn't exist)")
-        continue
-    fi
-    if ! grep -qE "^${banned}\s*=" "$crate_path/Cargo.toml"; then
-        stale_entries+=("$entry (dep no longer declared — remove from allowlist)")
-    fi
+    allowlist_paths+=("${entry%::*}/Cargo.toml")
 done
+allowlist_paths_exist "$LINT" "${allowlist_paths[@]}"
 
 # Report.
 if [[ ${#unexpected_violations[@]} -gt 0 ]]; then
@@ -181,27 +193,11 @@ if [[ ${#unexpected_violations[@]} -gt 0 ]]; then
     echo "not on the impl crate. If the contract you need isn't in the client crate"
     echo "yet, move it there first; if the client crate doesn't exist, create one."
     echo
-    if [[ ${#stale_entries[@]} -gt 0 ]]; then
-        echo "Also: ${#stale_entries[@]} stale allowlist entry/entries:"
-        for s in "${stale_entries[@]}"; do echo "  $s"; done
-        echo
-    fi
     exit 1
 fi
 
-if [[ ${#stale_entries[@]} -gt 0 ]]; then
-    echo "sim-boundary-audit: ${#stale_entries[@]} stale allowlist entry/entries"
-    echo
-    for s in "${stale_entries[@]}"; do
-        echo "  $s"
-    done
-    echo
-    echo "Remove these from ALLOWLIST in $(basename "$0")."
-    exit 1
-fi
+allowlist_entries_used "$LINT" "$allowlisted_used" "${ALLOWLIST[@]}"
 
 echo "sim-boundary-audit: clean"
-echo "  ${#SIM_SIDE_CRATES[@]} sim-side crate(s) audited"
-echo "  $total_deps_audited dep declarations scanned"
 echo "  ${#ALLOWLIST[@]} allowlisted violator(s) (migrate to *-client to retire)"
 exit 0

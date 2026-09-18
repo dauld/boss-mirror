@@ -40,6 +40,8 @@
 # both sets from their source of truth, exit 1 naming every offender.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 SCHEMA_DIR="infra/postgres/schema"
 
@@ -107,7 +109,10 @@ kind_const_map() {
 emitted() {
     local mapfile
     mapfile="$(mktemp)"
-    trap 'rm -f "$mapfile"' RETURN
+    # Cleaned up at the end of this function, NOT by a RETURN trap: a
+    # RETURN trap set here fires again when a later `.`-sourced file
+    # finishes, with $mapfile out of scope and `set -u` aborting the
+    # lint (measured in a-boot-check, 2026-09-18).
     kind_const_map > "$mapfile"
     # Phase 2: scan every non-test crate file, resolving const names
     # (`NAME<TAB>value`, read from mapfile) against the global map.
@@ -219,6 +224,7 @@ emitted() {
             }
         }
     ' | sort -u
+    rm -f "$mapfile"
 }
 
 DECLARED="$(declared)"
@@ -274,4 +280,5 @@ if [ "${#undeclared[@]}" -gt 0 ]; then
     exit 1
 fi
 
+lint_scanned emitted-kinds-are-declared "$emitted_count" "emitted kind(s) resolved across crates/, against $declared_count declared"
 echo "ok: every literal/const emitted kind is declared in event_kinds"

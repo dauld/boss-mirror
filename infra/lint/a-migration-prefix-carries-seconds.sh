@@ -40,6 +40,9 @@
 set -uo pipefail
 
 NAME="a-migration-prefix-carries-seconds"
+LINT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=infra/lint/lib/scanned.sh
+. "$LINT_DIR/lib/scanned.sh"
 SCHEMA_REL="infra/postgres/schema"
 # The seconds migration's own minute: a twelve-digit stamp above this
 # was written after the convention it ignores.
@@ -115,4 +118,5 @@ if ! check_dir "$dir"; then
     echo "  file its name is checksum-guarded history and this set closes over it." >&2
     exit 1
 fi
+lint_scanned "$NAME" "$n" "migration(s) under $SCHEMA_REL"
 echo "$NAME: clean — $n migrations; every stamp after $SECONDS_SINCE carries seconds (six minute-width files are applied history)"

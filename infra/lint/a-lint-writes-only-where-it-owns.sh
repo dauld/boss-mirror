@@ -50,6 +50,8 @@ set -uo pipefail
 
 NAME="a-lint-writes-only-where-it-owns"
 cd "$(dirname "$0")/../.." || exit 1
+# shellcheck source=infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh
 
 # Paths exempted from the rule, as `<file>:<line-text-fragment>`, each
 # with the reason it is tolerated. A NAMED SET, never a count, so adding
@@ -177,5 +179,6 @@ EOF
     exit 1
 fi
 
+lint_scanned "$NAME" "${#files[@]}" "lint(s) under infra/lint"
 echo "$NAME: ok — ${#files[@]} lint(s) checked, none writes a fixed path under /tmp"
 exit 0

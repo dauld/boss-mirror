@@ -102,6 +102,7 @@ impl Tree {
             &root.join("infra/lint/a-fixture-path-cannot-be-a-literal.sh"),
             &body,
         );
+        boss_testing::copy_lint_libs(&root);
         git(&root, &["init", "-q", "-b", "main"]);
         // `git ls-files` reads the index, which `git add` is enough to
         // populate — no commit and so no author identity needed.
