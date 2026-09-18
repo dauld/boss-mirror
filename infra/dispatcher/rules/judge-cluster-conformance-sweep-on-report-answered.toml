@@ -1,0 +1,39 @@
+# The cluster-conformance sweep is judged by its own measurement. Its
+# measure rule (measure-cluster-conformance-sweep-on-inspect-ready)
+# files a `conformance-report` ops-request the moment the sweep's
+# Inspect checklist becomes ready, linked back as metadata.for_sweep;
+# the forge's ops-runner answers it with the orphan set as the ONE
+# definition computes it (undeclared-objects.sh --list) and, since
+# 2026-09-18, ONE verdict line drawn from that set by
+# infra/cluster/conformance-report.sh — `verdict: clean` at zero
+# undeclared objects, `verdict: <n> undeclared object(s)` otherwise,
+# `verdict: unanswered (...)` when the derivation refused. This rule
+# fires when that ops-request closes `answered`: for a
+# cluster-conformance sweep whose Inspect step is still open, a clean
+# verdict completes the checklist (findings none, measured, the verdict
+# copied as `reading`, the report's id as `source`, action_needed=false
+# so the sweep routes to Clear); anything else is written onto the
+# still-open step for the inspector. Backlog 970c0c94.
+[[rule]]
+name = "judge-cluster-conformance-sweep-on-report-answered"
+why = """
+A CROSS-PROTOCOL REACTOR closing the loop measure-cluster-conformance-
+sweep-on-inspect-ready opened: ops-request -> maintenance-sweep, which
+no single Workflow consequence can express — the ops-request's
+protocol cannot know which sweep asked, and the sweep's cannot read
+another packet's step. Measured 2026-09-18: conformance-report exited
+0 while reporting one undeclared object, and the sweep's Inspect step
+it was filed for stayed assigned to the agent for 24h with the reading
+on another packet. No authority widened: the only writes are the
+sweep's own checklist and its routing key, on a verdict whose
+threshold is the one the orphan lint already enforces (zero undeclared
+objects). An unclean or unanswered reading completes nothing — the
+judgement of a finding stays a person's. Self-filters to this one
+sweep by the (target, verb) pair, which sweep_verdict_rules.rs pins to
+the pair the measure rule files.
+"""
+on_event = "jobs.job.closed"
+when = 'kind = "ops-request" AND outcome = "answered"'
+[[rule.do]]
+handler = "maintenance.sweep.judge"
+args = { target = "\"cluster-conformance\"", verb = "\"conformance-report\"" }

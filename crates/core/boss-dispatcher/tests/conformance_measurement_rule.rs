@@ -101,10 +101,11 @@ fn the_verb_the_rule_names_is_in_the_ops_allowlist() {
     .expect("conformance-report.json parses");
     assert!(v.is_object(), "conformance-report is not an ops verb");
     assert_eq!(v["hosts"], json!(["forge"]));
-    assert_eq!(
-        v["argv"],
-        json!(["infra/cluster/undeclared-objects.sh", "--list"])
-    );
+    // Since 2026-09-18 (970c0c94) the verb runs the wrapper that passes
+    // the derivation's `--list` answer through and appends the verdict
+    // line the judge rule reads; the derivation's own stdout IS the
+    // orphan set and cannot carry one (sweep_report_verdicts_sh.rs).
+    assert_eq!(v["argv"], json!(["infra/cluster/conformance-report.sh"]));
     assert!(
         v["params"].as_array().is_some_and(Vec::is_empty),
         "a read with no arguments"
