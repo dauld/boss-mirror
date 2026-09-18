@@ -39,10 +39,13 @@ FAIL=0
 
 # Deploy entry points, each with what it deploys. A new one belongs here
 # the day it is written — a deploy path that cannot converge the schema
-# is the defect this lint exists to catch.
+# is the defect this lint exists to catch. ONE since 2026-09-18: the
+# conductor's own deploy hop (train.rs pulling a host tree and running
+# the bare-metal scripts) left with that path (train #443, backlog
+# ed64f852); the container converges on every train, and this is the
+# path it converges through.
 PATHS=(
     "infra/oss-quickstart/init.sh|cluster initContainer + compose init (boss-init)"
-    "crates/orchestrators/boss-cli/src/train.rs|train deploy verb (boss train)"
 )
 
 for entry in "${PATHS[@]}"; do

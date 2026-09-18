@@ -1533,6 +1533,172 @@ dependency to add before hardening starts. Not chosen: the jobs API
 proxying read-only paths for the probe tier, which duplicates the
 gateway's routing inside a domain service.
 
+## Consolidation toward 1.0.0
+
+**The debt is measured, the order to pay it is decided, and every
+consolidation car leaves a measured line smaller** (design `42277636`,
+David 2026-09-18; all four questions accepted as proposed). The
+framing, David's: "We built up a lot of tech debt in our sprint to
+design BOSS, and we need to spend this next period getting ourselves
+simple, clean, functional, and adaptive … getting the open source
+version into 1.0.0 readiness, but we are going to prove its utility by
+running Algedonic, LLC on it." A read-only audit of origin/main
+`3465acbb` (train #436) measured the debt — 406k Rust / 49k shell / 93k
+TS; 82 lints, two of which could not fail; ~100 pinned pairs, 14 with a
+concrete collapse; 154 migrations of which 81 were DML-only seeds; a
+2,081-line bare-metal deploy script with ~310 live lines; the
+system-of-record address spelled in 47 files — and the report stays on
+the packet, not in a file. Decided: (1) **the order** — 1.0.0 blockers
+first, being what a stranger hits before anything else (H5 instance data
+in the platform schema, H6 `emp-david` literals, H10 the address
+literals, H7 the bare-metal path), then what costs cars and diagnoses
+weekly (H2 lints that cannot fail, H3 unguarded flake classes, H1 the
+contended monoliths, H9 the lint exclusion set in five places, H4
+registry rows whose only home is a migration, H8 no `boss` binary on the
+forge, H11 nothing prunes the pod), then the MEDIUM and LOW findings as
+filler cars when a builder is idle; (2) **the rule** — each item is one
+car or a short series, and **every car must leave a measured line
+smaller** (files, definitions, baselines): a consolidation car that
+cannot name the number it reduced is not one; (3) **the bare-metal
+deploy path is deleted, and the container launcher is the one way to
+run BOSS** — it was 85% dead, drifted three ways from the container's
+config generator, and every real instance is the container path; the
+OSS quickstart documents docker/Kubernetes only, and the deleted code
+stays in history; (4) **the `boss` CLI is installed on the forge from
+the image** (as boss-gcp already is) and the ~3,000 lines of shell and
+python twins each pinned by a test retire one verb at a time — one
+implementation of each verb, in Rust, tested once, the forge running
+the same binary the cluster does; (5) **the stranger lens** — the
+by-hand and by-memory steps a fresh operator has no door for (the pod's
+hand-installed tooling and door symlinks, the forge's hand-placed
+Forgejo config, a printed runbook for the root ceremonies, the
+hardening inventory) become items now, and they are the quickstart's
+test: a fresh install on a clean machine, by the runbook, with nothing
+from memory.
+
+**What has landed, each with its measured line** (the item ids are the
+backlog packets the design spawned):
+
+- **H3 — the flake classes have a guard** (train #439, 2026-09-18,
+  item `2c257761`). The 47 `… | grep -q` pipelines under `pipefail` in
+  `infra/lint/` — a 1-in-3,000 SIGPIPE false red or green — became
+  here-strings the converted-lint pin already covers, and the
+  `tracing::set_default` shape that redded two trains (the #281 class)
+  left `boss-core/src/publisher.rs` for one-test binaries that own their
+  process, pinned by `a_log_capturing_test_owns_its_process.rs`.
+  Measured: 47 flake sites → 0.
+- **H2 — a lint that scans nothing is red** (train #441, 2026-09-18,
+  item `cdf2d959`). `sim-boundary-audit.sh` scanned zero declarations
+  under mawk's `\s` and exited clean; `seed-bypass-smell.sh` scanned a
+  deleted directory. Every scanning lint now prints its scanned count
+  through `infra/lint/lib/scanned.sh` and refuses on zero, a test of
+  lints (`a_lint_that_scanned_nothing_is_red.rs`) runs each against the
+  tree and asserts it, stale allowlist entries are refused by a shared
+  helper, and `a-kind-bundle-does-not-tighten.sh` — the weaker twin of
+  `steptype-bundle-ratchet` — was deleted. Measured: lints that cannot
+  fail 2 → 0, and one duplicate lint gone.
+- **H6 — one `platform_owner()`** (train #442, 2026-09-18, item
+  `3c23662d`). Fourteen production sites named `emp-david` (one in
+  Tier-1 `car.rs`) and `bootstrap.rs` named `emp-cto`; a second
+  operator (Algedonic, LLC on BOSS, decided 2026-09-16) would have been
+  fourteen edits or every alarm landing on David forever. The owner is
+  now read once from the people registry (`boss-people-client::
+  platform_owner`, the first hire holding `platform-admin`, with an
+  explicit launcher override), the shell alerts read it off the same
+  API, and `no-employee-id-literal.sh` refuses a new literal outside
+  tests and example seeds. Measured: 15 literals → 0.
+- **H7 — the bare-metal deploy path is gone** (train #443, 2026-09-18,
+  item `e109bd71`; 102 files, +1,134/−5,508). `deploy-services.sh`
+  (2,081 lines), `deploy-web.sh`, `bootstrap-local.sh` (which still
+  started the deleted `boss-docs-api`), `bootstrap-vm.sh`,
+  `dev-postgres.sh`, the four smoke scripts nothing ran,
+  `check-service-drift.sh`, `check-service-write-roundtrip.sh`,
+  `push-step-plugins.sh`, the host backup and restore, the
+  deploy-confirm dead-man (unit, timer and script) and `files-root.sh`
+  were deleted; the ~310 live lines — the `units` and `roster` modes
+  boss-gcp's converge runs — became `infra/gcp/install-units.sh`,
+  reading its roster from `infra/estate/roles.toml` and nothing else.
+  The container launcher (`infra/oss-quickstart/services-launcher.sh`)
+  is the one way BOSS runs, and its roster — the unpinned copy the
+  whole time — is now the one held equal to `boss-ports`. The quickstart
+  and the operator runbook document the container path only.
+- **H10 — the address is spelled once** (train #444, 2026-09-18, item
+  `5222163e`). The system-of-record address was in 47 files three ways
+  and the forge IP in 62. Both now live in `infra/estate/estate.toml`:
+  each managed host's converge renders `/etc/boss/sor.env` from it,
+  every unit reads that file with `EnvironmentFile=`, every script
+  through `infra/lib/sor.sh` (which refuses, naming the file, rather
+  than fall back to a literal), the forge verbs source one
+  `forge-defaults.sh`, and `the-estate-address-lives-once` refuses
+  either address anywhere else, with a per-file allowance table whose
+  stale entries are themselves refused. The `boss.algedonic.dev`
+  cutover is now an edit to one file. Measured: 47 files → 1.
+- **H5 — instance data leaves the platform schema** (train #445,
+  2026-09-18, item `ee368d0c`). Nine migrations inserted this LAN's
+  seven nodes and eight service instances, five node roles and eight
+  credential ids into every fresh database — an adopter's first boot
+  declared a cluster it does not run and credentials it does not hold,
+  and one re-declaration under `ON CONFLICT DO NOTHING` had never
+  landed anywhere. Credentials are now the instance's declaration
+  (`seeds/credentials.toml` in the tenant contract, sent by `boss tenant
+  publish` through an insert-if-absent batch door); the estate's nodes
+  and roles are the tree's (`infra/estate/estate.toml`, published on
+  every pod start through `POST /api/estate/nodes/batch`); and migration
+  `20260918063829` deletes the seeded rows wherever nothing references
+  them. Measured: the instance rows a fresh install boots with (seven
+  nodes, eight service instances, their roles, eight credentials) → none.
+- **H9 — the lint declares its own consist skip** (train #447,
+  2026-09-18, item `6fa15484`). Which lints the consist check leaves
+  out lived five times, and nothing held `gate.sh`'s copy equal to the
+  one the conductor ran on — which had already produced one false
+  refusal. Whether a lint needs more than a bare tree is a fact about
+  the lint, so each such lint declares it on one header line
+  (`# consist: skip — <why>`), `gate.sh --exclusions` derives the set,
+  the conductor asks the assembled tree's `gate.sh`, and migration
+  `20260918102236` drops the `consist_excluded_lints` column the
+  delivery policy no longer needs. Measured: 5 definitions → 1;
+  `delivery_policy.rs` −160 lines.
+- **H7 residue — the hops that called the deleted path** (this car,
+  item `ed64f852`, 2026-09-18). What #443 left: the conductor's own
+  deploy hop in `train.rs` (pulled `/opt/boss`, ran `migrate.sh`,
+  `build-release.sh`, `sudo deploy-services.sh prod`, `sudo
+  deploy-web.sh`), reachable only through a `BOSS_TRAIN_DEPLOY_TREE`
+  the one live conductor had set empty since the 2026-09-04 cutover;
+  `boss status`/`restart`/`logs` and `boss deploy` (a hand-typed
+  service roster, `systemctl` and `journalctl` on a host, a backup check
+  reading a deleted timer); `check-binary-freshness.sh` (the
+  `/usr/local/bin` fleet), `dev-refresh.sh` (an ssh to a host that no
+  longer exists) and `deploy.env.example` (sourced by the deleted
+  script). Every present-tense mention of `deploy-services.sh` became
+  history or named its successor. Measured: 4 files and ~2,300 lines
+  deleted, 4 CLI verbs gone; the `deployed` step of a train is now
+  completed by one arm instead of two, with the same evidence it always
+  carried on the cluster. Kept, each with its reason: `build-release.sh`
+  (the migration rehearsal `restore-log-copy.sh` names it for the
+  release binaries it verifies), `validate-brewery-sim.sh` and
+  `reset-to-baseline.sh` (the maintainer correctness gate and the
+  drop-and-reseed it calls, named by the README, the runbooks and the
+  invariant register — still shaped for a host with systemd, which is a
+  retarget, not a deletion). And one thing measured rather than done:
+  the `maintenance-deploy-confirm` kind (0 packets ever) was retired on
+  the live registry at 12:20Z and re-published by the next boot's
+  platform seed at 12:42Z as v3, active — the seed reads "present" as
+  "an active row exists", so a retired kind whose bundle file is still
+  in the tree is re-inserted on every boot, and the file cannot leave
+  the tree while the registry admits the kind. The seed must learn that
+  a retired version is an operator decision it does not revert; then
+  the retire sticks and the file goes.
+
+**Pending, by item:** H4 registry rows whose only home is a migration
+(`393d3234`); H11 the pod prunes worktrees whose branch is gone from the
+forge (`1933db9e`); H12 the conservation-invariant sweep never ran
+against the system of record (`236529aa`, found by the H7 measurement);
+H1 splitting `train.rs` along its test-module seams, and H8 the `boss`
+CLI on the forge with the shell twins retired verb by verb, are decided
+above and not yet filed as items; the stranger-lens items likewise. The
+MEDIUM and LOW findings ride as filler, by what a first outside user
+would see.
+
 ## Design docs and the decision record
 
 The markdown corpus stopped being the source of truth and kept the

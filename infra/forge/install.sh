@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Install the forge host's systemd units from this checkout.
 #
-# WHY THIS EXISTS. boss-gcp has had `deploy-services.sh` with a TIMERS
-# array since the day its own comment was written: "Adding a new timer
-# = author the .service + .timer in the right place under infra/, then
-# add a row here. New timers land via `sudo ./infra/deploy-services.sh
-# prod` instead of a `sudo install` treadmill that's been the source of
-# every 'this timer was authored but never installed' gap so far
-# (audit-integrity, ml-inference-batch, ledger-recognize,
-# conservation-invariants — all caught by hand)."
+# WHY THIS EXISTS. boss-gcp has had an installer with a timer roster
+# (today infra/gcp/install-units.sh reading infra/estate/roles.toml;
+# until 2026-09-18 the TIMERS array of the deleted bare-metal deploy
+# script) since the day its own comment was written: "Adding a new
+# timer = author the .service + .timer in the right place under infra/,
+# then add a row here" — instead of a `sudo install` treadmill that had
+# been the source of every 'this timer was authored but never installed'
+# gap so far (audit-integrity, ml-inference-batch, ledger-recognize,
+# conservation-invariants — all caught by hand).
 #
 # The forge host had no equivalent, so its units went on by hand, and
 # one of the two was forgotten. On 2026-08-17 the CI runner's disk

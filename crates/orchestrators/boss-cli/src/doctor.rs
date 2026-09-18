@@ -304,7 +304,7 @@ fn services_check_from_states(states: &[(String, UnitState)]) -> Check {
     }
     if !absent.is_empty() {
         detail.push_str(&format!(
-            " — {} not installed on this host (no unit file: deploy it or drop it from SERVICES)",
+            " — {} not installed on this host (no unit file: deploy it or drop it from SERVICE_UNITS)",
             preview_list(&absent)
         ));
     }
@@ -315,18 +315,34 @@ fn services_check_from_states(states: &[(String, UnitState)]) -> Check {
     }
 }
 
-/// Probe each registered boss-* systemd service. Pulls the list
-/// from `ops::SERVICES` (already used by `boss status`) for a
-/// single source of truth. Classification and message assembly are
-/// pure (`classify_unit` / `services_check_from_states`); only the
-/// systemctl call lives here.
+/// The boss-* systemd units a bare-metal install runs. Until
+/// 2026-09-18 this was `ops::SERVICES`, shared with `boss status`;
+/// that verb left with the bare-metal deploy path (backlog ed64f852)
+/// and this check is the one reader left.
+const SERVICE_UNITS: &[&str] = &[
+    "boss-gateway",
+    "boss-assets-api",
+    "boss-catalog-api",
+    "boss-people-api",
+    "boss-commerce-api",
+    "boss-inventory-api",
+    "boss-messages-api",
+    "boss-shipping-api",
+    "boss-observability",
+    "boss-cybernetics",
+];
+
+/// Probe each registered boss-* systemd service. Classification and
+/// message assembly are pure (`classify_unit` /
+/// `services_check_from_states`); only the systemctl call lives here.
 async fn check_install_services() -> Check {
-    let services = crate::ops::registered_service_units();
+    let services: Vec<String> = SERVICE_UNITS.iter().map(|u| u.to_string()).collect();
     if services.is_empty() {
         return Check {
             label: "Services",
             passed: false,
-            detail: "no registered systemd units in SERVICES — boss-cli build is corrupt".into(),
+            detail: "no registered systemd units in SERVICE_UNITS — boss-cli build is corrupt"
+                .into(),
         };
     }
     let mut states = Vec::with_capacity(services.len());

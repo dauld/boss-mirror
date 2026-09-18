@@ -20,10 +20,6 @@ for Claude Code / scripted usage). Run `boss --help` or
 
 | Command | Description |
 |---------|-------------|
-| `boss status [--json]` | Health check: all services, Postgres, NATS, backups |
-| `boss restart <service> [--json]` | Restart a service without rebuilding |
-| `boss logs <service> [-n 50] [-f] [--json]` | View service logs (journalctl) |
-| `boss backup [--json]` | Trigger manual backup (pg_dump + configs) |
 | `boss audit [--kind prefix] [--source svc] [--json]` | Query audit_log |
 | `boss inspect invoices [--status …] [--account-id …] [-n N] [--json]` | List invoices via HTTP |
 | `boss inspect accounts [--name …] [-n N] [--json]` | List accounts via HTTP |
@@ -41,18 +37,10 @@ there.
 | Command | Description |
 |---------|-------------|
 | `boss doctor` | Post-install health check (Postgres, NATS, gateway, manifest, SPA, services) |
-| `boss deploy list` | List all deployable services |
-| `boss deploy run [service]` | Build + deploy a service (or all) |
-| `boss deploy web` | Build + deploy the frontend |
-| `boss deploy clean` | Remove debug build artifacts |
 | `boss upgrade` | Self-update to the latest release |
 | `boss emit <kind> [payload]` | Emit an event to NATS |
 | `boss script list` | List registered agent scripts |
 | `boss script info <id>` | Show script details |
-| `boss status` | Per-service systemd status |
-| `boss restart <svc>` | Restart a service unit |
-| `boss logs <svc>` | Tail a service's journalctl |
-| `boss backup` | Trigger a manual backup (pg_dump + configs) |
 | `boss fleet rebuild-projection` | Rebuild the `systems` projection from `system_events` |
 | `boss inspect ...` | Read-only diagnostic HTTP probes through the gateway |
 | `boss audit ...` | Query the audit log for domain events |

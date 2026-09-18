@@ -245,7 +245,7 @@ say "role: $NODE_ID declares $BOSS_NODE_ROLES — legacy-stack is not among them
 
 # --- bound 6: the capture --------------------------------------------------
 # The database is whichever the stack's own units point at, read off
-# their definitions: deploy-services.sh writes BOSS_POSTGRES_URL as an
+# their definitions: the bare-metal deploy wrote BOSS_POSTGRES_URL as an
 # Environment= on the clap+env binaries (dispatcher, clock, search,
 # views, brewery-sim). The first listed service that carries it wins.
 PG_URL=""

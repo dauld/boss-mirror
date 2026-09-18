@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Canonical release build for a host checkout (the image build runs its own cargo).
+# Canonical release build for a checkout (the image build runs its own cargo).
+# Since the bare-metal deploy path left (2026-09-18, train #443) its one
+# caller is infra/cluster/restore-log-copy.sh, the migration rehearsal that
+# needs release binaries on the box it runs on.
 #
 # WHY THIS EXISTS
 # ---------------
@@ -18,7 +21,8 @@
 #      or silently no-ops* when the real gate is `accounts-api`.
 #
 # Hand-maintaining a list of "which crates need --features what" drifts
-# instantly (deploy-services.sh's NEEDS_POSTGRES_FEATURE listed 7 of 17).
+# instantly (the deleted deploy script's NEEDS_POSTGRES_FEATURE listed 7
+# of 17).
 # So this script asks cargo: for every bin target that declares
 # `required-features`, build it with exactly those. No list to maintain.
 #
@@ -69,8 +73,7 @@ echo "==> [3/3] boss CLI (-p boss-cli --bin boss)"
 # this named invocation is the roster entry that keeps that true — if
 # the bin ever grows a feature gate or leaves default workspace
 # members, this line fails or fixes it loudly instead of silently
-# shipping whatever /usr/local/bin already had. deploy-services.sh
-# stages it into the generation and links it through `current`.
+# shipping whatever /usr/local/bin already had.
 cargo build --release -p boss-cli --bin boss
 
 if [[ "${1:-}" == "--verify" ]]; then
@@ -102,8 +105,8 @@ fi
 # The touch turned a conservative wrong answer into a confident wrong one, and
 # those cost differently: a false STALE costs a rebuild, a false "fresh" costs
 # an incident. So a skipped bin may now read STALE. That is the safe
-# direction, and `check-binary-freshness.sh --rebuild` settles it for real —
-# cargo is the only thing that actually knows.
+# direction, and a rebuild settles it for real — cargo is the only thing
+# that actually knows.
 
 # Stamp what this build was made from. `set -euo pipefail` is on, so
 # reaching this line means every cargo invocation above succeeded — the

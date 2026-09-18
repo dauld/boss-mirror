@@ -742,102 +742,6 @@ pub fn platform_workflows() -> Vec<WorkflowSpec> {
     vec![]
 }
 
-/// One maintenance kind per chore (internal-forge.md Q6): the systemd
-/// timer stays the EXECUTOR; the Job is the visibility layer. The
-/// timer's unit ensures the open Job exists at start
-/// (`boss-maintenance-wrap.sh`) and completes `run` on success via
-/// `boss-step.sh` — which is also why it is one KIND per chore:
-/// boss-step's contract is "the single open Job of a workflow".
-/// Failure completes nothing, so the Job stays OPEN — visible on the
-/// fleet and the canvas until a later successful run (or a human)
-/// closes it. A failed backup is an algedonic signal, not a journal
-/// line.
-///
-/// Deliberately NOT spawned by the dispatcher's schedule runner: it
-/// fires on SIM-day boundaries, and at warp a "daily" rule fires
-/// every couple of wall-minutes — maintenance is wall-clock work.
-///
-/// `description` is prose and goes in the `description` column;
-/// `category` is the grouping key, and these are platform chores like
-/// every other `maintenance-*` protocol authored under
-/// infra/platform/workflows/, so it is "platform" for all of them.
-///
-/// TEST-ONLY since 2026-09-11. All three chores this built are authored
-/// at infra/platform/workflows/maintenance-{backup,audit-integrity,
-/// ledger-replay}.toml, and it survives as
-/// `the_platform_bundle_matches_the_specs_it_replaced`'s expected
-/// value — the proof the bundle says exactly what the code used to.
-/// Deleted once that test has watched a release go by.
-#[cfg(test)]
-fn maintenance_spec(kind: &str, label: &str, description: &str) -> WorkflowSpec {
-    let steps = vec![
-        StepSpec {
-            title: "scheduled".into(),
-            kind: "trigger".into(),
-            ready_when: "true".into(),
-            title_template: "Timer fired".into(),
-            metadata_defaults: serde_json::json!({
-                "trigger_kind": "periodic",
-                "trigger_name": "systemd-timer",
-            }),
-            ..Default::default()
-        },
-        StepSpec {
-            title: "run".into(),
-            kind: "task".into(),
-            ready_when: "steps.scheduled.done".into(),
-            title_template: "Run to completion".into(),
-            // Gated so the simulated workforce cannot role-match and
-            // "complete" real maintenance (the ship-a-change scope
-            // comment's hazard); the timer's boss-step call presents
-            // the automation actor with this role.
-            authority_role: Some("platform-admin".into()),
-            fields: vec![boss_core::job::StepField {
-                name: "result".into(),
-                field_type: "string".into(),
-                required: true,
-                filled_by: boss_core::job::FilledBy::Executor,
-                item_keys: Vec::new(),
-                covers: None,
-            }],
-            ..Default::default()
-        },
-        StepSpec {
-            title: "completed".into(),
-            kind: "outcome".into(),
-            ready_when: "steps.run.done AND steps.run.metadata.result = \"ok\"".into(),
-            title_template: "Maintenance completed".into(),
-            metadata_defaults: serde_json::json!({ "outcome_kind": "completed" }),
-            terminal: Some(Terminal {
-                outcome: "completed".into(),
-            }),
-            ..Default::default()
-        },
-        // A run that died records how (boss-step.sh from ExecStopPost:
-        // the service result and exit status) and lands here, instead
-        // of sitting open looking like a run in progress until a later
-        // run closed it "ok" (2026-09-05, twice in one afternoon).
-        StepSpec {
-            title: "failed".into(),
-            kind: "outcome".into(),
-            ready_when: "steps.run.done AND steps.run.metadata.result != \"ok\"".into(),
-            title_template: "Maintenance failed".into(),
-            metadata_defaults: serde_json::json!({ "outcome_kind": "aborted" }),
-            terminal: Some(Terminal {
-                outcome: "failed".into(),
-            }),
-            ..Default::default()
-        },
-    ];
-    let mut spec =
-        WorkflowSpec::platform_seed(kind, label, "platform", vec!["custom".into()], steps);
-    spec.description = Some(description.to_string());
-    // Owner + /system/flow membership: maintenance is the department's
-    // own labor, so it appears with the other platform kinds.
-    spec.metadata = serde_json::json!({ "owner_role": "platform-admin" });
-    spec
-}
-
 /// Which `user-feedback` step a triage disposition opens, and whether
 /// reaching it ends the Job on its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3395,25 +3299,22 @@ mod tests {
         // with the deployment without editing Rust. The file now
         // carries the live row, the drift lint compares steps as well
         // as prose, and this literal held nothing the file does not.
+        //
+        // THE THREE `maintenance_spec` CHORES LEFT ON 2026-09-18 (backlog
+        // 4f909642), a week and 133 landed trains after their move. Every
+        // chore's `run` step now declares the automation that completes
+        // it as its audience instead of a bare `platform-admin` role
+        // (the shape that had the dispatcher nominate each one to the
+        // agent alias), and that is a protocol change the literal would
+        // have had to mirror in Rust — the same backwards edit that
+        // retired the two above. The presence half stays in `CONVERTED`;
+        // `platform_bundle_maintenance.rs` pins the new shape from the
+        // bundle side, for every chore rather than the three that
+        // happened to be literals.
         let expected = [
             workflow_design_spec(),
             regenerate_deployment_spec(),
             design_doc_review_spec(),
-            maintenance_spec(
-                "maintenance-backup",
-                "Nightly backup",
-                "The 03:00 backup run — configs, Postgres dump, kanidm state.",
-            ),
-            maintenance_spec(
-                "maintenance-audit-integrity",
-                "Audit-log integrity check",
-                "The 03:00 chain scan + event-kind drift guard.",
-            ),
-            maintenance_spec(
-                "maintenance-ledger-replay",
-                "Ledger replay check",
-                "The 03:30 rooted-at-audit-log replay comparison.",
-            ),
         ];
         // Every CONVERTED kind must still be here. This is the
         // load-bearing half and it has earned its keep: it went red

@@ -73,7 +73,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use boss_jobs::car;
 use boss_jobs::delivery::DeliveryPolicyRow;
-use chrono::{DateTime, FixedOffset, Utc};
+use chrono::{DateTime, Utc};
 use reqwest::Method;
 use serde_json::{Map, Value, json};
 
@@ -254,7 +254,6 @@ struct Config {
     upstream_url: String,
     home: String,
     clone: String,
-    deploy_tree: String,
     /// Which forge adapter is active (BOSS_TRAIN_FORGE: `github` or
     /// `forgejo`). Stored on the config so decisions that hinge on
     /// WHICH forge — the arrival branch cleanup only runs against the
@@ -372,13 +371,6 @@ impl Config {
                 &format!("{forge_base}/{forge_repo}.git"),
             ),
             clone: format!("{home}/repo"),
-            // Default `/opt/boss` is the boss-gcp conductor's playground
-            // tree and stays unchanged. Set BOSS_TRAIN_DEPLOY_TREE="" to
-            // mean "the deploy happens elsewhere (the cluster converge),
-            // not here" — the intended config for a cluster-resident
-            // conductor, which has no such tree and no sudo. See
-            // `playground_deploy_disabled` and `deploy`.
-            deploy_tree: env_or("BOSS_TRAIN_DEPLOY_TREE", "/opt/boss"),
             forge_kind: env_or("BOSS_TRAIN_FORGE", "forgejo"),
             auto_merge: std::env::var("BOSS_TRAIN_AUTO_MERGE").as_deref() == Ok("1"),
             allow_local_jobs: std::env::var("BOSS_TRAIN_ALLOW_LOCAL_JOBS").as_deref() == Ok("1"),
@@ -2242,45 +2234,6 @@ pub(crate) fn stranded_alarm_body(
     })
 }
 
-/// The alarm a deploy tree that stays busy becomes: the conductor
-/// refuses to deploy from an unknown working state (correct) but used
-/// to wait SILENTLY (2026-09-02: six hours, two merged trains, a retry
-/// logging to nobody). Pure so the shape is pinned by tests.
-pub(crate) fn deploy_blocked_alarm_body(
-    tid: &str,
-    mins: i64,
-    reason: &str,
-    blocked_since: &str,
-    threshold_mins: i64,
-    owner: &str,
-) -> Value {
-    json!({
-        "kind": "user-feedback",
-        "status": "open",
-        "title": format!("Deploy blocked {mins} min: the playground tree is not clean"),
-        "subject": {"subject_kind": "custom", "id": "cluster-convergence"},
-        "tags": ["deploy", "pipeline"],
-        "owner_id": owner,
-        "priority": "urgent",
-        // No `opened_on`: see stranded_alarm_body (dd3624a0).
-        "metadata": {
-            "message": format!(
-                "The conductor has refused to deploy for {mins} minutes: \
-                 {reason}. Refusing is correct — building from an unknown \
-                 working state is worse than waiting — but waiting SILENTLY \
-                 is the defect this packet exists to end (2026-09-02: a \
-                 regenerated Cargo.lock left the tree dirty and two merged \
-                 trains waited six hours while the retry logged to nobody). \
-                 Inspect with `git -C <deploy tree> status --short`; a \
-                 regenerable artifact is `git checkout --` and the next tick \
-                 deploys. Threshold is BOSS_TRAIN_CONVERGE_ALARM_MINS ({threshold_mins})."
-            ),
-            "train": tid,
-            "blocked_since": blocked_since,
-        },
-    })
-}
-
 /// The alarm a merged train whose commit never reaches the cluster
 /// becomes (fdff316c / 7e5ee013). Pure so the shape is pinned by tests.
 pub(crate) fn convergence_overdue_alarm_body(
@@ -3479,38 +3432,15 @@ pub(crate) fn arrival_summary(report: &Value) -> String {
     format!("{n} cars; generation {generation}; total {total}s")
 }
 
-/// Is a deploy actually needed? `current_key` is the generation
-/// store's live key — the 8-char short-sha release dirname
-/// (infra/generation.sh); `remote_main` is the FULL 40-char sha
-/// `git ls-remote` answers. Same generation iff the full sha starts
-/// with the short key — exactly that direction (the live incident:
-/// this pair failing the comparison re-ran a full no-op deploy every
-/// 10-minute reconcile). Missing evidence on either side deploys —
-/// the deploy path surfaces its own errors, and a skip must never
-/// rest on absence.
-pub(crate) fn deploy_needed(current_key: &str, remote_main: &str) -> bool {
-    current_key.is_empty() || remote_main.is_empty() || !remote_main.starts_with(current_key)
-}
-
-/// Is the conductor's own playground deploy turned OFF? An empty
-/// `deploy_tree` (`BOSS_TRAIN_DEPLOY_TREE=""`) is the deliberate
-/// config for the cluster-resident conductor: it has no `/opt/boss`
-/// tree and no sudo, and the cluster converges on forge main by
-/// itself — the forge-host cluster-deploy-runner takes the merge,
-/// not the conductor (deployment-as-network; the migration in
-/// docs/design/the-cluster-is-the-system.md). The default stays
-/// `/opt/boss`, so the boss-gcp conductor is unaffected; only an
-/// explicitly-empty tree disables the hop. Whitespace-only counts as
-/// empty — it can only be a mis-set env var, never a real path.
-pub(crate) fn playground_deploy_disabled(deploy_tree: &str) -> bool {
-    deploy_tree.trim().is_empty()
-}
-
-/// The `deployed`-step evidence a cluster-resident conductor stamps
-/// when it runs no playground deploy. It is a COMPLETION, not a
-/// block: there is genuinely nothing for the conductor to deploy, and
-/// the downstream convergence-verification step is what confirms the
-/// cluster actually took the merge.
+/// The `deployed`-step evidence the conductor stamps: it runs no
+/// deploy of its own. It is a COMPLETION, not a block: there is
+/// genuinely nothing for the conductor to deploy — the forge-host
+/// cluster-deploy-runner converges the cluster on forge main — and the
+/// downstream convergence-verification step is what confirms the
+/// cluster actually took the merge. Until 2026-09-18 this was one arm
+/// of a deploy-tree switch; the other arm pulled a host tree and ran
+/// the bare-metal deploy scripts train #443 deleted, and left with
+/// them (backlog ed64f852).
 pub(crate) const NO_PLAYGROUND_DEPLOY_EVIDENCE: &str = "no playground deploy — the cluster converges on forge main via the deploy-runner \
      (deployment-as-network); nothing to deploy from the conductor";
 
@@ -3522,45 +3452,6 @@ pub(crate) const NO_PLAYGROUND_DEPLOY_EVIDENCE: &str = "no playground deploy —
 /// accidentally "match".
 pub(crate) fn commits_match(a: &str, b: &str) -> bool {
     a.len() >= 7 && b.len() >= 7 && (a.starts_with(b) || b.starts_with(a))
-}
-
-/// What a BLOCKED deploy tree should do this reconcile pass.
-///
-/// WHY THIS EXISTS. `deploy` refuses to build from a dirty or
-/// off-main tree — correctly; deploying an unknown working state is
-/// worse than waiting. But it only logged "deploy tree busy — will
-/// retry" and stamped the step, so on 2026-09-02 the tree sat dirty
-/// with a regenerated `Cargo.lock` and the conductor retried in
-/// silence every ten minutes for SIX HOURS while two merged trains
-/// waited to deploy. Nothing in the system of record said the
-/// pipeline had stopped; it was found by reading a journal by hand.
-///
-/// This is the `ConvergenceVerdict::Overdue` idea one step upstream:
-/// a quiet wait is fine, an INDEFINITE quiet wait is the defect.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum DeployBlockVerdict {
-    /// Blocked, but inside the patience window — retry quietly.
-    Waiting,
-    /// Blocked past the window and nothing filed yet — file the packet.
-    Overdue,
-}
-
-/// Pure so the rule is pinned by tests rather than by this comment.
-/// `blocked_since` is the stamp the first blocked pass wrote; None
-/// means this pass is the first, which is never overdue.
-pub(crate) fn deploy_block_verdict(
-    blocked_since: Option<DateTime<FixedOffset>>,
-    now: DateTime<Utc>,
-    alarm_after_mins: i64,
-) -> DeployBlockVerdict {
-    let Some(since) = blocked_since else {
-        return DeployBlockVerdict::Waiting;
-    };
-    if (now.fixed_offset() - since).num_minutes() >= alarm_after_mins {
-        DeployBlockVerdict::Overdue
-    } else {
-        DeployBlockVerdict::Waiting
-    }
 }
 
 /// What the `converged` step should do this reconcile pass.
@@ -3611,18 +3502,6 @@ pub(crate) fn convergence_verdict(
     } else {
         ConvergenceVerdict::Waiting
     }
-}
-
-/// The live generation's key — the basename of the store's `current`
-/// symlink. The store layout is owned by infra/generation.sh (the
-/// one definition); this reads the same BOSS_GEN_ROOT contract.
-/// Empty when the box has no generation store yet.
-fn current_generation_key() -> String {
-    let root = env_or("BOSS_GEN_ROOT", "/usr/local/boss");
-    fs::read_link(Path::new(&root).join("current"))
-        .ok()
-        .and_then(|t| t.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .unwrap_or_default()
 }
 
 /// The newest `completed_at` stamp across a train's steps — when
@@ -6475,197 +6354,22 @@ impl Conductor {
     // Phase 1 — reconcile open trains against reality
     // -----------------------------------------------------------------------
 
-    /// Carry a merged train out to the playground — only from a clean
-    /// main tree; anything else is recorded and retried next run.
-    ///
-    /// EMPTY-TREE CONTRACT. When `deploy_tree` is empty
-    /// (`BOSS_TRAIN_DEPLOY_TREE=""`) the deploy happens ELSEWHERE, not
-    /// here: the cluster converges on forge main by itself via the
-    /// forge-host cluster-deploy-runner (deployment-as-network). This
-    /// is the deliberate config for a conductor running inside the
-    /// cluster, which has no `/opt/boss` tree and no sudo — the
-    /// migration in docs/design/the-cluster-is-the-system.md, which
-    /// retires the vestigial boss-gcp playground deploy. In that mode
-    /// deploy() does no git or tree access at all: it completes the
-    /// `deployed` step honestly (nothing to deploy) and returns, and
-    /// the downstream convergence-verification step is what proves the
-    /// cluster actually took the merge. The default stays `/opt/boss`,
-    /// so the boss-gcp conductor's path is byte-unchanged.
-    async fn deploy(&self, train: &Value, deployed_step: &Value, now: DateTime<Utc>) -> Result<()> {
-        // Cluster-resident conductor: no playground deploy. Short-
-        // circuit BEFORE any git/tree access — there is no tree, and a
-        // no-op deploy has no business touching one. This is a
-        // COMPLETION, not a block (see NO_PLAYGROUND_DEPLOY_EVIDENCE):
-        // convergence verification downstream confirms the merge landed.
-        if playground_deploy_disabled(&self.cfg.deploy_tree) {
-            log("deploy skipped — no playground tree; the cluster converges on forge main");
-            self.complete_step(
-                train,
-                Some(deployed_step),
-                &[("deployed", Some(NO_PLAYGROUND_DEPLOY_EVIDENCE.to_string()))],
-            )
-            .await?;
-            return Ok(());
-        }
-        let tree = self.cfg.deploy_tree.clone();
-        let tree_path = Path::new(&tree);
-        // Deploy only when needed. The skip decision comes before the
-        // busy check — a no-op deploy has no business caring about
-        // the tree — and reads two facts: the generation store's live
-        // key and what `main` is on the remote. Matching pair: record
-        // the evidence on the step and journal the skip; the services
-        // stay unbounced.
-        let pull_remote = env_or("BOSS_TRAIN_DEPLOY_REMOTE", "origin");
-        let remote_out = sh_unchecked(&["git", "-C", &tree, "ls-remote", &pull_remote, "main"])?;
-        let remote_main = stdout_str(&remote_out)
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .to_string();
-        let current = current_generation_key();
-        if !deploy_needed(&current, &remote_main) {
-            let short: String = remote_main.chars().take(12).collect();
-            log(format!(
-                "deploy skipped — generation {current} already serves main@{short}"
-            ));
-            self.complete_step(
-                train,
-                Some(deployed_step),
-                &[(
-                    "deployed",
-                    Some(format!(
-                        "already live: generation {current} serves main@{short}; no deploy run"
-                    )),
-                )],
-            )
-            .await?;
-            return Ok(());
-        }
-        let dirty_out = sh_unchecked(&["git", "-C", &tree, "status", "--porcelain"])?;
-        let dirty = !stdout_str(&dirty_out).trim().is_empty();
-        let branch_out = sh(&["git", "-C", &tree, "rev-parse", "--abbrev-ref", "HEAD"])?;
-        let branch = stdout_str(&branch_out).trim().to_string();
-        if dirty || branch != "main" {
-            // dirty prints True/False — python's bool repr; the journal
-            // line is operator surface and stays byte-identical.
-            let reason = format!(
-                "deploy tree busy (branch={branch}, dirty={}) — will retry",
-                if dirty { "True" } else { "False" }
-            );
-            log(&reason);
-            if !self.cfg.dry {
-                let tid = job_id(train)?;
-                let sid = deployed_step
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow!("deployed step without an id on job {tid}"))?;
-                let mut md = metadata_map(deployed_step);
-                md.insert("deploy_blocked".to_string(), json!(reason));
-                // WHEN the block started, stamped once and left alone
-                // while it persists — the elapsed time is the whole
-                // signal, so a stamp that refreshed every pass would
-                // make an indefinite block look permanently fresh.
-                let blocked_since = md
-                    .get("deploy_blocked_since")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| now.to_rfc3339());
-                md.insert("deploy_blocked_since".to_string(), json!(blocked_since));
-                self.api(
-                    Method::PUT,
-                    &format!("/api/jobs/{tid}/steps/{sid}"),
-                    Some(json!({"metadata": md})),
-                )
-                .await?;
-
-                let since = parse_stamp(Some(blocked_since.as_str()));
-                if deploy_block_verdict(since, now, self.cfg.converge_alarm_mins)
-                    == DeployBlockVerdict::Overdue
-                    && !truthy(
-                        train
-                            .get("metadata")
-                            .and_then(|m| m.get("deploy_alarm_filed")),
-                    )
-                {
-                    let mins = since
-                        .map(|s| (now.fixed_offset() - s).num_minutes())
-                        .unwrap_or_default();
-                    log(format!(
-                        "train {}: deploy tree BLOCKED {mins} min — filing packet",
-                        id8(tid)
-                    ));
-                    let owner = self.owner_for_filing().await;
-                    self.api(
-                        Method::POST,
-                        "/api/jobs",
-                        Some(deploy_blocked_alarm_body(
-                            tid,
-                            mins,
-                            &reason,
-                            &blocked_since,
-                            self.cfg.converge_alarm_mins,
-                            &owner,
-                        )),
-                    )
-                    .await?;
-                    self.api(
-                        Method::PATCH,
-                        &format!("/api/jobs/{tid}/metadata"),
-                        Some(json!({"deploy_alarm_filed": true})),
-                    )
-                    .await?;
-                }
-            }
-            return Ok(());
-        }
-        if self.cfg.dry {
-            log("DRY: would pull main, migrate, build, deploy services + web");
-            return Ok(());
-        }
-        // Under the forge protocol the playground converges on forge
-        // main; GitHub is the mirror, never the source (27ab7680).
-        sh(&["git", "-C", &tree, "pull", &pull_remote, "main"])?;
-        let main_ref_out = sh(&["git", "-C", &tree, "rev-parse", "--short", "HEAD"])?;
-        let main_ref = stdout_str(&main_ref_out).trim().to_string();
-        let mig = Command::new(format!("{tree}/infra/postgres/migrate.sh"))
-            .args(["--", "psql", "-U", "boss", "-h", "127.0.0.1", "-d", "boss"])
-            .current_dir(tree_path)
-            .env("PGPASSWORD", "boss")
-            .output()
-            .context("spawning migrate.sh")?;
-        if !mig.status.success() {
-            bail!(
-                "migrate.sh failed:\n{}",
-                String::from_utf8_lossy(&mig.stderr).trim()
-            );
-        }
-        sh_in(
-            Some(tree_path),
-            true,
-            &[&format!("{tree}/infra/build-release.sh")],
-        )?;
-        sh_in(
-            Some(tree_path),
-            true,
-            &[
-                "sudo",
-                "-n",
-                &format!("{tree}/infra/deploy-services.sh"),
-                "prod",
-            ],
-        )?;
-        sh_in(
-            Some(tree_path),
-            true,
-            &["sudo", "-n", &format!("{tree}/infra/deploy-web.sh")],
-        )?;
-        let mig_out = stdout_str(&mig);
-        let summary = format!(
-            "main@{main_ref}; {}; services: prod; web: deployed",
-            mig_out.trim().lines().last().unwrap_or_default()
-        );
-        self.complete_step(train, Some(deployed_step), &[("deployed", Some(summary))])
-            .await?;
+    /// Complete a merged train's `deployed` step. The conductor deploys
+    /// nothing itself: the cluster converges on forge main by itself
+    /// via the forge-host cluster-deploy-runner (deployment-as-network;
+    /// the migration in docs/design/the-cluster-is-the-system.md), so
+    /// this touches no repository and no tree — it records the one
+    /// honest evidence (NO_PLAYGROUND_DEPLOY_EVIDENCE) and returns, and
+    /// the convergence-verification step downstream is what proves the
+    /// cluster took the merge.
+    async fn deploy(&self, train: &Value, deployed_step: &Value) -> Result<()> {
+        log("deploy skipped — no playground tree; the cluster converges on forge main");
+        self.complete_step(
+            train,
+            Some(deployed_step),
+            &[("deployed", Some(NO_PLAYGROUND_DEPLOY_EVIDENCE.to_string()))],
+        )
+        .await?;
         Ok(())
     }
 
@@ -7641,7 +7345,7 @@ impl Conductor {
             if step_done(merged_step) && !step_done(deployed_step) {
                 let deployed_step = deployed_step
                     .ok_or_else(|| anyhow!("deployed step missing on job {}", id8(&tid)))?;
-                self.deploy(&t, deployed_step, now).await?;
+                self.deploy(&t, deployed_step).await?;
                 t = self.get_job(&tid).await?;
             }
             // Installation is not the finish line either — the cluster
@@ -10367,11 +10071,10 @@ mod tests {
         NO_PLAYGROUND_DEPLOY_EVIDENCE, RetryPolicy, SweepGuard, arrival_already_filed,
         arrival_report, arrival_summary, auto_cancel_reason, boarded_head, branch_moved_line,
         car_hold_reason, ci_overdue, claim_deferred_branches, classify_transport, commits_match,
-        convergence_verdict, deletable_branches, deploy_needed, local_jobs_problem,
-        merge_declined_reason, overlay_metadata, parked_ready, playground_deploy_disabled,
-        releasable_cars, repo_path, resolve_train, retryable, retrying, short_cause,
-        skip_reason_branch_missing, skip_reason_conflict, stall_age_hours, sweep_complete,
-        sweep_guard, sweep_note, sweep_pending, sweep_settled, sweep_subject,
+        convergence_verdict, deletable_branches, local_jobs_problem, merge_declined_reason,
+        overlay_metadata, parked_ready, releasable_cars, repo_path, resolve_train, retryable,
+        retrying, short_cause, skip_reason_branch_missing, skip_reason_conflict, stall_age_hours,
+        sweep_complete, sweep_guard, sweep_note, sweep_pending, sweep_settled, sweep_subject,
         train_branch_to_delete, verdict_drift,
     };
     use crate::delivery_policy::DeliveryPolicy;
@@ -11393,37 +11096,6 @@ mod tests {
         assert!(!summary.contains("?:"), "no anonymous checks: {summary}");
     }
 
-    /// A blocked deploy tree is quiet inside the window and LOUD past
-    /// it — the six-hour silent retry of 2026-09-02, pinned. The first
-    /// blocked pass (no stamp yet) is never overdue: elapsed time is
-    /// the signal and it has not started elapsing.
-    #[test]
-    fn a_blocked_deploy_tree_goes_loud_past_the_window() {
-        let now = chrono::DateTime::parse_from_rfc3339("2026-09-02T15:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        let since = |mins: i64| Some((now - chrono::Duration::minutes(mins)).fixed_offset());
-        assert_eq!(
-            deploy_block_verdict(None, now, 30),
-            DeployBlockVerdict::Waiting,
-            "first blocked pass has not started elapsing"
-        );
-        assert_eq!(
-            deploy_block_verdict(since(29), now, 30),
-            DeployBlockVerdict::Waiting
-        );
-        assert_eq!(
-            deploy_block_verdict(since(30), now, 30),
-            DeployBlockVerdict::Overdue,
-            "the boundary is inclusive, like the convergence alarm"
-        );
-        // The incident's own duration, six hours, must be loud.
-        assert_eq!(
-            deploy_block_verdict(since(360), now, 30),
-            DeployBlockVerdict::Overdue
-        );
-    }
-
     /// The rolled-past case (2026-09-02, train #176): the cluster
     /// self-reports a LATER commit that contains this train's merge.
     /// Equality misses; ancestry converges. And git's inability to
@@ -12293,7 +11965,6 @@ mod tests {
                 upstream_url: "https://github.com/example/boss.git".into(),
                 home: home.display().to_string(),
                 clone: home.join("repo").display().to_string(),
-                deploy_tree: home.join("tree").display().to_string(),
                 forge_kind: forge_kind.into(),
                 auto_merge: false,
                 allow_local_jobs: true,
@@ -12461,73 +12132,18 @@ mod tests {
         assert!(resolve_train(&twins, "aaaa1111").is_err(), "ambiguous");
     }
 
-    // -- the deploy-needed decision ----------------------------------------
+    // -- the deployed-step evidence -------------------------------------------
     //
-    // Live incident: every 10-minute reconcile re-ran a full no-op
-    // deploy — generation unchanged, services bounced anyway. The
-    // store's `current` key is the 8-char release dirname; ls-remote
-    // answers the FULL 40-char sha. full.starts_with(short) is the
-    // match — that exact direction, pinned here with the real shapes.
-
-    #[test]
-    fn a_generation_already_serving_remote_main_skips_the_deploy() {
-        let full = "c0020201aa5f3d9e8b7c6d5e4f3a2b1c0d9e8f7a";
-        assert!(
-            !deploy_needed("c0020201", full),
-            "8-char store key vs 40-char remote sha must read as up to date"
-        );
-    }
-
-    #[test]
-    fn every_other_pair_deploys() {
-        let full = "deadbeefaa5f3d9e8b7c6d5e4f3a2b1c0d9e8f7a";
-        assert!(deploy_needed("c0020201", full), "different generations");
-        // The reversed half-match must never read as up to date.
-        assert!(deploy_needed(
-            "c0020201aa5f3d9e8b7c6d5e4f3a2b1c0d9e8f7a",
-            "c0020201"
-        ));
-        // Missing evidence on either side deploys — the deploy path
-        // surfaces its own errors; a skip must never rest on absence.
-        assert!(deploy_needed("", full));
-        assert!(deploy_needed("c0020201", ""));
-    }
-
-    // -- the playground-deploy-disabled decision ---------------------------
-    //
-    // The FIRST car of the conductor migration
-    // (docs/design/the-cluster-is-the-system.md): move the conductor
-    // into the cluster and retire the vestigial boss-gcp playground
-    // deploy. A cluster-resident conductor has no `/opt/boss` tree and
-    // no sudo, so an empty `deploy_tree` turns the hop OFF — deploy()
-    // short-circuits BEFORE any git/tree access and completes the step
-    // honestly. The default `/opt/boss` MUST stay enabled so the
-    // boss-gcp conductor is byte-unchanged.
-
-    #[test]
-    fn an_empty_deploy_tree_disables_the_playground_deploy() {
-        // The one intended off-switch: an explicitly-empty tree.
-        assert!(playground_deploy_disabled(""));
-        // Whitespace-only can only be a mis-set env var, never a path.
-        assert!(playground_deploy_disabled("   "));
-        assert!(playground_deploy_disabled("\t\n"));
-    }
-
-    #[test]
-    fn a_real_deploy_tree_keeps_the_playground_deploy() {
-        // The default the boss-gcp conductor runs under — unchanged.
-        assert!(!playground_deploy_disabled("/opt/boss"));
-        // And the scratch path the tree-backed deploy tests exercise.
-        assert!(!playground_deploy_disabled(
-            &train_test_home().join("tree").display().to_string()
-        ));
-    }
+    // The conductor deploys nothing: the cluster-deploy-runner on the
+    // forge converges the cluster on merge. The `deployed` step is
+    // completed with this evidence and nothing else (the tree-backed
+    // arm and its deploy-tree switch left on 2026-09-18).
 
     #[test]
     fn the_no_playground_deploy_evidence_names_the_convergence_path() {
-        // The completion evidence the cluster-resident conductor stamps
-        // on the `deployed` step. It reads as a COMPLETION (nothing to
-        // deploy), not a block, and points at what actually deploys.
+        // The completion evidence the conductor stamps on the `deployed`
+        // step. It reads as a COMPLETION (nothing to deploy), not a
+        // block, and points at what actually deploys.
         let ev = NO_PLAYGROUND_DEPLOY_EVIDENCE;
         assert!(ev.contains("no playground deploy"), "states the skip: {ev}");
         assert!(
@@ -15295,9 +14911,8 @@ mod burial_tests {
 mod stranded_green_tests {
     use super::{
         StrandCause, StrandWindows, StrandedGreen, convergence_overdue_alarm_body,
-        deploy_blocked_alarm_body, stranded_alarm_body, stranded_alarms_to_clear,
-        stranded_clear_reason, stranded_clear_step_body, stranded_greens_to_alarm,
-        stranded_refresh_patch,
+        stranded_alarm_body, stranded_alarms_to_clear, stranded_clear_reason,
+        stranded_clear_step_body, stranded_greens_to_alarm, stranded_refresh_patch,
     };
     use chrono::{TimeZone, Utc};
     use serde_json::{Map, json};
@@ -15816,29 +15431,6 @@ mod stranded_green_tests {
              or the packet gets no `opened_at`: {b}"
         );
         assert_eq!(b["metadata"]["last_measured_at"], now.to_rfc3339());
-    }
-
-    /// Same rule, the deploy-blocked alarm (dd3624a0).
-    #[test]
-    fn the_deploy_blocked_alarm_leaves_the_open_date_to_the_api_clock() {
-        let b = deploy_blocked_alarm_body(
-            "t-1",
-            45,
-            "deploy tree busy (branch=main, dirty=True) — will retry",
-            "2026-09-07T11:15:00+00:00",
-            30,
-            "emp-owner",
-        );
-        assert!(
-            b.get("opened_on").is_none(),
-            "`opened_on` must be left to the create handler's clock: {b}"
-        );
-        assert_eq!(b["kind"], "user-feedback");
-        assert_eq!(b["priority"], "urgent");
-        assert_eq!(b["metadata"]["train"], "t-1");
-        assert_eq!(b["metadata"]["blocked_since"], "2026-09-07T11:15:00+00:00");
-        let msg = b["metadata"]["message"].as_str().unwrap();
-        assert!(msg.contains("45 minutes") && msg.contains("(30)"), "{msg}");
     }
 
     /// Same rule, the convergence-overdue alarm (dd3624a0).

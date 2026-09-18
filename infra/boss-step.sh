@@ -137,8 +137,9 @@ fi
 # So: no default. A maintenance tool with no system of record
 # configured refuses, loudly, and systemd records a failed unit — which
 # is a state somebody notices, unlike a packet filed in the wrong
-# database. Set BOSS_JOBS_URL explicitly; deploy-services.sh writes it
-# into a drop-in for every timer it installs.
+# database. Set BOSS_JOBS_URL explicitly; every unit reads it from the
+# host's /etc/boss/sor.env (infra/estate/estate.toml, rendered by the
+# converge).
 if [ -z "${BOSS_JOBS_URL:-}" ]; then
     echo "$(basename "$0"): BOSS_JOBS_URL is not set, and there is no safe default." >&2
     echo "    Defaulting to 127.0.0.1 is how nightly maintenance packets spent weeks" >&2

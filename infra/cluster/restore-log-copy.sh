@@ -4,7 +4,7 @@
 # restore sequence:
 #
 #   migrate.sh from empty → restore the copy-set → boss-rebuild-all →
-#   boss-audit-integrity-check green → deploy-services + deploy-web
+#   boss-audit-integrity-check green → converge the instance onto it
 #
 # This script owns everything up to (not including) the deploys. It is
 # deliberately shape-independent: all it needs is a Postgres it may
@@ -141,4 +141,4 @@ else
 fi
 
 echo "==> restore complete: $DB carries the log, the registries, and rebuilt projections"
-echo "    next on the real move: deploy-services + deploy-web, then point services at $DB"
+echo "    next on the real move: point the instance's services at $DB and converge"

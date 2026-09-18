@@ -350,7 +350,7 @@ arrived is answered by the next run, usually `converged: <sha>`.
   `journal-read.sh` is the door that states its own freshness — packet
   8bea0c9c). Since 2026-09-11 the *how* is `infra/journal-door-ensure.sh`
   — one definition, called by this installer and by
-  `deploy-services.sh units`, because boss-gcp needed the same door
+  `install-units.sh units` on boss-gcp, because that host needed the same door
   (backlog 68757702) and a second copy is what drifts. `journal-read.sh`
   now takes `--host boss-gcp` as a named target.
 - The ops runner's residue closed on 2026-09-05 (`install.sh` lands it

@@ -21,8 +21,8 @@ Environment=HOST_ID=boss-gcp
 #
 # This line used to read `Environment="UNITS=boss-estate-observe-host.timer
 # boss-gcp-converge.timer"`, and those two units were the whole of what
-# this host's observer watched. Everything else deploy-services.sh
-# installs here was outside the watch BY CONSTRUCTION, so its absence
+# this host's observer watched. Everything else the installer put
+# here was outside the watch BY CONSTRUCTION, so its absence
 # from a clean observation said nothing — and on 2026-09-10 that is
 # exactly what went wrong (backlog 68757702): "is
 # boss-ml-inference-batch.timer installed?" had no read path, the tree

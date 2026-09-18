@@ -29,10 +29,10 @@ await rm(OUT, { recursive: true, force: true });
 //
 // `$REPO_ROOT/target/release/` FIRST, then PATH — the same order
 // `infra/lint/no-snapshot-arrays.sh` uses, and deliberately the
-// opposite of `infra/check-binary-freshness.sh`.
+// opposite of what a freshness check of an installed binary wants.
 //
-// The two scripts want different things. Freshness-checking asks "is
-// what's INSTALLED current?", so it must resolve the installed binary.
+// The two want different things. Freshness-checking asks "is what's
+// INSTALLED current?", so it must resolve the installed binary.
 // Codegen asks "what does THIS working tree declare?", so it must
 // resolve the binary built from this tree; an entry in PATH came from
 // whenever someone last ran a deploy and can be arbitrarily old.

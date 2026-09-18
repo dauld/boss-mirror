@@ -45,7 +45,7 @@
 #   git clone && migrate.sh from empty
 #   psql < copy-set dumps
 #   boss-rebuild-all && boss-audit-integrity-check   # must be green
-#   deploy-services + deploy-web
+#   converge the instance onto the restored database
 #
 # Usage:
 #   sudo ./infra/cluster/export-log-copy.sh --check   # preconditions only

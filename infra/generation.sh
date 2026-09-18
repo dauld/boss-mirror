@@ -16,8 +16,6 @@
 #     current -> releases/<sha>    the live generation (atomic flip)
 #     previous -> releases/<sha>   the one before it (revert target)
 #     state/
-#       deploy-confirm.pending   marker armed at flip, cleared by the
-#                                confirm verdict (boss-deploy-confirm)
 #       deploy-history.log       append-only activate/confirm/revert log
 #
 # Units exec through the symlink (ExecStart=/usr/local/boss/current/
@@ -29,7 +27,6 @@
 BOSS_GEN_ROOT="${BOSS_GEN_ROOT:-/usr/local/boss}"
 GEN_RELEASES="$BOSS_GEN_ROOT/releases"
 GEN_STATE="$BOSS_GEN_ROOT/state"
-GEN_PENDING="$GEN_STATE/deploy-confirm.pending"
 GEN_HISTORY="$GEN_STATE/deploy-history.log"
 # Q1/Q3: retain the 3 newest generations; prune the rest (with sizes —
 # this box has had its disk-full day).

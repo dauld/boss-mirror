@@ -13,9 +13,6 @@
 #   ./infra/train/conductor.sh --dry-run        # say what would happen
 set -euo pipefail
 
-# build-release.sh resolves cargo from CARGO_BIN or $HOME — under the
-# cadence service HOME is the service user's, where the toolchain lives.
-
 # Translate the historical flags to `boss train` verbs. --preflight
 # wins over --reconcile-only, same as the python argv scan (preflight
 # returned before reconcile was consulted); everything else —

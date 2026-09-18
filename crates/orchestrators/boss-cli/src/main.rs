@@ -10,7 +10,6 @@ mod census;
 mod channels;
 mod credential;
 mod delivery_policy;
-mod deploy;
 mod design;
 mod dock_preview;
 mod doctor;
@@ -88,39 +87,6 @@ enum Commands {
     Script {
         #[command(subcommand)]
         action: ScriptAction,
-    },
-    /// Build, install, and restart services
-    Deploy {
-        #[command(subcommand)]
-        action: DeployAction,
-    },
-    /// Check health of all services, Postgres, NATS, and backups
-    Status {
-        /// Output as JSON (for Claude Code / machine parsing)
-        #[arg(long)]
-        json: bool,
-    },
-    /// Restart a service without rebuilding
-    Restart {
-        /// Service name (assets, catalog, people, commerce, etc.)
-        service: String,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-    /// View service logs via journalctl
-    Logs {
-        /// Service name
-        service: String,
-        /// Number of log lines to show
-        #[arg(short = 'n', long, default_value = "50")]
-        lines: u32,
-        /// Follow log output (like tail -f)
-        #[arg(short, long)]
-        follow: bool,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
     },
     /// Asset maintenance subcommands
     Assets {
@@ -821,24 +787,6 @@ enum PacketAction {
 }
 
 #[derive(Subcommand)]
-enum DeployAction {
-    /// List all deployable services
-    List,
-    /// Deploy a service (or all if no service specified)
-    Run {
-        /// Service name (e.g. assets, shipping, gateway). Omit for all.
-        service: Option<String>,
-        /// Skip cargo build (install existing binary only)
-        #[arg(long)]
-        skip_build: bool,
-    },
-    /// Build and deploy the web frontend
-    Web,
-    /// Remove debug build artifacts to free disk space
-    Clean,
-}
-
-#[derive(Subcommand)]
 enum AssetsAction {
     /// Rebuild the `systems` projection table from the `system_events` log.
     /// Idempotent — safe to run on a healthy DB.
@@ -1117,23 +1065,6 @@ async fn main() -> Result<()> {
             ScriptAction::List { category } => script::list(category.as_deref()).await,
             ScriptAction::Info { id } => script::info(&id).await,
         },
-        Commands::Deploy { action } => match action {
-            DeployAction::List => deploy::list().await,
-            DeployAction::Run {
-                service,
-                skip_build,
-            } => deploy::run(service.as_deref(), skip_build).await,
-            DeployAction::Web => deploy::deploy_web().await,
-            DeployAction::Clean => deploy::clean().await,
-        },
-        Commands::Status { json } => ops::status(json).await,
-        Commands::Restart { service, json } => ops::restart(&service, json).await,
-        Commands::Logs {
-            service,
-            lines,
-            follow,
-            json,
-        } => ops::logs(&service, lines, follow, json).await,
         Commands::Assets { action } => match action {
             AssetsAction::RebuildProjection { postgres_url } => {
                 cmd_assets_rebuild_projection(&postgres_url).await
@@ -1699,9 +1630,9 @@ mod tests {
         let cmd = Cli::command();
         let names: Vec<&str> = cmd.get_subcommands().map(|c| c.get_name()).collect();
         for expected in [
-            "doctor", "emit", "upgrade", "script", "deploy", "status", "restart", "logs", "assets",
-            "sim", "ledger", "inspect", "train", "gate", "park", "merged", "receipt", "running",
-            "workflow", "job", "prove", "publish", "queue", "packet", "audit",
+            "doctor", "emit", "upgrade", "script", "assets", "sim", "ledger", "inspect", "train",
+            "gate", "park", "merged", "receipt", "running", "workflow", "job", "prove", "publish",
+            "queue", "packet", "audit",
         ] {
             assert!(
                 names.contains(&expected),

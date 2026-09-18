@@ -12,8 +12,8 @@
 #
 # The dump is plain SQL of the whole database. audit_log is the
 # system of record inside the system of record — a restore is
-# schema + audit_log + boss-rebuild-all, same as dev-refresh.sh —
-# but a full dump keeps the restore path dumb, which is what you
+# schema + audit_log + boss-rebuild-all — but a full dump keeps the
+# restore path dumb, which is what you
 # want at 03:00.
 #
 # SECOND OFFSITE LEG — GCS (David, 2026-08-29, option (c)).

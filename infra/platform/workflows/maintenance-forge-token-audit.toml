@@ -29,7 +29,12 @@ title = "run"
 kind = "task"
 ready_when = "steps.scheduled.done"
 title_template = "Run to completion"
-authority_role = "platform-admin"
+# The step is the automation's and says so (backlog 4f909642,
+# 2026-09-18): born assigned to the actor boss-step.sh signs as, so the
+# dispatcher's executes-lane never nominates it to the agent and no
+# role queue lists it. The sim workforce is kept off it by the
+# partition rule (88798c96), which the old platform-admin role guarded.
+audience = { individual = "automation:boss-step" }
 [[workflow.step.fields]]
 name = "result"
 field_type = "string"

@@ -511,11 +511,12 @@ fi
 # A timer whose schedule shape this cannot read FAILS rather than being
 # skipped — the same fail-closed posture the sweep itself takes for a
 # declaration it cannot parse. A timer with no schedule directive at
-# all (boss-deploy-confirm is armed by `systemctl restart`, not by the
-# clock; the deploy dead-man was one until it left with the bare-metal
-# path) is not a cadence and is not checked. A DECLARED kind with no
-# rostered timer is left alone: it may be a cluster CronJob or a
-# dispatcher-driven kind, neither of which this file can see.
+# all (one armed by `systemctl restart`, not by the clock — the
+# bare-metal deploy's dead-man was the one instance, and it left with
+# that path on 2026-09-18) is not a cadence and is not checked. A
+# DECLARED kind with no rostered timer is left alone: it may be a
+# cluster CronJob or a dispatcher-driven kind, neither of which this
+# file can see.
 # The cadence roster is the args of ONE rule, and since 2026-09-09 each
 # rule is its own file (infra/dispatcher/rules/README.md).
 #

@@ -91,7 +91,7 @@
         <p class="empty">
           Phase 1 bootstrap seeds three candidate models on service startup.
           If you see "0 models," boss-ml-api probably isn't running — check
-          <code>boss status</code>.
+          the launcher's log.
         </p>
       {:else}
         <div

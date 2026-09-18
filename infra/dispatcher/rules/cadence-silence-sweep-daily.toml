@@ -35,9 +35,10 @@
 # AND a daily boss-gcp one, so 1440 is what the SoR can honestly expect.
 # Silence is judged at 2x the interval, floored at six hours (the sweep
 # fires once a sim-day; see MIN_SILENCE_WINDOW_MIN). Two kinds are
-# deliberately absent: `maintenance-deploy-confirm` is an armed dead-man
-# with no OnCalendar at all — not a cadence — and
-# `maintenance-forge-token-audit` is authored but on no host's roster.
+# deliberately absent: `maintenance-forge-token-audit` is authored but
+# on no host's roster, and `maintenance-deploy-confirm` — the bare-metal
+# deploy's dead-man, no OnCalendar, its unit deleted 2026-09-18 — has no
+# producer at all.
 #
 # The interval also lives in the timer files that execute the chores, so
 # it is pinned: infra/lint/timers-leave-a-packet.sh check 8 fails CI when

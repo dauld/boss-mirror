@@ -50,8 +50,8 @@ START="${BOSS_REGEN_START:-2025-04-01}"
 # sustains only ~10 writes/wall-second. At 8640 that's ~105 completions per
 # sim-day — far below the ~400+ steps generated/day — so work-in-flight
 # grows unboundedly. The compressed burst load also stresses Postgres: the
-# ~24 API pools now run against max_connections=400 (raised from 100 — see
-# deploy-services.sh), which keeps connection contention in the transient
+# ~24 API pools now run against max_connections=400 (raised from 100 on
+# the bare-metal box this ran on), which keeps connection contention in the transient
 # regime the JetStream redelivery layer can self-heal rather than the
 # sustained saturation that dead-letters assignments. 2000 still gives the
 # serial path ~43 wall-s per sim-day to keep pace. Raising serial write
@@ -80,10 +80,9 @@ echo
 # -- Step 0: clock-api must be up in sim mode ------------------
 # Every write in the run is stamped through clock-api, so the whole
 # script depends on a sim-mode clock (`POST /configure` is sim-only —
-# a wall-mode clock 405s it). deploy-services.sh installs the clock
-# with BOSS_CLOCK_MODE=wall (the prod default), so a fresh
-# bootstrap-vm.sh box fails here until the mode is flipped; the
-# playground carries the sim-mode drop-in already. Probe /configure
+# a wall-mode clock 405s it). A unit installed with BOSS_CLOCK_MODE=wall
+# (the prod default) fails here until the mode is flipped; the
+# playground carried the sim-mode drop-in. Probe /configure
 # up front — before the DB drop — so a wall-mode box fails in
 # seconds with the remediation, not minutes in with a half-reset DB.
 # In sim mode the probe doubles as an early epoch prime; step 2.4
@@ -104,8 +103,8 @@ deployed unit to sim mode and re-run:
       sudo tee /etc/systemd/system/boss-clock-api.service.d/override.conf
   sudo systemctl daemon-reload && sudo systemctl restart boss-clock-api
 
-(The drop-in survives deploy-services.sh re-runs; see the clock section
-there for why wall is the install default.)
+(A drop-in survives unit reinstalls; wall is the install default because
+production must never run on a sim clock.)
 EOF
     exit 1
 fi

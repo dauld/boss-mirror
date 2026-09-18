@@ -21,10 +21,11 @@
 #
 # THIS IS THE BINARY-FRESHNESS CHECK, ONE LAYER UP
 # ------------------------------------------------
-# check-binary-freshness.sh asks "is the deployed binary the thing we
-# built" of the playground fleet. This asks the same question of the
-# cluster: is the running image the one built from the head of the
-# trunk. Same shape, same reason, different substrate.
+# check-binary-freshness.sh asked "is the deployed binary the thing we
+# built" of the bare-metal fleet, until that fleet and the script left
+# on 2026-09-18 (train #443, backlog ed64f852). This asks the same
+# question of the cluster: is the running image the one built from the
+# head of the trunk. Same shape, same reason, the one substrate left.
 #
 # WHAT IT PROVES, AND WHAT IT DOES NOT
 # ------------------------------------

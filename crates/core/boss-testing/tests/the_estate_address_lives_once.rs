@@ -719,8 +719,8 @@ fn the_lint_refuses_a_stale_allowance_and_notes_a_dead_one() {
         r.err
     );
     // An allowed path present WITH the literal is allowed; the absent
-    // ones are noted, not failed (the bare-metal deletion lands on its
-    // own car).
+    // ones are noted, not failed (the MetalLB pin is absent from this
+    // scratch tree, present in every real one).
     let allowed = scratch_tree(
         "estate-lint-allowed",
         &[(
@@ -732,7 +732,7 @@ fn the_lint_refuses_a_stale_allowance_and_notes_a_dead_one() {
     assert_eq!(r.code, 0, "{}{}", r.out, r.err);
     assert!(
         r.out
-            .contains("note — allowance for infra/deploy.env.example"),
+            .contains("note — allowance for infra/cluster/manifests/boss-jobs-internal.yaml"),
         "{}",
         r.out
     );

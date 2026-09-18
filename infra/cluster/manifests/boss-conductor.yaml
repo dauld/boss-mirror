@@ -19,16 +19,15 @@
 # host already converges the cluster on every merge to forge main
 # (infra/forge/cluster-deploy-runner.sh): it builds the image, applies
 # these manifests, and rolls the deployment. That converge IS the deploy.
-# So the cluster conductor runs `boss train cadence` with an EMPTY deploy
-# tree — it drives boarding, reconcile and merge, but it does NOT deploy a
-# playground. The old boss-gcp conductor's `BOSS_TRAIN_DEPLOY_TREE=/opt/boss`
-# bounced a local vestigial stack; playground.algedonic.dev now routes to
-# the cluster gateway, so there is no local tree to bounce. The empty
-# deploy tree is made a clean no-op by CAR 1
-# (feat/conductor-deploy-hop-is-optional): the cadence deploy phase skips
-# when BOSS_TRAIN_DEPLOY_TREE is empty. This car depends on car 1 having
-# landed before CUTOVER — until then this pod is dormant, so the ordering
-# is only a cutover precondition, not a landing one.
+# So the cluster conductor runs `boss train cadence` and drives boarding,
+# reconcile and merge, but it does NOT deploy a playground. The old
+# boss-gcp conductor bounced a local vestigial stack through a deploy-tree
+# switch; playground.algedonic.dev now routes to the cluster gateway, so
+# there is no local tree to bounce, and on 2026-09-18 the tree-backed arm
+# of that switch was deleted with the bare-metal deploy path (train #443,
+# backlog ed64f852) — the conductor's `deployed` step is completed with
+# the one evidence it ever stamped here: nothing to deploy, the runner
+# converges.
 #
 # ----------------------------------------------------------------------------
 # CUTOVER PROCEDURE (performed by an operator, NOT by landing this car):
@@ -182,12 +181,6 @@ data:
   # The conductor's clone + lock live under here (clone = $HOME/repo). The
   # PVC above is mounted at this path.
   BOSS_TRAIN_HOME: "/var/lib/boss-train"
-  # THE POINT OF CAR 2: no playground deploy. Empty deploy tree, made a
-  # clean skip by car 1 (feat/conductor-deploy-hop-is-optional). The
-  # cluster-deploy-runner on the forge host converges the cluster on merge
-  # to forge main — that converge IS the deploy — so the conductor drives
-  # boarding/reconcile/merge and hands off deployment to the runner.
-  BOSS_TRAIN_DEPLOY_TREE: ""
   # The conductor drives merges. Off by default; the boss-gcp unit turns
   # it on via a drop-in, and so must this.
   BOSS_TRAIN_AUTO_MERGE: "1"

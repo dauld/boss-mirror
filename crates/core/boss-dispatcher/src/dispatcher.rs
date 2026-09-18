@@ -1509,6 +1509,87 @@ mod tests {
         );
     }
 
+    /// The `run` step of a maintenance chore, materialised from the
+    /// platform bundle exactly as `POST /api/jobs` does and serialised
+    /// the way `STEP_CREATED` carries it — so what this reads is what
+    /// `handle_event` reads. Named for the chore family on purpose: the
+    /// pr-train car (af796788) carries its own helper for the train.
+    fn bundled_chore_run_step(kind: &str) -> super::StepEventPayload {
+        use boss_core::job::{JobId, StepId, Subject};
+        let spec =
+            boss_jobs::seed_loader::load_workflows(boss_jobs::registry::platform_bundle_path())
+                .expect("the platform bundle parses")
+                .into_iter()
+                .find(|w| w.kind == kind)
+                .unwrap_or_else(|| panic!("{kind} ships in the platform bundle"));
+        let subject = Subject::new("custom", "maintenance/2026-09-18");
+        let run = boss_jobs::registry::materialize_steps(
+            &spec,
+            &subject,
+            JobId::new(),
+            &serde_json::Value::Object(Default::default()),
+            StepId::new,
+        )
+        .into_iter()
+        .find(|s| s.spec_slug.as_deref() == Some("run"))
+        .unwrap_or_else(|| panic!("{kind} has a `run` step"));
+        serde_json::from_value(boss_jobs::events::step_state_payload(&run))
+            .expect("a serialised Step is a StepEventPayload")
+    }
+
+    /// A chore's `run` step nominates nobody — it is born its
+    /// automation's (backlog 4f909642, the pr-train's af796788 applied
+    /// to the chores). Measured 2026-09-18 on every closed
+    /// `maintenance-*` packet the system of record listed: each `run`
+    /// arrived with `authority_role = platform-admin` and no assignee,
+    /// so the executes-lane handed it to the agent alias and
+    /// `automation:boss-step` completed it over the agent's head —
+    /// every five minutes for the estate observer. The bundle now
+    /// declares the completing actor as the step's audience, so the
+    /// step is born placed and the guard at the top of `handle_event`
+    /// (assignee already set) passes it over before any pick. The
+    /// executes-lane itself is unchanged: handed the role the step used
+    /// to carry, it still names the executor.
+    #[test]
+    fn a_chores_run_step_nominates_nobody() {
+        for (kind, actor) in [
+            ("maintenance-backup", "automation:boss-step"),
+            ("maintenance-estate-observe-units", "automation:boss-step"),
+            (
+                "maintenance-dev-scratch-reclaim",
+                "automation:dev-scratch-reclaim",
+            ),
+        ] {
+            let run = bundled_chore_run_step(kind);
+            assert_eq!(
+                run.assignee_id.as_deref(),
+                Some(actor),
+                "{kind}: `run` is born placed with the actor that completes it, so the \
+                 dispatcher never reaches a pick for it"
+            );
+            assert!(
+                run.metadata
+                    .as_ref()
+                    .and_then(|m| m.get("authority_role"))
+                    .is_none(),
+                "{kind}: `run` carries no role for the role arm to list"
+            );
+        }
+        // The control: the shape the chores USED to arrive in — the
+        // role and no assignee — is exactly what the lane nominates.
+        assert_eq!(
+            executor_for(
+                Partition::Real,
+                false,
+                Some("claude@algedonic.dev"),
+                Some("platform-admin"),
+                &["platform-admin"]
+            )
+            .as_deref(),
+            Some("claude@algedonic.dev")
+        );
+    }
+
     /// An UNKNOWN kind counts as a decision: the registry lookup that
     /// feeds `executor_for` defaults decision_shaped=true when the kind
     /// has no StepType row (correction-verdict rides permissively), so

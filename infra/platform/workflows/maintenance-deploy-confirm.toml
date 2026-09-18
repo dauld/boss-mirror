@@ -4,10 +4,19 @@
 # never filed a packet (0 ever, audit 2026-09-18). This file stays only
 # because the live registry still carries the kind `active`, and the
 # authored bundle must describe what the registry holds
-# (the-live-protocols-are-the-authored-protocols). The remaining move is
-# the operator's: POST /api/workflows/maintenance-deploy-confirm/retire,
-# then delete this file — the same sequence maintenance-gate-seed took
-# on 2026-09-12 (4247deca).
+# (the-live-protocols-are-the-authored-protocols).
+#
+# WHY IT IS STILL HERE (measured 2026-09-18, backlog ed64f852). The
+# operator retired the kind at 12:20Z, as maintenance-gate-seed was on
+# 2026-09-12 (4247deca) — and at 12:42Z the next boot's platform seed
+# published it again as v3, active, because the seed reads "present"
+# as "an active row exists" and a retired kind with a bundle file is,
+# by that reading, missing (boss_platform_workflow_seed.rs; the same
+# insert-if-missing rule that makes a deleted file re-insert nothing).
+# So a retire cannot stick while this file is in the tree, and the file
+# cannot leave while the registry admits the kind. The order that ends
+# it: the seed learns that a retired version is a decision it must not
+# revert; the operator retires the kind once more; this file goes.
 [[workflow]]
 kind = "maintenance-deploy-confirm"
 label = "Deploy confirm"
