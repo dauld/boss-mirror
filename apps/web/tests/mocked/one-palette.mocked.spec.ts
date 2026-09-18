@@ -19,7 +19,7 @@
 // `prefers-color-scheme` block reappearing in apps/ or libs/.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
-import { mountPage } from '../smoke/_helpers';
+import { mountPage } from './_helpers';
 import { AA_FLOOR, describeUnreadable, measureContrast } from './_contrast';
 
 const json = (r: Route, b: unknown, status = 200) =>

@@ -5,10 +5,12 @@
 // invents an identity, because the fallback that used to be here is
 // what let the chrome disagree with the server about who you were.
 //
-// `setPersona` survives for `bun run dev` and the smoke suite, where
-// there is no gateway to issue a session. The dev-server reads the
-// cookie it writes and synthesises `x-boss-user` from it. The gateway
-// ignores it entirely.
+// `setPersona` survives for `bun run dev`, where there is no gateway
+// to issue a session. The dev-server reads the cookie it writes and
+// synthesises `x-boss-user` from it. The gateway ignores it entirely.
+// (The live smoke suite that was its other reader was deleted
+// 2026-09-18, design 0e07ce64; the nightly playground crawl that
+// replaced it uses the gateway's guest session, not a persona.)
 
 /// Name of the cookie that tells the dev-server / gateway which
 /// persona the user is currently viewing as (demo mode only). The

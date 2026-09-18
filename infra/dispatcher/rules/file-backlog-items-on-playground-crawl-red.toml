@@ -1,0 +1,42 @@
+# The nightly playground crawl is judged by its own record. The chore
+# (infra/cluster/manifests/boss-playground-crawl.yaml, kind
+# maintenance-playground-crawl) crawls every catalogued surface against
+# the playground as a guest and records its verdict on its `run` step
+# through boss-chore.sh: `result=failed` plus the check's output, one
+# `RED <route> <kind>: <error>` line per surface that threw or never
+# painted, and the packet closes `failed`. Both the chore's kind file
+# and its manifest say whose job the opening is — "the daily judge's,
+# not this run's" — and until this rule there was no judge. This rule
+# fires when a crawl packet closes `failed`: the handler reads the RED
+# lines off the `run` step, groups them by route, files ONE
+# backlog-item per route not already open (dedup by `red_route` while
+# one is open; a closed item files again — a recurrence after a fix is
+# a new fact), each carrying the route, the kind, the error text
+# copied not retyped, design 0e07ce64 and the chore packet as `source`,
+# and notes `judged` on the chore naming what it filed. A red with no
+# RED line (the clone refused, the browser never started) files nothing
+# and says so on the packet. Backlog ac3270c7, in the shape of
+# judge-disk-headroom-sweep-on-report-answered (970c0c94) and
+# publish-drift-for-real-on-clean-check (a1d3c762).
+[[rule]]
+name = "file-backlog-items-on-playground-crawl-red"
+why = """
+A CROSS-PROTOCOL REACTOR: maintenance-playground-crawl -> backlog-item,
+which no single Workflow consequence can express — the chore's protocol
+can record its own red but cannot open another kind's packet, and the
+backlog-item's cannot read a closed chore's step. Measured 2026-09-18
+(backlog ac3270c7): the crawl's first rehearsal found /it/registry/
+dispatcher throwing on the playground's real rule rows, and the only
+way that finding reached the queue was the operator reading the run
+step by hand. No authority widened: the only writes are standard
+backlog-items on the queue the kind's owner_role already answers for,
+and one `judged` note on the chore's own packet. The judgement of a
+finding stays a person's — triage is the item's first step — and the
+dedup key is the route, so a surface that is red every night is one
+item until someone closes it.
+"""
+on_event = "jobs.job.closed"
+when = 'kind = "maintenance-playground-crawl" AND outcome = "failed"'
+[[rule.do]]
+handler = "maintenance.chore.file_reds"
+args = { step = "\"run\"", design = "\"0e07ce64\"", area = "\"web\"" }

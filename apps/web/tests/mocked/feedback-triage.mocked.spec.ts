@@ -12,7 +12,7 @@
 // tests exist partly to stop that coming back.
 
 import { test, expect } from '@playwright/test';
-import { mountPage } from '../smoke/_helpers';
+import { mountPage } from './_helpers';
 
 const MANIFEST = { display_name: 'Algedonic Ales', modules: {}, labels: {} };
 

@@ -17,7 +17,7 @@
 // mechanism only works where someone already wrote a plugin.
 
 import { test, expect } from '@playwright/test';
-import { mountPage } from '../smoke/_helpers';
+import { mountPage } from './_helpers';
 
 const MANIFEST = { display_name: 'Algedonic Ales', modules: {}, labels: {} };
 

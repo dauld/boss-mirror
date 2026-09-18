@@ -284,41 +284,15 @@ impl OpsJudge {
     }
 
     /// POST the follow-on and read the id the jobs API minted for it —
-    /// the one thing `common::post_json` does not return, and the thing
-    /// the judged request's `judged` note names.
+    /// the thing the judged request's `judged` note names.
     async fn file(&self, body: &serde_json::Value, rule: &str) -> Result<String, HandlerError> {
-        let url = format!("{}/api/jobs", self.base());
-        let resp = self
-            .client
-            .post(&url)
-            .header("content-type", "application/json")
-            .header("x-boss-user", super::common::dispatcher_actor_header(rule))
-            .header("x-sim-origin", super::common::sim_origin_value())
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| HandlerError::Downstream(format!("POST {url}: {e}")))?;
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            return Err(if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
-                HandlerError::Permanent(format!("POST {url} returned {status}: {text}"))
-            } else {
-                HandlerError::Downstream(format!("POST {url} returned {status}: {text}"))
-            });
-        }
-        let created: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| HandlerError::Downstream(format!("POST {url} answer not JSON: {e}")))?;
-        created
-            .get("id")
-            .or_else(|| created.get("data").and_then(|d| d.get("id")))
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| {
-                HandlerError::Downstream(format!("POST {url} answered no id: {created}"))
-            })
+        super::common::post_json_minted_id(
+            &self.client,
+            &format!("{}/api/jobs", self.base()),
+            body,
+            rule,
+        )
+        .await
     }
 
     async fn annotate(

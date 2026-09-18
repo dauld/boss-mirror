@@ -1,15 +1,14 @@
-// The mocked suite's shared mount helper — MISFILED, and said so.
+// The mocked suite's shared mount helper.
 //
-// This directory held the live-backend smoke suite until 2026-09-18:
-// 35 specs no CI job, gate check or chore ran since 2026-06-18, deleted
-// with design 0e07ce64 (the nightly playground crawl under tests/live
-// is what replaced them). This one file stayed because twelve specs
-// under tests/mocked import `mountPage` from `../smoke/_helpers`, and
-// that suite is another car's (in flight the same day). Moving the
-// helper to tests/mocked/_helpers.ts and repointing the twelve imports
-// belongs to that car; until then this is the whole of tests/smoke,
-// and crates/core/boss-testing/tests/the_playground_is_crawled_nightly.rs
-// pins that no spec comes back beside it.
+// Lived under tests/smoke until 2026-09-18, beside the live-backend
+// suite that directory held — 35 specs no CI job, gate check or chore
+// ran since 2026-06-18, deleted with design 0e07ce64 (the nightly
+// playground crawl under tests/live is what replaced them). This
+// helper was the one file that stayed, because twelve mocked specs
+// imported `mountPage` from `../smoke/_helpers`; it moved here with
+// them (backlog ac3270c7), and tests/smoke is gone —
+// crates/core/boss-testing/tests/the_playground_is_crawled_nightly.rs
+// pins that it stays gone.
 //
 // The four helpers only the deleted specs used (pinPersona,
 // clickButton, clickAndExpectNavigation, expectTableRow) went with them.

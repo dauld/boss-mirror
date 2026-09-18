@@ -11,7 +11,7 @@
 // that render outside AppShell.
 
 import { test, expect } from '@playwright/test';
-import { mountPage } from '../smoke/_helpers';
+import { mountPage } from './_helpers';
 import { AA_FLOOR, describeUnreadable, measureContrast } from './_contrast';
 import { DEPARTMENT_CLASSES } from './_smokeMocks';
 

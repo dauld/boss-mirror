@@ -143,6 +143,18 @@ const PAGE_SCOPE = `.shell-content, ${DIALOGS}`;
 /// each spend a click timeout proving it.
 type Scope = 'page' | 'chrome' | 'dialog';
 
+/// How long one control gets to become clickable. It was 3 000 ms until
+/// 2026-09-18, and that redded train #461's gate at 22:00Z with a
+/// finding that was the HOST, not the page: "[/ux/views] id: not
+/// clickable: locator.click: Timeout 3000ms exceeded" and "[/ux/me]
+/// MORE ▾: not clickable …" while cargo tests ran beside the web-suite
+/// (the crawl took 2.0 min); the same flake fired once on the dev pod
+/// under builder load the same day — the second web-suite flake at a
+/// head in a day (backlog ac3270c7). A control that is genuinely not
+/// clickable still fails, just later; a control that is merely waiting
+/// on a starved renderer no longer reds a train.
+const CLICK_TIMEOUT_MS = 15_000;
+
 /// Every visible, enabled button in scope, keyed so the same control
 /// rendered twice (a row action repeated per row) is clicked once:
 /// identical label + tag + stable classes is the same code path.
@@ -316,7 +328,11 @@ async function clickLeg(
     nativeDialog = null;
     const target = page.locator('button, [role="button"]').nth(next.index);
     try {
-      await target.click({ timeout: 3_000 });
+      // A non-<button> control falls through to dispatchEvent below when
+      // the real click misses, so it keeps the short wait: fifteen
+      // seconds per SVG track before a click that lands anyway is the
+      // crawl's own time, not a finding.
+      await target.click({ timeout: next.tag === 'button' ? CLICK_TIMEOUT_MS : 3_000 });
     } catch (e) {
       // A `<g role="button">` in an SVG (the yard map's track) has no
       // fill, so the centre of its box hits the canvas beneath and the

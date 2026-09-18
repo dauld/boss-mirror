@@ -22,10 +22,12 @@
 //! the underlying session. It was scoped to demo mode, and it went
 //! when demo mode did.
 //!
-//! The dev-server still reads that cookie for `bun run dev` and the
-//! smoke suite (`apps/web/src/dev-server.ts`), where there is no
-//! gateway and no real session to speak of. That is a local
-//! affordance and stops at the gateway's edge.
+//! The dev-server still reads that cookie for `bun run dev`
+//! (`apps/web/src/dev-server.ts`), where there is no gateway and no
+//! real session to speak of. That is a local affordance and stops at
+//! the gateway's edge. (The live smoke suite that also relied on it was
+//! deleted 2026-09-18, design 0e07ce64; the nightly playground crawl
+//! that replaced it signs in as the gateway's own guest session.)
 
 use std::sync::Arc;
 

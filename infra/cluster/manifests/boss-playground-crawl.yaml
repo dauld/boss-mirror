@@ -40,9 +40,10 @@
 #
 # THE VERDICT. The wrapper carries the check's output onto the `run`
 # step: `crawled N routes … : R red`, then one `RED <route> <kind>:
-# <error>` line per red surface. Opening one backlog-item per RED line
-# is the daily judge's job, not this run's — the chore records, the
-# reader opens.
+# <error>` line per red surface. Opening one backlog-item per RED route
+# is the judge's job, not this run's — the chore records, and the
+# dispatcher rule file-backlog-items-on-playground-crawl-red opens on
+# the packet's `failed` close (ac3270c7).
 apiVersion: batch/v1
 kind: CronJob
 metadata:

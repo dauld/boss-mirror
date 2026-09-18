@@ -23,8 +23,9 @@
 # THE VERDICT rides this packet through boss-chore.sh: `result=ok` on a
 # clean night, `result=failed` with the crawl's own output — one
 # `RED <route> <kind>: <error>` line per red surface — when any surface
-# threw or never painted. Filing one backlog-item per RED line is the
-# daily judge's job, not this run's: the chore records; the reader opens.
+# threw or never painted. Filing one backlog-item per RED route is the
+# judge's job, not this run's: the chore records, and the dispatcher
+# rule file-backlog-items-on-playground-crawl-red opens (ac3270c7).
 # ---------------------------------------------------------------------------
 
 [[workflow]]
