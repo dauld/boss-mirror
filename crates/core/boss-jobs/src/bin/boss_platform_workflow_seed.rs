@@ -28,11 +28,27 @@
 //! for a workflow authored in the UI. A malformed bundle fails here,
 //! loudly, on the deployment that is booting — not later, on the first
 //! Job that tries to use it.
+//!
+//! STATIONS RIDE THE SAME SEED (backlog 393d3234, consolidation H4,
+//! 2026-09-18). The platform station bundle lives BESIDE the Workflow
+//! bundle — `infra/platform/stations/`, found as the sibling of
+//! `--seed-path` — and is published after the workflows by
+//! `boss_jobs::station_seed::seed_stations`: insert-if-missing by
+//! (name, version), a version bump the edit path, and a bundle row
+//! that differs from the live active row of the same (name, version)
+//! a REFUSAL that names the field. Deriving the directory rather than
+//! adding a flag every launcher must learn is what let bootstrap-db.sh,
+//! the quickstart's init.sh and the image go untouched;
+//! `--stations-path` exists for a bundle that lives elsewhere. The
+//! binary keeps its name because two launchers and a bootstrap invoke
+//! it by name.
 
 use anyhow::{Context, Result};
 use boss_core::actor::ActorId;
 use boss_jobs::registry::{PgWorkflows, WorkflowRegistry};
-use boss_jobs::seed_loader::load_workflows;
+use boss_jobs::seed_loader::{load_stations, load_workflows};
+use boss_jobs::station_seed::{seed_stations, stations_beside};
+use boss_jobs::{PgStations, StationSpec};
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -52,9 +68,50 @@ struct Cli {
     #[arg(long, default_value = "infra/platform/workflows")]
     seed_path: PathBuf,
 
+    /// The station bundle: a directory of `<name>.toml` files.
+    /// Defaults to the `stations` directory BESIDE `--seed-path`
+    /// (`infra/platform/stations` for the in-tree default), so the
+    /// launchers that already pass `--seed-path` needed no edit.
+    #[arg(long)]
+    stations_path: Option<PathBuf>,
+
     /// Report what would be inserted and write nothing.
     #[arg(long)]
     dry_run: bool,
+}
+
+/// Where the station bundle is, and that it is there. A directory
+/// `--seed-path` names has its sibling REQUIRED: the image copies
+/// infra/platform whole, so a missing `stations/` beside a present
+/// `workflows/` is a packaging fault, and a packaging fault must read
+/// like one rather than as a seed that quietly did less (the three
+/// silences bootstrap-db.sh records). A single bundle FILE has no
+/// sibling to derive, so stations are published only when
+/// `--stations-path` names them, and the binary says so.
+fn load_station_bundle(cli: &Cli) -> Result<Option<(PathBuf, Vec<StationSpec>)>> {
+    let dir = match &cli.stations_path {
+        Some(p) => p.clone(),
+        None if cli.seed_path.is_dir() => stations_beside(&cli.seed_path),
+        None => {
+            println!(
+                "platform-station-seed: --seed-path is a file, so no station bundle sits \
+                 beside it; pass --stations-path to publish stations"
+            );
+            return Ok(None);
+        }
+    };
+    if !dir.is_dir() {
+        anyhow::bail!(
+            "platform-station-seed: station bundle NOT FOUND at {} — the platform \
+             station bundle is published from the `stations` directory beside the \
+             Workflow bundle (infra/platform/stations/ in the tree, copied into the \
+             image with infra/platform/). A missing bundle is a packaging fault: every \
+             platform station would be absent from this deployment.",
+            dir.display()
+        );
+    }
+    let specs = load_stations(&dir).with_context(|| format!("reading {}", dir.display()))?;
+    Ok(Some((dir, specs)))
 }
 
 /// Who the platform seed publishes as.
@@ -72,9 +129,13 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let specs = load_workflows(&cli.seed_path)
         .with_context(|| format!("reading {}", cli.seed_path.display()))?;
+    // Read BOTH bundles before touching the database: a station bundle
+    // that does not parse refuses the whole run before any workflow is
+    // published, so a half-seeded deployment is not a state this binary
+    // can leave behind.
+    let stations = load_station_bundle(&cli)?;
     if specs.is_empty() {
         println!("platform-workflow-seed: bundle is empty, nothing to do");
-        return Ok(());
     }
 
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -82,7 +143,7 @@ async fn main() -> Result<()> {
         .connect(&cli.database_url)
         .await
         .context("connecting to Postgres")?;
-    let registry = PgWorkflows::new(pool);
+    let registry = PgWorkflows::new(pool.clone());
     let actor = ActorId::Automation(SEED_ACTOR.trim_start_matches("automation:").to_string());
     // Bootstrap runs before the clock-api is necessarily up, so this
     // takes the wall client explicitly rather than reaching for
@@ -124,5 +185,24 @@ async fn main() -> Result<()> {
         println!("  {kind}: inserted");
     }
     println!("platform-workflow-seed: {inserted} inserted, {present} already present");
+
+    if let Some((dir, station_specs)) = stations {
+        if station_specs.is_empty() {
+            println!(
+                "platform-station-seed: bundle at {} is empty",
+                dir.display()
+            );
+            return Ok(());
+        }
+        let registry = PgStations::new(pool);
+        // A refusal is collected for every row before anything is
+        // written, and it is the boot's to see: the row the tree
+        // declares and the row the deployment runs disagree, and only
+        // a version bump in the tree resolves that.
+        let report = seed_stations(&registry, &station_specs, &actor, now, cli.dry_run)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        println!("{report}");
+    }
     Ok(())
 }

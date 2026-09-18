@@ -20,7 +20,7 @@
 //! because the first honest read of a zone nobody measured whole is the
 //! list of what it holds that nobody declared.
 
-use boss_testing::repo_root;
+use boss_testing::{feed_stdin, repo_root};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -172,7 +172,6 @@ impl Run {
         self
     }
     fn go(self) -> Output {
-        use std::io::Write;
         use std::process::Stdio;
         // `/bin/bash` by absolute path: the no-python case empties PATH,
         // and the shell must still be found for the script to refuse in.
@@ -189,12 +188,9 @@ impl Run {
             cmd.env("PATH", p);
         }
         let mut child = cmd.spawn().expect("spawn check-declared.sh");
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(self.stdin.as_bytes())
-            .unwrap();
+        // A refusal exits before it reads stdin; the closed pipe is its
+        // verdict, read from the exit status (boss_testing::feed_stdin).
+        feed_stdin(&mut child, self.stdin.as_bytes());
         child.wait_with_output().unwrap()
     }
 }

@@ -1,0 +1,40 @@
+# ---------------------------------------------------------------------------
+# my-watchlist — the packets I filed, and what became of them.
+#
+# The one actor station that ships as PLATFORM data: `@me` in a value
+# position binds to the requesting actor at read time, so one row
+# serves every actor and no roster is needed (118). Version 2 added the
+# `watchlist_dismissed` exclusion so a filer can take a packet off
+# their own list by writing one key (130); 139 filled the lens in
+# place. `terminal_window_days = 14` is a RETENTION rule, not a
+# membership one: a closed packet stays visible for a fortnight because
+# the terminal state is the information the filer came for. Discipline
+# `recency` because a watchlist is read, not pulled from.
+#
+# Declared here since 2026-09-18 (backlog 393d3234, consolidation H4);
+# the seed publishes it insert-if-missing and migrations newer than the
+# cutover stamp in infra/lint/migrations-declare-schema-only.sh declare
+# schema only. To change this station, bump `version` — the seed
+# refuses a row that differs from the live active row of the same
+# (name, version).
+# ---------------------------------------------------------------------------
+
+[[station]]
+name = "my-watchlist"
+version = 2
+status = "active"
+title = "My watchlist — packets I filed"
+kind = "actor"
+discipline = ["recency"]
+terminal_window_days = 14
+
+[station.predicate]
+metadata_absent = ["watchlist_dismissed"]
+
+[station.predicate.metadata_equals]
+submitted_by = "@me"
+
+[station.lens]
+title = "My watchlist"
+subtitle = "What you sent, and where it got to"
+with_steps = true

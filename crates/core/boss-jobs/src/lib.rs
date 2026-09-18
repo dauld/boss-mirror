@@ -49,6 +49,7 @@ pub mod station_lint;
 pub mod station_projection;
 pub mod station_quarantine;
 pub mod station_queue;
+pub mod station_seed;
 pub mod stations;
 pub mod stranded;
 pub mod trust;

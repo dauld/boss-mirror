@@ -350,6 +350,29 @@ pub trait StationRegistry: Send + Sync {
         actor: &boss_core::actor::ActorId,
         now: DateTime<Utc>,
     ) -> Result<(), StationError>;
+
+    /// Publish `spec` at ITS OWN declared version — the platform
+    /// bundle's write (`crate::station_seed`, backlog 393d3234).
+    ///
+    /// `create_draft` + `publish` assign `max(version) + 1`, which is
+    /// right for an author and wrong for a bundle: a bundle row
+    /// carries its version (a version bump is the edit path), and a
+    /// fresh deployment must land `loading-dock` at v3 — the version
+    /// the migrations produced and every in-flight reference names —
+    /// not at v1 with two versions of history nobody wrote.
+    ///
+    /// In one transaction: the viability gate, retire any active row
+    /// of the same name, INSERT the row active at `spec.version` with
+    /// `created_at = now`, record `jobs.station.published` (payload =
+    /// the row written). `Conflict` when (name, version) already
+    /// exists — the caller decides what an existing row means, this
+    /// never overwrites one.
+    async fn publish_declared(
+        &self,
+        spec: StationSpec,
+        actor: &boss_core::actor::ActorId,
+        now: DateTime<Utc>,
+    ) -> Result<StationSpec, StationError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -545,6 +568,38 @@ impl StationRegistry for InMemoryStations {
             ));
         }
         Ok(())
+    }
+
+    async fn publish_declared(
+        &self,
+        mut spec: StationSpec,
+        actor: &boss_core::actor::ActorId,
+        now: DateTime<Utc>,
+    ) -> Result<StationSpec, StationError> {
+        crate::station_lint::gate_active(&spec).map_err(StationError::Unviable)?;
+        let mut rows = self.rows.lock().unwrap();
+        let key = (spec.name.clone(), spec.version);
+        if rows.contains_key(&key) {
+            return Err(StationError::Conflict(format!(
+                "row already exists: {}@{}",
+                spec.name, spec.version
+            )));
+        }
+        for ((n, _), row) in rows.iter_mut() {
+            if *n == spec.name && row.status == WorkflowStatus::Active {
+                row.status = WorkflowStatus::Retired;
+            }
+        }
+        spec.status = WorkflowStatus::Active;
+        spec.created_at = now;
+        rows.insert(key, spec.clone());
+        drop(rows);
+        self.record(crate::events::station_registry_event(
+            crate::events::STATION_PUBLISHED,
+            actor,
+            &spec,
+        ));
+        Ok(spec)
     }
 }
 
@@ -882,6 +937,106 @@ mod pg {
                 .await
                 .map_err(|e| StationError::Storage(e.to_string()))?;
             Ok(())
+        }
+
+        async fn publish_declared(
+            &self,
+            mut spec: StationSpec,
+            actor: &boss_core::actor::ActorId,
+            now: DateTime<Utc>,
+        ) -> Result<StationSpec, StationError> {
+            // The viability gate before the transaction opens: an
+            // unviable bundle row never occupies the ACTIVE slot, not
+            // even for the length of a transaction.
+            crate::station_lint::gate_active(&spec).map_err(StationError::Unviable)?;
+
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|e| StationError::Storage(e.to_string()))?;
+
+            let exists: Option<(i32,)> =
+                sqlx::query_as("SELECT version FROM stations WHERE name = $1 AND version = $2")
+                    .bind(&spec.name)
+                    .bind(spec.version)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| StationError::Storage(e.to_string()))?;
+            if exists.is_some() {
+                return Err(StationError::Conflict(format!(
+                    "row already exists: {}@{}",
+                    spec.name, spec.version
+                )));
+            }
+
+            // RETIRE FIRST, THEN INSERT: `stations_one_active_per_name`
+            // is a plain partial unique index, enforced per statement,
+            // so the order is load-bearing (130 and 133 each reddened
+            // a train by getting it the other way round).
+            sqlx::query(
+                "UPDATE stations SET status = 'retired'
+                 WHERE name = $1 AND status = 'active'",
+            )
+            .bind(&spec.name)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StationError::Storage(e.to_string()))?;
+
+            spec.status = WorkflowStatus::Active;
+            spec.created_at = now;
+            sqlx::query(
+                "INSERT INTO stations
+                    (name, version, status, title, kind, predicate, discipline,
+                     wip_limit, terminal_window_days, capability, rollup_parent,
+                     upstream, lens, created_at)
+                 VALUES ($1, $2, 'active', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+            )
+            .bind(&spec.name)
+            .bind(spec.version)
+            .bind(&spec.title)
+            .bind(spec.kind.as_str())
+            .bind(serde_json::to_value(&spec.predicate).unwrap_or_default())
+            .bind(serde_json::to_value(&spec.discipline).unwrap_or_default())
+            .bind(spec.wip_limit)
+            .bind(
+                spec.terminal_window_days
+                    .map(|d| i32::try_from(d).unwrap_or(i32::MAX)),
+            )
+            .bind(
+                spec.capability
+                    .as_ref()
+                    .map(|c| serde_json::to_value(c).unwrap_or_default()),
+            )
+            .bind(&spec.rollup_parent)
+            .bind(
+                spec.upstream
+                    .as_ref()
+                    .map(|u| serde_json::to_value(u).unwrap_or_default()),
+            )
+            .bind(
+                spec.lens
+                    .as_ref()
+                    .map(|l| serde_json::to_value(l).unwrap_or_default()),
+            )
+            .bind(spec.created_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StationError::Storage(e.to_string()))?;
+
+            let event = crate::events::station_registry_event(
+                crate::events::STATION_PUBLISHED,
+                actor,
+                &spec,
+            );
+            boss_events::outbox::record_event_in_tx(&mut tx, &event)
+                .await
+                .map_err(StationError::Storage)?;
+
+            tx.commit()
+                .await
+                .map_err(|e| StationError::Storage(e.to_string()))?;
+            Ok(spec)
         }
     }
 }

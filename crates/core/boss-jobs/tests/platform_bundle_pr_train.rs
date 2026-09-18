@@ -1,0 +1,111 @@
+//! `infra/platform/workflows/pr-train.toml` keeps its decided shape.
+//! One pin file per kind file (see `platform_bundle.rs`), so a new
+//! protocol touches no shared line.
+
+use boss_core::job::{JobId, StepId, Subject};
+use boss_jobs::audience::Audience;
+use boss_jobs::registry::{WorkflowSpec, materialize_steps, platform_bundle_path};
+use boss_jobs::seed_loader::load_workflows;
+
+fn bundled(kind: &str) -> WorkflowSpec {
+    load_workflows(platform_bundle_path())
+        .expect("the platform bundle parses")
+        .into_iter()
+        .find(|w| w.kind == kind)
+        .unwrap_or_else(|| panic!("{kind} ships in the platform bundle"))
+}
+
+/// The actor that drives every task step of a train — the value
+/// `completed_by` carries on every one of them in the system of record.
+const CONDUCTOR: &str = "automation:train-conductor";
+
+/// The train's task steps, in protocol order. Every one is completed
+/// by the conductor and by nothing else.
+const CONDUCTORS_STEPS: [&str; 7] = [
+    "collect",
+    "assemble",
+    "pr",
+    "ci",
+    "merged",
+    "deployed",
+    "converged",
+];
+
+/// The conductor's steps declare the conductor as their audience — one
+/// declaration, the `individual` shape (design f5ebd2e1) — and nothing
+/// else about who they are for.
+///
+/// WHY (backlog af796788). Measured 2026-09-18 on pr-trains 018fa4ad,
+/// 784c4178 and 16966a29: every task step carried
+/// `authority_role = platform-admin` and no assignee at birth, so the
+/// dispatcher's executes-lane (`BOSS_DISPATCH_EXECUTOR_ID`, roles
+/// `platform-admin`) nominated each one to `claude@algedonic.dev`, and
+/// the conductor then completed it. Seven steps per train in the
+/// agent's MY WORK, every ~45 minutes, none of them the agent's. A bare
+/// `authority_role` with no assignee is not the fix either: the
+/// assignment query's role arm lists such a step for EVERY holder of
+/// the role, so it would have reached David's queue as claimable work
+/// instead. The step is the conductor's; the record should say so.
+#[test]
+fn the_conductors_steps_declare_the_conductor_as_their_audience() {
+    let train = bundled("pr-train");
+    for slug in CONDUCTORS_STEPS {
+        let step = train
+            .steps
+            .iter()
+            .find(|s| s.title == slug)
+            .unwrap_or_else(|| panic!("the conductor completes a `{slug}` step; it is gone"));
+        assert_eq!(step.kind, "task", "`{slug}` is a task step");
+        assert_eq!(
+            step.audience,
+            Some(Audience::Individual(CONDUCTOR.into())),
+            "`{slug}` is the conductor's step and declares so as its audience"
+        );
+        assert_eq!(
+            step.authority_role, None,
+            "`{slug}` declares who it is for ONCE — the legacy `authority_role` would put it \
+             in every platform-admin holder's role queue"
+        );
+    }
+}
+
+/// Materialised, the conductor's steps are born the conductor's: the
+/// dispatcher's assignee-already-set guard passes them over, and
+/// neither arm of the assignment query lists them for a person or an
+/// agent — no `assignee_id` a login matches, no `authority_role`.
+#[test]
+fn a_materialised_train_is_born_the_conductors() {
+    let train = bundled("pr-train");
+    let subject = Subject::new("custom", "train/20260918-1141");
+    let steps = materialize_steps(
+        &train,
+        &subject,
+        JobId::new(),
+        &serde_json::Value::Object(Default::default()),
+        StepId::new,
+    );
+    for slug in CONDUCTORS_STEPS {
+        let step = steps
+            .iter()
+            .find(|s| s.spec_slug.as_deref() == Some(slug))
+            .unwrap_or_else(|| panic!("`{slug}` materialised"));
+        assert_eq!(
+            step.assignee_id.as_deref(),
+            Some(CONDUCTOR),
+            "`{slug}` is born assigned to the conductor"
+        );
+        assert!(
+            step.metadata.get("authority_role").is_none(),
+            "`{slug}` carries no authority_role for the role arm to list"
+        );
+    }
+    // The train's markers are untouched: the trigger and both outcomes
+    // are nobody's, exactly as before.
+    for slug in ["scheduled", "arrived", "cancelled"] {
+        let step = steps
+            .iter()
+            .find(|s| s.spec_slug.as_deref() == Some(slug))
+            .unwrap_or_else(|| panic!("`{slug}` materialised"));
+        assert_eq!(step.assignee_id, None, "`{slug}` is a marker, nobody's");
+    }
+}

@@ -159,18 +159,23 @@ checks for itself, not something authors have to remember.
    hiccup self-heals instead of silently dropping a side effect.
 
 3. **Conservation-invariant sweep.** `infra/lint/conservation-invariants.sh`
-   ships with a paired `boss-conservation-invariants.timer`
-   systemd unit (hourly). 20 SQL invariants — trial balance per
-   JE, inventory non-negative, closed jobs have closed_on, paid
-   (customer and vendor) invoices have paid_on, financial_facts
-   provenance resolves, each GL control account (cash,
-   raw-inventory 1300, finished-goods 1320) non-negative and
-   tied back to physical counts, accruals ≥ remittances for
-   sales tax / payroll / deferred revenue, period close reflects
-   net P&L, and more. Each query selects only the rows that
-   *violate* its invariant; any non-empty result exits the
-   script non-zero. The journal is the sink today (a future
-   hook lands violations as Operations Bulletins).
+   runs hourly as the `boss-conservation-invariants` CronJob on every
+   instance, against that instance's own database. 8 platform SQL
+   invariants — trial balance per JE, inventory non-negative, closed
+   jobs have closed_on, paid (customer and vendor) invoices have
+   paid_on, financial_facts provenance resolves, job subjects and
+   declared subject edges resolve — plus the balance-sheet A = L + E
+   read. A tenant's own invariants live in its directory and the
+   same chore runs them when the image ships them:
+   `examples/brewery/conservation-invariants.sh` carries the brewery's
+   14 (each GL control account — cash, raw-inventory 1300,
+   finished-goods 1320 — non-negative and tied back to physical
+   counts, accruals ≥ remittances for sales tax / payroll / deferred
+   revenue, batch consume covers produce, period close reflects net
+   P&L). Each query selects only the rows that *violate* its
+   invariant; any non-empty result exits the script non-zero, and
+   the run's packet (`maintenance-conservation-invariants`) is the
+   sink.
 
 4. **Tenant seed + lifecycle tests.** The brewery crate's
    `tests/protocol_holds_e2e.rs` runs the layer-1 static lint

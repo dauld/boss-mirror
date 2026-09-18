@@ -59,14 +59,33 @@
 //!   * THE DRY RUN PUSHES NOTHING; the real run deletes exactly the
 //!     planned set, reads each ref back, and records it.
 //!   * THE REMOTE'S URL NEVER REACHES THE OUTPUT, even when git fails.
+//!   * A RECORDED DECISION IS THE ONLY DOOR FOR THE REST (backlog
+//!     a12736b1, 2026-09-18): an optional fourth argument names a job
+//!     whose review is completed with an answer, and only then do the
+//!     moved and unrecorded branches go too — `by decision <id>`, leased
+//!     and read back like the rest; a live car's or an OPEN train's
+//!     branch never. A packet that is missing, the wrong kind, unreviewed,
+//!     wordless or declined is refused by name and nothing is deleted.
 //!   * THE VERB FILE serves the forge, is MUTATING, and takes
-//!     mode/namespace/archive_db with the switch verb's patterns.
+//!     mode/namespace/archive_db with the switch verb's patterns, plus the
+//!     optional decision as a full job id.
 
 use boss_testing::{repo_root, scratch_dir, write_exec, write_file};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SCRIPT: &str = "infra/forge/sweep-archive-branches.sh";
+/// The decision packet the verb was built to carry out (backlog
+/// a12736b1): design 7fc3970b's review on 2604d814, answered "Delete
+/// them all" by David on 2026-09-17.
+const DECISION: &str = "2604d814-48d8-4963-aadf-0cca57ef98ac";
+/// What the answered review carries on the record, read 2026-09-18.
+fn answered() -> serde_json::Value {
+    serde_json::json!({"accepted_as_proposed": false, "answer": "Delete them all",
+        "audience": {"role": "platform-admin"}, "authority_role": "platform-admin",
+        "question": "Decide design 'Fifty orphan branches on the forge after the database switch' (7fc3970b) at /it/design",
+        "verdict": "approved"})
+}
 const PASSWORD: &str = "s3cretpw0123";
 const LIVE_URL: &str =
     "postgres://boss:s3cretpw0123@postgres.boss.svc.cluster.local:5432/algedonic";
@@ -113,6 +132,11 @@ struct Case {
     seed: PathBuf,
     /// What the stub `boss-sor-read` prints for the open-cars listing.
     live: PathBuf,
+    /// What it prints for the open-trains listing (empty unless set).
+    trains: PathBuf,
+    /// What it prints for `/api/jobs/<id>` — the decision packet; absent
+    /// means the system of record answers 404 the way curl -f reports it.
+    decision: PathBuf,
     /// branch -> the head the forge holds for it
     heads: Vec<(String, String)>,
 }
@@ -135,9 +159,20 @@ impl Case {
             r#"{"data":[],"total":0,"limit":200,"offset":0}
 "#,
         );
+        // The open trains, empty unless a test says otherwise; the
+        // decision packet, absent unless a test plants one.
+        let trains = root.join("trains.json");
+        write_file(
+            &trains,
+            r#"{"data":[],"total":0,"limit":200,"offset":0}
+"#,
+        );
+        let decision = root.join("decision.json");
         // The stub reader: logs its one argument and the identity it was
-        // handed, then prints the file — or refuses the way the real one
-        // does when it is told to.
+        // handed, then prints the file the path selects — or refuses the
+        // way the real one does when it is told to. A job read for a
+        // packet that is not planted answers the way `curl -f` reports
+        // the system of record's 404.
         write_exec(
             &bin.join("boss-sor-read"),
             r#"#!/usr/bin/env bash
@@ -147,7 +182,13 @@ if [ -n "${STUB_LIVE_FAIL:-}" ]; then
     echo "boss-sor-read: REFUSED — ${STUB_LIVE_FAIL}" >&2
     exit 2
 fi
-cat "$STUB_LIVE"
+case "$1" in
+    /api/jobs/*)
+        [ -f "$STUB_DECISION" ] || { echo "curl: (22) The requested URL returned error: 404" >&2; exit 22; }
+        cat "$STUB_DECISION" ;;
+    "/api/jobs?kind=pr-train"*) cat "$STUB_TRAINS" ;;
+    *) cat "$STUB_LIVE" ;;
+esac
 "#,
         );
 
@@ -270,6 +311,8 @@ exit 1
             tree,
             seed,
             live,
+            trains,
+            decision,
             heads,
         }
     }
@@ -348,6 +391,48 @@ exit 1
         );
     }
 
+    /// The live system of record's open trains, each on its `train/*`
+    /// branch — a pr-train's branch is its subject id (train.rs
+    /// `train_branch_to_delete`).
+    fn set_trains(&self, trains: &[(&str, &str)]) {
+        let data: Vec<serde_json::Value> = trains
+            .iter()
+            .map(|(id, branch)| {
+                serde_json::json!({"id": id, "kind": "pr-train", "status": "open",
+                    "subject": {"kind": "branch", "id": branch}, "metadata": {}})
+            })
+            .collect();
+        let total = data.len();
+        write_file(
+            &self.trains,
+            &format!(
+                "{}\n",
+                serde_json::json!({"data": data, "total": total, "limit": 200, "offset": 0})
+            ),
+        );
+    }
+
+    /// The decision packet the system of record answers for
+    /// `/api/jobs/<id>`: a job of `kind` whose review step (`spec_slug`
+    /// is the workflow's step title) is in `status` with `metadata`.
+    fn set_decision(&self, kind: &str, spec_slug: &str, status: &str, metadata: serde_json::Value) {
+        let job = serde_json::json!({
+            "id": DECISION, "kind": kind, "status": "open",
+            "title": "DECISION: 37 orphan forge branches are provably landed; 13 have no merged PR — delete which?",
+            "metadata": {"area": "platform"},
+            "steps": [
+                {"id": "f1ad3bdc-d8a4-4b78-bde2-14766ffeadf0", "kind": "task", "title": "Measure the claim",
+                 "spec_slug": "triage", "status": "completed", "metadata": {"disposition": "design"}},
+                {"id": "3756dd6d-3183-40c7-8a1a-5ab62d86dda0", "kind": "answer-question", "title": "Decide the design",
+                 "spec_slug": spec_slug, "status": status, "completed_by": "emp-david",
+                 "completed_at": "2026-09-17T13:52:15.125469Z", "metadata": metadata},
+                {"id": "0a0a0a0a-aaaa-4aaa-8aaa-0a0a0a0a0a0a", "kind": "task", "title": "Build the change",
+                 "spec_slug": "build", "status": "ready", "metadata": {}}
+            ]
+        });
+        write_file(&self.decision, &format!("{job}\n"));
+    }
+
     fn run(&self, args: &[&str]) -> (i32, String) {
         self.run_env(args, &[])
     }
@@ -370,6 +455,8 @@ exit 1
             .env("STUB_SECRET", &self.secret)
             .env("STUB_ANSWERS", &self.answers)
             .env("STUB_LIVE", &self.live)
+            .env("STUB_TRAINS", &self.trains)
+            .env("STUB_DECISION", &self.decision)
             .env("BOSS_SWEEP_SOR_READ", self.bin.join("boss-sor-read"))
             .env("BOSS_SWEEP_TREE", &self.tree);
         for (k, v) in extra {
@@ -416,6 +503,8 @@ exit 1
             .env("STUB_SECRET", &self.secret)
             .env("STUB_ANSWERS", &self.answers)
             .env("STUB_LIVE", &self.live)
+            .env("STUB_TRAINS", &self.trains)
+            .env("STUB_DECISION", &self.decision)
             .env("BOSS_SWEEP_SOR_READ", self.bin.join("boss-sor-read"))
             .env("BOSS_SWEEP_TREE", &self.tree);
         for (k, v) in extra {
@@ -1342,18 +1431,412 @@ fn an_unreadable_live_record_is_a_refusal() {
 }
 
 // ---------------------------------------------------------------------------
+// The decision: a human's recorded answer is the fourth argument, and it
+// is the only thing that lets a moved or unrecorded branch go.
+// ---------------------------------------------------------------------------
+
+/// Without a decision the verb keeps what it cannot prove, exactly as
+/// before (the dry-run and for-real cases above pin the kept set); the
+/// record says so — no decision, nothing by decision — and the live
+/// record is asked for no packet and no train.
+#[test]
+fn without_a_decision_nothing_is_read_or_deleted_on_a_decisions_account() {
+    if !has("jq") {
+        eprintln!("skipping: jq not on PATH");
+        return;
+    }
+    let c = Case::new("no-decision");
+    c.set_decision("backlog-item", "design-review", "completed", answered());
+    let (rc, text) = c.run_merged(&["--for-real", "boss", "boss"]);
+    assert_eq!(rc, 0, "the real run did not exit 0:\n{text}");
+    let record = record_line(&text);
+    assert_eq!(record["decision"], serde_json::Value::Null);
+    assert_eq!(record["by_decision"], 0);
+    assert!(
+        !text.contains("by decision") && !text.contains("decision="),
+        "a run without a decision spoke of one:\n{text}"
+    );
+    let reads: Vec<String> = c
+        .calls()
+        .into_iter()
+        .filter(|w| w.first().is_some_and(|x| x == "boss-sor-read"))
+        .map(|w| w[1].clone())
+        .collect();
+    assert_eq!(
+        reads,
+        ["/api/jobs?kind=ship-a-change&status=open&limit=200"],
+        "a run without a decision read more than the open cars"
+    );
+    let mut heads = c.forge_heads();
+    heads.sort();
+    assert_eq!(
+        heads,
+        [
+            "feat/claimed-without-a-head",
+            "feat/moved-after-boarding",
+            "feat/nobody-claims",
+            "main",
+        ],
+        "the kept set changed without a decision"
+    );
+}
+
+/// A decision is carried out only when the record holds one: the
+/// argument must be a full job id; the packet must exist, be a
+/// backlog-item or design-doc, and its review step must be completed
+/// with an answer (or resolutions) and not declined. Anything else is
+/// refused NAMING THE PACKET AND THE MISSING FACT, before a single
+/// delete — the archive-planned branches included: a run given a
+/// decision it cannot honour does nothing, so the operator reads one
+/// refusal rather than half a sweep.
+#[test]
+fn a_decision_that_does_not_qualify_is_refused_by_name_and_nothing_is_deleted() {
+    if !has("jq") {
+        eprintln!("skipping: jq not on PATH");
+        return;
+    }
+    let c = Case::new("decision-refused");
+    let before = c.forge_heads();
+    // (a) not a job id: refused before anything is read
+    for bad in [
+        "2604d814",
+        "../etc/passwd",
+        "2604D814-48D8-4963-AADF-0CCA57EF98AC",
+    ] {
+        let (rc, text) = c.run(&["--for-real", "boss", "boss", bad]);
+        assert_eq!(rc, 2, "`{bad}` was not refused:\n{text}");
+        contains_all(&text, &["REFUSED", "job id", "Nothing was changed"], bad);
+        assert!(c.calls().is_empty(), "`{bad}` reached a reader:\n{text}");
+    }
+    // (b) the packet is not on the record
+    let (rc, text) = c.run(&["--for-real", "boss", "boss", DECISION]);
+    assert_eq!(rc, 2, "a missing packet was not refused:\n{text}");
+    contains_all(
+        &text,
+        &["REFUSED", DECISION, "404", "Nothing was changed"],
+        "the missing-packet refusal",
+    );
+    // (c) the wrong kind of packet
+    c.set_decision("ship-a-change", "design-review", "completed", answered());
+    let (rc, text) = c.run(&["--for-real", "boss", "boss", DECISION]);
+    assert_eq!(rc, 2, "a ship-a-change was accepted as a decision:\n{text}");
+    contains_all(
+        &text,
+        &["REFUSED", DECISION, "ship-a-change", "Nothing was changed"],
+        "the wrong-kind refusal",
+    );
+    // (d) the review is not completed — the decision has not been made
+    c.set_decision(
+        "backlog-item",
+        "design-review",
+        "ready",
+        serde_json::json!({}),
+    );
+    let (rc, text) = c.run(&["--for-real", "boss", "boss", DECISION]);
+    assert_eq!(rc, 2, "an open review was accepted as a decision:\n{text}");
+    contains_all(
+        &text,
+        &[
+            "REFUSED",
+            DECISION,
+            "design-review",
+            "ready",
+            "not completed",
+            "Nothing was changed",
+        ],
+        "the not-completed refusal",
+    );
+    // (e) completed, but with no words
+    c.set_decision(
+        "backlog-item",
+        "design-review",
+        "completed",
+        serde_json::json!({"verdict": "approved", "answer": ""}),
+    );
+    let (rc, text) = c.run(&["--for-real", "boss", "boss", DECISION]);
+    assert_eq!(rc, 2, "an empty answer was accepted as a decision:\n{text}");
+    contains_all(
+        &text,
+        &["REFUSED", DECISION, "no answer", "Nothing was changed"],
+        "the empty-answer refusal",
+    );
+    // (f) declined: a decision AGAINST is not a licence to delete
+    c.set_decision(
+        "backlog-item",
+        "design-review",
+        "completed",
+        serde_json::json!({"verdict": "declined", "answer": "Keep them"}),
+    );
+    let (rc, text) = c.run(&["--for-real", "boss", "boss", DECISION]);
+    assert_eq!(
+        rc, 2,
+        "a declined review was accepted as a decision:\n{text}"
+    );
+    contains_all(
+        &text,
+        &["REFUSED", DECISION, "declined", "Nothing was changed"],
+        "the declined refusal",
+    );
+    // (g) no review step at all
+    c.set_decision("backlog-item", "build", "completed", answered());
+    let (rc, text) = c.run(&["--for-real", "boss", "boss", DECISION]);
+    assert_eq!(rc, 2, "a packet with no review was accepted:\n{text}");
+    contains_all(
+        &text,
+        &[
+            "REFUSED",
+            DECISION,
+            "no design-review",
+            "Nothing was changed",
+        ],
+        "the no-review refusal",
+    );
+    assert_eq!(
+        c.forge_heads(),
+        before,
+        "a refused decision changed the forge"
+    );
+    // Every packet read went to exactly that packet, as the read-scoped actor.
+    let calls = c.calls();
+    let packet_reads: Vec<&Vec<String>> = calls
+        .iter()
+        .filter(|w| {
+            w.first().is_some_and(|x| x == "boss-sor-read") && w[1].starts_with("/api/jobs/")
+        })
+        .collect();
+    assert_eq!(
+        packet_reads.len(),
+        6,
+        "the packet was read {} times",
+        packet_reads.len()
+    );
+    for w in packet_reads {
+        assert_eq!(w[1], format!("/api/jobs/{DECISION}"));
+        assert!(
+            w[2].contains("\"role\":\"audit-readonly\""),
+            "the packet read is not as a read-scoped actor: {w:?}"
+        );
+    }
+}
+
+/// With the recorded decision, the moved and unrecorded branches go
+/// too — each `by decision <id>`, leased to the forge's head, read
+/// back absent — and every protection stands: a live car's branch and
+/// an OPEN train's branch are never candidates, main is never a
+/// candidate, a closed train's branch is unrecorded and goes.
+#[test]
+fn a_recorded_decision_deletes_the_moved_and_unrecorded_and_never_a_live_branch() {
+    if !has("jq") {
+        eprintln!("skipping: jq not on PATH");
+        return;
+    }
+    let c = Case::new("decision");
+    // Two train branches on the forge: one train still open in the
+    // system of record, one long closed.
+    for b in ["train/20260918-open", "train/20260917-closed"] {
+        git(&c.seed, &["checkout", "-q", "-b", b, "main"]);
+        write_file(&c.seed.join(format!("{}.txt", b.replace('/', "-"))), b);
+        git(&c.seed, &["add", "."]);
+        git(
+            &c.seed,
+            &["-c", "commit.gpgsign=false", "commit", "-q", "-m", b],
+        );
+        git(&c.seed, &["push", "-q", "forgejo", b]);
+    }
+    c.set_trains(&[(
+        "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+        "train/20260918-open",
+    )]);
+    c.set_live(&[(
+        "77777777-aaaa-4aaa-8aaa-777777777777",
+        "feat/claimed-without-a-head",
+    )]);
+    c.set_decision("backlog-item", "design-review", "completed", answered());
+    let (rc, text) = c.run_merged(&["--for-real", "boss", "boss", DECISION]);
+    assert_eq!(rc, 0, "the real run did not exit 0:\n{text}");
+    no_password(&text, "decision run");
+    let first = text.lines().next().unwrap_or_default();
+    assert_eq!(
+        first,
+        format!(
+            "sweep-archive-branches: --for-real archive=boss recorded=6 planned=5 by_archive=2 by_pr=0 by_decision=3 deleted=5 moved=0 unrecorded=0 live=2 gone=2 decision={DECISION}"
+        ),
+        "the verdict does not carry the decision:\n{text}"
+    );
+    let record = record_line(&text);
+    assert_eq!(record["decision"]["id"], DECISION);
+    assert_eq!(record["decision"]["kind"], "backlog-item");
+    assert_eq!(record["decision"]["step"], "design-review");
+    assert_eq!(record["decision"]["answer"], "Delete them all");
+    assert_eq!(record["decision"]["decided_by"], "emp-david");
+    assert_eq!(record["by_decision"], 3);
+    let mut by_decision: Vec<(&str, &str)> = record["branches"]["deleted"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|b| b["evidence"] == "decision")
+        .map(|b| {
+            (
+                b["branch"].as_str().unwrap(),
+                b["read_back"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    by_decision.sort();
+    assert_eq!(
+        by_decision,
+        [
+            ("feat/moved-after-boarding", "absent"),
+            ("feat/nobody-claims", "absent"),
+            ("train/20260917-closed", "absent"),
+        ]
+    );
+    // Each decision delete was leased to the head the forge held.
+    for b in record["branches"]["deleted"].as_array().unwrap() {
+        if b["evidence"] == "decision" {
+            let name = b["branch"].as_str().unwrap();
+            if let Some(h) = c.heads.iter().find(|(n, _)| n == name) {
+                assert_eq!(b["head"], h.1, "{name} was not leased to the forge's head");
+            }
+        }
+    }
+    contains_all(
+        &text,
+        &[
+            "deleted feat/moved-after-boarding (by decision 2604d814",
+            "deleted feat/nobody-claims (by decision 2604d814",
+            "deleted train/20260917-closed (by decision 2604d814",
+            "read back: absent",
+            "deleted feat/landed-at-head (car 11111111",
+            "live feat/claimed-without-a-head (open car 77777777",
+            "live train/20260918-open (open train aaaaaaaa",
+            "an open train's branch is never a candidate",
+            "3 by decision 2604d814-48d8-4963-aadf-0cca57ef98ac",
+        ],
+        "the per-branch lines",
+    );
+    assert!(
+        !text.contains("a human's decision"),
+        "a run carrying the decision still asks for one:\n{text}"
+    );
+    let mut heads = c.forge_heads();
+    heads.sort();
+    assert_eq!(
+        heads,
+        ["feat/claimed-without-a-head", "main", "train/20260918-open"],
+        "the forge holds the wrong set after the decided sweep"
+    );
+    // The reads: the open cars, the open trains, the packet — each as
+    // the read-scoped actor.
+    let calls = c.calls();
+    let reads: Vec<&Vec<String>> = calls
+        .iter()
+        .filter(|w| w.first().is_some_and(|x| x == "boss-sor-read"))
+        .collect();
+    let paths: Vec<&str> = reads.iter().map(|w| w[1].as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            "/api/jobs?kind=ship-a-change&status=open&limit=200",
+            "/api/jobs?kind=pr-train&status=open&limit=200",
+            &format!("/api/jobs/{DECISION}") as &str,
+        ]
+    );
+    assert!(
+        reads
+            .iter()
+            .all(|w| w[2].contains("\"role\":\"audit-readonly\"")),
+        "a read went out as something other than the read-scoped actor"
+    );
+}
+
+/// A dry run WITH a decision plans what the real run would delete on
+/// its account — `would delete … (by decision …)` — and pushes nothing;
+/// a design-doc's completed `review` with resolutions qualifies the
+/// same way a backlog-item's answered `design-review` does.
+#[test]
+fn a_dry_run_with_a_decision_plans_the_decided_set_and_changes_nothing() {
+    if !has("jq") {
+        eprintln!("skipping: jq not on PATH");
+        return;
+    }
+    let c = Case::new("decision-dry-run");
+    let before = c.forge_heads();
+    c.set_decision(
+        "design-doc",
+        "review",
+        "completed",
+        serde_json::json!({"title": "Fifty orphan branches on the forge after the database switch",
+            "resolutions": [{"anchor": "q1", "decision": "Delete them all"}]}),
+    );
+    let (rc, text) = c.run_merged(&["--dry-run", "boss", "boss", DECISION]);
+    assert_eq!(rc, 0, "the dry run did not exit 0:\n{text}");
+    let first = text.lines().next().unwrap_or_default();
+    assert_eq!(
+        first,
+        format!(
+            "sweep-archive-branches: --dry-run archive=boss recorded=6 planned=5 by_archive=2 by_pr=0 by_decision=3 deleted=0 moved=0 unrecorded=0 live=0 gone=2 decision={DECISION}"
+        ),
+        "the verdict is not the first line:\n{text}"
+    );
+    let record = record_line(&text);
+    assert_eq!(record["dry_run"], true);
+    assert_eq!(record["decision"]["kind"], "design-doc");
+    assert_eq!(record["decision"]["step"], "review");
+    assert_eq!(record["decision"]["resolutions"], 1);
+    let planned: Vec<(&str, &str)> = record["branches"]["delete"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| {
+            (
+                b["branch"].as_str().unwrap(),
+                b["evidence"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        planned,
+        [
+            ("feat/landed-at-head", "archive"),
+            ("feat/moved-after-boarding", "decision"),
+            ("feat/claimed-without-a-head", "decision"),
+            ("feat/rerail-original", "archive"),
+            ("feat/nobody-claims", "decision"),
+        ]
+    );
+    assert_eq!(record["branches"]["deleted"].as_array().unwrap().len(), 0);
+    contains_all(
+        &text,
+        &[
+            "would delete feat/moved-after-boarding (by decision 2604d814",
+            "would delete feat/claimed-without-a-head (by decision 2604d814",
+            "would delete feat/nobody-claims (by decision 2604d814",
+            "DRY RUN",
+            "3 by decision",
+            "Nothing was changed",
+        ],
+        "the per-branch lines",
+    );
+    assert_eq!(c.forge_heads(), before, "the dry run changed the forge");
+}
+
+// ---------------------------------------------------------------------------
 // The verb file.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_verb_file_is_a_mutating_forge_verb_with_the_three_params() {
+fn the_verb_file_is_a_mutating_forge_verb_with_the_four_params() {
     let path = repo_root().join("infra/ops/verbs/sweep-archive-branches.json");
     let v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(v["hosts"], serde_json::json!(["forge"]));
-    assert_eq!(v["argv"], serde_json::json!([SCRIPT, "{1}", "{2}", "{3}"]));
+    assert_eq!(
+        v["argv"],
+        serde_json::json!([SCRIPT, "{1}", "{2}", "{3}", "{4}"])
+    );
     let params = v["params"].as_array().unwrap();
-    assert_eq!(params.len(), 3);
+    assert_eq!(params.len(), 4);
     assert_eq!(params[0]["name"], "mode");
     assert_eq!(
         params[0]["one_of"],
@@ -1363,6 +1846,16 @@ fn the_verb_file_is_a_mutating_forge_verb_with_the_three_params() {
     assert_eq!(params[1]["pattern"], "^boss(-[a-z0-9]+)*$");
     assert_eq!(params[2]["name"], "archive_db");
     assert_eq!(params[2]["pattern"], "^[a-z][a-z0-9_]{0,62}$");
+    // The decision (backlog a12736b1): OPTIONAL — the runner drops the
+    // placeholder when the packet passes no fourth arg, so the three-arg
+    // sweep is unchanged — and a FULL job id, so a short id or a branch
+    // name is refused at the allowlist before the script sees it.
+    assert_eq!(params[3]["name"], "decision");
+    assert_eq!(params[3]["optional"], true);
+    assert_eq!(
+        params[3]["pattern"],
+        "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    );
     assert_eq!(v["timeout"], 300);
     let about = v["about"].as_str().unwrap();
     assert!(
@@ -1376,7 +1869,14 @@ fn the_verb_file_is_a_mutating_forge_verb_with_the_three_params() {
         "about says the dry run is the default way in"
     );
     // The second source and the two defects it was rebuilt for.
-    for needle in ["2c10a25d", "refs/pull/", "live", "gone is a COUNT"] {
+    for needle in [
+        "2c10a25d",
+        "refs/pull/",
+        "live",
+        "gone is a COUNT",
+        "a12736b1",
+        "decision",
+    ] {
         assert!(about.contains(needle), "about lacks `{needle}`: {about}");
     }
 }

@@ -1,0 +1,45 @@
+# ---------------------------------------------------------------------------
+# q.platform-admin.task — the operator's task station, minus the proofs
+# the machine owns (backlog b725e860, 2026-09-15).
+#
+# An AUTHORED row over a derived name: `q.platform-admin.task` is
+# otherwise the projection of every active protocol's `(task,
+# platform-admin)` constraint (station_projection.rs), and an authored
+# row of the same name wins. The row is the projection's predicate plus
+# ONE exclusion — `metadata_absent = ["proof_probe"]` — so a ship-a-
+# change car whose `proven` step the forge will run itself is not
+# listed as a person's task. `proof_probe` is written once at park and
+# never released, so missing-or-null is the right reading (unlike the
+# dock's `hold`). Capability `platform-admin` and the default discipline
+# are field for field what the projection would have written, which is
+# what `station_lint`'s derived-namespace check requires.
+#
+# Declared here since 2026-09-18 (backlog 393d3234, consolidation H4);
+# the seed publishes it insert-if-missing and migrations newer than the
+# cutover stamp in infra/lint/migrations-declare-schema-only.sh declare
+# schema only. To change this station, bump `version` — the seed
+# refuses a row that differs from the live active row of the same
+# (name, version).
+# ---------------------------------------------------------------------------
+
+[[station]]
+name = "q.platform-admin.task"
+version = 1
+status = "active"
+title = "platform-admin — task"
+kind = "constraint"
+discipline = ["priority", "age"]
+
+[station.predicate]
+status = "open"
+metadata_absent = ["proof_probe"]
+
+[station.predicate.step]
+kind = "task"
+status_in = ["ready", "active"]
+
+[station.predicate.step.metadata_equals]
+authority_role = "platform-admin"
+
+[station.capability]
+roles = ["platform-admin"]

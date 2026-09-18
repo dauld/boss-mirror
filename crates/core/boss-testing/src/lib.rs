@@ -15,6 +15,7 @@
 //!   `codebase_metrics_sh.rs`) rather than any service's behaviour.
 
 pub mod assertions;
+pub mod feed;
 pub mod leaked_policy;
 pub mod recording_bus;
 pub mod request;
@@ -24,6 +25,7 @@ pub mod test_db;
 pub mod tree;
 
 pub use assertions::*;
+pub use feed::feed_stdin;
 pub use recording_bus::RecordingEventBus;
 pub use request::{TestRequest, TestResponse};
 pub use scratch::{create_dir, scratch_dir, scratch_path, write_exec, write_file};

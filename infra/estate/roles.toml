@@ -61,7 +61,9 @@ units = []
 # with it on 2026-09-15 (ops-request 7912c9ae) and uninstalled from
 # boss-gcp by the uninstall-not-in-role verb. The host backup and the
 # deploy-confirm dead-man left this list with the bare-metal deploy path
-# (2026-09-18): the cluster's boss-pg-backup CronJob is the backup. Each
-# chore here has a cluster CronJob twin that is the one that runs.
+# (2026-09-18): the cluster's boss-pg-backup CronJob is the backup, and
+# the conservation sweep's units were deleted the same day once its
+# CronJob existed (H12, backlog 236529aa). Each chore here has a cluster
+# CronJob twin that is the one that runs.
 # This role exists to be removed.
-units = ["boss-messages-events-purge", "boss-audit-integrity-check", "boss-ledger-recognize", "boss-ledger-replay-check", "boss-conservation-invariants", "boss-files-gc", "boss-views-catchup", "boss-search-reindex"]
+units = ["boss-messages-events-purge", "boss-audit-integrity-check", "boss-ledger-recognize", "boss-ledger-replay-check", "boss-files-gc", "boss-views-catchup", "boss-search-reindex"]

@@ -92,7 +92,9 @@ fn kept_stems() -> Vec<String> {
 fn not_in_role_stems() -> Vec<String> {
     let mut out = role_units("roles.legacy-stack");
     out.extend(role_units("roles.cluster-operator"));
-    assert!(out.len() >= 8, "legacy-stack names {out:?}");
+    // Seven since 2026-09-18: boss-conservation-invariants left with its
+    // unit files once its cluster CronJob existed (H12, backlog 236529aa).
+    assert!(out.len() >= 7, "legacy-stack names {out:?}");
     out
 }
 

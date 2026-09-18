@@ -1135,6 +1135,58 @@ mod tests {
         );
     }
 
+    /// §9a, the pin half, for the THIRD reader of this floor: the
+    /// `disk-report` ops verb (`infra/forge/disk-report.sh`) ends its
+    /// output with a verdict judged by the same rule this comparator
+    /// applies (backlog 970c0c94), so the disk-headroom sweep's Inspect
+    /// step can be completed by rule when the reading is clean. A shell
+    /// script cannot read a Rust `const`, so the three numbers live
+    /// twice and this test names whichever moved. If the floor ever
+    /// lands in one registry, both should read it and this pin should
+    /// go.
+    #[test]
+    fn the_disk_report_judges_by_the_comparators_floor() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let rel = "infra/forge/disk-report.sh";
+        let text = std::fs::read_to_string(root.join(rel))
+            .unwrap_or_else(|e| panic!("{rel} must be readable to pin the floor: {e}"));
+        let int_after = |needle: &str| -> i64 {
+            let at = text.find(needle).unwrap_or_else(|| {
+                panic!("{rel} no longer sets `{needle}` — the verdict lost its floor")
+            });
+            let digits: String = text[at + needle.len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            digits
+                .parse()
+                .unwrap_or_else(|e| panic!("{rel}: `{needle}` is not followed by a number: {e}"))
+        };
+        for (name, here, there) in [
+            (
+                "DISK_TIGHT_FLOOR_GB",
+                DISK_TIGHT_FLOOR_GB,
+                int_after("\nDISK_TIGHT_FLOOR_GB="),
+            ),
+            (
+                "DISK_TIGHT_FLOOR_PCT",
+                DISK_TIGHT_FLOOR_PCT,
+                int_after("\nDISK_TIGHT_FLOOR_PCT="),
+            ),
+            (
+                "DISK_TIGHT_HEADROOM_CEILING_GB",
+                DISK_TIGHT_HEADROOM_CEILING_GB,
+                int_after("\nDISK_TIGHT_HEADROOM_CEILING_GB="),
+            ),
+        ] {
+            assert_eq!(
+                here, there,
+                "{name} is {here} here and {there} in {rel} — the disk-report verdict and \
+                 the estate comparator judge by one floor; move both"
+            );
+        }
+    }
+
     #[test]
     fn the_floor_reads_the_same_on_both_surfaces() {
         // ONE definition of the floor, not two (CLAUDE.md §9a). The host

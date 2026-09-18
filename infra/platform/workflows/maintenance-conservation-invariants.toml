@@ -22,14 +22,15 @@
 # Rust and should follow — separately, since moving a kind with live
 # packets is its own change.
 
-# boss-conservation-invariants.service
+# infra/cluster/manifests/boss-conservation-invariants.yaml (the hourly
+# CronJob, per instance; the bare-metal unit pair left 2026-09-18, H12)
 [[workflow]]
 kind = "maintenance-conservation-invariants"
 label = "Conservation-invariant sweep"
 category = "platform"
 subject_kinds = ["custom"]
 owning_team = "platform"
-description = "The hourly conservation-invariant scan (infra/lint/conservation-invariants.sh). Hourly rather than nightly because a conservation break is a correctness fault, not housekeeping."
+description = "The hourly conservation-invariant sweep: the platform's eight invariants (infra/lint/conservation-invariants.sh) on every instance, plus the tenant directory's own sweep when the image ships one (examples/brewery/conservation-invariants.sh on the playground). Hourly rather than nightly because a conservation break is a correctness fault, not housekeeping."
 metadata = { owner_role = "platform-admin" }
 
 [[workflow.step]]

@@ -93,8 +93,9 @@ naming the upstream record it was projected from — `invoices`,
 `revenue_schedules`, or `brewery_seed_opening_balance` for the
 openings (the projection rules live in
 `crates/modules/boss-ledger/src/rebuild_facts.rs`).
-`infra/lint/conservation-invariants.sh` (run hourly by
-`boss-conservation-invariants.timer`) sweeps these for orphans.
+`infra/lint/conservation-invariants.sh` (run hourly by the
+`boss-conservation-invariants` CronJob on every instance) sweeps these
+for orphans.
 Invariant E rejects any row whose `source_table='steps'` but
 whose `source_id` doesn't resolve to a real `steps` row — a
 forged or orphaned fact. That check is a forward guard today: it

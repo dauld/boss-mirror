@@ -1,0 +1,115 @@
+# Conservation-invariant sweep — in-cluster chore, hourly, on every
+# instance (consolidation H12, backlog 236529aa, 2026-09-18).
+#
+# MEASURED before this file existed: the sweep ran ONLY on boss-gcp
+# against PGHOST=127.0.0.1 — the retired second stack's postgres, never
+# the system of record — and stopped with that stack on 2026-09-15
+# 21:11Z. Nothing swept the SoR's database after that while
+# docs/invariants said `run hourly in prod`, and the cadence-silence
+# sweep filed CADENCE SILENT daily for a kind never once filed on the
+# SoR. Same rule as boss-audit-integrity beside it: a chore runs
+# against the database of the instance whose packet it completes —
+# rendered per instance (infra/cluster/instance-manifests.txt), so prod
+# and the playground each sweep their own.
+#
+# TWO SWEEPS. The platform's eight invariants
+# (infra/lint/conservation-invariants.sh — no account code, no tenant
+# table) run on every instance; then the TENANT's own, when the
+# directory the image ships for it carries one: the renderer
+# substitutes BOSS_TENANT_DIR below per instance the way it does on the
+# boss Deployment, so the playground runs examples/brewery/
+# conservation-invariants.sh (its fourteen chart-of-accounts and
+# batch invariants) and prod — whose tenant is delivered as a seeds-only
+# ConfigMap the chore does not mount — runs the platform eight alone.
+# psql is in the image and reads DATABASE_URL as its dbname; invariant S
+# reads the instance's own ledger door.
+#
+# Hourly because a conservation break is a correctness fault, not
+# housekeeping (the Workflow says the same); the interval is declared
+# to the cadence-silence sweep in
+# infra/dispatcher/rules/cadence-silence-sweep-daily.toml as 60 and
+# crates/core/boss-testing/tests/conservation_invariants_sweep_the_sor.rs
+# holds the two equal.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: boss-conservation-invariants
+  namespace: boss
+  labels:
+    boss-chore: "true"
+spec:
+  schedule: "20 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          # The uid this workload runs as, DECLARED rather than inherited from
+          # the image (backlog 5234cda4; the reasoning and the exemption list
+          # are in infra/lint/a-workload-declares-the-user-it-runs-as.sh, and
+          # the README section "Pod security" below it).
+          #
+          # MEASURED, not inferred from the image name: `id` inside the live
+          # boss-image pod answers uid=1500(boss) gid=1500(boss), the image's
+          # final directive is `USER boss` over `useradd --uid 1500`
+          # (infra/oss-quickstart/Dockerfile, which cluster-deploy-runner.sh
+          # builds this tag from), and no pod in this namespace overrides
+          # runAsUser. So this states what ALREADY happens and changes no
+          # behaviour — which is the whole point: the declaration is what
+          # survives a cluster-wide restricted default, the behaviour was
+          # never the gap.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1500
+            runAsGroup: 1500
+            seccompProfile: {type: RuntimeDefault}
+          restartPolicy: Never
+          containers:
+            - name: chore
+              image: 10.20.0.15:3000/david/boss:latest
+              # Baseline/restricted floor for a chore that needs neither: it shells
+              # out to boss binaries and curl, nothing setuid, no capability.
+              # readOnlyRootFilesystem is deliberately NOT set — boss-generate-configs
+              # writes files, so that one would change behaviour and belongs to a car
+              # that measured it.
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: {drop: ["ALL"]}
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  /usr/local/bin/boss-maintenance-wrap.sh maintenance-conservation-invariants "Conservation-invariant sweep"
+                  # psql reads DATABASE_URL directly — no config file needed.
+                  /opt/boss/infra/lint/conservation-invariants.sh
+                  # The tenant's own sweep, when the image ships one for this instance's tenant directory.
+                  if [ -f "$BOSS_TENANT_DIR/conservation-invariants.sh" ]; then
+                      bash "$BOSS_TENANT_DIR/conservation-invariants.sh"
+                  fi
+                  /usr/local/bin/boss-step.sh maintenance-conservation-invariants run result=ok
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: boss-secrets
+                      key: database-url
+                # The tenant directory the instance's pod reads (boss.yaml's
+                # BOSS_TENANT_DIR, substituted per instance by render-instance.sh):
+                # where a tenant's own sweep is looked for.
+                - name: BOSS_TENANT_DIR
+                  value: /opt/boss/tenant
+                # Invariant S reads the balance sheet off the instance's ledger
+                # API — the same machine door as the jobs API, port 7080.
+                - name: LEDGER_BASE
+                  value: http://boss-jobs-internal.boss.svc.cluster.local:7080
+                - name: BOSS_JOBS_URL
+                  value: http://boss-jobs-internal.boss.svc.cluster.local:7900
+                - name: BOSS_MACHINE_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: boss-secrets
+                      key: machine-token
+                      optional: true

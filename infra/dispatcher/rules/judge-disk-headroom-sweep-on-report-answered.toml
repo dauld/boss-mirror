@@ -1,0 +1,40 @@
+# The disk-headroom sweep is judged by its own measurement. Its measure
+# rule (measure-disk-headroom-sweep-on-inspect-ready) files a
+# `disk-report` ops-request the moment the sweep's Inspect checklist
+# becomes ready, linked back as metadata.for_sweep; the forge's
+# ops-runner answers it, and disk-report.sh now ends its output with
+# ONE verdict line judged by the estate comparator's own floor —
+# `verdict: clean`, or `verdict: disk_tight free=63g floor=80g`. This
+# rule fires when that ops-request closes `answered`: the handler reads
+# the report, follows for_sweep, and — for a disk-headroom sweep whose
+# Inspect step is still open — completes the checklist on a clean
+# verdict (findings none, measured, the verdict copied as `reading`, the
+# report's id as `source`, and action_needed=false so the sweep routes
+# to Clear), or writes the finding onto the still-open step so the agent
+# reads it where they are assigned. Backlog 970c0c94.
+[[rule]]
+name = "judge-disk-headroom-sweep-on-report-answered"
+why = """
+A CROSS-PROTOCOL REACTOR closing the loop measure-disk-headroom-sweep-
+on-inspect-ready opened: ops-request -> maintenance-sweep, which no
+single Workflow consequence can express — the ops-request's protocol
+cannot know which sweep asked, and the sweep's cannot read another
+packet's step. Measured 2026-09-18: all four measure-* rules filed an
+ops-request that ANSWERED (exit 0), but the reading landed on the
+ops-request's run step as free text with no verdict, so nothing could
+complete the sweep's Inspect step by rule and four of them sat
+assigned to the agent for 24h with a clean reading on another packet.
+No authority widened: the only writes are the sweep's own checklist
+and its routing key, and only on a verdict the verb judged by the
+floor the estate already declares (estate_compare.rs, pinned to
+disk-report.sh). An unclean reading completes nothing — the judgement
+of a finding stays a person's — and a report with no verdict line
+(a verb that predates it) writes nothing. Self-filters to this one
+sweep by the (target, verb) pair, which sweep_verdict_rules.rs pins to
+the pair the measure rule files.
+"""
+on_event = "jobs.job.closed"
+when = 'kind = "ops-request" AND outcome = "answered"'
+[[rule.do]]
+handler = "maintenance.sweep.judge"
+args = { target = "\"disk-headroom\"", verb = "\"disk-report\"" }

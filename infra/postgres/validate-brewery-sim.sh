@@ -162,7 +162,6 @@ done
 MAINT_TIMERS=(
     boss-ledger-replay-check.timer
     boss-audit-integrity-check.timer
-    boss-conservation-invariants.timer
     boss-ledger-recognize.timer
     boss-files-gc.timer
     boss-messages-events-purge.timer
@@ -606,19 +605,26 @@ PGPASSWORD=boss psql -h 127.0.0.1 -U boss -d boss -q -c "DROP TABLE IF EXISTS _d
 echo "    determinism OK — rebuilt ledger matches live across all accounts"
 
 # -- Step 8.5: conservation invariants (incl. exact GL ≡ value) --
-echo "==> [8.5/10] running conservation-invariant sweep"
-# The full lettered sweep the nightly timer runs, promoted to a
-# regen gate. Invariants N + P are EXACT under value-primary rows
-# (PR 6a): balance(1300) == Σ inventory_items.value_cents and
-# balance(1320) == Σ finished_product_inventory.value_cents, to the
-# cent, after a full year — the class of leak the old ±$50k / $100
-# tolerances papered over no longer exists, so any hit here is a
-# write path that moved stock without its JE (or vice versa).
-if ! PGHOST=127.0.0.1 PGUSER=boss PGDATABASE=boss PGPASSWORD=boss     "$REPO_ROOT/infra/lint/conservation-invariants.sh"; then
-    echo "ERROR: conservation invariants failed — see the lettered failures above" >&2
-    exit 1
-fi
-echo "    conservation invariants green (N + P exact)"
+echo "==> [8.5/10] running conservation-invariant sweeps"
+# The full lettered sweep, promoted to a regen gate — in TWO scripts
+# since 2026-09-18 (H12, backlog 236529aa): the platform's eight
+# (infra/lint/conservation-invariants.sh, what the hourly in-cluster
+# chore runs on every instance) and the brewery's fourteen
+# (examples/brewery/conservation-invariants.sh — the chart-of-accounts
+# and batch invariants only this tenant means). Invariants N + P are
+# EXACT under value-primary rows (PR 6a): balance(1300) == Σ
+# inventory_items.value_cents and balance(1320) == Σ
+# finished_product_inventory.value_cents, to the cent, after a full
+# year — the class of leak the old ±$50k / $100 tolerances papered
+# over no longer exists, so any hit here is a write path that moved
+# stock without its JE (or vice versa).
+for sweep in infra/lint/conservation-invariants.sh examples/brewery/conservation-invariants.sh; do
+    if ! PGHOST=127.0.0.1 PGUSER=boss PGDATABASE=boss PGPASSWORD=boss "$REPO_ROOT/$sweep"; then
+        echo "ERROR: conservation invariants failed ($sweep) — see the lettered failures above" >&2
+        exit 1
+    fi
+done
+echo "    conservation invariants green (platform 8 + brewery 14; N + P exact)"
 
 # -- Step 9: dangling-FK lint ----------------------------------
 echo "==> [9/10] running audit_log integrity check"

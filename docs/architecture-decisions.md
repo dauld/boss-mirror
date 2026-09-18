@@ -326,6 +326,27 @@ departed packets vanish at closure. Stations ship read-only and
 barely seeded — two platform `batch` rows, no authoring API — so
 "every executor has one" is the design, not today's data.
 
+**A platform station is declared in `infra/platform/stations/`, and a
+migration newer than 20260918112134 declares schema only** (2026-09-18,
+backlog 393d3234, consolidation H4, the first of four registries to
+make this move — step_plugins, cadence_rules and delivery_policy
+follow). Measured on that day, seven migrations were the only place a
+platform station existed, and a migration is the wrong home for a
+registry row: it runs once, a fresh instance cannot re-declare the row
+without replaying history, nothing drift-checks it against the live
+row, and every edit is a contended timestamped file. The dispatcher
+rules above and the Workflow bundle before them already answered this;
+stations take the same shape: one `<name>.toml` per station carrying
+every column, published insert-if-missing by (name, version) at every
+start by the same seed the Workflow bundle rides (the directory is
+found beside `--seed-path`, so no launcher changed). A bundle row that
+differs from the live active row of the same (name, version) is a
+refusal naming the field — a version bump is the edit path — and
+`infra/lint/migrations-declare-schema-only.sh` holds the cutover stamp
+once, with the registry tables listed beside it. The historical
+inserts stay as history; the bundle is pinned equal to the rows they
+produce, and proven able to rebuild an emptied table alone.
+
 **Priority becomes Class-registry data.** The `CHECK` constraint,
 the closed Rust enum and the TS union retire together in favour of
 Classes of `job`-kind Subjects — §Registries-over-code one level

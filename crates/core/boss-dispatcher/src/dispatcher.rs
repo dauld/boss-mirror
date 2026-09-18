@@ -285,12 +285,7 @@ async fn handle_event(
     if status != "ready" && status != "active" {
         return Ok(());
     }
-    if step
-        .assignee_id
-        .as_deref()
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false)
-    {
+    if born_placed(&step) {
         return Ok(());
     }
     let Some(job_id) = step.job_id.as_deref() else {
@@ -525,6 +520,24 @@ async fn handle_event(
 /// role the executor is declared to execute for — a brewery `brewer`
 /// step must not land on the platform agent just because the agent
 /// exists.
+/// Is this step already somebody's? An assigned step never re-routes
+/// through the dispatcher — that is the idempotency guard on every
+/// status flip (the assignment PUT itself emits a `jobs.step.updated`)
+/// — and it is also how a step that is born placed stays out of every
+/// pick below. A Workflow step with an `individual` audience
+/// materialises with its `assignee_id` set (f5ebd2e1), and since
+/// backlog af796788 the pr-train's task steps name the conductor that
+/// way: they were arriving with a role and no assignee, so the
+/// executes-lane nominated all seven of every train to the agent alias
+/// and the conductor completed them over its head. Pure, so the rule
+/// is testable over a materialised packet without an event loop.
+fn born_placed(step: &StepEventPayload) -> bool {
+    step.assignee_id
+        .as_deref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+}
+
 /// Why a ready step is left in its role queue instead of being
 /// nominated to one actor, or `None` to nominate as usual. Two
 /// declarations on the materialized step say so: `claimable` (the
@@ -973,9 +986,10 @@ async fn assign(ctx: &DispatcherCtx, job_id: &str, step_id: &str, emp_id: &str) 
 #[cfg(test)]
 mod tests {
     use super::{
-        Partition, eligible_candidates, event_partition, executor_for, is_active_holder,
-        left_for_role_queue, owner_assignee, owner_id_from_job_body, partition_permits, pick_index,
-        pick_index_for, roster_union, stable_hash,
+        Partition, StepEventPayload, born_placed, eligible_candidates, event_partition,
+        executor_for, is_active_holder, left_for_role_queue, owner_assignee,
+        owner_id_from_job_body, partition_permits, pick_index, pick_index_for, roster_union,
+        stable_hash,
     };
     use crate::config::AssignmentStrategy;
     use boss_jobs::step_registry::StepRegistry;
@@ -1606,5 +1620,107 @@ mod tests {
                 "a single-holder role must pick index 0 under {strategy:?}"
             );
         }
+    }
+
+    /// The step payloads the jobs API publishes for a freshly opened
+    /// packet of `kind`, materialised from the platform bundle exactly
+    /// as `POST /api/jobs` does and serialised the way `STEP_CREATED`
+    /// carries them — so what this test reads is what `handle_event`
+    /// reads.
+    fn bundled_packet_steps(kind: &str) -> Vec<(String, StepEventPayload)> {
+        use boss_core::job::{JobId, StepId, Subject};
+        let spec =
+            boss_jobs::seed_loader::load_workflows(boss_jobs::registry::platform_bundle_path())
+                .expect("the platform bundle parses")
+                .into_iter()
+                .find(|w| w.kind == kind)
+                .unwrap_or_else(|| panic!("{kind} ships in the platform bundle"));
+        let subject = Subject::new("custom", "train/20260918-1141");
+        boss_jobs::registry::materialize_steps(
+            &spec,
+            &subject,
+            JobId::new(),
+            &serde_json::Value::Object(Default::default()),
+            StepId::new,
+        )
+        .into_iter()
+        .map(|step| {
+            let slug = step.spec_slug.clone().expect("a bundled step has a slug");
+            let payload = serde_json::from_value(boss_jobs::events::step_state_payload(&step))
+                .expect("a serialised Step is a StepEventPayload");
+            (slug, payload)
+        })
+        .collect()
+    }
+
+    /// The deployment's executes-lane (`infra/cluster/manifests/boss.yaml`):
+    /// the agent alias, executing for `platform-admin`.
+    const EXECUTOR: &str = "claude@algedonic.dev";
+    const EXECUTOR_ROLES: &str = "platform-admin";
+
+    /// A train's steps nominate nobody — they are born the conductor's
+    /// (backlog af796788). Measured 2026-09-18 on three consecutive
+    /// pr-trains: every task step arrived with `authority_role =
+    /// platform-admin` and no assignee, so the executes-lane below
+    /// handed all seven to the agent alias and the conductor completed
+    /// them over its head. The bundle now declares the conductor as
+    /// each step's audience, so the step is born placed and the
+    /// dispatcher's first guard passes it over — while a genuine
+    /// agent-executable step (a backlog item's `build`) still reaches
+    /// the executor through the same lane.
+    #[test]
+    fn the_conductors_train_steps_nominate_nobody() {
+        let train = bundled_packet_steps("pr-train");
+        let conductors = [
+            "collect",
+            "assemble",
+            "pr",
+            "ci",
+            "merged",
+            "deployed",
+            "converged",
+        ];
+        for slug in conductors {
+            let (_, step) = train
+                .iter()
+                .find(|(s, _)| s == slug)
+                .unwrap_or_else(|| panic!("the train has a `{slug}` step"));
+            assert!(
+                born_placed(step),
+                "`{slug}` is born placed, so the dispatcher never reaches a pick for it"
+            );
+            assert_eq!(
+                step.assignee_id.as_deref(),
+                Some("automation:train-conductor"),
+                "`{slug}` is the conductor's, not the executor's"
+            );
+        }
+
+        // The control: a step the agent genuinely executes is still
+        // unplaced at birth, carries its role, and the lane names the
+        // executor for it — the fix narrowed nothing but the train.
+        let backlog = bundled_packet_steps("backlog-item");
+        let (_, build) = backlog
+            .iter()
+            .find(|(s, _)| s == "build")
+            .expect("a backlog item has a `build` step");
+        assert!(!born_placed(build), "a build step waits for a nomination");
+        let role = build
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("authority_role"))
+            .and_then(|v| v.as_str())
+            .expect("a build step carries its role");
+        assert_eq!(
+            executor_for(
+                Partition::Real,
+                false,
+                Some(EXECUTOR),
+                Some(EXECUTOR_ROLES),
+                &[role]
+            )
+            .as_deref(),
+            Some(EXECUTOR)
+        );
     }
 }

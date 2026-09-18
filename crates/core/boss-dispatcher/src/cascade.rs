@@ -131,6 +131,21 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
             "maintenance.sweep.inspect",
             vec!["jobs.step.completed", "jobs.job.updated"],
         ),
+        // An answered sweep measurement judges the sweep that asked
+        // for it (970c0c94): a clean `verdict:` line routes the sweep
+        // (`jobs.job.updated`, action_needed) and completes its inspect
+        // checklist (`jobs.step.completed`); an unclean one merges the
+        // reading onto the still-open step (`jobs.step.updated`). Every
+        // write is on a maintenance-sweep, never an ops-request, so the
+        // close it fires on cannot re-enter it.
+        (
+            "maintenance.sweep.judge",
+            vec![
+                "jobs.step.completed",
+                "jobs.job.updated",
+                "jobs.step.updated",
+            ],
+        ),
         ("jobs.subjob_resolve", vec!["jobs.step.completed"]),
         // Completes the open branch on the Job a declared edge names
         // (a merged car answering its feedback packet). The completion

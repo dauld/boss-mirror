@@ -65,6 +65,7 @@ use boss_dispatcher_handlers::handlers::{
     stripe_charges::StripeCharges,
     stripe_payouts::StripePayouts,
     sweep_empty_decisions::MaintenanceSweepInspect,
+    sweep_judge_report::MaintenanceSweepJudge,
     webhook_notify::WebhookNotify,
 };
 use tokio::net::TcpListener;
@@ -353,6 +354,13 @@ async fn main() -> Result<()> {
             // checklist, and route (action_needed) to Remediate or Clear
             // (ee8ec68a — mechanical inspections become automation).
             handlers.register(MaintenanceSweepInspect::new(cfg.jobs_api_url.clone()));
+            // The host-measured sweeps judge themselves from the verb's
+            // answer: on an ops-request closing `answered`, read its
+            // `verdict:` line and, for the sweep it was filed for,
+            // complete the Inspect checklist when clean or write the
+            // finding onto the open step when not (970c0c94). Which
+            // (target, verb) pair ride the rule row.
+            handlers.register(MaintenanceSweepJudge::new(cfg.jobs_api_url.clone()));
             // A closing Job completes the open step it was authorized
             // by, on the Job its declared edge names — the merged car
             // → feedback-packet obligation (2c4ae549). Generic: which

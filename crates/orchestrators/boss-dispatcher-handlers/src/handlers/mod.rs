@@ -61,4 +61,5 @@ pub mod stripe_charges;
 pub mod stripe_payouts;
 pub mod sweep_deploy_convergence;
 pub mod sweep_empty_decisions;
+pub mod sweep_judge_report;
 pub mod webhook_notify;

@@ -147,6 +147,24 @@ a new crate — stations are packet-adjacent data, and the evaluation
 port ("give me this station's queue, ordered") belongs where jobs
 and steps already live.
 
+**Where a platform station is DECLARED moved on 2026-09-18** (backlog
+393d3234, consolidation H4). "Migrations in the 11x sequence" was the
+registry's only home for its first five weeks — seven migrations
+inserted or bumped rows, four more UPDATEd columns in place — and a
+migration is the wrong home for a registry row: it runs once, a fresh
+instance cannot re-declare it without replaying history, nothing
+drift-checks it against the live row. The home is now
+`infra/platform/stations/<name>.toml`, one file per station carrying
+every column, published insert-if-missing by (name, version) at every
+start by `boss-platform-workflow-seed` (the same seed path the Workflow
+bundle rides; the directory is found beside `--seed-path`). A bundle
+row that differs from the live active row of the same (name, version)
+is refused by field — a version bump is the edit path — and
+`infra/lint/migrations-declare-schema-only.sh` refuses `INSERT INTO
+stations` in any migration newer than its cutover stamp. The historical
+inserts stay as history, and the bundle is pinned equal to the rows they
+produce (`the_stations_bundle_is_the_migrations_pg.rs`).
+
 ## Open questions
 
 _None — Q1–Q4 resolved in Decision history; further questions arise from the build._

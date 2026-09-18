@@ -121,8 +121,8 @@ That last clause is the reason to name it. Today those five properties
 are stated in [correctness-protocol.md](./correctness-protocol.md) as
 the design north star and owned by *nobody*. That ownership vacuum is
 not theoretical: it is why provenance turned out to have no real check
-at all, and why conservation is swept by a timer
-(`boss-conservation-invariants.timer`) rather than held by the layer
+at all, and why conservation is swept by a chore
+(the `boss-conservation-invariants` CronJob) rather than held by the layer
 that would know when it broke. Giving the properties a home crate
 makes "which property is unenforced?" a question with an address.
 

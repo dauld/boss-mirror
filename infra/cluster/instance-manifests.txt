@@ -68,6 +68,10 @@ boss-dispatcher-internal.yaml instance
 # and opens its packet on the namespace's boss-jobs-internal, so each
 # maintains exactly the instance it is rendered into.
 boss-audit-integrity.yaml instance
+# The conservation-invariant sweep: the platform's eight invariants on
+# every instance, plus the tenant directory's own sweep when the image
+# ships one (the playground's brewery) — H12, backlog 236529aa.
+boss-conservation-invariants.yaml instance
 boss-files-gc.yaml instance
 boss-ledger-recognize.yaml instance
 boss-ledger-replay-check.yaml instance

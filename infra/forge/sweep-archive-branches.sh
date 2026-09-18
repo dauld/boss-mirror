@@ -90,13 +90,45 @@
 # unreadable live = cannot tell live from stale, and a wrong target
 # answers instead of erroring (CLAUDE.md §Doors).
 #
+# THE DECISION (backlog a12736b1, measured 2026-09-18)
+# ---------------------------------------------------------------------
+# The for-real sweep (ops-request e96e5e60) deleted the 40 it could
+# prove landed; the dry run after it (a2d0b0fc) still kept 10 — 2
+# moved, 8 unrecorded — "a human's decision". The human had decided:
+# design 7fc3970b, answered on packet 2604d814's design-review by
+# David, "Delete them all". The decision was on the record and the
+# verb had no door to carry it out, so the 10 would have needed a hand
+# `git push --delete` — the by-hand act the doors exist to replace. So
+# an OPTIONAL FOURTH ARGUMENT names the decision: a full job id. The
+# verb READS that packet from the system of record through the same
+# reader as the live cars and requires, in this order: the packet
+# exists; it is a `backlog-item` or a `design-doc`; it has a review
+# step (`design-review` on a backlog-item, `review` on a design-doc —
+# the workflow's step titles, read as the step's `spec_slug`); that
+# step is `completed`; it is not `declined` (a decision AGAINST is not
+# a licence); and it carries an `answer` or `resolutions` (a decision
+# with no words is not one). Anything else is REFUSED naming the
+# packet and the missing fact, and nothing is deleted — not even the
+# archive-planned set, so the operator reads one refusal, never half a
+# sweep. With a qualifying decision the `moved`, `no head` and
+# `unrecorded` branches are planned too, `evidence: "decision"`, each
+# leased to the head the forge holds and read back like the rest, and
+# named `by decision <id>`. EVERY PROTECTION STANDS: a live car's
+# branch is never a candidate, `main` is never a candidate, and — read
+# only when a decision is given, because only then is an unrecorded
+# branch ever planned — an OPEN pr-train's `train/*` branch (its
+# subject id, train.rs `train_branch_to_delete`) is `live` too. A
+# dry run with a decision plans the decided set and pushes nothing.
+#
 # THE BOUNDS, in the order they are applied — each refuses loudly and
 # names the bound; a refusal changes nothing:
 #
 #   1. THE ARGUMENTS. `--dry-run` or `--for-real`, a namespace of the
 #      shape instances.toml admits (`boss` or `boss-<name>`; never
-#      boss-dev, the pipeline's), and a database name that is a plain
-#      lowercase identifier — so it is never quoted, escaped or split.
+#      boss-dev, the pipeline's), a database name that is a plain
+#      lowercase identifier — so it is never quoted, escaped or split —
+#      and, optionally, a decision that is a full lowercase job uuid,
+#      so it is the one path segment `/api/jobs/<id>` and nothing else.
 #      The allowlist checks these first; the script re-checks rather
 #      than relying on one layer (the retire-second-stack convention).
 #   2. THE ARCHIVE IS NOT THE LIVE DATABASE. Secret `boss-secrets` key
@@ -128,7 +160,11 @@
 #      the same reason: an unidentified reader is answered a NARROWER
 #      WORLD in silence (backlog 61085a9e). The reader missing,
 #      refusing, answering the wrong shape, or answering a listing cut
-#      at its limit (`total` above what came back) is a refusal.
+#      at its limit (`total` above what came back) is a refusal. With
+#      a decision: the open pr-trains too (same reader, same bounds),
+#      and then the decision packet itself, judged as above — a
+#      packet the record does not hold, or holds without a completed,
+#      worded, undeclined review, is a refusal that names it.
 #   6. THE PULL REQUESTS. One fetch through the same remote, under the
 #      checkout's lock (checkout-lock.sh — one lock for every git user
 #      of the forge checkout): every `refs/heads/*` and every
@@ -156,14 +192,16 @@
 # OUTPUT ORDER IS LOAD-BEARING (backlog 5323f3ef: the ops-runner keeps
 # the first 100 KB of a verb's output, OPS_OUTPUT_CAP). The VERDICT
 # LINE PRINTS FIRST — `sweep-archive-branches: <mode> archive=<db>
-# recorded=<n> planned=<n> by_archive=<n> by_pr=<n> deleted=<n>
-# moved=<n> unrecorded=<n> live=<n> gone=<n>` — then the ONE JSON
-# record line on stdout, then the per-branch lines, so a cut listing
-# never costs the verdict. In a dry run `deleted` is 0 by construction
-# and `planned` is the count the real run would delete.
+# recorded=<n> planned=<n> by_archive=<n> by_pr=<n> [by_decision=<n>]
+# deleted=<n> moved=<n> unrecorded=<n> live=<n> gone=<n>
+# [decision=<id>]` (the bracketed fields only when a decision was
+# given) — then the ONE JSON record line on stdout, then the
+# per-branch lines, so a cut listing never costs the verdict. In a dry
+# run `deleted` is 0 by construction and `planned` is the count the
+# real run would delete.
 #
 # USAGE
-#   sweep-archive-branches.sh --dry-run | --for-real <namespace> <archive-db>
+#   sweep-archive-branches.sh --dry-run | --for-real <namespace> <archive-db> [<decision-job-id>]
 #
 # EXIT
 #   0  done (or, with --dry-run, the plan)
@@ -220,12 +258,14 @@ CAR_KIND="ship-a-change"
 
 # --- bound 1: the arguments -------------------------------------------------
 usage() {
-    say "usage: $ME --dry-run | --for-real <namespace> <archive-db>"
+    say "usage: $ME --dry-run | --for-real <namespace> <archive-db> [<decision-job-id>]"
     say "  --dry-run   read the archive and the forge, print the plan; pushes nothing"
     say "  --for-real  delete the planned branches on the forge, read each back"
+    say "  <decision-job-id>  a backlog-item or design-doc whose review is completed with an answer:"
+    say "              the moved and unrecorded branches it otherwise keeps are deleted on that decision"
     exit 2
 }
-[ "$#" -eq 3 ] || usage
+[ "$#" -eq 3 ] || [ "$#" -eq 4 ] || usage
 DRY=""
 case "$1" in
     --dry-run) DRY=1 ;;
@@ -241,6 +281,13 @@ fi
 [ "$NS" != "boss-dev" ] || refuse "boss-dev is the pipeline's namespace, not an instance's"
 if ! [[ "$ARCHIVE" =~ ^[a-z][a-z0-9_]{0,62}$ ]]; then
     refuse "\`$ARCHIVE\` is not a database name this verb will read: lowercase letters, digits and _ only, leading letter, 63 at most"
+fi
+# The decision, when given: a FULL lowercase job uuid — the one path
+# segment of /api/jobs/<id>, so it can never be a query, a branch name
+# or a short id that answers a different packet than the one meant.
+DECISION="${4:-}"
+if [ -n "$DECISION" ] && ! [[ "$DECISION" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    refuse "\`$DECISION\` is not a job id (a full lowercase uuid); a decision is named by the packet that records it"
 fi
 
 command -v jq >/dev/null 2>&1 || { say "jq is not on PATH, so nothing can be read. Nothing was changed."; exit 1; }
@@ -393,7 +440,7 @@ if ! LIVE_JSON=$(jq -c --argjson limit "$LIVE_LIMIT" --arg kind "$CAR_KIND" '
         if type != "object" or (.data | type) != "array" then error("not a listing: no data array") else . end
         | (.total // (.data | length)) as $total
         | if $total > (.data | length) then error("the listing is cut: total \($total), \(.data | length) returned, limit \($limit) — a cut listing cannot name every live car") else . end
-        | [ .data[] | select(type == "object") | {car: (.id // ""), branch: (.metadata.branch // "")}
+        | [ .data[] | select(type == "object") | {car: (.id // ""), branch: (.metadata.branch // ""), kind: "car"}
             | select(.car != "" and .branch != "") ]' < "$TMP/live.out" 2> "$TMP/live-jq.err"); then
     flush_notes
     say "REFUSED — the live record answered $LIVE_PATH, but not with a listing this verb can read:"
@@ -403,6 +450,82 @@ if ! LIVE_JSON=$(jq -c --argjson limit "$LIVE_LIMIT" --arg kind "$CAR_KIND" '
     exit 2
 fi
 note "live: the system of record holds $(printf '%s' "$LIVE_JSON" | jq 'length') open $CAR_KIND car(s) naming a branch"
+
+# --- bound 5, with a decision: the open trains, then the decision -----------
+# Only a decision ever plans an unrecorded branch, and an OPEN train's
+# `train/*` branch is unrecorded by construction (no car names it; its
+# own PR is not merged) — so only then is it read, and it joins the
+# live set: never a candidate, named with the train that rides it. The
+# same listing bounds as the cars: the same reader, the same actor, a
+# cut listing is a refusal.
+TRAIN_KIND="pr-train"
+DECISION_JSON=null
+if [ -n "$DECISION" ]; then
+    TRAINS_PATH="/api/jobs?kind=$TRAIN_KIND&status=open&limit=$LIVE_LIMIT"
+    if ! BOSS_SOR_USER="$READER_USER" "$SOR_READ" "$TRAINS_PATH" > "$TMP/trains.out" 2> "$TMP/trains.err"; then
+        flush_notes
+        say "REFUSED — cannot read the live open $TRAIN_KIND packets ($TRAINS_PATH); the reader said:"
+        scrub < "$TMP/trains.err" | sed 's/^/    /' >&2
+        say "  A decision plans unrecorded branches, and an open train's branch is one; unreadable trains cannot be kept out. Nothing was changed."
+        exit 2
+    fi
+    if ! TRAINS_JSON=$(jq -c --argjson limit "$LIVE_LIMIT" '
+            if type != "object" or (.data | type) != "array" then error("not a listing: no data array") else . end
+            | (.total // (.data | length)) as $total
+            | if $total > (.data | length) then error("the listing is cut: total \($total), \(.data | length) returned, limit \($limit) — a cut listing cannot name every open train") else . end
+            | [ .data[] | select(type == "object") | {car: (.id // ""), branch: (.subject.id // ""), kind: "train"}
+                | select(.car != "" and (.branch | startswith("train/"))) ]' < "$TMP/trains.out" 2> "$TMP/trains-jq.err"); then
+        flush_notes
+        say "REFUSED — the live record answered $TRAINS_PATH, but not with a listing this verb can read:"
+        sed 's/^/    /' "$TMP/trains-jq.err" >&2
+        head -c 400 "$TMP/trains.out" | scrub | sed 's/^/    /' >&2
+        say "  Nothing was changed."
+        exit 2
+    fi
+    note "live: the system of record holds $(printf '%s' "$TRAINS_JSON" | jq 'length') open $TRAIN_KIND(s) on a train/ branch"
+    LIVE_JSON=$(jq -c -n --argjson cars "$LIVE_JSON" --argjson trains "$TRAINS_JSON" '$cars + $trains')
+
+    # The decision packet: read as the same actor, judged as one value.
+    # Each refusal names the packet and the ONE fact it lacks.
+    DECISION_PATH="/api/jobs/$DECISION"
+    if ! BOSS_SOR_USER="$READER_USER" "$SOR_READ" "$DECISION_PATH" > "$TMP/decision.out" 2> "$TMP/decision.err"; then
+        flush_notes
+        say "REFUSED — cannot read the decision packet $DECISION ($DECISION_PATH); the reader said:"
+        scrub < "$TMP/decision.err" | sed 's/^/    /' >&2
+        say "  A decision the record does not hold cannot be carried out. Nothing was changed."
+        exit 2
+    fi
+    if ! DECISION_JSON=$(jq -c --arg id "$DECISION" '
+            def words: if . == null then "" elif type == "string" then . else tojson end;
+            if type != "object" then error("packet \($id): the record answered something other than one job") else . end
+            | if (.id // "") != $id then error("packet \($id): the record answered job \(.id // "?"), not \($id)") else . end
+            | (.kind // "") as $kind
+            | if $kind != "backlog-item" and $kind != "design-doc"
+              then error("packet \($id) is a \($kind), not a backlog-item or a design-doc — only a reviewed design records a decision") else . end
+            | ([ (.steps // [])[] | select(type == "object") | select(.spec_slug == "design-review" or .spec_slug == "review") ]) as $reviews
+            | if ($reviews | length) == 0 then error("packet \($id) (\($kind)) has no design-review (or review) step, so it records no decision") else . end
+            | ([ $reviews[] | select(.status == "completed") ] | first) as $done
+            | if $done == null
+              then error("packet \($id) (\($kind)): its \($reviews[0].spec_slug) step is \($reviews[0].status // "?"), not completed — the decision has not been made") else . end
+            | ($done.metadata.verdict | words) as $verdict
+            | if $verdict == "declined" then error("packet \($id) (\($kind)): its \($done.spec_slug) was declined — a decision against is not a licence to delete") else . end
+            | ($done.metadata.answer | words) as $answer
+            | ($done.metadata.resolutions | if type == "array" then . else [] end) as $res
+            | if ($answer | length) == 0 and ($res | length) == 0
+              then error("packet \($id) (\($kind)): its \($done.spec_slug) step is completed but carries no answer and no resolutions — a decision with no words is not one") else . end
+            | { id: $id, kind: $kind, title: (.title // ""), status: (.status // ""),
+                step: $done.spec_slug, verdict: (if $verdict == "" then null else $verdict end),
+                decided_by: ($done.completed_by // null), decided_at: ($done.completed_at // null),
+                answer: (if ($answer | length) > 0 then $answer else null end), resolutions: ($res | length) }
+        ' < "$TMP/decision.out" 2> "$TMP/decision-jq.err"); then
+        flush_notes
+        say "REFUSED — the packet named as the decision does not record one:"
+        sed -E 's/^jq: error \(at [^)]*\): //; s/^/    /' "$TMP/decision-jq.err" >&2
+        say "  Nothing was changed."
+        exit 2
+    fi
+    note "decision: $DECISION ($(printf '%s' "$DECISION_JSON" | jq -r '"\(.kind), \(.step) completed by \(.decided_by // "?") — \(.answer // "\(.resolutions) resolution(s)")"'))"
+fi
 
 # --- bound 6: the pull requests --------------------------------------------
 # One fetch, under the checkout's lock, into this verb's own namespace:
@@ -467,21 +590,28 @@ note "pull requests: $PULL_HEADS pull head(s) fetched, $(printf '%s' "$MERGED_JS
 # head is in a merged consist, and an unclaimed head does the same.
 # Bound 7 — the name shape — is judged here too, so an unsafe name
 # never reaches a git argv. `unclaimed` is every forge head no claim,
-# no live car and no merged PR names, `main` excepted.
+# no live car and no merged PR names, `main` excepted. With a
+# DECISION, what would be `moved`, `no_head` or `unclaimed` is planned
+# on `evidence: "decision"` at the head the forge holds — after `live`,
+# so the decision never reaches a live car's or an open train's branch.
 jq -c --argjson heads "$HEADS_JSON" --argjson live "$LIVE_JSON" \
-      --argjson ancestry "$ANCESTRY_JSON" --argjson merged "$MERGED_JSON" '
+      --argjson ancestry "$ANCESTRY_JSON" --argjson merged "$MERGED_JSON" \
+      --argjson decided "$( [ -n "$DECISION" ] && echo true || echo false )" '
     def nonempty: if . == null or . == "" then null else . end;
     def safe_name: test("^[A-Za-z0-9][A-Za-z0-9._/-]*$") and (contains("..") | not);
-    (reduce $live[] as $l ({}; if has($l.branch) then . else .[$l.branch] = $l.car end)) as $live_car
+    (reduce $live[] as $l ({}; if has($l.branch) then . else .[$l.branch] = {car: $l.car, kind: ($l.kind // "car")} end)) as $live_car
     | (reduce $ancestry[] as $a ({};
           .[$a.branch] = ([ $a.prs[] | select(. as $n | $merged | index($n) != null) ] | max))) as $landed_pr
     | def judge:
         if .current == null then .verdict = "gone"
-        elif $live_car[.branch] != null then .verdict = "live" | .live_car = $live_car[.branch]
+        elif $live_car[.branch] != null then .verdict = "live" | .live_car = $live_car[.branch].car | .live_kind = $live_car[.branch].kind
         elif .head != null and .head == .current then
             .evidence = "archive" | .verdict = (if (.branch | safe_name) then "delete" else "unsafe" end)
         elif $landed_pr[.branch] != null then
             .evidence = "pull-request" | .pr = $landed_pr[.branch] | .head = .current
+            | .verdict = (if (.branch | safe_name) then "delete" else "unsafe" end)
+        elif $decided then
+            .evidence = "decision" | .head = .current
             | .verdict = (if (.branch | safe_name) then "delete" else "unsafe" end)
         elif .head == null then .verdict = "no_head"
         else .verdict = "moved" end;
@@ -552,7 +682,7 @@ fi
 RECORD=$(jq -c -n -R --rawfile done "$TMP/done.tsv" --slurpfile plan "$TMP/plan.json" \
     --arg verb "$ME" --argjson dry "$( [ "$DRY" = 1 ] && echo true || echo false )" \
     --arg ns "$NS" --arg archive "$ARCHIVE" --arg live "$SHOWN_LIVE" --arg remote "$REMOTE" \
-    --argjson cars "$CARS_READ" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+    --argjson cars "$CARS_READ" --argjson decision "$DECISION_JSON" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
     ($plan[0]) as $p
     | ([ $done | split("\n")[] | select(length > 0) | split("\u001f")
          | {branch: .[0], car: (.[1] | if . == "" then null else . end), head: .[2], outcome: .[3], read_back: .[4],
@@ -566,6 +696,8 @@ RECORD=$(jq -c -n -R --rawfile done "$TMP/done.tsv" --slurpfile plan "$TMP/plan.
         planned: ($planned | length),
         by_archive: ($planned | map(select(.evidence == "archive")) | length),
         by_pr: ($planned | map(select(.evidence == "pull-request")) | length),
+        by_decision: ($planned | map(select(.evidence == "decision")) | length),
+        decision: $decision,
         deleted: ($d | map(select(.outcome == "deleted")) | length),
         failed: ($d | map(select(.outcome == "failed")) | length),
         moved: ($p.claims | map(select(.verdict == "moved")) | length),
@@ -577,7 +709,7 @@ RECORD=$(jq -c -n -R --rawfile done "$TMP/done.tsv" --slurpfile plan "$TMP/plan.
           delete: [ $planned[] | entry ],
           deleted: [ $d[] | select(.outcome == "deleted") | {branch, evidence, pr, car, head, read_back} ],
           failed: [ $d[] | select(.outcome == "failed") | {branch, evidence, pr, car, head, reason: .read_back} ],
-          live: [ $all[] | select(.verdict == "live") | {branch, car: .live_car, current} ],
+          live: [ $all[] | select(.verdict == "live") | {branch, car: .live_car, kind: .live_kind, current} ],
           moved: [ $p.claims[] | select(.verdict == "moved") | {branch, car, recorded, current, rerail_origin} ],
           no_head: [ $p.claims[] | select(.verdict == "no_head") | {branch, car, current, rerail_origin} ],
           unclaimed: [ $p.unclaimed[] | select(.verdict == "unclaimed") | {branch, current} ],
@@ -586,19 +718,27 @@ RECORD=$(jq -c -n -R --rawfile done "$TMP/done.tsv" --slurpfile plan "$TMP/plan.
 n() { printf '%s' "$RECORD" | jq -r ".$1"; }
 
 # --- the verdict FIRST, then the record, then the lines ----------------------
-VERDICT="$MODE archive=$ARCHIVE recorded=$(n recorded) planned=$(n planned) by_archive=$(n by_archive) by_pr=$(n by_pr) deleted=$(n deleted) moved=$(n moved) unrecorded=$(n unrecorded) live=$(n live) gone=$(n gone)"
+VERDICT="$MODE archive=$ARCHIVE recorded=$(n recorded) planned=$(n planned) by_archive=$(n by_archive) by_pr=$(n by_pr)"
+[ -z "$DECISION" ] || VERDICT="$VERDICT by_decision=$(n by_decision)"
+VERDICT="$VERDICT deleted=$(n deleted) moved=$(n moved) unrecorded=$(n unrecorded) live=$(n live) gone=$(n gone)"
 [ "$(n unsafe)" = 0 ] || VERDICT="$VERDICT unsafe=$(n unsafe)"
 [ "$(n failed)" = 0 ] || VERDICT="$VERDICT failed=$(n failed)"
+[ -z "$DECISION" ] || VERDICT="$VERDICT decision=$DECISION"
 say "$VERDICT"
 printf '%s\n' "$RECORD"
 flush_notes
 
 id8() { printf '%s' "$1" | cut -c1-8; }
-# What vouches for a planned entry, in words: the archive's car, or
-# the merged pull request whose consist contains the head.
+# What vouches for a planned entry, in words: the archive's car, the
+# merged pull request whose consist contains the head, or the recorded
+# decision — named by its packet, with who decided and what.
 vouch() { # <evidence> <pr> <car> <rerail_origin|""> <head>
     if [ "$1" = pull-request ]; then
         printf 'landed with pull request #%s, at %s = the forge'"'"'s head' "$2" "$(id8 "$5")"
+    elif [ "$1" = decision ]; then
+        printf 'by decision %s: %s, at %s = the forge'"'"'s head' "$(id8 "$DECISION")" \
+            "$(printf '%s' "$RECORD" | jq -r '.decision | "\(.step) on \(.kind) completed by \(.decided_by // "?"), \(.answer // "\(.resolutions) resolution(s)")"')" \
+            "$(id8 "$5")"
     else
         case "$4" in true) kind="rerail original of car" ;; false) kind="branch of car" ;; *) kind="car" ;; esac
         printf '%s %s, at %s = boarded' "$kind" "$(id8 "$3")" "$(id8 "$5")"
@@ -616,8 +756,8 @@ else
         say "FAILED $b ($(vouch "$e" "$p" "$c" "" "$h")) — $r"
     done
 fi
-printf '%s' "$RECORD" | jq -r '.branches.live[] | "\(.branch)\u001f\(.car)\u001f\(.current)"' | while IFS="$US" read -r b c cur; do
-    say "live $b (open car $(id8 "$c") in the system of record, at $(id8 "$cur")) — kept: a live car's branch is never a candidate"
+printf '%s' "$RECORD" | jq -r '.branches.live[] | "\(.branch)\u001f\(.car)\u001f\(.kind // "car")\u001f\(.current)"' | while IFS="$US" read -r b c k cur; do
+    say "live $b (open $k $(id8 "$c") in the system of record, at $(id8 "$cur")) — kept: an open $k's branch is never a candidate"
 done
 printf '%s' "$RECORD" | jq -r '.branches.moved[] | "\(.branch)\u001f\(.car)\u001f\(.recorded)\u001f\(.current)"' | while IFS="$US" read -r b c r cur; do
     say "moved $b (car $(id8 "$c") boarded $(id8 "$r"), the forge now holds $(id8 "$cur")) — kept: the commits after boarding live nowhere else, and no merged pull request contains them"
@@ -626,20 +766,26 @@ printf '%s' "$RECORD" | jq -r '.branches.no_head[] | "\(.branch)\u001f\(.car)\u0
     say "no head $b (car $(id8 "$c") landed, recorded no head; the forge holds $(id8 "$cur")) — kept: an unknown head is not evidence, and no merged pull request contains the head the forge holds"
 done
 printf '%s' "$RECORD" | jq -r '.branches.unsafe[] | "\(.branch)\u001f\(.evidence)\u001f\(.pr // "")\u001f\(.car // "")"' | while IFS="$US" read -r b e p c; do
-    [ "$e" = pull-request ] && who="pull request #$p" || who="car $(id8 "$c")"
+    case "$e" in
+        pull-request) who="pull request #$p" ;;
+        decision) who="decision $(id8 "$DECISION")" ;;
+        *) who="car $(id8 "$c")" ;;
+    esac
     say "unsafe name $b ($who) — kept: the name is outside the shape this verb hands to git"
 done
 printf '%s' "$RECORD" | jq -r '.branches.unclaimed[] | "\(.branch)\u001f\(.current)"' | while IFS="$US" read -r b cur; do
     say "unrecorded $b (at $(id8 "$cur")) — kept: no closed, merged $CAR_KIND car in $ARCHIVE names it, no merged pull request contains it, no open car rides it; an abandoned attempt or a branch never filed — a human's decision"
 done
 
+BY_DECISION=""
+[ -z "$DECISION" ] || BY_DECISION=", $(n by_decision) by decision $DECISION"
 if [ "$DRY" = 1 ]; then
-    say "DRY RUN — would delete $(n planned) branch(es) from remote $REMOTE ($(n by_archive) on the archive's record, $(n by_pr) on pull-request ancestry); $(n moved) moved, $(n unrecorded) unrecorded, $(n live) live, $(n gone) gone. Nothing was changed."
+    say "DRY RUN — would delete $(n planned) branch(es) from remote $REMOTE ($(n by_archive) on the archive's record, $(n by_pr) on pull-request ancestry$BY_DECISION); $(n moved) moved, $(n unrecorded) unrecorded, $(n live) live, $(n gone) gone. Nothing was changed."
     exit 0
 fi
 if [ "$(n failed)" != 0 ]; then
     say "FAILED — deleted $(n deleted) of $(n planned) planned branch(es); $(n failed) could not be deleted or read back (named above). The rest stand as recorded."
     exit 1
 fi
-say "OK — deleted $(n deleted) of $(n planned) planned branch(es) from remote $REMOTE ($(n by_archive) on the archive's record, $(n by_pr) on pull-request ancestry), each read back absent; $(n moved) moved, $(n unrecorded) unrecorded and $(n live) live kept and named above."
+say "OK — deleted $(n deleted) of $(n planned) planned branch(es) from remote $REMOTE ($(n by_archive) on the archive's record, $(n by_pr) on pull-request ancestry$BY_DECISION), each read back absent; $(n moved) moved, $(n unrecorded) unrecorded and $(n live) live kept and named above."
 exit 0

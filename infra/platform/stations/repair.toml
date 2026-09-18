@@ -1,0 +1,40 @@
+# ---------------------------------------------------------------------------
+# repair — trains whose CI went red (David, 2026-08-13, bb86d687).
+#
+# A red train is a `pr-train` whose `ci` step recorded `result =
+# failing` — the conductor's own verdict, read where the conductor
+# writes it rather than copied onto the Job. Discipline `age` alone:
+# every train carries the same priority, and the oldest red train is
+# the one blocking the most cars. No WIP limit — nobody chooses to pull
+# a red train, so the depth IS the signal. Upstream is the yard, where
+# a red train is diagnosed by what it is carrying.
+#
+# Declared here since 2026-09-18 (backlog 393d3234, consolidation H4);
+# the seed publishes it insert-if-missing and migrations newer than the
+# cutover stamp in infra/lint/migrations-declare-schema-only.sh declare
+# schema only. To change this station, bump `version` — the seed
+# refuses a row that differs from the live active row of the same
+# (name, version).
+# ---------------------------------------------------------------------------
+
+[[station]]
+name = "repair"
+version = 1
+status = "active"
+title = "Repair — trains whose CI went red"
+kind = "batch"
+discipline = ["age"]
+
+[station.predicate]
+kind = "pr-train"
+status = "open"
+
+[station.predicate.step]
+slug = "ci"
+
+[station.predicate.step.metadata_equals]
+result = "failing"
+
+[station.upstream]
+label = "THE YARD"
+href = "/system/yard"

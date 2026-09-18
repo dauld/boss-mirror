@@ -137,7 +137,7 @@ rules.
 | Timer | Cadence | What it does |
 |---|---|---|
 | `boss-audit-integrity-check.timer` | Daily | Walks `audit_log`, verifies the per-row hash chain, checks `created_at` monotonicity, flags dangling cross-event refs. Schema-level append-only enforcement (`REVOKE INSERT/UPDATE/DELETE`) is the structural complement. |
-| `boss-conservation-invariants.timer` (`infra/lint/`) | Hourly | Re-asserts the five-property correctness protocol across every projection vs `audit_log`. |
+| `boss-conservation-invariants` CronJob (`infra/cluster/manifests/`, running `infra/lint/conservation-invariants.sh` and the tenant directory's own sweep) | Hourly, per instance | Re-asserts the five-property correctness protocol across every projection vs `audit_log`. |
 | `check-service-drift.sh` | Per-deploy | Asserts every declared systemd unit is enabled + active. |
 | `check-service-write-roundtrip.sh` | Per-deploy | POSTs a sentinel row to every write endpoint, queries Postgres directly, deletes — catches in-memory-fallback class of bug. |
 

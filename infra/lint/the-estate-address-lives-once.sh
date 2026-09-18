@@ -84,6 +84,7 @@ crates/orchestrators/boss-cli/src/train.rs	BOSS_TRAIN_FORGE_URL defaults, refusa
 crates/orchestrators/boss-dispatcher-handlers/src/handlers/estate_compare.rs	#[cfg(test)] estate fixtures
 infra/cluster/manifests/boss-audit-integrity.yaml	a CronJob's image: the kubelet pulls it; a manifest reads no host file (the registry as a render parameter is a later car)
 infra/cluster/manifests/boss-backup.yaml	CronJob images, as above
+infra/cluster/manifests/boss-conservation-invariants.yaml	CronJob image
 infra/cluster/manifests/boss-conductor.yaml	the conductor's image and BOSS_TRAIN_FORGE_URL — prod is the source instance; render-instance.sh substitutes only the instance keys
 infra/cluster/manifests/boss-dev.yaml	the dev pod's images and forge credential key; editing it rolls the pod
 infra/cluster/manifests/boss-files-gc.yaml	CronJob image

@@ -5656,12 +5656,17 @@ mod tests {
             .expect("pr-train present in the platform bundle");
 
         // Every evidence step — one that carries required fields for
-        // the conductor to fill — is authority-gated: an ungated ready
-        // step gets role-matched and completed by the simulated
-        // workforce, and a train whose steps the sim closes records
-        // fiction. Property-based, not kind-named (ADR-0021): "has
-        // evidence fields, is not a terminal" IS the conductor-closed
-        // set, whatever kinds those steps declare.
+        // the conductor to fill — is the CONDUCTOR'S, born assigned to
+        // it through an `individual` audience (backlog af796788). Until
+        // 2026-09-18 the gate here was `authority_role = platform-admin`,
+        // against the sim workforce role-matching an ungated step and
+        // closing a train on fiction; that concern is now held by the
+        // workforce's partition rule (88798c96: a real row is never the
+        // sim's), and the role had a cost of its own — the dispatcher's
+        // executes-lane nominated every such step to the agent alias.
+        // Property-based, not kind-named (ADR-0021): "has evidence
+        // fields, is not a terminal" IS the conductor-closed set,
+        // whatever kinds those steps declare.
         let evidence_steps: Vec<_> = train
             .steps
             .iter()
@@ -5673,10 +5678,17 @@ mod tests {
         );
         for s in &evidence_steps {
             assert_eq!(
-                s.authority_role.as_deref(),
-                Some("platform-admin"),
-                "evidence step `{}` must be closed by the conductor or a person, \
-                 never the sim workforce",
+                s.selectors().assignee_id.as_deref(),
+                Some("automation:train-conductor"),
+                "evidence step `{}` is the conductor's: born assigned to it, so neither \
+                 the executes-lane nor a role queue can hand it to anyone else",
+                s.title
+            );
+            assert_eq!(
+                s.selectors().authority_role,
+                None,
+                "evidence step `{}` declares no role — a role with no assignee is what \
+                 nominated every train step to the agent alias",
                 s.title
             );
         }

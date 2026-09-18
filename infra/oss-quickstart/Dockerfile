@@ -369,6 +369,14 @@ COPY infra/oss-quickstart/tenant-modules.sh /usr/local/bin/tenant-modules.sh
 # way the boss-gcp timers do — one script pair, both hosts (jq above
 # is theirs).
 COPY infra/boss-maintenance-wrap.sh infra/boss-step.sh infra/boss-api-curl.sh /usr/local/bin/
+# The platform's conservation-invariant sweep and the helper it sources,
+# for the hourly boss-conservation-invariants CronJob (H12, backlog
+# 236529aa) — the brewery's own sweep rides in with `COPY examples`
+# above. The gate never builds the image, so
+# crates/core/boss-testing/tests/conservation_invariants_sweep_the_sor.rs
+# pins this pairing to the path the manifest runs.
+COPY infra/lint/conservation-invariants.sh /opt/boss/infra/lint/conservation-invariants.sh
+COPY infra/lint/lib/conservation.sh /opt/boss/infra/lint/lib/conservation.sh
 COPY infra/oss-quickstart/generate-configs.sh /usr/local/bin/boss-generate-configs
 RUN chmod +x /opt/boss/infra/oss-quickstart/database-from-url.sh /usr/local/bin/boss-init /usr/local/bin/boss-launch \
     /usr/local/bin/boss-generate-configs \

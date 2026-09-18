@@ -55,7 +55,9 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::audience::Audience;
-use crate::registry::{StepSpec, Terminal, WorkflowSpec};
+use crate::registry::{StepSpec, Terminal, WorkflowSpec, WorkflowStatus};
+use crate::station_queue::{DisciplineKey, StationPredicate, default_discipline};
+use crate::stations::{StationCapability, StationKind, StationLens, StationSpec, StationUpstream};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SeedLoaderError {
@@ -386,6 +388,183 @@ fn workflow_toml_to_spec(
     }
     spec.owning_team = default_owner.to_string();
     Ok(spec)
+}
+
+// ---------------------------------------------------------------------------
+// Stations — the platform station bundle (infra/platform/stations/)
+// ---------------------------------------------------------------------------
+
+/// Serde mirror of [`StationSpec`] for a bundle row. Decoupled from
+/// the registry type for the same reason [`StepToml`] is: the TOML
+/// carries no `created_at` (that is when the deployment was built,
+/// stamped by the seed's clock), and `discipline` may be omitted for
+/// the ratified `priority, then age` default. Every other column is
+/// named exactly as the `stations` table names it, so a reader can
+/// hold the file beside `116-stations.sql` and see one row.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StationToml {
+    name: String,
+    version: i32,
+    /// The bundle declares what a FRESH deployment gets, and a fresh
+    /// deployment gets active rows; `draft` and `retired` are live
+    /// verbs (`POST /api/stations/{name}/retire`), not declarations.
+    /// Carried rather than implied so the equality pin compares every
+    /// column, and refused below when it is anything else.
+    status: WorkflowStatus,
+    title: String,
+    kind: StationKind,
+    predicate: StationPredicate,
+    #[serde(default = "default_discipline")]
+    discipline: Vec<DisciplineKey>,
+    #[serde(default)]
+    wip_limit: Option<i32>,
+    #[serde(default)]
+    terminal_window_days: Option<u32>,
+    #[serde(default)]
+    capability: Option<StationCapability>,
+    #[serde(default)]
+    rollup_parent: Option<String>,
+    #[serde(default)]
+    upstream: Option<StationUpstream>,
+    #[serde(default)]
+    lens: Option<StationLens>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StationsFile {
+    #[serde(rename = "station", default)]
+    stations: Vec<StationToml>,
+}
+
+/// Load the platform station bundle: a DIRECTORY of `<name>.toml`
+/// files, each holding exactly one `[[station]]` whose `name` is the
+/// file's stem — the same rules as [`load_workflows_with_owning_team`]
+/// and for the same reason (adding a station is dropping a file in;
+/// two cars touch no shared line). A single file is accepted too.
+///
+/// Since 2026-09-18 (backlog 393d3234, consolidation H4) this bundle
+/// is where a platform station is DECLARED. Seven migrations were the
+/// only home before; they stay as history, and migrations newer than
+/// the cutover stamp in `infra/lint/migrations-declare-schema-only.sh`
+/// may not insert one. `crate::station_seed::seed_stations` publishes
+/// the bundle insert-if-missing by (name, version) at every start.
+///
+/// Every row is run through [`crate::station_lint::gate_active`] here
+/// — the viability gate every API publish passes — so a malformed
+/// bundle fails on the deployment that is booting, not on the first
+/// lens that reads the row. `created_at` is stamped `now` by the
+/// caller (the seed's clock) and is not part of the declaration.
+pub fn load_stations(path: impl AsRef<Path>) -> Result<Vec<StationSpec>, SeedLoaderError> {
+    let path_ref = path.as_ref();
+    if !path_ref.is_dir() {
+        return load_station_file(path_ref);
+    }
+    let mut specs = Vec::new();
+    for file in bundle_files(path_ref)? {
+        let file_str = file.display().to_string();
+        let stem = file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let loaded = load_station_file(&file)?;
+        let names: Vec<&str> = loaded.iter().map(|s| s.name.as_str()).collect();
+        if names != [stem.as_str()] {
+            return Err(SeedLoaderError::Parse(
+                file_str,
+                format!(
+                    "a station file holds exactly one [[station]] named after the file \
+                     (expected name `{stem}`, found {names:?})"
+                ),
+            ));
+        }
+        specs.extend(loaded);
+    }
+    Ok(specs)
+}
+
+fn load_station_file(path: &Path) -> Result<Vec<StationSpec>, SeedLoaderError> {
+    let path_str = path.display().to_string();
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| SeedLoaderError::Io(path_str.clone(), e.to_string()))?;
+    parse_stations(&text, &path_str)
+}
+
+/// Parse TOML text directly — the file loader is a thin wrapper.
+pub fn parse_stations(text: &str, source: &str) -> Result<Vec<StationSpec>, SeedLoaderError> {
+    let file: StationsFile = toml::from_str(text)
+        .map_err(|e| SeedLoaderError::Parse(source.to_string(), e.to_string()))?;
+    let specs: Vec<StationSpec> = file
+        .stations
+        .into_iter()
+        .map(|s| station_toml_to_spec(s, source))
+        .collect::<Result<_, _>>()?;
+    let failures: Vec<String> = specs
+        .iter()
+        .filter_map(|spec| {
+            crate::station_lint::gate_active(spec)
+                .err()
+                .map(|problems| {
+                    problems
+                        .iter()
+                        .map(|p| format!("  {p}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+        })
+        .collect();
+    if !failures.is_empty() {
+        return Err(SeedLoaderError::LintFailed {
+            file: source.to_string(),
+            failures,
+        });
+    }
+    Ok(specs)
+}
+
+fn station_toml_to_spec(toml: StationToml, source: &str) -> Result<StationSpec, SeedLoaderError> {
+    if toml.status != WorkflowStatus::Active {
+        return Err(SeedLoaderError::Parse(
+            source.to_string(),
+            format!(
+                "station `{}` declares status `{}`; a bundle row is what a fresh \
+                 deployment gets, and that is an active row — retiring is a live verb",
+                toml.name,
+                toml.status.as_str()
+            ),
+        ));
+    }
+    if toml.version < 1 {
+        return Err(SeedLoaderError::Parse(
+            source.to_string(),
+            format!(
+                "station `{}` declares version {}; versions start at 1",
+                toml.name, toml.version
+            ),
+        ));
+    }
+    Ok(StationSpec {
+        name: toml.name,
+        version: toml.version,
+        status: toml.status,
+        title: toml.title,
+        kind: toml.kind,
+        predicate: toml.predicate,
+        discipline: toml.discipline,
+        wip_limit: toml.wip_limit,
+        terminal_window_days: toml.terminal_window_days,
+        capability: toml.capability,
+        rollup_parent: toml.rollup_parent,
+        upstream: toml.upstream,
+        lens: toml.lens,
+        // Not a declaration: the seed stamps its own clock reading on
+        // the row it writes, and the equality pin excludes the column.
+        // The epoch here is a sentinel nothing reads before the seed
+        // overwrites it — never `Utc::now()` in a loader
+        // (infra/lint/no-wallclock.sh).
+        created_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+    })
 }
 
 #[cfg(test)]

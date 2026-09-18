@@ -333,7 +333,9 @@ fn the_tree_list_is_well_formed_and_names_the_inventory() {
 fn the_list_agrees_with_the_roles_registry() {
     let list = tree_list();
     let legacy = role_units("roles.legacy-stack");
-    assert!(legacy.len() >= 8, "legacy-stack names {legacy:?}");
+    // Seven since 2026-09-18: boss-conservation-invariants left with its
+    // unit files once its cluster CronJob existed (H12, backlog 236529aa).
+    assert!(legacy.len() >= 7, "legacy-stack names {legacy:?}");
     for stem in &legacy {
         for suffix in [".timer", ".service"] {
             let unit = format!("{stem}{suffix}");

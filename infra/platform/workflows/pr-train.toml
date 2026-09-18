@@ -13,6 +13,27 @@
 #
 # In-flight trains are untouched: the seed binary inserts only what is
 # missing, so an open train keeps its pinned version.
+#
+# THE CONDUCTOR'S STEPS ARE THE CONDUCTOR'S (backlog af796788, 2026-09-18).
+# Every task step below is completed by `automation:train-conductor`
+# and by nothing else, and each now declares that actor as its
+# `audience` — the `individual` shape of design f5ebd2e1 — in place of
+# the bare `authority_role = "platform-admin"` it carried at live v1.
+# Measured on pr-trains 018fa4ad, 784c4178 and 16966a29: a role with no
+# assignee at birth is what the dispatcher's executes-lane nominates,
+# so all seven steps of every train landed in the agent alias's MY
+# WORK (`claude@algedonic.dev`) and the conductor completed them over
+# its head. A role with no nomination would be no better: the
+# assignment query's role arm lists an unassigned role step for EVERY
+# holder, so the same seven would have reached David's queue as
+# claimable work. Born assigned to the conductor, a train step is
+# passed over by the dispatcher (assignee already set), matched by
+# neither arm of the assignment query, and covered — not orphaned —
+# by the no-orphan-steps check. Authority is unchanged: the jobs API
+# never gated a train step's completion on the role; policy does.
+# Publishing this shape is a separate act — a new version through
+# `POST /api/workflows` + publish; the seed inserts nothing over an
+# existing kind.
 # ---------------------------------------------------------------------------
 
 [[workflow]]
@@ -36,7 +57,7 @@ title = "collect"
 kind = "task"
 ready_when = "steps.scheduled.done"
 title_template = "Collect what is ready to board"
-authority_role = "platform-admin"
+audience = { individual = "automation:train-conductor" }
 [[workflow.step.fields]]
 name = "boarded"
 field_type = "string"
@@ -47,7 +68,7 @@ title = "assemble"
 kind = "task"
 ready_when = "steps.collect.done"
 title_template = "Assemble the train branch"
-authority_role = "platform-admin"
+audience = { individual = "automation:train-conductor" }
 [[workflow.step.fields]]
 name = "train_ref"
 field_type = "string"
@@ -58,7 +79,7 @@ title = "pr"
 kind = "task"
 ready_when = "steps.assemble.done"
 title_template = "Open the batched PR"
-authority_role = "platform-admin"
+audience = { individual = "automation:train-conductor" }
 [[workflow.step.fields]]
 name = "pr_url"
 field_type = "string"
@@ -69,7 +90,7 @@ title = "ci"
 kind = "task"
 ready_when = "steps.pr.done"
 title_template = "Yard inspection — CI verdict"
-authority_role = "platform-admin"
+audience = { individual = "automation:train-conductor" }
 metadata_defaults = { notify_on_done = true }
 [[workflow.step.fields]]
 name = "result"
@@ -81,7 +102,7 @@ title = "merged"
 kind = "task"
 ready_when = "steps.pr.done"
 title_template = "DEPARTED — merged into main"
-authority_role = "platform-admin"
+audience = { individual = "automation:train-conductor" }
 metadata_defaults = { notify_on_done = true }
 [[workflow.step.fields]]
 name = "merge_ref"
@@ -93,7 +114,7 @@ title = "deployed"
 kind = "task"
 ready_when = "steps.merged.done"
 title_template = "In transit — deployed to the playground"
-authority_role = "platform-admin"
+audience = { individual = "automation:train-conductor" }
 metadata_defaults = { notify_on_done = true }
 [[workflow.step.fields]]
 name = "deployed"
@@ -105,7 +126,7 @@ title = "converged"
 kind = "task"
 ready_when = "steps.deployed.done"
 title_template = "In transit — cluster converged"
-authority_role = "platform-admin"
+audience = { individual = "automation:train-conductor" }
 [[workflow.step.fields]]
 name = "cluster_commit"
 field_type = "string"

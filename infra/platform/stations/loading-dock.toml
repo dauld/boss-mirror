@@ -1,0 +1,47 @@
+# ---------------------------------------------------------------------------
+# loading-dock — the yard's dock: ship-a-change cars parked at review,
+# not yet boarded on a train, and not held.
+#
+# Version 3 is the row the migrations produced (116 seeded v1, 133 gave
+# it the WIP limit of 24 as v2, 20260910201453 taught it the `hold`
+# brake as v3; 119 filled `upstream` in place). Declared here since
+# 2026-09-18 (backlog 393d3234, consolidation H4): a station's home is
+# this bundle, published insert-if-missing by `boss-platform-workflow-
+# seed`, and migrations newer than the cutover stamp in
+# infra/lint/migrations-declare-schema-only.sh declare schema only.
+#
+# WIP limit 24 = two full trains (David, 2026-08-15) — ADVISORY, never
+# enforced: the queue envelope reports `over_limit`, lenses warn.
+# `metadata_unmarked = ["hold"]` reads the marker the way the whole
+# system reads markers (`stranded::marked`): a hold released by writing
+# `hold = false` is released here too, which `metadata_absent` would
+# have got wrong. The FEEDBACK upstream is where a dock that is emptier
+# than expected is diagnosed: at triage, one click up.
+#
+# To change this station, bump `version` — the seed refuses a row that
+# differs from the live active row of the same (name, version).
+# ---------------------------------------------------------------------------
+
+[[station]]
+name = "loading-dock"
+version = 3
+status = "active"
+title = "Loading dock — parked ship-a-change cars"
+kind = "batch"
+discipline = ["priority", "age"]
+wip_limit = 24
+
+[station.predicate]
+kind = "ship-a-change"
+status = "open"
+metadata_present = ["branch"]
+metadata_absent = ["train"]
+
+[station.predicate.step]
+slug = "review"
+status_in = ["ready", "active"]
+metadata_unmarked = ["hold"]
+
+[station.upstream]
+label = "FEEDBACK"
+href = "/system/feedback"

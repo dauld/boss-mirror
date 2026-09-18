@@ -21,7 +21,7 @@
 //! counted entries across documents would read every node as DOUBLED.
 //! The fixture carries that shape on purpose.
 
-use boss_testing::repo_root;
+use boss_testing::{feed_stdin, repo_root};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -201,7 +201,6 @@ fn w1_as_found() -> Live {
 }
 
 fn run(args: &[&str], stdin: &str, patches: Option<&Path>, path_env: Option<&Path>) -> Output {
-    use std::io::Write;
     use std::process::Stdio;
     // `/bin/bash` by absolute path: the no-python case empties PATH, and
     // the shell must still be found for the script to refuse in.
@@ -219,14 +218,9 @@ fn run(args: &[&str], stdin: &str, patches: Option<&Path>, path_env: Option<&Pat
     }
     let mut child = cmd.spawn().expect("spawn check-declared.sh");
     // A usage refusal exits before it reads stdin, so the write races
-    // the exit and loses about one run in four with EPIPE (backlog
-    // 28f29f0b). A closed pipe here is the child's verdict, not the
-    // test's failure: the verdict is read from the exit status below.
-    match child.stdin.take().unwrap().write_all(stdin.as_bytes()) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
-        Err(e) => panic!("write stdin to check-declared.sh: {e}"),
-    }
+    // the exit (backlog 28f29f0b); the one tolerant write lives in
+    // boss_testing::feed_stdin, shared with the dns twin (d0eafe94).
+    feed_stdin(&mut child, stdin.as_bytes());
     child.wait_with_output().unwrap()
 }
 
