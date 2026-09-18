@@ -34,7 +34,7 @@
 # WHAT `pipeline` MEANS. The object runs the trains and gates, or is
 # pinned to prod for a stated reason: it exists exactly once, in prod,
 # exactly as the file says. The conductor, the dev pod and its access,
-# the credential broker, the gate seed, break-glass — and two
+# the credential broker, the gate seed, break-glass — and three
 # instance-SHAPED objects held back for the reasons on their lines.
 
 # --- instance: rendered once per entry in instances.toml ----------------
@@ -114,6 +114,15 @@ cloudflared-config.yaml pipeline
 # ClusterRoleBinding are cluster-scoped names a second render would
 # collide on.
 boss-estate-observe.yaml pipeline
+#
+# boss-playground-crawl: crawls ONE instance — the playground, by its
+# Service name — and files its packet on prod's jobs door, so it is
+# instance-shaped; but it runs in boss-dev because the forge is not
+# anonymously readable and the clone it needs uses `forge-read`, the
+# pipeline namespace's credential (the gate runner's). Rendered per
+# instance it would run once per namespace, each against the same
+# target, each without the credential (design 0e07ce64, 2026-09-18).
+boss-playground-crawl.yaml pipeline
 #
 # boss-backup: the nightly dump ships to boss-gcp and to GCS under the
 # name `boss-<stamp>.sql.gz` with a keep-21 retention shared by every

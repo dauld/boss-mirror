@@ -1,11 +1,12 @@
 // Mocked-backend Playwright config — the CI-gated frontend smoke layer.
 //
-// Unlike playwright.config.ts (which runs the suite against the live
-// backend via the dev-server proxy + seeds a scratch stack in
-// globalSetup), this config runs specs that intercept EVERY `/api/**`
-// call in-browser. So it needs only the dev-server serving the SPA
+// The specs under tests/mocked intercept EVERY `/api/**` call
+// in-browser, so this config needs only the dev-server serving the SPA
 // shell — no backend, no seeding — which makes it fast, deterministic,
 // and safe to gate in the fast `web` CI job. See tests/mocked/_mockApi.ts.
+// (Until 2026-09-18 a sibling playwright.config.ts ran a live-backend
+// suite against a scratch stack; nothing ran it, and it went with
+// design 0e07ce64. The live crawl is playwright.live.config.ts.)
 
 import { defineConfig } from '@playwright/test';
 

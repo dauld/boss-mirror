@@ -1,0 +1,75 @@
+# ---------------------------------------------------------------------------
+# maintenance-playground-crawl — every catalogued surface rendered from
+# the playground's real data as a guest sees it, nightly.
+#
+# Design 0e07ce64, decided 2026-09-18 (backlog 8664f53e). The 35-spec
+# live Playwright suite under apps/web/tests/smoke ran under no CI job,
+# gate check or chore from 2026-06-18 until it was deleted with this
+# chore; the mocked suite that IS gated proves every surface renders
+# under an adversarial fake backend, and cannot prove the other half —
+# that a surface renders the shape the backend actually produces. On
+# 2026-05-22 that half slipped twice (a null `extras` on a real catalog
+# model, a real part whose detail route 404'd while the list linked to
+# it), and on this chore's first rehearsal it found `/it/registry/
+# dispatcher` throwing on the playground's real rule rows.
+#
+# WHAT RUNS. infra/cluster/manifests/boss-playground-crawl.yaml: a
+# CronJob in the boss-ci image (the only one with the browser) that
+# clones main, installs apps/web and runs `bun run test:live` — the
+# mocked suite's route roster against the playground's in-cluster
+# gateway, as the guest session the playground offers a stranger. The
+# playground only (public data, a read-only role), never prod.
+#
+# THE VERDICT rides this packet through boss-chore.sh: `result=ok` on a
+# clean night, `result=failed` with the crawl's own output — one
+# `RED <route> <kind>: <error>` line per red surface — when any surface
+# threw or never painted. Filing one backlog-item per RED line is the
+# daily judge's job, not this run's: the chore records; the reader opens.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "maintenance-playground-crawl"
+label = "Playground crawl"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "The nightly crawl of every catalogued surface against the playground as a guest: the shell must paint and nothing may throw. A red night's output names each red route on its own line."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Timer fired"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "cluster-cronjob" }
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Crawl the playground"
+# The step is the automation's and says so (backlog 4f909642,
+# 2026-09-18): born assigned to the actor boss-step.sh signs as, so the
+# dispatcher's executes-lane never nominates it to the agent and no
+# role queue lists it.
+audience = { individual = "automation:boss-step" }
+fields = [{ name = "result", field_type = "string", required = true }]
+
+[[workflow.step]]
+title = "completed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
+title_template = "Every surface rendered"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }
+
+# A red crawl, a clone that could not read the forge, or a browser that
+# never started all land here with the exit status and the output that
+# says which — never an open packet that reads as a run in progress.
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Crawl red"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }

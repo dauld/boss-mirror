@@ -1,0 +1,174 @@
+# The nightly playground crawl — every catalogued surface rendered from
+# the playground's real data as a guest, in a headless browser
+# (design 0e07ce64, backlog 8664f53e, 2026-09-18).
+#
+# WHAT IT REPLACES. apps/web/tests/smoke held 35 live-backend Playwright
+# specs that no CI job, gate check or chore ran between 2026-06-18 and
+# their deletion with this manifest. The gated mocked suite proves every
+# surface renders under a fake backend; this chore proves the same
+# roster (tests/mocked/_routes.ts, ONE list) renders the shape the
+# backend actually produces. Its first rehearsal from the dev pod found
+# /it/registry/dispatcher throwing on the playground's real rule rows.
+#
+# WHY THIS SHAPE — each line measured 2026-09-18:
+#   * the boss-ci image, not the boss image: the browser is baked into
+#     boss-ci at /opt/ms-playwright (infra/forge/boss-ci/Dockerfile);
+#     the boss image has none, and baking chromium into the production
+#     image for one nightly read is the larger change by far.
+#   * a clone, not a baked script: the crawl IS the tree's live config +
+#     spec + the mocked roster, so it must read the tree. The forge is
+#     not anonymously readable (info/refs answers 401), so the clone
+#     needs the read credential — `forge-read`, the Secret the gate
+#     runner in this namespace clones with. That credential is why the
+#     chore lives in boss-dev and is classified `pipeline` in
+#     instance-manifests.txt rather than rendered per instance.
+#   * the in-cluster gateway, not the public hostname: an anonymous
+#     request to https://playground.algedonic.dev answers 302 to
+#     Cloudflare Access, so a browser from here cannot reach it; the
+#     tunnel proxies that hostname to this same Service in plain HTTP.
+#     The crawl signs in the way a stranger does — POST /api/auth/guest —
+#     and the spec re-plants the (Secure-flagged) cookie for the http
+#     origin; see apps/web/tests/live/playground-crawl.spec.ts.
+#   * prod's jobs door for the packet: the crawl is IT's work about the
+#     playground, recorded where IT's queue is — the same door the
+#     conductor in this namespace uses.
+#   * the chore wrapper (boss-chore.sh), copied in from the boss image
+#     by an init container:
+#     the wrapper is what records `failed` as well as `ok` (480e183c),
+#     and boss-ci does not carry it. Copied BEFORE the clone so a clone
+#     that cannot read the forge is a recorded failure, not silence.
+#
+# THE VERDICT. The wrapper carries the check's output onto the `run`
+# step: `crawled N routes … : R red`, then one `RED <route> <kind>:
+# <error>` line per red surface. Opening one backlog-item per RED line
+# is the daily judge's job, not this run's — the chore records, the
+# reader opens.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: boss-playground-crawl
+  namespace: boss-dev
+  labels:
+    boss-chore: "true"
+spec:
+  # After the 03:30 nightlies; the sim has ticked all day.
+  schedule: "45 4 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      # The crawl of 55 routes took 1.4 min from the dev pod (2026-09-18);
+      # the clone and install are seconds to a minute. An hour is a
+      # stuck browser, not a slow one.
+      activeDeadlineSeconds: 3600
+      template:
+        spec:
+          # The gate runner's uid, for the gate runner's reasons
+          # (infra/gate-runner/gate-runner.yaml): boss-ci has no passwd
+          # entry for 1500, 65534 exists in the base image, and fsGroup
+          # 1500 makes the emptyDirs and the secret group-readable.
+          securityContext:
+            fsGroup: 1500
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 1500
+            seccompProfile: {type: RuntimeDefault}
+          affinity:
+            nodeAffinity:
+              # A clone, a package install and a browser are a write
+              # sink; never on a node that fsyncs for the cluster
+              # (infra/lint/a-build-never-shares-a-node-with-etcd.sh).
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - {key: node-role.kubernetes.io/control-plane, operator: DoesNotExist}
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  preference:
+                    matchExpressions:
+                      - {key: boss.dev/purpose, operator: In, values: ["build"]}
+          imagePullSecrets:
+            - {name: forgejo-registry}
+          restartPolicy: Never
+          initContainers:
+            # The chore wrapper and the two helpers it resolves next to
+            # itself, plus the transport-retry curl the step helper finds
+            # the same way. The boss image is where the Dockerfile COPYs
+            # them (a_chore_records_ok_and_failed.rs pins that).
+            - name: tools
+              image: 10.20.0.15:3000/david/boss:latest
+              command:
+                - cp
+                - /usr/local/bin/boss-chore.sh
+                - /usr/local/bin/boss-maintenance-wrap.sh
+                - /usr/local/bin/boss-step.sh
+                - /usr/local/bin/boss-api-curl.sh
+                - /tools/
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: {drop: ["ALL"]}
+              volumeMounts:
+                - {name: tools, mountPath: /tools}
+          containers:
+            - name: crawl
+              image: 10.20.0.15:3000/david/boss-ci:rust1.96
+              imagePullPolicy: Always
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: {drop: ["ALL"]}
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  # The clone is INSIDE the check: a forge that refuses the
+                  # credential is a failed run the packet records, with the
+                  # refusal in its output.
+                  /tools/boss-chore.sh maintenance-playground-crawl "Playground crawl" -- bash -c '
+                    set -euo pipefail
+                    git clone --depth 1 "$FORGE_URL" /work/boss
+                    cd /work/boss/apps/web
+                    PUPPETEER_SKIP_DOWNLOAD=1 bun install --frozen-lockfile
+                    bun run test:live
+                  '
+              env:
+                - {name: HOME, value: /work}
+                - {name: CI, value: "1"}
+                - {name: FORGE_URL, value: http://10.20.0.15:3000/david/boss.git}
+                # git's env-var config channel, the dev pod's way in
+                # (boss-dev.yaml): the helper exists the moment the
+                # container starts and writes nothing to disk.
+                - {name: GIT_CONFIG_COUNT, value: "1"}
+                - {name: GIT_CONFIG_KEY_0, value: "credential.http://10.20.0.15:3000.helper"}
+                - {name: GIT_CONFIG_VALUE_0, value: "!f() { echo username=x-access-token; echo password=$(cat /etc/forge/token); }; f"}
+                # The instance crawled: the playground's gateway Service,
+                # the origin the tunnel proxies playground.algedonic.dev
+                # to. Pinned to instances.toml's playground namespace by
+                # crates/core/boss-testing/tests/the_playground_is_crawled_nightly.rs.
+                - name: BOSS_E2E_BASE_URL
+                  value: http://boss-gateway.boss-playground.svc.cluster.local
+                # The record: prod's jobs door, IT's queue.
+                - name: BOSS_JOBS_URL
+                  value: http://boss-jobs-internal.boss.svc.cluster.local:7900
+              resources:
+                # Headroom for bun install plus one headless chromium; a
+                # bounded Job dies alone if it is wrong.
+                requests: {cpu: "1", memory: 2Gi}
+                limits: {cpu: "2", memory: 4Gi}
+              volumeMounts:
+                - {name: tools, mountPath: /tools, readOnly: true}
+                - {name: work, mountPath: /work}
+                - {name: forge-token, mountPath: /etc/forge, readOnly: true}
+          volumes:
+            - name: tools
+              emptyDir: {}
+            # The clone, node_modules and bun's cache; gone with the pod.
+            - name: work
+              emptyDir: {sizeLimit: 4Gi}
+            # Read-only forge credential, the gate runner's Secret. Optional
+            # so an unbootstrapped namespace runs the Job and RECORDS the
+            # clone's refusal instead of holding a pod in ContainerCreating
+            # with no packet.
+            - name: forge-token
+              secret: {secretName: forge-read, optional: true, defaultMode: 0400}

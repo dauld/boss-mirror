@@ -36,24 +36,19 @@
 // tests at the bottom) so it can only shrink.
 
 import { test, expect, type Page } from '@playwright/test';
-import { installSmokeMocks } from './_smokeMocks';
-import { FAILURE_MARKER, ROUTES } from './_routes';
+import { SHELL_ENDPOINTS, installSmokeMocks } from './_smokeMocks';
+import { FAILURE_MARKER, LANDING_FALLBACK, ROUTES } from './_routes';
 
-/// The endpoints that stay up. The app shell cannot paint without
+/// The endpoints that stay up — SHELL_ENDPOINTS, defined beside the
+/// fixtures in _smokeMocks.ts since the interaction crawl's empty leg
+/// (f2b8a01c) needs the same set. The app shell cannot paint without
 /// identity and the nav cannot resolve visibility without the taxonomy
-/// registries, and a crawl where nothing renders measures nothing. Every
-/// other endpoint — including the chrome's own /api/jobs/live and
+/// registries, and a crawl where nothing renders measures nothing.
+/// Every other endpoint — including the chrome's own /api/jobs/live and
 /// /api/jobs/step-types — is broken, which is what makes the assertion
 /// below meaningful: those two break on all 51 routes, and the 34 silent
 /// ones still show no marker, so a marker is never chrome's.
-const HEALTHY: ReadonlyArray<RegExp> = [
-  /\/api\/session$/,
-  /\/api\/auth\/me$/,
-  /\/api\/people$/,
-  /\/api\/tenant\/manifest$/,
-  /\/api\/classes(\?|$)/,
-  /\/api\/subject-kinds$/,
-];
+const HEALTHY = SHELL_ENDPOINTS;
 
 /// Surfaces that render NOTHING when every read behind them fails, with
 /// what each one reads. Shrinking this list is the work; adding to it is
@@ -79,7 +74,7 @@ const SILENT: ReadonlyMap<string, string> = new Map([
   ['/ux/assets', 'assets: /api/assets + /api/assets/summary'],
   ['/ux/calendar/me', 'my calendar: identity-keyed reads never fire under the empty mocked session'],
   ['/ux/service', 'service: /api/jobs + /api/workflows'],
-  ['/ux/refurb', 'refurb: /api/jobs + /api/workflows/{kind}'],
+  [LANDING_FALLBACK, 'the landing page (router catch-all): /api/workflows + /api/jobs/live'],
   ['/ux/hr', 'HR: the workflow + step reads fire on the Workflows tab, not on load (see false-empty.mocked.spec.ts, which pins them)'],
   ['/ux/sales', 'sales: /api/jobs + /api/workflows'],
   ['/ux/shop', 'shop: /api/inventory/items + /api/workflows'],

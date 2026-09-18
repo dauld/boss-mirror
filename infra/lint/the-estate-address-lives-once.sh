@@ -96,6 +96,7 @@ infra/cluster/manifests/boss-jobs-internal.yaml	THE MetalLB pin that defines the
 infra/cluster/manifests/boss-ledger-recognize.yaml	CronJob image
 infra/cluster/manifests/boss-ledger-replay-check.yaml	CronJob image
 infra/cluster/manifests/boss-messages-events-purge.yaml	CronJob image
+infra/cluster/manifests/boss-playground-crawl.yaml	CronJob images and the clone-by-IP a Job needs before it has a checkout or a host file (gate-runner.yaml + run.sh's shape)
 infra/cluster/manifests/boss-search-reindex.yaml	CronJob image
 infra/cluster/manifests/boss-views-catchup.yaml	CronJob image
 infra/cluster/manifests/boss.yaml	the instance's images and BOSS_BROKER_FORGE_URL (prod is the source instance)

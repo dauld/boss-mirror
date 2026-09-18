@@ -76,6 +76,42 @@ const SHIPMENT = {
   created_on: '2026-01-01', shipped_on: null, estimated_delivery: null, delivered_on: null,
 };
 
+/// The endpoints the app SHELL needs to paint at all: identity, the
+/// tenant manifest and the taxonomy registries the nav resolves
+/// visibility from. A crawl that breaks or empties every read still
+/// keeps these up, because a crawl where nothing renders measures
+/// nothing. Read by outage-crawl (every other read 500s) and
+/// interaction-crawl's empty leg (every other read is `[]`); it lives
+/// here, beside the fixtures it names, so the two legs cannot disagree
+/// about what "the shell" is.
+export const SHELL_ENDPOINTS: ReadonlyArray<RegExp> = [
+  /\/api\/session$/,
+  /\/api\/auth\/me$/,
+  /\/api\/people$/,
+  /\/api\/tenant\/manifest$/,
+  /\/api\/classes(\?|$)/,
+  /\/api\/subject-kinds$/,
+];
+
+/// The endpoints whose fixture is an OBJECT, not a list. Named once,
+/// used below to route them and exported for interaction-crawl's empty
+/// leg, which answers `[]` to every collection read and must let these
+/// fall through to their (already empty, or seeded-detail) fixture: a
+/// list where an object is due is a malformed read, not an empty one.
+export const JOBS_LIVE = /\/api\/jobs\/live$/;
+export const JOBS_SUMMARY = /\/api\/jobs\/summary(\?|$)/;
+export const YARD_STATUS = /\/api\/yard\/status$/;
+export const WORKFLOW_DETAIL = /\/api\/workflows\/[^/]+$/;
+export const DISPATCHER_RULES = /\/api\/dispatcher\/rules$/;
+export const GATEWAY_PERF = /\/api\/gateway\/perf$/;
+export const MARKETING_ASSET_DETAIL = /\/api\/catalog\/marketing-assets\/[^/]+$/;
+export const VIEW_RESULTS = /\/api\/views\/[^/]+\/results/;
+export const SHIPMENT_DETAIL = /\/api\/shipping\/shipments\/[^/]+$/;
+export const OBJECT_ENDPOINTS: ReadonlyArray<RegExp> = [
+  JOBS_LIVE, JOBS_SUMMARY, YARD_STATUS, WORKFLOW_DETAIL, DISPATCHER_RULES, GATEWAY_PERF,
+  MARKETING_ASSET_DETAIL, VIEW_RESULTS, SHIPMENT_DETAIL,
+];
+
 export async function installSmokeMocks(page: Page): Promise<void> {
   // Strip the bun dev-server HMR overlay. Identity comes from the
   // mocked `/api/session` below, not from anything stored client-side.
@@ -94,11 +130,11 @@ export async function installSmokeMocks(page: Page): Promise<void> {
   await page.route(/\/api\/auth\/me$/, (r) => json(r, {}));
 
   // Live job state (objects, not lists — the catch-all `[]` would break these).
-  await page.route(/\/api\/jobs\/live$/, (r) => json(r, { counts: {}, open_total: 0, recent: [], sim_clock: {} }));
-  await page.route(/\/api\/jobs\/summary(\?|$)/, (r) => json(r, { counts: {}, total: 0 }));
+  await page.route(JOBS_LIVE, (r) => json(r, { counts: {}, open_total: 0, recent: [], sim_clock: {} }));
+  await page.route(JOBS_SUMMARY, (r) => json(r, { counts: {}, total: 0 }));
   // The yard status read-model (object, not a list). An empty-but-well-
   // formed payload so the page renders its "no trains / no cars" states.
-  await page.route(/\/api\/yard\/status$/, (r) =>
+  await page.route(YARD_STATUS, (r) =>
     json(r, {
       trains: [], dock: [], recent: [], stranded: [],
       boarding: { dock_threshold: null, cooldown_minutes: null, at_times: [], dock_depth: 0, threshold_met: null, summary: 'No boarding cadence is configured.' },
@@ -111,7 +147,7 @@ export async function installSmokeMocks(page: Page): Promise<void> {
 
   // Workflow registry + the adversarial kind (omitted-terminal step).
   await page.route(/\/api\/workflows$/, (r) => json(r, [WORKFLOW]));
-  await page.route(/\/api\/workflows\/[^/]+$/, (r) => json(r, WORKFLOW));
+  await page.route(WORKFLOW_DETAIL, (r) => json(r, WORKFLOW));
   await page.route(/\/api\/workflows\/[^/]+\/versions$/, (r) => json(r, [WORKFLOW]));
   await page.route(/\/api\/jobs\/step-types$/, (r) => json(r, [
     { kind: 'generic', label: 'Generic', category: 'generic', ux: 'inline', description: '' },
@@ -122,7 +158,7 @@ export async function installSmokeMocks(page: Page): Promise<void> {
   ]));
 
   // Dispatcher cascade.
-  await page.route(/\/api\/dispatcher\/rules$/, (r) => json(r, {
+  await page.route(DISPATCHER_RULES, (r) => json(r, {
     rules: [{ name: 'r1', on_event: 'step.done.task', when: null, do: [{ handler: 'h1', args: {} }], version: 1 }],
     handler_emits: { h1: ['x.y'] }, system_edges: [],
   }));
@@ -140,7 +176,7 @@ export async function installSmokeMocks(page: Page): Promise<void> {
   ]));
 
   // Gateway perf histogram (PerfPage iterates `.endpoints`).
-  await page.route(/\/api\/gateway\/perf$/, (r) => json(r, { endpoints: [], window_started_at: '2026-01-01T00:00:00Z' }));
+  await page.route(GATEWAY_PERF, (r) => json(r, { endpoints: [], window_started_at: '2026-01-01T00:00:00Z' }));
 
   // Audit tail (the event pulse).
   await page.route(/\/api\/events\/tail(\?|$)/, (r) => json(r, [
@@ -150,7 +186,7 @@ export async function installSmokeMocks(page: Page): Promise<void> {
   // Marketing assets (optionals omitted).
   await page.route(/\/api\/catalog\/marketing-assets(\?|$)/, (r) => json(r, [MARKETING_ASSET]));
   await page.route(/\/api\/catalog\/marketing-assets\/[^/]+\/history$/, (r) => json(r, []));
-  await page.route(/\/api\/catalog\/marketing-assets\/[^/]+$/, (r) => json(r, MARKETING_ASSET));
+  await page.route(MARKETING_ASSET_DETAIL, (r) => json(r, MARKETING_ASSET));
 
   // Shipments (carrier omitted).
   // Views — the Home composer surface. Two rows so the crawler renders
@@ -184,7 +220,7 @@ export async function installSmokeMocks(page: Page): Promise<void> {
       },
     ]),
   );
-  await page.route(/\/api\/views\/[^/]+\/results/, (r) =>
+  await page.route(VIEW_RESULTS, (r) =>
     json(r, {
       view_id: 'view-1', source: 'jobs', layout: 'table',
       rows: [{ id: 'j-1', status: 'open' }],
@@ -192,5 +228,5 @@ export async function installSmokeMocks(page: Page): Promise<void> {
     }),
   );
   await page.route(/\/api\/shipping\/shipments(\?|$)/, (r) => json(r, [SHIPMENT]));
-  await page.route(/\/api\/shipping\/shipments\/[^/]+$/, (r) => json(r, SHIPMENT));
+  await page.route(SHIPMENT_DETAIL, (r) => json(r, SHIPMENT));
 }

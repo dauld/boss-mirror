@@ -59,9 +59,9 @@ The contribution path depends on what you want to do.
    [`CLAUDE.md`](CLAUDE.md) § Testing.
 4. **Both stacks.** Rust changes need `cargo fmt` + `cargo
    clippy -- -D warnings` clean and `cargo test -p <crate>`
-   green. Frontend changes need `bun run typecheck` clean and
-   the relevant smokes under
-   `apps/web/tests/smoke/*.spec.ts` green.
+   green. Frontend changes need `bun run gate` in `apps/web`
+   clean (svelte-check, unit tests, the build and the mocked
+   Playwright suite — the same checks the gate runs).
 5. **Commit messages.** Imperative mood, short summary on the
    first line, body explaining the *why*. Follow the conventional
    prefixes already in `git log` (`feat(<area>):`, `fix(<area>):`,

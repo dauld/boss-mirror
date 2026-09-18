@@ -99,7 +99,12 @@ fn every_bundled_workflow_is_viable() {
 /// backlog 1933db9e) is the second machine executor: it loops
 /// in-process rather than under systemd, but it opens and completes
 /// its packet through the same wrap + boss-step pair with the same
-/// `result` routing, so the verdict rule covers it the same way.
+/// `result` routing, so the verdict rule covers it the same way. The
+/// third, `cluster-cronjob` (the playground crawl, design 0e07ce64,
+/// 2026-09-18), is a Kubernetes CronJob recording through
+/// boss-chore.sh — both halves of the pair in one wrapper — and the
+/// rule covers it for the same reason. (The older CronJob chores still
+/// say `systemd-timer`, inherited from the units they replaced.)
 ///
 /// `kind.starts_with("maintenance-")` was the selector until
 /// 2026-09-10, and it was a PROXY for this: it happened to be exact
@@ -118,7 +123,7 @@ fn is_unit_run(w: &WorkflowSpec) -> bool {
                 s.metadata_defaults
                     .get("trigger_name")
                     .and_then(|v| v.as_str()),
-                Some("systemd-timer" | "reclaim-sidecar")
+                Some("systemd-timer" | "reclaim-sidecar" | "cluster-cronjob")
             )
         })
 }

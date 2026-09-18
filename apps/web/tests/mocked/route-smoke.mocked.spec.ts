@@ -16,7 +16,7 @@ import { installAuthoringMocks, JOB_ID } from './_mockApi';
 // reads the same list, and a second copy would reproduce the very defect
 // the drift test at the bottom of this file exists to stop (CLAUDE.md
 // §9a — collapse, do not pin).
-import { ROUTES } from './_routes';
+import { DEFERRED, ROUTES } from './_routes';
 
 
 // DEFERRED, group 1 — aggregation dashboards that read OBJECT-shaped
@@ -143,16 +143,9 @@ test.describe('route smoke — every surface renders without a runtime crash', (
 // crawled by default; skipping one is a line in DEFERRED with a
 // reason, not an omission.
 test.describe('the crawl covers every registered surface', () => {
-  /// Routes the crawl cannot cover yet, each with why. Shrinking this
-  /// list is the work; adding to it is a decision.
-  const DEFERRED: ReadonlyMap<string, string> = new Map([
-    ['/it/operate/audit', 'aggregation dashboard: snapshot .length needs a faithful fixture'],
-    ['/ux/finance', 'statements .reduce needs object-shaped fixtures'],
-    ['/ux/warehouse', 'summary.below_reorder_count needs a faithful fixture'],
-    ['/ux/exec', '.find/.length over object-shaped summaries'],
-    // '/system/os-map' deferral dropped: the page retired with the
-    // pre-network framing and its catalog entry is gone.
-  ]);
+  // DEFERRED moved to _routes.ts on 2026-09-18 (f2b8a01c): the
+  // interaction crawl reads the same exclusions, and one definition is
+  // the only shape that cannot drift between the two crawls.
 
   test('no deferral names a route that does not exist', async () => {
     const { ROUTE_CATALOG } = await import('../../src/shell/nav-catalog');

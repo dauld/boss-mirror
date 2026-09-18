@@ -241,7 +241,11 @@
   onMount(() => {
     void (async () => {
       await Promise.all([loadKinds(), refreshLive()]);
-      await loadSpec(selectedKind);
+      // An empty registry leaves no kind selected; reading
+      // /api/workflows/ (no kind) answered a list and `.join` on it
+      // crashed the page — found by the interaction crawl's empty leg
+      // (f2b8a01c).
+      if (selectedKind) await loadSpec(selectedKind);
     })();
     // Refresh the recent-jobs panel + count chips on a 1s tick.
     // The sim daemon advances at hourly granularity (~0.42s real

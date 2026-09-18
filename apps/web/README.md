@@ -49,8 +49,19 @@ the browser cache.
 
 ```bash
 bun run typecheck                # svelte-check — 0 errors required
-bunx playwright test             # smoke suite (needs backend running)
+bun run test:unit                # bun test src/
+bun run test:mocked              # Playwright against an in-browser mocked backend (CI-gated)
+bun run gate                     # all of the above plus the build — what the gate runs
 ```
+
+There is no live-backend suite in the tree. The one that was here
+(`tests/smoke/`, 35 specs against a scratch stack) ran under no CI
+job, gate check or chore from 2026-06-18 until it was deleted on
+2026-09-18 (design 0e07ce64). What only a real backend can show — a
+page rendering the playground's real data — is the nightly
+`maintenance-playground-crawl` chore: `bun run test:live` with
+`BOSS_E2E_BASE_URL` pointed at the playground, run in-cluster by
+`infra/cluster/manifests/boss-playground-crawl.yaml`.
 
 ## Layout
 
@@ -69,7 +80,8 @@ apps/web/
     debug/                # DebugGear + shared debug-mode state
     steps/                # StepSurface dispatcher + plugin host (plain-DOM)
     <domain>/             # per-domain pages + types + api helpers
-  tests/                  # Playwright smokes
+  tests/mocked/           # Playwright specs, every /api call mocked in-browser
+  tests/live/             # the playground crawl (BOSS_E2E_BASE_URL, nightly chore)
 ```
 
 Type definitions that would otherwise be shared across domains live

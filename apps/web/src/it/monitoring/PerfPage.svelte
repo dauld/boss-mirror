@@ -66,11 +66,27 @@
     };
   });
 
+  /// A refused reset, rendered beside the button. The interaction
+  /// crawl (f2b8a01c) answered the POST 403 and the page showed
+  /// nothing: the response was never read, and the loading state it
+  /// set was overwritten by the next poll.
+  let resetError = $state<string | null>(null);
+
   async function resetHistograms(): Promise<void> {
-    await fetch('/api/gateway/perf/reset', {
-      method: 'POST',
-      credentials: 'same-origin',
-    });
+    resetError = null;
+    try {
+      const r = await fetch('/api/gateway/perf/reset', {
+        method: 'POST',
+        credentials: 'same-origin',
+      });
+      if (!r.ok) {
+        resetError = `HTTP ${r.status}`;
+        return;
+      }
+    } catch (e) {
+      resetError = e instanceof Error ? e.message : String(e);
+      return;
+    }
     loadState = { kind: 'loading' };
   }
 
@@ -152,6 +168,9 @@
         {paused ? '▶ Resume' : '⏸ Pause'}
       </button>
       <button type="button" class="btn" onclick={resetHistograms}>Reset</button>
+      {#if resetError}
+        <span class="load-failed" role="alert" style="color:#dc2626">Reset refused: {resetError}</span>
+      {/if}
     </div>
   </div>
 

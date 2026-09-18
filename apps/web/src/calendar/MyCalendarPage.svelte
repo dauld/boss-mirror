@@ -159,10 +159,14 @@
     subtitle="Reservations from the global calendar primitive"
   />
 
+  <!-- Without an employee there is no week to page through: the body
+       says "Sign in", the title has no week in it, and the three
+       controls changed nothing on screen. The interaction crawl
+       (f2b8a01c) found them answering nothing; disabled says so. -->
   <div class="week-controls">
-    <button onclick={() => shiftWeek(-1)}>← Prev week</button>
-    <button onclick={jumpToToday}>This week</button>
-    <button onclick={() => shiftWeek(1)}>Next week →</button>
+    <button onclick={() => shiftWeek(-1)} disabled={!employeeId}>← Prev week</button>
+    <button onclick={jumpToToday} disabled={!employeeId}>This week</button>
+    <button onclick={() => shiftWeek(1)} disabled={!employeeId}>Next week →</button>
   </div>
 
   {#if !employeeId}

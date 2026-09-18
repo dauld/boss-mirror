@@ -25,7 +25,7 @@ export const ROUTES: ReadonlyArray<string> = [
   '/', '/ux/me', '/ux/inbox', '/ux/views', '/ux/jobs', '/ux/accounts', '/ux/vendors', '/ux/people', '/ux/parts',
   '/ux/products', '/ux/shipping', '/ux/assets', '/ux/catalog',
   '/ux/marketing-assets', '/ux/marketing-assets/ma-1', '/ux/calendar', '/ux/calendar/me',
-  '/ux/support', '/ux/service', '/ux/refurb', '/ux/qa', '/ux/hr', '/ux/sales',
+  '/ux/support', '/ux/service', '/ux/qa', '/ux/hr', '/ux/sales',
   '/ux/shop', '/ux/manual',
   // The IT department — six surfaces, families as tabs (1f6d55e0).
   // /system is GONE (David's Q1/Q4: no legacy users, no redirects), so
@@ -110,7 +110,36 @@ export const ROUTES: ReadonlyArray<string> = [
   // `[]` catch-all for `/api/jobs?department=sales` renders the "no
   // jobs in Sales" state, and the outage renders `load-failed`.
   '/ux/departments/sales',
+  // The router's catch-all — see LANDING_FALLBACK.
+  '/ux/unknown-path',
 ];
+
+/// The one ROUTES entry the router does NOT serve, on purpose: an
+/// unknown path renders LandingPage (the System Model live view) as the
+/// catch-all, and nothing else reaches that page. Until 2026-09-18 this
+/// row was spelled '/ux/refurb' and both crawls believed they were
+/// crawling a refurb page — there is no refurb route, and the outage
+/// roster explained its silence with reads the landing page makes.
+/// interaction-crawl pins every OTHER row to the router (f2b8a01c).
+export const LANDING_FALLBACK = '/ux/unknown-path';
+
+/// Routes the crawls cannot cover yet, each with why. Shrinking this
+/// list is the work; adding to it is a decision.
+///
+/// It lives beside ROUTES for the same reason ROUTES lives here: two
+/// specs walk the catalog (route-smoke.mocked.spec.ts and
+/// interaction-crawl.mocked.spec.ts, since f2b8a01c) and a route
+/// deferred in one and not the other would be crash-checked and never
+/// interaction-checked, or the reverse, with nothing to say so. One
+/// definition cannot disagree with itself (CLAUDE.md §9a).
+export const DEFERRED: ReadonlyMap<string, string> = new Map([
+  ['/it/operate/audit', 'aggregation dashboard: snapshot .length needs a faithful fixture'],
+  ['/ux/finance', 'statements .reduce needs object-shaped fixtures'],
+  ['/ux/warehouse', 'summary.below_reorder_count needs a faithful fixture'],
+  ['/ux/exec', '.find/.length over object-shaped summaries'],
+  // '/system/os-map' deferral dropped: the page retired with the
+  // pre-network framing and its catalog entry is gone.
+]);
 
 /// The ONE class a surface puts on a line that says "this read failed".
 ///
