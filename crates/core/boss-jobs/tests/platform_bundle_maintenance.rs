@@ -54,12 +54,6 @@ const OVERRIDES: [(&str, &str); 1] = [
     ),
 ];
 
-/// A chore whose `run` step this pin deliberately does NOT range over.
-/// `maintenance-deploy-confirm` is being deleted by a separate car
-/// (2026-09-18) and this one does not touch its file; drop the entry
-/// once the file is gone.
-const NOT_PINNED: [&str; 1] = ["maintenance-deploy-confirm"];
-
 /// The actor that completes `kind`'s `run` step.
 fn completing_actor(kind: &str) -> &'static str {
     OVERRIDES
@@ -78,7 +72,6 @@ fn bundled_chores() -> Vec<WorkflowSpec> {
         .expect("the platform bundle parses")
         .into_iter()
         .filter(|w| w.kind.starts_with("maintenance-"))
-        .filter(|w| !NOT_PINNED.contains(&w.kind.as_str()))
         .filter(|w| w.steps.iter().any(|s| s.title == "run" && s.kind == "task"))
         .collect()
 }

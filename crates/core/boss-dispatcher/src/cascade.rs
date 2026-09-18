@@ -146,6 +146,14 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
                 "jobs.step.updated",
             ],
         ),
+        // An answered ops-request's verdict line files the next verb
+        // (a1d3c762): a follow-on ops-request (`jobs.job.created`) and
+        // a `judged` note on the request it read (`jobs.job.updated`).
+        // The follow-on closes `answered` through the same trigger, but
+        // a rule never judges the packet it files (same verb, same
+        // args), and its answer is a different line, so the chain ends
+        // at the follow-on by construction.
+        ("ops.judge", vec!["jobs.job.created", "jobs.job.updated"]),
         ("jobs.subjob_resolve", vec!["jobs.step.completed"]),
         // Completes the open branch on the Job a declared edge names
         // (a merged car answering its feedback packet). The completion

@@ -54,6 +54,7 @@ use boss_dispatcher_handlers::handlers::{
     messages_notify::MessagesNotify,
     messages_notify_job_terminal::MessagesNotifyJobTerminal,
     network_census::NetworkCensus,
+    ops_judge::OpsJudge,
     packaging_allocate::PackagingAllocate,
     people_hire::PeopleHire,
     people_terminate::PeopleTerminate,
@@ -361,6 +362,15 @@ async fn main() -> Result<()> {
             // finding onto the open step when not (970c0c94). Which
             // (target, verb) pair ride the rule row.
             handlers.register(MaintenanceSweepJudge::new(cfg.jobs_api_url.clone()));
+            // An answered ops-request's verdict line files the NEXT
+            // verb, with args: on the close, match the rule's
+            // `verdict_pattern` against the run step's output, evaluate
+            // its `when` over the named groups, and spawn `then_verb
+            // then_args` on `then_host` linked back by `for_check` — or
+            // note on the judged request why nothing was filed
+            // (a1d3c762: publish-drift's --for-real by rule). Every noun
+            // rides the rule row, so the next verb chain is a rule file.
+            handlers.register(OpsJudge::new(cfg.jobs_api_url.clone()));
             // A closing Job completes the open step it was authorized
             // by, on the Job its declared edge names — the merged car
             // → feedback-packet obligation (2c4ae549). Generic: which

@@ -1,0 +1,55 @@
+# When boss-gcp's checkout MOVES, ask what the tree moved ahead of.
+#
+# The `publish-drift` verb (infra/gcp/publish-drift.sh, boss-gcp) reads
+# THIS host's checkout of main against the live workflow registry and
+# answers the whole drift set as one table — every kind the tree moved
+# ahead of, every live row the tree never said (listed, never
+# published). `boss-gcp-converge` fast-forwards that checkout to forge
+# main every 30 minutes and records `converge_from` / `converge_sha` on
+# its `run` step (infra/gcp/boss-gcp-converge.sh, infra/run-summary.sh).
+# A run that closed `ok` with the two shas DIFFERENT is the first moment
+# the verb can answer without `not yet` — and it happens once per
+# movement, not once per tick, so an idle night files nothing.
+#
+# WHY NOT THE TRAIN'S OWN CLOSE. `run-car-probes-on-train-arrived` fires
+# on `jobs.job.closed` kind=pr-train outcome=arrived — converged AND ci
+# — but boss-gcp's checkout follows main up to 30 minutes after that,
+# and the verb would answer `not yet` (75) with nothing to re-file it.
+# That 30-minute window is exactly the hand `until --check ok` loop the
+# retro counted. Firing on the checkout's own movement closes it.
+#
+# THE PACKET CARRIES NO ARGS, on purpose. `jobs.spawn` cannot carry a
+# list, and the verb file's `mode` defaults to `--check`, so the packet
+# this rule files can only ever ask. A `--for-real` is a word a packet
+# carries because someone (or a rule that read a clean `--check` answer)
+# decided it — see the rule's `why` for the handler that second rule
+# needs.
+[[rule]]
+name = "check-publish-drift-on-boss-gcp-converge-moved"
+why = """
+A CROSS-PROTOCOL REACTOR spanning maintenance-boss-gcp-converge ->
+ops-request -> a verb on the boss-gcp host, which no single Workflow
+`on` consequence can express: the converge's protocol cannot name a
+host verb, and the ops-request's cannot know which converge asked.
+Measured in retro 27fad542 (backlog a2f97942): 26 publish-workflow
+ops-requests in a 38-hour window, 23 of them ONE hand-scripted loop at
+2026-09-18 13:4x — every maintenance-* kind after the maintenance-
+audience car landed on #449 — preceded by a hand `until --check ok`
+wait of ~45 minutes for boss-gcp's checkout to carry the train. The
+verb is one kind per request by design; the gap was one level up, and
+this rule is the level up: the checkout moving is what ends the wait,
+so that is the event. It files a READ (`--check`: the verb file's
+default, the only mode a jobs.spawn packet can carry — no authority
+widened); the publish stays a `--for-real` a packet carries on
+purpose. The second half the retro asked for — file `--for-real` when
+the `--check` answered `refused 0` and `would publish >= 1` — needs a
+handler that reads a closed ops-request's execute output and spawns
+with args (the maintenance.sweep.judge shape, 970c0c94, spawning
+instead of completing); no shipped handler does that, so it is named
+here rather than faked with a rule that cannot read the answer.
+"""
+on_event = "step.done.task"
+when = 'workflow_kind = "maintenance-boss-gcp-converge" AND spec_slug = "run" AND metadata.result = "ok" AND metadata.converge_from != metadata.converge_sha'
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"ops-request\"", subject_kind = "\"custom\"", subject = "\"boss-gcp\"", title = "\"publish-drift --check on boss-gcp — its checkout moved\"", "metadata.host" = "\"boss-gcp\"", "metadata.verb" = "\"publish-drift\"", "metadata.for_converge" = "job_id" }

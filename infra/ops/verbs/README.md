@@ -118,7 +118,18 @@ be under two hours old, `connected`, and routing every hostname
 unit-cat's mask, and refuses success while systemd still holds the
 unit. It never touches the tunnel in Cloudflare: that is the broker's
 revoke phase, which completes on its own once the old tunnel shows
-zero connections.
+zero connections. The fifth, `publish-drift` (retro 27fad542 approved by
+David 2026-09-18; backlog a2f97942), publishes every platform workflow
+kind the tree moved ahead of as ONE act — 23 `publish-workflow`
+requests were one hand loop on 2026-09-18 — and is bounded by
+composition: the drift set is `publish-workflow.sh <kind> --check` per
+kind, the publish is that verb per tree-ahead kind, a live row the tree
+never said is listed field by field and never published (there is no
+`--force-tree`; that stays the Drift tab's approve, one kind at a
+time). Its `mode` DEFAULTS to `--check`, which is what lets a
+dispatcher rule file it on boss-gcp's checkout moving without any
+authority widening: a `jobs.spawn` packet carries no args, so it can
+only ask; `--for-real` is a word a packet carries on purpose.
 
 ## Defense
 

@@ -65,6 +65,21 @@
 # matters. The record never gates the work — an unreachable system of
 # record costs this pass its visibility, not its reclaim.
 #
+# AND SINCE 2026-09-18 THE ONE PASS THAT INSTALLS RATHER THAN RECLAIMS
+# (backlog c35eda6c, retro 27fad542): the pod's `boss` CLI, taken out of
+# the cluster image at origin/main with infra/estate/install-cli-from-
+# image.sh — the installer boss-gcp and the forge already run — into
+# /work/tools/image-cli, where the shim (infra/dev/boss) prefers it
+# over the hand-built /scratch/target binary. The retro counted that
+# binary rebuilt by hand three times in one window because a landed
+# car had changed what the CLI validates locally, and a stale one
+# refused a valid verb. This pass runs here, and not in the manifest,
+# because a manifest change rolls the pod and ends the operator's live
+# session (memory: boss-dev-manifest-cars-restart-the-session); the
+# sidecar already runs THIS script from the checkout every hour with
+# git, curl, jq and tar in its image and /work writable. `--cli` runs
+# that leg alone (the ten-second fix the shim's refusal names).
+#
 # WHAT RUNS IT. The `reclaim` sidecar in boss-dev.yaml fires it hourly
 # (the disk-floor-sweep.timer cadence: above the floor a pass is one
 # log line; below it a pass frees GBs, well ahead of the fill rate).
@@ -87,6 +102,12 @@
 #   REPO_DIR (/work/boss) WORKTREES_DIR (REPO_DIR/.claude/worktrees)
 #   CARGO_TARGET_DIR (/scratch/target)
 #   SCRATCH_MOUNT (/scratch) WORK_MOUNT (/work)
+#   BOSS_CLI_STORE (WORK_MOUNT/tools/image-cli) — the image CLI's
+#     generations, what the shim reads; BOSS_CLI_LINK
+#     (WORK_MOUNT/tools/bin/boss-image) — the image CLI on PATH by its
+#     own name, whatever the shim decides; BOSS_CLI_INSTALLER — the
+#     installer to run (the estate's, beside this checkout; a test
+#     stubs it)
 set -euo pipefail
 
 SCRATCH_FLOOR_GB="${BOSS_SCRATCH_FLOOR_GB:-50}"
@@ -519,6 +540,100 @@ reclaim_stale_targets() {
 }
 
 # ---------------------------------------------------------------------
+# THE CLI: the tree's `boss`, out of the cluster image, into /work.
+# ---------------------------------------------------------------------
+# Measured 2026-09-18 14:4xZ (backlog c35eda6c): /scratch/target/debug/
+# boss said `built from 6286857f` (#448) while origin/main stood at
+# cb053ed6 (#450), and the same installer this pass runs pulled the CLI
+# out of the registry's david/boss:cb053ed into a scratch store in 10
+# seconds from this pod — no docker, no root, no manifest change. So:
+#
+#   * origin/main's sha is the checkout's OWN remote-tracking ref
+#     (refs/remotes/origin/main), not a `git ls-remote` of the forge:
+#     the sidecar mounts only /work and /scratch (boss-dev.yaml) — no
+#     forge token, no HOME carrying the credential helper — and the
+#     forge answers an anonymous read of david/boss with 401, so a
+#     network read here would skip every hour. The ref is what the
+#     operator's session and every builder worktree fetch (they share
+#     it), and it is THE SAME ref the shim compares a candidate against
+#     — one definition of "main" on the pod, so the sidecar installs
+#     exactly the sha the shim will call current (CLAUDE.md §9a). A
+#     checkout without the ref installs nothing and says so.
+#   * the registry host reaches the installer the way it reaches every
+#     managed host: a sor.env rendered from infra/estate/estate.toml
+#     (render-sor-env.sh --to), handed as BOSS_SOR_ENV, so
+#     forge-defaults.sh builds the image repo from it. Never a literal
+#     (the lint the-estate-address-lives-once refuses one).
+#   * the store and the link are under WORK_MOUNT: the sidecar runs
+#     without root and /usr/local/bin is its own container overlay,
+#     invisible to the dev container; /work is the shared mount.
+#   * the installer's verdicts are the forge's install.sh's: 0 is the
+#     tree's CLI confirmed through the link; 75 is "not yet" — the
+#     deploy runner builds the image a few minutes after each train,
+#     and this pass runs hourly, so the first pass after a train often
+#     lands here; a wait, logged, never a problem; anything else is a
+#     refusal (registry dark, digest mismatch, a binary naming another
+#     commit) and a problem, loud and on the packet with the exit named.
+#     The installer leaves `current` at the previous confirmed
+#     generation in every non-zero case.
+#
+# The installer's output is captured whole and printed under a `cli:`
+# prefix — a tail or a digest would throw away the only copy (CLAUDE.md
+# §Diagnosis).
+CLI_STORE="${BOSS_CLI_STORE:-$WORK_MOUNT/tools/image-cli}"
+CLI_LINK="${BOSS_CLI_LINK:-$WORK_MOUNT/tools/bin/boss-image}"
+CLI_SHA=""
+CLI_RESULT=skipped
+install_tree_cli() {
+    local here installer render sha log rc
+    here="$(dirname "$(readlink -f "$0")")"
+    installer="${BOSS_CLI_INSTALLER:-$here/../estate/install-cli-from-image.sh}"
+    render="$here/../estate/render-sor-env.sh"
+    if [ ! -d "$REPO_DIR/.git" ] && [ ! -f "$REPO_DIR/.git" ]; then
+        log "CLI install skipped: $REPO_DIR is not a git checkout" >&2
+        return 0
+    fi
+    if ! sha=$(git -C "$REPO_DIR" rev-parse --verify -q refs/remotes/origin/main 2>&1) || [ -z "$sha" ]; then
+        log "CLI install skipped: $REPO_DIR has no refs/remotes/origin/main (git fetch origin in the checkout; ${sha:-empty answer})" >&2
+        return 0
+    fi
+    case "$sha" in
+        *[!0-9a-f]*|"") log "CLI install skipped: origin/main resolved to '$sha', not a sha" >&2; return 0 ;;
+    esac
+    if [ "${#sha}" -ne 40 ]; then
+        log "CLI install skipped: origin/main resolved to '$sha' (${#sha} chars), not a full sha" >&2
+        return 0
+    fi
+    CLI_SHA="$sha"
+    if [ ! -f "$installer" ] || [ ! -f "$render" ]; then
+        log "CLI install skipped: $installer or $render is missing beside this script" >&2
+        return 0
+    fi
+    if ! mkdir -p "$CLI_STORE" || ! bash "$render" --to "$CLI_STORE/sor.env" >/dev/null; then
+        log "CLI install FAILED: could not render $CLI_STORE/sor.env from infra/estate/estate.toml" >&2
+        CLI_RESULT="failed: no sor.env"
+        problems=$((problems + 1))
+        return 0
+    fi
+    log "CLI: installing the tree's boss at ${sha:0:8} (origin/main) from the cluster image into $CLI_STORE"
+    log=$(mktemp "${TMPDIR:-/tmp}/dev-scratch-reclaim-cli.XXXXXX")
+    rc=0
+    BOSS_SOR_ENV="$CLI_STORE/sor.env" BOSS_CLI_STORE="$CLI_STORE" BOSS_CLI_LINK="$CLI_LINK" \
+        bash "$installer" "$sha" >"$log" 2>&1 || rc=$?
+    sed 's/^/dev-scratch-reclaim:   cli: /' "$log"
+    rm -f "$log"
+    case "$rc" in
+        0)  CLI_RESULT=ok
+            log "CLI: the tree's boss at ${sha:0:8} is confirmed at $CLI_LINK (store $CLI_STORE); the shim runs it" ;;
+        75) CLI_RESULT="not yet"
+            log "CLI: not yet — the image for ${sha:0:8} is not in the registry (the deploy runner builds it a few minutes after each train); the next pass retries, and the store stays at $(readlink "$CLI_STORE/current" 2>/dev/null || echo none)" ;;
+        *)  CLI_RESULT="failed: exit $rc"
+            log "CLI install FAILED (exit $rc) at ${sha:0:8} — the installer's complete output is above; the store stays at $(readlink "$CLI_STORE/current" 2>/dev/null || echo none)" >&2
+            problems=$((problems + 1)) ;;
+    esac
+}
+
+# ---------------------------------------------------------------------
 # THE RECORD: a packet for a pass that did something.
 # ---------------------------------------------------------------------
 # The sidecar's log is read by nobody (`kubectl logs -c reclaim`, by
@@ -573,9 +688,20 @@ record_pass() {
             "floor_worktrees_removed=$FLOOR_WORKTREES_REMOVED" \
             "stale_targets_reclaimed=$STALE_TARGETS_RECLAIMED" \
             "incremental_dirs_dropped=$INCREMENTAL_DROPPED" \
+            "cli_sha=$CLI_SHA" "cli_result=$CLI_RESULT" \
         || log "could not complete the $RECLAIM_KIND run step — its packet stays open for the next acting pass to complete" >&2
 }
 
+# `--cli`: the CLI leg alone, its exit the verdict (0 confirmed, 1
+# failed; not yet is 0 — a wait, said above). What the shim's refusal
+# names as the fix, runnable from the dev container as well.
+if [ "${1:-}" = "--cli" ]; then
+    install_tree_cli
+    [ "$problems" -eq 0 ] || exit 1
+    exit 0
+fi
+
+install_tree_cli
 reclaim_gone_worktrees
 reclaim_work
 reclaim_stale_targets

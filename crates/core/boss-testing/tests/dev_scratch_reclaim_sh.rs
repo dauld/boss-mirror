@@ -100,8 +100,13 @@ fn stub_curl(root: &Path) -> PathBuf {
 
 fn run(scratch: &Path, extra: &[(&str, &str)]) -> Output {
     let bin = stub_curl(scratch);
+    let installer = stub_installer(scratch);
     let mut cmd = Command::new("bash");
     cmd.arg(repo_root().join("infra/cluster/dev-scratch-reclaim.sh"))
+        // The CLI leg goes to the stub installer below, never to the
+        // registry; the stub's log is what the CLI tests read.
+        .env("BOSS_CLI_INSTALLER", &installer)
+        .env("STUB_INSTALL_LOG", scratch.join("install-log.txt"))
         .env("SCRATCH_MOUNT", scratch)
         .env("CARGO_TARGET_DIR", scratch.join("target"))
         .env("WORK_MOUNT", scratch.join("work"))
@@ -486,5 +491,186 @@ fn a_forge_that_cannot_be_read_removes_nothing() {
         !curl_log(&root).contains("POST"),
         "a pass that did nothing files no packet\n{}\n{text}",
         curl_log(&root)
+    );
+}
+
+// ---------------------------------------------------------------------
+// THE CLI LEG (backlog c35eda6c, retro 27fad542, 2026-09-18): the pod's
+// `boss` is the tree's by construction. Each pass takes the CLI at
+// origin/main out of the cluster image with the estate's installer
+// into a store under /work the shim (infra/dev/boss) reads. The retro
+// counted the CLI rebuilt by hand three times in one window because a
+// landed car changed what it validates locally; this pass is what
+// deletes the rebuild. The installer is stubbed here — its own pin
+// (install_cli_from_image_sh.rs) drives the registry protocol — and
+// what is pinned is the HANDOFF: the sha, the store, the link, and the
+// registry host rendered from infra/estate/estate.toml, never a literal.
+// ---------------------------------------------------------------------
+
+/// A stub installer on disk: records its argument and the environment
+/// the pass handed it, and exits with `STUB_INSTALLER_RC`.
+fn stub_installer(root: &Path) -> PathBuf {
+    let path = root.join("bin").join("install-cli");
+    boss_testing::create_dir(&root.join("bin"));
+    boss_testing::write_exec(
+        &path,
+        concat!(
+            "#!/usr/bin/env bash\n",
+            "printf 'sha=%s store=%s link=%s sor_env=%s\\n' \"$1\" \"${BOSS_CLI_STORE:-}\" \"${BOSS_CLI_LINK:-}\" \"${BOSS_SOR_ENV:-}\" >> \"$STUB_INSTALL_LOG\"\n",
+            "case \"${STUB_INSTALLER_RC:-0}\" in\n",
+            "    0) echo \"install-cli-from-image: CONFIRMED — stub at $1\" ;;\n",
+            "    75) echo \"install-cli-from-image: NOT YET — no image for $1 (stub)\" >&2 ;;\n",
+            "    *) echo \"install-cli-from-image: REFUSED — stub refusal for $1\" >&2 ;;\n",
+            "esac\n",
+            "exit \"${STUB_INSTALLER_RC:-0}\"\n",
+        ),
+    );
+    path
+}
+
+fn install_log(root: &Path) -> String {
+    std::fs::read_to_string(root.join("install-log.txt")).unwrap_or_default()
+}
+
+/// What infra/estate/estate.toml spells as the registry — read, not typed.
+fn tree_registry() -> String {
+    let toml = std::fs::read_to_string(repo_root().join("infra/estate/estate.toml"))
+        .expect("infra/estate/estate.toml");
+    toml.lines()
+        .find_map(|l| l.strip_prefix("forge_registry = \""))
+        .and_then(|v| v.strip_suffix('"'))
+        .expect("estate.toml spells forge_registry")
+        .to_string()
+}
+
+#[test]
+fn each_pass_installs_the_trees_cli_from_the_image_through_the_estate_installer() {
+    let root = boss_testing::scratch_dir("boss-dsr-cli");
+    let _guard = Scratch(root.clone());
+    let yard = Yard::new(&root);
+    let main = git(&yard.repo, 0, &["rev-parse", "refs/remotes/origin/main"]);
+    let store = root.join("work").join("tools").join("image-cli");
+    let link = root
+        .join("work")
+        .join("tools")
+        .join("bin")
+        .join("boss-image");
+
+    // Confirmed: the sha is the checkout's origin/main — the ref the
+    // shim compares against, and the only one the sidecar can read (it
+    // has no forge credential) — the store and link are under the work
+    // mount, and the registry reaches the installer as a rendered
+    // sor.env (BOSS_SOR_ENV) whose host is estate.toml's.
+    let out = run(&root, &[]);
+    let text = say(&out);
+    assert!(out.status.success(), "{text}");
+    let log = install_log(&root);
+    let want = format!(
+        "sha={main} store={} link={} sor_env={}",
+        store.display(),
+        link.display(),
+        store.join("sor.env").display()
+    );
+    assert_eq!(log.trim(), want, "the handoff to the installer\n{text}");
+    let rendered = std::fs::read_to_string(store.join("sor.env")).expect("the rendered sor.env");
+    assert!(
+        rendered.contains(&format!("BOSS_FORGE_REGISTRY_HOST={}\n", tree_registry())),
+        "the registry host is rendered from estate.toml, never a literal:\n{rendered}\n{text}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("cli: install-cli-from-image: CONFIRMED") && stdout.contains(&main[..8]),
+        "the installer's output rides the log, prefixed, and the sha is named\n{text}"
+    );
+    assert!(
+        !curl_log(&root).contains("POST"),
+        "a confirmed install alone files no packet\n{}\n{text}",
+        curl_log(&root)
+    );
+
+    // Not yet: the image is not built — a wait, logged, not a problem.
+    let out = run(&root, &[("STUB_INSTALLER_RC", "75")]);
+    let text = say(&out);
+    assert!(out.status.success(), "not yet is not a failure\n{text}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("not yet") && text.contains(&main[..8]),
+        "the wait is said, with the sha\n{text}"
+    );
+    assert!(
+        !curl_log(&root).contains("POST"),
+        "and files nothing\n{text}"
+    );
+
+    // Refused: a real fault (a dark registry, a digest mismatch) is a
+    // problem — loud, exit 1, and on a packet with the exit named.
+    let out = run(&root, &[("STUB_INSTALLER_RC", "1")]);
+    let text = say(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a refusal reds the pass\n{text}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("CLI install FAILED"),
+        "the failure is loud, on stderr\n{text}"
+    );
+    let log = curl_log(&root);
+    let put = log
+        .lines()
+        .find(|l| l.starts_with("PUT "))
+        .unwrap_or_else(|| panic!("the run step is completed\n{log}\n{text}"));
+    assert!(
+        put.contains(&format!("\"cli_sha\":\"{main}\""))
+            && put.contains("\"cli_result\":\"failed: exit 1\""),
+        "the packet names the sha and the verdict\n{put}\n{text}"
+    );
+
+    // `--cli` runs the CLI leg alone — what the shim's refusal names as
+    // the ten-second fix — and none of the reclaim passes.
+    std::fs::remove_file(root.join("install-log.txt")).expect("reset the install log");
+    let out = Command::new("bash")
+        .arg(repo_root().join("infra/cluster/dev-scratch-reclaim.sh"))
+        .arg("--cli")
+        .env("BOSS_CLI_INSTALLER", stub_installer(&root))
+        .env("STUB_INSTALL_LOG", root.join("install-log.txt"))
+        .env("SCRATCH_MOUNT", &root)
+        .env("WORK_MOUNT", root.join("work"))
+        .env("REPO_DIR", &yard.repo)
+        .env("BOSS_JOBS_URL", "http://sor.test:7900")
+        .output()
+        .expect("run --cli");
+    let text = say(&out);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        install_log(&root).contains(&format!("sha={main} ")),
+        "{text}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("worktree pass"),
+        "--cli runs no reclaim pass\n{text}"
+    );
+}
+
+/// A checkout with no origin/main — never fetched — names no sha to
+/// install, and the pass says so rather than guess one.
+#[test]
+fn a_checkout_without_origin_main_installs_no_cli() {
+    let root = boss_testing::scratch_dir("boss-dsr-cli-noref");
+    let _guard = Scratch(root.clone());
+    let yard = Yard::new(&root);
+    git(
+        &yard.repo,
+        0,
+        &["update-ref", "-d", "refs/remotes/origin/main"],
+    );
+    let out = run(&root, &[]);
+    let text = say(&out);
+    assert!(
+        install_log(&root).is_empty(),
+        "no origin/main, no install\n{text}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("CLI install skipped"),
+        "the skip is said out loud, on stderr\n{text}"
     );
 }

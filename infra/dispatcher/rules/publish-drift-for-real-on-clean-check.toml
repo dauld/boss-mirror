@@ -1,0 +1,61 @@
+# A clean `publish-drift --check` files its own `--for-real`.
+#
+# The `publish-drift` verb (infra/gcp/publish-drift.sh, boss-gcp)
+# answers the whole workflow drift set as one table and ends with ONE
+# verdict line: `publish-drift: would publish N, skipped M equal,
+# refused K (...)` under --check, `published N, ...` under --for-real.
+# check-publish-drift-on-boss-gcp-converge-moved files the --check the
+# moment boss-gcp's checkout moves; it can only ever ASK, because a
+# jobs.spawn packet carries no args and the verb file's `mode` defaults
+# to --check. This rule is the answer's reader: when the --check closes
+# `answered`, `ops.judge` matches `verdict_pattern` against the run
+# step's recorded output, reads the groups, and files `then_verb
+# then_args` on `then_host` when `when` holds — an ops-request with
+# metadata.args ["--for-real"] and metadata.for_check naming the check
+# it read, so the publish carries the evidence that earned it.
+#
+# WHEN IT FILES, AND WHEN IT DOES NOT. `k = 0 AND n >= 1`: nothing
+# refused and something ahead. A refusal-6 kind (the live row carries
+# what the tree never said) is listed on the check, never published by
+# this verb, and the decision stays a person's at the Drift tab's
+# approve — so ONE refusal holds the whole for-real, and the check is
+# annotated (`judged`) with the predicate, the groups and the line, so
+# the reason is on the packet a person will open. `would publish 0`
+# files nothing either. A check with no verdict line (a `not yet`, a
+# killed run) is warned and left alone.
+#
+# The pattern is written `[0-9]+`, not `\d+`: the arg crosses two
+# string lexers (TOML's, then boss-expr's, which reads `\d` as `d`).
+# It deliberately does not match the --for-real answer (`published N`),
+# and the handler never judges the packet it files (same verb, same
+# args), so the chain ends at the publish. Pinned by
+# crates/core/boss-dispatcher/tests/publish_drift_for_real_rule.rs.
+[[rule]]
+name = "publish-drift-for-real-on-clean-check"
+why = """
+A CROSS-PROTOCOL REACTOR closing the loop check-publish-drift-on-
+boss-gcp-converge-moved opened: ops-request -> ops-request with ARGS,
+which no single Workflow consequence can express — the check's own
+protocol cannot read its run step's output and file a second packet
+carrying a word, and jobs.spawn cannot carry an args list at all.
+Measured in retro 27fad542 (backlog a1d3c762): 23 publish-workflow
+ops-requests hand-scripted one per kind at 2026-09-18 13:4x, after a
+hand `until --check ok` wait of ~45 minutes — the check half became a
+rule on the converge's own movement (f1b2822a) and this is the half
+it named as needing a handler that reads an answer. The authority is
+the verb's own: --for-real publishes only tree-ahead kinds through
+publish-workflow.sh <kind> itself (its lint, its read-back, its actor
+rule) and NEVER a refusal-6 kind — and this rule files it only on
+`refused 0`, so a single refusal leaves the whole set to a person at
+the Drift tab, with the reason written onto the check. Redelivery-
+safe: the check carries `judged` once read, and an open publish-drift
+request linked by for_check (or the same for_converge) is found
+before a twin is filed. Generic on purpose: verb, pattern, predicate
+and the follow-on are all args of ops.judge, so the next verb chain
+is a file in this directory, not a handler.
+"""
+on_event = "jobs.job.closed"
+when = 'kind = "ops-request" AND outcome = "answered"'
+[[rule.do]]
+handler = "ops.judge"
+args = { verb = '"publish-drift"', verdict_pattern = '"publish-drift: would publish (?P<n>[0-9]+), skipped (?P<m>[0-9]+) equal, refused (?P<k>[0-9]+)"', when = '"k = 0 AND n >= 1"', then_verb = '"publish-drift"', then_host = '"boss-gcp"', then_args = '"--for-real"' }

@@ -1,0 +1,21 @@
+{
+  "about": "MUTATING — publish EVERY platform workflow kind the tree moved ahead of, as one act, from the converged checkout on boss-gcp (infra/gcp/publish-drift.sh). publish-workflow is one kind per request by design (bounded), and on 2026-09-18 13:4x that bound was the operator's loop: 23 publish-workflow ops-requests hand-scripted one per kind after the maintenance-audience car landed (26 in the retro's window), plus a hand `until --check ok` wait for this host's checkout to carry the train. Counted in retro 27fad542, ratified by David 2026-09-18 (item 2 of the order he approved: 'publish-drift verb + converge rule'); backlog a2f97942. THE VERB RE-DERIVES NOTHING: the drift set is publish-workflow.sh <kind> --check per kind in the bundle, classified by that verb's own exit codes — tree-ahead (0), equal (5), the live row carries what the tree NEVER SAID (6), does not lint (4), no live row (8) — and in --for-real each tree-ahead kind is published in bundle order through publish-workflow.sh <kind> itself (its lint, its publish, its read-back, its actor rule). A refusal-6 kind is LISTED field by field and NEVER published by this verb: there is no --force-tree here, and that decision stays the operator's, one kind at a time, at the Drift tab's approve. It answers ONE table (kind | from | to | result) and a verdict line `publish-drift: published N, skipped M equal, refused K` (`would publish N` under --check); exit 0 with refusals listed (the operator's decision, not the verb's failure), exit 1 when any publish was not confirmed. Its first line names the checkout sha it read; a checkout behind the newest converged train (the newest closed pr-train's merge_ref, read off the system of record) answers `not yet: checkout at X, main at Y` and exit 75 without asking anything — the hand wait, as a verdict. `mode` DEFAULTS TO --check, which is what makes a rule-filed packet safe: a jobs.spawn rule cannot carry an args list, so the packet the converge rule files (check-publish-drift-on-boss-gcp-converge-moved) can only ever check; --for-real is a word a packet carries on purpose. Timeout sized for a whole bundle: each --check is a sub-verb run (a registry read and, for a drifted kind, a history walk), and --for-real adds one publish per tree-ahead kind; 85 kinds and 23 publishes fit in 1800s with room (publish-workflow's own bound is 300s for one). Pinned by crates/core/boss-testing/tests/publish_drift_sh.rs, the lints a-verb-declares-the-hosts-it-serves.sh and the-controls-are-bounded-verbs.sh.",
+  "hosts": [
+    "boss-gcp"
+  ],
+  "argv": [
+    "infra/gcp/publish-drift.sh",
+    "{1}"
+  ],
+  "params": [
+    {
+      "name": "mode",
+      "one_of": [
+        "--check",
+        "--for-real"
+      ],
+      "default": "--check"
+    }
+  ],
+  "timeout": 1800
+}

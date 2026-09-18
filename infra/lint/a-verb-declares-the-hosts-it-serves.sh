@@ -133,6 +133,17 @@ GCP_MUTATING_ADMITTED = {
     # exercisable without acting. Never touches the tunnel in
     # Cloudflare (the broker's revoke phase).
     "retire-cloudflared": "David 2026-09-16, design 4c565f8c",
+    # retro 27fad542, approved by David 2026-09-18 14:18Z — item 2 of
+    # the order he ratified, "publish-drift verb + converge rule";
+    # backlog a2f97942. Composes the admitted publish-workflow verb
+    # and nothing else: the drift set is that verb's --check per kind,
+    # the publish is that verb per tree-ahead kind, a live row the
+    # tree never said is listed and NEVER published (no --force-tree
+    # here). `mode` defaults to --check so a rule-filed packet can
+    # only read; --for-real is a word a packet carries on purpose.
+    # Flagged for David's review as the first verb that publishes
+    # MORE THAN ONE registry row per request.
+    "publish-drift": "David 2026-09-18, retro 27fad542 / backlog a2f97942 — flagged for review",
 }
 
 problems = []
