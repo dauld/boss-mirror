@@ -205,6 +205,10 @@ name = "a_node_declares_its_roles_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "instance_data_leaves_the_platform_schema_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "job_edges_pg"
 required-features = ["postgres"]
 

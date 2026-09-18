@@ -715,6 +715,81 @@ impl JobsRepository for PgJobs {
             .collect())
     }
 
+    async fn declare_estate_nodes(
+        &self,
+        declared: &[crate::port::EstateNodeInput],
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<crate::port::EstateBatchOutcome, JobsError> {
+        let storage = |e: sqlx::Error| JobsError::Storage(e.to_string());
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let mut inserted = 0;
+        let mut roles_inserted = 0;
+        for n in declared {
+            let node_new = sqlx::query(
+                "INSERT INTO nodes (id, label, address, role, cpu, memory_gb, disk_gb, notes) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+                 ON CONFLICT (id) DO NOTHING",
+            )
+            .bind(&n.id)
+            .bind(&n.label)
+            .bind(&n.address)
+            .bind(&n.role)
+            .bind(n.cpu)
+            .bind(n.memory_gb)
+            .bind(n.disk_gb)
+            .bind(&n.notes)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?
+            .rows_affected()
+                > 0;
+            if node_new {
+                // The identity row, so a Job may name the node as its
+                // subject — 144's own projection rule.
+                sqlx::query(
+                    "INSERT INTO subjects (kind, id, label) VALUES ('node', $1, $2) \
+                     ON CONFLICT (kind, id) DO NOTHING",
+                )
+                .bind(&n.id)
+                .bind(&n.label)
+                .execute(&mut *tx)
+                .await
+                .map_err(storage)?;
+                inserted += 1;
+            }
+            let mut landed_roles = Vec::new();
+            for r in &n.roles {
+                let role_new = sqlx::query(
+                    "INSERT INTO node_roles (node_id, role) VALUES ($1, $2) \
+                     ON CONFLICT (node_id, role) DO NOTHING",
+                )
+                .bind(&n.id)
+                .bind(r)
+                .execute(&mut *tx)
+                .await
+                .map_err(storage)?
+                .rows_affected()
+                    > 0;
+                if role_new {
+                    landed_roles.push(r.clone());
+                }
+            }
+            roles_inserted += landed_roles.len();
+            if node_new || !landed_roles.is_empty() {
+                let event = crate::port::node_declared_event(stamp, n, node_new, &landed_roles)?;
+                boss_events::outbox::record_event_in_tx(&mut tx, &event)
+                    .await
+                    .map_err(JobsError::Storage)?;
+            }
+        }
+        tx.commit().await.map_err(storage)?;
+        Ok(crate::port::EstateBatchOutcome {
+            received: declared.len(),
+            inserted,
+            roles_inserted,
+        })
+    }
+
     async fn recent_events_by_kind(
         &self,
         kind: &str,

@@ -194,6 +194,26 @@ pub const CONTRACT: &[Entry] = &[
         scaffold: Some(scaffold_business_calendars),
     },
     Entry {
+        paths: &["seeds/credentials.toml"],
+        required: false,
+        read_by: "POST /api/credentials/batch (boss-jobs, insert-if-absent by id; one \
+                  `credential.declared` fact per inserted row) — sent by `boss tenant publish` \
+                  BEFORE the sensors, because a sensor names a credential by id; the broker's \
+                  rotation handlers and the forge-token audit read the rows it lands. KNOWLEDGE \
+                  only: where a value lives and who reads it — the value stays in the \
+                  deployment's Secret, and a key the shape does not name is refused (backlog \
+                  ee368d0c: until 2026-09-18 these rows were seeded by migrations, so every \
+                  install carried one operator's credential ids)",
+        shape: "`[[credential]]` rows: id, kind (`forgejo-access-token`, `stripe-restricted-key`, \
+                ...), issuer, principal, scopes? (as the issuer spells them; empty = \
+                unverified), storage_location (a Secret ns/name/key or a file path — never a \
+                value), consumers? = [{kind, location}], rotation_policy? (on-demand | \
+                scheduled), notes? — the `credentials` table's declarable columns; validated \
+                by `boss_jobs::credentials::load_credentials_toml`",
+        parse: parse_credentials,
+        scaffold: Some(scaffold_credentials),
+    },
+    Entry {
         paths: &["seeds/sensors.toml"],
         required: false,
         read_by: "POST /api/sensors/batch (boss-jobs, insert-if-absent by id) — sent by `boss tenant \
@@ -514,6 +534,21 @@ fn parse_business_calendars(path: &Path, _: &Ctx) -> Result<String, String> {
         serde_json::from_str(&read(path)?).map_err(|e| e.to_string())?;
     let codes: Vec<&str> = rows.iter().map(|c| c.code.as_str()).collect();
     Ok(format!("{} calendars: {}", rows.len(), codes.join(", ")))
+}
+
+fn parse_credentials(path: &Path, _: &Ctx) -> Result<String, String> {
+    let rows = boss_jobs::credentials::load_credentials_toml(path)?;
+    refuse_if_stray(&read(path)?, "credential", rows.len())?;
+    Ok(match rows.len() {
+        0 => "0 credentials".to_string(),
+        n => format!(
+            "{n} credentials: {}",
+            rows.iter()
+                .map(|r| format!("{} ({} at {})", r.id, r.kind, r.storage_location))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    })
 }
 
 fn parse_sensors(path: &Path, _: &Ctx) -> Result<String, String> {
@@ -1212,6 +1247,36 @@ fn scaffold_business_calendars(_: &Scaffold) -> String {
         .to_string()
 }
 
+fn scaffold_credentials(s: &Scaffold) -> String {
+    format!(
+        "# {display} — credentials (backlog ee368d0c).\n\
+#\n\
+# A credential row is KNOWLEDGE about a secret the deployment holds:\n\
+# what kind it is, who minted it, whose authority it carries, where\n\
+# its value lives (a Secret name and key, a file path) and who reads\n\
+# it — so that \"what can this token do?\" is a lookup and a rotation\n\
+# has a row to record against. The VALUE is never here: a key this\n\
+# shape does not name (value, token, secret) is refused by the loader.\n\
+# Published by `boss tenant publish` to the `credentials` registry,\n\
+# insert-if-absent by id; a row already there keeps its rotation\n\
+# book-keeping. A sensor's `credential` names one of these ids.\n\
+#\n\
+# [[credential]]\n\
+# id = \"stripe-restricted-read\"\n\
+# kind = \"stripe-restricted-key\"\n\
+# issuer = \"stripe (minted in the dashboard as a restricted key)\"\n\
+# principal = \"the Stripe account that receives payments\"\n\
+# scopes = [\"charges: read\", \"checkout_sessions: read\", \"customers: read\"]\n\
+# storage_location = \"k8s Secret boss/boss-credential-broker-root key stripe-restricted-read\"\n\
+# consumers = [\n\
+#   {{ kind = \"env\", location = \"dispatcher env BOSS_BROKER_STRIPE_KEY in the boss pod\" }},\n\
+# ]\n\
+# rotation_policy = \"on-demand\"\n\
+# notes = \"read-only by construction\"\n",
+        display = s.display_name
+    )
+}
+
 fn scaffold_sensors(s: &Scaffold) -> String {
     format!(
         "# {display} — sensors (design 14c9b2ad).\n\
@@ -1699,6 +1764,17 @@ terminal = { outcome = "sponsored" }
 "#,
         );
 
+        // The credential the sensor names (backlog ee368d0c): declared
+        // by the instance, knowledge only.
+        write_file(
+            &seeds.join("credentials.toml"),
+            "[[credential]]\nid = \"stripe-restricted-read\"\nkind = \"stripe-restricted-key\"\n\
+             issuer = \"stripe (the dashboard, restricted key)\"\n\
+             principal = \"the company's Stripe account\"\nscopes = [\"charges: read\"]\n\
+             storage_location = \"k8s Secret boss/boss-credential-broker-root key stripe-restricted-read\"\n\
+             consumers = [{ kind = \"env\", location = \"dispatcher env BOSS_BROKER_STRIPE_KEY\" }]\n",
+        );
+
         // The first sensor (design 14c9b2ad), in the real file's shape.
         write_file(
             &seeds.join("sensors.toml"),
@@ -1727,12 +1803,19 @@ terminal = { outcome = "sponsored" }
             "seeds/classes.json",
             "seeds/employees.json",
             "seeds/locations.toml",
+            "seeds/credentials.toml",
             "seeds/sensors.toml",
             "seeds/rules.toml",
         ] {
             let row = status_of(&r, ok).unwrap_or_else(|| panic!("{ok} is reported"));
             assert_eq!(row.status, Status::Ok, "{row:?}");
         }
+        let creds = status_of(&r, "seeds/credentials.toml").unwrap();
+        assert!(
+            creds.detail.contains("stripe-restricted-read")
+                && creds.detail.contains("boss-credential-broker-root"),
+            "the line names the id and where the value lives: {creds:?}"
+        );
         let rules = status_of(&r, "seeds/rules.toml").unwrap();
         assert!(
             rules
@@ -1828,6 +1911,44 @@ terminal = { outcome = "sponsored" }
         assert_eq!(row.status, Status::Invalid, "{row:?}");
         assert!(row.detail.contains("[[sensor]]"), "{row:?}");
     }
+    /// A credential declaration (backlog ee368d0c) is judged by the
+    /// registry's own loader: a row that smuggles a value under a key
+    /// the shape does not name is INVALID naming the KEY and the line —
+    /// never the text under it — and a stray table name is refused.
+    #[test]
+    fn a_credential_row_carrying_a_value_is_invalid_naming_the_key_not_the_value() {
+        let dir = scratch_dir("boss-cli-tenant-check-credentials");
+        write_file(&dir.join("tenant.toml"), "[meta]\ntenant_id = \"t\"\n");
+        let seeds = dir.join("seeds");
+        boss_testing::scratch::create_dir(&seeds);
+        write_file(&seeds.join("workflows.toml"), "");
+        write_file(
+            &seeds.join("credentials.toml"),
+            "[[credential]]\nid = \"stripe-restricted-read\"\nkind = \"stripe-restricted-key\"\n\
+             issuer = \"stripe\"\nprincipal = \"the account\"\n\
+             storage_location = \"k8s Secret boss/x key y\"\n\
+             value = \"sk_live_not_a_real_key\"\n",
+        );
+        let r = check(&dir);
+        let row = status_of(&r, "seeds/credentials.toml").unwrap();
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(row.detail.contains("value"), "{row:?}");
+        assert!(row.detail.contains("line 7"), "{row:?}");
+        assert!(
+            !row.detail.contains("sk_live"),
+            "the verdict must never echo the text under the key: {row:?}"
+        );
+
+        write_file(
+            &seeds.join("credentials.toml"),
+            "[[credentials]]\nid = \"x\"\n",
+        );
+        let r = check(&dir);
+        let row = status_of(&r, "seeds/credentials.toml").unwrap();
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(row.detail.contains("[[credential]]"), "{row:?}");
+    }
+
     /// The two ledger rule files (backlog a40541cb) are judged by the
     /// ledger's own loaders: an unbalanced posting rule is INVALID
     /// naming the rule, a projection whose `when` key is not a pointer

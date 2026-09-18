@@ -134,9 +134,22 @@ tenant_id_of() {
 # the publish never runs against an instance that cannot open a
 # platform Job, and the engine never seeds against a half-published
 # tenant.
+#
+# THE ESTATE GOES BEFORE ALL OF IT (backlog ee368d0c, 2026-09-18). The
+# machines this instance runs on are the INSTANCE's declaration —
+# infra/estate/estate.toml, published by seed-estate.sh through the
+# estate door, insert-if-absent — not a tenant's and not a
+# migration's: until that car the estate reached a database only as a
+# schema migration, so every fresh database booted declaring this
+# LAN's seven machines. It needs no platform-admin (no packet opens)
+# and nothing after it needs to wait, but the converges that read a
+# host's roles off /api/estate/nodes and the observer that compares
+# declared against observed want it before anything else, so it runs
+# first; its failure is the verdict like the others'.
 publish_tenant() {
     local dir
     dir="$(tenant_dir)"
+    "$BOSS_INFRA_DIR/seed-estate.sh" || return $?
     BOSS_TENANT_DIR="$dir" "$BOSS_INFRA_DIR/seed-operator-baseline.sh" || return $?
     BOSS_TENANT_DIR="$dir" "$BOSS_INFRA_DIR/seed-tenant.sh" || return $?
     case "$(tenant_id_of "$dir")" in

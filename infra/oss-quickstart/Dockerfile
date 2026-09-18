@@ -339,6 +339,13 @@ COPY infra/seed-brewery-tenant.sh /opt/boss/infra/seed-brewery-tenant.sh
 # brewery's. Pinned by crates/core/boss-testing/tests/
 # the_launcher_publishes_a_tenant_by_its_id.rs.
 COPY infra/seed-tenant.sh /opt/boss/infra/seed-tenant.sh
+# The estate declaration (`boss estate declare`, backlog ee368d0c): the
+# tree's machines, published on every start BEFORE the baseline and
+# the tenant — until 2026-09-18 they reached a database only as a
+# migration, so every fresh database booted declaring this LAN's
+# seven. The source is the one file the estate lives in.
+COPY infra/seed-estate.sh /opt/boss/infra/seed-estate.sh
+COPY infra/estate/estate.toml /opt/boss/infra/estate/estate.toml
 
 # Quickstart launcher + init scripts.
 COPY infra/oss-quickstart/init.sh /usr/local/bin/boss-init
@@ -367,7 +374,8 @@ RUN chmod +x /opt/boss/infra/oss-quickstart/database-from-url.sh /usr/local/bin/
     /usr/local/bin/boss-generate-configs \
     /opt/boss/infra/seed-operator-baseline.sh \
     /opt/boss/infra/seed-brewery-tenant.sh \
-    /opt/boss/infra/seed-tenant.sh
+    /opt/boss/infra/seed-tenant.sh \
+    /opt/boss/infra/seed-estate.sh
 
 # /etc must be writable by the boss user so generate-configs can
 # write the per-service TOML files at container start. Default

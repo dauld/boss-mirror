@@ -9,8 +9,28 @@ use std::sync::Mutex;
 use boss_core::event::Event;
 use boss_core::publisher::EventStamp;
 
-use super::port::{CredentialsError, CredentialsRegistry};
-use super::types::{CredentialRow, RotationPhase};
+use super::port::{CredentialsError, CredentialsRegistry, declared_event};
+use super::types::{CredentialInput, CredentialRow, CredentialsBatchOutcome, RotationPhase};
+
+/// The registry row a declaration lands as: JSON arrays for the two
+/// list columns (the Pg adapter's `scopes`/`consumers` are JSONB),
+/// `rotated_at` NULL — a declaration never claims a rotation instant.
+fn row_of(c: &CredentialInput) -> Result<CredentialRow, CredentialsError> {
+    Ok(CredentialRow {
+        id: c.id.clone(),
+        kind: c.kind.clone(),
+        issuer: c.issuer.clone(),
+        principal: c.principal.clone(),
+        scopes: serde_json::to_value(&c.scopes)
+            .map_err(|e| CredentialsError::Storage(e.to_string()))?,
+        storage_location: c.storage_location.clone(),
+        consumers: serde_json::to_value(&c.consumers)
+            .map_err(|e| CredentialsError::Storage(e.to_string()))?,
+        rotation_policy: c.rotation_policy.clone(),
+        rotated_at: None,
+        notes: c.notes.clone(),
+    })
+}
 
 #[derive(Default)]
 pub struct InMemoryCredentials {
@@ -49,6 +69,29 @@ impl CredentialsRegistry for InMemoryCredentials {
             .iter()
             .find(|r| r.id == id)
             .cloned())
+    }
+
+    async fn publish(
+        &self,
+        tenant_id: &str,
+        declared: &[CredentialInput],
+        stamp: &EventStamp,
+    ) -> Result<CredentialsBatchOutcome, CredentialsError> {
+        let mut rows = self.rows.lock().expect("rows lock");
+        let mut events = self.events.lock().expect("events lock");
+        let mut inserted = 0;
+        for c in declared {
+            if rows.iter().any(|r| r.id == c.id) {
+                continue;
+            }
+            rows.push(row_of(c)?);
+            events.push(declared_event(stamp, tenant_id, c)?);
+            inserted += 1;
+        }
+        Ok(CredentialsBatchOutcome {
+            received: declared.len(),
+            inserted,
+        })
     }
 
     async fn record_rotation(
@@ -185,6 +228,92 @@ mod tests {
                 .rotated_at,
             Some(s.timestamp),
             "the row bind and the event share ONE instant (stamp.timestamp)"
+        );
+    }
+
+    fn declaration(id: &str) -> CredentialInput {
+        CredentialInput {
+            id: id.into(),
+            kind: "stripe-restricted-key".into(),
+            issuer: "stripe (the operator's dashboard)".into(),
+            principal: "the company's Stripe account".into(),
+            scopes: vec!["charges: read".into()],
+            storage_location:
+                "k8s Secret boss/boss-credential-broker-root key stripe-restricted-read".into(),
+            consumers: vec![super::super::types::Consumer {
+                kind: "env".into(),
+                location: "dispatcher env BOSS_BROKER_STRIPE_KEY".into(),
+            }],
+            rotation_policy: "on-demand".into(),
+            notes: "declared by the tenant".into(),
+        }
+    }
+
+    /// The declaration door (backlog ee368d0c): insert-if-absent by id,
+    /// one `credential.declared` per row INSERTED carrying `declared_by`
+    /// and the tenant, none for a kept row — and the kept row keeps
+    /// what the rotation path wrote (`rotated_at`), because a
+    /// declaration is knowledge about the credential, not its history.
+    #[tokio::test]
+    async fn a_declaration_inserts_absent_rows_keeps_held_ones_and_leaves_one_fact_per_insert() {
+        let repo = InMemoryCredentials::new(vec![row("boss-dev-forge-token")]);
+        let s = stamp();
+        repo.record_rotation(
+            "boss-dev-forge-token",
+            RotationPhase::Installed,
+            json!({}),
+            &s,
+        )
+        .await
+        .unwrap();
+        let mut held = declaration("boss-dev-forge-token");
+        held.notes = "a declaration must not erase the rotation's book-keeping".into();
+        let out = repo
+            .publish("acme", &[held, declaration("stripe-restricted-read")], &s)
+            .await
+            .unwrap();
+        assert_eq!((out.received, out.inserted), (2, 1));
+        let kept = repo.get("boss-dev-forge-token").await.unwrap().unwrap();
+        assert_eq!(
+            kept.rotated_at,
+            Some(s.timestamp),
+            "the held row is untouched"
+        );
+        assert_eq!(kept.notes, "", "the held row's notes are untouched");
+        let new = repo.get("stripe-restricted-read").await.unwrap().unwrap();
+        assert_eq!(new.scopes, json!(["charges: read"]));
+        assert!(
+            new.rotated_at.is_none(),
+            "a declaration claims no rotation instant"
+        );
+        let declared: Vec<_> = repo
+            .recorded_events()
+            .into_iter()
+            .filter(|e| e.kind == "credential.declared")
+            .collect();
+        assert_eq!(
+            declared.len(),
+            1,
+            "one fact per inserted row, none for the kept one"
+        );
+        assert_eq!(declared[0].payload["id"], "stripe-restricted-read");
+        assert_eq!(declared[0].payload["tenant_id"], "acme");
+        assert_eq!(
+            declared[0].payload["declared_by"], declared[0].payload["_actor"],
+            "declared_by and the stamp's actor are one value"
+        );
+        // A second publish inserts nothing and records nothing.
+        let again = repo
+            .publish("acme", &[declaration("stripe-restricted-read")], &s)
+            .await
+            .unwrap();
+        assert_eq!((again.received, again.inserted), (1, 0));
+        assert_eq!(
+            repo.recorded_events()
+                .iter()
+                .filter(|e| e.kind == "credential.declared")
+                .count(),
+            1
         );
     }
 

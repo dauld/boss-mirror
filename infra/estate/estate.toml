@@ -56,3 +56,101 @@ forge_host = "10.20.0.15"
 forge_url = "http://10.20.0.15:3000"
 forge_registry = "10.20.0.15:3000"
 forge_journal = "http://10.20.0.15:19531"
+
+
+# THE MACHINES — the estate's nodes and their roles, declared here and
+# published on every pod start by the launcher (`boss estate declare`,
+# infra/seed-estate.sh) through POST /api/estate/nodes/batch,
+# insert-if-absent: a node already there is kept as it is, a role not
+# yet on it is added (backlog ee368d0c, design 42277636 first wave).
+# Until 2026-09-18 these rows were schema migrations
+# (144-estate-subjects, 202608301900, 202609120300, 202609121800), so
+# every fresh database — an adopter's included — booted declaring this
+# LAN's seven machines; 20260918063829 removed them where nothing
+# references them, and this file is where they live.
+#
+# DECLARED capacity (cpu, memory_gb, disk_gb), as measured and rounded
+# the way the observer rounds (nearest GiB, 202608301905): free space
+# now is an observation and rides the log, never this file. `role` is
+# the PRIMARY role the estate page keys on and the comparison selects
+# on (`talos-*` participates in the cluster compare); `roles` are the
+# Classes of `node` a managed host derives its unit roster from
+# (infra/estate/roles.toml) — a code the Class registry does not hold
+# is refused by the door. An adopter replaces every row below with
+# their own machines.
+#
+# The `[[node]]` tables are read by boss_jobs::estate_seed (a TOML
+# parser); the flat keys above by the shell renderer. Neither reads the
+# other's.
+
+[[node]]
+id = "cp-1"
+label = "cp-1"
+address = "10.20.0.11"
+role = "talos-control-plane"
+cpu = 8
+memory_gb = 15
+disk_gb = 236
+notes = "Runs kanidm. Cluster VIP is 10.20.0.10."
+
+[[node]]
+id = "cp-2"
+label = "cp-2"
+address = "10.20.0.12"
+role = "talos-control-plane"
+cpu = 12
+memory_gb = 31
+disk_gb = 236
+notes = "Most cores of the three control-plane nodes, and an etcd member — a stall here is felt by every node whose KubePrism routes to its apiserver (incident a398c4d3, 2026-09-11). The SoR pod is control-plane-pinned (boss.yaml) and floats across cp-1/2/3. The dev pod is NOT pinned here: it prefers the build node w-1 (boss-dev.yaml nodeAffinity)."
+
+[[node]]
+id = "cp-3"
+label = "cp-3"
+address = "10.20.0.13"
+role = "talos-control-plane"
+cpu = 8
+memory_gb = 31
+disk_gb = 463
+notes = "Largest disk of the three."
+
+[[node]]
+id = "w-1"
+label = "w-1"
+address = "10.20.0.14"
+role = "talos-worker"
+cpu = 32
+memory_gb = 63
+disk_gb = 929
+notes = "THE BUILD NODE (boss.dev/purpose=build). Every gate Job prefers it by node affinity — preferred, not required, so cordoning it degrades gating rather than stopping it. Most cores and the largest disk in the estate; a cold workspace build needs ~74GB of target/. Deliberately not a control plane, so a gate cannot starve etcd."
+
+[[node]]
+id = "w-2"
+label = "w-2"
+address = "10.20.0.16"
+role = "talos-worker"
+cpu = 4
+memory_gb = 15
+disk_gb = 110
+notes = "Utility worker (boss.dev/purpose=utility). Joined 2026-08-25 and went unrecorded for five days. Smallest node in the estate after boss-gcp."
+
+[[node]]
+id = "forge"
+label = "Forge host"
+address = "10.20.0.15"
+role = "forge"
+roles = ["cluster-operator"]
+cpu = 16
+memory_gb = 30
+disk_gb = 228
+notes = "Forgejo, the container registry, and the CI runner. A cold CI job needs ~74GB of target/. cluster-operator (design 1bc4b4ed): holds talosctl, kubectl and the cluster credentials under /etc/boss-ops."
+
+[[node]]
+id = "boss-gcp"
+label = "boss-gcp"
+address = "34.45.110.40"
+role = "bastion"
+roles = ["ml-batch-host", "off-cluster-observer", "wireguard-bastion"]
+cpu = 4
+memory_gb = 15
+disk_gb = 48
+notes = "WireGuard bastion and the public edge; hosted the second, older BOSS stack until it was retired on 2026-09-15 (7912c9ae). The conductor moved into the cluster on 2026-09-04. 48GB is the smallest disk in the estate."

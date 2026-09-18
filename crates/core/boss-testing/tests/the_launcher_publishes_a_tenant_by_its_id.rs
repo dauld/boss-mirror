@@ -50,6 +50,7 @@ impl Fixture {
         create_dir(&infra);
         let log = root.join("log");
         for script in [
+            "seed-estate.sh",
             "seed-operator-baseline.sh",
             "seed-brewery-tenant.sh",
             "seed-tenant.sh",
@@ -133,17 +134,42 @@ fn the_brewery_is_published_through_the_generic_door_before_its_engine_seeds_the
     // locations, the chart, the rules and everything else the contract
     // names reach the instance through it, not through the engine. The
     // engine runs LAST, for the sim data and the reset-baseline stamp.
+    //
+    // THE ESTATE GOES BEFORE ALL OF IT (backlog ee368d0c, 2026-09-18):
+    // the instance's machines are the tree's declaration, published
+    // through the estate door with no tenant dir — it is not the
+    // tenant's — before the baseline and the publish.
     let scripts: Vec<&str> = out.lines().take_while(|l| !l.starts_with("---")).collect();
     let baseline = format!("seed-operator-baseline.sh tenant_dir={}", s(&brewery));
     let generic = format!("seed-tenant.sh tenant_dir={}", s(&brewery));
     assert_eq!(
         scripts,
         vec![
+            "seed-estate.sh tenant_dir=unset",
             baseline.as_str(),
             generic.as_str(),
             "seed-brewery-tenant.sh tenant_dir=unset",
         ],
-        "baseline first, then the publish, then the engine for what only it does:\n{out}"
+        "the estate, then the baseline, then the publish, then the engine for what only it does:\n{out}"
+    );
+}
+
+#[test]
+fn a_failed_estate_declaration_stops_before_the_baseline_and_is_the_verdict() {
+    // The DEGRADED loop retries publish_tenant whole: an estate that did
+    // not land is the verdict, and the converges reading roles off an
+    // empty registry are not papered over by a tenant that published.
+    let fx = Fixture::new("estate-fails");
+    let acme = fx.tenant("acme", "tenant.toml", "acme");
+    let (rc, out) = fx.publish(&[
+        ("BOSS_TENANT_DIR", &s(&acme)),
+        ("STUB_FAIL", "seed-estate.sh"),
+    ]);
+    assert_eq!(rc, 3, "the estate's exit is the verdict:\n{out}");
+    assert!(out.starts_with("seed-estate.sh"), "{out}");
+    assert!(
+        !out.contains("seed-operator-baseline.sh") && !out.contains("seed-tenant.sh"),
+        "nothing runs after a failed estate declaration:\n{out}"
     );
 }
 
@@ -188,8 +214,8 @@ fn a_failed_baseline_stops_before_the_publish_and_is_the_verdict() {
     ]);
     assert_eq!(rc, 3, "the baseline's exit is the verdict:\n{out}");
     assert!(
-        out.starts_with(&format!(
-            "seed-operator-baseline.sh tenant_dir={}",
+        out.contains(&format!(
+            "\nseed-operator-baseline.sh tenant_dir={}",
             s(&brewery)
         )),
         "{out}"
@@ -222,11 +248,11 @@ fn any_other_tenant_runs_the_generic_publish_with_its_directory() {
     // the founder still lands once and the publish still finds its
     // owner.
     assert!(
-        out.starts_with(&format!(
-            "seed-operator-baseline.sh tenant_dir={}",
+        out.contains(&format!(
+            "\nseed-operator-baseline.sh tenant_dir={}",
             s(&acme)
         )),
-        "the operator baseline runs first, handed the tenant dir:\n{out}"
+        "the operator baseline runs after the estate, handed the tenant dir:\n{out}"
     );
     assert!(
         out.contains("\nseed-tenant.sh"),

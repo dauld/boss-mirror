@@ -35,7 +35,8 @@ Three verbs make the contract usable:
   doors the tenant engines' prepare compose** (backlog `ee7b62bb`):
   classes → the chart of accounts → locations → business calendars →
   the company Subject → policy grants → people (two passes) → agents →
-  Workflows, after a barrier on the people projection → sensors → the
+  Workflows, after a barrier on the people projection → credentials →
+  sensors → the
   ledger's posting rules → its event→fact projections → dispatcher
   rules last. Idempotent (insert-if-absent, upsert, an employee or
   agent already there updated only where the declaration differs, a
@@ -121,6 +122,7 @@ stating plainly:
 | `seeds/employees.json` | no | POST /api/people, one `boss_people::Employee` per row; a row already there is PUT on the declared fields that differ and the rest kept — the tenant's declaration wins on declared fields (backlog 09887242) — sent by `boss tenant publish` (the brewery engine's prepare reads it at the FIXED path /opt/boss/examples/brewery/seeds/, not from the bundle; used-device-shop reads data/employees.json instead) | JSON array of Employee rows: id, name, email, role, department, hire_date, location, manager_id, employment_type, status, skills[], certifications[], annual_salary_cents; role/department/location are validated against the registries at write time, not here | yes |
 | `seeds/operator_hires.toml` | no | boss-brewery-engine prepare (`seed_brewery_operator_hires`): each `[[hire]]` POSTed to /api/people as a `boss_people::Employee` | `[[hire]]` rows in the Employee shape above | no |
 | `seeds/business_calendars.json` | no | POST /api/calendar/business-calendars/batch as `Vec<boss_core::calendar::BusinessCalendar>` (the brewery engine's prepare); the dispatcher's timing triggers and the sim resolve business days from it | JSON array of {code, name, weekend: [0..6 Mon=0], closed: [YYYY-MM-DD]} | yes |
+| `seeds/credentials.toml` | no | POST /api/credentials/batch (boss-jobs, insert-if-absent by id; one `credential.declared` fact per inserted row) — sent by `boss tenant publish` BEFORE the sensors, because a sensor names a credential by id; the broker's rotation handlers and the forge-token audit read the rows it lands. KNOWLEDGE only: where a value lives and who reads it — the value stays in the deployment's Secret, and a key the shape does not name is refused (backlog ee368d0c: until 2026-09-18 these rows were seeded by migrations, so every install carried one operator's credential ids) | `[[credential]]` rows: id, kind (`forgejo-access-token`, `stripe-restricted-key`, ...), issuer, principal, scopes? (as the issuer spells them; empty = unverified), storage_location (a Secret ns/name/key or a file path — never a value), consumers? = [{kind, location}], rotation_policy? (on-demand | scheduled), notes? — the `credentials` table's declarable columns; validated by `boss_jobs::credentials::load_credentials_toml` | yes |
 | `seeds/sensors.toml` | no | POST /api/sensors/batch (boss-jobs, insert-if-absent by id) — sent by `boss tenant publish` as the tenant's declarations; the dispatcher's `sensor.poll` handler reads the registry every 5 minutes and polls each due sensor (design 14c9b2ad); a push-only source is never due — the gateway's site surface records one `www-visits` reading per page view through POST /api/sensors/{id}/readings (backlog 0b5c5081) | `[[sensor]]` rows: id, source (`stripe` for succeeded charges and `stripe-payouts` for paid payouts, both polled on the same credential; `site` push-only), credential (a `credentials` registry id; none on a push-only source), every_minutes (none on a push-only source), opens (the workflow kind one reading opens), subject_kind, enabled? — validated by `boss_jobs::sensors::load_sensors_toml` | yes |
 | `seeds/agents.toml` | no | POST /api/agents/batch (boss-jobs) — sent by `boss tenant publish` BEFORE the Workflows (a step's audience may name an agent); a row the registry lacks is inserted, a row it holds is updated on the declared fields that differ and the publish line names each change from → to, an alias the tenant does not declare is kept — the tenant's declaration wins on declared fields (backlog 09887242); the jobs API's login door resolves each alias to the id (design 6fda05ae; backlog f56155f0) | `[[agent]]` rows: id (`agent-<slug>`), display_name, default_model (a rate-card model, e.g. `opus-5[1m]`), aliases? (the logins that sign as it), role? and department? (Class codes under (employee, role) / (employee, department), checked against the registry at the batch door like an employee's — a role audience resolves to every holder, agents included; backlog ab192a9f), hourly_budget_usd_micros?, max_concurrent_runs? — the `agents` table's columns and nothing else; validated by `boss_jobs::agents::load_agents_toml` | yes |
 | `seeds/posting_rules.toml` | no | POST /api/ledger/posting-rules/batch (boss-ledger, insert-if-absent by fact_kind + version, source = tenant:<id>) — sent by `boss tenant publish` AFTER the Workflows; the posting path evaluates a fact by the newest registry rule for its kind and by the code rules otherwise (backlog a40541cb) | `[[posting_rule]]` rows: fact_kind, version? (1), basis (cash|accrual), lines = [{account_code, side (debit|credit), amount_path (a JSON pointer into the fact payload, integer cents), memo?}] — the debit pointers and the credit pointers must be the same multiset (balanced for every fact); validated by `boss_ledger::posting_rules::load_posting_rules_toml` | yes |
@@ -430,6 +432,34 @@ the last line is refused by `check` (INVALID, naming
 `finance.sponsorship.received v1`) and by the door (422) with the same
 words. The files above are the tenant's commit, not the product's;
 `boss tenant init` writes both as commented templates.
+
+## Credentials are declared, never carried — `seeds/credentials.toml`
+
+A credential row is KNOWLEDGE about a secret the deployment holds —
+its kind, who minted it, whose authority it carries, where the value
+lives (a Secret name and key, a file path) and who reads it — so that
+"what can this token do?" is a lookup and a rotation has a row to
+record against (`202609031700`). The VALUE never enters: the
+`[[credential]]` shape has no field one could ride in, and a key it
+does not name (`value`, `token`, `secret`) is refused by the loader
+and by the door, naming the key and the line and never the text
+under it.
+
+Until 2026-09-18 these rows were authored only by migrations, so every
+fresh database — every OSS install — booted with one operator's forge,
+Stripe and Cloudflare credential ids (audit H5, backlog `ee368d0c`).
+Now they are instance data: the instance's tenant directory declares
+them, `boss tenant publish` sends them through `POST
+/api/credentials/batch` before the sensors (a sensor's `credential`
+names one of these ids), the door lands them insert-if-absent by id
+with one `credential.declared` fact per inserted row, and a row
+already there keeps its `rotated_at` and notes — the rotation path's
+book-keeping, which a declaration must not erase. A fresh database
+holds no credential row until an instance declares one; the migration
+`20260918063829-instance-data-leaves-the-platform-schema.sql` removed
+the seeded rows where nothing references them. The company's own file
+is the operator's commit in the tenant repository, one row per
+credential the deployment's broker Secret and token files hold.
 
 ## A tenant's own reactors — `seeds/rules.toml`
 

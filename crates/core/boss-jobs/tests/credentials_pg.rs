@@ -1,14 +1,16 @@
 //! Postgres-backed coverage for the credentials registry.
 //!
-//! What only a real database can answer: the migration applies, the
-//! seeded rows are readable through the port every consumer reads
-//! them through, the JSON-shape CHECKs refuse the rows they claim to
-//! refuse, and the honest-gap posture survived the trip — the facts
-//! tonight could not verify are seeded as marked-unverified, not as
-//! guesses.
+//! What only a real database can answer: the migrations apply and a
+//! FRESH database holds no credential row (backlog ee368d0c: the rows
+//! are the instance's declaration, not the platform's); a declaration
+//! lands through the port every consumer reads through, keeps a row
+//! already there, and leaves one fact per inserted row; the JSON-shape
+//! CHECKs refuse the rows they claim to refuse; and the honest-gap
+//! posture survives the trip — a fact the declaration cannot verify
+//! is declared as marked-unverified, not as a guess.
 
 use boss_core::publisher::EventStamp;
-use boss_jobs::credentials::types::RotationPhase;
+use boss_jobs::credentials::types::{Consumer, CredentialInput, RotationPhase};
 use boss_jobs::credentials::{CredentialsError, CredentialsRegistry, PgCredentials};
 use boss_testing::TestDb;
 
@@ -21,58 +23,154 @@ fn stamp() -> EventStamp {
     )
 }
 
+fn seed_stamp() -> EventStamp {
+    EventStamp::new(
+        "jobs",
+        boss_core::actor::ActorId::Automation("tenant-seed".into()),
+    )
+}
+
+/// The two rows the rotation tests below need, in the shape the
+/// instance's `seeds/credentials.toml` declares them: the forge write
+/// token the broker rotates, and the broker's root with its scope
+/// honestly unverified.
+fn declarations() -> Vec<CredentialInput> {
+    vec![
+        CredentialInput {
+            id: "boss-dev-forge-token".into(),
+            kind: "forgejo-access-token".into(),
+            issuer: "the forge".into(),
+            principal: "the operator's forge user".into(),
+            scopes: vec!["write:repository".into()],
+            storage_location: "k8s Secret boss-dev/boss-dev-forge-token key token".into(),
+            consumers: vec![Consumer {
+                kind: "secret-mount".into(),
+                location: "/etc/boss-train/forge.token in the boss-dev pod".into(),
+            }],
+            rotation_policy: "on-demand".into(),
+            notes: "rotated by the credential broker".into(),
+        },
+        CredentialInput {
+            id: "boss-credential-broker-root".into(),
+            kind: "forgejo-access-token".into(),
+            issuer: "the forge".into(),
+            principal: "the operator's forge user (admin)".into(),
+            scopes: vec![],
+            storage_location: "k8s Secret boss/boss-credential-broker-root key forgejo-token"
+                .into(),
+            consumers: vec![Consumer {
+                kind: "env".into(),
+                location: "dispatcher env BOSS_BROKER_FORGEJO_TOKEN in the boss pod".into(),
+            }],
+            rotation_policy: "on-demand".into(),
+            notes: "scope unverified — audit fills this".into(),
+        },
+    ]
+}
+
+async fn declared(db: &TestDb) -> PgCredentials {
+    let repo = PgCredentials::new(db.pool.clone());
+    let out = repo
+        .publish("acme", &declarations(), &seed_stamp())
+        .await
+        .expect("the declaration lands");
+    assert_eq!((out.received, out.inserted), (2, 2));
+    repo
+}
+
+/// A fresh database holds NO credential row: the migrations that
+/// seeded one operator's ids (202609031700 … 20260917041500) are
+/// undone by 20260918063829 where nothing references them, so what an
+/// instance reads is what it declared and nothing else.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_seeded_credentials_are_readable_through_the_port() {
+async fn a_fresh_database_holds_no_credential_until_an_instance_declares_one() {
     let db = TestDb::new().await;
     let repo = PgCredentials::new(db.pool.clone());
+    assert!(
+        repo.list().await.unwrap().is_empty(),
+        "no credential row before any declaration"
+    );
+    let n: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM event_outbox WHERE kind LIKE 'credential.%'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(n, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_declaration_lands_readable_through_the_port_ordered_by_id() {
+    let db = TestDb::new().await;
+    let repo = declared(&db).await;
     let rows = repo.list().await.unwrap();
     let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
-    // The rows the registry has carried since its first seeds are
-    // PRESENT and the list is ORDERED by id — never "exactly these".
-    // This assertion used to pin the exact five, and on 2026-09-16 it
-    // struck train 767cfb14: two cars each declared a Cloudflare
-    // credential (a migration each, ON CONFLICT DO NOTHING, no
-    // collision), each was green on its own gate (neither ran this
-    // crate), and together they made the list seven long. A registry
-    // that grows by a declaration is the design; a test that refuses
-    // growth would red every train that declares one.
-    for known in [
-        "boss-credential-broker-root",
-        "boss-dev-forge-token",
-        "boss-machine-token",
-        "dauld-github-token",
-        "dev-session-token",
-    ] {
-        assert!(
-            ids.contains(&known),
-            "{known} is seeded (dauld-github-token: 202609081230, the \
-             publish-github-pr verb's token — declared before it exists); got {ids:?}"
-        );
-    }
-    let mut sorted = ids.clone();
-    sorted.sort_unstable();
-    assert_eq!(ids, sorted, "the port lists credentials ordered by id");
+    assert_eq!(ids, ["boss-credential-broker-root", "boss-dev-forge-token"]);
     for r in &rows {
         assert!(
             r.rotated_at.is_none(),
-            "{}: rotations that predate the registry live on their packets, \
-             so no seed may claim a rotation instant",
+            "{}: a declaration claims no rotation instant",
             r.id
         );
         assert!(
             r.consumers.as_array().is_some_and(|a| !a.is_empty()),
-            "{}: a credential with no recorded consumer is one nobody dares \
-             revoke — every seed names at least one",
+            "{}: a credential with no recorded consumer is one nobody dares revoke",
             r.id
         );
     }
+    // One `credential.declared` per inserted row, staged in the
+    // insert's transaction, carrying the declarer and the tenant.
+    let facts: Vec<(String, serde_json::Value)> = sqlx::query_as(
+        "SELECT kind, payload FROM event_outbox WHERE kind = 'credential.declared' ORDER BY payload->>'id'",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(facts.len(), 2);
+    assert_eq!(facts[0].1["id"], "boss-credential-broker-root");
+    assert_eq!(facts[0].1["declared_by"], "automation:tenant-seed");
+    assert_eq!(facts[0].1["tenant_id"], "acme");
+    assert!(facts[0].1.get("value").is_none());
+}
+
+/// The kept-row rule at the adapter: a second declaration of a row the
+/// rotation path has since stamped inserts nothing, records nothing,
+/// and leaves `rotated_at` exactly as the install wrote it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_declaration_keeps_a_rotated_row_as_the_rotation_left_it() {
+    let db = TestDb::new().await;
+    let repo = declared(&db).await;
+    let s = stamp();
+    repo.record_rotation(
+        "boss-dev-forge-token",
+        RotationPhase::Installed,
+        serde_json::json!({ "value_length": 40 }),
+        &s,
+    )
+    .await
+    .unwrap();
+    let mut again = declarations();
+    again[0].notes = "a later declaration with different prose".into();
+    let out = repo.publish("acme", &again, &seed_stamp()).await.unwrap();
+    assert_eq!((out.received, out.inserted), (2, 0));
+    let row = repo.get("boss-dev-forge-token").await.unwrap().unwrap();
+    assert_eq!(
+        row.rotated_at.map(|t| t.timestamp_micros()),
+        Some(s.timestamp.timestamp_micros())
+    );
+    assert_eq!(row.notes, "rotated by the credential broker");
+    let n: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM event_outbox WHERE kind = 'credential.declared'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(n, 2, "the second publish records no new fact");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_forge_write_token_row_answers_the_scope_question() {
     // The lookup that used to be an experiment.
     let db = TestDb::new().await;
-    let repo = PgCredentials::new(db.pool.clone());
+    let repo = declared(&db).await;
     let row = repo.get("boss-dev-forge-token").await.unwrap().unwrap();
     assert_eq!(row.kind, "forgejo-access-token");
     assert_eq!(row.scopes, serde_json::json!(["write:repository"]));
@@ -90,7 +188,7 @@ async fn an_unverified_scope_is_an_empty_array_with_a_note_not_a_guess() {
     // gap and points at the audit, rather than inventing a scope
     // string nobody verified.
     let db = TestDb::new().await;
-    let repo = PgCredentials::new(db.pool.clone());
+    let repo = declared(&db).await;
     let row = repo
         .get("boss-credential-broker-root")
         .await
@@ -141,7 +239,7 @@ async fn a_recorded_install_stamps_rotated_at_and_lands_one_event() {
     // `credential.installed` event and the `rotated_at` stamp are one
     // transaction, sharing one instant.
     let db = TestDb::new().await;
-    let repo = PgCredentials::new(db.pool.clone());
+    let repo = declared(&db).await;
     let s = stamp();
     repo.record_rotation(
         "boss-dev-forge-token",
@@ -166,11 +264,11 @@ async fn a_recorded_install_stamps_rotated_at_and_lands_one_event() {
     );
 
     let (kind, source, payload): (String, String, serde_json::Value) = sqlx::query_as(
-        "SELECT kind, source, payload FROM event_outbox WHERE kind LIKE 'credential.%'",
+        "SELECT kind, source, payload FROM event_outbox WHERE kind LIKE 'credential.%' AND kind <> 'credential.declared'",
     )
     .fetch_one(&db.pool)
     .await
-    .expect("exactly one credential.* outbox row");
+    .expect("exactly one credential.* outbox row beyond the declarations");
     assert_eq!(kind, "credential.installed");
     assert_eq!(
         source, "jobs",
@@ -187,7 +285,7 @@ async fn a_recorded_install_stamps_rotated_at_and_lands_one_event() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_recorded_mint_leaves_rotated_at_alone() {
     let db = TestDb::new().await;
-    let repo = PgCredentials::new(db.pool.clone());
+    let repo = declared(&db).await;
     repo.record_rotation(
         "boss-dev-forge-token",
         RotationPhase::Minted,
@@ -251,6 +349,9 @@ async fn every_rotation_phase_kind_is_declared_in_event_kinds() {
     let mut expected: Vec<String> = RotationPhase::ALL
         .iter()
         .map(|p| p.event_kind().to_string())
+        .chain(std::iter::once(
+            boss_jobs::credentials::types::CREDENTIAL_DECLARED.to_string(),
+        ))
         .collect();
     expected.sort();
     assert_eq!(declared, expected);

@@ -16,10 +16,26 @@
 //! Readers: `boss credential list` (boss-cli), the weekly
 //! forge-token-audit (compares live forge tokens against rows of kind
 //! `forgejo-access-token`, both directions), and any agent asking a
-//! scope question. Writes are migrations and the rotation path
-//! (`rotated_at`/`notes`); the mutability decision is written down in
+//! scope question. Writes are the instance's DECLARATION and the
+//! rotation path (`rotated_at`/`notes`); the mutability decision is
+//! written down in
 //! `infra/postgres/schema/202609031700-credentials-are-registry-rows.sql`.
-//! The rotation path's write is the one HTTP write on this surface —
+//!
+//! WHO AUTHORS A ROW (backlog ee368d0c, 2026-09-18). Until that car
+//! the rows were authored by migrations, so every OSS install booted
+//! with one operator's forge, Stripe and Cloudflare credential ids —
+//! instance data in the platform schema. Now the instance declares
+//! them: `seeds/credentials.toml` in the tenant contract, published by
+//! `boss tenant publish` through `POST /api/credentials/batch`
+//! (insert-if-absent by id, one `credential.declared` fact per row
+//! inserted — the classes/locations/agents doors' shape). The
+//! migration 20260918-instance-data-leaves-the-platform-schema removes
+//! the rows the historical migrations seeded where nothing references
+//! them, so a fresh database holds no credential row until an instance
+//! declares one. Values never enter: the declaration shape has no field
+//! a value could ride in.
+//!
+//! The rotation path's write is the other HTTP write on this surface —
 //! `POST /api/credentials/{id}/rotation/{phase}` — because the broker
 //! is a dispatcher handler and handlers own no database: each phase
 //! records a `credential.minted` / `.installed` / `.verified` /
@@ -34,10 +50,15 @@ pub mod in_memory;
 pub mod port;
 #[cfg(feature = "postgres")]
 pub mod postgres;
+pub mod seed;
 pub mod types;
 
 pub use in_memory::InMemoryCredentials;
-pub use port::{CredentialsError, CredentialsRegistry};
+pub use port::{CredentialsError, CredentialsRegistry, declared_event};
 #[cfg(feature = "postgres")]
 pub use postgres::PgCredentials;
-pub use types::{CredentialRow, RotationPhase};
+pub use seed::{load_credentials_toml, parse_credentials_toml};
+pub use types::{
+    CredentialBatch, CredentialInput, CredentialRow, CredentialsBatchOutcome, RotationPhase,
+    validate_credential,
+};

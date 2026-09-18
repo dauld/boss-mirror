@@ -15,6 +15,7 @@ mod design;
 mod dock_preview;
 mod doctor;
 mod envelope;
+mod estate;
 mod freshness;
 mod gate;
 mod git_auth;
@@ -650,6 +651,8 @@ enum Commands {
     Running(running::Cmd),
     #[command(flatten)]
     Tenant(tenant::Cmd),
+    #[command(flatten)]
+    Estate(estate::Cmd),
 }
 
 #[derive(Subcommand)]
@@ -1475,6 +1478,7 @@ async fn main() -> Result<()> {
         Commands::Receipt(cmd) => receipt::dispatch(cmd).await,
         Commands::Running(cmd) => running::dispatch(cmd),
         Commands::Tenant(cmd) => tenant::dispatch(cmd).await,
+        Commands::Estate(cmd) => estate::dispatch(cmd),
     }
 }
 

@@ -196,6 +196,12 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
         .route("/api/jobs/{id}/metadata", patch(patch_job_metadata::<R, B>))
         .route("/api/jobs/{id}/convert", post(convert_job::<R, B>))
         .route("/api/estate/nodes", get(list_estate_nodes::<R, B>))
+        // The tree's estate declaration (backlog ee368d0c): the
+        // launcher publishes infra/estate/estate.toml on every start.
+        .route(
+            "/api/estate/nodes/batch",
+            post(declare_estate_nodes::<R, B>),
+        )
         .route(
             "/api/estate/observations",
             get(list_estate_observations::<R, B>),

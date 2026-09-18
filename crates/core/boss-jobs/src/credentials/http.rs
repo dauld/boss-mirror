@@ -43,10 +43,10 @@ use axum::{Json, Router};
 
 use boss_policy_client::{AccessTier, CurrentUser};
 
-use crate::trust::can_read;
+use crate::trust::{can_read, is_trusted};
 
 use super::port::{CredentialsError, CredentialsRegistry};
-use super::types::RotationPhase;
+use super::types::{CredentialBatch, RotationPhase, validate_credential};
 
 pub struct CredentialsApiState {
     pub registry: Arc<dyn CredentialsRegistry>,
@@ -63,12 +63,74 @@ pub fn router(state: CredentialsApiState) -> Router {
     let shared = Arc::new(state);
     Router::new()
         .route("/api/credentials", get(list))
+        .route("/api/credentials/batch", post(publish))
         .route("/api/credentials/{id}", get(get_one))
         .route(
             "/api/credentials/{id}/rotation/{phase}",
             post(record_rotation_phase),
         )
         .with_state(shared)
+}
+
+/// The declaration door (backlog ee368d0c): `POST /api/credentials/
+/// batch` takes an instance's `seeds/credentials.toml` rows, validates
+/// every one with the same `validate_credential` the TOML loader ran
+/// and refuses the whole batch (422, naming the row) on the first bad
+/// one — a registry with a half-declared instance is worse than a
+/// refusal — then lands them insert-if-absent by id. A key the shape
+/// does not name (`value`, `token`) is refused by the JSON extractor
+/// before this runs: nothing a value could ride in reaches the port.
+/// Operator machinery like every tenant batch door (`is_trusted`).
+async fn publish(
+    State(state): State<Arc<CredentialsApiState>>,
+    CurrentUser(user): CurrentUser,
+    body: Result<Json<CredentialBatch>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if !is_trusted(&user) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Json(body) = match body {
+        Ok(b) => b,
+        // The rejection's text quotes the offending JSON, which for an
+        // unknown key is exactly the text that must not be echoed.
+        Err(_) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "the batch did not parse as {tenant_id, credentials: [CredentialInput]}; \
+                 a key the shape does not name (a value under any spelling) is refused",
+            )
+                .into_response();
+        }
+    };
+    if body.tenant_id.trim().is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "tenant_id is required: the declaring tenant's [meta] tenant_id",
+        )
+            .into_response();
+    }
+    if let Some(why) = body
+        .credentials
+        .iter()
+        .find_map(|c| validate_credential(c).err())
+    {
+        return (StatusCode::UNPROCESSABLE_ENTITY, why).into_response();
+    }
+    // Same envelope as the rotation door and the agents batch: the
+    // actor the request signed with rides as `_actor` and is named
+    // again as `declared_by` on each inserted row's fact.
+    let actor = user
+        .ambient_actor()
+        .unwrap_or_else(|| boss_core::actor::ActorId::Automation("platform".into()));
+    let stamp = boss_core::publisher::EventStamp::new("jobs", actor);
+    match state
+        .registry
+        .publish(&body.tenant_id, &body.credentials, &stamp)
+        .await
+    {
+        Ok(out) => Json(out).into_response(),
+        Err(e) => err_response(e),
+    }
 }
 
 fn err_response(e: CredentialsError) -> Response {
@@ -577,5 +639,128 @@ mod tests {
             .unwrap();
         assert_eq!(guest_resp.status(), StatusCode::FORBIDDEN);
         assert!(registry.recorded_events().is_empty());
+    }
+
+    // ----- the declaration door (backlog ee368d0c) -----
+
+    fn batch() -> serde_json::Value {
+        json!({
+            "tenant_id": "acme",
+            "credentials": [{
+                "id": "stripe-restricted-read",
+                "kind": "stripe-restricted-key",
+                "issuer": "stripe (the operator's dashboard, restricted key)",
+                "principal": "the company's Stripe account",
+                "scopes": ["charges: read"],
+                "storage_location": "k8s Secret boss/boss-credential-broker-root key stripe-restricted-read",
+                "consumers": [{ "kind": "env", "location": "dispatcher env BOSS_BROKER_STRIPE_KEY" }]
+            }]
+        })
+    }
+
+    fn post_batch(body: serde_json::Value, header: &str) -> Request<Body> {
+        Request::post("/api/credentials/batch")
+            .header("x-boss-user", header)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    /// A tenant's declaration lands insert-if-absent, leaves one
+    /// `credential.declared` per inserted row signed as the caller,
+    /// and a second publish inserts nothing.
+    #[tokio::test]
+    async fn a_tenant_declares_its_credentials_and_a_second_publish_inserts_nothing() {
+        let (app, registry) = rotation_app(vec![]);
+        let resp = app
+            .clone()
+            .oneshot(post_batch(batch(), &operator_header()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body, json!({ "received": 1, "inserted": 1 }));
+        let events = registry.recorded_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "credential.declared");
+        assert_eq!(events[0].payload["declared_by"], "emp-ops");
+        assert_eq!(events[0].payload["tenant_id"], "acme");
+        assert!(
+            events[0].payload.get("value").is_none(),
+            "a declaration carries locations, never a value"
+        );
+        let resp = app
+            .oneshot(post_batch(batch(), &operator_header()))
+            .await
+            .unwrap();
+        assert_eq!(
+            body_json(resp).await,
+            json!({ "received": 1, "inserted": 0 })
+        );
+        assert_eq!(registry.recorded_events().len(), 1);
+        let row = registry
+            .get("stripe-restricted-read")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.storage_location,
+            "k8s Secret boss/boss-credential-broker-root key stripe-restricted-read"
+        );
+    }
+
+    /// The whole batch is refused, naming the row, when one declaration
+    /// is bad, when a row smuggles a value under an unknown key, or
+    /// when no tenant is named; nothing lands.
+    #[tokio::test]
+    async fn a_bad_declaration_refuses_the_batch_by_name_and_a_value_is_refused_by_shape() {
+        let (app, registry) = rotation_app(vec![]);
+        let mut bad = batch();
+        bad["credentials"][0]["storage_location"] = json!("");
+        let resp = app
+            .clone()
+            .oneshot(post_batch(bad, &operator_header()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&bytes).contains("stripe-restricted-read"));
+
+        let mut with_value = batch();
+        with_value["credentials"][0]["value"] = json!("sk_live_not_a_real_key");
+        let resp = app
+            .clone()
+            .oneshot(post_batch(with_value, &operator_header()))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "an unknown key is refused before anything is stored"
+        );
+
+        let mut no_tenant = batch();
+        no_tenant["tenant_id"] = json!("");
+        let resp = app
+            .clone()
+            .oneshot(post_batch(no_tenant, &operator_header()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        assert!(registry.list().await.unwrap().is_empty());
+        assert!(registry.recorded_events().is_empty());
+    }
+
+    /// Writes are operator machinery: the auditor tier that reads the
+    /// registry and a user-tier session are both refused.
+    #[tokio::test]
+    async fn the_declaration_door_is_operator_machinery() {
+        for header in [probe_reader_header(), user_tier_header()] {
+            let (app, registry) = rotation_app(vec![]);
+            let resp = app.oneshot(post_batch(batch(), &header)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+            assert!(registry.list().await.unwrap().is_empty());
+        }
     }
 }

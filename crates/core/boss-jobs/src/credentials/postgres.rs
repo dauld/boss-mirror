@@ -10,8 +10,8 @@ use sqlx::{PgPool, Row};
 
 use boss_core::publisher::EventStamp;
 
-use super::port::{CredentialsError, CredentialsRegistry};
-use super::types::{CredentialRow, RotationPhase};
+use super::port::{CredentialsError, CredentialsRegistry, declared_event};
+use super::types::{CredentialInput, CredentialRow, CredentialsBatchOutcome, RotationPhase};
 
 const COLUMNS: &str = "id, kind, issuer, principal, scopes, storage_location, consumers, \
                        rotation_policy, rotated_at, notes";
@@ -27,6 +27,10 @@ impl PgCredentials {
 }
 
 fn storage(e: sqlx::Error) -> CredentialsError {
+    CredentialsError::Storage(e.to_string())
+}
+
+fn storage_json(e: &serde_json::Error) -> CredentialsError {
     CredentialsError::Storage(e.to_string())
 }
 
@@ -62,6 +66,62 @@ impl CredentialsRegistry for PgCredentials {
             .await
             .map_err(storage)?;
         row.as_ref().map(row_of).transpose()
+    }
+
+    async fn publish(
+        &self,
+        tenant_id: &str,
+        declared: &[CredentialInput],
+        stamp: &EventStamp,
+    ) -> Result<CredentialsBatchOutcome, CredentialsError> {
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let mut inserted = 0;
+        for c in declared {
+            let scopes = serde_json::to_value(&c.scopes).map_err(|e| storage_json(&e))?;
+            let consumers = serde_json::to_value(&c.consumers).map_err(|e| storage_json(&e))?;
+            // ON CONFLICT DO NOTHING, not DO UPDATE: the held row's
+            // rotated_at and notes are the rotation path's book-keeping
+            // (202609031700's mutability decision), and a declaration
+            // that overwrote them would erase a rotation's record.
+            let n = sqlx::query(
+                "INSERT INTO credentials \
+                 (id, kind, issuer, principal, scopes, storage_location, consumers, \
+                  rotation_policy, rotated_at, notes) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9) \
+                 ON CONFLICT (id) DO NOTHING",
+            )
+            .bind(&c.id)
+            .bind(&c.kind)
+            .bind(&c.issuer)
+            .bind(&c.principal)
+            .bind(&scopes)
+            .bind(&c.storage_location)
+            .bind(&consumers)
+            .bind(&c.rotation_policy)
+            .bind(&c.notes)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?
+            .rows_affected();
+            if n > 0 {
+                // OUTBOX, in the insert's own transaction: the row and
+                // its `credential.declared` fact commit or roll back
+                // together (20260917071313's rule for every tenant
+                // batch door).
+                boss_events::outbox::record_event_in_tx(
+                    &mut tx,
+                    &declared_event(stamp, tenant_id, c)?,
+                )
+                .await
+                .map_err(CredentialsError::Storage)?;
+                inserted += 1;
+            }
+        }
+        tx.commit().await.map_err(storage)?;
+        Ok(CredentialsBatchOutcome {
+            received: declared.len(),
+            inserted,
+        })
     }
 
     async fn record_rotation(

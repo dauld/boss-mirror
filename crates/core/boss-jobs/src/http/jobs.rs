@@ -1827,14 +1827,57 @@ pub(super) async fn convert_job<R: JobsRepository + 'static, B: EventBus + 'stat
 /// recollection — were wrong in the same direction because none was
 /// connected to the machines (59ef456a).
 ///
-/// Read-only on purpose: declaring a machine is a schema migration that
-/// converges, not an API write.
+/// Declaring a machine is a change to the tree that converges — since
+/// backlog ee368d0c through the batch door below, before that as a
+/// schema migration.
 pub(super) async fn list_estate_nodes<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
     CurrentUser(_user): CurrentUser,
 ) -> Response {
     match state.jobs.list_estate_nodes().await {
         Ok(nodes) => Json(serde_json::json!({ "data": nodes })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// `POST /api/estate/nodes/batch` — the tree's estate declaration
+/// (backlog ee368d0c). The launcher sends infra/estate/estate.toml's
+/// `[[node]]` rows on every pod start; the port lands them
+/// insert-if-absent (a node already there is kept, a role not yet on
+/// it is added) and leaves one `node.declared` per node it changed.
+/// Until this door the estate reached a database only as a migration,
+/// so every fresh OSS database booted with this LAN's seven machines.
+///
+/// Operator TIER, like the observation door — not `is_trusted`, whose
+/// headerless-guest allowance exists for reads: a caller with no
+/// identity must not be able to declare hardware. The same
+/// `validate_estate_node` the file loader runs refuses the whole batch
+/// (422, naming the node) on the first bad row.
+pub(super) async fn declare_estate_nodes<R: JobsRepository + 'static, B: EventBus + 'static>(
+    State(state): State<Arc<JobsApiState<R, B>>>,
+    CurrentUser(user): CurrentUser,
+    Json(batch): Json<crate::port::EstateNodeBatch>,
+) -> Response {
+    if user.access_tier != boss_policy_client::AccessTier::Operator {
+        return (
+            StatusCode::FORBIDDEN,
+            "the estate declaration door is operator machinery — operator tier required",
+        )
+            .into_response();
+    }
+    if let Some(why) = batch
+        .nodes
+        .iter()
+        .find_map(|n| crate::port::validate_estate_node(n).err())
+    {
+        return (StatusCode::UNPROCESSABLE_ENTITY, why).into_response();
+    }
+    let actor = user
+        .ambient_actor()
+        .unwrap_or_else(|| boss_core::actor::ActorId::Automation("platform".into()));
+    let stamp = boss_core::publisher::EventStamp::new("jobs", actor);
+    match state.jobs.declare_estate_nodes(&batch.nodes, &stamp).await {
+        Ok(out) => Json(out).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

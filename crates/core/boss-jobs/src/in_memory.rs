@@ -38,6 +38,9 @@ struct State {
     /// tiebreak every windowed read of a busy day returned an
     /// arbitrary subset.
     job_created_at: HashMap<String, DateTime<Utc>>,
+    /// The estate as declared through `declare_estate_nodes` — empty
+    /// until a test declares one, exactly as a fresh database is.
+    estate: Vec<crate::port::EstateNode>,
 }
 
 impl InMemoryJobs {
@@ -339,10 +342,74 @@ impl JobsRepository for InMemoryJobs {
     }
 
     async fn list_estate_nodes(&self) -> Result<Vec<crate::port::EstateNode>, JobsError> {
-        // The estate is seeded by schema migration, so an in-memory
-        // registry genuinely has none — and saying so is better than
-        // inventing fixtures a test would then assert against.
-        Ok(Vec::new())
+        // Empty until a declaration lands, exactly as a fresh database
+        // is (backlog ee368d0c) — no invented fixtures a test would
+        // then assert against. The Pg read orders by (role, id).
+        let st = self
+            .inner
+            .lock()
+            .map_err(|_| JobsError::Storage("lock".into()))?;
+        let mut nodes = st.estate.clone();
+        nodes.sort_by(|a, b| (&a.role, &a.id).cmp(&(&b.role, &b.id)));
+        Ok(nodes)
+    }
+
+    async fn declare_estate_nodes(
+        &self,
+        declared: &[crate::port::EstateNodeInput],
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<crate::port::EstateBatchOutcome, JobsError> {
+        let mut st = self
+            .inner
+            .lock()
+            .map_err(|_| JobsError::Storage("lock".into()))?;
+        let mut inserted = 0;
+        let mut roles_inserted = 0;
+        let mut events = Vec::new();
+        for n in declared {
+            let node_new = !st.estate.iter().any(|e| e.id == n.id);
+            if node_new {
+                st.estate.push(crate::port::EstateNode {
+                    id: n.id.clone(),
+                    label: n.label.clone(),
+                    address: n.address.clone(),
+                    role: n.role.clone(),
+                    roles: Vec::new(),
+                    cpu: n.cpu,
+                    memory_gb: n.memory_gb,
+                    disk_gb: n.disk_gb,
+                    notes: n.notes.clone(),
+                    retired: false,
+                });
+                inserted += 1;
+            }
+            let row = st
+                .estate
+                .iter_mut()
+                .find(|e| e.id == n.id)
+                .ok_or_else(|| JobsError::Storage("the node just landed".into()))?;
+            let landed: Vec<String> = n
+                .roles
+                .iter()
+                .filter(|r| !row.roles.contains(r))
+                .cloned()
+                .collect();
+            row.roles.extend(landed.iter().cloned());
+            row.roles.sort();
+            roles_inserted += landed.len();
+            if node_new || !landed.is_empty() {
+                events.push(crate::port::node_declared_event(
+                    stamp, n, node_new, &landed,
+                )?);
+            }
+        }
+        drop(st);
+        self.record_all(&events);
+        Ok(crate::port::EstateBatchOutcome {
+            received: declared.len(),
+            inserted,
+            roles_inserted,
+        })
     }
 
     async fn recent_events_by_kind(

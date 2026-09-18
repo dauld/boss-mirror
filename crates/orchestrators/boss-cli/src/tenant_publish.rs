@@ -30,7 +30,9 @@
 //! step's audience may name one; backlog f56155f0) → Workflows, after
 //! a barrier on the people projection (a publish opens design Jobs
 //! whose role-bearing steps are assigned against the roster) →
-//! sensors → the ledger's posting rules → its event→fact projections
+//! credentials (knowledge about the secrets the deployment holds,
+//! never a value; backlog ee368d0c) → sensors (a sensor names a
+//! credential by id) → the ledger's posting rules → its event→fact projections
 //! (a projection names the fact kind a rule posts and the workflow
 //! whose step it reads; backlog a40541cb) → dispatcher rules LAST (the
 //! tenant's own reactors, backlog 458971ef; a rule fires on the
@@ -192,6 +194,14 @@ pub enum Door {
         owning_team: String,
         kinds: Vec<String>,
     },
+    /// The instance's credential declarations (backlog ee368d0c):
+    /// knowledge about each secret the deployment holds — where the
+    /// value lives, who reads it — never a value. Before the sensors,
+    /// because a sensor names one by id.
+    Credentials {
+        tenant_id: String,
+        rows: Vec<boss_jobs::credentials::CredentialInput>,
+    },
     /// The tenant's sensor declarations (design 14c9b2ad): what the
     /// platform polls and what kind each reading opens. After the
     /// Workflows, because a row names one by kind.
@@ -236,6 +246,7 @@ impl Door {
             }
             Door::Agents { .. } => "POST /api/agents/batch",
             Door::Workflows { .. } => "POST /api/jobs (workflow-design), walked to publish",
+            Door::Credentials { .. } => "POST /api/credentials/batch",
             Door::Sensors { .. } => "POST /api/sensors/batch",
             Door::PostingRules { .. } => "POST /api/ledger/posting-rules/batch",
             Door::ProjectionRules { .. } => "POST /api/ledger/fact-projection-rules/batch",
@@ -289,6 +300,14 @@ impl Door {
                 "{} workflows as owning_team `{owning_team}` ({}) (a kind an authoring Job already published is skipped)",
                 kinds.len(),
                 kinds.join(", ")
+            ),
+            Door::Credentials { rows, .. } => format!(
+                "{} credentials (insert-if-absent by id: {}; a row already there keeps its rotation book-keeping; locations only, never a value)",
+                rows.len(),
+                rows.iter()
+                    .map(|r| r.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             Door::Sensors { rows, .. } => format!(
                 "{} sensors (insert-if-absent by id: {})",
@@ -668,7 +687,16 @@ pub fn plan(dir: &Path) -> Result<Plan> {
             kinds: specs.iter().map(|s| s.kind.clone()).collect(),
         })
     })?;
-    // 9. Sensors (design 14c9b2ad): each row names the workflow kind
+    // 9. Credentials (backlog ee368d0c): a sensor names one by id, so
+    //    the declarations go before the sensors. Knowledge only — the
+    //    loader refuses a row carrying a value under any key.
+    door(present(dir, &["seeds/credentials.toml"]), &|p| {
+        Ok(Door::Credentials {
+            tenant_id: tenant_id.clone(),
+            rows: boss_jobs::credentials::load_credentials_toml(p).map_err(anyhow::Error::msg)?,
+        })
+    })?;
+    // 10. Sensors (design 14c9b2ad): each row names the workflow kind
     //    a reading opens, so the kinds go first; the registry row is
     //    what the platform's 5-minute poll reads.
     door(present(dir, &["seeds/sensors.toml"]), &|p| {
@@ -677,7 +705,7 @@ pub fn plan(dir: &Path) -> Result<Plan> {
             rows: boss_jobs::sensors::load_sensors_toml(p).map_err(anyhow::Error::msg)?,
         })
     })?;
-    // 10. Posting rules (backlog a40541cb): fact kind → journal lines,
+    // 11. Posting rules (backlog a40541cb): fact kind → journal lines,
     //     landed with the tenant as their source.
     door(present(dir, &["seeds/posting_rules.toml"]), &|p| {
         Ok(Door::PostingRules {
@@ -686,7 +714,7 @@ pub fn plan(dir: &Path) -> Result<Plan> {
                 .map_err(anyhow::Error::msg)?,
         })
     })?;
-    // 11. Event→fact projections: a projection names the fact kind a
+    // 12. Event→fact projections: a projection names the fact kind a
     //     posting rule posts and (through `when`) the workflow whose
     //     step it reads, so both go first.
     door(present(dir, &["seeds/fact_projection_rules.toml"]), &|p| {
@@ -695,7 +723,7 @@ pub fn plan(dir: &Path) -> Result<Plan> {
                 .map_err(anyhow::Error::msg)?,
         })
     })?;
-    // 12. Rules LAST (backlog 458971ef): a reactor's `when` and args
+    // 13. Rules LAST (backlog 458971ef): a reactor's `when` and args
     //     name the kinds and steps of protocols above (and the fact
     //     kinds the projections above turn them into), and a rule live
     //     before its protocol would fire on nothing or on the wrong
@@ -1034,6 +1062,22 @@ fn send(client: &Client, bases: &Bases, door: &Door) -> Result<String> {
                 Some(SEED_USER),
             )?;
             Ok("ok (published/skipped counts in the log)".to_string())
+        }
+        Door::Credentials { tenant_id, rows } => {
+            let u = url(&bases.jobs, "/api/credentials/batch");
+            let resp = refuse(
+                client
+                    .post(&u)
+                    .json(&json!({ "tenant_id": tenant_id, "credentials": rows }))
+                    .send()?,
+                &format!("POST {u}"),
+            )?;
+            let body: Value = resp.json().unwrap_or(Value::Null);
+            Ok(format!(
+                "received {}, inserted {}",
+                body.get("received").and_then(Value::as_u64).unwrap_or(0),
+                body.get("inserted").and_then(Value::as_u64).unwrap_or(0)
+            ))
         }
         Door::Sensors { tenant_id, rows } => {
             let u = url(&bases.jobs, "/api/sensors/batch");
@@ -1411,6 +1455,17 @@ terminal = { outcome = "sponsored" }
              normal_balance = \"credit\"\n",
         );
         put(&dir, "seeds/workflows.toml", WORKFLOWS);
+        // The credential the sensor names (backlog ee368d0c): declared
+        // by the instance, before the sensor that names it.
+        put(
+            &dir,
+            "seeds/credentials.toml",
+            "[[credential]]\nid = \"stripe-restricted-read\"\nkind = \"stripe-restricted-key\"\n\
+             issuer = \"stripe (the dashboard, restricted key)\"\n\
+             principal = \"the company's Stripe account\"\nscopes = [\"charges: read\"]\n\
+             storage_location = \"k8s Secret boss/boss-credential-broker-root key stripe-restricted-read\"\n\
+             consumers = [{ kind = \"env\", location = \"dispatcher env BOSS_BROKER_STRIPE_KEY\" }]\n",
+        );
         // The first sensor (design 14c9b2ad): opens the workflow above.
         put(
             &dir,
@@ -1492,12 +1547,13 @@ terminal = { outcome = "sponsored" }
                 "seeds/employees.json",
                 "seeds/agents.toml",
                 "seeds/workflows.toml",
+                "seeds/credentials.toml",
                 "seeds/sensors.toml",
                 "seeds/posting_rules.toml",
                 "seeds/fact_projection_rules.toml",
                 "seeds/rules.toml",
             ],
-            "classes → chart of accounts → locations → calendars → company → policy → people → agents → workflows → sensors → posting rules → projections → rules LAST"
+            "classes → chart of accounts → locations → calendars → company → policy → people → agents → workflows → credentials → sensors → posting rules → projections → rules LAST"
         );
         // The chart door (backlog 41af5195): the rows as the ledger
         // door's own type, after the classes.
@@ -1569,6 +1625,15 @@ terminal = { outcome = "sponsored" }
             }) => {
                 assert_eq!(owning_team, "acme");
                 assert_eq!(kinds, &["receive-a-sponsorship".to_string()]);
+            }
+            other => panic!("{other:?}"),
+        }
+        match &step(&p, "seeds/credentials.toml").action {
+            Action::Write(Door::Credentials { tenant_id, rows }) => {
+                assert_eq!(tenant_id, "acme");
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].id, "stripe-restricted-read");
+                assert_eq!(rows[0].rotation_policy, "on-demand");
             }
             other => panic!("{other:?}"),
         }
@@ -1743,6 +1808,8 @@ terminal = { outcome = "sponsored" }
         jobs: usize,
         /// Published sensor ids (insert-if-absent, like the door).
         sensors: BTreeSet<String>,
+        /// Declared credential ids (insert-if-absent, like the door).
+        credentials: BTreeSet<String>,
         /// Published location ids (insert-if-absent, like the door).
         locations: BTreeSet<String>,
         /// Registered agents: id -> display_name (insert-if-absent;
@@ -1770,6 +1837,7 @@ terminal = { outcome = "sponsored" }
                 + self.workflows.len()
                 + self.jobs
                 + self.sensors.len()
+                + self.credentials.len()
                 + self.locations.len()
                 + self.agents.len()
                 + self.posting_rules.len()
@@ -2003,6 +2071,26 @@ terminal = { outcome = "sponsored" }
                 st.jobs += 1;
                 (200, json!({"id": format!("job-{}", st.jobs)}).to_string())
             }
+            ("POST", "/api/credentials/batch") => {
+                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                assert_eq!(v["tenant_id"], "acme", "the batch names the tenant: {body}");
+                let rows = v["credentials"].as_array().cloned().unwrap_or_default();
+                for r in &rows {
+                    assert!(
+                        r.get("value").is_none() && r.get("token").is_none(),
+                        "a declaration carries locations, never a value: {r}"
+                    );
+                }
+                let inserted = rows
+                    .iter()
+                    .filter_map(|r| r["id"].as_str().map(str::to_string))
+                    .filter(|id| st.credentials.insert(id.clone()))
+                    .count();
+                (
+                    200,
+                    json!({"received": rows.len(), "inserted": inserted}).to_string(),
+                )
+            }
             ("POST", "/api/sensors/batch") => {
                 let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
                 assert_eq!(v["tenant_id"], "acme", "the batch names the tenant: {body}");
@@ -2196,6 +2284,15 @@ terminal = { outcome = "sponsored" }
         );
         assert_eq!(st.agents.keys().collect::<Vec<_>>(), ["agent-claude"]);
         assert_eq!(
+            hit("POST", "/api/credentials/batch"),
+            1,
+            "one batch for the credentials file"
+        );
+        assert_eq!(
+            st.credentials.iter().collect::<Vec<_>>(),
+            ["stripe-restricted-read"]
+        );
+        assert_eq!(
             hit("POST", "/api/sensors/batch"),
             1,
             "one batch for the sensors file"
@@ -2260,6 +2357,10 @@ terminal = { outcome = "sponsored" }
         assert!(
             pos("POST", "/api/jobs") < pos("POST", "/api/sensors/batch"),
             "the sensors name a workflow kind, so the kinds go first"
+        );
+        assert!(
+            pos("POST", "/api/credentials/batch") < pos("POST", "/api/sensors/batch"),
+            "a sensor names a credential by id, so the credentials go first (backlog ee368d0c)"
         );
         assert!(
             pos("POST", "/api/ledger/posting-rules/batch")

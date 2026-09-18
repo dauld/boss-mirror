@@ -21,6 +21,7 @@ pub mod decision_record;
 pub mod delivery;
 pub mod department;
 pub mod escalation;
+pub mod estate_seed;
 pub mod events;
 pub mod experiments;
 pub mod http;

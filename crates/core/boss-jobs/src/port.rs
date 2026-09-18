@@ -486,6 +486,112 @@ pub struct EstateNode {
     pub retired: bool,
 }
 
+/// A machine as the tree DECLARES it (`[[node]]` in
+/// infra/estate/estate.toml) and as `POST /api/estate/nodes/batch`
+/// takes it — the columns 144-estate-subjects.sql gave `nodes`, plus
+/// the roles 202609120300 gave `node_roles`. Declared capacity only:
+/// free space now is an observation and rides the log.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EstateNodeInput {
+    pub id: String,
+    pub label: String,
+    pub address: String,
+    /// The PRIMARY role (`talos-control-plane`, `talos-worker`,
+    /// `forge`, `bastion`) — what the estate page keys on and the
+    /// comparison selects on (`talos-*` participates in the cluster
+    /// compare).
+    pub role: String,
+    /// Every role the node declares — Classes of `node`, so an
+    /// undeclared code is refused by the schema's FK, never invented.
+    #[serde(default)]
+    pub roles: Vec<String>,
+    #[serde(default)]
+    pub cpu: Option<i32>,
+    #[serde(default)]
+    pub memory_gb: Option<i32>,
+    #[serde(default)]
+    pub disk_gb: Option<i32>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+/// Why a node declaration is refused, named so the refusal says which
+/// check failed; the same check runs at the file, the door and both
+/// adapters.
+pub fn validate_estate_node(n: &EstateNodeInput) -> Result<(), String> {
+    let slug = |field: &str, v: &str| -> Result<(), String> {
+        if v.is_empty() {
+            return Err(format!("node {}: {field} is required", n.id));
+        }
+        if !v
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            return Err(format!(
+                "node {}: {field} `{v}` is not kebab-case (lowercase, digits, hyphens)",
+                n.id
+            ));
+        }
+        Ok(())
+    };
+    if n.id.is_empty() {
+        return Err("a node needs an id (e.g. cp-1)".into());
+    }
+    slug("id", &n.id)?;
+    slug("role", &n.role)?;
+    for r in &n.roles {
+        slug("roles entry", r)?;
+    }
+    for (field, v) in [("label", &n.label), ("address", &n.address)] {
+        if v.trim().is_empty() {
+            return Err(format!("node {}: {field} is required", n.id));
+        }
+    }
+    Ok(())
+}
+
+/// What `POST /api/estate/nodes/batch` takes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EstateNodeBatch {
+    pub nodes: Vec<EstateNodeInput>,
+}
+
+/// What a declaration did: nodes received, nodes inserted, and roles
+/// inserted (a role landed on a node already there counts here — the
+/// forge gained `cluster-operator` after its row existed).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EstateBatchOutcome {
+    pub received: usize,
+    pub inserted: usize,
+    pub roles_inserted: usize,
+}
+
+/// The fact one declaration leaves: `node.declared`, once per node the
+/// batch changed (its row inserted, or a role landed on it), carrying
+/// the declaration, what landed, and `declared_by` from the stamp.
+pub const NODE_DECLARED: &str = "node.declared";
+
+pub fn node_declared_event(
+    stamp: &boss_core::publisher::EventStamp,
+    node: &EstateNodeInput,
+    inserted: bool,
+    roles_inserted: &[String],
+) -> Result<boss_core::event::Event, JobsError> {
+    let mut payload = serde_json::to_value(node).map_err(|e| JobsError::Storage(e.to_string()))?;
+    if let serde_json::Value::Object(map) = &mut payload {
+        map.insert(
+            "declared_by".to_string(),
+            serde_json::Value::String(stamp.actor().to_string()),
+        );
+        map.insert(
+            "landed".to_string(),
+            serde_json::json!({ "node": inserted, "roles": roles_inserted }),
+        );
+    }
+    Ok(stamp.event(NODE_DECLARED, payload))
+}
+
 /// Persistence port for jobs and steps.
 ///
 /// **Timestamp threading.** The four mutation methods come in two
@@ -620,19 +726,38 @@ pub trait JobsRepository: Send + Sync {
 
     /// Every machine the estate declares.
     ///
-    /// READ ONLY, AND DELIBERATELY SO. `nodes` is seeded by schema
-    /// migration — declaring a machine is a change to the tree that
-    /// converges, not an API write — so there is no create/update here
-    /// and there should not be. What is missing today is any way to
-    /// READ it: the tables have existed since 144-estate-subjects.sql
-    /// and no service has ever served them, so "what hardware is
-    /// running" was unanswerable from inside BOSS and had to be
-    /// re-derived by shelling into machines (59ef456a).
+    /// Declaring a machine is a change to the TREE that converges
+    /// (infra/estate/estate.toml), never a hand write: until backlog
+    /// ee368d0c (2026-09-18) the tree's copy was a schema migration, so
+    /// every fresh database — every OSS install — carried this LAN's
+    /// nodes; now the launcher publishes the tree's declaration through
+    /// `declare_estate_nodes` on every start, insert-if-absent. What was
+    /// missing before either existed was any way to READ it: the tables
+    /// had existed since 144-estate-subjects.sql and no service served
+    /// them, so "what hardware is running" was unanswerable from inside
+    /// BOSS and had to be re-derived by shelling into machines
+    /// (59ef456a).
     ///
     /// DECLARED capacity, not observed. Free space now is a
     /// measurement with a timestamp and belongs on the log, which is
     /// what the `node` subject kind's own description says.
     async fn list_estate_nodes(&self) -> Result<Vec<EstateNode>, JobsError>;
+
+    /// Land the tree's declaration, insert-if-absent: a `nodes` row and
+    /// its `subjects` identity for each id not already there (a row
+    /// already there is KEPT — its notes and capacity as the last
+    /// declaration or migration left them, never overwritten), and a
+    /// `node_roles` row for each (node, role) pair not already there,
+    /// on kept nodes too. One `node.declared` fact per node the batch
+    /// changed, staged in the write's own transaction; none for a node
+    /// it left alone. A role that is not a Class of `node` is refused
+    /// by the schema's FK — the vocabulary stays registry data
+    /// (202609120300).
+    async fn declare_estate_nodes(
+        &self,
+        declared: &[EstateNodeInput],
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<EstateBatchOutcome, JobsError>;
 
     /// Recent recorded events of ONE exact kind, newest first, as the
     /// raw rows `{event_id, timestamp, source, kind, payload}`.

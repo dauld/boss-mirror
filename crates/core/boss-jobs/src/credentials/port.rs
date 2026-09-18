@@ -18,9 +18,39 @@
 
 use async_trait::async_trait;
 
+use boss_core::event::Event;
 use boss_core::publisher::EventStamp;
 
-use super::types::{CredentialRow, RotationPhase};
+use super::types::{
+    CREDENTIAL_DECLARED, CredentialInput, CredentialRow, CredentialsBatchOutcome, RotationPhase,
+};
+
+/// Build the `credential.declared` event for one inserted row: the
+/// declaration as inserted plus `declared_by` — the actor the request
+/// signed with, read from the stamp so it is the same value `_actor`
+/// carries — and `tenant_id`, the declaring instance. One builder for
+/// both adapters, so the in-memory double records exactly what the Pg
+/// adapter stages on the outbox. Locations and consumers only, never a
+/// value: the input shape has no field one could ride in.
+pub fn declared_event(
+    stamp: &EventStamp,
+    tenant_id: &str,
+    row: &CredentialInput,
+) -> Result<Event, CredentialsError> {
+    let mut payload =
+        serde_json::to_value(row).map_err(|e| CredentialsError::Storage(e.to_string()))?;
+    if let serde_json::Value::Object(map) = &mut payload {
+        map.insert(
+            "declared_by".to_string(),
+            serde_json::Value::String(stamp.actor().to_string()),
+        );
+        map.insert(
+            "tenant_id".to_string(),
+            serde_json::Value::String(tenant_id.to_string()),
+        );
+    }
+    Ok(stamp.event(CREDENTIAL_DECLARED, payload))
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum CredentialsError {
@@ -45,6 +75,22 @@ pub trait CredentialsRegistry: Send + Sync {
     /// holds no such row. `None` is an answer, not an error — the
     /// HTTP door turns it into a 404 that names the id.
     async fn get(&self, id: &str) -> Result<Option<CredentialRow>, CredentialsError>;
+
+    /// Admit an instance's declarations, insert-if-absent by id (the
+    /// classes batch idiom; backlog ee368d0c): a row already there is
+    /// KEPT as it is — its `rotated_at` and the notes the rotation
+    /// path wrote are book-keeping the declaration must not erase —
+    /// and a second publish inserts nothing new. One
+    /// `credential.declared` fact per row inserted, staged in the
+    /// insert's own transaction, none for a kept row. Validation is
+    /// the caller's (`validate_credential`), the same check at every
+    /// door.
+    async fn publish(
+        &self,
+        tenant_id: &str,
+        declared: &[CredentialInput],
+        stamp: &EventStamp,
+    ) -> Result<CredentialsBatchOutcome, CredentialsError>;
 
     /// Record one rotation phase: append the phase's `credential.*`
     /// event (kind from [`RotationPhase::event_kind`], envelope from
