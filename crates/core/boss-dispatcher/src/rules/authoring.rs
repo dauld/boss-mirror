@@ -244,12 +244,26 @@ pub fn source_label(source: Option<&str>) -> &str {
 /// SPA's editor sends the default, 1) still takes `MAX + 1`, so a
 /// version is never walked back.
 ///
-/// A NAME BELONGS TO WHOEVER PUBLISHED IT FIRST. The table is one
+/// A NAME BELONGS TO WHOEVER HOLDS IT LIVE. The table is one
 /// namespace with one active row per name, and publish retires the
 /// incumbent whatever its source: a tenant drafting
 /// `auto-park-on-gate-green` v2 would put its reaction in the product's
-/// slot. So a draft whose `source` differs from the name's existing
-/// rows is refused, naming both owners, and writes nothing.
+/// slot. So a draft whose `source` differs from the name's ACTIVE or
+/// DRAFT rows is refused, naming both owners, and writes nothing.
+///
+/// A RETIRED NAME IS FREE (retired-name-is-free; backlog 70bc5725,
+/// 2026-09-18). Ownership is judged on live rows only. Until then the
+/// refusal read every row of the name, so a name the product had
+/// retired stayed the product's forever — measured on the playground's
+/// fresh database, where the historical migrations insert the demo tenant's
+/// thirty-one reactors as product rows, the boot seed retires them (no
+/// file names them; they moved to the tenant's `seeds/rules.toml`), and
+/// `boss tenant publish` was then refused under all thirty-one:
+/// the tenant had 0 active rules on every instance. A name whose rows are
+/// all retired is nobody's: the new source's draft lands at
+/// `max(declared, MAX + 1)` as always — above the retired history,
+/// never reusing a version — and the retired rows of the old source
+/// stay as history under the name, so `list_versions` shows both.
 pub async fn create_draft(
     pool: &PgPool,
     raw: &RawRule,
@@ -258,12 +272,13 @@ pub async fn create_draft(
     validate(raw).map_err(|e| AuthoringError::Invalid(e.to_string()))?;
     let do_json = serde_json::to_value(&raw.do_steps).map_err(store)?;
     let mut tx = pool.begin().await.map_err(store)?;
-    let owners: Vec<Option<String>> =
-        sqlx::query_scalar("SELECT DISTINCT source FROM dispatcher_rules WHERE name = $1")
-            .bind(&raw.name)
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(store)?;
+    let owners: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT DISTINCT source FROM dispatcher_rules WHERE name = $1 AND status <> 'retired'",
+    )
+    .bind(&raw.name)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(store)?;
     if let Some(owner) = owners.iter().find(|o| o.as_deref() != source) {
         return Err(AuthoringError::Invalid(format!(
             "rule `{}` is owned by {}; a draft from {} cannot supersede it (one name, one \

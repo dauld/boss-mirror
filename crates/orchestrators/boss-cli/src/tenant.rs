@@ -279,7 +279,8 @@ pub const CONTRACT: &[Entry] = &[
                   per rule (boss-dispatcher) — sent by `boss tenant publish` LAST, after the \
                   Workflows a rule reacts on; append-only: an unchanged version is a no-op \
                   (the line says `present`), a higher version supersedes, a live version ahead \
-                  of the file is left alone, and a name another source owns is refused; the \
+                  of the file is left alone, a name another source holds live is refused and \
+                  a name the product retired is taken over (backlog 70bc5725); the \
                   dispatcher's boot seed retires only product-sourced rules no file names, so a \
                   tenant's rule survives every converge (backlog 458971ef)",
         shape: "`[[rule]]` rows in the product rule file's own shape (infra/dispatcher/rules/*.toml): \

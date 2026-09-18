@@ -548,3 +548,183 @@ async fn a_tenant_sourced_rule_survives_a_seed_that_names_no_file_for_it() {
     .expect("read the source back");
     assert_eq!(source.as_deref(), Some("tenant:acme"));
 }
+
+/// A NAME THE PRODUCT RETIRED IS FREE FOR A TENANT (backlog 70bc5725,
+/// 2026-09-18). Measured on the playground's fresh database: the
+/// historical `INSERT INTO dispatcher_rules` migrations still run and
+/// land the brewery's thirty-one reactors as product-sourced rows; the
+/// boot seed retires them (no file here names them, and the thirty-one
+/// moved to the tenant's `seeds/rules.toml` on 2026-09-17); then
+/// `boss tenant publish` was refused under every one of them — "owned
+/// by product" — because the draft door read ownership off EVERY row
+/// of the name, retired history included. Result: tenant:brewery/active
+/// = 0 on any instance, fresh or not. Ownership is a claim on the LIVE
+/// rows only: a name whose rows are all retired is nobody's, the
+/// tenant's draft lands above the retired versions (never reusing
+/// one), and the product's retired rows stay as history under the
+/// same name. The next seed leaves the tenant's row alone, as it
+/// always did.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_name_the_seed_retired_is_free_for_a_tenant_to_take_over() {
+    use boss_dispatcher::rules::authoring::{create_draft, list_versions, publish};
+    use boss_dispatcher::rules::registry::{RawDoStep, RawRule};
+
+    let db = TestDb::new().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = authored_copy(&tmp);
+
+    // The playground's shape: a migration's product-sourced row under a
+    // name no file in the directory authors.
+    let name = "spawn-tasting-panel-on-brew-close";
+    assert!(
+        !dir.join(format!("{name}.toml")).exists(),
+        "the product directory must not author the tenant's rule, or this test proves nothing"
+    );
+    let product_version = active_version(&db.pool, name)
+        .await
+        .expect("the migrations seeded the brewery reactor as a product row");
+    let report = seed_authored_rules(&db.pool, &dir)
+        .await
+        .expect("seed the fixture registry");
+    assert!(
+        report.retired.iter().any(|n| n == name),
+        "the seed retires the product row no file names: {:?}",
+        report.retired
+    );
+    assert_eq!(active_version(&db.pool, name).await, None);
+
+    // The tenant's file, declaring the same version the migration did.
+    let file = RawRule {
+        name: name.to_string(),
+        on_event: Some("jobs.job.closed".into()),
+        schedule: None,
+        when: Some("kind = \"morning-brew\" AND outcome = \"completed\"".into()),
+        do_steps: vec![RawDoStep {
+            handler: "jobs.spawn".into(),
+            args: Default::default(),
+        }],
+        delay: None,
+        version: product_version as u32,
+    };
+    let draft = create_draft(&db.pool, &file, Some("tenant:brewery"))
+        .await
+        .expect("a name whose only rows are retired is free for a tenant");
+    assert_eq!(draft.source.as_deref(), Some("tenant:brewery"));
+    assert_eq!(
+        draft.version,
+        product_version + 1,
+        "the takeover lands above the retired history, never on a version it reuses"
+    );
+    let live = publish(&db.pool, name).await.expect("publish the takeover");
+    assert_eq!(
+        (live.version, live.status.as_str()),
+        (draft.version, "active")
+    );
+    assert_eq!(live.source.as_deref(), Some("tenant:brewery"));
+
+    // The history shows both owners: the product's retired row and the
+    // tenant's active one, under the one name.
+    let history = list_versions(&db.pool, name).await.expect("list versions");
+    let owners: Vec<(i32, &str, Option<&str>)> = history
+        .iter()
+        .map(|v| (v.version, v.status.as_str(), v.source.as_deref()))
+        .collect();
+    assert!(
+        owners.contains(&(product_version, "retired", None)),
+        "the product's retired version stays as history: {owners:?}"
+    );
+    assert!(
+        owners.contains(&(draft.version, "active", Some("tenant:brewery"))),
+        "the tenant's version is the live one: {owners:?}"
+    );
+
+    // The next boot's seed (no file, still) leaves the tenant's row
+    // alone and does not resurrect the product's.
+    let again = seed_authored_rules(&db.pool, &dir)
+        .await
+        .expect("seed again");
+    assert!(
+        !again.retired.iter().any(|n| n == name),
+        "the tenant's takeover survives the next seed: {:?}",
+        again.retired
+    );
+    assert_eq!(active_version(&db.pool, name).await, Some(draft.version));
+}
+
+/// THE SEED HOLDS THE SAME LINE THE DOOR HOLDS: a name a tenant holds
+/// LIVE is refused to a product file, by name, and the tenant's row is
+/// untouched; a name whose tenant rows are all retired is free, and the
+/// product file lands above them (backlog 70bc5725 — the one sentence,
+/// read from both sides).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_product_file_takes_a_tenant_name_only_once_the_tenant_has_retired_it() {
+    let db = TestDb::new().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = authored_copy(&tmp);
+
+    let name = "zzz-a-name-the-tenant-holds";
+    sqlx::query(
+        "INSERT INTO dispatcher_rules (name, version, status, on_event, when_expr, do_steps, source) \
+         VALUES ($1, 1, 'active', 'jobs.job.closed', NULL, \
+                 '[{\"handler\":\"messages.notify\",\"args\":{}}]'::jsonb, 'tenant:acme')",
+    )
+    .bind(name)
+    .execute(&db.pool)
+    .await
+    .expect("publish a tenant-sourced rule the way the dispatcher API does");
+    std::fs::write(
+        dir.join(format!("{name}.toml")),
+        format!(
+            r#"
+[[rule]]
+name = "{name}"
+why = """
+A TEST FIXTURE: a product file under a name a tenant published first.
+"""
+version = 2
+on_event = "step.done.task"
+[[rule.do]]
+handler = "webhook.notify"
+"#
+        ),
+    )
+    .expect("write the product's rule file");
+
+    let report = seed_authored_rules(&db.pool, &dir)
+        .await
+        .expect("seed the fixture registry");
+    assert!(
+        report
+            .rejected
+            .iter()
+            .any(|(n, why)| n == name && why.contains("tenant:acme")),
+        "a live tenant name is refused to the product file, naming the owner: {:?}",
+        report.rejected
+    );
+    assert_eq!(
+        active_version(&db.pool, name).await,
+        Some(1),
+        "the tenant's row is untouched"
+    );
+
+    // The tenant retires its rule: the name is nobody's, and the
+    // product file lands on the next pass, above the retired history.
+    sqlx::query("UPDATE dispatcher_rules SET status = 'retired' WHERE name = $1")
+        .bind(name)
+        .execute(&db.pool)
+        .await
+        .expect("retire the tenant's row");
+    let report = seed_authored_rules(&db.pool, &dir)
+        .await
+        .expect("seed the fixture registry again");
+    assert!(
+        report.inserted.iter().any(|(n, v)| n == name && *v == 2),
+        "a retired name is free for the product file: {report:?}"
+    );
+    assert_eq!(active_version(&db.pool, name).await, Some(2));
+    assert_eq!(
+        status_of(&db.pool, name, 1).await.as_deref(),
+        Some("retired"),
+        "the tenant's version stays as history"
+    );
+}

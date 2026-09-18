@@ -126,7 +126,7 @@ stating plainly:
 | `seeds/posting_rules.toml` | no | POST /api/ledger/posting-rules/batch (boss-ledger, insert-if-absent by fact_kind + version, source = tenant:<id>) — sent by `boss tenant publish` AFTER the Workflows; the posting path evaluates a fact by the newest registry rule for its kind and by the code rules otherwise (backlog a40541cb) | `[[posting_rule]]` rows: fact_kind, version? (1), basis (cash|accrual), lines = [{account_code, side (debit|credit), amount_path (a JSON pointer into the fact payload, integer cents), memo?}] — the debit pointers and the credit pointers must be the same multiset (balanced for every fact); validated by `boss_ledger::posting_rules::load_posting_rules_toml` | yes |
 | `seeds/fact_projection_rules.toml` | no | POST /api/ledger/fact-projection-rules/batch (boss-ledger, insert-if-absent by event_kind + when) — sent by `boss tenant publish` after the posting rules; the ledger's facts rebuild projects every matching audit_log event into a financial_fact (backlog a40541cb) | `[[projection]]` rows: event_kind (an audit_log kind whose family the platform event stream ingests — `boss_nats::durable::stream_subjects`; a rule on any other family would fire never live, so it is refused naming the family, backlog 94f20e76), when? (a table of {"/pointer" = value}, every pointer equal for the rule to fire), fact_kind, source_table, source_id_path, happened_on_path?, created_by_path? — the `gl_fact_projection_rules` columns; validated by `boss_ledger::posting_rules::load_projection_rules_toml` | yes |
 | `seeds/locations.toml` | no | POST /api/locations/batch, one boss-locations `http::LocationInput` per row (insert-if-absent by id) — sent by `boss tenant publish` BEFORE the roster, because an `employees.json` `location` is a foreign key into the registry (backlog 1ec8312a; until 2026-09-17 nothing read this file) | `[[location]]` rows: id, name, kind, timezone (+ parent_id, latitude, longitude, address, account_id, metadata) — the `locations` table's columns | yes |
-| `seeds/rules.toml` | no | POST /api/dispatcher/rules/_validate, then POST /api/dispatcher/rules (a draft carrying `source = tenant:<tenant_id>`) + POST /api/dispatcher/rules/{name}/publish per rule (boss-dispatcher) — sent by `boss tenant publish` LAST, after the Workflows a rule reacts on; append-only: an unchanged version is a no-op (the line says `present`), a higher version supersedes, a live version ahead of the file is left alone, and a name another source owns is refused; the dispatcher's boot seed retires only product-sourced rules no file names, so a tenant's rule survives every converge (backlog 458971ef) | `[[rule]]` rows in the product rule file's own shape (infra/dispatcher/rules/*.toml): name, why, version, on_event or schedule, when?, delay?, `[[rule.do]]` handler + args — parsed by `boss_dispatcher::rules::registry::parse_raw_file`, validated by the publish door's own `authoring::validate`, handler names checked against `cascade::handler_emits` (this build's roster) | yes |
+| `seeds/rules.toml` | no | POST /api/dispatcher/rules/_validate, then POST /api/dispatcher/rules (a draft carrying `source = tenant:<tenant_id>`) + POST /api/dispatcher/rules/{name}/publish per rule (boss-dispatcher) — sent by `boss tenant publish` LAST, after the Workflows a rule reacts on; append-only: an unchanged version is a no-op (the line says `present`), a higher version supersedes, a live version ahead of the file is left alone, a name another source holds live is refused and a name the product retired is taken over (backlog 70bc5725); the dispatcher's boot seed retires only product-sourced rules no file names, so a tenant's rule survives every converge (backlog 458971ef) | `[[rule]]` rows in the product rule file's own shape (infra/dispatcher/rules/*.toml): name, why, version, on_event or schedule, when?, delay?, `[[rule.do]]` handler + args — parsed by `boss_dispatcher::rules::registry::parse_raw_file`, validated by the publish door's own `authoring::validate`, handler names checked against `cascade::handler_emits` (this build's roster) | yes |
 | `seeds/subject_kinds.toml` | no | NO READER (measured 2026-09-16). Check parses the rows conservatively | `[[subject_kind]]` rows: kind, label, description, owning_team, sort_order | no |
 | `seeds/accounts.toml` | no | boss-brewery-engine, `include_str!` at compile time from examples/brewery/seeds — a copy in a tenant directory is never read | brewery engine data (`names`, `[[city]]`); check parses TOML only | no |
 | `seeds/vendors.toml` | no | boss-brewery-engine, `include_str!` at compile time — never read from a tenant directory | brewery engine data (`[[vendor]]`); check parses TOML only | no |
@@ -466,12 +466,25 @@ left armed), reads the name's versions, and then:
   `published` or `published, superseding vN`, and the promoted row is
   checked to be the one just drafted.
 
-**A name belongs to whoever published it first.** `dispatcher_rules`
+**A name belongs to whoever holds it live.** `dispatcher_rules`
 is one namespace with one active row per name, so a tenant drafting
 `auto-park-on-gate-green` v2 would put its reaction in the product's
 slot. The door refuses a draft whose `source` differs from the name's
-existing rows, naming both owners; `publish` reads the versions first
-and refuses the same way before drafting. Choose names of your own.
+ACTIVE or DRAFT rows, naming both owners; `publish` reads the versions
+first and refuses the same way before drafting. Choose names of your
+own. **A name the product retired is free for a tenant** (backlog
+70bc5725, 2026-09-18): ownership is judged on live rows only, so a name
+whose rows are all retired — the brewery's thirty-one reactors, which
+the historical migrations insert as product rows and the boot seed
+then retires — is taken over by the tenant's file. The draft lands
+where the door always lands one, `max(declared, MAX + 1)`, which is
+above the retired history when the file declares the version the
+migration did; the line says `published as vN, taking over the name
+from product`, the product's retired versions stay as history under
+the name (`GET /api/dispatcher/rules/{name}/versions` shows both
+sources), and the next publish reads the tenant's own row as ahead of
+its file and leaves it alone. The file's version is compared against
+the tenant's OWN rows only, never against the other source's history.
 
 **The product's boot seed leaves a tenant's rule alone.** The seed
 that derives `dispatcher_rules` from `infra/dispatcher/rules/` retires

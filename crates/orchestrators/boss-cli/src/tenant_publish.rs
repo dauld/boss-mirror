@@ -1102,20 +1102,33 @@ fn rules_outcome(resp: reqwest::blocking::Response, u: &str) -> Result<String> {
 /// this build's — a refusal is its words and no draft exists to sit
 /// armed for the next publish), then the name's versions, then:
 ///
-/// - a version above the file's → left alone, said so (never walked
-///   back; an operator's live edit survives);
-/// - the file's version present, at any status → no-op, said so — and
-///   if the stored content differs from the file's, the field is named
-///   with "bump `version`", because a silent edit under an unchanged
-///   version would otherwise read as `present` forever;
+/// - a version of the tenant's OWN above the file's → left alone, said
+///   so (never walked back; an operator's live edit survives);
+/// - the file's version present among the tenant's own, at any status
+///   → no-op, said so — and if the stored content differs from the
+///   file's, the field is named with "bump `version`", because a
+///   silent edit under an unchanged version would otherwise read as
+///   `present` forever;
 /// - otherwise → draft + publish, at the file's version, `source`
 ///   riding the draft; the promoted row is checked to be the one just
 ///   drafted (publish promotes the NEWEST draft, and an operator's
 ///   armed draft would be it otherwise).
 ///
-/// A name another source owns is refused by the door (400, naming
-/// both owners) — read here from the versions first, so the refusal
-/// names the owner before a draft is even attempted.
+/// A name another source holds LIVE (active or draft) is refused by
+/// the door (400, naming both owners) — read here from the versions
+/// first, so the refusal names the owner before a draft is even
+/// attempted. A NAME WHOSE OTHER-SOURCE ROWS ARE ALL RETIRED IS FREE
+/// (backlog 70bc5725, 2026-09-18): on the playground's fresh database
+/// the historical migrations insert the demo tenant's thirty-one reactors
+/// as product rows, the boot seed retires them, and this function
+/// refused every one — so the tenant's `seeds/rules.toml` could land
+/// on no instance at all. The takeover is the door's ordinary draft:
+/// it lands at `max(declared, MAX + 1)`, which is ABOVE the retired
+/// history when the file declares the version the migration did, so
+/// the landing version is computed the way the door computes it and
+/// the line names the version the row actually took and the source
+/// it took the name from. The next publish then reads the tenant's
+/// own row as ahead of its file, and leaves it alone.
 fn publish_rule(
     client: &Client,
     dispatcher_base: &str,
@@ -1149,23 +1162,26 @@ fn publish_rule(
     let versions: Vec<Value> = resp
         .json()
         .with_context(|| format!("GET {u}: the versions did not parse"))?;
-    if let Some(other) = versions
+    let (mine, theirs): (Vec<&Value>, Vec<&Value>) = versions
         .iter()
-        .find(|v| v["source"].as_str() != Some(source))
-    {
+        .partition(|v| v["source"].as_str() == Some(source));
+    if let Some(other) = theirs.iter().find(|v| v["status"] != json!("retired")) {
         bail!(
             "{name}: owned by {}; a rule from {source} cannot supersede it — declare it under a \
              name of your own",
             source_label(other["source"].as_str())
         );
     }
-    let max = versions.iter().filter_map(|v| v["version"].as_u64()).max();
+    // The other source's rows are all retired: history under the name,
+    // which the tenant's own file is not compared against.
+    let taken_from = theirs.first().map(|v| source_label(v["source"].as_str()));
+    let max = mine.iter().filter_map(|v| v["version"].as_u64()).max();
     if let Some(max) = max.filter(|m| *m > want) {
         return Ok(format!(
             "{name} v{want}: registry ahead at v{max}, left alone"
         ));
     }
-    if let Some(stored) = versions.iter().find(|v| v["version"] == json!(want)) {
+    if let Some(stored) = mine.iter().find(|v| v["version"] == json!(want)) {
         let status = stored["status"].as_str().unwrap_or("?");
         let file = serde_json::to_value(rule).unwrap_or(Value::Null);
         let differs: Vec<&str> = ["on_event", "schedule", "when", "do", "delay"]
@@ -1198,7 +1214,13 @@ fn publish_rule(
     let drafted: Value = resp
         .json()
         .with_context(|| format!("POST {u} ({name}): the draft did not parse"))?;
-    if drafted["version"] != json!(want) {
+    // Where the door lands a draft: `max(declared, MAX + 1)` over EVERY
+    // row of the name. With no other source's history that is the
+    // file's version (the checks above returned otherwise); over a
+    // retired history it is the first version above it.
+    let history_max = versions.iter().filter_map(|v| v["version"].as_u64()).max();
+    let expect = history_max.map_or(want, |m| want.max(m + 1));
+    if drafted["version"] != json!(expect) {
         bail!(
             "{name}: the draft landed at v{} where the file says v{want} — refusing to publish \
              a version the file does not name",
@@ -1213,17 +1235,26 @@ fn publish_rule(
     let promoted: Value = resp
         .json()
         .with_context(|| format!("POST {u}: the promoted row did not parse"))?;
-    if promoted["version"] != json!(want) || promoted["status"] != json!("active") {
+    if promoted["version"] != json!(expect) || promoted["status"] != json!("active") {
         bail!(
-            "{name}: publish promoted v{} ({}) rather than the v{want} just drafted — an armed \
+            "{name}: publish promoted v{} ({}) rather than the v{expect} just drafted — an armed \
              draft from another author?",
             promoted["version"],
             promoted["status"]
         );
     }
-    Ok(match max {
-        Some(prev) => format!("{name} v{want}: published, superseding v{prev}"),
-        None => format!("{name} v{want}: published"),
+    Ok(match (max, taken_from) {
+        (Some(prev), _) => format!("{name} v{want}: published, superseding v{prev}"),
+        (None, Some(owner)) if expect != want => format!(
+            "{name} v{want}: published as v{expect}, taking over the name from {owner} (its \
+             rows are retired; the file's version was already in the history)"
+        ),
+        (None, Some(owner)) => {
+            format!(
+                "{name} v{want}: published, taking over the name from {owner} (its rows are retired)"
+            )
+        }
+        (None, None) => format!("{name} v{want}: published"),
     })
 }
 
@@ -1757,8 +1788,9 @@ terminal = { outcome = "sponsored" }
     /// The dispatcher's authoring door, as the real one behaves
     /// (boss_dispatcher::rules::authoring): `_validate` answers
     /// `{ok, error}`; a draft lands at max(declared, MAX + 1) carrying
-    /// its `source`, refused when another source owns the name;
-    /// publish promotes the newest draft and retires the incumbent.
+    /// its `source`, refused when another source holds a LIVE row of
+    /// the name (a retired name is free, backlog 70bc5725); publish
+    /// promotes the newest draft and retires the incumbent.
     fn route_dispatcher(st: &mut Stub, method: &str, path: &str, body: &str) -> (u16, String) {
         let seg = |i: usize| path.split('/').nth(i).unwrap_or("").to_string();
         match (method, path) {
@@ -1778,11 +1810,9 @@ terminal = { outcome = "sponsored" }
                 let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
                 let name = v["name"].as_str().unwrap_or("").to_string();
                 let source = v["source"].clone();
-                if let Some(other) = st
-                    .rules
-                    .iter()
-                    .find(|r| r["name"] == name && r["source"] != source)
-                {
+                if let Some(other) = st.rules.iter().find(|r| {
+                    r["name"] == name && r["status"] != "retired" && r["source"] != source
+                }) {
                     return (
                         400,
                         format!(
@@ -2538,6 +2568,115 @@ terminal = { outcome = "sponsored" }
                 .count(),
             1,
             "no draft was written under the product's name"
+        );
+    }
+
+    /// A NAME THE PRODUCT RETIRED IS FREE FOR THE TENANT (backlog
+    /// 70bc5725, 2026-09-18) — the playground's shape: the historical
+    /// migrations insert the demo tenant's thirty-one reactors as product
+    /// rows, the boot seed retires them, and the tenant's file declares
+    /// the same versions the migrations did. The publish read every
+    /// row as the owner's and refused all thirty-one ("owned by
+    /// product"); had it read only the live rows it would still have
+    /// answered `present (retired)` off the product's row and landed
+    /// nothing. Ownership is the live rows; the file's version is
+    /// compared against the tenant's OWN rows; the draft lands where
+    /// the door puts it (above the retired history) and the line says
+    /// so. A second publish is a no-op that says the registry is
+    /// ahead, and a product row still LIVE is still refused.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rule_name_the_product_retired_is_taken_over_by_the_tenant() {
+        let dir = real_shape("rule-takeover");
+        let st = Arc::new(Mutex::new(Stub::default()));
+        // The migration's row, retired by the seed: no file names it.
+        st.lock().unwrap().rules.push(json!({
+            "name": "complete-site-live-on-converge-closed", "version": 2, "status": "retired",
+            "on_event": "jobs.job.closed", "when": "kind = \"maintenance-cluster-converge\"",
+            "do": [{"handler": "messages.notify", "args": {}}], "delay": null,
+            "created_at": "2026-09-10T00:00:00Z"
+        }));
+        let base = spawn_stub(st.clone()).await;
+
+        let lines = run_publish(plan(&dir).unwrap(), base.clone())
+            .await
+            .unwrap();
+        {
+            let st = st.lock().unwrap();
+            let live = st
+                .active_rule("complete-site-live-on-converge-closed")
+                .expect("the tenant's rule is live");
+            assert_eq!(live["version"], 3, "above the product's retired v2");
+            assert_eq!(live["source"], "tenant:acme");
+            let history: Vec<(u64, &str, Option<&str>)> = st
+                .rules
+                .iter()
+                .filter(|r| r["name"] == "complete-site-live-on-converge-closed")
+                .map(|r| {
+                    (
+                        r["version"].as_u64().unwrap(),
+                        r["status"].as_str().unwrap(),
+                        r["source"].as_str(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                history,
+                [(2, "retired", None), (3, "active", Some("tenant:acme"))],
+                "both sources in the history"
+            );
+        }
+        let line = lines
+            .iter()
+            .find(|l| l.contains("seeds/rules.toml"))
+            .unwrap();
+        assert!(
+            line.contains("v2: published as v3, taking over the name from product"),
+            "{line}"
+        );
+
+        // Idempotent: the tenant's own row is now ahead of its file.
+        let lines = run_publish(plan(&dir).unwrap(), base.clone())
+            .await
+            .unwrap();
+        let line = lines
+            .iter()
+            .find(|l| l.contains("seeds/rules.toml"))
+            .unwrap();
+        assert!(
+            line.contains("v2: registry ahead at v3, left alone"),
+            "{line}"
+        );
+        assert_eq!(
+            st.lock()
+                .unwrap()
+                .rules
+                .iter()
+                .filter(|r| r["name"] == "complete-site-live-on-converge-closed")
+                .count(),
+            2,
+            "the second publish wrote nothing"
+        );
+
+        // A product row that is still LIVE is still the product's.
+        st.lock().unwrap().rules.push(json!({
+            "name": "auto-park-on-gate-green", "version": 1, "status": "active",
+            "on_event": "step.done.gate-verdict", "when": null,
+            "do": [{"handler": "jobs.auto-park", "args": {}}], "delay": null,
+            "created_at": "2026-09-10T00:00:00Z"
+        }));
+        put(
+            &dir,
+            "seeds/rules.toml",
+            &rules_toml(2, "messages.notify").replace(
+                "complete-site-live-on-converge-closed",
+                "auto-park-on-gate-green",
+            ),
+        );
+        let err = run_publish(plan(&dir).unwrap(), base).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("owned by product") && msg.contains("tenant:acme"),
+            "{msg}"
         );
     }
 

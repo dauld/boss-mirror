@@ -211,3 +211,62 @@ async fn a_name_another_source_owns_is_refused_at_the_draft() {
         .expect_err("the product cannot draft over a tenant-owned name");
     assert!(err.to_string().contains("tenant:acme"), "{err}");
 }
+
+/// OWNERSHIP IS A CLAIM ON THE LIVE ROWS (backlog 70bc5725, 2026-09-18).
+/// The refusal above read every row of the name, retired history
+/// included, so a name the product had retired stayed the product's
+/// forever — the playground's thirty-one brewery reactors, inserted by
+/// migrations and retired by the boot seed, could never be published by
+/// the tenant that now declares them. A name whose rows are ALL retired
+/// is free; the draft lands above the retired versions; an active or
+/// draft row of another source still refuses with the same sentence.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_name_whose_rows_are_all_retired_is_free_for_another_source() {
+    let db = TestDb::new().await;
+    // Product v1 active, then retired: nobody's.
+    create_draft(&db.pool, &rule("was-ours", "step.done.x", None), None)
+        .await
+        .unwrap();
+    publish(&db.pool, "was-ours").await.unwrap();
+    retire(&db.pool, "was-ours").await.unwrap();
+
+    let d = create_draft(
+        &db.pool,
+        &rule("was-ours", "step.done.y", None),
+        Some("tenant:acme"),
+    )
+    .await
+    .expect("a retired name is free");
+    assert_eq!(d.version, 2, "above the retired history");
+    assert_eq!(d.source.as_deref(), Some("tenant:acme"));
+    let a = publish(&db.pool, "was-ours").await.unwrap();
+    assert_eq!((a.version, a.status.as_str()), (2, "active"));
+    assert_eq!(a.source.as_deref(), Some("tenant:acme"));
+    assert_eq!(
+        status_of(&db, "was-ours", 1).await.as_deref(),
+        Some("retired"),
+        "the product's version is history, not deleted"
+    );
+    assert_eq!(list_versions(&db.pool, "was-ours").await.unwrap().len(), 2);
+
+    // Now the tenant holds the live row: the product is refused, with
+    // the same sentence as before.
+    let err = create_draft(&db.pool, &rule("was-ours", "step.done.z", None), None)
+        .await
+        .expect_err("a live row of another source still refuses");
+    assert!(err.to_string().contains("owned by tenant:acme"), "{err}");
+
+    // A DRAFT of another source is a live claim too — an armed draft is
+    // what the next publish promotes.
+    create_draft(&db.pool, &rule("drafted", "step.done.x", None), None)
+        .await
+        .unwrap();
+    let err = create_draft(
+        &db.pool,
+        &rule("drafted", "step.done.y", None),
+        Some("tenant:acme"),
+    )
+    .await
+    .expect_err("a product draft is a live claim on the name");
+    assert!(err.to_string().contains("owned by product"), "{err}");
+}

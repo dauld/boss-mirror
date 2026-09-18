@@ -70,8 +70,12 @@
 //!   through `boss tenant publish`. The tree can only ever name its
 //!   own, so only NULL-sourced rows are retired; a tenant's reactor is
 //!   the tenant's protocol data and survives every converge. The
-//!   namespace is still one: a product file under a tenant-owned name
-//!   is `rejected` by name, the same refusal the API door makes.
+//!   namespace is still one: a product file under a name a tenant holds
+//!   LIVE (active or draft) is `rejected` by name, the same refusal the
+//!   API door makes — and, like the door, a name whose rows are all
+//!   retired is free (backlog 70bc5725): a tenant takes over a name the
+//!   product retired, and the reverse, with the retired rows kept as
+//!   history.
 //! - **An unreadable directory writes NOTHING.** `parse_raw_path` errors
 //!   on an absent, unreadable or rule-less directory, and this function
 //!   propagates that before its first write. A wrong `BOSS_DISPATCHER_RULES`
@@ -160,7 +164,12 @@ pub async fn seed_authored_rules(
     // is one, and a tenant row ahead of a product file is `behind`, not
     // overwritten.
     let mut active: HashMap<String, i32> = HashMap::new();
-    // `name -> source` for every name some OTHER source owns a row of.
+    // `name -> source` for every name some OTHER source holds a LIVE
+    // row of (active or draft). Ownership is judged on live rows only,
+    // the door's own rule (`authoring::create_draft`, backlog 70bc5725):
+    // a name whose rows are all retired is nobody's, and a file here
+    // may take it over the way a tenant takes over a name the product
+    // retired. The retired rows stay as history under the name.
     let mut foreign_owner: HashMap<String, String> = HashMap::new();
     for (name, version, status, source) in rows {
         have.insert((name.clone(), version));
@@ -170,6 +179,7 @@ pub async fn seed_authored_rules(
                 active.insert(name, version);
             }
             None => {}
+            Some(_) if status == "retired" => {}
             Some(owner) => {
                 foreign_owner.insert(name, owner);
             }

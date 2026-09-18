@@ -70,9 +70,17 @@ for everything this directory, a migration or the SPA's editor wrote;
 tenant contract, docs/tenant-contract.md). The seed retires only
 NULL-sourced rows no file here names, so a tenant's reactor survives
 every converge; the namespace is still one, so a file here under a name
-a tenant owns is `rejected` by name, the same refusal the API door makes
-of a tenant draft under a product name. `GET /api/dispatcher/rules`
-reports `source` per rule.
+a tenant holds LIVE (active or draft) is `rejected` by name, the same
+refusal the API door makes of a tenant draft under a product name.
+**A name the product retired is free for a tenant** (backlog 70bc5725,
+2026-09-18): ownership is judged on live rows only, so a name whose rows
+are all retired — the thirty-one brewery reactors the historical
+migrations still insert and this seed then retires — is taken over by
+the tenant's `boss tenant publish`, landing above the retired history
+with the product's retired versions kept under the name; the reverse
+holds for a file here under a name a tenant has retired.
+`GET /api/dispatcher/rules` reports `source` per rule, and
+`GET /api/dispatcher/rules/{name}/versions` shows both sources.
 
 **Publishing live and stopping there is still the defect it was.** The
 same change owes a file here, or the next converge retires the rule and
