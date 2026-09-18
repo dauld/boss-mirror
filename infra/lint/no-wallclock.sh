@@ -38,6 +38,14 @@
 #                                      stamp — wall by decision)
 #   * **/tests/                       (test files; no production
 #                                      runtime)
+#   * a whole-file test module        (`#[cfg(test)] mod tests;` in the
+#                                      parent, the tests in tests.rs —
+#                                      lib/test-file.sh, the predicate
+#                                      no-employee-id-literal shares;
+#                                      backlog e9c77544. Until 2026-09-18
+#                                      only the inline shape below was
+#                                      read, so a builder kept 4,651
+#                                      lines' tests inline to stay green)
 #   * #[cfg(test)] items              (inline test blocks — the
 #                                      exemption is the attributed
 #                                      item's BODY, brace-counted; it
@@ -64,6 +72,8 @@ cd "$LINT_DIR/../.."
 . "$LINT_DIR/lib/scanned.sh"
 # shellcheck source=infra/lint/lib/allowlist.sh
 . "$LINT_DIR/lib/allowlist.sh"
+# shellcheck source=infra/lint/lib/test-file.sh
+. "$LINT_DIR/lib/test-file.sh"
 
 LINT=no-wallclock
 
@@ -194,8 +204,9 @@ allow_used=""
 
 is_allowed() {
   local file="$1"
-  # Test files anywhere are fine.
-  if [[ "$file" == *"/tests/"* ]]; then
+  # Test files anywhere are fine — a tests/ path or a whole-file
+  # cfg(test) module (lib/test-file.sh).
+  if is_test_file "$file"; then
     return 0
   fi
   # In-memory adapters are by convention test fixtures (the prod
@@ -357,11 +368,29 @@ FIXTURE
       st_fail=1
     fi
   done
+  # The whole-file shape, through is_allowed: `#[cfg(test)] mod tests;`
+  # in the parent makes tests.rs a test file; a tests.rs no parent
+  # declares under cfg(test) is production (backlog e9c77544).
+  whole=$(mktemp -d -t no-wallclock-selftest.XXXXXX)
+  trap 'rm -f "$fixture"; rm -rf "$whole"' EXIT
+  mkdir -p "$whole/declared" "$whole/undeclared"
+  printf '#[cfg(test)]\nmod tests;\n' >"$whole/declared/lib.rs"
+  printf 'let _ = Utc::now();\n' >"$whole/declared/tests.rs"
+  printf 'mod tests;\n' >"$whole/undeclared/lib.rs"
+  printf 'let _ = Utc::now();\n' >"$whole/undeclared/tests.rs"
+  if ! is_allowed "$whole/declared/tests.rs"; then
+    echo "self-test FAIL: a tests.rs the parent declares under #[cfg(test)] classified as production"
+    st_fail=1
+  fi
+  if is_allowed "$whole/undeclared/tests.rs"; then
+    echo "self-test FAIL: a tests.rs no parent declares under #[cfg(test)] classified as a test file"
+    st_fail=1
+  fi
   if [ "$st_fail" -eq 0 ]; then
-    echo "no-wallclock --self-test: ok (cfg(test) exemption is bounded to the item)"
+    echo "no-wallclock --self-test: ok (cfg(test) exemption is bounded to the item; a whole-file test module is exempt by its parent's declaration)"
     exit 0
   fi
-  echo "no-wallclock --self-test: FAILED — the cfg(test) exemption is leaking past the item it applies to."
+  echo "no-wallclock --self-test: FAILED — the cfg(test) exemption is leaking past the item it applies to, or misreads a whole-file test module."
   exit 1
 fi
 
@@ -520,7 +549,7 @@ sql_is_file_allowed() {
   local file="$1"
   # Same blanket allow as Rust pass for clock crates, in_memory,
   # port.rs, tests, ml (predictions land in own table not audit_log).
-  if [[ "$file" == *"/tests/"* ]]; then return 0; fi
+  if is_test_file "$file"; then return 0; fi
   if [[ "$file" == *"/in_memory.rs" ]]; then return 0; fi
   if [[ "$file" == *"/port.rs" ]]; then return 0; fi
   case "$file" in

@@ -24,10 +24,13 @@
 #
 # WHAT IS EXEMPT, and each is a judgement a reader can check:
 #   * tests — `*/tests/*`, `*.test.*`, `*.spec.*`, `*/testdata/*`,
-#     `*/fixtures/*`, and every `#[cfg(test)]` region of a Rust file
-#     (a top-level one runs to the next column-0 `}`; an indented one to
-#     the closing brace at its own indent, or the one statement it
-#     guards). A test names people because it stages a roster.
+#     `*/fixtures/*`, a Rust test module declared as a whole file
+#     (`#[cfg(test)] mod tests;` in the parent — lib/test-file.sh, the
+#     predicate no-wallclock shares; backlog e9c77544), and every
+#     `#[cfg(test)]` region of a Rust file (a top-level one runs to the
+#     next column-0 `}`; an indented one to the closing brace at its
+#     own indent, or the one statement it guards). A test names people
+#     because it stages a roster.
 #   * example seeds — `examples/` and `crates/tenants/` (the two example
 #     tenants' `prepare` modules ARE their seed data: emp-cto, emp-coo and
 #     emp-ceo are Algedonic Ales' founding operators, not the platform's).
@@ -73,6 +76,8 @@ cd "$LINT_DIR/../.." || exit 1
 
 # shellcheck source=/dev/null
 . "$LINT_DIR/lib/git-answer.sh"
+# shellcheck source=infra/lint/lib/test-file.sh
+. "$LINT_DIR/lib/test-file.sh"
 
 # The platform identities: the bootstrap identity boss-people declares,
 # plus every id the operator baseline hires — read from the file, so a
@@ -185,10 +190,13 @@ kind_of() { # path
 }
 
 # The exemptions, as one predicate so the self-test and the tree read
-# agree on them.
+# agree on them. "Is a test file" (a `tests/` path, or a whole-file
+# `#[cfg(test)] mod <name>;` module) is lib/test-file.sh's answer, the
+# same one no-wallclock reads.
 exempt() { # path
+    is_test_file "$1" && return 0
     case "$1" in
-        */tests/*|*.test.*|*.spec.*|*/testdata/*|*/fixtures/*) return 0 ;;
+        *.test.*|*.spec.*|*/testdata/*|*/fixtures/*) return 0 ;;
         examples/*|crates/tenants/*|crates/core/boss-testing/*) return 0 ;;
         "infra/lint/$NAME.sh") return 0 ;;
     esac

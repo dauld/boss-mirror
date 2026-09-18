@@ -47,7 +47,12 @@ impl Tree {
     fn new(tag: &str) -> Tree {
         let root = scratch::scratch_dir(&format!("no-employee-id-literal-{tag}"));
         scratch::create_dir(&root.join("infra/lint/lib"));
-        for rel in [LINT, "infra/lint/lib/git-answer.sh"] {
+        for rel in [
+            LINT,
+            "infra/lint/lib/git-answer.sh",
+            "infra/lint/lib/scanned.sh",
+            "infra/lint/lib/test-file.sh",
+        ] {
             let body = std::fs::read_to_string(repo_root().join(rel))
                 .unwrap_or_else(|e| panic!("read {rel}: {e}"));
             scratch::write_exec(&root.join(rel), &body);
@@ -257,6 +262,74 @@ const BARE: &str = \"%Ebare\";
     assert!(
         !msg.contains("src/lib.rs:3"),
         "the staged id inside the test module must not be named:\n{msg}"
+    );
+}
+
+/// A test module declared as a whole FILE is a test file end to end
+/// (backlog e9c77544). Measured 2026-09-18: `#[cfg(test)] mod tests;` in
+/// the parent with the tests in `tests.rs` beside it was read as
+/// production, so the H1 builder kept conductor.rs's tests inline to
+/// stay green — the lint dictating file layout. The DECLARATION is what
+/// makes the file a test file (`infra/lint/lib/test-file.sh`): a
+/// `tests.rs` nobody declares under `#[cfg(test)]` is still production,
+/// and so is a literal in the parent after the declaration.
+#[test]
+fn a_whole_file_test_module_is_a_test_file() {
+    let tree = Tree::new("whole-file-module");
+    tree.file(
+        "crates/core/x/src/lib.rs",
+        "\
+pub fn owner(port: &dyn PlatformOwner) -> String { port.platform_owner() }
+const BOOT: &str = \"%Ebootstrap-admin\";
+#[cfg(test)]
+mod tests;
+",
+    );
+    tree.file(
+        "crates/core/x/src/tests.rs",
+        "const WHO: &str = \"%Estaged\";\n",
+    );
+    // A module directory declared the same way: <dir>/<name>/mod.rs.
+    tree.file(
+        "crates/core/x/src/conductor.rs",
+        "pub fn run() {}\n#[cfg(test)]\npub(crate) mod conductor_tests;\n",
+    );
+    tree.file(
+        "crates/core/x/src/conductor/conductor_tests/mod.rs",
+        "const WHO: &str = \"%Estaged\";\n",
+    );
+    let out = tree.run();
+    assert!(
+        out.status.success(),
+        "a whole-file test module must be a test region; got {:?}:\n{}",
+        out.status.code(),
+        text(&out)
+    );
+
+    let tree = Tree::new("undeclared-tests-rs");
+    tree.file(
+        "crates/core/x/src/lib.rs",
+        "mod tests;\n#[cfg(test)]\nmod staged;\nconst OWNER: &str = \"%Eafter\";\n",
+    );
+    tree.file(
+        "crates/core/x/src/tests.rs",
+        "const WHO: &str = \"%Eundeclared\";\n",
+    );
+    tree.file(
+        "crates/core/x/src/staged.rs",
+        "const WHO: &str = \"%Estaged\";\n",
+    );
+    let out = tree.run();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let msg = text(&out);
+    assert!(
+        msg.contains("src/tests.rs:1") && msg.contains("src/lib.rs:4"),
+        "a tests.rs declared WITHOUT cfg(test), and the parent's own literal \
+         after the declaration, must both be named:\n{msg}"
+    );
+    assert!(
+        !msg.contains("src/staged.rs"),
+        "the module declared under cfg(test) must not be named:\n{msg}"
     );
 }
 
