@@ -4,7 +4,13 @@
   // demo sessions, so a demo visitor sees "Sign in" and a real
   // operator sees "Sign out". Styled for the dark bar. Render it once,
   // inside the perspective tab bar.
+  import { requestLogout, type LogoutOutcome } from './session/logout';
+
   let isLoggedIn = $state<boolean>(false);
+  /** The last sign-out that did NOT land, shown beside the button.
+   *  Cleared on the next attempt. */
+  let refusal = $state<Exclude<LogoutOutcome, { kind: 'signed-out' }> | null>(null);
+  let signingOut = $state(false);
   $effect(() => {
     (async () => {
       try {
@@ -16,19 +22,36 @@
     })();
   });
 
+  // Navigation follows a CONFIRMED sign-out. Until 2026-09-18 this
+  // redirected whatever the gateway answered ("best-effort"), so a
+  // refused logout looked exactly like a successful one with the
+  // session still live — the interaction crawl's refused-write leg
+  // found it (car f09aafe1, backlog a5dff6f1). A refusal now stays on
+  // the page and says so.
   async function signOut(): Promise<void> {
-    try {
-      await fetch('/api/auth/logout', { method: 'POST' });
-    } catch {
-      // Best-effort — redirect regardless; the next request re-mints
-      // a demo session if logout didn't land.
+    signingOut = true;
+    refusal = null;
+    const outcome = await requestLogout();
+    signingOut = false;
+    if (outcome.kind === 'signed-out') {
+      window.location.href = '/login';
+      return;
     }
-    window.location.href = '/login';
+    refusal = outcome;
   }
 </script>
 
 {#if isLoggedIn}
-  <button class="signin-btn" onclick={signOut}>Sign out</button>
+  <button class="signin-btn" onclick={signOut} disabled={signingOut}>Sign out</button>
+  {#if refusal}
+    <span class="signin-refusal" role="alert">
+      {#if refusal.kind === 'refused'}
+        sign out refused (HTTP {refusal.status}){refusal.detail ? `: ${refusal.detail}` : ''}
+      {:else}
+        sign out did not reach the gateway: {refusal.detail}
+      {/if}
+    </span>
+  {/if}
 {:else}
   <a class="signin-btn" href="/login">Sign in</a>
 {/if}
@@ -58,5 +81,14 @@
     background: var(--fog, #e8ecef);
     color: var(--void, #0d1014);
     border-color: var(--fog, #e8ecef);
+  }
+  /* The refusal beside the button: the bar's mono voice, in the
+     error tone, so a sign-out that did not land looks like one. */
+  .signin-refusal {
+    margin-left: 8px;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 11px;
+    color: var(--err, #e2685c);
+    white-space: nowrap;
   }
 </style>

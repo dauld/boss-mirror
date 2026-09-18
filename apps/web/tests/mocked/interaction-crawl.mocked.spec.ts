@@ -417,12 +417,6 @@ type Gap = Readonly<{ route: string; control: string; chrome?: true; why: string
 const CHROME_ROUTE = '/ux/me';
 
 const KNOWN_GAPS: ReadonlyArray<Gap> = [
-  // The chrome's Sign out (libs/web-kit SignInControl.svelte) POSTs
-  // /api/auth/logout and sets window.location to /login whatever the
-  // answer — "best-effort, redirect regardless". A refused logout
-  // therefore looks exactly like a successful one, with the session
-  // still live. Outside apps/web, so listed rather than fixed here.
-  { route: CHROME_ROUTE, control: 'SIGN OUT', chrome: true, why: 'write refused (POST /api/auth/logout) and the page navigated to /login as if it had succeeded' },
   // JobsListPage's "Create Ad Hoc Job" opens the form with kind
   // 'ad-hoc' preselected — a kind the registry must carry for the
   // select to show it. Under a registry without it (the smoke mock's,
