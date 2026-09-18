@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# consist: skip — psql against a live database; a tree cannot answer it, and it has its own systemd timer
 #
 # Causal / temporal ordering sweep over the audit-log-derived
 # projections. Per docs/design/correctness-protocol.md, the audit log

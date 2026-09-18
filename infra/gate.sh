@@ -23,6 +23,11 @@
 #                                 # nothing else. It runs inside every
 #                                 # mode below too; this is the way to
 #                                 # read its verdict on its own.
+#   infra/gate.sh --roster        # print the pre-flight roster, one
+#                                 # `<name> <path>` per lint, and stop
+#   infra/gate.sh --exclusions    # print the lints the pre-flight
+#                                 # leaves out, `<path>\t<why>` each,
+#                                 # read off their own headers
 #   infra/gate.sh -p crate [...]  # car mode — cargo phases scoped to
 #                                 # the named crates (FULL suites, all
 #                                 # features); lints + fmt always run
@@ -128,6 +133,7 @@ AUTO=0
 QUICK=0
 LINT=0
 ROSTER=0
+EXCLUSIONS=0
 SELFTEST=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -136,8 +142,9 @@ while [ $# -gt 0 ]; do
         --quick) QUICK=1; shift ;;
         --lint) LINT=1; shift ;;
         --roster) ROSTER=1; shift ;;
+        --exclusions) EXCLUSIONS=1; shift ;;
         --self-test) SELFTEST=1; shift ;;
-        *) echo "gate.sh: unknown arg: $1 (accepts -p <crate>, --auto, --quick, --lint, --roster and --self-test)" >&2; exit 2 ;;
+        *) echo "gate.sh: unknown arg: $1 (accepts -p <crate>, --auto, --quick, --lint, --roster, --exclusions and --self-test)" >&2; exit 2 ;;
     esac
 done
 # Alternatives, not companions: --auto derives exactly what -p states,
@@ -1177,25 +1184,67 @@ check() {
 # manifest.txt lesson (CLAUDE.md §9a) one level up — a list holding no
 # information its source does not is a merge conflict waiting to
 # happen. Adding a lint is now dropping a file in infra/lint/; this
-# file does not change. The conductor's consist check discovers its
-# lints the same way (train.rs `cheap_lints`: every infra/lint/*.sh,
-# sorted, minus the delivery policy's exclusions), so the two readers
-# agree by construction rather than by being kept in step.
+# file does not change. The conductor's consist check reads the same
+# directory and asks THIS SCRIPT what to leave out (train.rs
+# `gate_exclusions` runs `gate.sh --exclusions` in the assembled
+# tree), so the two readers agree by construction rather than by
+# being kept in step.
 #
-# What is NOT run here is written down once, with its reason. Each
-# needs something a bare tree cannot answer in seconds. The set is
-# pinned by boss-testing's gate_sh.rs, which asks this script (via
-# `--roster`) rather than re-parsing it.
-PREFLIGHT_EXCLUDES=(
-    # live-DB sweeps on systemd timers, not static checks
-    "infra/lint/audit-ordering.sh"
-    "infra/lint/conservation-invariants.sh"
-    # needs a built workspace (boss-ports-list); the build phase below
-    # runs it once the binary exists
-    "infra/lint/no-snapshot-arrays.sh"
-    # installs packages — minutes, not seconds; the web phase below runs it
-    "infra/lint/svelte-check.sh"
-)
+# What is NOT run here is declared BY THE LINT ITSELF, on one line of
+# its header:
+#
+#     # consist: skip — <what a bare tree cannot answer in seconds>
+#
+# The header, not anywhere in the file: the first line that is not a
+# comment ends it, so a lint that mentions the marker in its prose is
+# not excluded by it. The reason is required — a bare declaration is
+# refused by name, because an exemption nobody explained is one nobody
+# can later judge. Each declaring lint needs something a bare tree
+# cannot answer in seconds: a live database, a built workspace, a
+# package manager.
+#
+# WHY THE LINT DECLARES IT, rather than a list here. Until 2026-09-18
+# the exclusion set lived FIVE times — an array here, a hand copy in
+# boss-testing's gate_sh.rs, the conductor's compiled fallback in
+# delivery_policy.rs, the delivery-policy seed migration, and the live
+# registry row — with two pins holding two of the pairs and NOTHING
+# holding this array equal to what the conductor ran on (tech-debt
+# audit H9, backlog 6fa15484). A fact the lint's author already knows
+# when writing it (this needs psql; this needs a built binary) was
+# being retyped four times by four other people. Now the lint says it
+# once, this function reads it, `--exclusions` prints it, and every
+# other reader asks here. The set is pinned by gate_sh.rs against the
+# roster, both asked of this script rather than re-parsed from it.
+consist_exclusions() {
+    local listed path readable=()
+    # Only files awk can open: a lint it cannot read (a dangling
+    # symlink some car left) declares nothing, and the roster loop
+    # below reports it as a check that could not run — which is the
+    # honest verdict, where an awk refusal here would take the whole
+    # roster down over one name.
+    for path in $(LC_ALL=C ls infra/lint/*.sh); do
+        [ -r "$path" ] && readable+=("$path")
+    done
+    [ ${#readable[@]} -eq 0 ] && return 0
+    listed=$(LC_ALL=C awk '
+        FNR == 1 { header = 1; if (/^#!/) next }
+        !header { next }
+        /^[ \t]*$/ { next }
+        !/^#/ { header = 0; next }
+        sub(/^# consist: skip[ \t]*/, "") {
+            sub(/[ \t]+$/, "")
+            if (!sub(/^—[ \t]*/, "") || $0 == "") {
+                printf "gate.sh: %s declares a consist skip with no reason — the line is: # consist: skip — <why a bare tree cannot answer it>\n", FILENAME > "/dev/stderr"
+                bad = 1
+                next
+            }
+            print FILENAME "\t" $0
+        }
+        END { exit bad }
+    ' "${readable[@]}") || return 1
+    [ -n "$listed" ] && printf '%s\n' "$listed"
+    return 0
+}
 
 # FIRST on purpose: it says what this workspace cannot cover, which
 # frames every result below it. A green pre-flight on a machine with
@@ -1206,31 +1255,39 @@ PREFLIGHT_FIRST="infra/lint/workspace-declares-what-it-runs.sh"
 
 # One `<name> <path>` line per lint, in the order they run: the pinned
 # first, then the directory in C-locale order, so two hosts ask the
-# same questions in the same sequence. An exclusion naming a file that
-# no longer exists is refused: left standing, it would keep a future
-# lint of that name out of the gate without anyone deciding so.
+# same questions in the same sequence. The excluded set cannot name a
+# file that does not exist any more — it is read off the files that
+# do — so the only roster entry that can be missing is the pinned one.
 #
 # `cargo-advisories` is the one lint allowed a network fetch: it is
 # report-only (always exits 0) and soft-skips when the tool or the
 # advisory DB is absent, so it cannot red a gate — only add a line.
 preflight_roster() {
-    local path
-    for path in "${PREFLIGHT_EXCLUDES[@]}" "$PREFLIGHT_FIRST"; do
-        if [ ! -f "$path" ]; then
-            echo "gate.sh: the pre-flight roster names a lint that does not exist: $path" >&2
-            return 1
-        fi
-    done
+    local excluded path nl=$'\n'
+    excluded=$(consist_exclusions) || return 1
+    excluded=$(printf '%s\n' "$excluded" | cut -f1)
+    if [ ! -f "$PREFLIGHT_FIRST" ]; then
+        echo "gate.sh: the pre-flight roster names a lint that does not exist: $PREFLIGHT_FIRST" >&2
+        return 1
+    fi
     echo "$(basename "$PREFLIGHT_FIRST" .sh) $PREFLIGHT_FIRST"
     for path in $(LC_ALL=C ls infra/lint/*.sh); do
         [ "$path" = "$PREFLIGHT_FIRST" ] && continue
-        case " ${PREFLIGHT_EXCLUDES[*]} " in *" $path "*) continue ;; esac
+        case "${nl}${excluded}${nl}" in *"${nl}${path}${nl}"*) continue ;; esac
         echo "$(basename "$path" .sh) $path"
     done
 }
 
 if [ "$ROSTER" -eq 1 ]; then
     preflight_roster
+    exit $?
+fi
+
+# `<path>\t<why>` per excluded lint, in directory order — the set the
+# roster above leaves out and the reason each lint gave. This is the
+# print the conductor's consist check and gate_sh.rs both read.
+if [ "$EXCLUSIONS" -eq 1 ]; then
+    consist_exclusions
     exit $?
 fi
 
@@ -1533,6 +1590,11 @@ run_preflight() {
         RAN+=("preflight-roster:fail:0")
         return
     fi
+    # Say what is NOT asked before asking the rest, the way the first
+    # lint says what the workspace cannot cover: a reader of a clean
+    # pre-flight should not have to open the directory to learn which
+    # lints declared themselves out of it.
+    echo "pre-flight: not run here, by their own headers: $(consist_exclusions | cut -f1 | sed 's|.*/||; s/\.sh$//' | tr '\n' ' ')"
     # A truncated roster is a FAILED check, not a quiet shortfall: the
     # receipt has to carry the fact that the gate did not ask everything
     # it claims to ask.

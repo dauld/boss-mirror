@@ -66,7 +66,13 @@ spool_count() {
 # spool sorts into the order the readings were taken.
 spool_put() {
     mkdir -p "$SPOOL_DIR"
-    at=$(sed -n 's/.*"observed_at":"\([^"]*\)".*/\1/;T;p;q' <<<"$1")
+    # POSIX parameter expansion, no subprocess: this file is #!/bin/sh
+    # and runs under dash on the forge and boss-gcp, where a here-string
+    # is a syntax error (train #439 shipped one; two hosts went
+    # unobserved, 2026-09-18). infra/lint/a-sh-script-parses-under-sh.sh
+    # holds the shebang to its parser.
+    at=${1#*'"observed_at":"'}
+    if [ "$at" = "$1" ]; then at=; else at=${at%%'"'*}; fi
     [ -n "$at" ] || at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     printf '%s' "$1" > "$SPOOL_DIR/$at.json"
     while [ "$(spool_count)" -gt "$SPOOL_MAX" ]; do

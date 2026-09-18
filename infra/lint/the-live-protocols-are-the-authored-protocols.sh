@@ -960,8 +960,9 @@ authored=$(printf '%s\n%s\n%s\n%s\n' \
 
 # An exemption for a kind the tree now authors is refused. Left standing
 # it would keep a future live-authored kind of that name out of this
-# check without anyone deciding so — the same refusal gate.sh applies to
-# a PREFLIGHT_EXCLUDES entry naming a lint that no longer exists.
+# check without anyone deciding so — the same reason gate.sh reads its
+# pre-flight exclusions off the excluded lints' own headers, where a
+# lint that no longer exists cannot be named.
 for kind in ${EXEMPT[@]+"${EXEMPT[@]}"}; do
     if printf '%s\n' "$authored" | LC_ALL=C grep -qxF "$kind"; then
         fail "the exemption for \`$kind\` is stale — the tree now authors it"

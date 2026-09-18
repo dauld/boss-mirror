@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# consist: skip — reads the built boss-ports-list binary; with no target/ it can only report not-found, so the gate runs it after its build phase
+#
 # Lint against the "snapshot, not projection" anti-pattern that
 # repeatedly bit the SPA — hand-maintained arrays of facts that
 # silently drift from their real source of truth (boss-ports::lib

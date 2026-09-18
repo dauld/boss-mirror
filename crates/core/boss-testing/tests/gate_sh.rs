@@ -177,32 +177,25 @@ fn gate_script_covers_the_checks() {
     // manifest.txt lesson one level up).
     //
     // Under-covering can therefore arrive only one way now: a lint
-    // slipping into that exclusion set. So the exclusion set is what is
-    // pinned. It is asked of the script itself (`--roster`), not
-    // re-parsed from its text — a second parser of the array would be
-    // the pair reopening.
-    let not_preflighted: &[(&str, &str)] = &[
-        (
-            "conservation-invariants.sh",
-            "live-DB sweep on a systemd timer, not a static check",
-        ),
-        (
-            "audit-ordering.sh",
-            "live-DB sweep; needs a populated audit_log to say anything",
-        ),
-        (
-            "no-snapshot-arrays.sh",
-            "needs a built workspace (boss-ports-list); the gate's build \
-             phase runs it once the binary exists, and that is asserted \
-             below — it is the check that would have caught the stale \
-             _generated/ports.ts",
-        ),
-        (
-            "svelte-check.sh",
-            "installs packages — minutes, not seconds; the gate's web phase \
-             runs it, and that is asserted below",
-        ),
-    ];
+    // slipping into that exclusion set. Until 2026-09-18 the set was
+    // pinned by a second hand-typed copy of it HERE — one of FIVE copies
+    // the tech-debt audit counted (H9, backlog 6fa15484): gate.sh's
+    // array, this list, the conductor's compiled fallback, the
+    // delivery-policy seed row and the live registry row, with nothing
+    // holding gate.sh's copy equal to the conductor's. Now each excluded
+    // lint declares its own exclusion in its header (`# consist: skip —
+    // <why>`), gate.sh derives the set from those (`--exclusions`), and
+    // the conductor asks the assembled tree's gate.sh for its roster.
+    // So what is pinned is the DERIVATION: the roster is exactly the
+    // directory minus what the lints themselves declare, asked of the
+    // script rather than re-parsed from its text — a second parser
+    // would be the pair reopening.
+    let excluded = exclusions_of(&mut gate_cmd(&["--exclusions"]));
+    assert!(
+        !excluded.is_empty(),
+        "no lint declares a consist skip — the four that need a live database, a \
+         built workspace or a package manager must still say so in their headers"
+    );
 
     let out = gate_cmd(&["--roster"])
         .output()
@@ -223,27 +216,26 @@ fn gate_script_covers_the_checks() {
         "the pre-flight must open by saying what the workspace cannot cover"
     );
 
-    let mut missing = Vec::new();
+    let mut disagree = Vec::new();
     for entry in std::fs::read_dir(repo_root().join("infra/lint")).expect("read infra/lint") {
         let path = entry.expect("dir entry").path();
         let name = match path.file_name().and_then(|n| n.to_str()) {
             Some(n) if n.ends_with(".sh") => n.to_string(),
             _ => continue,
         };
-        let excluded = not_preflighted.iter().any(|(n, _)| *n == name);
-        let runs = preflighted
-            .iter()
-            .any(|p| *p == format!("infra/lint/{name}"));
-        if excluded == runs {
-            missing.push(name);
+        let rel = format!("infra/lint/{name}");
+        let declared_skip = excluded.iter().any(|(p, _)| *p == rel);
+        let runs = preflighted.iter().any(|p| *p == rel);
+        if declared_skip == runs {
+            disagree.push(name);
         }
     }
-    missing.sort();
+    disagree.sort();
     assert!(
-        missing.is_empty(),
-        "infra/lint/ and gate.sh's pre-flight disagree on: {missing:?}. A lint \
-         listed here as not-preflighted must be in gate.sh's PREFLIGHT_EXCLUDES, \
-         and one excluded there must be listed here with the reason it is exempt."
+        disagree.is_empty(),
+        "infra/lint/ and gate.sh's pre-flight disagree on: {disagree:?}. A lint is out \
+         of the pre-flight exactly when its own header declares `# consist: skip — <why>`, \
+         and `--exclusions` must print exactly those."
     );
     assert!(
         gate.contains("infra/lint/svelte-check.sh"),
@@ -262,6 +254,158 @@ fn gate_script_covers_the_checks() {
         "no-snapshot-arrays.sh is kept out of the pre-flight because it needs the built \
          boss-ports-list: the gate's build phase must still run it as a check"
     );
+}
+
+/// `gate.sh --exclusions`, parsed: one `(path, why)` per line, the two
+/// separated by a tab because a reason has spaces in it.
+fn exclusions_of(cmd: &mut std::process::Command) -> Vec<(String, String)> {
+    let out = cmd.output().expect("run gate.sh --exclusions");
+    assert!(
+        out.status.success(),
+        "gate.sh --exclusions refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| {
+            let (path, why) = l
+                .split_once('\t')
+                .unwrap_or_else(|| panic!("an exclusion line is `<path>\\t<why>`, got {l:?}"));
+            (path.to_string(), why.to_string())
+        })
+        .collect()
+}
+
+/// A bare tree holding THIS tree's gate.sh and only the lints a test
+/// puts there, so the derivation can be exercised on lints written for
+/// the purpose rather than on whatever `infra/lint/` holds today. The
+/// gate's first-pinned lint is stubbed because the roster refuses a
+/// tree without it, which is a different claim.
+fn skeleton(label: &str, lints: &[(&str, &str)]) -> std::path::PathBuf {
+    let dir = boss_testing::scratch_dir(label);
+    let tree = dir.join("tree");
+    boss_testing::create_dir(&tree.join("infra/lint"));
+    std::fs::copy(
+        repo_root().join("infra/gate.sh"),
+        tree.join("infra/gate.sh"),
+    )
+    .expect("carry this tree's gate.sh into the skeleton");
+    boss_testing::write_file(
+        &tree.join("infra/lint/workspace-declares-what-it-runs.sh"),
+        "#!/usr/bin/env bash\nexit 0\n",
+    );
+    for (name, body) in lints {
+        boss_testing::write_file(&tree.join("infra/lint").join(name), body);
+    }
+    tree
+}
+
+fn skeleton_gate(tree: &std::path::Path, mode: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new("bash");
+    cmd.arg(tree.join("infra/gate.sh"))
+        .arg(mode)
+        .current_dir(tree);
+    cmd
+}
+
+/// THE ONE DEFINITION OF "NOT PRE-FLIGHTED" IS THE LINT'S OWN HEADER.
+///
+/// A lint that needs something a bare tree cannot answer in seconds — a
+/// live database, a built workspace, a package manager — says so on a
+/// header line, and that line is the whole mechanism: gate.sh reads it
+/// to build the roster, prints it on `--exclusions`, and the conductor
+/// asks gate.sh. Nothing else in the tree lists the excluded lints, so
+/// nothing else can drift from this.
+#[test]
+fn a_lint_declares_its_own_consist_skip_in_its_header() {
+    let tree = skeleton(
+        "boss-gate-consist-skip",
+        &[
+            (
+                "declared.sh",
+                "#!/usr/bin/env bash\n\
+                 # A lint that sweeps the live database.\n\
+                 #\n\
+                 # consist: skip — psql against a live database, not a question about a tree\n\
+                 exit 0\n",
+            ),
+            (
+                "plain.sh",
+                "#!/usr/bin/env bash\n# An ordinary static check.\nexit 0\n",
+            ),
+            (
+                "late.sh",
+                "#!/usr/bin/env bash\n\
+                 set -euo pipefail\n\
+                 # consist: skip — below the first line of code, so prose, not a declaration\n\
+                 exit 0\n",
+            ),
+        ],
+    );
+
+    let excluded = exclusions_of(&mut skeleton_gate(&tree, "--exclusions"));
+    assert_eq!(
+        excluded,
+        vec![(
+            "infra/lint/declared.sh".to_string(),
+            "psql against a live database, not a question about a tree".to_string()
+        )],
+        "exactly the lint whose HEADER declares the skip, with its reason; a marker \
+         below the first line of code is prose"
+    );
+
+    let out = skeleton_gate(&tree, "--roster")
+        .output()
+        .expect("run the skeleton's gate.sh --roster");
+    assert!(
+        out.status.success(),
+        "--roster refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let roster = String::from_utf8_lossy(&out.stdout);
+    let paths: Vec<&str> = roster
+        .lines()
+        .filter_map(|l| l.split_once(' ').map(|(_, p)| p))
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            "infra/lint/workspace-declares-what-it-runs.sh",
+            "infra/lint/late.sh",
+            "infra/lint/plain.sh",
+        ],
+        "the roster is the directory minus what the lints themselves declare"
+    );
+    let _ = std::fs::remove_dir_all(tree.parent().expect("skeleton has a parent"));
+}
+
+/// An exemption nobody explained is one nobody can later judge — the
+/// rule the delivery-policy row used to enforce on its JSON, kept at
+/// the one place the declaration now lives. Refused loudly, by name,
+/// in both modes that derive from it: a bare `# consist: skip` must
+/// not quietly drop a lint out of every gate.
+#[test]
+fn a_consist_skip_with_no_reason_is_refused() {
+    let tree = skeleton(
+        "boss-gate-consist-skip-mute",
+        &[("mute.sh", "#!/usr/bin/env bash\n# consist: skip\nexit 0\n")],
+    );
+    for mode in ["--exclusions", "--roster"] {
+        let out = skeleton_gate(&tree, mode)
+            .output()
+            .unwrap_or_else(|e| panic!("run the skeleton's gate.sh {mode}: {e}"));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "{mode} accepted a consist skip with no reason: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(
+            stderr.contains("infra/lint/mute.sh") && stderr.contains("consist: skip"),
+            "{mode}'s refusal names the lint and the line it wants: {stderr}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(tree.parent().expect("skeleton has a parent"));
 }
 
 /// THE GATE MUST NOT EAT THE DISK IT IS RUNNING ON.

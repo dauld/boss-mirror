@@ -14,7 +14,7 @@ use sqlx::{PgPool, Row};
 use super::port::{DeliveryPolicyError, DeliveryPolicyRepository};
 use super::types::DeliveryPolicyRow;
 
-const COLUMNS: &str = "name, version, max_red_trains, stall_hours, consist_excluded_lints, \
+const COLUMNS: &str = "name, version, max_red_trains, stall_hours, \
                        consist_budget_secs, consist_output_budget, consist_files_named, \
                        skip_reason_file_budget, blip_cause_budget, ci_host_floor_gb, \
                        gate_max_concurrent";
@@ -39,7 +39,6 @@ fn row_of(row: &sqlx::postgres::PgRow) -> Result<DeliveryPolicyRow, DeliveryPoli
         version: row.try_get("version").map_err(storage)?,
         max_red_trains: row.try_get("max_red_trains").map_err(storage)?,
         stall_hours: row.try_get("stall_hours").map_err(storage)?,
-        consist_excluded_lints: row.try_get("consist_excluded_lints").map_err(storage)?,
         consist_budget_secs: row.try_get("consist_budget_secs").map_err(storage)?,
         consist_output_budget: row.try_get("consist_output_budget").map_err(storage)?,
         consist_files_named: row.try_get("consist_files_named").map_err(storage)?,

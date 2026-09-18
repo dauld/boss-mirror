@@ -38,14 +38,6 @@ async fn the_seeded_policy_is_active_and_readable_through_the_port() {
         policy.ci_host_floor_gb, 40,
         "policy v3's one change (approval d99b198d)"
     );
-    assert!(
-        policy
-            .consist_excluded_lints
-            .as_array()
-            .is_some_and(|a| !a.is_empty()),
-        "the consist exclusions are a JSON array of {{script, reason}}: {:?}",
-        policy.consist_excluded_lints
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -95,9 +87,9 @@ async fn two_active_versions_of_one_policy_cannot_coexist() {
     let db = TestDb::new().await;
     let inserted = sqlx::query(
         "INSERT INTO delivery_policy (name, version, status, max_red_trains, stall_hours, \
-         consist_excluded_lints, consist_budget_secs, consist_output_budget, \
+         consist_budget_secs, consist_output_budget, \
          consist_files_named, skip_reason_file_budget, blip_cause_budget) \
-         VALUES ($1, 2, 'active', 2, 6, '[]'::jsonb, 60, 1200, 6, 96, 80)",
+         VALUES ($1, 2, 'active', 2, 6, 60, 1200, 6, 96, 80)",
     )
     .bind(POLICY)
     .execute(&db.pool)
@@ -118,9 +110,9 @@ async fn a_budget_of_zero_is_refused_by_the_schema() {
     let db = TestDb::new().await;
     let inserted = sqlx::query(
         "INSERT INTO delivery_policy (name, version, status, max_red_trains, stall_hours, \
-         consist_excluded_lints, consist_budget_secs, consist_output_budget, \
+         consist_budget_secs, consist_output_budget, \
          consist_files_named, skip_reason_file_budget, blip_cause_budget) \
-         VALUES ('draft-policy', 1, 'draft', 0, 6, '[]'::jsonb, 60, 1200, 6, 96, 80)",
+         VALUES ('draft-policy', 1, 'draft', 0, 6, 60, 1200, 6, 96, 80)",
     )
     .execute(&db.pool)
     .await;

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# consist: skip — psql + curl against a LIVE deployment; an invariant on the running system, not on a tree (it has its own systemd timer)
 #
 # Layer 3 of the Job-completeness validator — periodic
 # conservation-invariant sweep over the live DB. Per

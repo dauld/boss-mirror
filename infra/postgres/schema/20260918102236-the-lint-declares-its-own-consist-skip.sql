@@ -1,0 +1,32 @@
+-- 20260918102236-the-lint-declares-its-own-consist-skip.sql — the
+-- delivery policy stops carrying the consist check's lint exclusions,
+-- because the lints carry them now (tech-debt audit H9, backlog
+-- 6fa15484, 2026-09-18).
+--
+-- WHAT WAS WRONG. Which lints the consist check leaves out lived FIVE
+-- times: an array in infra/gate.sh, a hand copy in boss-testing's
+-- gate_sh.rs, the conductor's compiled fallback in delivery_policy.rs,
+-- the seed row in 202608242117-delivery-policy-registry.sql, and the
+-- live `train-conductor` row this column held. Two pins held two of the
+-- pairs; NOTHING held gate.sh's copy equal to the one the conductor
+-- actually ran on. Whether a lint needs more than a bare tree (psql, a
+-- built binary, a package manager) is a fact about the LINT, known to
+-- whoever writes it — so each such lint now declares it on one header
+-- line (`# consist: skip — <why>`), gate.sh derives the set from those
+-- and prints it (`--exclusions`), and the conductor asks the assembled
+-- tree's gate.sh. That is also the RIGHT tree to ask: a lint arriving
+-- on a train with the header is left out on that same boarding, where a
+-- registry row could only have learned of it after the train landed.
+--
+-- WHY DROP RATHER THAN LEAVE. A column nothing reads, still holding four
+-- confident entries on the active row and served by
+-- GET /api/delivery/policy/train-conductor, is a surface that answers
+-- differently from the system it describes — the next reader would take
+-- the row as the roster in force. The seed migration's four entries stay
+-- in history, as the row they were.
+--
+-- NOT A POLICY VERSION. No number the conductor decides by moves, so no
+-- row is retired and none inserted; trains in flight stay pinned to the
+-- version they departed under, and reconcile reads that version's
+-- remaining columns exactly as before.
+ALTER TABLE delivery_policy DROP COLUMN IF EXISTS consist_excluded_lints;

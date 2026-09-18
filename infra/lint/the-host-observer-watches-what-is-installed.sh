@@ -111,8 +111,8 @@ grep -qx 'boss-ml-inference-batch.timer' <<< "$roster" \
     from the tree instead cost a correction on a live alarm (backlog 68757702)."
 
 # 4. EVERY EXCLUSION IS JUSTIFIED IN THE FILE. The gate's own roster is
-#    "the directory minus a four-entry exclusion set" with each reason
-#    written down once (gate.sh PREFLIGHT_EXCLUDES); an unexplained
+#    "the directory minus what each excluded lint declares in its own
+#    header, with its reason" (gate.sh `--exclusions`); an unexplained
 #    exclusion is how a unit stops being watched without anybody
 #    deciding so.
 n_excl=0

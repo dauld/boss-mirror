@@ -1073,7 +1073,24 @@ fn is_a_producer_piped_into_an_early_exiting_reader(line: &str) -> bool {
 /// and inherits its sourcer's, and every sourcer under infra/ sets it —
 /// the first class was found in `forge/prune-ci-images.lib.sh` — so a
 /// library starts on.
+/// A `#!/bin/sh` file has no pipefail to be under: dash (the sh on the
+/// forge, boss-gcp and this pod) refuses `set -o pipefail` as an illegal
+/// option, and a library whose shebang says sh is sourced by sh scripts
+/// (observe-host.sh sources observe-lib.sh). Reading such a file as
+/// "under pipefail" named a repair — a here-string — that dash cannot
+/// parse; train #439 shipped it and two hosts went unobserved
+/// (2026-09-18). The parser named on line one decides.
+fn says_sh(body: &str) -> bool {
+    let first = body.lines().next().unwrap_or("").trim_end();
+    matches!(first, "#!/bin/sh" | "#!/usr/bin/env sh")
+        || first.starts_with("#!/bin/sh ")
+        || first.starts_with("#!/usr/bin/env sh ")
+}
+
 fn pipefail_per_line(body: &str, is_library: bool) -> Vec<bool> {
+    if says_sh(body) {
+        return body.lines().map(|_| false).collect();
+    }
     let mut on = is_library;
     body.lines()
         .map(|line| {
@@ -1135,7 +1152,10 @@ fn no_shell_under_infra_pipes_a_producer_into_an_early_exiting_reader() {
          variable-list class is 9840e529). Read a capture through a \
          here-string (`grep -q … <<< \"$out\"`), use a reader that drains \
          (`grep -c`, `awk`), or `set +o pipefail` around the one pipeline \
-         with a comment naming why. no-producer-coin: the offenders are\n{}",
+         with a comment naming why — in a bash script. A file whose first \
+         line says #!/bin/sh has no pipefail and no here-string (dash), \
+         and is not read here; infra/lint/a-sh-script-parses-under-sh.sh \
+         holds it to that shebang. no-producer-coin: the offenders are\n{}",
         offenders.len(),
         offenders.join("\n")
     );
@@ -1220,4 +1240,26 @@ fn the_producer_check_honours_a_pipefail_window() {
         pipefail_per_line(library, false).iter().all(|&on| !on),
         "a script that never sets pipefail cannot flip this coin"
     );
+}
+
+/// The shape #439 "repaired": observe-lib.sh is a sourced library
+/// (`lib.sh`) whose first line is `#!/bin/sh`. Under sh there is no
+/// pipefail, so its `printf | sed | head -n 1` was never the coin, and
+/// the here-string this pin's message names as the repair is not
+/// available to it. A bash library of the same body IS under its
+/// sourcer's pipefail, as before.
+#[test]
+fn a_sh_library_is_never_under_pipefail() {
+    let sh = "#!/bin/sh\nspool_put() {\n    at=$(printf '%s' \"$1\" | sed -n 's/x/y/p' | head -n 1)\n}\n";
+    assert!(
+        pipefail_per_line(sh, true).iter().all(|&on| !on),
+        "a #!/bin/sh library runs under dash, which has no pipefail"
+    );
+    let bash = "#!/usr/bin/env bash\nspool_put() {\n    at=$(printf '%s' \"$1\" | sed -n 's/x/y/p' | head -n 1)\n}\n";
+    assert!(
+        pipefail_per_line(bash, true).iter().all(|&on| on),
+        "a bash library runs under its sourcer's pipefail"
+    );
+    let env_sh = "#!/usr/bin/env sh\nset -e\nls | head -1\n";
+    assert!(pipefail_per_line(env_sh, false).iter().all(|&on| !on));
 }

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# consist: skip — bun install plus a typecheck: minutes and a network fetch, and it exits 1 on a box without bun; the gate runs it in its web phase
+#
 # svelte-check over apps/web — the type gate for the frontend.
 #
 # WHY THIS EXISTS. Until 2026-08-13 infra/gate.sh ran fifteen Rust

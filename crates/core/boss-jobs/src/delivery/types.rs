@@ -26,9 +26,6 @@ pub struct DeliveryPolicyRow {
     pub max_red_trains: i32,
     /// Hours without a step completion before an open train counts stalled.
     pub stall_hours: i32,
-    /// `[{"script": "...", "reason": "..."}]` — the lints the consist
-    /// check does not run, each with why.
-    pub consist_excluded_lints: serde_json::Value,
     /// Wall clock the whole consist check may spend.
     pub consist_budget_secs: i32,
     /// Characters of a failing lint's output that go on the record.

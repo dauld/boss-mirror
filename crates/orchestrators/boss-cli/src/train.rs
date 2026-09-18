@@ -830,12 +830,53 @@ pub(crate) fn consist_refusal_reason(failed: &[LintFailure], file_budget: usize)
     )
 }
 
+/// The lint script names the assembled tree's OWN gate leaves out of
+/// its pre-flight, asked of `infra/gate.sh --exclusions` in that tree.
+///
+/// gate.sh derives them from each lint's `# consist: skip — <why>`
+/// header, and this asks gate.sh rather than reading the headers
+/// itself: a second parser of the same line is the pair reopening.
+/// Until 2026-09-18 the conductor subtracted the delivery policy's
+/// `consist_excluded_lints` instead — a copy of the same four names
+/// that nothing held equal to gate.sh's, one of five (tech-debt audit
+/// H9, backlog 6fa15484). The tree's gate.sh is also the RIGHT copy:
+/// a lint arriving on this very train with the header is left out on
+/// this boarding, where a registry row could only have learned of it
+/// after the train landed.
+///
+/// A refusal (a declaration with no reason) or a tree with no gate.sh
+/// is an error the caller turns into a warning on a `Proceed`, by
+/// name — never a silent "then run everything".
+fn gate_exclusions(tree: &Path) -> Result<BTreeSet<String>> {
+    let out = Command::new("bash")
+        .arg("infra/gate.sh")
+        .arg("--exclusions")
+        .current_dir(tree)
+        .output()
+        .with_context(|| format!("running infra/gate.sh --exclusions in {}", tree.display()))?;
+    if !out.status.success() {
+        bail!(
+            "infra/gate.sh --exclusions rc={}: {}",
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| line.split('\t').next())
+        .filter_map(|path| Path::new(path).file_name())
+        .map(|name| name.to_string_lossy().to_string())
+        .collect())
+}
+
 /// Which `infra/lint/*.sh` of the assembled tree this check runs, in
 /// a deterministic order (sorted, so two runs over one tree ask the
 /// same questions in the same sequence). The roster is the directory
-/// minus the policy's exclusions — nothing in code to edit when a lint
-/// lands, and nothing in code to edit when an exclusion changes either.
-fn cheap_lints(tree: &Path, policy: &DeliveryPolicy) -> Result<Vec<PathBuf>> {
+/// minus what the tree's gate declares out — nothing in code to edit
+/// when a lint lands, and nothing anywhere but the lint's own header
+/// to edit when one needs more than a tree.
+fn cheap_lints(tree: &Path) -> Result<Vec<PathBuf>> {
+    let excluded = gate_exclusions(tree)?;
     let dir = tree.join("infra/lint");
     let mut scripts: Vec<PathBuf> = fs::read_dir(&dir)
         .with_context(|| format!("reading {}", dir.display()))?
@@ -848,7 +889,7 @@ fn cheap_lints(tree: &Path, policy: &DeliveryPolicy) -> Result<Vec<PathBuf>> {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
-            !policy.excludes(&name)
+            !excluded.contains(&name)
         })
         .collect();
     scripts.sort();
@@ -986,7 +1027,7 @@ fn freshen_trunk(clone: &str) {
 /// seconds each, and learning ONE bit per attempt is precisely the
 /// cost this exists to stop paying.
 pub(crate) fn consist_check(tree: &Path, policy: &DeliveryPolicy) -> ConsistVerdict {
-    let scripts = match cheap_lints(tree, policy) {
+    let scripts = match cheap_lints(tree) {
         Ok(s) if s.is_empty() => {
             return ConsistVerdict::Proceed {
                 ran: 0,
@@ -6118,11 +6159,8 @@ impl Conductor {
         let policy = delivery_policy::resolve_from(fetched, &|m| log(m));
         if policy.is_from_registry() {
             log(format!(
-                "delivery policy v{} in force (hold {}, stall {}h, {} lint exclusions)",
-                policy.version,
-                policy.max_red_trains,
-                policy.stall_hours,
-                policy.excluded_lints.len()
+                "delivery policy v{} in force (hold {}, stall {}h)",
+                policy.version, policy.max_red_trains, policy.stall_hours
             ));
         }
         policy
@@ -13526,6 +13564,12 @@ mod tests {
         // script without the lib runs a lint that cannot start, and the
         // verdict is about the fixture, not the tree.
         boss_testing::copy_lint_libs(&root);
+        // And the tree's gate.sh: the consist check asks it which lints
+        // declare themselves out (`--exclusions`), so a fixture without
+        // one is a tree whose roster cannot be derived.
+        let gate = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../infra/gate.sh");
+        std::fs::copy(&gate, root.join("infra/gate.sh"))
+            .unwrap_or_else(|e| panic!("copy {}: {e}", gate.display()));
         for m in migrations {
             std::fs::write(schema.join(m), "-- fixture\n").expect("write migration");
         }
@@ -13760,16 +13804,19 @@ mod tests {
     /// and its verdict depends on the working tree, neither of which
     /// belongs in a unit test.
     ///
-    /// The exclusions are pinned in both directions: each must be out
-    /// of the roster AND still be a real script, because an exemption
-    /// naming a file that is gone covers nothing and only misleads the
-    /// next reader.
+    /// What the conductor leaves out is what the tree's own gate leaves
+    /// out of its pre-flight (`infra/gate.sh --exclusions`, read off
+    /// each lint's `# consist: skip — <why>` header). Until 2026-09-18
+    /// this test held the conductor's roster against the delivery
+    /// policy's copy of that set — one of five copies (audit H9, backlog
+    /// 6fa15484), and the one the consist check actually ran on, held
+    /// equal to gate.sh's by nothing. Now there is one derivation and
+    /// the conductor asks it; this pins that it does.
     #[test]
-    fn the_roster_is_the_lint_directory_itself() {
-        let lint_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../infra/lint");
+    fn the_roster_is_the_lint_directory_minus_what_the_gate_declares_out() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let names: Vec<String> = cheap_lints(&root, &policy())
-            .expect("the tree has an infra/lint")
+        let names: Vec<String> = cheap_lints(&root)
+            .expect("the tree has an infra/lint and a gate.sh")
             .iter()
             .map(|p| p.file_name().unwrap_or_default().to_string_lossy().into())
             .collect();
@@ -13781,52 +13828,78 @@ mod tests {
             names.iter().any(|n| n == "migration-numbers-unique.sh"),
             "the lint that catches duplicate migration numbers is in: {names:?}"
         );
-        for excluded in &policy().excluded_lints {
-            let (script, why) = (&excluded.script, &excluded.reason);
+        let declared_out = gate_exclusions(&root).expect("the tree's gate.sh answers --exclusions");
+        assert!(
+            !declared_out.is_empty(),
+            "the lints that need a live database, a built workspace or a package manager \
+             still declare themselves out"
+        );
+        for script in &declared_out {
             assert!(
                 !names.iter().any(|n| n == script),
-                "{script} needs more than a tree ({why}) and must stay out: {names:?}"
-            );
-            assert!(
-                lint_dir.join(script).is_file(),
-                "{script} is excluded ({why}) but is no longer in infra/lint/ — drop the \
-                 exemption rather than leaving it to mislead"
+                "{script} declares itself out of the pre-flight and must stay out: {names:?}"
             );
         }
     }
 
-    /// The exclusion roster is DATA now: a policy that excuses one more
-    /// lint excuses it on the next boarding, with no code change and no
-    /// train. This is the property the design was bought for, exercised
-    /// against the real `infra/lint/` directory.
+    /// THE PROPERTY THE DESIGN IS BOUGHT FOR, one notch better than the
+    /// policy row it replaces. A lint that needs more than a tree says
+    /// so in its own header, so a lint arriving ON the train with that
+    /// header is left out on the same boarding — no registry edit, no
+    /// migration, no train ahead of it. Exercised on a fixture whose
+    /// declaring lint would FAIL if run: the only way the consist
+    /// proceeds is by honouring the declaration.
     #[test]
-    fn an_exclusion_added_to_the_policy_takes_a_lint_out_of_the_roster() {
-        use crate::delivery_policy::ExcludedLint;
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let victim = "migration-numbers-unique.sh";
-        let mut excused = policy();
-        excused.excluded_lints.push(ExcludedLint {
-            script: victim.to_string(),
-            reason: "excused by this test, not by the registry".to_string(),
-        });
-        let names: Vec<String> = cheap_lints(&root, &excused)
-            .expect("the tree has an infra/lint")
+    fn a_lint_that_declares_a_consist_skip_is_left_out_on_the_same_boarding() {
+        let (_g, tree) = consist_fixture("declared-skip", &twelve_migrations());
+        std::fs::write(
+            tree.join("infra/lint/needs-a-database.sh"),
+            "#!/usr/bin/env bash\n\
+             # consist: skip — psql against a live database, which the assembled tree has not got\n\
+             echo 'this lint must never have been run by the consist check' >&2\n\
+             exit 1\n",
+        )
+        .expect("write the declaring lint");
+        let names: Vec<String> = cheap_lints(&tree)
+            .expect("the fixture carries gate.sh and infra/lint")
             .iter()
             .map(|p| p.file_name().unwrap_or_default().to_string_lossy().into())
             .collect();
-        // Same floor the sibling test above uses, on purpose: one
-        // opinion per derivation. A negative claim — "the victim is not
-        // on the roster" — is the vacuity-prone direction, true of an
-        // empty roster, and `cheap_lints` returning nothing is exactly
-        // the failure this would then hide.
-        boss_testing::assert_roster_floor!(
+        assert_eq!(
             names,
-            15,
-            "infra/lint/ minus the policy's exclusions (69 scripts less 4 today)"
+            vec!["migration-numbers-unique.sh".to_string()],
+            "the roster is the directory MINUS what the lints themselves declare: {names:?}"
+        );
+        let verdict = consist_check(&tree, &policy());
+        assert!(
+            matches!(verdict, ConsistVerdict::Proceed { .. }),
+            "the declaring lint was not run, so it could not refuse: {verdict:?}"
+        );
+        assert_eq!(verdict.ran(), 1, "the one undeclared lint ran");
+    }
+
+    /// The one way the derivation can go wrong is now loud. A
+    /// declaration with no reason is refused by gate.sh; the conductor
+    /// must carry that refusal — by name — onto the verdict as a
+    /// warning and let the train go, never run every lint as if
+    /// nothing had been declared and never hold the track over it.
+    #[test]
+    fn a_consist_skip_with_no_reason_warns_by_name_and_the_train_departs() {
+        let (_g, tree) = consist_fixture("mute-skip", &twelve_migrations());
+        std::fs::write(
+            tree.join("infra/lint/mute.sh"),
+            "#!/usr/bin/env bash\n# consist: skip\nexit 0\n",
+        )
+        .expect("write the mute lint");
+        let verdict = consist_check(&tree, &policy());
+        assert!(
+            matches!(verdict, ConsistVerdict::Proceed { ran: 0, .. }),
+            "a roster that cannot be derived is a warning, not a verdict on the tree: {verdict:?}"
         );
         assert!(
-            !names.iter().any(|n| n == victim),
-            "the roster is the directory MINUS the policy's exclusions: {names:?}"
+            verdict.warnings().iter().any(|w| w.contains("mute.sh")),
+            "the warning names the lint whose declaration is broken: {:?}",
+            verdict.warnings()
         );
     }
 

@@ -138,7 +138,6 @@ fn policy_row() -> StoredPolicy {
             version: 1,
             max_red_trains: 2,
             stall_hours: 6,
-            consist_excluded_lints: json!([]),
             consist_budget_secs: 600,
             consist_output_budget: 2000,
             consist_files_named: 5,

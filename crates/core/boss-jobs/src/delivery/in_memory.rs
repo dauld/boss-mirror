@@ -63,7 +63,6 @@ mod tests {
             version,
             max_red_trains: 2,
             stall_hours: 6,
-            consist_excluded_lints: serde_json::json!([]),
             consist_budget_secs: 60,
             consist_output_budget: 1200,
             consist_files_named: 6,
