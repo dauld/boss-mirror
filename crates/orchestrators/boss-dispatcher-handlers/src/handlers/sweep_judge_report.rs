@@ -283,7 +283,10 @@ impl Handler for MaintenanceSweepJudge {
                 .or_else(|| ctx.event_payload.get("closed_on").and_then(|v| v.as_str()))
                 .unwrap_or("")
                 .to_string();
-            let actor = format!("rule:{rule}");
+            // The same spelling the step API records as `completed_by`
+            // for a dispatcher write (`automation:rule:<name>`), so the
+            // item and the step agree on who checked it.
+            let actor = format!("automation:rule:{rule}");
             let body =
                 clean_completion_body(&existing, verb, host, verdict, report_id, &actor, &at);
             write_json(&self.client, reqwest::Method::PUT, &step_url, &body, rule).await?;
@@ -551,7 +554,10 @@ mod tests {
             m["authority_role"], "platform-admin",
             "PUT replaces metadata wholesale, so the existing keys ride back"
         );
-        assert_eq!(m["items"][0]["checked_by"], format!("rule:{RULE}"));
+        assert_eq!(
+            m["items"][0]["checked_by"],
+            format!("automation:rule:{RULE}")
+        );
         assert_eq!(m["items"][0]["checked_at"], "2026-09-18T10:02:00Z");
     }
 
