@@ -160,6 +160,16 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         // args), and its answer is a different line, so the chain ends
         // at the follow-on by construction.
         ("ops.judge", vec!["jobs.job.created", "jobs.job.updated"]),
+        // A chore that closed red opens one backlog-item per RED route
+        // on its recorded step (ac3270c7): items (`jobs.job.created`)
+        // and a `judged` note on the chore it read (`jobs.job.updated`).
+        // Every item is a backlog-item, never the chore kind the close
+        // fires on, so the chain ends at the operator's queue the way
+        // estate.alarm's does.
+        (
+            "maintenance.chore.file_reds",
+            vec!["jobs.job.created", "jobs.job.updated"],
+        ),
         ("jobs.subjob_resolve", vec!["jobs.step.completed"]),
         // Completes the open branch on the Job a declared edge names
         // (a merged car answering its feedback packet). The completion

@@ -34,10 +34,11 @@
 //! (CLAUDE.md §9a).
 //!
 //! WHAT THIS PINS:
-//!   * the live suite and its config are gone (the one file left under
-//!     tests/smoke is the mocked suite's misfiled `mountPage` helper, and
-//!     no spec sits beside it), and apps/web carries exactly two Playwright
-//!     configs: mocked (gated) and live (the chore);
+//!   * the live suite, its config and its directory are gone (the one
+//!     file it held for a day, the mocked suite's `mountPage` helper, now
+//!     lives beside its importers at tests/mocked/_helpers.ts), and
+//!     apps/web carries exactly two Playwright configs: mocked (gated)
+//!     and live (the chore);
 //!   * `bun run test:live` is the live config, which reads the crawled
 //!     instance from BOSS_E2E_BASE_URL and nothing else, and the crawl
 //!     spec reads the mocked roster rather than its own copy;
@@ -104,23 +105,44 @@ fn the_live_suite_and_its_config_are_gone() {
              chore, not a suite in the tree"
         );
     }
-    // The directory itself survives for ONE file: the mocked suite's
-    // `mountPage` helper, which twelve mocked specs import from
-    // `../smoke/_helpers` (that suite is another car's; moving the
-    // helper is its job). No spec comes back beside it.
-    let dir = repo_root().join("apps/web/tests/smoke");
-    let mut left: Vec<String> = std::fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    left.sort();
-    assert_eq!(
-        left,
-        ["_helpers.ts"],
-        "apps/web/tests/smoke holds the mocked suite's misfiled helper and nothing else — a \
-         spec here is a live suite nothing runs"
+    // The directory itself is gone too. It survived one day for ONE
+    // file — the mocked suite's `mountPage` helper, which twelve mocked
+    // specs imported from `../smoke/_helpers` — until ac3270c7 moved the
+    // helper beside its importers. A tests/smoke that comes back is a
+    // live suite nothing runs.
+    assert!(
+        !exists("apps/web/tests/smoke"),
+        "apps/web/tests/smoke is back — the mocked suite's helper lives at tests/mocked/_helpers.ts \
+         and the live crawl at tests/live; a spec here is a live suite nothing runs"
     );
+    assert!(
+        exists("apps/web/tests/mocked/_helpers.ts"),
+        "apps/web/tests/mocked/_helpers.ts holds mountPage, beside the specs that import it"
+    );
+    let mocked = repo_root().join("apps/web/tests/mocked");
+    let specs: Vec<(String, String)> = std::fs::read_dir(&mocked)
+        .unwrap_or_else(|e| panic!("{}: {e}", mocked.display()))
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".spec.ts"))
+        .map(|e| {
+            let text = std::fs::read_to_string(e.path()).unwrap_or_default();
+            (e.file_name().to_string_lossy().into_owned(), text)
+        })
+        .collect();
+    let importers = specs
+        .iter()
+        .filter(|(_, text)| text.contains("from './_helpers'"))
+        .count();
+    assert!(
+        importers >= 12,
+        "the twelve mocked specs still import mountPage, now from './_helpers' (found {importers})"
+    );
+    for (name, text) in &specs {
+        assert!(
+            !text.contains("../smoke/"),
+            "tests/mocked/{name} imports from ../smoke/, a directory that no longer exists"
+        );
+    }
 }
 
 #[test]
@@ -189,6 +211,28 @@ fn the_crawl_reads_the_mocked_roster_rather_than_its_own() {
     assert!(
         spec.contains("`RED ${i.route} ${i.kind}: "),
         "every red route is one `RED <route> <kind>: …` line, so the packet's output names them"
+    );
+    // The guest's refusals are listed, with the reason, and printed
+    // apart from unexplained noise (ac3270c7 part 4: expected, not gated).
+    assert!(
+        spec.contains("const EXPECTED_CONSOLE_ERRORS")
+            && spec.contains("a guest hitting an operator route is the product refusing correctly"),
+        "the crawl declares the console.error lines it expects, each with the reason"
+    );
+}
+
+#[test]
+fn the_judge_rule_opens_one_item_per_red_route_on_the_failed_close() {
+    let rule = read("infra/dispatcher/rules/file-backlog-items-on-playground-crawl-red.toml");
+    assert!(
+        rule.contains(&format!("kind = \"{KIND}\"")) && rule.contains("outcome = \"failed\""),
+        "the rule fires on this chore's `failed` close and nothing else"
+    );
+    assert!(
+        rule.contains("handler = \"maintenance.chore.file_reds\"")
+            && rule.contains("step = \"\\\"run\\\"\"")
+            && rule.contains("design = \"\\\"0e07ce64\\\"\""),
+        "the RED lines are read off the `run` step and every item carries the design id"
     );
 }
 

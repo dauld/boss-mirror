@@ -37,8 +37,17 @@
 // console.error is reported, not gated. Every red route is printed on
 // its own line as `RED <route> <kind>: <text>` BEFORE the assertion
 // fails, so the chore's packet (boss-chore.sh carries the check's
-// output onto the `run` step) holds the list a reader — or the daily
-// judge — can open one backlog-item per line from.
+// output onto the `run` step) holds the list the daily judge opens one
+// backlog-item per route from (infra/dispatcher/rules/
+// file-backlog-items-on-playground-crawl-red.toml, backlog ac3270c7).
+//
+// EXPECTED console.error. A guest hitting an operator route is the
+// product refusing correctly: the gateway answers 404 or 403, Chromium
+// logs "Failed to load resource" as a console.error, and the page
+// renders its refusal. Those are listed in EXPECTED_CONSOLE_ERRORS
+// with that reason and printed apart from the rest, so the noise a
+// reader scans is the noise nobody has explained. Not gated either
+// way (decided on ac3270c7, 2026-09-18).
 
 import { test, expect } from '@playwright/test';
 import { ROUTES } from '../mocked/_routes';
@@ -46,6 +55,27 @@ import { ROUTES } from '../mocked/_routes';
 const SESSION_COOKIE = 'boss_session';
 
 type Issue = { route: string; kind: string; text: string };
+
+/// The one reason every entry below carries: the crawl is a guest, and
+/// these routes are an operator's. The refusal IS the product working.
+const GUEST_REFUSED = 'a guest hitting an operator route is the product refusing correctly';
+
+/// console.error lines the crawl expects, by route and HTTP status —
+/// measured on the chore's first nights (2026-09-18). An entry matches
+/// a resource-load error on that route carrying that status; anything
+/// else on the route is still reported as unexplained noise.
+const EXPECTED_CONSOLE_ERRORS: ReadonlyArray<{ route: string; status: number; reason: string }> = [
+  { route: '/ux/marketing-assets/ma-1', status: 404, reason: GUEST_REFUSED },
+  { route: '/it', status: 404, reason: GUEST_REFUSED },
+  { route: '/it/codebase', status: 403, reason: GUEST_REFUSED },
+];
+
+/// PURE: the expected entry a console.error matches, if any.
+function expectedFor(issue: Issue): { reason: string } | undefined {
+  return EXPECTED_CONSOLE_ERRORS.find(
+    (e) => e.route === issue.route && issue.text.includes(`status of ${e.status}`),
+  );
+}
 
 /// Mint the guest session and plant it for the crawled origin.
 async function guestSession(page: import('@playwright/test').Page, origin: string): Promise<void> {
@@ -111,12 +141,18 @@ test('every catalogued route renders the instance as a guest', async ({ page, ba
   }
 
   const crashes = issues.filter((i) => i.kind !== 'console.error');
-  const noise = issues.filter((i) => i.kind === 'console.error');
-  console.log(`crawled ${ROUTES.length} routes at ${origin}: ${crashes.length} red, ${noise.length} console.error`);
+  const noise = issues.filter((i) => i.kind === 'console.error' && !expectedFor(i));
+  const expected = issues.filter((i) => i.kind === 'console.error' && expectedFor(i));
+  console.log(
+    `crawled ${ROUTES.length} routes at ${origin}: ${crashes.length} red, ${noise.length} console.error, ${expected.length} expected console.error`,
+  );
   // One line per finding: a multi-line stack would break the one-item-
   // per-line contract the packet's reader relies on.
   const oneLine = (t: string) => t.replace(/\s*\n\s*/g, ' | ').trim();
   for (const i of noise) console.log(`  console.error [${i.route}] ${oneLine(i.text)}`);
+  for (const i of expected) {
+    console.log(`  expected console.error [${i.route}] ${oneLine(i.text)} — ${expectedFor(i)!.reason}`);
+  }
   for (const i of crashes) console.log(`RED ${i.route} ${i.kind}: ${oneLine(i.text)}`);
   expect(
     crashes,

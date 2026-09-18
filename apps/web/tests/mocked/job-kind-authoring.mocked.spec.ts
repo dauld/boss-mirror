@@ -6,7 +6,7 @@
 // rail can advance.
 
 import { test, expect } from '@playwright/test';
-import { mountPage } from '../smoke/_helpers';
+import { mountPage } from './_helpers';
 import { installAuthoringMocks, JOB_ID, KIND_SLUG } from './_mockApi';
 
 const WORKSPACE = `/it/registry/authoring/${JOB_ID}`;

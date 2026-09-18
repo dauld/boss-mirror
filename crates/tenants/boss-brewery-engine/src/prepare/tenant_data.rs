@@ -32,10 +32,13 @@ use tracing::{info, warn};
 /// Per-service base URLs the tenant seed POSTs against. In the
 /// converged-prepare path every field is the same gateway URL
 /// ([`SeedBases::all`]); the standalone `boss-brewery-data-seed`
-/// binary can point each at an individual service port — the
-/// Playwright scratch stack runs services on separate ports and
-/// deliberately points `content`/`calendar` at a dead port so the
-/// reachability probe skips the solo, prod-only services.
+/// binary can point each at an individual service port, and a
+/// partial stack (one without the solo, prod-only `content` /
+/// `calendar` services) is skipped by the reachability probe rather
+/// than failed. The Playwright scratch stack that first needed that
+/// probe was deleted 2026-09-18 with the live smoke suite (design
+/// 0e07ce64); the probe stays because the standalone binary still
+/// runs against whatever is up.
 pub struct SeedBases {
     pub people: String,
     pub accounts: String,
@@ -256,8 +259,8 @@ const OPERATORS: &[&str] = &["emp-cto", "emp-coo", "emp-ceo"];
 /// employees), then accounts/prospects/vendors, then messages,
 /// bulletins, reservations, finished-goods, raw materials, equipment
 /// catalog, and serialized assets — each gated on a reachability
-/// probe so a partial stack (Playwright scratch) skips the services
-/// it doesn't run.
+/// probe so a partial stack (the standalone seed binary pointed at
+/// fewer services than prod runs) skips the services it doesn't run.
 ///
 /// `x_boss_user` overrides the default `automation:brewery-seed`
 /// platform-admin header when `Some`. Idempotent throughout.
@@ -365,12 +368,13 @@ pub fn seed_tenant_data(
     ensure_messages(&client, &bases.messages, &headers)?;
 
     // Bulletins and reservations live on solo (prod-only)
-    // services. When the seeder is pointed at the scratch stack
-    // (Playwright globalSetup, etc.), those base URLs will be
-    // unreachable. Skip with a warn instead of failing the whole
-    // seed run — the scratch suite doesn't need bulletins /
-    // reservations seeded today, and pointing them at prod from
-    // a scratch context would pollute the live DB. Reachability
+    // services. When the standalone seed binary is pointed at a
+    // partial stack, those base URLs will be unreachable. Skip with
+    // a warn instead of failing the whole seed run — a partial stack
+    // does not need bulletins / reservations seeded, and pointing
+    // them at prod from another context would pollute the live DB.
+    // (The Playwright scratch stack this was written for went with
+    // the live smoke suite, 2026-09-18, design 0e07ce64.) Reachability
     // probe is a 2-second timeout against the service health
     // endpoint; on success the seed step runs as before.
     if base_reachable(&client, &bases.content, "/api/content/health") {

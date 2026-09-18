@@ -37,8 +37,37 @@
 //! collide with was created by the same uid, so it is a path that run
 //! can always remove. The pid covers concurrency, the uid covers
 //! ownership, and this is an ownership defect.
+//!
+//! ## Why a sequence number as well
+//!
+//! Every test of one binary runs in ONE process, so the pid tells two
+//! of them apart from nothing. A name two tests share — a
+//! `plain_tenant()` helper four tests call — was therefore one path,
+//! and under the parallel runner one test's `remove_dir_all` raced
+//! another's first write: `write` panicked at a path that had existed
+//! a moment before (backlog 6eaef658, second instance, 2026-09-18).
+//! `scratch_dir` now hands out a fresh child of the per-name root on
+//! every call, numbered from a process-wide counter, so the same name
+//! from two tests — or twice from one — never shares a directory.
+//!
+//! ## Why an executable is written by a child process
+//!
+//! Linux refuses to exec a file any process holds open for writing
+//! (`ETXTBSY`). A test that writes a script and runs it closes the
+//! descriptor first — and still hit `Text file busy` once in a full
+//! run (backlog 6eaef658, first instance). The writer was not the
+//! holder: a child spawned by a SIBLING thread inherits every open
+//! descriptor of this process until its own exec, so a write
+//! descriptor open at the instant any other test spawns is briefly
+//! open in that child too, and the exec that follows the close loses
+//! the race. Measured with four spawning threads: 3–9 of 50 fresh
+//! scripts refused. The only fix that removes the race rather than
+//! narrowing it is to never hold the file open for writing in this
+//! process at all — `write_exec` streams the body to a child that does
+//! the writing and has exited before the call returns.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The uid this process runs as, for use in a path segment.
 ///
@@ -54,15 +83,21 @@ fn current_uid() -> u32 {
         .unwrap_or(u32::MAX)
 }
 
-/// The path `scratch_dir` would use, without creating anything.
+/// The per-name root this process and uid own, without creating
+/// anything. `scratch_dir(name)` hands out a fresh child of it.
 ///
 /// Exposed so a test can assert on the naming, and so a caller that
-/// needs a sibling path can derive one.
+/// needs a path that must NOT exist can derive one.
 pub fn scratch_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{name}-{}-{}", current_uid(), std::process::id()))
 }
 
-/// An empty scratch directory this process owns outright.
+/// One per call, process-wide: the component that tells two tests of
+/// one binary — one pid — apart (module note, "Why a sequence number").
+static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// An empty scratch directory this process owns outright, distinct
+/// from every other call's — including another call with this name.
 ///
 /// Panics naming the path if the directory cannot be cleared or created.
 /// A removal failure is NOT discarded: a pre-existing root we cannot
@@ -70,7 +105,12 @@ pub fn scratch_path(name: &str) -> PathBuf {
 /// assume, and carrying on is what made the original failures
 /// unreadable. `NotFound` is the normal case and is not an error.
 pub fn scratch_dir(name: &str) -> PathBuf {
-    let dir = scratch_path(name);
+    let seq = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    cleared(scratch_path(name).join(seq.to_string()))
+}
+
+/// `dir`, emptied of whatever a recycled pid left there and created.
+fn cleared(dir: PathBuf) -> PathBuf {
     if let Err(e) = std::fs::remove_dir_all(&dir) {
         assert!(
             e.kind() == std::io::ErrorKind::NotFound,
@@ -99,9 +139,38 @@ pub fn write_file(path: &Path, body: &str) {
 }
 
 /// Write an executable file (mode `0755`), naming the path on failure.
+///
+/// The body is written by a child process, not by this one, so no
+/// thread of this process ever holds the file open for writing and a
+/// sibling's spawn cannot inherit that descriptor into a child that
+/// keeps it past our exec (module note, "Why an executable is written
+/// by a child process"). The child has exited before this returns.
 pub fn write_exec(path: &Path, body: &str) {
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
-    write_file(path, body);
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("sh")
+        .args(["-c", "cat > \"$1\"", "sh"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("write {}: spawn the writer: {e}", path.display()));
+    let stdin = child.stdin.take();
+    stdin
+        .expect("a piped stdin")
+        .write_all(body.as_bytes())
+        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    let out = child
+        .wait_with_output()
+        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    assert!(
+        out.status.success(),
+        "write {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
         .unwrap_or_else(|e| panic!("chmod 0755 {}: {e}", path.display()));
 }
@@ -131,18 +200,20 @@ mod tests {
         );
     }
 
-    /// A fresh root is empty even when the previous run of the same
-    /// process left files in it — the removal is real, not best-effort.
+    /// A fresh root is empty even when an earlier process with this pid
+    /// left files at the same path — the removal is real, not
+    /// best-effort. Exercised on the clearing step itself, because
+    /// `scratch_dir` never hands the same path out twice.
     #[test]
     fn a_scratch_root_comes_back_empty() {
         let dir = scratch_dir("boss-scratch-reuse");
-        write_file(&dir.join("stale"), "from an earlier call");
-        let again = scratch_dir("boss-scratch-reuse");
-        assert_eq!(dir, again, "the same name yields the same root");
+        write_file(&dir.join("stale"), "from an earlier process");
+        let again = cleared(dir.clone());
+        assert_eq!(dir, again, "clearing keeps the path");
         assert!(
             !again.join("stale").exists(),
-            "scratch_dir must clear what it finds, so a test never reads \
-             an earlier run's file: {} survived",
+            "a scratch root must be cleared of what a recycled pid left, \
+             so a test never reads an earlier run's file: {} survived",
             again.join("stale").display()
         );
         let _ = std::fs::remove_dir_all(&again);
@@ -170,6 +241,76 @@ mod tests {
             "a write failure must name the path it was at; got: {msg}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two tests of ONE binary share a pid, so a name shared between
+    /// them — a `plain_tenant()` helper four tests call — was one path
+    /// until 2026-09-18: one test's `remove_dir_all` raced another's
+    /// first write (backlog 6eaef658, panicked at the write). Every call
+    /// now gets its own root, even for the same name in the same
+    /// process.
+    #[test]
+    fn two_calls_with_one_name_yield_two_roots() {
+        let a = scratch_dir("boss-scratch-twice");
+        let b = scratch_dir("boss-scratch-twice");
+        assert_ne!(
+            a, b,
+            "two calls with the same name must not share a root: tests \
+             of one binary share a pid, and a shared root is a race \
+             between one test's clear and another's first write"
+        );
+        write_file(&a.join("mine"), "a");
+        assert!(a.join("mine").exists() && !b.join("mine").exists());
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    /// An executable `write_exec` wrote can be run at once, while
+    /// another thread of this process keeps spawning children — the
+    /// shape of a parallel test binary. Linux refuses to exec a file
+    /// any process holds open for writing (ETXTBSY), and a child forked
+    /// by a SIBLING thread inherits every open descriptor until its own
+    /// exec, so a write descriptor that is still open in this process
+    /// at the instant a sibling spawns is briefly open in that child
+    /// too. That is the once-in-a-run `Text file busy` the shim test hit
+    /// (backlog 6eaef658, 2026-09-18). The write must therefore never
+    /// hold the file open in this process at all.
+    #[test]
+    fn an_executable_just_written_can_be_execd_while_siblings_spawn() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = scratch_dir("boss-scratch-exec-race");
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let spawners: Vec<_> = (0..4)
+            .map(|_| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = std::process::Command::new("true").output();
+                    }
+                })
+            })
+            .collect();
+        let mut busy = 0;
+        for i in 0..50 {
+            let exe = dir.join(format!("exe-{i}"));
+            write_exec(&exe, "#!/bin/sh\nexit 0\n");
+            match std::process::Command::new(&exe).output() {
+                Ok(o) => assert!(o.status.success(), "{} failed", exe.display()),
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => busy += 1,
+                Err(e) => panic!("exec {}: {e}", exe.display()),
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        for s in spawners {
+            s.join().expect("a spawner thread ends");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            busy, 0,
+            "{busy} of 50 fresh executables answered ExecutableFileBusy: \
+             write_exec left its file open for writing in this process \
+             while a sibling thread spawned"
+        );
     }
 
     /// A root that cannot be cleared must REFUSE, naming the path —

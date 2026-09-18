@@ -101,7 +101,7 @@ authority_role = "platform-admin"
 # The analyst block backlog-item's `draft-design` carries — one step,
 # one declaration in both kinds (c87fb59b car 1).
 agent = { profile = "analyst", model = "opus-5[1m]", budget_usd = 2, effort = "medium" }
-metadata_defaults = { procedure = "File the design-doc that answers this feedback: `boss design <title> --markdown <file> --question 'Qn|title|proposal' ... --answers <this packet>`. The verb writes the design's id here as design_id and completes this step; the founder's design-review opens on it, asking for that design at /it/design." }
+metadata_defaults = { procedure = "File the design-doc that answers this feedback: `boss design <title> --markdown-file <file> --question 'Qn|title|proposal' ... --answers <this packet>`. The verb writes the design's id here as design_id and completes this step; the founder's design-review opens on it, asking for that design at /it/design." }
 [[workflow.step.fields]]
 name = "design_id"
 field_type = "string"

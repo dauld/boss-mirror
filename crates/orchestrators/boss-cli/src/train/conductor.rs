@@ -824,6 +824,8 @@ impl Conductor {
                         vec![
                             (tg::KEY_RUN, json!(run_id)),
                             (tg::KEY_LAUNCHED_AT, json!(now.to_rfc3339())),
+                            // Filed: the train no longer waits for a reason.
+                            (tg::KEY_WAIT_REASON, Value::Null),
                         ],
                     )
                     .await
@@ -849,18 +851,17 @@ impl Conductor {
                 let why = format!("{e:#}");
                 let unavailable = failures >= tg::MAX_LAUNCH_FAILURES;
                 log(format!(
-                    "train {}: train gate not filed this pass ({why}) — attempt {failures} of {}; {}",
+                    "train {}: {}",
                     id8(tid),
-                    tg::MAX_LAUNCH_FAILURES,
-                    if !unavailable {
-                        "retrying next pass; the train waits"
-                    } else if self.cfg.gate_required {
-                        "the gate is REQUIRED, the train waits"
-                    } else {
-                        "reading the gate as UNAVAILABLE: CI alone judges this train, stamped on it"
-                    }
+                    tg::launch_failure_line(&why, failures, self.cfg.gate_required)
                 ));
-                let mut kv = vec![(tg::KEY_LAUNCH_FAILURES, json!(failures))];
+                // The count AND the reason: a troubled packet must look
+                // troubled, and a count alone drew a healthy train at CI
+                // for two hours (48f7aba1).
+                let mut kv = vec![
+                    (tg::KEY_LAUNCH_FAILURES, json!(failures)),
+                    (tg::KEY_WAIT_REASON, json!(why)),
+                ];
                 if unavailable && !self.cfg.gate_required {
                     kv.push((
                         tg::KEY_FALLBACK,
@@ -948,7 +949,9 @@ impl Conductor {
         let ns = self.cfg.gate_namespace.as_str();
         let max = crate::gate::max_concurrent(&self.http).await?;
         let live = crate::gate::running_gates(ns)?;
-        if live.len() >= max {
+        // The train is admitted AT the bound (48f7aba1): the one
+        // predicate `boss gate` also consults, with the train's answer.
+        if !crate::gate::admits(live.len(), max, crate::gate::Requester::Train) {
             bail!(
                 "the cluster is at its gate bound ({} running of {max}: {})",
                 live.len(),
@@ -3691,6 +3694,86 @@ mod tests {
         assert!(
             !puts.lock().unwrap().contains(&"c1".to_string()),
             "the car was released despite close_pr failing — a half-cancelled train"
+        );
+    }
+
+    /// 48f7aba1: a train whose gate could not be filed carried only
+    /// `train_gate_launch_failures=5` — a count with no reason — and
+    /// the yard drew a healthy train at CI for two hours. This drives
+    /// `train_gate` against an in-process jobs server with a launch
+    /// that fails before any cluster call (the runner manifest is
+    /// unreadable) and reads the train's PUT: the count AND the reason
+    /// land on the packet together.
+    #[tokio::test]
+    async fn a_gate_that_cannot_be_filed_records_why_on_the_train() {
+        use axum::extract::Path;
+        use axum::routing::get;
+        use axum::{Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        let train = json!({
+            "id": "t1", "kind": "pr-train", "status": "open",
+            "metadata": { "boarded_jobs": ["c1"], "train_ref": "train/x@abcdef1" },
+            "steps": [
+                {"id":"s-assemble","spec_slug":"assemble","title":"Assemble the train branch","status":"completed","metadata":{"train_ref":"train/x@abcdef1"}},
+                {"id":"s-pr","spec_slug":"pr","title":"Open the batched PR","status":"completed","metadata":{"pr_url":"https://forge.example/david/boss/pulls/9"}},
+                {"id":"s-ci","spec_slug":"ci","title":"CI verdict","status":"ready","metadata":{}}
+            ]
+        });
+        // Every PUT body the conductor sends for the train.
+        let puts: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let train_one = train.clone();
+        let puts_route = puts.clone();
+        let app = Router::new().route(
+            "/api/jobs/{id}",
+            get(move |Path(_id): Path<String>| {
+                let t = train_one.clone();
+                async move { Json(t) }
+            })
+            .put(move |Path(_id): Path<String>, Json(b): Json<Value>| {
+                let puts = puts_route.clone();
+                async move {
+                    puts.lock().unwrap().push(b);
+                    Json(json!({}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut c = cleanup_conductor(
+            "forgejo",
+            Box::new(FakeForge {
+                deleted: Arc::new(Mutex::new(Vec::new())),
+                fail_deletes: false,
+            }),
+        );
+        c.cfg.jobs = format!("http://{addr}");
+        c.cfg.gate_required = true;
+
+        let mut t = train.clone();
+        let (standing, _) = c.train_gate(&mut t, "t1", Utc::now()).await;
+        assert_eq!(
+            standing, None,
+            "no gate-run was filed, so the train has no standing yet"
+        );
+        let puts = puts.lock().unwrap();
+        let recorded = puts
+            .iter()
+            .find(|b| b.pointer("/metadata/train_gate_launch_failures").is_some())
+            .expect("the failed launch is recorded on the train");
+        assert_eq!(recorded["metadata"]["train_gate_launch_failures"], json!(1));
+        let why = recorded["metadata"][crate::train_gate::KEY_WAIT_REASON]
+            .as_str()
+            .expect("the reason rides with the count");
+        assert!(
+            why.contains("gate runner manifest"),
+            "the reason is the launch error, verbatim: {why}"
+        );
+        assert!(
+            recorded["metadata"].get("train_gate_fallback").is_none(),
+            "a REQUIRED gate never falls back to CI alone"
         );
     }
 

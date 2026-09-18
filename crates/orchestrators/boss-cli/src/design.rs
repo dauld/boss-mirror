@@ -46,6 +46,8 @@
 //! guard resolves the empty string trivially". A packet that simply
 //! left the flag out would stall its own review step.
 
+use std::path::{Path, PathBuf};
+
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
@@ -73,6 +75,59 @@ pub(crate) fn parse_question(raw: &str) -> Result<Value> {
         bail!("--question needs all three of anchor, title and proposal: {raw:?}");
     }
     Ok(question(a, t, p))
+}
+
+/// Is this value a file's NAME rather than a document's text? A single
+/// line (nothing after trimming but one line) that either is one token
+/// ending in `.md`/`.txt` or names a file `exists` answers for. Prose
+/// that merely mentions a file ("fold it into decisions.md") is several
+/// words and no file, so it passes; an empty body is not a path.
+/// `exists` is handed in so the shape is pinned without a filesystem.
+pub(crate) fn path_shaped(text: &str, exists: impl Fn(&str) -> bool) -> bool {
+    let line = text.trim();
+    if line.is_empty() || line.contains('\n') {
+        return false;
+    }
+    let one_token = !line.contains(char::is_whitespace);
+    (one_token && (line.ends_with(".md") || line.ends_with(".txt"))) || exists(line)
+}
+
+/// `--markdown` takes the doc's TEXT, and the natural misreading of an
+/// option whose value is a whole document is to hand it a file name.
+/// The verb accepted that: two designs (11e60367, 55417146) reached
+/// David's review queue with a one-line /tmp path for a body, rendered
+/// on /it/design as "carried by this packet · not yet a file" followed
+/// by the path, and neither could be reviewed until the packet and the
+/// step's copy were rewritten by hand (backlog 1763d5af, 2026-09-18).
+/// A body is prose and a path is not prose, so the path-shaped value
+/// is refused at the flag, naming the door that reads a file.
+pub(crate) fn body_is_prose(flag: &str, text: &str, exists: impl Fn(&str) -> bool) -> Result<()> {
+    if path_shaped(text, exists) {
+        bail!(
+            "{flag} takes the doc body as text, and {:?} is a path, not prose — pass \
+             `--markdown-file <PATH>` to read the body from that file. A design filed \
+             with a path for a body reaches the reviewer with nothing to read.",
+            text.trim()
+        );
+    }
+    Ok(())
+}
+
+/// The same refusal one flag over: a question's title and proposal are
+/// prose too, and a path in either reaches the reviewer as a question
+/// nobody can answer.
+pub(crate) fn question_is_prose(q: &Value, exists: impl Fn(&str) -> bool) -> Result<()> {
+    for key in ["title", "proposal"] {
+        let text = q.get(key).and_then(Value::as_str).unwrap_or("");
+        if path_shaped(text, &exists) {
+            bail!(
+                "--question takes its {key} as text, and {text:?} is a path, not prose — write \
+                 the question inline (`anchor|title|proposal`); only the doc body can come \
+                 from a file, through `--markdown-file <PATH>`."
+            );
+        }
+    }
+    Ok(())
 }
 
 /// The job body, pure so the shape is pinned by tests rather than by
@@ -269,6 +324,7 @@ pub(crate) fn review_step_metadata(body: &Value, doc_path: &str) -> Value {
 pub async fn run(
     title: String,
     markdown: String,
+    markdown_file: Option<PathBuf>,
     questions: Vec<String>,
     no_questions: bool,
     doc_path: Option<String>,
@@ -286,9 +342,21 @@ pub async fn run(
              failure this verb exists to prevent."
         );
     }
+    // The body: read from the file named, or the text given — and a
+    // path handed to the text flag is refused here, before anything is
+    // filed (backlog 1763d5af). clap keeps the two flags exclusive.
+    let is_file = |p: &str| Path::new(p).is_file();
+    let markdown = match markdown_file {
+        Some(path) => std::fs::read_to_string(&path)
+            .with_context(|| format!("--markdown-file: reading {}", path.display()))?,
+        None => {
+            body_is_prose("--markdown", &markdown, is_file)?;
+            markdown
+        }
+    };
     let parsed = questions
         .iter()
-        .map(|q| parse_question(q))
+        .map(|q| parse_question(q).and_then(|q| question_is_prose(&q, is_file).map(|()| q)))
         .collect::<Result<Vec<_>>>()?;
     let http = reqwest::Client::new();
 
@@ -708,6 +776,78 @@ mod tests {
         let err = answerable(&json!({ "id": "abc", "kind": "ship-a-change", "steps": [] }))
             .expect_err("no design-review step");
         assert!(err.contains("ship-a-change"), "{err}");
+    }
+
+    /// `--markdown` takes the doc's TEXT, and the natural misreading of
+    /// an option whose value is a whole document is to hand it a file
+    /// name. The verb accepted that: two designs (11e60367, 55417146)
+    /// reached David's review queue with a one-line /tmp path for a
+    /// body, and neither could be reviewed until the packet and the
+    /// step's copy were rewritten by hand (backlog 1763d5af,
+    /// 2026-09-18). A body is prose; a path is not prose. A single
+    /// token ending in .md/.txt, or a single line naming a file that
+    /// exists, is refused and told about `--markdown-file`.
+    #[test]
+    fn a_path_is_not_a_body() {
+        let none = |_: &str| false;
+        let tmp_file = |p: &str| p == "/home/david/design-body.md" || p == "notes";
+        for path in [
+            "/home/david/design-body.md",
+            "docs/design/x.md",
+            "body.txt",
+            " README.md\n",
+        ] {
+            assert!(path_shaped(path, none), "a path-shaped body: {path:?}");
+            let err = body_is_prose("--markdown", path, none).expect_err("refused");
+            assert!(
+                err.to_string().contains("--markdown-file")
+                    && err.to_string().contains(path.trim()),
+                "the refusal names the path and the door: {err}"
+            );
+        }
+        // A bare name is a path when it names a file that exists.
+        assert!(path_shaped("notes", tmp_file));
+        assert!(
+            !path_shaped("notes", none),
+            "and just a word when it does not"
+        );
+        // Prose is prose: several lines, or one that only mentions a file.
+        for prose in [
+            "# the doc\n\nBody, on lines.\n",
+            "fold it into architecture-decisions.md",
+            "ship the cheap one",
+            "",
+        ] {
+            assert!(
+                !path_shaped(prose, tmp_file),
+                "prose, not a path: {prose:?}"
+            );
+            body_is_prose("--markdown", prose, tmp_file).expect("accepted");
+        }
+        // A one-line body that is prose still passes: the shape refused
+        // is a path, not brevity.
+        body_is_prose("--markdown", "# only a heading", none).expect("accepted");
+    }
+
+    /// The same refusal on a question: its title and proposal are prose
+    /// too, and a path in either is the same misreading one flag over.
+    #[test]
+    fn a_question_is_prose_too() {
+        let none = |_: &str| false;
+        let q = parse_question("Q1|first brick?|ship the cheap one").unwrap();
+        question_is_prose(&q, none).expect("prose");
+        let bad = parse_question("Q1|first brick?|/home/david/proposal.md").unwrap();
+        let err = question_is_prose(&bad, none).expect_err("a path proposal is refused");
+        assert!(
+            err.to_string().contains("/home/david/proposal.md")
+                && err.to_string().contains("--question"),
+            "{err}"
+        );
+        let bad = parse_question("Q1|title.txt|a real proposal").unwrap();
+        assert!(
+            question_is_prose(&bad, none).is_err(),
+            "a path title is refused"
+        );
     }
 
     /// The draft's completion carries the id the filing returned —

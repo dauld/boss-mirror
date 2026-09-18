@@ -242,6 +242,49 @@ pub(crate) async fn post_json(
     Ok(())
 }
 
+/// POST a packet and read the id the jobs API minted for it — the one
+/// thing [`post_json`] does not return, and the thing a judging
+/// handler's note on the judged packet names. Same 422 contract.
+///
+/// Lived in `ops_judge` until `maintenance.chore.file_reds` needed the
+/// same POST-and-read (ac3270c7) — one definition rather than a second
+/// copy (CLAUDE.md §9a).
+pub(crate) async fn post_json_minted_id(
+    client: &reqwest::Client,
+    url: &str,
+    body: &Value,
+    rule_name: &str,
+) -> Result<String, HandlerError> {
+    let resp = client
+        .post(url)
+        .header("content-type", "application/json")
+        .header("x-boss-user", dispatcher_actor_header(rule_name))
+        .header("x-sim-origin", sim_origin_value())
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| HandlerError::Downstream(format!("POST {url}: {e}")))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+            HandlerError::Permanent(format!("POST {url} returned {status}: {text}"))
+        } else {
+            HandlerError::Downstream(format!("POST {url} returned {status}: {text}"))
+        });
+    }
+    let created: Value = resp
+        .json()
+        .await
+        .map_err(|e| HandlerError::Downstream(format!("POST {url} answer not JSON: {e}")))?;
+    created
+        .get("id")
+        .or_else(|| created.get("data").and_then(|d| d.get("id")))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| HandlerError::Downstream(format!("POST {url} answered no id: {created}")))
+}
+
 /// GET a JSON document from a downstream service, stamping the same
 /// rule-as-actor `x-boss-user` header as [`post_json`], mapping
 /// transport failures and non-2xx responses into

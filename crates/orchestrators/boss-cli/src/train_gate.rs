@@ -53,6 +53,12 @@ pub(crate) const KEY_RELAUNCHES: &str = "train_gate_relaunches";
 pub(crate) const KEY_REFUSALS: &str = "train_gate_refusals";
 pub(crate) const KEY_LAUNCH_FAILURES: &str = "train_gate_launch_failures";
 pub(crate) const KEY_FALLBACK: &str = "train_gate_fallback";
+/// WHY the gate is not filed yet, verbatim from the last failed launch
+/// (the bound line names the running gates). On 2026-09-18 train
+/// ccd8b08e sat two hours at CI carrying `train_gate_launch_failures=5`
+/// and no reason; the yard drew a healthy train (48f7aba1). Cleared the
+/// pass the gate is filed.
+pub(crate) const KEY_WAIT_REASON: &str = "train_gate_wait_reason";
 
 /// Launch attempts the conductor makes (one per reconcile pass, a minute
 /// apart) before a gate it cannot file is read as unavailable.
@@ -262,6 +268,38 @@ pub(crate) fn packet_marks(train_id: &str, train_title: &str) -> Value {
             &train_id[..8.min(train_id.len())]
         ),
     })
+}
+
+/// The one line the conductor logs when it could not FILE the gate
+/// this pass. It never counts past its own cap: while the gate is
+/// required there is no cap (the train waits, however long), so the
+/// line names no "of N" — train ccd8b08e logged "attempt 4 of 3" and
+/// "attempt 5 of 3" on 2026-09-18 (48f7aba1). Without the requirement
+/// the cap is real: up to it the line counts against it, at it the
+/// gate reads UNAVAILABLE, and past it the line says the cap is spent.
+pub(crate) fn launch_failure_line(why: &str, failures: u32, required: bool) -> String {
+    let (count, next) = if required {
+        (
+            format!("attempt {failures}"),
+            "the gate is REQUIRED, the train waits",
+        )
+    } else if failures < MAX_LAUNCH_FAILURES {
+        (
+            format!("attempt {failures} of {MAX_LAUNCH_FAILURES}"),
+            "retrying next pass; the train waits",
+        )
+    } else if failures == MAX_LAUNCH_FAILURES {
+        (
+            format!("attempt {failures} of {MAX_LAUNCH_FAILURES}"),
+            "reading the gate as UNAVAILABLE: CI alone judges this train, stamped on it",
+        )
+    } else {
+        (
+            format!("attempt {failures}, the {MAX_LAUNCH_FAILURES} the fallback allows spent"),
+            "reading the gate as UNAVAILABLE: CI alone judges this train, stamped on it",
+        )
+    };
+    format!("train gate not filed this pass ({why}) — {count}; {next}")
 }
 
 /// The one line the conductor logs and stamps when it reads the gate.
@@ -554,6 +592,36 @@ mod tests {
             !boss_jobs::stranded::park_intent(&m),
             "no park intent: the auto-park handler leaves it alone"
         );
+    }
+
+    /// 48f7aba1: the conductor logged "attempt 4 of 3" and "attempt 5
+    /// of 3" on train ccd8b08e — a required gate has no cap, so the
+    /// count must not name one. Without the requirement the cap is real
+    /// and the line keeps it, and past it the line says the cap is
+    /// spent rather than counting beyond it.
+    #[test]
+    fn the_launch_failure_line_never_exceeds_its_own_count() {
+        let required = launch_failure_line("at its gate bound", 5, true);
+        assert!(required.contains("attempt 5;"), "{required}");
+        assert!(
+            !required.contains(" of "),
+            "no cap while REQUIRED: {required}"
+        );
+        assert!(required.contains("REQUIRED"), "{required}");
+        assert!(required.contains("at its gate bound"), "{required}");
+
+        let first = launch_failure_line("no kubectl", 1, false);
+        assert!(first.contains("attempt 1 of 3"), "{first}");
+        assert!(first.contains("retrying next pass"), "{first}");
+
+        let spent = launch_failure_line("no kubectl", 3, false);
+        assert!(spent.contains("attempt 3 of 3"), "{spent}");
+        assert!(spent.contains("UNAVAILABLE"), "{spent}");
+
+        let past = launch_failure_line("no kubectl", 5, false);
+        assert!(!past.contains("5 of 3"), "{past}");
+        assert!(past.contains("attempt 5"), "{past}");
+        assert!(past.contains("UNAVAILABLE"), "{past}");
     }
 
     #[test]

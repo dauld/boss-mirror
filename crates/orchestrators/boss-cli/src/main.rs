@@ -464,9 +464,14 @@ enum Commands {
     Design {
         /// The doc's title.
         title: String,
-        /// The doc body, markdown.
+        /// The doc body, as TEXT. A file name here is refused — two
+        /// designs reached review with a /tmp path for a body (backlog
+        /// 1763d5af); pass the file with --markdown-file instead.
         #[arg(long, default_value = "")]
         markdown: String,
+        /// The doc body, read from this file. Exclusive with --markdown.
+        #[arg(long, conflicts_with = "markdown")]
+        markdown_file: Option<std::path::PathBuf>,
         /// An open question as `anchor|title|proposal`. Repeatable.
         #[arg(long = "question")]
         questions: Vec<String>,
@@ -1334,11 +1339,23 @@ async fn main() -> Result<()> {
         Commands::Design {
             title,
             markdown,
+            markdown_file,
             questions,
             no_questions,
             doc_path,
             answers,
-        } => design::run(title, markdown, questions, no_questions, doc_path, answers).await,
+        } => {
+            design::run(
+                title,
+                markdown,
+                markdown_file,
+                questions,
+                no_questions,
+                doc_path,
+                answers,
+            )
+            .await
+        }
 
         Commands::Rerail {
             car,

@@ -16,6 +16,7 @@
 pub mod bill_payment_batch;
 pub mod cadence_roster;
 pub mod cadence_silence;
+pub mod chore_file_reds;
 pub mod commerce_invoice_issue;
 pub mod common;
 pub mod credential_issuer;

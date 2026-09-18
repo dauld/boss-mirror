@@ -133,6 +133,10 @@ pub struct Take(BTreeSet<String>);
 impl Take {
     /// Parse the flag's value. Refuses a name no door can take, naming
     /// the ones that can — a typo must not read as "nothing taken".
+    /// The refusal leads with `REFUSED`, the word infra/seed-tenant.sh
+    /// stops on: without it the launcher read a BOSS_TENANT_TAKE typo
+    /// as a stack still binding and retried it 30 x 5 s (backlog
+    /// 6ad63e09, 2026-09-18).
     pub fn parse(spec: Option<&str>) -> Result<Self> {
         let mut set = BTreeSet::new();
         for name in spec
@@ -143,8 +147,8 @@ impl Take {
         {
             if !TAKEABLE.contains(&name) {
                 bail!(
-                    "--take {name}: no door overwrites that registry; the registries a take can \
-                     name are {}",
+                    "REFUSED: --take {name}: no door overwrites that registry; the registries a \
+                     take can name are {}",
                     TAKEABLE.join(", ")
                 );
             }
@@ -3521,6 +3525,13 @@ terminal = { outcome = "sponsored" }
     /// `--take` NAMES ONLY A REGISTRY A DOOR CAN OVERWRITE. A typo or a
     /// registry with no overwrite (sensors) is refused naming the
     /// list, so a mis-spelt take never reads as "nothing taken".
+    ///
+    /// AND THE REFUSAL SAYS `REFUSED`. infra/seed-tenant.sh retries a
+    /// failed publish 30 x 5 s while the stack binds and stops at once
+    /// only on that word; this error lacked it, so a BOSS_TENANT_TAKE
+    /// typo was retried for 150 s before the pod degraded (backlog
+    /// 6ad63e09, left by the builder of 6a8d4972, 2026-09-18). Waiting
+    /// cannot change a flag any more than it can change a file.
     #[test]
     fn take_parses_the_takeable_registries_and_refuses_the_rest() {
         let t = Take::parse(Some("agents, employees")).unwrap();
@@ -3531,6 +3542,10 @@ terminal = { outcome = "sponsored" }
         assert!(Take::parse(Some("")).unwrap().is_empty());
         for bad in ["sensors", "agent", "everything"] {
             let err = Take::parse(Some(bad)).unwrap_err().to_string();
+            assert!(
+                err.starts_with("REFUSED: --take"),
+                "the launcher keys on the word, and it leads: {err}"
+            );
             assert!(
                 err.contains(bad) && err.contains("classes, calendars"),
                 "{err}"

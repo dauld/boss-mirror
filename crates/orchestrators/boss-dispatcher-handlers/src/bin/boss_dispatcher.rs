@@ -23,6 +23,7 @@ use boss_dispatcher::rules::seed::seed_authored_rules;
 use boss_dispatcher_handlers::handlers::{
     bill_payment_batch::BillPaymentBatch,
     cadence_silence::CadenceSilenceSweep,
+    chore_file_reds::ChoreFileReds,
     commerce_invoice_issue::CommerceInvoiceIssue,
     credential_issuer,
     credential_rotate_cloudflare_tunnel::CredentialRotateCloudflareTunnel,
@@ -385,6 +386,18 @@ async fn main() -> Result<()> {
             // (a1d3c762: publish-drift's --for-real by rule). Every noun
             // rides the rule row, so the next verb chain is a rule file.
             handlers.register(OpsJudge::new(cfg.jobs_api_url.clone()));
+            // A chore that closed red opens one backlog-item per RED
+            // route on its recorded step (ac3270c7): on the close, parse
+            // `RED <route> <kind>: <error>` lines off the step the rule
+            // names, dedup by route against the open board, file the
+            // rest carrying the design id, and note on the chore what
+            // was filed. Which chore, which step and which design ride
+            // the rule row. Files to the platform owner like every
+            // alarm handler.
+            handlers.register(ChoreFileReds::new(
+                cfg.jobs_api_url.clone(),
+                platform_owner.clone(),
+            ));
             // A closing Job completes the open step it was authorized
             // by, on the Job its declared edge names — the merged car
             // → feedback-packet obligation (2c4ae549). Generic: which

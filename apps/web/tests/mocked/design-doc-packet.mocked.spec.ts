@@ -18,7 +18,7 @@
 
 import { test, expect } from '@playwright/test';
 import { readFileSync } from 'fs';
-import { mountPage } from '../smoke/_helpers';
+import { mountPage } from './_helpers';
 import { installSmokeMocks } from './_smokeMocks';
 
 const PLUGIN = readFileSync(

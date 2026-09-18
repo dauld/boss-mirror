@@ -816,10 +816,24 @@ fn the_installer_lints_pass_with_a_foreign_address_in_the_environment() {
 /// the rendered file does not carry — the divergence the lints exist
 /// to catch. Only `infra/` is copied: both lints resolve the tree from
 /// their own location and read nothing outside it.
+///
+/// The copy keeps content, modes and links but NOT owners: the test
+/// needs the scripts executable, not owned by whoever checked out the
+/// tree. A plain `-a` tries to preserve ownership, and on the dev pod
+/// (uid 0 without `CAP_CHOWN`, files owned `0:1500`) that is refused,
+/// `cp` exits non-zero, and this one fixture redded the whole
+/// `boss-testing --all-features` suite for every builder there while the
+/// gate, as uid 65534 in a workspace it owns, stayed green (backlog
+/// d6859c00, 2026-09-18). Running this test as root on the pod IS the
+/// pin.
 fn infra_copy_reporting(name: &str, reported: &str) -> PathBuf {
     let root = scratch_dir(name);
     let o = Command::new("cp")
-        .args(["-a", repo_root().join("infra").to_str().unwrap()])
+        .args([
+            "-a",
+            "--no-preserve=ownership",
+            repo_root().join("infra").to_str().unwrap(),
+        ])
         .arg(&root)
         .output()
         .expect("cp");

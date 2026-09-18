@@ -340,13 +340,47 @@ pub(crate) async fn max_concurrent(http: &reqwest::Client) -> Result<usize> {
     )
 }
 
+/// Who is asking the bound for a slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Requester {
+    /// A PR car's gate, filed by `boss gate` — as many as builders send.
+    Car,
+    /// A train's gate, filed by the conductor — REQUIRED for the CI
+    /// verdict since design 128b5496, one per train, 2–10 min on a
+    /// warm target.
+    Train,
+}
+
+/// THE ONE DEFINITION OF ADMISSION AT THE GATE BOUND. `live` is the
+/// count of running gate Jobs, whoever filed them; `max` is the
+/// delivery policy's `gate_max_concurrent` (or the env override).
+///
+/// A car is admitted BELOW the bound. A train is admitted AT it — it
+/// may be the bound+1th running Job. Measured 2026-09-18 on train
+/// ccd8b08e (backlog 48f7aba1): with the train held to the same line
+/// as the cars, the conductor logged "the cluster is at its gate bound
+/// (3 running of 3)" five passes running while operator and builder
+/// car gates refilled the three slots between passes, and the train sat
+/// two hours at CI. A busy dock starved the train — the more cars were
+/// gated, the less could land, the inverse of what a bound is for.
+/// Admitting the train at the bound is one branch here and never
+/// delays a car; the alternative (reserving a slot for trains) would
+/// hold a car slot empty on every quiet hour. One slot of overage,
+/// never two: a train asking with the bound+1th already running waits.
+pub(crate) const fn admits(live: usize, max: usize, who: Requester) -> bool {
+    match who {
+        Requester::Car => live < max,
+        Requester::Train => live <= max,
+    }
+}
+
 /// The polite refusal at the concurrency bound, or None below it.
 ///
 /// Pure, and it NAMES the running gates — the operator's next move is
 /// to wait for or watch one of them, and a bound that says only "3
 /// running" sends them off to run the kubectl this verb already ran.
 pub(crate) fn crowd_refusal(live: &[String], max: usize) -> Option<String> {
-    if live.len() < max {
+    if admits(live.len(), max, Requester::Car) {
         return None;
     }
     Some(format!(
@@ -554,7 +588,7 @@ pub(crate) fn places_ahead(order: &[String], reuse: Option<&str>) -> usize {
 /// line waits for the second slot, so two waiters released by one
 /// finishing gate do not both launch onto a node with room for one.
 pub(crate) const fn may_launch(live: usize, max: usize, position: usize) -> bool {
-    live + position < max
+    admits(live + position, max, Requester::Car)
 }
 
 /// Roughly what a place costs, a gate at a time. Arithmetic on the
@@ -5214,6 +5248,40 @@ mod tests {
     #[test]
     fn an_idle_cluster_admits_even_at_bound_one() {
         assert_eq!(crowd_refusal(&[], 1), None);
+    }
+
+    /// 48f7aba1: THE ONE DEFINITION OF ADMISSION, both callers. Three
+    /// PR-car gates running of a bound of three, and a train asks: the
+    /// train is admitted (the bound+1th Job); a car asking the same
+    /// question is refused exactly as before; and a train asking with
+    /// the bound+1th already running is refused — the overage is one
+    /// slot, never a second.
+    #[test]
+    fn a_train_gate_is_admitted_at_the_bound_and_a_car_is_not() {
+        assert!(
+            admits(3, 3, Requester::Train),
+            "a train at the bound is admitted"
+        );
+        assert!(
+            !admits(3, 3, Requester::Car),
+            "a car at the bound waits, as today"
+        );
+        assert!(
+            !admits(4, 3, Requester::Train),
+            "one slot of overage, not two"
+        );
+        assert!(
+            admits(2, 3, Requester::Car),
+            "below the bound a car is admitted"
+        );
+        assert!(admits(2, 3, Requester::Train));
+        // And the two car-side readers of the bound are that predicate:
+        // `crowd_refusal` at the bound refuses, `may_launch` counts a
+        // waiter's place against the same line.
+        let live: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
+        assert!(crowd_refusal(&live, 3).is_some());
+        assert!(!may_launch(3, 3, 0));
+        assert!(may_launch(2, 3, 0) && !may_launch(2, 3, 1));
     }
 
     /// The env override: absent means the FALLBACK (the delivery
