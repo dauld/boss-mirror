@@ -150,7 +150,17 @@ twenty minutes in. **It is now refused rather than merely unnecessary:**
 migration written after the collapse that writes rule rows, because §9a is
 explicit that asking the next person not to re-open a second home is not a
 mechanism. The thirty-one that predate it are applied history and are left
-alone. The first rule added after the collapse (2026-09-12,
+alone — but what they insert is not: on every fresh database they still
+wrote sixty-four names as active product rows, thirty-five of them under
+names no file here authors any longer (the brewery's reactors, moved to
+the tenant on 2026-09-17, and the design-doc sweep's), which the seed then
+retired at first boot and a tenant's publish had to take over at v(n+1).
+`20260918022108-seed-residue-is-not-a-retirement.sql` deletes those rows
+(backlog b5f21e82) — `source IS NULL`, no tenant row under the name — so a
+fresh database's first seed retires nothing and a tenant lands at its
+file's version. The lint reads a DELETE as what it is: it cannot open a
+second home, so it passes; an INSERT or UPDATE is still refused. The
+first rule added after the collapse (2026-09-12,
 `measure-*-sweep-on-inspect-ready`) still arrived with that INSERT, because
 `an-expectation-names-a-rule-the-tree-declares.sh` had kept demanding one —
 its non-vacuity guard predated the collapse — and the minute-width stamp on

@@ -19,6 +19,18 @@
 //! publish line, never in silence. This batch IS the tenant's update
 //! door: the declaration is the whole row, so a per-row PUT would only
 //! repeat it.
+//!
+//! A declared `role` or `department` is a Class code under
+//! `(employee, role)` / `(employee, department)` — the same registry
+//! rows `boss-people` checks an employee's against, through the same
+//! `ClassesClient` — and this door checks it BEFORE the batch lands
+//! (backlog ab192a9f): an undeclared code refuses the whole batch by
+//! agent, attribute and code. The check lives here, not in the
+//! adapters, because this is the one write path and the code is data
+//! the database cannot vouch for (a CHECK copied from the registry
+//! would drift from it). `classes: None` skips it, the people
+//! adapter's posture for in-memory and test paths; the service binary
+//! always wires it.
 
 use std::sync::Arc;
 
@@ -28,6 +40,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
+use boss_classes_client::ClassesClient;
+use boss_core::primitives::ClassRef;
 use boss_policy_client::CurrentUser;
 
 use crate::trust::{can_read, is_trusted};
@@ -37,6 +51,37 @@ use super::types::{AgentInput, validate_agent};
 
 pub struct AgentsApiState {
     pub registry: Arc<dyn AgentsRegistry>,
+    /// The Class registry an agent's `role` / `department` are checked
+    /// against. `None` skips the check (test and in-memory paths).
+    pub classes: Option<Arc<dyn ClassesClient>>,
+}
+
+/// Why a declared role or department is refused: the code is not an
+/// active Class under `(employee, <attribute>)`. `Ok(None)` when every
+/// declared code is held; `Err` when the registry could not answer,
+/// which is a different fact from "not held" and is answered as one.
+async fn undeclared_class(
+    classes: &dyn ClassesClient,
+    rows: &[AgentInput],
+) -> Result<Option<String>, String> {
+    for a in rows {
+        for (attribute, code) in [("role", &a.role), ("department", &a.department)] {
+            let Some(code) = code else { continue };
+            let held = classes
+                .class_exists(&ClassRef::new("employee", code.as_str()))
+                .await
+                .map_err(|e| format!("classes registry: {e}"))?;
+            if !held {
+                return Ok(Some(format!(
+                    "agent {}: {attribute} `{code}` is not an active Class in the registry \
+                     (subject_kind employee, member_attribute {attribute}) — declare the Class \
+                     in seeds/classes.json first, as for an employee's",
+                    a.id
+                )));
+            }
+        }
+    }
+    Ok(None)
 }
 
 pub fn router(state: AgentsApiState) -> Router {
@@ -84,6 +129,13 @@ async fn publish(
     }
     if let Some(why) = rows.iter().find_map(|a| validate_agent(a).err()) {
         return (StatusCode::UNPROCESSABLE_ENTITY, why).into_response();
+    }
+    if let Some(classes) = &state.classes {
+        match undeclared_class(classes.as_ref(), &rows).await {
+            Ok(None) => {}
+            Ok(Some(why)) => return (StatusCode::UNPROCESSABLE_ENTITY, why).into_response(),
+            Err(why) => return (StatusCode::INTERNAL_SERVER_ERROR, why).into_response(),
+        }
     }
     // Same envelope construction as the credentials door: the actor
     // the request signed with rides as `_actor` (and is named again
@@ -172,6 +224,21 @@ mod tests {
     fn app(registry: &Arc<InMemoryAgents>) -> Router {
         router(AgentsApiState {
             registry: registry.clone() as Arc<dyn AgentsRegistry>,
+            classes: None,
+        })
+    }
+
+    /// The door with the Class registry wired, holding exactly the
+    /// tenant's `engineering-agent` role and `engineering` department.
+    fn app_with_classes(registry: &Arc<InMemoryAgents>) -> Router {
+        use boss_classes_client::FakeClassesClient;
+        use boss_core::primitives::ClassRef;
+        router(AgentsApiState {
+            registry: registry.clone() as Arc<dyn AgentsRegistry>,
+            classes: Some(Arc::new(FakeClassesClient::with(vec![
+                ClassRef::new("employee", "engineering-agent"),
+                ClassRef::new("employee", "engineering"),
+            ]))),
         })
     }
 
@@ -344,6 +411,106 @@ mod tests {
         assert_eq!(
             events[0].payload["_actor"], events[0].payload["declared_by"],
             "declared_by and the stamp's actor are one value"
+        );
+    }
+
+    /// An agent's role and department are Class codes under
+    /// `(employee, role)` / `(employee, department)` — the rows an
+    /// employee's are validated against (backlog ab192a9f). A declared
+    /// code the registry holds lands and reads back; one it does not
+    /// hold refuses the WHOLE batch, 422, naming the agent, the
+    /// attribute and the code, and nothing lands. A row that declares
+    /// neither reads `role: null` — the KEY is always on the wire, so
+    /// a reader tells "holds no role" from "an older registry".
+    #[tokio::test]
+    async fn a_role_and_a_department_are_class_codes_checked_at_the_door() {
+        let registry = Arc::new(InMemoryAgents::new());
+        let mut declared = batch();
+        declared[0]["role"] = json!("engineering-agent");
+        declared[0]["department"] = json!("engineering");
+        let (status, body) = send(
+            app_with_classes(&registry),
+            "POST",
+            "/api/agents/batch",
+            Some(declared.clone()),
+            seed(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (_, body) = send(
+            app_with_classes(&registry),
+            "GET",
+            "/api/agents",
+            None,
+            probe_reader(),
+        )
+        .await;
+        let listing: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(listing["data"][0]["role"], "engineering-agent");
+        assert_eq!(listing["data"][0]["department"], "engineering");
+
+        for (attribute, code) in [("role", "wizard"), ("department", "narnia")] {
+            let mut bad = declared.clone();
+            bad[0][attribute] = json!(code);
+            let (status, body) = send(
+                app_with_classes(&registry),
+                "POST",
+                "/api/agents/batch",
+                Some(bad),
+                seed(),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{attribute}: {body}"
+            );
+            assert!(
+                body.contains("agent-claude")
+                    && body.contains(attribute)
+                    && body.contains(code)
+                    && body.contains("Class"),
+                "{attribute}: {body}"
+            );
+        }
+        let rows = registry.list().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].role.as_deref(),
+            Some("engineering-agent"),
+            "a refused batch lands nothing: the held row keeps its declared role"
+        );
+        assert_eq!(
+            registry.recorded_events().len(),
+            1,
+            "one agent.declared for the row that landed, nothing for the refusals"
+        );
+
+        // A declaration that names neither: the key is there, null.
+        let registry = Arc::new(InMemoryAgents::new());
+        let (status, body) = send(
+            app_with_classes(&registry),
+            "POST",
+            "/api/agents/batch",
+            Some(batch()),
+            seed(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (_, body) = send(
+            app_with_classes(&registry),
+            "GET",
+            "/api/agents",
+            None,
+            probe_reader(),
+        )
+        .await;
+        let listing: Value = serde_json::from_str(&body).unwrap();
+        let row = listing["data"][0].as_object().unwrap();
+        assert!(row.contains_key("role") && row["role"].is_null(), "{row:?}");
+        assert!(
+            row.contains_key("department") && row["department"].is_null(),
+            "{row:?}"
         );
     }
 

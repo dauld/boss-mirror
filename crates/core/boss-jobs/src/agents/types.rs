@@ -9,9 +9,19 @@
 //! declaration was prose. The shape below is the `agents` table's
 //! columns plus the `actor_aliases` the row owns — and NOTHING the
 //! table cannot hold: `deny_unknown_fields`, so a field the registry
-//! would silently drop (the real tenant's first draft carried `role`
-//! and `department`) is refused by name at `boss tenant check` rather
+//! would silently drop is refused by name at `boss tenant check` rather
 //! than believed.
+//!
+//! WHY A ROLE AND A DEPARTMENT (backlog ab192a9f, 2026-09-17). The
+//! real tenant's first draft carried both and was refused for it. But
+//! an agent is an executor like a person (CLAUDE.md: humans and agents
+//! are CPUs in the same machine), and a step whose audience is
+//! `{ role = X }` resolves to the HOLDERS of X — every reader that
+//! enumerated holders read the employees roster only, so an agent could
+//! be reached by a role audience never, and by id only. Both columns
+//! are Class codes under `(employee, role)` / `(employee, department)`,
+//! the registry rows an employee's are validated against, and the
+//! batch door checks them with the same client (`http.rs`).
 
 use boss_core::actor::REGISTERED_AGENT_PREFIX;
 use serde::{Deserialize, Serialize};
@@ -33,6 +43,17 @@ pub struct AgentInput {
     /// The logins that sign as this agent (`actor_aliases`).
     #[serde(default)]
     pub aliases: Vec<String>,
+    /// The role this agent holds — a Class code under `(employee,
+    /// role)`, checked against the registry at the batch door. `None`
+    /// is "holds no role": reachable by id, never by a role audience.
+    #[serde(default)]
+    pub role: Option<String>,
+    /// Where it sits in the org — a Class code under `(employee,
+    /// department)`. Carried and validated like an employee's; nothing
+    /// routes on it until design f5ebd2e1 car 2 makes department a
+    /// selector.
+    #[serde(default)]
+    pub department: Option<String>,
     /// Caps, `None` while nothing reads them (budgets are 7dd9f28c).
     #[serde(default)]
     pub hourly_budget_usd_micros: Option<i64>,
@@ -74,6 +95,15 @@ pub fn validate_agent(a: &AgentInput) -> Result<(), String> {
     if let Some(alias) = a.aliases.iter().find(|s| s.trim().is_empty()) {
         return Err(format!("agent {}: an alias is empty ({alias:?})", a.id));
     }
+    for (attribute, code) in [("role", &a.role), ("department", &a.department)] {
+        if code.as_deref().is_some_and(|c| c.trim().is_empty()) {
+            return Err(format!(
+                "agent {}: {attribute} is empty — name a Class code under (employee, {attribute}) \
+                 or omit the key",
+                a.id
+            ));
+        }
+    }
     if a.hourly_budget_usd_micros.is_some_and(|n| n < 0) {
         return Err(format!(
             "agent {}: hourly_budget_usd_micros must be >= 0",
@@ -92,6 +122,11 @@ pub struct AgentRow {
     pub id: String,
     pub display_name: String,
     pub default_model: String,
+    /// Always present on the wire, `null` until declared — a reader
+    /// (the dispatcher's roster union, a probe) tells "holds no role"
+    /// from "a registry that predates the column" by the key.
+    pub role: Option<String>,
+    pub department: Option<String>,
     pub hourly_budget_usd_micros: Option<i64>,
     pub max_concurrent_runs: Option<i32>,
     /// Every login that resolves to this id, sorted.
@@ -196,6 +231,16 @@ impl AgentRow {
                 &after.default_model,
             ));
         }
+        if self.role != after.role {
+            out.push(FieldChange::new("role", &self.role, &after.role));
+        }
+        if self.department != after.department {
+            out.push(FieldChange::new(
+                "department",
+                &self.department,
+                &after.department,
+            ));
+        }
         if self.hourly_budget_usd_micros != after.hourly_budget_usd_micros {
             out.push(FieldChange::new(
                 "hourly_budget_usd_micros",
@@ -255,6 +300,8 @@ mod tests {
             display_name: "Claude (engineering)".into(),
             default_model: "opus-5[1m]".into(),
             aliases: vec!["claude@algedonic.dev".into()],
+            role: None,
+            department: None,
             hourly_budget_usd_micros: None,
             max_concurrent_runs: None,
         }
@@ -290,17 +337,79 @@ mod tests {
     #[test]
     fn a_field_the_registry_cannot_hold_is_refused_by_name() {
         let err = toml::from_str::<AgentInput>(
-            "id = \"agent-claude\"\ndisplay_name = \"Claude\"\ndefault_model = \"opus-5[1m]\"\nrole = \"engineering-agent\"\n",
+            "id = \"agent-claude\"\ndisplay_name = \"Claude\"\ndefault_model = \"opus-5[1m]\"\nmanager_id = \"emp-david\"\n",
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("role"), "{err}");
+        assert!(err.contains("manager_id"), "{err}");
         let ok: AgentInput = toml::from_str(
             "id = \"agent-claude\"\ndisplay_name = \"Claude\"\ndefault_model = \"opus-5[1m]\"\n",
         )
         .unwrap();
         assert!(ok.aliases.is_empty());
         assert_eq!(ok.hourly_budget_usd_micros, None);
+    }
+
+    /// An agent holds a role and sits in a department the way an
+    /// employee does (backlog ab192a9f): both parse from the tenant's
+    /// shape, both are optional (NULL until declared), an empty string
+    /// is refused as a code that names nothing, and a field the table
+    /// still cannot hold is refused by name as before.
+    #[test]
+    fn a_declaration_may_carry_a_role_and_a_department() {
+        let a: AgentInput = toml::from_str(
+            "id = \"agent-claude\"\ndisplay_name = \"Claude\"\ndefault_model = \"opus-5[1m]\"\n\
+             role = \"engineering-agent\"\ndepartment = \"engineering\"\n",
+        )
+        .unwrap();
+        assert_eq!(a.role.as_deref(), Some("engineering-agent"));
+        assert_eq!(a.department.as_deref(), Some("engineering"));
+        assert!(validate_agent(&a).is_ok());
+        let bare = input();
+        assert_eq!((bare.role, bare.department), (None, None));
+        let mut blank = input();
+        blank.role = Some("  ".into());
+        let why = validate_agent(&blank).unwrap_err();
+        assert!(why.contains("role") && why.contains("Class"), "{why}");
+        let mut blank = input();
+        blank.department = Some(String::new());
+        assert!(validate_agent(&blank).unwrap_err().contains("department"));
+        let err = toml::from_str::<AgentInput>(
+            "id = \"agent-claude\"\ndisplay_name = \"Claude\"\ndefault_model = \"opus-5[1m]\"\nteam = \"it\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("team"), "{err}");
+
+        // The row reads both back, and a declaration that moves either
+        // names the change like any other field.
+        let before = AgentRow {
+            id: "agent-claude".into(),
+            display_name: "Claude".into(),
+            default_model: "opus-5[1m]".into(),
+            role: None,
+            department: None,
+            hourly_budget_usd_micros: None,
+            max_concurrent_runs: None,
+            aliases: vec![],
+        };
+        let mut after = before.clone();
+        after.role = Some("engineering-agent".into());
+        after.department = Some("engineering".into());
+        let changes = before.changes_to(&after);
+        let rendered: Vec<String> = changes.iter().map(FieldChange::render).collect();
+        assert_eq!(
+            rendered,
+            [
+                "role null → engineering-agent",
+                "department null → engineering"
+            ]
+        );
+        let json = serde_json::to_value(&before).unwrap();
+        assert!(
+            json.get("role").is_some_and(Value::is_null),
+            "a row without a role still carries the key, so a reader can tell null from absent: {json}"
+        );
     }
 
     /// A row updated to the declaration names every field that moved,
@@ -314,6 +423,8 @@ mod tests {
             id: "agent-claude".into(),
             display_name: "Claude (Claude Code sessions on the dev pod)".into(),
             default_model: "opus-5[1m]".into(),
+            role: None,
+            department: None,
             hourly_budget_usd_micros: None,
             max_concurrent_runs: None,
             aliases: vec!["claude@algedonic.dev".into()],

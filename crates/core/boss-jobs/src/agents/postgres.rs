@@ -51,6 +51,8 @@ struct AgentDbRow {
     id: String,
     display_name: String,
     default_model: String,
+    role: Option<String>,
+    department: Option<String>,
     hourly_budget_usd_micros: Option<i64>,
     max_concurrent_runs: Option<i32>,
 }
@@ -78,13 +80,15 @@ fn to_row(r: AgentDbRow, aliases: &BTreeMap<String, Vec<String>>) -> AgentRow {
         id: r.id,
         display_name: r.display_name,
         default_model: r.default_model,
+        role: r.role,
+        department: r.department,
         hourly_budget_usd_micros: r.hourly_budget_usd_micros,
         max_concurrent_runs: r.max_concurrent_runs,
     }
 }
 
-const SELECT: &str = "SELECT id, display_name, default_model, hourly_budget_usd_micros, \
-                      max_concurrent_runs FROM agents";
+const SELECT: &str = "SELECT id, display_name, default_model, role, department, \
+                      hourly_budget_usd_micros, max_concurrent_runs FROM agents";
 
 /// One agent's row with its aliases (`None` when the registry does
 /// not hold the id), read inside the batch's transaction so the
@@ -150,22 +154,29 @@ impl AgentsRegistry for PgAgents {
             // touching the row at all.
             sqlx::query(
                 "INSERT INTO agents \
-                 (id, display_name, default_model, hourly_budget_usd_micros, max_concurrent_runs) \
-                 VALUES ($1, $2, $3, $4, $5) \
+                 (id, display_name, default_model, role, department, \
+                  hourly_budget_usd_micros, max_concurrent_runs) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7) \
                  ON CONFLICT (id) DO UPDATE SET \
                    display_name = EXCLUDED.display_name, \
                    default_model = EXCLUDED.default_model, \
+                   role = EXCLUDED.role, \
+                   department = EXCLUDED.department, \
                    hourly_budget_usd_micros = EXCLUDED.hourly_budget_usd_micros, \
                    max_concurrent_runs = EXCLUDED.max_concurrent_runs \
-                 WHERE (agents.display_name, agents.default_model, \
-                        agents.hourly_budget_usd_micros, agents.max_concurrent_runs) \
+                 WHERE (agents.display_name, agents.default_model, agents.role, \
+                        agents.department, agents.hourly_budget_usd_micros, \
+                        agents.max_concurrent_runs) \
                        IS DISTINCT FROM \
-                       (EXCLUDED.display_name, EXCLUDED.default_model, \
-                        EXCLUDED.hourly_budget_usd_micros, EXCLUDED.max_concurrent_runs)",
+                       (EXCLUDED.display_name, EXCLUDED.default_model, EXCLUDED.role, \
+                        EXCLUDED.department, EXCLUDED.hourly_budget_usd_micros, \
+                        EXCLUDED.max_concurrent_runs)",
             )
             .bind(&a.id)
             .bind(&a.display_name)
             .bind(&a.default_model)
+            .bind(&a.role)
+            .bind(&a.department)
             .bind(a.hourly_budget_usd_micros)
             .bind(a.max_concurrent_runs)
             .execute(&mut *tx)

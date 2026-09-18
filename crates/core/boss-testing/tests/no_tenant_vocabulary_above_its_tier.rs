@@ -255,6 +255,64 @@ fn a_tenant_name_as_a_path_or_an_id_is_not_vocabulary() {
     );
 }
 
+/// A migration's DELETE names what it removes, and is not counted
+/// (backlog b5f21e82, 2026-09-18). The rows the historical migrations
+/// inserted under the demo tenant's rule names are the leak in the
+/// running system, and the one migration that deletes them has to spell
+/// those names — inside a `DELETE FROM … ;` statement, where a word can
+/// only leave the product, never arrive. Every file in this tier is
+/// applied history and cannot be edited, so without this form the
+/// tier's count could never fall to zero once that migration landed.
+/// The exemption reaches exactly the statement: the same word in an
+/// INSERT beside it, or in a comment above it, still counts.
+#[test]
+fn a_word_inside_a_migrations_delete_is_the_leak_leaving() {
+    let tree = Tree::new("delete-statement");
+    tree.vocabulary().baseline(0, 0).file(
+        "infra/postgres/schema/20260918000000-residue-goes.sql",
+        "\
+-- a header that names no term
+DELETE FROM some_rules d
+ WHERE d.source IS NULL
+   AND d.name IN (
+    'spawn-wibble-return-on-delivery',
+    'flurble-on-close'
+   );
+",
+    );
+    let out = tree.run();
+    assert!(
+        out.status.success(),
+        "two terms inside a DELETE statement must count zero; got {:?}:\n{}",
+        out.status.code(),
+        text(&out)
+    );
+
+    // And only the statement: an INSERT of the same name, or the word in
+    // a comment outside the DELETE, is still the leak arriving.
+    let tree = Tree::new("delete-statement-bounds");
+    tree.vocabulary().baseline(0, 0).file(
+        "infra/postgres/schema/20260918000001-not-only-a-delete.sql",
+        "\
+-- the wibble reactor, named in prose above the statement: one hit
+DELETE FROM some_rules WHERE name = 'spawn-wibble-return';
+INSERT INTO some_rules (name) VALUES ('spawn-wibble-return');
+",
+    );
+    let out = tree.run();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a term in the comment and one in the INSERT must still count:\n{}",
+        text(&out)
+    );
+    assert!(
+        text(&out).contains("     2  infra/postgres/schema/20260918000001-not-only-a-delete.sql"),
+        "exactly two of the three occurrences count, and the file is named:\n{}",
+        text(&out)
+    );
+}
+
 /// Test files are not counted. `#[cfg(test)]` blocks inside a source
 /// file ARE — the lint says so in its header — so the exclusion is by
 /// path only, and this pins the shapes it recognises.

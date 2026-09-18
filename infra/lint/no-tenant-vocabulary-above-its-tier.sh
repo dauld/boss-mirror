@@ -65,7 +65,18 @@
 #     on the assembled tree, for naming the playground's tenant path.
 #     ONLY those two forms, for the names of tenants that declare a
 #     VOCABULARY; the same name as a bare word, or as any other key's
-#     value, still counts.
+#     value, still counts;
+#   - a word inside a migration's DELETE statement (backlog b5f21e82,
+#     2026-09-18): `DELETE FROM … ;` in a `.sql` file, from the line
+#     the statement starts on to the line its `;` ends. The rows the
+#     historical migrations inserted under the demo tenant's rule names
+#     are the leak in every running database, and the one migration
+#     that deletes them has to spell those names. Inside a DELETE a
+#     word can only leave the product, never arrive — and every file
+#     in infra/postgres/schema is applied history that cannot be
+#     edited, so without this form that tier could never fall to zero
+#     once the deleting migration landed. The same word in an INSERT
+#     beside it, or in the comment above it, still counts.
 #
 # A wrong path answers 0 instead of erroring (CLAUDE.md §Doors), so a
 # missing tier root, a missing VOCABULARY, a malformed term, and a
@@ -193,6 +204,31 @@ exempt_weighted=$(
         printf '%s %s\n' "$file" "${weight[$lit]}"
     done <<< "$exempt"
 )
+
+# ---- the exemption: what a migration's DELETE names, it removes ----
+# The text of every `DELETE FROM … ;` statement in a `.sql` file under
+# a tier, counted with the same pattern and SUBTRACTED from that file:
+# a word there is the leak leaving. Whole-line comments inside the
+# statement are dropped the way the header above the statement is,
+# so prose cannot ride the exemption; a statement is the lines from
+# its `DELETE FROM` to the first line ending in `;`.
+delete_exempt=$(
+    for tier in "${TIERS[@]}"; do
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            n=$(LC_ALL=C awk '
+                tolower($0) ~ /^[ \t]*delete[ \t]+from[ \t]/ { inside = 1 }
+                inside && $0 !~ /^[ \t]*--/ { print }
+                inside && /;[ \t]*$/ { inside = 0 }
+            ' "$f" | grep -oiE -e "$pattern" | wc -l | tr -d ' ')
+            [ "$n" -gt 0 ] && printf '%s %s\n' "$f" "$n"
+        done <<EOF
+$(find "$tier" -name '*.sql' -type f 2>/dev/null | grep -vE '/tests/' | LC_ALL=C sort)
+EOF
+    done
+)
+exempt_weighted="${exempt_weighted}
+${delete_exempt}"
 
 # `<count> <file>` per file, descending — raw hits minus the exempt
 # weight, files at zero dropped — and `<count> <tier>` per tier.

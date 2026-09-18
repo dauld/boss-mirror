@@ -122,7 +122,7 @@ stating plainly:
 | `seeds/operator_hires.toml` | no | boss-brewery-engine prepare (`seed_brewery_operator_hires`): each `[[hire]]` POSTed to /api/people as a `boss_people::Employee` | `[[hire]]` rows in the Employee shape above | no |
 | `seeds/business_calendars.json` | no | POST /api/calendar/business-calendars/batch as `Vec<boss_core::calendar::BusinessCalendar>` (the brewery engine's prepare); the dispatcher's timing triggers and the sim resolve business days from it | JSON array of {code, name, weekend: [0..6 Mon=0], closed: [YYYY-MM-DD]} | yes |
 | `seeds/sensors.toml` | no | POST /api/sensors/batch (boss-jobs, insert-if-absent by id) — sent by `boss tenant publish` as the tenant's declarations; the dispatcher's `sensor.poll` handler reads the registry every 5 minutes and polls each due sensor (design 14c9b2ad); a push-only source is never due — the gateway's site surface records one `www-visits` reading per page view through POST /api/sensors/{id}/readings (backlog 0b5c5081) | `[[sensor]]` rows: id, source (`stripe` for succeeded charges and `stripe-payouts` for paid payouts, both polled on the same credential; `site` push-only), credential (a `credentials` registry id; none on a push-only source), every_minutes (none on a push-only source), opens (the workflow kind one reading opens), subject_kind, enabled? — validated by `boss_jobs::sensors::load_sensors_toml` | yes |
-| `seeds/agents.toml` | no | POST /api/agents/batch (boss-jobs) — sent by `boss tenant publish` BEFORE the Workflows (a step's audience may name an agent); a row the registry lacks is inserted, a row it holds is updated on the declared fields that differ and the publish line names each change from → to, an alias the tenant does not declare is kept — the tenant's declaration wins on declared fields (backlog 09887242); the jobs API's login door resolves each alias to the id (design 6fda05ae; backlog f56155f0) | `[[agent]]` rows: id (`agent-<slug>`), display_name, default_model (a rate-card model, e.g. `opus-5[1m]`), aliases? (the logins that sign as it), hourly_budget_usd_micros?, max_concurrent_runs? — the `agents` table's columns and nothing else; validated by `boss_jobs::agents::load_agents_toml` | yes |
+| `seeds/agents.toml` | no | POST /api/agents/batch (boss-jobs) — sent by `boss tenant publish` BEFORE the Workflows (a step's audience may name an agent); a row the registry lacks is inserted, a row it holds is updated on the declared fields that differ and the publish line names each change from → to, an alias the tenant does not declare is kept — the tenant's declaration wins on declared fields (backlog 09887242); the jobs API's login door resolves each alias to the id (design 6fda05ae; backlog f56155f0) | `[[agent]]` rows: id (`agent-<slug>`), display_name, default_model (a rate-card model, e.g. `opus-5[1m]`), aliases? (the logins that sign as it), role? and department? (Class codes under (employee, role) / (employee, department), checked against the registry at the batch door like an employee's — a role audience resolves to every holder, agents included; backlog ab192a9f), hourly_budget_usd_micros?, max_concurrent_runs? — the `agents` table's columns and nothing else; validated by `boss_jobs::agents::load_agents_toml` | yes |
 | `seeds/posting_rules.toml` | no | POST /api/ledger/posting-rules/batch (boss-ledger, insert-if-absent by fact_kind + version, source = tenant:<id>) — sent by `boss tenant publish` AFTER the Workflows; the posting path evaluates a fact by the newest registry rule for its kind and by the code rules otherwise (backlog a40541cb) | `[[posting_rule]]` rows: fact_kind, version? (1), basis (cash|accrual), lines = [{account_code, side (debit|credit), amount_path (a JSON pointer into the fact payload, integer cents), memo?}] — the debit pointers and the credit pointers must be the same multiset (balanced for every fact); validated by `boss_ledger::posting_rules::load_posting_rules_toml` | yes |
 | `seeds/fact_projection_rules.toml` | no | POST /api/ledger/fact-projection-rules/batch (boss-ledger, insert-if-absent by event_kind + when) — sent by `boss tenant publish` after the posting rules; the ledger's facts rebuild projects every matching audit_log event into a financial_fact (backlog a40541cb) | `[[projection]]` rows: event_kind (an audit_log kind whose family the platform event stream ingests — `boss_nats::durable::stream_subjects`; a rule on any other family would fire never live, so it is refused naming the family, backlog 94f20e76), when? (a table of {"/pointer" = value}, every pointer equal for the rule to fire), fact_kind, source_table, source_id_path, happened_on_path?, created_by_path? — the `gl_fact_projection_rules` columns; validated by `boss_ledger::posting_rules::load_projection_rules_toml` | yes |
 | `seeds/locations.toml` | no | POST /api/locations/batch, one boss-locations `http::LocationInput` per row (insert-if-absent by id) — sent by `boss tenant publish` BEFORE the roster, because an `employees.json` `location` is a foreign key into the registry (backlog 1ec8312a; until 2026-09-17 nothing read this file) | `[[location]]` rows: id, name, kind, timezone (+ parent_id, latitude, longitude, address, account_id, metadata) — the `locations` table's columns | yes |
@@ -168,13 +168,23 @@ stating plainly:
 - **A field the registry cannot hold.** `seeds/agents.toml` was the
   first extension the real tenant asked for and read UNKNOWN until its
   seed landed (backlog `f56155f0`, 2026-09-17). Its row is the `agents`
-  table's columns plus the aliases the row owns, and nothing else: the
-  real tenant's first draft also carried `role` and `department`, which
-  the registry has no column for, and `check` refuses those **by name**
-  (`unknown field`) rather than dropping them in silence. A row the
-  platform already registered (prod's `agent-claude` came from
-  migration `20260915212644`) is updated to the declaration — see
-  the next section.
+  table's columns plus the aliases the row owns, and nothing else, and
+  `check` refuses any other key **by name** (`unknown field`) rather
+  than dropping it in silence. The real tenant's first draft carried
+  `role` and `department` and was refused that way until the registry
+  gained the columns (backlog `ab192a9f`): an agent now holds a role and
+  sits in a department exactly as an employee does — both Class codes
+  under `(employee, role)` / `(employee, department)`, checked at the
+  batch door against the same registry an employee's are, so a code
+  `seeds/classes.json` does not declare is refused naming the agent,
+  the attribute and the code. A step whose audience is `{ role = X }`
+  resolves to every holder of X, and an agent holding X is one: the
+  dispatcher's nomination reads the people roster and the agents
+  registry as one roster. A department is carried and validated but
+  routes nothing yet (design `f5ebd2e1` car 2). A row the platform
+  already registered (prod's `agent-claude` came from migration
+  `20260915212644`) is updated to the declaration — see the next
+  section.
 
 ## The tenant's declaration wins on declared fields
 
@@ -485,6 +495,20 @@ the name (`GET /api/dispatcher/rules/{name}/versions` shows both
 sources), and the next publish reads the tenant's own row as ahead of
 its file and leaves it alone. The file's version is compared against
 the tenant's OWN rows only, never against the other source's history.
+**A fresh instance no longer has that history to take over** (backlog
+b5f21e82, 2026-09-18): the migration
+`20260918022108-seed-residue-is-not-a-retirement.sql` deletes the rows
+the historical migrations inserted under names no product file authors,
+before the boot seed runs, so the brewery's `seeds/rules.toml` lands at
+the versions it declares (`published`, v1 — v2 for the two the file
+says so) and the next publish reads `present`. An instance whose tenant
+took a name over BEFORE this migration converged (the playground, at
+v2 above the product's retired v1) keeps both rows — the migration
+leaves a name a tenant holds alone — and its publish keeps reading
+`registry ahead at v2, left alone` for the file's v1. That line is
+accurate and harmless: the tenant's row is live, the file's content is
+what it enforces, and bumping the file's version to match would be a
+change written for one instance's history.
 
 **The product's boot seed leaves a tenant's rule alone.** The seed
 that derives `dispatcher_rules` from `infra/dispatcher/rules/` retires
@@ -553,7 +577,7 @@ repo):
   `{code, name, weekend, closed}` and would reject it. INVALID with
   serde's own "missing field `code`".
 - `seeds/agents.toml` — UNKNOWN then; since `f56155f0` it is judged,
-  and its `role` / `department` are refused by name (above).
+  and since `ab192a9f` its `role` / `department` are held (above).
 - Everything else — the manifest, the
   classes, the founder's employee row, the location — is OK under the
   product's own loaders.

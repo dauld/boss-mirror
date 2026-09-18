@@ -34,6 +34,8 @@ impl Rows {
             id: a.id.clone(),
             display_name: a.display_name.clone(),
             default_model: a.default_model.clone(),
+            role: a.role.clone(),
+            department: a.department.clone(),
             hourly_budget_usd_micros: a.hourly_budget_usd_micros,
             max_concurrent_runs: a.max_concurrent_runs,
             aliases: self
@@ -74,6 +76,8 @@ impl InMemoryAgents {
                     display_name: agent_id.to_string(),
                     default_model: "opus-5".to_string(),
                     aliases: Vec::new(),
+                    role: None,
+                    department: None,
                     hourly_budget_usd_micros: None,
                     max_concurrent_runs: None,
                 });

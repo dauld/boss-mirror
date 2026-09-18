@@ -221,7 +221,10 @@ pub const CONTRACT: &[Entry] = &[
                   the jobs API's login door resolves each alias to the id (design 6fda05ae; \
                   backlog f56155f0)",
         shape: "`[[agent]]` rows: id (`agent-<slug>`), display_name, default_model (a rate-card \
-                model, e.g. `opus-5[1m]`), aliases? (the logins that sign as it), \
+                model, e.g. `opus-5[1m]`), aliases? (the logins that sign as it), role? and \
+                department? (Class codes under (employee, role) / (employee, department), \
+                checked against the registry at the batch door like an employee's — a role \
+                audience resolves to every holder, agents included; backlog ab192a9f), \
                 hourly_budget_usd_micros?, max_concurrent_runs? — the `agents` table's columns \
                 and nothing else; validated by `boss_jobs::agents::load_agents_toml`",
         parse: parse_agents,
@@ -584,11 +587,13 @@ fn parse_agents(path: &Path, _: &Ctx) -> Result<String, String> {
             "{n} agents: {}",
             rows.iter()
                 .map(|a| format!(
-                    "{} ({}, {}; {} alias(es))",
+                    "{} ({}, {}; {} alias(es); role {}, department {})",
                     a.id,
                     a.display_name,
                     a.default_model,
-                    a.aliases.len()
+                    a.aliases.len(),
+                    a.role.as_deref().unwrap_or("none"),
+                    a.department.as_deref().unwrap_or("none"),
                 ))
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -1302,15 +1307,21 @@ fn scaffold_agents(s: &Scaffold) -> String {
 # what a run uses when it does not say, spelled as the rate card\n\
 # spells it (opus-5[1m], never claude-…); the caps are the budget the\n\
 # jobs API admits each run against, and are unset until measured.\n\
-# Published to the agents registry by `boss tenant publish`,\n\
-# insert-if-absent by id: a row the platform already registered is\n\
-# kept, and the publish names any field this file differs on.\n\
+# `role` and `department` place it in the org exactly as an\n\
+# employee's do — Class codes from seeds/classes.json under\n\
+# (employee, role) and (employee, department) — and a step whose\n\
+# audience is that role reaches the agent through them.\n\
+# Published to the agents registry by `boss tenant publish`: a row\n\
+# the platform already registered is updated on the declared fields\n\
+# that differ, and the publish names each change.\n\
 #\n\
 # [[agent]]\n\
 # id = \"agent-scout\"\n\
 # display_name = \"Scout (research)\"\n\
 # default_model = \"sonnet-5\"\n\
-# aliases = [\"scout@{name}.example\"]\n",
+# aliases = [\"scout@{name}.example\"]\n\
+# role = \"research-agent\"\n\
+# department = \"product\"\n",
         display = s.display_name,
         name = s.name,
     )
@@ -1598,10 +1609,11 @@ mod tests {
     /// private repo. Every file the contract names is judged by the
     /// product's own loader — including agents.toml, which was UNKNOWN
     /// (the first extension the real tenant asked for) until its seed
-    /// landed (f56155f0, 2026-09-17): in the contract's shape it is OK;
-    /// in the real tenant's first-draft shape, carrying `role` and
-    /// `department` the registry cannot hold, it is INVALID naming the
-    /// field rather than silently dropping it.
+    /// landed (f56155f0, 2026-09-17), and whose first-draft `role` and
+    /// `department` were refused by name until the registry gained the
+    /// columns (ab192a9f): both shapes are OK now, and a field the
+    /// registry still cannot hold is INVALID naming the field rather
+    /// than silently dropped.
     #[test]
     fn the_real_tenants_shape_is_judged_file_by_file() {
         let dir = scratch_dir("boss-cli-tenant-check-algedonic-shape");
@@ -1734,8 +1746,10 @@ terminal = { outcome = "sponsored" }
             "{agents:?}"
         );
         // The real tenant's first draft (20f3a9e) carried role and
-        // department: a field the agents registry cannot hold is
-        // refused by name, never dropped.
+        // department, and was refused for it until the registry gained
+        // the columns (ab192a9f): now the shape is judged OK and the
+        // line reads them back. A field the registry still cannot hold
+        // is refused by name, never dropped.
         write_file(
             &seeds.join("agents.toml"),
             "[[agent]]\nid = \"agent-claude\"\ndisplay_name = \"Claude (engineering)\"\n\
@@ -1744,11 +1758,22 @@ terminal = { outcome = "sponsored" }
         );
         let drafted = check(&dir);
         let agents = status_of(&drafted, "seeds/agents.toml").unwrap();
-        assert_eq!(agents.status, Status::Invalid, "{agents:?}");
-        // toml names one unknown field per refusal (the last it read).
+        assert_eq!(agents.status, Status::Ok, "{agents:?}");
         assert!(
-            agents.detail.contains("unknown field")
-                && (agents.detail.contains("`role`") || agents.detail.contains("`department`")),
+            agents.detail.contains("role engineering-agent")
+                && agents.detail.contains("department engineering"),
+            "{agents:?}"
+        );
+        write_file(
+            &seeds.join("agents.toml"),
+            "[[agent]]\nid = \"agent-claude\"\ndisplay_name = \"Claude (engineering)\"\n\
+             default_model = \"opus-5[1m]\"\nmanager_id = \"emp-david\"\n",
+        );
+        let stray = check(&dir);
+        let agents = status_of(&stray, "seeds/agents.toml").unwrap();
+        assert_eq!(agents.status, Status::Invalid, "{agents:?}");
+        assert!(
+            agents.detail.contains("unknown field") && agents.detail.contains("`manager_id`"),
             "{agents:?}"
         );
         // Three files the product would refuse or silently mis-read

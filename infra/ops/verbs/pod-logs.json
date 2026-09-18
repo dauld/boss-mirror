@@ -1,0 +1,34 @@
+{
+  "about": "READ-ONLY: an instance pod's log, verdict first, through the deploy runner's kubectl (infra/forge/pod-logs.sh) — pod-logs <namespace> <deployment> <lines 1..400> [container]. Prints one line per pod of the deployment (name, phase, ready n/m, restarts, age, and the waiting reason when a container is not running, so a crash loop looks troubled on its own line), then per pod `--- <pod> <container> (last N lines) ---` and `kubectl logs --tail=N --prefix` (--all-containers unless a container is named), and for a pod in CrashLoopBackOff / Error also the PREVIOUS container's last 60 lines — the words that explain a crash were printed by the container that died. Filed by backlog c09cab0b (2026-09-18): the playground's tenant publish failed silently on its fresh database and nothing could say why — the dev pod's ServiceAccount cannot read pods or logs in boss-playground, journal-tail is systemd only, and the converge record carries only prod's roll, so a degraded instance was invisible from every door. Bounded: the namespace must be one of infra/cluster/instances.toml's namespaces, DERIVED through render-instance.sh --instances and never a typed list (boss-dev and every system namespace refused); deployment and container are plain DNS labels; lines 1..400 (the runner caps output at 100 KB — the verdict lines are first and survive a cut). Reads pods and logs and nothing else through the same kubectl + kubeconfig resolution as delete-orphan-object and tenant-census (undeclared-objects.sh --kubectl); never a Secret, never an env. But a log line is what the process printed — if a process logged a credential, the line is the line: the caller reads a tail before quoting it anywhere wider than this packet. Exit 4 is 'cannot answer' with kubectl's own words (a missing deployment is exit 4, never 'no pods'). Timeout 60: two reads plus one logs call per pod and container.",
+  "hosts": [
+    "forge"
+  ],
+  "argv": [
+    "infra/forge/pod-logs.sh",
+    "{1}",
+    "{2}",
+    "{3}",
+    "{4}"
+  ],
+  "params": [
+    {
+      "name": "namespace",
+      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+    },
+    {
+      "name": "deployment",
+      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+    },
+    {
+      "name": "lines",
+      "pattern": "^[0-9]{1,3}$",
+      "max": 400
+    },
+    {
+      "name": "container",
+      "pattern": "^[a-z][a-z0-9-]{0,62}$",
+      "optional": true
+    }
+  ],
+  "timeout": 60
+}

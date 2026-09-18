@@ -28,6 +28,10 @@ pub struct DispatcherCtx {
     /// round-trip per assign — ~6 assigns/sec, so each newly-ready step
     /// waited seconds in the queue and every pipeline tier inherited that
     /// lag. The cache turns the steady-state assign into a local pick.
+    /// Since backlog ab192a9f the roster is the UNION of the people
+    /// roster and the registered agents that hold a role
+    /// (`roster_union`): a role audience resolves to its holders, and an
+    /// agent holding the role is one.
     roster: Arc<tokio::sync::Mutex<RosterCache>>,
     /// Step-assignment distribution strategy, selected by config/data
     /// (`BOSS_DISPATCH_STRATEGY`, default `Spread`). Read by
@@ -458,8 +462,14 @@ async fn handle_event(
             return Ok(());
         }
     }
-    let chosen =
-        pick_employee_with_role_fallback(ctx, &role_candidates, step_id, partition).await?;
+    let chosen = pick_employee_with_role_fallback(
+        ctx,
+        &role_candidates,
+        step_id,
+        partition,
+        decision_shaped,
+    )
+    .await?;
     let Some((emp_id, role_used)) = chosen else {
         // A role IS required (role_candidates is non-empty) but no active
         // holder was found. This is virtually always transient: at sim start
@@ -596,24 +606,55 @@ async fn pick_employee_with_role_fallback(
     role_candidates: &[&str],
     step_id: &str,
     partition: Partition,
+    decision_shaped: bool,
 ) -> Result<Option<(String, String)>> {
     if role_candidates.is_empty() {
-        let chosen = pick_employee(ctx, None, step_id, partition).await?;
+        let chosen = pick_employee(ctx, None, step_id, partition, decision_shaped).await?;
         return Ok(chosen.map(|id| (id, String::new())));
     }
     for r in role_candidates {
-        if let Some(id) = pick_employee(ctx, Some(r), step_id, partition).await? {
+        if let Some(id) = pick_employee(ctx, Some(r), step_id, partition, decision_shaped).await? {
             return Ok(Some((id, (*r).to_string())));
         }
     }
     Ok(None)
 }
 
+/// One roster row: a person as `/api/people` answers it, or a
+/// registered agent that holds a role, folded in by `roster_union`.
 #[derive(Debug, Deserialize)]
 struct Employee {
     id: String,
     role: String,
     status: String,
+    /// A registered agent (from `/api/agents`, backlog ab192a9f), not a
+    /// person. Never on the wire from `/api/people`, hence the default;
+    /// read by `eligible_candidates`, which admits an agent under the
+    /// executor's three guards and nowhere else.
+    #[serde(default)]
+    is_agent: bool,
+}
+
+/// The one roster every reader shares: the people roster plus each
+/// registered agent that HOLDS a role, as a row of that role (backlog
+/// ab192a9f). An agent with no role is not on the roster — it is
+/// reachable by id only, which is what a null role means. Pure, so the
+/// union is testable without the two HTTP reads.
+fn roster_union(
+    employees: Vec<Employee>,
+    agents: Vec<boss_jobs::agents::AgentRow>,
+) -> Vec<Employee> {
+    employees
+        .into_iter()
+        .chain(agents.into_iter().filter_map(|a| {
+            a.role.map(|role| Employee {
+                id: a.id,
+                role,
+                status: "active".to_string(),
+                is_agent: true,
+            })
+        }))
+        .collect()
 }
 
 /// Roster cache TTL: short enough that a new hire becomes assignable
@@ -628,21 +669,41 @@ fn roster_is_stale(cache: &RosterCache) -> bool {
         .unwrap_or(true)
 }
 
-/// The active roster, fetched from the people API. The one HTTP call
-/// every roster reader shares; the TTL cache in `ctx.roster` is what
-/// keeps it off the hot path.
+/// The active roster: the people API's employees and the jobs API's
+/// registered agents, unioned by `roster_union`. The one read every
+/// roster reader shares; the TTL cache in `ctx.roster` is what keeps
+/// it off the hot path. Either read failing fails the roster — the
+/// caller NAKs for redelivery exactly as for a cold people projection,
+/// and a roster missing its agents would nominate nobody for a role
+/// only an agent holds, silently, which is the defect ab192a9f names.
 async fn fetch_active_roster(ctx: &DispatcherCtx) -> Result<Vec<Employee>> {
-    let url = format!("{}/api/people", ctx.people_api_url.trim_end_matches('/'));
+    let people = format!("{}/api/people", ctx.people_api_url.trim_end_matches('/'));
+    let agents = format!("{}/api/agents", ctx.jobs_api_url.trim_end_matches('/'));
+    let employees: Vec<Employee> = fetch_json(ctx, &people).await?;
+    let listing: AgentsListing = fetch_json(ctx, &agents).await?;
+    Ok(roster_union(employees, listing.data))
+}
+
+/// `GET /api/agents` answers `{data, total}`; the rows are the
+/// registry's own shape.
+#[derive(Debug, Deserialize)]
+struct AgentsListing {
+    data: Vec<boss_jobs::agents::AgentRow>,
+}
+
+async fn fetch_json<T: serde::de::DeserializeOwned>(ctx: &DispatcherCtx, url: &str) -> Result<T> {
     let resp = ctx
         .client
-        .get(&url)
+        .get(url)
         .header("x-sim-origin", sim_origin_value())
         .send()
         .await
         .with_context(|| format!("GET {url}"))?
         .error_for_status()
         .with_context(|| format!("GET {url}"))?;
-    resp.json().await.context("decode /api/people response")
+    resp.json()
+        .await
+        .with_context(|| format!("decode {url} response"))
 }
 
 /// Is `owner_id` an active holder of any of `roles`? Reads the SAME
@@ -683,7 +744,8 @@ fn is_active_holder(
     partition: Partition,
 ) -> bool {
     employees.iter().any(|e| {
-        e.status == "active"
+        !e.is_agent
+            && e.status == "active"
             && e.id == owner_id
             && roles.contains(&e.role.as_str())
             && partition_permits(partition, &e.role)
@@ -804,13 +866,14 @@ async fn pick_employee(
     role: Option<&str>,
     step_id: &str,
     partition: Partition,
+    decision_shaped: bool,
 ) -> Result<Option<String>> {
     let mut cache = ctx.roster.lock().await;
     if roster_is_stale(&cache) {
         cache.employees = fetch_active_roster(ctx).await?;
         cache.fetched_at = Some(std::time::Instant::now());
     }
-    let candidates = eligible_candidates(&cache.employees, role, partition);
+    let candidates = eligible_candidates(&cache.employees, role, partition, decision_shaped);
     if candidates.is_empty() {
         // No eligible holder — preserve the None contract; never `% 0`.
         return Ok(None);
@@ -826,16 +889,27 @@ async fn pick_employee(
 /// reproducible. Factored out of `pick_employee` so the eligibility
 /// rule — the surface the 9c23395c defect lived on — is testable
 /// without the roster cache / HTTP.
+///
+/// A registered agent on the roster (backlog ab192a9f) is admitted
+/// under the executor's own three guards (`executor_for`, 291a73a7
+/// option c): the packet is REAL, the step is EXECUTABLE (a verdict
+/// goes to a person), and a role constrains the step — the
+/// unconstrained pool stays people. So a role only an agent holds
+/// nominates the agent, and everything that reached a person before
+/// still does.
 fn eligible_candidates<'a>(
     employees: &'a [Employee],
     role: Option<&str>,
     partition: Partition,
+    decision_shaped: bool,
 ) -> Vec<&'a Employee> {
+    let agent_permitted = role.is_some() && partition.is_real() && !decision_shaped;
     let mut candidates: Vec<&Employee> = employees
         .iter()
         .filter(|e| e.status == "active")
         .filter(|e| role.map(|r| e.role == r).unwrap_or(true))
         .filter(|e| partition_permits(partition, &e.role))
+        .filter(|e| !e.is_agent || agent_permitted)
         .collect();
     candidates.sort_by(|a, b| a.id.cmp(&b.id));
     candidates
@@ -901,7 +975,7 @@ mod tests {
     use super::{
         Partition, eligible_candidates, event_partition, executor_for, is_active_holder,
         left_for_role_queue, owner_assignee, owner_id_from_job_body, partition_permits, pick_index,
-        pick_index_for, stable_hash,
+        pick_index_for, roster_union, stable_hash,
     };
     use crate::config::AssignmentStrategy;
     use boss_jobs::step_registry::StepRegistry;
@@ -1086,6 +1160,7 @@ mod tests {
             id: id.into(),
             role: role.into(),
             status: status.into(),
+            is_agent: false,
         };
         let roster = vec![
             emp("emp-david", "platform-admin", "active"),
@@ -1182,6 +1257,7 @@ mod tests {
             id: id.into(),
             role: role.into(),
             status: status.into(),
+            is_agent: false,
         };
         vec![
             emp("emp-aa-100", "brewer", "active"),
@@ -1201,12 +1277,18 @@ mod tests {
         let ids = |v: Vec<&super::Employee>| v.iter().map(|e| e.id.clone()).collect::<Vec<_>>();
         // The exact probe shape: authority_role=platform-admin, sim event.
         assert!(
-            eligible_candidates(&roster, Some("platform-admin"), Partition::Simulated).is_empty(),
+            eligible_candidates(&roster, Some("platform-admin"), Partition::Simulated, false)
+                .is_empty(),
             "sim packets must never route to operator identities"
         );
         // Unconstrained sim steps still reach the sim-workable roster.
         assert_eq!(
-            ids(eligible_candidates(&roster, None, Partition::Simulated)),
+            ids(eligible_candidates(
+                &roster,
+                None,
+                Partition::Simulated,
+                false
+            )),
             vec!["emp-aa-100"]
         );
         // Non-operator roles are untouched by the partition.
@@ -1214,7 +1296,8 @@ mod tests {
             ids(eligible_candidates(
                 &roster,
                 Some("brewer"),
-                Partition::Simulated
+                Partition::Simulated,
+                false
             )),
             vec!["emp-aa-100"]
         );
@@ -1229,11 +1312,12 @@ mod tests {
         ));
         // The shadow lane closes the same doors (508cc38c).
         assert!(
-            eligible_candidates(&roster, Some("platform-admin"), Partition::Shadow).is_empty(),
+            eligible_candidates(&roster, Some("platform-admin"), Partition::Shadow, false)
+                .is_empty(),
             "shadow packets must never route to operator identities"
         );
         assert_eq!(
-            ids(eligible_candidates(&roster, None, Partition::Shadow)),
+            ids(eligible_candidates(&roster, None, Partition::Shadow, false)),
             vec!["emp-aa-100"]
         );
         assert!(!is_active_holder(
@@ -1242,6 +1326,113 @@ mod tests {
             &["platform-admin"],
             Partition::Shadow
         ));
+    }
+
+    /// Backlog ab192a9f: a step whose audience is a role resolves to
+    /// the HOLDERS of the role, and a registered agent that holds it is
+    /// one. Until this the roster was the employees table alone, so a
+    /// role only an agent held nominated nobody (NAK, then dead-letter)
+    /// and an agent was reachable by id only. The agent joins the pool
+    /// under the executor's own three guards (`executor_for`): a REAL
+    /// packet, an EXECUTABLE (not decision-shaped) step, and a role it
+    /// holds — never the unconstrained pool, never a verdict, never a
+    /// sim or shadow packet.
+    #[test]
+    fn a_role_audience_nominates_an_agent_that_holds_the_role_when_no_employee_does() {
+        let agent = |id: &str, role: &str| super::Employee {
+            id: id.into(),
+            role: role.into(),
+            status: "active".into(),
+            is_agent: true,
+        };
+        let mut roster = partition_roster();
+        roster.push(agent("agent-claude", "engineering-agent"));
+        let ids = |v: Vec<&super::Employee>| v.iter().map(|e| e.id.clone()).collect::<Vec<_>>();
+        // No employee holds engineering-agent: the agent is the holder.
+        assert_eq!(
+            ids(eligible_candidates(
+                &roster,
+                Some("engineering-agent"),
+                Partition::Real,
+                false
+            )),
+            vec!["agent-claude"]
+        );
+        // A verdict still goes to a person — and here there is none.
+        assert!(
+            eligible_candidates(&roster, Some("engineering-agent"), Partition::Real, true)
+                .is_empty(),
+            "a decision-shaped step is never nominated to an agent"
+        );
+        // A packet that is not real never enters a real actor's queue.
+        for not_real in [Partition::Simulated, Partition::Shadow] {
+            assert!(
+                eligible_candidates(&roster, Some("engineering-agent"), not_real, false).is_empty(),
+                "{not_real} must not reach a registered agent"
+            );
+        }
+        // The unconstrained pool is people, as before.
+        assert_eq!(
+            ids(eligible_candidates(&roster, None, Partition::Real, false)),
+            vec!["emp-aa-100", "emp-agent", "emp-david"]
+        );
+        // A role both hold: both, in stable id order, so the spread
+        // pick stays deterministic over the union.
+        roster.push(agent("agent-scout", "platform-admin"));
+        assert_eq!(
+            ids(eligible_candidates(
+                &roster,
+                Some("platform-admin"),
+                Partition::Real,
+                false
+            )),
+            vec!["agent-scout", "emp-agent", "emp-david"]
+        );
+        // The owner check reads people only: an agent never owns a
+        // packet (owner_resolution refuses automation-shaped owners).
+        assert!(!is_active_holder(
+            &roster,
+            "agent-claude",
+            &["engineering-agent"],
+            Partition::Real
+        ));
+    }
+
+    /// The roster union, pure: an agent row with a role becomes a
+    /// holder of that role; one without a role is not on the roster at
+    /// all (reachable by id only), and every employee rides through
+    /// untouched.
+    #[test]
+    fn the_roster_is_employees_and_the_agents_that_hold_a_role() {
+        let agent = |id: &str, role: Option<&str>| boss_jobs::agents::AgentRow {
+            id: id.into(),
+            display_name: id.into(),
+            default_model: "opus-5[1m]".into(),
+            role: role.map(str::to_string),
+            department: None,
+            hourly_budget_usd_micros: None,
+            max_concurrent_runs: None,
+            aliases: vec![],
+        };
+        let roster = roster_union(
+            partition_roster(),
+            vec![
+                agent("agent-claude", Some("engineering-agent")),
+                agent("agent-mute", None),
+            ],
+        );
+        let rows: Vec<(&str, bool)> = roster.iter().map(|e| (e.id.as_str(), e.is_agent)).collect();
+        assert_eq!(
+            rows,
+            [
+                ("emp-aa-100", false),
+                ("emp-agent", false),
+                ("emp-david", false),
+                ("agent-claude", true),
+            ]
+        );
+        assert_eq!(roster[3].role, "engineering-agent");
+        assert_eq!(roster[3].status, "active");
     }
 
     /// REAL packets are byte-for-byte unaffected: same candidates, same
@@ -1254,12 +1445,13 @@ mod tests {
             ids(eligible_candidates(
                 &roster,
                 Some("platform-admin"),
-                Partition::Real
+                Partition::Real,
+                false
             )),
             vec!["emp-agent", "emp-david"]
         );
         assert_eq!(
-            ids(eligible_candidates(&roster, None, Partition::Real)),
+            ids(eligible_candidates(&roster, None, Partition::Real, false)),
             vec!["emp-aa-100", "emp-agent", "emp-david"]
         );
         assert!(is_active_holder(

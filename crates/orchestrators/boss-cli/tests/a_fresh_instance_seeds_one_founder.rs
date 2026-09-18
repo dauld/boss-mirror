@@ -100,8 +100,12 @@ async fn serve(pool: PgPool) -> String {
     // The agents door (backlog f56155f0): the real registry over the
     // same pool — the schema's migration already registered
     // agent-claude, so the tenant's declaration meets a kept row.
+    // Like the people router above, no Class registry is wired: the
+    // classes batch is a stub here, and the door's own test proves the
+    // role / department check (boss_jobs::agents::http).
     let agents_router = boss_jobs::agents::http::router(boss_jobs::agents::http::AgentsApiState {
         registry: Arc::new(boss_jobs::agents::PgAgents::new(pool.clone())),
+        classes: None,
     });
     // What boss-policy-api does before it binds: reconcile the code
     // defaults (platform-admin / audit-readonly / smoke-tester / guest)
@@ -287,10 +291,12 @@ async fn the_real_tenant_verbatim_lands_its_location_before_its_founder() {
 
     // The agent (backlog f56155f0; the rule since 09887242): the
     // migration registered agent-claude under the platform's own
-    // display name; the tenant declares it under its own. The tenant's
-    // declaration wins on the declared field: the row is UPDATED, the
-    // publish line names the change from → to, the declared alias
-    // resolves, and the agents door went before the Workflows.
+    // display name and no role; the tenant declares it under its own
+    // name, holding engineering-agent in engineering (backlog
+    // ab192a9f). The tenant's declaration wins on the declared fields:
+    // the row is UPDATED, the publish line names each change from →
+    // to, the declared alias resolves, and the agents door went before
+    // the Workflows.
     assert!(
         line_of("seeds/agents.toml") < line_of("seeds/workflows.toml"),
         "the agents are sent before the Workflows:\n{out}"
@@ -303,16 +309,18 @@ async fn the_real_tenant_verbatim_lands_its_location_before_its_founder() {
         agents_line.contains("POST /api/agents/batch")
             && agents_line.contains(
                 "received 1, inserted 0, updated 1: agent-claude (display_name Claude \
-                 (Claude Code sessions on the dev pod) → Claude (engineering))"
+                 (Claude Code sessions on the dev pod) → Claude (engineering), \
+                 role null → engineering-agent, department null → engineering)"
             ),
         "{agents_line}"
     );
-    let agent: Option<(String, String)> =
-        sqlx::query_as("SELECT display_name, default_model FROM agents WHERE id = 'agent-claude'")
-            .fetch_optional(&db.pool)
-            .await
-            .unwrap();
-    let (display_name, default_model) = agent.expect("the agent row is there");
+    let agent: Option<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT display_name, default_model, role, department FROM agents WHERE id = 'agent-claude'",
+    )
+    .fetch_optional(&db.pool)
+    .await
+    .unwrap();
+    let (display_name, default_model, role, department) = agent.expect("the agent row is there");
     assert_eq!(
         display_name, "Claude (engineering)",
         "the tenant's declaration wins on the declared field"
@@ -320,6 +328,11 @@ async fn the_real_tenant_verbatim_lands_its_location_before_its_founder() {
     assert_eq!(
         default_model, "opus-5[1m]",
         "and the tenant's model matches it"
+    );
+    assert_eq!(
+        (role.as_deref(), department.as_deref()),
+        (Some("engineering-agent"), Some("engineering")),
+        "the agent holds the role and sits in the department the tenant declared"
     );
     let alias: Option<String> = sqlx::query_scalar(
         "SELECT actor_id FROM actor_aliases WHERE alias = 'claude@algedonic.dev'",

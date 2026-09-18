@@ -129,6 +129,8 @@ async fn a_batch_registers_new_agents_and_updates_the_migrations_row_to_the_decl
         display_name: name.into(),
         default_model: "opus-5[1m]".into(),
         aliases: vec![alias.into()],
+        role: None,
+        department: None,
         hourly_budget_usd_micros: None,
         max_concurrent_runs: None,
     };
@@ -260,4 +262,70 @@ async fn a_batch_registers_new_agents_and_updates_the_migrations_row_to_the_decl
         "Claude (Claude Code sessions on the dev pod)"
     );
     assert_eq!(changed[0].1["updated_by"], "automation:tenant-seed");
+}
+
+/// The two columns an agent shares with an employee (backlog ab192a9f):
+/// the migration's row holds neither (NULL, not ""), a declaration
+/// that names them UPDATES the row and names both changes from null, a
+/// re-run changes nothing, the roster reads them back, and the
+/// `agent.updated` fact carries them. The Class check is the door's
+/// (http.rs), not the schema's — the registry is data, so a CHECK that
+/// copied it would drift.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_holds_a_role_and_sits_in_a_department_like_an_employee() {
+    use boss_jobs::agents::AgentInput;
+    let db = TestDb::new().await;
+    let registry = PgAgents::new(db.pool.clone());
+
+    let seeded = registry.list().await.expect("list");
+    let claude = seeded
+        .iter()
+        .find(|r| r.id == "agent-claude")
+        .expect("the migration's row");
+    assert_eq!(
+        (claude.role.as_deref(), claude.department.as_deref()),
+        (None, None)
+    );
+
+    let placed = AgentInput {
+        id: "agent-claude".into(),
+        display_name: "Claude (Claude Code sessions on the dev pod)".into(),
+        default_model: "opus-5[1m]".into(),
+        aliases: vec![],
+        role: Some("engineering-agent".into()),
+        department: Some("engineering".into()),
+        hourly_budget_usd_micros: None,
+        max_concurrent_runs: None,
+    };
+    let out = registry
+        .publish(std::slice::from_ref(&placed), &stamp())
+        .await
+        .expect("lands");
+    assert_eq!((out.inserted, out.unchanged), (0, 0));
+    assert_eq!(
+        out.updated[0].render(),
+        "agent-claude (role null → engineering-agent, department null → engineering)"
+    );
+    let again = registry.publish(&[placed], &stamp()).await.expect("lands");
+    assert_eq!((again.inserted, again.unchanged), (0, 1));
+    assert!(again.updated.is_empty(), "{:?}", again.updated);
+
+    let rows = registry.list().await.expect("list");
+    let claude = rows.iter().find(|r| r.id == "agent-claude").unwrap();
+    assert_eq!(claude.role.as_deref(), Some("engineering-agent"));
+    assert_eq!(claude.department.as_deref(), Some("engineering"));
+    let json = serde_json::to_value(claude).unwrap();
+    assert_eq!(json["role"], "engineering-agent");
+
+    let changed: Vec<(serde_json::Value,)> =
+        sqlx::query_as("SELECT payload FROM event_outbox WHERE kind = $1")
+            .bind(boss_jobs::agents::AGENT_UPDATED)
+            .fetch_all(&db.pool)
+            .await
+            .expect("outbox reads");
+    assert_eq!(changed.len(), 1, "{changed:?}");
+    assert_eq!(changed[0].0["role"], "engineering-agent");
+    assert_eq!(changed[0].0["department"], "engineering");
+    assert_eq!(changed[0].0["changes"][0]["field"], "role");
+    assert_eq!(changed[0].0["changes"][1]["field"], "department");
 }

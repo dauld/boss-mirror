@@ -239,6 +239,7 @@ async fn main() -> Result<()> {
             subject_kinds,
             subject_existence,
             roster,
+            cfg.classes_api_url.clone(),
             clock.clone(),
             cancel_tx,
             cancel_rx,
@@ -275,6 +276,7 @@ async fn run_server<R: JobsRepository + 'static>(
     subject_kinds: Option<Arc<dyn boss_subject_kinds_client::SubjectKindsClient>>,
     subject_existence: Option<Arc<dyn boss_jobs::subject_existence::SubjectExistenceCheck>>,
     roster: Option<Arc<dyn boss_jobs::owner_resolution::RosterLookup>>,
+    classes_api_url: Option<String>,
     clock: Arc<dyn boss_clock_client::ClockClient>,
     cancel_tx: watch::Sender<bool>,
     cancel_rx: watch::Receiver<bool>,
@@ -391,10 +393,23 @@ async fn run_server<R: JobsRepository + 'static>(
     // The agents roster and the tenant batch (backlog f56155f0): the
     // same registry the login door below resolves through, so an
     // alias a tenant declares resolves on the next request.
-    info!("agents mounted at /api/agents (+ /batch)");
+    // An agent's role / department are Class codes checked at the
+    // batch door against the same registry an employee's are
+    // (backlog ab192a9f); the client is built from classes_api_url,
+    // the URL the executive-role seed above already reads.
+    let agent_classes: Option<Arc<dyn boss_classes_client::ClassesClient>> =
+        classes_api_url.as_deref().map(|url| {
+            Arc::new(boss_classes_client::ReqwestClassesClient::new(url))
+                as Arc<dyn boss_classes_client::ClassesClient>
+        });
+    info!(
+        class_checked = agent_classes.is_some(),
+        "agents mounted at /api/agents (+ /batch)"
+    );
     app = app.merge(boss_jobs::agents::http::router(
         boss_jobs::agents::http::AgentsApiState {
             registry: agents.clone(),
+            classes: agent_classes,
         },
     ));
     // Sim-origin middleware: extract x-sim-origin header and set the

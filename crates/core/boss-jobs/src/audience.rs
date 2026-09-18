@@ -40,7 +40,10 @@ use serde::{Deserialize, Serialize};
 pub enum Audience {
     /// One named actor — a person or a registered agent, by id.
     Individual(String),
-    /// Every holder of a role (Class-registry code): a role queue.
+    /// Every holder of a role (Class-registry code): a role queue. A
+    /// holder is a person whose `employees.role` is the code OR a
+    /// registered agent whose `agents.role` is (backlog ab192a9f) —
+    /// the dispatcher's nomination reads both as one roster.
     Role(String),
     /// A department (Class-registry code). Parsed and carried, derives
     /// nothing until car 2 makes department a Class on stations.

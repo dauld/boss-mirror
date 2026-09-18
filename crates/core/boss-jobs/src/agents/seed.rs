@@ -57,14 +57,16 @@ pub fn load_agents_toml(path: &Path) -> Result<Vec<AgentInput>, String> {
 mod tests {
     use super::*;
 
-    /// The real tenant's shape, minus the two fields the registry
-    /// cannot hold (see `types.rs`).
+    /// The real tenant's shape — its first draft, role and department
+    /// included, which the registry can hold since backlog ab192a9f.
     const FILE: &str = r#"
 [[agent]]
 id = "agent-claude"
 display_name = "Claude (engineering)"
 default_model = "opus-5[1m]"
 aliases = ["claude@algedonic.dev"]
+role = "engineering-agent"
+department = "engineering"
 "#;
 
     #[test]
@@ -74,7 +76,20 @@ aliases = ["claude@algedonic.dev"]
         assert_eq!(rows[0].id, "agent-claude");
         assert_eq!(rows[0].default_model, "opus-5[1m]");
         assert_eq!(rows[0].aliases, ["claude@algedonic.dev"]);
+        assert_eq!(rows[0].role.as_deref(), Some("engineering-agent"));
+        assert_eq!(rows[0].department.as_deref(), Some("engineering"));
         assert_eq!(rows[0].hourly_budget_usd_micros, None);
+        // A row that declares neither holds neither: NULL, not "".
+        let bare = FILE
+            .lines()
+            .filter(|l| !l.starts_with("role") && !l.starts_with("department"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let rows = parse_agents_toml(&bare).unwrap();
+        assert_eq!(
+            (rows[0].role.as_deref(), rows[0].department.as_deref()),
+            (None, None)
+        );
     }
 
     #[test]
@@ -93,10 +108,18 @@ aliases = ["claude@algedonic.dev"]
             why.contains("claude@algedonic.dev") && why.contains("ONE actor"),
             "{why}"
         );
-        // The real tenant's first draft carried role/department: refused
-        // naming the field, never silently dropped.
-        let drafted = format!("{FILE}role = \"engineering-agent\"\n");
-        assert!(parse_agents_toml(&drafted).unwrap_err().contains("role"));
+        // A field the registry still cannot hold is refused naming the
+        // field, never silently dropped (the rule that once refused
+        // role and department, before ab192a9f gave them columns).
+        let drafted = format!("{FILE}manager_id = \"emp-david\"\n");
+        assert!(
+            parse_agents_toml(&drafted)
+                .unwrap_err()
+                .contains("manager_id")
+        );
+        let blank = FILE.replace("role = \"engineering-agent\"", "role = \"\"");
+        let why = parse_agents_toml(&blank).unwrap_err();
+        assert!(why.contains("role is empty"), "{why}");
         assert!(parse_agents_toml("").unwrap().is_empty());
     }
 }

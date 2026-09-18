@@ -564,6 +564,14 @@ async fn a_tenant_sourced_rule_survives_a_seed_that_names_no_file_for_it() {
 /// one), and the product's retired rows stay as history under the
 /// same name. The next seed leaves the tenant's row alone, as it
 /// always did.
+///
+/// The product row is written HERE since backlog b5f21e82 (2026-09-18):
+/// a fresh database no longer carries the migrations' thirty-one
+/// brewery rows (`20260918022108-seed-residue-is-not-a-retirement.sql`
+/// removes them before the seed runs — seed_residue_migration.rs), so
+/// this test builds the converged instance's shape itself — an active
+/// product row under a name the directory does not author, the way a
+/// rule file deleted from the tree leaves one.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_name_the_seed_retired_is_free_for_a_tenant_to_take_over() {
     use boss_dispatcher::rules::authoring::{create_draft, list_versions, publish};
@@ -573,16 +581,29 @@ async fn a_name_the_seed_retired_is_free_for_a_tenant_to_take_over() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = authored_copy(&tmp);
 
-    // The playground's shape: a migration's product-sourced row under a
-    // name no file in the directory authors.
+    // The converged instance's shape: a product-sourced active row
+    // under a name no file in the directory authors.
     let name = "spawn-tasting-panel-on-brew-close";
     assert!(
         !dir.join(format!("{name}.toml")).exists(),
         "the product directory must not author the tenant's rule, or this test proves nothing"
     );
-    let product_version = active_version(&db.pool, name)
-        .await
-        .expect("the migrations seeded the brewery reactor as a product row");
+    assert_eq!(
+        active_version(&db.pool, name).await,
+        None,
+        "a fresh database carries no product row under the moved name any longer"
+    );
+    let product_version = 2;
+    sqlx::query(
+        "INSERT INTO dispatcher_rules (name, version, status, on_event, when_expr, do_steps) \
+         VALUES ($1, $2, 'active', 'jobs.job.closed', 'kind = \"morning-brew\"', \
+                 '[{\"handler\":\"jobs.spawn\",\"args\":{}}]'::jsonb)",
+    )
+    .bind(name)
+    .bind(product_version)
+    .execute(&db.pool)
+    .await
+    .expect("publish a product row the way the tree's own seed did before the file moved");
     let report = seed_authored_rules(&db.pool, &dir)
         .await
         .expect("seed the fixture registry");

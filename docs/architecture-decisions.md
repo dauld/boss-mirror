@@ -472,7 +472,24 @@ and only the tree can supply a fresh database. Live authoring is
 untouched — the seed is insert-if-absent and never walks a version back,
 so `POST /api/dispatcher/rules` + publish still changes a rule with no
 deploy, and the tree owns which rules exist rather than moment-to-moment
-control of the rows.
+control of the rows. **One exception to append-only, stated once
+(backlog b5f21e82, 2026-09-18): seed residue is deleted, not kept.** The
+thirty-one pre-collapse migrations are applied history and still insert
+sixty-four names on every fresh database; thirty-five of them no product
+file authors any longer (the brewery's reactors moved to the tenant's
+`seeds/rules.toml`, the design-doc sweep's retired with it), so the boot
+seed retired them on every new instance and a tenant then had to take
+each name over at v(n+1), reading `registry ahead, left alone` on every
+publish after. Append-only protects decisions — a version someone
+published, a rule someone switched off. A row a migration wrote and a
+seed retired minutes later, under a name no file ever authored again, is
+not a decision anyone made; `20260918022108-seed-residue-is-not-a-retirement.sql`
+removes those rows (`source IS NULL`, no tenant row under the name — a
+tenant that already took a name over keeps the history it was judged
+against), and the list is pinned to its derivation by a test. Live
+retirement is still a status flip, and `no-migration-writes-a-dispatcher-rule`
+still refuses a migration that inserts or updates a rule; it passes a
+DELETE, which cannot open a second home.
 The reactive wiring is visualized as a cascade — trigger event →
 rule → handler → emitted event → re-triggered rule, feedback cycles
 highlighted, filterable by trigger event — at `/system/dispatcher`. The
