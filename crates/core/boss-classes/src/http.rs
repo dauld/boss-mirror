@@ -1,5 +1,7 @@
 //! HTTP API for the Class registry. Reads are open; the one write —
 //! `POST /api/classes/batch` — seeds the registry via the public API
+//! (insert-if-absent; a held row that differs from its declaration is
+//! named in the answer as `kept: [{id, differs}]` — design e187198f)
 //! (replacing the direct `psql -f classes.sql` end-around) and is
 //! gated to operator-tier callers (with the `x-sim-origin` bypass).
 
@@ -11,6 +13,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use boss_core::primitives::{Class, ClassRef};
+use boss_core::publish::KeptRow;
 use boss_policy_client::{AccessTier, CurrentUser};
 use serde::Deserialize;
 use serde_json::Value;
@@ -201,6 +204,32 @@ impl From<ClassInput> for Class {
     }
 }
 
+/// The declared fields a held Class disagrees with the declaration on,
+/// by the input's field names (the chart door's `differs_from`, for
+/// the registry's editable body — the key itself cannot differ, it is
+/// what matched). `retired_at` is the table's own and not compared: a
+/// retired code the file still declares is kept retired, which is the
+/// retire door's decision, not the seed's.
+pub fn class_differs(held: &Class, declared: &Class) -> Vec<String> {
+    let mut out = Vec::new();
+    if held.display_name != declared.display_name {
+        out.push("display_name".to_string());
+    }
+    if held.parent_code != declared.parent_code {
+        out.push("parent_code".to_string());
+    }
+    if held.member_attribute != declared.member_attribute {
+        out.push("member_attribute".to_string());
+    }
+    if held.metadata != declared.metadata {
+        out.push("metadata".to_string());
+    }
+    if held.sort_order != declared.sort_order {
+        out.push("sort_order".to_string());
+    }
+    out
+}
+
 /// Batch-upsert Class rows — the single write surface, used to seed
 /// the registry from JSON instead of `psql -f classes.sql`. Each row
 /// inserts `ON CONFLICT (subject_kind, code) DO NOTHING`, so the call
@@ -223,6 +252,30 @@ async fn batch_upsert(
     }
 
     let classes: Vec<Class> = rows.into_iter().map(Into::into).collect();
+    // What the registry already holds of this batch, read BEFORE the
+    // insert so a kept row's disagreement is named (design e187198f:
+    // the instance is the truth, and a repo row that does not land is
+    // named, never silent). Insert-if-absent never touches these, so
+    // the read is the whole comparison.
+    let (mut kept, mut unchanged) = (Vec::new(), 0usize);
+    for c in &classes {
+        let class_ref = ClassRef::new(c.subject_kind.as_str(), c.code.as_str());
+        match state.classes.get(&class_ref).await {
+            Ok(Some(held)) => {
+                let differs = class_differs(&held, c);
+                if differs.is_empty() {
+                    unchanged += 1;
+                } else {
+                    kept.push(KeptRow {
+                        id: format!("{}/{}", c.subject_kind, c.code),
+                        differs,
+                    });
+                }
+            }
+            Ok(None) => {}
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        }
+    }
     // The fact each inserted row leaves is stamped with the actor the
     // request signed with (`x-boss-user`, the id `boss tenant publish`
     // sends); a sim-chain caller with no identity is this service's
@@ -238,6 +291,8 @@ async fn batch_upsert(
         Ok(inserted) => Json(serde_json::json!({
             "received": classes.len(),
             "inserted": inserted,
+            "kept": kept,
+            "unchanged": unchanged,
         }))
         .into_response(),
         // A class for an unregistered kind is a caller error, not a
@@ -539,13 +594,13 @@ mod tests {
 
     #[tokio::test]
     async fn batch_upsert_is_idempotent_on_conflict() {
-        let repo = Arc::new(InMemoryClasses::new(vec![employee("brewer", 32)]));
+        let repo = Arc::new(InMemoryClasses::new(vec![employee("clerk", 32)]));
         let app = router(ClassesApiState {
             classes: repo.clone(),
         });
-        // `brewer` already present → DO NOTHING; only `cellar-tech` is new.
+        // `clerk` already present → DO NOTHING; only `cellar-tech` is new.
         let body = json!([
-            {"subject_kind": "employee", "code": "brewer", "display_name": "Brewer", "member_attribute": "role", "sort_order": 32},
+            {"subject_kind": "employee", "code": "clerk", "display_name": "Clerk", "member_attribute": "role", "sort_order": 32},
             {"subject_kind": "employee", "code": "cellar-tech", "display_name": "Cellar Tech", "member_attribute": "role", "sort_order": 33},
         ]);
         let resp = app
@@ -557,10 +612,31 @@ mod tests {
         let v: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["received"], json!(2));
         assert_eq!(v["inserted"], json!(1), "conflicting row is left untouched");
+        // The held row differs from the declaration (its display_name
+        // is the fixture's CLERK, the file says Clerk): kept, and the
+        // answer names the field (design e187198f) — until 2026-09-18
+        // this door said nothing about a repo row that never landed.
+        assert_eq!(v["kept"][0]["id"], "employee/clerk", "{v}");
+        assert_eq!(v["kept"][0]["differs"], json!(["display_name"]));
         assert_eq!(
             repo.list_for_subject_kind("employee").await.unwrap().len(),
             2
         );
+        // A row declared exactly as held is not a finding.
+        let same = json!([
+            {"subject_kind": "employee", "code": "clerk", "display_name": "CLERK", "member_attribute": "role", "sort_order": 32},
+        ]);
+        let resp = router(ClassesApiState {
+            classes: repo.clone(),
+        })
+        .oneshot(batch_request(Some(&operator_header()), same))
+        .await
+        .unwrap();
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["inserted"], json!(0));
+        assert_eq!(v["kept"], json!([]), "{v}");
+        assert_eq!(v["unchanged"], json!(1));
     }
 
     /// The fact a declaration leaves (backlog d9409039, 2026-09-17):

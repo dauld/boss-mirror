@@ -10,6 +10,7 @@
 
 use async_trait::async_trait;
 use boss_core::event::Event;
+use boss_core::publish::PublishMode;
 use boss_core::publisher::EventStamp;
 
 use super::types::{AgentInput, AgentRow, AgentsBatchOutcome, FieldChange};
@@ -95,24 +96,32 @@ pub trait AgentsRegistry: Send + Sync {
     async fn list(&self) -> Result<Vec<AgentRow>, AgentsError>;
 
     /// Land a tenant's declarations, one transaction: a row the
-    /// registry does not hold is inserted; a row it holds is UPDATED
-    /// on every declared field that differs — the tenant's declaration
-    /// wins on declared fields (backlog 09887242), and a declaration
-    /// is the whole row, since [`AgentInput`] is the table's columns —
-    /// with the outcome naming each change; a declared alias lands
-    /// under the declared id (moved, if another agent held it), and
-    /// an alias the tenant does not declare is kept. Rows arrive
-    /// already validated (`validate_agent`); an unpriced
-    /// `default_model` is the one refusal the registry itself makes.
+    /// registry does not hold is inserted; a row it holds is, under
+    /// [`PublishMode::InsertIfAbsent`] (the default), KEPT with the
+    /// declared fields it differs on named in the outcome — THE
+    /// INSTANCE IS THE TRUTH (design e187198f, 2026-09-18: until then
+    /// the declaration overwrote the row on every publish, and the
+    /// publish runs at every boot, so an operator's edit lived until
+    /// the next converge) — and under [`PublishMode::Take`] UPDATED on
+    /// every declared field that differs, the outcome naming each
+    /// change (a declaration is the whole row, since [`AgentInput`] is
+    /// the table's columns). A declared alias nobody holds lands under
+    /// the declared id in either mode (an alias is its own row); one
+    /// another agent holds is kept there under the default and moved
+    /// under take. An alias the tenant does not declare is never
+    /// touched. Rows arrive already validated (`validate_agent`); an
+    /// unpriced `default_model` is the one refusal the registry
+    /// itself makes.
     ///
     /// Every row inserted records one [`AGENT_DECLARED`] event and
     /// every row changed one [`AGENT_UPDATED`] event, both built from
-    /// `stamp` in that same transaction; a row already as declared
-    /// records nothing (backlog d9409039 — until then a tenant's
-    /// agents left no audit-log fact).
+    /// `stamp` in that same transaction; a row kept or already as
+    /// declared records nothing (backlog d9409039 — until then a
+    /// tenant's agents left no audit-log fact).
     async fn publish(
         &self,
         rows: &[AgentInput],
+        mode: PublishMode,
         stamp: &EventStamp,
     ) -> Result<AgentsBatchOutcome, AgentsError>;
 }

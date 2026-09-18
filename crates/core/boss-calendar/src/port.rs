@@ -7,6 +7,7 @@
 
 use async_trait::async_trait;
 use boss_core::actor::ActorId;
+use boss_core::publish::{FieldChange, KeptRow, PublishMode, UpdatedRow};
 use boss_core::publisher::EventStamp;
 use chrono::{DateTime, Utc};
 
@@ -142,11 +143,96 @@ pub trait CalendarClient: Send + Sync {
         code: &str,
     ) -> Result<Option<BusinessCalendar>, CalendarError>;
 
-    /// Seed/replace business calendars. Each calendar is upserted by
-    /// `code` and its `closed`-day set is replaced wholesale. Returns the
-    /// number of calendars upserted.
-    async fn upsert_business_calendars(
+    /// Publish business calendars, insert-if-absent by `code` (design
+    /// e187198f: THE INSTANCE IS THE TRUTH). A code the table holds is
+    /// KEPT and the outcome names the declared fields it differs on
+    /// (`name`, `weekend`, `closed`); only [`PublishMode::Take`]
+    /// replaces it — header and closed-day set wholesale — naming each
+    /// change from → to. Until 2026-09-18 this was an unconditional
+    /// upsert plus a DELETE-and-reinsert of the closed days, and the
+    /// tenant publish runs at every boot, so an operator's edit to a
+    /// calendar lived until the next converge.
+    async fn publish_business_calendars(
         &self,
         calendars: &[BusinessCalendar],
-    ) -> Result<usize, CalendarError>;
+        mode: PublishMode,
+    ) -> Result<BusinessCalendarsOutcome, CalendarError>;
+}
+
+/// What a business-calendar batch did: rows received, rows inserted,
+/// rows kept with their differing fields named, rows a take updated
+/// with each change named, and rows already as declared.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct BusinessCalendarsOutcome {
+    pub received: usize,
+    pub inserted: usize,
+    pub kept: Vec<KeptRow>,
+    pub updated: Vec<UpdatedRow>,
+    pub unchanged: usize,
+}
+
+/// The declared fields `declared` disagrees with the held row on, by
+/// the file's field names — the pure comparison both adapters answer
+/// a kept row with.
+pub fn calendar_differs(held: &BusinessCalendar, declared: &BusinessCalendar) -> Vec<String> {
+    let mut out = Vec::new();
+    if held.name != declared.name {
+        out.push("name".to_string());
+    }
+    if held.weekend != declared.weekend {
+        out.push("weekend".to_string());
+    }
+    if held.closed != declared.closed {
+        out.push("closed".to_string());
+    }
+    out
+}
+
+/// The same disagreement as changes from `held` to `declared` — what a
+/// take reports after replacing the row.
+pub fn calendar_changes(held: &BusinessCalendar, declared: &BusinessCalendar) -> Vec<FieldChange> {
+    let mut out = Vec::new();
+    if held.name != declared.name {
+        out.push(FieldChange::new("name", &held.name, &declared.name));
+    }
+    if held.weekend != declared.weekend {
+        out.push(FieldChange::new(
+            "weekend",
+            &held.weekend,
+            &declared.weekend,
+        ));
+    }
+    if held.closed != declared.closed {
+        out.push(FieldChange::new("closed", &held.closed, &declared.closed));
+    }
+    out
+}
+
+/// One row's contribution to the outcome, shared by both adapters:
+/// `held` is what the table had (`None` = inserted), and the adapter
+/// has already written what `mode` asked for.
+pub fn account_for(
+    out: &mut BusinessCalendarsOutcome,
+    held: Option<&BusinessCalendar>,
+    declared: &BusinessCalendar,
+    mode: PublishMode,
+) {
+    let Some(held) = held else {
+        out.inserted += 1;
+        return;
+    };
+    let differs = calendar_differs(held, declared);
+    if differs.is_empty() {
+        out.unchanged += 1;
+    } else if mode.is_take() {
+        out.updated.push(UpdatedRow {
+            id: declared.code.clone(),
+            changes: calendar_changes(held, declared),
+        });
+    } else {
+        out.kept.push(KeptRow {
+            id: declared.code.clone(),
+            differs,
+        });
+    }
 }

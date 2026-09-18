@@ -18,6 +18,7 @@
 //! only reads — because the question is whether the DATABASE refuses.
 
 use boss_core::actor::ActorId;
+use boss_core::publish::PublishMode;
 use boss_core::publisher::EventStamp;
 use boss_jobs::agents::{AgentsRegistry, PgAgents};
 use boss_testing::TestDb;
@@ -112,7 +113,7 @@ async fn the_schema_refuses_an_alias_to_nothing_and_a_mis_shaped_id() {
     );
 }
 
-/// The tenant's batch against the real tables (backlog f56155f0,
+/// The tenant's batch against the real tables under `take` (backlog f56155f0,
 /// 2026-09-17; the rule since 09887242): a row the registry lacks is
 /// inserted, a row the migration already registered is UPDATED to the
 /// declaration and the batch names each change from → to, a re-run of
@@ -153,6 +154,7 @@ async fn a_batch_registers_new_agents_and_updates_the_migrations_row_to_the_decl
                 ),
                 declared("agent-scout", "Scout", "scout@example.test"),
             ],
+            PublishMode::Take,
             &stamp(),
         )
         .await
@@ -199,6 +201,7 @@ async fn a_batch_registers_new_agents_and_updates_the_migrations_row_to_the_decl
                 ),
                 declared("agent-scout", "Scout", "scout@example.test"),
             ],
+            PublishMode::Take,
             &stamp(),
         )
         .await
@@ -213,6 +216,7 @@ async fn a_batch_registers_new_agents_and_updates_the_migrations_row_to_the_decl
     let err = registry
         .publish(
             &[declared("agent-later", "L", "l@example.test"), unpriced],
+            PublishMode::Take,
             &stamp(),
         )
         .await
@@ -298,7 +302,7 @@ async fn an_agent_holds_a_role_and_sits_in_a_department_like_an_employee() {
         max_concurrent_runs: None,
     };
     let out = registry
-        .publish(std::slice::from_ref(&placed), &stamp())
+        .publish(std::slice::from_ref(&placed), PublishMode::Take, &stamp())
         .await
         .expect("lands");
     assert_eq!((out.inserted, out.unchanged), (0, 0));
@@ -306,7 +310,10 @@ async fn an_agent_holds_a_role_and_sits_in_a_department_like_an_employee() {
         out.updated[0].render(),
         "agent-claude (role null → engineering-agent, department null → engineering)"
     );
-    let again = registry.publish(&[placed], &stamp()).await.expect("lands");
+    let again = registry
+        .publish(&[placed], PublishMode::Take, &stamp())
+        .await
+        .expect("lands");
     assert_eq!((again.inserted, again.unchanged), (0, 1));
     assert!(again.updated.is_empty(), "{:?}", again.updated);
 
@@ -328,4 +335,157 @@ async fn an_agent_holds_a_role_and_sits_in_a_department_like_an_employee() {
     assert_eq!(changed[0].0["department"], "engineering");
     assert_eq!(changed[0].0["changes"][0]["field"], "role");
     assert_eq!(changed[0].0["changes"][1]["field"], "department");
+}
+
+/// THE INSTANCE IS THE TRUTH (design e187198f, David 2026-09-18). The
+/// batch's default is insert-if-absent: a row the registry holds and
+/// the declaration disagrees with is KEPT, the outcome names the
+/// differing fields, and no `agent.updated` is staged — so a converge's
+/// republish never reverts an operator's edit. Under `mode=take` the
+/// declaration overwrites the row on every declared field, the outcome
+/// names each change from → to, and the fact rides the transaction.
+/// A declared alias nobody holds still lands under the default (an
+/// alias is its own row, inserted if absent); one another agent holds
+/// is kept there and named.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_keeps_a_differing_live_row_by_default_and_overwrites_it_only_under_take() {
+    use boss_jobs::agents::AgentInput;
+    let db = TestDb::new().await;
+    let registry = PgAgents::new(db.pool.clone());
+    let declared = AgentInput {
+        id: "agent-claude".into(),
+        display_name: "Claude (engineering)".into(),
+        default_model: "opus-5[1m]".into(),
+        aliases: vec!["claude@algedonic.dev".into()],
+        role: None,
+        department: None,
+        hourly_budget_usd_micros: None,
+        max_concurrent_runs: Some(3),
+    };
+
+    // The migration's row, with an operator's edits the file does not
+    // know about: a raised run cap, an extra login.
+    sqlx::query("UPDATE agents SET max_concurrent_runs = 8 WHERE id = 'agent-claude'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO actor_aliases (alias, actor_id) VALUES ('ops-added@algedonic.dev', 'agent-claude')",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let out = registry
+        .publish(
+            std::slice::from_ref(&declared),
+            PublishMode::InsertIfAbsent,
+            &stamp(),
+        )
+        .await
+        .expect("the batch lands");
+    assert_eq!((out.received, out.inserted, out.unchanged), (1, 0, 0));
+    assert!(out.updated.is_empty(), "{:?}", out.updated);
+    assert_eq!(out.kept.len(), 1, "{:?}", out.kept);
+    assert_eq!(
+        out.kept[0].render(),
+        "agent-claude differs on display_name, max_concurrent_runs"
+    );
+    let rows = registry.list().await.unwrap();
+    let claude = rows.iter().find(|r| r.id == "agent-claude").unwrap();
+    assert_eq!(
+        claude.display_name, "Claude (Claude Code sessions on the dev pod)",
+        "the instance's row is kept under the default"
+    );
+    assert_eq!(claude.max_concurrent_runs, Some(8));
+    assert_eq!(
+        claude.aliases,
+        ["claude@algedonic.dev", "ops-added@algedonic.dev"],
+        "the migration's alias and the operator's are both still there"
+    );
+    let updated_facts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM event_outbox WHERE kind = $1")
+            .bind(boss_jobs::agents::AGENT_UPDATED)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(updated_facts, 0, "nothing changed, so nothing is recorded");
+
+    // The same declaration under take: the row takes every declared
+    // column, the change is named, and the fact is staged.
+    let out = registry
+        .publish(std::slice::from_ref(&declared), PublishMode::Take, &stamp())
+        .await
+        .expect("the take lands");
+    assert_eq!((out.inserted, out.unchanged), (0, 0));
+    assert!(out.kept.is_empty(), "{:?}", out.kept);
+    assert_eq!(
+        out.updated[0].render(),
+        "agent-claude (display_name Claude (Claude Code sessions on the dev pod) → Claude \
+         (engineering), max_concurrent_runs 8 → 3)"
+    );
+    let rows = registry.list().await.unwrap();
+    let claude = rows.iter().find(|r| r.id == "agent-claude").unwrap();
+    assert_eq!(claude.display_name, "Claude (engineering)");
+    assert_eq!(claude.max_concurrent_runs, Some(3));
+    let updated_facts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM event_outbox WHERE kind = $1")
+            .bind(boss_jobs::agents::AGENT_UPDATED)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(updated_facts, 1, "one agent.updated for the take");
+
+    // An alias another agent holds: kept there under the default and
+    // named; moved under take.
+    sqlx::query(
+        "INSERT INTO agents (id, display_name, default_model) VALUES ('agent-other', 'Other', 'opus-5')",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO actor_aliases (alias, actor_id) VALUES ('shared@algedonic.dev', 'agent-other')",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let mut wants_shared = declared.clone();
+    wants_shared.aliases.push("shared@algedonic.dev".into());
+    let out = registry
+        .publish(
+            std::slice::from_ref(&wants_shared),
+            PublishMode::InsertIfAbsent,
+            &stamp(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.kept[0].render(), "agent-claude differs on aliases");
+    assert_eq!(
+        registry
+            .resolve_login("shared@algedonic.dev")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("agent-other"),
+        "the other agent keeps its login under the default"
+    );
+    let out = registry
+        .publish(
+            std::slice::from_ref(&wants_shared),
+            PublishMode::Take,
+            &stamp(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.updated[0].changes[0].field, "aliases");
+    assert_eq!(
+        registry
+            .resolve_login("shared@algedonic.dev")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("agent-claude"),
+        "take moves the login to the declared id"
+    );
 }

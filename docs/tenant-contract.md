@@ -30,7 +30,7 @@ Three verbs make the contract usable:
   (with the loader's own error, never rephrased) / **UNKNOWN** (a file
   the contract does not name). Exit 0 when nothing is MISSING or
   INVALID; UNKNOWN is reported, not refused.
-- `boss tenant publish <dir> [--gateway <url>] [--dry-run]` publishes
+- `boss tenant publish <dir> [--gateway <url>] [--dry-run] [--take <registry>[,<registry>]]` publishes
   a directory into a running deployment through the **same shared
   doors the tenant engines' prepare compose** (backlog `ee7b62bb`):
   classes → the chart of accounts → locations → business calendars →
@@ -38,10 +38,11 @@ Three verbs make the contract usable:
   Workflows, after a barrier on the people projection → credentials →
   sensors → the
   ledger's posting rules → its event→fact projections → dispatcher
-  rules last. Idempotent (insert-if-absent, upsert, an employee or
-  agent already there updated only where the declaration differs, a
-  kind an authoring Job already published is skipped, a rule at its
-  file's version is `present`), signed as
+  rules last. Idempotent (insert-if-absent on every door — the
+  instance is the truth; a row already there that differs from the
+  file is kept and named on the line, and only `--take <registry>`
+  overwrites it; a kind an authoring Job already published is kept, a
+  rule at its file's version is `present`), signed as
   `automation:tenant-seed` and **not** as a sim chain. One line per
   file present: the door and a count, or `skipped: <why>` for a file
   nothing reads — never silence. It refuses a directory that fails
@@ -56,11 +57,15 @@ Three verbs make the contract usable:
   until then the brewery reached an instance only through that
   prepare, which never sent its locations, its chart or its rules).
 
-`boss tenant contract` prints the table below. It is rendered from
-`CONTRACT` in `crates/orchestrators/boss-cli/src/tenant.rs`, and a test
-(`the_contract_doc_carries_the_codes_table`) holds this file's copy
-equal to the code's — one fact in two places gets an equality test
-(CLAUDE.md §9a). Edit the code, run the verb, paste between the markers.
+`boss tenant contract` prints the table below and the publish rule
+("The instance is the truth"). Both are rendered from
+`crates/orchestrators/boss-cli/src/tenant.rs` (`CONTRACT` and
+`INSTANCE_IS_THE_TRUTH`), and two tests
+(`the_contract_doc_carries_the_codes_table`,
+`the_contract_doc_carries_the_publish_rule_the_verb_prints`) hold this
+file's copies equal to the code's — one fact in two places gets an
+equality test (CLAUDE.md §9a). Edit the code, run the verb, paste
+between the markers.
 
 ## How the table was made
 
@@ -119,12 +124,12 @@ stating plainly:
 | `seeds/policy_rules.toml` | no | boss-policy-bootstrap / `boss_policy::bootstrap::publish_policy_rules` via `boss_policy_client::seed_loader::load_policy_rules` (the tenant prepare, first boot) | `[[grants]]` rows: `role` or `roles`, `resource` or `resources`, `action` or `actions`, `scope` (all/self/team/territory/none/department:<name>); expanded to one rule per role x resource x action | yes |
 | `seeds/classes.json` or `seeds/classes.toml` | no | POST /api/classes/batch, one boss-classes `http::ClassInput` per row — sent by the tenant prepare (brewery: classes.json; used-device-shop: classes.toml `[[class]]`) and infra/postgres/reset-to-baseline.sh | JSON array (or TOML `[[class]]` rows) of {subject_kind, code, display_name, parent_code?, member_attribute?, metadata?, sort_order?} | yes |
 | `seeds/chart_of_accounts.toml` | no | POST /api/ledger/accounts/batch, one boss-ledger `chart::AccountInput` per row (insert-if-absent by code) — sent by `boss tenant publish` AFTER the classes; a code the starter chart (40-ledger.sql, the OSS default) already holds is the SAME account, kept under its registered name, and the publish line names the field the declaration differs on — adopt the code or choose another (backlog 41af5195; design 18cf4272) | `[[account]]` rows: code, name, kind (asset|liability|equity|revenue|expense), normal_balance (debit|credit), parent? (a code declared earlier in the file) — the `gl_accounts` table's authorable columns; validated by `boss_ledger::chart::validate` | yes |
-| `seeds/employees.json` | no | POST /api/people, one `boss_people::Employee` per row; a row already there is PUT on the declared fields that differ and the rest kept — the tenant's declaration wins on declared fields (backlog 09887242) — sent by `boss tenant publish` (the brewery engine's prepare reads it at the FIXED path /opt/boss/examples/brewery/seeds/, not from the bundle; used-device-shop reads data/employees.json instead) | JSON array of Employee rows: id, name, email, role, department, hire_date, location, manager_id, employment_type, status, skills[], certifications[], annual_salary_cents; role/department/location are validated against the registries at write time, not here | yes |
+| `seeds/employees.json` | no | POST /api/people, one `boss_people::Employee` per row; a row already there is kept and the publish line names the declared fields that differ — the instance is the truth; `--take employees` PUTs the declared fields and keeps the rest (design e187198f) — sent by `boss tenant publish` (the brewery engine's prepare reads it at the FIXED path /opt/boss/examples/brewery/seeds/, not from the bundle; used-device-shop reads data/employees.json instead) | JSON array of Employee rows: id, name, email, role, department, hire_date, location, manager_id, employment_type, status, skills[], certifications[], annual_salary_cents; role/department/location are validated against the registries at write time, not here | yes |
 | `seeds/operator_hires.toml` | no | boss-brewery-engine prepare (`seed_brewery_operator_hires`): each `[[hire]]` POSTed to /api/people as a `boss_people::Employee` | `[[hire]]` rows in the Employee shape above | no |
-| `seeds/business_calendars.json` | no | POST /api/calendar/business-calendars/batch as `Vec<boss_core::calendar::BusinessCalendar>` (the brewery engine's prepare); the dispatcher's timing triggers and the sim resolve business days from it | JSON array of {code, name, weekend: [0..6 Mon=0], closed: [YYYY-MM-DD]} | yes |
+| `seeds/business_calendars.json` | no | POST /api/calendar/business-calendars/batch as `Vec<boss_core::calendar::BusinessCalendar>` (the brewery engine's prepare and `boss tenant publish`; insert-if-absent by code, a held code that differs is named, `--take calendars` replaces it wholesale — design e187198f); the dispatcher's timing triggers and the sim resolve business days from it | JSON array of {code, name, weekend: [0..6 Mon=0], closed: [YYYY-MM-DD]} | yes |
 | `seeds/credentials.toml` | no | POST /api/credentials/batch (boss-jobs, insert-if-absent by id; one `credential.declared` fact per inserted row) — sent by `boss tenant publish` BEFORE the sensors, because a sensor names a credential by id; the broker's rotation handlers and the forge-token audit read the rows it lands. KNOWLEDGE only: where a value lives and who reads it — the value stays in the deployment's Secret, and a key the shape does not name is refused (backlog ee368d0c: until 2026-09-18 these rows were seeded by migrations, so every install carried one operator's credential ids) | `[[credential]]` rows: id, kind (`forgejo-access-token`, `stripe-restricted-key`, ...), issuer, principal, scopes? (as the issuer spells them; empty = unverified), storage_location (a Secret ns/name/key or a file path — never a value), consumers? = [{kind, location}], rotation_policy? (on-demand | scheduled), notes? — the `credentials` table's declarable columns; validated by `boss_jobs::credentials::load_credentials_toml` | yes |
 | `seeds/sensors.toml` | no | POST /api/sensors/batch (boss-jobs, insert-if-absent by id) — sent by `boss tenant publish` as the tenant's declarations; the dispatcher's `sensor.poll` handler reads the registry every 5 minutes and polls each due sensor (design 14c9b2ad); a push-only source is never due — the gateway's site surface records one `www-visits` reading per page view through POST /api/sensors/{id}/readings (backlog 0b5c5081) | `[[sensor]]` rows: id, source (`stripe` for succeeded charges and `stripe-payouts` for paid payouts, both polled on the same credential; `site` push-only), credential (a `credentials` registry id; none on a push-only source), every_minutes (none on a push-only source), opens (the workflow kind one reading opens), subject_kind, enabled? — validated by `boss_jobs::sensors::load_sensors_toml` | yes |
-| `seeds/agents.toml` | no | POST /api/agents/batch (boss-jobs) — sent by `boss tenant publish` BEFORE the Workflows (a step's audience may name an agent); a row the registry lacks is inserted, a row it holds is updated on the declared fields that differ and the publish line names each change from → to, an alias the tenant does not declare is kept — the tenant's declaration wins on declared fields (backlog 09887242); the jobs API's login door resolves each alias to the id (design 6fda05ae; backlog f56155f0) | `[[agent]]` rows: id (`agent-<slug>`), display_name, default_model (a rate-card model, e.g. `opus-5[1m]`), aliases? (the logins that sign as it), role? and department? (Class codes under (employee, role) / (employee, department), checked against the registry at the batch door like an employee's — a role audience resolves to every holder, agents included; backlog ab192a9f), hourly_budget_usd_micros?, max_concurrent_runs? — the `agents` table's columns and nothing else; validated by `boss_jobs::agents::load_agents_toml` | yes |
+| `seeds/agents.toml` | no | POST /api/agents/batch (boss-jobs) — sent by `boss tenant publish` BEFORE the Workflows (a step's audience may name an agent); a row the registry lacks is inserted, a row it holds is kept and the publish line names the declared fields that differ, an alias the tenant does not declare is kept — the instance is the truth; `--take agents` applies the whole declaration and names each change from → to (design e187198f); the jobs API's login door resolves each alias to the id (design 6fda05ae; backlog f56155f0) | `[[agent]]` rows: id (`agent-<slug>`), display_name, default_model (a rate-card model, e.g. `opus-5[1m]`), aliases? (the logins that sign as it), role? and department? (Class codes under (employee, role) / (employee, department), checked against the registry at the batch door like an employee's — a role audience resolves to every holder, agents included; backlog ab192a9f), hourly_budget_usd_micros?, max_concurrent_runs? — the `agents` table's columns and nothing else; validated by `boss_jobs::agents::load_agents_toml` | yes |
 | `seeds/posting_rules.toml` | no | POST /api/ledger/posting-rules/batch (boss-ledger, insert-if-absent by fact_kind + version, source = tenant:<id>) — sent by `boss tenant publish` AFTER the Workflows; the posting path evaluates a fact by the newest registry rule for its kind and by the code rules otherwise (backlog a40541cb) | `[[posting_rule]]` rows: fact_kind, version? (1), basis (cash|accrual), lines = [{account_code, side (debit|credit), amount_path (a JSON pointer into the fact payload, integer cents), memo?}] — the debit pointers and the credit pointers must be the same multiset (balanced for every fact); validated by `boss_ledger::posting_rules::load_posting_rules_toml` | yes |
 | `seeds/fact_projection_rules.toml` | no | POST /api/ledger/fact-projection-rules/batch (boss-ledger, insert-if-absent by event_kind + when) — sent by `boss tenant publish` after the posting rules; the ledger's facts rebuild projects every matching audit_log event into a financial_fact (backlog a40541cb) | `[[projection]]` rows: event_kind (an audit_log kind whose family the platform event stream ingests — `boss_nats::durable::stream_subjects`; a rule on any other family would fire never live, so it is refused naming the family, backlog 94f20e76), when? (a table of {"/pointer" = value}, every pointer equal for the rule to fire), fact_kind, source_table, source_id_path, happened_on_path?, created_by_path? — the `gl_fact_projection_rules` columns; validated by `boss_ledger::posting_rules::load_projection_rules_toml` | yes |
 | `seeds/locations.toml` | no | POST /api/locations/batch, one boss-locations `http::LocationInput` per row (insert-if-absent by id) — sent by `boss tenant publish` BEFORE the roster, because an `employees.json` `location` is a foreign key into the registry (backlog 1ec8312a; until 2026-09-17 nothing read this file) | `[[location]]` rows: id, name, kind, timezone (+ parent_id, latitude, longitude, address, account_id, metadata) — the `locations` table's columns | yes |
@@ -185,63 +190,76 @@ stating plainly:
   registry as one roster. A department is carried and validated but
   routes nothing yet (design `f5ebd2e1` car 2). A row the platform
   already registered (prod's `agent-claude` came from migration
-  `20260915212644`) is updated to the declaration — see the next
-  section.
+  `20260915212644`) is kept as the instance holds it and the publish
+  line names what the file says differently — see the next section.
 
-## The tenant's declaration wins on declared fields
+<!-- contract-truth:begin -->
+## The instance is the truth; `--take` overwrites by decision
 
-For a row the tenant declares — an employee in `seeds/employees.json`,
-an agent in `seeds/agents.toml` — **the declared fields are applied,
-the undeclared fields are kept, and a row the tenant does not declare
-is never deleted.** Decided once for both halves of the roster
-(backlog `09887242`, 2026-09-17).
+**Seeds bootstrap. The live instance runs on its data. The tenant repo
+is bootstrap + export.** Decided on design `e187198f` (David,
+2026-09-18): "move away from seeds mattering, except to help OSS users
+bootstrap and/or to support playground; our actual BOSS instance should
+be flexible to use data instead of seeds."
 
-What it measured. On 2026-09-17 prod's `emp-david` read `location
-loc-hq` while the tenant's `employees.json` had declared
-`loc-algedonic-hq` since the day before, and `agent-claude` read the
-migration's display name while `agents.toml` declared `Claude
-(engineering)`. Each was the value of the FIRST publish (or the
-migration), kept by every publish since: the people door answered 409
-on the re-POST and the seed counted that as "already there" without
-reading the row; the agents batch was insert-if-absent and NAMED the
-differing field without applying it. The tenant owns its people and
-its agents; a file it can edit that nothing applies is prose.
+What it measured. `boss tenant publish` runs at EVERY services-container
+start (the launcher, `infra/seed-tenant.sh`), and on 2026-09-18 four
+doors overwrote a live row on every run — business calendars wholesale,
+the company label, an employee's declared fields, an agent's whole row —
+so an operator's edit to any of them lived exactly until the next boot.
+Four other registries (classes, sensors, policy, workflows) kept the
+live row and said NOTHING when the file differed, so a repo edit that
+never landed was dead text. The rule this section replaces — "the
+tenant's declaration wins on declared fields" (backlog `09887242`,
+2026-09-17) — was measured on a repo-edited location that had not
+landed, the bootstrap case; on a running instance the same overlay was
+the collision. It is dropped.
 
 How it lands.
 
-- **Employees** — `POST /api/people`; on 409 the row is `GET` and
-  compared key by key against the declaration. A declared key that
-  differs is applied through the people door's own update — the
-  current row with the declared keys overlaid, `PUT
-  /api/people/{id}`, which records `people.employee.updated` — so a
-  column the file does not carry (a salary set out of band) rides the
-  PUT unchanged. An explicit `null` in the file IS a declaration (the
-  tenant says: no location); to leave a column alone, omit the key. A
-  key the API's row does not hold (`github_username`) is not compared:
-  the POST dropped it already, and comparing it would name a change
-  no PUT can make, forever. A refused update fails the publish with
-  the API's words, like a refused POST.
-- **Agents** — `POST /api/agents/batch` inserts a row the registry
-  lacks and updates a row it holds on the declared columns that
-  differ, recording one `agent.updated` per row changed (the row as it
-  reads after, plus `changes: [{field, from, to}]` and `updated_by`).
-  An `[[agent]]` row is the `agents` table's columns, so the
-  declaration is the whole row: an omitted cap declares it unset. A
-  declared alias signs as the declared id (moved, if another agent
-  held it); an alias the tenant does not declare is kept.
-- **The line names what changed** — `updated 1: emp-david (location
-  loc-hq → loc-algedonic-hq)`, one entry per row, `; `-separated;
-  strings bare, nulls and lists as JSON. A row that compares equal is
-  `already as declared`. A second publish of the same directory
-  updates nothing and PUTs nothing — the manager-link pass also
-  compares before it writes.
+- **Every door is insert-if-absent by default.** A row the instance
+  holds is never changed by a plain publish. Each batch route takes
+  `?mode=insert-if-absent|take` where its semantics live (the calendar
+  and agents batches, the company mint); the employee overlay PUTs, the
+  Class edit door is used, policy's `force` is set and a workflow is
+  superseded only under the matching `--take`.
+- **`boss tenant publish --take <registry>[,<registry>]` is the only
+  overwrite.** It names `classes`, `calendars`, `company`, `policy`,
+  `employees`, `agents` or `workflows`; every other door stays
+  insert-if-absent on that run, and a name no door can take is refused
+  with the list. Every take prints the overwritten rows field by field:
+  `updated 1: <id> (location loc-hq → loc-algedonic-hq)`.
+- **Every registry's line names its kept-but-differing rows**, in one
+  shape: `kept: <id> differs on <fields> (the instance is the truth;
+  --take <registry> overwrites)`. A registry no door overwrites
+  (sensors, credentials, locations, the chart, the ledger's rules, the
+  reactors) says so instead of naming a flag. This line is the decision
+  surface: the operator reads what the repo says differently and
+  chooses to take it, to export the instance into the repo, or to leave
+  both as they are.
+- **What a take does per registry.** `employees`: the row's declared
+  keys are overlaid on the live row and PUT back through the people
+  door (its own `people.employee.updated`), so a column the file does
+  not carry rides unchanged; an explicit `null` in the file IS a
+  declaration. `agents`: the declaration is the whole row (an omitted
+  cap declares it unset); a declared alias another agent holds moves.
+  `calendars`: header and closed-day set are replaced wholesale.
+  `company`: the label. `classes`: each differing row is PUT through
+  `PUT /api/classes/{kind}/{code}`. `policy`: each rule whose `scope`
+  or `active` differs is re-POSTed. `workflows`: each kind whose file
+  differs on a facet the drift lint compares (label, description,
+  category, step count, titles, required fields, title templates) is
+  published as a new version that supersedes the live one.
+- **A row the tenant does not declare is never deleted**, under either
+  mode, and a second publish of an unchanged directory writes nothing
+  and names nothing.
 
-What stays as it was: the chart of accounts (a code that collides with
-the starter chart is the SAME account, kept under the starter's name —
-a rename would re-label every entry posted; the section below), and
-every insert-if-absent registry the tenant does not own a row of by
-id (classes, locations, sensors, the ledger's rules). Classes are the
-open half of this decision, left for the taxonomies car.
+The playground publishes its example tenant at every boot; with
+insert-if-absent as the default that publish changes nothing on a
+running instance, which is the point. Running the publish once per
+database (a stamp) is the next car; `boss tenant export`, which writes
+the live registries back into this shape, the one after.
+<!-- contract-truth:end -->
 
 ## The chart of accounts is the tenant's
 

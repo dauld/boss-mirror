@@ -79,11 +79,15 @@ fn main() -> Result<()> {
         .clone()
         .unwrap_or_else(|| cli.policy_base.clone());
 
-    boss_policy::bootstrap::publish_policy_rules(
+    let out = boss_policy::bootstrap::publish_policy_rules(
         &api_base,
         &cli.seeds,
         cli.force,
         &cli.changed_by,
         cli.x_boss_user.as_deref(),
-    )
+    )?;
+    // What landed, what was kept and differs, what force overwrote —
+    // the same line `boss tenant publish` prints (design e187198f).
+    println!("{}", out.summary());
+    Ok(())
 }

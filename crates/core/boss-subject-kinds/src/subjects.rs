@@ -22,11 +22,12 @@
 //! sites and the HTTP mint, both Postgres-shaped by construction.
 
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use serde::Deserialize;
+use boss_core::publish::{FieldChange, KeptRow, ModeQuery, PublishMode, UpdatedRow};
+use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
 
 const UPSERT_SQL: &str = "INSERT INTO subjects (kind, id, label) VALUES ($1, $2, $3) \
@@ -71,6 +72,84 @@ pub async fn upsert_subject(
     Ok(())
 }
 
+/// What the mint door did with one declaration: the batch doors'
+/// answer shape (`boss_core::publish`), for a batch of one.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SubjectPublishOutcome {
+    pub received: usize,
+    pub inserted: usize,
+    pub kept: Vec<KeptRow>,
+    pub updated: Vec<UpdatedRow>,
+    pub unchanged: usize,
+}
+
+/// Publish one identity row — insert-if-absent by `(kind, id)` (design
+/// e187198f: THE INSTANCE IS THE TRUTH). A row already there keeps its
+/// label under the default and the outcome names `label` as differing
+/// when the declaration disagrees; only [`PublishMode::Take`] applies
+/// the declared label, naming the change. A `None` label is no claim
+/// in either mode (the COALESCE rule of the upsert: a NULL never
+/// erases an earlier label). Until 2026-09-18 the mint was the upsert
+/// below, so the company's label was overwritten with `tenant.toml`'s
+/// display name at every tenant publish — every boot.
+pub async fn publish_subject(
+    pool: &PgPool,
+    kind: &str,
+    id: &str,
+    label: Option<&str>,
+    mode: PublishMode,
+) -> Result<SubjectPublishOutcome, String> {
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let held: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT label FROM subjects WHERE kind = $1 AND id = $2 FOR UPDATE")
+            .bind(kind)
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+    let mut out = SubjectPublishOutcome {
+        received: 1,
+        ..Default::default()
+    };
+    match held {
+        None => {
+            sqlx::query("INSERT INTO subjects (kind, id, label) VALUES ($1, $2, $3)")
+                .bind(kind)
+                .bind(id)
+                .bind(label)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| e.to_string())?;
+            out.inserted = 1;
+        }
+        Some((current,)) => {
+            let differs = label.is_some_and(|l| current.as_deref() != Some(l));
+            if !differs {
+                out.unchanged = 1;
+            } else if mode.is_take() {
+                sqlx::query("UPDATE subjects SET label = $3 WHERE kind = $1 AND id = $2")
+                    .bind(kind)
+                    .bind(id)
+                    .bind(label)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                out.updated.push(UpdatedRow {
+                    id: id.to_string(),
+                    changes: vec![FieldChange::new("label", &current, label)],
+                });
+            } else {
+                out.kept.push(KeptRow {
+                    id: id.to_string(),
+                    differs: vec!["label".to_string()],
+                });
+            }
+        }
+    }
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
 /// The uniform existence probe — one indexed lookup for every kind,
 /// tenant-defined included. Retired subjects still exist (historical
 /// jobs reference them); retirement semantics for NEW references are
@@ -90,9 +169,11 @@ struct SubjectsApiState {
 }
 
 /// The `/api/subjects` surface, mounted by the service bin alongside
-/// the read-only kinds router. POST is the mint path (the sim's
-/// campaign identities, operator tooling, R3's single minting
-/// authority later); GET is the cross-service existence probe.
+/// the read-only kinds router. POST is the mint path (the company
+/// identity at every tenant publish, operator tooling, R3's single
+/// minting authority later) — insert-if-absent, `?mode=take` to
+/// overwrite a held label ([`publish_subject`]); GET is the
+/// cross-service existence probe.
 pub fn subjects_router(pool: PgPool) -> Router {
     Router::new()
         .route("/api/subjects", post(post_subject))
@@ -113,18 +194,33 @@ struct SubjectBody {
 
 async fn post_subject(
     State(state): State<SubjectsApiState>,
+    Query(ModeQuery { mode }): Query<ModeQuery>,
     axum::Json(body): axum::Json<SubjectBody>,
 ) -> Response {
     if body.kind.trim().is_empty() || body.id.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "kind and id are required").into_response();
     }
-    match upsert_subject(&state.pool, &body.kind, &body.id, body.label.as_deref()).await {
-        Ok(()) => StatusCode::CREATED.into_response(),
+    mint(&state, &body.kind, &body.id, body.label.as_deref(), mode).await
+}
+
+/// The mint's answer: 201 with the outcome when the row was inserted,
+/// 200 with it otherwise (kept, updated or unchanged — the body says
+/// which), 422 for an unregistered kind.
+async fn mint(
+    state: &SubjectsApiState,
+    kind: &str,
+    id: &str,
+    label: Option<&str>,
+    mode: PublishMode,
+) -> Response {
+    match publish_subject(&state.pool, kind, id, label, mode).await {
+        Ok(out) if out.inserted == 1 => (StatusCode::CREATED, axum::Json(out)).into_response(),
+        Ok(out) => axum::Json(out).into_response(),
         // The FK rejection = unregistered kind → the caller's error,
         // not ours.
         Err(e) if e.contains("subjects_kind_fkey") => (
             StatusCode::UNPROCESSABLE_ENTITY,
-            format!("unregistered subject kind `{}`", body.kind),
+            format!("unregistered subject kind `{kind}`"),
         )
             .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
@@ -155,6 +251,7 @@ struct KindScopedBody {
 async fn post_subject_for_kind(
     State(state): State<SubjectsApiState>,
     Path(kind): Path<String>,
+    Query(ModeQuery { mode }): Query<ModeQuery>,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> Response {
     // Tolerant extraction: birth payloads are synthesized event
@@ -167,15 +264,7 @@ async fn post_subject_for_kind(
     if parsed.id.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "id is required").into_response();
     }
-    match upsert_subject(&state.pool, &kind, &parsed.id, parsed.label.as_deref()).await {
-        Ok(()) => StatusCode::CREATED.into_response(),
-        Err(e) if e.contains("subjects_kind_fkey") => (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("unregistered subject kind `{kind}`"),
-        )
-            .into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
-    }
+    mint(&state, &kind, &parsed.id, parsed.label.as_deref(), mode).await
 }
 
 const IDENTITY_SOURCES_TOML: &str = include_str!("../seeds/subject_identity_sources.toml");

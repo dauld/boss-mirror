@@ -54,3 +54,7 @@ workspace = true
 [[test]]
 name = "rebuild_e2e"
 required-features = ["postgres"]
+
+[[test]]
+name = "business_calendars_pg"
+required-features = ["postgres"]

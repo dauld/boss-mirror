@@ -1225,6 +1225,45 @@ adopts by collision: a fresh company instance has no chart until its
 tenant declares one, and the rows below about a colliding code apply
 only to an instance that ran the migration before the eviction.
 
+**The instance is the truth; seeds bootstrap; the tenant repo is
+bootstrap + export.** (Design `e187198f`, David 2026-09-18: "move away
+from seeds mattering, except to help OSS users bootstrap and/or to
+support playground; our actual BOSS instance should be flexible to use
+data instead of seeds; going all the way back to a seed is its own
+issue.") Measured that day against `40868c22`: `boss tenant publish`
+runs at EVERY services-container start, and four of its doors
+overwrote a live row on each run — business calendars wholesale
+(`ON CONFLICT DO UPDATE` + a closed-day DELETE/reinsert), the company
+label (`COALESCE(EXCLUDED.label, …)`), an employee's declared fields
+(the 409→GET→PUT overlay of `09887242`) and an agent's whole row — so
+an operator's edit to any of them lived until the next boot, while four
+others (classes, sensors, policy, workflows) kept the live row and said
+NOTHING when the file differed, so a repo edit that never landed was
+dead text. Decided, all as proposed: every door is **insert-if-absent
+by default**, each batch route carrying `?mode=insert-if-absent|take`
+where its semantics live; **`boss tenant publish --take
+<registry>[,…]`** is the only overwrite, sent per named registry
+(`classes`, `calendars`, `company`, `policy`, `employees`, `agents`,
+`workflows`) and printing every overwritten row field by field; the
+contract's "declaration wins on declared fields" rule (`09887242`,
+2026-09-17) is **dropped** — it covered a repo-edited location that had
+not landed, the bootstrap case, and on a running instance the same
+overlay was the collision; **every registry's publish line names its
+kept-but-differing rows** in one shape, `kept: <id> differs on
+<fields> (the instance is the truth; --take <registry> overwrites)`,
+as the decision surface; the publish runs **once per database** (a
+stamp, like `init.sh`'s first-start gates) and thereafter only by
+`--take`; and **`boss tenant export`** writes the live registries back
+into the contract's file shape by machine on a cadence, so the repo is
+never hand-edited on a live instance. The playground publishes the
+brewery every boot and, with insert-if-absent as the default, that
+publish changes nothing on a running instance — which is the point.
+Car 1 (the doors, the flag, the lines, this paragraph, the contract's
+section — printed by `boss tenant contract` and pinned) landed first;
+the stamp and the export verb follow. The rule is stated for tenants in
+`docs/tenant-contract.md` ("The instance is the truth; `--take`
+overwrites by decision").
+
 ## Deployment, the forge, and the cluster
 
 **Deployment is modeled on how networks patch** (living reference:

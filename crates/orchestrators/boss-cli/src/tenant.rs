@@ -88,6 +88,84 @@ pub struct Scaffold {
 pub const TABLE_BEGIN: &str = "<!-- contract-table:begin -->";
 pub const TABLE_END: &str = "<!-- contract-table:end -->";
 
+/// The markers around the publish rule in docs/tenant-contract.md —
+/// the prose half of the contract, carried the way the table is: one
+/// definition here, printed by `boss tenant contract`, held equal to
+/// the doc by a test (CLAUDE.md §9a).
+pub const TRUTH_BEGIN: &str = "<!-- contract-truth:begin -->";
+pub const TRUTH_END: &str = "<!-- contract-truth:end -->";
+
+/// THE PUBLISH RULE, in the contract's words (design e187198f, David
+/// 2026-09-18). It replaced the section "The tenant's declaration wins
+/// on declared fields" (backlog 09887242, 2026-09-17), which is why it
+/// names that rule and where it came from.
+pub const INSTANCE_IS_THE_TRUTH: &str = r#"## The instance is the truth; `--take` overwrites by decision
+
+**Seeds bootstrap. The live instance runs on its data. The tenant repo
+is bootstrap + export.** Decided on design `e187198f` (David,
+2026-09-18): "move away from seeds mattering, except to help OSS users
+bootstrap and/or to support playground; our actual BOSS instance should
+be flexible to use data instead of seeds."
+
+What it measured. `boss tenant publish` runs at EVERY services-container
+start (the launcher, `infra/seed-tenant.sh`), and on 2026-09-18 four
+doors overwrote a live row on every run — business calendars wholesale,
+the company label, an employee's declared fields, an agent's whole row —
+so an operator's edit to any of them lived exactly until the next boot.
+Four other registries (classes, sensors, policy, workflows) kept the
+live row and said NOTHING when the file differed, so a repo edit that
+never landed was dead text. The rule this section replaces — "the
+tenant's declaration wins on declared fields" (backlog `09887242`,
+2026-09-17) — was measured on a repo-edited location that had not
+landed, the bootstrap case; on a running instance the same overlay was
+the collision. It is dropped.
+
+How it lands.
+
+- **Every door is insert-if-absent by default.** A row the instance
+  holds is never changed by a plain publish. Each batch route takes
+  `?mode=insert-if-absent|take` where its semantics live (the calendar
+  and agents batches, the company mint); the employee overlay PUTs, the
+  Class edit door is used, policy's `force` is set and a workflow is
+  superseded only under the matching `--take`.
+- **`boss tenant publish --take <registry>[,<registry>]` is the only
+  overwrite.** It names `classes`, `calendars`, `company`, `policy`,
+  `employees`, `agents` or `workflows`; every other door stays
+  insert-if-absent on that run, and a name no door can take is refused
+  with the list. Every take prints the overwritten rows field by field:
+  `updated 1: <id> (location loc-hq → loc-algedonic-hq)`.
+- **Every registry's line names its kept-but-differing rows**, in one
+  shape: `kept: <id> differs on <fields> (the instance is the truth;
+  --take <registry> overwrites)`. A registry no door overwrites
+  (sensors, credentials, locations, the chart, the ledger's rules, the
+  reactors) says so instead of naming a flag. This line is the decision
+  surface: the operator reads what the repo says differently and
+  chooses to take it, to export the instance into the repo, or to leave
+  both as they are.
+- **What a take does per registry.** `employees`: the row's declared
+  keys are overlaid on the live row and PUT back through the people
+  door (its own `people.employee.updated`), so a column the file does
+  not carry rides unchanged; an explicit `null` in the file IS a
+  declaration. `agents`: the declaration is the whole row (an omitted
+  cap declares it unset); a declared alias another agent holds moves.
+  `calendars`: header and closed-day set are replaced wholesale.
+  `company`: the label. `classes`: each differing row is PUT through
+  `PUT /api/classes/{kind}/{code}`. `policy`: each rule whose `scope`
+  or `active` differs is re-POSTed. `workflows`: each kind whose file
+  differs on a facet the drift lint compares (label, description,
+  category, step count, titles, required fields, title templates) is
+  published as a new version that supersedes the live one.
+- **A row the tenant does not declare is never deleted**, under either
+  mode, and a second publish of an unchanged directory writes nothing
+  and names nothing.
+
+The playground publishes its example tenant at every boot; with
+insert-if-absent as the default that publish changes nothing on a
+running instance, which is the point. Running the publish once per
+database (a stamp) is the next car; `boss tenant export`, which writes
+the live registries back into this shape, the one after.
+"#;
+
 /// The contract. Measured 2026-09-16 by grepping every reader of
 /// `examples/<tenant>/seeds/*` across `crates/` and `infra/`.
 pub const CONTRACT: &[Entry] = &[
@@ -162,11 +240,11 @@ pub const CONTRACT: &[Entry] = &[
         paths: &["seeds/employees.json"],
         required: false,
         read_by: "POST /api/people, one `boss_people::Employee` per row; a row already there is \
-                  PUT on the declared fields that differ and the rest kept — the tenant's \
-                  declaration wins on declared fields (backlog 09887242) — sent by `boss \
-                  tenant publish` (the brewery engine's prepare reads it at the FIXED path \
-                  /opt/boss/examples/brewery/seeds/, not from the bundle; used-device-shop \
-                  reads data/employees.json instead)",
+                  kept and the publish line names the declared fields that differ — the \
+                  instance is the truth; `--take employees` PUTs the declared fields and keeps \
+                  the rest (design e187198f) — sent by `boss tenant publish` (the brewery \
+                  engine's prepare reads it at the FIXED path /opt/boss/examples/brewery/seeds/, \
+                  not from the bundle; used-device-shop reads data/employees.json instead)",
         shape: "JSON array of Employee rows: id, name, email, role, department, hire_date, \
                 location, manager_id, employment_type, status, skills[], certifications[], \
                 annual_salary_cents; role/department/location are validated against the \
@@ -187,8 +265,11 @@ pub const CONTRACT: &[Entry] = &[
         paths: &["seeds/business_calendars.json"],
         required: false,
         read_by: "POST /api/calendar/business-calendars/batch as \
-                  `Vec<boss_core::calendar::BusinessCalendar>` (the brewery engine's prepare); \
-                  the dispatcher's timing triggers and the sim resolve business days from it",
+                  `Vec<boss_core::calendar::BusinessCalendar>` (the brewery engine's prepare \
+                  and `boss tenant publish`; insert-if-absent by code, a held code that \
+                  differs is named, `--take calendars` replaces it wholesale — design \
+                  e187198f); the dispatcher's timing triggers and the sim resolve business \
+                  days from it",
         shape: "JSON array of {code, name, weekend: [0..6 Mon=0], closed: [YYYY-MM-DD]}",
         parse: parse_business_calendars,
         scaffold: Some(scaffold_business_calendars),
@@ -235,11 +316,11 @@ pub const CONTRACT: &[Entry] = &[
         required: false,
         read_by: "POST /api/agents/batch (boss-jobs) — sent by `boss tenant publish` BEFORE the \
                   Workflows (a step's audience may name an agent); a row the registry lacks is \
-                  inserted, a row it holds is updated on the declared fields that differ and the \
-                  publish line names each change from → to, an alias the tenant does not declare \
-                  is kept — the tenant's declaration wins on declared fields (backlog 09887242); \
-                  the jobs API's login door resolves each alias to the id (design 6fda05ae; \
-                  backlog f56155f0)",
+                  inserted, a row it holds is kept and the publish line names the declared \
+                  fields that differ, an alias the tenant does not declare is kept — the \
+                  instance is the truth; `--take agents` applies the whole declaration and \
+                  names each change from → to (design e187198f); the jobs API's login door \
+                  resolves each alias to the id (design 6fda05ae; backlog f56155f0)",
         shape: "`[[agent]]` rows: id (`agent-<slug>`), display_name, default_model (a rate-card \
                 model, e.g. `opus-5[1m]`), aliases? (the logins that sign as it), role? and \
                 department? (Class codes under (employee, role) / (employee, department), \
@@ -1476,7 +1557,9 @@ pub enum TenantAction {
     Contract,
     /// Publish a tenant directory into a running deployment through
     /// the shared doors, in the engines' dependency order, idempotently
-    /// (ee7b62bb). Refuses a directory that fails `check`.
+    /// (ee7b62bb). Insert-if-absent on every door: the instance is the
+    /// truth, and a live row the file differs from is kept and named
+    /// (design e187198f). Refuses a directory that fails `check`.
     Publish {
         dir: PathBuf,
         /// Route every /api prefix through one gateway URL (default:
@@ -1486,6 +1569,13 @@ pub enum TenantAction {
         /// Print every write the publish WOULD make; no HTTP.
         #[arg(long)]
         dry_run: bool,
+        /// Overwrite the live rows of these registries with the file's
+        /// (comma-separated: classes, calendars, company, policy,
+        /// employees, agents, workflows). Every other door stays
+        /// insert-if-absent; each overwritten row is printed field by
+        /// field.
+        #[arg(long, value_name = "REGISTRY[,REGISTRY]")]
+        take: Option<String>,
     },
 }
 
@@ -1518,19 +1608,24 @@ pub async fn dispatch(cmd: Cmd) -> Result<()> {
         }
         Cmd::Tenant(TenantAction::Contract) => {
             // With the markers, so the output pastes into
-            // docs/tenant-contract.md verbatim.
+            // docs/tenant-contract.md verbatim: the table, then the
+            // publish rule (design e187198f).
             print!("{TABLE_BEGIN}\n{}{TABLE_END}\n", contract_table());
+            print!("\n{TRUTH_BEGIN}\n{INSTANCE_IS_THE_TRUTH}{TRUTH_END}\n");
             Ok(())
         }
         Cmd::Tenant(TenantAction::Publish {
             dir,
             gateway,
             dry_run,
+            take,
         }) => {
+            let take = crate::tenant_publish::Take::parse(take.as_deref())?;
             let plan = crate::tenant_publish::plan(&dir)?;
             let bases = crate::tenant_publish::Bases::resolve(gateway.as_deref());
             println!("{}", plan.render_header(dry_run));
             println!("{}", bases.describe(gateway.as_deref()));
+            println!("{}", take.describe());
             if dry_run {
                 for s in &plan.steps {
                     println!("{}", plan.render_step(s, None));
@@ -1546,7 +1641,7 @@ pub async fn dispatch(cmd: Cmd) -> Result<()> {
             // blocking thread, printing each line as it lands so a
             // launcher log shows where a cold stack is holding.
             tokio::task::spawn_blocking(move || {
-                crate::tenant_publish::publish(&plan, &bases, &mut |l| println!("{l}"))?;
+                crate::tenant_publish::publish(&plan, &bases, &take, &mut |l| println!("{l}"))?;
                 println!("{}", plan.render_footer());
                 Ok(())
             })
@@ -2224,6 +2319,35 @@ terminal = { outcome = "sponsored" }
             contract_table().trim(),
             "docs/tenant-contract.md's table drifted from CONTRACT in tenant.rs; \
              paste `boss tenant contract` output between the markers"
+        );
+    }
+
+    /// The publish rule is one fact in two places too (design
+    /// e187198f): the constant `boss tenant contract` prints and the
+    /// section the doc carries between its markers.
+    #[test]
+    fn the_contract_doc_carries_the_publish_rule_the_verb_prints() {
+        let doc =
+            std::fs::read_to_string(boss_testing::repo_root().join("docs/tenant-contract.md"))
+                .expect("docs/tenant-contract.md exists");
+        let begin = doc
+            .find(TRUTH_BEGIN)
+            .expect("doc has the contract-truth begin marker");
+        let end = doc.find(TRUTH_END).expect("doc has the end marker");
+        let in_doc = doc[begin + TRUTH_BEGIN.len()..end].trim();
+        assert_eq!(
+            in_doc,
+            INSTANCE_IS_THE_TRUTH.trim(),
+            "docs/tenant-contract.md's publish rule drifted from INSTANCE_IS_THE_TRUTH in \
+             tenant.rs; paste `boss tenant contract` output between the markers"
+        );
+        assert!(
+            !doc.contains("## The tenant's declaration wins on declared fields"),
+            "the section this rule replaced is still in the doc"
+        );
+        assert!(
+            INSTANCE_IS_THE_TRUTH.contains("--take")
+                && INSTANCE_IS_THE_TRUTH.contains("insert-if-absent by default")
         );
     }
 

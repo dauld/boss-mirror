@@ -15,7 +15,10 @@
 //! `POST /api/sensors/batch` validates every row with the same
 //! `validate_sensor` the TOML loader ran, and refuses the whole batch
 //! (422, deterministic) naming the row: a registry with a half-admitted
-//! tenant is worse than a refusal.
+//! tenant is worse than a refusal. Insert-if-absent by id: a held row
+//! the declaration differs from is KEPT and named in the answer as
+//! `kept: [{id, differs}]` (design e187198f) — no door overwrites a
+//! sensor.
 //!
 //! `POST /api/sensors/{id}/readings` is also the SERVICE-RECORDED
 //! reading's door (backlog 0b5c5081): the gateway's site surface
@@ -34,13 +37,15 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 
+use boss_core::publish::KeptRow;
 use boss_policy_client::CurrentUser;
 
 use crate::trust::{can_read, is_trusted};
 
 use super::port::{Sensors, SensorsError, sweep_retention};
 use super::types::{
-    NewReading, PUSH_ONLY_SOURCES, PollStamp, SensorBatch, sensor_actor, validate_sensor,
+    NewReading, PUSH_ONLY_SOURCES, PollStamp, SensorBatch, SensorInput, SensorRow, sensor_actor,
+    validate_sensor,
 };
 
 pub struct SensorsApiState {
@@ -103,10 +108,65 @@ async fn publish(
     if let Some(why) = body.sensors.iter().find_map(|s| validate_sensor(s).err()) {
         return (StatusCode::UNPROCESSABLE_ENTITY, why).into_response();
     }
+    // What the registry holds of this batch, read BEFORE the insert so
+    // a kept row's disagreement is named (design e187198f: a repo edit
+    // that does not land is named, never silent). Insert-if-absent
+    // never touches a held row, so the read is the whole comparison.
+    let held = match state.repo.list().await {
+        Ok(rows) => rows,
+        Err(e) => return err_response(e),
+    };
+    let (mut kept, mut unchanged) = (Vec::new(), 0usize);
+    for s in &body.sensors {
+        if let Some(h) = held.iter().find(|h| h.id == s.id) {
+            let differs = sensor_differs(h, s);
+            if differs.is_empty() {
+                unchanged += 1;
+            } else {
+                kept.push(KeptRow {
+                    id: s.id.clone(),
+                    differs,
+                });
+            }
+        }
+    }
     match state.repo.publish(&body.tenant_id, &body.sensors).await {
-        Ok(out) => Json(out).into_response(),
+        Ok(out) => Json(serde_json::json!({
+            "received": out.received,
+            "inserted": out.inserted,
+            "kept": kept,
+            "unchanged": unchanged,
+        }))
+        .into_response(),
         Err(e) => err_response(e),
     }
+}
+
+/// The declared fields a held sensor disagrees with the declaration
+/// on, by the file's field names (`opens` is the column `opens_kind`).
+/// The cursor and poll book-keeping are the registry's own and never
+/// compared.
+pub fn sensor_differs(held: &SensorRow, declared: &SensorInput) -> Vec<String> {
+    let mut out = Vec::new();
+    if held.source != declared.source {
+        out.push("source".to_string());
+    }
+    if held.credential != declared.credential {
+        out.push("credential".to_string());
+    }
+    if held.every_minutes != declared.every_minutes {
+        out.push("every_minutes".to_string());
+    }
+    if held.opens_kind != declared.opens {
+        out.push("opens".to_string());
+    }
+    if held.subject_kind != declared.subject_kind {
+        out.push("subject_kind".to_string());
+    }
+    if held.enabled != declared.enabled {
+        out.push("enabled".to_string());
+    }
+    out
 }
 
 #[derive(Debug, Deserialize)]
@@ -368,6 +428,33 @@ mod tests {
         .await;
         let out: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(out["inserted"], 0, "a second publish inserts nothing");
+        assert_eq!(out["kept"], json!([]), "declared as held: not a finding");
+        assert_eq!(out["unchanged"], 1);
+        // A repo edit that does not land is named (design e187198f):
+        // the held row is kept and the answer says on which fields.
+        let mut edited = batch();
+        edited["sensors"][0]["every_minutes"] = json!(30);
+        edited["sensors"][0]["enabled"] = json!(false);
+        let (_, body) = send(
+            app(&repo),
+            "POST",
+            "/api/sensors/batch",
+            Some(edited),
+            seed(),
+        )
+        .await;
+        let out: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(out["inserted"], 0);
+        assert_eq!(out["kept"][0]["id"], "stripe-sponsorships", "{out}");
+        assert_eq!(
+            out["kept"][0]["differs"],
+            json!(["every_minutes", "enabled"])
+        );
+        assert_eq!(
+            repo.list().await.unwrap()[0].every_minutes,
+            15,
+            "the instance's row is kept"
+        );
 
         let readings = json!([
             {"external_id": "ch_1", "observed_at": "2026-09-17T10:00:00Z", "payload": {"amount": 100}},

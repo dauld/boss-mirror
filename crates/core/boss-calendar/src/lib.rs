@@ -29,7 +29,7 @@ pub mod rebuild;
 pub use calendar_config::{CalendarApiConfig, CalendarConfigError};
 pub use http::{CalendarApiState, router};
 pub use in_memory::InMemoryCalendar;
-pub use port::{CalendarClient, CalendarError};
+pub use port::{BusinessCalendarsOutcome, CalendarClient, CalendarError};
 
 #[cfg(feature = "postgres")]
 pub use postgres::PgCalendar;

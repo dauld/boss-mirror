@@ -4,21 +4,23 @@
 //! under a registered agent (`actor_aliases.actor_id` is a foreign key
 //! into `agents`), so the builder takes the agent and its logins
 //! together and there is no way to register a login to nothing; and a
-//! publish inserts a row the registry lacks, UPDATES a held row on the
-//! declared fields that differ (a declared alias lands under the
-//! declared id, an undeclared alias is kept), and names each change in
-//! the outcome. The rate-card FK is NOT mirrored (the Pg test proves
-//! that refusal).
+//! publish inserts a row the registry lacks, KEEPS a held row under the
+//! default insert-if-absent naming the fields that differ, UPDATES it
+//! under take on the declared fields that differ (a declared alias
+//! lands under the declared id, an undeclared alias is kept), and names
+//! each change in the outcome. The rate-card FK is NOT mirrored (the Pg
+//! test proves that refusal).
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 use boss_core::event::Event;
+use boss_core::publish::PublishMode;
 use boss_core::publisher::EventStamp;
 
 use super::port::{AgentsError, AgentsRegistry, declared_event, updated_event};
-use super::types::{AgentInput, AgentRow, AgentsBatchOutcome, UpdatedRow};
+use super::types::{AgentInput, AgentRow, AgentsBatchOutcome, KeptRow, UpdatedRow};
 
 #[derive(Default)]
 struct Rows {
@@ -109,23 +111,32 @@ impl AgentsRegistry for InMemoryAgents {
     async fn publish(
         &self,
         declared: &[AgentInput],
+        mode: PublishMode,
         stamp: &EventStamp,
     ) -> Result<AgentsBatchOutcome, AgentsError> {
         let mut rows = self.rows.lock().expect("agents lock");
         let mut events = self.events.lock().expect("events lock");
         let mut inserted = 0usize;
         let mut updated = Vec::new();
+        let mut kept = Vec::new();
         let mut unchanged = 0usize;
         for a in declared {
             let before = rows.agents.get(&a.id).map(|held| rows.row(held));
             let mut stored = a.clone();
             stored.aliases.clear();
-            rows.agents.insert(a.id.clone(), stored);
-            // A declared alias signs as the declared id — moved when
-            // another agent held it; one the tenant did not declare
-            // stays where it is.
+            // Insert-if-absent keeps a held row as it is; take replaces
+            // it (the Pg adapter's DO NOTHING / DO UPDATE).
+            if before.is_none() || mode.is_take() {
+                rows.agents.insert(a.id.clone(), stored);
+            }
+            // A declared alias signs as the declared id: landed when
+            // nobody holds it, moved only under take when another
+            // agent does; one the tenant did not declare stays where
+            // it is.
             for alias in &a.aliases {
-                rows.aliases.insert(alias.clone(), a.id.clone());
+                if mode.is_take() || !rows.aliases.contains_key(alias) {
+                    rows.aliases.insert(alias.clone(), a.id.clone());
+                }
             }
             let Some(before) = before else {
                 events.push(declared_event(stamp, a)?);
@@ -134,20 +145,29 @@ impl AgentsRegistry for InMemoryAgents {
             };
             let after = rows.row(&rows.agents[&a.id]);
             let changes = before.changes_to(&after);
-            if changes.is_empty() {
-                unchanged += 1;
-            } else {
+            let changed = !changes.is_empty();
+            if changed {
                 events.push(updated_event(stamp, &after, &changes)?);
                 updated.push(UpdatedRow {
                     id: a.id.clone(),
                     changes,
                 });
             }
+            let differs = after.differs_from(a);
+            if !differs.is_empty() {
+                kept.push(KeptRow {
+                    id: a.id.clone(),
+                    differs,
+                });
+            } else if !changed {
+                unchanged += 1;
+            }
         }
         Ok(AgentsBatchOutcome {
             received: declared.len(),
             inserted,
             updated,
+            kept,
             unchanged,
         })
     }

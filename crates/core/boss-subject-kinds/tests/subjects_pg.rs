@@ -294,3 +294,103 @@ async fn rebuild_reproduces_asset_and_message_subjects_from_the_log() {
         );
     }
 }
+
+/// THE INSTANCE IS THE TRUTH (design e187198f, David 2026-09-18). The
+/// mint door — `POST /api/subjects/{kind}`, the one the company
+/// identity comes through at every tenant publish — keeps a held
+/// row's label by default and answers what differs; only
+/// `?mode=take` overwrites it, naming the change. Measured that day:
+/// the door's `COALESCE(EXCLUDED.label, subjects.label)` overwrote the
+/// company's label with tenant.toml's display name at every boot.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_mint_door_keeps_a_held_label_by_default_and_overwrites_only_under_take() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    let db = TestDb::new().await;
+    let app = boss_subject_kinds::subjects::subjects_router(db.pool.clone());
+    let post = |uri: &str, label: &str| {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"id": "acme", "label": label}).to_string(),
+            ))
+            .unwrap()
+    };
+    let read = |resp: axum::response::Response| async move {
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        (status, v)
+    };
+    let label = || async {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT label FROM subjects WHERE kind='company' AND id='acme'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+    };
+
+    // Absent: inserted, 201.
+    let resp = app
+        .clone()
+        .oneshot(post("/api/subjects/company", "Acme, LLC"))
+        .await
+        .unwrap();
+    let (status, v) = read(resp).await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    assert_eq!(v["inserted"], 1);
+    assert_eq!(label().await.as_deref(), Some("Acme, LLC"));
+
+    // An operator renamed the company in the instance; the file's
+    // label differs: kept, named, 200.
+    sqlx::query("UPDATE subjects SET label = 'Acme Holdings' WHERE kind='company' AND id='acme'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post("/api/subjects/company", "Acme, LLC"))
+        .await
+        .unwrap();
+    let (status, v) = read(resp).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["inserted"], 0);
+    assert_eq!(v["kept"][0]["id"], "acme");
+    assert_eq!(v["kept"][0]["differs"], serde_json::json!(["label"]));
+    assert_eq!(v["updated"], serde_json::json!([]));
+    assert_eq!(
+        label().await.as_deref(),
+        Some("Acme Holdings"),
+        "the instance's label is kept under the default"
+    );
+
+    // Identical: nothing kept-differing, nothing updated.
+    let resp = app
+        .clone()
+        .oneshot(post("/api/subjects/company", "Acme Holdings"))
+        .await
+        .unwrap();
+    let (_, v) = read(resp).await;
+    assert_eq!(v["kept"], serde_json::json!([]));
+    assert_eq!(v["unchanged"], 1);
+
+    // Under take: overwritten, the change named from → to.
+    let resp = app
+        .clone()
+        .oneshot(post("/api/subjects/company?mode=take", "Acme, LLC"))
+        .await
+        .unwrap();
+    let (status, v) = read(resp).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["kept"], serde_json::json!([]));
+    assert_eq!(v["updated"][0]["id"], "acme");
+    assert_eq!(v["updated"][0]["changes"][0]["field"], "label");
+    assert_eq!(v["updated"][0]["changes"][0]["from"], "Acme Holdings");
+    assert_eq!(v["updated"][0]["changes"][0]["to"], "Acme, LLC");
+    assert_eq!(label().await.as_deref(), Some("Acme, LLC"));
+}

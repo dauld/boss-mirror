@@ -25,7 +25,6 @@
 
 use boss_core::actor::REGISTERED_AGENT_PREFIX;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 /// One agent as a tenant declares it and as `POST /api/agents/batch`
 /// takes it.
@@ -133,83 +132,11 @@ pub struct AgentRow {
     pub aliases: Vec<String>,
 }
 
-/// One field a declaration changed on a row the registry already
-/// held: the column, what it read, what it reads now. `from`/`to` are
-/// JSON so a string, a number, a null and a list render the same way
-/// everywhere ([`FieldChange::render`]), and so the fact recording the
-/// change carries the values, not a rendering of them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FieldChange {
-    pub field: String,
-    pub from: Value,
-    pub to: Value,
-}
-
-/// A value on a publish line: a string bare, everything else as JSON.
-fn show(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
-}
-
-impl FieldChange {
-    pub fn new(field: &str, from: impl Serialize, to: impl Serialize) -> Self {
-        Self {
-            field: field.to_string(),
-            from: serde_json::to_value(from).unwrap_or(Value::Null),
-            to: serde_json::to_value(to).unwrap_or(Value::Null),
-        }
-    }
-
-    /// `location loc-hq → loc-algedonic-hq`.
-    pub fn render(&self) -> String {
-        format!("{} {} → {}", self.field, show(&self.from), show(&self.to))
-    }
-}
-
-/// A row a publish UPDATED to the tenant's declaration (backlog
-/// 09887242, 2026-09-17): the id and every field that changed. The
-/// shape is the agents batch's answer AND the shape `boss tenant
-/// publish` names an updated employee by — one rule, one rendering,
-/// for both halves of the roster.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UpdatedRow {
-    pub id: String,
-    pub changes: Vec<FieldChange>,
-}
-
-impl UpdatedRow {
-    /// `emp-david (location loc-hq → loc-algedonic-hq)`.
-    pub fn render(&self) -> String {
-        format!(
-            "{} ({})",
-            self.id,
-            self.changes
-                .iter()
-                .map(FieldChange::render)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    }
-}
-
-/// `updated 2: emp-david (location loc-hq → loc-algedonic-hq); emp-two
-/// (department it → ops)` — the publish line's tail for the rows a
-/// declaration changed. Empty when nothing was.
-pub fn render_updated(rows: &[UpdatedRow]) -> String {
-    if rows.is_empty() {
-        return String::new();
-    }
-    format!(
-        "updated {}: {}",
-        rows.len(),
-        rows.iter()
-            .map(UpdatedRow::render)
-            .collect::<Vec<_>>()
-            .join("; ")
-    )
-}
+/// The change vocabulary is the platform's (`boss_core::publish`,
+/// design e187198f): one shape for every door and for the verb's own
+/// employee overlay — one rule, one rendering, for both halves of the
+/// roster. Re-exported so the registry's callers keep their paths.
+pub use boss_core::publish::{FieldChange, KeptRow, UpdatedRow, render_updated};
 
 impl AgentRow {
     /// Every field where `after` reads differently from this row —
@@ -260,16 +187,53 @@ impl AgentRow {
         }
         out
     }
+
+    /// Every declared field `declared` disagrees with this row on —
+    /// what a take WOULD change, named on a kept row under the default
+    /// insert-if-absent (design e187198f). The six columns compare
+    /// exactly; `aliases` differs when a declared login does not sign
+    /// as this id (a login the tenant does not declare is never a
+    /// difference — it is kept under either mode).
+    pub fn differs_from(&self, declared: &AgentInput) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.display_name != declared.display_name {
+            out.push("display_name".to_string());
+        }
+        if self.default_model != declared.default_model {
+            out.push("default_model".to_string());
+        }
+        if self.role != declared.role {
+            out.push("role".to_string());
+        }
+        if self.department != declared.department {
+            out.push("department".to_string());
+        }
+        if self.hourly_budget_usd_micros != declared.hourly_budget_usd_micros {
+            out.push("hourly_budget_usd_micros".to_string());
+        }
+        if self.max_concurrent_runs != declared.max_concurrent_runs {
+            out.push("max_concurrent_runs".to_string());
+        }
+        if declared.aliases.iter().any(|a| !self.aliases.contains(a)) {
+            out.push("aliases".to_string());
+        }
+        out
+    }
 }
 
 /// What a batch did: rows received, rows inserted, rows the registry
-/// already held that were UPDATED to the declaration (each change
-/// named), and rows already registered exactly as declared.
+/// already held that a take UPDATED to the declaration (each change
+/// named), rows it held and KEPT under insert-if-absent with the
+/// differing fields named (design e187198f), and rows already
+/// registered exactly as declared.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentsBatchOutcome {
     pub received: usize,
     pub inserted: usize,
     pub updated: Vec<UpdatedRow>,
+    /// Absent on the wire from a door that predates the field.
+    #[serde(default)]
+    pub kept: Vec<KeptRow>,
     pub unchanged: usize,
 }
 
@@ -285,6 +249,11 @@ impl AgentsBatchOutcome {
         }
         if self.unchanged > 0 {
             s.push_str(&format!(", {} already as declared", self.unchanged));
+        }
+        let kept = boss_core::publish::render_kept(&self.kept, Some("agents"));
+        if !kept.is_empty() {
+            s.push_str("; ");
+            s.push_str(&kept);
         }
         s
     }
@@ -407,7 +376,7 @@ mod tests {
         );
         let json = serde_json::to_value(&before).unwrap();
         assert!(
-            json.get("role").is_some_and(Value::is_null),
+            json.get("role").is_some_and(serde_json::Value::is_null),
             "a row without a role still carries the key, so a reader can tell null from absent: {json}"
         );
     }
@@ -462,6 +431,7 @@ mod tests {
                     "Claude (engineering)",
                 )],
             }],
+            kept: vec![],
             unchanged: 0,
         };
         assert_eq!(
@@ -472,6 +442,7 @@ mod tests {
             received: 1,
             inserted: 0,
             updated: vec![],
+            kept: vec![],
             unchanged: 1,
         };
         assert_eq!(
@@ -479,5 +450,63 @@ mod tests {
             "received 1, inserted 0, 1 already as declared"
         );
         assert_eq!(render_updated(&[]), "");
+    }
+
+    /// The default's answer (design e187198f): a held row the
+    /// declaration disagrees with is kept, the differing fields are
+    /// named, and the line says which flag would overwrite it. A
+    /// declared login that does not sign as the id is a difference; a
+    /// login the tenant does not declare is not.
+    #[test]
+    fn a_kept_row_names_its_differing_fields_and_the_take_flag() {
+        let held = AgentRow {
+            id: "agent-claude".into(),
+            display_name: "Claude (Claude Code sessions on the dev pod)".into(),
+            default_model: "opus-5[1m]".into(),
+            role: None,
+            department: None,
+            hourly_budget_usd_micros: None,
+            max_concurrent_runs: Some(8),
+            aliases: vec![
+                "claude@algedonic.dev".into(),
+                "ops-added@algedonic.dev".into(),
+            ],
+        };
+        let mut declared = input();
+        declared.max_concurrent_runs = Some(3);
+        assert_eq!(
+            held.differs_from(&declared),
+            ["display_name", "max_concurrent_runs"]
+        );
+        declared.aliases.push("new@algedonic.dev".into());
+        assert_eq!(
+            held.differs_from(&declared),
+            ["display_name", "max_concurrent_runs", "aliases"]
+        );
+        let mut same = input();
+        same.display_name = held.display_name.clone();
+        same.max_concurrent_runs = Some(8);
+        assert!(held.differs_from(&same).is_empty());
+
+        let out = AgentsBatchOutcome {
+            received: 1,
+            inserted: 0,
+            updated: vec![],
+            kept: vec![KeptRow {
+                id: "agent-claude".into(),
+                differs: vec!["display_name".into(), "max_concurrent_runs".into()],
+            }],
+            unchanged: 0,
+        };
+        assert_eq!(
+            out.summary(),
+            "received 1, inserted 0; kept: agent-claude differs on display_name, \
+             max_concurrent_runs (the instance is the truth; --take agents overwrites)"
+        );
+        // A door that predates the field answers without it.
+        let old: AgentsBatchOutcome =
+            serde_json::from_str(r#"{"received":1,"inserted":0,"updated":[],"unchanged":1}"#)
+                .unwrap();
+        assert!(old.kept.is_empty());
     }
 }

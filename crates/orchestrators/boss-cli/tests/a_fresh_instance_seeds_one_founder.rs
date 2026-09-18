@@ -48,15 +48,17 @@
 //! foreign key is the machine's own proof of the order. Backlog
 //! f56155f0 (same day) added the agents seed: the same case proves the
 //! tenant's `agent-claude` meets the migration's row and — since
-//! backlog 09887242, the same day — is UPDATED to the declaration with
-//! the change named from → to, instead of a silent "already there" or
-//! a kept row: the fixture's agents.toml is the contract's shape, which
-//! is the real tenant's @ 20f3a9e minus the `role` and `department` the
-//! registry cannot hold (check refuses those by name). The third case
-//! runs the rule at the people door: a changed employees.json updates
-//! the founder's declared field, keeps a column the file does not
-//! declare, leaves one `people.employee.updated`, and a re-run writes
-//! nothing. The second case also pins emp-audit as REAL: the baseline
+//! design e187198f (2026-09-18: THE INSTANCE IS THE TRUTH) — is KEPT
+//! with each differing field named, then UPDATED to the declaration
+//! only under `--take agents`, each change named from → to; never a
+//! silent "already there": the fixture's agents.toml is the contract's
+//! shape, which is the real tenant's @ 20f3a9e minus the `role` and
+//! `department` the registry cannot hold (check refuses those by
+//! name). The third case runs the rule at the people door: a changed
+//! employees.json is kept and named by default, applied under `--take
+//! employees` (the founder's declared field moves, a column the file
+//! does not declare is kept, one `people.employee.updated`), and a
+//! re-run writes nothing. The second case also pins emp-audit as REAL: the baseline
 //! seed carried `x-sim-origin: true` from the initial commit, which
 //! made the platform's own auditor prod's one simulated employee.
 
@@ -125,13 +127,26 @@ async fn serve(pool: PgPool) -> String {
                 Json(json!({"received": rows.len(), "inserted": rows.len()}))
             }),
         )
+        // The batch doors' answer shape (design e187198f): the verb
+        // reads counts, kept and updated off every door.
         .route(
             "/api/calendar/business-calendars/batch",
-            post(|| async { StatusCode::OK }),
+            post(|Json(rows): Json<Vec<Value>>| async move {
+                Json(json!({"received": rows.len(), "inserted": rows.len(),
+                            "kept": [], "updated": [], "unchanged": 0}))
+            }),
         )
         .route(
             "/api/subjects/company",
-            post(|| async { StatusCode::CREATED }),
+            post(|| async {
+                (
+                    StatusCode::CREATED,
+                    Json(
+                        json!({"received": 1, "inserted": 1, "kept": [], "updated": [],
+                                "unchanged": 0}),
+                    ),
+                )
+            }),
         )
         // The sensors batch (14c9b2ad) — the fixture declares one.
         .route(
@@ -189,12 +204,19 @@ fn copy_tree(from: &Path, to: &Path) {
 
 /// The shipped binary: `boss tenant publish <dir> --gateway <base>`.
 fn boss_tenant_publish(dir: &Path, base: &str) -> (bool, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_boss"))
-        .args(["tenant", "publish"])
+    boss_tenant_publish_taking(dir, base, None)
+}
+
+/// The same, with `--take <registries>` when `take` is given.
+fn boss_tenant_publish_taking(dir: &Path, base: &str, take: Option<&str>) -> (bool, String) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_boss"));
+    cmd.args(["tenant", "publish"])
         .arg(dir)
-        .args(["--gateway", base])
-        .output()
-        .expect("boss runs");
+        .args(["--gateway", base]);
+    if let Some(t) = take {
+        cmd.args(["--take", t]);
+    }
+    let out = cmd.output().expect("boss runs");
     (
         out.status.success(),
         format!(
@@ -294,14 +316,14 @@ async fn the_real_tenant_verbatim_lands_its_location_before_its_founder() {
         "the founder sits at the tenant's own site, not the platform's loc-hq"
     );
 
-    // The agent (backlog f56155f0; the rule since 09887242): the
-    // migration registered agent-claude under the platform's own
+    // The agent (backlog f56155f0; the rule since design e187198f):
+    // the migration registered agent-claude under the platform's own
     // display name and no role; the tenant declares it under its own
     // name, holding engineering-agent in engineering (backlog
-    // ab192a9f). The tenant's declaration wins on the declared fields:
-    // the row is UPDATED, the publish line names each change from →
-    // to, the declared alias resolves, and the agents door went before
-    // the Workflows.
+    // ab192a9f). THE INSTANCE IS THE TRUTH: the row is KEPT, the
+    // publish line names each differing field and the flag that would
+    // apply it, the declared alias (the migration's own) resolves, and
+    // the agents door went before the Workflows.
     assert!(
         line_of("seeds/agents.toml") < line_of("seeds/workflows.toml"),
         "the agents are sent before the Workflows:\n{out}"
@@ -313,32 +335,27 @@ async fn the_real_tenant_verbatim_lands_its_location_before_its_founder() {
     assert!(
         agents_line.contains("POST /api/agents/batch")
             && agents_line.contains(
-                "received 1, inserted 0, updated 1: agent-claude (display_name Claude \
-                 (Claude Code sessions on the dev pod) → Claude (engineering), \
-                 role null → engineering-agent, department null → engineering)"
+                "received 1, inserted 0; kept: agent-claude differs on display_name, role, \
+                 department (the instance is the truth; --take agents overwrites)"
             ),
         "{agents_line}"
     );
-    let agent: Option<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT display_name, default_model, role, department FROM agents WHERE id = 'agent-claude'",
-    )
-    .fetch_optional(&db.pool)
-    .await
-    .unwrap();
-    let (display_name, default_model, role, department) = agent.expect("the agent row is there");
+    let agent_row = || async {
+        sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
+            "SELECT display_name, default_model, role, department FROM agents WHERE id = 'agent-claude'",
+        )
+        .fetch_optional(&db.pool)
+        .await
+        .unwrap()
+        .expect("the agent row is there")
+    };
+    let (display_name, default_model, role, department) = agent_row().await;
     assert_eq!(
-        display_name, "Claude (engineering)",
-        "the tenant's declaration wins on the declared field"
+        display_name, "Claude (Claude Code sessions on the dev pod)",
+        "the instance's row is kept under the default"
     );
-    assert_eq!(
-        default_model, "opus-5[1m]",
-        "and the tenant's model matches it"
-    );
-    assert_eq!(
-        (role.as_deref(), department.as_deref()),
-        (Some("engineering-agent"), Some("engineering")),
-        "the agent holds the role and sits in the department the tenant declared"
-    );
+    assert_eq!(default_model, "opus-5[1m]");
+    assert_eq!((role.as_deref(), department.as_deref()), (None, None));
     let alias: Option<String> = sqlx::query_scalar(
         "SELECT actor_id FROM actor_aliases WHERE alias = 'claude@algedonic.dev'",
     )
@@ -347,7 +364,34 @@ async fn the_real_tenant_verbatim_lands_its_location_before_its_founder() {
     .unwrap();
     assert_eq!(alias.as_deref(), Some("agent-claude"));
 
-    // A second publish inserts nothing and changes nothing.
+    // `--take agents`: the declaration is applied at the real door,
+    // each change named from → to, and the fact rides the batch.
+    let (ok, out) = boss_tenant_publish_taking(&dir, &base, Some("agents"));
+    assert!(ok, "the take:\n{out}");
+    let agents_line = out
+        .lines()
+        .find(|l| l.contains("seeds/agents.toml"))
+        .unwrap();
+    assert!(
+        agents_line.contains(
+            "received 1, inserted 0, updated 1: agent-claude (display_name Claude \
+             (Claude Code sessions on the dev pod) → Claude (engineering), \
+             role null → engineering-agent, department null → engineering)"
+        ) && !agents_line.contains("kept:"),
+        "{agents_line}"
+    );
+    let (display_name, _, role, department) = agent_row().await;
+    assert_eq!(
+        display_name, "Claude (engineering)",
+        "the tenant's declaration wins under take"
+    );
+    assert_eq!(
+        (role.as_deref(), department.as_deref()),
+        (Some("engineering-agent"), Some("engineering")),
+        "the agent holds the role and sits in the department the tenant declared"
+    );
+
+    // A second default publish inserts nothing and changes nothing.
     let (ok, out) = boss_tenant_publish(&dir, &base);
     assert!(ok, "the second publish:\n{out}");
     let locations_line = out
@@ -371,16 +415,17 @@ async fn the_real_tenant_verbatim_lands_its_location_before_its_founder() {
     );
 }
 
-/// THE TENANT'S DECLARATION WINS ON DECLARED FIELDS, AT THE REAL DOOR
-/// (backlog 09887242). Prod's shape, run forward: the founder is
+/// THE INSTANCE IS THE TRUTH AT THE REAL DOOR; `--take employees`
+/// APPLIES THE DECLARATION AND KEEPS THE REST (design e187198f, over
+/// backlog 09887242). Prod's shape, run forward: the founder is
 /// published at one site, the tenant's file then declares another —
-/// here the platform's own `loc-hq`, so no locations row is needed —
-/// and the next publish applies it through the people door's PUT,
-/// leaving one `people.employee.updated` with the full row; the salary
-/// the file does not declare is kept; a third publish updates nothing.
+/// here the platform's own `loc-hq`, so no locations row is needed.
+/// The next default publish KEEPS the row and names the field; the
+/// take applies it through the people door's PUT, leaving one
+/// `people.employee.updated` with the full row; the salary the file
+/// does not declare is kept; a further publish updates nothing.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_changed_declaration_updates_the_founder_at_the_real_door_and_keeps_what_it_does_not_declare()
- {
+async fn a_changed_declaration_is_kept_at_the_real_door_and_taken_only_by_decision() {
     let db = TestDb::new().await;
     let base = serve(db.pool.clone()).await;
     let dir = tenant_copy("declaration-wins");
@@ -404,8 +449,40 @@ async fn a_changed_declaration_updates_the_founder_at_the_real_door_and_keeps_wh
         .remove("annual_salary_cents");
     std::fs::write(&path, serde_json::to_string_pretty(&roster).unwrap()).unwrap();
 
+    // By default the instance's row is kept and the line names the
+    // field the file says differently; nothing is PUT.
     let (ok, out) = boss_tenant_publish(&dir, &base);
     assert!(ok, "the second publish:\n{out}");
+    let people_line = out
+        .lines()
+        .find(|l| l.contains("seeds/employees.json"))
+        .unwrap();
+    assert!(
+        people_line.contains(
+            "0 posted, 0/0 linked; kept: emp-david differs on location (the instance is the \
+             truth; --take employees overwrites)"
+        ),
+        "{people_line}"
+    );
+    let at: Option<String> = sqlx::query_scalar("SELECT location FROM employees WHERE id = $1")
+        .bind(FOUNDER_ID)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(at.as_deref(), Some("loc-algedonic-hq"), "kept");
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM event_outbox WHERE kind = 'people.employee.updated' \
+         AND payload->>'id' = $1",
+    )
+    .bind(FOUNDER_ID)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 0, "no update fact under the default");
+
+    // Under --take employees the declared field is applied.
+    let (ok, out) = boss_tenant_publish_taking(&dir, &base, Some("employees"));
+    assert!(ok, "the take:\n{out}");
     let people_line = out
         .lines()
         .find(|l| l.contains("seeds/employees.json"))

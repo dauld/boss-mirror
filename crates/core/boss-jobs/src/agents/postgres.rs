@@ -3,20 +3,23 @@
 //! a handful of rows and the lookup is indexed; if the door's cost ever
 //! shows up, a short TTL cache in front of this adapter is the fix, not
 //! a wider read), the roster read, and the tenant batch (backlog
-//! f56155f0): one transaction — an insert-if-absent on `agents`, an
-//! UPDATE of the declared columns where the row was already there and
-//! differs (backlog 09887242), and an upsert on `actor_aliases` that
-//! lands each declared alias under the declared id — so a refused row
-//! lands nothing and a declaration lands whole.
+//! f56155f0): one transaction — an insert-if-absent on `agents` that
+//! KEEPS a held row and names what it differs on (design e187198f: the
+//! instance is the truth), or under `mode=take` an UPDATE of the
+//! declared columns where the row differs (the rule of 09887242, now
+//! by decision only), and an insert-if-absent (take: upsert) on
+//! `actor_aliases` that lands each declared alias under the declared
+//! id — so a refused row lands nothing and a declaration lands whole.
 
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
+use boss_core::publish::PublishMode;
 use boss_core::publisher::EventStamp;
 use sqlx::PgPool;
 
 use super::port::{AgentsError, AgentsRegistry, declared_event, updated_event};
-use super::types::{AgentInput, AgentRow, AgentsBatchOutcome, UpdatedRow};
+use super::types::{AgentInput, AgentRow, AgentsBatchOutcome, KeptRow, UpdatedRow};
 
 pub struct PgAgents {
     pool: PgPool,
@@ -137,11 +140,13 @@ impl AgentsRegistry for PgAgents {
     async fn publish(
         &self,
         declared: &[AgentInput],
+        mode: PublishMode,
         stamp: &EventStamp,
     ) -> Result<AgentsBatchOutcome, AgentsError> {
         let mut tx = self.pool.begin().await.map_err(storage)?;
         let mut inserted = 0usize;
         let mut updated = Vec::new();
+        let mut kept = Vec::new();
         let mut unchanged = 0usize;
         for a in declared {
             // What the registry held before this declaration, so the
@@ -149,15 +154,13 @@ impl AgentsRegistry for PgAgents {
             // transaction.
             let before = row_in_tx(&mut tx, &a.id).await?;
             // The declaration is the whole row (AgentInput is the
-            // table's columns), so a held row takes every declared
-            // column; the WHERE keeps an identical declaration from
-            // touching the row at all.
-            sqlx::query(
-                "INSERT INTO agents \
-                 (id, display_name, default_model, role, department, \
-                  hourly_budget_usd_micros, max_concurrent_runs) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7) \
-                 ON CONFLICT (id) DO UPDATE SET \
+            // table's columns). Under take a held row takes every
+            // declared column (the WHERE keeps an identical
+            // declaration from touching the row at all); under the
+            // default it is left exactly as the instance holds it —
+            // the instance is the truth (design e187198f).
+            let on_conflict = if mode.is_take() {
+                "ON CONFLICT (id) DO UPDATE SET \
                    display_name = EXCLUDED.display_name, \
                    default_model = EXCLUDED.default_model, \
                    role = EXCLUDED.role, \
@@ -170,8 +173,16 @@ impl AgentsRegistry for PgAgents {
                        IS DISTINCT FROM \
                        (EXCLUDED.display_name, EXCLUDED.default_model, EXCLUDED.role, \
                         EXCLUDED.department, EXCLUDED.hourly_budget_usd_micros, \
-                        EXCLUDED.max_concurrent_runs)",
-            )
+                        EXCLUDED.max_concurrent_runs)"
+            } else {
+                "ON CONFLICT (id) DO NOTHING"
+            };
+            sqlx::query(&format!(
+                "INSERT INTO agents \
+                 (id, display_name, default_model, role, department, \
+                  hourly_budget_usd_micros, max_concurrent_runs) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7) {on_conflict}"
+            ))
             .bind(&a.id)
             .bind(&a.display_name)
             .bind(&a.default_model)
@@ -182,15 +193,21 @@ impl AgentsRegistry for PgAgents {
             .execute(&mut *tx)
             .await
             .map_err(|e| insert_error(e, &a.default_model))?;
-            // A declared alias signs as the declared id — moved when
-            // another agent held it; an alias the tenant does not
-            // declare is not touched.
+            // A declared alias signs as the declared id: landed when
+            // nobody holds it (an alias is its own row, inserted if
+            // absent), moved only under take when another agent does;
+            // an alias the tenant does not declare is not touched.
+            let alias_on_conflict = if mode.is_take() {
+                "ON CONFLICT (alias) DO UPDATE SET actor_id = EXCLUDED.actor_id \
+                 WHERE actor_aliases.actor_id <> EXCLUDED.actor_id"
+            } else {
+                "ON CONFLICT (alias) DO NOTHING"
+            };
             for alias in &a.aliases {
-                sqlx::query(
+                sqlx::query(&format!(
                     "INSERT INTO actor_aliases (alias, actor_id) VALUES ($1, $2) \
-                     ON CONFLICT (alias) DO UPDATE SET actor_id = EXCLUDED.actor_id \
-                     WHERE actor_aliases.actor_id <> EXCLUDED.actor_id",
-                )
+                     {alias_on_conflict}"
+                ))
                 .bind(alias)
                 .bind(&a.id)
                 .execute(&mut *tx)
@@ -212,9 +229,8 @@ impl AgentsRegistry for PgAgents {
                 .await?
                 .ok_or_else(|| AgentsError::Storage(format!("{} vanished mid-batch", a.id)))?;
             let changes = before.changes_to(&after);
-            if changes.is_empty() {
-                unchanged += 1;
-            } else {
+            let changed = !changes.is_empty();
+            if changed {
                 boss_events::outbox::record_event_in_tx(
                     &mut tx,
                     &updated_event(stamp, &after, &changes)?,
@@ -226,12 +242,25 @@ impl AgentsRegistry for PgAgents {
                     changes,
                 });
             }
+            // What the row STILL differs on after the write: empty
+            // under take, the kept fields under the default — named,
+            // never silent.
+            let differs = after.differs_from(a);
+            if !differs.is_empty() {
+                kept.push(KeptRow {
+                    id: a.id.clone(),
+                    differs,
+                });
+            } else if !changed {
+                unchanged += 1;
+            }
         }
         tx.commit().await.map_err(storage)?;
         Ok(AgentsBatchOutcome {
             received: declared.len(),
             inserted,
             updated,
+            kept,
             unchanged,
         })
     }

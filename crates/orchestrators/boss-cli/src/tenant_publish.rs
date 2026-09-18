@@ -51,30 +51,39 @@
 //! (infra/seed-tenant.sh) that refusal is a DEGRADED pod that retries —
 //! the contract tenant-launch.sh already holds.
 //!
-//! IDEMPOTENT, LIKE THE ENGINES. The classes batch inserts if absent;
-//! the calendar batch replaces by code; the company Subject upserts;
-//! policy GETs each rule before it POSTs; an employee's 409 is
-//! followed by a GET and a PUT only where the declaration differs; the
-//! agents batch updates only where it differs; the workflow publish
-//! skips a kind an authoring Job already published; a dispatcher rule
-//! at its file's version is `present`. A second run writes nothing
-//! new.
+//! IDEMPOTENT, LIKE THE ENGINES. Every door inserts if absent: the
+//! classes, chart, locations, calendars, credentials, sensors and
+//! ledger batches; the company Subject; policy GETs each rule before
+//! it POSTs; an employee's 409 is followed by a GET and a comparison;
+//! the workflow publish keeps a kind an authoring Job already
+//! published; a dispatcher rule at its file's version is `present`. A
+//! second run writes nothing new.
 //!
-//! THE TENANT'S DECLARATION WINS ON DECLARED FIELDS (backlog 09887242,
-//! 2026-09-17). Measured on prod that day: `emp-david` read `loc-hq`
-//! while the tenant's employees.json declared `loc-algedonic-hq`, and
-//! `agent-claude` read the migration's display name while agents.toml
-//! declared another — each the value of the FIRST publish (or the
-//! migration), kept by every publish since, because "already there"
-//! and "insert-if-absent" both stopped at the row's existence. The
-//! tenant OWNS its people and its agents, so for a row the tenant
-//! declares, the declared fields are applied (an update of exactly
-//! those columns, through the door's own evented update), what the
-//! tenant does not declare is kept, and the line names each change:
-//! `updated 1: emp-david (location loc-hq → loc-algedonic-hq)`. A row
-//! the tenant does not declare is never deleted. One rule, both
-//! halves of the roster; the contract states it in
-//! docs/tenant-contract.md.
+//! THE INSTANCE IS THE TRUTH; `--take <registry>` OVERWRITES BY
+//! DECISION (design e187198f, David 2026-09-18). Measured that day
+//! (agent report on fed7a9e2): four doors overwrote a live row on
+//! every republish — business calendars wholesale, the company label,
+//! an employee's declared fields, an agent's whole row — and this verb
+//! runs at every services-container start, so an operator's edit to
+//! any of them lived until the next boot; four other registries
+//! (classes, sensors, policy, workflows) kept the live row and said
+//! NOTHING when the file differed, so a repo edit that never landed
+//! was dead text. The rule of 09887242 ("the tenant's declaration
+//! wins on declared fields", 2026-09-17) covered a repo-edited
+//! location that had not landed — the bootstrap case — and is dropped:
+//! seeds bootstrap an OSS install and the playground; the live
+//! instance runs on its data; the repo is bootstrap + export. So every
+//! door is insert-if-absent by default, each batch route takes
+//! `?mode=insert-if-absent|take` where the semantics live, this verb
+//! sends `take` ONLY for the registries named in `--take
+//! <registry>[,<registry>]` (the employee overlay PUTs only under
+//! `--take employees`; policy's `force` and the workflows' supersede
+//! are their doors' takes), every take prints the overwritten rows
+//! field by field, and EVERY registry's line names its kept-but-
+//! differing rows in one shape — `kept: <id> differs on <fields> (the
+//! instance is the truth; --take <registry> overwrites)` — as the
+//! decision surface. The contract states it in docs/tenant-contract.md;
+//! the decision is in docs/architecture-decisions.md.
 //!
 //! SIGNED, NOT SIMULATED. Every write carries `x-boss-user` as
 //! `automation:tenant-seed` (platform-admin / operator — the tier the
@@ -87,13 +96,145 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use boss_core::publish::{
+    FieldChange, KeptRow, PublishMode, UpdatedRow, render_kept, render_updated,
+};
 use boss_core::tenant_manifest::TenantToml;
-use boss_jobs::agents::{FieldChange, UpdatedRow, render_updated};
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
 use tracing::{info, warn};
 
 use crate::tenant::{self, Status};
+
+/// The registries `--take` may name, in the plan's order — each one a
+/// door with an overwrite of its own: the calendar and agents batches'
+/// `?mode=take`, the company mint's, the employee overlay PUT, the
+/// Class edit door (`PUT /api/classes/{kind}/{code}`), policy's
+/// `force`, the workflows' supersede. A registry not here has no
+/// overwrite (sensors, credentials, locations, the chart, the ledger's
+/// rules, the reactors) and its line says so.
+pub const TAKEABLE: &[&str] = &[
+    "classes",
+    "calendars",
+    "company",
+    "policy",
+    "employees",
+    "agents",
+    "workflows",
+];
+
+/// What `--take <registry>[,<registry>]` named: the only registries
+/// this publish may overwrite a live row of.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Take(BTreeSet<String>);
+
+impl Take {
+    /// Parse the flag's value. Refuses a name no door can take, naming
+    /// the ones that can — a typo must not read as "nothing taken".
+    pub fn parse(spec: Option<&str>) -> Result<Self> {
+        let mut set = BTreeSet::new();
+        for name in spec
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if !TAKEABLE.contains(&name) {
+                bail!(
+                    "--take {name}: no door overwrites that registry; the registries a take can \
+                     name are {}",
+                    TAKEABLE.join(", ")
+                );
+            }
+            set.insert(name.to_string());
+        }
+        Ok(Self(set))
+    }
+
+    #[cfg(test)]
+    pub fn named(registries: &[&str]) -> Self {
+        Self(registries.iter().map(|s| s.to_string()).collect())
+    }
+
+    pub fn has(&self, registry: &str) -> bool {
+        self.0.contains(registry)
+    }
+
+    /// The door's mode for `registry`.
+    pub fn mode(&self, registry: &str) -> PublishMode {
+        if self.has(registry) {
+            PublishMode::Take
+        } else {
+            PublishMode::InsertIfAbsent
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// For the report header.
+    pub fn describe(&self) -> String {
+        if self.is_empty() {
+            "take: nothing — every door is insert-if-absent; the instance is the truth".to_string()
+        } else {
+            format!(
+                "take: {} — the declaration OVERWRITES live rows of these registries; every \
+                 other door is insert-if-absent",
+                self.0.iter().cloned().collect::<Vec<_>>().join(", ")
+            )
+        }
+    }
+}
+
+/// A batch door's URL with the mode the take decides — the query is
+/// omitted for the default so a door that predates the parameter
+/// (none today; the shape is for the record) reads the same request.
+fn moded(base: &str, path: &str, mode: PublishMode) -> String {
+    match mode {
+        PublishMode::InsertIfAbsent => url(base, path),
+        PublishMode::Take => format!("{}?mode=take", url(base, path)),
+    }
+}
+
+/// The batch doors' common answer, as this verb reads it: counts plus
+/// the rows kept-but-differing and the rows a take updated. Every
+/// field defaults so a door that answers a subset (classes, sensors:
+/// no `updated`) parses.
+#[derive(Debug, Default, serde::Deserialize)]
+struct BatchAnswer {
+    #[serde(default)]
+    received: usize,
+    #[serde(default)]
+    inserted: usize,
+    #[serde(default)]
+    kept: Vec<KeptRow>,
+    #[serde(default)]
+    updated: Vec<UpdatedRow>,
+    #[serde(default)]
+    unchanged: usize,
+}
+
+impl BatchAnswer {
+    /// `received N, inserted M[, updated k: …][, n already as
+    /// declared][; kept: …]` — one shape for every batch door.
+    fn line(&self, take: Option<&str>) -> String {
+        let mut s = format!("received {}, inserted {}", self.received, self.inserted);
+        if !self.updated.is_empty() {
+            s.push_str(", ");
+            s.push_str(&render_updated(&self.updated));
+        }
+        if self.unchanged > 0 {
+            s.push_str(&format!(", {} already as declared", self.unchanged));
+        }
+        let kept = render_kept(&self.kept, take);
+        if !kept.is_empty() {
+            s.push_str("; ");
+            s.push_str(&kept);
+        }
+        s
+    }
+}
 
 /// The x-boss-user identity every publish write carries. A dedicated
 /// seed identity, not a person: "the tenant directory landed these
@@ -259,7 +400,10 @@ impl Door {
     /// What goes through it, and why a second run writes nothing new.
     pub fn what(&self) -> String {
         match self {
-            Door::Classes { rows } => format!("{} classes (insert-if-absent)", rows.len()),
+            Door::Classes { rows } => format!(
+                "{} classes (insert-if-absent; a held row that differs is named; --take classes edits it)",
+                rows.len()
+            ),
             Door::Chart { rows } => format!(
                 "{} accounts (insert-if-absent by code: {}; a code the starter chart holds is kept and a differing field is named)",
                 rows.len(),
@@ -276,18 +420,22 @@ impl Door {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            Door::Calendars { count, .. } => format!("{count} calendars (replaced by code)"),
-            Door::Company { id, label } => format!("company `{id}` ({label}) (upsert)"),
-            Door::Policy { rules, .. } => {
-                format!("{rules} rules (each GET first; an existing rule is kept)")
-            }
+            Door::Calendars { count, .. } => format!(
+                "{count} calendars (insert-if-absent by code; a held code that differs is named; --take calendars replaces it wholesale)"
+            ),
+            Door::Company { id, label } => format!(
+                "company `{id}` ({label}) (insert-if-absent; a held label that differs is named; --take company overwrites it)"
+            ),
+            Door::Policy { rules, .. } => format!(
+                "{rules} rules (each GET first; a held rule is kept and a differing scope or active is named; --take policy overwrites)"
+            ),
             Door::People { roster } => format!(
-                "{} people, {} manager links (a row already there is updated on the declared fields that differ, the rest kept)",
+                "{} people, {} manager links (a row already there is kept and its differing declared fields are named; --take employees applies them)",
                 roster.len(),
                 manager_split(roster.clone()).1.len()
             ),
             Door::Agents { rows } => format!(
-                "{} agents (by id: {}; a registered row is updated on the declared fields that differ, an undeclared alias kept)",
+                "{} agents (by id: {}; a registered row is kept and its differing declared fields are named; --take agents applies the whole declaration; an undeclared alias is kept either way)",
                 rows.len(),
                 rows.iter()
                     .map(|a| a.id.as_str())
@@ -297,7 +445,7 @@ impl Door {
             Door::Workflows {
                 owning_team, kinds, ..
             } => format!(
-                "{} workflows as owning_team `{owning_team}` ({}) (a kind an authoring Job already published is skipped)",
+                "{} workflows as owning_team `{owning_team}` ({}) (a kind an authoring Job already published is kept and its differing facets are named; --take workflows supersedes it with a new version)",
                 kinds.len(),
                 kinds.join(", ")
             ),
@@ -310,7 +458,7 @@ impl Door {
                     .join(", ")
             ),
             Door::Sensors { rows, .. } => format!(
-                "{} sensors (insert-if-absent by id: {})",
+                "{} sensors (insert-if-absent by id: {}; a held row that differs is named — no door overwrites a sensor)",
                 rows.len(),
                 rows.iter()
                     .map(|r| r.id.as_str())
@@ -820,29 +968,36 @@ fn declared_changes(current: &Value, declared: &Value) -> Vec<FieldChange> {
 /// followed by GET /api/people/{id}: 200 is already there; anything
 /// else is the refusal it was, with the API's words.
 ///
-/// THE TENANT'S DECLARATION WINS ON DECLARED FIELDS (backlog 09887242,
-/// 2026-09-17). "Already there" used to end the story, and measured on
-/// prod that day it had left `emp-david` at `loc-hq` — the FIRST
-/// publish's value — while the tenant's employees.json had declared
-/// `loc-algedonic-hq` since the day before: the 409's GET checked only
-/// that the row existed and threw the body away. The tenant OWNS its
-/// people, so the GET body is now compared key by key against the
-/// declaration ([`declared_changes`]); a declared key that differs is
-/// applied through the door's own update — the GET body with the
-/// declared keys overlaid, PUT back, which is the manager-link idiom
-/// below and records the door's `people.employee.updated` — so a
-/// column the tenant does not declare (a salary set out of band) rides
-/// the PUT unchanged. An explicit `null` in the file IS a declaration
-/// (the tenant says: no location); to leave a column alone, omit the
-/// key. A refused update fails the publish with the API's words, the
-/// same as a refused POST. Idempotent: a row that compares equal is
-/// counted `already as declared` and not written, and a manager edge
-/// already in place is not re-PUT.
-fn seed_people(client: &Client, people_base: &str, roster: &[Value]) -> Result<String> {
+/// THE INSTANCE IS THE TRUTH; `--take employees` APPLIES THE
+/// DECLARATION (design e187198f, 2026-09-18). The GET body is compared
+/// key by key against the declaration ([`declared_changes`]) and, by
+/// default, a row that differs is KEPT and the line names the fields:
+/// `kept: emp-david differs on location (the instance is the truth;
+/// --take employees overwrites)`. Under `take` a declared key that
+/// differs is applied through the door's own update — the GET body
+/// with the declared keys overlaid, PUT back, which is the manager-link
+/// idiom below and records the door's `people.employee.updated` — so
+/// a column the tenant does not declare (a salary set out of band)
+/// rides the PUT unchanged, and the line names each change. An
+/// explicit `null` in the file IS a declaration (the tenant says: no
+/// location); to leave a column alone, omit the key. A refused update
+/// fails the publish with the API's words, the same as a refused
+/// POST. Idempotent: a row that compares equal is counted `already as
+/// declared` and not written, and a manager edge already in place is
+/// not re-PUT.
+///
+/// The rule this replaces — "the tenant's declaration wins on declared
+/// fields", backlog 09887242, 2026-09-17 — was measured on a
+/// repo-edited location that had not landed (`emp-david` at `loc-hq`
+/// while the file said `loc-algedonic-hq`), the bootstrap case; on a
+/// running instance the same overlay reverted every operator edit at
+/// the next boot, which is the collision the design decided against.
+fn seed_people(client: &Client, people_base: &str, roster: &[Value], take: bool) -> Result<String> {
     let (rows, links) = manager_split(roster.to_vec());
     let post_url = url(people_base, "/api/people");
     let (mut posted, mut same) = (0usize, 0usize);
     let mut updated: Vec<UpdatedRow> = Vec::new();
+    let mut kept: Vec<KeptRow> = Vec::new();
     for emp in &rows {
         let resp = client
             .post(&post_url)
@@ -870,6 +1025,13 @@ fn seed_people(client: &Client, people_base: &str, roster: &[Value]) -> Result<S
                 let changes = declared_changes(&current, emp);
                 if changes.is_empty() {
                     same += 1;
+                    continue;
+                }
+                if !take {
+                    kept.push(KeptRow {
+                        id: id.to_string(),
+                        differs: changes.into_iter().map(|c| c.field).collect(),
+                    });
                     continue;
                 }
                 if let (Some(cur), Some(decl)) = (current.as_object_mut(), emp.as_object()) {
@@ -937,6 +1099,11 @@ fn seed_people(client: &Client, people_base: &str, roster: &[Value]) -> Result<S
         line.push_str(&format!(", {same} already as declared"));
     }
     line.push_str(&format!(", {linked}/{} linked", links.len()));
+    let kept = render_kept(&kept, Some("employees"));
+    if !kept.is_empty() {
+        line.push_str("; ");
+        line.push_str(&kept);
+    }
     Ok(line)
 }
 
@@ -974,18 +1141,78 @@ fn wait_for_people_projection(client: &Client, people_base: &str, threshold: usi
     );
 }
 
+/// `--take classes`: the Class registry's batch has no take of its
+/// own (insert-if-absent by design, so a seed cannot clobber an edit),
+/// but its edit door does — `PUT /api/classes/{kind}/{code}`, the
+/// operator's own path. Each row the batch KEPT-but-differing is read
+/// back, the declared body is PUT through that door, and the change is
+/// named field by field from the row read.
+fn take_classes(
+    client: &Client,
+    classes_base: &str,
+    rows: &[Value],
+    kept: &[KeptRow],
+) -> Result<Vec<UpdatedRow>> {
+    let mut updated = Vec::new();
+    for k in kept.iter().filter(|k| !k.differs.is_empty()) {
+        let Some(declared) = rows.iter().find(|r| {
+            format!(
+                "{}/{}",
+                r.get("subject_kind").and_then(Value::as_str).unwrap_or(""),
+                r.get("code").and_then(Value::as_str).unwrap_or("")
+            ) == k.id
+        }) else {
+            bail!(
+                "the classes door named a kept row this batch did not send: {}",
+                k.id
+            );
+        };
+        let row_url = url(classes_base, &format!("/api/classes/{}", k.id));
+        let current: Value = refuse(client.get(&row_url).send()?, &format!("GET {row_url}"))?
+            .json()
+            .with_context(|| format!("GET {row_url}: the row did not parse"))?;
+        let changes: Vec<FieldChange> = k
+            .differs
+            .iter()
+            .map(|f| FieldChange {
+                field: f.clone(),
+                from: current.get(f).cloned().unwrap_or(Value::Null),
+                to: declared.get(f).cloned().unwrap_or(Value::Null),
+            })
+            .collect();
+        refuse(
+            client.put(&row_url).json(declared).send()?,
+            &format!(
+                "PUT {row_url} (taking: {})",
+                changes
+                    .iter()
+                    .map(FieldChange::render)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )?;
+        updated.push(UpdatedRow {
+            id: k.id.clone(),
+            changes,
+        });
+    }
+    Ok(updated)
+}
+
 /// Send one door. Returns the outcome line's tail.
-fn send(client: &Client, bases: &Bases, door: &Door) -> Result<String> {
+fn send(client: &Client, bases: &Bases, door: &Door, take: &Take) -> Result<String> {
     match door {
         Door::Classes { rows } => {
             let u = url(&bases.classes, "/api/classes/batch");
             let resp = refuse(client.post(&u).json(rows).send()?, &format!("POST {u}"))?;
-            let body: Value = resp.json().unwrap_or(Value::Null);
-            Ok(format!(
-                "received {}, inserted {}",
-                body.get("received").and_then(Value::as_u64).unwrap_or(0),
-                body.get("inserted").and_then(Value::as_u64).unwrap_or(0)
-            ))
+            let mut out: BatchAnswer = resp
+                .json()
+                .with_context(|| format!("POST {u}: the outcome did not parse"))?;
+            if take.has("classes") {
+                out.updated = take_classes(client, &bases.classes, rows, &out.kept)?;
+                out.kept.clear();
+            }
+            Ok(out.line(Some("classes")))
         }
         Door::Chart { rows } => {
             let u = url(&bases.ledger, "/api/ledger/accounts/batch");
@@ -1009,38 +1236,54 @@ fn send(client: &Client, bases: &Bases, door: &Door) -> Result<String> {
                 body.get("inserted").and_then(Value::as_u64).unwrap_or(0)
             ))
         }
-        Door::Calendars { body, count } => {
-            let u = url(&bases.calendar, "/api/calendar/business-calendars/batch");
-            refuse(
+        Door::Calendars { body, .. } => {
+            let u = moded(
+                &bases.calendar,
+                "/api/calendar/business-calendars/batch",
+                take.mode("calendars"),
+            );
+            let resp = refuse(
                 client.post(&u).body(body.clone()).send()?,
                 &format!("POST {u}"),
             )?;
-            Ok(format!("{count} calendars landed"))
+            let out: BatchAnswer = resp
+                .json()
+                .with_context(|| format!("POST {u}: the outcome did not parse"))?;
+            Ok(out.line(Some("calendars")))
         }
         Door::Company { id, label } => {
-            let u = url(&bases.subjects, "/api/subjects/company");
-            refuse(
+            let u = moded(
+                &bases.subjects,
+                "/api/subjects/company",
+                take.mode("company"),
+            );
+            let resp = refuse(
                 client
                     .post(&u)
                     .json(&json!({ "id": id, "label": label }))
                     .send()?,
                 &format!("POST {u}"),
             )?;
-            Ok("upserted".to_string())
+            let out: BatchAnswer = resp
+                .json()
+                .with_context(|| format!("POST {u}: the outcome did not parse"))?;
+            Ok(out.line(Some("company")))
         }
         Door::Policy { path, .. } => {
-            boss_policy::bootstrap::publish_policy_rules(
+            let out = boss_policy::bootstrap::publish_policy_rules(
                 &bases.policy,
                 path,
-                false,
+                take.has("policy"),
                 "tenant-seed",
                 Some(SEED_USER),
             )?;
-            Ok("ok (posted/skipped counts in the log)".to_string())
+            Ok(out.summary())
         }
-        Door::People { roster } => seed_people(client, &bases.people, roster),
+        Door::People { roster } => {
+            seed_people(client, &bases.people, roster, take.has("employees"))
+        }
         Door::Agents { rows } => {
-            let u = url(&bases.jobs, "/api/agents/batch");
+            let u = moded(&bases.jobs, "/api/agents/batch", take.mode("agents"));
             let resp = refuse(client.post(&u).json(rows).send()?, &format!("POST {u}"))?;
             // The door's own outcome type, so the line names a kept
             // row's differing fields the way the registry reported
@@ -1053,15 +1296,15 @@ fn send(client: &Client, bases: &Bases, door: &Door) -> Result<String> {
         Door::Workflows {
             path, owning_team, ..
         } => {
-            boss_jobs::bootstrap::publish_workflows(
+            let out = boss_jobs::bootstrap::publish_workflows(
                 &bases.jobs,
                 path,
                 owning_team,
                 true,
-                false,
+                take.has("workflows"),
                 Some(SEED_USER),
             )?;
-            Ok("ok (published/skipped counts in the log)".to_string())
+            Ok(out.summary())
         }
         Door::Credentials { tenant_id, rows } => {
             let u = url(&bases.jobs, "/api/credentials/batch");
@@ -1088,12 +1331,12 @@ fn send(client: &Client, bases: &Bases, door: &Door) -> Result<String> {
                     .send()?,
                 &format!("POST {u}"),
             )?;
-            let body: Value = resp.json().unwrap_or(Value::Null);
-            Ok(format!(
-                "received {}, inserted {}",
-                body.get("received").and_then(Value::as_u64).unwrap_or(0),
-                body.get("inserted").and_then(Value::as_u64).unwrap_or(0)
-            ))
+            let out: BatchAnswer = resp
+                .json()
+                .with_context(|| format!("POST {u}: the outcome did not parse"))?;
+            // No door overwrites a sensor, and the line says so rather
+            // than naming a flag that does not exist.
+            Ok(out.line(None))
         }
         Door::PostingRules { tenant_id, rows } => {
             let u = url(&bases.ledger, "/api/ledger/posting-rules/batch");
@@ -1303,9 +1546,11 @@ fn publish_rule(
 }
 
 /// Run the plan against `bases`, one line per step through `out` as
-/// each lands. Refuses a plan with any Refused step BEFORE the first
-/// write. Blocking HTTP — call from `spawn_blocking`.
-pub fn publish(plan: &Plan, bases: &Bases, out: &mut dyn FnMut(String)) -> Result<()> {
+/// each lands; `take` names the registries whose live rows this run
+/// may overwrite (design e187198f; empty = none). Refuses a plan with
+/// any Refused step BEFORE the first write. Blocking HTTP — call from
+/// `spawn_blocking`.
+pub fn publish(plan: &Plan, bases: &Bases, take: &Take, out: &mut dyn FnMut(String)) -> Result<()> {
     if !plan.publishable() {
         for s in &plan.steps {
             out(plan.render_step(s, None));
@@ -1328,7 +1573,7 @@ pub fn publish(plan: &Plan, bases: &Bases, out: &mut dyn FnMut(String)) -> Resul
                     wait_for_people_projection(&client, &bases.people, roster_len);
                 }
                 Some(
-                    send(&client, bases, door)
+                    send(&client, bases, door, take)
                         .with_context(|| format!("{} ({})", step.path, door.label()))?,
                 )
             }
@@ -1758,7 +2003,7 @@ terminal = { outcome = "sponsored" }
         // listens on would fail loudly if anything were sent.
         let bases = Bases::resolve(Some("http://127.0.0.1:1"));
         let mut lines = Vec::new();
-        let err = publish(&p, &bases, &mut |l| lines.push(l)).unwrap_err();
+        let err = publish(&p, &bases, &Take::default(), &mut |l| lines.push(l)).unwrap_err();
         assert!(err.to_string().contains("REFUSED"), "{err}");
         assert!(
             lines.iter().any(|l| l.contains("REFUSED: ")),
@@ -1800,21 +2045,39 @@ terminal = { outcome = "sponsored" }
     struct Stub {
         /// Every request: (method, path, lowercased head, body).
         log: Vec<(String, String, String, String)>,
-        /// What "exists" server-side: policy rule ids, employee ids,
-        /// published workflow kinds, design Job ids.
-        policy: BTreeSet<String>,
+        /// What "exists" server-side: policy rules by id (the row the
+        /// GET answers, so the bootstrap's comparison sees it),
+        /// employee ids, published workflow kinds (kind -> the live
+        /// spec the GET answers), design Job ids.
+        policy: BTreeMap<String, Value>,
         people: BTreeMap<String, Value>,
-        workflows: BTreeSet<String>,
+        workflows: BTreeMap<String, Value>,
         jobs: usize,
-        /// Published sensor ids (insert-if-absent, like the door).
-        sensors: BTreeSet<String>,
+        /// Published sensors, id -> the declared row (insert-if-absent,
+        /// like the door; a held row that differs is named).
+        sensors: BTreeMap<String, Value>,
+        /// Published business calendars, code -> the row (insert-if-
+        /// absent; `?mode=take` replaces).
+        calendars: BTreeMap<String, Value>,
+        /// The company subject's label, once minted.
+        company: Option<String>,
+        /// What the stub's "publish" lands as a kind's live row: the
+        /// fixture file's own specs (`stub_for`), so a second publish
+        /// reads the row as the file declares it — the real registry
+        /// lands the spec through the design Job's publish step, which
+        /// this stub does not walk.
+        file_specs: BTreeMap<String, Value>,
+        /// Published classes, "kind/code" -> the row (insert-if-absent;
+        /// `PUT /api/classes/{kind}/{code}` edits one).
+        classes: BTreeMap<String, Value>,
         /// Declared credential ids (insert-if-absent, like the door).
         credentials: BTreeSet<String>,
         /// Published location ids (insert-if-absent, like the door).
         locations: BTreeSet<String>,
-        /// Registered agents: id -> display_name (insert-if-absent;
-        /// the stub's "migration" pre-registers agent-claude under
-        /// the platform's own name, as the real schema does).
+        /// Registered agents: id -> display_name (insert-if-absent by
+        /// default, `?mode=take` overwrites; a test's "migration"
+        /// pre-registers agent-claude under the platform's own name,
+        /// as the real schema does).
         agents: BTreeMap<String, String>,
         /// Published posting rules, "fact_kind v<n>" (insert-if-absent).
         posting_rules: BTreeSet<String>,
@@ -1844,6 +2107,9 @@ terminal = { outcome = "sponsored" }
                 + self.projections.len()
                 + self.accounts.len()
                 + self.rules.len()
+                + self.calendars.len()
+                + self.classes.len()
+                + usize::from(self.company.is_some())
         }
 
         fn active_rule(&self, name: &str) -> Option<&Value> {
@@ -1934,14 +2200,108 @@ terminal = { outcome = "sponsored" }
         }
     }
 
+    /// The declared fields of `declared` that `held` reads differently
+    /// — the comparison every insert-if-absent stub route answers a
+    /// kept row with, over the keys the declaration carries.
+    fn differs(held: &Value, declared: &Value) -> Vec<String> {
+        declared
+            .as_object()
+            .map(|d| {
+                d.iter()
+                    .filter(|(k, v)| *k != "id" && *k != "code" && held.get(*k) != Some(v))
+                    .map(|(k, _)| k.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The changes from `held` to `declared` on `fields`, the take's
+    /// answer.
+    fn changes(held: &Value, declared: &Value, fields: &[String]) -> Vec<Value> {
+        fields
+            .iter()
+            .map(|f| {
+                json!({"field": f, "from": held.get(f).cloned().unwrap_or(Value::Null),
+                            "to": declared.get(f).cloned().unwrap_or(Value::Null)})
+            })
+            .collect()
+    }
+
+    /// One insert-if-absent / take batch over a `key -> row` map, the
+    /// real doors' answer shape: `{received, inserted, kept, updated,
+    /// unchanged}`.
+    fn batch_into(
+        store: &mut BTreeMap<String, Value>,
+        rows: &[Value],
+        key_of: impl Fn(&Value) -> String,
+        take: bool,
+    ) -> Value {
+        let (mut inserted, mut unchanged) = (0usize, 0usize);
+        let (mut kept, mut updated) = (Vec::new(), Vec::new());
+        for r in rows {
+            let key = key_of(r);
+            match store.get(&key).cloned() {
+                None => {
+                    store.insert(key, r.clone());
+                    inserted += 1;
+                }
+                Some(held) => {
+                    let d = differs(&held, r);
+                    if d.is_empty() {
+                        unchanged += 1;
+                    } else if take {
+                        updated.push(json!({"id": key, "changes": changes(&held, r, &d)}));
+                        store.insert(key, r.clone());
+                    } else {
+                        kept.push(json!({"id": key, "differs": d}));
+                    }
+                }
+            }
+        }
+        json!({"received": rows.len(), "inserted": inserted, "kept": kept,
+               "updated": updated, "unchanged": unchanged})
+    }
+
     fn route(st: &mut Stub, method: &str, path: &str, body: &str) -> (u16, String) {
+        // The mode rides the query string; the path is matched bare.
+        let (path, take) = match path.split_once('?') {
+            Some((p, q)) => (p, q == "mode=take"),
+            None => (path, false),
+        };
         let seg = |i: usize| path.split('/').nth(i).unwrap_or("").to_string();
         match (method, path) {
             ("POST", "/api/classes/batch") => {
-                let n = serde_json::from_str::<Vec<Value>>(body)
-                    .map(|v| v.len())
-                    .unwrap_or(0);
-                (200, json!({"received": n, "inserted": n}).to_string())
+                let rows = serde_json::from_str::<Vec<Value>>(body).unwrap_or_default();
+                let key = |r: &Value| {
+                    format!(
+                        "{}/{}",
+                        r["subject_kind"].as_str().unwrap_or(""),
+                        r["code"].as_str().unwrap_or("")
+                    )
+                };
+                // The real batch has no take: insert-if-absent, kept
+                // rows named; the edit door below is the take.
+                let mut out = batch_into(&mut st.classes, &rows, key, false);
+                out.as_object_mut().unwrap().remove("updated");
+                (200, out.to_string())
+            }
+            ("GET", p) if p.starts_with("/api/classes/") => {
+                let key = format!("{}/{}", seg(3), seg(4));
+                match st.classes.get(&key) {
+                    Some(v) => (200, v.to_string()),
+                    None => (404, "no such class".into()),
+                }
+            }
+            ("PUT", p) if p.starts_with("/api/classes/") => {
+                let key = format!("{}/{}", seg(3), seg(4));
+                let row: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                match st.classes.get_mut(&key) {
+                    Some(held) => {
+                        *held = row.clone();
+                        (200, row.to_string())
+                    }
+                    None => (404, "no such class".into()),
+                }
             }
             ("POST", "/api/locations/batch") => {
                 // The classes batch shape: a bare JSON array of rows.
@@ -1957,25 +2317,28 @@ terminal = { outcome = "sponsored" }
                 )
             }
             ("POST", "/api/agents/batch") => {
-                // Insert by id; a held row is updated on the declared
-                // field that differs (here: display_name only) and the
-                // change is named from → to, as the real door answers.
+                // Insert by id; a held row that differs on the declared
+                // field (here: display_name only) is kept and named by
+                // default, updated with the change named from → to
+                // under `?mode=take`, as the real door answers.
                 let rows = serde_json::from_str::<Vec<Value>>(body).unwrap_or_default();
                 let mut inserted = 0usize;
                 let mut unchanged = 0usize;
                 let mut updated = Vec::new();
+                let mut kept = Vec::new();
                 for r in &rows {
                     let id = r["id"].as_str().unwrap_or("").to_string();
                     let name = r["display_name"].as_str().unwrap_or("").to_string();
                     match st.agents.get(&id).cloned() {
                         Some(have) if have == name => unchanged += 1,
-                        Some(have) => {
+                        Some(have) if take => {
                             updated.push(json!({
                                 "id": id,
                                 "changes": [{"field": "display_name", "from": have, "to": name}]
                             }));
                             st.agents.insert(id, name);
                         }
+                        Some(_) => kept.push(json!({"id": id, "differs": ["display_name"]})),
                         None => {
                             st.agents.insert(id, name);
                             inserted += 1;
@@ -1986,7 +2349,7 @@ terminal = { outcome = "sponsored" }
                     200,
                     json!({
                         "received": rows.len(), "inserted": inserted,
-                        "updated": updated, "unchanged": unchanged
+                        "updated": updated, "kept": kept, "unchanged": unchanged
                     })
                     .to_string(),
                 )
@@ -2016,21 +2379,54 @@ terminal = { outcome = "sponsored" }
                     json!({"received": rows.len(), "inserted": inserted, "kept": kept}).to_string(),
                 )
             }
-            ("POST", "/api/calendar/business-calendars/batch") => (200, "{}".into()),
-            ("POST", "/api/subjects/company") => (201, String::new()),
-            ("GET", p) if p.starts_with("/api/policy/rules/") => {
-                if st.policy.contains(&seg(4)) {
-                    (200, "{}".into())
-                } else {
-                    (404, String::new())
+            ("POST", "/api/calendar/business-calendars/batch") => {
+                let rows = serde_json::from_str::<Vec<Value>>(body).unwrap_or_default();
+                let key = |r: &Value| r["code"].as_str().unwrap_or("").to_string();
+                let out = batch_into(&mut st.calendars, &rows, key, take);
+                (200, out.to_string())
+            }
+            ("POST", "/api/subjects/company") => {
+                // The mint, for one row: insert-if-absent by id, the
+                // label kept and named by default, taken under take.
+                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                let label = v["label"].as_str().unwrap_or("").to_string();
+                match st.company.clone() {
+                    None => {
+                        st.company = Some(label);
+                        (201, json!({"received": 1, "inserted": 1, "kept": [], "updated": [], "unchanged": 0}).to_string())
+                    }
+                    Some(have) if have == label => (
+                        200,
+                        json!({"received": 1, "inserted": 0, "kept": [], "updated": [], "unchanged": 1}).to_string(),
+                    ),
+                    Some(have) if take => {
+                        st.company = Some(label.clone());
+                        (
+                            200,
+                            json!({"received": 1, "inserted": 0, "kept": [],
+                                   "updated": [{"id": v["id"], "changes": [{"field": "label", "from": have, "to": label}]}],
+                                   "unchanged": 0})
+                            .to_string(),
+                        )
+                    }
+                    Some(_) => (
+                        200,
+                        json!({"received": 1, "inserted": 0, "kept": [{"id": v["id"], "differs": ["label"]}],
+                               "updated": [], "unchanged": 0})
+                        .to_string(),
+                    ),
                 }
             }
+            ("GET", p) if p.starts_with("/api/policy/rules/") => match st.policy.get(&seg(4)) {
+                Some(rule) => (200, rule.to_string()),
+                None => (404, String::new()),
+            },
             ("POST", "/api/policy/rules") => {
-                let id = serde_json::from_str::<Value>(body)
-                    .ok()
-                    .and_then(|v| v["rule"]["id"].as_str().map(str::to_string))
-                    .unwrap_or_default();
-                st.policy.insert(id);
+                let rule = serde_json::from_str::<Value>(body)
+                    .map(|v| v["rule"].clone())
+                    .unwrap_or(Value::Null);
+                let id = rule["id"].as_str().unwrap_or_default().to_string();
+                st.policy.insert(id, rule);
                 (201, "{}".into())
             }
             ("GET", "/api/people") => (
@@ -2057,18 +2453,23 @@ terminal = { outcome = "sponsored" }
                 st.people.insert(seg(3), row);
                 (200, "{}".into())
             }
-            ("GET", p) if p.starts_with("/api/workflows/") => {
-                if st.workflows.contains(&seg(3)) {
-                    (200, json!({"authoring_job_id": "job-1"}).to_string())
-                } else {
-                    (404, String::new())
-                }
-            }
+            ("GET", p) if p.starts_with("/api/workflows/") => match st.workflows.get(&seg(3)) {
+                Some(live) => (200, live.to_string()),
+                None => (404, String::new()),
+            },
             ("POST", "/api/jobs") => {
+                // A design Job for the kind: the stub's "publish" lands
+                // the live row from the fixture's own file (its facets
+                // are what the bootstrap compares against next time),
+                // marked operator-published by its authoring_job_id.
                 let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
                 let kind = v["subject"]["id"].as_str().unwrap_or("").to_string();
-                st.workflows.insert(kind);
                 st.jobs += 1;
+                let mut live = st.file_specs.get(&kind).cloned().unwrap_or_else(
+                    || json!({"kind": kind, "label": "", "category": "", "steps": []}),
+                );
+                live["authoring_job_id"] = json!(format!("job-{}", st.jobs));
+                st.workflows.insert(kind, live);
                 (200, json!({"id": format!("job-{}", st.jobs)}).to_string())
             }
             ("POST", "/api/credentials/batch") => {
@@ -2094,22 +2495,12 @@ terminal = { outcome = "sponsored" }
             ("POST", "/api/sensors/batch") => {
                 let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
                 assert_eq!(v["tenant_id"], "acme", "the batch names the tenant: {body}");
-                let ids: Vec<String> = v["sensors"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|r| r["id"].as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let inserted = ids
-                    .into_iter()
-                    .filter(|id| st.sensors.insert(id.clone()))
-                    .count();
-                (
-                    200,
-                    json!({"received": v["sensors"].as_array().map_or(0, Vec::len), "inserted": inserted}).to_string(),
-                )
+                let rows = v["sensors"].as_array().cloned().unwrap_or_default();
+                let key = |r: &Value| r["id"].as_str().unwrap_or("").to_string();
+                // No take at this door: insert-if-absent, kept named.
+                let mut out = batch_into(&mut st.sensors, &rows, key, false);
+                out.as_object_mut().unwrap().remove("updated");
+                (200, out.to_string())
             }
             ("POST", "/api/ledger/posting-rules/batch") => {
                 let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
@@ -2221,15 +2612,42 @@ terminal = { outcome = "sponsored" }
         spawn_stub_with(st, route).await
     }
 
+    /// A stub whose "publish" of a workflow kind lands the fixture's
+    /// own spec as the live row (see `Stub::file_specs`).
+    fn stub_for(dir: &Path) -> Arc<Mutex<Stub>> {
+        let specs = boss_jobs::seed_loader::load_workflows_with_owning_team(
+            dir.join("seeds/workflows.toml"),
+            "acme",
+        )
+        .unwrap();
+        let mut st = Stub::default();
+        for s in specs {
+            st.file_specs
+                .insert(s.kind.clone(), serde_json::to_value(&s).unwrap());
+        }
+        Arc::new(Mutex::new(st))
+    }
+
     async fn run_publish(p: Plan, base: String) -> Result<Vec<String>> {
+        run_publish_taking(p, base, Take::default()).await
+    }
+
+    async fn run_publish_taking(p: Plan, base: String, take: Take) -> Result<Vec<String>> {
         tokio::task::spawn_blocking(move || {
             let bases = Bases::resolve(Some(&base));
             let mut lines = Vec::new();
-            publish(&p, &bases, &mut |l| lines.push(l))?;
+            publish(&p, &bases, &take, &mut |l| lines.push(l))?;
             Ok(lines)
         })
         .await
         .unwrap()
+    }
+
+    fn line_of<'a>(lines: &'a [String], path: &str) -> &'a str {
+        lines
+            .iter()
+            .find(|l| l.contains(path))
+            .unwrap_or_else(|| panic!("{path} has a line:\n{}", lines.join("\n")))
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2298,7 +2716,7 @@ terminal = { outcome = "sponsored" }
             "one batch for the sensors file"
         );
         assert_eq!(
-            st.sensors.iter().collect::<Vec<_>>(),
+            st.sensors.keys().collect::<Vec<_>>(),
             ["stripe-sponsorships"]
         );
         assert_eq!(hit("POST", "/api/ledger/posting-rules/batch"), 1);
@@ -2476,7 +2894,7 @@ terminal = { outcome = "sponsored" }
     async fn a_second_publish_writes_nothing_new() {
         let dir = real_shape("idempotent");
         let p = plan(&dir).unwrap();
-        let st = Arc::new(Mutex::new(Stub::default()));
+        let st = stub_for(&dir);
         let base = spawn_stub(st.clone()).await;
 
         run_publish(p.clone(), base.clone()).await.unwrap();
@@ -2813,15 +3231,20 @@ terminal = { outcome = "sponsored" }
         assert!(st.rules.is_empty(), "no draft was written: {:?}", st.rules);
     }
 
-    /// A REGISTERED AGENT IS UPDATED TO THE DECLARATION, AND THE LINE
-    /// NAMES THE CHANGE (backlog 09887242; the door f56155f0 opened).
-    /// The platform's migration registered `agent-claude` under its own
-    /// display name; the tenant declares the same id under another. The
-    /// tenant owns its agents: the declared field is applied, the line
-    /// reads `updated 1: agent-claude (display_name <from> → <to>)`, and
-    /// the next publish says `already as declared`.
+    /// A REGISTERED AGENT THAT DIFFERS IS KEPT BY DEFAULT AND NAMED;
+    /// `--take agents` APPLIES THE DECLARATION AND NAMES THE CHANGE
+    /// (design e187198f; the door f56155f0 opened, the rule 09887242
+    /// made a decision). The platform's migration registered
+    /// `agent-claude` under its own display name; the tenant declares
+    /// the same id under another. By default the instance's row is
+    /// kept and the line reads `kept: agent-claude differs on
+    /// display_name (the instance is the truth; --take agents
+    /// overwrites)` — the batch is sent WITHOUT `?mode=take`; under
+    /// `--take agents` the batch goes with `?mode=take`, the field is
+    /// applied, the line reads `updated 1: agent-claude (display_name
+    /// <from> → <to>)`, and the next publish says `already as declared`.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_registered_agent_is_updated_to_the_declaration_and_the_change_is_named() {
+    async fn a_registered_agent_that_differs_is_kept_by_default_and_taken_only_by_decision() {
         let dir = real_shape("agent-updated");
         let p = plan(&dir).unwrap();
         let st = Arc::new(Mutex::new(Stub::default()));
@@ -2831,48 +3254,108 @@ terminal = { outcome = "sponsored" }
         );
         let base = spawn_stub(st.clone()).await;
         let lines = run_publish(p.clone(), base.clone()).await.unwrap();
-        let agents_line = lines
-            .iter()
-            .find(|l| l.contains("seeds/agents.toml"))
-            .unwrap();
+        let agents_line = line_of(&lines, "seeds/agents.toml");
         assert!(
             agents_line.contains("POST /api/agents/batch")
                 && agents_line.contains(
-                    "received 1, inserted 0, updated 1: agent-claude (display_name Claude \
-                     (Claude Code sessions on the dev pod) → Claude (engineering))"
+                    "received 1, inserted 0; kept: agent-claude differs on display_name (the \
+                     instance is the truth; --take agents overwrites)"
                 ),
             "{agents_line}"
         );
-        assert_eq!(
-            st.lock().unwrap().agents["agent-claude"],
-            "Claude (engineering)",
-            "the declaration wins on the declared field"
-        );
-        let lines = run_publish(p, base).await.unwrap();
-        let agents_line = lines
-            .iter()
-            .find(|l| l.contains("seeds/agents.toml"))
+        {
+            let st = st.lock().unwrap();
+            assert_eq!(
+                st.agents["agent-claude"], "Claude (Claude Code sessions on the dev pod)",
+                "the instance's row is kept"
+            );
+            assert!(
+                st.log
+                    .iter()
+                    .any(|(m, p, _, _)| m == "POST" && p == "/api/agents/batch"),
+                "the batch went without a mode: {:?}",
+                st.log.iter().map(|l| &l.1).collect::<Vec<_>>()
+            );
+        }
+
+        let lines = run_publish_taking(p.clone(), base.clone(), Take::named(&["agents"]))
+            .await
             .unwrap();
+        let agents_line = line_of(&lines, "seeds/agents.toml");
+        assert!(
+            agents_line.contains(
+                "received 1, inserted 0, updated 1: agent-claude (display_name Claude \
+                 (Claude Code sessions on the dev pod) → Claude (engineering))"
+            ) && !agents_line.contains("kept:"),
+            "{agents_line}"
+        );
+        {
+            let st = st.lock().unwrap();
+            assert_eq!(
+                st.agents["agent-claude"], "Claude (engineering)",
+                "the declaration wins under take"
+            );
+            assert!(
+                st.log
+                    .iter()
+                    .any(|(m, p, _, _)| m == "POST" && p == "/api/agents/batch?mode=take"),
+                "the take rode the query string: {:?}",
+                st.log.iter().map(|l| &l.1).collect::<Vec<_>>()
+            );
+        }
+        let lines = run_publish(p, base).await.unwrap();
+        let agents_line = line_of(&lines, "seeds/agents.toml");
         assert!(
             agents_line.contains("received 1, inserted 0, 1 already as declared")
-                && !agents_line.contains("updated 1"),
+                && !agents_line.contains("updated 1")
+                && !agents_line.contains("kept:"),
             "{agents_line}"
         );
     }
 
-    /// AN EMPLOYEE ALREADY THERE IS UPDATED ON THE DECLARED FIELDS THAT
-    /// DIFFER, AND THE REST IS KEPT (backlog 09887242). Measured
-    /// 2026-09-17 on prod: emp-david read `loc-hq` — the first publish's
-    /// value — while the tenant's employees.json had said
-    /// `loc-algedonic-hq` for a day, because the 409 on the re-POST was
-    /// counted as "already there" and nothing compared the row. Now the
-    /// 409's GET is compared key by key against the declaration: a
-    /// declared key that differs is PUT (the door's own
-    /// `people.employee.updated`), a column the tenant does not declare
-    /// (here a salary set out of band) rides the PUT unchanged, the line
-    /// names the change, and the next publish PUTs nothing.
+    /// `--take` NAMES ONLY A REGISTRY A DOOR CAN OVERWRITE. A typo or a
+    /// registry with no overwrite (sensors) is refused naming the
+    /// list, so a mis-spelt take never reads as "nothing taken".
+    #[test]
+    fn take_parses_the_takeable_registries_and_refuses_the_rest() {
+        let t = Take::parse(Some("agents, employees")).unwrap();
+        assert!(t.has("agents") && t.has("employees") && !t.has("classes"));
+        assert_eq!(t.mode("agents"), PublishMode::Take);
+        assert_eq!(t.mode("classes"), PublishMode::InsertIfAbsent);
+        assert!(Take::parse(None).unwrap().is_empty());
+        assert!(Take::parse(Some("")).unwrap().is_empty());
+        for bad in ["sensors", "agent", "everything"] {
+            let err = Take::parse(Some(bad)).unwrap_err().to_string();
+            assert!(
+                err.contains(bad) && err.contains("classes, calendars"),
+                "{err}"
+            );
+        }
+        assert!(
+            Take::default()
+                .describe()
+                .contains("every door is insert-if-absent")
+        );
+        assert!(t.describe().contains("take: agents, employees"));
+    }
+
+    /// AN EMPLOYEE ALREADY THERE IS KEPT BY DEFAULT WITH THE DIFFERING
+    /// DECLARED FIELDS NAMED; `--take employees` APPLIES THEM AND KEEPS
+    /// THE REST (design e187198f over backlog 09887242). Measured
+    /// 2026-09-17 on prod: emp-david read `loc-hq` while the tenant's
+    /// employees.json said `loc-algedonic-hq`, and the 409 on the
+    /// re-POST was counted as "already there" with nothing compared —
+    /// the silence 09887242 fixed by applying the declaration on every
+    /// publish, which then reverted every operator edit at the next
+    /// boot. Now the 409's GET is compared key by key against the
+    /// declaration: by default the row is kept and the line names the
+    /// fields; under take a declared key that differs is PUT (the
+    /// door's own `people.employee.updated`), a column the tenant does
+    /// not declare (here a salary set out of band) rides the PUT
+    /// unchanged, the line names the change, and the next publish
+    /// PUTs nothing.
     #[tokio::test(flavor = "multi_thread")]
-    async fn an_employee_already_there_is_updated_on_declared_fields_and_the_rest_kept() {
+    async fn an_employee_that_differs_is_kept_by_default_and_taken_on_declared_fields_only() {
         let dir = real_shape("employee-updated");
         // The tenant declares the founder at its own site and does not
         // declare a salary at all.
@@ -2897,15 +3380,37 @@ terminal = { outcome = "sponsored" }
                 "certifications": [], "annual_salary_cents": 12_000_000}),
         );
         let base = spawn_stub(st.clone()).await;
+        // By default: kept, named, no PUT.
         let lines = run_publish(p.clone(), base.clone()).await.unwrap();
-        let people_line = lines
-            .iter()
-            .find(|l| l.contains("seeds/employees.json"))
+        let people_line = line_of(&lines, "seeds/employees.json");
+        assert!(
+            people_line.contains(
+                "0 posted, 0/0 linked; kept: emp-david differs on location (the instance is \
+                 the truth; --take employees overwrites)"
+            ) && !people_line.contains("updated"),
+            "{people_line}"
+        );
+        {
+            let st = st.lock().unwrap();
+            assert_eq!(
+                st.people["emp-david"]["location"], "loc-hq",
+                "the instance's row is kept"
+            );
+            assert!(
+                !st.log.iter().any(|(m, _, _, _)| m == "PUT"),
+                "nothing is PUT under the default: {:?}",
+                st.log.iter().map(|l| (&l.0, &l.1)).collect::<Vec<_>>()
+            );
+        }
+        // Under --take employees: the declared field is applied.
+        let lines = run_publish_taking(p.clone(), base.clone(), Take::named(&["employees"]))
+            .await
             .unwrap();
+        let people_line = line_of(&lines, "seeds/employees.json");
         assert!(
             people_line.contains(
                 "0 posted, updated 1: emp-david (location loc-hq → loc-acme-hq), 0/0 linked"
-            ),
+            ) && !people_line.contains("kept:"),
             "{people_line}"
         );
         {
@@ -2946,6 +3451,181 @@ terminal = { outcome = "sponsored" }
             !st.log[first_len..].iter().any(|(m, _, _, _)| m == "PUT"),
             "the second publish updated nothing: {:?}",
             &st.log[first_len..]
+        );
+    }
+
+    /// EVERY REGISTRY'S LINE NAMES ITS KEPT-BUT-DIFFERING ROWS, IN ONE
+    /// SHAPE (design e187198f). The instance holds an edited row of
+    /// every registry that used to say nothing — a class, a calendar,
+    /// the company label, a policy rule, a sensor, a workflow — and the
+    /// file's row differs. A default publish writes none of them and
+    /// every line reads `kept: <id> differs on <fields> (the instance
+    /// is the truth; --take <registry> overwrites)`, or, for the one
+    /// registry no door overwrites, says so.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_registry_names_its_kept_but_differing_rows_in_one_shape() {
+        let dir = real_shape("kept-lines");
+        let p = plan(&dir).unwrap();
+        let st = stub_for(&dir);
+        let base = spawn_stub(st.clone()).await;
+        // Land the file once, then edit the instance behind it the way
+        // an operator would: a renamed class, a longer closed set, a
+        // new company label, a narrower policy scope, a slower sensor,
+        // a re-described workflow with a step added in /it/registry.
+        run_publish(p.clone(), base.clone()).await.unwrap();
+        {
+            let mut st = st.lock().unwrap();
+            st.classes.get_mut("employee/founder").unwrap()["display_name"] =
+                json!("Founder & CEO");
+            st.calendars.get_mut("acme-founder").unwrap()["closed"] =
+                json!(["2026-12-25", "2026-12-26"]);
+            st.company = Some("Acme Holdings, LLC".into());
+            st.policy.get_mut("founder:job:read").unwrap()["scope"] = json!("team");
+            st.sensors.get_mut("stripe-sponsorships").unwrap()["every_minutes"] = json!(60);
+            let live = st.workflows.get_mut("receive-a-sponsorship").unwrap();
+            live["description"] = json!("edited in the registry");
+            live["steps"].as_array_mut().unwrap().push(json!({
+                "title": "thanked", "kind": "task", "ready_when": "steps.sponsored.done",
+                "title_template": "Thank the sponsor", "fields": []
+            }));
+        }
+        let before = st.lock().unwrap().writes();
+
+        let lines = run_publish(p.clone(), base.clone()).await.unwrap();
+        assert_eq!(
+            st.lock().unwrap().writes(),
+            before,
+            "a default publish writes nothing over an edited instance"
+        );
+        for (path, want) in [
+            (
+                "seeds/classes.json",
+                "received 2, inserted 0, 1 already as declared; kept: employee/founder differs on \
+                 display_name (the instance is the truth; --take classes overwrites)",
+            ),
+            (
+                "seeds/business_calendars.json",
+                "received 1, inserted 0; kept: acme-founder differs on closed (the instance is \
+                 the truth; --take calendars overwrites)",
+            ),
+            (
+                "tenant.toml",
+                "received 1, inserted 0; kept: acme differs on label (the instance is the truth; \
+                 --take company overwrites)",
+            ),
+            (
+                "seeds/policy_rules.toml",
+                "0 posted, 3 already as declared; kept: founder:job:read differs on scope (the \
+                 instance is the truth; --take policy overwrites)",
+            ),
+            (
+                "seeds/sensors.toml",
+                "received 1, inserted 0; kept: stripe-sponsorships differs on every_minutes (the \
+                 instance is the truth; no door overwrites this registry)",
+            ),
+            (
+                "seeds/workflows.toml",
+                "0 published; kept: receive-a-sponsorship differs on description, steps.count, \
+                 steps.titles (the instance is the truth; --take workflows overwrites)",
+            ),
+        ] {
+            let line = line_of(&lines, path);
+            assert!(line.contains(want), "{path}:\n  got  {line}\n  want {want}");
+        }
+        // The class the instance did not edit is not a finding.
+        assert!(
+            !line_of(&lines, "seeds/classes.json").contains("engineering"),
+            "{}",
+            line_of(&lines, "seeds/classes.json")
+        );
+
+        // `--take` on every takeable registry: each overwritten row is
+        // printed field by field, the instance now reads the file, and
+        // the next default publish names nothing.
+        let lines = run_publish_taking(
+            p.clone(),
+            base.clone(),
+            Take::named(&["classes", "calendars", "company", "policy", "workflows"]),
+        )
+        .await
+        .unwrap();
+        for (path, want) in [
+            (
+                "seeds/classes.json",
+                "received 2, inserted 0, updated 1: employee/founder (display_name Founder & CEO \
+                 → Founder), 1 already as declared",
+            ),
+            (
+                "seeds/business_calendars.json",
+                "received 1, inserted 0, updated 1: acme-founder (closed \
+                 [\"2026-12-25\",\"2026-12-26\"] → [\"2026-12-25\"])",
+            ),
+            (
+                "tenant.toml",
+                "received 1, inserted 0, updated 1: acme (label Acme Holdings, LLC → Acme, LLC)",
+            ),
+            (
+                "seeds/policy_rules.toml",
+                "0 posted, updated 1: founder:job:read (scope team → all), 3 already as declared",
+            ),
+            (
+                "seeds/workflows.toml",
+                "0 published, superseded 1: receive-a-sponsorship (description edited in the \
+                 registry → , steps.count 4 → 3, steps.titles \
+                 received,reconcile,sponsored,thanked → received,reconcile,sponsored)",
+            ),
+        ] {
+            let line = line_of(&lines, path);
+            assert!(
+                line.contains(want) && !line.contains("kept:"),
+                "{path}:\n  got  {line}\n  want {want}"
+            );
+        }
+        {
+            let st = st.lock().unwrap();
+            assert_eq!(st.classes["employee/founder"]["display_name"], "Founder");
+            assert_eq!(
+                st.calendars["acme-founder"]["closed"],
+                json!(["2026-12-25"])
+            );
+            assert_eq!(st.company.as_deref(), Some("Acme, LLC"));
+            assert_eq!(st.policy["founder:job:read"]["scope"], "all");
+            assert!(
+                st.log
+                    .iter()
+                    .any(|(m, p, _, _)| m == "PUT" && p == "/api/classes/employee/founder"),
+                "the class take went through the edit door"
+            );
+            assert!(
+                st.log.iter().any(|(m, p, _, _)| m == "POST"
+                    && p == "/api/calendar/business-calendars/batch?mode=take"),
+                "the calendar take rode the query string"
+            );
+            assert!(
+                st.log
+                    .iter()
+                    .any(|(m, p, _, _)| m == "POST" && p == "/api/subjects/company?mode=take"),
+                "the company take rode the query string"
+            );
+        }
+        let lines = run_publish(p, base).await.unwrap();
+        for path in [
+            "seeds/classes.json",
+            "seeds/business_calendars.json",
+            "tenant.toml",
+            "seeds/policy_rules.toml",
+            "seeds/workflows.toml",
+        ] {
+            let line = line_of(&lines, path);
+            assert!(
+                !line.contains("kept:") && !line.contains("updated"),
+                "{path} after the take: {line}"
+            );
+        }
+        assert!(
+            line_of(&lines, "seeds/sensors.toml").contains("kept: stripe-sponsorships"),
+            "the sensor was never taken: {}",
+            line_of(&lines, "seeds/sensors.toml")
         );
     }
 

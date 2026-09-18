@@ -16,6 +16,7 @@ pub mod partition;
 pub mod platform_owner;
 pub mod port;
 pub mod primitives;
+pub mod publish;
 pub mod publisher;
 pub mod rebuild;
 pub mod roles;

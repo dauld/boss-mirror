@@ -16,15 +16,25 @@
 //!
 //! Idempotent: if a `workflow-design` Job has already published a
 //! given target kind (the registry has an active row with an
-//! `authoring_job_id`), the publish skips it. Re-running after a
-//! partial failure resumes from where it left off.
+//! `authoring_job_id`), the publish keeps it — and when the file
+//! differs from the live row on a facet the drift lint compares
+//! ([`workflow_facets`]), the kind is NAMED in the outcome with those
+//! facets (design e187198f, 2026-09-18: the instance is the truth,
+//! and a repo edit that does not land is named, never silent; until
+//! then a differing kind was skipped without a word, so a repo edit to
+//! `seeds/workflows.toml` was dead text on a running instance).
+//! `force_republish` supersedes ONLY the kinds that differ, each
+//! change named. Re-running after a partial failure resumes from
+//! where it left off.
 //!
 //! Hard-fails on any non-2xx response. The seed regens that consume
 //! this output expect every kind to actually land in the registry.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use boss_core::publish::{FieldChange, KeptRow, UpdatedRow};
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
 use tracing::{info, warn};
@@ -40,8 +50,8 @@ use crate::registry::WorkflowSpec;
 /// `"<tenant>-bootstrap"` — see
 /// [`crate::seed_loader::load_workflows_with_owning_team`]); `dev`
 /// auto-walks the sign-off step (development only);
-/// `force_republish` re-publishes even already-operator-published
-/// kinds (each lands as a new version); `x_boss_user` overrides the
+/// `force_republish` re-publishes an already-operator-published kind
+/// whose file differs (a new version supersedes); `x_boss_user` overrides the
 /// default `automation:bootstrap` / `platform-admin` / `operator`
 /// header when `Some`.
 ///
@@ -54,7 +64,7 @@ pub fn publish_workflows(
     dev: bool,
     force_republish: bool,
     x_boss_user: Option<&str>,
-) -> Result<()> {
+) -> Result<WorkflowPublishOutcome> {
     let user_header = x_boss_user.map(|s| s.to_string()).unwrap_or_else(|| {
         json!({
             "id": "automation:bootstrap",
@@ -100,38 +110,192 @@ pub fn publish_workflows(
         "starting workflow bootstrap"
     );
 
-    let mut published = 0usize;
-    let mut skipped = 0usize;
+    let mut out = WorkflowPublishOutcome::default();
     for spec in &specs {
         // Skip if already operator-published. The registry's
         // `created_by` discriminator is the source of truth: rows
         // landed via a Job have `created_by = "job-<uuid>"`,
         // rows that came from `platform_workflows()` carry
         // `created_by = "bootstrap"`.
-        match active_kind_provenance(&client, api_base, &headers, &spec.kind)? {
-            Provenance::OperatorPublished if !force_republish => {
-                info!(kind = %spec.kind, "already operator-published; skipping");
-                skipped += 1;
-                continue;
-            }
+        let (provenance, live) = active_kind(&client, api_base, &headers, &spec.kind)?;
+        let changes = match provenance {
             Provenance::OperatorPublished => {
+                // The kind is live: what does the file say differently?
+                // Named either way (design e187198f) — kept under the
+                // default, superseded under force.
+                let changes = workflow_changes(&live, spec);
+                if changes.is_empty() {
+                    info!(kind = %spec.kind, "already published as the file declares; skipping");
+                    out.unchanged += 1;
+                    continue;
+                }
+                if !force_republish {
+                    info!(kind = %spec.kind, differs = ?changes.iter().map(|c| c.field.as_str()).collect::<Vec<_>>(), "already operator-published and the file differs; kept (the instance is the truth)");
+                    out.kept.push(KeptRow {
+                        id: spec.kind.clone(),
+                        differs: changes.into_iter().map(|c| c.field).collect(),
+                    });
+                    continue;
+                }
                 info!(kind = %spec.kind, "already operator-published; --force-republish set, publishing new version");
+                Some(changes)
             }
-            Provenance::BootstrapOwned | Provenance::Missing => {}
-        }
+            Provenance::BootstrapOwned | Provenance::Missing => None,
+        };
         bootstrap_kind(&client, api_base, &headers, spec, dev, &signer)
             .with_context(|| format!("bootstrap of `{}`", spec.kind))?;
-        published += 1;
+        match changes {
+            Some(changes) => out.superseded.push(UpdatedRow {
+                id: spec.kind.clone(),
+                changes,
+            }),
+            None => out.published.push(spec.kind.clone()),
+        }
     }
 
     info!(
-        published,
-        skipped,
+        published = out.published.len(),
+        superseded = out.superseded.len(),
+        kept = out.kept.len(),
+        unchanged = out.unchanged,
         total = specs.len(),
         owning_team = %owning_team,
         "workflow bootstrap complete"
     );
-    Ok(())
+    Ok(out)
+}
+
+/// What a workflow publish did: kinds published (new, or over a
+/// bootstrap-owned row), kinds a `force_republish` SUPERSEDED with a
+/// new version (each differing facet named from → to), kinds kept as
+/// the instance publishes them with the differing facets named, and
+/// kinds already as the file declares.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WorkflowPublishOutcome {
+    pub published: Vec<String>,
+    pub superseded: Vec<UpdatedRow>,
+    pub kept: Vec<KeptRow>,
+    pub unchanged: usize,
+}
+
+impl WorkflowPublishOutcome {
+    /// One line for a publish report.
+    pub fn summary(&self) -> String {
+        let mut s = format!("{} published", self.published.len());
+        if !self.published.is_empty() {
+            s.push_str(&format!(" ({})", self.published.join(", ")));
+        }
+        if !self.superseded.is_empty() {
+            s.push_str(&format!(
+                ", superseded {}: {}",
+                self.superseded.len(),
+                self.superseded
+                    .iter()
+                    .map(UpdatedRow::render)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+        if self.unchanged > 0 {
+            s.push_str(&format!(", {} already as declared", self.unchanged));
+        }
+        let kept = boss_core::publish::render_kept(&self.kept, Some("workflows"));
+        if !kept.is_empty() {
+            s.push_str("; ");
+            s.push_str(&kept);
+        }
+        s
+    }
+}
+
+/// The facets a live kind and its file are compared on — the SAME
+/// list `infra/lint/the-live-protocols-are-the-authored-protocols.sh`
+/// compares (its `FIELDS` and `step_facets`), so the publish line and
+/// the daily drift measurement name the same disagreements: the three
+/// scalar strings an operator reads (`label`, `description`,
+/// `category`) and the step facets both sides state verbatim
+/// (`steps.count`, `steps.titles`, and per title held on BOTH sides
+/// `steps.<title>.required` + `steps.<title>.title_template`). The
+/// structural fields (predicates, kinds, metadata_schema) are not
+/// compared here for the reason the lint gives: they need the publish
+/// path's normalisation before an equality means anything.
+pub fn workflow_facets(spec: &Value) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for f in ["label", "description", "category"] {
+        out.insert(
+            f.to_string(),
+            spec.get(f)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        );
+    }
+    let steps: Vec<&Value> = spec
+        .get("steps")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().collect())
+        .unwrap_or_default();
+    let titles: Vec<String> = steps
+        .iter()
+        .map(|s| {
+            s.get("title")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect();
+    out.insert("steps.count".to_string(), titles.len().to_string());
+    out.insert("steps.titles".to_string(), titles.join(","));
+    for (s, title) in steps.iter().zip(&titles) {
+        let mut required: Vec<String> = s
+            .get("fields")
+            .and_then(Value::as_array)
+            .map(|fields| {
+                fields
+                    .iter()
+                    .filter(|f| f.get("required") == Some(&Value::Bool(true)))
+                    .map(|f| {
+                        f.get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        required.sort();
+        out.insert(format!("steps.{title}.required"), required.join(","));
+        out.insert(
+            format!("steps.{title}.title_template"),
+            s.get("title_template")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        );
+    }
+    out
+}
+
+/// Every facet the file's `spec` disagrees with the `live` row on,
+/// from → to. Per-step facets compare only for titles BOTH sides hold
+/// (the lint's rule): a step on one side only shows in `steps.titles`
+/// once, not as a line against nothing.
+pub fn workflow_changes(live: &Value, spec: &WorkflowSpec) -> Vec<FieldChange> {
+    let file = workflow_facets(&serde_json::to_value(spec).unwrap_or(Value::Null));
+    let live = workflow_facets(live);
+    file.iter()
+        .filter(|(k, _)| {
+            // A per-step facet is compared only when the live side
+            // holds the same title.
+            !k.starts_with("steps.")
+                || ["steps.count", "steps.titles"].contains(&k.as_str())
+                || live.contains_key(*k)
+        })
+        .filter_map(|(k, want)| {
+            let have = live.get(k).cloned().unwrap_or_default();
+            (have != *want).then(|| FieldChange::new(k, &have, want))
+        })
+        .collect()
 }
 
 /// The actor id an `x-boss-user` header names — the walk's signer.
@@ -174,16 +338,18 @@ fn provenance_of(body: &Value) -> Provenance {
     }
 }
 
-fn active_kind_provenance(
+/// The active row for `kind` as the registry answers it, with its
+/// provenance; `Missing` rides an empty body.
+fn active_kind(
     client: &Client,
     api_base: &str,
     headers: &reqwest::header::HeaderMap,
     kind: &str,
-) -> Result<Provenance> {
+) -> Result<(Provenance, Value)> {
     let url = jobs_url(api_base, &format!("/api/workflows/{kind}"));
     let resp = client.get(&url).headers(headers.clone()).send()?;
     if resp.status() == 404 {
-        return Ok(Provenance::Missing);
+        return Ok((Provenance::Missing, Value::Null));
     }
     if !resp.status().is_success() {
         anyhow::bail!(
@@ -193,7 +359,7 @@ fn active_kind_provenance(
         );
     }
     let body: Value = resp.json()?;
-    Ok(provenance_of(&body))
+    Ok((provenance_of(&body), body))
 }
 
 fn bootstrap_kind(
@@ -638,6 +804,77 @@ mod tests {
         assert_eq!(
             jobs_url("http://localhost:7900/", "/api/jobs"),
             "http://localhost:7900/api/jobs"
+        );
+    }
+
+    /// The live-vs-file comparison names the lint's facets and nothing
+    /// else (design e187198f): a description edit, a step added on one
+    /// side (once, in `steps.titles`, never per facet against
+    /// nothing), a required field, a title template; predicates and
+    /// kinds are structural and out. Identical rows compare empty.
+    #[test]
+    fn a_live_kind_is_compared_on_the_lints_facets() {
+        let file: WorkflowSpec = serde_json::from_value(json!({
+            "kind": "receive-a-sponsorship", "version": 1, "status": "active",
+            "label": "Receive a sponsorship", "description": "Stripe reported a payment",
+            "category": "sales", "subject_kinds": ["account"],
+            "steps": [
+                {"title": "received", "kind": "trigger", "ready_when": "true",
+                 "title_template": "Stripe reported a payment", "fields": []},
+                {"title": "reconcile", "kind": "task", "ready_when": "steps.received.done",
+                 "title_template": "Match the payment",
+                 "fields": [{"name": "stripe_event_id", "field_type": "string", "required": true}]}
+            ],
+            "metadata_schema": {}, "entitlements": {}, "metadata": {},
+            "on_complete_create": [], "owning_team": "acme", "authoring_job_id": null,
+            "created_at": "2026-09-18T00:00:00Z"
+        }))
+        .unwrap();
+        let mut live = serde_json::to_value(&file).unwrap();
+        assert!(workflow_changes(&live, &file).is_empty());
+
+        live["description"] = json!("Stripe reported a payment (edited in /it/registry)");
+        live["steps"][1]["ready_when"] = json!("steps.received.done && true");
+        live["steps"][1]["fields"][0]["required"] = json!(false);
+        live["steps"].as_array_mut().unwrap().push(
+            json!({"title": "sponsored", "kind": "outcome", "ready_when": "steps.reconcile.done",
+                         "title_template": "Sponsorship recognized", "fields": []}),
+        );
+        let changes = workflow_changes(&live, &file);
+        let fields: Vec<&str> = changes.iter().map(|c| c.field.as_str()).collect();
+        assert_eq!(
+            fields,
+            [
+                "description",
+                "steps.count",
+                "steps.reconcile.required",
+                "steps.titles"
+            ],
+            "{changes:?}"
+        );
+        assert_eq!(changes[1].render(), "steps.count 3 → 2");
+        assert_eq!(
+            changes[2].render(),
+            "steps.reconcile.required  → stripe_event_id"
+        );
+        assert!(
+            !fields.iter().any(|f| f.contains("sponsored")),
+            "a step on one side only is one finding, in steps.titles"
+        );
+
+        let out = WorkflowPublishOutcome {
+            published: vec!["x".into()],
+            superseded: vec![],
+            kept: vec![KeptRow {
+                id: "receive-a-sponsorship".into(),
+                differs: vec!["description".into()],
+            }],
+            unchanged: 2,
+        };
+        assert_eq!(
+            out.summary(),
+            "1 published (x), 2 already as declared; kept: receive-a-sponsorship differs on \
+             description (the instance is the truth; --take workflows overwrites)"
         );
     }
 }

@@ -9,16 +9,18 @@
 //! admit `crate::trust::is_trusted`** — operator tier or a trusted
 //! internal sibling, the tier `boss tenant publish` signs with.
 //!
-//! `POST /api/agents/batch` takes a bare JSON array of `AgentInput` (the
-//! classes and locations batch shape), validates every row with the
-//! same `validate_agent` the TOML loader ran, refuses the whole batch
-//! (422, deterministic) naming the row, and answers what it did —
-//! rows inserted, rows the registry held that the declaration UPDATED
-//! with each change named (field, from, to; backlog 09887242), rows
-//! already as declared — so what a publish moved is read in the
-//! publish line, never in silence. This batch IS the tenant's update
-//! door: the declaration is the whole row, so a per-row PUT would only
-//! repeat it.
+//! `POST /api/agents/batch[?mode=insert-if-absent|take]` takes a bare
+//! JSON array of `AgentInput` (the classes and locations batch shape),
+//! validates every row with the same `validate_agent` the TOML loader
+//! ran, refuses the whole batch (422, deterministic) naming the row,
+//! and answers what it did — rows inserted, rows the registry held and
+//! KEPT with the declared fields they differ on named (the default;
+//! design e187198f: the instance is the truth), rows a `take` UPDATED
+//! with each change named (field, from, to; the rule of 09887242, now
+//! only by decision), rows already as declared — so what a publish
+//! moved, and what it did not, is read in the publish line, never in
+//! silence. This batch IS the tenant's update door: the declaration is
+//! the whole row, so a per-row PUT would only repeat it.
 //!
 //! A declared `role` or `department` is a Class code under
 //! `(employee, role)` / `(employee, department)` — the same registry
@@ -34,7 +36,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -42,6 +44,7 @@ use axum::{Json, Router};
 
 use boss_classes_client::ClassesClient;
 use boss_core::primitives::ClassRef;
+use boss_core::publish::ModeQuery;
 use boss_policy_client::CurrentUser;
 
 use crate::trust::{can_read, is_trusted};
@@ -122,6 +125,7 @@ async fn list(
 async fn publish(
     State(state): State<Arc<AgentsApiState>>,
     CurrentUser(user): CurrentUser,
+    Query(ModeQuery { mode }): Query<ModeQuery>,
     Json(rows): Json<Vec<AgentInput>>,
 ) -> Response {
     if !is_trusted(&user) {
@@ -146,7 +150,7 @@ async fn publish(
         .ambient_actor()
         .unwrap_or_else(|| boss_core::actor::ActorId::Automation("platform".into()));
     let stamp = boss_core::publisher::EventStamp::new("jobs", actor);
-    match state.registry.publish(&rows, &stamp).await {
+    match state.registry.publish(&rows, mode, &stamp).await {
         Ok(out) => Json(out).into_response(),
         Err(e) => err_response(e),
     }
@@ -250,10 +254,12 @@ mod tests {
     }
 
     /// The tenant batch lands, the roster lists it with its alias, a
-    /// declaration that disagrees with a registered row UPDATES it and
-    /// names each change (backlog 09887242), a re-run of the same
-    /// declaration changes nothing and says so, and an alias the
-    /// tenant did not declare is kept.
+    /// declaration that disagrees with a registered row is KEPT by
+    /// default with the differing fields named (design e187198f: the
+    /// instance is the truth), UPDATES it under `?mode=take` naming
+    /// each change (backlog 09887242), a re-run of the same declaration
+    /// changes nothing and says so, and an alias the tenant did not
+    /// declare is kept.
     #[tokio::test]
     async fn a_tenant_publishes_and_the_roster_lists_the_agent() {
         let registry = Arc::new(InMemoryAgents::new());
@@ -287,6 +293,8 @@ mod tests {
             Arc::new(InMemoryAgents::new().with_agent("agent-claude", ["ops-added@algedonic.dev"]));
         let mut renamed = batch();
         renamed[0]["display_name"] = json!("Claude (renamed)");
+        // The default: the held row is kept, the declared login lands
+        // (nobody held it), and the answer names what still differs.
         let (_, body) = send(
             app(&registry),
             "POST",
@@ -298,6 +306,40 @@ mod tests {
         let out: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(out["inserted"], 0, "a held row is not inserted twice");
         assert_eq!(out["unchanged"], 0);
+        assert_eq!(out["kept"][0]["id"], "agent-claude");
+        assert_eq!(
+            out["kept"][0]["differs"],
+            json!(["display_name", "default_model"]),
+            "{out}"
+        );
+        assert_eq!(
+            out["updated"][0]["changes"][0]["field"], "aliases",
+            "the declared login landed, and that is the one change: {out}"
+        );
+        let rows = registry.list().await.unwrap();
+        assert_eq!(
+            rows[0].display_name, "agent-claude",
+            "the instance's row is kept under the default"
+        );
+        assert_eq!(
+            rows[0].aliases,
+            ["claude@algedonic.dev", "ops-added@algedonic.dev"],
+            "the declared alias landed and the undeclared one is kept"
+        );
+
+        // Under take the declaration overwrites, naming each change.
+        let (_, body) = send(
+            app(&registry),
+            "POST",
+            "/api/agents/batch?mode=take",
+            Some(renamed.clone()),
+            seed(),
+        )
+        .await;
+        let out: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(out["inserted"], 0);
+        assert_eq!(out["kept"], json!([]));
+        assert_eq!(out["unchanged"], 0);
         assert_eq!(out["updated"][0]["id"], "agent-claude");
         let fields: Vec<&str> = out["updated"][0]["changes"]
             .as_array()
@@ -305,18 +347,13 @@ mod tests {
             .iter()
             .map(|c| c["field"].as_str().unwrap())
             .collect();
-        assert_eq!(fields, ["display_name", "default_model", "aliases"]);
+        assert_eq!(fields, ["display_name", "default_model"]);
         assert_eq!(out["updated"][0]["changes"][0]["from"], "agent-claude");
         assert_eq!(out["updated"][0]["changes"][0]["to"], "Claude (renamed)");
         let rows = registry.list().await.unwrap();
         assert_eq!(
             rows[0].display_name, "Claude (renamed)",
-            "the declaration wins on the declared field"
-        );
-        assert_eq!(
-            rows[0].aliases,
-            ["claude@algedonic.dev", "ops-added@algedonic.dev"],
-            "the declared alias landed and the undeclared one is kept"
+            "the declaration wins under take"
         );
 
         // The same declaration again: nothing moves, and the answer
@@ -332,19 +369,32 @@ mod tests {
         let out: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(out["inserted"], 0);
         assert_eq!(out["updated"], json!([]));
+        assert_eq!(out["kept"], json!([]));
         assert_eq!(out["unchanged"], 1);
         let events = registry.recorded_events();
         assert_eq!(
             events.len(),
-            1,
-            "one agent.updated for the change, none for the re-run: {events:?}"
+            2,
+            "one agent.updated for the alias that landed, one for the take, none for the re-run: {events:?}"
         );
-        assert_eq!(events[0].kind, super::super::AGENT_UPDATED);
-        assert_eq!(events[0].payload["id"], "agent-claude");
-        assert_eq!(events[0].payload["display_name"], "Claude (renamed)");
-        assert_eq!(events[0].payload["changes"][0]["field"], "display_name");
-        assert_eq!(events[0].payload["updated_by"], "automation:tenant-seed");
-        assert_eq!(events[0].payload["_actor"], events[0].payload["updated_by"]);
+        assert_eq!(events[1].kind, super::super::AGENT_UPDATED);
+        assert_eq!(events[1].payload["id"], "agent-claude");
+        assert_eq!(events[1].payload["display_name"], "Claude (renamed)");
+        assert_eq!(events[1].payload["changes"][0]["field"], "display_name");
+        assert_eq!(events[1].payload["updated_by"], "automation:tenant-seed");
+        assert_eq!(events[1].payload["_actor"], events[1].payload["updated_by"]);
+
+        // A mode the door does not know is a caller error, not a
+        // silent default.
+        let (status, _) = send(
+            app(&registry),
+            "POST",
+            "/api/agents/batch?mode=overwrite",
+            Some(batch()),
+            seed(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     /// The fact a declaration leaves (backlog d9409039, 2026-09-17):
