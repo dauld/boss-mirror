@@ -30,8 +30,11 @@
 #
 # AND SINCE 2026-09-18, ONE PASS THAT SPANS BOTH AND IS NOT
 # FLOOR-TRIGGERED (backlog 1933db9e, audit H11): a worktree whose
-# branch is GONE FROM THE FORGE, clean and idle, is removed together
-# with the per-worktree cargo target wt-cargo made for it. Measured
+# branch is GONE — no origin/ ref left in the checkout, and either
+# landed on origin/main or abandoned unpushed — clean and idle, is
+# removed together with the per-worktree cargo target wt-cargo made
+# for it. The judgement reads the checkout's OWN refs and never the
+# forge (backlog b50a65ef, below). Measured
 # that day: 203 worktrees under /work/boss, 175 of their 182 branches
 # no longer on the forge, 36 target-* dirs — 364 GB on a 929 GB disk at
 # 77% — and nothing here could see any of it: the floor passes wait for
@@ -91,8 +94,11 @@
 #   BOSS_SCRATCH_FLOOR_GB    free GB to keep on /scratch     (default 50)
 #   BOSS_STALE_TARGET_H      hours before a sibling target dir is dead (default 12)
 #   BOSS_WORK_FLOOR_GB       free GB to keep on /work        (default 6)
-#   BOSS_WORKTREE_MAX_AGE_H  only prune worktrees older than (default 48)
-#   BOSS_WORKTREE_GRACE_H    hours of git quiet before a gone-branch
+#   BOSS_WORKTREE_MAX_AGE_H  only prune worktrees older than; also the
+#                            git quiet before an UNPUSHED worktree (no
+#                            origin/ ref, not on origin/main) counts as
+#                            abandoned                      (default 48)
+#   BOSS_WORKTREE_GRACE_H    hours of git quiet before a LANDED
 #                            worktree is removable          (default 12)
 #   BOSS_WORKTREE_IDLE_H     hours of git quiet before a main/detached
 #                            worktree is removable          (default 168)
@@ -118,13 +124,14 @@ SCRATCH_FLOOR_GB="${BOSS_SCRATCH_FLOOR_GB:-50}"
 STALE_TARGET_H="${BOSS_STALE_TARGET_H:-12}"
 WORK_FLOOR_GB="${BOSS_WORK_FLOOR_GB:-6}"
 WORKTREE_MAX_AGE_H="${BOSS_WORKTREE_MAX_AGE_H:-48}"
-# Hours of git QUIET (no commit, no index or HEAD write) before a
-# worktree whose branch the forge no longer has may go. The forge not
-# having the branch is necessary, not sufficient: a builder's branch is
-# absent from the forge from `git checkout -b` until its push, and its
-# tree is CLEAN in the minutes between its commit and that push. The
-# same 12h as the target pass — longer than any session's silence
-# between two git commands, shorter than the next morning.
+# Hours of git QUIET (no commit, no HEAD, index or reflog write) before a
+# worktree whose branch has LANDED — head on origin/main, no origin/
+# ref left — may go. Landed is necessary, not sufficient: a builder's
+# tree is CLEAN in the minutes between its commit and its push, and an
+# unpushed branch has no origin/ ref either, which is why an unpushed
+# tree waits the longer WORKTREE_MAX_AGE_H instead. The same 12h as
+# the target pass — longer than any session's silence between two git
+# commands, shorter than the next morning.
 WORKTREE_GRACE_H="${BOSS_WORKTREE_GRACE_H:-12}"
 # A worktree on `main` or a detached HEAD has no branch for the forge
 # to have forgotten, so idleness is the whole judgement: 7 days.
@@ -177,7 +184,8 @@ free_kb() {
 problems=0
 
 # Totals every pass leaves for the record at the end.
-WT_PASS=skipped
+WT_PASS=skipped; WT_PASS_REASON=""
+WT_MAIN_SHA=""; WT_MAIN_TS=""
 WT_REMOVED=0; WT_REMOVED_MIB=0
 WT_KEPT_DIRTY=0; WT_KEPT_DIRTY_NAMES=""
 WT_KEPT_LIVE=0; WT_KEPT_RECENT=0; WT_KEPT_LOCKED=0; WT_KEPT_REFUSED=0
@@ -203,21 +211,47 @@ INCREMENTAL_DROPPED=0
 # space, the way the stale-target pass runs on age.
 #
 # THREE THINGS EVERY REMOVAL REQUIRES, and any one missing keeps it:
-#   1. the branch is gone from the forge — from ONE `git ls-remote
-#      --heads origin` read at the start, compared by name. A worktree
-#      on `main` or a detached HEAD has no branch to be gone, so it is
-#      judged by (2) alone with the longer WORKTREE_IDLE_H window;
-#   2. git has been QUIET in it for WORKTREE_GRACE_H hours — no commit,
-#      no HEAD, index or reflog write — because a builder's branch is
-#      absent from the forge until its push and its tree is clean for
-#      the minutes between the commit and the push; the harness's own
-#      `worktree-agent-*` branches never reach the forge at all;
+#   1. the branch is GONE, read from the checkout's OWN refs and never
+#      from the forge: a worktree's branch is gone when the checkout
+#      holds no refs/remotes/origin/<branch> AND EITHER its head is an
+#      ancestor of refs/remotes/origin/main (LANDED — the forge sweeps
+#      a car's branch when it merges) OR git has been quiet in it for
+#      WORKTREE_MAX_AGE_H (ABANDONED unpushed — the harness's own
+#      `worktree-agent-*` branches never reach the forge at all). A
+#      worktree on `main` or a detached HEAD has no branch to be gone,
+#      so it is judged by (2) alone with the longer WORKTREE_IDLE_H
+#      window. The pass first shipped (H11) took this from ONE `git
+#      ls-remote --heads origin`, and on the pod that read failed
+#      every hour: the reclaim sidecar mounts only /work and /scratch
+#      (boss-dev.yaml) — no forge token, no HOME carrying the
+#      credential helper — and the forge answers an anonymous
+#      info/refs with 401, so git asked for a username it had no
+#      terminal to read (`fatal: could not read Username for
+#      'http://10.20.0.15:3000'`, exit 128; measured 2026-09-18,
+#      backlog b50a65ef). The pass skipped in silence and the three
+#      newest packets read `worktree_pass=skipped` with no reason.
+#      The refs are what the operator's session and every builder
+#      worktree fetch (they share one object store), so the pass is
+#      ONLY AS FRESH AS THE DEV CONTAINER'S LAST FETCH — it records
+#      the origin/main sha and its commit time on the packet so a
+#      stale read is visible — and a landed branch's origin/ ref
+#      outlives the forge's copy until a fetch prunes it (fetch.prune
+#      is not set on the pod), which keeps a worktree, never removes
+#      one: every error here is on the side of keeping;
+#   2. git has been QUIET in it for the window (1) chose — no commit,
+#      no HEAD, index or reflog write — because a builder's tree is
+#      clean for the minutes between its commit and its push;
 #   3. the tree is CLEAN: `git status --porcelain` empty, untracked
 #      files included. A dirty tree is kept and NAMED with its count,
 #      in the log and on the packet, so an operator can decide.
 # Locked worktrees, the main checkout and the one this run stands in
 # are never candidates. `git worktree remove` still runs without
 # --force, a second lock on (3).
+#
+# A PASS THAT CANNOT ANSWER — no refs/remotes/origin/main, git refusing
+# — removes nothing AND RECORDS IT: `worktree_pass=skipped` with the
+# reason beside it, counted as a problem so the packet is filed
+# (result=incomplete). A skipped pass is a finding, not silence.
 #
 # WHAT GOES WITH IT: the per-worktree cargo target. wt-cargo names it
 # `$WT_TARGET_ROOT/target-<basename of the worktree>` (infra/dev/
@@ -268,16 +302,27 @@ reclaim_gone_worktrees() {
         log "$REPO_DIR is not a git checkout — worktree pass skipped"
         return 0
     fi
-    # ONE read of the forge, up front. A failed or empty read is NOT
-    # an empty forge — under it every branch would read as gone — so
-    # the pass skips, and says so.
-    local heads live_branches
-    if ! heads=$(git -C "$REPO_DIR" ls-remote --heads origin 2>&1) || [ -z "$heads" ]; then
-        log "worktree pass skipped: the forge's branches could not be read (git ls-remote --heads origin: ${heads:-empty answer})" >&2
+    # ONE read of origin/main, up front, from the checkout's own refs.
+    # Without it "landed" has no meaning — under a missing ref every
+    # branch would read as abandoned-or-not by age alone — so the pass
+    # skips, says so, and RECORDS the skip (below) rather than return
+    # in silence.
+    local main_sha main_ts
+    if ! main_sha=$(git -C "$REPO_DIR" rev-parse --verify -q refs/remotes/origin/main 2>&1) || [ -z "$main_sha" ]; then
+        WT_PASS_REASON="$REPO_DIR has no refs/remotes/origin/main (git fetch origin in the dev container; ${main_sha:-empty answer})"
+        log "worktree pass skipped: $WT_PASS_REASON" >&2
+        problems=$((problems + 1))
         return 0
     fi
-    live_branches=$(printf '%s\n' "$heads" | awk '{ sub("^refs/heads/", "", $2); print $2 }')
+    if ! main_ts=$(git -C "$REPO_DIR" log -1 --format=%ct "$main_sha" 2>&1) || [ -z "$main_ts" ]; then
+        WT_PASS_REASON="git could not read refs/remotes/origin/main at $main_sha (${main_ts:-empty answer})"
+        log "worktree pass skipped: $WT_PASS_REASON" >&2
+        problems=$((problems + 1))
+        return 0
+    fi
+    WT_MAIN_SHA="$main_sha"; WT_MAIN_TS="$main_ts"
     WT_PASS=ran
+    log "worktree pass: judging against origin/main ${main_sha:0:8} (committed $(date -u -d "@$main_ts" +%FT%TZ 2>/dev/null || echo "@$main_ts"), read from $REPO_DIR's refs — only as fresh as the dev container's last fetch)"
 
     # Admin entries whose directory is already gone — a worktree an
     # operator rm -rf'd — hold the branch checked out and nothing else.
@@ -311,11 +356,15 @@ reclaim_gone_worktrees() {
                 window=$WORKTREE_IDLE_H; why="on $branch"
                 ;;
             *)
-                if grep -qxF -- "$branch" <<< "$live_branches"; then
+                if git -C "$REPO_DIR" rev-parse --verify -q "refs/remotes/origin/$branch" >/dev/null 2>&1; then
                     WT_KEPT_LIVE=$((WT_KEPT_LIVE + 1))
                     continue
                 fi
-                window=$WORKTREE_GRACE_H; why="branch $branch is gone from the forge"
+                if git -C "$REPO_DIR" merge-base --is-ancestor "refs/heads/$branch" "$main_sha" 2>/dev/null; then
+                    window=$WORKTREE_GRACE_H; why="branch $branch has no origin/ ref and its head is on origin/main (landed)"
+                else
+                    window=$WORKTREE_MAX_AGE_H; why="branch $branch has no origin/ ref and is not on origin/main (unpushed)"
+                fi
                 ;;
         esac
 
@@ -353,7 +402,7 @@ reclaim_gone_worktrees() {
         '
     )
 
-    log "worktree pass: removed $WT_REMOVED worktree(s) (${WT_REMOVED_MIB}MiB) and $WT_TARGETS_REMOVED target(s) (${WT_TARGETS_MIB}MiB); kept $WT_KEPT_LIVE with a branch the forge still has, $WT_KEPT_RECENT with git activity inside the window, $WT_KEPT_DIRTY dirty, $WT_KEPT_LOCKED locked, $WT_KEPT_REFUSED refused by git; pruned $WT_PRUNED entries whose directory was gone"
+    log "worktree pass: removed $WT_REMOVED worktree(s) (${WT_REMOVED_MIB}MiB) and $WT_TARGETS_REMOVED target(s) (${WT_TARGETS_MIB}MiB); kept $WT_KEPT_LIVE with an origin/ ref still in the checkout, $WT_KEPT_RECENT with git activity inside the window, $WT_KEPT_DIRTY dirty, $WT_KEPT_LOCKED locked, $WT_KEPT_REFUSED refused by git; pruned $WT_PRUNED entries whose directory was gone"
 }
 
 # ---------------------------------------------------------------------
@@ -639,7 +688,8 @@ install_tree_cli() {
 # The sidecar's log is read by nobody (`kubectl logs -c reclaim`, by
 # hand, on a pod whose restarts lose it) — CLAUDE.md §Diagnosis, a check
 # nobody reads is a check that is not running. So a pass that removed
-# anything, or ended with a floor unmet, opens a maintenance packet and
+# anything, ended with a floor unmet, or could not answer (the worktree
+# pass skipped, counted as a problem), opens a maintenance packet and
 # completes its `run` step with the totals, through the SAME two
 # helpers every timer chore uses (the timer is the executor, the Job is
 # the visibility — boss-maintenance-wrap.sh) rather than a third
@@ -678,7 +728,8 @@ record_pass() {
     BOSS_JOBS_URL="$url" BOSS_STEP_ACTOR=automation:dev-scratch-reclaim \
         bash "$step" "$RECLAIM_KIND" run \
             "result=$result" "problems=$problems" \
-            "worktree_pass=$WT_PASS" \
+            "worktree_pass=$WT_PASS" "worktree_pass_reason=$WT_PASS_REASON" \
+            "origin_main_sha=$WT_MAIN_SHA" "origin_main_ref_ts=$WT_MAIN_TS" \
             "worktrees_removed=$WT_REMOVED" "worktrees_removed_mib=$WT_REMOVED_MIB" \
             "worktrees_kept_dirty=$WT_KEPT_DIRTY" "worktrees_kept_dirty_names=$WT_KEPT_DIRTY_NAMES" \
             "worktrees_kept_live=$WT_KEPT_LIVE" "worktrees_kept_recent=$WT_KEPT_RECENT" \
