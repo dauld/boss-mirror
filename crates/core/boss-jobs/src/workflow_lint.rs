@@ -37,6 +37,11 @@
 //!   "who is this for"; an audience shape nothing derives a selector
 //!   from yet (`department`, until f5ebd2e1 car 2) would publish a step
 //!   no queue holds. Both refused, naming the step.
+//! - **Phase 8 — an agent block is runnable.** `agent = { … }` names a
+//!   model the rate card prices (else a run of it could not be costed)
+//!   and a positive budget, and does not sit on a `human_only` step —
+//!   two answers to "who executes this". Refused naming the step and,
+//!   for the model, the models it could have named.
 //!
 //! Runs at author time (`POST /api/workflows/_validate`), publish
 //! time (every registry path that can set a row ACTIVE — see
@@ -99,7 +104,44 @@ pub fn validate_workflow(spec: &WorkflowSpec, registry: &StepRegistry) -> Vec<Wo
     for step in &spec.steps {
         check_audience_is_declared_once(spec, step, &mut errs);
     }
+    // Phase 8 — an agent block is runnable.
+    for step in &spec.steps {
+        check_agent_block_is_runnable(spec, step, &mut errs);
+    }
     errs
+}
+
+/// Phase 8: a step's `agent` block can actually be run (design
+/// c87fb59b car 1, backlog 028891cf).
+///
+/// The block's shape is serde's to refuse (every key required, effort a
+/// closed set); this is the part a parse cannot know. The model must be
+/// one `agent_rate_card` prices — the card is the registry of models
+/// the system can cost, and a run on a model it does not name is
+/// recorded unpriced, which is exactly the "component answering
+/// instead of erroring" that table's comment refuses — so the refusal
+/// names every model it does price. The budget must be positive: zero
+/// would read as "free" the same way. And a `human_only` step that also
+/// says how an agent runs it carries two answers to "who executes
+/// this", the same defect Phase 7 refuses for audiences.
+fn check_agent_block_is_runnable(
+    spec: &WorkflowSpec,
+    step: &StepSpec,
+    errs: &mut Vec<WorkflowLintError>,
+) {
+    let Some(agent) = &step.agent else {
+        return;
+    };
+    if let Some(why) = crate::agent_spec::refusal(agent) {
+        errs.push(err(spec, &step.title, why));
+    }
+    if crate::human_only::declared(&step.metadata_defaults) {
+        errs.push(err(
+            spec,
+            &step.title,
+            "declares an `agent` block on a `human_only` step — two answers to who executes              it; drop the block or the human_only default",
+        ));
+    }
 }
 
 /// Phase 7: a step declares its audience ONCE, and in a shape a reader
@@ -1268,6 +1310,83 @@ mod tests {
         assert_eq!(errs[0].step, "finish");
         assert!(errs[0].reason.contains("department"), "{}", errs[0].reason);
         assert!(errs[0].reason.contains("f5ebd2e1"), "{}", errs[0].reason);
+    }
+
+    // Phase 8 — an agent block names a priced model and a positive
+    // budget (c87fb59b car 1, 028891cf).
+    fn with_agent(agent: crate::agent_spec::AgentSpec) -> WorkflowSpec {
+        let mut spec = viable_spec("agent");
+        spec.steps[1].agent = Some(agent);
+        spec
+    }
+
+    fn builder() -> crate::agent_spec::AgentSpec {
+        crate::agent_spec::AgentSpec {
+            profile: "builder".into(),
+            model: "opus-5[1m]".into(),
+            budget_usd: 5.0,
+            effort: crate::agent_spec::Effort::High,
+        }
+    }
+
+    #[test]
+    fn an_agent_block_on_a_priced_model_is_viable() {
+        let reg = StepRegistry::v1();
+        let errs = validate_workflow(&with_agent(builder()), &reg);
+        assert!(errs.is_empty(), "{errs:?}");
+        // And the publish gate — the one every ACTIVE write runs —
+        // admits it, the same call `_validate` and the seed use.
+        assert!(gate_active(&with_agent(builder())).is_ok());
+    }
+
+    #[test]
+    fn an_agent_block_naming_an_unpriced_model_is_refused_naming_the_priced_ones() {
+        let reg = StepRegistry::v1();
+        let spec = with_agent(crate::agent_spec::AgentSpec {
+            model: "claude-opus-5".into(),
+            ..builder()
+        });
+        let errs = validate_workflow(&spec, &reg);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert_eq!(errs[0].step, "finish");
+        assert!(
+            errs[0].reason.contains("`claude-opus-5`"),
+            "{}",
+            errs[0].reason
+        );
+        assert!(errs[0].reason.contains("opus-5[1m]"), "{}", errs[0].reason);
+        assert!(errs[0].reason.contains("sonnet-5"), "{}", errs[0].reason);
+        assert!(gate_active(&spec).is_err());
+    }
+
+    #[test]
+    fn an_agent_block_with_a_non_positive_budget_is_refused() {
+        let reg = StepRegistry::v1();
+        for budget in [0.0, -5.0] {
+            let spec = with_agent(crate::agent_spec::AgentSpec {
+                budget_usd: budget,
+                ..builder()
+            });
+            let errs = validate_workflow(&spec, &reg);
+            assert_eq!(errs.len(), 1, "{budget}: {errs:?}");
+            assert!(errs[0].reason.contains("budget_usd"), "{}", errs[0].reason);
+        }
+    }
+
+    /// A step that requires a person and declares how an agent runs it
+    /// carries two answers to "who executes this"; refuse it the way
+    /// two audiences are refused.
+    #[test]
+    fn an_agent_block_on_a_human_only_step_is_refused() {
+        let reg = StepRegistry::v1();
+        let mut spec = with_agent(builder());
+        spec.steps[1].metadata_defaults = json!({ "human_only": true });
+        let errs = validate_workflow(&spec, &reg);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].reason.contains("human_only"), "{}", errs[0].reason);
+        // The `false` the retro bundles write is not a declaration.
+        spec.steps[1].metadata_defaults = json!({ "human_only": false });
+        assert!(validate_workflow(&spec, &reg).is_empty());
     }
 
     #[test]

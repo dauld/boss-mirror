@@ -171,6 +171,19 @@ pub struct StepSpec {
     /// disagrees. `None` means today's behaviour, exactly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audience: Option<crate::audience::Audience>,
+    /// HOW AN AGENT RUNS THIS STEP, declared once (design c87fb59b car
+    /// 1, backlog 028891cf): `agent = { profile = "builder", model =
+    /// "opus-5[1m]", budget_usd = 5, effort = "high" }`. The prompt is
+    /// the step's own `procedure`. Projected at materialisation by
+    /// [`crate::agent_spec::projection`] onto four plain step-metadata
+    /// keys (`agent_profile`, `agent_model`, `agent_budget_usd`,
+    /// `agent_effort`) the way an audience projects, so a station's
+    /// `step.metadata_equals` and the claim door read the packet. The
+    /// publish lint refuses a model the rate card cannot price and a
+    /// budget that is not positive. `None` means today's behaviour,
+    /// exactly: nothing is written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<crate::agent_spec::AgentSpec>,
     #[serde(default)]
     pub metadata_defaults: serde_json::Value,
 }
@@ -1734,6 +1747,15 @@ fn merge_metadata(defaults: &serde_json::Value, step: &StepSpec) -> serde_json::
     // reacting to an event and has no workflow row in hand.
     if let (Some(claimable), serde_json::Value::Object(m)) = (step.claimable, &mut merged) {
         m.insert("claimable".to_string(), serde_json::Value::Bool(claimable));
+    }
+    // HOW an agent runs it, the same way: the one block, four plain
+    // keys (`agent_spec::projection`), so a station's
+    // `step.metadata_equals` and the claim door read the packet
+    // (c87fb59b car 1). A step with no block writes none of them.
+    if let (Some(agent), serde_json::Value::Object(m)) = (&step.agent, &mut merged) {
+        for (key, value) in crate::agent_spec::projection(agent) {
+            m.insert(key.to_string(), value);
+        }
     }
     merged
 }
@@ -4684,6 +4706,58 @@ mod tests {
                 by_slug(slug).metadata.get("audience"),
                 Some(&want),
                 "{slug}"
+            );
+        }
+    }
+
+    /// One block, four keys written (c87fb59b car 1, 028891cf). The
+    /// spec below declares an `agent` block on one step and none on the
+    /// other; the materialised packet carries exactly the four plain
+    /// keys a station predicate or the claim door reads on the first,
+    /// and nothing agent-shaped on the second.
+    #[test]
+    fn materialize_writes_the_keys_an_agent_block_projects() {
+        use crate::agent_spec::{AgentSpec, Effort};
+        let mut with_agent = one_step_with("build", crate::audience::Audience::Role("x".into()));
+        with_agent.agent = Some(AgentSpec {
+            profile: "builder".into(),
+            model: "opus-5[1m]".into(),
+            budget_usd: 5.0,
+            effort: Effort::High,
+        });
+        with_agent.metadata_defaults = serde_json::json!({"procedure": "Build it."});
+        let without = one_step_with("review", crate::audience::Audience::Role("x".into()));
+        let spec = WorkflowSpec::platform_seed(
+            "agent-probe",
+            "Agent probe",
+            "platform",
+            vec!["custom".into()],
+            vec![with_agent, without],
+        );
+        let subject = Subject::new("custom", "x");
+        let job_metadata = serde_json::Value::Object(Default::default());
+        let steps = materialize_steps(&spec, &subject, JobId::new(), &job_metadata, StepId::new);
+        let by_slug = |slug: &str| {
+            steps
+                .iter()
+                .find(|s| s.spec_slug.as_deref() == Some(slug))
+                .expect("materialised")
+        };
+
+        let build = by_slug("build");
+        assert_eq!(build.metadata["agent_profile"], "builder");
+        assert_eq!(build.metadata["agent_model"], "opus-5[1m]");
+        assert_eq!(build.metadata["agent_budget_usd"], 5.0);
+        assert_eq!(build.metadata["agent_effort"], "high");
+        // Beside, not instead of, the defaults and the audience keys.
+        assert_eq!(build.metadata["procedure"], "Build it.");
+        assert_eq!(build.metadata["authority_role"], "x");
+
+        let review = by_slug("review");
+        for key in crate::agent_spec::KEYS {
+            assert!(
+                review.metadata.get(key).is_none(),
+                "a step with no agent block writes no `{key}`"
             );
         }
     }

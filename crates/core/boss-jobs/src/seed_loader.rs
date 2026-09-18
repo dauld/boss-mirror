@@ -33,6 +33,8 @@
 //! audience = { role = "head-brewer" }  # who it is for, declared ONCE;
 //!                                  # `authority_role` is its projection
 //! claimable = true              # role queue, not a nomination
+//! agent = { profile = "builder", model = "opus-5[1m]", budget_usd = 5, effort = "high" }
+//!                                  # how an agent runs it; the prompt is `procedure`
 //! metadata_defaults = { mash_temp_f = 152 }
 //! ```
 //!
@@ -54,6 +56,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::agent_spec::AgentSpec;
 use crate::audience::Audience;
 use crate::cadence::{CadenceRuleRow, CadenceRuleSpec};
 use crate::registry::{StepSpec, Terminal, WorkflowSpec, WorkflowStatus};
@@ -167,6 +170,13 @@ struct StepToml {
     /// and the publish verb read by slug.
     #[serde(default)]
     audience: Option<toml::Value>,
+    /// How an agent runs the step, declared ONCE — `agent = { profile,
+    /// model, budget_usd, effort }` (design c87fb59b, backlog 028891cf).
+    /// Raw here for the same reason `audience` is: a refusal names the
+    /// step ([`parse_agent`]). The model and budget are the viability
+    /// lint's to judge, which `parse_workflows` runs.
+    #[serde(default)]
+    agent: Option<toml::Value>,
     #[serde(default)]
     metadata_defaults: serde_json::Value,
 }
@@ -184,6 +194,24 @@ fn parse_audience(
         .map(|v| {
             Audience::deserialize(v).map_err(|e| {
                 SeedLoaderError::Parse(source.to_string(), format!("step `{step}`: audience {e}"))
+            })
+        })
+        .transpose()
+}
+
+/// The shape check on an authored agent block, phrased for the author:
+/// `step `build`: agent unknown variant `max`, expected one of `low`,
+/// `medium`, `high``. The shape is [`AgentSpec`]'s serde derive — every
+/// key required, unknown keys refused; this only adds the step's name.
+fn parse_agent(
+    step: &str,
+    value: Option<toml::Value>,
+    source: &str,
+) -> Result<Option<AgentSpec>, SeedLoaderError> {
+    value
+        .map(|v| {
+            AgentSpec::deserialize(v).map_err(|e| {
+                SeedLoaderError::Parse(source.to_string(), format!("step `{step}`: agent {e}"))
             })
         })
         .transpose()
@@ -362,6 +390,7 @@ fn workflow_toml_to_spec(
         .into_iter()
         .map(|s| {
             let audience = parse_audience(&s.title, s.audience, source)?;
+            let agent = parse_agent(&s.title, s.agent, source)?;
             let derived_role = audience
                 .as_ref()
                 .and_then(|a| crate::audience::selectors_for(a).authority_role);
@@ -380,6 +409,7 @@ fn workflow_toml_to_spec(
                 authority_role: s.authority_role.or(derived_role),
                 claimable: s.claimable,
                 audience,
+                agent,
                 metadata_defaults: s.metadata_defaults,
             })
         })
@@ -1031,6 +1061,107 @@ terminal = { outcome = "done" }
         assert!(err.contains("step `triage`"), "{err}");
         assert!(err.contains("audience"), "{err}");
         assert!(err.contains("unknown variant `team`"), "{err}");
+    }
+
+    /// A step declares how an agent runs it ONCE in TOML (c87fb59b car
+    /// 1, 028891cf): `agent = { profile, model, budget_usd, effort }`
+    /// lands on `StepSpec::agent` typed, an integer budget reads as the
+    /// number it is, and a step without the block carries `None`.
+    #[test]
+    fn a_step_declares_its_agent_block_and_the_loader_types_it() {
+        let text = r#"
+[[workflow]]
+kind = "with-agent"
+label = "With agent"
+category = "platform"
+subject_kinds = ["custom"]
+
+[[workflow.step]]
+title = "filed"
+kind = "task"
+ready_when = "true"
+title_template = "Open"
+
+[[workflow.step]]
+title = "build"
+kind = "task"
+ready_when = "steps.filed.done"
+title_template = "Build"
+audience = { role = "platform-admin" }
+agent = { profile = "builder", model = "opus-5[1m]", budget_usd = 5, effort = "high" }
+metadata_defaults = { procedure = "Build it." }
+terminal = { outcome = "done" }
+"#;
+        let specs = parse_workflows(text, "platform", "<test>").unwrap();
+        assert_eq!(specs[0].steps[0].agent, None);
+        assert_eq!(
+            specs[0].steps[1].agent,
+            Some(crate::agent_spec::AgentSpec {
+                profile: "builder".into(),
+                model: "opus-5[1m]".into(),
+                budget_usd: 5.0,
+                effort: crate::agent_spec::Effort::High,
+            })
+        );
+    }
+
+    /// The refusals name the STEP, like an audience's: an effort
+    /// outside the closed set at parse, an unpriced model or a
+    /// negative budget from the viability lint the loader runs.
+    #[test]
+    fn a_bad_agent_block_is_refused_naming_the_step() {
+        let with = |agent: &str| {
+            format!(
+                r#"
+[[workflow]]
+kind = "bad-agent"
+label = "Bad agent"
+category = "platform"
+subject_kinds = ["custom"]
+
+[[workflow.step]]
+title = "filed"
+kind = "task"
+ready_when = "true"
+title_template = "Open"
+
+[[workflow.step]]
+title = "build"
+kind = "task"
+ready_when = "steps.filed.done"
+title_template = "Build"
+agent = {agent}
+terminal = {{ outcome = "done" }}
+"#
+            )
+        };
+        let err = |agent: &str| {
+            parse_workflows(&with(agent), "platform", "<test>")
+                .unwrap_err()
+                .to_string()
+        };
+
+        let e =
+            err(r#"{ profile = "builder", model = "opus-5[1m]", budget_usd = 5, effort = "max" }"#);
+        assert!(e.contains("step `build`"), "{e}");
+        assert!(e.contains("agent"), "{e}");
+        assert!(e.contains("unknown variant `max`"), "{e}");
+
+        let e =
+            err(r#"{ profile = "builder", model = "nope-9", budget_usd = 5, effort = "high" }"#);
+        assert!(e.contains("step `build`"), "{e}");
+        assert!(e.contains("`nope-9`"), "{e}");
+        assert!(e.contains("opus-5[1m]"), "names the priced models: {e}");
+
+        let e = err(
+            r#"{ profile = "builder", model = "opus-5[1m]", budget_usd = -1, effort = "high" }"#,
+        );
+        assert!(e.contains("step `build`"), "{e}");
+        assert!(e.contains("budget_usd"), "{e}");
+
+        let e = err(r#"{ profile = "builder", model = "opus-5[1m]", effort = "high" }"#);
+        assert!(e.contains("step `build`"), "{e}");
+        assert!(e.contains("budget_usd"), "a missing key is named: {e}");
     }
 
     /// Declaring both, disagreeing, is the two-declarations defect

@@ -503,6 +503,7 @@ mod tests {
             authority_role: None,
             claimable: None,
             audience: None,
+            agent: None,
             metadata_defaults: serde_json::json!({}),
         }
     }

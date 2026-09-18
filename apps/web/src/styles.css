@@ -2453,6 +2453,8 @@ button.manual-tree-node {
   transition: border-color 0.15s;
 }
 .jd-step:hover { border-color: var(--accent); }
+/* The step a click on the workflow diagram focused (WorkflowDetailPage). */
+.jd-step.focused { outline: 2px solid var(--signal); outline-offset: 1px; }
 .jd-step-done { opacity: 0.6; }
 /* Display-state-driven left borders. Queued is subtle (waiting is
    normal); blocked and in-progress-blocked are loud (needs attention);

@@ -32,6 +32,20 @@
     session.value.kind === 'ready' ? session.value.user.id : '',
   );
 
+  // A click on a diagram node focuses that step's definition card
+  // below: the node is highlighted, the card is outlined and scrolled
+  // into view. Until 2026-09-18 the nodes were buttons with no handler
+  // at all — clickable, doing nothing (backlog 68409b1b, found by the
+  // interaction crawl f2b8a01c).
+  let focusedStep = $state<string | null>(null);
+  const stepCardId = (slug: string): string => `step-${slug}`;
+  function focusStep(slug: string): void {
+    focusedStep = focusedStep === slug ? null : slug;
+    if (focusedStep) {
+      document.getElementById(stepCardId(slug))?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }
+
   // Edit / new version (D6): author the next version *through* a fresh
   // `workflow-design` Job seeded from the active spec — never a direct
   // registry write. The active row + in-flight Jobs are untouched until
@@ -295,9 +309,13 @@
           </table>
       </Section>
 
-      {#snippet stepCard(step: StepSpec, bg: string | undefined, mark: string | undefined)}
+      {#snippet stepCard(step: StepSpec, bg: string | undefined, mark: string | undefined, focusable: boolean)}
+        <!-- Only the primary list is focusable from the diagram; the
+             diff renders one slug twice, and two cards cannot share an id. -->
         <div
+          id={focusable ? stepCardId(step.title) : undefined}
           class="jd-step jd-step-ds-ready"
+          class:focused={focusable && focusedStep === step.title}
           style={bg ? `background:${bg}` : ''}
           title={mark}
         >
@@ -362,7 +380,7 @@
                     {@const step = compareSpec.steps.find((s) => s.title === slug)}
                     {#if step}
                       {@const mark = diffMark(step, spec, 'A')}
-                      {@render stepCard(step, diffBackground(mark), mark)}
+                      {@render stepCard(step, diffBackground(mark), mark, false)}
                     {:else}
                       <div class="jd-step jd-step-absent">
                         <span class="mono">{slug}</span> — not present in this version
@@ -380,7 +398,7 @@
                     {@const step = spec.steps.find((s) => s.title === slug)}
                     {#if step}
                       {@const mark = diffMark(step, compareSpec, 'B')}
-                      {@render stepCard(step, diffBackground(mark), mark)}
+                      {@render stepCard(step, diffBackground(mark), mark, false)}
                     {:else}
                       <div class="jd-step jd-step-absent">
                         <span class="mono">{slug}</span> — not present in this version
@@ -397,10 +415,10 @@
           wide
         >
             {@const dag = workflowToDag(spec.steps)}
-            <StepDag nodes={dag.nodes} edges={dag.edges} />
+            <StepDag nodes={dag.nodes} edges={dag.edges} selectedId={focusedStep} onNodeClick={focusStep} />
             <div class="jd-steps">
               {#each spec.steps as step (step.title)}
-                {@render stepCard(step, undefined, undefined)}
+                {@render stepCard(step, undefined, undefined, true)}
               {/each}
             </div>
         </Section>

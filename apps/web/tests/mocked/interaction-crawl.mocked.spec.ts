@@ -432,12 +432,6 @@ const KNOWN_GAPS: ReadonlyArray<Gap> = [
   { route: '/ux/jobs', control: 'Create Ad Hoc Job', why: 'no observable response: presumes a registered ad-hoc kind' },
   { route: '/ux/service', control: 'Create Ad Hoc Job', why: 'no observable response: presumes a registered ad-hoc kind' },
   { route: '/ux/sales', control: 'Create Ad Hoc Job', why: 'no observable response: presumes a registered ad-hoc kind' },
-  // WorkflowDetailPage renders its steps through StepDag, whose nodes
-  // are <button>s wired to an onNodeClick the page never passes — so
-  // every step node is a button that does nothing. StepDag has one
-  // consumer, and that consumer sends no handler.
-  { route: '/it/registry/seasonal-release', control: 'Start', why: 'no observable response: StepDag node buttons have no handler on the workflow detail page' },
-  { route: '/it/registry/seasonal-release', control: 'Finish', why: 'no observable response: StepDag node buttons have no handler on the workflow detail page' },
   // The codebase page paints "0 codebase-metrics packets exist and none
   // carries a measurement" with the FAILURE_MARKER class under a read
   // that succeeded and answered empty. The marker means "this read

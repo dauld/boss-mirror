@@ -78,6 +78,10 @@ kind = "task"
 ready_when = "steps.triage.done AND steps.triage.metadata.disposition = \"design\""
 title_template = "Draft the design"
 audience = { role = "platform-admin" }
+# An analyst's step, not a builder's: agent-claude completed it 4 times
+# live (measured 2026-09-18) writing a design, never code. Same block
+# shape as `build` below; see the note there (c87fb59b car 1).
+agent = { profile = "analyst", model = "opus-5[1m]", budget_usd = 2, effort = "medium" }
 metadata_defaults = { procedure = "File the design-doc that answers this item: `boss design <title> --markdown <file> --question 'Qn|title|proposal' ... --answers <this packet>`. The verb writes the design's id here as design_id and completes this step; the founder's design-review opens on it, asking for that design at /it/design." }
 [[workflow.step.fields]]
 name = "design_id"
@@ -152,6 +156,17 @@ kind = "task"
 ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"build\") OR (steps.design-review.done AND steps.design-review.metadata.verdict = \"approved\")"
 title_template = "Build the change"
 authority_role = "platform-admin"
+# HOW AN AGENT RUNS IT, declared once (design c87fb59b car 1, backlog
+# 028891cf). This is the step the executor lane hands to the agent:
+# measured 2026-09-18 over 155 backlog-items read (every closed one
+# and 50 open), `build` completed 74 times by the car-merged rule on
+# the builder's behalf and 6 times by agent-claude directly — and
+# nothing on the row said which model, at what effort, under what
+# spend. The prompt is not here; it is the procedure a builder is
+# briefed with. Materialisation projects this
+# onto the packet as agent_profile / agent_model / agent_budget_usd /
+# agent_effort, which a station predicate and the claim door read.
+agent = { profile = "builder", model = "opus-5[1m]", budget_usd = 5, effort = "high" }
 
 [[workflow.step]]
 title = "duplicate"

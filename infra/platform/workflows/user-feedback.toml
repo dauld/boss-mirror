@@ -98,6 +98,9 @@ kind = "task"
 ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"design\") OR (steps.investigate.done AND steps.investigate.metadata.disposition = \"design\")"
 title_template = "Draft the design"
 authority_role = "platform-admin"
+# The analyst block backlog-item's `draft-design` carries — one step,
+# one declaration in both kinds (c87fb59b car 1).
+agent = { profile = "analyst", model = "opus-5[1m]", budget_usd = 2, effort = "medium" }
 metadata_defaults = { procedure = "File the design-doc that answers this feedback: `boss design <title> --markdown <file> --question 'Qn|title|proposal' ... --answers <this packet>`. The verb writes the design's id here as design_id and completes this step; the founder's design-review opens on it, asking for that design at /it/design." }
 [[workflow.step.fields]]
 name = "design_id"
@@ -129,6 +132,12 @@ kind = "task"
 ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"build\") OR (steps.investigate.done AND steps.investigate.metadata.disposition = \"build\") OR (steps.design-review.done AND steps.design-review.metadata.verdict = \"approved\")"
 title_template = "Build the change"
 authority_role = "platform-admin"
+# HOW AN AGENT RUNS IT, declared once (design c87fb59b car 1, backlog
+# 028891cf) — the same block backlog-item's `build` carries, because it
+# is the same step: the executor lane's build. Projected onto the
+# packet as agent_profile / agent_model / agent_budget_usd /
+# agent_effort at materialisation.
+agent = { profile = "builder", model = "opus-5[1m]", budget_usd = 5, effort = "high" }
 
 [[workflow.step]]
 title = "needs-info"

@@ -259,3 +259,7 @@ required-features = ["postgres"]
 [[test]]
 name = "the_cadence_rules_bundle_is_the_migrations_pg"
 required-features = ["postgres"]
+
+[[test]]
+name = "the_models_a_step_may_name_are_the_rate_card_pg"
+required-features = ["postgres"]

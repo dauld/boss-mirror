@@ -237,25 +237,46 @@
       {/each}
     </svg>
 
+    {#snippet nodeBody(n: Placed)}
+      <span class="node-top">
+        {#if n.status}<span class="node-icon">{ICON[n.status] ?? '○'}</span>{/if}
+        <span class="node-kind">{n.kind}</span>
+        {#if n.terminal}<span class="node-terminal">⤳ {n.terminal}</span>{/if}
+      </span>
+      <span class="node-title">{n.title}</span>
+      {#if n.badge}<span class="node-badge">{n.badge}</span>{/if}
+      {#if n.pulse}{#key n.pulse}<span class="node-pulse" aria-hidden="true"></span>{/key}{/if}
+    {/snippet}
+
     {#each layout.placed as n (n.id)}
-      <button
-        type="button"
-        class="node {statusClass(n)}"
-        class:selected={selectedId === n.id}
-        class:terminal={n.terminal}
-        style="left:{n.x}px; top:{n.y}px; width:{NODE_W}px; height:{NODE_H}px;"
-        onclick={() => onNodeClick?.(n.id)}
-        title={n.title}
-      >
-        <span class="node-top">
-          {#if n.status}<span class="node-icon">{ICON[n.status] ?? '○'}</span>{/if}
-          <span class="node-kind">{n.kind}</span>
-          {#if n.terminal}<span class="node-terminal">⤳ {n.terminal}</span>{/if}
-        </span>
-        <span class="node-title">{n.title}</span>
-        {#if n.badge}<span class="node-badge">{n.badge}</span>{/if}
-        {#if n.pulse}{#key n.pulse}<span class="node-pulse" aria-hidden="true"></span>{/key}{/if}
-      </button>
+      {@const place = `left:${n.x}px; top:${n.y}px; width:${NODE_W}px; height:${NODE_H}px;`}
+      <!-- A node is a button only when a click means something: the
+           interaction crawl found the workflow detail page's nodes
+           rendered as buttons wired to a handler nobody passed
+           (backlog 68409b1b). Without a handler it is a card. -->
+      {#if onNodeClick}
+        <button
+          type="button"
+          class="node {statusClass(n)}"
+          class:selected={selectedId === n.id}
+          class:terminal={n.terminal}
+          style={place}
+          onclick={() => onNodeClick?.(n.id)}
+          title={n.title}
+        >
+          {@render nodeBody(n)}
+        </button>
+      {:else}
+        <div
+          class="node inert {statusClass(n)}"
+          class:selected={selectedId === n.id}
+          class:terminal={n.terminal}
+          style={place}
+          title={n.title}
+        >
+          {@render nodeBody(n)}
+        </div>
+      {/if}
     {/each}
   </div>
 </div>
@@ -343,6 +364,14 @@
   .node:hover {
     box-shadow: 0 3px 10px rgba(42, 29, 16, 0.14);
     transform: translateY(-1px);
+  }
+  /* No handler: no pointer cursor and no hover lift, so the card does
+     not promise a click it cannot answer. */
+  .node.inert,
+  .node.inert:hover {
+    cursor: default;
+    transform: none;
+    box-shadow: 0 1px 2px rgba(42, 29, 16, 0.06);
   }
   .node.selected {
     outline: 2px solid var(--signal, #5FD4A8);
