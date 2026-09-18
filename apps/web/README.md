@@ -52,6 +52,7 @@ bun run typecheck                # svelte-check — 0 errors required
 bun run test:unit                # bun test src/
 bun run test:mocked              # Playwright against an in-browser mocked backend (CI-gated)
 bun run gate                     # all of the above plus the build — what the gate runs
+bun scripts/open-page-audits.ts --dry-run   # the page march: one page-audit packet per catalogued route (--all opens them through boss-api; design 0e07ce64)
 ```
 
 There is no live-backend suite in the tree. The one that was here

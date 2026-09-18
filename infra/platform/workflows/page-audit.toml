@@ -1,0 +1,170 @@
+# ---------------------------------------------------------------------------
+# page-audit — the page-by-page march, one packet per catalogued route
+# (design 0e07ce64, decided 2026-09-18 as proposed; backlog 0c4ff12b).
+#
+# WHAT WAS MEASURED (on #451). 45 routes in the nav catalog; the mocked
+# Playwright crawl renders 26 of them and fails only on an uncaught
+# exception or an unpainted shell; behaviour — a button, a link, a
+# back — is exercised on ~10 routes by ~10 specs; a 35-spec live suite
+# under apps/web/tests/smoke had been run by nothing since 2026-06-18
+# and read as coverage. Nothing measured "does this page show what its
+# department needs". Coverage was render-only on ~58% of routes,
+# behaviour on ~22%, and the thorough-looking suite was not running.
+#
+# THE MARCH IS THE SCIENTIFIC METHOD ON A PAGE. measure (the controls
+# inventory and the department's needs, as a list) → file (every gap
+# is a backlog-item carrying route + department) → test (a mocked spec
+# that pins every control) → review (the founder reads the gap list,
+# the inventory and the page's words) → styled (deferred: the visual
+# redesign lands on pages whose behaviour is already pinned) →
+# audited. The agent drafts; David decides at `review`; specs and
+# styling are the agent's (design resolution `review`).
+#
+# The route rides on the packet (`metadata_schema` requires `route`,
+# a catalogued path, and `department`, the Class code of the app the
+# catalog assigns it — nav-catalog.ts's `app`, which IS a department
+# code since ce68f137). The Subject is the route. One packet per
+# route, opened by `apps/web/scripts/open-page-audits.ts` from the ONE
+# roster (apps/web/src/shell/nav-catalog.ts) in the decided order:
+# the departments whose first protocols land first, IT's own last.
+#
+# `styled` IS A MARKER, NOT A SECOND TERMINAL. The decision names a
+# styled outcome "deferred to the redesign" AND an `audited` terminal,
+# and two terminals reached off one review decision would race (two
+# steps Ready off one write — the af28e250 shape backlog-item.toml
+# records). So `styled` is an `outcome` step the machine completes on
+# its own the moment the review approves (the marker rule,
+# infra/dispatcher/rules/complete-marker-on-step-ready.toml), carrying
+# `outcome_kind = "skipped"` — the outcome vocabulary's own word for
+# "not applicable here" — and `audited` is the terminal it feeds. The
+# packet's terminal-report then reads N × audited, and every packet's
+# DAG holds the deferral by name. When the redesign lands, a new
+# version of this kind makes `styled` work again; in-flight packets
+# stay pinned to this one.
+#
+# `owning_team` records the platform; the bundle loader stamps every
+# row with `platform` and ignores the key.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "page-audit"
+label = "Page audit"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "One page of the operator surface, audited against what its department needs and pinned by a mocked spec that exercises every control. The Subject is the route; `metadata.route` and `metadata.department` carry it and the department the nav catalog assigns it.\n\nWHY (design 0e07ce64, measured on #451). 45 catalogued routes; the mocked crawl rendered 26 of them and checked only that the shell painted; behaviour was exercised on ~10; a 35-spec live suite had been run by nothing for three months and read as coverage. Nothing asked whether a page shows what its department needs. So the march: one packet per route, in the order the departments' first protocols land on pages (support and sales first, IT's own last), each walking measure / file / test / review / styled / audited.\n\nTHE GAP IS A LIST, NOT A FEELING. `measure` writes the controls inventory (every link, button and form, the reads and writes the page makes) beside the department's in / working / out needs, and the difference is `gaps_md`. `file` turns every gap into a backlog-item carrying the route and the department — 'none' is a legitimate answer with a reason. `test` pins every control in a mocked spec and writes the reviewer's brief. `review` is the founder's: the gap list, the inventory and the page's words. `styled` is deferred by design — the visual redesign lands on pages whose behaviour is already pinned — and `audited` closes the packet.\n\nA route that leaves the catalog mid-march takes `withdrawn`: set `metadata.withdrawn = \"true\"` and say why. The opener skips a route with an open or audited packet and re-opens one whose packet was withdrawn, so a page that comes back is audited."
+metadata = { surfaces = ["system-design"] }
+metadata_schema = { type = "object", required = ["route", "department"], properties = { route = { type = "string", description = "The catalogued path this audit is about — a `path` in apps/web/src/shell/nav-catalog.ts, spelled the way the router spells it." }, department = { type = "string", description = "The department Class code the catalog assigns the route (its `app`); Home surfaces carry `it`, the department that builds them." } } }
+
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+title_template = "Page audit opened"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "open-page-audits" }
+
+[[workflow.step]]
+title = "measure"
+kind = "task"
+ready_when = "steps.opened.done"
+title_template = "Inventory the page and the department's needs"
+# WHO THE WORK STEPS ARE FOR, declared once (design f5ebd2e1): the
+# platform operator's queue, agent-workable (`human_only = false`) —
+# the agent drafts, the founder decides at `review`. A platform-admin
+# TASK rides the dispatcher's executor lane (the DECIDES-vs-EXECUTES
+# rule, 291a73a7); this is the shape backlog-item's `draft-design`
+# uses, and NOT pr-train's — that kind's steps are completed by one
+# automation and declare it as an `individual`, which is right for a
+# conductor and wrong for a step any platform-admin may pick up.
+audience = { role = "platform-admin" }
+metadata_defaults = { human_only = false, procedure = "Read the PAGE and the DEPARTMENT, and write the difference as a list. The route is `metadata.route` on this packet; the department is `metadata.department`.\n\nTHE CONTROLS INVENTORY (`controls_md`). From the component tree under apps/web/src — start at the router's branch for the route and follow the imports — list every control the page renders: each link and where it lands (a catalogued route, or not), each button and what its label promises, each form and what it submits. Beside them, the READS the page makes (every fetch path) and the WRITES (every non-GET), because the false-empty class lives there: a read that fails and paints as empty is a gap, and so is a write whose refusal the page swallows. Count what you list — 'seven links, three buttons, one form, four reads, one write' survives being reread; 'the usual controls' does not.\n\nTHE DEPARTMENT'S NEEDS (`needs_md`). What this department needs to see IN (what arrives for it), WORKING (what it is doing) and OUT (what it has finished) — read from its protocols, not from the page: GET /api/departments/{department}/readiness names the kinds whose active workflow row declares this department, with each one's packet count and newest terminal; GET /api/workflows/{kind} gives each kind's steps and the fields its executors fill; GET /api/jobs?department={department} is the join over those kinds. A Home surface (department `it`) is read against every department's use of it, and IT's own surfaces against the three thirds of the operator surface (queue management, actors building, delivery).\n\nTHE GAP (`gaps_md`) is needs minus controls, as a numbered list a reader can file from: what the page does not show, what it shows that no protocol produces, and every control whose honest behaviour nothing pins. A page needing nothing says so with the count that proves it — 'every one of the four reads has an honest failure line' — not with silence." }
+fields = [
+  { name = "controls_md", field_type = "string", required = true },
+  { name = "needs_md", field_type = "string", required = true },
+  { name = "gaps_md", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "file"
+kind = "task"
+ready_when = "steps.measure.done"
+title_template = "File every gap as work"
+audience = { role = "platform-admin" }
+metadata_defaults = { human_only = false, procedure = "THE OUTPUT IS FILED WORK, NOT PROSE. Every numbered gap in `gaps_md` becomes ONE backlog-item — `boss job file --kind backlog-item` — whose metadata carries `route` and `department` copied from this packet, so the department's queue and the page both answer 'what is outstanding against me'. Record the ids in `filed_ids`, one per line, each beside the gap number it came from.\n\n'none' IS A LEGITIMATE ANSWER, WITH A REASON. A page whose inventory covers its department's needs files nothing and writes `filed_ids = none: <the count from measure that proves it>`. What is not legitimate is a gap list with entries and a `filed_ids` shorter than it — a gap that lives only in this packet's prose is a gap nobody acts on (protocol-retro's `gaps` step learned this on 2026-08-27: four proposals, two still unfiled a day later).\n\nDO NOT FIX HERE. The fix is the item's; this step's job is that every gap has an id. A gap small enough to fix inside the `test` step's car (a missing failure line, a link that lands off-catalog) is still filed, and the item closes when that car lands." }
+fields = [
+  { name = "filed_ids", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "test"
+kind = "task"
+ready_when = "steps.file.done"
+title_template = "Pin every control in a mocked spec"
+audience = { role = "platform-admin" }
+metadata_defaults = { human_only = false, procedure = "Write the page's mocked Playwright spec under apps/web/tests/mocked/ and ship it as a car. Hermetic, gated, already in the image — 'more thorough' is more assertions per page, not a different tool. The generic crawl (design 0e07ce64, resolution `crawl`) already clicks every link, every button and back for every catalogued route; THIS spec carries the page's own meaning, and it pins EVERY control from `controls_md`:\n  - each link lands on a catalogued route (read apps/web/src/shell/nav-catalog.ts, never a second list);\n  - each button does what its label says against the mock, and answers honestly when the mock refuses;\n  - back returns to the page it came from;\n  - an EMPTY backend paints an honest empty state — the false-empty class: an empty list is 'nothing here', a failed read is `.load-failed` (tests/mocked/_routes.ts, FAILURE_MARKER), and the two are never the same paint;\n  - a REFUSED write shows the refusal, in the page's words, where the user was looking.\n\nRECORD `spec_path` (the file, repo-relative) and `car` (the ship-a-change id or branch that carries it) — a spec that is not on a car is not pinned.\n\nTHEN WRITE THE REVIEWER'S BRIEF. `sign_off_context` is REQUIRED on THIS step and it is what the founder reads at `review` — the UI renders THE STEP THE READER IS ON, so a sign-off carrying only its audience is an empty screen whatever the work steps hold (protocol-retro reached David empty three times running before that rule was written into it, 2026-08-28). Write it as `context_md` onto the `review` step as well, so the surface finds it where it looks. It must let the reviewer decide without opening anything else: the route and its department in one line; the GAP LIST with the filed ids; the CONTROLS INVENTORY with its counts; and THE PAGE'S STRINGS — every heading, label, button text, empty-state and failure line the page shows, verbatim — because the words are what David edits (design resolution `review`: the gap list and the words, not the spec). If the honest answer is 'nothing needs deciding except the sign-off itself', say that first.\n\nTHE CONSTRAINT LIVES HERE, NOT ON THE SIGN-OFF: required metadata is validated at COMPLETION, useless on the sign-off step itself and exactly right one step earlier — `review` cannot become ready until this completes." }
+fields = [
+  { name = "spec_path", field_type = "string", required = true },
+  { name = "car", field_type = "string", required = true },
+  { name = "sign_off_context", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "review"
+kind = "sign-off"
+ready_when = "steps.test.done"
+title_template = "Review the gap list and the page's words"
+# The founder's decision, in the one shape every reader derives from
+# (f5ebd2e1). The `platform-admin` holder decides; `decision` is
+# enum-checked HERE — the sign-off bundle's own `decision` allows
+# `pending` and `rejected`, which are not routes this packet has
+# (backlog-item's `verdict` is the same move, and for the same reason:
+# an authored enum on the step is versioned; the bundle's is not).
+audience = { role = "platform-admin" }
+metadata_defaults = { procedure = "A HUMAN READS THIS STEP AND NOTHING ELSE. It arrives carrying `context_md` — the gap list with its filed ids, the controls inventory with its counts, and every string the page shows — written by the `test` step before this became ready.\n\nDECIDE TWO THINGS. (1) Is the gap list complete — is there something this department needs from this page that `measure` did not see? Name it in `comment`; it becomes a filed item. (2) Are the WORDS right — headings, labels, buttons, empty states, refusals? Edit them in `comment`, verbatim, old → new. Specs and styling are not yours to review (design 0e07ce64, resolution `review`).\n\n`approved` records the page as behaviour-pinned; `styled` then defers the visual pass to the redesign and the packet closes `audited`. `changes-requested` routes to `revise`, where the agent applies exactly the edits in `comment` and files anything larger.\n\nIF YOU ARE LOOKING AT THIS STEP AND IT IS EMPTY, that is a defect in the `test` step's completion, not the audit: the content is on measure / file / test; read it there, and say so." }
+fields = [{ name = "decision", field_type = "approved|changes-requested", required = true }]
+
+[[workflow.step]]
+title = "revise"
+kind = "task"
+ready_when = "steps.review.done AND steps.review.metadata.decision = \"changes-requested\""
+title_template = "Apply the requested changes"
+audience = { role = "platform-admin" }
+metadata_defaults = { human_only = false, procedure = "Apply EXACTLY what the review's `comment` asked for — the word edits verbatim, the named gap filed as a backlog-item carrying route + department — on a car, and record what changed in `changes_md` with the car beside each change. A request larger than an edit (a control the page should have, a read it should make) is FILED, not built here: the review has already decided the page is behaviour-pinned as it stands, and a packet is not the place to grow it. Nothing loops back to the founder — the DAG has no cycle — so what you record here is what the record will say was done in his name; quote his words and yours." }
+fields = [
+  { name = "changes_md", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "styled"
+kind = "outcome"
+# The deferral, recorded by name. Reached the moment the review
+# approves (or the requested changes are applied) and completed by
+# the machine — see the file header for why it is a marker and not a
+# terminal. `skipped` is the outcome vocabulary's word for "not
+# applicable here": the visual redesign is a decision David has
+# announced and not yet taken (memory: visual-redesign-coming,
+# 2026-09-17), and a page whose behaviour is pinned is the page it
+# lands on.
+ready_when = "(steps.review.done AND steps.review.metadata.decision = \"approved\") OR steps.revise.done"
+title_template = "Styled — deferred to the redesign"
+metadata_defaults = { outcome_kind = "skipped" }
+
+[[workflow.step]]
+title = "audited"
+kind = "outcome"
+ready_when = "steps.styled.done"
+title_template = "Audited"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "audited" }
+
+[[workflow.step]]
+title = "withdrawn"
+kind = "outcome"
+# A route that leaves the catalog mid-march. Gated on a marker a
+# person sets, so it cannot fire on create (lint phase 6); the opener
+# reads a withdrawn packet as no packet and opens again if the route
+# is back.
+ready_when = "steps.opened.done AND job.metadata.withdrawn = \"true\""
+title_template = "Withdrawn — the route left the catalog"
+metadata_defaults = { outcome_kind = "withdrawn" }
+terminal = { outcome = "withdrawn" }
