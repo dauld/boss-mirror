@@ -282,6 +282,13 @@ async fn main() -> Result<()> {
                 "rules registry loaded from dispatcher_rules"
             );
             let mut handlers = HandlerRegistry::new();
+            // WHO THE PLATFORM'S PACKETS ARE FILED TO (backlog 3c23662d):
+            // the platform owner, read from the people registry through
+            // the one port and cached for this process — never a literal
+            // person. Every alarm handler and auto-park share this one.
+            let platform_owner: Arc<dyn boss_core::platform_owner::PlatformOwner> = Arc::new(
+                boss_people_client::ReqwestPlatformOwner::new(cfg.people_api_url.clone()),
+            );
             handlers.register(JobsSpawn::new(cfg.jobs_api_url.clone()));
             // Auto-park: on a gate-run's green `gate-verdict` step, file
             // the car the `--park-*` intent describes, so a gate-green
@@ -295,6 +302,7 @@ async fn main() -> Result<()> {
             handlers.register(EstateAlarm::new(
                 cfg.jobs_api_url.clone(),
                 cfg.clock_api_url.clone(),
+                platform_owner.clone(),
             ));
             // The half that closes (ef421cd3): an alarm whose finding
             // has been ABSENT from N consecutive comparisons of its
@@ -321,10 +329,12 @@ async fn main() -> Result<()> {
                 cfg.jobs_api_url.clone(),
                 cfg.clock_api_url.clone(),
                 enforced_rules,
+                platform_owner.clone(),
             ));
             handlers.register(JobsAutoPark::new(
                 cfg.jobs_api_url.clone(),
                 cfg.clock_api_url.clone(),
+                platform_owner.clone(),
             ));
             // D7 delegate-subjob write-back: on a child Job's
             // close, resolve the parent delegate-subjob step.
@@ -476,6 +486,7 @@ async fn main() -> Result<()> {
                     access_apps,
                     secrets,
                     cfg.dns_declarations_dir.clone(),
+                    platform_owner.clone(),
                 ));
             }
             // The first sensor (design 14c9b2ad, backlog 2d33e111): the
@@ -507,6 +518,7 @@ async fn main() -> Result<()> {
                         "BOSS_BROKER_STRIPE_KEY",
                         cfg.broker_stripe_key.clone(),
                     ),
+                    platform_owner.clone(),
                 ));
             }
             // Packaging allocation — splits a brewed batch across formats by

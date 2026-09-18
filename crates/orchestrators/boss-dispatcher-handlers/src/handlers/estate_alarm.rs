@@ -87,7 +87,7 @@ use serde_json::{Value, json};
 
 use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext};
 
-use super::common::{api_client, get_json, post_json};
+use super::common::{api_client, get_json, owner_for_filing, post_json};
 use super::estate_compare::{HOST_SCOPE, KNOWN_SCOPE, UNITS_SCOPE};
 
 /// Consecutive same-series comparisons a hard finding must survive to
@@ -133,14 +133,23 @@ pub struct EstateAlarm {
     /// The dispatcher is not on the no-wallclock allowlist, so this
     /// comes from the clock service like every other stamp.
     clock: Arc<dyn boss_clock_client::ClockClient>,
+    /// Who the packets this handler files are owned by — the platform
+    /// owner through the port (backlog 3c23662d), resolved once per
+    /// invocation by `common::owner_for_filing`; never a literal.
+    owner: Arc<dyn boss_core::platform_owner::PlatformOwner>,
 }
 
 impl EstateAlarm {
-    pub fn new(jobs_base: impl Into<String>, clock_url: impl Into<String>) -> Arc<Self> {
+    pub fn new(
+        jobs_base: impl Into<String>,
+        clock_url: impl Into<String>,
+        owner: Arc<dyn boss_core::platform_owner::PlatformOwner>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             client: api_client(),
             jobs_base: jobs_base.into(),
             clock: Arc::new(boss_clock_client::ReqwestClockClient::new(clock_url)),
+            owner,
         })
     }
 
@@ -419,7 +428,14 @@ fn excerpt(entry: &Value) -> String {
 /// `unit_unhealthy:boss-gcp/boss-train.service`), so the title does
 /// too; the excerpt is the finding's entry from the TRIGGERING
 /// comparison — the latest reading, not a stale one.
-fn alarm_body(key: &str, scope: &str, host: Option<&str>, evidence: &str, excerpt: &str) -> Value {
+fn alarm_body(
+    key: &str,
+    scope: &str,
+    host: Option<&str>,
+    evidence: &str,
+    excerpt: &str,
+    owner: &str,
+) -> Value {
     let mut metadata = json!({
         "area": "estate",
         "estate_finding": key,
@@ -442,7 +458,9 @@ fn alarm_body(key: &str, scope: &str, host: Option<&str>, evidence: &str, excerp
         "kind": "backlog-item",
         "title": format!("ESTATE ALARM: {key} persisted {PERSIST_N} consecutive comparisons"),
         "subject": {"subject_kind": "custom", "id": "bosspipeline"},
-        "owner_id": "emp-david",
+        // The platform owner as the registry answers it, or nobody for
+        // the jobs API to resolve from the kind's owner_role (3c23662d).
+        "owner_id": owner,
         "priority": "urgent",
         "status": "open",
         "tags": [],
@@ -472,7 +490,7 @@ fn unobserved_key(stale: &Value) -> String {
 /// cluster scope's rows are host-less, and a cluster alarm stamped with
 /// the series name as its host matched no series and never auto-closed
 /// (3908d555). The title and detail still name the series.
-fn staleness_body(stale: &Value, evidence: &str) -> Value {
+fn staleness_body(stale: &Value, evidence: &str, owner: &str) -> Value {
     let series = stale
         .get("series")
         .and_then(Value::as_str)
@@ -507,7 +525,7 @@ fn staleness_body(stale: &Value, evidence: &str) -> Value {
              {STALE_MULTIPLIER}x cadence"
         ),
         "subject": {"subject_kind": "custom", "id": "bosspipeline"},
-        "owner_id": "emp-david",
+        "owner_id": owner,
         "priority": "urgent",
         "status": "open",
         "tags": [],
@@ -540,6 +558,7 @@ impl Handler for EstateAlarm {
             "triggering event {} on topic {}",
             ctx.triggering_event_id, ctx.triggering_topic
         );
+        let owner = owner_for_filing(self.owner.as_ref(), &ctx.rule_name).await;
 
         // First-key-wins map: two stale series on one host collapse to
         // one raise before the dedup fetch ever runs.
@@ -591,7 +610,7 @@ impl Handler for EstateAlarm {
                             .find(|(k, _)| *k == key)
                             .map(|(_, e)| excerpt(e))
                             .unwrap_or_default();
-                        let body = alarm_body(&key, scope, host, &evidence, &latest);
+                        let body = alarm_body(&key, scope, host, &evidence, &latest, &owner);
                         to_raise.entry(key).or_insert(body);
                     }
                 }
@@ -632,7 +651,7 @@ impl Handler for EstateAlarm {
                 .cloned()
                 .unwrap_or_default();
             for stale in stale_series(&rows, per_host, watched_scope, now) {
-                let body = staleness_body(&stale, &evidence);
+                let body = staleness_body(&stale, &evidence, &owner);
                 to_raise.entry(unobserved_key(&stale)).or_insert(body);
             }
         }
@@ -976,8 +995,16 @@ mod tests {
 
     #[test]
     fn the_alarm_packet_is_urgent_and_carries_the_key() {
-        let b = alarm_body("not_ready:cp-2", "kubernetes-nodes", None, "evt", "");
+        let b = alarm_body(
+            "not_ready:cp-2",
+            "kubernetes-nodes",
+            None,
+            "evt",
+            "",
+            "emp-owner",
+        );
         assert_eq!(b["priority"], "urgent");
+        assert_eq!(b["owner_id"], "emp-owner", "the owner is the one handed in");
         assert_eq!(b["metadata"]["estate_finding"], "not_ready:cp-2");
         assert!(b["title"].as_str().unwrap().contains("not_ready:cp-2"));
     }
@@ -992,6 +1019,7 @@ mod tests {
             Some("boss-gcp"),
             "evt",
             &excerpt(&entry),
+            "emp-owner",
         );
         let title = b["title"].as_str().unwrap();
         assert!(title.contains("boss-gcp/boss-train.service"));
@@ -1150,7 +1178,7 @@ mod tests {
             "last_observed_at": "2026-09-03T11:20:00+00:00",
             "cadence_s": 900, "age_s": 3600,
         });
-        let b = staleness_body(&stale, "evt");
+        let b = staleness_body(&stale, "evt", "emp-owner");
         assert_eq!(
             b["metadata"]["estate_finding"],
             "unobserved:kubernetes-nodes"
@@ -1171,7 +1199,7 @@ mod tests {
             "last_observed_at": "2026-09-03T11:20:00+00:00",
             "cadence_s": 300, "age_s": 2400,
         });
-        let b = staleness_body(&stale, "evt");
+        let b = staleness_body(&stale, "evt", "emp-owner");
         assert_eq!(b["priority"], "urgent");
         assert_eq!(b["metadata"]["estate_finding"], "unobserved:boss-gcp");
         assert_eq!(b["metadata"]["host"], "boss-gcp");

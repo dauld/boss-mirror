@@ -1180,6 +1180,8 @@ fn scaffold_chart_of_accounts(s: &Scaffold) -> String {
 }
 
 fn scaffold_employees(s: &Scaffold) -> String {
+    // employee-id-ok: a placeholder the operator renames in their own
+    // tenant's seed — this verb writes example data, it names nobody.
     format!(
         r#"[
   {{

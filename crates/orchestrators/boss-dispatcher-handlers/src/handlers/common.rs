@@ -168,6 +168,26 @@ pub fn api_client() -> reqwest::Client {
         .expect("reqwest client always builds")
 }
 
+/// The owner a handler files a packet with: the platform owner as the
+/// port answers it, or NOBODY with the refusal in the journal under the
+/// rule's name (backlog 3c23662d — every alarm handler wrote
+/// `"emp-david"` until 2026-09-18). The filing goes ahead either way:
+/// the jobs API resolves the kind's `owner_role` from the same registry
+/// or refuses by name, and a handler that fell silent for want of an
+/// owner would be the failure mode the alarms exist to end.
+pub async fn owner_for_filing(
+    port: &dyn boss_core::platform_owner::PlatformOwner,
+    rule_name: &str,
+) -> String {
+    boss_core::platform_owner::owner_for_filing(port, |e| {
+        tracing::warn!(
+            rule = rule_name,
+            "{e}; filing with no owner named — the jobs API resolves the kind's owner_role, or refuses"
+        )
+    })
+    .await
+}
+
 /// Re-exported, not defined here: the rules runner in core writes as
 /// this same actor when it lands a dead-letter on a packet
 /// (`boss_dispatcher::rules::dead_letter`), and an identity that exists

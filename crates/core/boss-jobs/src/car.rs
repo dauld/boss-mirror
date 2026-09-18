@@ -37,12 +37,16 @@ pub fn stamp(now: chrono::DateTime<chrono::Utc>) -> String {
     now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-/// The ship-a-change packet body for a car.
+/// The ship-a-change packet body for a car. `owner` is who answers
+/// for it — the platform owner as `boss_core::platform_owner` resolved
+/// it, or `NOBODY` when it refused (backlog 3c23662d: this line named
+/// one person, on every car on every deployment, until 2026-09-18).
 pub fn car_body(
     branch: &str,
     summary: &str,
     backlog_item: Option<&str>,
     delivery_channel: Option<&str>,
+    owner: &str,
 ) -> Value {
     let mut metadata = json!({ "branch": branch, "summary": summary });
     if let Some(item) = backlog_item {
@@ -62,7 +66,7 @@ pub fn car_body(
         "kind": "ship-a-change",
         "title": summary_title(summary),
         "subject": {"subject_kind": "custom", "id": branch},
-        "owner_id": "emp-david",
+        "owner_id": owner,
         "priority": "standard",
         "status": "open",
         "tags": [],
@@ -907,12 +911,18 @@ mod tests {
 
     #[test]
     fn the_car_body_carries_the_fields_the_api_demands() {
-        let b = car_body("feat/x", "A thing does the thing. And more.", None, None);
+        let b = car_body(
+            "feat/x",
+            "A thing does the thing. And more.",
+            None,
+            None,
+            "emp-owner",
+        );
         assert!(
             b["metadata"].get("delivery_channel").is_none(),
             "no delivery_channel when None"
         );
-        let d = car_body("feat/x", "A thing.", None, Some("data"));
+        let d = car_body("feat/x", "A thing.", None, Some("data"), "emp-owner");
         assert_eq!(
             d["metadata"]["delivery_channel"], "data",
             "the car carries the delivery channel the gate stamped"
@@ -924,6 +934,7 @@ mod tests {
         }
         assert_eq!(b["title"], "A thing does the thing");
         assert_eq!(b["subject"]["id"], "feat/x");
+        assert_eq!(b["owner_id"], "emp-owner", "the owner is the one handed in");
         assert!(b["metadata"].get("backlog_item").is_none());
     }
 
@@ -934,6 +945,7 @@ mod tests {
             "Summary",
             Some("de6f0c06-a341-4445-9f47-399dc27a60fb"),
             None,
+            "emp-owner",
         );
         assert_eq!(
             b["metadata"]["backlog_item"],

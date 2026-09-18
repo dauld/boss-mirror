@@ -83,6 +83,7 @@ pub(crate) fn design_job_body(
     questions: &[Value],
     no_open_questions: bool,
     answers: Option<&str>,
+    owner: &str,
 ) -> Value {
     let mut body = json!({
         "kind": "design-doc",
@@ -96,7 +97,10 @@ pub(crate) fn design_job_body(
         // argument, so the card and the doc cannot disagree.
         "title": title,
         "status": "open",
-        "owner_id": "emp-david",
+        // The platform owner as the registry answers it (backlog
+        // 3c23662d), or nobody for the jobs API to resolve from the
+        // kind's owner_role — never a literal person.
+        "owner_id": owner,
         "priority": "standard",
         "tags": ["design"],
         // No `opened_on`: the create handler injects it off its clock
@@ -249,12 +253,14 @@ pub async fn run(
         None => None,
     };
 
+    let owner = crate::owner::for_filing_at(&crate::gate::resolve_jobs_base(None)?).await;
     let body = design_job_body(
         &title,
         &markdown,
         &parsed,
         no_questions,
         answered.as_ref().map(|(id, _)| id.as_str()),
+        &owner,
     );
     let created = api(
         &http,
@@ -354,8 +360,8 @@ mod tests {
     /// own review step — the trap the module header records.
     #[test]
     fn the_flag_is_always_present() {
-        let with = design_job_body("t", "m", &[], true, None);
-        let without = design_job_body("t", "m", &[], false, None);
+        let with = design_job_body("t", "m", &[], true, None, "emp-owner");
+        let without = design_job_body("t", "m", &[], false, None, "emp-owner");
         assert_eq!(with["metadata"]["no_open_questions"], json!("true"));
         assert_eq!(without["metadata"]["no_open_questions"], json!("false"));
     }
@@ -366,7 +372,7 @@ mod tests {
     #[test]
     fn the_review_step_carries_the_questions_too() {
         let q = vec![question("Q1", "which brick first?", "the cheap one")];
-        let body = design_job_body("t", "# doc", &q, false, None);
+        let body = design_job_body("t", "# doc", &q, false, None, "emp-owner");
         let step = review_step_metadata(&body, "docs/design/x.md");
         assert_eq!(step["questions"].as_array().map(Vec::len), Some(1));
         assert_eq!(step["questions"][0]["anchor"], json!("Q1"));
@@ -401,14 +407,21 @@ mod tests {
     /// here reproduces what the type actually sees — as gate.rs does.
     #[test]
     fn the_body_deserializes_into_the_job_type_the_api_parses_it_as() {
-        let body = as_the_handler_sees_it(design_job_body("the doc", "# body", &[], true, None));
+        let body = as_the_handler_sees_it(design_job_body(
+            "the doc",
+            "# body",
+            &[],
+            true,
+            None,
+            "emp-owner",
+        ));
         let job: boss_core::job::Job = serde_json::from_value(body).expect(
             "design body must deserialize into Job — this is verbatim what the API does before \
              it admits the packet",
         );
         assert_eq!(job.kind, "design-doc");
         assert_eq!(job.title, "the doc");
-        assert_eq!(job.owner_id, "emp-david");
+        assert_eq!(job.owner_id, "emp-owner", "the owner is the one handed in");
     }
 
     /// The create handler injects `opened_on` off its clock before it
@@ -431,7 +444,7 @@ mod tests {
     /// design` files today's doc, never a backdated one.
     #[test]
     fn the_design_body_leaves_the_open_date_to_the_api_clock() {
-        let body = design_job_body("t", "m", &[], true, None);
+        let body = design_job_body("t", "m", &[], true, None, "emp-owner");
         assert!(
             body.get("opened_on").is_none(),
             "`opened_on` must be left to the create handler's clock, \
@@ -447,7 +460,14 @@ mod tests {
     /// another is the drift this costs nothing to prevent.
     #[test]
     fn the_envelope_title_and_the_tracker_title_are_the_same_string() {
-        let body = design_job_body("stations hold, they do not drop", "# doc", &[], true, None);
+        let body = design_job_body(
+            "stations hold, they do not drop",
+            "# doc",
+            &[],
+            true,
+            None,
+            "emp-owner",
+        );
         assert_eq!(body["title"], json!("stations hold, they do not drop"));
         assert_eq!(body["title"], body["metadata"]["title"]);
         assert_eq!(
@@ -485,9 +505,9 @@ mod tests {
     #[test]
     fn answers_rides_as_the_declared_edge_and_is_absent_otherwise() {
         const FEEDBACK: &str = "61366e5a-d15f-472c-a667-f4cc007ef8f8";
-        let with = design_job_body("t", "m", &[], false, Some(FEEDBACK));
+        let with = design_job_body("t", "m", &[], false, Some(FEEDBACK), "emp-owner");
         assert_eq!(with["metadata"]["answers"], json!(FEEDBACK));
-        let without = design_job_body("t", "m", &[], false, None);
+        let without = design_job_body("t", "m", &[], false, None, "emp-owner");
         assert!(
             without["metadata"].get("answers").is_none(),
             "a design that answers nothing carries no edge key at all"

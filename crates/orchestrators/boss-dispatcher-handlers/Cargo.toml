@@ -14,6 +14,7 @@ boss-core = { path = "../../core/boss-core" }
 boss-ports = { path = "../../core/boss-ports" }
 boss-nats = { path = "../../core/boss-nats" }
 boss-jobs = { path = "../../core/boss-jobs" }
+boss-people-client = { path = "../../modules/boss-people-client" }
 boss-expr = { path = "../../core/boss-expr" }
 boss-clock-client = { path = "../../core/boss-clock-client" }
 boss-calendar-client = { path = "../../core/boss-calendar-client" }

@@ -511,11 +511,18 @@ pub(crate) async fn run(
             .ok_or_else(|| anyhow::anyhow!("the building car for {branch} has no id"))?
             .to_string(),
         None => {
+            let owner = crate::owner::for_filing_at(&crate::gate::resolve_jobs_base(None)?).await;
             let created = crate::gate::api(
                 &http,
                 reqwest::Method::POST,
                 "/api/jobs",
-                Some(car_body(branch, summary, backlog_item.as_deref(), None)),
+                Some(car_body(
+                    branch,
+                    summary,
+                    backlog_item.as_deref(),
+                    None,
+                    &owner,
+                )),
             )
             .await?;
             created

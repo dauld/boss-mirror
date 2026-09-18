@@ -81,8 +81,8 @@ use serde_json::{Value as Json, json};
 use tokio::io::AsyncWriteExt;
 
 use super::common::{
-    StepEvent, api_client, dispatcher_actor_header, dispatcher_reader_header, get_json, post_json,
-    sim_origin_value, write_json,
+    StepEvent, api_client, dispatcher_actor_header, dispatcher_reader_header, get_json,
+    owner_for_filing, post_json, sim_origin_value, write_json,
 };
 use super::credential_issuer::{
     AccessApp, AccessAppSpec, AccessApps, AccessPolicySpec, SecretStore, ZoneRecordSpec,
@@ -893,7 +893,7 @@ pub fn observe_put_body(existing: &serde_json::Map<String, Json>, r: &Reading) -
 /// The urgent packet a drifted zone becomes. Keyed like every estate
 /// alarm (`estate_finding`), so the same dedup lens reads it; `area:
 /// estate` so it sits with its siblings.
-pub fn alarm_body(zone: &str, observation_id: &str, r: &Reading) -> Json {
+pub fn alarm_body(zone: &str, observation_id: &str, r: &Reading, owner: &str) -> Json {
     let findings = r.findings();
     json!({
         "kind": "backlog-item",
@@ -902,7 +902,9 @@ pub fn alarm_body(zone: &str, observation_id: &str, r: &Reading) -> Json {
             findings.len()
         ),
         "subject": {"subject_kind": "custom", "id": zone},
-        "owner_id": "emp-david",
+        // The platform owner as the registry answers it, or nobody for
+        // the jobs API to resolve from the kind's owner_role (3c23662d).
+        "owner_id": owner,
         "priority": "urgent",
         "status": "open",
         "tags": [],
@@ -984,6 +986,10 @@ pub struct DnsObserve {
     /// The directory holding `<zone>.toml`, `access.toml` and the
     /// comparator, or the reason none is configured.
     declarations: Result<PathBuf, String>,
+    /// Who the packets this handler files are owned by — the platform
+    /// owner through the port (backlog 3c23662d), resolved once per
+    /// invocation by `common::owner_for_filing`; never a literal.
+    owner: Arc<dyn boss_core::platform_owner::PlatformOwner>,
 }
 
 impl DnsObserve {
@@ -993,6 +999,7 @@ impl DnsObserve {
         access: Arc<dyn AccessApps>,
         secrets: Arc<dyn SecretStore>,
         declarations: Option<String>,
+        owner: Arc<dyn boss_core::platform_owner::PlatformOwner>,
     ) -> Arc<Self> {
         Arc::new(Self {
             client: api_client(),
@@ -1000,6 +1007,7 @@ impl DnsObserve {
             zone,
             access,
             secrets,
+            owner,
             declarations: declarations.map(PathBuf::from).ok_or_else(|| {
                 "dns observer unconfigured: BOSS_DNS_DECLARATIONS unset (the image carries \
                  infra/cluster/dns at /opt/boss/infra/cluster/dns)"
@@ -1345,10 +1353,11 @@ impl DnsObserve {
                 Ok("refreshed")
             }
             None => {
+                let owner = owner_for_filing(self.owner.as_ref(), rule).await;
                 post_json(
                     &self.client,
                     &format!("{}/api/jobs", self.base()),
-                    &alarm_body(zone, observation_id, r),
+                    &alarm_body(zone, observation_id, r, &owner),
                     rule,
                 )
                 .await?;
@@ -1688,8 +1697,9 @@ mod tests {
             json!({"application": "playground.algedonic.dev", "verdict": "DRIFT"}),
             json!({"application": "boss.algedonic.dev", "verdict": "MATCH"}),
         ];
-        let b = alarm_body("algedonic.dev", "obs-1", &r);
+        let b = alarm_body("algedonic.dev", "obs-1", &r, "emp-owner");
         assert_eq!(b["kind"], "backlog-item");
+        assert_eq!(b["owner_id"], "emp-owner", "the owner is the one handed in");
         assert_eq!(b["priority"], "urgent");
         assert_eq!(b["metadata"]["estate_finding"], "dns_drift:algedonic.dev");
         assert_eq!(b["metadata"]["area"], "estate");
@@ -2806,7 +2816,14 @@ why = "x"
         secrets: Arc<FakeSecrets>,
         declarations: Option<String>,
     ) -> Arc<DnsObserve> {
-        DnsObserve::new(jobs, zone, access, secrets, declarations)
+        DnsObserve::new(
+            jobs,
+            zone,
+            access,
+            secrets,
+            declarations,
+            Arc::new(boss_core::platform_owner::Fixed("emp-owner".into())),
+        )
     }
 
     fn writes(c: &Captured) -> Vec<(String, Json)> {
@@ -3295,6 +3312,7 @@ why = "x"
             Arc::new(RefusingAccess(inner)),
             secrets(),
             declarations(),
+            Arc::new(boss_core::platform_owner::Fixed("emp-owner".into())),
         );
         h.invoke(&zone_args(), &ctx())
             .await
@@ -3491,6 +3509,7 @@ why = "x"
             Arc::new(StubbornAccess(inner)),
             secrets(),
             declarations(),
+            Arc::new(boss_core::platform_owner::Fixed("emp-owner".into())),
         );
         h.invoke(&zone_args(), &ctx()).await.unwrap();
 
@@ -3572,6 +3591,7 @@ why = "x"
             Arc::new(LaggingAccess(inner.clone())),
             secrets(),
             declarations(),
+            Arc::new(boss_core::platform_owner::Fixed("emp-owner".into())),
         );
         h.invoke(&zone_args(), &ctx()).await.unwrap();
         assert_eq!(

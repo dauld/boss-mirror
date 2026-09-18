@@ -267,8 +267,9 @@ fn open_body(
     host: &str,
     worktree: &str,
     now: chrono::DateTime<chrono::Utc>,
+    owner: &str,
 ) -> Value {
-    let mut body = car::car_body(branch, summary, item.backlog_item.as_deref(), None);
+    let mut body = car::car_body(branch, summary, item.backlog_item.as_deref(), None, owner);
     if let Some(md) = body.get_mut("metadata").and_then(Value::as_object_mut) {
         md.extend(car::build_start(actor, host, worktree, now));
         md.extend(item.provenance());
@@ -363,12 +364,13 @@ pub(crate) async fn open(
         return Ok(());
     }
 
+    let owner = crate::owner::for_filing_at(&crate::gate::resolve_jobs_base(None)?).await;
     let created = crate::gate::api(
         &http,
         reqwest::Method::POST,
         "/api/jobs",
         Some(open_body(
-            branch, summary, &item, &actor, &host, &worktree, now,
+            branch, summary, &item, &actor, &host, &worktree, now, &owner,
         )),
     )
     .await?;
@@ -599,6 +601,7 @@ mod tests {
             "boss-dev-0",
             "/work/boss/.claude/worktrees/agent-a23",
             at("2026-09-10T18:00:00Z"),
+            "emp-owner",
         );
         // The shared car body, unchanged: one definition of what a
         // ship-a-change packet is (CLAUDE.md §9a).
@@ -632,6 +635,7 @@ mod tests {
             "",
             "",
             at("2026-09-10T18:00:00Z"),
+            "emp-owner",
         );
         assert_eq!(
             body["metadata"]["backlog_item"],
@@ -694,6 +698,7 @@ mod tests {
                 "boss-dev-0",
                 "/w",
                 at("2026-09-11T09:00:00Z"),
+                "emp-owner",
             )
         };
 

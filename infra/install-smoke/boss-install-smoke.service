@@ -16,6 +16,11 @@ After=network-online.target docker.service
 [Service]
 Type=oneshot
 Environment=JOBS_API=http://10.20.0.34:7900
+# The people door — the same address on boss-ports' people port — so
+# the red is filed to the platform OWNER the registry names (the first
+# active platform-admin hire), never a person written into the script
+# (backlog 3c23662d). BOSS_PLATFORM_OWNER=<id> here would override it.
+Environment=PEOPLE_API=http://10.20.0.34:7500
 # A RED files an urgent packet through the jobs API (the estate-alarm
 # idiom): install breakage surfaces in the queue within hours, not in
 # a journal nobody reads. ~35-45 min on a cold docker cache.

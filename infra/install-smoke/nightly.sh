@@ -38,6 +38,20 @@ SMOKE_DIR="${SMOKE_DIR:-/var/tmp/boss-install-smoke}"
 STAGE="setup"
 LOG_TAIL=""
 
+# Who the red is filed to (backlog 3c23662d — until 2026-09-18 a person
+# was written here): BOSS_PLATFORM_OWNER when the unit carries it; else
+# the people registry's first active platform-admin hire, read from
+# PEOPLE_API (the unit names the SoR's people door); else nobody — an
+# empty owner_id the jobs API resolves from the kind's owner_role or
+# refuses by name. Best-effort: a dark registry must not stop the red.
+platform_owner() {
+    if [ -n "${BOSS_PLATFORM_OWNER:-}" ]; then printf '%s' "$BOSS_PLATFORM_OWNER"; return 0; fi
+    [ -n "${PEOPLE_API:-}" ] || return 0
+    curl -sf --max-time 5 "$PEOPLE_API/api/people?role=platform-admin&status=active" 2>/dev/null \
+        | jq -r '[.[] | {id, hire_date: (.hire_date // "~")}] | sort_by(.hire_date, .id) | .[0].id // empty' 2>/dev/null
+    return 0
+}
+
 file_red() {
     # One urgent packet naming the failing stage, with the log tail as
     # evidence. Filed best-effort: the journal keeps the full story
@@ -45,11 +59,12 @@ file_red() {
     body=$(jq -n \
         --arg stage "$STAGE" \
         --arg tail "$LOG_TAIL" \
+        --arg owner "$(platform_owner)" \
         '{
             kind: "backlog-item",
             title: ("install-smoke RED at stage " + $stage + " — a fresh install does not boot"),
             subject: {subject_kind: "custom", id: "bosspipeline"},
-            owner_id: "emp-david",
+            owner_id: $owner,
             priority: "urgent",
             status: "open",
             tags: [],

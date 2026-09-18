@@ -803,6 +803,7 @@ fn synthesized_birth_payload(kind: &str, id: &str, day: chrono::NaiveDate) -> se
                 // get a plausible territory owner instead of the CTO
                 // (which was a placeholder that surfaced in operator
                 // testing).
+                // employee-id-ok: the example tenant's seeded pool ids
                 "territory_rep_id": format!("emp-aa-{:03}", 284 + (seed % 10)),
                 "account_type": "wholesale",
                 "contacts": [],

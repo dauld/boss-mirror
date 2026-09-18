@@ -66,6 +66,13 @@ pub fn publish_workflows(
         })
         .to_string()
     });
+    // WHO SIGNS. The walk's synthetic approvals are recorded against
+    // the actor the walk RUNS AS — the id in the header every call
+    // below already carries — never a named person. Until 2026-09-18
+    // this was a literal `emp-cto` (backlog 3c23662d): a signature by
+    // someone who did not sign, the forged-actor defect CLAUDE.md
+    // §Doors names, on every tenant's bootstrap.
+    let signer = signer_of(&user_header)?;
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         "x-boss-user",
@@ -112,7 +119,7 @@ pub fn publish_workflows(
             }
             Provenance::BootstrapOwned | Provenance::Missing => {}
         }
-        bootstrap_kind(&client, api_base, &headers, spec, dev)
+        bootstrap_kind(&client, api_base, &headers, spec, dev, &signer)
             .with_context(|| format!("bootstrap of `{}`", spec.kind))?;
         published += 1;
     }
@@ -125,6 +132,16 @@ pub fn publish_workflows(
         "workflow bootstrap complete"
     );
     Ok(())
+}
+
+/// The actor id an `x-boss-user` header names — the walk's signer.
+/// Refuses a header with no `id` rather than signing as nobody.
+fn signer_of(user_header: &str) -> Result<String> {
+    serde_json::from_str::<Value>(user_header)
+        .ok()
+        .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
+        .filter(|id| !id.is_empty())
+        .context("x-boss-user header names no actor id, so the walk has nobody to sign as")
 }
 
 fn jobs_url(api_base: &str, path: &str) -> String {
@@ -185,6 +202,7 @@ fn bootstrap_kind(
     headers: &reqwest::header::HeaderMap,
     target: &WorkflowSpec,
     dev: bool,
+    signer: &str,
 ) -> Result<()> {
     info!(kind = %target.kind, "opening workflow-design Job");
 
@@ -297,7 +315,7 @@ fn bootstrap_kind(
         // validated against.
         let step = current.as_ref().unwrap_or(step);
         walk_step(
-            client, api_base, headers, &job_id, step_id, step_kind, step, target, dev,
+            client, api_base, headers, &job_id, step_id, step_kind, step, target, dev, signer,
         )
         .with_context(|| format!("walk_step `{step_kind}` ({step_id})"))?;
     }
@@ -380,9 +398,9 @@ fn synthesized_completion_metadata(step: &Value) -> serde_json::Map<String, Valu
 ///   `decision: "approved"` wherever the step declares one unauthored
 ///   (the walk IS the approval; `synthesized_completion_metadata`
 ///   alone would record the enum's first variant, "pending", on a
-///   step the walk is about to approve and complete). The hardcoded
-///   approver identity is fine because the walk only ever walks
-///   `workflow-design` Jobs.
+///   step the walk is about to approve and complete). `signed_by` is
+///   the actor the walk runs as — the record says who actually did
+///   it, which the literal it replaced did not.
 /// - `workflow-publish` — the full WorkflowSpec the dispatch handler
 ///   publishes from.
 ///
@@ -393,6 +411,7 @@ fn walk_completion_metadata(
     step_kind: &str,
     step: &Value,
     publish_spec: Option<&Value>,
+    signer: &str,
 ) -> serde_json::Map<String, Value> {
     let authored = step
         .get("metadata")
@@ -415,7 +434,7 @@ fn walk_completion_metadata(
                 out.insert("decision".into(), json!("approved"));
             }
             out.insert("authority_role".into(), json!("workflow-approver"));
-            out.insert("signed_by".into(), json!("emp-cto"));
+            out.insert("signed_by".into(), json!(signer));
         }
         "workflow-publish" => {
             if let Some(spec) = publish_spec {
@@ -492,6 +511,7 @@ fn walk_step(
     step: &Value,
     target: &WorkflowSpec,
     dev: bool,
+    signer: &str,
 ) -> Result<()> {
     let url = jobs_url(api_base, &format!("/api/jobs/{job_id}/steps/{step_id}"));
 
@@ -511,16 +531,20 @@ fn walk_step(
             // The `workflow-design` approve step requires the
             // `workflow-approver` authority (boss-jobs registry), so the
             // stamp's `role` must equal that — the sign-off endpoint
-            // rejects any role not in `sign_offs_required`. We stamp as the
-            // `platform-admin` automation identity, which holds
-            // `step-signoff:workflow-approver` via the core policy defaults;
-            // seed-time provisioning therefore never depends on the tenant's
-            // approver grants having loaded first.
+            // rejects any role not in `sign_offs_required`. The stamp
+            // goes out under the walk's own header — a `platform-admin`
+            // automation identity, which holds
+            // `step-signoff:workflow-approver` via the core policy
+            // defaults — so seed-time provisioning never depends on the
+            // tenant's approver grants having loaded first, and the
+            // stamp names the actor that made it.
             let md_url = jobs_url(api_base, &format!("/api/jobs/{job_id}/steps/{step_id}"));
             let md_resp = client
                 .put(&md_url)
                 .headers(headers.clone())
-                .json(&json!({ "metadata": walk_completion_metadata(step_kind, step, None) }))
+                .json(
+                    &json!({ "metadata": walk_completion_metadata(step_kind, step, None, signer) }),
+                )
                 .send()
                 .with_context(|| format!("PUT {md_url}"))?;
             if !md_resp.status().is_success() {
@@ -532,22 +556,9 @@ fn walk_step(
                 api_base,
                 &format!("/api/jobs/{job_id}/steps/{step_id}/sign-offs"),
             );
-            let stamper = json!({
-                "id": "emp-cto",
-                "role": "platform-admin",
-                "access_tier": "operator",
-                "territory_account_ids": [],
-                "direct_report_ids": [],
-                "department": "executive",
-            })
-            .to_string();
             let resp = client
                 .post(&stamp_url)
                 .headers(headers.clone())
-                .header(
-                    "x-boss-user",
-                    reqwest::header::HeaderValue::from_str(&stamper).context("stamper header")?,
-                )
                 .json(&json!({ "role": "workflow-approver" }))
                 .send()
                 .with_context(|| format!("POST {stamp_url}"))?;
@@ -567,7 +578,7 @@ fn walk_step(
                 .context("serializing WorkflowSpec for publish step")?;
             json!({
                 "status":"completed",
-                "metadata": walk_completion_metadata(step_kind, step, Some(&spec_value)),
+                "metadata": walk_completion_metadata(step_kind, step, Some(&spec_value), signer),
             })
         }
         other => {
@@ -579,7 +590,7 @@ fn walk_step(
             if !matches!(other, "task" | "outcome") {
                 warn!(step_kind = %other, "unrecognized step kind on workflow-design; flipping to done");
             }
-            let md = walk_completion_metadata(other, step, None);
+            let md = walk_completion_metadata(other, step, None, signer);
             if md.is_empty() {
                 json!({ "status":"completed" })
             } else {
@@ -693,6 +704,17 @@ mod walker_tests {
         assert_eq!(md.get("when"), Some(&json!("2026-01-01")));
     }
 
+    /// The signer is the actor the header names; a header naming no
+    /// actor is refused rather than signed as nobody (backlog 3c23662d).
+    #[test]
+    fn the_walk_signs_as_the_actor_its_header_names() {
+        let header = json!({"id": "automation:tenant-seed", "role": "platform-admin"}).to_string();
+        assert_eq!(signer_of(&header).unwrap(), "automation:tenant-seed");
+        assert!(signer_of(r#"{"role":"platform-admin"}"#).is_err());
+        assert!(signer_of(r#"{"id":""}"#).is_err());
+        assert!(signer_of("not json").is_err());
+    }
+
     /// The 2026-09-02 EVENING crash-loop shape verbatim: the
     /// workflow-design `approve` step requires `decision` (cdfe2e1a)
     /// and the sign-off arm's bare completion missed it. The walk IS
@@ -708,10 +730,14 @@ mod walker_tests {
                 "required": true
             }]
         });
-        let md = walk_completion_metadata("sign-off", &step, None);
+        let md = walk_completion_metadata("sign-off", &step, None, "automation:bootstrap");
         assert_eq!(md.get("decision"), Some(&json!("approved")));
         assert_eq!(md.get("authority_role"), Some(&json!("workflow-approver")));
-        assert_eq!(md.get("signed_by"), Some(&json!("emp-cto")));
+        assert_eq!(
+            md.get("signed_by"),
+            Some(&json!("automation:bootstrap")),
+            "the walk signs as the actor it runs as, never a named person"
+        );
     }
 
     /// An authored decision is a record already made; the walk must
@@ -726,7 +752,7 @@ mod walker_tests {
                 "required": true
             }]
         });
-        let md = walk_completion_metadata("sign-off", &step, None);
+        let md = walk_completion_metadata("sign-off", &step, None, "automation:bootstrap");
         assert_eq!(md.get("decision"), Some(&json!("changes-requested")));
     }
 
@@ -787,9 +813,9 @@ mod walker_tests {
     #[test]
     fn a_fieldless_sign_off_keeps_existing_keys_and_adds_no_decision() {
         let step = json!({ "metadata": { "already": "here" } });
-        let md = walk_completion_metadata("sign-off", &step, None);
+        let md = walk_completion_metadata("sign-off", &step, None, "automation:bootstrap");
         assert_eq!(md.get("already"), Some(&json!("here")));
-        assert_eq!(md.get("signed_by"), Some(&json!("emp-cto")));
+        assert_eq!(md.get("signed_by"), Some(&json!("automation:bootstrap")));
         assert!(!md.contains_key("decision"));
     }
 
@@ -804,7 +830,7 @@ mod walker_tests {
                 {"name": "review_notes", "field_type": "string", "required": true}
             ]
         });
-        let md = walk_completion_metadata("sign-off", &step, None);
+        let md = walk_completion_metadata("sign-off", &step, None, "automation:bootstrap");
         assert_eq!(md.get("decision"), Some(&json!("approved")));
         assert!(md.get("review_notes").and_then(|v| v.as_str()).is_some());
     }
@@ -820,7 +846,12 @@ mod walker_tests {
             "fields": [{"name": "release_note", "field_type": "string", "required": true}]
         });
         let spec = json!({"kind": "x"});
-        let md = walk_completion_metadata("workflow-publish", &step, Some(&spec));
+        let md = walk_completion_metadata(
+            "workflow-publish",
+            &step,
+            Some(&spec),
+            "automation:bootstrap",
+        );
         assert_eq!(md.get("workflow_spec"), Some(&spec));
         assert_eq!(md.get("already"), Some(&json!("here")));
         assert!(md.get("release_note").is_some());
@@ -864,6 +895,7 @@ mod walker_tests {
                 &step.kind,
                 &step_value,
                 Some(&dummy_spec),
+                "automation:bootstrap",
             ));
             if let Err(errors) = registry.validate_metadata(&step.kind, &md).and_then(|()| {
                 crate::step_registry::StepRegistry::validate_authored_fields(&step.fields, &md)

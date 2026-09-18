@@ -18,6 +18,7 @@ boss-nats = { path = "../../core/boss-nats" }
 # calling the SAME `StationPredicate::matches` the /queue endpoint
 # calls — a census that disagrees with the queue is worse than none.
 boss-jobs = { path = "../../core/boss-jobs" }
+boss-people-client = { path = "../../modules/boss-people-client" }
 # `boss tenant check` validates a tenant directory with the SAME
 # types the product reads it with (fcc1d57b): the classes batch row,
 # the people row, the policy grant loader, and the manifest in

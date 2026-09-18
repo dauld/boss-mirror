@@ -131,7 +131,9 @@ use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext};
 use boss_dispatcher::rules::registry::RawRule;
 
 use super::cadence_roster::{ClockCadence, Guard, clock_cadences};
-use super::common::{TRIAGE_SLUG, api_client, get_json, post_json, triage_step, write_json};
+use super::common::{
+    TRIAGE_SLUG, api_client, get_json, owner_for_filing, post_json, triage_step, write_json,
+};
 
 /// Arg-key prefix for one declared cadence. `interval_minutes.<kind>`
 /// = "a packet of `<kind>` is expected every N minutes".
@@ -223,6 +225,10 @@ pub struct CadenceSilenceSweep {
     /// `GET /api/dispatcher/rules` serves, so the derivation is
     /// unchanged if the reader ever becomes that surface.
     rules: Vec<RawRule>,
+    /// Who the packets this handler files are owned by — the platform
+    /// owner through the port (backlog 3c23662d), resolved once per
+    /// invocation by `common::owner_for_filing`; never a literal.
+    owner: Arc<dyn boss_core::platform_owner::PlatformOwner>,
 }
 
 impl CadenceSilenceSweep {
@@ -230,12 +236,14 @@ impl CadenceSilenceSweep {
         jobs_base: impl Into<String>,
         clock_url: impl Into<String>,
         rules: Vec<RawRule>,
+        owner: Arc<dyn boss_core::platform_owner::PlatformOwner>,
     ) -> Arc<Self> {
         Arc::new(Self {
             client: api_client(),
             jobs_base: jobs_base.into(),
             clock: Arc::new(boss_clock_client::ReqwestClockClient::new(clock_url)),
             rules,
+            owner,
         })
     }
 
@@ -876,7 +884,13 @@ pub fn measurement(w: &Watched, v: &Verdict, now: DateTime<Utc>) -> Map<String, 
 }
 
 /// The urgent packet one silent kind becomes.
-pub fn alarm_body(w: &Watched, v: &Verdict, evidence: &str, now: DateTime<Utc>) -> Value {
+pub fn alarm_body(
+    w: &Watched,
+    v: &Verdict,
+    evidence: &str,
+    now: DateTime<Utc>,
+    owner: &str,
+) -> Value {
     let label = &w.label;
     let mut metadata = measurement(w, v, now);
     metadata.insert("area".into(), json!("estate-observation"));
@@ -901,7 +915,9 @@ pub fn alarm_body(w: &Watched, v: &Verdict, evidence: &str, now: DateTime<Utc>) 
         "kind": "backlog-item",
         "title": alarm_title(label, v),
         "subject": {"subject_kind": "custom", "id": "bosspipeline"},
-        "owner_id": "emp-david",
+        // The platform owner as the registry answers it, or nobody for
+        // the jobs API to resolve from the kind's owner_role (3c23662d).
+        "owner_id": owner,
         "priority": "urgent",
         "status": "open",
         "tags": [],
@@ -1134,6 +1150,7 @@ impl Handler for CadenceSilenceSweep {
         let settled = settled_recently(&closed_rows, now);
 
         // Raise or refresh, one packet per quiet cadence.
+        let owner = owner_for_filing(self.owner.as_ref(), &ctx.rule_name).await;
         for (w, v) in &findings {
             let label = &w.label;
             let key = silence_key(label);
@@ -1164,7 +1181,7 @@ impl Handler for CadenceSilenceSweep {
             if let Err(e) = post_json(
                 &self.client,
                 &format!("{}/api/jobs", self.base()),
-                &alarm_body(w, v, &evidence, now),
+                &alarm_body(w, v, &evidence, now, &owner),
                 &ctx.rule_name,
             )
             .await
@@ -1479,7 +1496,13 @@ mod tests {
         let now = at("2026-09-09T12:00:00Z");
         let kind = "maintenance-ml-inference-batch";
         let v = Verdict::NeverFiled { interval_min: 1440 };
-        let raised = alarm_body(&watched(kind), &v, "first pass", at("2026-09-08T12:00:00Z"));
+        let raised = alarm_body(
+            &watched(kind),
+            &v,
+            "first pass",
+            at("2026-09-08T12:00:00Z"),
+            "emp-owner",
+        );
         // The packet as the jobs API would list it back.
         let open = json!({
             "id": "alarm-1",
@@ -1594,6 +1617,7 @@ mod tests {
             &v,
             "evidence",
             now,
+            "emp-owner",
         );
         let title = body["title"].as_str().expect("a title");
         assert!(
@@ -1717,7 +1741,7 @@ mod tests {
 
         let (mut cadences, _) = clock_cadences(&[image_freshness_rule()]);
         let w = Watched::from_clock_rule(&cadences.remove(0));
-        let body = alarm_body(&w, &v, "evidence", now);
+        let body = alarm_body(&w, &v, "evidence", now, "emp-owner");
         let title = body["title"].as_str().expect("a title");
         assert!(title.starts_with("CADENCE SUPPRESSED:"), "{title}");
         assert!(
@@ -1847,6 +1871,7 @@ mod tests {
             &v,
             "evidence",
             now,
+            "emp-owner",
         );
         assert!(
             body["title"]

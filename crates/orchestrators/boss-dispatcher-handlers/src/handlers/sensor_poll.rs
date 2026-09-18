@@ -80,7 +80,8 @@ use chrono::{DateTime, Utc};
 use serde_json::{Value as Json, json};
 
 use super::common::{
-    api_client, dispatcher_reader_header, get_json, post_json, sim_origin_value, triage_step,
+    api_client, dispatcher_reader_header, get_json, owner_for_filing, post_json, sim_origin_value,
+    triage_step,
 };
 
 /// The two standing conditions a sensor alarms on. Each is its own
@@ -378,7 +379,7 @@ pub fn packet_body(sensor: &SensorRow, r: &Reading, d: &Described) -> Json {
 
 /// The alarm one troubled sensor files. The reason is what the failing
 /// call answered — never a value.
-pub fn alarm_body(sensor: &SensorRow, alarm: &Alarm) -> Json {
+pub fn alarm_body(sensor: &SensorRow, alarm: &Alarm, owner: &str) -> Json {
     let reason = &alarm.reason;
     let (title, detail) = match alarm.condition {
         Condition::Unreadable => (
@@ -442,7 +443,9 @@ pub fn alarm_body(sensor: &SensorRow, alarm: &Alarm) -> Json {
         "kind": "backlog-item",
         "title": title,
         "subject": {"subject_kind": "custom", "id": sensor.id},
-        "owner_id": "emp-david",
+        // The platform owner as the registry answers it, or nobody for
+        // the jobs API to resolve from the kind's owner_role (3c23662d).
+        "owner_id": owner,
         "priority": "urgent",
         "status": "open",
         "tags": [],
@@ -528,6 +531,10 @@ pub struct SensorPoll {
     jobs_base: String,
     sources: HashMap<String, Arc<dyn SensorSource>>,
     credentials: CredentialValues,
+    /// Who the packets this handler files are owned by — the platform
+    /// owner through the port (backlog 3c23662d), resolved once per
+    /// invocation by `common::owner_for_filing`; never a literal.
+    owner: Arc<dyn boss_core::platform_owner::PlatformOwner>,
 }
 
 /// What one sensor's poll did — the line the firing logs per sensor.
@@ -551,12 +558,14 @@ impl SensorPoll {
         jobs_base: impl Into<String>,
         sources: HashMap<String, Arc<dyn SensorSource>>,
         credentials: CredentialValues,
+        owner: Arc<dyn boss_core::platform_owner::PlatformOwner>,
     ) -> Arc<Self> {
         Arc::new(Self {
             client: api_client(),
             jobs_base: jobs_base.into(),
             sources,
             credentials,
+            owner,
         })
     }
 
@@ -676,6 +685,7 @@ impl SensorPoll {
     ) -> Result<&'static str, HandlerError> {
         let key = alarm.condition.key(&sensor.id);
         let reason = &alarm.reason;
+        let owner = owner_for_filing(self.owner.as_ref(), self.name()).await;
         match self.open_alarm_for(&key).await? {
             Some((id, held)) if held == *reason => {
                 tracing::info!(finding = %key, packet = %id, "sensor.poll: alarm already open with this reason");
@@ -688,7 +698,7 @@ impl SensorPoll {
                 self.write(
                     reqwest::Method::PATCH,
                     &format!("/api/jobs/{id}/metadata"),
-                    &alarm_body(sensor, alarm)["metadata"],
+                    &alarm_body(sensor, alarm, &owner)["metadata"],
                     &sensor.id,
                 )
                 .await?;
@@ -699,7 +709,7 @@ impl SensorPoll {
                 self.write(
                     reqwest::Method::POST,
                     "/api/jobs",
-                    &alarm_body(sensor, alarm),
+                    &alarm_body(sensor, alarm, &owner),
                     &sensor.id,
                 )
                 .await?;
@@ -999,7 +1009,9 @@ mod tests {
         let b = alarm_body(
             &sensor(),
             &Alarm::unreadable("env BOSS_BROKER_STRIPE_KEY is empty"),
+            "emp-owner",
         );
+        assert_eq!(b["owner_id"], "emp-owner", "the owner is the one handed in");
         assert_eq!(
             b["metadata"]["estate_finding"],
             "sensor_unreadable:stripe-sponsorships"
@@ -1282,6 +1294,7 @@ mod tests {
                 "BOSS_BROKER_STRIPE_KEY",
                 key.map(str::to_string),
             ),
+            Arc::new(boss_core::platform_owner::Fixed("emp-owner".into())),
         )
     }
 
@@ -1488,7 +1501,7 @@ mod tests {
             400,
             "unknown or inactive job kind: receive-a-sponsorship",
         );
-        let b = alarm_body(&sensor(), &alarm);
+        let b = alarm_body(&sensor(), &alarm, "emp-owner");
         assert_eq!(
             b["metadata"]["estate_finding"],
             "sensor_unopenable:stripe-sponsorships"
@@ -1517,7 +1530,7 @@ mod tests {
             b["metadata"]["detail"]
         );
         // The unreadable body still reads as it did.
-        let b = alarm_body(&sensor(), &Alarm::unreadable("env X is empty"));
+        let b = alarm_body(&sensor(), &Alarm::unreadable("env X is empty"), "emp-owner");
         assert_eq!(
             b["metadata"]["estate_finding"],
             "sensor_unreadable:stripe-sponsorships"
@@ -1715,6 +1728,7 @@ mod tests {
                 "BOSS_BROKER_STRIPE_KEY",
                 Some("rk_test_good".into()),
             ),
+            Arc::new(boss_core::platform_owner::Fixed("emp-owner".into())),
         );
         *stub_jobs.refuse_opens.lock().unwrap() =
             Some((400, "unknown or inactive job kind: receive-a-payout".into()));

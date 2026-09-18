@@ -788,6 +788,7 @@ pub(crate) fn gate_run_body(
     sha: &str,
     manifest: &str,
     delivery_channel: Option<&str>,
+    owner: &str,
 ) -> Value {
     let mut metadata = json!({
         "branch": branch,
@@ -805,7 +806,11 @@ pub(crate) fn gate_run_body(
         "kind": "gate-run",
         "title": format!("Gate: {branch}"),
         "subject": {"subject_kind": "custom", "id": "bosspipeline"},
-        "owner_id": "emp-david",
+        // Who answers for the gate-run: the platform owner as the
+        // registry answers it (backlog 3c23662d), or nobody, which the
+        // jobs API resolves from the kind's owner_role — never a
+        // literal person.
+        "owner_id": owner,
         "priority": "standard",
         "status": "open",
         "tags": [],
@@ -2281,6 +2286,7 @@ pub async fn run(
                 println!("boss gate: DRY would file a gate-run packet for {branch}@{sha}");
                 "dry-run-packet".to_string()
             } else {
+                let owner = crate::owner::for_filing_at(&jobs_base()?).await;
                 let created = api(
                     &http,
                     reqwest::Method::POST,
@@ -2290,6 +2296,7 @@ pub async fn run(
                         &sha,
                         &manifest_path.display().to_string(),
                         crate::channels::delivery_channel_for(branch).as_deref(),
+                        &owner,
                     )),
                 )
                 .await?;
@@ -5126,6 +5133,7 @@ mod tests {
             "abc123",
             "infra/gate-runner/gate-runner.yaml",
             None,
+            "emp-owner",
         );
         // Exactly the `Job` fields with no serde default and no Option.
         for field in [
@@ -5155,6 +5163,7 @@ mod tests {
             "abc123",
             "infra/gate-runner/gate-runner.yaml",
             None,
+            "emp-owner",
         );
         assert!(
             b.get("opened_on").is_none(),
@@ -5181,6 +5190,7 @@ mod tests {
             "abc123",
             "infra/gate-runner/gate-runner.yaml",
             None,
+            "emp-owner",
         );
         b.as_object_mut()
             .expect("body is an object")
@@ -5198,14 +5208,26 @@ mod tests {
     /// rig produced a verdict without guessing from the branch name.
     #[test]
     fn the_packet_records_which_runner_manifest_rendered_it() {
-        let b = gate_run_body("feat/x", "abc123", "infra/gate-runner/local.yaml", None);
+        let b = gate_run_body(
+            "feat/x",
+            "abc123",
+            "infra/gate-runner/local.yaml",
+            None,
+            "emp-owner",
+        );
         assert_eq!(b["metadata"]["runner"], "infra/gate-runner/local.yaml");
     }
 
     #[test]
     fn the_gate_run_stamps_the_delivery_channel_when_known() {
         // None (branch had no forge diff to classify) leaves it unstamped.
-        let b = gate_run_body("feat/x", "abc123", "infra/gate-runner/local.yaml", None);
+        let b = gate_run_body(
+            "feat/x",
+            "abc123",
+            "infra/gate-runner/local.yaml",
+            None,
+            "emp-owner",
+        );
         assert!(b["metadata"].get("delivery_channel").is_none());
         // A known channel rides on the gate-run so the car and the
         // channel-gated delivery can read it without re-deriving.
@@ -5214,6 +5236,7 @@ mod tests {
             "abc123",
             "infra/gate-runner/local.yaml",
             Some("data"),
+            "emp-owner",
         );
         assert_eq!(d["metadata"]["delivery_channel"], "data");
     }

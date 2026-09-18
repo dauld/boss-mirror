@@ -2131,6 +2131,7 @@ pub(crate) fn stranded_alarm_body(
     a: &StrandedGreen,
     windows: StrandWindows,
     now: DateTime<Utc>,
+    owner: &str,
 ) -> Value {
     let window = windows.for_cause(a.cause);
     let title = match a.cause {
@@ -2162,7 +2163,11 @@ pub(crate) fn stranded_alarm_body(
         "status": "open",
         "title": title,
         "subject": {"subject_kind": "custom", "id": "bosspipeline"},
-        "owner_id": "emp-david",
+        // The platform owner as the registry answers it (backlog
+        // 3c23662d), or nobody for the jobs API to resolve from the
+        // kind's owner_role — never a literal person. Same on every
+        // alarm below.
+        "owner_id": owner,
         "priority": "standard",
         // No `opened_on`: the create handler injects it off its clock
         // and stamps the filing instant as `metadata.opened_at` only
@@ -2206,6 +2211,7 @@ pub(crate) fn deploy_blocked_alarm_body(
     reason: &str,
     blocked_since: &str,
     threshold_mins: i64,
+    owner: &str,
 ) -> Value {
     json!({
         "kind": "user-feedback",
@@ -2213,7 +2219,7 @@ pub(crate) fn deploy_blocked_alarm_body(
         "title": format!("Deploy blocked {mins} min: the playground tree is not clean"),
         "subject": {"subject_kind": "custom", "id": "cluster-convergence"},
         "tags": ["deploy", "pipeline"],
-        "owner_id": "emp-david",
+        "owner_id": owner,
         "priority": "urgent",
         // No `opened_on`: see stranded_alarm_body (dd3624a0).
         "metadata": {
@@ -2242,6 +2248,7 @@ pub(crate) fn convergence_overdue_alarm_body(
     mins_since_merge: i64,
     reported: &str,
     threshold_mins: i64,
+    owner: &str,
 ) -> Value {
     json!({
         "kind": "user-feedback",
@@ -2252,7 +2259,7 @@ pub(crate) fn convergence_overdue_alarm_body(
         ),
         "subject": {"subject_kind": "custom", "id": "cluster-convergence"},
         "tags": ["deploy", "pipeline"],
-        "owner_id": "emp-david",
+        "owner_id": owner,
         "priority": "urgent",
         // No `opened_on`: see stranded_alarm_body (dd3624a0).
         "metadata": {
@@ -4317,12 +4324,12 @@ pub(crate) fn red_train_alert(
 /// gate passed it because it only exercised `red_train_alert` (the pure
 /// decision), never this body against the API. Now the body is pure and
 /// pinned, and `reconcile` files it best-effort (see `announce_red_train`).
-pub(crate) fn red_train_alert_body(tid: &str, alert: &RedTrainAlert) -> Value {
+pub(crate) fn red_train_alert_body(tid: &str, alert: &RedTrainAlert, owner: &str) -> Value {
     json!({
         "kind": "backlog-item",
         "title": alert.title,
         "subject": {"subject_kind": "custom", "id": "bosspipeline"},
-        "owner_id": "emp-david",
+        "owner_id": owner,
         "status": "open",
         "tags": [],
         "priority": "urgent",
@@ -4374,7 +4381,7 @@ mod red_train_alert_tests {
             refused: false,
             logs: vec![],
         };
-        let b = red_train_alert_body("abcd1234-0000-0000-0000-000000000000", &alert);
+        let b = red_train_alert_body("abcd1234-0000-0000-0000-000000000000", &alert, "emp-owner");
         for f in [
             "kind", "title", "subject", "owner_id", "status", "tags", "priority", "metadata",
         ] {
@@ -4384,7 +4391,7 @@ mod red_train_alert_tests {
             );
         }
         assert_eq!(b["status"], "open");
-        assert_eq!(b["owner_id"], "emp-david");
+        assert_eq!(b["owner_id"], "emp-owner", "the owner is the one handed in");
         assert_eq!(b["tags"], json!([]));
         assert_eq!(
             b["metadata"]["train_alert"], "abcd1234-0000-0000-0000-000000000000",
@@ -4512,7 +4519,7 @@ mod red_train_alert_tests {
             "the gate's excerpt rides the alert the way a forge check's log does, labelled as \
              the gate's so the two are never confused"
         );
-        let body = red_train_alert_body("abcd1234-0000-0000-0000-000000000000", &r);
+        let body = red_train_alert_body("abcd1234-0000-0000-0000-000000000000", &r, "emp-owner");
         assert_eq!(body["metadata"]["failing_logs"][0]["check"], "gate: test");
         assert!(
             body["metadata"]["failing_logs"][0]["log_tail"]
@@ -4936,7 +4943,8 @@ mod red_verdict_log_tests {
             .expect("still an alert without a log");
         assert_eq!(alert.failing, vec!["CI / test".to_string()]);
         assert!(alert.logs.is_empty(), "no attachment, not an error");
-        let body = red_train_alert_body("e799e241-aaaa-bbbb-cccc-000000000000", &alert);
+        let body =
+            red_train_alert_body("e799e241-aaaa-bbbb-cccc-000000000000", &alert, "emp-owner");
         assert_eq!(
             body["metadata"]["failing_logs"],
             json!([]),
@@ -4955,7 +4963,8 @@ mod red_verdict_log_tests {
         ]);
         let alert = red_train_alert(&train, "failing", Some(&rollup), &[], &[]).unwrap();
         assert_eq!(alert.logs.len(), 1);
-        let body = red_train_alert_body("abcd1234-0000-0000-0000-000000000000", &alert);
+        let body =
+            red_train_alert_body("abcd1234-0000-0000-0000-000000000000", &alert, "emp-owner");
         assert_eq!(body["metadata"]["failing_logs"][0]["check"], "CI / test");
         assert_eq!(
             body["metadata"]["failing_logs"][0]["log_tail"],
@@ -6037,6 +6046,11 @@ struct Conductor {
     cfg: Config,
     http: reqwest::Client,
     forge: Box<dyn Forge>,
+    /// Who the conductor's packets are filed to — the platform owner,
+    /// read from the people registry through the port and cached for
+    /// this process (backlog 3c23662d). Every alarm and the train's
+    /// gate-run go through `owner_for_filing`; none names a person.
+    owner: boss_people_client::ReqwestPlatformOwner,
     /// THE RULES THIS INVOCATION DECIDES BY — resolved once, from the
     /// registry, and threaded to every decision point below. Nothing in
     /// this file reaches for a policy constant any more; if a threshold
@@ -6060,12 +6074,27 @@ impl Conductor {
         // Built on the compiled fallback so the conductor can make the
         // very API call that resolves the real one; `with_policy`
         // replaces it before any decision is taken.
+        let owner = crate::owner::resolver(&cfg.jobs);
         Ok(Conductor {
             cfg,
             http,
             forge,
+            owner,
             policy: DeliveryPolicy::compiled(),
         })
+    }
+
+    /// The owner a packet this loop files carries: the port's answer,
+    /// or nobody with the refusal in the journal — the filing goes
+    /// ahead either way, because an alarm that fell silent for want of
+    /// an owner would be the failure mode this loop exists to end.
+    async fn owner_for_filing(&self) -> String {
+        boss_core::platform_owner::owner_for_filing(&self.owner, |e| {
+            log(format!(
+                "{e}; filing with no owner named — the jobs API resolves the kind's owner_role, or refuses"
+            ))
+        })
+        .await
     }
 
     fn with_policy(mut self, policy: DeliveryPolicy) -> Self {
@@ -6214,10 +6243,11 @@ impl Conductor {
     /// machinery can see it. Dedup is the train's `red_alert_filed`
     /// flag (see `announce_red_train`), not this key.
     async fn file_train_alert(&self, tid: &str, alert: &RedTrainAlert) -> Result<()> {
+        let owner = self.owner_for_filing().await;
         self.api(
             Method::POST,
             "/api/jobs",
-            Some(red_train_alert_body(tid, alert)),
+            Some(red_train_alert_body(tid, alert, &owner)),
         )
         .await?;
         Ok(())
@@ -6526,6 +6556,7 @@ impl Conductor {
                         "train {}: deploy tree BLOCKED {mins} min — filing packet",
                         id8(tid)
                     ));
+                    let owner = self.owner_for_filing().await;
                     self.api(
                         Method::POST,
                         "/api/jobs",
@@ -6535,6 +6566,7 @@ impl Conductor {
                             &reason,
                             &blocked_since,
                             self.cfg.converge_alarm_mins,
+                            &owner,
                         )),
                     )
                     .await?;
@@ -6706,6 +6738,7 @@ impl Conductor {
                     return Ok(());
                 }
                 let reported = cluster_commit.as_deref().unwrap_or("nothing");
+                let owner = self.owner_for_filing().await;
                 self.api(
                     Method::POST,
                     "/api/jobs",
@@ -6715,6 +6748,7 @@ impl Conductor {
                         mins_since_merge,
                         reported,
                         self.cfg.converge_alarm_mins,
+                        &owner,
                     )),
                 )
                 .await?;
@@ -7135,6 +7169,7 @@ impl Conductor {
                 live.join(", ")
             );
         }
+        let owner = self.owner_for_filing().await;
         let created = self
             .api(
                 Method::POST,
@@ -7144,6 +7179,7 @@ impl Conductor {
                     &sha,
                     &self.cfg.gate_manifest,
                     None,
+                    &owner,
                 )),
             )
             .await?;
@@ -7744,10 +7780,11 @@ impl Conductor {
             if self.cfg.dry {
                 continue;
             }
+            let owner = self.owner_for_filing().await;
             self.api(
                 Method::POST,
                 "/api/jobs",
-                Some(stranded_alarm_body(a, windows, now)),
+                Some(stranded_alarm_body(a, windows, now, &owner)),
             )
             .await?;
         }
@@ -12235,6 +12272,7 @@ mod tests {
             },
             http: reqwest::Client::new(),
             forge,
+            owner: crate::owner::resolver("http://jobs.invalid"),
             policy: policy(),
         }
     }
@@ -15378,7 +15416,7 @@ mod stranded_green_tests {
         let got = stranded_greens_to_alarm(&runs, &branches(&[]), &branches(&[]), now, windows());
         assert_eq!(got.len(), 1, "20 min with no car is past the 10-min grace");
         assert_eq!(got[0].cause, StrandCause::AutoParkFailed);
-        let body = stranded_alarm_body(&got[0], windows(), now);
+        let body = stranded_alarm_body(&got[0], windows(), now, "emp-owner");
         assert_eq!(body["metadata"]["stranded_cause"], "auto-park-failed");
         let title = body["title"].as_str().unwrap();
         assert!(title.contains("auto-park"), "the title names it: {title}");
@@ -15659,11 +15697,11 @@ mod stranded_green_tests {
             age_mins: 90,
             cause: StrandCause::NeverParked,
         };
-        let b = stranded_alarm_body(&a, windows(), now);
+        let b = stranded_alarm_body(&a, windows(), now, "emp-owner");
         assert_eq!(b["kind"], "backlog-item");
         assert_eq!(b["status"], "open");
         assert_eq!(b["priority"], "standard");
-        assert_eq!(b["owner_id"], "emp-david");
+        assert_eq!(b["owner_id"], "emp-owner", "the owner is the one handed in");
         assert_eq!(b["metadata"]["stranded_branch"], "fix/stranded");
         assert_eq!(b["metadata"]["gate_run_id"], "gr-1");
         assert_eq!(b["metadata"]["verdict_age_mins"], 90);
@@ -15698,7 +15736,7 @@ mod stranded_green_tests {
             age_mins: 90,
             cause: StrandCause::NeverParked,
         };
-        let b = stranded_alarm_body(&a, windows(), now);
+        let b = stranded_alarm_body(&a, windows(), now, "emp-owner");
         assert!(
             b.get("opened_on").is_none(),
             "`opened_on` must be left to the create handler's clock, \
@@ -15716,6 +15754,7 @@ mod stranded_green_tests {
             "deploy tree busy (branch=main, dirty=True) — will retry",
             "2026-09-07T11:15:00+00:00",
             30,
+            "emp-owner",
         );
         assert!(
             b.get("opened_on").is_none(),
@@ -15738,6 +15777,7 @@ mod stranded_green_tests {
             50,
             "nothing",
             30,
+            "emp-owner",
         );
         assert!(
             b.get("opened_on").is_none(),

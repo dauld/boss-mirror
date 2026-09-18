@@ -28,7 +28,9 @@ use serde_json::{Value, json};
 use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext};
 use boss_jobs::car::{self, Receipt};
 
-use super::common::{StepEvent, api_client, dispatcher_actor_header, get_json, write_json};
+use super::common::{
+    StepEvent, api_client, dispatcher_actor_header, get_json, owner_for_filing, write_json,
+};
 
 pub struct JobsAutoPark {
     client: reqwest::Client,
@@ -40,14 +42,23 @@ pub struct JobsAutoPark {
     /// allowlist, so this comes from the clock service like every other
     /// record stamp.
     clock: Arc<dyn boss_clock_client::ClockClient>,
+    /// Who the car this handler files is owned by — the platform owner
+    /// through the port (backlog 3c23662d), resolved once per filing by
+    /// `common::owner_for_filing`; never a literal.
+    owner: Arc<dyn boss_core::platform_owner::PlatformOwner>,
 }
 
 impl JobsAutoPark {
-    pub fn new(jobs_base: impl Into<String>, clock_url: impl Into<String>) -> Arc<Self> {
+    pub fn new(
+        jobs_base: impl Into<String>,
+        clock_url: impl Into<String>,
+        owner: Arc<dyn boss_core::platform_owner::PlatformOwner>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             client: api_client(),
             jobs_base: jobs_base.into(),
             clock: Arc::new(boss_clock_client::ReqwestClockClient::new(clock_url)),
+            owner,
         })
     }
 
@@ -639,12 +650,13 @@ fn open_cars_url(base: &str, offset: usize) -> String {
 /// these keys are added here rather than threaded through its signature
 /// because `boss park` (the hand verb auto-park replaces) has no probe
 /// to pass.
-fn car_body_with_proof(inputs: &AutoParkInputs) -> Value {
+fn car_body_with_proof(inputs: &AutoParkInputs, owner: &str) -> Value {
     let mut body = car::car_body(
         &inputs.branch,
         &inputs.summary,
         inputs.backlog_item.as_deref(),
         inputs.delivery_channel.as_deref(),
+        owner,
     );
     if let Some(md) = body.get_mut("metadata").and_then(Value::as_object_mut) {
         md.extend(inputs.proof.clone());
@@ -942,7 +954,8 @@ impl Handler for JobsAutoPark {
                 id
             }
             None => {
-                let body = car_body_with_proof(&inputs);
+                let owner = owner_for_filing(self.owner.as_ref(), &ctx.rule_name).await;
+                let body = car_body_with_proof(&inputs, &owner);
                 let created = post_json_return(
                     &self.client,
                     &format!("{}/api/jobs", self.base()),
@@ -1161,7 +1174,7 @@ mod tests {
             "park_expect": "park-probe",
         }));
         let got = auto_park_inputs(&gr, &green_step_meta()).expect("parks");
-        let body = car_body_with_proof(&got);
+        let body = car_body_with_proof(&got, "emp-owner");
         let md = &body["metadata"];
         assert_eq!(
             md[car::PROOF_PROBE],
@@ -1194,7 +1207,7 @@ mod tests {
         let got = auto_park_inputs(&gr, &green_step_meta()).expect("parks");
         assert_eq!(got.boards_after.as_deref(), Some("a1b2c3d4"));
         assert!(
-            car_body_with_proof(&got)["metadata"]
+            car_body_with_proof(&got, "emp-owner")["metadata"]
                 .get(car::BOARDS_AFTER)
                 .is_none(),
             "the edge must not ride the POST: an unresolvable id would redeliver forever \
@@ -1259,7 +1272,7 @@ mod tests {
             "park_proof_event": "event-bound — needs a stalled train",
         }));
         let got = auto_park_inputs(&gr, &green_step_meta()).expect("parks");
-        let md = car_body_with_proof(&got)["metadata"].clone();
+        let md = car_body_with_proof(&got, "emp-owner")["metadata"].clone();
         assert_eq!(md[car::PROOF_EVENT], "event-bound — needs a stalled train");
         assert!(md.get(car::PROOF_PROBE).is_none());
 
@@ -1268,7 +1281,7 @@ mod tests {
         }));
         let got = auto_park_inputs(&plain, &green_step_meta()).expect("parks");
         assert!(got.proof.is_empty());
-        let md = car_body_with_proof(&got)["metadata"].clone();
+        let md = car_body_with_proof(&got, "emp-owner")["metadata"].clone();
         for k in [car::PROOF_PROBE, car::PROOF_EXPECT, car::PROOF_EVENT] {
             assert!(md.get(k).is_none(), "{k} must be absent, not null");
         }
@@ -1296,7 +1309,7 @@ mod tests {
             "a partial item is not the closing edge — and this None is what stops the \
              park-time triage write too"
         );
-        let md = car_body_with_proof(&got)["metadata"].clone();
+        let md = car_body_with_proof(&got, "emp-owner")["metadata"].clone();
         assert_eq!(
             md[car::PARTIAL_ITEM],
             "cf0f5e2d-0000-0000-0000-000000000000"
@@ -1319,7 +1332,7 @@ mod tests {
         }));
         let got = auto_park_inputs(&gr, &green_step_meta()).expect("parks");
         assert_eq!(got.backlog_item, None);
-        let md = car_body_with_proof(&got)["metadata"].clone();
+        let md = car_body_with_proof(&got, "emp-owner")["metadata"].clone();
         assert_eq!(
             md[car::NO_ITEM_REASON],
             "David asked for this in conversation"
@@ -1341,7 +1354,7 @@ mod tests {
             Some("7c9e376d-0000-0000-0000-000000000000")
         );
         assert!(got.item_provenance.is_empty());
-        let md = car_body_with_proof(&got)["metadata"].clone();
+        let md = car_body_with_proof(&got, "emp-owner")["metadata"].clone();
         assert_eq!(md["backlog_item"], "7c9e376d-0000-0000-0000-000000000000");
         for k in [car::PARTIAL_ITEM, car::NO_ITEM_REASON] {
             assert!(md.get(k).is_none(), "{k} must be absent, not null");
@@ -1756,7 +1769,11 @@ mod park_routes_its_item_tests {
     #[tokio::test]
     async fn parking_routes_the_linked_item_to_build() {
         let (base, puts) = mock_item(Some(untriaged_item()), axum::http::StatusCode::OK).await;
-        let h = JobsAutoPark::new(base, "http://unused");
+        let h = JobsAutoPark::new(
+            base,
+            "http://unused",
+            Arc::new(boss_core::platform_owner::Fixed("emp-owner".into())),
+        );
         h.triage_linked_item(ITEM, CAR_ID, "fix/x", "jobs.auto-park")
             .await;
 
@@ -1782,7 +1799,11 @@ mod park_routes_its_item_tests {
         decided["steps"][1]["status"] = json!("completed");
         decided["steps"][1]["metadata"] = json!({ "disposition": "verify", "evidence": "by hand" });
         let (base, puts) = mock_item(Some(decided), axum::http::StatusCode::OK).await;
-        let h = JobsAutoPark::new(base, "http://unused");
+        let h = JobsAutoPark::new(
+            base,
+            "http://unused",
+            Arc::new(boss_core::platform_owner::Fixed("emp-owner".into())),
+        );
         h.triage_linked_item(ITEM, CAR_ID, "fix/x", "jobs.auto-park")
             .await;
         assert!(
@@ -1800,13 +1821,21 @@ mod park_routes_its_item_tests {
     #[tokio::test]
     async fn a_routing_write_that_cannot_land_does_not_fail_the_park() {
         let (base, puts) = mock_item(None, axum::http::StatusCode::INTERNAL_SERVER_ERROR).await;
-        let h = JobsAutoPark::new(base.clone(), "http://unused");
+        let h = JobsAutoPark::new(
+            base.clone(),
+            "http://unused",
+            Arc::new(boss_core::platform_owner::Fixed("emp-owner".into())),
+        );
         // Returns () — there is no error for the park to propagate.
         h.triage_linked_item(ITEM, CAR_ID, "fix/x", "jobs.auto-park")
             .await;
         assert!(puts.lock().unwrap().is_empty());
 
-        let h = JobsAutoPark::new(base, "http://unused");
+        let h = JobsAutoPark::new(
+            base,
+            "http://unused",
+            Arc::new(boss_core::platform_owner::Fixed("emp-owner".into())),
+        );
         h.triage_linked_item("5942f205", CAR_ID, "fix/x", "jobs.auto-park")
             .await;
         assert!(
