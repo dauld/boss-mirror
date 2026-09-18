@@ -50,6 +50,12 @@ boss-policy-client = { path = "../boss-policy-client" }
 # the services that reader routes to are three copies of one fact whose
 # definition is boss-ports. Pinned equal (CLAUDE.md §9a; design 28d2bed9).
 boss-ports = { path = "../boss-ports" }
+# Test-only, for `tag_release_sh.rs`: the answer line tag-release.sh
+# prints and the `verdict_pattern` the dispatcher rule complete-release-
+# tag-on-tag-release-answered reads it with are one fact in two files
+# (the script and the rule), so the test compiles the rule's regex and
+# runs it over the script's real output (CLAUDE.md §9a).
+regex = "1"
 
 [[test]]
 name = "migrate_sh"

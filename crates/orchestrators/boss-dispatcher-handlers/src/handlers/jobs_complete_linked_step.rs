@@ -83,6 +83,30 @@
 //! residue that remains — an item a person routed somewhere this
 //! obligation cannot act, or a kind whose triage is not its to make.
 //!
+//! ## Reading the answer (v5, 05d301be)
+//!
+//! A closing packet may carry the FACTS the step needs — an ops-request
+//! whose verb read something back from a host — and until this version
+//! the only substitutions were the car's own (`{branch}`, `{car}`,
+//! `{title}`). The tag-release verb prints `tag-release: v1.2.3 at
+//! <sha> (packet <id>)` as its last line, the release packet's `tag`
+//! step requires exactly `tag` and `sha`, and "never a sha you did not
+//! read from git" is that step's own procedure. Two optional args, in
+//! `ops.judge`'s vocabulary so a rule author learns one:
+//!
+//! - `verb` — the closing packet's `metadata.verb` must equal it, or
+//!   the close is not this rule's (every answered ops-request fires a
+//!   `kind = "ops-request" AND outcome = "answered"` rule; the closed
+//!   marker carries no metadata to select on).
+//! - `verdict_pattern` — a regex with NAMED groups over the closing
+//!   packet's `execute` step `output`; the LAST matching line is the
+//!   answer, and each group substitutes `{name}` in `done_metadata`
+//!   beside the car facts. No line matching means the verb did not
+//!   answer (a refusal prints `REFUSED`, which no answer pattern
+//!   matches): the obligation completes nothing and notes why on both
+//!   ends, the way a dead link is noted. A pattern that is not a regex
+//!   is rule authoring — `Permanent`, never retried.
+//!
 //! ## Idempotence
 //!
 //! JetStream is at-least-once and the close marker is emitted from
@@ -408,6 +432,9 @@ impl Handler for JobsCompleteLinkedStep {
             Some(Value::String(s)) if !s.is_empty() => s.as_str(),
             _ => DEFAULT_EVIDENCE_KEY,
         };
+        // Parsed before any read: a bad regex is the same on every
+        // delivery, and dying on it after the reads wastes them.
+        let answer = AnswerSpec::from_args(args)?;
 
         // The `jobs.job.closed` payload carries the closing Job's id.
         // A malformed marker is not something a redelivery can fix, so
@@ -418,6 +445,15 @@ impl Handler for JobsCompleteLinkedStep {
 
         let closing = self.get_job(closing_id, &ctx.rule_name).await?;
         let closing_meta = closing.get("metadata").cloned().unwrap_or(json!({}));
+
+        // Not this rule's verb: another answered request on the same
+        // topic, possibly carrying the same edge. Silent — it is
+        // somebody else's close, not a dead link.
+        if let Some(verb) = &answer.verb
+            && closing_meta.get("verb").and_then(|v| v.as_str()) != Some(verb.as_str())
+        {
+            return Ok(());
+        }
 
         // No declared edge → no obligation. This is the legacy /
         // free-text case: a car whose motivating item is named only in
@@ -449,6 +485,37 @@ impl Handler for JobsCompleteLinkedStep {
         if matches!(target_status, "closed" | "cancelled") {
             return Ok(());
         }
+
+        // THE ANSWER (v5). A rule that asked for one gets it or gets
+        // nothing: a closing packet whose recorded output carries no
+        // line the pattern matches did not answer — the verb refused,
+        // or was killed before its last line — and the step it would
+        // have completed stays with its person. Said on both ends, like
+        // a dead link; idempotent under redelivery like it too.
+        let answer_groups = match answer.groups(&closing) {
+            Ok(groups) => groups,
+            Err(why) => {
+                tracing::warn!(
+                    rule = %ctx.rule_name,
+                    car = %closing_id,
+                    packet = %target_id,
+                    "obligation completed nothing — {why}"
+                );
+                for (on, key, counterpart) in [
+                    (closing_id, "packet", target_id),
+                    (target_id, "car", closing_id),
+                ] {
+                    if let Err(e) = self
+                        .note_noop(on, key, counterpart, &why, &ctx.rule_name)
+                        .await
+                    {
+                        tracing::warn!(rule = %ctx.rule_name, job = %on,
+                            "could not record the no-op note: {e}");
+                    }
+                }
+                return Ok(());
+            }
+        };
 
         // The rule row's translation of "this shipped" into the step
         // kind's own completion vocabulary (0ab5fa3a, accepted (a)).
@@ -531,7 +598,9 @@ impl Handler for JobsCompleteLinkedStep {
                     }
                     return Ok(());
                 };
-                let facts = self.shipped(closing_id, &closing, &closing_meta, ctx).await;
+                let facts = self
+                    .shipped(closing_id, &closing, &closing_meta, &answer_groups, ctx)
+                    .await;
                 self.complete_step(
                     target_id,
                     &routing_step,
@@ -574,7 +643,10 @@ impl Handler for JobsCompleteLinkedStep {
 
         let facts = match shipped {
             Some(f) => f,
-            None => self.shipped(closing_id, &closing, &closing_meta, ctx).await,
+            None => {
+                self.shipped(closing_id, &closing, &closing_meta, &answer_groups, ctx)
+                    .await
+            }
         };
         self.complete_step(
             target_id,
@@ -596,6 +668,66 @@ struct Shipped {
     branch: String,
     title: String,
     evidence: serde_json::Value,
+    /// The named groups of the closing packet's answer line (v5) —
+    /// empty when the rule asked for none.
+    answer: serde_json::Map<String, serde_json::Value>,
+}
+
+/// What a rule asked the obligation to READ off the closing packet
+/// (v5, 05d301be): which verb's answers are its business, and the
+/// pattern whose named groups are the facts. Both optional; the
+/// pattern's spelling is `ops.judge`'s.
+struct AnswerSpec {
+    verb: Option<String>,
+    pattern: Option<regex::Regex>,
+}
+
+impl AnswerSpec {
+    fn from_args(args: &[(String, Value)]) -> Result<Self, HandlerError> {
+        let verb = match arg(args, "verb") {
+            Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+            _ => None,
+        };
+        let pattern = match arg(args, "verdict_pattern") {
+            Some(Value::String(src)) if !src.is_empty() => {
+                Some(regex::Regex::new(src).map_err(|e| {
+                    HandlerError::Permanent(format!("verdict_pattern {src:?} is not a regex: {e}"))
+                })?)
+            }
+            _ => None,
+        };
+        Ok(Self { verb, pattern })
+    }
+
+    /// PURE over the closing packet: the answer's named groups, or why
+    /// there is no answer. No pattern asked for means no groups and no
+    /// complaint. The line is the LAST one the pattern matches in the
+    /// `execute` step's recorded `output` (`ops_judge::verdict_groups`,
+    /// one definition), because the ops-runner records the two streams
+    /// merged and a verb says its answer last.
+    fn groups(
+        &self,
+        closing: &serde_json::Value,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+        let Some(pattern) = &self.pattern else {
+            return Ok(serde_json::Map::new());
+        };
+        let output = step_by_slug(closing, super::ops_judge::REPORT_STEP)
+            .and_then(|s| s.get("metadata"))
+            .and_then(|m| m.get("output"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        match super::ops_judge::verdict_groups(pattern, output) {
+            Some((_, serde_json::Value::Object(groups))) => Ok(groups),
+            _ => Err(format!(
+                "no line of the closing packet's {} output matches the answer pattern {:?} — \
+                 the verb refused or never reached its answer line, so nothing was read back \
+                 and the step stays with its person",
+                super::ops_judge::REPORT_STEP,
+                pattern.as_str()
+            )),
+        }
+    }
 }
 
 /// The routing a rule row may ask for (v3, dda0713c): when none of
@@ -729,11 +861,21 @@ fn fill(
             continue;
         }
         let v = match v {
-            serde_json::Value::String(s) => serde_json::Value::String(
-                s.replace("{branch}", &shipped.branch)
+            serde_json::Value::String(s) => {
+                let base = s
+                    .replace("{branch}", &shipped.branch)
                     .replace("{car}", &shipped.car)
-                    .replace("{title}", &shipped.title),
-            ),
+                    .replace("{title}", &shipped.title);
+                // The answer's groups (v5): a numeric group renders as
+                // its digits, a string as itself.
+                serde_json::Value::String(shipped.answer.iter().fold(base, |acc, (name, val)| {
+                    let text = match val {
+                        serde_json::Value::String(t) => t.clone(),
+                        other => other.to_string(),
+                    };
+                    acc.replace(&format!("{{{name}}}"), &text)
+                }))
+            }
             other => other.clone(),
         };
         merged.insert(k.clone(), v);
@@ -751,6 +893,7 @@ impl JobsCompleteLinkedStep {
         closing_id: &str,
         closing: &serde_json::Value,
         closing_meta: &serde_json::Value,
+        answer: &serde_json::Map<String, serde_json::Value>,
         ctx: &InvocationContext,
     ) -> Shipped {
         let branch = closing_meta.get("branch").and_then(|v| v.as_str());
@@ -802,6 +945,7 @@ impl JobsCompleteLinkedStep {
                 "generation": generation,
                 "by_rule": ctx.rule_name,
             }),
+            answer: answer.clone(),
         }
     }
 
@@ -978,7 +1122,7 @@ mod tests {
         })
     }
 
-    type Puts = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
+    pub(super) type Puts = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
 
     /// Stand-in for jobs-api: serves the Jobs by id, records every
     /// step PUT, and records every job-metadata PATCH — the noop-note
@@ -991,7 +1135,7 @@ mod tests {
     /// completes with `disposition = "build"` — standing in for
     /// jobs-api's own re-evaluation on the write. The handler routes,
     /// re-reads, and must find the branch it opened.
-    async fn mock_jobs(jobs: Vec<serde_json::Value>) -> (String, Puts, Puts) {
+    pub(super) async fn mock_jobs(jobs: Vec<serde_json::Value>) -> (String, Puts, Puts) {
         let patches: Puts = Arc::new(Mutex::new(Vec::new()));
         let puts: Puts = Arc::new(Mutex::new(Vec::new()));
         let by_id: Arc<Mutex<std::collections::HashMap<String, serde_json::Value>>> =
@@ -2170,5 +2314,253 @@ mod noop_reason_tests {
             assert!(why.contains(slug), "{why} is missing {slug}");
         }
         assert!(why.contains("needs-info"), "{why}");
+    }
+}
+
+/// THE ANSWER (backlog 05d301be): a rule may ask the obligation to read
+/// the closing packet's recorded output and write what it says.
+#[cfg(test)]
+mod answer_tests {
+    use super::*;
+    use boss_dispatcher::rules::expr::NoHelpers;
+    use boss_dispatcher::rules::registry::{Registry, match_event};
+
+    const REQUEST: &str = "55555555-5555-4555-8555-555555555555";
+    const RELEASE: &str = "66666666-6666-4666-8666-666666666666";
+    const TAG_STEP: &str = "77777777-7777-4777-8777-777777777777";
+    const MERGE_SHA: &str = "e4d5d9816d34a1b2c3d4e5f60718293a4b5c6d7e";
+
+    fn ctx(payload: serde_json::Value) -> InvocationContext {
+        InvocationContext {
+            rule_name: "complete-release-tag-on-tag-release-answered".into(),
+            triggering_event_id: "evt-close-9".into(),
+            triggering_topic: "jobs.job.closed".into(),
+            event_payload: payload,
+        }
+    }
+
+    /// The rule complete-release-tag-on-tag-release-answered, read from
+    /// its file and matched against an answered ops-request's close, so
+    /// the args below are exactly what the dispatcher hands this handler
+    /// — not a copy of the file typed here.
+    fn tag_release_rule_args() -> Vec<(String, Value)> {
+        let path = boss_testing::dispatcher_rules_dir()
+            .join("complete-release-tag-on-tag-release-answered.toml");
+        let toml = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let reg = Registry::from_toml(&toml).expect("the rule file parses");
+        let matched =
+            match_event(&reg, "jobs.job.closed", &request_close_marker(), &NoHelpers).matched;
+        assert_eq!(
+            matched.len(),
+            1,
+            "an answered ops-request fires the rule once"
+        );
+        let inv = &matched[0].invocations[0];
+        assert_eq!(inv.handler, "jobs.complete_linked_step");
+        inv.args.clone()
+    }
+
+    fn request_close_marker() -> serde_json::Value {
+        json!({
+            "id": REQUEST,
+            "kind": "ops-request",
+            "outcome": "answered",
+            "closed_on": "2026-09-18",
+            "title": "Run tag-release on forge",
+            "subject_id": "forge",
+            "parent_step_id": null,
+        })
+    }
+
+    /// An answered tag-release ops-request: the verb's output rides its
+    /// `execute` step, the release packet its `release` edge.
+    fn tag_release_request(verb: &str, output: &str) -> serde_json::Value {
+        json!({
+            "id": REQUEST,
+            "kind": "ops-request",
+            "title": "Run tag-release on forge",
+            "status": "closed",
+            "subject": { "subject_kind": "custom", "id": "forge" },
+            "metadata": { "host": "forge", "verb": verb,
+                          "args": ["v1.2.3", MERGE_SHA, RELEASE],
+                          "release": RELEASE, "outcome": "answered" },
+            "steps": [
+                { "id": "r-filed", "spec_slug": "filed", "status": "completed", "metadata": {} },
+                { "id": "r-execute", "spec_slug": "execute", "status": "completed",
+                  "metadata": { "disposition": "answered", "exit_code": "0",
+                                "output": output, "runner_host": "forge" } },
+            ],
+        })
+    }
+
+    /// The release packet at its `tag` step (cut-a-release: tag and sha
+    /// required at done; `authority_role` on the step keeps it gated).
+    fn release_packet(tag_status: &str) -> serde_json::Value {
+        json!({
+            "id": RELEASE,
+            "kind": "cut-a-release",
+            "title": "Release v1.2.3 decided — boss",
+            "status": "open",
+            "metadata": { "version": "1.2.3" },
+            "steps": [
+                { "id": "s-approve", "spec_slug": "approve", "status": "completed",
+                  "metadata": { "decision": "approved" } },
+                { "id": TAG_STEP, "spec_slug": "tag", "status": tag_status,
+                  "metadata": { "authority_role": "platform-admin" } },
+                { "id": "s-mirror", "spec_slug": "mirror", "status": "pending", "metadata": {} },
+            ],
+        })
+    }
+
+    fn answered_output() -> String {
+        let short = &MERGE_SHA[..12];
+        format!(
+            "tag-release: forge: no tag v1.2.3 on remote forgejo\n\
+             tag-release: record: pr-train 0000abcd merged as {short} (57 closed trains read)\n\
+             tag-release: converged main: {short} carries {short}\n\
+             tag-release: read back: refs/tags/v1.2.3 on remote forgejo peels to {MERGE_SHA}\n\
+             tag-release: v1.2.3 at {MERGE_SHA} (packet {RELEASE})\n"
+        )
+    }
+
+    #[tokio::test]
+    async fn an_answered_tag_release_completes_the_release_tag_step_from_its_read_back() {
+        let (base, puts, patches) = super::tests::mock_jobs(vec![
+            tag_release_request("tag-release", &answered_output()),
+            release_packet("ready"),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        h.invoke(&tag_release_rule_args(), &ctx(request_close_marker()))
+            .await
+            .expect("runs");
+
+        let calls = puts.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "exactly the tag step completed: {calls:?}");
+        let (step_id, body) = &calls[0];
+        assert_eq!(step_id, TAG_STEP);
+        assert_eq!(body["status"], "completed");
+        // The step's two required fields, COPIED from the read-back line.
+        assert_eq!(body["metadata"]["tag"], "v1.2.3");
+        assert_eq!(body["metadata"]["sha"], MERGE_SHA);
+        // The evidence names the request, under the rule's own key.
+        assert_eq!(body["metadata"]["tagged_by"]["car"], REQUEST);
+        assert_eq!(body["metadata"]["tagged_by"]["outcome"], "answered");
+        assert_eq!(body["metadata"]["authority_role"], "platform-admin");
+        assert!(patches.lock().unwrap().is_empty(), "nothing to note");
+    }
+
+    /// A refused run is still an ANSWERED ops-request (the runner ran
+    /// the verb; the verb said no). Its output has no read-back line,
+    /// so the step stays the founder's and both packets say why.
+    #[tokio::test]
+    async fn a_refused_tag_release_completes_nothing_and_says_so_on_both_ends() {
+        let refused = "tag-release: forge: no tag v1.2.3 on remote forgejo\n\
+                       tag-release: REFUSED — sha e4d5d9816d34 is not the merge commit of any of the 57 closed pr-train packets read\n\
+                       tag-release:   Nothing was written.\n";
+        let (base, puts, patches) = super::tests::mock_jobs(vec![
+            tag_release_request("tag-release", refused),
+            release_packet("ready"),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        h.invoke(&tag_release_rule_args(), &ctx(request_close_marker()))
+            .await
+            .expect("runs");
+
+        assert!(puts.lock().unwrap().is_empty(), "no step completed");
+        let notes = patches.lock().unwrap().clone();
+        let mut on: Vec<&str> = notes.iter().map(|(id, _)| id.as_str()).collect();
+        on.sort_unstable();
+        assert_eq!(on, [REQUEST, RELEASE], "the note lands on both ends");
+        for (_, body) in &notes {
+            let why = body["obligation_noop"]["why"].as_str().unwrap_or("");
+            assert!(
+                why.contains("no line"),
+                "the note says what was missing: {why}"
+            );
+            assert!(why.contains("tag-release"), "and names the pattern: {why}");
+        }
+    }
+
+    /// Another verb's answered request carrying the same `release` edge
+    /// (the GitHub-release verb, one day) is not this rule's.
+    #[tokio::test]
+    async fn another_verbs_answer_is_not_this_rules() {
+        let (base, puts, patches) = super::tests::mock_jobs(vec![
+            tag_release_request("github-release", &answered_output()),
+            release_packet("ready"),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        h.invoke(&tag_release_rule_args(), &ctx(request_close_marker()))
+            .await
+            .expect("runs");
+        assert!(puts.lock().unwrap().is_empty(), "no step completed");
+        assert!(patches.lock().unwrap().is_empty(), "nothing noted either");
+    }
+
+    /// Redelivery: the tag step already completed by the first delivery
+    /// is left alone, silently.
+    #[tokio::test]
+    async fn a_redelivered_answer_writes_nothing() {
+        let (base, puts, patches) = super::tests::mock_jobs(vec![
+            tag_release_request("tag-release", &answered_output()),
+            release_packet("completed"),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        h.invoke(&tag_release_rule_args(), &ctx(request_close_marker()))
+            .await
+            .expect("runs");
+        assert!(puts.lock().unwrap().is_empty());
+        assert!(patches.lock().unwrap().is_empty());
+    }
+
+    /// A pattern that is not a regex is rule authoring, the same on
+    /// every redelivery: Permanent, never a retry.
+    #[tokio::test]
+    async fn a_malformed_verdict_pattern_is_a_permanent_error() {
+        let (base, _, _) = super::tests::mock_jobs(vec![
+            tag_release_request("tag-release", &answered_output()),
+            release_packet("ready"),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let mut a = tag_release_rule_args();
+        for (k, v) in a.iter_mut() {
+            if k == "verdict_pattern" {
+                *v = Value::String("(?P<tag>[".into());
+            }
+        }
+        let err = h
+            .invoke(&a, &ctx(request_close_marker()))
+            .await
+            .expect_err("a bad regex cannot be retried into a good one");
+        assert!(matches!(err, HandlerError::Permanent(_)), "{err:?}");
+    }
+
+    #[test]
+    fn answer_substitutions_render_every_named_group_as_text() {
+        let groups = json!({ "tag": "v1.2.3", "n": 7 });
+        let shipped = Shipped {
+            car: REQUEST.into(),
+            branch: "(no branch recorded)".into(),
+            title: "t".into(),
+            evidence: json!({}),
+            answer: groups.as_object().cloned().unwrap_or_default(),
+        };
+        let mut merged = serde_json::Map::new();
+        let template: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"tag": "{tag}", "count": "{n} cars", "who": "{car}"}"#)
+                .unwrap();
+        fill(&mut merged, &template, &shipped);
+        assert_eq!(merged["tag"], "v1.2.3");
+        assert_eq!(
+            merged["count"], "7 cars",
+            "a numeric group renders as its digits"
+        );
+        assert_eq!(merged["who"], REQUEST, "the car facts still substitute");
     }
 }

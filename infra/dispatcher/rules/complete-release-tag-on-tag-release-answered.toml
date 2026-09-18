@@ -1,0 +1,58 @@
+# The tag-release verb's read-back completes the release packet's `tag`
+# step (backlog 05d301be, 2026-09-18).
+#
+# The tenant's cut-a-release protocol (design 3613f0af) has a `tag`
+# step whose two required fields are the tag name and the sha the forge
+# holds it at — "Never a sha you did not read from git", its own
+# procedure says. Until this car the step was the founder's by hand,
+# because no ops verb wrote a git ref. Now infra/forge/tag-release.sh
+# writes exactly one, READS IT BACK with `git ls-remote --tags`, and
+# prints that read-back as its last line:
+#
+#   tag-release: v1.2.3 at <40-hex sha> (packet <release packet id>)
+#
+# This rule copies that line onto the step. The ops-request the verb
+# answered carries `metadata.release` — the cut-a-release packet's id,
+# the same id the verb's third argument put in the tag's message — so
+# `jobs.complete_linked_step` follows that edge, the way the tenant's
+# own mirror and announce rules (examples: seeds/rules.toml in the
+# tenant repo) follow it from the publish and landing-page packets.
+#
+# WHY THE HANDLER READS THE ANSWER, NOT THE REQUEST. The request's
+# args already name the version and the sha, but a request is what was
+# ASKED; the answer line is what the forge now HOLDS, read back after
+# the push. `verdict_pattern` (the `ops.judge` vocabulary, same regex,
+# same "last matching line of the execute step's output") names the two
+# groups, and `done_metadata` writes them as `{tag}` and `{sha}` — the
+# step's own required fields. A refusal prints `tag-release: REFUSED —
+# …`, which the pattern does not match, so an answered-but-refused
+# request completes nothing and says so on both packets: the step stays
+# the founder's until a request succeeds. `verb` keeps this rule off
+# every other answered ops-request — including the GitHub-release verb
+# that will carry the same `release` edge one day.
+#
+# The pattern is written without a backslash: the arg passes through
+# two string lexers (TOML, then boss-expr's), and boss-expr reads `\d`
+# as `d` (ops_judge.rs).
+[[rule]]
+name = "complete-release-tag-on-tag-release-answered"
+why = """
+A CROSS-PROTOCOL REACTOR: an answered `ops-request` (the platform's
+host-side verb packet) completes a step on the tenant's release
+packet, which no single Workflow consequence can express — the
+release protocol cannot read another packet's execute step, and the
+ops-request protocol does not know it was filed for a release.
+Measured 2026-09-18 (backlog 05d301be): cut-a-release's `tag` step
+was the founder's by hand because nothing could write a ref and
+nothing could copy the read-back onto the step; the tag-release verb
+is the first half and this rule the second. The fields it writes are
+COPIED from the verb's read-back line (its verdict_pattern), never
+from the request's arguments, so the step records what the forge
+holds. A refused request matches no line and completes nothing.
+"""
+version = 1
+on_event = "jobs.job.closed"
+when = 'kind = "ops-request" AND outcome = "answered"'
+[[rule.do]]
+handler = "jobs.complete_linked_step"
+args = { verb = '"tag-release"', verdict_pattern = '"^tag-release: (?P<tag>v[0-9]+[.][0-9]+[.][0-9]+) at (?P<sha>[0-9a-f]{40}) [(]packet "', link = '"release"', steps = '"tag"', done_metadata = '"{\"tag\": \"{tag}\", \"sha\": \"{sha}\"}"', evidence_key = '"tagged_by"' }

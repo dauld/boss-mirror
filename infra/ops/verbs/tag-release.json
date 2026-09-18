@@ -1,0 +1,27 @@
+{
+  "about": "MUTATING — put an annotated tag on the forge at a LANDED train's merge commit and read it back (infra/forge/tag-release.sh <version> <sha> <release-packet-id>). Backlog 05d301be, left by the cut-a-release tenant car on 2026-09-18: no ops verb wrote a git ref (31 verbs, none tags), so the release protocol's `tag` step was the founder's by hand — fetch, git tag -a, git push, read the sha back, type it onto the step. Authorized by David through design 3613f0af (2026-09-18, the six department protocols; cut-a-release names this verb as the door its tag step is owed) under his 2026-09-16 rule that nothing is done by hand unless absolutely required. THE BOUNDS, each a refusal that writes nothing: the version is vMAJOR.MINOR.PATCH and the sha the full 40 hex (patterns here, checked again in the script); the tag must not already exist on the forge (git ls-remote --tags — a release is cut once); the sha must be the merge_ref a CLOSED pr-train's merged step records, read off the system of record through boss-sor-read as a read-scoped actor (an open train's is not proof; an empty listing is a failed read, not a fact); and it must be an ancestor of the converged main (HEAD of the converged checkout). Then ONE ref is written: git tag -a in the converged checkout as its owner, whose login environment carries the forge credential helper (no token is read or printed here), pushed to the forgejo remote, and READ BACK with ls-remote — the peeled commit must be the sha given. The tag's message carries the version, the release packet id, the train and this ops-request. The last output line is the answer, `tag-release: <version> at <sha> (packet <id>)`, which the dispatcher rule complete-release-tag-on-tag-release-answered reads to complete the release packet's tag step (jobs.complete_linked_step follows metadata.release on this request — the filer sets it to the same id as the third arg). The GitHub release on the public mirror is a second verb, after David merges the mirror PR; not this one.",
+  "hosts": [
+    "forge"
+  ],
+  "argv": [
+    "infra/forge/tag-release.sh",
+    "{1}",
+    "{2}",
+    "{3}"
+  ],
+  "params": [
+    {
+      "name": "version",
+      "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    {
+      "name": "sha",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    {
+      "name": "release",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    }
+  ],
+  "timeout": 120
+}

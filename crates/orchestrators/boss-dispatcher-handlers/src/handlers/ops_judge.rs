@@ -64,7 +64,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 /// The step the ops-runner completes with the verb's output.
-const REPORT_STEP: &str = "execute";
+pub(crate) const REPORT_STEP: &str = "execute";
 /// The key this handler writes onto a judged request, and reads first
 /// on a redelivery.
 pub(crate) const JUDGED: &str = "judged";
