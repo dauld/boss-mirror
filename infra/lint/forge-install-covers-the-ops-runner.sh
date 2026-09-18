@@ -27,6 +27,17 @@ echo "systemctl $*" >>"$STUB_LOG"
 exit 0
 STUB
 chmod +x "$tmp/bin/systemctl"
+# THE ADDRESS FILE. install.sh renders /etc/boss/sor.env from
+# infra/estate/estate.toml before it installs a unit (backlog 5222163e);
+# here it renders into the scratch root, and the ops-runner installer —
+# which refuses without the file — reads the same one. NAMED with
+# BOSS_SOR_ENV, the file replaces whatever address the process
+# environment carries (infra/lib/sor.sh): the conductor pod runs this
+# check with BOSS_JOBS_URL set to the cluster-internal service and no
+# /etc/boss/sor.env, and on 2026-09-18 that refused a car because the
+# installer reported the pod's address instead of the file's. The
+# expected answer is read off the file below, never the environment.
+export INSTALL_SOR_ENV="$tmp/sor.env" BOSS_SOR_ENV="$tmp/sor.env"
 
 if ! STUB_LOG="$tmp/systemctl.log" INSTALL_ETC="$tmp/etc" INSTALL_SYSTEMCTL="$tmp/bin/systemctl" INSTALL_KUBECTL=0 \
     bash "$installer" >"$tmp/out" 2>&1; then
@@ -37,7 +48,7 @@ fi
 
 fail() { echo "FAIL: $*" >&2; echo "--- installer output:" >&2; cat "$tmp/out" >&2; exit 1; }
 
-for u in reap-dead-ci-jobs cluster-deploy-runner disk-floor-sweep forge-converge estate-observe-host boss-ops-runner; do
+for u in reap-dead-ci-jobs cluster-deploy-runner disk-floor-sweep forge-converge estate-observe-host cluster-watchdog boss-ops-runner; do
     for ext in service timer; do
         [[ -f "$tmp/etc/$u.$ext" ]] || fail "$u.$ext was not installed"
     done
@@ -49,8 +60,22 @@ dropin="$tmp/etc/boss-ops-runner.service.d/forge.conf"
 [[ -f "$dropin" ]] || fail "the ops runner has no forge drop-in"
 grep -qx 'Environment=HOST_ID=forge' "$dropin" || fail "the drop-in does not name this host: $(cat "$dropin")"
 grep -qx 'ExecStart=' "$dropin" || fail "the drop-in does not clear the unit's ExecStart before overriding it"
-grep -qx "ExecStart=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 $repo/infra/ops/ops-runner.sh" "$dropin" \
+grep -qx "ExecStart=$repo/infra/ops/ops-runner.sh" "$dropin" \
     || fail "the drop-in does not run the runner from this checkout: $(cat "$dropin")"
+# The address is the rendered file's, read by every unit with
+# EnvironmentFile= — never a per-unit drop-in, which install.sh used to
+# write and now removes.
+[[ -f "$tmp/sor.env" ]] || fail "install.sh did not render the address file (INSTALL_SOR_ENV=$tmp/sor.env)"
+sor_url=$(sed -n 's/^BOSS_JOBS_URL=//p' "$tmp/sor.env")
+[[ -n "$sor_url" ]] || fail "the rendered address file names no BOSS_JOBS_URL: $(cat "$tmp/sor.env")"
+for u in reap-dead-ci-jobs cluster-deploy-runner disk-floor-sweep forge-converge estate-observe-host cluster-watchdog boss-ops-runner; do
+    grep -qE '^EnvironmentFile=-?/etc/boss/sor.env$' "$tmp/etc/$u.service" \
+        || fail "$u.service does not read /etc/boss/sor.env — it would start with no system of record"
+    [[ ! -e "$tmp/etc/$u.service.d/jobs-url.conf" ]] \
+        || fail "$u still has the retired jobs-url.conf drop-in — a second copy of the address nothing re-renders"
+done
+grep -q "reporting to $sor_url" "$tmp/out" \
+    || fail "the ops-runner installer did not report the address it checked ($sor_url)"
 # The unit file itself is boss-gcp's, byte for byte — one definition.
 cmp -s "$repo/infra/ops/boss-ops-runner.service" "$tmp/etc/boss-ops-runner.service" \
     || fail "the installed ops unit differs from infra/ops/boss-ops-runner.service"

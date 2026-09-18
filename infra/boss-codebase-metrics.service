@@ -26,18 +26,21 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
+EnvironmentFile=/etc/boss/sor.env
 Type=oneshot
 # One git pass over ~470 landings plus one archive of the tree: about two
 # seconds measured. The ceiling is for a contended box, not the work.
 TimeoutStartSec=10min
-# THE SYSTEM OF RECORD, PINNED INLINE WITH env(1) on every line that
-# speaks to it. deploy-services' shared jobs-url.conf drop-in points this
-# host's timer fleet at the legacy 127.0.0.1 instance, drop-in env
-# outranks unit Environment=, and that instance has never heard of a
-# bundle-only kind: the packet would die 400 in ExecStartPre and the
-# measurement would be PATCHed onto an instance nobody reads. Same fix
-# the estate observers needed (91ddebfb), and timers-leave-a-packet
-# check 7 makes it the rule.
+# THE SYSTEM OF RECORD comes from /etc/boss/sor.env (EnvironmentFile=
+# under [Service]), rendered on this host by its converge from
+# infra/estate/estate.toml — the one place the address is spelled
+# (backlog 5222163e, 2026-09-18). Until then it was pinned INLINE with
+# env(1) on every Exec line, against a drop-in that pointed the timer
+# fleet at the retired second stack (91ddebfb); EnvironmentFile= outranks
+# any Environment= drop-in, so the file does the pin's job, and
+# timers-leave-a-packet check 7 holds every unit to it. No `-` on the
+# EnvironmentFile line: a unit that started without its address would
+# answer a wrong target, and a wrong target answers instead of erroring.
 #
 # ExecStartPre=- because the packet is VISIBILITY, NEVER A PRECONDITION —
 # except that here the packet is also where the work LANDS, so the
@@ -56,6 +59,6 @@ TimeoutStartSec=10min
 # READ a foreign clone and wrong everywhere else (infra/gate.sh says why),
 # and nothing here needs root.
 User=david
-ExecStartPre=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-maintenance-wrap.sh maintenance-codebase-metrics "Codebase metrics"
-ExecStart=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/codebase-metrics.sh file --repo /opt/boss --ref main
-ExecStopPost=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-step.sh maintenance-codebase-metrics run
+ExecStartPre=-/opt/boss/infra/boss-maintenance-wrap.sh maintenance-codebase-metrics "Codebase metrics"
+ExecStart=/opt/boss/infra/codebase-metrics.sh file --repo /opt/boss --ref main
+ExecStopPost=-/opt/boss/infra/boss-step.sh maintenance-codebase-metrics run

@@ -24,22 +24,27 @@
 #     drop-in's business
 #   * a drop-in <host>.conf naming THIS host (HOST_ID, which the runner
 #     refuses to run without) and running the runner from THIS
-#     checkout, with the system of record pinned INLINE by env(1)
+#     checkout
 #   * the timer enabled
 #
-# WHY THE SYSTEM OF RECORD IS PINNED INLINE, EVERY TIME.
-# deploy-services.sh writes a shared `jobs-url.conf` drop-in pointing
-# the timer fleet at `127.0.0.1` — which on boss-gcp is the LEGACY
-# second stack, not the system of record (91ddebfb). A drop-in's
-# `Environment=` outranks the unit's; `env(1)` on the Exec line
-# outranks both, which is how the estate observers and
-# boss-gcp-converge.service do it. This matters more here than almost
-# anywhere: a runner pointed at the legacy instance finds no
-# ops-request packets, exits 0 every minute, and looks perfectly
-# healthy forever — a wrong target answers instead of erroring
-# (CLAUDE.md §Doors). The empty `ExecStart=` clears the unit's own
-# command before the override, which is how a drop-in replaces rather
-# than appends one.
+# WHERE THE SYSTEM OF RECORD COMES FROM. The unit reads
+# /etc/boss/sor.env (EnvironmentFile=), which each host's converge
+# renders from infra/estate/estate.toml before it calls this script —
+# ONE spelling for every host (backlog 5222163e). Until 2026-09-18 the
+# drop-in pinned it INLINE with env(1) on the Exec line, because
+# deploy-services.sh wrote a shared `jobs-url.conf` drop-in pointing the
+# timer fleet at `127.0.0.1` — which on boss-gcp was the LEGACY second
+# stack, not the system of record (91ddebfb) — and a drop-in's
+# `Environment=` outranks the unit's. EnvironmentFile= outranks any
+# Environment=, drop-in or not, so the file does what the pin did. This
+# matters more here than almost anywhere: a runner pointed at a wrong
+# instance finds no ops-request packets, exits 0 every minute, and
+# looks perfectly healthy forever — a wrong target answers instead of
+# erroring (CLAUDE.md §Doors). So the address is CHECKED here, from the
+# same file the unit will read, and a host without it gets no runner
+# rather than a runner with no target. The empty `ExecStart=` clears
+# the unit's own command before the override, which is how a drop-in
+# replaces rather than appends one.
 #
 # AND IT ONLY CLAIMS WHAT HAPPENED. Until 2026-09-11 the last line here
 # was an unconditional "boss-ops-runner installed for HOST_ID=…": with no
@@ -68,8 +73,6 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 ETC="${INSTALL_ETC:-/etc/systemd/system}"
 SYSTEMCTL="${INSTALL_SYSTEMCTL:-systemctl}"
-# The cluster. Not a default and not a knob: see above.
-JOBS_URL="http://10.20.0.34:7900"
 
 refuse() { # <what failed>
     echo "install-ops-runner: FAILED — $1" >&2
@@ -80,6 +83,15 @@ refuse() { # <what failed>
     exit 1
 }
 
+# The address the unit will read, checked from the same file — see
+# above. sor_require exits by itself; `refuse` puts the verdict on the
+# packet first.
+# shellcheck source=infra/lib/sor.sh
+. "$REPO/infra/lib/sor.sh"
+[ -n "${BOSS_JOBS_URL:-}" ] \
+    || refuse "no system of record: ${BOSS_SOR_ENV:-/etc/boss/sor.env} carries no BOSS_JOBS_URL (the converge renders it from infra/estate/estate.toml)"
+JOBS_URL="$BOSS_JOBS_URL"
+
 for ext in service timer; do
     src="$HERE/boss-ops-runner.$ext"
     [ -f "$src" ] || refuse "$src is missing from the tree"
@@ -89,8 +101,8 @@ done
 
 install -d -m 0755 "$ETC/boss-ops-runner.service.d" \
     || refuse "could not create $ETC/boss-ops-runner.service.d"
-printf '[Service]\nEnvironment=HOST_ID=%s\nExecStart=\nExecStart=/usr/bin/env BOSS_JOBS_URL=%s %s/infra/ops/ops-runner.sh\n' \
-    "$HOST" "$JOBS_URL" "$REPO" >"$ETC/boss-ops-runner.service.d/$HOST.conf" \
+printf '[Service]\nEnvironment=HOST_ID=%s\nExecStart=\nExecStart=%s/infra/ops/ops-runner.sh\n' \
+    "$HOST" "$REPO" >"$ETC/boss-ops-runner.service.d/$HOST.conf" \
     || refuse "could not write the $HOST drop-in, without which the runner has no HOST_ID and refuses every tick"
 
 "$SYSTEMCTL" daemon-reload || refuse "systemctl daemon-reload failed"

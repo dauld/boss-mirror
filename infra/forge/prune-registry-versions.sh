@@ -119,10 +119,10 @@
 # only an argv built from the allowlist, so a packet cannot set these)
 #   BOSS_JOBS_URL              the system of record (required, no default:
 #                              a guessed instance answers 'no trains')
-#   BOSS_FORGE_REGISTRY        the image the converge pushes
-#                              (default: 10.20.0.15:3000/david/boss — the
-#                              runner's own default; host, owner and the
-#                              sibling boss-ci are derived from it)
+#   BOSS_FORGE_REGISTRY        the image the converge pushes (default:
+#                              forge-defaults.sh's, off the registry
+#                              host in /etc/boss/sor.env; host, owner and
+#                              the sibling boss-ci are derived from it)
 #   BOSS_PRUNE_FORGE_URL       the forge's HTTP base (default: http://<host>,
 #                              the registry is plain HTTP on the LAN)
 #   BOSS_PRUNE_DOCKER_CONFIG   the docker config holding the login
@@ -185,12 +185,14 @@ JOBS_URL="${BOSS_JOBS_URL:-}"
 [ -n "$JOBS_URL" ] || refuse "BOSS_JOBS_URL is not set and there is no safe default: the landed trains are read from the system of record, and a read against a guessed instance answers 'no trains' instead of erroring"
 
 # --- the registry, derived from the image the converge pushes --------------
-# `10.20.0.15:3000/david/boss` -> host 10.20.0.15:3000, owner david, and
-# the two packages this verb touches: boss (the converge's image) and
-# boss-ci (the per-train CI image, .forgejo/workflows/ci.yml). Nothing
-# else in the registry — boss-ci-cache, the mirrored bases — is ever a
-# candidate: a version of another name is not read.
-REGISTRY="${BOSS_FORGE_REGISTRY:-10.20.0.15:3000/david/boss}"
+# `<host:port>/<owner>/boss` -> the host, the owner, and the two
+# packages this verb touches: boss (the converge's image) and boss-ci
+# (the per-train CI image, .forgejo/workflows/ci.yml). Nothing else in
+# the registry — boss-ci-cache, the mirrored bases — is ever a
+# candidate: a version of another name is not read. The image repo is
+# forge-defaults.sh's, the same one the converge pushes.
+. "$SELF_DIR/forge-defaults.sh"
+forge_need REGISTRY
 REG_HOST="${REGISTRY%%/*}"
 reg_rest="${REGISTRY#*/}"
 OWNER="${reg_rest%%/*}"
@@ -217,7 +219,7 @@ if [ -z "${BOSS_PRUNE_DOCKER_CONFIG:-}" ] || [ -z "${BOSS_FORGE_LAST_BUILT:-}" ]
     OWNER_HOME="$(owner_home)" || refuse "cannot resolve the owner of $REPO, so neither the docker login nor the converge's stamp has a default path; set BOSS_PRUNE_DOCKER_CONFIG and BOSS_FORGE_LAST_BUILT"
 fi
 DOCKER_CONFIG_FILE="${BOSS_PRUNE_DOCKER_CONFIG:-$OWNER_HOME/.docker/config.json}"
-STAMP_FILE="${BOSS_FORGE_LAST_BUILT:-$OWNER_HOME/.boss-last-built}"
+STAMP_FILE="${BOSS_FORGE_LAST_BUILT:-$OWNER_HOME/$LAST_BUILT_NAME}"
 DF_PATH="${BOSS_PRUNE_DF_PATH:-/opt/forgejo/data}"
 LIST_DIR="${BOSS_PRUNE_LIST_DIR:-/var/backups/boss/registry-prune}"
 

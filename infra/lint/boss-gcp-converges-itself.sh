@@ -132,6 +132,27 @@ mkdir -p "$tmp/unitlib" "$tmp/empty-unitlib" "$tmp/etc-absent"
 # UNITS_REPO_ROOT and UNITS_SUMMARY are read from the environment rather
 # than taken as arguments so the three original call sites read as they
 # did; check 10 sets them.
+# THE ADDRESS FILE the installers read (infra/lib/sor.sh): on the host
+# the converge renders /etc/boss/sor.env from infra/estate/estate.toml
+# before the installer runs; here it is rendered once into the scratch
+# root, from the same source, and every run below is pointed at it. The
+# ops-runner installer refuses without it — by design, so a host with
+# no address gets no runner (backlog 5222163e). NAMED, not merely
+# present: a file named with BOSS_SOR_ENV replaces whatever address the
+# process environment carries (infra/lib/sor.sh), which is what makes
+# this check the same in every environment — the conductor pod runs the
+# consist check with BOSS_JOBS_URL set to the cluster-internal service
+# and no /etc/boss/sor.env, and on 2026-09-18 that refused a car here
+# because the installer reported the pod's address instead of the
+# file's. The expected answer below is read off the file, never the
+# environment, for the same reason.
+sor_env="$tmp/sor.env"
+bash "$repo/infra/estate/render-sor-env.sh" --to "$sor_env" >/dev/null \
+    || fail "infra/estate/render-sor-env.sh could not render the address file from infra/estate/estate.toml"
+export BOSS_SOR_ENV="$sor_env"
+sor_url=$(sed -n 's/^BOSS_JOBS_URL=//p' "$sor_env")
+[ -n "$sor_url" ] || fail "the rendered address file names no BOSS_JOBS_URL"
+
 units_run() { # <systemctl-log> <etc> <unit-lib> <outfile>
     STUB_LOG="$1" INSTALL_ETC="$2" INSTALL_SYSTEMCTL="$tmp/bin/systemctl" \
         INSTALL_APT_GET="$tmp/bin/apt-get" INSTALL_UNIT_LIB="$3" \
@@ -365,9 +386,18 @@ grep -qx 'Environment=HOST_ID=boss-gcp' "$dropin" \
     || units_fail "the drop-in does not name this host: $(cat "$dropin")"
 grep -qx 'ExecStart=' "$dropin" \
     || units_fail "the drop-in does not clear the unit's ExecStart before overriding it"
-grep -qx "ExecStart=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 $repo/infra/ops/ops-runner.sh" "$dropin" \
-    || units_fail "the drop-in does not run the runner from THIS checkout with the cluster
-    pinned inline by env(1): $(cat "$dropin")"
+grep -qx "ExecStart=$repo/infra/ops/ops-runner.sh" "$dropin" \
+    || units_fail "the drop-in does not run the runner from THIS checkout: $(cat "$dropin")"
+# The address the unit reads is the FILE's, not a drop-in's: the unit
+# carries EnvironmentFile=/etc/boss/sor.env (which outranks any
+# Environment= drop-in) and the installer checked that file before it
+# wrote anything.
+grep -qx 'EnvironmentFile=/etc/boss/sor.env' "$tmp/etc/boss-ops-runner.service" \
+    || units_fail "boss-ops-runner.service does not read /etc/boss/sor.env — the unit would start
+    with no system of record, or with whatever a stale drop-in still says"
+grep -q "reporting to $sor_url" "$tmp/units.out" \
+    || units_fail "the ops-runner installer did not report the address it checked ($sor_url):
+$(grep -n 'install-ops-runner' "$tmp/units.out")"
 # THE NEGATIVE. `127.0.0.1` anywhere in what configures this runner is
 # the legacy stack, and the failure it causes is silent.
 # Directive lines only: the unit's own comments explain this very trap
@@ -582,6 +612,7 @@ cat >"$nodes_json" <<'JSON'
 JSON
 run_converge() { # <dir> <installer> -> output; returns the script's status
     BOSS_GCP_REPO_DIR="$1" BOSS_GCP_CONVERGE_INSTALLER="$2" \
+        BOSS_GCP_CONVERGE_SOR_ENV="$tmp/sor.env.converge" \
         BOSS_GCP_CONVERGE_CLI_INSTALLER="$tmp/bin/cli-installer-ok" \
         BOSS_NODE_ID="${CONVERGE_NODE_ID:-boss-gcp}" \
         BOSS_ESTATE_NODES_URL="${CONVERGE_NODES_URL:-file://$nodes_json}" \
@@ -736,6 +767,7 @@ $out"
 sum_conv="$tmp/summary-converge.json"
 run_converge_sum() { # <dir> <installer>
     BOSS_GCP_REPO_DIR="$1" BOSS_GCP_CONVERGE_INSTALLER="$2" \
+        BOSS_GCP_CONVERGE_SOR_ENV="$tmp/sor.env.converge" \
         BOSS_GCP_CONVERGE_CLI_INSTALLER="$tmp/bin/cli-installer-ok" \
         BOSS_RUN_SUMMARY_FILE="$sum_conv" \
         BOSS_NODE_ID=boss-gcp BOSS_ESTATE_NODES_URL="file://$nodes_json" \

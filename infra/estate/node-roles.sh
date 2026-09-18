@@ -41,13 +41,32 @@
 #   comma-separated list, so `operator` never matches `cluster-operator`.
 read_node_roles() { # <node-id>
     local node_id="$1"
-    local nodes_url="${BOSS_ESTATE_NODES_URL:-http://10.20.0.34:7900/api/estate/nodes}"
     local prefix="${BOSS_CONVERGE_NAME:-converge}"
     local cache="${BOSS_NODE_ROLES_CACHE:-/var/lib/boss/node-roles.${node_id}}"
+    # WHERE THE REGISTRY IS: the system of record in /etc/boss/sor.env
+    # (infra/lib/sor.sh; the one tree source is infra/estate/estate.toml,
+    # backlog 5222163e). Not `sor_require`: this read is the dark-registry
+    # path's own definition, and the converge that renders the file is
+    # the one caller here — on a host that has no file yet, "no address"
+    # is a dark registry (cache, else [always]), never a refusal.
+    local nodes_url="${BOSS_ESTATE_NODES_URL:-}"
+    if [ -z "$nodes_url" ]; then
+        # shellcheck source=infra/lib/sor.sh
+        . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/sor.sh"
+        if [ -n "${BOSS_JOBS_URL:-}" ]; then
+            nodes_url="$BOSS_JOBS_URL/api/estate/nodes"
+        else
+            # Named as what it is, so the "did not answer" lines below say
+            # which file is missing rather than showing an empty URL.
+            nodes_url="/api/estate/nodes on the system of record (${BOSS_SOR_ENV:-/etc/boss/sor.env} not rendered yet)"
+        fi
+    fi
     BOSS_NODE_ROLES_SOURCE="preset"
     if [ -z "${BOSS_NODE_ROLES+set}" ]; then
-        local roles_json
-        roles_json="$(curl -fsS --max-time 10 "$nodes_url" 2>/dev/null)" || roles_json=""
+        local roles_json=""
+        if [ -n "${BOSS_JOBS_URL:-}${BOSS_ESTATE_NODES_URL:-}" ]; then
+            roles_json="$(curl -fsS --max-time 10 "$nodes_url" 2>/dev/null)" || roles_json=""
+        fi
         if [ -z "$roles_json" ]; then
             if [ -s "$cache" ]; then
                 BOSS_NODE_ROLES="$(tr -d '[:space:]' < "$cache")"

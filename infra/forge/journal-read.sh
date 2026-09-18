@@ -5,7 +5,7 @@
 # Nothing on the host is mutated and nothing is written to the SoR.
 #
 # WHY THIS EXISTS. On 2026-09-10 03:40 UTC `systemd-journal-gatewayd` on
-# the forge (10.20.0.15:19531) served a journal whose newest entry was
+# the forge (:19531) served a journal whose newest entry was
 # 2026-09-09 20:40:53 — seven hours behind — while returning HTTP 200 to
 # everything. A unit-filtered query for `disk-floor-sweep.service`, which
 # HAD run in that window, came back with zero rows. Zero rows from a
@@ -85,8 +85,9 @@
 # refusal prints.
 #
 # TWO HOSTS, AND THE ADVICE FOLLOWS THE TARGET. `forge` and `boss-gcp`
-# are named targets, so each door's address lives in this file once
-# instead of in whoever types it. boss-gcp's door was added by backlog
+# are named targets, so each door's address lives in the tree once —
+# the forge's in infra/estate/estate.toml, boss-gcp's below — instead
+# of in whoever types it. boss-gcp's door was added by backlog
 # 68757702: that host is the WireGuard bastion, it carries a second,
 # older BOSS stack, and it had NO read path from the pod for either logs
 # or unit state — so a failing timer there could only be diagnosed by a
@@ -111,7 +112,18 @@
 #        4 door STALE — refused
 set -uo pipefail
 
-DEFAULT_HOST="10.20.0.15:19531"
+# The forge's own door is read from the tree's one source,
+# infra/estate/estate.toml (`forge_journal`, through render-sor-env.sh)
+# — not from /etc/boss/sor.env, because this is a READER that runs
+# wherever the tree is: the pod, a workstation, the forge itself. The
+# tree beside this script is the source; a host's env file is that
+# same source rendered. Resolved only for the `forge` label, so a
+# caller with an explicit --host needs neither.
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+forge_door() {
+    bash "$SELF_DIR/../estate/render-sor-env.sh" --value BOSS_FORGE_JOURNAL_URL \
+        || { echo "journal-read: cannot resolve the forge's door from infra/estate/estate.toml" >&2; exit 3; }
+}
 # boss-gcp over the WireGuard overlay: the hub is 10.99.0.1, and from the
 # pod that is the only route to the bastion (the-dev-door-is-lan-only).
 BOSS_GCP_HOST="10.99.0.1:19531"
@@ -157,7 +169,10 @@ done
 [ -n "$HOST" ] || HOST="forge"
 HOST_LABEL="$HOST"
 case "$HOST" in
-    forge)    HOST="$DEFAULT_HOST" ;;
+    forge)
+        # host:port, no scheme — the door is plain HTTP; BASE below adds it.
+        HOST="$(forge_door)" || exit 3
+        HOST="${HOST#http://}" ;;
     boss-gcp) HOST="$BOSS_GCP_HOST" ;;
 esac
 case "$HOST" in *:*) : ;; *) HOST="${HOST}:19531" ;; esac

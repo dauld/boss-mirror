@@ -34,8 +34,9 @@
 #   3. it calls boss-step.sh with the SAME kind (records the verdict)
 #   3b. that call is on ExecStopPost, the one phase that runs on failure
 #   4. that kind is a real Workflow in the platform bundle
-#   7. a boss-gcp unit pins the system of record inline and opens its
-#      packet best-effort (`-`)
+#   7. a boss-gcp unit reads the system of record from /etc/boss/sor.env
+#      (EnvironmentFile=, no inline copy) and opens its packet
+#      best-effort (`-`)
 #   8. and every CLUSTER CRONJOB does (2)–(4) too, because that is where
 #      the chores live since the 2026-09-04 cutover — the nightly backup
 #      ran unrecorded for twenty days inside this lint's blind spot
@@ -154,9 +155,10 @@ done
 # green. Until 2026-09-18 the answer was a jobs-url drop-in the
 # bare-metal deploy wrote per unit, naming the local instance; that
 # instance was retired on 2026-09-15 and the deploy path deleted, so a
-# boss-gcp unit now names the system of record INLINE on its own Exec
-# lines or it names nothing — check 7 is the whole rule, and check 6
-# keeps the helpers from inventing a default.
+# boss-gcp unit now reads the system of record from /etc/boss/sor.env
+# (rendered on the host from infra/estate/estate.toml) or it names
+# nothing — check 7 is the whole rule, and check 6 keeps the helpers
+# from inventing a default.
 
 # 5b. THE FORGE INSTALLER MUST NAME THE SYSTEM OF RECORD FOR ITS UNITS.
 #
@@ -166,17 +168,34 @@ done
 # split-brain above, one installer over: a check that reads only one
 # deploy manifest calls itself complete while the other host's units are
 # uncovered — the exact shape the FORGE_INSTALL rows were added to close.
-if [ -f "$FORGE_INSTALL" ] && ! grep -q 'BOSS_JOBS_URL=' "$FORGE_INSTALL"; then
-    echo "timers-leave-a-packet: install.sh installs forge timers but writes no" >&2
-    echo "    BOSS_JOBS_URL for them, so boss-maintenance-wrap.sh REFUSES (it has no" >&2
-    echo "    localhost default) and every forge maintenance packet fails to open —" >&2
-    echo "    which is how reap-dead-ci-jobs failed on 2026-09-03." >&2
+#
+# Since 2026-09-18 (backlog 5222163e) the address is not a drop-in but
+# /etc/boss/sor.env, which install.sh RENDERS from infra/estate/
+# estate.toml before it installs a unit, and which every forge unit
+# reads with EnvironmentFile= — so both halves are checked: the render
+# call, and the line on every unit the installer lists.
+if [ -f "$FORGE_INSTALL" ] && ! grep -q 'render-sor-env.sh' "$FORGE_INSTALL"; then
+    echo "timers-leave-a-packet: install.sh installs forge timers but does not render" >&2
+    echo "    /etc/boss/sor.env for them (infra/estate/render-sor-env.sh), so" >&2
+    echo "    boss-maintenance-wrap.sh REFUSES (it has no localhost default) and every" >&2
+    echo "    forge maintenance packet fails to open — which is how reap-dead-ci-jobs" >&2
+    echo "    failed on 2026-09-03." >&2
     problems=$((problems + 1))
 fi
+for row in $forge_rows; do
+    unit="infra/forge/${row%%:*}.service"
+    [ -f "$unit" ] || continue   # check 1 named it
+    if ! grep -qE '^EnvironmentFile=-?/etc/boss/sor.env$' "$unit"; then
+        echo "timers-leave-a-packet: $unit does not read /etc/boss/sor.env (EnvironmentFile=)," >&2
+        echo "    and install.sh no longer writes a per-unit drop-in: the unit would start" >&2
+        echo "    with no system of record and its wrap would refuse." >&2
+        problems=$((problems + 1))
+    fi
+done
 
 # 6. AND NEITHER HELPER MAY CARRY A LOCALHOST DEFAULT.
 #
-# The inline pin (check 7) is the belt; this is the braces. A default of
+# The sor.env line (check 7) is the belt; this is the braces. A default of
 # 127.0.0.1 in boss-maintenance-wrap.sh or boss-step.sh makes a missing
 # BOSS_JOBS_URL look like a working configuration, which is exactly how
 # 21 nightly packets landed on a non-authoritative instance without one
@@ -264,8 +283,8 @@ if ! grep -q 'summary_absent' <<<"$rs_out"; then
 fi
 rm -rf "$rs_dir"
 
-# 7. A boss-gcp CHORE NAMES THE SYSTEM OF RECORD INLINE — and its
-#    packet never blocks its run.
+# 7. A boss-gcp CHORE READS THE SYSTEM OF RECORD FROM /etc/boss/sor.env
+#    — and its packet never blocks its run.
 #
 # Measured 2026-09-08 on boss-gcp (backlog e109f57e). The bare-metal
 # deploy's jobs-url.conf drop-in pointed every timer at the LOCAL
@@ -280,10 +299,10 @@ rm -rf "$rs_dir"
 # invariants and the deploy dead-man did the same. The estate observers
 # had already met this bug and pinned the system of record INLINE with
 # env(1) on the Exec line, which outranks a drop-in (91ddebfb); this
-# check makes that the rule. Since 2026-09-18 there is no drop-in and no
+# check made that the rule. Since 2026-09-18 there is no drop-in and no
 # local instance at all (the second stack was retired 2026-09-15, the
-# deploy path deleted), so the inline pin is a unit's ONLY way to name
-# where its packet goes.
+# deploy path deleted), and the address a unit reads is the ONE file
+# the host renders from estate.toml, not an inline copy per unit.
 #
 # WHICH UNITS. Every rostered row minus kinds a cluster CronJob already
 # opens (a boss-gcp copy of those is the vestige the-cluster-is-the-
@@ -292,18 +311,21 @@ rm -rf "$rs_dir"
 # recovery would then "recover" the cluster's. Retirement is their fix,
 # not a pin.)
 #
-# WHAT THEY MUST DO. Name the system of record on BOTH the wrap and
-# the boss-step lines (a packet opened on one instance and closed on
-# another is the split-brain) — the URL infra/deploy.env.example names
-# for boss-gcp, so the tree states it once — and prefix the packet-
-# opening ExecStartPre with `-`: the packet is visibility, never a
-# precondition (CLAUDE.md §Diagnosis, "an arm that needs the patient
-# is not an arm"; cluster-watchdog.service is the precedent).
-sor=$(grep -oE '^BOSS_JOBS_URL=http://[^ ]+' infra/deploy.env.example | sed -n 1p | cut -d= -f2)
-if [ -z "$sor" ]; then
-    echo "timers-leave-a-packet: infra/deploy.env.example names no BOSS_JOBS_URL — check 7 cannot know the system of record" >&2
-    problems=$((problems + 1))
-fi
+# WHAT THEY MUST DO. Read the system of record from /etc/boss/sor.env
+# with `EnvironmentFile=` (a packet opened on one instance and closed on
+# another is the split-brain, so ONE file feeds both the wrap and the
+# boss-step line) — the file every host's converge renders from
+# infra/estate/estate.toml, so the tree states the address once
+# (backlog 5222163e; until 2026-09-18 this check wanted the URL pinned
+# inline with env(1) on both Exec lines, against a drop-in that pointed
+# at the retired second stack; EnvironmentFile= outranks any Environment=
+# drop-in) — and prefix the packet-opening ExecStartPre with `-`: the
+# packet is visibility, never a precondition (CLAUDE.md §Diagnosis, "an
+# arm that needs the patient is not an arm"; cluster-watchdog.service
+# is the precedent). The two converges (boss-gcp-converge,
+# forge-converge) read the file OPTIONALLY (`EnvironmentFile=-`): they
+# are the arm that renders it, and must start on a host that has none.
+sor_env_line='EnvironmentFile=/etc/boss/sor.env'
 cluster_kinds=$(grep -ohE 'boss-maintenance-wrap\.sh maintenance-[a-z-]+' infra/cluster/manifests/*.yaml 2>/dev/null \
     | awk '{print $2}' | sort -u)
 gcp_rows=$(BOSS_REPO_ROOT="$PWD" bash "$INSTALLER" rows 2>/dev/null | grep -E '^[a-z0-9-]+:[^:]+$')
@@ -317,22 +339,24 @@ for row in $gcp_rows; do
     grep -qxF -- "$kind" <<< "$cluster_kinds" && continue  # the cluster runs it; this copy is a vestige
     pre=$(grep -E '^ExecStartPre=' "$unit" | grep 'boss-maintenance-wrap' | sed -n 1p)
     post=$(grep -E '^ExecStopPost=' "$unit" | grep 'boss-step\.sh' | sed -n 1p)
-    if ! grep -qF -- "BOSS_JOBS_URL=$sor " <<<"$pre" \
-        || ! grep -qF -- "BOSS_JOBS_URL=$sor " <<<"$post"; then
-        echo "timers-leave-a-packet: $name opens '$kind' but does not pin the system of record" >&2
-        echo "    on both its Exec lines. Nothing else names one for it — the installer writes" >&2
+    if ! grep -qE "^${sor_env_line/=/=-?}\$" "$unit"; then
+        echo "timers-leave-a-packet: $name opens '$kind' but does not read the system of record" >&2
+        echo "    from /etc/boss/sor.env. Nothing else names one for it — the installer writes" >&2
         echo "    no drop-in and the helpers refuse to default — so every run refuses 78 in" >&2
-        echo "    ExecStartPre and the chore runs unrecorded. Pin it inline with env(1) on the" >&2
-        echo "    wrap AND the boss-step call:" >&2
-        echo "      ExecStartPre=-/usr/bin/env BOSS_JOBS_URL=$sor /opt/boss/infra/boss-maintenance-wrap.sh $kind \"<label>\"" >&2
-        echo "      ExecStopPost=-/usr/bin/env BOSS_JOBS_URL=$sor /opt/boss/infra/boss-step.sh $kind run" >&2
+        echo "    ExecStartPre and the chore runs unrecorded. Add, under [Service]:" >&2
+        echo "      $sor_env_line" >&2
+        problems=$((problems + 1)); continue
+    fi
+    if grep -qE '^Exec(StartPre|Start|StopPost)=-?/usr/bin/env BOSS_JOBS_URL=' "$unit"; then
+        echo "timers-leave-a-packet: $name still pins BOSS_JOBS_URL inline on an Exec line — a" >&2
+        echo "    second copy of the address, beside the file. The file is the one spelling." >&2
         problems=$((problems + 1)); continue
     fi
     if ! grep -q '^ExecStartPre=-' <<<"$pre"; then
         echo "timers-leave-a-packet: $name opens its packet from a HARD ExecStartPre. The packet is" >&2
         echo "    visibility, not a precondition: an API that answers 400 must not stop the" >&2
         echo "    chore (boss-ml-inference-batch lost 23 nights to exactly that). Prefix it:" >&2
-        echo "      ExecStartPre=-/usr/bin/env BOSS_JOBS_URL=$sor ..." >&2
+        echo "      ExecStartPre=-/opt/boss/infra/boss-maintenance-wrap.sh ..." >&2
         problems=$((problems + 1)); continue
     fi
     if grep -qE '127\.0\.0\.1|localhost' <<< "$pre"$'\n'"$post"; then

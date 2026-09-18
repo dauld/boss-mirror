@@ -1,0 +1,58 @@
+# infra/estate/estate.toml — WHERE THE ESTATE IS: the one tree file that
+# spells the system of record's address and the forge's (backlog
+# 5222163e, design 42277636 first wave; audit H10, 2026-09-18).
+#
+# Until this file existed, `http://10.20.0.34:7900` was spelled in 47
+# files three ways — as a `/usr/bin/env BOSS_JOBS_URL=…` prefix on 32
+# Exec lines, as `Environment=JOBS_API=…` in the observers, as a
+# `${JOBS_API:-…}` fallback in the scripts they ran — while
+# infra/dev/sor-url called itself "the ONE spelling", and the forge's IP
+# sat in 62 files as a registry prefix, a clone URL, a journal door and
+# an image tag. The boss.algedonic.dev cutover would have touched every
+# one of them. Now it touches this file.
+#
+# HOW IT REACHES A HOST. infra/estate/render-sor-env.sh reads this file
+# and writes /etc/boss/sor.env (KEY=VALUE, one per line). Each host's
+# install renders it — the forge in infra/forge/install.sh (every ten
+# minutes under forge-converge), boss-gcp in infra/gcp/boss-gcp-
+# converge.sh (every half hour) — and then:
+#
+#   * every systemd unit carries `EnvironmentFile=/etc/boss/sor.env`
+#     (no `-` prefix: a unit that starts without its address would
+#     answer a wrong target, and a wrong target answers instead of
+#     erroring — CLAUDE.md §Doors);
+#   * every shell script sources infra/lib/sor.sh, which loads the file
+#     and REFUSES, naming the path, when a value it needs is absent —
+#     there is no fallback literal anywhere downstream of this file;
+#   * the forge verbs get their registry / stamp / hold / postgres
+#     defaults from infra/forge/forge-defaults.sh, which sources sor.sh.
+#
+# THE POD reads the cluster spelling: infra/dev/sor-url is WRITTEN from
+# `sor_cluster_url` (render-sor-env.sh --dev-sor-url) and a test holds
+# the two equal, so the pod's door and this file cannot drift.
+#
+# THE LINT infra/lint/the-estate-address-lives-once.sh refuses either IP
+# anywhere in the tree but here, the tests, the docs, and a named
+# allowance whose every entry says why it cannot read this file yet.
+#
+# ONE key per line, `key = "value"`: the renderer reads this file with
+# the shell, not a TOML parser — the rule infra/estate/roles.toml and
+# infra/cluster/instances.toml already live under.
+
+# The system of record — the boss-jobs-internal LoadBalancer (MetalLB,
+# LAN-only). The manifest that pins that address
+# (infra/cluster/manifests/boss-jobs-internal.yaml) is held equal to
+# this line by the test in crates/core/boss-testing/tests/
+# the_estate_address_lives_once.rs.
+sor_url = "http://10.20.0.34:7900"
+
+# The same service, as a workload INSIDE the cluster reaches it — the
+# dev pod's door (infra/dev/sor-url) and any in-cluster reader.
+sor_cluster_url = "http://boss-jobs-internal.boss.svc.cluster.local:7900"
+
+# The forge: Forgejo (repository, API, the OCI registry on one port),
+# the CI runner, and the systemd journal door.
+forge_host = "10.20.0.15"
+forge_url = "http://10.20.0.15:3000"
+forge_registry = "10.20.0.15:3000"
+forge_journal = "http://10.20.0.15:19531"

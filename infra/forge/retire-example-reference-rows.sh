@@ -133,9 +133,7 @@ TENANTS_DIR="${BOSS_FORGE_TENANTS_DIR:-$(dirname "$TREE")/tenants}"
 # The target, as infra/cluster/manifests/boss.yaml declares it: the
 # StatefulSet `postgres`, container `postgres`, POSTGRES_USER=boss; the
 # namespace is the packet's; the database is the Secret's.
-PG_WORKLOAD="sts/postgres"
-PG_CONTAINER="postgres"
-PG_USER="boss"
+. "$(dirname "$0")/forge-defaults.sh"
 SECRET_NAME="boss-secrets"
 SECRET_KEY="database-url"
 

@@ -290,7 +290,7 @@ def main(argv=None):
     p.add_argument("--now", type=int, default=None,
                    help="unix seconds; for tests, so the run is deterministic")
     p.add_argument("--registry-url", default=None,
-                   help="jobs API base (e.g. http://10.20.0.34:7900); enables the "
+                   help="jobs API base (the BOSS_JOBS_URL of /etc/boss/sor.env); enables the "
                         "forge-vs-credentials-registry direction")
     p.add_argument("--registry-json", default=None,
                    help="a file holding the GET /api/credentials response; for "

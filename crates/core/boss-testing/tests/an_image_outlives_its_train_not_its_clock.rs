@@ -251,6 +251,35 @@ impl Sweep {
         );
         write_file(&self.dir.join("reply.json"), &self.reply);
 
+        // The registry host the sweep's other image repo derives from:
+        // /etc/boss/sor.env on the host, rendered here from the one
+        // source (infra/estate/estate.toml) into this scratch dir.
+        let sor_env = self.dir.join("sor.env");
+        let rendered = Command::new("bash")
+            .arg(repo_root().join("infra/estate/render-sor-env.sh"))
+            .arg("--to")
+            .arg(&sor_env)
+            .output()
+            .expect("render sor.env");
+        assert!(
+            rendered.status.success(),
+            "{}",
+            String::from_utf8_lossy(&rendered.stderr)
+        );
+        // "No system of record" on a host is a file the render left the
+        // record out of (a partial render cannot happen — the renderer
+        // refuses — but a host whose file predates the key can): the
+        // registry host stays, the record's two lines go.
+        if self.jobs_url.is_none() {
+            let text = std::fs::read_to_string(&sor_env).unwrap();
+            let without: String = text
+                .lines()
+                .filter(|l| !l.starts_with("BOSS_JOBS_URL=") && !l.starts_with("JOBS_API="))
+                .map(|l| format!("{l}\n"))
+                .collect();
+            write_file(&sor_env, &without);
+        }
+
         let mut cmd = Command::new("bash");
         cmd.arg(repo_root().join(SWEEP))
             .env(
@@ -261,6 +290,7 @@ impl Sweep {
                     std::env::var("PATH").unwrap_or_default()
                 ),
             )
+            .env("BOSS_SOR_ENV", &sor_env)
             .env("BOSS_CI_IMAGE_DOCKER", bin.join("boss-stub-docker"))
             .env("BOSS_CI_IMAGE_DAEMON_ROOT", "/var/lib/docker")
             .env("BOSS_CI_IMAGE_REPO", REPO)
@@ -552,17 +582,18 @@ fn the_below_floor_remediations_do_not_depend_on_the_record() {
 }
 
 /// The installed unit has to name the system of record, or the pass runs
-/// blind on the host and silently keeps the old behaviour.
+/// blind on the host and silently keeps the old behaviour. Since
+/// 2026-09-18 (backlog 5222163e) that is the one address file every
+/// unit reads, not a per-unit Environment= line.
 #[test]
 fn the_unit_names_the_system_of_record() {
     let unit = read(UNIT);
     assert!(
-        unit.lines().any(|l| l
-            .trim()
-            .starts_with("Environment=BOSS_JOBS_URL=http://10.20.0.34:7900")),
-        "{UNIT} does not pin Environment=BOSS_JOBS_URL — ExecStart inherits no \
-         environment from its siblings' inline `env`, so the sweep would read no \
-         trains on the host and fall back to the age window forever"
+        unit.lines()
+            .any(|l| l.trim() == "EnvironmentFile=/etc/boss/sor.env"),
+        "{UNIT} does not read /etc/boss/sor.env — ExecStart inherits no \
+         environment from its siblings, so the sweep would read no trains on \
+         the host and fall back to the age window forever"
     );
 }
 

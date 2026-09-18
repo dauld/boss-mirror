@@ -3,6 +3,9 @@ Description=Boss audit_log integrity scan (Layer 1 of immutable-audit-log)
 After=postgresql.service
 
 [Service]
+# BOSS_JOBS_URL from /etc/boss/sor.env, rendered on this host from
+# infra/estate/estate.toml (backlog 5222163e) — the one spelling.
+EnvironmentFile=/etc/boss/sor.env
 Type=oneshot
 # Surfaces id gaps and created_at regressions in audit_log. Schema-level
 # triggers reject UPDATE / DELETE / TRUNCATE; this scan catches operators

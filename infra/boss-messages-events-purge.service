@@ -3,6 +3,9 @@ Description=Boss messages_events retention sweep
 After=postgresql.service
 
 [Service]
+# BOSS_JOBS_URL from /etc/boss/sor.env, rendered on this host from
+# infra/estate/estate.toml (backlog 5222163e) — the one spelling.
+EnvironmentFile=/etc/boss/sor.env
 Type=oneshot
 Environment=RUST_LOG=info
 ExecStartPre=/opt/boss/infra/boss-maintenance-wrap.sh maintenance-messages-purge "messages_events retention sweep"

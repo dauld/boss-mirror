@@ -215,10 +215,25 @@ fn publish_check_env(root: &Path) -> Vec<(&'static str, String)> {
     let token = etc.join("github.token");
     std::fs::write(&token, "not-a-real-token\n").unwrap();
     std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).unwrap();
+    // The forge's address file (/etc/boss/sor.env on the host), rendered
+    // from the one source: the verb derives its forge clone URL from it.
+    let sor_env = etc.join("sor.env");
+    let rendered = Command::new("bash")
+        .arg(repo_root().join("infra/estate/render-sor-env.sh"))
+        .arg("--to")
+        .arg(&sor_env)
+        .output()
+        .expect("render sor.env");
+    assert!(
+        rendered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rendered.stderr)
+    );
     vec![
         ("BOSS_PUBLISH_STATE_DIR", state.display().to_string()),
         ("BOSS_FORGE_REPO_PATH", forge.display().to_string()),
         ("BOSS_GITHUB_TOKEN_FILE", token.display().to_string()),
+        ("BOSS_SOR_ENV", sor_env.display().to_string()),
     ]
 }
 

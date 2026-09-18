@@ -162,7 +162,12 @@ seed_commit=$(fixture_git commit-tree "$seed_tree" -m seed) \
 fixture_git update-ref refs/heads/main "$seed_commit" \
     || fail "could not point the fixture's main at $seed_commit"
 printf 'not-a-real-token\n' > "$tmp/etc/github.token"; chmod 600 "$tmp/etc/github.token"
-checkenv=(env -i PATH="$tmp/bin:$PATH" BOSS_PUBLISH_STATE_DIR="$tmp/state" BOSS_FORGE_REPO_PATH="$tmp/forge.git")
+# The forge's address file (infra/lib/sor.sh): on the host the verb reads
+# /etc/boss/sor.env for the forge's clone base; here the same file,
+# rendered from the one source into the scratch root (backlog 5222163e).
+bash "$repo/infra/estate/render-sor-env.sh" --to "$tmp/sor.env" >/dev/null \
+    || fail "could not render the address file from infra/estate/estate.toml"
+checkenv=(env -i PATH="$tmp/bin:$PATH" BOSS_PUBLISH_STATE_DIR="$tmp/state" BOSS_FORGE_REPO_PATH="$tmp/forge.git" BOSS_SOR_ENV="$tmp/sor.env")
 out=$("${checkenv[@]}" BOSS_GITHUB_TOKEN_FILE="$tmp/etc/github.token" bash "$pub" --check 2>&1) \
     || fail "publish-github-pr.sh --check refused a complete input set: $out"
 grep -q -- '--check ok' <<<"$out" || fail "--check did not report ok: $out"
@@ -177,8 +182,10 @@ chmod 644 "$tmp/etc/github.token"
 chmod 600 "$tmp/etc/github.token"
 # A run (no --check) with no system of record refuses before touching
 # anything — the ops-runner rule, and the reason nothing here needs a
-# network to prove.
-"${checkenv[@]}" BOSS_GITHUB_TOKEN_FILE="$tmp/etc/github.token" bash "$pub" >/dev/null 2>&1 \
+# network to prove. No address file for this one (the forge's clone URL
+# named explicitly, so the refusal is the record's, not the forge's).
+"${checkenv[@]}" BOSS_SOR_ENV="$tmp/absent.env" BOSS_FORGE_PUSH_URL="http://forge.test/david/boss.git" \
+    BOSS_GITHUB_TOKEN_FILE="$tmp/etc/github.token" bash "$pub" >/dev/null 2>&1 \
     && fail "a run without BOSS_JOBS_URL did not refuse"
 # THROUGH THE RUNNER: the allowed literal is exercised the way a packet
 # would — ops-runner.sh against a stubbed system of record (a GET serves
@@ -210,7 +217,7 @@ EOF
         env -i PATH="$tmp/rbin:$PATH" HOST_ID=forge BOSS_JOBS_URL=http://sor.invalid \
             OPS_VERBS_DIR="$tmp/verbs" STUB_JOBS="$tmp/jobs.json" STUB_PUT="$tmp/put.json" \
             BOSS_PUBLISH_STATE_DIR="$tmp/rstate" BOSS_FORGE_REPO_PATH="$tmp/forge.git" \
-            BOSS_GITHUB_TOKEN_FILE="$tmp/etc/github.token" \
+            BOSS_GITHUB_TOKEN_FILE="$tmp/etc/github.token" BOSS_SOR_ENV="$tmp/sor.env" \
             sh "$repo/infra/ops/ops-runner.sh" 2>&1
     }
     rm -f "$tmp/put.json"; packet '["--check"]'

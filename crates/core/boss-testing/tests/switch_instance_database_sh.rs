@@ -925,9 +925,14 @@ fn the_target_and_the_hold_file_are_the_ones_the_tree_declares() {
     let manifest =
         std::fs::read_to_string(repo_root().join("infra/cluster/manifests/boss.yaml")).unwrap();
     let want = |s: &str| assert!(src.contains(s), "script lacks `{s}`");
-    want("PG_WORKLOAD=\"sts/postgres\"");
-    want("PG_CONTAINER=\"postgres\"");
-    want("PG_USER=\"boss\"");
+    // The postgres target words live once, in forge-defaults.sh
+    // (backlog 5222163e); the switch sources it.
+    want("forge-defaults.sh");
+    let defaults =
+        std::fs::read_to_string(repo_root().join("infra/forge/forge-defaults.sh")).unwrap();
+    assert!(defaults.contains("PG_WORKLOAD=\"sts/postgres\""));
+    assert!(defaults.contains("PG_CONTAINER=\"postgres\""));
+    assert!(defaults.contains("PG_USER=\"boss\""));
     want("NATS_WORKLOAD=\"sts/nats\"");
     want("NATS_CONTAINER=\"nats\"");
     assert!(manifest.contains("{name: POSTGRES_USER, value: boss}"));
@@ -954,8 +959,9 @@ fn the_target_and_the_hold_file_are_the_ones_the_tree_declares() {
     assert!(nats.contains("8222"), "nats monitoring port is 8222");
     // The hold file: the same default converge-hold.sh and the runner use.
     let hold = std::fs::read_to_string(repo_root().join("infra/forge/converge-hold.sh")).unwrap();
-    assert!(hold.contains("${BOSS_CONVERGE_HOLD:-/var/tmp/boss-converge-hold}"));
-    want("${BOSS_CONVERGE_HOLD:-/var/tmp/boss-converge-hold}");
+    // The hold path lives once, in forge-defaults.sh; both verbs source it.
+    assert!(hold.contains("forge-defaults.sh"));
+    assert!(defaults.contains("${BOSS_CONVERGE_HOLD:-/var/tmp/boss-converge-hold}"));
     // boss-init carries NO PGDATABASE literal since the sibling car
     // (fix/boss-init-reads-its-database-from-the-secret, 2026-09-16):
     // its database is derived from DATABASE_URL, the Secret this verb

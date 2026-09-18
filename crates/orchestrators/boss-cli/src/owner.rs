@@ -74,8 +74,8 @@ mod tests {
     fn the_people_door_is_the_jobs_host_on_the_people_port() {
         let people = boss_ports::prod("people");
         assert_eq!(
-            on_port("http://10.20.0.34:7900", people),
-            format!("http://10.20.0.34:{people}")
+            on_port("http://192.0.2.34:7900", people),
+            format!("http://192.0.2.34:{people}")
         );
         assert_eq!(
             on_port(

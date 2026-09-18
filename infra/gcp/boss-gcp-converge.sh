@@ -277,6 +277,28 @@ run_summary_field converge_sha "$after"
 # its roles the same way). Best-effort: an unreachable registry leaves
 # the roles empty and every row installs, as before roles existed.
 NODE_ID="${BOSS_NODE_ID:-$(hostname -s)}"
+# THE ADDRESS FILE, BEFORE ANYTHING THAT READS IT. /etc/boss/sor.env is
+# the one place on this host that spells the system of record; every
+# unit the installer below puts down reads it with EnvironmentFile=, the
+# ops-runner installer checks it, and the roles read next uses it.
+# Rendered from infra/estate/estate.toml on every tick — the one tree
+# source (backlog 5222163e, audit H10) — so a moved address reaches this
+# host by a merge and a tick, not an ssh. Written first so a unit
+# installed on this tick never starts without it. The renderer is read
+# from this script's own infra directory (on the host, $REPO/infra
+# after the fast-forward above, so the converged tree's source; under
+# test, the tree the script came from — a fixture checkout carries no
+# estate.toml). The path is a knob only so a test never writes /etc.
+SOR_ENV="${BOSS_GCP_CONVERGE_SOR_ENV:-/etc/boss/sor.env}"
+if ! bash "${BOSS_GCP_CONVERGE_INFRA:-$(dirname "$0")/..}/estate/render-sor-env.sh" --to "$SOR_ENV"; then
+    echo "boss-gcp-converge: could not render $SOR_ENV from infra/estate/estate.toml —" >&2
+    echo "    nothing installed: every unit reads that file, and a unit without its address" >&2
+    echo "    would answer a wrong target instead of erroring." >&2
+    run_summary_field sor_env "not rendered"
+    exit 1
+fi
+export BOSS_SOR_ENV="$SOR_ENV"
+run_summary_field sor_env "$SOR_ENV"
 . "${BOSS_GCP_CONVERGE_INFRA:-$(dirname "$0")}/estate/node-roles.sh"
 BOSS_CONVERGE_NAME="boss-gcp-converge" read_node_roles "$NODE_ID"
 run_summary_field node_id "$NODE_ID"

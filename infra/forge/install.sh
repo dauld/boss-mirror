@@ -17,10 +17,11 @@
 # had never been installed. `cluster-deploy-runner` had been. Nothing
 # in the tree could tell the difference, and nothing was going to.
 #
-# WHERE IT RUNS. On the forge host (10.20.0.15), from its checkout at
-# /home/david/boss, which is where the installed units already point:
+# WHERE IT RUNS. On the forge host (infra/estate/estate.toml
+# `forge_host`), from its checkout at /home/david/boss, which is where
+# the installed units already point:
 #
-#   ssh 10.20.0.15 'cd /home/david/boss && git fetch forgejo main \
+#   ssh <forge> 'cd /home/david/boss && git fetch forgejo main \
 #     && git checkout -qf FETCH_HEAD && sudo infra/forge/install.sh'
 #
 # (NOT `git pull` — the checkout tracks no upstream branch; it is driven
@@ -57,6 +58,27 @@ if [ "$ETC" = "/etc/systemd/system" ] && [ "$(id -u)" -ne 0 ]; then
     echo "install.sh: needs root to write /etc/systemd/system — re-run with sudo." >&2
     exit 1
 fi
+
+# THE ADDRESS FILE, FIRST. /etc/boss/sor.env is the one place on this
+# host that spells the system of record and the forge's own addresses;
+# every unit installed below reads it with EnvironmentFile= (no `-`: a
+# unit that started without its address would answer a wrong target)
+# and every script sources infra/lib/sor.sh. Rendered from the tree's
+# ONE source, infra/estate/estate.toml, on every converge — so the
+# boss.algedonic.dev cutover is an edit to that file and a tick of this
+# timer (backlog 5222163e, audit H10). Before the units, deliberately:
+# a daemon-reload that finds the file absent would leave every unit
+# refusing to start until the next tick. Overridable for the scratch
+# run the lints drive (a test never writes /etc).
+SOR_ENV="${INSTALL_SOR_ENV:-/etc/boss/sor.env}"
+bash "${HERE}/../estate/render-sor-env.sh" --to "$SOR_ENV"
+run_summary_field sor_env "$SOR_ENV"
+# Now this run itself has the addresses the rest of the install reads
+# (the journal door below, the roles read, the ops-runner installer).
+export BOSS_SOR_ENV="$SOR_ENV"
+# shellcheck source=infra/lib/sor.sh
+. "${HERE}/../lib/sor.sh"
+sor_require BOSS_JOBS_URL BOSS_FORGE_JOURNAL_URL
 
 # Every unit this host runs. A unit absent from this list is a unit
 # nobody installs, which is the entire defect above.
@@ -191,18 +213,15 @@ else
     echo "install.sh: cluster-operator not among this host's roles (${BOSS_NODE_ROLES:-none}) — no Talos client installed"
 fi
 
-# The system of record for the maintenance packets these units open.
-# ONE definition (§9a), written as a per-unit drop-in so
-# boss-maintenance-wrap.sh — which has NO localhost default and REFUSES
-# without it — reaches the cluster jobs API. The forge host carries no
-# deploy-services jobs-url.conf drop-in, which is why reap-dead-ci-jobs
-# failed every run on 2026-09-03 until the URL was hand-authored. Now it
-# is installed from the tree, so it converges instead of drifting.
-JOBS_URL="http://10.20.0.34:7900"
+# The per-unit `jobs-url.conf` drop-in that used to carry the system of
+# record (from 2026-09-03, when reap-dead-ci-jobs failed every run for
+# want of it, to 2026-09-18) is RETIRED: every unit reads
+# /etc/boss/sor.env itself. A drop-in left behind would carry a second
+# copy of the address that nothing re-renders, so it is removed — the
+# converge that stops writing a file must also stop the file standing.
 for u in "${UNITS[@]}"; do
-    mkdir -p "${ETC}/${u}.service.d"
-    printf '[Service]\nEnvironment=BOSS_JOBS_URL=%s\n' "$JOBS_URL" \
-        > "${ETC}/${u}.service.d/jobs-url.conf"
+    rm -f "${ETC}/${u}.service.d/jobs-url.conf"
+    rmdir "${ETC}/${u}.service.d" 2>/dev/null || true
 done
 
 # The ops-request runner is the same unit boss-gcp runs, installed the
@@ -244,7 +263,7 @@ done
 # infra/journal-door-ensure.sh and both converges call it: that file
 # carries why the door exists, why nothing of ours is shipped for it, and
 # why every failure in it is non-fatal.
-JOURNAL_DOOR_URL="http://10.20.0.15:19531" bash "${HERE}/../journal-door-ensure.sh"
+JOURNAL_DOOR_URL="$BOSS_FORGE_JOURNAL_URL" bash "${HERE}/../journal-door-ensure.sh"
 
 echo "install.sh: ${installed} unit pair(s) installed and enabled"
 run_summary_field units_installed "$installed"

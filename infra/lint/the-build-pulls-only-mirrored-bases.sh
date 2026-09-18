@@ -39,7 +39,10 @@ cd "$(dirname "$0")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
 . infra/lint/lib/scanned.sh
 
-REGISTRY="10.20.0.15:3000"
+# The registry, from the one tree source (infra/estate/estate.toml,
+# backlog 5222163e) — never typed here.
+REGISTRY=$(sed -n 's/^forge_registry = "\(.*\)"[[:space:]]*$/\1/p' infra/estate/estate.toml | sed -n 1p)
+[ -n "$REGISTRY" ] || { echo "the-build-pulls-only-mirrored-bases: infra/estate/estate.toml names no forge_registry" >&2; exit 1; }
 FORGE_BASE="$REGISTRY/david"
 # Repos this pipeline pushes: built by build-image, never mirrored.
 BUILT_REPOS="boss-ci boss"

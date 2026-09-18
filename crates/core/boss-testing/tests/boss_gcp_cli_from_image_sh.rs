@@ -968,6 +968,9 @@ impl Converge {
         self.case.env(&mut cmd, extra);
         cmd.env("HOME", self.case.root.join("home"))
             .env("BOSS_GCP_REPO_DIR", &self.clone)
+            // The address file the converge renders before it installs
+            // anything: into the scratch root here, never /etc.
+            .env("BOSS_GCP_CONVERGE_SOR_ENV", self.case.root.join("sor.env"))
             .env(
                 "BOSS_GCP_CONVERGE_INSTALLER",
                 self.case.bin.join("installer-ok"),

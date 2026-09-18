@@ -456,9 +456,19 @@ fn the_runner_answers_its_request_through_the_exit_trap() {
         "cluster-deploy-lib.sh",
         "checkout-lock.sh",
         "cluster-deploy-runner.sh",
+        "forge-defaults.sh",
     ] {
         std::fs::copy(forge.join(f), work.join("infra/forge").join(f)).unwrap();
     }
+    // …and the address library forge-defaults.sh sources (the registry
+    // host comes from /etc/boss/sor.env through it; the runner names its
+    // image repo explicitly below, so no file is needed here).
+    std::fs::create_dir_all(work.join("infra/lib")).unwrap();
+    std::fs::copy(
+        repo_root().join("infra/lib/sor.sh"),
+        work.join("infra/lib/sor.sh"),
+    )
+    .unwrap();
     // …and the run-summary lib it stamps its stage timings through.
     std::fs::copy(
         repo_root().join("infra/run-summary.sh"),
@@ -587,6 +597,8 @@ fn the_runner_answers_its_request_through_the_exit_trap() {
         .env("BOSS_FORGE_REPO_DIR", &work)
         .env("BOSS_FORGE_LAST_BUILT", root.join("last-built"))
         .env("BOSS_JOBS_URL", "http://stub:7900")
+        // The image repo named outright: no address file on this box.
+        .env("BOSS_FORGE_REGISTRY", "reg.test/david/boss")
         .output()
         .unwrap();
     assert!(

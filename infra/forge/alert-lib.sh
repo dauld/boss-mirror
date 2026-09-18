@@ -28,7 +28,13 @@
 # stop the alert being kept.
 
 ALERT_SPOOL="${ALERT_SPOOL:-/var/tmp/boss-alert-spool}"
-ALERT_API="${JOBS_API:-http://10.20.0.34:7900}"
+# The system of record, from /etc/boss/sor.env (infra/lib/sor.sh) — no
+# fallback address: an alert filed against a wrong instance is an alert
+# nobody reads (backlog 5222163e).
+# shellcheck source=infra/lib/sor.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/sor.sh"
+sor_require JOBS_API
+ALERT_API="$JOBS_API"
 ALERT_USER='{"id":"automation:cluster-watchdog","role":"platform-admin","access_tier":"operator"}'
 ALERT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

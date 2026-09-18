@@ -4,19 +4,22 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
+# The system of record comes from /etc/boss/sor.env, which install.sh
+# — run by THIS unit — renders from infra/estate/estate.toml (backlog
+# 5222163e). Optional (`-`) here and nowhere else: the converge is the
+# arm that writes the file, so it must start on a host that does not
+# have it yet. On that first tick the wrap pair below has no address and
+# files nothing (both are `-`); the run still converges, the file is
+# there for the next tick, and every other unit on the host reads it
+# hard. Until 2026-09-18 the address was pinned inline on these lines
+# and once more in a per-unit drop-in install.sh wrote — reap failed on
+# 2026-09-03 for want of exactly that (there was no drop-in yet).
+EnvironmentFile=-/etc/boss/sor.env
 Type=oneshot
 # Root: install.sh writes /etc/systemd/system. The script itself drops
 # to the checkout owner (runuser -l) for the git operations, so the
 # clone never accumulates root-owned objects.
 User=root
-# The system of record, pinned inline exactly like boss-ops-runner and
-# boss-estate-observe-host: the maintenance-wrap helper has no localhost
-# default (it refuses without this), and the forge host carries no
-# deploy-services jobs-url drop-in. Reap failed on 2026-09-03 for want
-# of exactly this line; install.sh now also writes it as a drop-in, but
-# pinning it on the unit that INSTALLS the drop-in avoids the bootstrap
-# gap where the first converge runs before its own drop-in exists.
-Environment=BOSS_JOBS_URL=http://10.20.0.34:7900
 # WHICH NODE THIS IS in the estate registry, so the converge can read
 # its own roles off /api/estate/nodes (infra/estate/roles.toml maps them
 # to what the host installs). Declared here, not read from a hostname.
@@ -36,7 +39,11 @@ TimeoutStartSec=10min
 # opens (or reuses) the maintenance-forge-converge packet; ExecStopPost
 # records the verdict whether ExecStart succeeded or not, so a failed
 # converge closes its packet "Maintenance failed" — the alarm, naming
-# the exit status. (timers-leave-a-packet)
-ExecStartPre=/home/david/boss/infra/boss-maintenance-wrap.sh maintenance-forge-converge "Forge host converges on its own units"
+# the exit status. (timers-leave-a-packet) ExecStartPre=- since
+# 2026-09-18: this converge renders the address file the wrap reads, so
+# on a host that has no file yet the wrap refuses (exit 78) and the
+# converge must run anyway — the packet is visibility, never a
+# precondition (CLAUDE.md §Diagnosis; boss-gcp-converge is the same).
+ExecStartPre=-/home/david/boss/infra/boss-maintenance-wrap.sh maintenance-forge-converge "Forge host converges on its own units"
 ExecStart=/home/david/boss/infra/forge/forge-converge.sh
 ExecStopPost=-/home/david/boss/infra/boss-step.sh maintenance-forge-converge run

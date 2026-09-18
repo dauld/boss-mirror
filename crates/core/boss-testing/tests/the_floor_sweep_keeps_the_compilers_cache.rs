@@ -76,6 +76,20 @@ fn sweep(case: &str, free_gb: u64) -> Run {
         &bin.join("curl"),
         "#!/usr/bin/env bash\necho '{}'\nexit 0\n",
     );
+    // The registry host the sweep's image repos derive from:
+    // /etc/boss/sor.env on the host, rendered here from the one source.
+    let sor_env = dir.join("sor.env");
+    let rendered = Command::new("bash")
+        .arg(repo_root().join("infra/estate/render-sor-env.sh"))
+        .arg("--to")
+        .arg(&sor_env)
+        .output()
+        .expect("render sor.env");
+    assert!(
+        rendered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rendered.stderr)
+    );
     let out = Command::new("bash")
         .arg(repo_root().join(SWEEP))
         .env(
@@ -86,6 +100,7 @@ fn sweep(case: &str, free_gb: u64) -> Run {
                 std::env::var("PATH").unwrap_or_default()
             ),
         )
+        .env("BOSS_SOR_ENV", &sor_env)
         .env("BOSS_CI_IMAGE_DOCKER", bin.join("system-docker"))
         .env("BOSS_CI_IMAGE_DAEMON_ROOT", "/var/lib/docker")
         .env("BOSS_SWEEP_CURL_CMD", bin.join("curl"))

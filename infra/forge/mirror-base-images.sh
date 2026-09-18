@@ -6,8 +6,9 @@
 # repeatedly (#236, #250: `lookup gcr.io on 127.0.0.53:53: no such
 # host`) and reddened trains; mirroring moves that DNS dependency off
 # the every-train hot path and onto this occasional, retryable job.
-# Trains then pull the base images from 10.20.0.15:3000 (the forge host
-# itself), which needs no external resolver.
+# Trains then pull the base images from the forge's own registry
+# (infra/estate/estate.toml `forge_registry`), which needs no external
+# resolver.
 #
 # BOUNDED BY CONSTRUCTION, like disk-floor-sweep.sh (infra/ops/verbs/README.md):
 # the set of images is a FIXED in-tree list below, never a packet-
@@ -27,7 +28,10 @@
 # ops-request records exactly what broke.
 set -euo pipefail
 
-REGISTRY_BASE="${BOSS_FORGE_REGISTRY_BASE:-10.20.0.15:3000/david}"
+# The owner's namespace on the forge registry, from forge-defaults.sh
+# off /etc/boss/sor.env (BOSS_FORGE_REGISTRY_BASE overrides).
+. "$(dirname "$0")/forge-defaults.sh"
+forge_need REGISTRY_BASE
 export DOCKER_HOST="${BOSS_MIRROR_DOCKER_HOST:-unix:///run/user/1000/docker.sock}"
 export DOCKER_CONFIG="${BOSS_MIRROR_DOCKER_CONFIG:-/home/david/.docker}"
 

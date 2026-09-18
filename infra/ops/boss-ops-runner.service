@@ -21,14 +21,17 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
+# BOSS_JOBS_URL from /etc/boss/sor.env, rendered on every managed host
+# by its converge from infra/estate/estate.toml — one spelling for both
+# hosts (backlog 5222163e). Until 2026-09-18 it was pinned inline on the
+# Exec line, exactly like boss-estate-observe-host.service and for the
+# same reason: deploy-services' shared jobs-url.conf drop-in pointed the
+# timer fleet at the retired second stack (91ddebfb). EnvironmentFile=
+# outranks any Environment= drop-in the same way env(1) did. The script
+# itself refuses to run without an explicit BOSS_JOBS_URL (no default;
+# the boss-step.sh lesson, 2026-08-17).
+EnvironmentFile=/etc/boss/sor.env
 Type=oneshot
-# BOSS_JOBS_URL pinned INLINE on the Exec line, exactly like
-# boss-estate-observe-host.service and for the same reason:
-# deploy-services' shared jobs-url.conf drop-in points the timer fleet
-# at the legacy 127.0.0.1 instance (91ddebfb) and drop-in env wins over
-# unit env — env(1) on the Exec line outranks both. The script itself
-# refuses to run without an explicit BOSS_JOBS_URL (no default; the
-# boss-step.sh lesson, 2026-08-17).
 #
 # No boss-maintenance-wrap pair, deliberately: this fires every minute
 # and a packet per firing would drown the board. Its product IS
@@ -37,6 +40,6 @@ Type=oneshot
 #
 # Every host's drop-in REPLACES this line with the runner from its own
 # checkout; the path below is only what a host whose checkout is
-# /opt/boss would get. The URL is the same on both, because the system
-# of record is one place.
-ExecStart=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/ops/ops-runner.sh
+# /opt/boss would get. The address is the same on both, because the
+# system of record is one place — and one file.
+ExecStart=/opt/boss/infra/ops/ops-runner.sh

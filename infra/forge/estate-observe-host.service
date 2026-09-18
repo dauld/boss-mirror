@@ -21,14 +21,14 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
+EnvironmentFile=/etc/boss/sor.env
 Type=oneshot
 # Reads df/nproc/meminfo and POSTs — nothing here needs root.
 User=david
 Environment=HOST_ID=forge
-Environment=JOBS_API=http://10.20.0.34:7900
-# BOSS_JOBS_URL pinned INLINE (the boss-estate-observe-host idiom):
-# the helpers refuse without one, and env(1) on the Exec line
-# outranks any drop-in.
-ExecStartPre=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /home/david/boss/infra/boss-maintenance-wrap.sh maintenance-estate-observe-host "estate host observation (forge)"
+# BOSS_JOBS_URL and JOBS_API come from /etc/boss/sor.env (EnvironmentFile=
+# above), rendered by install.sh from infra/estate/estate.toml; the
+# helpers refuse without one, and every Exec line reads the same file.
+ExecStartPre=/home/david/boss/infra/boss-maintenance-wrap.sh maintenance-estate-observe-host "estate host observation (forge)"
 ExecStart=/home/david/boss/infra/estate/observe-host.sh
-ExecStopPost=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /home/david/boss/infra/boss-step.sh maintenance-estate-observe-host run
+ExecStopPost=-/home/david/boss/infra/boss-step.sh maintenance-estate-observe-host run

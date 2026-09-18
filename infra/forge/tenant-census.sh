@@ -112,10 +112,11 @@ RESOLVE="$REPO/infra/cluster/undeclared-objects.sh"
 # StatefulSet `postgres` in namespace `boss`, container `postgres`,
 # POSTGRES_USER=boss, POSTGRES_DB=boss. tenant_census_sh.rs holds the
 # equality test between these five words and the manifest (§9a).
+. "$(dirname "$0")/forge-defaults.sh"
 CENSUS_NS="boss"
-CENSUS_WORKLOAD="sts/postgres"
-CENSUS_CONTAINER="postgres"
-CENSUS_DB_USER="boss"
+CENSUS_WORKLOAD="$PG_WORKLOAD"
+CENSUS_CONTAINER="$PG_CONTAINER"
+CENSUS_DB_USER="$PG_USER"
 CENSUS_DB_NAME="boss"
 
 MODE="${1:-}"

@@ -178,12 +178,17 @@ say "locomotive: nproc=$(nproc) loadavg=$(cut -d' ' -f1-3 /proc/loadavg) stamp=$
 # design: a missing token or a refused POST is one line here and the
 # old behaviour (a strike) — never a second failure mode.
 if [ "$fail" -ne 0 ] && [ -n "$refusal" ]; then
-  if [ -n "${FORGE_TOKEN:-}" ] && [ -n "${GITHUB_SHA:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then
-    api="${GITHUB_API_URL:-http://10.20.0.15:3000/api/v1}"
+  if [ -n "${FORGE_TOKEN:-}" ] && [ -n "${GITHUB_SHA:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ] \
+     && [ -n "${GITHUB_API_URL:-}" ] && [ -n "${GITHUB_SERVER_URL:-}" ]; then
+    # The forge's API and web base are the runner's own facts
+    # (GITHUB_API_URL / GITHUB_SERVER_URL, set on every job); a run
+    # without them is a run outside the forge, and posts nothing rather
+    # than guessing an address (backlog 5222163e).
+    api="$GITHUB_API_URL"
     desc="refused: $(printf '%s' "$refusal" | cut -c1-200)"
     body=$(printf '{"state":"failure","context":"CI / locomotive refusal","description":%s,"target_url":%s}' \
       "$(printf '%s' "$desc" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf '"%s"' "refused: see the locomotive log")" \
-      "$(printf '"%s"' "${GITHUB_SERVER_URL:-http://10.20.0.15:3000}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID:-}")")
+      "$(printf '"%s"' "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID:-}")")
     if curl -fsS -o /dev/null -X POST -H "Authorization: token $FORGE_TOKEN" -H 'Content-Type: application/json' \
          "$api/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -d "$body"; then
       say "locomotive: refusal posted as a commit status (context 'CI / locomotive refusal') — the conductor will spare the cars"
@@ -191,7 +196,7 @@ if [ "$fail" -ne 0 ] && [ -n "$refusal" ]; then
       say "locomotive: could not post the refusal status — the conductor will read this as a plain red"
     fi
   else
-    say "locomotive: no FORGE_TOKEN/GITHUB_SHA/GITHUB_REPOSITORY in the environment — refusal not posted, the conductor will read a plain red"
+    say "locomotive: no FORGE_TOKEN/GITHUB_SHA/GITHUB_REPOSITORY/GITHUB_API_URL/GITHUB_SERVER_URL in the environment — refusal not posted, the conductor will read a plain red"
   fi
 fi
 

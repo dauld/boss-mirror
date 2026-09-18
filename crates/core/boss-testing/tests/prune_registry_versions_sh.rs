@@ -1478,11 +1478,20 @@ fn the_registry_and_the_stamp_are_the_ones_the_converge_declares() {
     let runner =
         std::fs::read_to_string(repo_root().join("infra/forge/cluster-deploy-runner.sh")).unwrap();
     let want = |s: &str| assert!(src.contains(s), "script lacks `{s}`");
-    want("${BOSS_FORGE_REGISTRY:-10.20.0.15:3000/david/boss}");
-    assert!(runner.contains("${BOSS_FORGE_REGISTRY:-10.20.0.15:3000/david/boss}"));
+    // Since 2026-09-18 (backlog 5222163e) neither script spells the
+    // image repo: both source forge-defaults.sh and ask it for REGISTRY,
+    // and the stamp's file name is that file's LAST_BUILT_NAME.
+    want("forge-defaults.sh");
+    want("forge_need REGISTRY");
+    assert!(runner.contains("forge-defaults.sh") && runner.contains("forge_need REGISTRY"));
     want("${BOSS_FORGE_LAST_BUILT:-");
-    want(".boss-last-built");
-    assert!(runner.contains("${BOSS_FORGE_LAST_BUILT:-$HOME/.boss-last-built}"));
+    want("$LAST_BUILT_NAME");
+    let defaults =
+        std::fs::read_to_string(repo_root().join("infra/forge/forge-defaults.sh")).unwrap();
+    assert!(defaults.contains("LAST_BUILT_NAME=\".boss-last-built\""));
+    assert!(
+        defaults.contains("STAMP_FILE=\"${BOSS_FORGE_LAST_BUILT:-${HOME:-}/$LAST_BUILT_NAME}\"")
+    );
     // The landed shas come from the one lib the sweep reads, not a copy.
     want("landed-train-shas.lib.sh");
     want("landed_train_shas ");

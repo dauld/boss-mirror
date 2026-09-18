@@ -130,20 +130,20 @@ refuse() { say "REFUSED — $*"; say "  Nothing was changed."; exit 2; }
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SELF_DIR/../.." && pwd)"
 RESOLVE="$REPO/infra/cluster/undeclared-objects.sh"
-HOLD_FILE="${BOSS_CONVERGE_HOLD:-/var/tmp/boss-converge-hold}"
+# HOLD_FILE, PG_WORKLOAD, PG_CONTAINER, PG_USER: forge-defaults.sh, one
+# definition for every verb that reads the hold or the instance database.
+. "$SELF_DIR/forge-defaults.sh"
 BACKUP_DIR="${BOSS_SWITCH_BACKUP_DIR:-/var/backups/boss/instance-db}"
 MIN_BYTES="${BOSS_SWITCH_MIN_SNAPSHOT_BYTES:-1048576}"
 TREE="${BOSS_SWITCH_TREE:-$REPO}"
 MAIN_REF="${BOSS_SWITCH_MAIN_REF:-forgejo/main}"
 
 # The targets, as infra/cluster/manifests/boss.yaml declares them: the
-# StatefulSet `postgres`, container `postgres`, POSTGRES_USER=boss; the
-# StatefulSet `nats`, container `nats`, monitoring on 8222. The
-# namespace is the packet's. switch_instance_database_sh.rs holds the
-# equality test between these words and the manifest (§9a).
-PG_WORKLOAD="sts/postgres"
-PG_CONTAINER="postgres"
-PG_USER="boss"
+# StatefulSet `postgres`, container `postgres`, POSTGRES_USER=boss (the
+# PG_* trio, from forge-defaults.sh above); the StatefulSet `nats`,
+# container `nats`, monitoring on 8222. The namespace is the packet's.
+# switch_instance_database_sh.rs holds the equality test between these
+# words and the manifest (§9a).
 NATS_WORKLOAD="sts/nats"
 NATS_CONTAINER="nats"
 SECRET_NAME="boss-secrets"

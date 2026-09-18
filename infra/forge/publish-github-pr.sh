@@ -92,7 +92,16 @@ MIRROR_URL="${BOSS_MIRROR_URL:-https://github.com/${MIRROR_SLUG}.git}"
 # arrangement, forge-converge.sh), over Forgejo's HTTP, from a clone
 # made readable to it. Empty BOSS_FORGE_PUSH_AS runs the push inline
 # (the test harness, whose fixture repo the test's uid owns).
-FORGE_PUSH_URL="${BOSS_FORGE_PUSH_URL:-http://10.20.0.15:3000/david/boss.git}"
+# The forge's clone URL: BOSS_FORGE_PUSH_URL, else the forge base from
+# /etc/boss/sor.env (infra/lib/sor.sh) with the product repository's
+# path — the same owner every image repo lives under.
+if [ -z "${BOSS_FORGE_PUSH_URL:-}" ]; then
+    # shellcheck source=infra/lib/sor.sh
+    . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/sor.sh"
+    sor_require BOSS_FORGE_URL
+    BOSS_FORGE_PUSH_URL="$BOSS_FORGE_URL/${BOSS_FORGE_OWNER:-david}/boss.git"
+fi
+FORGE_PUSH_URL="$BOSS_FORGE_PUSH_URL"
 FORGE_PUSH_AS="${BOSS_FORGE_PUSH_AS-david}"
 FORK_SLUG="${BOSS_FORK_SLUG:-dauld/boss-mirror}"
 FORK_URL="${BOSS_FORK_URL:-https://github.com/${FORK_SLUG}.git}"

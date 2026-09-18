@@ -2,6 +2,12 @@
 Description=BOSS cluster converges on forge main (build + push + roll)
 
 [Service]
+# The system of record (the wrap pair, the request annotations) and the
+# registry host (forge-defaults.sh derives the image repo from it) come
+# from /etc/boss/sor.env, rendered by install.sh from
+# infra/estate/estate.toml — until 2026-09-18 a per-unit drop-in
+# install.sh wrote carried the address instead (backlog 5222163e).
+EnvironmentFile=/etc/boss/sor.env
 Type=oneshot
 User=david
 # The build is a cached docker build (~minutes warm, ~an hour cold).

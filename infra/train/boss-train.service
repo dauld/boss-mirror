@@ -52,6 +52,9 @@ Wants=network-online.target
 # survive every deploy.
 
 [Service]
+# BOSS_JOBS_URL from /etc/boss/sor.env, rendered on this host from
+# infra/estate/estate.toml (backlog 5222163e) — the one spelling.
+EnvironmentFile=/etc/boss/sor.env
 # The scheduling knowledge that used to live in this directory's two
 # timers (06:00/18:00 boarding, 10-minute reconcile) is now rows in
 # the cadence_rules registry (infra/postgres/schema/114-cadence-rules.sql):

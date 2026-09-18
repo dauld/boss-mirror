@@ -9,11 +9,14 @@
 # and main is untouched: a rollback buys time for a fix, it is not one.
 set -uo pipefail
 . "$(dirname "$0")/cluster-deploy-lib.sh"
+. "$(dirname "$0")/forge-defaults.sh"
 sha="${1:?rollback-to needs the sha of the build to serve}"
 # The converge's kubeconfig by its fixed path: this runs as root with no
 # HOME under the ops runner, and as david by hand.
 KUBECONFIG_PATH="${BOSS_FORGE_KUBECONFIG:-/home/david/kc.yaml}"
-REGISTRY="${REGISTRY:-10.20.0.15:3000/david/boss}"
+# The image repo the converge pushes: forge-defaults.sh, from the
+# registry host in /etc/boss/sor.env (REGISTRY overrides).
+forge_need REGISTRY
 K="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
 before=$($K get deploy boss -n boss -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null)
 echo "rollback-to: deploy/boss serves $before — rolling to $REGISTRY:$sha"

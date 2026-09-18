@@ -187,9 +187,26 @@ fn base_env(root: &Path) -> Vec<(String, String)> {
     let token = root.join("github.token");
     std::fs::write(&token, "not-a-real-token\n").unwrap();
     std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).unwrap();
+    // The forge's address file: on the host /etc/boss/sor.env, rendered
+    // from infra/estate/estate.toml; here the same render into the
+    // scratch root, so the verb derives its forge clone URL as it does
+    // under the ops runner (backlog 5222163e).
+    let sor_env = root.join("sor.env");
+    let rendered = Command::new("bash")
+        .arg(repo_root().join("infra/estate/render-sor-env.sh"))
+        .arg("--to")
+        .arg(&sor_env)
+        .output()
+        .expect("render sor.env");
+    assert!(
+        rendered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rendered.stderr)
+    );
     vec![
         ("BOSS_PUBLISH_STATE_DIR".into(), state.display().to_string()),
         ("BOSS_GITHUB_TOKEN_FILE".into(), token.display().to_string()),
+        ("BOSS_SOR_ENV".into(), sor_env.display().to_string()),
     ]
 }
 

@@ -21,6 +21,14 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
+# The system of record comes from /etc/boss/sor.env, which THIS unit's
+# converge renders from infra/estate/estate.toml before it installs
+# anything (backlog 5222163e). Optional (`-`) here and in forge-converge
+# only: the converge is the arm that writes the file, so it must start
+# on a host that does not have it yet; on that first tick the wrap pair
+# below has no address and files nothing (both are `-`), and every other
+# unit on the host reads the file hard.
+EnvironmentFile=-/etc/boss/sor.env
 Type=oneshot
 # Root: install-units.sh writes /etc/systemd/system. The script drops
 # to the checkout's owner for every git operation, so /opt/boss never
@@ -48,18 +56,17 @@ Environment=BOSS_RUN_SUMMARY_FILE=/run/boss-gcp-converge.summary.json
 # to units). This unit file lives under infra/gcp/ and installs on this
 # one host, so the id is declared rather than guessed from a hostname.
 Environment=BOSS_NODE_ID=boss-gcp
-# THE SYSTEM OF RECORD, PINNED INLINE WITH env(1). deploy-services'
-# shared jobs-url.conf drop-in points this host's timer fleet at the
-# legacy 127.0.0.1 instance, drop-in env outranks unit Environment=, and
-# that instance has never heard of a bundle-only kind: the packet dies
-# 400 in ExecStartPre. That is the bug 4ef79606 fixed for the estate
-# observers, and env(1) on the Exec line outranks both (91ddebfb).
+# Until 2026-09-18 the address was pinned inline with env(1) on these
+# lines, against deploy-services' shared jobs-url.conf drop-in that
+# pointed the timer fleet at the retired second stack (4ef79606,
+# 91ddebfb). EnvironmentFile= outranks any Environment= drop-in, so the
+# file does the pin's job.
 #
 # ExecStartPre=- because the packet is VISIBILITY, NEVER A PRECONDITION.
 # An arm that needs the patient is not an arm: boss-ml-inference-batch
 # lost 23 nights to a hard ExecStartPre, and on 2026-09-05 the cluster
 # converge could not run at all because its own packet-opener refused.
 # A converge that cannot be seen still converges.
-ExecStartPre=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-maintenance-wrap.sh maintenance-boss-gcp-converge "boss-gcp adopts its own units"
+ExecStartPre=-/opt/boss/infra/boss-maintenance-wrap.sh maintenance-boss-gcp-converge "boss-gcp adopts its own units"
 ExecStart=/opt/boss/infra/gcp/boss-gcp-converge.sh
-ExecStopPost=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-step.sh maintenance-boss-gcp-converge run
+ExecStopPost=-/opt/boss/infra/boss-step.sh maintenance-boss-gcp-converge run

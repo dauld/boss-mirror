@@ -111,9 +111,10 @@
 #   install-cli-from-image.sh <full sha>
 #
 # ENV
-#   BOSS_CLI_IMAGE_REPO   the image repository (default the forge's
-#                         10.20.0.15:3000/david/boss — cluster-deploy-
-#                         runner.sh's REGISTRY); "<host>/<name>"
+#   BOSS_CLI_IMAGE_REPO   the image repository (default the converge's
+#                         REGISTRY from infra/forge/forge-defaults.sh, off
+#                         the registry host in /etc/boss/sor.env);
+#                         "<host>/<name>"
 #   BOSS_CLI_REGISTRY_SCHEME  http (default — the forge registry is plain
 #                         HTTP on the LAN) or https
 #   BOSS_CLI_PLATFORM     "<arch>/<os>" of the manifest to take from a
@@ -155,7 +156,13 @@ case "$SHA" in
 esac
 [ "${#SHA}" -eq 40 ] || { echo "usage: $(basename "$0") <full sha> — got '${SHA}' (${#SHA} chars; the full commit is the attestation, the image tag is derived from it)" >&2; exit 2; }
 
-IMAGE_REPO="${BOSS_CLI_IMAGE_REPO:-10.20.0.15:3000/david/boss}"
+if [ -z "${BOSS_CLI_IMAGE_REPO:-}" ]; then
+    # shellcheck source=infra/forge/forge-defaults.sh
+    . "$SELF_DIR/../forge/forge-defaults.sh"
+    forge_need REGISTRY
+    BOSS_CLI_IMAGE_REPO="$REGISTRY"
+fi
+IMAGE_REPO="$BOSS_CLI_IMAGE_REPO"
 SCHEME="${BOSS_CLI_REGISTRY_SCHEME:-http}"
 STORE="${BOSS_CLI_STORE:-/opt/boss-cli}"
 LINK="${BOSS_CLI_LINK:-/usr/local/bin/boss}"

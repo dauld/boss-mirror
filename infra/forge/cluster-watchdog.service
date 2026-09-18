@@ -7,11 +7,14 @@ Description=BOSS forge: the cluster watchdog — knows the cluster is working fr
 # 2026-09-05 deadlock again.
 
 [Service]
+# JOBS_API (the record it watches) and the registry host (the image it
+# rolls to) come from /etc/boss/sor.env, rendered by install.sh from
+# infra/estate/estate.toml; the image repo itself is forge-defaults.sh's
+# derivation from that host (backlog 5222163e, 2026-09-18).
+EnvironmentFile=/etc/boss/sor.env
 Type=oneshot
 User=david
-Environment=JOBS_API=http://10.20.0.34:7900
 Environment=KUBECONFIG_PATH=/home/david/kc.yaml
-Environment=REGISTRY=10.20.0.15:3000/david/boss
 Environment=BOSS_FORGE_LAST_BUILT=/home/david/.boss-last-built
 Environment=WATCHDOG_STATE=/home/david/.boss-watchdog-dark
 Environment=WATCHDOG_DARK_LIMIT=3

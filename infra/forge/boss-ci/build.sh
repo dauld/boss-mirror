@@ -12,7 +12,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-REGISTRY="${BOSS_CI_REGISTRY:-10.20.0.15:3000/david}"
+# The owner's namespace on the forge registry, from forge-defaults.sh
+# off /etc/boss/sor.env (BOSS_CI_REGISTRY overrides).
+. ../forge-defaults.sh
+forge_need REGISTRY_BASE
+REGISTRY="$REGISTRY_BASE"
 TAG="${BOSS_CI_TAG:-rust1.96}"
 
 # The image stamps itself from its own build context now — see the

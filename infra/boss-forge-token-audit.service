@@ -2,6 +2,7 @@
 Description=Forge access-token inventory audit (drift against infra/platform/forge-tokens.toml)
 
 [Service]
+EnvironmentFile=/etc/boss/sor.env
 Type=oneshot
 # Runs ON THE FORGE HOST, not on boss-gcp or in the cluster, because the
 # authority it reads is the forge's own SQLite database and reading it
@@ -29,7 +30,7 @@ ExecStart=/usr/bin/python3 /opt/boss/infra/maintenance/forge-token-audit.py \
     --declaration /opt/boss/infra/platform/forge-tokens.toml \
     --db /opt/forgejo/data/gitea/gitea.db \
     --user david \
-    --registry-url http://10.20.0.34:7900
+    --registry-url ${BOSS_JOBS_URL}
 ExecStopPost=-/opt/boss/infra/boss-step.sh maintenance-forge-token-audit run
 # The database is 0644 and the check opens it read-only (SQLite URI
 # mode=ro), so this does not need root and does not get it.

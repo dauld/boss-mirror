@@ -213,9 +213,7 @@ LIVE_LIMIT=200
 # StatefulSet `postgres`, container `postgres`, POSTGRES_USER=boss; the
 # namespace is the packet's. The cars are `ship-a-change` packets
 # (infra/platform/workflows/ship-a-change.toml), the kind the sweep reads.
-PG_WORKLOAD="sts/postgres"
-PG_CONTAINER="postgres"
-PG_USER="boss"
+. "$(dirname "$0")/forge-defaults.sh"
 SECRET_NAME="boss-secrets"
 SECRET_KEY="database-url"
 CAR_KIND="ship-a-change"

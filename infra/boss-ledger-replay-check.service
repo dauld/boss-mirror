@@ -3,6 +3,9 @@ Description=Boss ledger deep reconstruction integrity check (financial_facts + j
 After=postgresql.service
 
 [Service]
+# BOSS_JOBS_URL from /etc/boss/sor.env, rendered on this host from
+# infra/estate/estate.toml (backlog 5222163e) — the one spelling.
+EnvironmentFile=/etc/boss/sor.env
 Type=oneshot
 # Reprojects financial_facts from audit_log and the journal from the facts,
 # inside an aborted transaction, and diffs BOTH against the live projection

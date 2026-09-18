@@ -3,6 +3,9 @@ Description=Boss revenue-recognition scheduler (ASC 606 step 3)
 After=postgresql.service
 
 [Service]
+# BOSS_JOBS_URL from /etc/boss/sor.env, rendered on this host from
+# infra/estate/estate.toml (backlog 5222163e) — the one spelling.
+EnvironmentFile=/etc/boss/sor.env
 Type=oneshot
 # The binary + config + env-var gate for RuleSet v2. Operators on
 # pre-switchover deployments leave BOSS_LEDGER_RULESET unset (default

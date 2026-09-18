@@ -4,7 +4,7 @@
 # `POST /api/agent-runs`, from a data file of observations.
 #
 #   ./infra/record-agent-runs.sh infra/agent-runs/2026-09-10.tsv --dry-run
-#   BOSS_JOBS_URL=http://10.20.0.34:7900 \
+#   BOSS_JOBS_URL=<the system of record, /etc/boss/sor.env> \
 #     ./infra/record-agent-runs.sh infra/agent-runs/2026-09-10.tsv
 #
 # WHY A SCRIPT AND NOT FIFTEEN CALLS. The same reason every other
@@ -64,7 +64,7 @@ if [ -z "${BOSS_JOBS_URL:-}" ]; then
     echo "record-agent-runs: BOSS_JOBS_URL is not set, and there is no safe default." >&2
     echo "    The system of record is the cluster's jobs API; a second, older stack" >&2
     echo "    answers on 127.0.0.1 with different data. Name it explicitly:" >&2
-    echo "        BOSS_JOBS_URL=http://10.20.0.34:7900 $(basename "$0") $RUNS_FILE" >&2
+    echo "        BOSS_JOBS_URL=<the system of record, /etc/boss/sor.env> $(basename "$0") $RUNS_FILE" >&2
     exit 78   # EX_CONFIG — a configuration fault, not a run-time one.
 fi
 BASE="${BOSS_JOBS_URL%/}"

@@ -81,14 +81,18 @@
 #
 # Install (forge host): disk-floor-sweep is in install.sh's UNITS
 # list, so the standing idiom covers it —
-#   ssh 10.20.0.15 'cd /home/david/boss && git pull && sudo infra/forge/install.sh'
+#   ssh <forge> 'cd /home/david/boss && git pull && sudo infra/forge/install.sh'
 #
 # Usage: disk-floor-sweep.sh [floor_gb]
 #   floor_gb overrides BOSS_DISK_FLOOR_GB (default 70, = CI's floor). The optional
 #   arg is what the reclaim-disk ops verb passes.
 set -euo pipefail
 
-REGISTRY="${BOSS_FORGE_REGISTRY:-10.20.0.15:3000/david/boss}"
+# The image repos this sweep prunes — the converge's and the per-train
+# CI runner's — from forge-defaults.sh, off the registry host in
+# /etc/boss/sor.env (BOSS_FORGE_REGISTRY / BOSS_CI_IMAGE_REPO override).
+. "$(dirname "$0")/forge-defaults.sh"
+forge_need REGISTRY CI_IMAGE_REPO
 export DOCKER_HOST="${DOCKER_HOST:-unix:///run/user/1000/docker.sock}"
 
 # 40 (70 until 2026-09-16), not 25, and it MUST match locomotive.sh's
@@ -147,8 +151,8 @@ CI_IMAGE_FLOOR_AGE_HOURS=4
 # starting right now pulls. Same keep-N idiom as the registry-tag loop.
 CI_IMAGE_KEEP_NEWEST="${BOSS_CI_IMAGE_KEEP_NEWEST:-3}"
 # The per-train CI image repo (.forgejo/workflows/ci.yml stamps
-# `boss-ci:${GITHUB_SHA}` on every train's build-image job).
-CI_IMAGE_REPO="${BOSS_CI_IMAGE_REPO:-10.20.0.15:3000/david/boss-ci}"
+# `boss-ci:${GITHUB_SHA}` on every train's build-image job) is
+# CI_IMAGE_REPO, resolved above.
 # HOW MANY TRAIN PACKETS TO READ. A limit is not a filter: this is a
 # window on the newest packets, not the whole record, and an image whose
 # train is older than the window resolves to nothing and falls to the age

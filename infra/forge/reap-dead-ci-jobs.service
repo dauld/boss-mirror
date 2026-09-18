@@ -5,6 +5,11 @@ After=docker.service
 Requires=docker.service
 
 [Service]
+# The system of record for the wrap pair, from /etc/boss/sor.env —
+# rendered by install.sh from infra/estate/estate.toml. This unit failed
+# every run on 2026-09-03 for want of an address; the per-unit drop-in
+# that fixed it is retired for the one file (backlog 5222163e).
+EnvironmentFile=/etc/boss/sor.env
 Type=oneshot
 # The script sudos to docker if it has to; running as root avoids that
 # and keeps the unit's failure modes to the script's own.

@@ -15,11 +15,16 @@
 # the same reason as boss-codebase-metrics and boss-protocol-drift, and
 # the same role (off-cluster-observer) so the converge installs it.
 #
-# THE SYSTEM OF RECORD, PINNED INLINE WITH env(1) on every line that
-# speaks to it — the rule timers-leave-a-packet check 7 states, learned
-# from the estate observers (91ddebfb) and boss-codebase-metrics: a
-# drop-in outranks unit Environment=, and a chore filed on an instance
-# nobody reads is a chore that did not run.
+# THE SYSTEM OF RECORD comes from /etc/boss/sor.env (EnvironmentFile=
+# under [Service]), rendered on this host by its converge from
+# infra/estate/estate.toml — the one place the address is spelled
+# (backlog 5222163e, 2026-09-18). Until then it was pinned INLINE with
+# env(1) on every Exec line, against a drop-in that pointed the timer
+# fleet at the retired second stack (91ddebfb); EnvironmentFile= outranks
+# any Environment= drop-in, so the file does the pin's job, and
+# timers-leave-a-packet check 7 holds every unit to it. No `-` on the
+# EnvironmentFile line: a unit that started without its address would
+# answer a wrong target, and a wrong target answers instead of erroring.
 #
 # ExecStartPre=- because the packet is VISIBILITY, NEVER A PRECONDITION
 # — and here, as for codebase-metrics, the packet is also where the
@@ -40,11 +45,12 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
+EnvironmentFile=/etc/boss/sor.env
 Type=oneshot
 # One roll-up read, one sweep, one PATCH: seconds. The ceiling is for
 # a contended box and the transport's deploy-roll retry, not the work.
 TimeoutStartSec=10min
 User=david
-ExecStartPre=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-maintenance-wrap.sh maintenance-surface-usage "Surface usage"
-ExecStart=/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/surface-usage.sh file --repo /opt/boss
-ExecStopPost=-/usr/bin/env BOSS_JOBS_URL=http://10.20.0.34:7900 /opt/boss/infra/boss-step.sh maintenance-surface-usage run
+ExecStartPre=-/opt/boss/infra/boss-maintenance-wrap.sh maintenance-surface-usage "Surface usage"
+ExecStart=/opt/boss/infra/surface-usage.sh file --repo /opt/boss
+ExecStopPost=-/opt/boss/infra/boss-step.sh maintenance-surface-usage run

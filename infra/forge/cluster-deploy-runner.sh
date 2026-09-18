@@ -110,13 +110,15 @@ trap _finish EXIT
 # uses, which is why they live in the lib and not in this file.
 . "$REPO/infra/forge/cluster-deploy-lib.sh"
 take_converge_requests "$REPO" || true
-REGISTRY="${BOSS_FORGE_REGISTRY:-10.20.0.15:3000/david/boss}"
+# The image repo this converge pushes (REGISTRY), its stamp (STAMP_FILE
+# — the last build rolled and verified) and the quarantine stamp for a
+# head whose BOOT failed (FAILED_FILE — "proven unbootable; do not
+# re-roll it") are forge-defaults.sh's: one definition for this runner,
+# the watchdog, the rollback and the sweeps, off the registry host in
+# /etc/boss/sor.env (backlog 5222163e).
+. "$REPO/infra/forge/forge-defaults.sh"
+forge_need REGISTRY
 KUBECONFIG_PATH="${BOSS_FORGE_KUBECONFIG:-$HOME/kc.yaml}"
-STAMP_FILE="${BOSS_FORGE_LAST_BUILT:-$HOME/.boss-last-built}"
-# The quarantine stamp for a head whose BOOT failed (rollout never went
-# Ready and was rolled back). Distinct from STAMP_FILE — that one means
-# "converged", this one means "proven unbootable; do not re-roll it".
-FAILED_FILE="${BOSS_FORGE_LAST_FAILED:-$HOME/.boss-last-failed}"
 export DOCKER_HOST="${DOCKER_HOST:-unix:///run/user/1000/docker.sock}"
 # kubectl, through the alpine/k8s container with the admin kubeconfig.
 # Defined before the unchanged check below because the no-op tick

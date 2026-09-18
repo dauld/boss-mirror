@@ -10,7 +10,9 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
+# JOBS_API from /etc/boss/sor.env, rendered on this host from
+# infra/estate/estate.toml (backlog 5222163e).
+EnvironmentFile=/etc/boss/sor.env
 Type=oneshot
-Environment=JOBS_API=http://10.20.0.34:7900
 Environment=CLONE_DIR=/var/lib/boss-train/repo
 ExecStart=/usr/local/lib/boss/observe-codebase.sh

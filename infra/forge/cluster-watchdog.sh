@@ -7,16 +7,18 @@
 # (readable over the journal gateway with the API dark) and, when the
 # API answers, the estate observation series through the normal path.
 #
-# Env: JOBS_API (the system of record), KUBECONFIG_PATH, REGISTRY,
-#      BOSS_FORGE_LAST_BUILT (the converge's stamp file),
-#      WATCHDOG_STATE (dark-count file), WATCHDOG_DARK_LIMIT (checks).
+# Env: JOBS_API (the system of record) and the registry host from
+#      /etc/boss/sor.env through forge-defaults.sh (REGISTRY overrides
+#      the image repo), KUBECONFIG_PATH, BOSS_FORGE_LAST_BUILT (the
+#      converge's stamp file), WATCHDOG_STATE (dark-count file),
+#      WATCHDOG_DARK_LIMIT (checks).
 set -uo pipefail
 . "$(dirname "$0")/cluster-watchdog-lib.sh"
+. "$(dirname "$0")/forge-defaults.sh"
 . "$(dirname "$0")/alert-lib.sh"
-JOBS_API="${JOBS_API:-http://10.20.0.34:7900}"
+sor_require JOBS_API
+forge_need REGISTRY
 KUBECONFIG_PATH="${KUBECONFIG_PATH:-$HOME/kc.yaml}"
-REGISTRY="${REGISTRY:-10.20.0.15:3000/david/boss}"
-STAMP_FILE="${BOSS_FORGE_LAST_BUILT:-$HOME/.boss-last-built}"
 STATE="${WATCHDOG_STATE:-$HOME/.boss-watchdog-dark}"
 LIMIT="${WATCHDOG_DARK_LIMIT:-3}"
 K="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"

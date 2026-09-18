@@ -553,9 +553,16 @@ fn the_target_is_the_one_the_manifest_declares() {
     let src = std::fs::read_to_string(script()).unwrap();
     let want = |s: &str| assert!(src.contains(s), "script lacks `{s}`");
     want("CENSUS_NS=\"boss\"");
-    want("CENSUS_WORKLOAD=\"sts/postgres\"");
-    want("CENSUS_CONTAINER=\"postgres\"");
-    want("CENSUS_DB_USER=\"boss\"");
+    // The postgres target words live once, in forge-defaults.sh
+    // (backlog 5222163e); the census reads them from there.
+    want("CENSUS_WORKLOAD=\"$PG_WORKLOAD\"");
+    let defaults =
+        std::fs::read_to_string(repo_root().join("infra/forge/forge-defaults.sh")).unwrap();
+    assert!(defaults.contains("PG_WORKLOAD=\"sts/postgres\""));
+    want("CENSUS_CONTAINER=\"$PG_CONTAINER\"");
+    assert!(defaults.contains("PG_CONTAINER=\"postgres\""));
+    want("CENSUS_DB_USER=\"$PG_USER\"");
+    assert!(defaults.contains("PG_USER=\"boss\""));
     want("CENSUS_DB_NAME=\"boss\"");
     // The StatefulSet named postgres, in namespace boss, with a container
     // named postgres, POSTGRES_USER=boss and POSTGRES_DB=boss.

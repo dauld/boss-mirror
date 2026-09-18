@@ -750,12 +750,14 @@ a door that stops being true is a defect worth a car.
   `infra/dev/`, pinned by a shell test in `crates/core/boss-testing/tests/`
   (`boss_api_sh`, `boss_shim_sh`, `wt_cargo_sh`, `wt_web_sh`), and
   `/work/tools/bin/<name>` is a SYMLINK to the main checkout's copy —
-  which is why the main checkout stays on `origin/main`. One system-of-
-  record spelling lives in `infra/dev/sor-url` and both `boss-api` and
-  the shim read it. A builder in a worktree builds through `wt-cargo`
-  (its own reflink-seeded target; 4-wide and niced for `agent-*`
-  worktrees so the operator's shell wins the scheduler) and links
-  `node_modules` through `wt-web` before any web check.
+  which is why the main checkout stays on `origin/main`. The pod's
+  system-of-record spelling is `infra/dev/sor-url`, which both
+  `boss-api` and the shim read — WRITTEN from the one tree source,
+  `infra/estate/estate.toml`, and held equal to it by a test (since
+  2026-09-18, backlog 5222163e). A builder in a worktree builds
+  through `wt-cargo` (its own reflink-seeded target; 4-wide and niced
+  for `agent-*` worktrees so the operator's shell wins the scheduler)
+  and links `node_modules` through `wt-web` before any web check.
 
 - **The jobs API — `boss-api METHOD /api/path [body.json]`**
   (`infra/dev/boss-api`; `/Users/david/bin/boss-api` on the
@@ -787,7 +789,15 @@ a door that stops being true is a defect worth a car.
   a query against a wrong or dark instance answers `total: 0` instead
   of erroring, so every verb pins `BOSS_JOBS_URL` explicitly (the
   conductor's unit, the pod shim's `sor-url`) and a verb run by hand
-  inherits no unit.
+  inherits no unit. **The address is spelled ONCE in the tree**, in
+  `infra/estate/estate.toml` (with the forge's): each managed host's
+  converge renders it into `/etc/boss/sor.env`, every unit reads that
+  file with `EnvironmentFile=`, every script through `infra/lib/sor.sh`
+  (which refuses, naming the file, rather than fall back to a literal),
+  and the lint `the-estate-address-lives-once` refuses either IP
+  anywhere else. Until 2026-09-18 it was spelled in 47 files three ways
+  (backlog 5222163e); the cutover to `boss.algedonic.dev` is now an edit
+  to that file.
 
 - **Who a verb signs as — `BOSS_ACTOR`.** Every `boss` verb signs its
   jobs-API calls as the actor RUNNING it, read from `BOSS_ACTOR` or,
