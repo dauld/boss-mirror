@@ -23,7 +23,8 @@
 # WHAT IS A CANDIDATE — READ, NEVER TYPED. The set is
 # infra/postgres/example-reference-rows.sh's, derived from the
 # example tenants' own seeds in this checkout (examples/*/seeds/
-# classes.*, locations.toml, chart_of_accounts.toml, tenant.toml) —
+# classes.*, locations.toml, chart_of_accounts.toml, tax.toml,
+# tenant.toml) —
 # the same derivation init.sh runs on a fresh instance's first boot,
 # so the two doors cannot disagree about what is an example row.
 #
@@ -65,7 +66,8 @@
 #      psql (SET default_transaction_read_only = on) exec'd in the
 #      postgres container, judging every candidate — an employee
 #      wearing the role, a location wearing the kind, an account of
-#      the type, a journal line on the account, a tax kind naming it,
+#      the type, a journal line on the account, a tax kind naming it
+#      (one that is not itself leaving), a filing naming the tax kind,
 #      a job about the location or company, … — and a referenced row
 #      is KEPT and NAMED with its reasons; the real run re-judges
 #      inside each table's own transaction, so a reference that
@@ -199,10 +201,10 @@ SEEDS=$(BOSS_EXAMPLES_DIR="$TREE/examples" "$DERIVE" seeds "$TENANT_CHECKOUT" 2>
     flush_notes; say "REFUSED — cannot derive the candidate set from $TREE/examples minus the tenant's declarations at $TENANT_CHECKOUT:"; sed 's/^/    /' "$TMP/seeds.err" >&2; say "  Nothing was changed."; exit 2; }
 PLAN_SQL=$(BOSS_EXAMPLES_DIR="$TREE/examples" "$DERIVE" plan-sql "$TENANT_CHECKOUT") || cannot "the plan SQL could not be derived (see above)."
 TENANT_ID=$(printf '%s' "$SEEDS" | jq -r '.declared_by_tenant.tenant')
-DECLARED=$(printf '%s' "$SEEDS" | jq -c '.declared_by_tenant | {classes, locations, gl_accounts, companies}')
+DECLARED=$(printf '%s' "$SEEDS" | jq -c '.declared_by_tenant | {classes, locations, gl_accounts, companies, tax_kinds, sales_tax_rates}')
 DECLARED_N=$(printf '%s' "$DECLARED" | jq -r '[.[] | length] | add')
 note "tenant: $TENANT_ID at $TENANT_CHECKOUT declares $DECLARED_N example key(s) as its own — subtracted before judging ($(printf '%s' "$SEEDS" | jq -r '.declared_by_tenant.sources | if length == 0 then "no seeds" else join(", ") end'))"
-note "candidates: $(printf '%s' "$SEEDS" | jq -r '"\(.classes | length) classes, \(.locations | length) locations, \(.gl_accounts | length) accounts, \(.companies | length) companies, from \(.sources | join(", "))"')"
+note "candidates: $(printf '%s' "$SEEDS" | jq -r '"\(.classes | length) classes, \(.locations | length) locations, \(.gl_accounts | length) accounts, \(.companies | length) companies, \(.tax_kinds | length) tax kinds, \(.sales_tax_rates | length) sales-tax rates, from \(.sources | join(", "))"')"
 
 # --- the kubectl, resolved once, by the derivation the census uses ---------
 KUBECTL_LINE=$("$RESOLVE" --kubectl) || cannot "no kubectl to act with (see above)."

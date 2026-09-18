@@ -147,7 +147,7 @@ trap 'rm -rf "$TMP"' EXIT
 # The helper is infra/gcp/boss-gcp-converge.sh's `as_owner`, for the same
 # hazard on the same shape of host; the invocation is the probe runner's
 # non-login `runuser -u <user> --` with an explicit HOME
-# (run-car-probe.sh), because these are reads that need no credential
+# (the shape the retired run-car-probe.sh used), because these are reads that need no credential
 # helper and a login shell's profile output would be captured as part of a
 # `rev-parse`. The owner is READ OFF THE DIRECTORY, never hardcoded, so a
 # host that lands the checkout under a different account does not silently

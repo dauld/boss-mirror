@@ -1,0 +1,185 @@
+# Algedonic Ales — tax regime: filing kinds + sales-tax rates
+# (backlog 7f163e58; design e187198f).
+#
+# These are the rows 40-ledger.sql seeded into `tax_kinds` and
+# `sales_tax_rate_by_state` on every instance until 2026-09-18: the
+# brewery's five filing kinds, each against an account of the
+# brewery's chart (chart_of_accounts.toml — 2150 Payroll Tax Payable,
+# 2300 Sales Tax Payable, 2310 Income Tax Payable, 2320 Excise Tax
+# Payable, 6500 Income Tax Expense), and the flat sales-tax rate of
+# each of the 27 states the brewery ships into (state DOR schedules as
+# of 2026-01-01, rounded to 25 bps; 100 bps = 1.00%; the five zero
+# rows are the no-sales-tax states). They are the brewery's regime,
+# not the product's, so they live here: published by `boss tenant
+# publish` through POST /api/ledger/tax/batch, insert-if-absent by
+# kind and by state, and evicted from a real company's instance with
+# the rest of the example reference rows
+# (infra/postgres/example-reference-rows.sh reads this file).
+#
+# `derive_basis` names the amount derivation the accrual door runs
+# (POST /api/ledger/tax-accruals); a kind without one takes the
+# caller's amount. `expense_account` is set only for a kind that
+# accrues against an expense — income tax — and omitted for a kind
+# that drains a liability already built up per invoice or per payroll
+# run. A kind that names an account this tenant's chart does not
+# declare is refused by `boss tenant check`.
+
+[[tax_kind]]
+kind = "sales"
+liability_account = "2300"
+derive_basis = "period-sales-tax"
+
+[[tax_kind]]
+kind = "income"
+liability_account = "2310"
+expense_account = "6500"
+derive_basis = "prior-quarter-net-income"
+
+[[tax_kind]]
+kind = "payroll_941"
+liability_account = "2150"
+derive_basis = "period-payroll-941"
+
+[[tax_kind]]
+kind = "payroll_940"
+liability_account = "2150"
+
+[[tax_kind]]
+kind = "excise"
+liability_account = "2320"
+derive_basis = "period-excise"
+
+[[sales_tax_rate]]
+state = "CA"
+jurisdiction = "US-CA"
+rate_bps = 725
+
+[[sales_tax_rate]]
+state = "TX"
+jurisdiction = "US-TX"
+rate_bps = 625
+
+[[sales_tax_rate]]
+state = "FL"
+jurisdiction = "US-FL"
+rate_bps = 600
+
+[[sales_tax_rate]]
+state = "NY"
+jurisdiction = "US-NY"
+rate_bps = 800
+
+[[sales_tax_rate]]
+state = "IL"
+jurisdiction = "US-IL"
+rate_bps = 625
+
+[[sales_tax_rate]]
+state = "PA"
+jurisdiction = "US-PA"
+rate_bps = 600
+
+[[sales_tax_rate]]
+state = "OH"
+jurisdiction = "US-OH"
+rate_bps = 575
+
+[[sales_tax_rate]]
+state = "GA"
+jurisdiction = "US-GA"
+rate_bps = 400
+
+[[sales_tax_rate]]
+state = "NC"
+jurisdiction = "US-NC"
+rate_bps = 475
+
+[[sales_tax_rate]]
+state = "MI"
+jurisdiction = "US-MI"
+rate_bps = 600
+
+[[sales_tax_rate]]
+state = "AZ"
+jurisdiction = "US-AZ"
+rate_bps = 560
+
+[[sales_tax_rate]]
+state = "WA"
+jurisdiction = "US-WA"
+rate_bps = 650
+
+[[sales_tax_rate]]
+state = "MA"
+jurisdiction = "US-MA"
+rate_bps = 625
+
+[[sales_tax_rate]]
+state = "VA"
+jurisdiction = "US-VA"
+rate_bps = 530
+
+[[sales_tax_rate]]
+state = "NJ"
+jurisdiction = "US-NJ"
+rate_bps = 663
+
+[[sales_tax_rate]]
+state = "CO"
+jurisdiction = "US-CO"
+rate_bps = 290
+
+[[sales_tax_rate]]
+state = "MD"
+jurisdiction = "US-MD"
+rate_bps = 600
+
+[[sales_tax_rate]]
+state = "TN"
+jurisdiction = "US-TN"
+rate_bps = 700
+
+[[sales_tax_rate]]
+state = "IN"
+jurisdiction = "US-IN"
+rate_bps = 700
+
+[[sales_tax_rate]]
+state = "MO"
+jurisdiction = "US-MO"
+rate_bps = 425
+
+[[sales_tax_rate]]
+state = "WI"
+jurisdiction = "US-WI"
+rate_bps = 500
+
+[[sales_tax_rate]]
+state = "MN"
+jurisdiction = "US-MN"
+rate_bps = 688
+
+[[sales_tax_rate]]
+state = "OR"
+jurisdiction = "US-OR"
+rate_bps = 0
+
+[[sales_tax_rate]]
+state = "NH"
+jurisdiction = "US-NH"
+rate_bps = 0
+
+[[sales_tax_rate]]
+state = "MT"
+jurisdiction = "US-MT"
+rate_bps = 0
+
+[[sales_tax_rate]]
+state = "DE"
+jurisdiction = "US-DE"
+rate_bps = 0
+
+[[sales_tax_rate]]
+state = "AK"
+jurisdiction = "US-AK"
+rate_bps = 0

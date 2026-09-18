@@ -123,11 +123,21 @@
     </p>
   {:else if page.kind === 'loading'}
     <p class="ct-quiet">Reading the measured packets…</p>
-  {:else if !newest || !read || !ready}
+  {:else if !ready || ready.total === 0}
+    <!-- A successful read that found nothing: the cadence has not
+         filed. Not a failed read, so it does not wear the failure
+         marker — that class means "this read failed"
+         (tests/mocked/_routes.ts), and the interaction crawl's empty
+         leg found it worn here (backlog 409feafd). -->
+    <p class="ct-notice">
+      No codebase-metrics packet exists yet — the 05:10 measurement has not filed. Until it does this page
+      has nothing it can honestly draw.
+    </p>
+  {:else if !newest || !read}
     <p class="ct-fail load-failed">
-      {ready?.total ?? 0} codebase-metrics packet{ready?.total === 1 ? '' : 's'} exist and none carries a
-      measurement{ready && ready.unmeasured > 0 ? ` (${ready.unmeasured} failed run${ready.unmeasured === 1 ? '' : 's'})` : ''}.
-      The cadence has not measured yet; this page has nothing it can honestly draw.
+      {ready.total} codebase-metrics packet{ready.total === 1 ? '' : 's'} exist and none carries a
+      measurement ({ready.unmeasured} failed run{ready.unmeasured === 1 ? '' : 's'}: the script refused before
+      measuring, or filed nothing). That is a failed measurement, not an empty series.
     </p>
   {:else}
     <div class="ct-section">00 — THE CODEBASE NOW · at head {short(newest.measured.head)}, measured {newest.measured.at.slice(0, 16).replace('T', ' ')}Z</div>
@@ -382,6 +392,10 @@
   .ct-fail {
     color: var(--warn, #d9a441); border: 1px solid var(--warn, #d9a441);
     padding: 8px 12px; font-size: 13px;
+  }
+  .ct-notice {
+    color: var(--fog, #e8ecef); border: 1px solid var(--hairline, #2a3138);
+    padding: 8px 12px; font-size: 13px; max-width: 90ch;
   }
   .mono { font-family: var(--font-mono, ui-monospace, monospace); font-variant-numeric: tabular-nums; }
   .dim { color: var(--static, #7a838c); }

@@ -59,14 +59,26 @@
 //! difference this registry carries: it is live-editable by design, so
 //! a row an operator re-versioned live is reported as ahead of its
 //! file and left alone, and a rule the operator retired stays retired.
+//!
+//! THE DELIVERY POLICY RIDES IT LAST (car 4, the last registry). What
+//! the train conductor decides by — `infra/platform/delivery-policy/`,
+//! the sibling again, `--delivery-policy-path` to override — is
+//! published after the cadence rules by
+//! `boss_jobs::delivery_policy_seed::seed_delivery_policies`, the same
+//! table. One row is the whole policy and a train pins the version it
+//! departed under, so a version bump here changes the rules for the
+//! NEXT boarding and never for a train in flight.
 
 use anyhow::{Context, Result};
 use boss_core::actor::ActorId;
 use boss_jobs::cadence::{CadenceRuleSpec, PgCadence};
 use boss_jobs::cadence_seed::{cadence_beside, seed_cadence_rules};
+use boss_jobs::delivery::{DeliveryPolicySpec, PgDeliveryPolicy};
+use boss_jobs::delivery_policy_seed::{delivery_policy_beside, seed_delivery_policies};
 use boss_jobs::registry::PgWorkflows;
 use boss_jobs::seed_loader::{
-    SeedLoaderError, load_cadence_rules, load_stations, load_step_plugins, load_workflows,
+    SeedLoaderError, load_cadence_rules, load_delivery_policies, load_stations, load_step_plugins,
+    load_workflows,
 };
 use boss_jobs::station_seed::{seed_stations, stations_beside};
 use boss_jobs::step_plugin_seed::{seed_step_plugins, step_plugins_beside};
@@ -109,6 +121,12 @@ struct Cli {
     /// (`infra/platform/cadence` for the in-tree default).
     #[arg(long)]
     cadence_path: Option<PathBuf>,
+
+    /// The delivery-policy bundle: a directory of `<name>.toml` files.
+    /// Defaults to the `delivery-policy` directory BESIDE `--seed-path`
+    /// (`infra/platform/delivery-policy` for the in-tree default).
+    #[arg(long)]
+    delivery_policy_path: Option<PathBuf>,
 
     /// Report what would be inserted and write nothing.
     #[arg(long)]
@@ -193,6 +211,18 @@ fn load_cadence_bundle(cli: &Cli) -> Result<Option<(PathBuf, Vec<CadenceRuleSpec
     )
 }
 
+fn load_delivery_policy_bundle(cli: &Cli) -> Result<Option<(PathBuf, Vec<DeliveryPolicySpec>)>> {
+    load_sibling_bundle(
+        cli,
+        "platform-delivery-policy-seed",
+        "delivery-policy",
+        "--delivery-policy-path",
+        &cli.delivery_policy_path,
+        delivery_policy_beside,
+        |dir| load_delivery_policies(dir),
+    )
+}
+
 /// Who the platform seed publishes as.
 ///
 /// Machine-shaped on purpose. It is not `bootstrap`: that string is
@@ -215,6 +245,7 @@ async fn main() -> Result<()> {
     let stations = load_station_bundle(&cli)?;
     let step_plugins = load_step_plugin_bundle(&cli)?;
     let cadence = load_cadence_bundle(&cli)?;
+    let delivery_policy = load_delivery_policy_bundle(&cli)?;
     if specs.is_empty() {
         println!("platform-workflow-seed: bundle is empty, nothing to do");
     }
@@ -292,8 +323,23 @@ async fn main() -> Result<()> {
                 dir.display()
             );
         } else {
-            let registry = PgCadence::new(pool);
+            let registry = PgCadence::new(pool.clone());
             let report = seed_cadence_rules(&registry, &cadence_specs, &actor, now, cli.dry_run)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("{report}");
+        }
+    }
+
+    if let Some((dir, policy_specs)) = delivery_policy {
+        if policy_specs.is_empty() {
+            println!(
+                "platform-delivery-policy-seed: bundle at {} is empty",
+                dir.display()
+            );
+        } else {
+            let registry = PgDeliveryPolicy::new(pool);
+            let report = seed_delivery_policies(&registry, &policy_specs, &actor, now, cli.dry_run)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("{report}");

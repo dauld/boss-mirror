@@ -24,6 +24,7 @@ import {
   parseGateRuns,
   parseYard,
   parseWaits,
+  parseAgentRuns,
   isBuilding,
   gatedBranches,
   pipelineTrack,
@@ -638,6 +639,83 @@ describe('takenNotProgressed — claimed, and not moving', () => {
 });
 
 // ---------------------------------------------------------------------
+// Agent runs — the shape `boss dispatch` files (crates/orchestrators/
+// boss-cli/src/dispatch.rs `run_body`), with the steps the agent-run
+// protocol materialises; not a snapshot, because the kind lands with
+// the same car as this reader.
+// ---------------------------------------------------------------------
+
+const AGENT_RUNS_RAW = {
+  data: [
+    {
+      id: '5b1d2c3e-0000-4000-8000-000000000001',
+      kind: 'agent-run',
+      status: 'open',
+      title: 'builder run: Agent controls car 2',
+      owner_id: 'emp-david',
+      opened_on: '2026-09-18',
+      metadata: {
+        packet: '39d0b528-ff69-4cb8-ba82-408b641da66c',
+        step: 'build',
+        agent: 'claude@algedonic.dev',
+        model: 'opus-5[1m]',
+        budget_usd: 5,
+        effort: 'high',
+        worktree: '/work/boss/.claude/worktrees/agent-a5',
+        host: 'boss-dev-0',
+        brief: '== THE PACKET ==',
+        opened_at: '2026-09-18T19:40:00.000000Z',
+      },
+      steps: [
+        { spec_slug: 'claimed', status: 'completed' },
+        { spec_slug: 'briefed', status: 'completed' },
+        { spec_slug: 'building', status: 'ready' },
+        { spec_slug: 'reported', status: 'pending' },
+      ],
+    },
+    // A run between states: nothing open on it yet.
+    {
+      id: '5b1d2c3e-0000-4000-8000-000000000002',
+      kind: 'agent-run',
+      status: 'open',
+      title: 'analyst run: something',
+      metadata: { packet: 'p', step: 'draft-design', agent: 'a', model: 'm', effort: 'medium' },
+      steps: [{ spec_slug: 'claimed', status: 'completed' }],
+    },
+    { kind: 'agent-run', status: 'open', title: 'no id, not a row' },
+  ],
+  total: 3,
+};
+
+describe('parseAgentRuns', () => {
+  it('reads the dispatch-time keys and the step the run is at', () => {
+    const runs = parseAgentRuns(AGENT_RUNS_RAW);
+    expect(runs.length).toBe(2);
+    const run = runs[0]!;
+    const between = runs[1]!;
+    expect(run.packet).toBe('39d0b528-ff69-4cb8-ba82-408b641da66c');
+    expect(run.step).toBe('build');
+    expect(run.agent).toBe('claude@algedonic.dev');
+    expect(run.model).toBe('opus-5[1m]');
+    expect(run.budgetUsd).toBe(5);
+    expect(run.effort).toBe('high');
+    expect(run.host).toBe('boss-dev-0');
+    expect(run.at).toBe('building');
+    expect(run.openedAt).toBe('2026-09-18T19:40:00.000000Z');
+    // Absence is null, never a made-up value.
+    expect(between.at).toBeNull();
+    expect(between.budgetUsd).toBeNull();
+    expect(between.host).toBeNull();
+    expect(between.openedAt).toBeNull();
+  });
+
+  it('accepts a bare array as readily as a page', () => {
+    expect(parseAgentRuns(AGENT_RUNS_RAW.data).length).toBe(2);
+    expect(parseAgentRuns(null)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------
 // The page, pinned at source level
 // ---------------------------------------------------------------------
 // `bun test` has no Svelte pass (apps/web/bunfig.toml), so the
@@ -657,11 +735,20 @@ const moduleCode = readFileSync(new URL('./crew.ts', import.meta.url), 'utf8')
   .replace(/(^|[^:])\/\/.*$/gm, '$1');
 
 describe('CrewBoardPage wiring', () => {
-  it('reads only the four endpoints this board measured', () => {
+  it('reads only the five endpoints this board measured', () => {
     expect(moduleCode).toContain('/api/yard/status');
     expect(moduleCode).toContain('kind=ship-a-change');
     expect(moduleCode).toContain('kind=gate-run');
     expect(moduleCode).toContain('/api/jobs/queue-age');
+    // Open runs only, narrowed in the query — a closed run is history.
+    expect(moduleCode).toContain('kind=agent-run&status=open');
+  });
+
+  it('renders the agent runs as rows of the same table shape, data only', () => {
+    // A visual redesign is pending (David, 2026-09-17), so the runs
+    // ride the existing `crew-table` and add no styling of their own.
+    expect(pageCode).toContain('agentRuns');
+    expect(pageCode).not.toMatch(/\.crew-run[\s{]/);
   });
 
   it('windows the car reads in the QUERY STRING, not after the fetch', () => {

@@ -156,7 +156,7 @@
 #      directory's owner (delete-orphan-object.sh's as_owner).
 #   5. THE LIVE RECORD. `boss-sor-read` reads the open ship-a-change
 #      cars (one listing, limit 200) as a read-scoped `audit-readonly`
-#      actor — the identity run-car-probe.sh builds for a probe, for
+#      actor — the identity boss prove --unattended builds for a probe, for
 #      the same reason: an unidentified reader is answered a NARROWER
 #      WORLD in silence (backlog 61085a9e). The reader missing,
 #      refusing, answering the wrong shape, or answering a listing cut
@@ -420,7 +420,7 @@ note "forge: $(printf '%s' "$HEADS_JSON" | jq 'length') head(s) on remote $REMOT
 
 # --- bound 5: the live record ----------------------------------------------
 # The open cars in the system of record, read as a NAMED, READ-SCOPED
-# actor through the same reader a recorded probe uses (run-car-probe.sh
+# actor through the same reader a recorded probe uses (boss prove --unattended
 # builds this identity for the same reason: role `audit-readonly` is
 # Read at Scope::All and nothing else, and an unidentified reader is
 # answered a narrower world in silence — backlog 61085a9e). The reader

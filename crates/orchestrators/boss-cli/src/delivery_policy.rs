@@ -11,9 +11,13 @@
 //!
 //! The policy lives in the `delivery_policy` registry
 //! (`infra/postgres/schema/202608242117-delivery-policy-registry.sql`),
-//! is resolved ONCE per conductor invocation, and is threaded to the
-//! decision points. Changing it is a registry write that takes effect on
-//! the next boarding — no build, no deploy, no train
+//! is DECLARED in `infra/platform/delivery-policy/train-conductor.toml`
+//! (since 2026-09-18, backlog 393d3234: the platform seed publishes the
+//! bundle insert-if-missing by (name, version) at every start; before
+//! it, two migrations were the row's only home), is resolved ONCE per
+//! conductor invocation, and is threaded to the decision points.
+//! Changing it is a version bump in that file that takes effect on the
+//! next boarding — no code change, no train
 //! (docs/design/delivery-as-protocol.md).
 //!
 //! THREE RULES KEEP IT FROM BECOMING WHAT IT REPLACES.
@@ -55,8 +59,18 @@ pub(crate) const NO_VERSION: i32 = 0;
 // These are not defaults in the "sensible starting value" sense. They
 // are the values the pipeline ran on the day the policy moved into the
 // registry, kept here so that losing the registry loses no behaviour.
-// `db_tests::the_seeded_policy_equals_the_compiled_fallback` pins the
-// seed row against them, so the two cannot drift (CLAUDE.md §9a).
+//
+// WHY THEY STAY NOW THAT THE BUNDLE IS THE DECLARED HOME (393d3234,
+// car 4, 2026-09-18). The conductor runs outside the cluster with no
+// tree and no database of its own; when the registry is unreachable,
+// empty, or holds a row that does not parse, THESE are what board the
+// train. A fact that lives twice gets an equality test (CLAUDE.md
+// §9a): `tests::the_bundle_equals_the_compiled_fallback` holds these
+// equal to `infra/platform/delivery-policy/train-conductor.toml` with
+// no database, and `db_tests::the_seeded_policy_equals_the_compiled_
+// fallback` closes the triangle through the migrations' own row.
+// `estate_compare.rs` also reads `COMPILED_CI_HOST_FLOOR_GB` out of
+// this file's text for its headroom-ceiling pin.
 // ---------------------------------------------------------------------------
 
 /// How many red trains a car may ride before boarding leaves it behind.
@@ -461,6 +475,43 @@ mod tests {
         );
     }
 
+    /// §9a pin, the half that needs no database: the bundle row
+    /// `infra/platform/delivery-policy/train-conductor.toml` — the
+    /// declared home of the policy since 393d3234 — parses to exactly
+    /// the compiled fallback, version aside. The conductor runs on
+    /// these numbers whether or not the registry answered, so the file
+    /// an operator edits and the constants a dark registry falls back
+    /// to must be one policy. Which one is authoritative is settled:
+    /// the bundle; this test is what makes editing it without editing
+    /// here a red gate rather than a silent fork.
+    #[test]
+    fn the_bundle_equals_the_compiled_fallback() {
+        let bundle = boss_jobs::seed_loader::load_delivery_policies(
+            boss_jobs::delivery_policy_seed::platform_delivery_policy_path(),
+        )
+        .expect("the platform delivery-policy bundle parses");
+        let declared = bundle
+            .into_iter()
+            .find(|s| s.name() == POLICY_NAME)
+            .unwrap_or_else(|| panic!("the bundle declares `{POLICY_NAME}`"));
+        let declared = parse(declared.row).expect("the declared row parses");
+        assert!(
+            declared.is_from_registry(),
+            "the bundle declares a real version, so a train departing under it pins one"
+        );
+        assert_eq!(
+            DeliveryPolicy {
+                version: NO_VERSION,
+                ..declared
+            },
+            DeliveryPolicy::compiled(),
+            "infra/platform/delivery-policy/train-conductor.toml drifted from the \
+             conductor's compiled fallback — one of them is now changing behaviour \
+             the other does not, and which one runs depends on whether the registry \
+             answered (left = bundle, right = compiled)"
+        );
+    }
+
     #[test]
     fn a_departing_train_carries_the_version_it_left_under() {
         let stamps = pin_stamps(&parse(row()).unwrap());
@@ -542,7 +593,13 @@ mod db_tests {
     /// written down twice by necessity (a migration cannot read Rust and
     /// a Rust fallback cannot read SQL), so equality is the mechanism
     /// rather than a comment asking the next person to keep them in
-    /// step.
+    /// step. Since 393d3234 the migrations are history and the bundle
+    /// is the declared home — `tests::the_bundle_equals_the_compiled_
+    /// fallback` pins that side with no database, and boss-jobs'
+    /// `the_delivery_policy_bundle_is_the_migrations_pg` holds bundle
+    /// and migrations equal; this test keeps the third side of the
+    /// triangle, the one that sees what a fresh database actually
+    /// serves.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_seeded_policy_equals_the_compiled_fallback() {
         let db = boss_testing::TestDb::new().await;

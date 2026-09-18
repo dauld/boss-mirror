@@ -44,6 +44,17 @@ set -u
 
 cd "$(dirname "$0")/.."
 
+# The lint vocabulary, read from its one definition: `LINT_CANNOT_ANSWER`
+# (exit 3) is a lint saying "the machine could not answer", and
+# `check_lint` below turns it into a refusal rather than a red. Sourced
+# rather than spelled as a `3` here so the number cannot drift from the
+# lints that exit it (CLAUDE.md §9a).
+# shellcheck source=infra/lint/lib/git-answer.sh
+. infra/lint/lib/git-answer.sh || {
+    echo "gate.sh: infra/lint/lib/git-answer.sh could not be read — without it the pre-flight cannot tell a lint that could not answer from one that failed. Refusing." >&2
+    exit 2
+}
+
 # Incremental compilation helps REPEATED local builds; a gate build is
 # cold and one-shot, so incremental only writes an incremental/ dir that
 # is pure disk cost here — part of the ~80GB target/ that exhausted the
@@ -1169,14 +1180,99 @@ check() {
     # cost around it.
     local t0=$SECONDS
     if "$@" < /dev/null; then
+        CHECK_STATUS=0
         echo "::endgroup::"
         RAN+=("${name}:pass:$((SECONDS - t0))")
     else
+        # Kept for `check_lint`, which needs the NUMBER: a lint's exit 3
+        # is not a failure, and pass/fail cannot carry that.
+        CHECK_STATUS=$?
         echo "::endgroup::"
-        echo "GATE FAIL: ${name} (after $((SECONDS - t0))s)" >&2
+        echo "GATE FAIL: ${name} (exit ${CHECK_STATUS}, after $((SECONDS - t0))s)" >&2
         FAILED+=("${name}")
         RAN+=("${name}:fail:$((SECONDS - t0))")
     fi
+}
+CHECK_STATUS=0
+
+# A LINT THAT COULD NOT ANSWER IS A REFUSAL, NOT A RED.
+#
+# `infra/lint/lib/git-answer.sh` gives the lints a third exit: 0 clean,
+# 1 a violation — a fact about the BRANCH — and 3, `LINT_CANNOT_ANSWER`,
+# the lint never read what it judges — a fact about the MACHINE, which
+# no author can fix by editing code. It named this mapping as the half
+# still open: `check` knows only pass/fail, so a 3 was a plain red.
+#
+# MEASURED 2026-09-18 (backlog a26f92c4, gate 35f4ff0c): the system of
+# record was rolling under a converge, so
+# `the-live-protocols-are-the-authored-protocols` could not read the
+# registry, and the gate went red on a car that had changed nothing the
+# lint judges. CLAUDE.md §Diagnosis: "an infrastructure refusal is not a
+# consist failure" — recorded as one it strikes every car aboard.
+#
+# THE DISK FLOOR'S SHAPE, exactly: `GATE_REFUSAL` set, `write_receipt
+# "refused"`, exit 2. `train_gate::standing` reads that receipt as
+# `Standing::Refused` and relaunches; the yard and `red_verdict_detail`
+# print `refused_because`; nothing takes a strike. Immediate, like the
+# floor, rather than at the end of the roster: a machine that cannot
+# answer one lint is not a machine whose other verdicts are worth
+# recording as the branch's.
+#
+# The lint's own stderr is kept to a file so the receipt can carry its
+# first refusal line — the WHY, in the lint's words, which is otherwise
+# a log the runner reaps (§Diagnosis: a verdict someone must go
+# re-derive is not a verdict). It is replayed to the gate's stderr after
+# the lint exits, so nothing is lost, only delayed by one lint's runtime.
+# Only the roster runs through here; cargo, bun and svelte-check have no
+# such vocabulary, and a 3 from them means nothing this maps.
+lint_keeping_stderr() { # <file> <cmd...>
+    local keep="$1" status
+    shift
+    "$@" 2>"$keep"
+    status=$?
+    cat "$keep" >&2
+    return "$status"
+}
+
+check_lint() {
+    local name="$1" keep why
+    shift
+    keep="$(mktemp)" || {
+        echo "gate: could not make a file to keep a lint's stderr — refusing rather than running a lint whose words would be lost." >&2
+        GATE_REFUSAL="no temp file for lint stderr"
+        write_receipt "refused"
+        exit 2
+    }
+    # Through a variable, as `run_roster` invokes its runner: boss-cli's
+    # brief.rs derives the gate's PHASE list from lines that begin
+    # `check "<name>"`, and a literal `check "$name"` here would put a
+    # phase called `$name` in every brief.
+    local runner=check
+    "$runner" "$name" lint_keeping_stderr "$keep" "$@"
+    if [ "$CHECK_STATUS" -ne "$LINT_CANNOT_ANSWER" ]; then
+        rm -f "$keep"
+        return 0
+    fi
+    # `check` recorded a failure; the lint said otherwise. Rewrite that
+    # one entry so the receipt's checks list agrees with its verdict —
+    # a reader counting `fail` entries must not count this one.
+    unset "FAILED[$((${#FAILED[@]} - 1))]"
+    RAN[${#RAN[@]} - 1]="${name}:refused:$(ran_secs "${RAN[${#RAN[@]} - 1]}")"
+    # The first line carrying the marker, else the first line at all,
+    # made safe for a JSON string literal (the receipt is written by
+    # interpolation): quotes and backslashes dropped, control characters
+    # flattened, bounded so a chatty lint cannot bloat the receipt.
+    why="$(grep -m1 -F "$LINT_CANNOT_ANSWER_MARKER" "$keep" || grep -m1 '[^[:space:]]' "$keep" || true)"
+    why="$(printf '%s' "${why:-(the lint printed nothing on stderr)}" | tr -d '"\\' | tr '[:cntrl:]' ' ' | cut -c1-400)"
+    rm -f "$keep"
+    echo "gate: REFUSED — the pre-flight lint '${name}' could not answer (exit ${LINT_CANNOT_ANSWER}), so this run judged nothing about the branch." >&2
+    echo "  ${why}" >&2
+    echo "  An infrastructure refusal, recorded as one (the GATE FAIL line above is check's" >&2
+    echo "  pass/fail bookkeeping; the receipt records this check as refused). Fix what the" >&2
+    echo "  lint could not reach and gate again — there is nothing here for the author to edit." >&2
+    GATE_REFUSAL="pre-flight lint ${name} could not answer (exit ${LINT_CANNOT_ANSWER}): ${why}"
+    write_receipt "refused"
+    exit 2
 }
 
 # ---------------------------------------------------------------------
@@ -1624,8 +1720,9 @@ run_preflight() {
     echo "pre-flight: not run here, by their own headers: $(consist_exclusions | cut -f1 | sed 's|.*/||; s/\.sh$//' | tr '\n' ' ')"
     # A truncated roster is a FAILED check, not a quiet shortfall: the
     # receipt has to carry the fact that the gate did not ask everything
-    # it claims to ask.
-    if ! run_roster "$roster" check; then
+    # it claims to ask. `check_lint`, not `check`: a lint's exit 3 is a
+    # refusal, and only the roster speaks that vocabulary.
+    if ! run_roster "$roster" check_lint; then
         FAILED+=("preflight-roster-complete")
         RAN+=("preflight-roster-complete:fail:0")
     fi

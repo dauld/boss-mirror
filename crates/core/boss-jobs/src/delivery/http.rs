@@ -46,6 +46,7 @@ pub fn router(state: DeliveryPolicyApiState) -> Router {
 fn err_response(e: DeliveryPolicyError) -> Response {
     match e {
         DeliveryPolicyError::BadRequest(m) => (StatusCode::BAD_REQUEST, m).into_response(),
+        DeliveryPolicyError::Conflict(m) => (StatusCode::CONFLICT, m).into_response(),
         DeliveryPolicyError::Storage(m) => (StatusCode::INTERNAL_SERVER_ERROR, m).into_response(),
     }
 }

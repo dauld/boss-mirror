@@ -977,7 +977,8 @@ impl ParkIntent {
                 "--park-probe invokes `{tool}`, which the FORGE HOST does not have.\n\n\
                  A recorded probe does not run here. It runs on the forge host, as david, \
                  in /home/david/boss, when this car's train arrives \
-                 (infra/forge/run-car-probe.sh) — a machine outside the cluster with no \
+                 (boss prove --from-car --unattended, run by the ops-runner) — a machine \
+                 outside the cluster with no \
                  kubeconfig. Measured 2026-09-09 (f9304366): the first two cars ever to \
                  record a probe both used `kubectl`, both were right from this pod, and \
                  both came back as an exit code with empty streams.\n\n\
@@ -1276,6 +1277,23 @@ impl ParkIntent {
             PARK_PROOF_EVENT: Value::Null,
         })
     }
+}
+
+/// The env var a dispatched builder exports so the gate it launches
+/// names the run that launched it (`boss dispatch` prints the id).
+pub(crate) const AGENT_RUN_ENV: &str = "BOSS_AGENT_RUN";
+
+/// The key the run's id rides under on the gate-run — the `link` the
+/// landing rule's `jobs.complete_linked_step` follows.
+pub(crate) const AGENT_RUN_KEY: &str = "agent_run";
+
+/// The merging PATCH that records the run, or `None` when nothing
+/// names one. A blank value is nothing: an `export BOSS_AGENT_RUN=`
+/// must not stamp an empty edge the handler would refuse as unusable.
+pub(crate) fn agent_run_patch(env: Option<String>) -> Option<Value> {
+    env.map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .map(|id| json!({ AGENT_RUN_KEY: id }))
 }
 
 /// The HOLD a gate carries: `--hold <reason>` stamps `hold: <reason>`
@@ -2470,6 +2488,33 @@ pub async fn run(
         );
     }
 
+    // THE RUN THAT LAUNCHED THIS GATE (design c87fb59b car 2, backlog
+    // 39d0b528). A builder dispatched by `boss dispatch` exports its
+    // run's id as BOSS_AGENT_RUN; stamped here as `agent_run`, it is the
+    // declared edge `agent-run-lands-on-gate-green` follows on green
+    // (jobs.complete_linked_step, the same handler a car's
+    // `backlog_item` rides). A merging PATCH like the base and the
+    // re-gate relationship, and BEST EFFORT for the same reason: this
+    // is a record — the run is completed by hand if it is lost — and
+    // losing it to a rolling SoR must not cost the gate.
+    if let Some(patch) = agent_run_patch(std::env::var(AGENT_RUN_ENV).ok()).filter(|_| !dry) {
+        match api(
+            &http,
+            reqwest::Method::PATCH,
+            &format!("/api/jobs/{packet}/metadata"),
+            Some(patch),
+        )
+        .await
+        {
+            Ok(_) => {
+                println!("boss gate: agent run stamped — a green here lands the run by itself")
+            }
+            Err(e) => eprintln!(
+                "boss gate: could not stamp the agent run onto the gate-run ({e:#}) — the \
+                 gate runs anyway, but the run will not land on this green by itself."
+            ),
+        }
+    }
     // Stamp the park intent onto the gate-run so the auto-park handler
     // can file the car verbatim on green. A PATCH so it works whether the
     // packet was just created or reused, and merges rather than replaces.
@@ -4156,7 +4201,7 @@ mod tests {
     #[test]
     fn a_probe_that_only_mentions_the_sor_is_not_refused() {
         for probe in [
-            "grep -c BOSS_JOBS_URL /home/david/boss/infra/forge/run-car-probe.sh",
+            "grep -c BOSS_JOBS_URL /home/david/boss/infra/ops/ops-runner.sh",
             "test -n \"$BOSS_JOBS_URL\" && echo claim-ok",
             "grep -q 'boss-jobs-internal' /home/david/boss/infra/cluster/manifests/boss.yaml && echo claim-ok",
             "git -C /home/david/boss log -1 --format=%s | grep -q /api/yard",
@@ -6055,6 +6100,24 @@ kind: Job\n\
             ABSENCE_TOLERANCE.as_secs() <= 600,
             "a gate takes ~11 minutes"
         );
+    }
+}
+
+#[cfg(test)]
+mod agent_run_tests {
+    use super::*;
+
+    /// A dispatched builder's gate names its run; a hand-launched gate
+    /// — or a blank export — names nothing and stamps nothing.
+    #[test]
+    fn the_run_is_stamped_only_when_something_names_it() {
+        assert_eq!(
+            agent_run_patch(Some("5b1d2c3e-0000-4000-8000-000000000001".into())),
+            Some(json!({ "agent_run": "5b1d2c3e-0000-4000-8000-000000000001" }))
+        );
+        assert_eq!(agent_run_patch(Some("  ".into())), None);
+        assert_eq!(agent_run_patch(None), None);
+        assert_eq!(AGENT_RUN_ENV, "BOSS_AGENT_RUN");
     }
 }
 

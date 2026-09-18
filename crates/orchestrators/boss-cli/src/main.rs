@@ -11,8 +11,10 @@ mod channels;
 mod credential;
 mod delivery_policy;
 mod design;
+mod dispatch;
 mod dock_preview;
 mod doctor;
+mod documents;
 mod envelope;
 mod estate;
 mod freshness;
@@ -403,6 +405,30 @@ enum Commands {
         /// branch. Omit it to print the invariants alone.
         packet: Option<String>,
     },
+    /// Hand a protocol step to an agent, as a packet (design c87fb59b
+    /// car 2): claims the step as you, opens an `agent-run` with the
+    /// step's own agent block (model, budget, effort — from its
+    /// Workflow row; a step declaring none is refused, naming the
+    /// fix), and PRINTS the exact prompt: `boss brief`'s rendering plus
+    /// the run id. The prompt is stdout and nothing else is, so
+    /// `boss dispatch <packet> > prompt.txt` is what you paste.
+    Dispatch {
+        /// The packet: its full uuid, 8+ characters of its id, or its
+        /// branch.
+        packet: String,
+        /// The step's slug. Omit it when the packet is at exactly one.
+        #[arg(long)]
+        step: Option<String>,
+        /// Override the block's model (must be on the rate card).
+        #[arg(long)]
+        model: Option<String>,
+        /// Override the block's budget, in USD.
+        #[arg(long)]
+        budget: Option<f64>,
+        /// Override the block's effort: low, medium or high.
+        #[arg(long)]
+        effort: Option<String>,
+    },
     /// Where the IT department's work comes from — the input-channel
     /// mix (user-feedback vs monitoring/error-discovery), the algedonic
     /// reading over recent work (docs/design/it-delivery-channels.md).
@@ -512,6 +538,16 @@ enum Commands {
         /// unrunnable in the other (f9304366).
         #[arg(long, conflicts_with_all = ["probe", "expect", "exit_only"])]
         from_car: bool,
+        /// The machine's door: what the forge's ops-runner runs for a
+        /// `run-car-probe` ops-request (backlog 9f00a805, replacing the
+        /// shell twin infra/forge/run-car-probe.sh). Nobody is reading,
+        /// so every outcome is written on the car and the exit code IS
+        /// the verdict: 0 proven, 1 not proven, 3 did not run, 75 not
+        /// yet, 2 refused. The car is a full id; the probe runs as
+        /// BOSS_PROBE_USER in BOSS_PROBE_DIR under BOSS_PROBE_TIMEOUT
+        /// with the read-only reader on its PATH, never as root.
+        #[arg(long, requires = "from_car", conflicts_with_all = ["recheck", "replace", "dry_run", "verified", "method", "probe_anyway"])]
+        unattended: bool,
         /// Run a probe this verb REFUSES, stating why.
         ///
         /// The refusal it escapes is the one rule `boss gate
@@ -1287,6 +1323,13 @@ async fn main() -> Result<()> {
         },
         Commands::Orient { all } => orient::run(all).await,
         Commands::Brief { packet } => brief::run(packet).await,
+        Commands::Dispatch {
+            packet,
+            step,
+            model,
+            budget,
+            effort,
+        } => dispatch::run(packet, step, model, budget, effort).await,
         Commands::Channels => channels::run().await,
         Commands::Design {
             title,
@@ -1313,8 +1356,12 @@ async fn main() -> Result<()> {
             replace,
             dry_run,
             from_car,
+            unattended,
             probe_anyway,
         } => {
+            if unattended {
+                return prove::run_unattended(&car, chrono::Utc::now()).await;
+            }
             prove::run(
                 &car,
                 probe,

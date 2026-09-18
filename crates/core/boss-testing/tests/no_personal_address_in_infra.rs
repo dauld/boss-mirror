@@ -146,20 +146,28 @@ fn company_and_reserved_addresses_are_clean_and_the_count_is_files_read() {
         "infra/forge/publish-github-pr.sh",
         "#!/usr/bin/env bash\ngit -c user.email=dauld@users.noreply.github.com commit -q\n",
     );
+    // A no-reply mailbox is a machine's, not a person's — the commit
+    // trailer every car carries named one and the train gate for #461
+    // refused the assembled tree on it (2026-09-18, the day the lint
+    // landed).
+    tree.file(
+        "infra/platform/documents/builder-rules.md",
+        "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>\nReply-To: no-reply@example-vendor.io\n",
+    );
     tree.file("infra/estate/estate.toml", "[node]\nid = \"forge\"\n");
     let out = tree.run();
     assert!(
         out.status.success(),
-        "company and reserved addresses must exit 0; got {:?}:\n{}",
+        "company, reserved and no-reply addresses must exit 0; got {:?}:\n{}",
         out.status.code(),
         text(&out)
     );
     let said = text(&out);
-    // Five fixtures, plus the lint and its two helpers — which live
+    // Six fixtures, plus the lint and its two helpers — which live
     // under infra/ themselves and are read like any other file.
     assert!(
-        said.contains("scanned 8 file(s)"),
-        "the count is the eight files under infra/ read:\n{said}"
+        said.contains("scanned 9 file(s)"),
+        "the count is the nine files under infra/ read:\n{said}"
     );
     assert!(said.contains("no personal address"), "{said}");
 }

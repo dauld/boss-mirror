@@ -74,9 +74,11 @@ CUTOVER="20260918112134"
 # 202609082130-sign-off-plugin-v3.sql, is older than the cutover, so
 # the stamp did not move). cadence_rules: car 3 (infra/platform/cadence/
 # — newest insert 202609042110-a-lone-car-still-ships.sql, older than
-# the cutover; the stamp stays). Car 4 of 393d3234 adds
-# delivery_policy.
-REGISTRY_TABLES="stations step_plugins cadence_rules"
+# the cutover; the stamp stays). delivery_policy: car 4, the last
+# (infra/platform/delivery-policy/ — newest insert
+# 202609050500-the-ci-host-floor-is-forty.sql, older than the cutover;
+# 20260918102236 is newer but only DROPs a column, which is schema).
+REGISTRY_TABLES="stations step_plugins cadence_rules delivery_policy"
 
 # --- the scanner -------------------------------------------------------
 # One file's findings, as `<line>\t<table>`. Empty output = clean. The
@@ -153,8 +155,12 @@ self_test() {
     # rows come from a SELECT, not a VALUES list.
     printf 'INSERT INTO cadence_rules\n    (name, version, status, verb, basis)\nSELECT %s, COALESCE(MAX(version), 0) + 1, %s, %s, %s\n  FROM cadence_rules WHERE name = %s;\n' \
         "'x'" "'active'" "'board'" "'queue-depth'" "'x'" >"$t/bad5.sql"
+    # The copy-the-active-row supersede (202609050500): a retiring
+    # UPDATE, then an INSERT whose column list opens on the next line.
+    printf 'UPDATE delivery_policy SET status = %s WHERE name = %s AND status = %s;\nINSERT INTO delivery_policy (\n    name, version, status, max_red_trains\n)\nSELECT name, version + 1, %s, max_red_trains FROM delivery_policy WHERE name = %s;\n' \
+        "'retired'" "'x'" "'active'" "'active'" "'x'" >"$t/bad6.sql"
     local f
-    for f in bad1.sql bad2.sql bad3.sql bad4.sql bad5.sql; do
+    for f in bad1.sql bad2.sql bad3.sql bad4.sql bad5.sql bad6.sql; do
         [ -n "$(findings_in "$t/$f")" ] || {
             echo "$NAME: self-test FAILED — the scanner passed:" >&2
             sed 's/^/    /' "$t/$f" >&2
@@ -175,7 +181,7 @@ self_test() {
         echo "$NAME: self-test FAILED — the cutover comparison answers wrongly" >&2
         return 1
     }
-    echo "$NAME: self-test ok — schema statements, prose, an UPDATE and a prefixed table name pass; five spellings of INSERT INTO a registry table are refused; the cutover splits history from new"
+    echo "$NAME: self-test ok — schema statements, prose, an UPDATE and a prefixed table name pass; six spellings of INSERT INTO a registry table are refused; the cutover splits history from new"
 }
 
 if [ "${1:-}" = "--self-test" ]; then self_test; exit $?; fi
@@ -226,6 +232,11 @@ the seed publishes insert-if-missing at every start:
     refusal, same edit path. The table stays live-editable: a rule
     re-versioned live is reported as ahead of its file, never rewritten,
     and a rule the operator retired stays retired.
+  * delivery_policy — infra/platform/delivery-policy/<name>.toml, one
+    file per policy (there is one, train-conductor), every column of
+    the row. Same seed, same sibling lookup, same refusal, same edit
+    path. One row is the whole policy: a train pins the version it
+    departed under, so a bump changes the NEXT boarding's rules only.
 
 Leave the migration to its ALTERs and put the row in the bundle. The
 historical inserts before the cutover are history and stay as they are.

@@ -71,11 +71,20 @@
 # do not control — the "an infrastructure refusal is not a consist
 # failure" cost CLAUDE.md records. So it is REPORTED, never failed on.
 #
-# WHEN THE REGISTRY IS UNREACHABLE it SKIPS, loudly, and exits 0 — the
-# gate runs on the forge host, which has no route to the in-cluster read
-# surface, and a lint that reds there would red every car. The static
-# half below still runs, so a skip is never a no-op. What it must never
-# do is treat "could not read" as "nothing to report": a wrong target
+# WHEN THE REGISTRY IS UNREACHABLE it SKIPS, loudly, and exits 3 —
+# `LINT_CANNOT_ANSWER`, lib/git-answer.sh's word for "the machine could
+# not answer": never 0, because a skip prints no `scanned` line and a
+# clean exit with no count is exactly what lib/scanned.sh refuses; never
+# 1, because nothing about the BRANCH was judged. Until 2026-09-18 it
+# exited 0 on the argument that the gate ran on the forge host with no
+# route here — no longer true (the gate runs in-cluster, design
+# 128b5496) — and the day the system of record was rolling under a
+# converge, the lint-of-lints pin redded gate 35f4ff0c for a lint that
+# had scanned nothing (backlog a26f92c4). gate.sh maps exit 3 to a
+# REFUSAL receipt (`refused`, not `failed`), which the conductor
+# relaunches and strikes no car for. The static half below still runs,
+# so a skip is never a no-op. What it must never do is treat "could not
+# read" as "nothing to report": a wrong target
 # answers instead of erroring (CLAUDE.md §Doors), so an answer that
 # parses but is not an array of workflow rows is a FAILURE, and so is an
 # EMPTY one — a registry admitting zero kinds is dead air, not a clean
@@ -162,9 +171,11 @@
 #                  Rust literal, a stale exemption, an unreadable
 #                  bundle file, or a comparison refused as vacuous
 #                2 field drift, under --require-live only
+#                3 LINT_CANNOT_ANSWER — the live comparison could not
+#                  run (bare invocation; the gate records a refusal)
 #               64 unknown argument
-#               75 EX_TEMPFAIL — the live comparison could not run;
-#                  under --require-live only, bare exits 0
+#               75 EX_TEMPFAIL — the same condition under
+#                  --require-live, the code infra/protocol-drift.sh reads
 #
 #   BOSS_JOBS_URL  read surface base (default: the in-cluster machine
 #                  door, boss-jobs-internal:7900)
@@ -174,6 +185,8 @@ set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
 . infra/lint/lib/scanned.sh
+# shellcheck source=infra/lint/lib/git-answer.sh
+. infra/lint/lib/git-answer.sh
 
 BUNDLE="infra/platform/workflows"
 TENANT_GLOB="examples/*/seeds/workflows.toml"
@@ -977,7 +990,7 @@ done
 # Live half — skips loudly when the read surface is unreachable.
 # ---------------------------------------------------------------------------
 skip() {
-    echo "the-live-protocols-are-the-authored-protocols: SKIPPED the live comparison — $1" >&2
+    echo "$NAME: $LINT_CANNOT_ANSWER_MARKER — SKIPPED the live comparison — $1" >&2
     echo "  target: $URL (override with BOSS_JOBS_URL)" >&2
     echo "  The exemption set was still checked against the tree" >&2
     echo "  (${#EXEMPT[@]} exemptions, $(printf '%s\n' "$authored" | wc -l | tr -d ' ') authored kinds)." >&2
@@ -994,13 +1007,15 @@ skip() {
     # and for it "I could not read the registry" must not be the same
     # exit as "I read it and it agrees". 75 is EX_TEMPFAIL, the code
     # this tree already uses for a run that could not happen rather
-    # than one that failed (infra/gate-runner/run.sh, checkout-lock.sh).
-    # The bare invocation keeps exiting 0: the gate runs on the forge
-    # host, which has no route to the in-cluster read surface, and a
-    # lint that reds there would red every car for an infrastructure
-    # refusal that says nothing about the branch.
+    # than one that failed (infra/gate-runner/run.sh, checkout-lock.sh),
+    # and the one infra/protocol-drift.sh reads by number.
     [ "$REQUIRE_LIVE" -eq 0 ] || exit 75
-    exit 0
+    # The bare invocation is the gate's, and for it the answer is the
+    # lint vocabulary: 3, "the machine could not answer". No scanned
+    # line is printed on this path — the comparison did not run, so a
+    # count would certify it — and gate.sh turns this exit into a
+    # refusal receipt instead of a red (backlog a26f92c4).
+    exit "$LINT_CANNOT_ANSWER"
 }
 
 command -v curl >/dev/null 2>&1 || skip "curl is not on this box"

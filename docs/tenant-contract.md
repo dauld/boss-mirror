@@ -124,6 +124,7 @@ stating plainly:
 | `seeds/policy_rules.toml` | no | boss-policy-bootstrap / `boss_policy::bootstrap::publish_policy_rules` via `boss_policy_client::seed_loader::load_policy_rules` (the tenant prepare, first boot) | `[[grants]]` rows: `role` or `roles`, `resource` or `resources`, `action` or `actions`, `scope` (all/self/team/territory/none/department:<name>); expanded to one rule per role x resource x action | yes |
 | `seeds/classes.json` or `seeds/classes.toml` | no | POST /api/classes/batch, one boss-classes `http::ClassInput` per row — sent by the tenant prepare (brewery: classes.json; used-device-shop: classes.toml `[[class]]`) and infra/postgres/reset-to-baseline.sh | JSON array (or TOML `[[class]]` rows) of {subject_kind, code, display_name, parent_code?, member_attribute?, metadata?, sort_order?} | yes |
 | `seeds/chart_of_accounts.toml` | no | POST /api/ledger/accounts/batch, one boss-ledger `chart::AccountInput` per row (insert-if-absent by code) — sent by `boss tenant publish` AFTER the classes; a code the starter chart (40-ledger.sql, the OSS default) already holds is the SAME account, kept under its registered name, and the publish line names the field the declaration differs on — adopt the code or choose another (backlog 41af5195; design 18cf4272) | `[[account]]` rows: code, name, kind (asset|liability|equity|revenue|expense), normal_balance (debit|credit), parent? (a code declared earlier in the file) — the `gl_accounts` table's authorable columns; validated by `boss_ledger::chart::validate` | yes |
+| `seeds/tax.toml` | no | POST /api/ledger/tax/batch, one boss-ledger `tax_registry::TaxSeed` (insert-if-absent by kind and by state; a held row that differs is named) — sent by `boss tenant publish` AFTER the chart, because a kind names accounts of it; the accrual door (POST /api/ledger/tax-accruals) resolves a filing's accounts and amount derivation from the kinds it lands (backlog 7f163e58: until 2026-09-18 these rows were migration-seeded with the demo tenant's regime, pinning five of its accounts on every instance) | `[[tax_kind]]` rows: kind, liability_account, expense_account? (only a kind that accrues against an expense), derive_basis? (the accrual door's amount derivation; none = the caller's amount) — the `tax_kinds` columns; `[[sales_tax_rate]]` rows: state (two letters), jurisdiction (`US-CA`), rate_bps (0..=2000) — the `sales_tax_rate_by_state` columns. Either table may be empty, and an empty file is valid (a tenant with nothing sellable files no sales tax). Validated by `boss_ledger::tax_registry::validate`, and every account a kind names must be a code `seeds/chart_of_accounts.toml` declares (`validate_against_chart`) | yes |
 | `seeds/employees.json` | no | POST /api/people, one `boss_people::Employee` per row; a row already there is kept and the publish line names the declared fields that differ — the instance is the truth; `--take employees` PUTs the declared fields and keeps the rest (design e187198f) — sent by `boss tenant publish` (the brewery engine's prepare reads it at the FIXED path /opt/boss/examples/brewery/seeds/, not from the bundle; used-device-shop reads data/employees.json instead) | JSON array of Employee rows: id, name, email, role, department, hire_date, location, manager_id, employment_type, status, skills[], certifications[], annual_salary_cents; role/department/location are validated against the registries at write time, not here | yes |
 | `seeds/operator_hires.toml` | no | boss-brewery-engine prepare (`seed_brewery_operator_hires`): each `[[hire]]` POSTed to /api/people as a `boss_people::Employee` | `[[hire]]` rows in the Employee shape above | no |
 | `seeds/business_calendars.json` | no | POST /api/calendar/business-calendars/batch as `Vec<boss_core::calendar::BusinessCalendar>` (the brewery engine's prepare and `boss tenant publish`; insert-if-absent by code, a held code that differs is named, `--take calendars` replaces it wholesale — design e187198f); the dispatcher's timing triggers and the sim resolve business days from it | JSON array of {code, name, weekend: [0..6 Mon=0], closed: [YYYY-MM-DD]} | yes |
@@ -398,6 +399,48 @@ ledger calls it) or moved (the tenant picks `1001 Bank` and the next
 publish inserts it). `boss tenant check` cannot see the deployment's
 chart, so it judges the file alone: codes unique, kinds and balances
 inside the enum, every parent declared before its child.
+
+## The tax regime is the tenant's — `seeds/tax.toml`
+
+`seeds/tax.toml` (backlog `7f163e58`; design `e187198f`) declares
+which taxes the tenant files and where it collects them: one
+`[[tax_kind]]` per filing kind — `kind`, the `liability_account` it
+drains on remit, the `expense_account` it accrues against (only a kind
+that accrues, income tax; omit it for a kind that drains a liability
+built up per invoice or per payroll run) and `derive_basis`, the
+accrual door's amount derivation (`POST /api/ledger/tax-accruals`;
+none means the caller's amount) — and one `[[sales_tax_rate]]` per
+state: `state` (two letters), `jurisdiction` (`US-CA`), `rate_bps`
+(0..=2000). Until this file had a door, both tables came from the
+product: 40-ledger.sql seeds the brewery's five kinds and the 27
+states it ships into, and the accrual door refuses any other kind with
+"register it in tax_kinds first" — a migration to the product. Worse,
+measured 2026-09-17: each kind's FK pins a GL account (2150, 2300,
+2310, 2320, 6500), so the eviction that clears the brewery's chart off
+a company's instance had to keep those five under the brewery's names,
+on every instance. The regime is the **brewery's** — declared in
+`examples/brewery/seeds/tax.toml` and example residue everywhere else,
+evicted with the rest by `infra/postgres/example-reference-rows.sh`
+(a kind a `tax_filings` row still names is kept and named) — and the
+five accounts are candidates like the rest of its chart. Published
+through `POST /api/ledger/tax/batch`, insert-if-absent by kind and by
+state, one `ledger.tax_kind.declared` / `ledger.sales_tax_rate.declared`
+fact per inserted row; `GET /api/ledger/tax-kinds` and
+`GET /api/ledger/sales-tax-rates` read them back.
+
+**A kind names an account the chart must declare.** The table's FK
+holds at the door; `check` holds it in the directory: a kind naming a
+code `seeds/chart_of_accounts.toml` does not declare is INVALID naming
+the kind and the code, before anything is sent. The file goes after
+the chart in the publish for the same reason.
+
+**An empty file is valid, and is what `init` writes.** Algedonic has
+nothing to file yet — design `18cf4272`: the first sellable SKU comes
+before sales tax is figured out, because what is sold decides where it
+is taxed — so its `seeds/tax.toml` is a comment saying when to fill
+it, `check` reports `0 tax kinds, 0 sales-tax rates (nothing to file
+yet)`, and the publish sends nothing. Until then the accrual door
+refuses every filing kind on that instance, which is the truth.
 
 ## The ledger's two rule files — a worked example
 

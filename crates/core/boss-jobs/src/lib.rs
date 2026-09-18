@@ -22,6 +22,7 @@ pub mod car;
 pub mod credentials;
 pub mod decision_record;
 pub mod delivery;
+pub mod delivery_policy_seed;
 pub mod department;
 pub mod escalation;
 pub mod estate_seed;

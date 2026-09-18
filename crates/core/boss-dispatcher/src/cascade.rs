@@ -173,6 +173,12 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         // packet `live` (c34583cb). No rule this tree ships names it;
         // the rule is the tenant's.
         ("jobs.complete_step_matching", vec!["jobs.step.completed"]),
+        // A clock rule completes an open step on every packet of a
+        // kind that has gone silent past a bound (c87fb59b car 2: an
+        // agent-run whose builder died). The completion carries the
+        // packet to its own terminal; nothing listens for a run's
+        // close, so the loop ends at the packet.
+        ("jobs.age_out_step", vec!["jobs.step.completed"]),
         ("gate.resolve", vec!["jobs.step.completed"]),
         ("packaging.allocate", vec!["jobs.step.completed"]),
         // The packet-loss census (migration 152): reads the whole

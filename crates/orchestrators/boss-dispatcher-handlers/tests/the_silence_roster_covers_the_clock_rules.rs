@@ -112,6 +112,16 @@ const SPAWNS_NOTHING_ON_PURPOSE: &[(&str, &str)] = &[
          its own loud packet (`sensor_unreadable:<id>`), which is the failure this sweep \
          would otherwise be for.",
     ),
+    (
+        "agent-run-dies-when-building-is-silent",
+        "runs `jobs.age_out_step`, which completes the `building` step of every open \
+         agent-run that has gone silent past the bound (design c87fb59b car 2, backlog \
+         39d0b528). It files nothing: it CLOSES packets a dispatch opened, so on an hour \
+         with no dead builder it produces NOTHING, and that zero is the healthy reading. \
+         The packets it advances are agent-runs opened by `boss dispatch`, an operator's \
+         act — a sweep keyed by kind would be watching the operator's cadence, not this \
+         one's.",
+    ),
 ];
 
 fn shipped() -> (Vec<ClockCadence>, Vec<NotACadence>) {

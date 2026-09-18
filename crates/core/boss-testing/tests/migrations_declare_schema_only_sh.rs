@@ -9,9 +9,10 @@
 //! moved stations to `infra/platform/stations/` and wrote the cutover
 //! stamp into the lint; car 2 moved step plugins to
 //! `infra/platform/step-plugins/` and added the table beside it; car 3
-//! moved cadence rules to `infra/platform/cadence/` the same way. The
-//! lint is what keeps every LATER migration from re-opening the old
-//! home, and this file is what keeps the lint honest.
+//! moved cadence rules to `infra/platform/cadence/` the same way; car 4
+//! moved the delivery policy to `infra/platform/delivery-policy/` and
+//! closed the item. The lint is what keeps every LATER migration from
+//! re-opening the old home, and this file is what keeps the lint honest.
 //!
 //! WHY THIS TEST AND NOT ONLY THE LINT'S `--self-test`: the self-test
 //! owns "the SCANNER still matches" and "the cutover comparison answers
@@ -173,6 +174,26 @@ SELECT 'train-board-on-dock-depth',
  WHERE name = 'train-board-on-dock-depth';
 ";
 
+/// A migration newer than the cutover that re-versions the delivery
+/// policy — car 4's table, in the copy-the-active-row spelling
+/// 202609050500 used (a retiring UPDATE, then an INSERT whose column
+/// list opens on the line after the table name).
+const NEW_POLICY: &str = "20261001000004-a-delivery-policy-the-old-way.sql";
+const NEW_POLICY_SQL: &str = "\
+-- 20261001000004 — a policy version declared where it no longer lives.
+UPDATE delivery_policy
+   SET status = 'retired'
+ WHERE name = 'train-conductor' AND status = 'active';
+INSERT INTO delivery_policy (
+    name, version, status, max_red_trains, stall_hours
+)
+SELECT name, version + 1, 'active', max_red_trains, 9
+  FROM delivery_policy
+ WHERE name = 'train-conductor'
+ ORDER BY version DESC
+ LIMIT 1;
+";
+
 /// The scanner proves itself on every invocation and SAYS so.
 #[test]
 fn the_scanner_proves_itself_on_every_invocation() {
@@ -322,6 +343,40 @@ fn a_post_cutover_cadence_insert_is_refused_naming_its_bundle() {
     );
 }
 
+/// BEHAVIOUR 2, car 4 — a post-cutover `INSERT INTO delivery_policy`
+/// in the copy-the-active-row spelling is refused, the verdict names
+/// the delivery-policy bundle as the door and says why a bump is safe
+/// for a train in flight, and the retiring UPDATE is not what is named.
+#[test]
+fn a_post_cutover_delivery_policy_insert_is_refused_naming_its_bundle() {
+    let tree = Tree::new("violating-policy");
+    tree.migration(HISTORY, HISTORY_SQL)
+        .migration(NEW_POLICY, NEW_POLICY_SQL);
+    let out = tree.run();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a violating tree must exit 1:\n{}",
+        text(&out)
+    );
+    let msg = text(&out);
+    for expect in [
+        &format!("{SCHEMA}/{NEW_POLICY}:5"),
+        "inserts into delivery_policy",
+        "infra/platform/delivery-policy/",
+        "pins the version",
+    ] {
+        assert!(
+            msg.contains(expect),
+            "the verdict must name {expect:?}:\n{msg}"
+        );
+    }
+    assert!(
+        !msg.contains(&format!("{SCHEMA}/{NEW_POLICY}:2")),
+        "the retiring UPDATE is not a finding:\n{msg}"
+    );
+}
+
 /// A schema directory with nothing in it is red, not clean: a lint that
 /// scanned nothing certifies nothing (lib/scanned.sh, backlog cdf2d959).
 #[test]
@@ -392,11 +447,16 @@ fn the_cutover_is_one_fourteen_digit_stamp() {
         .and_then(|rest| rest.strip_suffix('"'))
         .expect("the registry list is declared once, on one line");
     let tables: Vec<&str> = tables.split_whitespace().collect();
-    assert!(
-        tables.contains(&"stations")
-            && tables.contains(&"step_plugins")
-            && tables.contains(&"cadence_rules"),
-        "the registry list names stations (car 1), step_plugins (car 2) and \
-         cadence_rules (car 3), and is where car 4 adds delivery_policy: {tables:?}"
+    assert_eq!(
+        tables,
+        [
+            "stations",
+            "step_plugins",
+            "cadence_rules",
+            "delivery_policy"
+        ],
+        "the registry list names the four registries 393d3234 moved — stations \
+         (car 1), step_plugins (car 2), cadence_rules (car 3), delivery_policy \
+         (car 4) — and a fifth arrives with its own bundle and pin: {tables:?}"
     );
 }

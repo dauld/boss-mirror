@@ -285,6 +285,67 @@ fn every_preflight_lint_scans_something_or_says_why_it_is_not_a_scanner() {
     );
 }
 
+/// A lint that reads a LIVE registry and cannot reach it has scanned
+/// nothing and says so in the one vocabulary the gate maps to a
+/// refusal: exit 3 (`LINT_CANNOT_ANSWER`, infra/lint/lib/git-answer.sh)
+/// with the `CANNOT ANSWER` marker, and NO `scanned` line — because a
+/// count here would certify a comparison that never ran.
+///
+/// MEASURED 2026-09-18 (backlog a26f92c4, gate 35f4ff0c): with the
+/// system of record rolling, `the-live-protocols-are-the-authored-
+/// protocols` skipped with exit 0 and no scanned line, so the pin above
+/// redded the gate — an infrastructure refusal recorded as a consist
+/// failure. Its sibling `the-live-rules-are-the-authored-rules` had the
+/// same skip. Each is pointed at a link-local port nothing listens on
+/// (refused in milliseconds, no DNS, the target the lint's own self-test
+/// uses) through the env var its header names. The gate half — exit 3
+/// becomes a `refused` receipt — is pinned in
+/// `a_lint_that_cannot_answer_refuses_the_gate.rs`.
+#[test]
+fn a_live_reading_lint_that_cannot_reach_its_registry_exits_3_and_scans_nothing() {
+    const CANNOT_ANSWER: i32 = 3;
+    let root = repo_root();
+    for (rel, env) in [
+        (
+            "infra/lint/the-live-protocols-are-the-authored-protocols.sh",
+            "BOSS_JOBS_URL",
+        ),
+        (
+            "infra/lint/the-live-rules-are-the-authored-rules.sh",
+            "BOSS_DISPATCHER_URL",
+        ),
+    ] {
+        let out = Command::new("bash")
+            .arg(root.join(rel))
+            .current_dir(&root)
+            .stdin(Stdio::null())
+            .env(env, "http://[::1]:9")
+            .output()
+            .unwrap_or_else(|e| panic!("run {rel}: {e}"));
+        let code = out.status.code().unwrap_or(-1);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            code, CANNOT_ANSWER,
+            "{rel}: an unreachable registry is exit {CANNOT_ANSWER} — the machine could not \
+             answer, never a clean 0 and never a red 1 — got {code}:\n{stdout}\n{stderr}"
+        );
+        assert!(
+            stderr.contains("CANNOT ANSWER") && stderr.contains("[::1]:9"),
+            "{rel}: the refusal carries the marker and names what it could not reach:\n{stderr}"
+        );
+        assert_eq!(
+            scanned_count(&format!("{stdout}\n{stderr}")),
+            None,
+            "{rel}: a lint that compared nothing must print no scanned line:\n{stdout}\n{stderr}"
+        );
+        assert!(
+            !stdout.contains("OK —") && !stdout.contains("clean"),
+            "{rel}: a refusal must not read as a pass on stdout:\n{stdout}"
+        );
+    }
+}
+
 /// The helper itself: a positive count prints the line, a zero exits 1
 /// naming the lint, a non-number exits 1 — and none of the refusals
 /// reaches stdout, where a `scanned` line would be read as evidence.

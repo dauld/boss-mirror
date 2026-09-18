@@ -46,10 +46,17 @@ impl Tree {
     fn new(tag: &str) -> Tree {
         let dir = boss_testing::scratch_dir(&format!("quick-preflight-untracked-{tag}"));
         let tree = dir.join("tree");
-        boss_testing::create_dir(&tree.join("infra/lint"));
+        boss_testing::create_dir(&tree.join("infra/lint/lib"));
         let gate = std::fs::read_to_string(repo_root().join("infra/gate.sh"))
             .unwrap_or_else(|e| panic!("read infra/gate.sh: {e}"));
         boss_testing::write_exec(&tree.join("infra/gate.sh"), &gate);
+        // gate.sh sources the lint vocabulary from the lib and refuses to
+        // run without it (a lint's exit 3 is a refusal, backlog a26f92c4).
+        std::fs::copy(
+            repo_root().join("infra/lint/lib/git-answer.sh"),
+            tree.join("infra/lint/lib/git-answer.sh"),
+        )
+        .unwrap_or_else(|e| panic!("carry infra/lint/lib/git-answer.sh into the tree: {e}"));
         boss_testing::write_file(
             &tree.join("infra/lint/workspace-declares-what-it-runs.sh"),
             "#!/usr/bin/env bash\nexit 0\n",

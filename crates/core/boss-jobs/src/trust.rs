@@ -4,7 +4,7 @@
 //! `surface_opens`) each carried their own copy of `is_trusted`, and on
 //! 2026-09-15 one of them learned that its READS must also admit the
 //! auditor tier — the tier the recorded-probe reader carries
-//! (`infra/forge/run-car-probe.sh`: `audit-readonly` at `auditor`,
+//! (the unattended prove door: `audit-readonly` at `auditor`,
 //! signing as `automation:run-car-probe-reader`) — because without it
 //! no car about that surface could ever be proved through
 //! `boss-sor-read`, the one reader a probe may use. The other four did

@@ -291,7 +291,16 @@ ARGV
         # unit's outcome lands back on that packet instead of the
         # `answered` that `systemctl start --no-block` earns by merely
         # being accepted (backlog d66f92b2). Data, not program text.
-        OPS_REQUEST_ID="$job_id" timeout "${verb_timeout:-$OPS_TIMEOUT}" "$@" > "$rawf" 2>&1 < /dev/null
+        #
+        # SO DOES THE ACTOR. A verb whose argv is the tree's own CLI
+        # (`boss prove … --unattended`, run-car-probe since backlog
+        # 9f00a805 car 2) signs its jobs-API writes as BOSS_ACTOR and
+        # REFUSES a write unnamed (CLAUDE.md §Doors); this runner's own
+        # account is the one it should sign as, the same identity the
+        # step completion below carries. A unit that set BOSS_ACTOR
+        # itself wins — the drop-in is the operator's say.
+        OPS_REQUEST_ID="$job_id" BOSS_ACTOR="${BOSS_ACTOR:-$ACTOR}" \
+            timeout "${verb_timeout:-$OPS_TIMEOUT}" "$@" > "$rawf" 2>&1 < /dev/null
         rc=$?
         size=$(wc -c < "$rawf")
         if [ "$size" -gt "$OPS_OUTPUT_CAP" ]; then

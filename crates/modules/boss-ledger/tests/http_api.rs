@@ -2983,3 +2983,186 @@ async fn chart_batch_is_operator_tier_and_refuses_an_auditor_and_an_anonymous_ca
         .unwrap();
     assert_eq!(n, 0);
 }
+
+// ---------------------------------------------------------------------------
+// POST /api/ledger/tax/batch — the tenant declares its tax regime
+// (backlog 7f163e58): kinds insert-if-absent by kind, rates by state,
+// one fact per INSERTED row, a kept row named with what differs, and
+// an account the chart does not hold refused by name before any row
+// is written. GET /api/ledger/tax-kinds and /api/ledger/sales-tax-rates
+// read the registry back in the declaration's shape.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tax_batch_inserts_if_absent_keeps_a_migration_row_and_names_the_difference() {
+    let db = TestDb::new().await;
+    // The starter chart holds 2300 and 6500; 2900 is the tenant's own.
+    let (status, _) = post_as_operator(
+        router(chart_state(&db)),
+        "/api/ledger/accounts/batch",
+        json!([{"code": "2900", "name": "Other tax payable", "kind": "liability", "normal_balance": "credit"}]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = json!({
+        "tax_kind": [
+            // The migration's row, declared with a different basis: kept, named.
+            {"kind": "sales", "liability_account": "2300", "derive_basis": "monthly-sales-tax"},
+            {"kind": "gross-receipts", "liability_account": "2900", "expense_account": "6500"},
+        ],
+        "sales_tax_rate": [
+            {"state": "CA", "jurisdiction": "US-CA", "rate_bps": 700},
+            {"state": "HI", "jurisdiction": "US-HI", "rate_bps": 400},
+        ]
+    });
+    let (status, out) = post_as_operator(
+        router(chart_state(&db)),
+        "/api/ledger/tax/batch",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(out["received"], 4);
+    assert_eq!(out["inserted"], 2);
+    assert_eq!(
+        out["kept"],
+        json!([
+            {"id": "tax_kind sales", "differs": ["derive_basis"]},
+            {"id": "sales_tax_rate CA", "differs": ["rate_bps"]},
+        ]),
+        "{out}"
+    );
+
+    // Kept as the migration registered it.
+    let (basis,): (Option<String>,) =
+        sqlx::query_as("SELECT derive_basis FROM tax_kinds WHERE kind = 'sales'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(basis.as_deref(), Some("period-sales-tax"));
+    let (bps,): (i32,) =
+        sqlx::query_as("SELECT rate_bps FROM sales_tax_rate_by_state WHERE state = 'CA'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(bps, 725);
+
+    // The GET doors list the tenant's rows beside the migration's, in
+    // the declaration's shape.
+    let (status, kinds) = get(router(chart_state(&db)), "/api/ledger/tax-kinds").await;
+    assert_eq!(status, StatusCode::OK);
+    let gross = kinds
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["kind"] == "gross-receipts")
+        .unwrap_or_else(|| panic!("{kinds}"));
+    assert_eq!(gross["liability_account"], "2900");
+    assert_eq!(gross["expense_account"], "6500");
+    assert!(gross.get("derive_basis").is_none(), "{gross}");
+    let (status, rates) = get(router(chart_state(&db)), "/api/ledger/sales-tax-rates").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        rates
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["state"] == "HI" && r["rate_bps"] == 400),
+        "{rates}"
+    );
+
+    // One fact per inserted row, on the outbox, declared_by the actor.
+    let staged: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT kind, payload FROM event_outbox WHERE kind = $1 OR kind = $2 ORDER BY kind",
+    )
+    .bind(boss_ledger::tax_registry::TAX_KIND_DECLARED)
+    .bind(boss_ledger::tax_registry::SALES_TAX_RATE_DECLARED)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(staged.len(), 2, "{staged:?}");
+    assert_eq!(staged[0].0, "ledger.sales_tax_rate.declared");
+    assert_eq!(staged[0].1["state"], "HI");
+    assert_eq!(staged[0].1["declared_by"], "automation:tenant-seed");
+    assert_eq!(staged[1].0, "ledger.tax_kind.declared");
+    assert_eq!(staged[1].1["kind"], "gross-receipts");
+    assert_eq!(staged[1].1["declared_by"], "automation:tenant-seed");
+
+    // Idempotent: the second run keeps all four and stages nothing.
+    let (status, out) =
+        post_as_operator(router(chart_state(&db)), "/api/ledger/tax/batch", body).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(out["inserted"], 0);
+    assert_eq!(out["kept"].as_array().unwrap().len(), 4);
+    let (n,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM event_outbox WHERE kind LIKE 'ledger.%.declared'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        n, 3,
+        "the chart's one row + the tax batch's two; a kept row records nothing"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tax_batch_refuses_an_account_the_chart_does_not_hold_and_writes_nothing() {
+    let db = TestDb::new().await;
+    let body = json!({
+        "tax_kind": [
+            {"kind": "gross-receipts", "liability_account": "2900"},
+        ],
+        "sales_tax_rate": [{"state": "HI", "jurisdiction": "US-HI", "rate_bps": 400}]
+    });
+    let (status, out) =
+        post_as_operator(router(chart_state(&db)), "/api/ledger/tax/batch", body).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{out}");
+    let text = out.as_str().unwrap_or_default().to_string();
+    assert!(
+        text.contains("gross-receipts") && text.contains("`2900`") && text.contains("chart"),
+        "{text}"
+    );
+    let (n,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM sales_tax_rate_by_state WHERE state = 'HI'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(n, 0, "the good rate beside the bad kind did not land");
+
+    // The door's own validation, by row.
+    let (status, out) = post_as_operator(
+        router(chart_state(&db)),
+        "/api/ledger/tax/batch",
+        json!({"sales_tax_rate": [{"state": "hi", "jurisdiction": "US-HI", "rate_bps": 400}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{out}");
+    assert!(
+        out.as_str()
+            .unwrap_or_default()
+            .contains("sales tax rate #1 (hi)"),
+        "{out}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tax_batch_is_operator_tier_and_refuses_an_auditor_and_an_anonymous_caller() {
+    let db = TestDb::new().await;
+    let body =
+        json!({"sales_tax_rate": [{"state": "HI", "jurisdiction": "US-HI", "rate_bps": 400}]});
+    let (status, _) = post_as_auditor(
+        router(chart_state(&db)),
+        "/api/ledger/tax/batch",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = post_json(router(chart_state(&db)), "/api/ledger/tax/batch", body).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (n,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM sales_tax_rate_by_state WHERE state = 'HI'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(n, 0);
+}

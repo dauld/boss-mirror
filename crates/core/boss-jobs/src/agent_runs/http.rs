@@ -382,7 +382,7 @@ mod tests {
         }
     }
 
-    /// The recorded-probe reader (`infra/forge/run-car-probe.sh`:
+    /// The recorded-probe reader (boss-cli prove.rs, the unattended door:
     /// role `audit-readonly`, tier `auditor`) reads every surface and
     /// writes none — the same door `/api/events/*` already opens to
     /// that tier. Found 2026-09-15 by rehearsing this car's probe:

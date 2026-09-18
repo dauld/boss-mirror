@@ -22,7 +22,9 @@
 //! THE PLAN IS THE CONTRACT, IN DEPENDENCY ORDER. [`plan`] walks the
 //! directory the way the engines' prepare does: classes (employee and
 //! account writes validate against them) → the chart of accounts (the
-//! ledger's rows, after the classes; backlog 41af5195) → locations (an
+//! ledger's rows, after the classes; backlog 41af5195) → the tax
+//! regime (its kinds name accounts of the chart; backlog 7f163e58) →
+//! locations (an
 //! employee's `location` FKs into them; backlog 1ec8312a) → business
 //! calendars →
 //! the company Subject → policy grants → people (two passes: create,
@@ -52,7 +54,7 @@
 //! the contract tenant-launch.sh already holds.
 //!
 //! IDEMPOTENT, LIKE THE ENGINES. Every door inserts if absent: the
-//! classes, chart, locations, calendars, credentials, sensors and
+//! classes, chart, tax, locations, calendars, credentials, sensors and
 //! ledger batches; the company Subject; policy GETs each rule before
 //! it POSTs; an employee's 409 is followed by a GET and a comparison;
 //! the workflow publish keeps a kind an authoring Job already
@@ -111,8 +113,8 @@ use crate::tenant::{self, Status};
 /// `?mode=take`, the company mint's, the employee overlay PUT, the
 /// Class edit door (`PUT /api/classes/{kind}/{code}`), policy's
 /// `force`, the workflows' supersede. A registry not here has no
-/// overwrite (sensors, credentials, locations, the chart, the ledger's
-/// rules, the reactors) and its line says so.
+/// overwrite (sensors, credentials, locations, the chart, the tax
+/// regime, the ledger's rules, the reactors) and its line says so.
 pub const TAKEABLE: &[&str] = &[
     "classes",
     "calendars",
@@ -314,6 +316,13 @@ pub enum Door {
     Chart {
         rows: Vec<boss_ledger::chart::AccountInput>,
     },
+    /// The tenant's tax regime (backlog 7f163e58): filing kinds and
+    /// sales-tax rates, as the ledger door's own seed. After the
+    /// chart — a kind names accounts of it — and insert-if-absent by
+    /// kind and by state; a held row that differs is named.
+    Tax {
+        seed: boss_ledger::tax_registry::TaxSeed,
+    },
     /// The tenant's sites (backlog 1ec8312a, 2026-09-17), as the
     /// batch endpoint's JSON rows. Before the roster: an employee's
     /// `location` is a foreign key into the registry, and until this
@@ -390,6 +399,7 @@ impl Door {
         match self {
             Door::Classes { .. } => "POST /api/classes/batch",
             Door::Chart { .. } => "POST /api/ledger/accounts/batch",
+            Door::Tax { .. } => "POST /api/ledger/tax/batch",
             Door::Locations { .. } => "POST /api/locations/batch",
             Door::Calendars { .. } => "POST /api/calendar/business-calendars/batch",
             Door::Company { .. } => "POST /api/subjects/company",
@@ -423,6 +433,20 @@ impl Door {
                     .map(|a| a.code.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
+            ),
+            Door::Tax { seed } => format!(
+                "{} tax kinds ({}) + {} sales-tax rates (insert-if-absent by kind and by state; a held row that differs is named)",
+                seed.tax_kind.len(),
+                if seed.tax_kind.is_empty() {
+                    "none".to_string()
+                } else {
+                    seed.tax_kind
+                        .iter()
+                        .map(|k| k.kind.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+                seed.sales_tax_rate.len()
             ),
             Door::Locations { rows } => format!(
                 "{} locations (insert-if-absent by id: {})",
@@ -773,6 +797,15 @@ pub fn plan(dir: &Path) -> Result<Plan> {
     door(present(dir, &["seeds/chart_of_accounts.toml"]), &|p| {
         Ok(Door::Chart {
             rows: boss_ledger::chart::load_chart_toml(p).map_err(anyhow::Error::msg)?,
+        })
+    })?;
+    // 1c. The tax regime (backlog 7f163e58) — after the chart, because
+    //    a kind's liability and expense accounts are codes of it (the
+    //    table's FK; check has already held every one to the file).
+    //    Insert-if-absent by kind and by state.
+    door(present(dir, &["seeds/tax.toml"]), &|p| {
+        Ok(Door::Tax {
+            seed: boss_ledger::tax_registry::load_tax_toml(p).map_err(anyhow::Error::msg)?,
         })
     })?;
     // 2. Locations (backlog 1ec8312a) — a row's `kind` is a Class
@@ -1237,6 +1270,15 @@ fn send(client: &Client, bases: &Bases, door: &Door, take: &Take) -> Result<Stri
                 .json()
                 .with_context(|| format!("POST {u}: the outcome did not parse"))?;
             Ok(out.summary())
+        }
+        Door::Tax { seed } => {
+            let u = url(&bases.ledger, "/api/ledger/tax/batch");
+            let resp = refuse(client.post(&u).json(seed).send()?, &format!("POST {u}"))?;
+            let out: BatchAnswer = resp
+                .json()
+                .with_context(|| format!("POST {u}: the outcome did not parse"))?;
+            // No door overwrites a tax row, and the line says so.
+            Ok(out.line(None))
         }
         Door::Locations { rows } => {
             let u = url(&bases.locations, "/api/locations/batch");
@@ -1717,6 +1759,14 @@ terminal = { outcome = "sponsored" }
             "[[agent]]\nid = \"agent-claude\"\ndisplay_name = \"Claude (engineering)\"\n\
              default_model = \"opus-5[1m]\"\naliases = [\"claude@acme.example\"]\n",
         );
+        // A rates-only tax regime (backlog 7f163e58): a state collected
+        // in, no filing kind yet — a kind would name an account of the
+        // chart below.
+        put(
+            &dir,
+            "seeds/tax.toml",
+            "[[sales_tax_rate]]\nstate = \"WA\"\njurisdiction = \"US-WA\"\nrate_bps = 650\n",
+        );
         // The real tenant's chart (design 18cf4272): 1000 collides with
         // the starter's Cash, 1010 with Cash in Transit; 4200 is new.
         put(
@@ -1814,6 +1864,7 @@ terminal = { outcome = "sponsored" }
             [
                 "seeds/classes.json",
                 "seeds/chart_of_accounts.toml",
+                "seeds/tax.toml",
                 "seeds/locations.toml",
                 "seeds/business_calendars.json",
                 "tenant.toml",
@@ -1827,8 +1878,18 @@ terminal = { outcome = "sponsored" }
                 "seeds/fact_projection_rules.toml",
                 "seeds/rules.toml",
             ],
-            "classes → chart of accounts → locations → calendars → company → policy → people → agents → workflows → credentials → sensors → posting rules → projections → rules LAST"
+            "classes → chart of accounts → tax → locations → calendars → company → policy → people → agents → workflows → credentials → sensors → posting rules → projections → rules LAST"
         );
+        // The tax door (backlog 7f163e58): the seed as the ledger
+        // door's own type, after the chart its kinds would name.
+        match &step(&p, "seeds/tax.toml").action {
+            Action::Write(Door::Tax { seed }) => {
+                assert!(seed.tax_kind.is_empty());
+                assert_eq!(seed.sales_tax_rate.len(), 1);
+                assert_eq!(seed.sales_tax_rate[0].state, "WA");
+            }
+            other => panic!("{other:?}"),
+        }
         // The chart door (backlog 41af5195): the rows as the ledger
         // door's own type, after the classes.
         match &step(&p, "seeds/chart_of_accounts.toml").action {
@@ -2116,6 +2177,10 @@ terminal = { outcome = "sponsored" }
         /// code; a test pre-seeds the starter's rows the way
         /// 40-ledger.sql does).
         accounts: BTreeMap<String, String>,
+        /// The tax regime: "tax_kind <kind>" / "sales_tax_rate <ST>" ->
+        /// the row (insert-if-absent; a test pre-seeds the migration's
+        /// rows the way 40-ledger.sql does).
+        tax: BTreeMap<String, Value>,
         /// The dispatcher's rule registry, one row per (name, version):
         /// the stored draft/active/retired rows with their `source`,
         /// the append-only shape `dispatcher_rules` has.
@@ -2135,6 +2200,7 @@ terminal = { outcome = "sponsored" }
                 + self.posting_rules.len()
                 + self.projections.len()
                 + self.accounts.len()
+                + self.tax.len()
                 + self.rules.len()
                 + self.calendars.len()
                 + self.classes.len()
@@ -2399,6 +2465,44 @@ terminal = { outcome = "sponsored" }
                         })),
                         None => {
                             st.accounts.insert(code, name);
+                            inserted += 1;
+                        }
+                    }
+                }
+                (
+                    200,
+                    json!({"received": rows.len(), "inserted": inserted, "kept": kept}).to_string(),
+                )
+            }
+            ("POST", "/api/ledger/tax/batch") => {
+                // Insert-if-absent by kind and by state; a kept row
+                // reports which declared fields differ, in the one
+                // KeptRow shape.
+                let seed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                let mut rows: Vec<(String, Value)> = Vec::new();
+                for k in seed["tax_kind"].as_array().cloned().unwrap_or_default() {
+                    rows.push((format!("tax_kind {}", k["kind"].as_str().unwrap_or("")), k));
+                }
+                for r in seed["sales_tax_rate"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                {
+                    rows.push((
+                        format!("sales_tax_rate {}", r["state"].as_str().unwrap_or("")),
+                        r,
+                    ));
+                }
+                let mut inserted = 0usize;
+                let mut kept = Vec::new();
+                for (id, row) in &rows {
+                    match st.tax.get(id) {
+                        Some(have) => kept.push(json!({
+                            "id": id,
+                            "differs": differs(have, row)
+                        })),
+                        None => {
+                            st.tax.insert(id.clone(), row.clone());
                             inserted += 1;
                         }
                     }
@@ -2793,6 +2897,10 @@ terminal = { outcome = "sponsored" }
             "the chart goes after the classes (backlog 41af5195)"
         );
         assert!(
+            pos("POST", "/api/ledger/accounts/batch") < pos("POST", "/api/ledger/tax/batch"),
+            "the tax regime goes after the chart its kinds name (backlog 7f163e58)"
+        );
+        assert!(
             pos("POST", "/api/locations/batch") < pos("POST", "/api/people"),
             "employees.location is a FK into locations, so the sites land first"
         );
@@ -2871,6 +2979,17 @@ terminal = { outcome = "sponsored" }
                 && chart_line.contains("received 3, inserted 3"),
             "{chart_line}"
         );
+        assert_eq!(
+            hit("POST", "/api/ledger/tax/batch"),
+            1,
+            "one batch for the tax regime"
+        );
+        let tax_line = line_of(&lines, "seeds/tax.toml");
+        assert!(
+            tax_line.contains("POST /api/ledger/tax/batch")
+                && tax_line.contains("received 1, inserted 1"),
+            "{tax_line}"
+        );
         let rules_line = lines
             .iter()
             .find(|l| l.contains("seeds/rules.toml"))
@@ -2917,6 +3036,63 @@ terminal = { outcome = "sponsored" }
             "kept as the starter registered it"
         );
         assert_eq!(st.accounts["4200"], "Support revenue");
+    }
+
+    /// A TAX ROW THE INSTANCE HOLDS IS KEPT AND NAMED (backlog
+    /// 7f163e58). The stub pre-seeds 40-ledger.sql's `sales` kind and
+    /// its CA rate; the tenant declares `sales` with another basis, CA
+    /// at another rate, and a new state. Insert-if-absent keeps the
+    /// two and the publish line names the field each differs on, in
+    /// the one shape every registry uses — with no `--take`, because
+    /// no door overwrites this registry.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tax_row_the_instance_holds_is_kept_and_the_differing_field_is_named() {
+        let dir = real_shape("tax-kept");
+        put(
+            &dir,
+            "seeds/chart_of_accounts.toml",
+            "[[account]]\ncode = \"2300\"\nname = \"Sales tax payable\"\nkind = \"liability\"\n\
+             normal_balance = \"credit\"\n",
+        );
+        put(
+            &dir,
+            "seeds/tax.toml",
+            "[[tax_kind]]\nkind = \"sales\"\nliability_account = \"2300\"\n\
+             derive_basis = \"monthly-sales-tax\"\n\
+             [[sales_tax_rate]]\nstate = \"CA\"\njurisdiction = \"US-CA\"\nrate_bps = 700\n\
+             [[sales_tax_rate]]\nstate = \"WA\"\njurisdiction = \"US-WA\"\nrate_bps = 650\n",
+        );
+        let p = plan(&dir).unwrap();
+        let st = Arc::new(Mutex::new(Stub::default()));
+        {
+            let mut st = st.lock().unwrap();
+            st.tax.insert(
+                "tax_kind sales".into(),
+                json!({"kind": "sales", "liability_account": "2300", "derive_basis": "period-sales-tax"}),
+            );
+            st.tax.insert(
+                "sales_tax_rate CA".into(),
+                json!({"state": "CA", "jurisdiction": "US-CA", "rate_bps": 725}),
+            );
+        }
+        let base = spawn_stub(st.clone()).await;
+        let lines = run_publish(p, base).await.unwrap();
+        let tax_line = line_of(&lines, "seeds/tax.toml");
+        assert!(
+            tax_line.contains(
+                "received 3, inserted 1; kept: tax_kind sales differs on \
+                 derive_basis; sales_tax_rate CA differs on rate_bps (the instance is the \
+                 truth; no door overwrites this registry)"
+            ),
+            "{tax_line}"
+        );
+        let st = st.lock().unwrap();
+        assert_eq!(
+            st.tax["tax_kind sales"]["derive_basis"], "period-sales-tax",
+            "kept as the instance registered it"
+        );
+        assert_eq!(st.tax["sales_tax_rate CA"]["rate_bps"], 725);
+        assert_eq!(st.tax["sales_tax_rate WA"]["rate_bps"], 650);
     }
 
     #[tokio::test(flavor = "multi_thread")]

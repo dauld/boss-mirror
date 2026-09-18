@@ -162,6 +162,20 @@ fn seeds_is_the_example_tenants_own_rows_counted_independently() {
         ["brewery", "used-device-shop"],
         "companies = each example manifest's [meta] tenant_id"
     );
+    // The tax regime (backlog 7f163e58): the brewery's tax.toml carries
+    // the rows 40-ledger.sql seeded — five kinds, 27 states.
+    assert_eq!(
+        v["tax_kinds"].as_array().unwrap().len(),
+        toml_headers(&brewery.join("tax.toml"), "tax_kind"),
+        "tax_kinds = the brewery's [[tax_kind]] kinds"
+    );
+    assert_eq!(v["tax_kinds"].as_array().unwrap().len(), 5);
+    assert_eq!(
+        v["sales_tax_rates"].as_array().unwrap().len(),
+        toml_headers(&brewery.join("tax.toml"), "sales_tax_rate"),
+        "sales_tax_rates = the brewery's [[sales_tax_rate]] states"
+    );
+    assert_eq!(v["sales_tax_rates"].as_array().unwrap().len(), 27);
     let sources: Vec<&str> = v["sources"]
         .as_array()
         .unwrap()
@@ -172,6 +186,7 @@ fn seeds_is_the_example_tenants_own_rows_counted_independently() {
         "brewery/seeds/classes.json",
         "brewery/seeds/locations.toml",
         "brewery/seeds/chart_of_accounts.toml",
+        "brewery/seeds/tax.toml",
         "used-device-shop/seeds/classes.toml",
     ] {
         assert!(sources.contains(&s), "sources names {s}: {sources:?}");
@@ -345,6 +360,10 @@ fn an_attribute_the_script_cannot_judge_is_a_refusal() {
         &t.join("seeds/chart_of_accounts.toml"),
         "[[account]]\ncode = \"1000\"\nname = \"Bank\"\nkind = \"asset\"\nnormal_balance = \"debit\"\n",
     );
+    write(
+        &t.join("seeds/tax.toml"),
+        "[[tax_kind]]\nkind = \"sales\"\nliability_account = \"1000\"\n\n[[sales_tax_rate]]\nstate = \"CA\"\njurisdiction = \"US-CA\"\nrate_bps = 725\n",
+    );
     let (rc, out, _) = run(&["seeds"], Some(&examples));
     assert_eq!(rc, 0, "seeds reads the set: {out}");
     let tenant = plain_tenant("unmapped");
@@ -385,18 +404,27 @@ fn the_sql_shapes_are_a_read_only_plan_and_one_transaction_per_table() {
         [
             "-- retire-example-reference-rows:delete companies",
             "-- retire-example-reference-rows:delete locations",
+            "-- retire-example-reference-rows:delete tax_kinds",
+            "-- retire-example-reference-rows:delete sales_tax_rates",
             "-- retire-example-reference-rows:delete gl_accounts",
             "-- retire-example-reference-rows:delete classes"
         ],
-        "dependency order: a location's kind is a class, so classes go last"
+        "dependency order: a tax kind FKs its accounts, so the tax tables go before gl_accounts; a location's kind is a class, so classes go last"
     );
     assert_eq!(
         del.matches("\nBEGIN;\n").count(),
-        4,
+        6,
         "one transaction per table"
     );
-    assert_eq!(del.matches("\nCOMMIT;\n").count(), 4);
-    for t in ["companies", "locations", "gl_accounts", "classes"] {
+    assert_eq!(del.matches("\nCOMMIT;\n").count(), 6);
+    for t in [
+        "companies",
+        "locations",
+        "tax_kinds",
+        "sales_tax_rate_by_state",
+        "gl_accounts",
+        "classes",
+    ] {
         assert!(
             del.contains(&format!("DELETE FROM {t} ")),
             "deletes from {t}"
@@ -417,6 +445,7 @@ fn the_sql_shapes_are_a_read_only_plan_and_one_transaction_per_table() {
         "jobs.subject_id",
         "gl_journal_lines.account_id",
         "tax_kinds",
+        "tax_filings.kind",
         "gl_posting_rules.lines",
     ] {
         assert!(
@@ -527,6 +556,12 @@ fn redeclaring_tenant(name: &str) -> PathBuf {
         &t.join("seeds/chart_of_accounts.toml"),
         "[[account]]\ncode = \"1100\"\nname = \"Accounts receivable\"\nkind = \"asset\"\nnormal_balance = \"debit\"\n\n[[account]]\ncode = \"7100\"\nname = \"Hosting\"\nkind = \"expense\"\nnormal_balance = \"debit\"\n",
     );
+    // The brewery's `sales` kind and its CA rate, re-declared (backlog
+    // 7f163e58), beside a kind and a state that are no example's.
+    write(
+        &t.join("seeds/tax.toml"),
+        "[[tax_kind]]\nkind = \"sales\"\nliability_account = \"1100\"\n\n[[tax_kind]]\nkind = \"gross-receipts\"\nliability_account = \"1100\"\n\n[[sales_tax_rate]]\nstate = \"CA\"\njurisdiction = \"US-CA\"\nrate_bps = 725\n\n[[sales_tax_rate]]\nstate = \"HI\"\njurisdiction = \"US-HI\"\nrate_bps = 400\n",
+    );
     t
 }
 
@@ -579,6 +614,10 @@ fn a_row_the_tenant_declares_leaves_the_candidate_set_and_is_named() {
     assert!(!strs(&v, "gl_accounts").contains(&"1100".to_string()));
     assert!(strs(&v, "gl_accounts").contains(&"1000".to_string()));
     assert_eq!(strs(&v, "companies"), strs(&plain, "companies"));
+    assert!(!strs(&v, "tax_kinds").contains(&"sales".to_string()));
+    assert!(strs(&v, "tax_kinds").contains(&"income".to_string()));
+    assert!(!strs(&v, "sales_tax_rates").contains(&"CA".to_string()));
+    assert!(strs(&v, "sales_tax_rates").contains(&"TX".to_string()));
 
     let d = &v["declared_by_tenant"];
     assert_eq!(
@@ -593,6 +632,8 @@ fn a_row_the_tenant_declares_leaves_the_candidate_set_and_is_named() {
     assert_eq!(strs(d, "locations"), ["loc-brewery-taproom"]);
     assert_eq!(strs(d, "gl_accounts"), ["1100"]);
     assert_eq!(strs(d, "companies"), Vec::<String>::new());
+    assert_eq!(strs(d, "tax_kinds"), ["sales"]);
+    assert_eq!(strs(d, "sales_tax_rates"), ["CA"]);
     assert_eq!(d["directory"], tenant);
     assert!(
         plain["declared_by_tenant"].is_null(),
@@ -613,6 +654,20 @@ fn a_row_the_tenant_declares_leaves_the_candidate_set_and_is_named() {
         assert!(sql.contains(r#"{"subject_kind":"employee","code":"cto""#));
         assert!(!sql.contains(r#""loc-brewery-taproom""#));
         assert!(!sql.contains(r#""1100""#));
+        assert!(
+            !sql.contains(r#""CA""#),
+            "the re-declared state is not a candidate"
+        );
+        assert!(sql.contains(r#""TX""#));
+        let kinds = sql
+            .split(r#""tax_kinds":["#)
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("the SQL embeds the tax_kinds candidates");
+        assert!(
+            !kinds.contains(r#""sales""#) && kinds.contains(r#""income""#),
+            "the re-declared kind is not a candidate: {kinds}"
+        );
     }
     // A tenant declaring nothing an example does leaves the set whole.
     let plain_t = plain_tenant("whole");

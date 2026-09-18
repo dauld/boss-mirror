@@ -38,6 +38,7 @@ use boss_dispatcher_handlers::handlers::{
     inventory_parts_produce::InventoryPartsProduce,
     inventory_po_place::InventoryPoPlace,
     inventory_receive::InventoryReceive,
+    jobs_age_out_step::JobsAgeOutStep,
     jobs_auto_park::JobsAutoPark,
     jobs_clear_waiting::JobsClearWaiting,
     jobs_complete_linked_step::JobsCompleteLinkedStep,
@@ -396,6 +397,12 @@ async fn main() -> Result<()> {
             // two steps, the field and the path ride the rule row, and
             // the rule is the tenant's.
             handlers.register(JobsCompleteStepMatching::new(cfg.jobs_api_url.clone()));
+            // A clock rule completes an open step on every packet of a
+            // kind that has gone silent past a bound — an agent-run
+            // whose builder died is a packet that ages (c87fb59b car 2).
+            // Generic: kind, step, the bound and what to write ride the
+            // rule row; the tick's own `_at` is the clock.
+            handlers.register(JobsAgeOutStep::new(cfg.jobs_api_url.clone()));
             // System-completes zero-duration, no-role markers
             // (trigger / outcome / milestone) the moment they go
             // Ready, so a Job flows past its structural checkpoints

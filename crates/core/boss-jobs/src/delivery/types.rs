@@ -9,7 +9,10 @@
 //! board at all — a policy registry must not become a new way to wedge
 //! every train.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+use crate::registry::WorkflowStatus;
 
 /// One row of `delivery_policy`, unparsed.
 ///
@@ -44,4 +47,34 @@ pub struct DeliveryPolicyRow {
     /// status surface (the number it draws as slots) — one source, so
     /// the capacity a page shows is the capacity the pipeline obeys.
     pub gate_max_concurrent: i32,
+}
+
+/// One row of `delivery_policy` as DECLARED — the wire row (which
+/// already carries `name` and `version`) plus the column the conductor
+/// never reads (`status`) and the one the seed stamps (`created_at`).
+/// This is what the platform bundle
+/// (`infra/platform/delivery-policy/<name>.toml`) declares and what
+/// `DeliveryPolicyRegistry::live_versions` reads back, so the equality
+/// pin compares the same shape on both sides. The columns live ONCE,
+/// in [`DeliveryPolicyRow`], flattened here rather than repeated
+/// (CLAUDE.md §9a): a budget added to the row is added to the
+/// declaration by construction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryPolicySpec {
+    pub status: WorkflowStatus,
+    #[serde(flatten)]
+    pub row: DeliveryPolicyRow,
+    /// When the deployment was built — stamped by the seed's clock on
+    /// the row it writes; never part of the declaration.
+    pub created_at: DateTime<Utc>,
+}
+
+impl DeliveryPolicySpec {
+    pub fn name(&self) -> &str {
+        &self.row.name
+    }
+
+    pub fn version(&self) -> i32 {
+        self.row.version
+    }
 }

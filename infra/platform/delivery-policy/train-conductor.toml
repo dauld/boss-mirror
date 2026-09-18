@@ -1,0 +1,56 @@
+# ---------------------------------------------------------------------------
+# train-conductor — the delivery pipeline's POLICY: what the conductor
+# DECIDES by (crates/orchestrators/boss-cli/src/delivery_policy.rs is
+# the reader; train.rs is what it DOES).
+#
+# ONE ROW IS THE WHOLE POLICY, the `workflows` shape: a train pins one
+# policy version at boarding (`metadata.delivery_policy_version`) and
+# reconcile judges it by the version it departed under, so editing this
+# file mid-flight cannot rewrite the rules a train left on.
+#
+# Version 2 is the row the migrations produced: 202608242117 seeded v1
+# with train.rs's compiled constants verbatim (hold 2, stall 6h, the
+# consist check's three budgets and the two reason budgets);
+# 202609030800 and 202609031000 widened the table (ci_host_floor_gb
+# default 90, gate_max_concurrent default 3, both filled in place);
+# 202609050500 retired v1 and published v2 with the floor at 40
+# (approval d99b198d: the forge runs lean CI green at 60-70 GB free and
+# the locomotive's own door is 40); 20260918102236 dropped
+# consist_excluded_lints (H9 — each lint declares its own consist skip).
+# Declared here since 2026-09-18 (backlog 393d3234, consolidation H4,
+# car 4 of 4); see README.md for what that means.
+#
+# The compiled fallback in delivery_policy.rs is held equal to this
+# file by `the_bundle_equals_the_compiled_fallback` (boss-cli): the
+# conductor runs on these numbers whether or not the registry answers,
+# and a train that departed on the fallback pins no version.
+#
+# To change this policy, bump `version`.
+# ---------------------------------------------------------------------------
+
+[[delivery_policy]]
+name = "train-conductor"
+version = 2
+status = "active"
+# THE HOLD: red trains a car may be released from before boarding
+# leaves it behind until a human looks.
+max_red_trains = 2
+# THE STALL WINDOW: hours without a step completion before an open
+# train counts stalled.
+stall_hours = 6
+# THE CONSIST CHECK'S THREE BUDGETS: wall-clock seconds for the whole
+# check, characters of a failing lint's output on the record, and how
+# many filenames a refusal names.
+consist_budget_secs = 60
+consist_output_budget = 1200
+consist_files_named = 6
+# THE TWO REASON BUDGETS, in characters: a left-behind car's
+# conflicted-file chip, and a jobs-API blip's cause in the journal.
+skip_reason_file_budget = 96
+blip_cause_budget = 80
+# GB of free disk the CI host's latest host-scope estate observation
+# must show before boarding assembles a consist.
+ci_host_floor_gb = 40
+# How many gates `boss gate` admits at once before it refuses — the
+# number the CLI obeys and the number the yard draws as slots.
+gate_max_concurrent = 3

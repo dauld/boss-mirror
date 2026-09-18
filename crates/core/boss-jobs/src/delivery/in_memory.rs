@@ -2,12 +2,18 @@
 //! test double. Mirrors the two Pg semantics that matter: `active_policy`
 //! sees only the active row, and `policy_version` sees a version
 //! whatever its status, because an in-flight train's pinned version may
-//! have been retired underneath it.
+//! have been retired underneath it. Since the bundle seed (backlog
+//! 393d3234, car 4) it is also the `DeliveryPolicyRegistry` double, so
+//! a row the seed publishes is a row the conductor's read then serves,
+//! as in Postgres.
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use tokio::sync::RwLock;
 
-use super::port::{DeliveryPolicyError, DeliveryPolicyRepository};
-use super::types::DeliveryPolicyRow;
+use super::port::{DeliveryPolicyError, DeliveryPolicyRegistry, DeliveryPolicyRepository};
+use super::types::{DeliveryPolicyRow, DeliveryPolicySpec};
+use crate::registry::WorkflowStatus;
 
 /// A stored row plus the status the registry holds it at.
 #[derive(Debug, Clone)]
@@ -18,12 +24,25 @@ pub struct StoredPolicy {
 
 #[derive(Default)]
 pub struct InMemoryDeliveryPolicy {
-    rows: Vec<StoredPolicy>,
+    /// The whole lineage, every version of every name.
+    rows: RwLock<Vec<DeliveryPolicySpec>>,
 }
 
 impl InMemoryDeliveryPolicy {
     pub fn new(rows: Vec<StoredPolicy>) -> Self {
-        Self { rows }
+        let lineage = rows
+            .into_iter()
+            .map(|s| DeliveryPolicySpec {
+                // A status string the registry could not hold is a
+                // test's typo; the CHECK constraint refuses it in Pg.
+                status: s.status.parse().unwrap_or(WorkflowStatus::Retired),
+                row: s.row,
+                created_at: DateTime::<Utc>::UNIX_EPOCH,
+            })
+            .collect();
+        Self {
+            rows: RwLock::new(lineage),
+        }
     }
 }
 
@@ -35,8 +54,10 @@ impl DeliveryPolicyRepository for InMemoryDeliveryPolicy {
     ) -> Result<Option<DeliveryPolicyRow>, DeliveryPolicyError> {
         Ok(self
             .rows
+            .read()
+            .await
             .iter()
-            .find(|s| s.row.name == name && s.status == "active")
+            .find(|s| s.name() == name && s.status == WorkflowStatus::Active)
             .map(|s| s.row.clone()))
     }
 
@@ -47,9 +68,59 @@ impl DeliveryPolicyRepository for InMemoryDeliveryPolicy {
     ) -> Result<Option<DeliveryPolicyRow>, DeliveryPolicyError> {
         Ok(self
             .rows
+            .read()
+            .await
             .iter()
-            .find(|s| s.row.name == name && s.row.version == version)
+            .find(|s| s.name() == name && s.version() == version)
             .map(|s| s.row.clone()))
+    }
+}
+
+#[async_trait]
+impl DeliveryPolicyRegistry for InMemoryDeliveryPolicy {
+    async fn live_versions(
+        &self,
+        name: &str,
+    ) -> Result<Vec<DeliveryPolicySpec>, DeliveryPolicyError> {
+        let mut out: Vec<DeliveryPolicySpec> = self
+            .rows
+            .read()
+            .await
+            .iter()
+            .filter(|r| r.name() == name)
+            .cloned()
+            .collect();
+        out.sort_by_key(|r| r.version());
+        Ok(out)
+    }
+
+    async fn publish_declared(
+        &self,
+        mut spec: DeliveryPolicySpec,
+        _actor: &boss_core::actor::ActorId,
+        now: DateTime<Utc>,
+    ) -> Result<DeliveryPolicySpec, DeliveryPolicyError> {
+        let mut rows = self.rows.write().await;
+        if rows
+            .iter()
+            .any(|r| r.name() == spec.name() && r.version() == spec.version())
+        {
+            return Err(DeliveryPolicyError::Conflict(format!(
+                "row already exists: {}@{}",
+                spec.name(),
+                spec.version()
+            )));
+        }
+        // Mirrors the Pg adapter: retire by name, then insert.
+        for r in rows.iter_mut() {
+            if r.name() == spec.name() && r.status == WorkflowStatus::Active {
+                r.status = WorkflowStatus::Retired;
+            }
+        }
+        spec.status = WorkflowStatus::Active;
+        spec.created_at = now;
+        rows.push(spec.clone());
+        Ok(spec)
     }
 }
 
@@ -129,6 +200,50 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_published_version_retires_the_active_one_and_is_then_served() {
+        let repo = InMemoryDeliveryPolicy::new(vec![stored(1, "active")]);
+        let actor = boss_core::actor::ActorId::Automation("platform-workflow-seed".into());
+        let spec = DeliveryPolicySpec {
+            status: WorkflowStatus::Active,
+            row: row(2),
+            created_at: DateTime::<Utc>::UNIX_EPOCH,
+        };
+        repo.publish_declared(spec, &actor, DateTime::<Utc>::UNIX_EPOCH)
+            .await
+            .expect("a new version publishes");
+        let lineage = repo.live_versions("train-conductor").await.unwrap();
+        assert_eq!(
+            lineage
+                .iter()
+                .map(|r| (r.version(), r.status))
+                .collect::<Vec<_>>(),
+            vec![(1, WorkflowStatus::Retired), (2, WorkflowStatus::Active)]
+        );
+        assert_eq!(
+            repo.active_policy("train-conductor")
+                .await
+                .unwrap()
+                .unwrap()
+                .version,
+            2,
+            "what the seed published is what the conductor's read serves"
+        );
+        let again = DeliveryPolicySpec {
+            status: WorkflowStatus::Active,
+            row: row(2),
+            created_at: DateTime::<Utc>::UNIX_EPOCH,
+        };
+        assert!(
+            matches!(
+                repo.publish_declared(again, &actor, DateTime::<Utc>::UNIX_EPOCH)
+                    .await,
+                Err(DeliveryPolicyError::Conflict(_))
+            ),
+            "a row already at (name, version) is a conflict, not an overwrite"
         );
     }
 }

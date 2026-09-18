@@ -83,6 +83,22 @@ bare command resolved on PATH. An absolute path is refused by the lint
 (66077f9c: eleven verbs once baked the forge checkout's path in and
 could run nowhere else).
 
+**The tree's own CLI is a bare command too.** Since backlog 9f00a805
+(consolidation H8) every managed host installs `/usr/local/bin/boss`
+from the converged image (`infra/estate/install-cli-from-image.sh`),
+so a verb whose behaviour already exists as a `boss` verb names it
+directly — `run-car-probe` is `["boss", "prove", "{1}", "--from-car",
+"--unattended"]` — and the shell twin that re-implemented it on the
+host is deleted with its pin. The runner hands such a verb its own
+account as `BOSS_ACTOR` (the CLI refuses an unnamed write) and the
+system of record from its unit's `EnvironmentFile`; the verb's exit
+code is the packet's `exit_code`, so a CLI verb run this way must make
+its exit the verdict. The remaining twins retire the same way, one
+verb per car, each measured first (which of the script's behaviours
+the CLI verb lacks — the argument shape, the refusals, the output a
+reader of the packet expects, the host-side actions a CLI verb cannot
+do from the system of record alone).
+
 `hosts` is WHICH HOSTS THE VERB SERVES — the estate node ids (`nodes.id`
 in `infra/postgres/schema`, the same string a packet's `metadata.host`
 carries) whose runner will execute it. REQUIRED, and ABSENT MEANS

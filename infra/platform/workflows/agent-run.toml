@@ -1,0 +1,145 @@
+# ---------------------------------------------------------------------------
+# agent-run — one agent's execution of one protocol step, as a packet.
+#
+# THE MIDDLE THIRD, MADE VISIBLE (design c87fb59b, decided 2026-09-18;
+# car 2, backlog 39d0b528). Car 1 gave a protocol step its `agent`
+# block — profile, model, budget, effort — so the row says HOW an agent
+# runs the step. What was still invisible was the run itself: a builder
+# dispatched from the pod existed only in an operator's terminal, and a
+# builder that died left nothing that aged. Measured 2026-09-18 over the
+# backlog-items read for car 1, `build` was completed 74 times by the
+# car-merged rule on a builder's behalf, and not one of those builds had
+# a packet of its own while it ran — the crew board's BUILDING lane could
+# only infer one from a branch with no gate-run behind it.
+#
+# `boss dispatch <packet>` opens one of these at the claim: it claims the
+# step as the running actor, files this packet, writes the brief, the
+# model, the budget, the worktree and the host onto it, prints the exact
+# prompt, and completes `briefed`. From there the run is a packet like
+# any other — it sits on /it/crew, it ages, and a rule closes it.
+#
+# THREE TERMINALS, EACH REACHED BY A DIFFERENT HAND:
+#   landed  — `building` is completed by the rule that reads the run's
+#             gate going green (`agent-run-lands-on-gate-green`:
+#             jobs.complete_linked_step keyed by `metadata.agent_run` on
+#             the gate-run, which `boss gate` records when BOSS_AGENT_RUN
+#             is set); that opens `reported`, which records the builder's
+#             handback — by the operator who read it today, by the
+#             runner later — and the run lands on it. No rule ever
+#             writes the report, because a summary the machine invents
+#             is not the builder's.
+#   refused — the builder stopped without building (the claim no longer
+#             held on main, the packet was a duplicate): `building`
+#             completed by hand with `result = refused`.
+#   died    — the builder went silent: `building` is completed with
+#             `result = died` by the hourly clock rule
+#             `agent-run-dies-when-building-is-silent` once the packet
+#             has not moved for 2x this step's `duration_hours`. A
+#             builder that dies is a packet that ages, which is the whole
+#             reason the run is a packet.
+#
+# `result` is REQUIRED and enum-checked on `building`, so the fork below
+# is total: every value routes somewhere, and a run cannot close without
+# saying which way it went.
+#
+# The metadata schema names what `boss dispatch` writes: `packet` (the
+# step's job), `step` (its slug), `agent` (the actor id), `model`,
+# `budget_usd`, `effort`, `worktree`, `host`, and what later hands add —
+# `gate_run` and `car` (by the landing rule's evidence), `spend_usd` and
+# `tokens` (by the report). Only the dispatch-time keys are required.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "agent-run"
+label = "Agent run"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "One agent's execution of one protocol step, as a packet: claimed at dispatch, briefed with the exact prompt, building until the run's gate goes green (landed), the builder stops without building (refused), or the packet goes silent past twice the step's duration (died). The middle third of the operator surface — a builder that dies is a packet that ages."
+metadata = { owner_role = "platform-admin" }
+metadata_schema = { type = "object", required = ["packet", "step", "agent", "model", "budget_usd", "effort"], properties = { packet = { type = "string", description = "The job whose step this run executes." }, step = { type = "string", description = "The step's spec_slug on that job." }, agent = { type = "string", description = "The actor id the run signs as." }, model = { type = "string" }, budget_usd = { type = "number" }, effort = { type = "string" }, worktree = { type = "string" }, host = { type = "string" }, gate_run = { type = "string" }, car = { type = "string" }, spend_usd = { type = "number" }, tokens = { type = "number" } } }
+
+[[workflow.step]]
+title = "claimed"
+kind = "trigger"
+ready_when = "true"
+title_template = "Step claimed by the agent"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "boss-dispatch" }
+
+# Done BY `boss dispatch` the moment it has printed the prompt: the
+# brief, the rules document for the profile, and the run id. The record
+# of what the agent was told is the packet's own `brief` key; this step
+# says it was handed over, and how large it was.
+[[workflow.step]]
+title = "briefed"
+kind = "task"
+ready_when = "steps.claimed.done"
+title_template = "Prompt printed"
+authority_role = "platform-admin"
+fields = [
+  { name = "prompt_bytes", field_type = "string", required = true },
+]
+
+# The run. Two hours is the builder's measured shape on this pod (six
+# green first-try in one 2026-09-14 session, none over ninety minutes
+# to gate launch), and the clock rule reads its bound as 2x this value —
+# pinned equal by platform_bundle_agent_run.rs, because the number lives
+# in two files (CLAUDE.md 9a).
+[[workflow.step]]
+title = "building"
+kind = "task"
+ready_when = "steps.briefed.done"
+title_template = "Building"
+authority_role = "platform-admin"
+duration_hours = 2.0
+fields = [
+  { name = "result", field_type = "gated|refused|died", required = true },
+]
+
+# The builder's handback (rule 8 of the rules document): packet, branch,
+# sha, gate packet, what changed, what it saw. Opens on the green —
+# the handback itself arrives at gate launch, ten minutes earlier, and
+# until this step opens it rides the packet's metadata (`boss job
+# patch`), which any hand can write at any time; this step is the
+# acknowledgement that the report is on the record, and it is what the
+# run lands on. Recorded by the operator who read it today and by the
+# runner later; never by a rule. It follows `building` rather than
+# sitting beside it because the viability lint proves the `result`
+# fork total by evaluating each successor with ONLY the fork done, and
+# a terminal that also needed this step would read as an orphan
+# outcome.
+[[workflow.step]]
+title = "reported"
+kind = "task"
+ready_when = "steps.building.done AND steps.building.metadata.result = \"gated\""
+title_template = "Report recorded"
+authority_role = "platform-admin"
+fields = [
+  { name = "summary", field_type = "string", required = true },
+  { name = "spend_usd", field_type = "string" },
+  { name = "tokens", field_type = "string" },
+]
+
+[[workflow.step]]
+title = "landed"
+kind = "outcome"
+ready_when = "steps.reported.done"
+title_template = "Landed — gate green, report recorded"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "landed" }
+
+[[workflow.step]]
+title = "refused"
+kind = "outcome"
+ready_when = "steps.building.done AND steps.building.metadata.result = \"refused\""
+title_template = "Refused — the builder stopped without building"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "refused" }
+
+[[workflow.step]]
+title = "died"
+kind = "outcome"
+ready_when = "steps.building.done AND steps.building.metadata.result = \"died\""
+title_template = "Died — silent past twice the build's duration"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "died" }

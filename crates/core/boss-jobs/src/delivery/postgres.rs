@@ -9,11 +9,17 @@
 //! boarded" confidently and wrongly.
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
-use super::port::{DeliveryPolicyError, DeliveryPolicyRepository};
-use super::types::DeliveryPolicyRow;
+use super::port::{DeliveryPolicyError, DeliveryPolicyRegistry, DeliveryPolicyRepository};
+use super::types::{DeliveryPolicyRow, DeliveryPolicySpec};
+use crate::registry::WorkflowStatus;
 
+/// The policy columns, ONCE, for every SELECT and the seed's INSERT
+/// on the table. A column added to the row is added here, and (since
+/// the bundle seed reads the same list) a column missing here is one
+/// the equality pin cannot compare.
 const COLUMNS: &str = "name, version, max_red_trains, stall_hours, \
                        consist_budget_secs, consist_output_budget, consist_files_named, \
                        skip_reason_file_budget, blip_cause_budget, ci_host_floor_gb, \
@@ -83,5 +89,93 @@ impl DeliveryPolicyRepository for PgDeliveryPolicy {
         .await
         .map_err(storage)?;
         row.as_ref().map(row_of).transpose()
+    }
+}
+
+#[async_trait]
+impl DeliveryPolicyRegistry for PgDeliveryPolicy {
+    async fn live_versions(
+        &self,
+        name: &str,
+    ) -> Result<Vec<DeliveryPolicySpec>, DeliveryPolicyError> {
+        let rows = sqlx::query(&format!(
+            "SELECT status, created_at, {COLUMNS} \
+             FROM delivery_policy WHERE name = $1 ORDER BY version"
+        ))
+        .bind(name)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        rows.iter()
+            .map(|row| {
+                let status: String = row.try_get("status").map_err(storage)?;
+                Ok(DeliveryPolicySpec {
+                    status: status.parse().map_err(DeliveryPolicyError::Storage)?,
+                    row: row_of(row)?,
+                    created_at: row.try_get("created_at").map_err(storage)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn publish_declared(
+        &self,
+        mut spec: DeliveryPolicySpec,
+        _actor: &boss_core::actor::ActorId,
+        now: DateTime<Utc>,
+    ) -> Result<DeliveryPolicySpec, DeliveryPolicyError> {
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+
+        let exists: Option<(i32,)> =
+            sqlx::query_as("SELECT version FROM delivery_policy WHERE name = $1 AND version = $2")
+                .bind(spec.name())
+                .bind(spec.version())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage)?;
+        if exists.is_some() {
+            return Err(DeliveryPolicyError::Conflict(format!(
+                "row already exists: {}@{}",
+                spec.name(),
+                spec.version()
+            )));
+        }
+
+        // RETIRE BY NAME, THEN INSERT — the order 202609050500 used, and
+        // the one `delivery_policy_one_active_per_name` demands: a plain
+        // partial unique index, enforced per statement.
+        sqlx::query(
+            "UPDATE delivery_policy SET status = 'retired' WHERE name = $1 AND status = 'active'",
+        )
+        .bind(spec.name())
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+
+        spec.status = WorkflowStatus::Active;
+        spec.created_at = now;
+        let r = &spec.row;
+        sqlx::query(&format!(
+            "INSERT INTO delivery_policy (status, created_at, {COLUMNS}) \
+             VALUES ('active', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"
+        ))
+        .bind(spec.created_at)
+        .bind(&r.name)
+        .bind(r.version)
+        .bind(r.max_red_trains)
+        .bind(r.stall_hours)
+        .bind(r.consist_budget_secs)
+        .bind(r.consist_output_budget)
+        .bind(r.consist_files_named)
+        .bind(r.skip_reason_file_budget)
+        .bind(r.blip_cause_budget)
+        .bind(r.ci_host_floor_gb)
+        .bind(r.gate_max_concurrent)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+
+        tx.commit().await.map_err(storage)?;
+        Ok(spec)
     }
 }

@@ -4,7 +4,7 @@
 //! things later RUN it: `boss gate --park-probe` admits the text,
 //! `boss prove --probe / --from-car / --recheck` runs it by hand, the
 //! `jobs.run-car-probes` rule ships it to the forge on arrival, and
-//! `infra/forge/run-car-probe.sh` executes it there. The rules about
+//! `boss prove --from-car --unattended` executes it there. The rules about
 //! which text is worth running live HERE, in one place all of those can
 //! reach, because the alternative is what backlog 23b2dffa found: the
 //! gate refused two shapes of bad probe, the hand verb refused neither,
@@ -53,7 +53,7 @@ use serde_json::Value;
 ///
 /// A `--park-probe` is written on the dev pod (kubectl, a kubeconfig,
 /// the cluster one hop away) and RUN on the forge
-/// (`infra/forge/run-car-probe.sh`, as david, in /home/david/boss, when
+/// (`boss prove --from-car --unattended`, as david, in /home/david/boss, when
 /// the car's train arrives). Two machines. The forge is outside the
 /// cluster and holds no kubeconfig, so a probe that reaches for
 /// `kubectl` is correct and unrunnable — and its failure at arrival is
@@ -134,7 +134,7 @@ const ACTOR_VARS: [&str; 2] = ["BOSS_ACTOR", "BOSS_ACTOR_FILE"];
 /// READ is not a list of read-safe verbs — the CLI holds no such
 /// classification of its subcommands, and the split runs by flag as
 /// often as by verb — but an actor: the probe's env names none
-/// (`infra/forge/run-car-probe.sh` exports exactly `BOSS_JOBS_URL`,
+/// (the unattended door hands it exactly `BOSS_JOBS_URL`,
 /// `BOSS_PROBE_NOTFOUND`, [`SOR_USER_VAR`], `BOSS_SOR_PORTS` and
 /// `PATH`), and the CLI refuses an unnamed WRITE by its own rule while
 /// an unnamed READ goes out signed `operator:unidentified` under the
@@ -783,7 +783,7 @@ mod tests {
 
     /// A PROBE PROVES, IT DOES NOT ACT. The one thing that turns the
     /// forge's `boss` into a writer is an actor: the probe's env names
-    /// none (run-car-probe.sh exports exactly BOSS_JOBS_URL,
+    /// none (the unattended prove door hands it exactly BOSS_JOBS_URL,
     /// BOSS_PROBE_NOTFOUND, BOSS_SOR_USER, BOSS_SOR_PORTS and PATH), and
     /// the CLI refuses an unnamed write by its own rule
     /// (boss-cli identity.rs). So the probe's TEXT is the only place an
@@ -837,7 +837,7 @@ mod tests {
     #[test]
     fn a_mention_and_a_named_reader_are_both_allowed() {
         for probe in [
-            "grep -c BOSS_JOBS_URL infra/forge/run-car-probe.sh",
+            "grep -c BOSS_JOBS_URL infra/ops/ops-runner.sh",
             "test -n \"$BOSS_JOBS_URL\" && echo claim-ok",
             "boss-sor-read /api/yard/status | grep -q dock_depth",
             "curl -fsS -H \"x-boss-user: $BOSS_SOR_USER\" $BOSS_JOBS_URL/api/yard/status | grep -q x",
@@ -1050,7 +1050,7 @@ echo "ONE-HOME-FOR-A-DISPATCHER-RULE""#;
             "curl -fsS x | jq 'if (.a==1) then empty else error(\"no\") end'",
             "curl -fsS x | jq -e '.a == 1'",
             "curl -fsS x | jq -e --arg k v '.a == $k'",
-            "grep -c empty infra/forge/run-car-probe.sh",
+            "grep -c empty infra/ops/ops-runner.sh",
         ] {
             assert!(
                 !asserts_its_own_negation(probe),

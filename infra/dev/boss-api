@@ -46,7 +46,7 @@
 # (../forge/probe-bin/sor-routes.sh, `sor_service_for_path`) and the
 # PORT from a `name=port` table: BOSS_SOR_PORTS when set, else
 # ../forge/sor-ports.env read as data from beside this file — the same
-# file the forge's run-car-probe.sh hands its reader, pinned to
+# file the forge's unattended prove door hands its reader, pinned to
 # boss-ports by the_machine_door_carries_every_read_surface.rs. The host
 # is kept; only the port moves. Absent both tables nothing is routed
 # (the door as it was); a table that lacks the routed service is
@@ -81,7 +81,7 @@ BASE=${BOSS_JOBS_URL:-$(head -n1 "$SOR_URL_FILE" 2>/dev/null || true)}
 
 # The port table: BOSS_SOR_PORTS, else the forge's env file read as
 # data (`#` and blank lines dropped, one space-separated line) the way
-# run-car-probe.sh reads it. Absent both, nothing below routes.
+# boss prove --unattended reads it. Absent both, nothing below routes.
 SOR_PORTS_FILE="$HERE/../forge/sor-ports.env"
 SOR_PORTS=${BOSS_SOR_PORTS:-}; SOR_PORTS_FROM=BOSS_SOR_PORTS
 if [ -z "$SOR_PORTS" ] && [ -r "$SOR_PORTS_FILE" ]; then

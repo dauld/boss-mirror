@@ -145,7 +145,8 @@ explained the failure (`probe::rewrites_its_exit_status` warns on it).
 The one thing about a probe that is easy to get wrong. A probe is
 **authored** on the dev pod, where the cluster is one hop away, and
 **run** on the **forge host** — as `david`, in `/home/david/boss`, with
-that host's tools, by `infra/forge/run-car-probe.sh`. Two machines. The
+that host's tools, by `boss prove --from-car --unattended` (the shell twin
+run-car-probe.sh until 9f00a805 car 2). Two machines. The
 forge is outside the cluster and holds no kubeconfig, so a probe that
 reaches for `kubectl` is correct and unrunnable.
 

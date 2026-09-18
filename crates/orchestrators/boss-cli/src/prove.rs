@@ -94,47 +94,38 @@ pub(crate) struct Outcome {
 
 /// Run `probe` through a shell and capture everything it did.
 pub(crate) fn execute(probe: &str) -> Result<Outcome> {
-    execute_in(probe, None)
+    execute_with(probe, &Shell::here(None))
 }
 
-/// THE FORGE RUNNER'S OWN TEXT, compiled in so this door can run the
-/// same prelude the arrival rule runs — one definition, lifted between
-/// the markers boss-testing's run_car_probe_sh.rs lifts, never restated
-/// (CLAUDE.md §9a). The tests read the same constant for the judge and
-/// verdict blocks.
-const FORGE_RUNNER: &str = include_str!("../../../../infra/forge/run-car-probe.sh");
-
-/// The text of run-car-probe.sh from one marker up to the next. The
-/// opening marker rides along: every marker is a whole comment line, or
-/// the head of one. Refuses by name when the script lost a marker, so a
-/// refactor there fails here in the same commit.
-pub(crate) fn forge_block(begin: &str, end: &str) -> Result<&'static str> {
-    let a = FORGE_RUNNER
-        .find(begin)
-        .ok_or_else(|| anyhow::anyhow!("run-car-probe.sh lost its {begin} marker"))?;
-    let b = FORGE_RUNNER[a..]
-        .find(end)
-        .ok_or_else(|| anyhow::anyhow!("run-car-probe.sh lost its {end} marker"))?;
-    Ok(&FORGE_RUNNER[a..a + b])
-}
-
-/// THE UNRUNNABLE PRELUDE (backlog 46f67333). The forge runner puts this
-/// ahead of every probe's text: fd 9 opened on a not-found channel
-/// before the probe can redirect anything, and a
+/// THE UNRUNNABLE PRELUDE (backlog 46f67333). Every probe's shell gets
+/// this ahead of the probe's own text: fd 9 opened on a not-found
+/// channel before the probe can redirect anything, and a
 /// `command_not_found_handle` that writes every unresolved command to
 /// it — so a probe that pipes its own stderr into a `grep -q` still
-/// cannot hide which tool was missing (f9304366). Until this door ran
-/// the same prelude, a tool absent on the operator's machine read as
-/// CANNOT BE READ or NOT PROVEN here and DID NOT RUN on the forge: a
-/// verdict about the machine recorded as a verdict about the claim, and
-/// the two doors disagreeing about one probe.
-pub(crate) fn forge_prelude() -> Result<&'static str> {
-    forge_block("# PROBE-PRELUDE-BEGIN", "# PROBE-PRELUDE-END")
+/// cannot hide which tool was missing (f9304366). The handler ALSO
+/// prints bash's usual message, so nothing is taken away; if fd 9
+/// cannot be opened the probe still runs, with an empty channel.
+///
+/// ONE DEFINITION, ONE DOOR. Until backlog 9f00a805 (car 2, 2026-09-18)
+/// this text lived in the forge's shell twin, infra/forge/run-car-
+/// probe.sh, between markers this crate `include_str!`d and lifted at
+/// build time, and the hand door ran the forge's prelude so the two
+/// could not disagree. The twin is retired — the arrival rule's
+/// ops-request runs `boss prove <car> --from-car --unattended` on the
+/// forge — so the prelude, the judge, the verdict sentences and the
+/// attempt record are written here once and nowhere else.
+pub(crate) const PRELUDE: &str = r#"
+{ exec 9>>"${BOSS_PROBE_NOTFOUND:-/dev/null}"; } 2>/dev/null || exec 9>/dev/null
+command_not_found_handle() {
+    printf "%s: command not found\n" "$1" >&2
+    printf "%s\n" "$1" >&9
+    return 127
 }
+"#;
 
-/// The channel, read as the runner reads it: `sort -u`, blank lines
-/// dropped. Pure, so the record's `missing_tools` is testable without a
-/// shell.
+/// The channel, read as the forge's runner read it: `sort -u`, blank
+/// lines dropped. Pure, so the record's `missing_tools` is testable
+/// without a shell.
 pub(crate) fn missing_tools(channel: &str) -> Vec<String> {
     let mut tools: Vec<String> = channel
         .lines()
@@ -147,23 +138,113 @@ pub(crate) fn missing_tools(channel: &str) -> Vec<String> {
     tools
 }
 
+/// The seconds `timeout` waits after its TERM before the KILL — the
+/// forge runner's `timeout -k 5`, kept.
+const KILL_AFTER_SECS: u64 = 5;
+
+/// WHERE, AS WHOM AND UNDER WHAT A PROBE'S SHELL RUNS. The hand door
+/// ([`Shell::here`]) is the operator's own shell: this user, this
+/// directory (or the recorded one under `--recheck`), no timeout, the
+/// environment as it is. The unattended door ([`Shell::unattended`]) is
+/// what the forge's shell twin did and what the ops-request now asks
+/// `boss prove --unattended` to do: drop from root to the probe user,
+/// run in the converged checkout, under a timeout, with exactly the
+/// environment a recorded probe is promised — the system of record's
+/// address, the read-only reader's identity and port table, and
+/// `probe-bin` first on PATH — and WITHOUT the actor this verb writes
+/// as, which is a write credential handed to program text a builder
+/// wrote if it leaks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Shell {
+    pub cwd: Option<std::path::PathBuf>,
+    /// The user to run as, when this process is root — the forge's
+    /// `runuser -u david`. A process that is not root runs the probe
+    /// as itself, the twin's by-hand path: a person who is already the
+    /// probe user.
+    pub user: Option<String>,
+    /// Seconds before the probe is killed; `None` at the hand door.
+    pub timeout_secs: Option<u64>,
+    /// Set on the probe's environment, after `strip`.
+    pub env: Vec<(String, String)>,
+    /// Removed from the probe's environment.
+    pub strip: Vec<String>,
+    /// Prepended to the probe's PATH, colon-separated.
+    pub path_prefix: Option<std::path::PathBuf>,
+}
+
+impl Shell {
+    /// The hand door's shell: as the operator, in `cwd` when given.
+    pub(crate) fn here(cwd: Option<&Path>) -> Self {
+        Self {
+            cwd: cwd.map(Path::to_path_buf),
+            user: None,
+            timeout_secs: None,
+            env: Vec::new(),
+            strip: Vec::new(),
+            path_prefix: None,
+        }
+    }
+
+    /// The argv the shell runs — `timeout`, `runuser` and `bash -c` in
+    /// the forge runner's order — with the prelude ahead of the probe's
+    /// text. Pure, so the test pins the words rather than a run.
+    pub(crate) fn command_line(&self, probe: &str, as_root: bool) -> Vec<String> {
+        let mut argv = Vec::new();
+        if let Some(t) = self.timeout_secs {
+            argv.extend(
+                [
+                    "timeout",
+                    "-k",
+                    &KILL_AFTER_SECS.to_string(),
+                    &t.to_string(),
+                ]
+                .map(str::to_string),
+            );
+        }
+        if let (Some(u), true) = (&self.user, as_root) {
+            argv.extend(["runuser", "-u", u, "--"].map(str::to_string));
+        }
+        argv.extend(["bash", "-c", &format!("{PRELUDE}\n{probe}")].map(str::to_string));
+        argv
+    }
+}
+
+/// Is this process root? Asked of `id -u`, the way the forge runner
+/// asked it, so no libc binding rides in for one question.
+fn running_as_root() -> bool {
+    std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+}
+
 /// As [`execute`], but in a stated directory — what `--recheck` uses to
 /// put the probe back where it was recorded.
+pub(crate) fn execute_in(probe: &str, cwd: Option<&Path>) -> Result<Outcome> {
+    execute_with(probe, &Shell::here(cwd))
+}
+
+/// Run `probe` in `shell` and capture everything it did.
 ///
 /// `bash`, not `sh`, because the prelude's handler is a bash facility
-/// and because the forge runs the same text under `bash -c` — a probe
-/// should mean one thing at both doors. On a bash too old for the
-/// handler (macOS's 3.2) the channel stays empty and the verdict falls
-/// back to what it was: `command not found` on stderr, read as a red.
-pub(crate) fn execute_in(probe: &str, cwd: Option<&Path>) -> Result<Outcome> {
-    let prelude = forge_prelude()?;
+/// and because the forge ran the same text under `bash -c` — a probe
+/// means one thing at both doors. On a bash too old for the handler
+/// (macOS's 3.2) the channel stays empty and the verdict falls back to
+/// what it was: `command not found` on stderr, read as a red.
+pub(crate) fn execute_with(probe: &str, shell: &Shell) -> Result<Outcome> {
+    let as_root = shell.user.is_some() && running_as_root();
     // The channel: a file of this process's own, named so two operators
     // (or two rechecks) on one box never share it. It is created empty
     // and removed after the read; the prelude opens it for append. As
     // on the forge, the channel must not be able to take the probe down
     // with it: a temp dir that refuses the file leaves the env unset,
     // the prelude falls back to /dev/null, and the probe still runs —
-    // with an empty channel, which reads as today's verdict.
+    // with an empty channel, which reads as today's verdict. When the
+    // probe runs as another user the file is opened to everyone (the
+    // forge's `chmod 666`): it holds command names and nothing else,
+    // and a channel the probe cannot append to is a channel that never
+    // names the tool.
     let channel = std::env::temp_dir().join(format!(
         "boss-prove-notfound-{}-{}",
         std::process::id(),
@@ -173,18 +254,34 @@ pub(crate) fn execute_in(probe: &str, cwd: Option<&Path>) -> Result<Outcome> {
             .unwrap_or(0)
     ));
     let channel = std::fs::write(&channel, "").is_ok().then_some(channel);
-    let mut cmd = std::process::Command::new("bash");
-    if let Some(dir) = cwd {
+    #[cfg(unix)]
+    if let (Some(c), true) = (&channel, as_root) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(c, std::fs::Permissions::from_mode(0o666));
+    }
+    let argv = shell.command_line(probe, as_root);
+    let mut cmd = std::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..]);
+    if let Some(dir) = &shell.cwd {
         cmd.current_dir(dir);
+    }
+    for name in &shell.strip {
+        cmd.env_remove(name);
+    }
+    for (k, v) in &shell.env {
+        cmd.env(k, v);
+    }
+    if let Some(prefix) = &shell.path_prefix {
+        let path = std::env::var("PATH").unwrap_or_default();
+        cmd.env("PATH", format!("{}:{path}", prefix.display()));
     }
     if let Some(c) = &channel {
         cmd.env("BOSS_PROBE_NOTFOUND", c);
     }
     let out = cmd
-        .arg("-c")
-        .arg(format!("{prelude}\n{probe}"))
+        .stdin(std::process::Stdio::null())
         .output()
-        .map_err(|e| anyhow::anyhow!("could not run the probe: {e}"));
+        .map_err(|e| anyhow::anyhow!("could not run the probe ({}): {e}", argv[0]));
     let caught = channel
         .as_deref()
         .map(|c| {
@@ -194,15 +291,25 @@ pub(crate) fn execute_in(probe: &str, cwd: Option<&Path>) -> Result<Outcome> {
         })
         .unwrap_or_default();
     let out = out?;
+    // A signalled probe reports no code; -1 is recorded rather than
+    // silently becoming 0, because "killed" must not read as "passed".
+    let exit = out.status.code().unwrap_or(-1);
+    let mut stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    // `timeout` exits 124 for a probe it had to stop; the record says
+    // so where the probe's own last words are, as the forge's did.
+    if let (Some(t), TIMEOUT_EXIT) = (shell.timeout_secs, exit) {
+        stderr.push_str(&format!("\n[boss prove: killed at {t}s timeout]\n"));
+    }
     Ok(Outcome {
-        // A signalled probe reports no code; -1 is recorded rather than
-        // silently becoming 0, because "killed" must not read as "passed".
-        exit: out.status.code().unwrap_or(-1),
+        exit,
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        stderr,
         missing_tools: missing_tools(&caught),
     })
 }
+
+/// What `timeout(1)` exits when the command it ran did not finish.
+const TIMEOUT_EXIT: i32 = 124;
 
 /// Is this expectation a bare number?
 ///
@@ -405,12 +512,9 @@ pub(crate) fn failure_diagnosis(probe: &str, o: &Outcome) -> Option<String> {
 /// expected`: jq printed null, `[ "$n" -ge 1 ]` exited 2, and the `||`
 /// branch meant for "no such packet yet" exited 75. Nothing was judged.
 ///
-/// The forge runner (infra/forge/run-car-probe.sh) composes its own
-/// verdict in shell, on a host with no `boss` binary, so it carries this
-/// list as a grep pattern rather than reading it here. Two copies, one
-/// equality test: `the_forge_runner_names_the_same_crashes` runs the
-/// script's verdict block over every entry, so an entry added on one
-/// side and not the other fails by name (CLAUDE.md §9a).
+/// Until backlog 9f00a805 (car 2) the forge's shell twin carried this
+/// list a second time, as a grep pattern, pinned equal by a test; the
+/// twin is retired and this is the one copy.
 pub(crate) const NUMERIC_CRASH_MARKERS: [&str; 3] = [
     "integer expression expected",
     "unary operator expected",
@@ -441,21 +545,29 @@ pub(crate) fn judge_probe(probe: &str, o: &Outcome, expect: Option<&str>) -> Res
 /// THE EXIT CODE THAT MEANS "NOT YET" — the probe's, and now this
 /// verb's. 75 is EX_TEMPFAIL, the code a recorded probe exits with
 /// when the world is not ready to judge the claim ("not yet: no
-/// disk-report request carrying for_sweep yet"). The forge runner
-/// (infra/forge/run-car-probe.sh) exits 75 itself in that case so the
-/// ops-request carries the verdict; this verb exits the same number
-/// for the same reason, so a script wrapping either door tells the
-/// three answers apart the same way.
+/// disk-report request carrying for_sweep yet"). This verb exits the
+/// same number for the same reason — under `--unattended` that IS the
+/// ops-request's `exit_code`, the verdict a reader of the packet sees
+/// first — so a script wrapping either door tells the three answers
+/// apart the same way.
 pub(crate) const NOT_YET_EXIT: i32 = 75;
 
-/// THE EXIT CODE THAT MEANS "COULD NOT RUN HERE" — the forge runner's
-/// third code (46f67333). run-car-probe.sh exits 3 when fd 9 caught a
-/// tool, 75 when the probe ran and said not yet, 1 when it ran and did
-/// not prove: three different things to do about it, so three numbers
-/// for the ops-request to carry. This verb exits the same 3 for the same
-/// finding; `the_hand_door_exits_the_forges_unrunnable_code` reads the
-/// shell line so the two cannot drift.
+/// THE EXIT CODE THAT MEANS "COULD NOT RUN HERE" — the third code
+/// (46f67333). 3 when fd 9 caught a tool, 75 when the probe ran and
+/// said not yet, 1 when it ran and did not prove: three different
+/// things to do about it, so three numbers for the ops-request to
+/// carry. The forge's shell twin exited the same three until it was
+/// retired (9f00a805 car 2); `the_unattended_door_exits_one_of_three_codes`
+/// pins them here.
 pub(crate) const UNRUNNABLE_EXIT: i32 = 3;
+
+/// THE EXIT CODE THAT MEANS "REFUSED" at the unattended door — the
+/// forge runner's `refuse`, kept: the car is not a merged ship-a-change
+/// car with a recorded probe and an open `proven` step, so nothing ran
+/// and nothing was judged. Distinct from 1 (ran, not proven) so a
+/// reader of the ops-request does not go looking for a probe run that
+/// never happened.
+pub(crate) const REFUSED_EXIT: i32 = 2;
 
 /// THE THREE-WAY READING (backlog 726562de). Two doors run a car's
 /// probe, and until 2026-09-14 they read exit 75 in opposite
@@ -524,8 +636,8 @@ pub(crate) fn verdict(probe: &str, o: &Outcome, expect: Option<&str>) -> Verdict
 /// stderr, else of stdout, trimmed and cut as the forge cuts it (300
 /// characters). stderr first because that is where a tool puts its
 /// diagnosis — jq's `error(…)`, curl's message, bash's command-not-
-/// found. Mirrors run-car-probe.sh's `said`, so the reason clause both
-/// doors quote is the same line.
+/// found. One definition, so the reason clause both doors quote is the
+/// same line.
 pub(crate) fn what_it_said(o: &Outcome) -> Option<String> {
     o.stderr
         .lines()
@@ -536,12 +648,10 @@ pub(crate) fn what_it_said(o: &Outcome) -> Option<String> {
 }
 
 /// THE NOT-YET SENTENCE — `proof_attempt.why` when the probe said not
-/// yet, and what the operator reads. Pinned word-for-word against the
-/// forge's verdict block by
-/// `the_forge_runner_gives_the_same_verdict_for_every_outcome`: the
-/// lead word, the reason clause, and the disclaimer that this is not a
-/// verdict against the change are load-bearing text a reader of the
-/// car acts on, and must not depend on which door ran the probe.
+/// yet, and what the operator reads. The lead word, the reason clause,
+/// and the disclaimer that this is not a verdict against the change
+/// are load-bearing text a reader of the car acts on; both doors
+/// compose it here, so it cannot depend on which door ran the probe.
 pub(crate) fn not_yet_why(host: &str, said: &str) -> String {
     format!(
         "NOT YET: the probe ran on {host} and said the claim cannot be judged until \
@@ -551,31 +661,52 @@ pub(crate) fn not_yet_why(host: &str, said: &str) -> String {
 }
 
 /// THE DID-NOT-RUN SENTENCE — `proof_attempt.why` when the channel
-/// named a tool, and what the operator reads. Pinned against the forge's
-/// verdict block by `the_forge_runner_gives_the_same_verdict_for_every_outcome`
-/// on the load-bearing text: the lead word, the `on <host>: <tools> not
-/// found` clause a reader acts on, and the disclaimer that this says
-/// nothing about the change. The middle sentence is the door's own —
-/// the forge's names the forge host and its vantage, this one names the
-/// machine the operator is standing at — because what to do instead
-/// differs by door (`boss_jobs::probe`).
+/// named a tool, and what the operator reads. The lead word, the `on
+/// <host>: <tools> not found` clause a reader acts on, and the
+/// disclaimer that this says nothing about the change are the same at
+/// both doors. The middle sentence is the door's own — the unattended
+/// door names the forge host's vantage (the probe user and the
+/// converged checkout), the hand door names the machine the operator
+/// is standing at — because what to do instead differs by door
+/// (`boss_jobs::probe`).
 pub(crate) fn unrunnable_why(host: &str, missing: &[String]) -> String {
     format!(
         "THE PROBE DID NOT RUN on {host}: {list} not found. It ran HERE, as you, with this \
          machine's PATH, and bash could not resolve the tool, so nothing about the claim was \
-         judged — the same finding the forge runner records from its fd-9 channel. This says \
-         nothing about whether the change works; re-probe from a vantage this host has, or \
-         record the car as event-bound.",
+         judged — the same finding the unattended door records from its fd-9 channel. This \
+         says nothing about whether the change works; re-probe from a vantage this host has, \
+         or record the car as event-bound.",
         list = missing.join(", ")
+    )
+}
+
+/// [`unrunnable_why`] as the unattended door says it: the forge host,
+/// the user the probe ran as, the checkout it ran in — and where the
+/// tool the builder reached for actually lives (f9304366: two kubectl
+/// probes, correct from the pod, impossible on the forge).
+pub(crate) fn unrunnable_why_unattended(
+    host: &str,
+    missing: &[String],
+    user: &str,
+    dir: &Path,
+) -> String {
+    format!(
+        "THE PROBE DID NOT RUN on {host}: {list} not found. A recorded probe runs on the \
+         forge host as {user} in {dir}, with this host's tools — not on the dev pod where it \
+         was written, which is where cluster tools like kubectl live. This says nothing about \
+         whether the change works; re-probe from a vantage this host has, or record the car \
+         as event-bound.",
+        list = missing.join(", "),
+        dir = dir.display(),
     )
 }
 
 /// THE ATTEMPT RECORD — a run that settled nothing, written on the CAR
 /// (`metadata.proof_attempt`, via the merge-PATCH), never on the step,
-/// which stays open. The shape is the forge runner's, key for key:
-/// `the_hand_door_records_the_forges_attempt_shape` pins the two
-/// records equal, because `--recheck`, `boss orient` and the yard's
-/// shed read one shape and must not learn which door wrote it.
+/// which stays open. One shape from both doors, because `--recheck`,
+/// `boss orient` and the yard's shed (`apps/web/src/it/yard/yard.ts`,
+/// `proofAttempt`) read it and must not learn which door wrote it;
+/// `the_attempt_record_carries_the_keys_the_yard_reads` names the keys.
 /// `unrunnable` and `missing_tools` are the not-found channel's
 /// finding, from whichever door ran the prelude (46f67333). `expect` is
 /// `null` under `--exit-only`, as `proof_json` records it.
@@ -660,10 +791,10 @@ pub(crate) fn attempt_json(
 /// (`ParkIntent::probe_warnings`), because that is the door where the
 /// measured probe was admitted and the one moment the shape is cheap to
 /// fix. Neither is said at the two UNATTENDED doors — the arrival rule
-/// and the forge runner — because nothing there reads a warning, and a
+/// and `--unattended` — because nothing there reads a warning, and a
 /// check nobody reads is a check that is not running (CLAUDE.md
 /// §Diagnosis). What those two got instead is a VERDICT that names one
-/// thing: [`failure_diagnosis`] here, and run-car-probe.sh's `why`.
+/// thing: [`failure_diagnosis`], and the `why` on the attempt record.
 pub(crate) const OVERRIDE_FLAG: &str = "--probe-anyway";
 
 pub(crate) use boss_jobs::probe::{GIT_TIME_RULE, UNIDENTIFIED_RULE, override_record};
@@ -843,10 +974,9 @@ pub(crate) fn override_reason(given: Option<&str>) -> Result<Option<&str>> {
 /// `--recheck` — so its field names are a contract, not a detail.
 /// `overridden` is the one optional key: present only when the
 /// operator ran a probe this door refused, absent otherwise, so its
-/// presence means something to whoever reads the proof back. The forge
-/// runner records no such key because it has no override door — which
-/// is why `the_forge_runner_records_the_same_proof_shape` pins the
-/// plain shape and this key is not in it.
+/// presence means something to whoever reads the proof back. The
+/// unattended door never writes it: it has no override, and a probe it
+/// refuses is refused on the ops-request, exit 2.
 pub(crate) fn proof_json(
     probe: &str,
     expect: Option<&str>,
@@ -1451,6 +1581,381 @@ fn proven_metadata(
     md
 }
 
+// ---------------------------------------------------------------------
+// THE UNATTENDED DOOR — `boss prove <car> --from-car --unattended`
+// ---------------------------------------------------------------------
+//
+// What the forge's ops-runner runs for a `run-car-probe` ops-request
+// (infra/ops/verbs/run-car-probe.json), filed by the dispatcher rule
+// run-car-probes-on-train-arrived for every car aboard an arrived
+// train that recorded a probe at park time, and again by
+// recheck-failing-probes-daily for a car whose last run settled
+// nothing. Until backlog 9f00a805 (consolidation H8, car 2) the verb
+// ran infra/forge/run-car-probe.sh — 482 lines of shell re-implementing
+// this file's judge, verdict and records, because the forge had no
+// `boss` binary; car 1 installs the tree's CLI there from the converged
+// image (infra/estate/install-cli-from-image.sh), so the twin is
+// retired and the ops-request runs this door instead. Measured before
+// choosing it: of the four candidate twins this was the only one with
+// a CLI verb to retire INTO (tenant-census.sh, retire-example-
+// reference-rows.sh and prune-registry-versions.sh have none), and the
+// gaps it had were these, each closed here:
+//
+//   - the probe runs as ANOTHER USER (root drops to $BOSS_PROBE_USER,
+//     default david) in the converged checkout ($BOSS_PROBE_DIR,
+//     default /home/david/boss) under a timeout ($BOSS_PROBE_TIMEOUT,
+//     default 60 s) — `Shell::unattended`;
+//   - the probe's environment is exactly what a recorded probe is
+//     promised: BOSS_JOBS_URL, a READ-ONLY reader identity as
+//     BOSS_SOR_USER (backlog 61085a9e — never this verb's own write
+//     actor, which is stripped), the reader's port table as
+//     BOSS_SOR_PORTS (design 28d2bed9, read as data from the checkout's
+//     infra/forge/sor-ports.env), and infra/forge/probe-bin first on
+//     PATH so `boss-sor-read` is the cheap thing to type;
+//   - every outcome lands on the car: PROVEN completes `proven` with
+//     the proof record (and `proven_by`, which the yard reads); every
+//     other verdict — NOT YET, NOT RUN, NOT PROVEN — stamps
+//     `proof_attempt` and leaves `proven` ready, where the hand door
+//     prints NOT PROVEN to the operator and records nothing;
+//   - the exit code IS the verdict the ops-request carries: 0 proven,
+//     1 not proven, 3 did not run, 75 not yet, 2 refused;
+//   - a refusal changes nothing and names why (exit 2); a car already
+//     proven is "nothing to run", exit 0, because the daily recheck
+//     re-files for a car whose attempt has since been settled by hand.
+
+/// THE READER A RECORDED PROBE READS THE SYSTEM OF RECORD AS (backlog
+/// 61085a9e). The probe is program text a builder wrote, run here as
+/// the probe user; the privilege matches the job — read the system of
+/// record, change nothing. `audit-readonly` is what core policy
+/// (boss-policy-client::defaults) grants Read at Scope::All on every
+/// shipped resource and NO other action anywhere: verified by effect on
+/// the live deployment, a PATCH and a step PUT under it both answered
+/// 403 while every list read matched the operator's. The fact lives
+/// here and in the policy defaults, and
+/// `the_probes_reader_role_can_read_everything_and_write_nothing` holds
+/// them equal (CLAUDE.md §9a). The id is the one the credentials door
+/// already names for this reader (`boss_jobs::credentials`).
+pub(crate) const READER_ACTOR: &str = "automation:run-car-probe-reader";
+pub(crate) const READER_ROLE: &str = "audit-readonly";
+
+/// The `x-boss-user` header a recorded probe's reader sends —
+/// `boss-sor-read` puts it on the wire verbatim.
+pub(crate) fn reader_header(id: &str) -> String {
+    json!({
+        "id": id,
+        "role": READER_ROLE,
+        "access_tier": "auditor",
+        "territory_account_ids": [],
+        "direct_report_ids": [],
+        "department": "platform",
+    })
+    .to_string()
+}
+
+/// The reader's port table, from `infra/forge/sor-ports.env` in the
+/// checkout the probe runs in: `name=port` lines, `#` comments and
+/// blanks dropped, one space between entries — the shape
+/// `boss-sor-read` parses from `BOSS_SOR_PORTS`. Read as DATA, never
+/// sourced (this verb runs as root at that door). An absent file is an
+/// empty table, which the reader treats as absent: jobs only.
+pub(crate) fn sor_ports_table(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Where the twin's tools live, relative to the checkout the probe runs
+/// in: the sanctioned reader on PATH, and the port table it reads.
+const PROBE_BIN: &str = "infra/forge/probe-bin";
+const SOR_PORTS_ENV: &str = "infra/forge/sor-ports.env";
+
+impl Shell {
+    /// The unattended door's shell, from the same environment the
+    /// twin read (`BOSS_PROBE_USER`, `BOSS_PROBE_DIR`,
+    /// `BOSS_PROBE_TIMEOUT`, `BOSS_PROBE_READER_ACTOR`) so a forge that
+    /// set none of them changes nothing. `base` is the system of record
+    /// this verb resolved, handed to the probe as `BOSS_JOBS_URL`.
+    pub(crate) fn unattended(base: &str) -> Result<Self> {
+        let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+        let user = var("BOSS_PROBE_USER").unwrap_or_else(|| "david".into());
+        let dir = std::path::PathBuf::from(
+            var("BOSS_PROBE_DIR").unwrap_or_else(|| "/home/david/boss".into()),
+        );
+        let timeout = match var("BOSS_PROBE_TIMEOUT") {
+            Some(t) => t.parse::<u64>().map_err(|_| {
+                anyhow::anyhow!("BOSS_PROBE_TIMEOUT={t:?} is not a number of seconds")
+            })?,
+            None => 60,
+        };
+        let reader = var("BOSS_PROBE_READER_ACTOR").unwrap_or_else(|| READER_ACTOR.into());
+        let ports = std::fs::read_to_string(dir.join(SOR_PORTS_ENV))
+            .map(|t| sor_ports_table(&t))
+            .unwrap_or_default();
+        Ok(Self {
+            path_prefix: Some(dir.join(PROBE_BIN)),
+            cwd: Some(dir),
+            user: Some(user),
+            timeout_secs: Some(timeout),
+            env: vec![
+                ("BOSS_JOBS_URL".into(), base.to_string()),
+                ("BOSS_SOR_USER".into(), reader_header(&reader)),
+                ("BOSS_SOR_PORTS".into(), ports),
+            ],
+            // This verb's own write credential never reaches the
+            // probe's text; `boss_jobs::probe::names_an_actor` refuses
+            // a probe that sets one, and this is the other half.
+            strip: vec![
+                crate::identity::ACTOR_ENV.into(),
+                crate::identity::ACTOR_FILE_ENV.into(),
+            ],
+        })
+    }
+}
+
+/// The proven step, by slug first and title second — the twin's read,
+/// and the one the arrival handler uses to decide a car is probe-able.
+fn proven_step_unattended(car: &Value) -> Option<&Value> {
+    let steps = car.get("steps").and_then(Value::as_array)?;
+    steps
+        .iter()
+        .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some("proven"))
+        .or_else(|| {
+            steps
+                .iter()
+                .find(|s| s.get("title").and_then(Value::as_str) == Some(PROVEN))
+        })
+}
+
+/// What the unattended door found before running anything. Pure over
+/// the car, so the refusals are pinned without a socket.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Admitted {
+    /// Run this probe, expect this token, complete this step id with
+    /// this `verified` prose.
+    Run {
+        probe: String,
+        expect: String,
+        step_id: String,
+        verified: String,
+    },
+    /// `proven` is already completed — nothing to run, and not a red.
+    AlreadyProven,
+    /// Not a car this door will run: the reason, for the packet.
+    Refused(String),
+}
+
+/// The twin's admission, in order: kind, merged, probe and expect
+/// (with the event-bound car named as such), a `proven` step, its
+/// status. Every refusal changes nothing.
+pub(crate) fn admit_unattended(car: &Value) -> Admitted {
+    let short = crate::train::id8(car.get("id").and_then(Value::as_str).unwrap_or("?"));
+    let kind = car.get("kind").and_then(Value::as_str).unwrap_or("");
+    if kind != "ship-a-change" {
+        return Admitted::Refused(format!("{short} is a {kind}, not a ship-a-change car"));
+    }
+    let merged = car
+        .get("metadata")
+        .and_then(|m| m.get("merged"))
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        })
+        .unwrap_or_default();
+    if merged != "true" {
+        return Admitted::Refused(format!(
+            "{short} has not merged (metadata.merged={merged:?}) — a probe against production \
+             proves nothing about unshipped code"
+        ));
+    }
+    let (probe, expect) = match car_probe(car) {
+        Ok(pair) => pair,
+        Err(e) => return Admitted::Refused(format!("{short}: {e}")),
+    };
+    let Some(step) = proven_step_unattended(car) else {
+        return Admitted::Refused(format!("{short} has no proven step"));
+    };
+    match step.get("status").and_then(Value::as_str).unwrap_or("") {
+        "ready" | "active" => {}
+        "completed" => return Admitted::AlreadyProven,
+        other => {
+            return Admitted::Refused(format!(
+                "{short}'s proven step is {other:?} (pending = not merged; skipped = abandoned)"
+            ));
+        }
+    }
+    let Some(step_id) = step.get("id").and_then(Value::as_str) else {
+        return Admitted::Refused(format!("{short}'s proven step has no id"));
+    };
+    // `verified` is the car's own claim (the summary), the same
+    // default the hand door's --from-car uses; a car without one is
+    // still proven, by the probe it recorded.
+    let verified = car_verified(car, None)
+        .unwrap_or_else(|_| "proven by the probe the car recorded at park time".into());
+    Admitted::Run {
+        probe,
+        expect,
+        step_id: step_id.to_string(),
+        verified,
+    }
+}
+
+/// The one line the ops-request's output leads its verdict with: the
+/// ALL-CAPS word a reader of the packet scans for, then the car, then
+/// why. The twin printed the same four words for two weeks of packets,
+/// and `the_unattended_verdict_line_leads_with_its_word` pins them.
+pub(crate) fn unattended_verdict_line(
+    short: &str,
+    verdict: &Verdict,
+    expect: &str,
+    why: &str,
+) -> String {
+    match verdict {
+        Verdict::Proven => format!("PROVEN {short} — exit 0 and printed {expect:?}"),
+        Verdict::NotYet { .. } => format!("NOT YET {short} — {why}"),
+        Verdict::Unrunnable { .. } => format!("NOT RUN {short} — {why}"),
+        Verdict::NotProven(_) => format!("NOT PROVEN {short} — {why}"),
+    }
+}
+
+/// The exit code the ops-request carries for a verdict — see
+/// [`NOT_YET_EXIT`], [`UNRUNNABLE_EXIT`].
+pub(crate) fn unattended_exit(verdict: &Verdict) -> i32 {
+    match verdict {
+        Verdict::Proven => 0,
+        Verdict::NotYet { .. } => NOT_YET_EXIT,
+        Verdict::Unrunnable { .. } => UNRUNNABLE_EXIT,
+        Verdict::NotProven(_) => 1,
+    }
+}
+
+/// Who completed `proven` at this door — what the yard's inspection
+/// shed shows as the stamp's `by`, and the verb's name so a reader of
+/// the step finds the door that wrote it.
+pub(crate) const PROVEN_BY: &str = "run-car-probe";
+
+/// Run a car's recorded probe the way the forge's ops-runner asks for
+/// it, and write the verdict on the car — see the header of this
+/// section. `car_id` is the full uuid the verb's argument pattern
+/// admitted; the car is re-read from the system of record, never
+/// trusted from the packet that asked.
+pub(crate) async fn run_unattended(car_id: &str, now: chrono::DateTime<chrono::Utc>) -> Result<()> {
+    let http = reqwest::Client::new();
+    let base = crate::gate::resolve_jobs_base(None)?;
+    let car = crate::gate::api(
+        &http,
+        reqwest::Method::GET,
+        &format!("/api/jobs/{car_id}"),
+        None,
+    )
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("GET /api/jobs/{car_id} answered no body"))?;
+    let short = crate::train::id8(car_id);
+    let (probe, expect, step_id, verified) = match admit_unattended(&car) {
+        Admitted::Run {
+            probe,
+            expect,
+            step_id,
+            verified,
+        } => (probe, expect, step_id, verified),
+        Admitted::AlreadyProven => {
+            println!("boss prove: {short} is already proven — nothing to run");
+            return Ok(());
+        }
+        Admitted::Refused(why) => {
+            eprintln!("boss prove: REFUSED — {why}");
+            std::process::exit(REFUSED_EXIT);
+        }
+    };
+    // The gate's rule on a recorded probe, at this door too: a probe
+    // that reads the system of record unidentified is refused — it
+    // would pass an absence assertion against a narrowed world — and
+    // there is no operator here to override.
+    if let Some(r) = admit(&probe, true).refusal {
+        eprintln!("boss prove: REFUSED — {r}");
+        std::process::exit(REFUSED_EXIT);
+    }
+
+    let shell = Shell::unattended(&base)?;
+    println!("boss prove: {short}  $ {probe}");
+    let o = execute_with(&probe, &shell)?;
+    let at = now.to_rfc3339();
+    let here = host();
+    let verdict = verdict(&probe, &o, Some(&expect));
+    if let Verdict::Proven = verdict {
+        let proof = proof_json(&probe, Some(&expect), &o, &here, &at, None);
+        let mut md = proven_metadata(&verified, &serde_json::to_string(&proof)?, None, now);
+        md["proven_by"] = json!(PROVEN_BY);
+        crate::gate::api(
+            &http,
+            reqwest::Method::PUT,
+            &format!("/api/jobs/{car_id}/steps/{step_id}"),
+            Some(json!({"status": "completed", "metadata": md})),
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "the probe passed but recording it on {short} failed — {e}; re-file the \
+                 ops-request or run boss prove {short} --from-car"
+            )
+        })?;
+        println!(
+            "boss prove: {}",
+            unattended_verdict_line(&short, &verdict, &expect, "")
+        );
+        let shown = o.stdout.trim();
+        if !shown.is_empty() {
+            println!("{shown}");
+        }
+        return Ok(());
+    }
+    let why = match &verdict {
+        Verdict::NotYet { said } => not_yet_why(&here, said),
+        Verdict::Unrunnable { missing } => unrunnable_why_unattended(
+            &here,
+            missing,
+            shell.user.as_deref().unwrap_or("?"),
+            shell.cwd.as_deref().unwrap_or(Path::new("?")),
+        ),
+        Verdict::NotProven(e) => e.to_string(),
+        Verdict::Proven => unreachable!("handled above"),
+    };
+    let attempt = attempt_json(&probe, Some(&expect), &o, &here, &at, &why);
+    crate::gate::api(
+        &http,
+        reqwest::Method::PATCH,
+        &format!("/api/jobs/{car_id}/metadata"),
+        Some(json!({"proof_attempt": attempt})),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "probe exited {} and recording the attempt on {short} failed too — {e}",
+            o.exit
+        )
+    })?;
+    println!(
+        "boss prove: {}",
+        unattended_verdict_line(&short, &verdict, &expect, &why)
+    );
+    println!("boss prove: proof_attempt recorded, proven stays ready");
+    println!(
+        "  stdout: {}\n  stderr: {}",
+        if o.stdout.trim().is_empty() {
+            "(empty)"
+        } else {
+            o.stdout.trim()
+        },
+        if o.stderr.trim().is_empty() {
+            "(empty)"
+        } else {
+            o.stderr.trim()
+        }
+    );
+    std::process::exit(unattended_exit(&verdict))
+}
+
 /// Run a probe against production and record it on the car — or refuse.
 pub(crate) async fn run(
     car_ref: &str,
@@ -2033,145 +2538,6 @@ mod tests {
         // And with no summary there is no default prose to fall back on.
         let e = car_verified(&half, None).unwrap_err().to_string();
         assert!(e.contains("--verified is required"), "{e}");
-    }
-
-    /// A FACT THAT LIVES TWICE GETS AN EQUALITY TEST (CLAUDE.md 9a).
-    /// The arrival path judges probes in sh, not in Rust, so the
-    /// whole-token rule has to hold there too — otherwise the machine
-    /// half still accepts 10 as proof of 1. This lifts the script's
-    /// own matcher out and runs both sides against one table.
-    #[test]
-    fn the_forge_runner_judges_an_expectation_the_same_way() {
-        const SH: &str = FORGE_RUNNER;
-        const START: &str = "# --- expectation-match";
-        const END: &str = "# --- end expectation-match";
-        let a = SH
-            .find(START)
-            .expect("run-car-probe.sh lost its matcher block");
-        let b = SH
-            .find(END)
-            .expect("run-car-probe.sh lost its matcher end marker");
-        let matcher = &SH[a..b];
-
-        for (printed, expect, want) in [
-            ("10", "1", false),
-            ("100", "1", false),
-            ("0.15", "1", false),
-            ("v1.2.3", "1", false),
-            ("1", "1", true),
-            ("1 rule", "1", true),
-            ("count=1", "1", true),
-            ("rules: 1", "1", true),
-            ("0 errors", "0", true),
-            ("10 errors", "0", false),
-            ("prefix-claim:ok-suffix", "claim:ok", true),
-            ("nothing here", "claim:ok", false),
-        ] {
-            assert_eq!(
-                observed(printed, expect),
-                want,
-                "prove.rs: {expect:?} against {printed:?}"
-            );
-            let script = format!(
-                "{matcher}\nf=$(mktemp)\nprintf '%s\\n' \"$1\" > \"$f\"\n\
-                 if printed_expectation \"$2\" \"$f\"; then echo MATCH; else echo NOMATCH; fi\n\
-                 rm -f \"$f\"\n"
-            );
-            let out = std::process::Command::new("bash")
-                .arg("-c")
-                .arg(&script)
-                .arg("pin")
-                .arg(printed)
-                .arg(expect)
-                .output()
-                .expect("bash runs the lifted matcher");
-            let said = String::from_utf8_lossy(&out.stdout);
-            assert_eq!(
-                said.trim() == "MATCH",
-                want,
-                "run-car-probe.sh disagrees with prove.rs on {expect:?} against {printed:?} \
-                 (it said {said:?}) — the two comparisons must stay one rule"
-            );
-        }
-    }
-
-    /// THE PROOF RECORD LIVES TWICE — here and in the forge's
-    /// run-car-probe.sh, which records the same shape in sh so the
-    /// arrival rule can prove a car on a host with no `boss` binary
-    /// (28ac45ab). Pinned (CLAUDE.md 9a): every key `proof_json` and
-    /// `proven_metadata` write must appear in the script's jq record,
-    /// and its stream cap must equal MAX_STREAM — or `--recheck` reads
-    /// a machine-written proof it cannot re-run.
-    #[test]
-    fn the_forge_runner_records_the_same_proof_shape() {
-        const SH: &str = FORGE_RUNNER;
-        let p = proof_json("true", Some("x"), &ok("x"), "h", "now", None);
-        for k in p.as_object().unwrap().keys() {
-            assert!(
-                SH.contains(&format!("{k}:${k}")),
-                "run-car-probe.sh does not record proof key `{k}`"
-            );
-        }
-        let at: chrono::DateTime<chrono::Utc> =
-            chrono::DateTime::parse_from_rfc3339("2026-09-08T18:00:00Z")
-                .unwrap()
-                .into();
-        let md = proven_metadata("v", "{}", None, at);
-        for k in md.as_object().unwrap().keys() {
-            assert!(
-                SH.contains(&format!("{k}:$")),
-                "run-car-probe.sh does not write proven key `{k}`"
-            );
-        }
-        // `why`, `unrunnable` and `missing_tools` are the diagnosis
-        // half (f9304366): a probe authored on the pod and run on the
-        // forge can be correct and unrunnable, and exit-plus-empty-
-        // streams reads exactly like a false claim. The script must
-        // record which of the two it saw.
-        //
-        // Read out of the ATTEMPT's own jq record, not the whole file:
-        // `stdout:$stdout` appears in the proof record too, so a
-        // file-wide `contains` would pass for an attempt that dropped
-        // both streams — the pin would be green about the very thing
-        // 4fccc595 lost.
-        let attempt = SH
-            .split_once("attempt=$(jq -cn")
-            .expect("run-car-probe.sh builds a proof_attempt record")
-            .1
-            .split_once("proof_attempt")
-            .expect("…and PATCHes it onto the car")
-            .0;
-        for k in [
-            "at",
-            "exit",
-            "stdout",
-            "stderr",
-            "why",
-            "unrunnable",
-            "missing_tools",
-        ] {
-            assert!(
-                attempt.contains(&format!("{k}:${k}")),
-                "run-car-probe.sh's proof_attempt lacks `{k}`:\n{attempt}"
-            );
-        }
-        // AND NOT ONE MERGED FIELD. The attempt recorded `output` —
-        // stdout and stderr printf'd together — and the case that cost
-        // 18 hours read `output: ""`, which cannot tell a reader whether
-        // both streams were empty or the record dropped them (4fccc595).
-        assert!(
-            !attempt.contains("output:$output"),
-            "the two streams are recorded separately, as the proof record does:\n{attempt}"
-        );
-        assert!(
-            SH.contains("command_not_found_handle"),
-            "run-car-probe.sh must give the probe's shell a channel its own \
-             redirections cannot swallow, or a missing tool records as silence"
-        );
-        assert!(
-            SH.contains(&format!("MAX_STREAM={MAX_STREAM}")),
-            "the two stream caps differ"
-        );
     }
 
     /// Guards the bug class that made a hand-rolled check lie on
@@ -2880,7 +3246,7 @@ mod tests {
         for probe in [
             "boss-sor-read /api/yard/status | grep -q dock_depth",
             "boss-api GET /api/jobs?kind=pr-train | grep -q arrived",
-            "grep -c BOSS_JOBS_URL infra/forge/run-car-probe.sh",
+            "grep -c BOSS_JOBS_URL infra/ops/ops-runner.sh",
             "test -n \"$BOSS_JOBS_URL\" && echo claim-ok",
         ] {
             let a = admit(probe, true);
@@ -3159,412 +3525,6 @@ mod tests {
         assert!(failure_diagnosis(NULL_COUNT_PROBE, &o).is_none());
     }
 
-    /// A FACT THAT LIVES TWICE GETS AN EQUALITY TEST (CLAUDE.md 9a).
-    /// The forge runner composes its verdict in shell, on a host with
-    /// no `boss` binary, so the marker list cannot be ONE definition —
-    /// the shell's copy is a grep pattern. This lifts the runner's
-    /// verdict block (between the same markers boss-testing's
-    /// run_car_probe_sh.rs lifts) and runs it over every entry in
-    /// `NUMERIC_CRASH_MARKERS`: a marker added here and not there fails
-    /// by name, with both verdicts in the message.
-    #[test]
-    fn the_forge_runner_names_the_same_crashes() {
-        for marker in NUMERIC_CRASH_MARKERS {
-            let stderr = format!("bash: line 10: [: null: {marker}\n");
-            let run = ForgeRun {
-                rc: 75,
-                stdout: "not yet: none\n",
-                stderr: &stderr,
-                missing_tools: "",
-                expect: "x:ok",
-            };
-            let (ok, why) = forge_verdict("prove-forge-crash-verdict", &run);
-            assert!(!ok, "a crash is not proof: {why}");
-            let ours = failure_diagnosis(NULL_COUNT_PROBE, &crashed(75, &stderr)).unwrap();
-            for phrase in ["THE PROBE CRASHED", marker, "// empty", "*[!0-9]*"] {
-                assert!(
-                    why.contains(phrase),
-                    "run-car-probe.sh does not name {marker:?} as a crash the way \
-                     prove.rs does (missing {phrase:?}):\n  sh: {why}\n  rs: {ours}"
-                );
-            }
-            assert!(
-                !why.starts_with("NOT YET"),
-                "a crash must not read as not-yet on the forge either: {why}"
-            );
-        }
-    }
-
-    // -----------------------------------------------------------------
-    // ONE VERDICT, TWO AUTHORS, PINNED EQUAL (backlog a44e16aa)
-    // -----------------------------------------------------------------
-
-    /// What the forge runner has in scope when it composes `why`: the
-    /// probe's exit and two streams, the tools fd 9 caught it failing
-    /// to find (the runner's `missing_list`, empty when it ran), and the
-    /// expectation. The same run, read as `boss prove` reads it, is
-    /// [`ForgeRun::outcome`] — so both authors judge ONE record.
-    struct ForgeRun<'a> {
-        rc: i32,
-        stdout: &'a str,
-        stderr: &'a str,
-        missing_tools: &'a str,
-        expect: &'a str,
-    }
-
-    impl ForgeRun<'_> {
-        fn outcome(&self) -> Outcome {
-            Outcome {
-                exit: self.rc,
-                stdout: self.stdout.into(),
-                stderr: self.stderr.into(),
-                // The runner's `missing_list` is the channel joined with
-                // ", "; this door carries the channel itself.
-                missing_tools: missing_tools(&self.missing_tools.replace(", ", "\n")),
-            }
-        }
-    }
-
-    /// The text of run-car-probe.sh from one marker up to the next, so
-    /// a test RUNS the script's shell rather than restating it. The
-    /// opening marker rides along: every marker is a whole comment
-    /// line, or the head of one.
-    fn forge_block(begin: &str, end: &str) -> &'static str {
-        super::forge_block(begin, end).unwrap_or_else(|e| panic!("{e}"))
-    }
-
-    /// The forge runner's judgement of one run: `ok` from its judge
-    /// block (the two rules, over its own matcher) and `why` from its
-    /// verdict block — the sentence `proof_attempt.why` would carry.
-    /// Supplies exactly the variables the script has in scope there.
-    fn forge_verdict(case: &str, run: &ForgeRun<'_>) -> (bool, String) {
-        let dir = boss_testing::scratch::scratch_dir(case);
-        std::fs::write(dir.join("out"), run.stdout).unwrap();
-        std::fs::write(dir.join("errs"), run.stderr).unwrap();
-        let unrunnable = if run.missing_tools.is_empty() {
-            "false"
-        } else {
-            "true"
-        };
-        let script = format!(
-            "set -uo pipefail\nworkdir={dir}\nrc={rc}\nunrunnable={unrunnable}\n\
-             missing_list={missing:?}\nhost='david-asus-minipc'\nPROBE_USER=david\n\
-             PROBE_DIR=/home/david/boss\nexpect={expect:?}\n{matcher}\n{judge}\n{verdict}\n\
-             printf '%s\\n%s' \"$ok\" \"$why\"\n",
-            dir = dir.display(),
-            rc = run.rc,
-            missing = run.missing_tools,
-            expect = run.expect,
-            matcher = forge_block("# --- expectation-match", "# --- end expectation-match"),
-            judge = forge_block("# PROBE-JUDGE-BEGIN", "# PROBE-JUDGE-END"),
-            verdict = forge_block("# PROBE-VERDICT-BEGIN", "# PROBE-VERDICT-END"),
-        );
-        let out = std::process::Command::new("bash")
-            .arg("-c")
-            .arg(&script)
-            .output()
-            .expect("bash runs the lifted blocks");
-        assert!(
-            out.status.success(),
-            "the lifted blocks must run: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let printed = String::from_utf8_lossy(&out.stdout).to_string();
-        let (ok, why) = printed.split_once('\n').expect("ok, then why");
-        (ok == "1", why.to_string())
-    }
-
-    /// A probe as the forge's shell runs it: the runner's PROBE-PRELUDE
-    /// ahead of the text, fd 9 pointed at a not-found channel. Since
-    /// 46f67333 that is what `execute` IS, so this runs the door itself
-    /// and returns the channel joined the way the runner joins
-    /// `missing_list` — the input the shell side of the pin is fed.
-    fn run_as_the_forge_would(probe: &str) -> (Outcome, String) {
-        let o = execute(probe).expect("bash runs the probe");
-        let list = o.missing_tools.join(", ");
-        (o, list)
-    }
-
-    /// The ALL-CAPS verdict words this door can lead with — the three
-    /// `failure_diagnosis` names, and NOT YET, which `verdict` gives a
-    /// clean exit 75 (726562de). A run this door reads one way must not
-    /// be led with another of these by the shell — a verdict one door
-    /// invents and the other does not is the two-sentence defect in a
-    /// new coat, and NOT YET against NOT PROVEN was the measured one.
-    const VERDICT_WORDS: [&str; 5] = [
-        "THE PROBE CRASHED",
-        "THE FAILURE CANNOT BE READ",
-        "THE PROBE IS SELF-CONTRADICTORY",
-        "NOT YET",
-        "THE PROBE DID NOT RUN",
-    ];
-
-    /// One outcome, judged by both authors, and the phrases the two
-    /// verdicts must share: the ALL-CAPS word when there is one, and the
-    /// reason clause a reader acts on.
-    struct SameVerdict<'a> {
-        case: &'a str,
-        probe: &'a str,
-        run: ForgeRun<'a>,
-        /// The verdict word this door leads with — `failure_diagnosis`'s
-        /// when it diagnoses, NOT YET when `verdict` says so — or `None`
-        /// when it (rightly) adds nothing to `judge`'s refusal; then the
-        /// shell adds nothing of the kind either.
-        diagnosis: Option<&'a str>,
-        /// Load-bearing text both verdicts carry, verbatim.
-        agree: &'a [&'a str],
-    }
-
-    /// A PROBE VERDICT HAS TWO AUTHORS (backlog a44e16aa): the forge
-    /// runner's PROBE-VERDICT shell, on a host with no `boss` binary,
-    /// and `judge_probe` here. `the_forge_runner_names_the_same_crashes`
-    /// pinned the newest branch equal and left the older ones living
-    /// twice — CANNOT BE READ, not-yet, plain red, the wrong string —
-    /// where a wording change on one side silently diverged the other,
-    /// and the reader of a car saw different sentences for one verdict
-    /// depending on which door ran the probe.
-    ///
-    /// So every branch is run through both, on ONE record each, and the
-    /// load-bearing phrases are asserted shared. The Rust wording is the
-    /// reference (it has the unit tests); where the shell disagreed it
-    /// was changed to match. One branch was deliberately NOT equalised
-    /// at first and pinned as an asymmetry instead: unrunnable, because
-    /// its input (fd 9's not-found channel) existed only on the forge.
-    /// Since 46f67333 this door runs the same prelude, `execute` carries
-    /// the channel on the outcome, and the branch is pinned like the
-    /// rest — lead word, the `on <host>: <tool> not found` clause, and
-    /// the disclaimer.
-    ///
-    /// NOT-YET WAS THE OTHER EXCEPTION, and the pin documented it as an
-    /// asymmetry it could not resolve as wording: this door had no
-    /// branch for exit 75 at all, so the forge said NOT YET and the hand
-    /// door said "evidence AGAINST" about one run (726562de). Now both
-    /// have the branch, and it is pinned like the rest — `verdict` reads
-    /// the run as NOT YET, and `not_yet_why` is the sentence the forge's
-    /// verdict block composes, lead word and reason clause alike.
-    #[test]
-    fn the_forge_runner_gives_the_same_verdict_for_every_outcome() {
-        let (missing_tool, missing_list) =
-            run_as_the_forge_would("kubectl-no-such-tool get pods -A && echo pods:ok");
-        assert_eq!(missing_list, "kubectl-no-such-tool", "fd 9 caught the tool");
-        let cases = [
-            SameVerdict {
-                case: "not-yet",
-                probe: "n=$(boss-sor-read /api/x | jq -r '.total // empty'); case \"$n\" in \
-                        ''|*[!0-9]*) echo 'not yet: no disk-report request carrying for_sweep \
-                        yet'; exit 75;; esac; echo sweep-measured:ok",
-                run: ForgeRun {
-                    rc: 75,
-                    stdout: "not yet: no disk-report request carrying for_sweep yet\n",
-                    stderr: "",
-                    missing_tools: "",
-                    expect: "sweep-measured:ok",
-                },
-                diagnosis: Some("NOT YET"),
-                agree: &[
-                    "NOT YET",
-                    "cannot be judged until something happens",
-                    "not yet: no disk-report request carrying for_sweep yet",
-                    "Not a verdict against the change",
-                    "recheck-failing-probes-daily runs it again",
-                ],
-            },
-            SameVerdict {
-                case: "unrunnable",
-                probe: "kubectl-no-such-tool get pods -A && echo pods:ok",
-                run: ForgeRun {
-                    rc: missing_tool.exit,
-                    stdout: &missing_tool.stdout,
-                    stderr: &missing_tool.stderr,
-                    missing_tools: &missing_list,
-                    expect: "pods:ok",
-                },
-                diagnosis: Some("THE PROBE DID NOT RUN"),
-                agree: &[
-                    "THE PROBE DID NOT RUN",
-                    "on david-asus-minipc: kubectl-no-such-tool not found",
-                    "This says nothing about whether the change works",
-                ],
-            },
-            SameVerdict {
-                case: "cannot-be-read",
-                probe: "boss-sor-read /api/x | jq -e '.total == 0' >/dev/null || exit 1",
-                run: ForgeRun {
-                    rc: 1,
-                    stdout: "",
-                    stderr: "",
-                    missing_tools: "",
-                    expect: "x:ok",
-                },
-                diagnosis: Some("THE FAILURE CANNOT BE READ"),
-                agree: &[
-                    "THE FAILURE CANNOT BE READ",
-                    "exited 1",
-                    "printed NOTHING on either stream",
-                    "not a verdict on the claim",
-                    "missing record",
-                    "bare",
-                    "|| exit",
-                ],
-            },
-            SameVerdict {
-                case: "plain-red",
-                probe: "boss-sor-read /api/x | jq -e '.total == 0' >/dev/null || { echo \
-                        \"CLAIM FAILS for maintenance-backup (jq exit $?)\"; exit 1; }",
-                run: ForgeRun {
-                    rc: 1,
-                    stdout: "CLAIM FAILS for maintenance-backup (jq exit 5)\n",
-                    stderr: "",
-                    missing_tools: "",
-                    expect: "x:ok",
-                },
-                diagnosis: None,
-                agree: &[
-                    "exited 1",
-                    "not proof of anything",
-                    "CLAIM FAILS for maintenance-backup (jq exit 5)",
-                ],
-            },
-            SameVerdict {
-                case: "wrong-string",
-                probe: "echo dock_depth=$(boss-sor-read /api/yard/status | jq .dock_depth)",
-                run: ForgeRun {
-                    rc: 0,
-                    stdout: "dock_depth=0\n",
-                    stderr: "",
-                    missing_tools: "",
-                    expect: "dock_depth=1",
-                },
-                diagnosis: None,
-                agree: &[
-                    "exited 0",
-                    "never printed",
-                    "dock_depth=1",
-                    "dock_depth=0",
-                    "weak assertion",
-                    "echo hi",
-                    "exits 0 too",
-                ],
-            },
-            SameVerdict {
-                case: "zero-and-silent",
-                probe: "boss-sor-read /api/yard/status | jq -e '.dock_depth == 1' >/dev/null",
-                run: ForgeRun {
-                    rc: 0,
-                    stdout: "",
-                    stderr: "",
-                    missing_tools: "",
-                    expect: "dock:ok",
-                },
-                diagnosis: None,
-                agree: &[
-                    "exited 0",
-                    "never printed",
-                    "dock:ok",
-                    "weak assertion",
-                    "echo hi",
-                    "exits 0 too",
-                ],
-            },
-        ];
-        for c in &cases {
-            let o = c.run.outcome();
-            let (ok, why) = forge_verdict(&format!("prove-forge-verdict-{}", c.case), &c.run);
-            assert!(
-                !ok,
-                "{}: the forge must refuse what this door refuses",
-                c.case
-            );
-            // ONE record, read by this door's three-way `verdict`: what
-            // the operator reads (`rs`) and the word it leads with (`d`),
-            // the same two things the shell's `why` carries.
-            let (rs, d) = match verdict(c.probe, &o, Some(c.run.expect)) {
-                Verdict::Proven => panic!("{}: this door must not prove this", c.case),
-                Verdict::NotYet { said } => {
-                    assert_eq!(c.diagnosis, Some("NOT YET"), "{}: read as not-yet", c.case);
-                    let w = not_yet_why("david-asus-minipc", &said);
-                    (w.clone(), Some(w))
-                }
-                Verdict::Unrunnable { missing } => {
-                    assert_eq!(
-                        c.diagnosis,
-                        Some("THE PROBE DID NOT RUN"),
-                        "{}: read as unrunnable",
-                        c.case
-                    );
-                    let w = unrunnable_why("david-asus-minipc", &missing);
-                    (w.clone(), Some(w))
-                }
-                Verdict::NotProven(e) => {
-                    assert!(
-                        !matches!(c.diagnosis, Some("NOT YET" | "THE PROBE DID NOT RUN")),
-                        "{}: read as NOT PROVEN",
-                        c.case
-                    );
-                    (e.to_string(), failure_diagnosis(c.probe, &o))
-                }
-            };
-            match c.diagnosis {
-                Some(word) => {
-                    let d = d.unwrap_or_else(|| panic!("{}: prove.rs diagnoses this", c.case));
-                    assert!(
-                        d.starts_with(word),
-                        "{}: rs leads with {word:?}: {d}",
-                        c.case
-                    );
-                    assert!(
-                        why.starts_with(word),
-                        "{}: run-car-probe.sh does not lead with {word:?} the way prove.rs \
-                         does:\n  sh: {why}\n  rs: {d}",
-                        c.case
-                    );
-                }
-                None => {
-                    assert!(d.is_none(), "{}: prove.rs adds no diagnosis: {d:?}", c.case);
-                    for word in VERDICT_WORDS {
-                        assert!(
-                            !why.contains(word),
-                            "{}: run-car-probe.sh diagnoses {word:?} where prove.rs declines \
-                             to:\n  sh: {why}\n  rs: {rs}",
-                            c.case
-                        );
-                    }
-                }
-            }
-            for phrase in c.agree {
-                assert!(
-                    rs.contains(phrase),
-                    "{}: prove.rs lost {phrase:?}:\n  rs: {rs}",
-                    c.case
-                );
-                assert!(
-                    why.contains(phrase),
-                    "{}: run-car-probe.sh does not say {phrase:?} the way prove.rs does:\n  \
-                     sh: {why}\n  rs: {rs}",
-                    c.case
-                );
-            }
-        }
-
-        // AND GREEN: exit 0 with the token printed is proof at both
-        // doors, so the verdict block is never composed — which is the
-        // one outcome where "the same sentence" means no sentence.
-        let green = ForgeRun {
-            rc: 0,
-            stdout: "measured 3 sweeps\nsweep-measured:ok\n",
-            stderr: "",
-            missing_tools: "",
-            expect: "sweep-measured:ok",
-        };
-        let (ok, why) = forge_verdict("prove-forge-verdict-green", &green);
-        assert!(ok, "the forge proves what this door proves: {why}");
-        assert!(judge_probe("true", &green.outcome(), Some(green.expect)).is_ok());
-        assert!(matches!(
-            verdict("true", &green.outcome(), Some(green.expect)),
-            Verdict::Proven
-        ));
-    }
-
     // -----------------------------------------------------------------
     // --replace WITH NOTHING TO REPLACE (backlog 251dba77)
     // -----------------------------------------------------------------
@@ -3781,76 +3741,6 @@ mod tests {
         assert_eq!(what_it_said(&o), None);
     }
 
-    /// THE ATTEMPT RECORD LIVES TWICE — the forge's jq record and this
-    /// door's `attempt_json` — and `--recheck`, orient and the yard read
-    /// one shape. Pinned both ways (CLAUDE.md 9a): every key this door
-    /// writes is in the script's record, and every key the script
-    /// records is written here. Values the forge alone can know (fd 9's
-    /// missing tools) are recorded as the forge records "none".
-    #[test]
-    fn the_hand_door_records_the_forges_attempt_shape() {
-        const SH: &str = FORGE_RUNNER;
-        let sh_attempt = SH
-            .split_once("attempt=$(jq -cn")
-            .expect("run-car-probe.sh builds a proof_attempt record")
-            .1
-            .split_once("proof_attempt")
-            .expect("…and PATCHes it onto the car")
-            .0;
-        let sh_keys: std::collections::BTreeSet<&str> = sh_attempt
-            .split(['{', ',', '}'])
-            .filter_map(|kv| kv.trim().split_once(":$"))
-            .map(|(k, _)| k)
-            .collect();
-        assert!(
-            sh_keys.contains("not_yet"),
-            "the forge stamps not_yet: {sh_keys:?}"
-        );
-        let o = Outcome {
-            exit: 75,
-            stdout: "not yet: none\n".into(),
-            stderr: String::new(),
-            missing_tools: Vec::new(),
-        };
-        let a = attempt_json("true", Some("x:ok"), &o, "h", "now", "NOT YET: none");
-        let rs_keys: std::collections::BTreeSet<&str> =
-            a.as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(
-            rs_keys, sh_keys,
-            "the two proof_attempt records differ in shape:\n  rs: {rs_keys:?}\n  sh: {sh_keys:?}"
-        );
-        assert_eq!(a["not_yet"], true);
-        assert_eq!(a["unrunnable"], false);
-        assert_eq!(a["missing_tools"], json!([]));
-        assert_eq!(a["exit"], 75);
-        assert_eq!(a["why"], "NOT YET: none");
-        // A NOT PROVEN attempt from this door carries the same shape
-        // with not_yet false — one record, one reader.
-        let red = Outcome {
-            exit: 1,
-            stdout: "CLAIM FAILS\n".into(),
-            stderr: String::new(),
-            missing_tools: Vec::new(),
-        };
-        assert_eq!(
-            attempt_json("true", Some("x:ok"), &red, "h", "now", "why")["not_yet"],
-            false
-        );
-        // AND THE UNRUNNABLE ONE (46f67333): the channel's finding rides
-        // the record under the forge's two keys, so the yard, orient and
-        // the daily recheck read "did not run" from either door.
-        let unrun = Outcome {
-            exit: 127,
-            stdout: String::new(),
-            stderr: "bash: line 9: kubectl: command not found\n".into(),
-            missing_tools: vec!["kubectl".into()],
-        };
-        let a = attempt_json("kubectl get pods", Some("x:ok"), &unrun, "h", "now", "why");
-        assert_eq!(a["unrunnable"], true);
-        assert_eq!(a["missing_tools"], json!(["kubectl"]));
-        assert_eq!(a["not_yet"], false);
-    }
-
     // -----------------------------------------------------------------
     // THE UNRUNNABLE PRELUDE, AT THIS DOOR (backlog 46f67333)
     // -----------------------------------------------------------------
@@ -3940,39 +3830,6 @@ mod tests {
         assert!(missing_tools("\n\n").is_empty());
     }
 
-    /// THE EXIT CODE IS THE FORGE'S. run-car-probe.sh exits 3 for "could
-    /// not run here" — told apart from 75 (ran, not yet) and 1 (ran, did
-    /// not prove) so the ops-request carries three different things to
-    /// do. This verb exits the same number for the same reason, and the
-    /// two live twice, so the shell line is read here (CLAUDE.md §9a).
-    #[test]
-    fn the_hand_door_exits_the_forges_unrunnable_code() {
-        const SH: &str = FORGE_RUNNER;
-        assert!(
-            SH.contains(&format!(
-                "[[ \"$unrunnable\" == true ]] && exit {UNRUNNABLE_EXIT}"
-            )),
-            "run-car-probe.sh no longer exits {UNRUNNABLE_EXIT} for an unrunnable probe"
-        );
-        assert_ne!(UNRUNNABLE_EXIT, NOT_YET_EXIT);
-        assert_ne!(UNRUNNABLE_EXIT, 1);
-    }
-
-    /// The prelude this door runs IS the runner's — lifted between the
-    /// same markers boss-testing's run_car_probe_sh.rs lifts, never
-    /// restated — so a change to the handler on the forge is a change
-    /// here in the same commit.
-    #[test]
-    fn the_hand_door_runs_the_forges_own_prelude() {
-        let prelude = forge_prelude().unwrap();
-        assert!(prelude.contains("command_not_found_handle()"), "{prelude}");
-        assert!(prelude.contains("BOSS_PROBE_NOTFOUND"), "{prelude}");
-        assert_eq!(
-            prelude,
-            forge_block("# PROBE-PRELUDE-BEGIN", "# PROBE-PRELUDE-END")
-        );
-    }
-
     /// `--recheck` ON A NOT-YET CAR RE-RUNS THE ATTEMPT'S PROBE. The
     /// step is still `ready` and carries no `proof`, so the old reader
     /// refused with "nothing to re-run" — but the car holds exactly what
@@ -4011,5 +3868,471 @@ mod tests {
         let bare = json!({"metadata": {}});
         let e = recorded_probe_for(&bare, &step).unwrap_err().to_string();
         assert!(e.contains("nothing to re-run"), "{e}");
+    }
+
+    // -----------------------------------------------------------------
+    // THE UNATTENDED DOOR (backlog 9f00a805, consolidation H8 car 2):
+    // what infra/forge/run-car-probe.sh did that this file did not,
+    // each a gap measured before the twin was retired, each pinned.
+    // -----------------------------------------------------------------
+
+    /// THE PRELUDE IS ONE DEFINITION AND IT WORKS: a probe that pipes
+    /// its own stderr into a `grep -q` still cannot hide which tool was
+    /// missing (f9304366 — the shape the first two arrival probes had).
+    /// This ran out of the shell twin's markers in boss-testing's
+    /// run_car_probe_sh.rs until the twin was retired; it runs the
+    /// door itself now.
+    #[test]
+    fn a_missing_tool_is_named_even_when_the_probe_swallows_its_own_stderr() {
+        let o = execute("kubectl-no-such-tool -n boss get pods 2>&1 | grep -q Running")
+            .expect("bash runs");
+        assert_eq!(
+            o.missing_tools,
+            vec!["kubectl-no-such-tool".to_string()],
+            "fd 9 must name the tool the probe's own redirection hid: {o:?}"
+        );
+        assert_ne!(o.exit, 0);
+        // And the usual message is still printed, on the stream the
+        // probe redirected — nothing is taken away.
+        let o = execute("kubectl-no-such-tool get pods").expect("bash runs");
+        assert!(
+            o.stderr.contains("kubectl-no-such-tool: command not found"),
+            "{o:?}"
+        );
+        assert_eq!(o.exit, 127);
+        // A runnable probe leaves the channel empty.
+        let o = execute("printf 'claim:ok\\n'").expect("bash runs");
+        assert!(o.missing_tools.is_empty(), "{o:?}");
+        assert_eq!(o.exit, 0);
+    }
+
+    /// THE SHELL'S ARGV, in the twin's order: `timeout -k 5 <secs>`,
+    /// then `runuser -u <user> --` only when this process is root, then
+    /// `bash -c` with the prelude ahead of the probe's text. The hand
+    /// door is the bare `bash -c`.
+    #[test]
+    fn the_unattended_shell_runs_under_timeout_and_drops_to_the_probe_user() {
+        let shell = Shell {
+            cwd: Some("/home/david/boss".into()),
+            user: Some("david".into()),
+            timeout_secs: Some(60),
+            env: Vec::new(),
+            strip: Vec::new(),
+            path_prefix: None,
+        };
+        let as_root = shell.command_line("echo x", true);
+        assert_eq!(
+            &as_root[..8],
+            &["timeout", "-k", "5", "60", "runuser", "-u", "david", "--"]
+        );
+        assert_eq!(&as_root[8..10], &["bash", "-c"]);
+        assert!(as_root[10].contains("command_not_found_handle()"));
+        assert!(as_root[10].ends_with("\necho x"), "{}", as_root[10]);
+        // Not root: the twin's by-hand path, as this user, still timed.
+        let as_user = shell.command_line("echo x", false);
+        assert_eq!(&as_user[..6], &["timeout", "-k", "5", "60", "bash", "-c"]);
+        // The hand door: no timeout, no user.
+        let hand = Shell::here(None).command_line("echo x", true);
+        assert_eq!(&hand[..2], &["bash", "-c"]);
+        assert_eq!(hand.len(), 3);
+    }
+
+    /// A PROBE THAT OUTLIVES ITS TIMEOUT IS KILLED AND SAYS SO: exit
+    /// 124 from `timeout`, and the record's stderr carries the note the
+    /// twin appended, where the probe's own last words are.
+    #[test]
+    fn a_probe_that_outlives_the_timeout_is_killed_and_the_record_says_so() {
+        let shell = Shell {
+            timeout_secs: Some(1),
+            ..Shell::here(None)
+        };
+        let o = execute_with("sleep 30; echo never", &shell).expect("bash runs");
+        assert_eq!(o.exit, TIMEOUT_EXIT, "{o:?}");
+        assert!(o.stderr.contains("killed at 1s timeout"), "{o:?}");
+        assert!(!o.stdout.contains("never"));
+        // Under the timeout the exit is the probe's own.
+        let o = execute_with("echo fast:ok", &shell).expect("bash runs");
+        assert_eq!(o.exit, 0);
+        assert!(o.stdout.contains("fast:ok"));
+    }
+
+    /// THE PROBE'S ENVIRONMENT IS THE ONE IT WAS PROMISED and nothing
+    /// of this verb's own: `env` set, `strip` removed, `path_prefix`
+    /// first on PATH, and the run in `cwd`. The reader identity a
+    /// recorded probe's `boss-sor-read` sends is exactly the one
+    /// `Shell::unattended` builds.
+    #[test]
+    fn the_unattended_shell_hands_the_probe_its_env_and_strips_the_verbs_actor() {
+        let dir = boss_testing::scratch::scratch_dir("prove-unattended-env");
+        let bin = dir.join("pbin");
+        std::fs::create_dir_all(&bin).unwrap();
+        boss_testing::write_exec(&bin.join("tool-on-prefix"), "#!/bin/sh\necho prefix:ok\n");
+        let shell = Shell {
+            cwd: Some(dir.clone()),
+            user: None,
+            timeout_secs: None,
+            env: vec![
+                ("BOSS_JOBS_URL".into(), "http://sor.invalid:7900".into()),
+                ("BOSS_SOR_USER".into(), reader_header(READER_ACTOR)),
+                ("BOSS_SOR_PORTS".into(), "jobs=7900 events=7150".into()),
+            ],
+            strip: vec!["BOSS_PROVE_TEST_LEAK".into()],
+            path_prefix: Some(bin),
+        };
+        let o = execute_with(
+            "tool-on-prefix; printf '[%s][%s][%s][%s]\\n' \"$BOSS_JOBS_URL\" \"$BOSS_SOR_PORTS\" \
+             \"${BOSS_PROVE_TEST_LEAK:-}\" \"$PWD\"; printf '%s\\n' \"$BOSS_SOR_USER\"",
+            &shell,
+        )
+        .expect("bash runs");
+        assert_eq!(o.exit, 0, "{o:?}");
+        assert!(o.stdout.contains("prefix:ok"), "{o:?}");
+        assert!(
+            o.stdout.contains(&format!(
+                "[http://sor.invalid:7900][jobs=7900 events=7150][][{}]",
+                dir.display()
+            )),
+            "{o:?}"
+        );
+        let user: Value = serde_json::from_str(o.stdout.lines().last().unwrap()).unwrap();
+        assert_eq!(user["id"], READER_ACTOR);
+        assert_eq!(user["role"], READER_ROLE);
+        assert_eq!(user["access_tier"], "auditor");
+    }
+
+    /// AND THE STRIP IS REAL. The door's `env_remove` cannot be shown
+    /// from inside one process without mutating its environment (racy
+    /// under the parallel runner), so the mechanism is proven through a
+    /// wrapper: this test's own binary re-run under `BOSS_ACTOR=leak`
+    /// executes the probe through the door and prints what the probe
+    /// saw. The unattended shell names both spellings of the actor.
+    #[test]
+    fn a_stripped_name_does_not_reach_the_probe() {
+        if std::env::var("BOSS_PROVE_STRIP_INNER").is_ok() {
+            // Inner leg: the parent carries BOSS_ACTOR=leak.
+            let shell = Shell {
+                strip: vec!["BOSS_ACTOR".into()],
+                ..Shell::here(None)
+            };
+            let o = execute_with("printf '%s' \"${BOSS_ACTOR:-unset}\"", &shell).unwrap();
+            println!("STRIP-SAW={}", o.stdout);
+            return;
+        }
+        let me = std::env::current_exe().unwrap();
+        let out = std::process::Command::new(me)
+            .args([
+                "--exact",
+                "prove::tests::a_stripped_name_does_not_reach_the_probe",
+                "--nocapture",
+            ])
+            .env("BOSS_ACTOR", "leak")
+            .env("BOSS_PROVE_STRIP_INNER", "1")
+            .output()
+            .unwrap();
+        let printed = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{printed}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            printed.contains("STRIP-SAW=unset"),
+            "the strip must remove it: {printed}"
+        );
+        let shell = Shell::unattended("http://sor.invalid:7900").unwrap();
+        for name in ["BOSS_ACTOR", "BOSS_ACTOR_FILE"] {
+            assert!(shell.strip.contains(&name.to_string()), "{:?}", shell.strip);
+        }
+    }
+
+    /// THE PORT TABLE IS READ AS DATA: `name=port` lines become one
+    /// space-separated table; comments, blanks and padding are not in
+    /// it. The twin's `grep -Ev | tr -s | sed` extraction, in Rust.
+    #[test]
+    fn the_port_table_is_read_as_data() {
+        assert_eq!(
+            sor_ports_table("# a comment\n\njobs=7900\nevents=7150\n  people=7500  \n"),
+            "jobs=7900 events=7150 people=7500"
+        );
+        assert_eq!(sor_ports_table(""), "");
+        assert_eq!(sor_ports_table("# only\n# comments\n"), "");
+        // The tree's own table parses to something a reader can route
+        // by, and every entry is name=port.
+        let tree =
+            std::fs::read_to_string(boss_testing::repo_root().join("infra/forge/sor-ports.env"))
+                .expect("the port table ships in the tree");
+        let table = sor_ports_table(&tree);
+        assert!(table.contains("jobs=7900"), "{table}");
+        for entry in table.split(' ') {
+            let (name, port) = entry.split_once('=').unwrap_or_else(|| panic!("{entry}"));
+            assert!(!name.is_empty());
+            port.parse::<u16>()
+                .unwrap_or_else(|e| panic!("{entry}: {e}"));
+        }
+    }
+
+    /// THE FACT THAT LIVES TWICE GETS AN EQUALITY TEST (CLAUDE.md §9a).
+    /// The reader's role is named here and DEFINED in core policy's
+    /// defaults; they cannot be collapsed, so they are pinned equal.
+    /// `audit-readonly` must grant Read at Scope::All on what a probe
+    /// reads — and no non-Read action anywhere, which is what makes
+    /// handing it to program text a builder wrote safe (61085a9e).
+    #[test]
+    fn the_probes_reader_role_can_read_everything_and_write_nothing() {
+        use boss_policy_client::{Action, Resource, Scope};
+
+        let rules = boss_policy_client::defaults::default_rules();
+        let mine: Vec<_> = rules.iter().filter(|r| r.role == READER_ROLE).collect();
+        assert!(
+            !mine.is_empty(),
+            "the probe's reader role '{READER_ROLE}' is not seeded by core policy at all — \
+             an unseeded role reads NOTHING, which is the defect with extra steps"
+        );
+        for resource in [Resource::job(), Resource::step(), Resource::event()] {
+            assert!(
+                mine.iter().any(|r| r.resource == resource
+                    && r.action == Action::Read
+                    && r.scope == Scope::All),
+                "'{READER_ROLE}' has no Read/All on {resource:?} — a probe carrying it would \
+                 see a narrower world than the operator, which is what 61085a9e measured"
+            );
+        }
+        for rule in &mine {
+            assert_eq!(
+                rule.action,
+                Action::Read,
+                "'{READER_ROLE}' carries a non-Read grant ({:?} on {:?}) — it is handed to \
+                 program text a builder wrote, so it must not be able to change anything",
+                rule.action,
+                rule.resource
+            );
+        }
+    }
+
+    /// THE ADMISSION, in the twin's order, each refusal changing
+    /// nothing: kind, merged, probe (event-bound named), expect, step,
+    /// status — and a completed `proven` is "nothing to run", because
+    /// the daily recheck re-files for a car proven by hand meanwhile.
+    #[test]
+    fn the_unattended_door_admits_only_a_merged_probed_car_with_proven_open() {
+        let car = |kind: &str, merged: Value, md: Value, status: &str| {
+            let mut m = md;
+            m["merged"] = merged;
+            json!({
+                "id": "aaaaaaaa-0000-4000-8000-000000000000", "kind": kind,
+                "metadata": m,
+                "steps": [{"id": "s-proven", "spec_slug": "proven", "title": PROVEN, "status": status}]
+            })
+        };
+        let probed = json!({"proof_probe": "true && echo x:ok", "proof_expect": "x:ok", "summary": "the claim"});
+        match admit_unattended(&car(
+            "ship-a-change",
+            json!("true"),
+            probed.clone(),
+            "ready",
+        )) {
+            Admitted::Run {
+                probe,
+                expect,
+                step_id,
+                verified,
+            } => {
+                assert_eq!(probe, "true && echo x:ok");
+                assert_eq!(expect, "x:ok");
+                assert_eq!(step_id, "s-proven");
+                assert_eq!(verified, "the claim");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            admit_unattended(&car(
+                "ship-a-change",
+                json!("true"),
+                probed.clone(),
+                "completed"
+            )),
+            Admitted::AlreadyProven
+        );
+        let refused = |c: &Value| match admit_unattended(c) {
+            Admitted::Refused(why) => why,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+        assert!(
+            refused(&car("gate-run", json!("true"), probed.clone(), "ready"))
+                .contains("is a gate-run, not a ship-a-change car")
+        );
+        assert!(
+            refused(&car(
+                "ship-a-change",
+                json!("false"),
+                probed.clone(),
+                "ready"
+            ))
+            .contains("has not merged")
+        );
+        assert!(
+            refused(&car("ship-a-change", Value::Null, probed.clone(), "ready"))
+                .contains("has not merged")
+        );
+        assert!(
+            refused(&car(
+                "ship-a-change",
+                json!("true"),
+                json!({"proof_event": "the next red train"}),
+                "ready"
+            ))
+            .contains("EVENT-BOUND")
+        );
+        assert!(
+            refused(&car("ship-a-change", json!("true"), json!({}), "ready"))
+                .contains("recorded no `proof_probe`")
+        );
+        assert!(
+            refused(&car(
+                "ship-a-change",
+                json!("true"),
+                json!({"proof_probe": "true"}),
+                "ready"
+            ))
+            .contains("echo hi")
+        );
+        assert!(
+            refused(&car(
+                "ship-a-change",
+                json!("true"),
+                probed.clone(),
+                "pending"
+            ))
+            .contains("proven step is \"pending\"")
+        );
+        let no_step = json!({"id": "aaaaaaaa-0000-4000-8000-000000000000", "kind": "ship-a-change",
+            "metadata": {"merged": "true", "proof_probe": "true", "proof_expect": "x"}, "steps": []});
+        assert!(refused(&no_step).contains("has no proven step"));
+        // A car with no summary is still run, with the twin's default
+        // prose; `verified` stays required on the step.
+        let bare = json!({"proof_probe": "true && echo x:ok", "proof_expect": "x:ok"});
+        match admit_unattended(&car("ship-a-change", json!("true"), bare, "active")) {
+            Admitted::Run { verified, .. } => {
+                assert_eq!(
+                    verified,
+                    "proven by the probe the car recorded at park time"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// THE OUTPUT SHAPE THE PACKET'S READERS EXPECT: the verdict line
+    /// leads with its ALL-CAPS word — PROVEN, NOT YET, NOT RUN, NOT
+    /// PROVEN — then the car, then why; and the exit code is one of
+    /// the three the ops-request carries, plus 0.
+    #[test]
+    fn the_unattended_verdict_line_leads_with_its_word() {
+        let missing = vec!["kubectl".to_string()];
+        let cases: [(Verdict, &str, i32); 4] = [
+            (
+                Verdict::Proven,
+                "PROVEN c1 — exit 0 and printed \"x:ok\"",
+                0,
+            ),
+            (
+                Verdict::NotYet {
+                    said: "not yet: none".into(),
+                },
+                "NOT YET c1 — why",
+                NOT_YET_EXIT,
+            ),
+            (
+                Verdict::Unrunnable {
+                    missing: missing.clone(),
+                },
+                "NOT RUN c1 — why",
+                UNRUNNABLE_EXIT,
+            ),
+            (
+                Verdict::NotProven(anyhow::anyhow!("no")),
+                "NOT PROVEN c1 — why",
+                1,
+            ),
+        ];
+        for (v, line, code) in &cases {
+            assert_eq!(unattended_verdict_line("c1", v, "x:ok", "why"), *line);
+            assert_eq!(unattended_exit(v), *code);
+        }
+    }
+
+    /// The three non-zero codes are distinct from each other and from
+    /// the refusal's, so a reader of the ops-request's `exit_code`
+    /// knows what to do without opening the output.
+    #[test]
+    fn the_unattended_door_exits_one_of_three_codes() {
+        let codes = [1, UNRUNNABLE_EXIT, NOT_YET_EXIT, REFUSED_EXIT];
+        let mut sorted = codes.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), codes.len(), "{codes:?}");
+        assert_eq!(REFUSED_EXIT, 2);
+    }
+
+    /// THE ATTEMPT RECORD CARRIES THE KEYS THE YARD READS
+    /// (`apps/web/src/it/yard/yard.ts`, `proofAttempt`) and `--recheck`
+    /// re-runs from: one shape from both doors.
+    #[test]
+    fn the_attempt_record_carries_the_keys_the_yard_reads() {
+        let o = Outcome {
+            exit: 75,
+            stdout: "not yet: none\n".into(),
+            stderr: String::new(),
+            missing_tools: Vec::new(),
+        };
+        let a = attempt_json("true", Some("x:ok"), &o, "h", "now", "NOT YET: none");
+        let keys: std::collections::BTreeSet<&str> =
+            a.as_object().unwrap().keys().map(String::as_str).collect();
+        let want: std::collections::BTreeSet<&str> = [
+            "at",
+            "exit",
+            "stdout",
+            "stderr",
+            "host",
+            "probe",
+            "expect",
+            "why",
+            "unrunnable",
+            "not_yet",
+            "missing_tools",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(keys, want);
+        assert_eq!(a["not_yet"], true);
+        assert_eq!(a["unrunnable"], false);
+    }
+
+    /// THE DID-NOT-RUN SENTENCE at the unattended door names the forge's
+    /// vantage — the user and the checkout — with the same lead word and
+    /// disclaimer as the hand door's.
+    #[test]
+    fn the_unattended_unrunnable_sentence_names_the_vantage() {
+        let missing = vec!["kubectl".to_string()];
+        let why =
+            unrunnable_why_unattended("forge", &missing, "david", Path::new("/home/david/boss"));
+        assert!(
+            why.starts_with("THE PROBE DID NOT RUN on forge: kubectl not found"),
+            "{why}"
+        );
+        assert!(why.contains("as david in /home/david/boss"), "{why}");
+        assert!(
+            why.contains("This says nothing about whether the change works"),
+            "{why}"
+        );
+        let hand = unrunnable_why("pod", &missing);
+        assert!(
+            hand.starts_with("THE PROBE DID NOT RUN on pod: kubectl not found"),
+            "{hand}"
+        );
+        assert!(
+            hand.contains("This says nothing about whether the change works"),
+            "{hand}"
+        );
     }
 }

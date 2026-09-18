@@ -137,7 +137,7 @@ cd "$LINT_DIR/../.." || exit 1
 # either merge order and uses the shared definition the moment it lands.
 # The exit code and the marker text are a PROTOCOL, not a duplicated
 # fact — infra/safe-cargo.sh, infra/forge/journal-read.sh,
-# infra/forge/run-car-probe.sh and infra/cluster/undeclared-objects.sh
+# boss prove --unattended and infra/cluster/undeclared-objects.sh
 # each already speak exit 3 for "could not answer".
 if [ -r "$LINT_DIR/lib/git-answer.sh" ]; then
     # shellcheck source=/dev/null

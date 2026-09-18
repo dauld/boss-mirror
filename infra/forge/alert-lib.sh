@@ -20,7 +20,7 @@
 # carries it; else the people registry's first active platform-admin
 # hire, read the way this file reads the system of record (the people
 # service is the same address on boss-ports' people port — sor-ports.env
-# beside this file, the table run-car-probe.sh hands its reader); else
+# beside this file, the table the unattended prove door hands its reader); else
 # NOBODY, an empty owner_id the jobs API resolves from the kind's
 # owner_role or refuses by name. Never a literal. The read is
 # best-effort with a short timeout on purpose: the alert that matters

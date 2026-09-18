@@ -109,7 +109,9 @@ impl Case {
         // prints the URL base64-encoded; `exec -i … psql` reads stdin
         // whole, appends it to $STUB_STDIN, and answers by the first
         // tag line: the plan (the after-plan once a delete was served),
-        // or the four delete lines.
+        // or the delete lines (four tables in this stub's answer; the
+        // real derivation adds the two tax tables, 7f163e58, and the
+        // verb sums whatever tables the answer names).
         write_exec(
             &bin.join("kubectl"),
             r#"#!/usr/bin/env bash
@@ -229,7 +231,7 @@ fn a_dry_run_prints_the_verdict_first_and_deletes_nothing() {
     );
     assert_eq!(
         record["declared_by_tenant"],
-        serde_json::json!({"classes": ["employee:sales"], "locations": [], "gl_accounts": [], "companies": []}),
+        serde_json::json!({"classes": ["employee:sales"], "locations": [], "gl_accounts": [], "companies": [], "tax_kinds": [], "sales_tax_rates": []}),
         "what the tenant declares under an example's key, and only that:\n{out}"
     );
     assert!(
@@ -406,10 +408,14 @@ fn a_real_run_evicts_per_table_and_reads_the_plan_back() {
         .lines()
         .filter(|l| l.starts_with("-- retire-example-reference-rows:delete "))
         .collect();
-    assert_eq!(tags.len(), 4);
+    assert_eq!(
+        tags.len(),
+        6,
+        "companies, locations, tax_kinds, sales_tax_rates, gl_accounts, classes"
+    );
     assert_eq!(
         evict.matches("\nBEGIN;\n").count(),
-        4,
+        6,
         "one transaction per table"
     );
     let readback = stdin.split("=== stdin ===").nth(2).unwrap();

@@ -328,14 +328,16 @@ barely seeded — two platform `batch` rows, no authoring API — so
 
 **A platform station is declared in `infra/platform/stations/`, a
 step plugin's row in `infra/platform/step-plugins/`, a cadence rule in
-`infra/platform/cadence/`, and a migration newer than 20260918112134
-declares schema only** (2026-09-18, backlog 393d3234, consolidation
-H4, the first three of four registries to make this move —
-delivery_policy follows). Measured on that day, seven migrations were
-the only place a platform station existed, seven the only place a
-step plugin's row did, and nine the only place a cadence rule did
-(six of the nine re-versioning one integer, the boarding threshold,
-and one of those a silent no-op), and a
+`infra/platform/cadence/`, the delivery policy in
+`infra/platform/delivery-policy/`, and a migration newer than
+20260918112134 declares schema only** (2026-09-18, backlog 393d3234,
+consolidation H4, four registries in four cars). Measured on that day,
+seven migrations were the only place a platform station existed, seven
+the only place a step plugin's row did, nine the only place a cadence
+rule did (six of the nine re-versioning one integer, the boarding
+threshold, and one of those a silent no-op), and two the only place the
+delivery policy did (the second a policy edit that rode the pipeline it
+was re-tuning), and a
 migration is the wrong home for a registry row: it runs once, a fresh
 instance cannot re-declare the row without replaying history, nothing
 drift-checks it against the live row, and every edit is a contended
@@ -372,7 +374,14 @@ retired by decision the same day (the weekly department retro opens
 IT's retro through a dispatcher clock rule), and the equality pin
 compares the bundle to the migrations' active rows minus a
 `RETIRED_BY_DECISION` list that names it and why — a bundle must not
-carry a row the operator is retiring.
+carry a row the operator is retiring. The delivery policy is the
+`workflows` shape at one row: a train pins the version it departed
+under, so a bump in the bundle changes the NEXT boarding's rules and
+never a train in flight. Its compiled fallback in `boss-cli` stays —
+the conductor runs outside the cluster and must board when the
+registry is dark — and is now held equal to the bundle with no
+database (`the_bundle_equals_the_compiled_fallback`), closing a
+triangle the migration-side pin had left open on one edge.
 
 **Priority becomes Class-registry data.** The `CHECK` constraint,
 the closed Rust enum and the TS union retire together in favour of
@@ -771,6 +780,36 @@ door's own validation (codes unique, kinds and balances inside the
 table's CHECK constraints, a parent declared before its child); the
 collision itself is only visible at publish, because only the
 deployment knows its chart.
+
+**The tax regime is tenant data; the migration's kinds and rates are
+the brewery's.** (Backlog `7f163e58`; design `e187198f`, 2026-09-18.)
+40-ledger.sql seeds `tax_kinds` (five filing kinds, each FK-pinned to a
+GL account: 2150, 2300, 2310, 2320, 6500) and `sales_tax_rate_by_state`
+(27 states) on every instance, and nothing else could declare a kind —
+the accrual door refuses an unregistered one with "register it in
+tax_kinds first". Measured 2026-09-17: because a tax kind naming an
+account keeps it, the eviction above had to leave those five accounts
+under the brewery's names on every real instance, for ever. Both
+tables are now `seeds/tax.toml` in the tenant contract — `[[tax_kind]]`
+(kind, liability_account, expense_account?, derive_basis?) and
+`[[sales_tax_rate]]` (state, jurisdiction, rate_bps) — published
+through `POST /api/ledger/tax/batch` after the chart, insert-if-absent
+by kind and by state, one `ledger.tax_kind.declared` /
+`ledger.sales_tax_rate.declared` fact per inserted row, a held row that
+differs named in the publish line and never overwritten. The
+migration's rows are the brewery's seed (`examples/brewery/seeds/tax.toml`)
+and example residue everywhere else: the derivation reads the kinds
+and states as candidates, a kind is kept only when a `tax_filings` row
+names it, and **a kind that is itself leaving keeps nothing** — so the
+five accounts are candidates like the rest of the brewery's chart, and
+on a bare schema every account goes. `boss tenant check` holds the
+FK in the directory: a kind naming an account the tenant's
+`seeds/chart_of_accounts.toml` does not declare is INVALID naming the
+kind and the code. An empty file is valid and is what `init` writes:
+Algedonic has nothing to file until its first sellable SKU (design
+`18cf4272`), and until then the accrual door refuses every kind on its
+instance, which is the truth. The used-device shop declares no chart
+and so no tax; a tenant that files nothing declares nothing.
 
 **Counterparty prices are data; our costs emerge.** The vendor's
 agreed price (`inventory_items.vendor_price_cents`, seeded per
@@ -1252,9 +1291,9 @@ flagged `is_system_role` (`platform-admin`, `audit-readonly`), the
 bootstrap admin's and the operator baseline's row (the `it`
 department, `loc-hq`), the kinds the platform's three default
 locations wear, the `unspecified` account type the column defaults
-to, employment types and statuses, the module-tier vocabularies, and
-the five accounts the tax kinds reference — the sales-tax and tax-kind
-tables have no tenant seed yet and stay the product's until they do.
+to, employment types and statuses, the module-tier vocabularies. (Until
+backlog `7f163e58`, 2026-09-18, that line also carried the five accounts
+the migration's tax kinds reference; see the tax decision below.)
 The starter chart is therefore no longer an OSS default a company
 adopts by collision: a fresh company instance has no chart until its
 tenant declares one, and the rows below about a colliding code apply
@@ -1623,7 +1662,7 @@ ports under boss-ports' names, pinned by one equality test
 (`the_machine_door_carries_every_read_surface.rs`, CLAUDE.md §9a); (2)
 **the reader routes by path** from a `name=port` table rendered from
 boss-ports into the ops-runner's environment (`BOSS_SOR_PORTS`, read
-by run-car-probe.sh from `infra/forge/sor-ports.env` in its own
+by `boss prove --unattended` — until 9f00a805 car 2, run-car-probe.sh — from `infra/forge/sor-ports.env` in its own
 checkout), defaulting to jobs, still one argument, still refusing a
 URL and an unidentified read, and unchanged when no table is present;
 (3) **the gateway service-token door is deferred** to the hardening
@@ -1789,9 +1828,28 @@ backlog packets the design spawned):
   the tree while the registry admits the kind. The seed must learn that
   a retired version is an operator decision it does not revert; then
   the retire sticks and the file goes.
+- **H4 — registry rows whose only home was a migration** (trains
+  #448, #450, #453 and this car, 2026-09-18, item `393d3234`; the
+  decision paragraph is under §Stations above). Four registries, four
+  cars, one shape each: `infra/platform/stations/`, `step-plugins/`,
+  `cadence/`, `delivery-policy/` — one TOML per row carrying every
+  column, published insert-if-missing by (name, version) by the seed
+  every launcher already runs, through one decision table
+  (`boss_jobs::bundle_seed`, written once in car 1 and reused three
+  times); `infra/lint/migrations-declare-schema-only.sh` holds the
+  cutover stamp `20260918112134` once with the four tables beside it;
+  each bundle is held equal to the migrations' active rows by a
+  `*_bundle_is_the_migrations_pg.rs` pin that also rebuilds an emptied
+  table from the bundle alone. Measured: 25 migrations (7 + 7 + 9 + 2)
+  stopped being the only home of 21 declared rows (5 stations, 12
+  step-plugin kinds, 3 cadence rules, 1 delivery policy — the
+  directories, counted); no migration newer than the cutover may
+  insert one; the seed reads five bundle directories from one
+  `--seed-path` and no launcher changed. Kept, with its reason: the
+  conductor's compiled delivery-policy fallback (a dark registry must
+  still board a train), pinned to the bundle rather than deleted.
 
-**Pending, by item:** H4 registry rows whose only home is a migration
-(`393d3234`); H11 the pod prunes worktrees whose branch is gone from the
+**Pending, by item:** H11 the pod prunes worktrees whose branch is gone from the
 forge (`1933db9e`); H12 the conservation-invariant sweep never ran
 against the system of record (`236529aa`, found by the H7 measurement);
 H1 splitting `train.rs` along its test-module seams, and H8 the `boss`

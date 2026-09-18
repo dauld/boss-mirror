@@ -47,6 +47,14 @@ pub enum LedgerError {
     #[error("chart of accounts refused: {0}")]
     InvalidChart(String),
 
+    /// A tax batch that fails the door's own validation
+    /// (`tax_registry::validate`: a kind declared twice, a state that
+    /// is not a two-letter code, a rate outside the CHECK) or names an
+    /// account `gl_accounts` does not hold — a caller error naming the
+    /// row, refused before any row is written (backlog 7f163e58).
+    #[error("tax seed refused: {0}")]
+    InvalidTaxSeed(String),
+
     /// Postgres failure during insert, lookup, or trigger check.
     #[error("storage failure: {0}")]
     Storage(String),

@@ -20,6 +20,7 @@ pub mod excise;
 pub mod posting_rules;
 pub mod recognize;
 pub mod rules;
+pub mod tax_registry;
 pub mod types;
 
 // Kani bounded-model-checker proofs. The module compiles under both

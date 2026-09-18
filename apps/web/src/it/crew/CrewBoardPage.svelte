@@ -299,6 +299,64 @@
         as "at least" is a lower bound — the projection's stamp was a fallback, not an exact one.
       </p>
     {/if}
+
+    <!-- ========================== AGENT RUNS ========================= -->
+    <!-- The first first-party record of a build while it happens
+         (design c87fb59b car 2): one row per open agent-run packet,
+         as `boss dispatch` filed it. Data only, on the table the
+         section above already uses — a visual redesign is pending. -->
+    <div class="crew-section">03 — AGENT RUNS</div>
+
+    {#if crew.agentRuns.kind === 'failed'}
+      <p class="crew-fail load-failed">
+        The agent runs did not answer: {crew.agentRuns.error}. An unreadable registry is not an
+        idle crew.
+      </p>
+    {:else if crew.agentRuns.data.length === 0}
+      <p class="crew-stage-blank">No agent run is open.</p>
+    {:else}
+      <table class="crew-table">
+        <thead>
+          <tr>
+            <th>agent</th><th>run</th><th>on</th><th>at</th><th>model · budget · effort</th>
+            <th>host</th><th>since</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each crew.agentRuns.data as r (r.id)}
+            <tr>
+              <td>{r.agent === null ? '—' : formatActor(r.agent)}</td>
+              <td><a href={href(`/ux/jobs/${r.id}`)}>{r.title}</a></td>
+              <td>
+                {#if r.packet === null}
+                  <span class="crew-unknown">packet not recorded</span>
+                {:else}
+                  <a href={href(`/ux/jobs/${r.packet}`)}>{r.packet.slice(0, 8)}</a>
+                  {#if r.step !== null}· {r.step}{/if}
+                {/if}
+              </td>
+              <td>{r.at ?? '—'}</td>
+              <td>
+                {r.model ?? '—'} · {r.budgetUsd === null ? '—' : `$${r.budgetUsd}`} · {r.effort ?? '—'}
+              </td>
+              <td>{r.host ?? '—'}</td>
+              <td class="crew-num">
+                {#if r.openedAt === null}
+                  <span class="crew-unknown">not recorded</span>
+                {:else}
+                  {formatRelative(r.openedAt, loadedAt)}
+                {/if}
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+      <p class="crew-note">
+        Open runs only: a run that landed, was refused or died is history the packet's own page
+        tells. "At" is the run's own step — briefed, building, reported — not the step it is
+        executing on its packet, which "on" names.
+      </p>
+    {/if}
   {/if}
 </div>
 

@@ -36,7 +36,8 @@
 //! The forge already answers
 //! ops-request packets through a reviewed verb allowlist
 //! (`infra/ops/verbs/run-car-probe.json`), so the run goes through that door:
-//! `infra/forge/run-car-probe.sh` re-reads the car, refuses unless it
+//! `boss prove <car> --from-car --unattended` (the tree's CLI on the
+//! forge, backlog 9f00a805) re-reads the car, refuses unless it
 //! has merged and recorded a probe, runs the probe as `david` (never
 //! root) with a timeout, judges it by the two rules `boss prove`
 //! applies, and writes the verdict on the car — `proven` completed

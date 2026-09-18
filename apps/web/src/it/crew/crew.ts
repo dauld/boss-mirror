@@ -293,6 +293,59 @@ export function parseYard(raw: unknown): YardLanes {
 }
 
 // ---------------------------------------------------------------------
+// Agent runs — `GET /api/jobs?kind=agent-run&status=open`
+// ---------------------------------------------------------------------
+
+/// One agent's run of one protocol step, as `boss dispatch` files it
+/// (design c87fb59b car 2, backlog 39d0b528): the packet it executes,
+/// the settings it launched under, where it runs, and the step the run
+/// itself is at. The FIRST first-party record of a build while it
+/// happens — until this kind existed the BUILDING lane above could only
+/// infer one from a branch with no gate-run behind it.
+export type AgentRun = Readonly<{
+  id: string;
+  title: string;
+  /// The job whose step this run executes, and that step's slug.
+  packet: string | null;
+  step: string | null;
+  /// The actor the run signs as.
+  agent: string | null;
+  model: string | null;
+  budgetUsd: number | null;
+  effort: string | null;
+  host: string | null;
+  /// The run's own open step (`briefed` / `building` / `reported`), or
+  /// `null` between states.
+  at: string | null;
+  openedAt: string | null;
+}>;
+
+export function parseAgentRuns(raw: unknown): ReadonlyArray<AgentRun> {
+  return rows(raw)
+    .map((r) => {
+      const m = meta(r);
+      const steps = Array.isArray(r.steps)
+        ? (r.steps as ReadonlyArray<Record<string, unknown>>)
+        : [];
+      const open = steps.find((s) => str(s.status) === 'ready' || str(s.status) === 'active');
+      return {
+        id: str(r.id) ?? '',
+        title: str(r.title) ?? '',
+        packet: str(m.packet),
+        step: str(m.step),
+        agent: str(m.agent),
+        model: str(m.model),
+        budgetUsd: num(m.budget_usd),
+        effort: str(m.effort),
+        host: str(m.host),
+        at: open ? str(open.spec_slug) : null,
+        openedAt: str(m.opened_at) ?? str(r.opened_on),
+      };
+    })
+    .filter((a) => a.id !== '');
+}
+
+// ---------------------------------------------------------------------
 // Waits — `GET /api/jobs/queue-age`
 // ---------------------------------------------------------------------
 
@@ -692,14 +745,18 @@ export type CrewState = Readonly<{
   gateRuns: Exclude<Remote<ReadonlyArray<GateRun>>, { kind: 'loading' }>;
   yard: Exclude<Remote<YardLanes>, { kind: 'loading' }>;
   waits: Exclude<Remote<ReadonlyArray<Wait>>, { kind: 'loading' }>;
+  /// OPEN runs only: a run that landed, was refused or died is history
+  /// the packet's own page tells; this board is about now.
+  agentRuns: Exclude<Remote<ReadonlyArray<AgentRun>>, { kind: 'loading' }>;
 }>;
 
 export async function fetchCrew(): Promise<CrewState> {
-  const [cars, gateRuns, yard, waits] = await Promise.all([
+  const [cars, gateRuns, yard, waits, agentRuns] = await Promise.all([
     fetchRemote(`/api/jobs?kind=ship-a-change&limit=${CAR_WINDOW}`, parseCars),
     fetchRemote(`/api/jobs?kind=gate-run&limit=${CAR_WINDOW}`, parseGateRuns),
     fetchRemote('/api/yard/status', parseYard),
     fetchRemote('/api/jobs/queue-age', parseWaits),
+    fetchRemote(`/api/jobs?kind=agent-run&status=open&limit=${CAR_WINDOW}`, parseAgentRuns),
   ]);
-  return { cars, gateRuns, yard, waits };
+  return { cars, gateRuns, yard, waits, agentRuns };
 }

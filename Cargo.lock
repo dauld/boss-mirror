@@ -1708,7 +1708,6 @@ dependencies = [
  "async-trait",
  "axum",
  "boss-core",
- "boss-policy-client",
  "boss-ports",
  "http-body-util",
  "proc-macro2",

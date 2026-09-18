@@ -51,6 +51,14 @@
 //! without CAP_CHOWN) and prints what it did, so a receipt's `verified`
 //! field can quote it instead of claiming it.
 //!
+//! **The rules half** (design c87fb59b car 2, backlog 39d0b528) prints
+//! the profile's document from `infra/platform/documents/` after the
+//! invariants — the same tree the invariants are derived from, read the
+//! same way (`documents.rs`). Which profile is the step's own
+//! `agent_profile`, projected from its Workflow row's `agent` block;
+//! `builder` when it declares none. `boss dispatch` prints the same
+//! rendering as its prompt, through the one `render`.
+//!
 //! Read-only, and it writes nothing. The packet read goes through
 //! `gate::api`, so it inherits the no-default `BOSS_JOBS_URL` rule and
 //! is signed as the caller.
@@ -409,7 +417,7 @@ an invariant here in a brief is how the uid fact came to be wrong ten times
 /// The repo whose files the invariants are derived from: the worktree
 /// the caller is standing in. Asked of git rather than guessed, so a
 /// call from a subdirectory or a worktree lands on the right root.
-fn repo_root() -> Result<PathBuf> {
+pub(crate) fn repo_root() -> Result<PathBuf> {
     let out = std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .output()
@@ -427,26 +435,63 @@ fn repo_root() -> Result<PathBuf> {
     Ok(PathBuf::from(root))
 }
 
+/// The profile a packet's current step is briefed under: the
+/// `agent_profile` car 1 projects onto the step from its Workflow
+/// row's `agent` block, else [`crate::documents::DEFAULT_PROFILE`].
+/// A packet with no open step — or no packet at all — is briefed as
+/// the default, because the rules document is what the reader came
+/// for and a blank brief helps nobody.
+pub(crate) fn profile_for(job: Option<&Value>) -> String {
+    job.and_then(|j| {
+        crate::envelope::steps(j)
+            .into_iter()
+            .find(|s| crate::envelope::step_line(s).now)
+            .and_then(|s| s.get("metadata"))
+            .and_then(|m| m.get(boss_jobs::agent_spec::PROFILE_KEY))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    })
+    .unwrap_or_else(|| crate::documents::DEFAULT_PROFILE.to_string())
+}
+
+/// The whole brief, rendered: the packet (when there is one), the
+/// invariants, the line that says how to use them, and the rules
+/// document for `profile`. One function so `boss brief` and the
+/// prompt `boss dispatch` prints cannot drift apart (CLAUDE.md 9a).
+pub(crate) fn render(repo: &Path, job: Option<&Value>, profile: &str) -> Result<String> {
+    let invs = invariants(repo)?;
+    let mut out = String::new();
+    if let Some(job) = job {
+        out.push_str(&packet_section(job));
+        out.push('\n');
+    }
+    out.push_str(&invariant_section(&invs));
+    out.push_str(&format!("\n{HOW_TO_USE}\n\n"));
+    out.push_str(&crate::documents::section(repo, profile)?);
+    Ok(out)
+}
+
 pub async fn run(packet_ref: Option<String>) -> Result<()> {
     let repo = repo_root()?;
-    let invs = invariants(&repo)?;
-
-    if let Some(r) = packet_ref {
-        let http = reqwest::Client::new();
-        let id = crate::job::fetch_and_resolve(&http, &r).await?;
-        let job = crate::gate::api(
-            &http,
-            reqwest::Method::GET,
-            &format!("/api/jobs/{id}"),
-            None,
-        )
-        .await?
-        .context("the packet read returned no body")?;
-        print!("{}", packet_section(&job));
-        println!();
-    }
-    print!("{}", invariant_section(&invs));
-    println!("\n{HOW_TO_USE}");
+    let job = match packet_ref {
+        Some(r) => {
+            let http = reqwest::Client::new();
+            let id = crate::job::fetch_and_resolve(&http, &r).await?;
+            Some(
+                crate::gate::api(
+                    &http,
+                    reqwest::Method::GET,
+                    &format!("/api/jobs/{id}"),
+                    None,
+                )
+                .await?
+                .context("the packet read returned no body")?,
+            )
+        }
+        None => None,
+    };
+    let profile = profile_for(job.as_ref());
+    print!("{}", render(&repo, job.as_ref(), &profile)?);
     Ok(())
 }
 
@@ -704,5 +749,44 @@ mod tests {
         }
         assert!(rendered.contains("infra/dev/as-gate-uid.sh"));
         assert!(rendered.contains("pre-flight lints"));
+    }
+
+    /// The rules half: the document for the step's own profile follows
+    /// the invariants, so a builder is briefed with the rules of the
+    /// tree it stands in — and a packet declaring no profile is briefed
+    /// as a builder rather than with nothing.
+    #[test]
+    fn the_brief_ends_with_the_rules_for_the_steps_profile() {
+        let declared = json!({
+            "id": "39d0b528-ff69-4cb8-ba82-408b641da66c",
+            "kind": "backlog-item",
+            "metadata": {},
+            "steps": [
+                { "spec_slug": "triage", "status": "completed", "metadata": {} },
+                { "spec_slug": "build", "status": "ready",
+                  "metadata": { "agent_profile": "analyst", "agent_model": "opus-5[1m]" } },
+            ],
+        });
+        assert_eq!(profile_for(Some(&declared)), "analyst");
+        let undeclared = json!({
+            "steps": [{ "spec_slug": "build", "status": "ready", "metadata": {} }],
+        });
+        assert_eq!(profile_for(Some(&undeclared)), "builder");
+        assert_eq!(profile_for(None), "builder");
+
+        let out = render(&repo(), Some(&undeclared), "builder").expect("renders");
+        let packet = out.find("== THE PACKET").expect("the packet half");
+        let invariants = out.find("== THE INVARIANTS").expect("the invariant half");
+        let rules = out.find("== THE RULES").expect("the rules half");
+        assert!(
+            packet < invariants && invariants < rules,
+            "packet, invariants, rules"
+        );
+        assert!(out.contains("# Builder rules"));
+        assert!(out.contains(HOW_TO_USE));
+        // No packet: invariants and rules alone.
+        let alone = render(&repo(), None, "builder").expect("renders");
+        assert!(!alone.contains("== THE PACKET"));
+        assert!(alone.contains("== THE RULES"));
     }
 }

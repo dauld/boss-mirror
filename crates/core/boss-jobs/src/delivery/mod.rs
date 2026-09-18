@@ -19,7 +19,10 @@
 //! spawn a verb, and the conductor reads these inside the verb.
 //!
 //! Hexagonal: port trait + Pg adapter + in-memory adapter + HTTP door,
-//! the same shape as `cadence` and `scheduling`.
+//! the same shape as `cadence` and `scheduling`. The row is DECLARED in
+//! `infra/platform/delivery-policy/<name>.toml` and published by the
+//! platform seed (`crate::delivery_policy_seed`, backlog 393d3234,
+//! 2026-09-18); the two migrations that declared it before are history.
 
 pub mod http;
 pub mod in_memory;
@@ -29,7 +32,7 @@ pub mod postgres;
 pub mod types;
 
 pub use in_memory::{InMemoryDeliveryPolicy, StoredPolicy};
-pub use port::{DeliveryPolicyError, DeliveryPolicyRepository};
+pub use port::{DeliveryPolicyError, DeliveryPolicyRegistry, DeliveryPolicyRepository};
 #[cfg(feature = "postgres")]
 pub use postgres::PgDeliveryPolicy;
-pub use types::DeliveryPolicyRow;
+pub use types::{DeliveryPolicyRow, DeliveryPolicySpec};

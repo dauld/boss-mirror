@@ -4,7 +4,7 @@
 # the runner pinned.
 #
 # WHY THIS EXISTS — backlog 61085a9e, measured 2026-09-10 against one
-# backend at one commit. run-car-probe.sh builds the right `x-boss-user`
+# backend at one commit. The forge runner built the right `x-boss-user`
 # header for its own three calls and handed the probe an env carrying
 # only BOSS_JOBS_URL. So a probe doing `curl $BOSS_JOBS_URL/api/...`
 # read as `operator:unidentified`, and policy answered a NARROWER WORLD
@@ -55,7 +55,7 @@
 #
 # WHERE IT COMES FROM. This file is in the tree, so the converged
 # checkout at /home/david/boss carries it by construction — no install
-# step, nothing to drift. run-car-probe.sh puts this directory first on
+# step, nothing to drift. boss prove --unattended puts this directory first on
 # the probe's PATH. A checkout too old to have it makes the probe fail
 # as `boss-sor-read: command not found`, which the runner's fd-9 channel
 # records and reports as `unrunnable` with the tool named, rather than
@@ -85,7 +85,8 @@
 # table, the door's manifest and the runner's env file equal to
 # boss-ports (§9a).
 #
-# Env (all set by infra/forge/run-car-probe.sh):
+# Env (all set by the door that runs the probe — boss-cli prove.rs, the
+# unattended door, since backlog 9f00a805 retired run-car-probe.sh):
 #   BOSS_JOBS_URL   the system of record's base URL — host and jobs port
 #   BOSS_SOR_USER   the read-scoped actor, as x-boss-user JSON
 #   BOSS_SOR_PORTS  optional: `name=port …`, one entry per service the
@@ -116,7 +117,7 @@ esac
 
 [[ -n "${BOSS_JOBS_URL:-}" ]] || refuse \
     "BOSS_JOBS_URL is not set, and there is no safe default — the ops-runner's unit pins it
-  for run-car-probe.sh. If you are running this by hand, set it to the system of record."
+  for boss prove --unattended. If you are running this by hand, set it to the system of record."
 
 # THE REFUSAL THIS WHOLE FILE EXISTS FOR. Reading on with no identity is
 # exactly the defect: a narrowed answer that looks like a quiet system.
@@ -125,7 +126,7 @@ esac
     "BOSS_SOR_USER is not set, so this read would go out as operator:unidentified — and an
   unidentified reader is answered with a NARROWER WORLD, silently (backlog 61085a9e:
   21 open cars read as 0, a busy yard read as idle). Refusing rather than returning an
-  answer that cannot be told apart from 'nothing is there'. run-car-probe.sh exports
+  answer that cannot be told apart from 'nothing is there'. The unattended door exports
   this; by hand, export the read-scoped actor yourself."
 
 base="${BOSS_JOBS_URL%/}"

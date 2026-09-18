@@ -94,12 +94,13 @@ export const ROUTES: ReadonlyArray<string> = [
   // the route actually mounts.
   '/it/estate',
   // The Crew Board — the middle third of the operator surface, and a
-  // sidebar row of its own (backlog 04c5bbc0). Its four reads are
+  // sidebar row of its own (backlog 04c5bbc0). Its five reads are
   // `/api/jobs?kind=ship-a-change`, `/api/jobs?kind=gate-run`,
-  // `/api/yard/status` and `/api/jobs/queue-age`: the first, second and
-  // fourth come back `[]` from the catch-all and the third from the
-  // well-formed empty yard fixture above, so the crawl renders the
-  // board's five empty stage columns and its empty crew list. Every read
+  // `/api/yard/status`, `/api/jobs/queue-age` and
+  // `/api/jobs?kind=agent-run&status=open` (c87fb59b car 2): all but
+  // the yard come back `[]` from the catch-all and the yard from the
+  // well-formed empty fixture above, so the crawl renders the board's
+  // five empty stage columns, its empty crew list and no runs. Every read
   // goes through fetchRemote, so an unreachable backend renders a
   // bordered failure line per lane rather than an idle pipeline — the
   // same failed-never-empty bar as the estate row above.

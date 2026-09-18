@@ -61,9 +61,18 @@
 # not yet enforced is waiting on the converge, and a live rule this tree
 # no longer authors is one the next converge retires.
 #
-# WHEN THE API IS UNREACHABLE it SKIPS, loudly, and exits 0 — the gate
-# runs on the forge host, which has no route to the in-cluster read
-# surface, and a lint that reds there would red every car.
+# WHEN THE API IS UNREACHABLE it SKIPS, loudly, and exits 3 —
+# `LINT_CANNOT_ANSWER`, lib/git-answer.sh's word for "the machine could
+# not answer": never 0, because a skip prints no `scanned` line and a
+# clean exit with no count is what lib/scanned.sh refuses; never 1,
+# because nothing about the BRANCH was judged. Until 2026-09-18 it
+# exited 0 on the argument that the gate ran on the forge host with no
+# route here — no longer true (the gate runs in-cluster, design
+# 128b5496) — and its sibling `the-live-protocols-are-the-authored-
+# protocols` redded gate 35f4ff0c that way while the system of record
+# was rolling (backlog a26f92c4). gate.sh maps exit 3 to a REFUSAL
+# receipt (`refused`, not `failed`), which the conductor relaunches and
+# strikes no car for.
 #
 # Usage:  infra/lint/the-live-rules-are-the-authored-rules.sh
 #   BOSS_DISPATCHER_URL  read surface base (default: the in-cluster
@@ -75,6 +84,8 @@ set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
 . infra/lint/lib/scanned.sh
+# shellcheck source=infra/lint/lib/git-answer.sh
+. infra/lint/lib/git-answer.sh
 
 RULES_DIR="infra/dispatcher/rules"
 BASE="${BOSS_DISPATCHER_URL:-http://boss-dispatcher-internal.boss.svc.cluster.local:7950}"
@@ -99,12 +110,15 @@ tree_names=$(for f in "${files[@]}"; do basename "$f" .toml; done | LC_ALL=C sor
 # Live half — skips loudly when the read surface is unreachable.
 # ---------------------------------------------------------------------------
 skip() {
-    echo "the-live-rules-are-the-authored-rules: SKIPPED the live comparison — $1" >&2
+    echo "the-live-rules-are-the-authored-rules: $LINT_CANNOT_ANSWER_MARKER — SKIPPED the live comparison — $1" >&2
     echo "  target: $URL (override with BOSS_DISPATCHER_URL)" >&2
     echo "  ${#files[@]} authored rules were counted in the tree. Nothing is claimed" >&2
     echo "  about what the running dispatcher enforces." >&2
     [ "$problems" -eq 0 ] || exit 1
-    exit 0
+    # No scanned line on this path: the comparison did not run, so a
+    # count would certify it. gate.sh turns this exit into a refusal
+    # receipt instead of a red (backlog a26f92c4).
+    exit "$LINT_CANNOT_ANSWER"
 }
 
 command -v curl >/dev/null 2>&1 || skip "curl is not on this box"

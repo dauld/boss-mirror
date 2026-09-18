@@ -417,13 +417,6 @@ type Gap = Readonly<{ route: string; control: string; chrome?: true; why: string
 const CHROME_ROUTE = '/ux/me';
 
 const KNOWN_GAPS: ReadonlyArray<Gap> = [
-  // The codebase page paints "0 codebase-metrics packets exist and none
-  // carries a measurement" with the FAILURE_MARKER class under a read
-  // that succeeded and answered empty. The marker means "this read
-  // failed" (_routes.ts); this line means "the cadence has not filed",
-  // which is a different claim wearing the failure's name.
-  { route: '/it/codebase', control: 'empty backend', why: 'FAILURE_MARKER painted on a successful empty read (no-packets notice styled as a failed read)' },
-  { route: '/it/design/codebase', control: 'empty backend', why: 'FAILURE_MARKER painted on a successful empty read (no-packets notice styled as a failed read)' },
 ];
 
 const isKnown = (f: Finding): boolean => KNOWN_GAPS.some((g) => g.route === f.route && g.control === f.control);

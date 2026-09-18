@@ -659,3 +659,83 @@ fn a_directory_the_runner_cannot_load_stops_it_by_name() {
         "the fault must name the file that would not parse: {out}"
     );
 }
+
+/// A VERB THAT IS THE TREE'S OWN CLI SIGNS AS THE RUNNER. `run-car-probe`
+/// runs `boss prove … --unattended` since backlog 9f00a805 (car 2): the
+/// CLI signs every jobs-API call as `BOSS_ACTOR` and refuses a write
+/// unnamed, so the runner hands its own account over in the verb's
+/// environment — the same identity the step completion carries — and a
+/// unit that set `BOSS_ACTOR` itself wins. Read back through a bare
+/// command on PATH, the way `boss` resolves on the forge.
+#[test]
+fn a_cli_verb_signs_as_the_runners_own_account() {
+    needs_jq!();
+    let root = scratch("cli-verb-actor");
+    let bin = stub_sor(&root);
+    write_exec(
+        &bin.join("who-signs"),
+        "#!/bin/sh\nprintf 'signs-as=%s packet=%s\\n' \"${BOSS_ACTOR:-unset}\" \"${OPS_REQUEST_ID:-unset}\"\n",
+    );
+    let verbs = verbs_dir(
+        &root,
+        &[(
+            "who-signs",
+            r#"{"about": "prints the actor a CLI verb would sign as", "hosts": ["forge"],
+                "argv": ["who-signs"], "params": []}"#,
+        )],
+    );
+    packet(&root, "who-signs", "[]");
+    let (out, payload) = run(&root, &verbs, &[]);
+    let md = payload.unwrap_or_else(|| panic!("no step completed: {out}"));
+    assert_eq!(md["disposition"], "answered", "{md} / {out}");
+    let output = md["output"].as_str().unwrap_or("");
+    assert!(
+        output.contains("signs-as=automation:ops-runner"),
+        "the verb must see the runner's own account as BOSS_ACTOR: {md} / {out}"
+    );
+    assert!(
+        output.contains("packet=aaaaaaaa-0000-4000-8000-000000000000"),
+        "the packet id still rides the environment: {md}"
+    );
+
+    // The runner's account is BOSS_OPS_ACTOR when a unit names one…
+    let (out, payload) = run(
+        &root,
+        &verbs,
+        &[("BOSS_OPS_ACTOR", "automation:forge-ops".into())],
+    );
+    let md = payload.unwrap_or_else(|| panic!("no step completed: {out}"));
+    assert!(
+        md["output"]
+            .as_str()
+            .unwrap_or("")
+            .contains("signs-as=automation:forge-ops"),
+        "{md}"
+    );
+    // …and an explicit BOSS_ACTOR on the unit outranks both.
+    let (out, payload) = run(&root, &verbs, &[("BOSS_ACTOR", "emp-operator".into())]);
+    let md = payload.unwrap_or_else(|| panic!("no step completed: {out}"));
+    assert!(
+        md["output"]
+            .as_str()
+            .unwrap_or("")
+            .contains("signs-as=emp-operator"),
+        "{md}"
+    );
+
+    // And the shipped verb itself is the CLI, not a script: a bare
+    // `boss` on PATH, with the car first and both flags fixed words.
+    let shipped: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("infra/ops/verbs/run-car-probe.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        shipped["argv"],
+        serde_json::json!(["boss", "prove", "{1}", "--from-car", "--unattended"]),
+        "run-car-probe's argv is the tree's CLI (9f00a805 car 2)"
+    );
+    assert!(
+        !repo_root().join("infra/forge/run-car-probe.sh").exists(),
+        "the shell twin was retired with 9f00a805 car 2; a script here is a second definition"
+    );
+}

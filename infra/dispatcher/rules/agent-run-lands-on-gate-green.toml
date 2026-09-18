@@ -1,0 +1,45 @@
+# An agent's run lands when the gate it launched goes green (design
+# c87fb59b car 2, backlog 39d0b528).
+#
+# THE LINK IS WRITTEN BY THE GATE, NOT BY THIS RULE. `boss dispatch`
+# prints the run's id and the builder exports it as BOSS_AGENT_RUN;
+# `boss gate` stamps that id onto the gate-run as `metadata.agent_run`
+# the way it stamps park intent — a merging PATCH at launch. So when the
+# gate-run closes green (`outcome = "completed"`, the gate-run
+# protocol's own terminal label for green) the closing packet carries
+# the declared edge, and `jobs.complete_linked_step` follows it exactly
+# as it follows a car's `backlog_item`: the same handler, the same
+# guards, a different `link`.
+#
+# ONE STEP, AND ONLY THAT ONE. The green completes the run's `building`
+# with `result = gated` (`done_metadata` fills absent keys only) and
+# the gate-run's id and branch as evidence under `gate_run`. That opens
+# `reported`, which the rule never touches: it holds the builder's
+# handback, and a summary a rule invents is not the builder's, so the
+# report is written by the operator who read it today and by the runner
+# later. The run's own `landed` terminal fires on the report.
+#
+# A gate-run with no `agent_run` key — every hand-launched gate — is the
+# handler's first return: no declared edge, no obligation, nothing
+# written. A red or lost gate closes with a different outcome and does
+# not match; the run stays at `building` until the builder re-gates, the
+# operator records a refusal, or the silence rule ages it out.
+[[rule]]
+name = "agent-run-lands-on-gate-green"
+why = """
+A CROSS-PROTOCOL REACTOR: a `gate-run` packet's green verdict advances
+an `agent-run` packet — two protocols, so no single Workflow
+definition can declare it. The same shape as
+`complete-feedback-branch-on-car-merged`, one hop earlier in the
+pipeline: the edge is declared by the gate at launch
+(`metadata.agent_run`), and the close follows it. Measured 2026-09-18
+(car 1, 028891cf): 74 `build` steps completed by a rule on a builder's
+behalf, and not one of those builds had a packet of its own to land —
+the run existed in a terminal transcript and nowhere in the record.
+"""
+version = 1
+on_event = "jobs.job.closed"
+when = "kind = \"gate-run\" AND outcome = \"completed\""
+[[rule.do]]
+handler = "jobs.complete_linked_step"
+args = { link = "\"agent_run\"", steps = "\"building\"", evidence_key = "\"gate_run\"", done_metadata = '"{\"result\": \"gated\"}"' }

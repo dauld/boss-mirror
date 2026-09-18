@@ -77,6 +77,11 @@ pub struct Entry {
 struct Ctx {
     /// `[meta] tenant_id` — the `owning_team` workflows are stamped with.
     tenant_id: String,
+    /// The codes `seeds/chart_of_accounts.toml` declares, or `None`
+    /// when there is no such file or it does not parse (its own row
+    /// carries that refusal) — what a tax kind's account is checked
+    /// against (backlog 7f163e58).
+    chart: Option<BTreeSet<String>>,
 }
 
 /// What the scaffold templates need.
@@ -246,6 +251,27 @@ pub const CONTRACT: &[Entry] = &[
                 `boss_ledger::chart::validate`",
         parse: parse_chart_of_accounts,
         scaffold: Some(scaffold_chart_of_accounts),
+    },
+    Entry {
+        paths: &["seeds/tax.toml"],
+        required: false,
+        read_by: "POST /api/ledger/tax/batch, one boss-ledger `tax_registry::TaxSeed` (insert-if-absent \
+                  by kind and by state; a held row that differs is named) — sent by `boss tenant \
+                  publish` AFTER the chart, because a kind names accounts of it; the accrual door \
+                  (POST /api/ledger/tax-accruals) resolves a filing's accounts and amount \
+                  derivation from the kinds it lands (backlog 7f163e58: until 2026-09-18 these \
+                  rows were migration-seeded with the demo tenant's regime, pinning five of its \
+                  accounts on every instance)",
+        shape: "`[[tax_kind]]` rows: kind, liability_account, expense_account? (only a kind that \
+                accrues against an expense), derive_basis? (the accrual door's amount derivation; \
+                none = the caller's amount) — the `tax_kinds` columns; `[[sales_tax_rate]]` rows: \
+                state (two letters), jurisdiction (`US-CA`), rate_bps (0..=2000) — the \
+                `sales_tax_rate_by_state` columns. Either table may be empty, and an empty file \
+                is valid (a tenant with nothing sellable files no sales tax). Validated by \
+                `boss_ledger::tax_registry::validate`, and every account a kind names must be a \
+                code `seeds/chart_of_accounts.toml` declares (`validate_against_chart`)",
+        parse: parse_tax,
+        scaffold: Some(scaffold_tax),
     },
     Entry {
         paths: &["seeds/employees.json"],
@@ -603,6 +629,48 @@ fn parse_chart_of_accounts(path: &Path, _: &Ctx) -> Result<String, String> {
     })
 }
 
+/// The tax door's own loader and validation (backlog 7f163e58), plus
+/// the contract's cross-check: a kind naming an account the chart does
+/// not declare is INVALID naming the kind and the code, because the
+/// door's FK would refuse it as a constraint name and the chart is the
+/// tenant's to declare. An empty file is OK — a tenant with nothing
+/// sellable yet (design 18cf4272) files nothing.
+fn parse_tax(path: &Path, ctx: &Ctx) -> Result<String, String> {
+    let seed = boss_ledger::tax_registry::load_tax_toml(path)?;
+    boss_ledger::tax_registry::validate_against_chart(&seed, ctx.chart.as_ref())?;
+    if seed.is_empty() {
+        return Ok("0 tax kinds, 0 sales-tax rates (nothing to file yet)".to_string());
+    }
+    let kinds: Vec<String> = seed
+        .tax_kind
+        .iter()
+        .map(|k| match &k.expense_account {
+            Some(e) => format!("{} ({} <- {e})", k.kind, k.liability_account),
+            None => format!("{} ({})", k.kind, k.liability_account),
+        })
+        .collect();
+    let states: Vec<&str> = seed
+        .sales_tax_rate
+        .iter()
+        .map(|r| r.state.as_str())
+        .collect();
+    Ok(format!(
+        "{} tax kinds: {}; {} sales-tax rates: {}",
+        kinds.len(),
+        if kinds.is_empty() {
+            "none".to_string()
+        } else {
+            kinds.join(", ")
+        },
+        states.len(),
+        if states.is_empty() {
+            "none".to_string()
+        } else {
+            states.join(" ")
+        }
+    ))
+}
+
 fn parse_employees(path: &Path, _: &Ctx) -> Result<String, String> {
     let rows: Vec<boss_people::Employee> =
         serde_json::from_str(&read(path)?).map_err(|e| e.to_string())?;
@@ -936,6 +1004,9 @@ fn tenant_id_of(dir: &Path) -> String {
 pub fn check(dir: &Path) -> Report {
     let ctx = Ctx {
         tenant_id: tenant_id_of(dir),
+        chart: boss_ledger::chart::load_chart_toml(&dir.join("seeds/chart_of_accounts.toml"))
+            .ok()
+            .map(|rows| rows.into_iter().map(|a| a.code).collect()),
     };
     let mut rows = Vec::new();
     let mut named: BTreeSet<String> = BTreeSet::new();
@@ -1302,6 +1373,42 @@ fn scaffold_chart_of_accounts(s: &Scaffold) -> String {
 # kind = \"asset\"\n\
 # normal_balance = \"debit\"\n\
 # parent = \"1000\"\n",
+        display = s.display_name
+    )
+}
+
+fn scaffold_tax(s: &Scaffold) -> String {
+    format!(
+        "# {display} — tax regime: filing kinds + sales-tax rates (backlog\n\
+# 7f163e58; design e187198f).\n\
+#\n\
+# EMPTY ON PURPOSE. Fill it in when there is something to file — after\n\
+# the first sellable SKU (design 18cf4272: what is sold decides where\n\
+# it is taxed and which accounts the tax drains). An empty file is\n\
+# valid and publishes nothing. Until then the accrual door refuses\n\
+# every filing kind, which is the truth.\n\
+#\n\
+# One [[tax_kind]] per filing kind — its liability account, the\n\
+# expense account it accrues against (only a kind that accrues; omit\n\
+# it for a kind that drains a liability built up per invoice or per\n\
+# payroll run) and the accrual door's amount derivation — and one\n\
+# [[sales_tax_rate]] per state collected in. Every account a kind\n\
+# names must be a code seeds/chart_of_accounts.toml declares, or\n\
+# `boss tenant check` refuses the file naming the kind and the code.\n\
+# Published by `boss tenant publish` (POST /api/ledger/tax/batch),\n\
+# insert-if-absent by kind and by state; a row the instance already\n\
+# holds is kept and the publish line names the field this file\n\
+# differs on.\n\
+#\n\
+# [[tax_kind]]\n\
+# kind = \"sales\"\n\
+# liability_account = \"2300\"\n\
+# derive_basis = \"period-sales-tax\"\n\
+#\n\
+# [[sales_tax_rate]]\n\
+# state = \"CA\"\n\
+# jurisdiction = \"US-CA\"\n\
+# rate_bps = 725\n",
         display = s.display_name
     )
 }
@@ -2272,6 +2379,156 @@ terminal = { outcome = "sponsored" }
         let row = status_of(&row, "seeds/chart_of_accounts.toml").unwrap();
         assert_eq!(row.status, Status::Invalid, "{row:?}");
         assert!(row.detail.contains("[[account]]"), "{row:?}");
+    }
+
+    /// The tax regime (backlog 7f163e58) is judged by the ledger
+    /// loader's own validation AND against the chart: the migration's
+    /// regime over a chart that declares its accounts is OK and the
+    /// detail names the kinds and states; a kind naming an account the
+    /// chart does not declare is INVALID naming the kind and the code;
+    /// with no chart file at all any kind naming an account is
+    /// refused; an empty file is OK (a tenant with nothing to file
+    /// yet); a rate outside the table's CHECK is INVALID by row; and
+    /// rows under a wrong table name are refused naming the two this
+    /// reads rather than passed as nothing.
+    #[test]
+    fn a_tax_seed_is_judged_by_the_ledger_loader_and_against_the_chart() {
+        let dir = scratch_dir("boss-cli-tenant-check-tax");
+        write_file(&dir.join("tenant.toml"), "[meta]\ntenant_id = \"t\"\n");
+        let seeds = dir.join("seeds");
+        boss_testing::scratch::create_dir(&seeds);
+        write_file(&seeds.join("workflows.toml"), "");
+        const TAX: &str = "[[tax_kind]]\nkind = \"sales\"\nliability_account = \"2300\"\n\
+             derive_basis = \"period-sales-tax\"\n\
+             [[tax_kind]]\nkind = \"income\"\nliability_account = \"2310\"\n\
+             expense_account = \"6500\"\n\
+             [[sales_tax_rate]]\nstate = \"CA\"\njurisdiction = \"US-CA\"\nrate_bps = 725\n\
+             [[sales_tax_rate]]\nstate = \"OR\"\njurisdiction = \"US-OR\"\nrate_bps = 0\n";
+        write_file(&seeds.join("tax.toml"), TAX);
+
+        // No chart at all: the first kind's account is refused.
+        let r = check(&dir);
+        let row = status_of(&r, "seeds/tax.toml").unwrap();
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(
+            row.detail.contains("tax kind #1 (sales)")
+                && row.detail.contains("`2300`")
+                && row.detail.contains("no seeds/chart_of_accounts.toml"),
+            "{row:?}"
+        );
+
+        // A chart missing one of them: refused naming that kind and code.
+        write_file(
+            &seeds.join("chart_of_accounts.toml"),
+            "[[account]]\ncode = \"2300\"\nname = \"Sales tax payable\"\nkind = \"liability\"\n\
+             normal_balance = \"credit\"\n\
+             [[account]]\ncode = \"2310\"\nname = \"Income tax payable\"\nkind = \"liability\"\n\
+             normal_balance = \"credit\"\n",
+        );
+        let r = check(&dir);
+        let row = status_of(&r, "seeds/tax.toml").unwrap();
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(
+            row.detail.contains("tax kind #2 (income)")
+                && row.detail.contains("expense_account")
+                && row.detail.contains("`6500`")
+                && row.detail.contains("does not declare"),
+            "{row:?}"
+        );
+        assert!(
+            r.rows
+                .iter()
+                .any(|x| x.path == "seeds/chart_of_accounts.toml" && x.status == Status::Ok)
+        );
+
+        // The chart declaring all three: OK, and the detail reads the regime.
+        write_file(
+            &seeds.join("chart_of_accounts.toml"),
+            "[[account]]\ncode = \"2300\"\nname = \"Sales tax payable\"\nkind = \"liability\"\n\
+             normal_balance = \"credit\"\n\
+             [[account]]\ncode = \"2310\"\nname = \"Income tax payable\"\nkind = \"liability\"\n\
+             normal_balance = \"credit\"\n\
+             [[account]]\ncode = \"6500\"\nname = \"Income tax expense\"\nkind = \"expense\"\n\
+             normal_balance = \"debit\"\n",
+        );
+        let r = check(&dir);
+        let row = status_of(&r, "seeds/tax.toml").unwrap();
+        assert_eq!(row.status, Status::Ok, "{row:?}");
+        assert_eq!(
+            row.detail,
+            "2 tax kinds: sales (2300), income (2310 <- 6500); 2 sales-tax rates: CA OR"
+        );
+        assert!(r.passed());
+
+        // Empty: OK, and says so.
+        write_file(&seeds.join("tax.toml"), "# after the first sellable SKU\n");
+        let r = check(&dir);
+        let row = status_of(&r, "seeds/tax.toml").unwrap();
+        assert_eq!(row.status, Status::Ok, "{row:?}");
+        assert!(
+            row.detail.contains("0 tax kinds") && row.detail.contains("nothing to file"),
+            "{row:?}"
+        );
+
+        // The loader's own refusals, by row.
+        write_file(
+            &seeds.join("tax.toml"),
+            "[[sales_tax_rate]]\nstate = \"CA\"\njurisdiction = \"US-CA\"\nrate_bps = 2500\n",
+        );
+        let r = check(&dir);
+        let row = status_of(&r, "seeds/tax.toml").unwrap();
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(
+            row.detail.contains("sales tax rate #1 (CA)") && row.detail.contains("2500"),
+            "{row:?}"
+        );
+        write_file(&seeds.join("tax.toml"), "[[tax_kinds]]\nkind = \"sales\"\n");
+        let r = check(&dir);
+        let row = status_of(&r, "seeds/tax.toml").unwrap();
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(
+            row.detail.contains("tax_kinds") && row.detail.contains("sales_tax_rate"),
+            "{row:?}"
+        );
+    }
+
+    /// The scaffold's tax file is EMPTY with the reason in its comment
+    /// (design 18cf4272: filled after the first sellable SKU), and the
+    /// demo tenant's carries the migration's regime — five kinds, 27
+    /// states — over a chart that declares every account they name.
+    #[test]
+    fn the_scaffolded_tax_file_is_empty_by_design_and_the_examples_carry_the_migrations() {
+        let dir = scratch_dir("boss-cli-tenant-init-tax").join("acme");
+        init("acme", Some(&dir)).unwrap();
+        let tax = std::fs::read_to_string(dir.join("seeds/tax.toml")).unwrap();
+        assert!(
+            tax.lines()
+                .all(|l| l.trim().is_empty() || l.starts_with('#')),
+            "{tax}"
+        );
+        assert!(
+            tax.contains("EMPTY ON PURPOSE")
+                && tax.contains("first sellable SKU")
+                && tax.contains("18cf4272"),
+            "{tax}"
+        );
+        let r = check(&dir);
+        let row = status_of(&r, "seeds/tax.toml").unwrap();
+        assert_eq!(row.status, Status::Ok, "{row:?}");
+
+        let demo = boss_testing::repo_root().join("examples/brewery/seeds/tax.toml");
+        let seed = boss_ledger::tax_registry::load_tax_toml(&demo).unwrap();
+        assert_eq!(seed.tax_kind.len(), 5);
+        assert_eq!(seed.sales_tax_rate.len(), 27);
+        let codes: Vec<String> = seed.account_codes().into_iter().collect();
+        assert_eq!(codes, ["2150", "2300", "2310", "2320", "6500"]);
+        let r = check(&boss_testing::repo_root().join("examples/brewery"));
+        let row = status_of(&r, "seeds/tax.toml").unwrap();
+        assert_eq!(row.status, Status::Ok, "{row:?}");
+        assert!(
+            row.detail.starts_with("5 tax kinds:") && row.detail.contains("27 sales-tax rates"),
+            "{row:?}"
+        );
     }
 
     /// A RULE DECLARATION IS JUDGED BY THE DISPATCHER'S OWN READER

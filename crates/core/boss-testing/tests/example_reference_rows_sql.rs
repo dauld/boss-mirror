@@ -17,16 +17,21 @@
 //!     flags as such, the roles the platform Workflow bundle names, the
 //!     bootstrap admin's and the operator baseline's row, the kinds the
 //!     platform's default locations wear, the account_type column
-//!     default, the accounts the tax kinds reference. One generic row
-//!     (`owner`, the sole-proprietor role) is named by hand with its
-//!     reason. A migration that seeds a new example row, or an example
-//!     seed that stops carrying one, moves this line.
+//!     default. One generic row (`owner`, the sole-proprietor role) is
+//!     named by hand with its reason. A migration that seeds a new
+//!     example row, or an example seed that stops carrying one, moves
+//!     this line. Until backlog 7f163e58 (2026-09-18) the five accounts
+//!     the migration's tax kinds name (2150 / 2300 / 2310 / 2320 / 6500)
+//!     were kept here too, under the demo's names, on every instance;
+//!     the kinds and the sales-tax rates are the brewery's seed now, so
+//!     on a bare schema every account goes and both tax tables empty.
 //!   * DELETABLE ONLY WHEN UNREFERENCED. A fixture wearing the rows — an
 //!     employee with the role, department and location; an account of
 //!     the type; a policy grant naming a role; a job about the company
-//!     and one about a location; a child class — keeps each of them,
-//!     named with the column that points at it, and the run deletes
-//!     the rest.
+//!     and one about a location; a child class; a tax filing naming a
+//!     tax kind, which keeps the kind AND the accounts the kind names —
+//!     keeps each of them, named with the column that points at it, and
+//!     the run deletes the rest.
 //!   * A ROW THE INSTANCE'S OWN TENANT DECLARES IS NOT A CANDIDATE
 //!     (backlog 86835bf9; measured 2026-09-18, ops-request 8522ad76:
 //!     four departments Algedonic declares under the device shop's
@@ -273,26 +278,30 @@ async fn on_a_fresh_schema_what_remains_is_exactly_what_the_platform_names() {
     let status_before = classes(&db, "employee", "status").await;
     let phases_before = classes(&db, "asset", "phase").await;
 
-    // The plan on the bare schema: every present candidate is deletable
-    // but the accounts the tax kinds point at.
+    // The plan on the bare schema: every present candidate is deletable.
+    // The migration's tax kinds name five accounts, and until 7f163e58
+    // that kept them; a kind that is itself leaving keeps nothing.
     let p = plan(&url);
     let tax_accounts = set(&db, "SELECT liability_account FROM tax_kinds UNION SELECT expense_account FROM tax_kinds WHERE expense_account IS NOT NULL").await;
-    assert!(
-        !tax_accounts.is_empty(),
-        "40-ledger.sql seeds tax kinds naming accounts"
-    );
-    let gl_kept: BTreeSet<String> = kept(&p["gl_accounts"]["kept"])
-        .into_iter()
-        .map(|(k, _)| k)
-        .collect();
     assert_eq!(
-        gl_kept, tax_accounts,
-        "the accounts kept on a bare schema are exactly the tax kinds' — the tax tables have no tenant seed yet"
+        tax_accounts,
+        s(&["2150", "2300", "2310", "2320", "6500"]),
+        "40-ledger.sql seeds tax kinds naming these accounts"
     );
-    for (_, reasons) in kept(&p["gl_accounts"]["kept"]) {
-        assert_eq!(reasons, ["tax_kinds"]);
-    }
-    for t in ["companies", "locations", "classes"] {
+    assert_eq!(
+        p["tax_kinds"]["present"].as_u64().unwrap(),
+        5,
+        "the migration's five kinds are candidates: {p}"
+    );
+    assert_eq!(p["sales_tax_rates"]["present"].as_u64().unwrap(), 27);
+    for t in [
+        "companies",
+        "locations",
+        "tax_kinds",
+        "sales_tax_rates",
+        "gl_accounts",
+        "classes",
+    ] {
         assert_eq!(
             p[t]["kept"].as_array().unwrap().len(),
             0,
@@ -315,7 +324,17 @@ async fn on_a_fresh_schema_what_remains_is_exactly_what_the_platform_names() {
     // The run.
     let runs = evict(&url);
     let tables: Vec<&str> = runs.iter().map(|r| r["table"].as_str().unwrap()).collect();
-    assert_eq!(tables, ["companies", "locations", "gl_accounts", "classes"]);
+    assert_eq!(
+        tables,
+        [
+            "companies",
+            "locations",
+            "tax_kinds",
+            "sales_tax_rates",
+            "gl_accounts",
+            "classes"
+        ]
+    );
     for r in &runs {
         let t = r["table"].as_str().unwrap();
         assert_eq!(
@@ -325,7 +344,14 @@ async fn on_a_fresh_schema_what_remains_is_exactly_what_the_platform_names() {
         );
     }
     let after = plan(&url);
-    for t in ["companies", "locations", "gl_accounts", "classes"] {
+    for t in [
+        "companies",
+        "locations",
+        "tax_kinds",
+        "sales_tax_rates",
+        "gl_accounts",
+        "classes",
+    ] {
         assert_eq!(
             after[t]["deletable"].as_array().unwrap().len(),
             0,
@@ -431,8 +457,18 @@ async fn on_a_fresh_schema_what_remains_is_exactly_what_the_platform_names() {
     );
     assert_eq!(
         set(&db, "SELECT code FROM gl_accounts").await,
-        tax_accounts,
-        "accounts kept = the tax kinds' five, and nothing else of the starter chart"
+        BTreeSet::new(),
+        "the whole starter chart was the brewery's, the five tax accounts included (7f163e58)"
+    );
+    assert_eq!(
+        set(&db, "SELECT kind FROM tax_kinds").await,
+        BTreeSet::new(),
+        "every tax kind was the brewery's"
+    );
+    assert_eq!(
+        set(&db, "SELECT state FROM sales_tax_rate_by_state").await,
+        BTreeSet::new(),
+        "every sales-tax rate was the brewery's"
     );
 }
 
@@ -449,7 +485,9 @@ async fn a_referenced_row_is_kept_and_named_and_the_rest_go() {
              VALUES ('org-thing', 1, 'active', 'Org thing', 'ops', '[\"company\", \"location\"]', '[]', 'acme');
          INSERT INTO jobs (id, kind, subject_kind, subject_id, title, owner_id, status, priority, opened_on, partition)
              VALUES ('11111111-1111-1111-1111-111111111111', 'org-thing', 'company', 'brewery', 'about the company', 'emp-f', 'open', 'standard', '2026-09-17', 'real'),
-                    ('22222222-2222-2222-2222-222222222222', 'org-thing', 'location', 'loc-brewery-brewhouse', 'about the site', 'emp-f', 'closed', 'standard', '2026-09-17', 'simulated');",
+                    ('22222222-2222-2222-2222-222222222222', 'org-thing', 'location', 'loc-brewery-brewhouse', 'about the site', 'emp-f', 'closed', 'standard', '2026-09-17', 'simulated');
+         INSERT INTO tax_filings (id, kind, jurisdiction, period_start, period_end, due_on, amount_cents, liability_account, status)
+             VALUES ('tf-f', 'sales', 'US-CA', '2026-07-01', '2026-09-30', '2026-10-31', 12500, '2300', 'accrued');",
     )
     .execute(&db.pool)
     .await
@@ -487,6 +525,20 @@ async fn a_referenced_row_is_kept_and_named_and_the_rest_go() {
         &["jobs.subject_id"],
     );
     want(&p, "companies", "brewery", &["jobs.subject_id"]);
+    // A filing names the kind, so the kind stays — and a kind that
+    // stays keeps the accounts it names (7f163e58); the filing names
+    // its liability account too. The other four kinds go, and with
+    // them their accounts.
+    want(&p, "tax_kinds", "sales", &["tax_filings.kind"]);
+    want(
+        &p,
+        "gl_accounts",
+        "2300",
+        &["tax_kinds", "tax_filings.liability_account"],
+    );
+    assert_eq!(kept(&p["tax_kinds"]["kept"]).len(), 1);
+    assert_eq!(kept(&p["gl_accounts"]["kept"]).len(), 1);
+    assert_eq!(kept(&p["sales_tax_rates"]["kept"]).len(), 0);
     assert_eq!(
         kept(&p["classes"]["kept"]).len(),
         5,
@@ -523,6 +575,8 @@ async fn a_referenced_row_is_kept_and_named_and_the_rest_go() {
         "loc-brewery-taproom",
         "loc-brewery-brewhouse",
         "brewery",
+        "sales",
+        "2300",
     ] {
         assert!(!deleted.contains(k), "{k} was referenced and must survive");
     }
@@ -534,6 +588,9 @@ async fn a_referenced_row_is_kept_and_named_and_the_rest_go() {
         "location:brewhouse",
         "used-device-shop",
         "1000",
+        "income",
+        "6500",
+        "CA",
     ] {
         assert!(
             deleted.contains(k),
@@ -541,6 +598,12 @@ async fn a_referenced_row_is_kept_and_named_and_the_rest_go() {
         );
     }
     assert_eq!(set(&db, "SELECT id FROM companies").await, s(&["brewery"]));
+    assert_eq!(set(&db, "SELECT kind FROM tax_kinds").await, s(&["sales"]));
+    assert_eq!(set(&db, "SELECT code FROM gl_accounts").await, s(&["2300"]));
+    assert_eq!(
+        set(&db, "SELECT state FROM sales_tax_rate_by_state").await,
+        BTreeSet::new()
+    );
     assert_eq!(
         set(
             &db,

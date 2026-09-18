@@ -20,7 +20,13 @@
 #   * a RESERVED domain that names nobody: example.com/net/org, any
 #     `.example`, `.invalid`, `.test`, `.local`, `.localhost`, or
 #   * GitHub's per-account no-reply (`users.noreply.github.com`), which
-#     is a commit identity, not a mailbox.
+#     is a commit identity, not a mailbox, or
+#   * any `noreply@` / `no-reply@` / `no_reply@` local part: a mailbox
+#     nobody reads is a machine's, not a person's. The commit trailer
+#     every car carries (`Co-Authored-By: … <noreply@anthropic.com>`)
+#     reached infra/ as a platform document on 2026-09-18 and the train
+#     gate for #461 refused the assembled tree on it, the day this lint
+#     landed.
 # A systemd instance name (`wg-quick@wg0.service`) has the shape of an
 # address and is not one; unit suffixes are excluded.
 #
@@ -56,6 +62,14 @@ COMPANY_DOMAIN="algedonic.dev"
 # a letters-only label so `1.2.3.4`-style hosts are not read as one.
 ADDRESS='[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
 
+# is_no_reply <local-part> — 0 iff the mailbox is one nobody reads.
+is_no_reply() {
+    case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+        noreply|no-reply|no_reply|noreply.*|no-reply.*|no_reply.*|*.noreply|*.no-reply|*-noreply|*-no-reply) return 0 ;;
+    esac
+    return 1
+}
+
 # is_allowed_domain <domain> — 0 iff the address belongs to nobody in
 # particular, or to the company.
 is_allowed_domain() {
@@ -75,12 +89,14 @@ is_allowed_domain() {
 # One finding per (line, domain): two visitors at one provider on one
 # line are one thing to fix.
 findings_in() { # file
-    local hit line addr domain
+    local hit line addr domain local_part
     grep -noE "$ADDRESS" "$1" 2>/dev/null | while IFS= read -r hit; do
         [ -n "$hit" ] || continue
         line=${hit%%:*}
         addr=${hit#*:}
         domain=${addr##*@}
+        local_part=${addr%@*}
+        is_no_reply "$local_part" && continue
         is_allowed_domain "$domain" && continue
         printf '%s: %s\n' "$line" "$domain"
     done | sort -u -t: -k1,1n -k2
@@ -106,6 +122,7 @@ self_test() {
         printf 'd = alice%sexample.com\ne = lint%sexample.invalid\nf = va%sboss.local\n' "$at" "$at" "$at"
         printf 'g = x%sboss.example\nh = t%sx.test\ni = Requires=wg-quick%swg0.service\n' "$at" "$at" "$at"
         printf 'j = dauld%susers.noreply.github.com\n' "$at"
+        printf 'k = Co-Authored-By: a model <noreply%santhropic.com>\nl = no-reply%svendor.io\n' "$at" "$at"
     } >"$t/good.toml"
     [ -z "$(findings_in "$t/good.toml")" ] || {
         echo "$NAME: self-test FAILED — a company, reserved, unit or no-reply address was refused:" >&2
@@ -129,7 +146,7 @@ self_test() {
     case "$got" in
         *visitor*|*one"$at"*|*two"$at"*|*Someone*) echo "$NAME: self-test FAILED — a local part was printed" >&2; return 1 ;;
     esac
-    echo "$NAME: self-test ok — company, reserved, unit and no-reply addresses pass; a personal address is named by line and domain only"
+    echo "$NAME: self-test ok — company, reserved, unit, GitHub no-reply and noreply@ addresses pass; a personal address is named by line and domain only"
 }
 
 if [ "${1:-}" = "--self-test" ]; then self_test; exit $?; fi

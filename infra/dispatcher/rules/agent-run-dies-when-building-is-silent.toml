@@ -1,0 +1,57 @@
+# A builder that goes silent is a run that dies (design c87fb59b car 2,
+# backlog 39d0b528). The middle third: a builder that dies is a packet
+# that ages, and until this rule nothing read the age.
+#
+# WHAT SILENT MEANS HERE. An `agent-run` whose `building` step is open
+# and whose packet has not MOVED — no step completed, no metadata
+# written — for longer than the bound. The handler reads the newest
+# `completed_at` across the packet's completed steps (the server stamps
+# it at every flip to completed, and `briefed` completes the instant
+# `boss dispatch` prints the prompt, so that stamp IS the moment the
+# build began) and falls back to `metadata.opened_at` on a packet with
+# no such stamp. The clock it measures against is the tick's own `_at`,
+# which the schedule runner writes onto every sub-day firing; the
+# handler holds no clock of its own.
+#
+# THE BOUND IS 2x THE STEP'S DURATION, AND IT LIVES TWICE. The
+# agent-run protocol authors `building` at `duration_hours = 2.0`; the
+# packet did not carry that number onto the materialised step, and a
+# handler that fetched the workflow row on every hourly tick to read one
+# float would be a second reader of the same registry for one value. So
+# the bound is an arg here — the same idiom as
+# `cadence-silence-sweep-daily`, whose intervals are the rule row's
+# declaration — and `platform_bundle_agent_run.rs` holds this arg equal
+# to twice the step's `duration_hours` (CLAUDE.md 9a: pinned because it
+# cannot be collapsed today; collapse it when the projection carries
+# the duration).
+#
+# WHAT IT WRITES. `building` is completed with `result = died` and an
+# `aged_out` evidence object naming the silence measured, the bound,
+# and the tick; the run's own `died` terminal does the rest. Nothing
+# else on the packet is touched, and the step the run was executing on
+# ITS packet is left exactly as the builder left it — claimed, active —
+# because releasing it is a routing decision this rule must not make.
+# Idempotent by construction: a completed `building` is not open, and
+# the next tick finds nothing.
+#
+# HOURLY, NOT DAILY. The bound is four hours; a daily sweep would let a
+# dead run sit for up to a day past it, which is the same silence one
+# level up.
+[[rule]]
+name = "agent-run-dies-when-building-is-silent"
+why = """
+A TIMER, the standing exemption: the condition is a packet that did
+NOT move, and no event says "four hours passed with nothing arriving".
+A Workflow definition can say what a step requires at done; it cannot
+complete its own step for want of anyone completing it. Measured
+2026-09-09 (memory: a dead builder's loop keeps gating): a builder
+died mid-run and its retry loop kept filing twin cars, because the run
+existed in a transcript and nowhere a rule could read its age. It adds
+no routing: one firing completes `building` with `result = died` on
+every silent run and the run's own terminal closes it.
+"""
+version = 1
+schedule = { cadence = "hourly", anchor_date = "2026-09-18" }
+[[rule.do]]
+handler = "jobs.age_out_step"
+args = { kind = "\"agent-run\"", step = "\"building\"", hours = "\"4\"", done_metadata = '"{\"result\": \"died\"}"' }

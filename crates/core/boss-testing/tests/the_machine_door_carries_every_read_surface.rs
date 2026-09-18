@@ -20,7 +20,8 @@
 //!   1. the Service manifest, `infra/cluster/manifests/boss-jobs-internal.yaml`
 //!      — what the cluster actually exposes on 10.20.0.34;
 //!   2. `infra/forge/sor-ports.env` — the `name=port` table the forge's
-//!      run-car-probe.sh hands the reader as `BOSS_SOR_PORTS` (the forge
+//!      `boss prove --unattended` hands the reader as `BOSS_SOR_PORTS` (read
+//!      as data from the converged checkout: the forge
 //!      has no cargo and no boss-ports binary, so the table is checked
 //!      in rather than rendered there);
 //!   3. the path-prefix → service table in
@@ -104,7 +105,7 @@ fn manifest_ports() -> BTreeMap<String, (u16, u16)> {
 }
 
 /// Copy 2 — the env table: `name=port` lines, `#` comments and blanks
-/// ignored, exactly as run-car-probe.sh reads it.
+/// ignored, exactly as `prove::sor_ports_table` reads it.
 fn env_ports() -> BTreeMap<String, u16> {
     let body = read(PORTS_ENV);
     let mut out = BTreeMap::new();

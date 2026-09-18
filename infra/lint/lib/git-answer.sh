@@ -45,7 +45,7 @@
 # recover it afterwards, because the text of a lint's message is not a
 # contract. Exit 3 is already this tree's word for it —
 # `infra/safe-cargo.sh`, `infra/forge/journal-read.sh` ("UNREACHABLE →
-# SKIPS LOUDLY (exit 3). Never 0"), `infra/forge/run-car-probe.sh`,
+# SKIPS LOUDLY (exit 3). Never 0"), `boss prove --unattended`,
 # `infra/cluster/undeclared-objects.sh` — so a reader who knows the
 # vocabulary reads it right today.
 #
@@ -60,14 +60,15 @@
 #   that is a warning the train PROCEEDS past, which would turn a lint
 #   that read nothing into a boarding.
 #
-#   the per-car gate (`infra/gate.sh` `check()`) knows only pass/fail
-#   and will report exit 3 as a plain red check. That is safe — it never
-#   certifies — but it is the remaining half: the gate should record a
-#   refusal the way its disk floor already does (`GATE_REFUSAL`,
-#   `write_receipt "refused"`, exit 2) instead of as a verdict on the
-#   branch. gate.sh is owned by another car as this lands; the mapping
-#   is filed separately. The code carries the distinction so that change
-#   is a gate-only edit and nothing has to be re-derived.
+#   the per-car gate (`infra/gate.sh` `check_lint()`) records exit 3 as
+#   a REFUSAL the way its disk floor does — `GATE_REFUSAL` naming the
+#   lint and its first refusal line, `write_receipt "refused"`, exit 2 —
+#   which `train_gate::standing` reads as `Standing::Refused` and
+#   relaunches, striking no car. Until 2026-09-18 `check()` knew only
+#   pass/fail and a 3 was a plain red: gate 35f4ff0c went red on
+#   `the-live-protocols-are-the-authored-protocols` while the system of
+#   record was rolling (backlog a26f92c4). gate.sh sources THIS file for
+#   the number, so the two cannot drift.
 #
 # USAGE
 #   . "$LINT_DIR/lib/git-answer.sh"

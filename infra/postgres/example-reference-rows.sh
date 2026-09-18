@@ -12,7 +12,9 @@
 # worked-example tenants on EVERY instance — the used-device shop's
 # 26 roles and ten departments, the brewery's location kinds, account
 # types, equipment categories, two production sites, the brewery-
-# shaped starter chart of 33 accounts, a companies row for each. A
+# shaped starter chart of 33 accounts, its five tax kinds and the 27
+# states it collects sales tax in (40-ledger.sql; backlog 7f163e58),
+# a companies row for each. A
 # real company's instance booted with a brewer's books and a refurb
 # shop's org chart (measured on prod, 2026-09-17: "Brewery Taproom"
 # in /api/locations). The migrations cannot be edited — applied files
@@ -21,7 +23,7 @@
 #
 #   1. the example tenants' seeds now carry every one of those rows
 #      (examples/*/seeds/classes.*, locations.toml,
-#      chart_of_accounts.toml), so the playground publishes them
+#      chart_of_accounts.toml, tax.toml), so the playground publishes them
 #      through its contract and the migration rows become residue;
 #   2. a FRESH instance whose tenant is not an example evicts them at
 #      boot, before any service starts (init.sh, first start only —
@@ -34,7 +36,8 @@
 # THE CANDIDATE SET IS READ, NEVER TYPED. examples/*/seeds/classes.json
 # and classes.toml give (subject_kind, code, member_attribute);
 # locations.toml gives location ids; chart_of_accounts.toml gives
-# account codes; each tenant.toml's [meta] tenant_id is its companies
+# account codes; tax.toml gives tax kinds and sales-tax states; each
+# tenant.toml's [meta] tenant_id is its companies
 # row. Whatever the platform needs must therefore NOT be in an
 # example's seeds — the `platform-admin` / `audit-readonly` / `owner`
 # / `smoke-tester` roles, the `it` department, employment types and
@@ -75,13 +78,19 @@
 # requisition or product inventory at the location, a location under
 # it, a job about it; a job about the company; a journal line or daily
 # balance on the account, a tax kind or filing naming it, a registry
-# posting rule naming it, a child account. A child that is itself
-# deletable does not keep its parent, so the plan predicts the real run.
+# posting rule naming it, a child account; a tax filing naming the tax
+# kind (a sales-tax rate is referenced by nothing: it is always
+# deletable when present). A child that is itself deletable does not
+# keep its parent, and a tax kind that is itself deletable does not
+# keep its accounts (backlog 7f163e58: until 2026-09-18 the
+# migration's five kinds kept 2150 / 2300 / 2310 / 2320 / 6500 under
+# the demo's names on every instance), so the plan predicts the real run.
 # A member_attribute this script has no column for is KEPT and named
 # `unmapped:<attribute>` — never deleted on a guess.
 #
 # ONE TRANSACTION PER TABLE, in dependency order: companies, locations
-# (with their `subjects` projection rows), gl_accounts, classes last
+# (with their `subjects` projection rows), tax_kinds (they FK the
+# accounts), sales_tax_rate_by_state, gl_accounts, classes last
 # (a location's kind is a class). Each transaction re-judges from the
 # live state with the same CTEs the plan used, so nothing referenced
 # between the plan and the run is deleted.
@@ -195,7 +204,7 @@ example_dirs() {
 # each file read, relative to <base>. Returns 1 when a seed cannot be
 # parsed — a refusal upstream, never a smaller set.
 dir_sets() { # <tenant dir> <base for source names>
-    local d="$1" base="$2" id classes='[]' locations='[]' accounts='[]' companies='[]' sources='[]' n
+    local d="$1" base="$2" id classes='[]' locations='[]' accounts='[]' companies='[]' tax_kinds='[]' tax_rates='[]' sources='[]' n
     id=$(tenant_id_of "$d")
     companies=$(jq -c --arg id "$id" '. + [$id]' <<<"$companies")
     if [ -f "$d/seeds/classes.json" ]; then
@@ -218,16 +227,27 @@ dir_sets() { # <tenant dir> <base for source names>
         accounts=$(jq -c --argjson n "$n" '. + $n' <<<"$accounts")
         sources=$(jq -c --arg s "${d#"$base"/}/seeds/chart_of_accounts.toml" '. + [$s]' <<<"$sources")
     fi
+    if [ -f "$d/seeds/tax.toml" ]; then
+        n=$(toml_blocks "$d/seeds/tax.toml" tax_kind | jq -c 'map(.kind)') || return 1
+        tax_kinds=$(jq -c --argjson n "$n" '. + $n' <<<"$tax_kinds")
+        n=$(toml_blocks "$d/seeds/tax.toml" sales_tax_rate | jq -c 'map(.state)') || return 1
+        tax_rates=$(jq -c --argjson n "$n" '. + $n' <<<"$tax_rates")
+        sources=$(jq -c --arg s "${d#"$base"/}/seeds/tax.toml" '. + [$s]' <<<"$sources")
+    fi
     # Every row must carry its key, or the extraction is broken, not
     # the seed.
     jq -n -c \
         --argjson classes "$classes" --argjson locations "$locations" \
-        --argjson accounts "$accounts" --argjson companies "$companies" --argjson sources "$sources" '
+        --argjson accounts "$accounts" --argjson companies "$companies" \
+        --argjson tax_kinds "$tax_kinds" --argjson tax_rates "$tax_rates" --argjson sources "$sources" '
         if ($classes | map(select(.subject_kind == null or .code == null)) | length) > 0
         then error("a classes row without subject_kind or code") else . end
         | if ($locations | map(select(. == null)) | length) > 0 then error("a location row without id") else . end
         | if ($accounts | map(select(. == null)) | length) > 0 then error("an account row without code") else . end
-        | {classes: $classes, locations: $locations, gl_accounts: $accounts, companies: $companies, sources: $sources}'
+        | if ($tax_kinds | map(select(. == null)) | length) > 0 then error("a tax_kind row without kind") else . end
+        | if ($tax_rates | map(select(. == null)) | length) > 0 then error("a sales_tax_rate row without state") else . end
+        | {classes: $classes, locations: $locations, gl_accounts: $accounts, companies: $companies,
+           tax_kinds: $tax_kinds, sales_tax_rates: $tax_rates, sources: $sources}'
 }
 
 seed_sets() {
@@ -243,6 +263,8 @@ seed_sets() {
         locations: (map(.locations) | add | unique | sort),
         gl_accounts: (map(.gl_accounts) | add | unique | sort),
         companies: (map(.companies) | add | unique | sort),
+        tax_kinds: (map(.tax_kinds) | add | unique | sort),
+        sales_tax_rates: (map(.sales_tax_rates) | add | unique | sort),
         sources: (map(.sources) | add)
     }' <<<"$all"
 }
@@ -262,11 +284,14 @@ subtract_tenant() { # <candidate JSON> <tenant dir> -> JSON
     jq -c --argjson t "$declared" --arg id "$id" --arg dir "$dir" '
         ($t.classes | map("\(.subject_kind):\(.code)")) as $tc
         | ($t.locations) as $tl | ($t.gl_accounts) as $ta | ($t.companies) as $tco
+        | ($t.tax_kinds) as $tk | ($t.sales_tax_rates) as $ts
         | {
             classes: (.classes | map(select(("\(.subject_kind):\(.code)") as $k | $tc | index($k) | not))),
             locations: (.locations | map(select(. as $k | $tl | index($k) | not))),
             gl_accounts: (.gl_accounts | map(select(. as $k | $ta | index($k) | not))),
             companies: (.companies | map(select(. as $k | $tco | index($k) | not))),
+            tax_kinds: (.tax_kinds | map(select(. as $k | $tk | index($k) | not))),
+            sales_tax_rates: (.sales_tax_rates | map(select(. as $k | $ts | index($k) | not))),
             sources,
             declared_by_tenant: {
                 tenant: $id,
@@ -275,6 +300,8 @@ subtract_tenant() { # <candidate JSON> <tenant dir> -> JSON
                 locations: (.locations | map(select(. as $k | $tl | index($k))) | unique),
                 gl_accounts: (.gl_accounts | map(select(. as $k | $ta | index($k))) | unique),
                 companies: (.companies | map(select(. as $k | $tco | index($k))) | unique),
+                tax_kinds: (.tax_kinds | map(select(. as $k | $tk | index($k))) | unique),
+                sales_tax_rates: (.sales_tax_rates | map(select(. as $k | $ts | index($k))) | unique),
                 sources: $t.sources
             }
           }' <<<"$seed"
@@ -413,6 +440,20 @@ loc_judged0 AS (
     FROM locations l WHERE l.id IN (SELECT id FROM loc_cand)
 ),
 loc_judged AS (SELECT id, reasons, cardinality(reasons) = 0 AS deletable FROM loc_judged0),
+tk_cand AS (SELECT jsonb_array_elements_text(s->'tax_kinds') AS kind FROM seed),
+tk_judged0 AS (
+    SELECT k.kind,
+           array_remove(ARRAY[
+               CASE WHEN EXISTS (SELECT 1 FROM tax_filings r WHERE r.kind = k.kind) THEN 'tax_filings.kind' END
+           ], NULL) AS reasons
+    FROM tax_kinds k WHERE k.kind IN (SELECT kind FROM tk_cand)
+),
+tk_judged AS (SELECT kind, reasons, cardinality(reasons) = 0 AS deletable FROM tk_judged0),
+str_cand AS (SELECT jsonb_array_elements_text(s->'sales_tax_rates') AS state FROM seed),
+str_judged AS (
+    SELECT r.state, ARRAY[]::text[] AS reasons, true AS deletable
+    FROM sales_tax_rate_by_state r WHERE r.state IN (SELECT state FROM str_cand)
+),
 gl_cand AS (SELECT jsonb_array_elements_text(s->'gl_accounts') AS code FROM seed),
 gl_judged0 AS (
     SELECT a.id, a.code,
@@ -420,7 +461,7 @@ gl_judged0 AS (
                CASE WHEN EXISTS (SELECT 1 FROM gl_journal_lines r WHERE r.account_id = a.id) THEN 'gl_journal_lines.account_id' END,
                CASE WHEN EXISTS (SELECT 1 FROM gl_account_daily r WHERE r.account_id = a.id) THEN 'gl_account_daily.account_id' END,
                CASE WHEN EXISTS (SELECT 1 FROM gl_accounts r WHERE r.parent_id = a.id AND r.code NOT IN (SELECT code FROM gl_cand)) THEN 'gl_accounts.parent_id' END,
-               CASE WHEN EXISTS (SELECT 1 FROM tax_kinds r WHERE r.liability_account = a.code OR r.expense_account = a.code) THEN 'tax_kinds' END,
+               CASE WHEN EXISTS (SELECT 1 FROM tax_kinds r WHERE (r.liability_account = a.code OR r.expense_account = a.code) AND r.kind NOT IN (SELECT kind FROM tk_judged WHERE deletable)) THEN 'tax_kinds' END,
                CASE WHEN EXISTS (SELECT 1 FROM tax_filings r WHERE r.liability_account = a.code) THEN 'tax_filings.liability_account' END,
                CASE WHEN EXISTS (SELECT 1 FROM gl_posting_rules r, jsonb_array_elements(r.lines) l WHERE l->>'account_code' = a.code) THEN 'gl_posting_rules.lines' END
            ], NULL) AS reasons
@@ -463,6 +504,8 @@ if [ "$MODE" = plan-sql ]; then
 SELECT json_build_object(
     'companies',   $(table_json companies co id co_cand),
     'locations',   $(table_json locations loc_judged id loc_cand),
+    'tax_kinds',   $(table_json tax_kinds tk_judged kind tk_cand),
+    'sales_tax_rates', $(table_json sales_tax_rate_by_state str_judged state str_cand),
     'gl_accounts', $(table_json gl_accounts gl_judged code gl_cand),
     'classes',     $(table_json classes cls_judged "subject_kind || ':' || code" cls_cand)
 )
@@ -488,6 +531,22 @@ cat <<'SQL'
 , del AS (DELETE FROM locations l USING loc_judged j WHERE l.id = j.id AND j.deletable RETURNING l.id),
 del_subjects AS (DELETE FROM subjects s USING del WHERE s.kind = 'location' AND s.id = del.id RETURNING s.id)
 SELECT json_build_object('table', 'locations', 'deleted', (SELECT coalesce(json_agg(id ORDER BY id), '[]'::json) FROM del), 'subjects_deleted', (SELECT count(*) FROM del_subjects));
+COMMIT;
+SQL
+echo "-- retire-example-reference-rows:delete tax_kinds"
+echo "BEGIN;"
+judgement_ctes
+cat <<'SQL'
+, del AS (DELETE FROM tax_kinds k USING tk_judged j WHERE k.kind = j.kind AND j.deletable RETURNING k.kind)
+SELECT json_build_object('table', 'tax_kinds', 'deleted', (SELECT coalesce(json_agg(kind ORDER BY kind), '[]'::json) FROM del));
+COMMIT;
+SQL
+echo "-- retire-example-reference-rows:delete sales_tax_rates"
+echo "BEGIN;"
+judgement_ctes
+cat <<'SQL'
+, del AS (DELETE FROM sales_tax_rate_by_state r USING str_judged j WHERE r.state = j.state AND j.deletable RETURNING r.state)
+SELECT json_build_object('table', 'sales_tax_rates', 'deleted', (SELECT coalesce(json_agg(state ORDER BY state), '[]'::json) FROM del));
 COMMIT;
 SQL
 echo "-- retire-example-reference-rows:delete gl_accounts"

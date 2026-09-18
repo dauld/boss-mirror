@@ -284,12 +284,13 @@ fn exclusions_of(cmd: &mut std::process::Command) -> Vec<(String, String)> {
 fn skeleton(label: &str, lints: &[(&str, &str)]) -> std::path::PathBuf {
     let dir = boss_testing::scratch_dir(label);
     let tree = dir.join("tree");
-    boss_testing::create_dir(&tree.join("infra/lint"));
-    std::fs::copy(
-        repo_root().join("infra/gate.sh"),
-        tree.join("infra/gate.sh"),
-    )
-    .expect("carry this tree's gate.sh into the skeleton");
+    boss_testing::create_dir(&tree.join("infra/lint/lib"));
+    // gate.sh sources the lint vocabulary (LINT_CANNOT_ANSWER) from the
+    // lib and refuses to run without it, so the skeleton carries both.
+    for rel in ["infra/gate.sh", "infra/lint/lib/git-answer.sh"] {
+        std::fs::copy(repo_root().join(rel), tree.join(rel))
+            .unwrap_or_else(|e| panic!("carry this tree's {rel} into the skeleton: {e}"));
+    }
     boss_testing::write_file(
         &tree.join("infra/lint/workspace-declares-what-it-runs.sh"),
         "#!/usr/bin/env bash\nexit 0\n",

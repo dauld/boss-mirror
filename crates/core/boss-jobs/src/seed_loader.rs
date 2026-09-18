@@ -59,6 +59,7 @@ use serde::Deserialize;
 use crate::agent_spec::AgentSpec;
 use crate::audience::Audience;
 use crate::cadence::{CadenceRuleRow, CadenceRuleSpec};
+use crate::delivery::{DeliveryPolicyRow, DeliveryPolicySpec};
 use crate::registry::{StepSpec, Terminal, WorkflowSpec, WorkflowStatus};
 use crate::station_queue::{DisciplineKey, StationPredicate, default_discipline};
 use crate::stations::{StationCapability, StationKind, StationLens, StationSpec, StationUpstream};
@@ -291,9 +292,9 @@ pub fn bundle_files(dir: &Path) -> Result<Vec<PathBuf>, SeedLoaderError> {
 /// holding exactly one `[[<header>]]` whose `<key>` column is the
 /// file's stem — so `ls` answers "which rows does a deployment seed",
 /// and two cars adding rows touch no shared line. Written once here
-/// (workflows, stations, step plugins and cadence rules all read it)
-/// rather than once per registry, which is how car 3 of 393d3234 found
-/// it living three times.
+/// (workflows, stations, step plugins, cadence rules and the delivery
+/// policy all read it) rather than once per registry, which is how car
+/// 3 of 393d3234 found it living three times.
 fn load_bundle_dir<T>(
     dir: &Path,
     header: &str,
@@ -848,6 +849,138 @@ fn cadence_toml_to_spec(
             cadence: toml.cadence,
             anchor_date: toml.anchor_date,
             business_calendar: toml.business_calendar,
+        },
+        // Not a declaration — see `station_toml_to_spec`.
+        created_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Delivery policy — the platform delivery-policy bundle
+// (infra/platform/delivery-policy/)
+// ---------------------------------------------------------------------------
+
+/// Serde mirror of [`DeliveryPolicySpec`] for a bundle row: every
+/// column of `delivery_policy` (202608242117, widened by 202609030800
+/// and 202609031000, narrowed by 20260918102236) but `created_at`,
+/// which the seed's clock stamps. Every budget is REQUIRED — the table
+/// has no default a bundle row may lean on — and a column the table
+/// no longer has (`consist_excluded_lints`, dropped by H9) is refused
+/// rather than ignored.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeliveryPolicyToml {
+    name: String,
+    version: i32,
+    /// Carried rather than implied for the same reason a station's is:
+    /// the equality pin compares every column, and anything but
+    /// `active` is refused below.
+    status: WorkflowStatus,
+    max_red_trains: i32,
+    stall_hours: i32,
+    consist_budget_secs: i32,
+    consist_output_budget: i32,
+    consist_files_named: i32,
+    skip_reason_file_budget: i32,
+    blip_cause_budget: i32,
+    ci_host_floor_gb: i32,
+    gate_max_concurrent: i32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DeliveryPoliciesFile {
+    #[serde(rename = "delivery_policy", default)]
+    delivery_policies: Vec<DeliveryPolicyToml>,
+}
+
+/// Load the platform delivery-policy bundle: a DIRECTORY of
+/// `<name>.toml` files, each holding exactly one `[[delivery_policy]]`
+/// whose `name` is the file's stem — the same rules as
+/// [`load_stations`], for the same reason. A single file is accepted
+/// too.
+///
+/// Since 2026-09-18 (backlog 393d3234, consolidation H4, car 4) this
+/// bundle is where the delivery policy is DECLARED — the row a fresh
+/// deployment gets. Two migrations were the only home before; they
+/// stay as history, and migrations newer than the cutover stamp in
+/// `infra/lint/migrations-declare-schema-only.sh` may not insert one.
+/// `crate::delivery_policy_seed::seed_delivery_policies` publishes the
+/// bundle insert-if-missing by (name, version) at every start; a
+/// version bump here is the edit path.
+pub fn load_delivery_policies(
+    path: impl AsRef<Path>,
+) -> Result<Vec<DeliveryPolicySpec>, SeedLoaderError> {
+    let path_ref = path.as_ref();
+    if !path_ref.is_dir() {
+        return load_delivery_policy_file(path_ref);
+    }
+    load_bundle_dir(
+        path_ref,
+        "delivery_policy",
+        "name",
+        load_delivery_policy_file,
+        |s| s.name(),
+    )
+}
+
+fn load_delivery_policy_file(path: &Path) -> Result<Vec<DeliveryPolicySpec>, SeedLoaderError> {
+    let path_str = path.display().to_string();
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| SeedLoaderError::Io(path_str.clone(), e.to_string()))?;
+    parse_delivery_policies(&text, &path_str)
+}
+
+/// Parse TOML text directly — the file loader is a thin wrapper.
+pub fn parse_delivery_policies(
+    text: &str,
+    source: &str,
+) -> Result<Vec<DeliveryPolicySpec>, SeedLoaderError> {
+    let file: DeliveryPoliciesFile = toml::from_str(text)
+        .map_err(|e| SeedLoaderError::Parse(source.to_string(), e.to_string()))?;
+    file.delivery_policies
+        .into_iter()
+        .map(|r| delivery_policy_toml_to_spec(r, source))
+        .collect()
+}
+
+fn delivery_policy_toml_to_spec(
+    toml: DeliveryPolicyToml,
+    source: &str,
+) -> Result<DeliveryPolicySpec, SeedLoaderError> {
+    if toml.status != WorkflowStatus::Active {
+        return Err(SeedLoaderError::Parse(
+            source.to_string(),
+            format!(
+                "delivery policy `{}` declares status `{}`; a bundle row is what a fresh \
+                 deployment gets, and that is an active row — retiring is a live verb",
+                toml.name,
+                toml.status.as_str()
+            ),
+        ));
+    }
+    if toml.version < 1 {
+        return Err(SeedLoaderError::Parse(
+            source.to_string(),
+            format!(
+                "delivery policy `{}` declares version {}; versions start at 1",
+                toml.name, toml.version
+            ),
+        ));
+    }
+    Ok(DeliveryPolicySpec {
+        status: toml.status,
+        row: DeliveryPolicyRow {
+            name: toml.name,
+            version: toml.version,
+            max_red_trains: toml.max_red_trains,
+            stall_hours: toml.stall_hours,
+            consist_budget_secs: toml.consist_budget_secs,
+            consist_output_budget: toml.consist_output_budget,
+            consist_files_named: toml.consist_files_named,
+            skip_reason_file_budget: toml.skip_reason_file_budget,
+            blip_cause_budget: toml.blip_cause_budget,
+            ci_host_floor_gb: toml.ci_host_floor_gb,
+            gate_max_concurrent: toml.gate_max_concurrent,
         },
         // Not a declaration — see `station_toml_to_spec`.
         created_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
