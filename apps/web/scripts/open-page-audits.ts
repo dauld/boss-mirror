@@ -21,8 +21,8 @@
 // catalog is the roster; `_routes.ts` is a crawl list held to it.
 //
 // THE DOOR, NOT A SECOND HEADER SHAPE. Every read and write goes
-// through `boss-api` (infra/dev/boss-api; /Users/david/bin/boss-api on
-// the workstation): the base URL from BOSS_JOBS_URL or its sor-url,
+// through `boss-api` (infra/dev/boss-api, the same script on the
+// workstation's PATH): the base URL from BOSS_JOBS_URL or its sor-url,
 // the X-Boss-User envelope, the machine token, the refusal of an
 // unnamed write — one definition, and this script spawns it rather
 // than restating any of it. The body rides stdin (`boss-api` hands
