@@ -8,7 +8,7 @@
     "dev": "bun --hot src/dev-server.ts",
     "build": "bun run src/build.ts",
     "typecheck": "svelte-check --tsconfig ./tsconfig.json",
-    "test:unit": "bun test src/",
+    "test:unit": "bun test src/ scripts/",
     "test:mocked": "bun tests/run-mocked.ts",
     "gate": "bun run typecheck && bun run test:unit && bun run build && bun run test:mocked"
   },

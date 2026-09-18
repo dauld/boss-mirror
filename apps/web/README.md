@@ -50,6 +50,7 @@ the browser cache.
 ```bash
 bun run typecheck                # svelte-check — 0 errors required
 bunx playwright test             # smoke suite (needs backend running)
+bun scripts/open-page-audits.ts --dry-run   # the page march: one page-audit packet per catalogued route (--all opens them through boss-api; design 0e07ce64)
 ```
 
 ## Layout
