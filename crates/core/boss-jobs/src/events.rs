@@ -57,6 +57,19 @@ pub const STATION_PUBLISHED: &str = "jobs.station.published";
 /// The active station version of a name was retired with no
 /// successor. Payload is the retired `StationSpec`.
 pub const STATION_RETIRED: &str = "jobs.station.retired";
+/// A cadence rule version went live — the platform bundle's seed
+/// landing a declared row, or an operator's `POST
+/// /api/cadence/rules/{name}/publish` (backlog 13d1fff3): any prior
+/// active row of the name retired, the declared version inserted
+/// active, in one transaction. Payload is the row written, as a
+/// `CadenceRuleSpec`. Until 2026-09-18 the only writer of
+/// `cadence_rules` was a migration and no event ever recorded a
+/// schedule change; this is the log witnessing one.
+pub const CADENCE_PUBLISHED: &str = "jobs.cadence.published";
+/// The active cadence rule of a name was retired with no successor —
+/// the schedule switched off by a verb (`boss cadence retire`).
+/// Payload is the retired `CadenceRuleSpec`.
+pub const CADENCE_RETIRED: &str = "jobs.cadence.retired";
 
 // Marker events — informational only; rebuild ignores them.
 pub const JOB_STATUS_CHANGED: &str = "jobs.job.status_changed";
@@ -249,6 +262,21 @@ pub fn station_registry_event(
     kind: &str,
     actor: &boss_core::actor::ActorId,
     spec: &crate::stations::StationSpec,
+) -> boss_core::event::Event {
+    let payload =
+        boss_core::publisher::inject_actor(serde_json::to_value(spec).unwrap_or_default(), actor);
+    boss_core::event::Event::new("jobs", kind, payload, boss_clock_client::wall_now())
+}
+
+/// A cadence registry event — same contract as
+/// [`workflow_registry_event`], for the `cadence_rules` table: built
+/// inside the adapter that owns the row transaction, payload is the
+/// serialized `CadenceRuleSpec` with the actor riding as `_actor`
+/// exactly as EventStamp injects it.
+pub fn cadence_registry_event(
+    kind: &str,
+    actor: &boss_core::actor::ActorId,
+    spec: &crate::cadence::CadenceRuleSpec,
 ) -> boss_core::event::Event {
     let payload =
         boss_core::publisher::inject_actor(serde_json::to_value(spec).unwrap_or_default(), actor);

@@ -85,6 +85,10 @@ name = "agents_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "cadence_door_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "cadence_pg"
 required-features = ["postgres"]
 

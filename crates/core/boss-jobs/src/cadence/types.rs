@@ -71,7 +71,11 @@ pub struct CadenceRuleSpec {
     #[serde(flatten)]
     pub row: CadenceRuleRow,
     /// When the deployment was built — stamped by the seed's clock on
-    /// the row it writes; never part of the declaration.
+    /// the row it writes; never part of the declaration. Defaults on
+    /// the wire (to the epoch) for the same reason: a publish body
+    /// (`POST /api/cadence/rules/{name}/publish`) is a declaration,
+    /// and the door stamps its own clock over whatever was sent.
+    #[serde(default)]
     pub created_at: DateTime<Utc>,
 }
 

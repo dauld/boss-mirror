@@ -367,6 +367,16 @@ enum Commands {
         #[command(subcommand)]
         action: JobAction,
     },
+    /// The cadence registry's write verbs — retire a rule by name,
+    /// publish a version from its bundle file (13d1fff3). The loop
+    /// that RUNS the schedule is `boss train cadence`.
+    ///
+    /// Grouped like `Workflow`: a new cadence verb lands inside
+    /// `CadenceAction`, not as another variant here (84f9fbc0).
+    Cadence {
+        #[command(subcommand)]
+        action: CadenceAction,
+    },
     /// A session's first verb: trains in transit, gates running,
     /// stranded greens, the dock, and the task queue — the approach in
     /// one read, with the startup checklist at the end (CLAUDE.md
@@ -959,6 +969,27 @@ enum WorkflowAction {
 }
 
 #[derive(Subcommand)]
+enum CadenceAction {
+    /// Retire the active version of a cadence rule — the schedule
+    /// switched off by a verb, recorded as `jobs.cadence.retired`,
+    /// confirmed by reading the lineage back. A name with nothing
+    /// active is refused (the door's 404).
+    Retire {
+        /// The rule's name, e.g. `protocol-retro-daily`.
+        name: String,
+    },
+    /// Publish a cadence rule at the version its bundle file declares
+    /// (`infra/platform/cadence/<name>.toml`, read by the seed loader
+    /// — one definition for the seed and this verb). Retires the prior
+    /// active row; refused (409) unless the version is above the
+    /// newest of the lineage — a publish is a version bump.
+    Publish {
+        /// The bundle file to publish.
+        file: std::path::PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 enum JobAction {
     /// One packet in a stable shape: kind and protocol version, every
     /// step by slug/kind/status/holder/authority with the ready one
@@ -1230,6 +1261,10 @@ async fn main() -> Result<()> {
             wait,
             dry_run,
         } => ops_request::run(host, verb, args, wait, dry_run).await,
+        Commands::Cadence { action } => match action {
+            CadenceAction::Retire { name } => cadence::retire(&name).await,
+            CadenceAction::Publish { file } => cadence::publish(&file).await,
+        },
         Commands::Job { action } => match action {
             JobAction::Get { job, json } => job::get(&job, json).await,
             JobAction::Station { station, json } => job::station(&station, json).await,

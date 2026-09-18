@@ -21,6 +21,11 @@ pub struct InMemoryCadence {
     /// then serves, as in Postgres.
     rules: RwLock<Vec<CadenceRuleSpec>>,
     firings: RwLock<HashMap<String, NewFiring>>,
+    /// What the Pg adapter records into `event_outbox` inside the
+    /// row transaction, this adapter collects here — same events at
+    /// the same write points (the `InMemoryStations` shape), so tests
+    /// assert the event contract through the port without a database.
+    recorded: std::sync::Mutex<Vec<boss_core::event::Event>>,
 }
 
 impl InMemoryCadence {
@@ -39,6 +44,7 @@ impl InMemoryCadence {
         Self {
             rules: RwLock::new(lineage),
             firings: RwLock::new(HashMap::new()),
+            recorded: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -46,6 +52,40 @@ impl InMemoryCadence {
     pub async fn firing(&self, id: &str) -> Option<NewFiring> {
         self.firings.read().await.get(id).cloned()
     }
+
+    /// Every event a registry write recorded, in write order — the
+    /// in-memory stand-in for `SELECT ... FROM event_outbox`.
+    pub fn recorded_events(&self) -> Vec<boss_core::event::Event> {
+        self.recorded
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_else(|p| p.into_inner().clone())
+    }
+
+    fn record(&self, event: boss_core::event::Event) {
+        match self.recorded.lock() {
+            Ok(mut g) => g.push(event),
+            Err(p) => p.into_inner().push(event),
+        }
+    }
+}
+
+/// The version a publish must exceed: the newest the lineage holds,
+/// any status, or 0 for a name never held (so versions start at 1).
+/// ONE rule for both adapters' conflict arm; the Pg adapter asks the
+/// database the same question with `MAX(version)`.
+pub(super) fn newest_version(lineage: impl Iterator<Item = i32>) -> i32 {
+    lineage.max().unwrap_or(0)
+}
+
+/// The conflict a publish at or below the newest version answers —
+/// worded once, so the door's 409 reads the same over either adapter.
+pub(super) fn not_above(name: &str, version: i32, newest: i32) -> CadenceError {
+    CadenceError::Conflict(format!(
+        "{name}@{version} is not above the newest version of its lineage (v{newest}); \
+         a publish is a version bump — declare v{}",
+        newest + 1
+    ))
 }
 
 #[async_trait]
@@ -135,19 +175,18 @@ impl CadenceRegistry for InMemoryCadence {
     async fn publish_declared(
         &self,
         mut spec: CadenceRuleSpec,
-        _actor: &boss_core::actor::ActorId,
+        actor: &boss_core::actor::ActorId,
         now: DateTime<Utc>,
     ) -> Result<CadenceRuleSpec, CadenceError> {
         let mut rules = self.rules.write().await;
-        if rules
-            .iter()
-            .any(|r| r.name() == spec.name() && r.version == spec.version)
-        {
-            return Err(CadenceError::Conflict(format!(
-                "row already exists: {}@{}",
-                spec.name(),
-                spec.version
-            )));
+        let newest = newest_version(
+            rules
+                .iter()
+                .filter(|r| r.name() == spec.name())
+                .map(|r| r.version),
+        );
+        if spec.version <= newest {
+            return Err(not_above(spec.name(), spec.version, newest));
         }
         // Mirrors the Pg adapter: retire by name, then insert.
         for r in rules.iter_mut() {
@@ -158,7 +197,36 @@ impl CadenceRegistry for InMemoryCadence {
         spec.status = WorkflowStatus::Active;
         spec.created_at = now;
         rules.push(spec.clone());
+        self.record(crate::events::cadence_registry_event(
+            crate::events::CADENCE_PUBLISHED,
+            actor,
+            &spec,
+        ));
         Ok(spec)
+    }
+
+    async fn retire(
+        &self,
+        name: &str,
+        actor: &boss_core::actor::ActorId,
+        _now: DateTime<Utc>,
+    ) -> Result<Option<CadenceRuleSpec>, CadenceError> {
+        let mut rules = self.rules.write().await;
+        let Some(row) = rules
+            .iter_mut()
+            .find(|r| r.name() == name && r.status == WorkflowStatus::Active)
+        else {
+            // Nothing active — nothing written, nothing recorded.
+            return Ok(None);
+        };
+        row.status = WorkflowStatus::Retired;
+        let retired = row.clone();
+        self.record(crate::events::cadence_registry_event(
+            crate::events::CADENCE_RETIRED,
+            actor,
+            &retired,
+        ));
+        Ok(Some(retired))
     }
 }
 
@@ -227,5 +295,167 @@ mod tests {
             .await
             .unwrap();
         assert!(repo.last_firing("reconcile").await.unwrap().is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // The registry half's write contract (backlog 13d1fff3): every
+    // write records its event, a retire returns the row it retired
+    // and records nothing when nothing was active, and a publish must
+    // be ABOVE the newest version of its lineage.
+    // ------------------------------------------------------------------
+
+    fn actor() -> boss_core::actor::ActorId {
+        boss_core::actor::ActorId::Human("emp-david".into())
+    }
+
+    fn declared(name: &str, version: i32, every: i32) -> CadenceRuleSpec {
+        CadenceRuleSpec {
+            version,
+            status: WorkflowStatus::Active,
+            row: CadenceRuleRow {
+                name: name.into(),
+                verb: "reconcile".into(),
+                basis: "wall".into(),
+                every_minutes: Some(every),
+                at_times: None,
+                min_dock_depth: None,
+                cooldown_minutes: None,
+                cadence: None,
+                anchor_date: None,
+                business_calendar: None,
+            },
+            created_at: DateTime::<Utc>::UNIX_EPOCH,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_retire_returns_the_row_it_retired_and_records_it() {
+        let repo = InMemoryCadence::new(vec![declared("train-reconcile", 1, 10).row]);
+        let now = Utc.with_ymd_and_hms(2026, 9, 18, 17, 0, 0).unwrap();
+        let retired = repo
+            .retire("train-reconcile", &actor(), now)
+            .await
+            .unwrap()
+            .expect("the active row is retired and returned");
+        assert_eq!(retired.status, WorkflowStatus::Retired);
+        assert_eq!(retired.version, 1);
+        assert!(
+            repo.active_rules().await.unwrap().is_empty(),
+            "the conductor's read no longer serves it"
+        );
+        let lineage = repo.live_versions("train-reconcile").await.unwrap();
+        assert_eq!(lineage.len(), 1, "a retire keeps the row as history");
+        assert_eq!(lineage[0].status, WorkflowStatus::Retired);
+        let events = repo.recorded_events();
+        assert_eq!(events.len(), 1, "exactly one jobs.cadence.retired");
+        assert_eq!(events[0].kind, crate::events::CADENCE_RETIRED);
+        assert_eq!(events[0].payload["name"], "train-reconcile");
+        assert_eq!(events[0].payload["status"], "retired");
+        assert_eq!(events[0].payload["_actor"], "emp-david");
+    }
+
+    #[tokio::test]
+    async fn a_retire_of_nothing_active_is_none_and_records_nothing() {
+        let repo = InMemoryCadence::default();
+        let now = Utc.with_ymd_and_hms(2026, 9, 18, 17, 0, 0).unwrap();
+        assert!(
+            repo.retire("never-declared", &actor(), now)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Retired once, retiring again is the same answer.
+        repo.publish_declared(declared("train-reconcile", 1, 10), &actor(), now)
+            .await
+            .unwrap();
+        repo.retire("train-reconcile", &actor(), now)
+            .await
+            .unwrap()
+            .expect("first retire");
+        assert!(
+            repo.retire("train-reconcile", &actor(), now)
+                .await
+                .unwrap()
+                .is_none(),
+            "an already-retired name has nothing active to retire"
+        );
+        let kinds: Vec<String> = repo.recorded_events().into_iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                crate::events::CADENCE_PUBLISHED,
+                crate::events::CADENCE_RETIRED
+            ],
+            "the no-op retires recorded nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_publish_records_its_event_and_retires_the_prior_active_row() {
+        let repo = InMemoryCadence::default();
+        let now = Utc.with_ymd_and_hms(2026, 9, 18, 17, 0, 0).unwrap();
+        repo.publish_declared(declared("train-reconcile", 1, 10), &actor(), now)
+            .await
+            .unwrap();
+        let v2 = repo
+            .publish_declared(declared("train-reconcile", 2, 5), &actor(), now)
+            .await
+            .unwrap();
+        assert_eq!(v2.created_at, now, "stamped by the door's clock");
+        let lineage = repo.live_versions("train-reconcile").await.unwrap();
+        assert_eq!(
+            lineage
+                .iter()
+                .map(|r| (r.version, r.status))
+                .collect::<Vec<_>>(),
+            vec![(1, WorkflowStatus::Retired), (2, WorkflowStatus::Active)]
+        );
+        let events = repo.recorded_events();
+        assert_eq!(events.len(), 2);
+        assert!(
+            events
+                .iter()
+                .all(|e| e.kind == crate::events::CADENCE_PUBLISHED)
+        );
+        assert_eq!(events[1].payload["version"], 2);
+        assert_eq!(events[1].payload["every_minutes"], 5);
+    }
+
+    #[tokio::test]
+    async fn a_publish_not_above_the_newest_version_is_a_conflict() {
+        let repo = InMemoryCadence::default();
+        let now = Utc.with_ymd_and_hms(2026, 9, 18, 17, 0, 0).unwrap();
+        repo.publish_declared(declared("train-reconcile", 3, 10), &actor(), now)
+            .await
+            .unwrap();
+        // The same version (an overwrite) and a lower one (which would
+        // retire v3 under an older declaration) are both refused.
+        for v in [3, 2] {
+            let err = repo
+                .publish_declared(declared("train-reconcile", v, 5), &actor(), now)
+                .await
+                .expect_err("not above the newest");
+            assert!(matches!(err, CadenceError::Conflict(_)), "{err}");
+            assert!(err.to_string().contains('3'), "names the newest: {err}");
+        }
+        // A retired lineage still bounds the version: v3 retired, v2
+        // is still below it.
+        repo.retire("train-reconcile", &actor(), now).await.unwrap();
+        let err = repo
+            .publish_declared(declared("train-reconcile", 2, 5), &actor(), now)
+            .await
+            .expect_err("a retired lineage still bounds the version");
+        assert!(matches!(err, CadenceError::Conflict(_)), "{err}");
+        // Above it lands, re-activating the name.
+        repo.publish_declared(declared("train-reconcile", 4, 5), &actor(), now)
+            .await
+            .expect("v4 is above v3");
+        assert_eq!(repo.active_rules().await.unwrap().len(), 1);
+        // A version below 1 on an empty lineage is refused the same way.
+        let err = repo
+            .publish_declared(declared("fresh", 0, 5), &actor(), now)
+            .await
+            .expect_err("versions start at 1");
+        assert!(matches!(err, CadenceError::Conflict(_)), "{err}");
     }
 }

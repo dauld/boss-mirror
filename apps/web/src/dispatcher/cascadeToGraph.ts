@@ -14,7 +14,7 @@
 // wildcards. `inCycle` is filled from Tarjan SCCs so the page can light up
 // the feedback cycles (restock, DAG-advance, AR).
 
-import type { DispatcherRules } from './types';
+import type { DispatcherRule, DispatcherRules } from './types';
 
 export type CascadeNodeKind = 'event' | 'rule' | 'handler';
 export type CascadeEdgeKind = 'trigger' | 'do' | 'emit' | 'system' | 'match';
@@ -59,14 +59,45 @@ const EVT = (e: string): string => `evt:${e}`;
 const RULE = (n: string): string => `rule:${n}`;
 const HDL = (h: string): string => `hdl:${h}`;
 
+/** The distinct topics rules listen for, sorted. A scheduled rule has
+ *  no topic (on_event XOR schedule in the registry), so it contributes
+ *  nothing here — the first nightly playground crawl (car 01180167,
+ *  backlog ee86a789) found `undefined` in this set reaching
+ *  `topicMatch`, which split it and threw. */
+export function triggerTopics(rules: ReadonlyArray<DispatcherRule>): string[] {
+  return [...new Set(rules.flatMap((r) => (r.on_event ? [r.on_event] : [])))].sort();
+}
+
+/** What fires the rule, in words: `on <topic>` for an event-triggered
+ *  rule, the cadence for a scheduled one, and an honest "no trigger
+ *  recorded" for a row carrying neither (the registry refuses such a
+ *  row at load; the page must not). */
+export function describeTrigger(rule: Pick<DispatcherRule, 'on_event' | 'schedule'>): string {
+  if (rule.on_event) return `on ${rule.on_event}`;
+  const s = rule.schedule;
+  if (!s) return 'no trigger recorded';
+  const minutes = /^every-(\d+)-minutes$/.exec(s.cadence)?.[1];
+  const every = minutes ? `every ${minutes} minutes` : (CADENCE_WORDS[s.cadence] ?? `every ${s.cadence}`);
+  return `${every}  ·  from ${s.anchor_date}`;
+}
+
+const CADENCE_WORDS: Readonly<Record<string, string>> = {
+  daily: 'every day',
+  weekly: 'every week',
+  biweekly: 'every two weeks',
+  monthly: 'every month',
+  quarterly: 'every quarter',
+  annually: 'every year',
+  hourly: 'every hour',
+};
+
 export function buildCascade(data: DispatcherRules): Cascade {
   const rules = data.rules ?? [];
   const emits = data.handler_emits ?? {};
   const systemEdges = data.system_edges ?? [];
 
   // Universes.
-  const eventSet = new Set<string>();
-  for (const r of rules) eventSet.add(r.on_event);
+  const eventSet = new Set<string>(triggerTopics(rules));
   for (const list of Object.values(emits)) for (const e of list) eventSet.add(e);
   for (const se of systemEdges) {
     eventSet.add(se.from);
@@ -81,7 +112,7 @@ export function buildCascade(data: DispatcherRules): Cascade {
   const nodes: RawNode[] = [];
   for (const e of eventSet) nodes.push({ id: EVT(e), kind: 'event', label: e, ref: e });
   for (const r of rules) {
-    const sub = `on ${r.on_event}${r.when ? '  ·  when ⚲' : ''}`;
+    const sub = `${describeTrigger(r)}${r.when ? '  ·  when ⚲' : ''}`;
     nodes.push({ id: RULE(r.name), kind: 'rule', label: r.name, sublabel: sub, ref: r.name });
   }
   for (const h of handlerSet) {
@@ -99,7 +130,9 @@ export function buildCascade(data: DispatcherRules): Cascade {
   type RawEdge = Omit<CascadeEdge, 'inCycle'>;
   const edges: RawEdge[] = [];
   for (const r of rules) {
-    edges.push({ id: `t:${r.name}`, source: EVT(r.on_event), target: RULE(r.name), kind: 'trigger' });
+    // A scheduled rule is a source in the graph: the clock is not an
+    // event node, so it gets no trigger edge.
+    if (r.on_event) edges.push({ id: `t:${r.name}`, source: EVT(r.on_event), target: RULE(r.name), kind: 'trigger' });
     r.do.forEach((d, i) =>
       edges.push({ id: `d:${r.name}:${i}`, source: RULE(r.name), target: HDL(d.handler), kind: 'do' }),
     );
@@ -124,7 +157,7 @@ export function buildCascade(data: DispatcherRules): Cascade {
   const produced = new Set<string>();
   for (const list of Object.values(emits)) for (const e of list) produced.add(e);
   for (const se of systemEdges) produced.add(se.to);
-  const triggers = new Set(rules.map((r) => r.on_event));
+  const triggers = new Set(triggerTopics(rules));
   for (const p of produced) {
     for (const trg of triggers) {
       if (p === trg) continue;

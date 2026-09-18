@@ -174,8 +174,14 @@ async fn main() -> Result<()> {
             Arc::new(boss_jobs::PgStepPlugins::new(pool.clone()));
         let scheduling: Arc<dyn boss_jobs::scheduling::SchedulingRepository> =
             Arc::new(boss_jobs::scheduling::PgScheduling::new(pool.clone()));
-        let cadence: Arc<dyn boss_jobs::cadence::CadenceRepository> =
-            Arc::new(boss_jobs::cadence::PgCadence::new(pool.clone()));
+        // One adapter, both halves: the conductor's reads and claims,
+        // and the registry the operator's publish / retire door and
+        // the platform seed write through (backlog 13d1fff3).
+        let cadence = Arc::new(boss_jobs::cadence::PgCadence::new(pool.clone()));
+        let cadence: (
+            Arc<dyn boss_jobs::cadence::CadenceRepository>,
+            Arc<dyn boss_jobs::cadence::CadenceRegistry>,
+        ) = (cadence.clone(), cadence);
         // The delivery pipeline's policy content, served to the train
         // conductor through the same door as everything else it reads
         // (docs/design/delivery-as-protocol.md).
@@ -265,7 +271,10 @@ async fn run_server<R: JobsRepository + 'static>(
     kind_registry: Option<Arc<dyn boss_jobs::WorkflowRegistry>>,
     plugin_registry: Option<Arc<dyn boss_jobs::StepPluginRegistry>>,
     scheduling: Option<Arc<dyn boss_jobs::scheduling::SchedulingRepository>>,
-    cadence: Option<Arc<dyn boss_jobs::cadence::CadenceRepository>>,
+    cadence: Option<(
+        Arc<dyn boss_jobs::cadence::CadenceRepository>,
+        Arc<dyn boss_jobs::cadence::CadenceRegistry>,
+    )>,
     delivery: Option<Arc<dyn boss_jobs::delivery::DeliveryPolicyRepository>>,
     credentials: Option<Arc<dyn boss_jobs::credentials::CredentialsRegistry>>,
     agent_runs: Option<Arc<dyn boss_jobs::agent_runs::AgentRunLog>>,
@@ -308,6 +317,9 @@ async fn run_server<R: JobsRepository + 'static>(
         Arc::new(boss_policy_client::SimBypassPolicyClient::new(Arc::new(
             boss_policy_client::ReqwestPolicyClient::new(policy_url),
         )));
+    // The cadence door's publish / retire ask the same client the
+    // workflow routes do; clone before the state takes it.
+    let cadence_policy = policy.clone();
 
     // Wire the sim-mode probe into the publisher so every stamp
     // injects `_simulated: bool` into the audit_log payload without
@@ -344,7 +356,7 @@ async fn run_server<R: JobsRepository + 'static>(
         // /api/cadence and /api/delivery doors are operator-only, so the
         // browser cannot). Clone the Arc — the same repos back both the
         // operator doors below and this read-model.
-        cadence: cadence.clone(),
+        cadence: cadence.as_ref().map(|(repo, _)| repo.clone()),
         delivery: delivery.clone(),
     };
     let mut app = router(state);
@@ -358,10 +370,15 @@ async fn run_server<R: JobsRepository + 'static>(
             },
         ));
     }
-    if let Some(repo) = cadence {
+    if let Some((repo, registry)) = cadence {
         info!("cadence routes mounted at /api/cadence/*");
         app = app.merge(boss_jobs::cadence::http::router(
-            boss_jobs::cadence::http::CadenceApiState { repo },
+            boss_jobs::cadence::http::CadenceApiState {
+                repo,
+                registry,
+                policy: cadence_policy,
+                clock: clock.clone(),
+            },
         ));
     }
     if let Some(repo) = delivery {

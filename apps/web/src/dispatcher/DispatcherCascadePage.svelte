@@ -14,7 +14,7 @@
   import type { Node, Edge } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
   import dagre from '@dagrejs/dagre';
-  import { buildCascade, filterCascadeFromEvents, type Cascade } from './cascadeToGraph';
+  import { buildCascade, describeTrigger, filterCascadeFromEvents, triggerTopics, type Cascade } from './cascadeToGraph';
   import type { DispatcherRules } from './types';
   import { href, navigate } from '../router';
 
@@ -56,8 +56,8 @@
   const cascade = $derived<Cascade>(filterCascadeFromEvents(fullCascade, selectedTriggers));
 
   /** Distinct trigger events (topics rules listen for), sorted — the filter
-   *  selector's options. */
-  const allTriggers = $derived([...new Set((data?.rules ?? []).map((r) => r.on_event))].sort());
+   *  selector's options. Scheduled rules have none and are not listed. */
+  const allTriggers = $derived(triggerTopics(data?.rules ?? []));
   const availableTriggers = $derived(allTriggers.filter((t) => !selectedTriggers.includes(t)));
 
   function addTrigger(e: Event): void {
@@ -254,8 +254,15 @@
         {#if detail.kind === 'rule'}
           <h2>rule · {detail.rule.name}</h2>
           <dl>
-            <dt>on event</dt>
-            <dd><code>{detail.rule.on_event}</code></dd>
+            {#if detail.rule.on_event}
+              <dt>on event</dt>
+              <dd><code>{detail.rule.on_event}</code></dd>
+            {:else}
+              <!-- A scheduled rule: the clock fires it, no topic does
+                   (backlog ee86a789 — this panel used to print "undefined"). -->
+              <dt>on schedule</dt>
+              <dd><code>{describeTrigger(detail.rule)}</code></dd>
+            {/if}
             {#if detail.rule.when}
               <dt>when</dt>
               <dd><code class="dx-when">{detail.rule.when}</code></dd>

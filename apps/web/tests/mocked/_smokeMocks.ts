@@ -158,8 +158,17 @@ export async function installSmokeMocks(page: Page): Promise<void> {
   ]));
 
   // Dispatcher cascade.
+  // Two rows: an event-triggered rule, and a SCHEDULED one shaped like
+  // the real registry's — `schedule` and NO `on_event` (the registry is
+  // on_event XOR schedule), with a tenant `source`. The first nightly
+  // playground crawl (car 01180167, 2026-09-18) found the cascade page
+  // throwing on that shape while this mock, then one row that always
+  // carried on_event, rendered it green (backlog ee86a789).
   await page.route(DISPATCHER_RULES, (r) => json(r, {
-    rules: [{ name: 'r1', on_event: 'step.done.task', when: null, do: [{ handler: 'h1', args: {} }], version: 1 }],
+    rules: [
+      { name: 'r1', on_event: 'step.done.task', when: null, do: [{ handler: 'h1', args: {} }], version: 1, source: 'product' },
+      { name: 'sweep-daily', schedule: { cadence: 'daily', anchor_date: '2026-09-09' }, when: null, do: [{ handler: 'h1', args: {} }], version: 1, source: 'tenant:brewery', authored: false, why: null },
+    ],
     handler_emits: { h1: ['x.y'] }, system_edges: [],
   }));
 

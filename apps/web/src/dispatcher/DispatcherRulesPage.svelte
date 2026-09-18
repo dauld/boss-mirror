@@ -9,6 +9,7 @@
   import Link from '@boss/web-kit/ui/Link.svelte';
   import Breadcrumb from '@boss/web-kit/ui/Breadcrumb.svelte';
   import { listActiveRules, type DispatcherRule } from './ruleAuthoring';
+  import { describeTrigger } from './cascadeToGraph';
   import { href } from '../router';
 
   let rules = $state<ReadonlyArray<DispatcherRule>>([]);
@@ -68,7 +69,7 @@
           <thead>
             <tr>
               <th>Rule</th>
-              <th>On event</th>
+              <th>Trigger</th>
               <th class="num">Do steps</th>
               <th class="num">Version</th>
             </tr>
@@ -81,7 +82,10 @@
                     <span class="mono">{r.name}</span>
                   </Link>
                 </td>
-                <td><code class="mono" style="font-size:12px">{r.on_event}</code></td>
+                <!-- A scheduled rule has no on_event (on_event XOR
+                     schedule); this cell used to render it blank
+                     (backlog ee86a789). -->
+                <td><code class="mono" style="font-size:12px">{describeTrigger(r)}</code></td>
                 <td class="num">{r.do.length}</td>
                 <td class="num">{r.version}</td>
               </tr>

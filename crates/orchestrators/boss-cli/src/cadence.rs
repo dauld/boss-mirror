@@ -1520,6 +1520,382 @@ pub async fn run(once: bool, dry: bool) -> Result<()> {
 // Tests — the cadence semantics, pinned before the implementation.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// The operator's write verbs — `boss cadence retire <name>` and
+// `boss cadence publish <file.toml>` (backlog 13d1fff3, 2026-09-18).
+//
+// Until this car `cadence_rules` had no write door: a live rule was
+// re-versioned only by a migration (refused since the cutover stamp in
+// infra/lint/migrations-declare-schema-only.sh) and a retire had no
+// path at all — the department-retro car left `protocol-retro-daily`
+// redundant and the operator had to retire it "by name" with nothing
+// to run. These two verbs front `POST /api/cadence/rules/{name}/retire`
+// and `/publish`; they sign as the actor running them (BOSS_ACTOR, or
+// the actor file — refused unnamed, never the conductor), and they
+// confirm by READING THE LINEAGE BACK, never from the status code
+// (`boss job`'s rule: a 2xx is a claim, the row is the fact).
+//
+// The publish body is the bundle file's own shape, parsed by the seed
+// loader (`boss_jobs::seed_loader::load_cadence_rules`) — one
+// definition for the seed and the verb, so a file that publishes here
+// is a file the seed would land, and vice versa.
+// ---------------------------------------------------------------------------
+
+/// The lineage of one rule, for a person: every version with its
+/// status, verb, basis and the basis's own columns — what the door's
+/// `GET /api/cadence/rules/{name}/versions` holds, rendered oldest
+/// first. Pure, so the rendering is pinned without a socket.
+pub(crate) fn render_lineage(name: &str, rows: &[Value]) -> String {
+    let mut out = format!("{name}\n");
+    if rows.is_empty() {
+        out.push_str("  (no versions — the registry has never held this name)\n");
+        return out;
+    }
+    let mut sorted: Vec<&Value> = rows.iter().collect();
+    sorted.sort_by_key(|r| r.get("version").and_then(Value::as_i64).unwrap_or(0));
+    for r in sorted {
+        let s = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or("?").to_string();
+        // The basis's own columns, only those the row carries: TOML
+        // has no null and neither does this line.
+        let params: Vec<String> = [
+            "every_minutes",
+            "at_times",
+            "min_dock_depth",
+            "cooldown_minutes",
+            "cadence",
+            "anchor_date",
+            "business_calendar",
+        ]
+        .iter()
+        .filter_map(|k| {
+            r.get(*k)
+                .filter(|v| !v.is_null())
+                .map(|v| format!("{k}={}", v.to_string().replace('"', "")))
+        })
+        .collect();
+        out.push_str(&format!(
+            "  v{:<3} {:<8} {:<24} {:<12} {}\n",
+            r.get("version").and_then(Value::as_i64).unwrap_or(0),
+            s("status"),
+            s("verb"),
+            s("basis"),
+            params.join(" ")
+        ));
+    }
+    out
+}
+
+/// What a retire or a publish must find in the lineage it reads back:
+/// `version` at `status`. Pure — the read-back rule, pinned.
+pub(crate) fn lineage_holds(rows: &[Value], version: i64, status: &str) -> bool {
+    rows.iter().any(|r| {
+        r.get("version").and_then(Value::as_i64) == Some(version)
+            && r.get("status").and_then(Value::as_str) == Some(status)
+    })
+}
+
+async fn lineage(wire: &crate::steps::Wire, name: &str) -> Result<Vec<Value>> {
+    let body = wire
+        .call(
+            reqwest::Method::GET,
+            &format!("/api/cadence/rules/{name}/versions"),
+            None,
+        )
+        .await?;
+    Ok(crate::gate::rows(body))
+}
+
+/// `boss cadence retire <name>` — retire the active version of a rule
+/// and print the lineage read back. A name with nothing active is the
+/// door's 404, surfaced as the refusal it is.
+pub async fn retire(name: &str) -> Result<()> {
+    let wire = crate::steps::Wire::live()?;
+    print!("{}", retire_on(&wire, name).await?);
+    Ok(())
+}
+
+/// The verb against an explicit wire — the seam its test drives.
+pub(crate) async fn retire_on(wire: &crate::steps::Wire, name: &str) -> Result<String> {
+    let retired = wire
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/cadence/rules/{name}/retire"),
+            None,
+        )
+        .await
+        .with_context(|| format!("retiring cadence rule {name}"))?
+        .ok_or_else(|| anyhow!("the retire returned no body"))?;
+    let version = retired
+        .get("version")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("the retired row carries no version: {retired}"))?;
+    // The status code said yes; the lineage is the authority.
+    let rows = lineage(wire, name).await?;
+    if !lineage_holds(&rows, version, "retired") {
+        bail!(
+            "the API answered 200 but the lineage does not show v{version} retired — \
+             a silent no-op:\n{}",
+            render_lineage(name, &rows)
+        );
+    }
+    Ok(format!(
+        "boss cadence: retired {name} v{version} — confirmed by reading the lineage back\n{}",
+        render_lineage(name, &rows)
+    ))
+}
+
+/// `boss cadence publish <file.toml>` — publish every `[[cadence_rule]]`
+/// the file declares (one, in the bundle's one-rule-per-file shape) at
+/// its declared version, and print each lineage read back. The file is
+/// read by the seed loader, so what publishes here is what the seed
+/// would land; a version not above the newest of its lineage is the
+/// door's 409, surfaced as the refusal it is.
+pub async fn publish(path: &std::path::Path) -> Result<()> {
+    let wire = crate::steps::Wire::live()?;
+    print!("{}", publish_on(&wire, path).await?);
+    Ok(())
+}
+
+pub(crate) async fn publish_on(
+    wire: &crate::steps::Wire,
+    path: &std::path::Path,
+) -> Result<String> {
+    let specs = boss_jobs::seed_loader::load_cadence_rules(path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    if specs.is_empty() {
+        bail!("{} declares no [[cadence_rule]]", path.display());
+    }
+    let mut out = String::new();
+    for spec in specs {
+        let name = spec.name().to_string();
+        let written = wire
+            .call(
+                reqwest::Method::POST,
+                &format!("/api/cadence/rules/{name}/publish"),
+                Some(serde_json::to_value(&spec)?),
+            )
+            .await
+            .with_context(|| format!("publishing cadence rule {name} v{}", spec.version))?
+            .ok_or_else(|| anyhow!("the publish returned no body"))?;
+        let version = written
+            .get("version")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| anyhow!("the published row carries no version: {written}"))?;
+        let rows = lineage(wire, &name).await?;
+        if !lineage_holds(&rows, version, "active") {
+            bail!(
+                "the API answered 200 but the lineage does not show v{version} active — \
+                 a silent no-op:\n{}",
+                render_lineage(&name, &rows)
+            );
+        }
+        out.push_str(&format!(
+            "boss cadence: published {name} v{version} — confirmed by reading the lineage back\n{}",
+            render_lineage(&name, &rows)
+        ));
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod door_tests {
+    //! The two write verbs against the REAL `/api/cadence/*` router
+    //! over the in-memory adapter — the same wire and handlers
+    //! production mounts, on an ephemeral port — driven with a named
+    //! caller as a value, never through the process environment.
+
+    use super::*;
+    use boss_jobs::cadence::{CadenceRepository, CadenceRuleRow, InMemoryCadence};
+    use boss_policy_client::{Action, FakePolicyClient, PolicyClient, Resource, Scope};
+
+    async fn serve(cadence: Arc<InMemoryCadence>) -> String {
+        let policy: Arc<dyn PolicyClient> = Arc::new(
+            FakePolicyClient::builder()
+                .allow(
+                    "platform-admin",
+                    Action::Publish,
+                    Resource::workflow(),
+                    Scope::All,
+                )
+                .allow(
+                    "platform-admin",
+                    Action::Retire,
+                    Resource::workflow(),
+                    Scope::All,
+                )
+                .build(),
+        );
+        let app = boss_jobs::cadence::http::router(boss_jobs::cadence::http::CadenceApiState {
+            repo: cadence.clone(),
+            registry: cadence,
+            policy,
+            clock: Arc::new(boss_clock_client::WallClockClient),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    fn named() -> Option<crate::identity::Caller> {
+        Some(crate::identity::Caller {
+            id: "emp-david".into(),
+            source: crate::identity::Source::Env,
+        })
+    }
+
+    fn retro_row() -> CadenceRuleRow {
+        CadenceRuleRow {
+            name: "protocol-retro-daily".into(),
+            verb: "open:protocol-retro".into(),
+            basis: "calendar".into(),
+            every_minutes: None,
+            at_times: Some(json!(["06:10"])),
+            min_dock_depth: None,
+            cooldown_minutes: None,
+            cadence: Some("daily".into()),
+            anchor_date: Some(NaiveDate::from_ymd_opt(2026, 8, 28).unwrap()),
+            business_calendar: None,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn retire_retires_the_named_rule_and_prints_the_lineage_read_back() {
+        let cadence = Arc::new(InMemoryCadence::new(vec![retro_row()]));
+        let base = serve(cadence.clone()).await;
+        let wire = crate::steps::Wire::at(base, named());
+        let out = retire_on(&wire, "protocol-retro-daily").await.unwrap();
+        assert!(out.contains("retired protocol-retro-daily v1"), "{out}");
+        assert!(out.contains("v1   retired"), "the lineage line: {out}");
+        assert!(out.contains("cadence=daily"), "{out}");
+        assert!(
+            cadence.active_rules().await.unwrap().is_empty(),
+            "the conductor's read no longer serves it"
+        );
+        let events = cadence.recorded_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, boss_jobs::events::CADENCE_RETIRED);
+        assert_eq!(
+            events[0].payload["_actor"], "emp-david",
+            "signed as the actor running the verb"
+        );
+        // Nothing active any more: the door's 404 is the refusal.
+        let err = retire_on(&wire, "protocol-retro-daily")
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(err.contains("404") || err.contains("no active"), "{err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unnamed_caller_is_refused_before_the_wire() {
+        let cadence = Arc::new(InMemoryCadence::new(vec![retro_row()]));
+        let base = serve(cadence.clone()).await;
+        let unnamed = crate::steps::Wire::at(base, None);
+        let err = retire_on(&unnamed, "protocol-retro-daily")
+            .await
+            .map(|_| ())
+            .unwrap_err();
+        let err = format!("{err:#}");
+        assert!(err.contains("BOSS_ACTOR"), "{err}");
+        assert_eq!(
+            cadence.active_rules().await.unwrap().len(),
+            1,
+            "nothing written"
+        );
+        assert!(cadence.recorded_events().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_reads_the_bundle_file_shape_and_the_409_is_a_refusal() {
+        let cadence = Arc::new(InMemoryCadence::new(vec![CadenceRuleRow {
+            name: "train-reconcile".into(),
+            verb: "reconcile".into(),
+            basis: "wall".into(),
+            every_minutes: Some(10),
+            at_times: None,
+            min_dock_depth: None,
+            cooldown_minutes: None,
+            cadence: None,
+            anchor_date: None,
+            business_calendar: None,
+        }]));
+        let base = serve(cadence.clone()).await;
+        let wire = crate::steps::Wire::at(base, named());
+        let dir = boss_testing::scratch_dir("boss-cli-cadence-publish");
+        let file = dir.join("train-reconcile.toml");
+        let write = |version: i32| {
+            std::fs::write(
+                &file,
+                format!(
+                    "[[cadence_rule]]\nname = \"train-reconcile\"\nversion = {version}\n\
+                     status = \"active\"\nverb = \"reconcile\"\nbasis = \"wall\"\n\
+                     every_minutes = 7\n"
+                ),
+            )
+            .unwrap();
+        };
+        // The bundle's shape, version NOT bumped: the door's 409.
+        write(1);
+        let err = format!(
+            "{:#}",
+            publish_on(&wire, &file).await.map(|_| ()).unwrap_err()
+        );
+        assert!(err.contains("409"), "{err}");
+        assert!(err.contains("not above"), "names the bound: {err}");
+        assert!(
+            cadence.recorded_events().is_empty(),
+            "a refusal writes nothing"
+        );
+
+        write(2);
+        let out = publish_on(&wire, &file).await.unwrap();
+        assert!(out.contains("published train-reconcile v2"), "{out}");
+        assert!(out.contains("v1   retired"), "{out}");
+        assert!(out.contains("v2   active"), "{out}");
+        assert!(out.contains("every_minutes=7"), "{out}");
+        let served = cadence.active_rules().await.unwrap();
+        assert_eq!(served.len(), 1);
+        assert_eq!(served[0].every_minutes, Some(7), "the conductor reads v2");
+        let events = cadence.recorded_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, boss_jobs::events::CADENCE_PUBLISHED);
+        assert_eq!(events[0].payload["_actor"], "emp-david");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_lineage_renders_every_version_oldest_first_with_its_basis_columns() {
+        let rows = vec![
+            json!({"name": "train-board-on-dock-depth", "version": 7, "status": "active",
+                   "verb": "board", "basis": "queue-depth", "min_dock_depth": 1,
+                   "cooldown_minutes": 45, "every_minutes": null}),
+            json!({"name": "train-board-on-dock-depth", "version": 6, "status": "retired",
+                   "verb": "board", "basis": "queue-depth", "min_dock_depth": 3,
+                   "cooldown_minutes": 45}),
+        ];
+        let out = render_lineage("train-board-on-dock-depth", &rows);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "train-board-on-dock-depth");
+        assert!(lines[1].starts_with("  v6   retired"), "{out}");
+        assert!(lines[2].starts_with("  v7   active"), "{out}");
+        assert!(
+            lines[2].contains("min_dock_depth=1 cooldown_minutes=45"),
+            "{out}"
+        );
+        assert!(
+            !lines[2].contains("every_minutes"),
+            "a null column is absent: {out}"
+        );
+        assert!(lineage_holds(&rows, 7, "active"));
+        assert!(!lineage_holds(&rows, 7, "retired"));
+        assert!(render_lineage("never", &[]).contains("never held"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2712,10 +3088,15 @@ mod db_tests {
     /// ephemeral port. What these tests call "the surface" is not a
     /// lookalike.
     async fn serve_cadence_api(pool: sqlx::PgPool) -> String {
-        let repo: std::sync::Arc<dyn boss_jobs::cadence::CadenceRepository> =
-            std::sync::Arc::new(boss_jobs::cadence::PgCadence::new(pool));
-        let app =
-            boss_jobs::cadence::http::router(boss_jobs::cadence::http::CadenceApiState { repo });
+        let cadence = std::sync::Arc::new(boss_jobs::cadence::PgCadence::new(pool));
+        // These tests drive the loop's half only; the write door is
+        // mounted with nothing granted, as the router requires it.
+        let app = boss_jobs::cadence::http::router(boss_jobs::cadence::http::CadenceApiState {
+            repo: cadence.clone(),
+            registry: cadence,
+            policy: std::sync::Arc::new(boss_policy_client::FakePolicyClient::deny_all()),
+            clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
+        });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {

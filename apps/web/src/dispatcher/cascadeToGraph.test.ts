@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { buildCascade, filterCascadeFromEvents, topicMatch } from './cascadeToGraph';
+import { buildCascade, describeTrigger, filterCascadeFromEvents, topicMatch, triggerTopics } from './cascadeToGraph';
 import type { DispatcherRules } from './types';
 
 describe('topicMatch', () => {
@@ -98,5 +98,52 @@ describe('filterCascadeFromEvents', () => {
     expect(ids).toEqual(new Set(['evt:b', 'rule:r2', 'hdl:h2']));
     expect(ids.has('evt:a')).toBe(false);
     expect(ids.has('rule:r1')).toBe(false);
+  });
+});
+
+describe('a scheduled rule (no on_event)', () => {
+  // The dispatcher's registry is on_event XOR schedule (boss-dispatcher
+  // rules/registry.rs RawRule): a clock-driven rule carries `schedule`
+  // and NO `on_event`. Measured 2026-09-18 on the system of record: 14 of
+  // 50 rows are shaped so, and the playground's real rows the same way.
+  // The first nightly playground crawl (car 01180167) found the page
+  // throwing `Cannot read properties of undefined (reading 'split')` on
+  // them — topicMatch splitting an undefined trigger (backlog ee86a789).
+  const data: DispatcherRules = {
+    rules: [
+      {
+        name: 'sweep-daily',
+        when: null,
+        do: [{ handler: 'sweep', args: {} }],
+        version: 1,
+        schedule: { cadence: 'daily', anchor_date: '2026-09-09' },
+      },
+      { name: 'on-tick', on_event: 'tick.*', when: null, do: [{ handler: 'emit_tick', args: {} }], version: 1 },
+    ],
+    handler_emits: { sweep: ['tick.swept'], emit_tick: [] },
+    system_edges: [],
+  };
+
+  test('builds without throwing and draws the rule with no trigger event', () => {
+    const g = buildCascade(data);
+    const byId = new Map(g.nodes.map((n) => [n.id, n]));
+    expect(byId.get('rule:sweep-daily')?.sublabel).toBe('every day  ·  from 2026-09-09');
+    expect(byId.has('evt:undefined')).toBe(false);
+    // No edge into the rule at all: nothing precedes a clock.
+    expect(g.edges.some((e) => e.target === 'rule:sweep-daily')).toBe(false);
+    // Its handler's emit still bridges to the event-triggered rule.
+    expect(g.edges.some((e) => e.kind === 'match' && e.source === 'evt:tick.swept' && e.target === 'evt:tick.*')).toBe(true);
+  });
+
+  test('the trigger list holds only real topics', () => {
+    expect(triggerTopics(data.rules)).toEqual(['tick.*']);
+  });
+
+  test('a schedule is described in words, not as a missing topic', () => {
+    expect(describeTrigger(data.rules[0]!)).toBe('every day  ·  from 2026-09-09');
+    expect(describeTrigger({ ...data.rules[0]!, schedule: { cadence: 'every-15-minutes', anchor_date: '2026-09-09' } })).toBe('every 15 minutes  ·  from 2026-09-09');
+    expect(describeTrigger(data.rules[1]!)).toBe('on tick.*');
+    // Neither field — the registry refuses the row, but the page must not.
+    expect(describeTrigger({ ...data.rules[1]!, on_event: undefined })).toBe('no trigger recorded');
   });
 });

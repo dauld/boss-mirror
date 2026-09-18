@@ -156,24 +156,31 @@ impl CadenceRegistry for PgCadence {
     async fn publish_declared(
         &self,
         mut spec: CadenceRuleSpec,
-        _actor: &boss_core::actor::ActorId,
+        actor: &boss_core::actor::ActorId,
         now: DateTime<Utc>,
     ) -> Result<CadenceRuleSpec, CadenceError> {
         let mut tx = self.pool.begin().await.map_err(storage)?;
 
-        let exists: Option<(i32,)> =
-            sqlx::query_as("SELECT version FROM cadence_rules WHERE name = $1 AND version = $2")
-                .bind(spec.name())
-                .bind(spec.version)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(storage)?;
-        if exists.is_some() {
-            return Err(CadenceError::Conflict(format!(
-                "row already exists: {}@{}",
+        // The newest version the lineage holds, any status — the same
+        // question the in-memory adapter asks, so a publish at or below
+        // it is the same 409 over either. Locked for the transaction:
+        // two publishes of one name racing past this read would both
+        // pass the bound and the second insert would trip the (name,
+        // version) key as a 500 instead of the 409 it is.
+        let newest: Option<i32> = sqlx::query_scalar(
+            "SELECT MAX(version) FROM (SELECT version FROM cadence_rules WHERE name = $1 FOR UPDATE) v",
+        )
+        .bind(spec.name())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage)?;
+        let newest = super::in_memory::newest_version(newest.into_iter());
+        if spec.version <= newest {
+            return Err(super::in_memory::not_above(
                 spec.name(),
-                spec.version
-            )));
+                spec.version,
+                newest,
+            ));
         }
 
         // RETIRE BY NAME, THEN INSERT — the safe supersede idiom
@@ -212,7 +219,65 @@ impl CadenceRegistry for PgCadence {
         .await
         .map_err(storage)?;
 
+        // The row and its fact commit or roll back together (the
+        // stations posture): staged on the outbox, moved to audit_log
+        // and the bus by boss-event-relay.
+        let event =
+            crate::events::cadence_registry_event(crate::events::CADENCE_PUBLISHED, actor, &spec);
+        boss_events::outbox::record_event_in_tx(&mut tx, &event)
+            .await
+            .map_err(CadenceError::Storage)?;
+
         tx.commit().await.map_err(storage)?;
         Ok(spec)
+    }
+
+    async fn retire(
+        &self,
+        name: &str,
+        actor: &boss_core::actor::ActorId,
+        _now: DateTime<Utc>,
+    ) -> Result<Option<CadenceRuleSpec>, CadenceError> {
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+
+        // Read the active row first — the event payload is the retired
+        // row, and the nothing-active path must write and record
+        // nothing. At most one row is active per name
+        // (`cadence_rules_one_active_per_name`), so this is the row.
+        let active = sqlx::query(&format!(
+            "SELECT version, status, created_at, {RULE_COLUMNS} \
+             FROM cadence_rules WHERE name = $1 AND status = 'active' FOR UPDATE"
+        ))
+        .bind(name)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?;
+        let Some(row) = active else {
+            return Ok(None);
+        };
+        let mut spec = CadenceRuleSpec {
+            version: row.try_get("version").map_err(storage)?,
+            status: WorkflowStatus::Active,
+            row: rule_of(&row)?,
+            created_at: row.try_get("created_at").map_err(storage)?,
+        };
+
+        sqlx::query(
+            "UPDATE cadence_rules SET status = 'retired' WHERE name = $1 AND status = 'active'",
+        )
+        .bind(name)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+        spec.status = WorkflowStatus::Retired;
+
+        let event =
+            crate::events::cadence_registry_event(crate::events::CADENCE_RETIRED, actor, &spec);
+        boss_events::outbox::record_event_in_tx(&mut tx, &event)
+            .await
+            .map_err(CadenceError::Storage)?;
+
+        tx.commit().await.map_err(storage)?;
+        Ok(Some(spec))
     }
 }

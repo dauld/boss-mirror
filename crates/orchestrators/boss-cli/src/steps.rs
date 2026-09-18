@@ -510,7 +510,9 @@ impl Wire {
         }
     }
 
-    async fn call(
+    /// One signed call. `pub(crate)` since 13d1fff3: the cadence
+    /// write verbs speak through this same wire rather than a copy.
+    pub(crate) async fn call(
         &self,
         method: reqwest::Method,
         path: &str,

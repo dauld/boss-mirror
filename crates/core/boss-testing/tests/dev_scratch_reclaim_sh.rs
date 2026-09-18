@@ -98,8 +98,55 @@ fn stub_curl(root: &Path) -> PathBuf {
     bin
 }
 
+/// A `git` on PATH ahead of the real one that REFUSES `ls-remote` the
+/// way the sidecar's does (backlog b50a65ef, 2026-09-18: the sidecar
+/// mounts only /work and /scratch — no HOME, no credential helper — and
+/// the forge answers an anonymous info/refs with 401, so `git ls-remote
+/// --heads origin` there is `fatal: could not read Username`, exit 128).
+/// Every other git command goes through to the real binary. A call that
+/// reached ls-remote leaves `git-ls-remote.txt` behind for the test to
+/// find.
+fn stub_git(root: &Path) -> PathBuf {
+    let bin = root.join("bin");
+    boss_testing::create_dir(&bin);
+    let real = String::from_utf8(
+        Command::new("bash")
+            .args(["-c", "command -v git"])
+            .output()
+            .expect("locate git")
+            .stdout,
+    )
+    .expect("utf8");
+    let real = real.trim();
+    assert!(!real.is_empty(), "a real git on PATH");
+    boss_testing::write_exec(
+        &bin.join("git"),
+        &format!(
+            concat!(
+                "#!/usr/bin/env bash\n",
+                "for a in \"$@\"; do\n",
+                "    if [ \"$a\" = ls-remote ]; then\n",
+                "        printf '%s\\n' \"$*\" >> \"$STUB_LS_REMOTE\"\n",
+                "        echo \"fatal: could not read Username for 'http://forge.test': terminal prompts disabled\" >&2\n",
+                "        exit 128\n",
+                "    fi\n",
+                "done\n",
+                "exec {real} \"$@\"\n",
+            ),
+            real = real
+        ),
+    );
+    bin
+}
+
+/// What the stub git saw of ls-remote: empty when the pass never asked.
+fn ls_remote_calls(scratch: &Path) -> String {
+    std::fs::read_to_string(scratch.join("git-ls-remote.txt")).unwrap_or_default()
+}
+
 fn run(scratch: &Path, extra: &[(&str, &str)]) -> Output {
     let bin = stub_curl(scratch);
+    stub_git(scratch);
     let installer = stub_installer(scratch);
     let mut cmd = Command::new("bash");
     cmd.arg(repo_root().join("infra/cluster/dev-scratch-reclaim.sh"))
@@ -118,6 +165,7 @@ fn run(scratch: &Path, extra: &[(&str, &str)]) -> Output {
         .env("BOSS_JOBS_URL", "http://sor.test:7900")
         .env("BOSS_API_RETRY_DEADLINE", "0")
         .env("STUB_LOG", scratch.join("curl-log.txt"))
+        .env("STUB_LS_REMOTE", scratch.join("git-ls-remote.txt"))
         .env(
             "PATH",
             format!(
@@ -240,9 +288,15 @@ fn the_age_threshold_is_validated_like_the_floors() {
 // is kept and named.
 //
 // Driven against a REAL forge stand-in: a bare repository that `origin`
-// points at, read with the same `git ls-remote --heads` the pass runs on
-// the pod. A branch is "gone" because it was never pushed there, which
-// is indistinguishable from a landed branch the sweep deleted.
+// points at, so a push leaves the checkout the `refs/remotes/origin/<b>`
+// ref the pass reads. The pass reads ONLY those refs, never the forge
+// (backlog b50a65ef, 2026-09-18): the sidecar has no forge credential,
+// so the `git ls-remote --heads origin` the pass first shipped with
+// (H11) answered `fatal: could not read Username` every hour and the
+// three newest packets on the system of record all said
+// `worktree_pass=skipped` with no reason. `run()` puts a git on PATH
+// that refuses ls-remote, so a pass that reached for the network fails
+// here the way it failed there.
 // ---------------------------------------------------------------------
 
 /// Run git in `dir`, with the author/committer fixed so no test reads the
@@ -289,7 +343,6 @@ fn unix_now() -> u64 {
 /// worktrees under `work/wt/<name>`.
 struct Yard {
     root: PathBuf,
-    forge: PathBuf,
     repo: PathBuf,
 }
 
@@ -313,7 +366,6 @@ impl Yard {
         git(&repo, 100, &["push", "-q", "origin", "main"]);
         Self {
             root: root.to_path_buf(),
-            forge,
             repo,
         }
     }
@@ -353,9 +405,26 @@ impl Yard {
         path
     }
 
-    /// Publish a branch to the forge stand-in, so `ls-remote` lists it.
+    /// Publish a branch to the forge stand-in — which leaves the
+    /// checkout `refs/remotes/origin/<branch>`, the ref the pass reads.
     fn publish(&self, branch: &str) {
         git(&self.repo, 0, &["push", "-q", "origin", branch]);
+    }
+
+    /// Land a branch: its commit becomes the forge's `main`, so the
+    /// checkout's `refs/remotes/origin/main` moves to it while NO
+    /// `refs/remotes/origin/<branch>` is ever made — a car that merged
+    /// and whose branch the forge swept.
+    fn land(&self, branch: &str) {
+        git(
+            &self.repo,
+            0,
+            &["push", "-q", "origin", &format!("{branch}:main")],
+        );
+    }
+
+    fn origin_main(&self) -> String {
+        git(&self.repo, 0, &["rev-parse", "refs/remotes/origin/main"])
     }
 }
 
@@ -365,18 +434,30 @@ fn a_clean_worktree_whose_branch_is_gone_from_the_forge_is_removed_with_its_targ
     let _guard = Scratch(root.clone());
     let yard = Yard::new(&root);
 
-    // The bulk case: landed, forge branch swept, checkout idle. Its
-    // target is FRESH so the age pass cannot be what takes it.
+    // The bulk case: LANDED — its head is on origin/main, the forge
+    // swept the branch so the checkout has no origin/ ref for it — and
+    // idle past the grace window. Its target is FRESH so the age pass
+    // cannot be what takes it.
     let gone = yard.worktree("agent-gone", Some("feat/gone"), 30);
+    yard.land("feat/gone");
     let gone_target = target_dir(&root, "target-agent-gone", 1);
-    // Still on the forge — a car in flight or parked. Kept whatever its age.
+    // Still on the forge — the checkout has its origin/ ref — a car in
+    // flight or parked. Kept whatever its age.
     let live = yard.worktree("agent-live", Some("feat/live"), 200);
     yard.publish("feat/live");
     let live_target = target_dir(&root, "target-agent-live", 1);
-    // Gone from the forge, idle, but carrying uncommitted work: kept
-    // and named. The edits are as old as the checkout — a tree edited
-    // minutes ago is kept as RECENT before its dirtiness is even read.
-    let dirty = yard.worktree("agent-dirty", Some("feat/dirty"), 30);
+    // ABANDONED: never pushed (no origin/ ref, head not on origin/main)
+    // and idle past WORKTREE_MAX_AGE_H — the harness's own
+    // `worktree-agent-*` branches never reach the forge at all.
+    let abandoned = yard.worktree("agent-abandoned", Some("feat/abandoned"), 60);
+    // Never pushed but inside WORKTREE_MAX_AGE_H: a builder's branch is
+    // absent from the forge until its push, so an unpushed tree gets
+    // the longer window, not the grace one.
+    let unpushed = yard.worktree("agent-unpushed", Some("feat/unpushed"), 30);
+    // Abandoned, idle, but carrying uncommitted work: kept and named.
+    // The edits are as old as the checkout — a tree edited minutes ago
+    // is kept as RECENT before its dirtiness is even read.
+    let dirty = yard.worktree("agent-dirty", Some("feat/dirty"), 60);
     boss_testing::write_file(&dirty.join("work.txt"), "edited, not committed");
     boss_testing::write_file(&dirty.join("notes.txt"), "untracked");
     for p in [
@@ -384,10 +465,9 @@ fn a_clean_worktree_whose_branch_is_gone_from_the_forge_is_removed_with_its_targ
         dirty.join("notes.txt"),
         dirty.clone(),
     ] {
-        touch_at(&p, 30);
+        touch_at(&p, 60);
     }
-    // Gone from the forge but touched within the grace window — a
-    // builder between its commit and its push.
+    // Landed but touched within the grace window.
     let recent = yard.worktree("agent-recent", Some("feat/recent"), 1);
     // No branch at all: judged by idleness, and 7 days is the bar.
     let detached_old = yard.worktree("agent-detached-old", None, 24 * 10);
@@ -407,9 +487,17 @@ fn a_clean_worktree_whose_branch_is_gone_from_the_forge_is_removed_with_its_targ
     );
     assert!(
         live.exists(),
-        "a branch the forge still has is kept\n{text}"
+        "a branch the checkout still has an origin/ ref for is kept\n{text}"
     );
     assert!(live_target.exists(), "and so is its target\n{text}");
+    assert!(
+        !abandoned.exists(),
+        "no origin/ ref, not on origin/main, idle past MAX_AGE_H: abandoned, removed\n{text}"
+    );
+    assert!(
+        unpushed.exists(),
+        "no origin/ ref, not on origin/main, inside MAX_AGE_H: a builder not yet pushed, kept\n{text}"
+    );
     assert!(dirty.exists(), "a dirty tree is never removed\n{text}");
     assert!(
         stdout.contains("agent-dirty") && stdout.contains("2 dirty"),
@@ -428,8 +516,18 @@ fn a_clean_worktree_whose_branch_is_gone_from_the_forge_is_removed_with_its_targ
         "a detached HEAD idle 2 days is not\n{text}"
     );
     assert!(
-        stdout.contains("worktree pass: removed 2"),
+        stdout.contains("worktree pass: removed 3"),
         "the pass reports its totals on one line\n{text}"
+    );
+    assert!(
+        ls_remote_calls(&root).is_empty(),
+        "the pass never reads the forge — the sidecar cannot\n{}\n{text}",
+        ls_remote_calls(&root)
+    );
+    let main = yard.origin_main();
+    assert!(
+        stdout.contains(&main[..8]) && stdout.contains("last fetch"),
+        "the pass names the origin/main it read and that it is only as fresh as the last fetch\n{text}"
     );
     let listed = git(&yard.repo, 0, &["worktree", "list", "--porcelain"]);
     assert!(
@@ -450,14 +548,25 @@ fn a_clean_worktree_whose_branch_is_gone_from_the_forge_is_removed_with_its_targ
         .lines()
         .find(|l| l.starts_with("PUT "))
         .unwrap_or_else(|| panic!("the run step is completed\n{log}\n{text}"));
+    let main_ts = git(
+        &yard.repo,
+        0,
+        &["log", "-1", "--format=%ct", "refs/remotes/origin/main"],
+    );
     for field in [
-        "\"result\":\"ok\"",
-        "\"worktrees_removed\":\"2\"",
-        "\"worktrees_kept_dirty\":\"1\"",
-        "\"targets_removed\":\"1\"",
+        "\"result\":\"ok\"".to_string(),
+        "\"worktree_pass\":\"ran\"".to_string(),
+        "\"worktrees_removed\":\"3\"".to_string(),
+        "\"worktrees_kept_live\":\"1\"".to_string(),
+        "\"worktrees_kept_dirty\":\"1\"".to_string(),
+        "\"targets_removed\":\"1\"".to_string(),
+        // The ref the judgement was made against, and its commit time,
+        // so a pass on a stale fetch is visible on the packet.
+        format!("\"origin_main_sha\":\"{main}\""),
+        format!("\"origin_main_ref_ts\":\"{main_ts}\""),
     ] {
         assert!(
-            put.contains(field),
+            put.contains(&field),
             "the run step carries {field}\n{put}\n{text}"
         );
     }
@@ -467,30 +576,52 @@ fn a_clean_worktree_whose_branch_is_gone_from_the_forge_is_removed_with_its_targ
     );
 }
 
+/// A checkout with no origin/main cannot say what landed. The pass
+/// removes nothing, and — unlike the H11 pass, which returned in
+/// silence — RECORDS the skip and its reason on its packet: a skipped
+/// pass is a finding, not silence (backlog b50a65ef).
 #[test]
-fn a_forge_that_cannot_be_read_removes_nothing() {
-    let root = boss_testing::scratch_dir("boss-dsr-forge-dark");
+fn a_checkout_without_origin_main_skips_the_pass_and_records_why() {
+    let root = boss_testing::scratch_dir("boss-dsr-noref");
     let _guard = Scratch(root.clone());
     let yard = Yard::new(&root);
-    let gone = yard.worktree("agent-gone", Some("feat/gone"), 30);
-    // The forge stand-in vanishes: ls-remote fails. Every branch would
-    // read as "gone" if the pass took an error for an empty list.
-    std::fs::remove_dir_all(&yard.forge).expect("rm forge");
+    let gone = yard.worktree("agent-gone", Some("feat/gone"), 200);
+    git(
+        &yard.repo,
+        0,
+        &["update-ref", "-d", "refs/remotes/origin/main"],
+    );
 
     let out = run(&root, &[]);
     let text = say(&out);
     assert!(
         gone.exists(),
-        "an unreadable forge is not an empty forge\n{text}"
+        "a pass that cannot answer removes nothing\n{text}"
     );
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("worktree pass skipped"),
         "the skip is said out loud, on stderr\n{text}"
     );
     assert!(
-        !curl_log(&root).contains("POST"),
-        "a pass that did nothing files no packet\n{}\n{text}",
-        curl_log(&root)
+        ls_remote_calls(&root).is_empty(),
+        "and never by asking the forge\n{}\n{text}",
+        ls_remote_calls(&root)
+    );
+    let log = curl_log(&root);
+    assert!(
+        log.contains("POST http://sor.test:7900/api/jobs "),
+        "a pass that could not answer files its packet\n{log}\n{text}"
+    );
+    let put = log
+        .lines()
+        .find(|l| l.starts_with("PUT "))
+        .unwrap_or_else(|| panic!("the run step is completed\n{log}\n{text}"));
+    assert!(
+        put.contains("\"worktree_pass\":\"skipped\"")
+            && put.contains("\"worktree_pass_reason\":\"")
+            && put.contains("origin/main")
+            && put.contains("\"result\":\"incomplete\""),
+        "the packet carries the skip AND why, as an incomplete pass\n{put}\n{text}"
     );
 }
 
