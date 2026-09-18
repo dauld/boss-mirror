@@ -48,7 +48,7 @@ pub fn mask_password(url: &str) -> String {
 /// is `"in-memory"` — the signature of a service accidentally built
 /// without the `postgres` feature.
 ///
-/// `infra/check-service-write-roundtrip.sh` reads the same field as
+/// A write-roundtrip probe reads the same field as
 /// a defense-in-depth check.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Capabilities {

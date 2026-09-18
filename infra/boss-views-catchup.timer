@@ -1,4 +1,4 @@
-# Managed by infra/deploy-services.sh — edits will be overwritten.
+# Managed by infra/gcp/install-units.sh — edits will be overwritten.
 [Unit]
 Description=Keep event_facts level with audit_log
 

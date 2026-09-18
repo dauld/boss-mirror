@@ -105,7 +105,7 @@ at `infra/gcp/second-stack-units.txt`, capture-before-stop, `--dry-run`
 exercisable without acting, `--for-real` a human's decision to file.
 The second, `uninstall-not-in-role` (same authorization, car 4 of
 d5941ef3), carries no list at all: its set is what
-`deploy-services.sh roster` says the host's LIVE roles do not name —
+`install-units.sh roster` says the host's LIVE roles do not name —
 the installer's own derivation — and an empty set is a refusal. The
 third, `retire-cloudflared` (David 2026-09-16, design 4c565f8c; backlog
 0b7804f3 car 4), retires the host's hand-written tunnel connector —

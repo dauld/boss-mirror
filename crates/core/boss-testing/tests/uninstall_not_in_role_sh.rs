@@ -5,7 +5,7 @@
 //!
 //! WHY THE VERB EXISTS (design 9e3e093f, decided by David 2026-09-11;
 //! backlog d5941ef3 car 4). A host derives its unit roster from the
-//! roles it declares, and `deploy-services.sh units` installs only the
+//! roles it declares, and `install-units.sh units` installs only the
 //! rows the roles name — every other row it REPORTS as NOT IN ROLE and
 //! leaves alone. After the retire verb stopped the second stack on
 //! 2026-09-15 21:11Z (ops-request 7912c9ae) the ten legacy-stack unit
@@ -43,13 +43,13 @@ fn has(tool: &str) -> bool {
 }
 
 const SCRIPT: &str = "infra/gcp/uninstall-not-in-role.sh";
-const INSTALLER: &str = "infra/deploy-services.sh";
+const INSTALLER: &str = "infra/gcp/install-units.sh";
 /// The roles boss-gcp declared on 2026-09-15 (legacy-stack gone since
 /// car 3 landed on #362).
 const ROLES: &str = r#"["wireguard-bastion","off-cluster-observer","ml-batch-host"]"#;
 
 /// The stems `infra/estate/roles.toml` names under one section header,
-/// read the way `deploy-services.sh`'s `role_units` reads them: each
+/// read the way `install-units.sh`'s `role_units` reads them: each
 /// `units = [...]` is on one line.
 fn role_units(section: &str) -> Vec<String> {
     let toml = std::fs::read_to_string(repo_root().join("infra/estate/roles.toml"))
@@ -350,7 +350,7 @@ fn sorted(v: &[String]) -> Vec<String> {
 // The derivation is the installer's own.
 // ---------------------------------------------------------------------------
 
-/// `deploy-services.sh roster` says, for every TIMERS row, whether the
+/// `install-units.sh roster` says, for every roles.toml row, whether the
 /// roles in BOSS_NODE_ROLES name it — the same `roster_for_roles` the
 /// `units` mode installs by, so the uninstall set cannot drift from the
 /// install set (CLAUDE.md §9a). With no roles declared every row is in
@@ -363,7 +363,7 @@ fn the_installer_roster_mode_answers_the_roles() {
         cmd.arg(repo_root().join(INSTALLER)).arg("roster");
         c.env(&mut cmd);
         cmd.env("BOSS_NODE_ROLES", roles);
-        let out = cmd.output().expect("deploy-services.sh roster runs");
+        let out = cmd.output().expect("install-units.sh roster runs");
         (
             out.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&out.stdout).into_owned(),

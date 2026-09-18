@@ -4,11 +4,11 @@
 # runner.toml at container start so the API binaries (each of which
 # defaults --config to /etc/boss-<name>.toml) have something to read.
 #
-# This is the docker-side analog of the heredoc generator in
-# infra/deploy-services.sh — that script writes the same files on a
-# bare-metal install. The single-container assumption means every
-# cross-service URL collapses to 127.0.0.1:<port>, and there's no
-# scratch DB (only prod).
+# The ONE config generator since 2026-09-18: the bare-metal deploy's
+# heredoc twin (infra/deploy-services.sh) had drifted from this one
+# three ways and was deleted with that path (backlog e109bd71). The
+# single-container assumption means every cross-service URL collapses
+# to 127.0.0.1:<port>, and there's no scratch DB (only prod).
 #
 # Reads the canonical port table from `boss-ports-list` so a port
 # rename in boss-ports lands here for free.
@@ -237,8 +237,8 @@ EOF
 
 # `[meta] tenant_id` of the manifest the launcher already derived for
 # this pod (BOSS_TENANT_MANIFEST_TOML, from BOSS_TENANT_DIR in
-# services-launcher.sh; the compose file and bootstrap-local.sh name it
-# directly). Empty when nothing names one or the file has no id —
+# services-launcher.sh; the compose file names it directly). Empty
+# when nothing names one or the file has no id —
 # and empty is NOT the brewery. Same read as tenant-launch.sh's
 # tenant_id_of, which chooses the seed script by it.
 tenant_id() {

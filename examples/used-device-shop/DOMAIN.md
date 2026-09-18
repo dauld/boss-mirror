@@ -19,10 +19,16 @@ out.
 
 ## Install
 
-One command on a fresh Ubuntu 24.04 VM:
+The same container image the brewery runs, pointed at this
+directory — the launcher publishes whatever tenant the manifest path
+names (`infra/oss-quickstart/README.md`) — then the engine's prepare
+inside it:
 
 ```sh
-sudo TENANT=device-shop /opt/boss/infra/bootstrap-vm.sh
+# infra/oss-quickstart/docker-compose.yml, service boss-services:
+#   BOSS_TENANT_MANIFEST_TOML: /opt/boss/examples/used-device-shop/seeds/tenant.toml
+docker compose up -d
+docker compose exec boss-services boss-used-device-shop-engine prepare
 ```
 
 That stands up the same service stack the brewery uses, then runs

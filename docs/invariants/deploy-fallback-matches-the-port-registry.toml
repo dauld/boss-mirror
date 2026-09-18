@@ -1,8 +1,0 @@
-[[invariant]]
-id = "deploy-fallback-matches-the-port-registry"
-claim = "The deploy-services.sh fallback arrays must stand alone when the binary is unbuilt, and must not drift from boss-ports."
-source = "CLAUDE.md §9a; crates/core/boss-ports/src/lib.rs"
-enforcement = "enforced"
-mechanism = "crates/core/boss-ports/src/lib.rs"
-last_verified = ""
-note = "An equality-test pin, not a collapse: `mod deploy_fallback_agreement` include_str!s infra/deploy-services.sh and asserts SOLO_SERVICES and PAIRED_SERVICES match the registry, naming the drifted entry. CLAUDE.md is explicit that a pin is a holding action, not a destination — the drift it caught left two services silently absent from a deploy."

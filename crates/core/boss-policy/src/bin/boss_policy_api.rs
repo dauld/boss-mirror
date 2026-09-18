@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
     let app: Router = router(state);
 
     // Default port pulled from boss_ports — single source of truth
-    // shared with infra/deploy-services.sh + every BOSS_POLICY_URL
+    // shared with the config generator + every BOSS_POLICY_URL
     // default. The 7060/7250 collision once lived right here; the
     // table now makes drift impossible.
     let port = std::env::var("BOSS_POLICY_PORT")

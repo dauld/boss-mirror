@@ -106,9 +106,9 @@ epoch and generates the operation as it
 goes — jobs, orders, invoices, ledger entries, projections. So
 the SPA is **sparse on first load and fills in as the sim runs**,
 and the audit log grows while you click around. The install (see
-[Quick start](#quick-start) below) builds from source and seeds
-the tenant through the public API; the bootstrap-admin email you
-set in `.env` becomes your login.
+[Quick start](#quick-start) below) runs the one BOSS container
+image and seeds the tenant through the public API; the
+bootstrap-admin email you set in `.env` becomes your login.
 
 A few specific places that land the design quickly (all served
 by the local install on `:4443`):
@@ -139,7 +139,7 @@ stack.
 | See the second worked tenant | [examples/used-device-shop/DOMAIN.md](examples/used-device-shop/DOMAIN.md) |
 | Read the design pattern docs | [docs/design/](docs/design/) — load-bearing patterns referenced from CLAUDE.md and the decision record |
 | Run BOSS locally | [Quick start](#quick-start) below |
-| Bring up a fresh dev VM | [docs/runbooks/dev-environment-bootstrap.md](docs/runbooks/dev-environment-bootstrap.md) |
+| Set up a toolchain to work on BOSS itself | [docs/runbooks/dev-environment-bootstrap.md](docs/runbooks/dev-environment-bootstrap.md) |
 | Operate a deployed BOSS | [docs/runbooks/operator.md](docs/runbooks/operator.md), [`boss` CLI](crates/orchestrators/boss-cli/README.md) |
 | Track open work | [TODO.md](TODO.md) |
 | Read the decision record | [docs/architecture-decisions.md](docs/architecture-decisions.md) |
@@ -169,9 +169,10 @@ The workspace splits into four tiers (see CLAUDE.md):
   - **Used-device-shop** (`boss-used-device-shop-engine`) — sells,
     services, and resells used physical devices needing
     sophisticated diagnostics + repair. Data lives at
-    `examples/used-device-shop/`; install it on a fresh VM with
-    `sudo TENANT=device-shop infra/bootstrap-vm.sh` (same service
-    stack as the brewery, no sim daemon — after
+    `examples/used-device-shop/`; run the same container image with
+    its manifest path pointed at that directory
+    (`examples/used-device-shop/DOMAIN.md` §Install — same service
+    stack as the brewery, no sim daemon; after
     `boss-used-device-shop-engine prepare` seeds the model, work is
     driven by human and agent actors).
 
@@ -190,7 +191,8 @@ Port assignments are the canonical
 
 ## Quick start
 
-One supported install path — Docker compose:
+One way to run BOSS — the container image, under Docker compose
+(the same image the cluster runs; there is no host-native install):
 
 ```sh
 git clone https://github.com/algedonic-dev/boss.git
@@ -204,8 +206,8 @@ Open `http://localhost:4443` and log in with the bootstrap-admin
 email you set. The install seeds the brewery tenant through the
 public API and starts the live sim, which builds the demo from an
 empty log. Expected timings, the init-chain log checkpoints, the
-guest button, troubleshooting, and the host-native source-tree
-dev path (`quickstart.sh`) all live in the one install runbook:
+guest button, troubleshooting, and how to run the image you built
+from your own tree all live in the one install runbook:
 [`infra/oss-quickstart/README.md`](infra/oss-quickstart/README.md).
 
 > **The demo builds itself live.** The install starts the brewery sim
@@ -226,17 +228,20 @@ dev path (`quickstart.sh`) all live in the one install runbook:
 
 ## Production posture
 
-For deployments past the eval stage, v1's recipe is **single VM
-with a backup strategy**. One host runs the full stack —
-Postgres, NATS, every `boss-*-api`, the gateway, the static SPA.
-`infra/backup.sh` ships pg_dump snapshots off-box on a systemd
-timer; the `audit_log` is the disaster-recovery primitive (any
-snapshot replays cleanly via `boss-rebuild-all`).
+For deployments past the eval stage, the recipe is **the same
+container image on Kubernetes, with a backup CronJob**. One pod
+runs the full stack — every `boss-*-api`, the gateway, the static
+SPA, the dispatcher — beside a Postgres and a NATS StatefulSet;
+[`infra/cluster/manifests/`](infra/cluster/manifests/) is the
+declared shape, and the nightly `boss-pg-backup` CronJob ships
+pg_dump snapshots to two offsite legs. The `audit_log` is the
+disaster-recovery primitive (any snapshot replays cleanly via
+`boss-rebuild-all`).
 
-The systemd-managed deploy lives at
-[`infra/deploy-services.sh`](infra/deploy-services.sh); the
-operator runbook is at
-[`docs/runbooks/operator.md`](docs/runbooks/operator.md).
+The operator runbook is at
+[`docs/runbooks/operator.md`](docs/runbooks/operator.md); the
+cluster's bring-up and topology at
+[`docs/design/dev-cluster.md`](docs/design/dev-cluster.md).
 Cloud-provider provisioning recipes (Azure, GCP, AWS,
 Cloudflare, Hetzner) are queued post-release under
 `infra/blueprints/<provider>/` per the TODO entry.
@@ -261,15 +266,16 @@ The summary:
 | Static checks | `cargo clippy --workspace --all-features --tests -- -D warnings`, `cargo fmt --check`, `bun run typecheck` (svelte-check, strict TS) | CI on every push + PR |
 | Unit + integration tests | ~1,640 Rust `#[test]` cases across the workspace + Svelte component tests; `cargo test --all-features` | CI + local |
 | Lints beyond the type system | `infra/lint/seed-bypass-smell.sh` rejects seed scripts that bypass the Workflow path; `cargo clippy` lint set is the strict superset | CI |
-| Audit-log integrity | `boss-audit-integrity-check` verifies the per-row hash chain on `audit_log` and the `REVOKE UPDATE, DELETE, TRUNCATE` schema-level append-only enforcement | systemd timer (daily) in prod |
-| Conservation invariants | `infra/lint/conservation-invariants.sh` proves the five-property correctness protocol — provenance, conservation, closure, idempotence, determinism — across every projection vs. the `audit_log` it derives from | systemd timer in prod, on-demand locally |
-| Replay rebuild | `boss-rebuild-all` reconstructs every projection from `audit_log` alone and `infra/verify-replay.sh` diffs the result against live state | on-demand; in CI via `validate-brewery-sim.sh` (runs a sim-year, then asserts a clean rebuild) |
-| Service + binary drift | `infra/check-service-drift.sh` validates the systemd unit set, `check-service-write-roundtrip.sh` exercises every write endpoint against real Postgres, and `check-binary-build-coverage.sh` catches `*-api` binaries that would silently boot in-memory because their `postgres` feature isn't activated | on-demand + cron |
+| Audit-log integrity | `boss-audit-integrity-check` verifies the per-row hash chain on `audit_log` and the `REVOKE UPDATE, DELETE, TRUNCATE` schema-level append-only enforcement | cluster CronJob (daily) in prod |
+| Conservation invariants | `infra/lint/conservation-invariants.sh` proves the five-property correctness protocol — provenance, conservation, closure, idempotence, determinism — across every projection vs. the `audit_log` it derives from | cluster CronJob in prod, on-demand locally |
+| Replay rebuild | `boss-rebuild-all` reconstructs every projection from `audit_log` alone; `infra/postgres/validate-brewery-sim.sh` runs a sim-year and asserts 0 net drift across every rebuilder | on-demand (maintainers, before a release cut) |
+| Binary drift | `infra/check-binary-build-coverage.sh` catches `*-api` binaries that would silently boot in-memory because their `postgres` feature isn't activated; the launcher's roster is pinned to the port registry by `boss-ports`' tests | gate + on-demand |
 
 The "always green" claim isn't aspirational. Audit-log integrity
-runs every 24 h; conservation invariants run on a timer; replay
-rebuild is a CI step on every push that touches a projection. A
-red signal anywhere is an incident, not a flaky test to retry.
+runs every 24 h; conservation invariants run on a schedule; every
+scheduled run leaves a packet in the system of record and a
+cadence-silence sweep alarms when one stops arriving. A red signal
+anywhere is an incident, not a flaky test to retry.
 
 ```sh
 # Workspace build (15–20 min cold, ~30 s warm).
@@ -281,15 +287,15 @@ cargo test --all-features
 
 # Run the in-tree integrity checks against a local Postgres.
 infra/lint/conservation-invariants.sh
-infra/verify-replay.sh
 ```
 
 CI configuration: [`.forgejo/workflows/ci.yml`](.forgejo/workflows/ci.yml),
 which runs on the internal forge and invokes the one gate definition,
 [`infra/gate.sh`](infra/gate.sh). The public GitHub mirror is a backup of
 source, not part of CI/CD: it carries only the CodeQL and Scorecard
-security scans. The prod-deploy pipeline (cross-compile + scp +
-systemctl restart) is queued — see [TODO.md](TODO.md).
+security scans. Every merged train converges the cluster on its own
+(the forge builds the image for the merge sha and rolls it;
+[`docs/runbooks/operator.md`](docs/runbooks/operator.md) §Deploy).
 
 ## Founding ideas
 

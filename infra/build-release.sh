@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Canonical release build for deploy. Run this before infra/deploy-services.sh.
+# Canonical release build for a host checkout (the image build runs its own cargo).
 #
 # WHY THIS EXISTS
 # ---------------
@@ -127,7 +127,7 @@ if ! "$(dirname "$0")/src-fingerprint.sh" > "$RELEASE_DIR/.boss-src-fingerprint"
     exit 1
 fi
 
-echo "==> release build complete. Next: sudo infra/deploy-services.sh prod"
+echo "==> release build complete."
 
 # The build is a step of a regen when one is open, and a no-op otherwise.
 # A bookkeeping failure must not fail the build, but it must be SEEN —

@@ -35,7 +35,7 @@ struct Cli {
     seeds: PathBuf,
 
     /// boss-policy-api base URL. Default pulled from boss_ports —
-    /// single source of truth shared with deploy-services.sh.
+    /// single source of truth shared with the config generator.
     #[arg(long, default_value_t = boss_ports::url("policy"))]
     policy_base: String,
 

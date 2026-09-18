@@ -4,7 +4,7 @@
 # NOBODY INSTALLS THIS BY HAND ANY MORE, and this comment used to be
 # the two recipes for doing so. Both hosts that run it now converge it
 # from one definition — infra/ops/install-ops-runner.sh, called by
-# infra/forge/install.sh (forge) and by `deploy-services.sh units`
+# infra/forge/install.sh (forge) and by `install-units.sh units`
 # (boss-gcp). A hand-installed unit is one rebuild from gone, which is
 # exactly how the forge nearly lost this door (packet 4d5f158a).
 #

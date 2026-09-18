@@ -72,7 +72,7 @@ pub struct AuditEntry {
     pub payload: serde_json::Value,
 }
 
-/// Liveness probe — used by deploy-services.sh + IT Monitoring
+/// Liveness probe — used by the launcher's readiness wait + IT Monitoring
 /// page to confirm the service is reachable. No auth gate.
 /// How big the log is and how fast it grows (168b3f25). David,
 /// 2026-09-02: "We need size and growth stats on audit log to make

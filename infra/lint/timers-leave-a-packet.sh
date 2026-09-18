@@ -16,23 +16,26 @@
 # Three of eleven timers were wired that way. Eight ran nightly with no
 # packet, no findings, no event-log trace and nobody's queue, which
 # means a silent failure in any of them was indistinguishable from a
-# success. deploy-services.sh's own comment records that four of these
-# units were "authored but never installed" and each was caught by
-# hand; this is the same class one step later — installed, running, and
-# unobservable.
+# success. The bare-metal deploy script's own comment recorded that four
+# of these units were "authored but never installed" and each was caught
+# by hand; this is the same class one step later — installed, running,
+# and unobservable.
 #
 # David, 2026-08-16: "Let's make sure we have a job to handle each" and
 # "get as much maintenance and management into job protocols rather
 # than floating around scripts or system timers elsewhere."
 #
-# WHAT IT CHECKS, for every row of deploy-services.sh's TIMERS array:
-#   1. the .service unit exists where the array says it does
+# WHAT IT CHECKS, for every row of infra/estate/roles.toml (read off the
+# installer's `rows` mode, infra/gcp/install-units.sh — until 2026-09-18
+# the rows were the TIMERS array of the bare-metal deploy-services.sh,
+# deleted with backlog e109bd71):
+#   1. the .service unit exists where the installer finds it
 #   2. it calls boss-maintenance-wrap.sh with a kind (opens the Job)
 #   3. it calls boss-step.sh with the SAME kind (records the verdict)
 #   3b. that call is on ExecStopPost, the one phase that runs on failure
 #   4. that kind is a real Workflow in the platform bundle
-#   7. a boss-gcp unit whose kind only the bundle defines pins the
-#      system of record inline and opens its packet best-effort (`-`)
+#   7. a boss-gcp unit pins the system of record inline and opens its
+#      packet best-effort (`-`)
 #   8. and every CLUSTER CRONJOB does (2)–(4) too, because that is where
 #      the chores live since the 2026-09-04 cutover — the nightly backup
 #      ran unrecorded for twenty days inside this lint's blind spot
@@ -57,15 +60,15 @@ cd "$(dirname "$0")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
 . infra/lint/lib/scanned.sh
 
-DEPLOY="infra/deploy-services.sh"
+INSTALLER="infra/gcp/install-units.sh"
 # The FORGE host's own installer, added 2026-08-17. This lint read
-# boss-gcp's TIMERS array and called itself complete, which was the
-# same shape as the bug it was written for: the forge host runs two
-# timers of its own and neither was covered. reap-dead-ci-jobs was
-# committed and never installed anywhere as a result.
+# boss-gcp's roster and called itself complete, which was the same
+# shape as the bug it was written for: the forge host runs two timers
+# of its own and neither was covered. reap-dead-ci-jobs was committed
+# and never installed anywhere as a result.
 FORGE_INSTALL="infra/forge/install.sh"
 BUNDLE="infra/platform/workflows"   # a directory: one <kind>.toml per protocol
-[ -f "$DEPLOY" ] || { echo "timers-leave-a-packet: $DEPLOY not found" >&2; exit 1; }
+[ -f "$INSTALLER" ] || { echo "timers-leave-a-packet: $INSTALLER not found" >&2; exit 1; }
 [ -d "$BUNDLE" ] || { echo "timers-leave-a-packet: $BUNDLE not found" >&2; exit 1; }
 
 # The kinds a Workflow actually defines. ONE SOURCE since 2026-09-11:
@@ -78,9 +81,9 @@ BUNDLE="infra/platform/workflows"   # a directory: one <kind>.toml per protocol
 # test in Rust still names it.
 kinds=$(cat "$BUNDLE"/*.toml | grep -oE '^kind = "maintenance-[a-z-]+"' | sed -E 's/kind = "(.*)"/\1/' | sort -u)
 
-rows=$(sed -n '/^TIMERS=(/,/^)/p' "$DEPLOY" | grep -oE '"[a-z0-9-]+:[^"]+"' | tr -d '"')
+rows=$(BOSS_REPO_ROOT="$PWD" bash "$INSTALLER" rows 2>/dev/null | grep -E '^[a-z0-9-]+:[^:]+$')
 # Forge-host units live beside their installer, so the "subdirectory"
-# is always forge/. Same shape as a TIMERS row so the loop below is
+# is always forge/. Same shape as an installer row so the loop below is
 # unchanged.
 if [ -f "$FORGE_INSTALL" ]; then
     forge_rows=$(sed -n '/^UNITS=(/,/^)/p' "$FORGE_INSTALL" \
@@ -90,7 +93,7 @@ ${forge_rows}"
 fi
 count=$(printf '%s\n' "$rows" | grep -c . || true)
 if [ "$count" -lt 5 ]; then
-    echo "timers-leave-a-packet: only parsed $count timer rows from $DEPLOY —" >&2
+    echo "timers-leave-a-packet: only parsed $count timer rows from $INSTALLER —" >&2
     echo "  the scrape broke, so a green result would mean nothing." >&2
     exit 1
 fi
@@ -100,8 +103,8 @@ for row in $rows; do
     name="${row%%:*}"; sub="${row##*:}"
     [ "$sub" = "." ] && unit="infra/$name.service" || unit="infra/$sub/$name.service"
 
-    if [ ! -f "$unit" ]; then
-        echo "timers-leave-a-packet: $name is installed by $DEPLOY but $unit does not exist" >&2
+    if [ "$sub" = "missing" ] || [ ! -f "$unit" ]; then
+        echo "timers-leave-a-packet: $name is a roles.toml row but no $name.service + $name.timer pair exists under infra/" >&2
         problems=$((problems + 1)); continue
     fi
 
@@ -140,36 +143,24 @@ for row in $rows; do
     fi
 done
 
-# 5. AND THE DEPLOY MUST POINT THEM AT A JOBS API.
+# 5. WHERE A TIMER WRITES ITS PACKET.
 #
 # The four checks above prove a timer opens and completes a packet of a
 # real kind. They cannot see WHERE it writes it, and that turns out to
-# be the difference between visibility and none.
-#
-# boss-maintenance-wrap.sh falls back to
-# `BOSS_JOBS_URL:-http://127.0.0.1:7900`. On a box whose local instance
-# is not the system of record, that default is a silent redirect:
-# measured 2026-08-17, the backup / audit-integrity / ledger-replay
-# timers had fired on schedule for weeks and left 7 packets EACH on
-# boss-gcp's legacy instance and ZERO on the cluster SoR. Every check
-# in this lint passed the whole time. The 2026-08-13 split-brain
-# (incident c4b4a6b0) fixed the pipeline units by hand and missed
-# these.
-#
-# So: the deploy that installs a timer must also write its
-# BOSS_JOBS_URL, from the tree, where a reader can see it.
-if ! grep -q 'BOSS_JOBS_URL=' "$DEPLOY" || ! grep -q 'jobs-url.conf' "$DEPLOY"; then
-    echo "timers-leave-a-packet: deploy-services.sh installs timers but writes no" >&2
-    echo "    BOSS_JOBS_URL drop-in for them, so boss-maintenance-wrap.sh falls back to" >&2
-    echo "    127.0.0.1 — which on this deployment is not the system of record. Every" >&2
-    echo "    nightly packet would open and close where nobody is looking." >&2
-    problems=$((problems + 1))
-fi
+# be the difference between visibility and none: measured 2026-08-17,
+# the backup / audit-integrity / ledger-replay timers had fired on
+# schedule for weeks and left 7 packets EACH on boss-gcp's legacy
+# instance and ZERO on the cluster SoR, with every check in this lint
+# green. Until 2026-09-18 the answer was a jobs-url drop-in the
+# bare-metal deploy wrote per unit, naming the local instance; that
+# instance was retired on 2026-09-15 and the deploy path deleted, so a
+# boss-gcp unit now names the system of record INLINE on its own Exec
+# lines or it names nothing — check 7 is the whole rule, and check 6
+# keeps the helpers from inventing a default.
 
-# 5b. THE FORGE INSTALLER MUST DO THE SAME FOR ITS OWN UNITS.
+# 5b. THE FORGE INSTALLER MUST NAME THE SYSTEM OF RECORD FOR ITS UNITS.
 #
-# The check above reads deploy-services.sh (boss-gcp). The forge host is
-# installed by install.sh, which had NO jobs-url drop-in — a blind spot
+# The forge host is installed by install.sh, which had NO jobs-url — a blind spot
 # that let reap-dead-ci-jobs run without BOSS_JOBS_URL and FAIL every
 # time on 2026-09-03, with this lint green throughout. Same bug as the
 # split-brain above, one installer over: a check that reads only one
@@ -185,7 +176,7 @@ fi
 
 # 6. AND NEITHER HELPER MAY CARRY A LOCALHOST DEFAULT.
 #
-# The drop-in above is the belt; this is the braces. A default of
+# The inline pin (check 7) is the belt; this is the braces. A default of
 # 127.0.0.1 in boss-maintenance-wrap.sh or boss-step.sh makes a missing
 # BOSS_JOBS_URL look like a working configuration, which is exactly how
 # 21 nightly packets landed on a non-authoritative instance without one
@@ -273,31 +264,33 @@ if ! grep -q 'summary_absent' <<<"$rs_out"; then
 fi
 rm -rf "$rs_dir"
 
-# 7. A CHORE WHOSE KIND ONLY THE BUNDLE DEFINES FILES WHERE THE BUNDLE
-#    IS SEEDED — and its packet never blocks its run.
+# 7. A boss-gcp CHORE NAMES THE SYSTEM OF RECORD INLINE — and its
+#    packet never blocks its run.
 #
-# Measured 2026-09-08 on boss-gcp (backlog e109f57e). deploy-services'
-# jobs-url.conf drop-in points every timer at the LOCAL instance
-# (127.0.0.1:7900, "a chore reports to the instance whose data it
-# maintains", 2026-08-19). That instance carries only the three kinds
-# baked into registry.rs — the platform bundle was never seeded there
-# and never will be (the-cluster-is-the-system retires it). So a
-# boss-gcp timer whose kind exists ONLY in the bundle gets
+# Measured 2026-09-08 on boss-gcp (backlog e109f57e). The bare-metal
+# deploy's jobs-url.conf drop-in pointed every timer at the LOCAL
+# instance (127.0.0.1:7900, "a chore reports to the instance whose data
+# it maintains", 2026-08-19). That instance carried only the three kinds
+# then baked into registry.rs — the platform bundle was never seeded
+# there. So a boss-gcp timer whose kind existed ONLY in the bundle got
 # `400 unknown or inactive job kind` from its own ExecStartPre, and a
-# hard ExecStartPre turns that into a run that never starts:
+# hard ExecStartPre turned that into a run that never started:
 # boss-ml-inference-batch failed 23 nights in a row and the ML
 # predictions went three weeks stale, while boss-conservation-
-# invariants and boss-deploy-confirm (the deploy dead-man) did the
-# same. The estate observers had already met this bug and pinned the
-# system of record INLINE with env(1) on the Exec line, which outranks
-# the drop-in (91ddebfb); this check makes that the rule.
+# invariants and the deploy dead-man did the same. The estate observers
+# had already met this bug and pinned the system of record INLINE with
+# env(1) on the Exec line, which outranks a drop-in (91ddebfb); this
+# check makes that the rule. Since 2026-09-18 there is no drop-in and no
+# local instance at all (the second stack was retired 2026-09-15, the
+# deploy path deleted), so the inline pin is a unit's ONLY way to name
+# where its packet goes.
 #
-# WHICH UNITS. Kinds the bundle defines minus the baked-in three,
-# minus kinds a cluster CronJob already opens (a boss-gcp copy of
-# those is the vestige the-cluster-is-the-system retires: pinning it
-# to the SoR would file a second packet of a kind the cluster already
-# runs, and the wrap's reuse-the-open-packet recovery would then
-# "recover" the cluster's. Retirement is their fix, not a pin.)
+# WHICH UNITS. Every rostered row minus kinds a cluster CronJob already
+# opens (a boss-gcp copy of those is the vestige the-cluster-is-the-
+# system retires: pinning it to the SoR would file a second packet of a
+# kind the cluster already runs, and the wrap's reuse-the-open-packet
+# recovery would then "recover" the cluster's. Retirement is their fix,
+# not a pin.)
 #
 # WHAT THEY MUST DO. Name the system of record on BOTH the wrap and
 # the boss-step lines (a packet opened on one instance and closed on
@@ -311,27 +304,26 @@ if [ -z "$sor" ]; then
     echo "timers-leave-a-packet: infra/deploy.env.example names no BOSS_JOBS_URL — check 7 cannot know the system of record" >&2
     problems=$((problems + 1))
 fi
-baked=$(grep -oE '"maintenance-[a-z-]+"' crates/core/boss-jobs/src/registry.rs | tr -d '"' | sort -u)
 cluster_kinds=$(grep -ohE 'boss-maintenance-wrap\.sh maintenance-[a-z-]+' infra/cluster/manifests/*.yaml 2>/dev/null \
     | awk '{print $2}' | sort -u)
-gcp_rows=$(sed -n '/^TIMERS=(/,/^)/p' "$DEPLOY" | grep -oE '"[a-z0-9-]+:[^"]+"' | tr -d '"')
+gcp_rows=$(BOSS_REPO_ROOT="$PWD" bash "$INSTALLER" rows 2>/dev/null | grep -E '^[a-z0-9-]+:[^:]+$')
 for row in $gcp_rows; do
     name="${row%%:*}"; sub="${row##*:}"
+    [ "$sub" = "missing" ] && continue   # check 1 already named it
     [ "$sub" = "." ] && unit="infra/$name.service" || unit="infra/$sub/$name.service"
     [ -f "$unit" ] || continue   # check 1 already named it
     kind=$(grep -oE 'boss-maintenance-wrap\.sh [a-z-]+' "$unit" | awk '{print $2}' | sed -n 1p)
     [ -n "$kind" ] || continue   # check 2 already named it
-    grep -qxF -- "$kind" <<< "$baked" && continue          # local instance knows it
     grep -qxF -- "$kind" <<< "$cluster_kinds" && continue  # the cluster runs it; this copy is a vestige
     pre=$(grep -E '^ExecStartPre=' "$unit" | grep 'boss-maintenance-wrap' | sed -n 1p)
     post=$(grep -E '^ExecStopPost=' "$unit" | grep 'boss-step\.sh' | sed -n 1p)
     if ! grep -qF -- "BOSS_JOBS_URL=$sor " <<<"$pre" \
         || ! grep -qF -- "BOSS_JOBS_URL=$sor " <<<"$post"; then
-        echo "timers-leave-a-packet: $name opens '$kind', a kind only the platform bundle defines," >&2
-        echo "    but does not pin the system of record on both its Exec lines. deploy-services'" >&2
-        echo "    drop-in points it at the local instance, which has never heard of that kind:" >&2
-        echo "    every run dies 400 in ExecStartPre. Pin it inline, where env(1) outranks the" >&2
-        echo "    drop-in, on the wrap AND the boss-step call:" >&2
+        echo "timers-leave-a-packet: $name opens '$kind' but does not pin the system of record" >&2
+        echo "    on both its Exec lines. Nothing else names one for it — the installer writes" >&2
+        echo "    no drop-in and the helpers refuse to default — so every run refuses 78 in" >&2
+        echo "    ExecStartPre and the chore runs unrecorded. Pin it inline with env(1) on the" >&2
+        echo "    wrap AND the boss-step call:" >&2
         echo "      ExecStartPre=-/usr/bin/env BOSS_JOBS_URL=$sor /opt/boss/infra/boss-maintenance-wrap.sh $kind \"<label>\"" >&2
         echo "      ExecStopPost=-/usr/bin/env BOSS_JOBS_URL=$sor /opt/boss/infra/boss-step.sh $kind run" >&2
         problems=$((problems + 1)); continue
@@ -359,7 +351,7 @@ done
 # service's ExecStartPre with it. The backups kept running and kept
 # succeeding — verified artefact, both offsite legs — while the system
 # of record's last backup packet stayed at 2026-08-19 for twenty days.
-# Nothing here noticed, because a CronJob is not a TIMERS row. Found by
+# Nothing here noticed, because a CronJob is not a roles.toml row. Found by
 # hand (backlog 60095754), which is the definition of a gap in this
 # lint.
 #
@@ -496,7 +488,8 @@ fi
 # skipped — the same fail-closed posture the sweep itself takes for a
 # declaration it cannot parse. A timer with no schedule directive at
 # all (boss-deploy-confirm is armed by `systemctl restart`, not by the
-# clock) is not a cadence and is not checked. A DECLARED kind with no
+# clock; the deploy dead-man was one until it left with the bare-metal
+# path) is not a cadence and is not checked. A DECLARED kind with no
 # rostered timer is left alone: it may be a cluster CronJob or a
 # dispatcher-driven kind, neither of which this file can see.
 # The cadence roster is the args of ONE rule, and since 2026-09-09 each
@@ -562,11 +555,12 @@ if [ -z "$declared" ]; then
 fi
 
 # The loosest rostered timer per kind — the number the sweep must carry.
-# Same row shapes checks 1-7 already walk: boss-gcp's TIMERS plus the
-# forge installer's UNITS.
+# Same row shapes checks 1-7 already walk: boss-gcp's roles.toml rows
+# plus the forge installer's UNITS.
 expected=""
 for row in $rows; do
     name="${row%%:*}"; sub="${row##*:}"
+    [ "$sub" = "missing" ] && continue
     if [ "$sub" = "." ]; then unit="infra/$name.service"; timer="infra/$name.timer"
     else unit="infra/$sub/$name.service"; timer="infra/$sub/$name.timer"; fi
     [ -f "$unit" ] || continue

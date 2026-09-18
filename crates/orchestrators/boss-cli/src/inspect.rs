@@ -22,7 +22,7 @@
 //! Defaults to `http://127.0.0.1:4443` (the canonical local
 //! gateway listen address per `BOSS_LISTEN`). Override via the
 //! `--gateway-url` flag or `BOSS_GATEWAY_URL=...` env. Every
-//! install path (bootstrap-local, docker-compose, systemd) binds
+//! install path (docker-compose, the cluster) binds
 //! to `:4443`.
 
 use anyhow::{Context, Result, anyhow};

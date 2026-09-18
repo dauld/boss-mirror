@@ -156,7 +156,7 @@ fn unconfigured_files_router() -> Router {
         (
             StatusCode::OK,
             [("content-type", "application/json")],
-            r#"{"kind":"unconfigured","reason":"file-references surface not configured (no [files] block in boss-content-api config); see infra/deploy-services.sh"}"#,
+            r#"{"kind":"unconfigured","reason":"file-references surface not configured (no [files] block in boss-content-api config); see infra/oss-quickstart/generate-configs.sh"}"#,
         )
     });
     Router::new()

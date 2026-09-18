@@ -13,7 +13,7 @@
 # THIS unit pair among the rest, so it never needs repeating:
 #
 #   cd /opt/boss && git fetch forge main && git merge --ff-only FETCH_HEAD \
-#     && sudo ./infra/deploy-services.sh units
+#     && sudo ./infra/gcp/install-units.sh units
 [Unit]
 Description=BOSS boss-gcp adopts its own systemd units from forge main
 Documentation=file:/opt/boss/infra/gcp/boss-gcp-converge.sh
@@ -22,7 +22,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-# Root: deploy-services.sh writes /etc/systemd/system. The script drops
+# Root: install-units.sh writes /etc/systemd/system. The script drops
 # to the checkout's owner for every git operation, so /opt/boss never
 # accumulates root-owned objects.
 User=root

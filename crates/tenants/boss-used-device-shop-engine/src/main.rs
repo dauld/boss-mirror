@@ -12,9 +12,10 @@
 //!   `BOSS_SIM_PREPARE_GATEWAY` routes every `/api/*` call through
 //!   one gateway URL instead of per-service localhost ports.
 //!
-//! `infra/bootstrap-vm.sh`'s `TENANT=device-shop` branch calls this
-//! after deploying the service stack — that is the tenant's install
-//! story. There is no daemon mode: unlike the brewery this tenant
+//! The tenant's install story is the container image pointed at
+//! `examples/used-device-shop` (BOSS_TENANT_DIR), then this binary run
+//! inside it (examples/used-device-shop/DOMAIN.md §Install). There is
+//! no daemon mode: unlike the brewery this tenant
 //! ships no live sim service; after prepare, work is driven by human
 //! and agent actors through the normal surfaces (the engine library
 //! drives the day-loop in tests and offline runs).

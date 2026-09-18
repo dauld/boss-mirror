@@ -899,7 +899,7 @@ fn the_launcher_derives_the_manifest_and_the_seeds_from_the_tenant_dir() {
         )),
         "{out}"
     );
-    // An explicit value wins (the compose file and bootstrap-local.sh
+    // An explicit value wins (the compose file
     // set the paths directly).
     let (_, out, err) = run(&[
         ("BOSS_TENANT_DIR", in_seeds.to_str().unwrap()),

@@ -98,7 +98,6 @@ COPY infra/forge/host-absent-tools.txt ./infra/forge/host-absent-tools.txt
 # the host runner enforces (one per verb, 5086842d), listed by boss-cli's
 # build.rs; the terminal applies the same rules first.
 COPY infra/ops/verbs ./infra/ops/verbs
-COPY infra/deploy-services.sh ./infra/deploy-services.sh
 COPY infra/forge/run-car-probe.sh ./infra/forge/run-car-probe.sh
 
 # NO `ENV BOSS_BUILD_COMMIT` HERE — see the stage header; it is set in

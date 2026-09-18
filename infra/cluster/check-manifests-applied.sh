@@ -10,7 +10,7 @@
 # reachable host has kubectl, therefore nobody has one", which was
 # sound and wrong.
 #
-# `deploy-services.sh` owns systemd units on boss-gcp. Nothing owned
+# `install-units.sh` owns systemd units on boss-gcp. Nothing owned
 # `infra/cluster/manifests/`, so "merged" and "running" were different
 # states with no observer. This is the observer.
 #

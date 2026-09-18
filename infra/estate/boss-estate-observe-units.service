@@ -1,7 +1,7 @@
 # The unit half of the host observation loop (729329c6): observe-host
 # records what the machine IS, this records what its units are DOING —
 # so "is boss-train.service alive" is a SoR read, not a human with ssh.
-# Installed on boss-gcp by deploy-services.sh (TIMERS row). The forge
+# Installed on boss-gcp by install-units.sh (roles.toml row). The forge
 # host runs the SAME pair with drop-in overrides, installed by hand
 # until its config-not-in-repo debt is paid:
 #   sudo install -m644 infra/estate/boss-estate-observe-units.{service,timer} /etc/systemd/system/
@@ -29,8 +29,8 @@ Environment=JOBS_API=http://10.20.0.34:7900
 # was reasoned from instead, and the answer was WRONG — the unit had been
 # firing and failing nightly since 2026-08-17.
 #
-# Unset, observe-units.sh derives the roster from deploy-services.sh's
-# TIMERS list — the same file, at the same commit, that boss-gcp-converge
+# Unset, observe-units.sh derives the roster from the installer's
+# roles.toml rows — the same tree, at the same commit, that boss-gcp-converge
 # runs to install those units every half hour — and watches both halves
 # of every pair. So a timer that lands on main is watched on the tick it
 # is installed, with no line here to remember to edit (CLAUDE.md §9a).

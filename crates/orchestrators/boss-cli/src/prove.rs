@@ -40,7 +40,7 @@
 //! its output, so `boss prove <car> --recheck` re-executes it later and
 //! says whether the claim still holds. A proof that has silently
 //! decayed — a ConfigMap preview reverted by the next converge, exactly
-//! the failure `push-step-plugins.sh` warns about — becomes findable
+//! the failure a hand-pushed step-plugin bundle used to warn about — becomes findable
 //! instead of being a sentence in a closed packet that nobody rereads.
 //!
 //! WHAT IT DELIBERATELY DOES NOT DO. It does not judge whether the

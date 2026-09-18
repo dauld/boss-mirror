@@ -1,7 +1,7 @@
 # run-summary.sh — what a unit's run leaves for its own packet.
 #
 # WHY THIS EXISTS, measured 2026-09-11. `boss-gcp-converge` runs
-# `deploy-services.sh units` every half hour and its packet carried
+# the installer's `units` mode every half hour and its packet carried
 # exactly one field: `result=ok`. Car e09e30bd landed an ops-runner
 # install block at 15:40 UTC; the 15:52 and 16:22 converges both closed
 # `result=ok`, and answering "did it install?" took filing an
@@ -37,7 +37,7 @@
 # packet would be the same defect one layer in — a wrong answer instead
 # of an error.
 #
-# UNSET IS A NO-OP, deliberately. A human running `deploy-services.sh
+# UNSET IS A NO-OP, deliberately. A human running `install-units.sh
 # units` by hand is not inside a packet and writes nothing; so is every
 # lint that drives these installers without asking for a summary.
 #

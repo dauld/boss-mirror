@@ -164,7 +164,6 @@ MAINT_TIMERS=(
     boss-audit-integrity-check.timer
     boss-conservation-invariants.timer
     boss-ledger-recognize.timer
-    boss-backup.timer
     boss-files-gc.timer
     boss-messages-events-purge.timer
     boss-ml-inference-batch.timer

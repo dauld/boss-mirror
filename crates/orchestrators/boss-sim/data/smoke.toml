@@ -7,7 +7,7 @@
 # (intake → refurb → sale → install → service → work order → invoice
 # → PO reorder → vendor invoice → decommission) fits in ~45 days.
 #
-# Pair this with `infra/verify-smoke.sh` which asserts ≥1 row per
+# Its assertion, ≥1 row per
 # operating motion after the run. If any motion shows zero rows the
 # smoke is considered broken.
 

@@ -47,7 +47,7 @@ Wants=network-online.target
 #   (BOSS_TRAIN_AUTO_MERGE=1, BOSS_TRAIN_DEPLOY_REMOTE, … ride the
 #   same drop-ins.)
 #
-# infra/deploy-services.sh installs THIS file only; it never writes
+# infra/gcp/install-units.sh installs THIS file only; it never writes
 # or removes anything under boss-train.service.d/, so host drop-ins
 # survive every deploy.
 

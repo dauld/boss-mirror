@@ -219,15 +219,14 @@ if [ "$drift_count" -gt 0 ]; then
     echo "    NOT_DEPLOYED: the installed binary differs from target/release."
     echo "    Its mtime may look current — that is the failure mode this catches."
     echo "      sudo install -m 0755 target/release/<name> /usr/local/bin/<name>"
-    echo "    (deploy-services.sh only covers port-table services; seed,"
-    echo "     rebuild and one-shot binaries need installing directly.)"
+    echo "    (every binary on a host checkout needs installing directly;"
+    echo "     the container image carries them all.)"
 fi
 
 if [ "$stale_count" -gt 0 ] || [ "$drift_count" -gt 0 ]; then
     echo ""
     echo "    Rebuild + redeploy stale binaries:"
     echo "      cargo build --release --workspace --features postgres"
-    echo "      sudo ./infra/deploy-services.sh prod"
     echo "      sudo install -m 0755 target/release/boss /usr/local/bin/boss"
     exit 1
 fi

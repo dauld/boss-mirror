@@ -1,7 +1,10 @@
 # boss-gateway unit + drop-ins
 
-The gateway's systemd unit and its drop-ins, installed by
-`deploy-services.sh`. They live here because on 2026-08-07 they did
+The gateway's systemd unit and its drop-ins, once installed on a
+bare-metal host by the deploy script that left with that path on
+2026-09-18 (the container's gateway takes the same settings as
+environment in `infra/cluster/manifests/boss.yaml` and the compose
+file). They live here because on 2026-08-07 they did
 not: the only file in this directory was `demo-mode.conf`, describing
 a mode removed that same day, while the two drop-ins that were live
 and load-bearing — `guest-access.conf` and `local-auth.conf` — existed

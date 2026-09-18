@@ -7,8 +7,8 @@
 # call (the prepare_model lib fn) so this path and the offline regen
 # drive identical code instead of drifting.
 #
-# Called by both quickstart launchers (bare-metal bootstrap-local.sh
-# and docker services-launcher.sh) just before the brewery sim starts.
+# Called by the container launcher (services-launcher.sh) just before
+# the brewery sim starts.
 # Under the container launcher it runs AFTER `boss tenant publish`
 # (seed-tenant.sh, the door every tenant takes; backlog b644d727,
 # 2026-09-17), so prepare's own classes post, calendars batch, company

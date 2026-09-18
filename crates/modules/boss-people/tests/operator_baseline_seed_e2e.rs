@@ -64,7 +64,7 @@ async fn operator_baseline_seed_round_trips_through_rebuild() {
     seed_location(&db.pool).await;
 
     // Bootstrap-admin shape exactly matching what
-    // infra/oss-quickstart/quickstart.sh + init.sh now construct
+    // infra/oss-quickstart/init.sh now constructs
     // via temp TOML.
     let admin = Employee {
         id: "emp-bootstrap-test".into(),

@@ -1,5 +1,5 @@
 # The host half of the estate observation loop (a5d14977). Installed
-# on boss-gcp by deploy-services.sh (TIMERS row). The forge host runs
+# on boss-gcp by install-units.sh (roles.toml row). The forge host runs
 # the SAME pair with two overrides, installed by hand until its
 # config-not-in-repo debt is paid:
 #   sudo install -m644 infra/estate/boss-estate-observe-host.{service,timer} /etc/systemd/system/

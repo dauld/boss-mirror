@@ -80,11 +80,11 @@ that can talk to a backend port directly can set its own
 - **Do not publish backend ports.** The Docker quickstart already
   does this correctly — only the gateway port (`4443`) is published;
   the backends are reachable only on the internal compose network.
-- **On bare-metal / systemd installs**, backends bind to
-  `127.0.0.1` (the gateway is co-located) — this is what
-  `infra/deploy-services.sh` emits. If you hand-write configs or
-  need a multi-host topology, firewall the backend ports; multi-host
-  gets a real IAM story before it gets `0.0.0.0`.
+- **Inside the container**, backends bind to `127.0.0.1` (the
+  gateway is co-located) — this is what
+  `infra/oss-quickstart/generate-configs.sh` emits. If you hand-write
+  configs or need a multi-host topology, firewall the backend ports;
+  multi-host gets a real IAM story before it gets `0.0.0.0`.
 - **Front the gateway with a proxy/IDP** (Cloudflare Access,
   Authelia, etc.) for any internet-facing deployment. Its stripping
   of `x-boss-*` is no longer load-bearing (the gateway strips at its

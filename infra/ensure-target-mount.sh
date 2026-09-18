@@ -13,7 +13,7 @@
 # Clock-as-service deploy: root went from 38 G → 38 G → 47 G →
 # OOM on the next build.
 #
-# The intended setup (per `infra/deploy-services.sh:548`):
+# The intended setup (the pre-cluster dev VM's):
 # `/opt/boss/target` is a symlink to `/var/lib/boss-build/target`.
 # Fresh checkouts + `git clean -dfx` periodically break the
 # symlink — running this script idempotently restores it.

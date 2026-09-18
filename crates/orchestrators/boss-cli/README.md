@@ -1,7 +1,7 @@
 # `boss` CLI
 
 The single operator + developer entry point for BOSS. Wraps the
-service systemd units, the deploy-services script, the audit log,
+jobs API, the train and gate protocol, the audit log,
 and the agent runtime so day-to-day work goes through one
 interface instead of a tour of `journalctl` / `psql` / `cargo`
 incantations.

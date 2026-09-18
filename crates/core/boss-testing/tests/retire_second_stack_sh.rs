@@ -54,7 +54,7 @@ fn tree_list() -> Vec<String> {
 }
 
 /// The stems `infra/estate/roles.toml` names under one section header,
-/// read the way `deploy-services.sh`'s `role_units` reads them: each
+/// read the way `install-units.sh`'s `role_units` reads them: each
 /// `units = [...]` is on one line.
 fn role_units(section: &str) -> Vec<String> {
     let toml = std::fs::read_to_string(repo_root().join("infra/estate/roles.toml"))

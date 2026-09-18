@@ -26,7 +26,7 @@
 # Two hosts needing the same six lines is where a copy would have gone,
 # and the copy is what drifts (CLAUDE.md §9a). So: ONE definition, two
 # callers — infra/forge/install.sh (the forge's converge) and
-# infra/deploy-services.sh `units` (boss-gcp's, driven every half hour by
+# infra/gcp/install-units.sh `units` (boss-gcp's, driven every half hour by
 # infra/gcp/boss-gcp-converge.sh).
 #
 # NOTHING OF OURS IS SHIPPED HERE. The socket and service are the

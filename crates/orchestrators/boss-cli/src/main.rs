@@ -44,7 +44,16 @@ mod upgrade;
 mod workflow;
 
 #[derive(Parser)]
-#[command(name = "boss", about = "Boss operator + developer CLI", version = built_from::version())]
+#[command(
+    name = "boss",
+    about = "Boss operator + developer CLI",
+    version = built_from::version(),
+    // Backups have no verb: the cluster's boss-pg-backup CronJob
+    // (infra/cluster/manifests/boss-backup.yaml) is the backup, nightly,
+    // with its own packet. `boss backup` ran the bare-metal host
+    // backup script, retired with that path on 2026-09-18 (e109bd71).
+    after_help = "Backups: the cluster's boss-pg-backup CronJob is the backup (infra/cluster/manifests/boss-backup.yaml); there is no `boss backup` verb."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -108,12 +117,6 @@ enum Commands {
         /// Follow log output (like tail -f)
         #[arg(short, long)]
         follow: bool,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-    /// Trigger a manual backup (pg_dump + configs)
-    Backup {
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -1128,7 +1131,6 @@ async fn main() -> Result<()> {
             follow,
             json,
         } => ops::logs(&service, lines, follow, json).await,
-        Commands::Backup { json } => ops::backup(json).await,
         Commands::Assets { action } => match action {
             AssetsAction::RebuildProjection { postgres_url } => {
                 cmd_assets_rebuild_projection(&postgres_url).await
@@ -1693,9 +1695,9 @@ mod tests {
         let cmd = Cli::command();
         let names: Vec<&str> = cmd.get_subcommands().map(|c| c.get_name()).collect();
         for expected in [
-            "doctor", "emit", "upgrade", "script", "deploy", "status", "restart", "logs", "backup",
-            "assets", "sim", "ledger", "inspect", "train", "gate", "park", "merged", "receipt",
-            "running", "workflow", "job", "prove", "publish", "queue", "packet", "audit",
+            "doctor", "emit", "upgrade", "script", "deploy", "status", "restart", "logs", "assets",
+            "sim", "ledger", "inspect", "train", "gate", "park", "merged", "receipt", "running",
+            "workflow", "job", "prove", "publish", "queue", "packet", "audit",
         ] {
             assert!(
                 names.contains(&expected),

@@ -8,7 +8,7 @@
 # d5941ef3 car 4)
 # ---------------------------------------------------------------------
 # A host declares its roles in the estate registry and derives its unit
-# roster from them; `deploy-services.sh units` installs the rows the
+# roster from them; `install-units.sh units` installs the rows the
 # roles name and REPORTS every other row as NOT IN ROLE — reported,
 # never removed, because removing is destructive and belongs behind the
 # audited door. Car 2 stopped the second stack (ops-request 7912c9ae,
@@ -39,9 +39,9 @@
 #      bound that cannot be evaluated is not passed. A host declaring
 #      NO roles is refused too — the installer reads "no roles" as
 #      "every row", and every row is not a set with an outside.
-#   4. THE SET, derived — never listed. `deploy-services.sh roster`,
+#   4. THE SET, derived — never listed. `install-units.sh roster`,
 #      run from the checkout this script lives in with the roles just
-#      read, prints one line per TIMERS row: `in-role <stem>` or
+#      read, prints one line per roles.toml row: `in-role <stem>` or
 #      `not-in-role <stem>`. That is the installer's OWN roster_for_roles
 #      — the one that decides what `units` installs and enables — so
 #      what this verb may remove is the complement of what the converge
@@ -74,9 +74,9 @@
 # planned unit still has a file or is still loaded.
 #
 # WHAT IT DOES NOT DO. It never widens the set: no globs, no dependents,
-# nothing outside TIMERS − roster — so `boss-ops-runner` (installed by
-# infra/ops/install-ops-runner.sh, not a TIMERS row), the retired
-# daemons the DAEMONS array once carried, WireGuard, caddy and postgres
+# nothing outside roles.toml − roster — so `boss-ops-runner` (installed by
+# infra/ops/install-ops-runner.sh, not a roles.toml row), the retired
+# daemons of the second stack, WireGuard, caddy and postgres
 # are unreachable by construction. It stops nothing that is in role,
 # whatever the file system says. It captures nothing: these are unit
 # FILES the tree still carries, reinstalled by one converge should a
@@ -96,7 +96,7 @@
 #   INSTALL_ETC              where the installer put the units (default
 #                            /etc/systemd/system — the installer's own
 #                            seam, same name, same default)
-#   BOSS_REPO_ROOT           the checkout deploy-services.sh derives from
+#   BOSS_REPO_ROOT           the checkout install-units.sh derives from
 #                            (default: the one this script lives in)
 #   BOSS_ESTATE_NODES_URL    see infra/estate/node-roles.sh
 #   BOSS_NODE_ROLES          a pre-read role list wins (node-roles.sh) —
@@ -112,7 +112,7 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SELF_DIR/../.." && pwd)"
 ETC="${INSTALL_ETC:-/etc/systemd/system}"
 NODE_ID="boss-gcp"
-INSTALLER="$REPO/infra/deploy-services.sh"
+INSTALLER="$REPO/infra/gcp/install-units.sh"
 
 # --- bound 1: the mode ------------------------------------------------------
 usage() {
@@ -173,7 +173,7 @@ say "roles: $NODE_ID declares $BOSS_NODE_ROLES (live)"
 [ -f "$INSTALLER" ] || { say "CANNOT ANSWER — $INSTALLER is missing, and it is the only derivation of this host's roster"; exit 1; }
 if ! BOSS_REPO_ROOT="${BOSS_REPO_ROOT:-$REPO}" BOSS_NODE_ROLES="$BOSS_NODE_ROLES" \
         bash "$INSTALLER" roster > "$TMP/roster" 2> "$TMP/roster.err"; then
-    say "CANNOT ANSWER — deploy-services.sh roster exited non-zero, so the set cannot be derived:"
+    say "CANNOT ANSWER — install-units.sh roster exited non-zero, so the set cannot be derived:"
     sed 's/^/    /' "$TMP/roster.err" >&2
     say "  Nothing was removed."
     exit 1
@@ -190,26 +190,26 @@ while IFS= read -r line; do
             fi
             NOT_IN_ROLE+=("$stem")
             ;;
-        # The installer's own preamble (a deploy.env note, a ports
-        # warning) is not a roster line.
+        # Anything else the installer prints (a warning, a refusal)
+        # is not a roster line.
         *) ;;
     esac
 done < "$TMP/roster"
 if [ "${#KEEP[@]}" -eq 0 ] && [ "${#NOT_IN_ROLE[@]}" -eq 0 ]; then
-    say "CANNOT ANSWER — deploy-services.sh roster printed no in-role/not-in-role line:"
+    say "CANNOT ANSWER — install-units.sh roster printed no in-role/not-in-role line:"
     sed 's/^/    /' "$TMP/roster" >&2
     sed 's/^/    /' "$TMP/roster.err" >&2
     exit 1
 fi
 for k in "${KEEP[@]+"${KEEP[@]}"}"; do echo "keep $k"; done
 [ "${#NOT_IN_ROLE[@]}" -gt 0 ] \
-    || refuse "every TIMERS row is in role on $NODE_ID (roles: $BOSS_NODE_ROLES; keep: ${KEEP[*]}) — there is nothing to uninstall, and an empty set is a verdict, not an OK. Nothing was removed."
+    || refuse "every roles.toml row is in role on $NODE_ID (roles: $BOSS_NODE_ROLES; keep: ${KEEP[*]}) — there is nothing to uninstall, and an empty set is a verdict, not an OK. Nothing was removed."
 say "set: ${#NOT_IN_ROLE[@]} stem(s) not in role (${NOT_IN_ROLE[*]}); keep: ${#KEEP[@]} (${KEEP[*]})"
 is_kept() { # <unit>
     local stem="${1%.service}"; stem="${stem%.timer}"
     local k
     for k in "${KEEP[@]+"${KEEP[@]}"}"; do [ "$k" = "$stem" ] && return 0; done
-    # The door and the converge are never in this set, TIMERS row or not.
+    # The door and the converge are never in this set, roles.toml row or not.
     case "$stem" in boss-ops-runner|boss-gcp-converge) return 0 ;; esac
     return 1
 }

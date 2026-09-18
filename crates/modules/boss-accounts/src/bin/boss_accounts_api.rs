@@ -127,7 +127,7 @@ async fn main() -> Result<()> {
             publisher.clone(),
             clock.clone(),
         ))
-        // bootstrap-vm.sh + assets probes hit /api/accounts/health; mount
+        // Deploy + assets probes hit /api/accounts/health; mount
         // a simple liveness route so they don't 404. The six sub-routers
         // all mount under /api/people/accounts/*; this is the canonical
         // service-level health.

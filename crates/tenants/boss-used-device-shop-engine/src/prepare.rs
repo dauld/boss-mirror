@@ -2,9 +2,9 @@
 //! tenant model through the public API, idempotently. Sister of
 //! `boss_brewery_engine::prepare`, and deliberately the same shape:
 //! one [`prepare_model`] entry point, called by the
-//! `boss-used-device-shop-engine prepare` binary (which
-//! `infra/bootstrap-vm.sh`'s `TENANT=device-shop` branch drives), so
-//! a fresh-VM install and any future regen path run identical code.
+//! `boss-used-device-shop-engine prepare` binary (run inside the
+//! container image pointed at this tenant's directory), so a fresh
+//! install and any future regen path run identical code.
 //!
 //! Dependency order, mirroring the brewery's `prepare_model`:
 //!

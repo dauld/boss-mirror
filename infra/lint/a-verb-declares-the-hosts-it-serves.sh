@@ -119,7 +119,7 @@ GCP_MUTATING_ADMITTED = {
     # proposal names this path: "an uninstall path for units the role
     # does not name ... through the ops-runner door as a bounded verb";
     # backlog d5941ef3 car 4. Bounded to the installer's own roster
-    # derivation (deploy-services.sh roster: TIMERS minus what the
+    # derivation (install-units.sh roster: roles.toml minus what the
     # host's LIVE roles name), refuses an empty set, --dry-run
     # exercisable without acting.
     "uninstall-not-in-role": "David 2026-09-11, design 9e3e093f",
@@ -185,7 +185,7 @@ for name in sorted(verbs):
 
 if not serving_gcp:
     problems.append(
-        "no verb serves boss-gcp. The host runs an ops-runner (deploy-services.sh units "
+        "no verb serves boss-gcp. The host runs an ops-runner (install-units.sh units "
         "installs it) and would answer nothing — a door that opens onto a wall.")
 
 if problems:

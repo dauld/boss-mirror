@@ -759,20 +759,17 @@ scope_self_test() {
     # paths nobody got round to listing.
     _case "other infra implies no crate" "" \
         "infra/forge/locomotive.sh" "infra/forge/cluster-watchdog.sh"
-    # THE RE-PIN (backlog 294bb7c9). Until this car, the case above also
+    # THE RE-PIN (backlog 294bb7c9). Until that car, the case above also
     # asserted `infra/deploy-services.sh` implies no crate — and that
-    # answer was WRONG, not merely incomplete. boss-ports `include_str!`s
-    # that script and reads its fallback arrays out of the text
-    # (`solo_fallback_matches_the_registry`,
-    # `paired_fallback_matches_the_registry`), so it is a COMPILE INPUT
-    # of boss-ports and boss-testing's file_store_config_sh.rs reads it
-    # too. CLAUDE.md §9a's own table lists this pair — consequence "two
-    # services silently absent from a deploy", fix "pinned by a test" —
-    # so the gate was scoping out the documented mechanism for a defect
-    # that has already bitten. Nothing was missing; the wrong answer was
-    # asserted, which is why it needed un-asserting rather than adding to.
-    _case "a script a crate include_str!s is that crate's compile input" \
-        "boss-ports boss-testing" "infra/deploy-services.sh"
+    # answer was WRONG, not merely incomplete: boss-ports `include_str!`d
+    # that script, so it was a COMPILE INPUT, and the gate was scoping
+    # out the documented mechanism for a defect that had already bitten.
+    # Nothing was missing; the wrong answer was asserted, which is why it
+    # needed un-asserting rather than adding to. The fixture moved to
+    # host-absent-tools.txt when the bare-metal deploy script was deleted
+    # (2026-09-18, e109bd71); boss-jobs' probe.rs `include_str!`s it.
+    _case "a file a crate include_str!s is that crate's compile input" \
+        "boss-jobs" "infra/forge/host-absent-tools.txt"
     # A build script's read is a compile input too: boss-dispatcher-
     # handlers' build.rs `.expect`s infra/estate/observe-lib.sh to exist
     # and compiles its text in.

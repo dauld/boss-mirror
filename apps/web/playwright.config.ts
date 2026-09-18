@@ -13,9 +13,8 @@
 // shipping) route to the +1000 scratch ports → boss_scratch DB
 // instead of polluting the live boss DB. Set BOSS_SCRATCH=0 to
 // run smoke against the prod stack (e.g. for diffing live data
-// against a deploy). Note: boss-jobs-api is unpaired in
-// infra/deploy-services.sh so /api/jobs writes still land in
-// boss until the TODO follow-up adds boss-jobs-api-scratch.
+// against a deploy). Note: the container runs no scratch stack,
+// so /api/jobs writes land in boss.
 
 import { defineConfig } from '@playwright/test';
 

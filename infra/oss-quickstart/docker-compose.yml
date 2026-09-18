@@ -37,8 +37,8 @@ services:
     # the stack needs well above PG's default max_connections=100 — otherwise
     # the pools saturate the cluster ("FATAL: sorry, too many clients already")
     # and services fail-closed mid-startup (the brewery prepare then sees
-    # "stack not ready" and the sim idles). 400 matches the documented
-    # playground setting (see infra/deploy-services.sh).
+    # "stack not ready" and the sim idles). 400 is the setting every
+    # BOSS Postgres runs with (infra/cluster/manifests/boss.yaml).
     command: ["postgres", "-c", "max_connections=400"]
     environment:
       POSTGRES_USER: boss

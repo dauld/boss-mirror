@@ -1,4 +1,13 @@
-# boss-deploy-confirm.service
+# boss-deploy-confirm.service — RETIRED PRODUCER. The unit and the
+# bare-metal deploy it armed for were deleted on 2026-09-18 (design
+# 42277636, backlog e109bd71); nothing opens this kind any more, and it
+# never filed a packet (0 ever, audit 2026-09-18). This file stays only
+# because the live registry still carries the kind `active`, and the
+# authored bundle must describe what the registry holds
+# (the-live-protocols-are-the-authored-protocols). The remaining move is
+# the operator's: POST /api/workflows/maintenance-deploy-confirm/retire,
+# then delete this file — the same sequence maintenance-gate-seed took
+# on 2026-09-12 (4247deca).
 [[workflow]]
 kind = "maintenance-deploy-confirm"
 label = "Deploy confirm"

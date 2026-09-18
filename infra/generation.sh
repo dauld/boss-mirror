@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # generation.sh — the ONE definition of the deploy generation store.
-# Sourced (not executed) by deploy-services.sh, deploy-web.sh and
-# deploy-confirm.sh so the paths and the atomic-flip mechanics cannot
+# Sourced (not executed) by infra/gcp/install-cli-from-image.sh — and,
+# until the bare-metal deploy path was deleted on 2026-09-18, by the
+# three deploy scripts — so the paths and the atomic-flip mechanics cannot
 # drift between the three (CLAUDE.md §9a — a fact that lives twice).
 #
 # Layout (docs/design/deployment-as-network.md, Q1):

@@ -80,7 +80,8 @@ spec:
           image: 10.20.0.15:3000/david/postgres:16
           # ~24 API services each hold an sqlx pool (default max 10), which
           # blows past PG's default max_connections=100 and makes services
-          # fail-closed mid-startup. 400 matches infra/deploy-services.sh.
+          # fail-closed mid-startup. 400 is the one setting; the compose
+          # file's postgres carries the same.
           args: ["postgres", "-c", "max_connections=400"]
           env:
             - {name: POSTGRES_USER, value: boss}

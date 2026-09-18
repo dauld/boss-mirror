@@ -31,8 +31,8 @@
 //! gateway is the BROWSER edge: it authenticates a session cookie and
 //! strips every inbound `x-boss-*` header, so an operator tool has no
 //! way to present itself there. Terminal tooling goes to the service
-//! port with an actor header — the same path verify-smoke.sh and
-//! verify-replay.sh take.
+//! port with an actor header — the same path the sim validation script
+//! takes.
 //!
 //! The shell ancestor once curled the gateway anonymously. That worked
 //! only because demo mode minted an `audit-readonly` session for

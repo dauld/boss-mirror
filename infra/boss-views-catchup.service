@@ -1,4 +1,4 @@
-# Managed by infra/deploy-services.sh — edits will be overwritten.
+# Managed by infra/gcp/install-units.sh — edits will be overwritten.
 [Unit]
 Description=Boss event_facts catch-up (project audit_log rows past the watermark)
 After=network-online.target postgresql.service

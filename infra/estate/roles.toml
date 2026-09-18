@@ -2,21 +2,25 @@
 # roles it DECLARES (design 9e3e093f; migration
 # 202609120300-a-node-declares-its-roles.sql).
 #
-# A managed host's roster used to be "every row of deploy-services.sh's
-# TIMERS array", because nothing recorded what a host was FOR. Now the
-# host reads its roles off /api/estate/nodes (Classes of `node`, joined
-# through node_roles) and `deploy-services.sh units` installs the rows
-# its roles name plus the `always` set; every other row is REPORTED as
-# NOT IN ROLE — reported, not uninstalled: the uninstall is the
-# uninstall-not-in-role ops verb's job (infra/gcp/uninstall-not-in-
-# role.sh), which takes its set from `deploy-services.sh roster` — the
-# same derivation — and never from a list of its own.
+# THIS FILE IS THE ROSTER. A managed host's roster used to be "every
+# row of deploy-services.sh's TIMERS array", pinned equal to this file
+# by a lint — a holding action (CLAUDE.md §9a). Since 2026-09-18 (backlog
+# e109bd71) the array is gone: infra/gcp/install-units.sh reads the set
+# of rows from here and finds each stem's `<stem>.service` +
+# `<stem>.timer` pair in the tree. The host reads its roles off
+# /api/estate/nodes (Classes of `node`, joined through node_roles) and
+# `install-units.sh units` installs the rows its roles name plus the
+# `always` set; every other row is REPORTED as NOT IN ROLE — reported,
+# not uninstalled: the uninstall is the uninstall-not-in-role ops verb's
+# job (infra/gcp/uninstall-not-in-role.sh), which takes its set from
+# `install-units.sh roster` — the same derivation — and never from a
+# list of its own.
 #
-# ONE PLACE, PINNED. Every TIMERS stem appears in exactly one role (or
-# `always`) here, and every unit named here is a TIMERS stem —
-# infra/lint/boss-gcp-converges-itself.sh refuses either drift (CLAUDE.md
-# §9a). Keep each `units = [...]` on ONE line: the installer reads this
-# file with the shell, not a TOML parser.
+# Every stem appears in exactly one role (or `always`) here — the
+# installer refuses a stem named twice — and every stem named here must
+# have a unit pair under infra/ (timers-leave-a-packet.sh names one that
+# does not). Keep each `units = [...]` on ONE line: the installer reads
+# this file with the shell, not a TOML parser.
 #
 # A host that declares NO roles installs every row, exactly as before
 # this file existed; a host whose system of record cannot be reached at
@@ -53,7 +57,11 @@ units = ["boss-ml-inference-batch"]
 units = []
 
 [roles.legacy-stack]
-# The ten chores that maintain the second, older stack's data, plus the
-# deploy-confirm arm of the retired deploy hop (dead since 2026-09-03).
+# The chores that maintained the second, older stack's data — retired
+# with it on 2026-09-15 (ops-request 7912c9ae) and uninstalled from
+# boss-gcp by the uninstall-not-in-role verb. The host backup and the
+# deploy-confirm dead-man left this list with the bare-metal deploy path
+# (2026-09-18): the cluster's boss-pg-backup CronJob is the backup. Each
+# chore here has a cluster CronJob twin that is the one that runs.
 # This role exists to be removed.
-units = ["boss-messages-events-purge", "boss-audit-integrity-check", "boss-ledger-recognize", "boss-ledger-replay-check", "boss-conservation-invariants", "boss-files-gc", "boss-views-catchup", "boss-search-reindex", "boss-backup", "boss-deploy-confirm"]
+units = ["boss-messages-events-purge", "boss-audit-integrity-check", "boss-ledger-recognize", "boss-ledger-replay-check", "boss-conservation-invariants", "boss-files-gc", "boss-views-catchup", "boss-search-reindex"]

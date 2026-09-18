@@ -27,15 +27,17 @@
 # docs/design/the-build-plane-manages-itself.md).
 #
 # WHAT IT DOES, AND DELIBERATELY DOES NOT. It fast-forwards the checkout
-# to forge main and runs `deploy-services.sh units` — the EXISTING
+# to forge main and runs `infra/gcp/install-units.sh units` — the
 # installer, in a mode that installs unit FILES and nothing else. It
 # does not build, stage binaries, converge the schema, or restart a
 # service. That restraint is the point: boss-gcp is the WireGuard
-# bastion and still carries a second, older BOSS stack
-# (boss-gcp-local), and a loop that bounced ~24 of its services every
-# half hour would be a worse defect than the one it fixes. Code and
-# schema on this host stay a deliberate, human-run `deploy-services.sh
-# prod`; unit files converge.
+# bastion, and a loop that bounced services every half hour would be a
+# worse defect than the one it fixes. (Until 2026-09-18 the installer
+# was the `units` mode of infra/deploy-services.sh, the bare-metal
+# deploy this host's second, older stack ran on; the stack was retired
+# on 2026-09-15 and the deploy path deleted with backlog e109bd71 — the
+# container launcher is the one way to run BOSS, and this host installs
+# unit files only.)
 #
 # ONE BINARY IS THE EXCEPTION, since 2026-09-15: the `boss` CLI. After
 # the units, the converge runs infra/gcp/install-cli-from-image.sh with
@@ -54,12 +56,12 @@
 # somebody runs this once, from boss-gcp, as root. It is idempotent:
 #
 #   cd /opt/boss && git fetch forge main && git merge --ff-only FETCH_HEAD \
-#     && sudo ./infra/deploy-services.sh units
+#     && sudo ./infra/gcp/install-units.sh units
 #
-# The `units` mode installs every TIMERS row, and `boss-gcp-converge` is
-# one of them — so that command installs the loop that from then on
-# installs everything, itself included. After it, no unit on this host
-# needs a hand again.
+# The `units` mode installs every row infra/estate/roles.toml names for
+# this host, and `boss-gcp-converge` is one of them — so that command
+# installs the loop that from then on installs everything, itself
+# included. After it, no unit on this host needs a hand again.
 #
 # Exercised on every gate by infra/lint/boss-gcp-converges-itself.sh,
 # which runs the whole loop against a scratch checkout and a stub
@@ -181,7 +183,7 @@ if [ -z "${BOSS_GCP_CONVERGE_SNAPSHOT:-}" ]; then
 fi
 trap 'rm -f "$BOSS_GCP_CONVERGE_SNAPSHOT"' EXIT
 
-INSTALLER="${BOSS_GCP_CONVERGE_INSTALLER:-$REPO/infra/deploy-services.sh}"
+INSTALLER="${BOSS_GCP_CONVERGE_INSTALLER:-$REPO/infra/gcp/install-units.sh}"
 # Read from $REPO AFTER the fast-forward below, like the installer: the
 # step that runs is the one the converged tree carries.
 CLI_INSTALLER="${BOSS_GCP_CONVERGE_CLI_INSTALLER:-$REPO/infra/gcp/install-cli-from-image.sh}"
@@ -291,7 +293,7 @@ if [ "$rc" -ne 0 ]; then
     # systemd's own verdict says the run died; this says WHERE, on the
     # packet, beside whatever the installer had already recorded.
     run_summary_field installer_exit "$rc"
-    run_summary_note "deploy-services.sh units exited $rc — see this host's journal for every line"
+    run_summary_note "install-units.sh units exited $rc — see this host's journal for every line"
     exit "$rc"
 fi
 echo "boss-gcp-converge: units converged on ${after:0:8} ($REMOTE/main)"

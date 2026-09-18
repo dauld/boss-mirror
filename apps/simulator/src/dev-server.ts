@@ -34,7 +34,7 @@ const SIMULATOR_PORT = Number(process.env['BOSS_SIMULATOR_PORT'] ?? 7010);
 // Scratch mode: when BOSS_SCRATCH=1, paired services route to their
 // +1000 scratch ports (boss_scratch DB) so writes don't pollute the
 // live boss DB. Mirrors the PAIRED_SERVICES list in
-// infra/deploy-services.sh. Solo services have no scratch variant
+// boss-ports' PAIRED table. Solo services have no scratch variant
 // and stay on their prod ports.
 const SCRATCH = process.env['BOSS_SCRATCH'] === '1';
 const SCRATCH_OFFSET = 1000;

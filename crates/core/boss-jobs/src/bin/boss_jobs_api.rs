@@ -291,7 +291,7 @@ async fn run_server<R: JobsRepository + 'static>(
 
     // Policy client: wires boss-policy-api for row-level authorization.
     // Default URL pulled from the boss-ports table — single source
-    // of truth shared with `infra/deploy-services.sh`. Override via
+    // of truth shared with the config generator. Override via
     // BOSS_POLICY_URL. The 7060/7250 collision (`bb60c58` +
     // `8bf0f0a`) that motivated boss-ports lived right here.
     let policy_url = std::env::var("BOSS_POLICY_URL").unwrap_or_else(|_| boss_ports::url("policy"));

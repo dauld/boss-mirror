@@ -3,7 +3,7 @@
 //!
 //! The 7060/7250 collision (commits `bb60c58` + `8bf0f0a`) was
 //! caused by port assignments living in three places — the
-//! `infra/deploy-services.sh` arrays, each binary's
+//! bare-metal deploy script's arrays, each binary's
 //! `unwrap_or(<port>)` default, and each consumer's
 //! `BOSS_<X>_URL` default. They had to stay in sync by hand;
 //! they didn't, and jobs-api silently routed `policy.check()`
@@ -12,17 +12,19 @@
 //!
 //! Single fix: this crate. Every service binary reads its bind
 //! port from [`prod`] or [`scratch`]; every consumer reads its
-//! upstream URL via [`url`]. The deploy script generates its
-//! arrays from [`PAIRED`] / [`SOLO`] via the
-//! `boss ports list` subcommand (a build-time codegen step).
+//! upstream URL via [`url`]. The container's config generator
+//! (`infra/oss-quickstart/generate-configs.sh`) reads the table
+//! from `boss-ports-list` at container start, and the launcher's
+//! roster (`services-launcher.sh`) is pinned to this table by
+//! `launcher_roster_agreement` below.
 //!
 //! ## Adding a new service
 //!
 //! 1. Add a [`PortSpec`] entry below.
 //! 2. Bump the binary's `unwrap_or` to call
 //!    `boss_ports::prod("<name>")` instead of a literal.
-//! 3. Re-run `infra/deploy-services.sh` — its arrays are
-//!    derived from this crate.
+//! 3. Add the binary to `services-launcher.sh`'s `SERVICES` —
+//!    the pin below names the one you forgot.
 //!
 //! ## Per-environment overrides
 //!
@@ -42,7 +44,6 @@ pub struct PortSpec {
 }
 
 /// Paired services — both a prod and a scratch instance.
-/// Mirrors `PAIRED_SERVICES` in `infra/deploy-services.sh`.
 pub const PAIRED: &[PortSpec] = &[
     PortSpec {
         name: "shipping",
@@ -92,8 +93,7 @@ pub const PAIRED: &[PortSpec] = &[
 ];
 
 /// Solo services — prod only. Registry services + the simulator
-/// + ledger / ml / content. Mirrors `SOLO_SERVICES` in
-///   `infra/deploy-services.sh`.
+/// + ledger / ml / content.
 pub const SOLO: &[PortSpec] = &[
     // search — the global search read surface (boss-search). Core:
     // it reads subjects/jobs/audit_log, which every deployment has.
@@ -267,7 +267,7 @@ mod tests {
     /// The list bin classifies by array membership and EXPECTS every
     /// PAIRED spec to carry a scratch port — a solo-shaped spec
     /// parked in PAIRED panics `boss-ports-list --paired` mid-stream
-    /// and every consumer (deploy-services, generate-configs) sees a
+    /// and every consumer (generate-configs) sees a
     /// truncated table. Exactly this shipped once: campaigns
     /// (scratch: None) landed in PAIRED and docker's generated
     /// config rendered `http_bind = "0.0.0.0:"`, wedging the stack.
@@ -342,34 +342,39 @@ mod tests {
 }
 
 #[cfg(test)]
-mod deploy_fallback_agreement {
+mod launcher_roster_agreement {
     use super::{PAIRED, SOLO};
 
-    /// `deploy-services.sh` derives its service lists from this crate
-    /// via `boss-ports-list`, but carries hardcoded fallback arrays for
-    /// the case where that binary has not been built. Two copies of one
-    /// fact, kept in step by a comment — and they drifted:
-    /// `observability` and `simulator` reached the registry and never
-    /// reached the fallback, so a deploy from a machine without the
-    /// binary would silently skip two services with nothing to say so.
+    /// The container launcher (`infra/oss-quickstart/services-launcher.sh`,
+    /// the pod CMD on every cluster deploy) starts the binaries its
+    /// `SERVICES` array names — a roster this registry does not
+    /// generate. Until 2026-09-18 this module pinned the bare-metal
+    /// deploy script's fallback arrays to the registry instead, while
+    /// the LIVE roster was the unpinned one: views, search, ml and the
+    /// simulator reached this table and never reached the launcher, so
+    /// every container deploy 502'd on /system/os-map, /api/search/*,
+    /// /api/ml/* and /simulator with the binaries sitting in the image
+    /// (aab30bbf). The bare-metal path is deleted (backlog e109bd71,
+    /// design 42277636); this is the same fact-lives-twice pin, aimed at
+    /// the roster that runs.
     ///
-    /// This is the third instance of the pattern found in one session
-    /// (the others: the schema list vs `SCHEMA_FILES`, and
-    /// `MODEL_ROUTES` vs `MODEL_KINDS`). A fact that lives twice gets
-    /// an equality test; that is the convention this encodes.
-    ///
-    /// `sim-control` is the one legitimate absence: it is the sim
-    /// daemon's embedded port, alive only while the daemon runs, and
-    /// the script filters it out of the derived list at the source.
-    const DEPLOY_SH: &str = include_str!("../../../../infra/deploy-services.sh");
+    /// The binary for a registry name is `boss-<name>-api`, or
+    /// `boss-<name>` for the three non-`-api` services. `sim-control` is
+    /// the one legitimate absence: it is the sim daemon's
+    /// embedded port, alive only while the daemon runs, not a binary.
+    /// The launcher may carry binaries with no port row (the event
+    /// relay, the sim daemon, the gateway) — only `boss-*-api` lines
+    /// are checked in the reverse direction.
+    const LAUNCHER: &str = "infra/oss-quickstart/services-launcher.sh";
 
-    /// Pull `NAME=( "a:1" "b:2" )` entries out of the fallback block.
-    fn fallback_entries(array_name: &str) -> Vec<String> {
-        let start = DEPLOY_SH
-            .find(&format!("{array_name}=("))
-            .unwrap_or_else(|| panic!("{array_name} not found in deploy-services.sh"));
-        let rest = &DEPLOY_SH[start..];
-        let end = rest.find("\n    )").expect("array terminator");
+    fn launcher_services() -> Vec<String> {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../../{LAUNCHER}"));
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let start = text.find("SERVICES=(").expect("SERVICES=( in the launcher");
+        let rest = &text[start..];
+        let end = rest.find("\n)").expect("SERVICES array terminator");
         rest[..end]
             .lines()
             .filter_map(|l| {
@@ -382,40 +387,43 @@ mod deploy_fallback_agreement {
     }
 
     #[test]
-    fn solo_fallback_matches_the_registry() {
-        let mut expected: Vec<String> = SOLO
+    fn every_port_registry_service_is_launched() {
+        let launched = launcher_services();
+        assert!(
+            launched.len() >= 20,
+            "scraped only {} SERVICES lines from {LAUNCHER}",
+            launched.len()
+        );
+        let missing: Vec<String> = PAIRED
             .iter()
+            .chain(SOLO.iter())
             .filter(|s| s.name != "sim-control")
-            .map(|s| format!("{}:{}", s.name, s.prod))
+            .filter(|s| {
+                !launched.iter().any(|b| {
+                    b == &format!("boss-{}-api", s.name) || b == &format!("boss-{}", s.name)
+                })
+            })
+            .map(|s| s.name.to_string())
             .collect();
-        let mut actual = fallback_entries("SOLO_SERVICES");
-        expected.sort();
-        actual.sort();
-        assert_eq!(
-            actual, expected,
-            "deploy-services.sh SOLO_SERVICES has drifted from boss-ports"
+        assert!(
+            missing.is_empty(),
+            "in the port registry but not in {LAUNCHER}'s SERVICES (the binary would sit in the image and every request 502): {missing:?}"
         );
     }
 
     #[test]
-    fn paired_fallback_matches_the_registry() {
-        let mut expected: Vec<String> = PAIRED
-            .iter()
-            .map(|s| {
-                format!(
-                    "{}:{}:{}",
-                    s.name,
-                    s.prod,
-                    s.scratch.expect("a paired service has a scratch port")
-                )
+    fn every_launched_api_binary_has_a_port_row() {
+        let stray: Vec<String> = launcher_services()
+            .into_iter()
+            .filter(|b| b.starts_with("boss-") && b.ends_with("-api"))
+            .filter(|b| {
+                let name = &b["boss-".len()..b.len() - "-api".len()];
+                !PAIRED.iter().chain(SOLO.iter()).any(|s| s.name == name)
             })
             .collect();
-        let mut actual = fallback_entries("PAIRED_SERVICES");
-        expected.sort();
-        actual.sort();
-        assert_eq!(
-            actual, expected,
-            "deploy-services.sh PAIRED_SERVICES has drifted from boss-ports"
+        assert!(
+            stray.is_empty(),
+            "{LAUNCHER} launches an -api binary with no row in the port registry (it would bind a port nothing routes to): {stray:?}"
         );
     }
 }

@@ -55,7 +55,7 @@ docs/formal/*.toolbox/
 
 # Generated seed bundles — `infra/postgres/regenerate-brewery-seed.sh`
 # rebuilds them from source (JobKinds + tenant.toml + the live sim).
-# Don't commit; runtime consumers (bootstrap-local.sh,
+# Don't commit; runtime consumers (the container launcher,
 # reset-to-baseline.sh, oss-quickstart/init.sh) fetch or regenerate
 # as needed. Keeps git history slim and forces every deployment to
 # start from a known-fresh artifact rather than a stale snapshot.

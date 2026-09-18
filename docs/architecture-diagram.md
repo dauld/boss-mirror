@@ -31,8 +31,8 @@ cp docs/architecture/{00-state-surfaces-work,01-primitives,02-service-map,03-dep
    apps/web/src/it/kb-assets/
 ```
 
-Rebuild + redeploy the web bundle (`bun run build && sudo
-./infra/deploy-web.sh`) to push the updated diagrams to the browser.
+The next train's image build carries the updated diagrams to the
+browser (the SPA build runs inside `infra/oss-quickstart/Dockerfile`).
 
 ---
 

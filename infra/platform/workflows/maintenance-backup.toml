@@ -1,5 +1,4 @@
-# infra/cluster/manifests/boss-backup.yaml (CronJob), and
-# infra/boss-backup.service on a host that runs it under systemd.
+# infra/cluster/manifests/boss-backup.yaml (the boss-pg-backup CronJob)
 #
 # A `maintenance_spec(...)` Rust literal until 2026-09-11, alongside the
 # other two 03:00-ish chores. The form is what made 6c796f75 permanent:

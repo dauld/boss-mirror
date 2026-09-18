@@ -1,5 +1,5 @@
 //! A node's ROLES come off the estate read as registry data — the set
-//! deploy-services' `units` mode derives a host's roster from (design
+//! install-units.sh's `units` mode derives a host's roster from (design
 //! 9e3e093f; migration 202609120300-a-node-declares-its-roles.sql).
 //!
 //! Two facts are pinned here because `nodes.role` and `node_roles`

@@ -55,7 +55,7 @@ if [ -z "${BOSS_JOBS_URL:-}" ]; then
     echo "    landing on a non-authoritative instance (2026-08-17). Name the system of" >&2
     echo "    record explicitly:" >&2
     echo "        BOSS_JOBS_URL=http://<jobs-api-host>:<port> $(basename "$0") ..." >&2
-    echo "    Installed timers get it from deploy-services.sh's jobs-url.conf drop-in." >&2
+    echo "    A unit pins it inline with env(1) on its Exec lines (timers-leave-a-packet check 7)." >&2
     exit 78   # EX_CONFIG — a configuration fault, not a run-time one.
 fi
 BASE="${BOSS_JOBS_URL}"

@@ -26,7 +26,7 @@
 #    precedes it, so no "already initialized" shortcut can grow back.
 #
 # This is the CLAUDE.md §9a rule applied to a property rather than a
-# constant — it lives in three files that cannot be collapsed into one,
+# constant — it lives in two files that cannot be collapsed into one,
 # so it gets a test that names the file when it drifts.
 set -euo pipefail
 
@@ -42,7 +42,6 @@ FAIL=0
 # is the defect this lint exists to catch.
 PATHS=(
     "infra/oss-quickstart/init.sh|cluster initContainer + compose init (boss-init)"
-    "infra/deploy-services.sh|playground service deploy (bare-metal, systemd)"
     "crates/orchestrators/boss-cli/src/train.rs|train deploy verb (boss train)"
 )
 

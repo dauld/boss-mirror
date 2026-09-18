@@ -65,28 +65,33 @@ later — the demo was pinned to 2026-07-11.
 
 ## Re-cutting
 
+Binaries and seeds come from the SAME tree by construction: the
+container image carries both, and the launcher's tenant publish
+(`infra/oss-quickstart/tenant-launch.sh` → `seed-brewery-tenant.sh`)
+seeds the tenant and stamps the baseline when the pod starts against an
+empty database. So re-cutting is a fresh database plus a start:
+
 ```bash
-# 1. binaries and seeds must come from the SAME tree: the reset runs
-#    tools from $REPO_ROOT/target/release while the services run
-#    /usr/local/bin.
-./infra/build-release.sh
-sudo ./infra/deploy-services.sh prod
+# compose (the OSS quickstart): drop the volumes, rebuild from the tree,
+# start. ~1-2 min; the sim then rebuilds the 12-month demo live from day 0.
+docker compose down -v && docker compose up --build
 
-# 2. drop + reseed + re-stamp + restart. ~1-2 min of downtime; the sim
-#    then rebuilds the 12-month demo live from day 0.
-sudo ./infra/postgres/reset-to-baseline.sh
-
-# 3. confirm the pin moved
-curl -s localhost:7060/api/clock/baseline
+# confirm the pin moved (the clock service listens inside the container)
+docker compose exec boss-services curl -s localhost:7060/api/clock/baseline
 ```
 
-`BOSS_BASELINE_SOURCE_REF` overrides the recorded revision for callers that
-know it without a working tree (container builds).
+On the cluster the playground is its own namespace (design ffc83387);
+re-cutting it is the same shape — the instance's Postgres volume
+reset and the pod rolled — through the converge, not by hand.
+`BOSS_BASELINE_SOURCE_REF` overrides the recorded revision for callers
+that know it without a working tree (container builds record the sha
+they were built from).
 
-The reset aborts rather than stamping a baseline over a failed seed — a
-baseline captured mid-failure has no published Workflows, and the *next*
-restart-epoch would trim to it and destroy the tenant model. If it aborts,
-fix the reported cause and re-run; the script is idempotent.
+The seed aborts rather than stamping a baseline over a failed publish —
+a baseline captured mid-failure has no published Workflows, and the
+*next* restart-epoch would trim to it and destroy the tenant model. If it
+aborts, fix the reported cause and start again; the publish is
+idempotent.
 
 ## What re-cutting costs
 

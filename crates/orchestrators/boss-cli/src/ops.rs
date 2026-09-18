@@ -1,4 +1,4 @@
-//! Operator commands — status, restart, logs, backup, audit.
+//! Operator commands — status, restart, logs, audit.
 //!
 //! Designed for both human operators and AI agents (Claude Code).
 //! Every command supports `--json` for machine-readable output.
@@ -421,42 +421,6 @@ pub async fn logs(service: &str, lines: u32, follow: bool, json: bool) -> Result
         .context("failed to run journalctl")?;
 
     if !status.success() {
-        std::process::exit(1);
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// boss backup
-// ---------------------------------------------------------------------------
-
-pub async fn backup(json: bool) -> Result<()> {
-    let output = Command::new("sudo")
-        .args(["/opt/boss/infra/backup.sh"])
-        .output()
-        .context("failed to run backup.sh")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let success = output.status.success();
-
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "success": success,
-                "stdout": stdout.trim(),
-                "stderr": stderr.trim(),
-            })
-        );
-    } else {
-        print!("{stdout}");
-        if !stderr.is_empty() {
-            eprint!("{stderr}");
-        }
-    }
-
-    if !success {
         std::process::exit(1);
     }
     Ok(())

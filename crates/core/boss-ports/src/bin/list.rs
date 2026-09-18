@@ -1,6 +1,6 @@
 //! `boss-ports-list` — emits the canonical port table in a
-//! shell-sourceable form so `infra/deploy-services.sh` reads
-//! the same source of truth as the Rust binaries, plus a JSON
+//! shell-sourceable form so `infra/oss-quickstart/generate-configs.sh`
+//! reads the same source of truth as the Rust binaries, plus a JSON
 //! mode the SPA build step consumes to generate
 //! `apps/web/src/_generated/ports.ts` (deriving the in-app
 //! services list and the dev-server's proxy routes from the

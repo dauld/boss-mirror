@@ -233,7 +233,7 @@ real failure:
 
 | pair | what broke | now |
 |---|---|---|
-| `boss-ports` ↔ `deploy-services.sh` fallback arrays | two services silently absent from a deploy | pinned by a test — the fallback must stand alone when the binary is unbuilt |
+| `boss-ports` ↔ `deploy-services.sh` fallback arrays | two services silently absent from a deploy | **collapsed** — the bare-metal deploy and its arrays were deleted (2026-09-18); the pin now holds the LIVE container launcher's roster to the registry, which was the unpinned copy the whole time |
 | `manifest.txt` ↔ `boss-testing::SCHEMA_FILES` | every DB-backed test ran without two tables | **collapsed twice** — `build.rs` generated the list from the manifest, then the manifest itself was deleted and the schema directory became the definition |
 | `MODEL_ROUTES` ↔ `MODEL_KINDS` | pages rendered under the wrong tab, silently | **collapsed** — one `nav-catalog.ts` answers both questions |
 | gate.sh `PREFLIGHT_LINTS` ↔ `infra/lint/` | four cars collided on the roster's tail line in one day, one left behind by #218 | **collapsed** — the roster is the directory minus a four-entry exclusion set, read the way the consist check already read it |

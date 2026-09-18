@@ -65,13 +65,15 @@ SERVICES=(
     # telemetry (with the SPA-side "demo mode" banner on /ops).
     "boss-observability"
     # The views tier + search + ML + the simulator UX. These four
-    # were absent from this roster while present in boss-ports and
-    # deploy-services.sh — the fact-lives-thrice drift (CLAUDE.md
-    # §9a) surfacing as 502s on /system/os-map, /api/search/*,
-    # /api/ml/* and /simulator in every quickstart/container deploy
-    # (aab30bbf). The binaries were always in the image; only this
-    # list forgot them. A pin tying this roster to boss-ports (the
-    # deploy-services.sh treatment) is proposed on the feedback item.
+    # were absent from this roster while present in boss-ports — the
+    # fact-lives-twice drift (CLAUDE.md §9a) surfacing as 502s on
+    # /system/os-map, /api/search/*, /api/ml/* and /simulator in every
+    # quickstart/container deploy (aab30bbf). The binaries were always
+    # in the image; only this list forgot them. Since 2026-09-18 this
+    # roster is PINNED to boss-ports (`launcher_roster_agreement` in
+    # crates/core/boss-ports/src/lib.rs): a port row with no line here,
+    # or a `boss-*-api` line with no port row, fails that crate's tests
+    # by name.
     "boss-views-api"
     "boss-search-api"
     "boss-ml-api"
@@ -110,8 +112,8 @@ PIDS=()
 # here, once: BOSS_TENANT_MANIFEST_TOML for the gateway (tenant.toml at
 # the root, else seeds/tenant.toml — both spellings the contract
 # accepts, docs/tenant-contract.md) and BOSS_SIM_SEEDS_DIR for the seed
-# scripts and the engine. An explicit value wins (the compose file and
-# bootstrap-local.sh set them directly), and a directory holding no
+# scripts and the engine. An explicit value wins (the compose file
+# sets them directly), and a directory holding no
 # manifest REFUSES the launch: a pod that fell through to the gateway's
 # default path would answer instead of erroring (CLAUDE.md §Doors).
 if [[ -n "${BOSS_TENANT_DIR:-}" ]]; then
@@ -128,10 +130,10 @@ if [[ -n "${BOSS_TENANT_DIR:-}" ]]; then
 fi
 
 # Generate /etc/boss-*.toml configs at container start. The API
-# binaries default --config to /etc/<name>.toml; bare-metal installs
-# get these via infra/deploy-services.sh, the docker image via this
-# generator. Single-container assumption: every cross-service URL
-# is 127.0.0.1:<port>.
+# binaries default --config to /etc/<name>.toml and this generator is
+# the one thing that writes them (the bare-metal deploy's heredoc twin
+# left with that path on 2026-09-18). Single-container assumption:
+# every cross-service URL is 127.0.0.1:<port>.
 if command -v boss-generate-configs >/dev/null 2>&1; then
     boss-generate-configs
 else

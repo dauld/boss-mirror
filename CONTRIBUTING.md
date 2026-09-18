@@ -122,17 +122,16 @@ cd infra/oss-quickstart && docker compose up
 # open http://localhost:4443
 ```
 
-**Source-tree dev mode** — what you want if you're actually
-changing code; runs each service as a plain background process so
-you can iterate on a single crate without rebuilding the whole
-stack. Logs land in `~/.boss-logs/`, PIDs in `~/.boss-pids`, and
-the whole stack stops with `kill $(cat ~/.boss-pids)`. Prereqs
-(including the `CREATE ROLE boss` step) are in the runbook's
-"Developing against the source tree" section.
+**Working on the code** — the same image, rebuilt from your tree:
 
 ```sh
-./infra/oss-quickstart/quickstart.sh
+cd infra/oss-quickstart && docker compose up --build
 ```
+
+There is no host-native service install (the bare-metal path was
+deleted on 2026-09-18; design 42277636). Toolchains, the pre-push
+hook, and a Postgres for the DB-backed tests are in
+[docs/runbooks/dev-environment-bootstrap.md](docs/runbooks/dev-environment-bootstrap.md).
 
 The demo builds itself live — the install starts the brewery sim
 and it fills in as the sim ticks. If you're working on the sim

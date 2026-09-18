@@ -141,111 +141,36 @@ Try:
 
 ## Developing against the source tree
 
-For working on BOSS itself, `quickstart.sh` builds the workspace
-on the host and runs each service as a plain background process —
-so you can rebuild a single crate and restart one service instead
-of rebuilding the Docker image. This is the dev-mode path; the
-compose stack above is the supported install.
+There is one way to run BOSS: the container image. Working on BOSS
+itself means building that image from your tree and running it under
+the same compose file — `docker compose up --build` rebuilds
+`boss:latest` from `infra/oss-quickstart/Dockerfile` (the Rust build
+layer is cached; a one-crate change rebuilds in minutes, a cold build
+is ~40–60 min on a 2-vCPU VM). The host-native path that built the
+workspace and ran each service as a background process
+(`quickstart.sh` + `bootstrap-local.sh`) was deleted on 2026-09-18
+(design 42277636): it had drifted from the image three ways and was
+starting a service the tree no longer had.
 
-### Prerequisites
+For the Rust and web toolchains, tests and lints — everything that
+runs before a change reaches the image — see
+[`docs/runbooks/dev-environment-bootstrap.md`](../../docs/runbooks/dev-environment-bootstrap.md).
+BOSS's own development runs on a cluster dev pod
+([`docs/design/dev-cluster.md`](../../docs/design/dev-cluster.md)).
 
-**System packages first** — on a fresh Ubuntu/Debian VM, the bun
-installer needs `unzip` and the Rust build needs a C toolchain.
-Install both before the per-tool table below:
-
-```sh
-sudo apt-get install -y curl ca-certificates unzip build-essential pkg-config libssl-dev git
-```
-
-(macOS users: `unzip` ships in the base system; install Xcode CLT
-via `xcode-select --install` for the C toolchain.)
-
-Then four tools running on `localhost`:
-
-| Tool | Version | Install |
-|---|---|---|
-| Rust | stable | https://rustup.rs/ |
-| Bun | 1.1+ | `curl -fsSL https://bun.sh/install \| bash` (requires `unzip`) |
-| Postgres | 16+ on `:5432` | `apt install postgresql-16` / `brew install postgresql@16` |
-| NATS | any | [download](https://nats.io/download/) a release binary, then run `nats-server -js` (JetStream is required) |
-
-After installing Bun, **open a new shell** (or `source ~/.bashrc`)
-so `bun` lands on your `PATH` — the installer modifies your shell
-rc but it doesn't take effect in the current process.
-
-The Postgres role `boss` (password `boss`) must exist as a
-superuser — the bootstrap scripts create the database but **not**
-the role. Create it once before running the quickstart:
+Re-run against a clean demo: the sim builds the demo live from an
+empty `audit_log`, so starting over is dropping the volume:
 
 ```sh
-sudo -u postgres psql -c "CREATE ROLE boss WITH LOGIN SUPERUSER PASSWORD 'boss';"
+docker compose down -v          # drops postgres-data and boss-auth
+docker compose up --build
 ```
 
-### Run it
-
-```sh
-git clone https://github.com/algedonic-dev/boss.git
-cd boss
-./infra/oss-quickstart/quickstart.sh
-```
-
-The script will:
-
-1. Check the four prereqs above (bailing with install hints if any
-   are missing), then run a non-destructive **preflight readiness
-   check** that halts with a clear message if a prior run's BOSS
-   services are still up or the gateway port 4443 is taken — pass
-   `--skip-preflight` to override.
-2. Prompt for your **bootstrap-admin email** — the seed Employee
-   record that owns the platform-admin role. (Or pass
-   `--email=you@example.com`.)
-3. Build the workspace via `infra/bootstrap-local.sh` (~40–60 min
-   cold on a 2-vCPU VM, ~10 min on an 8-vCPU dev workstation,
-   ~30 s warm), then drop and recreate an empty local `boss`
-   Postgres database. The first cold build dominates wall-clock —
-   expect **~60–80 min clone-to-SPA total on a 2-vCPU VM**;
-   subsequent runs reuse `target/` and finish in seconds.
-4. Build the SPA via Bun.
-5. Seed your bootstrap-admin's `change-me` credential in
-   `/var/lib/boss/auth/credentials.toml`.
-6. Start every service as a background process (PIDs in
-   `~/.boss-pids`) — including the operator-baseline + brewery
-   tenant seed through the public API and the sim that builds the
-   demo live, and the gateway on `127.0.0.1:4443`.
-
-When it prints `Quickstart complete.`, open
-**http://127.0.0.1:4443** and sign in — bootstrap-admin email +
-`change-me`, or the guest button for read-only (see
-[Authentication](#authentication)).
-
-Stop it:
-
-```sh
-kill $(cat ~/.boss-pids)
-```
-
-Re-run it:
-
-```sh
-./infra/oss-quickstart/quickstart.sh --email=you@example.com
-```
-
-Re-runs auto-detect existing state: if the `boss` database already
-has a populated `audit_log` (>1000 rows — i.e. the sim has been
-running), the DB bootstrap is skipped and the script just rebuilds
-the SPA + restarts services. To start the demo over from an empty
-log, drop the DB first:
-
-```sh
-sudo -u postgres dropdb boss
-./infra/oss-quickstart/quickstart.sh --email=you@example.com
-```
-
-The bootstrap-admin email upserts in either path.
+The bootstrap-admin email in `.env` upserts on every start.
 
 ## Exposing the stack to a public hostname
 
-Both the compose stack and the dev-mode script land you on
+The compose stack lands you on
 `127.0.0.1:4443`. The gateway is HTTP-only — it does NOT
 terminate TLS, validate hostnames, or rewrite the SPA's fetch
 origin. For a public deployment:
@@ -299,20 +224,15 @@ one and reissued the cookie under the same name, so the SPA
 still looked signed in while every write returned 403. A
 session now appears only when someone asks for one.
 
-The bootstrap-admin credential is provisioned automatically on
-both paths. Default password: `change-me`. The credential lives
+The bootstrap-admin credential is provisioned automatically at
+first start. Default password: `change-me`. The credential lives
 in `/var/lib/boss/auth/credentials.toml` (Argon2id hashed).
 
 Rotate it before exposing the stack to anything other than your
 laptop:
 
 ```sh
-# Docker:
 docker compose exec boss-services boss-auth set you@example.com
-
-# Source-tree dev mode:
-BOSS_AUTH_FILE=/var/lib/boss/auth/credentials.toml \
-    target/release/boss-auth set you@example.com
 ```
 
 `boss-auth` is the admin CLI for the file-backed credential
@@ -326,16 +246,13 @@ boss-auth remove alice@example.com
 boss-auth verify alice@example.com  # exit 0 on match, 1 on miss
 ```
 
-Set a **strong** `BOSS_SESSION_KEY` (Docker: in `.env`;
-dev mode: in your shell env before running `quickstart.sh`)
+Set a **strong** `BOSS_SESSION_KEY` (in `.env`)
 before deploying anywhere reachable — it's the HMAC key the
 gateway uses to sign session cookies. The default value
 (`please-rotate-me-in-prod-do-not-leak`) is correctly named.
 
 To withdraw the guest button, unset `BOSS_GUEST_ACCESS`
-(Docker: remove the line from
-`docker-compose.yml`; dev mode: edit
-`infra/bootstrap-local.sh`'s gateway env). A login is then the
+(remove the line from `docker-compose.yml`). A login is then the
 only way in.
 
 > ⚠  This is the v1 launch auth — file-backed credentials, no
@@ -363,21 +280,11 @@ for `SKIP: <name> (binary not in image)` — the launcher skips
 missing binaries and keeps going, so a stale or partial image
 surfaces as a missing service rather than a failed start.
 
-**`pg_isready` fails** (dev mode). Postgres isn't listening on
-`127.0.0.1:5432`. Start it: `brew services start postgresql@16`
-or `sudo systemctl start postgresql`.
-
-**`could not connect to server: Connection refused` on NATS**
-(dev mode). Start `nats-server` on port 4222: `nats-server -js`.
-
-**`error: linker 'cc' not found`** (dev mode). Install
-`build-essential` (Linux) or `xcode-select --install` (macOS).
-
-**Build takes much longer than expected** (dev mode). The first
-cargo build does cold compile of ~150 crates (49 boss-* + their
+**`docker compose up --build` takes much longer than expected.** The
+first image build cold-compiles ~150 crates (49 boss-* + their
 transitive deps). On a 2-vCPU VM this is 40-50 minutes; on an
-8-vCPU dev workstation closer to 10. Subsequent runs reuse
-`target/` and finish in seconds. If you're evaluating on cloud
+8-vCPU dev workstation closer to 10. Later builds reuse the cached
+Rust layer and finish in minutes. If you're evaluating on cloud
 VMs, a 4+ vCPU instance halves the wait.
 
 ## Validating the brewery sim (maintainers)

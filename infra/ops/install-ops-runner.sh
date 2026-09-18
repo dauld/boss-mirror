@@ -4,7 +4,7 @@
 #
 # Two hosts answer ops-request packets and both install the runner from
 # here: the forge, through infra/forge/install.sh (forge-converge, every
-# ten minutes), and boss-gcp, through `deploy-services.sh units` (its
+# ten minutes), and boss-gcp, through `install-units.sh units` (its
 # self-converge, every half hour).
 #
 # WHY IT IS ONE SCRIPT. Until 2026-09-11 only the forge installed a

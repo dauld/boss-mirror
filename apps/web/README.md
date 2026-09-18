@@ -33,8 +33,11 @@ HMR is registered in `bunfig.toml` (`[serve.static].plugins =
 
 ```bash
 bun run build         # → apps/web/dist/
-sudo ../../infra/deploy-web.sh   # rsync to /var/lib/boss-web/dist/
 ```
+
+The container image (`infra/oss-quickstart/Dockerfile`) runs this
+build and carries `dist/` to where the gateway serves it; a merged
+train's converge rolls it. There is no host-side web deploy.
 
 The gateway serves from `BOSS_STATIC_DIR` (default
 `/var/lib/boss-web/dist`). No service restart is needed — the
