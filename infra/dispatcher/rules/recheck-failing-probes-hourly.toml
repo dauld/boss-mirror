@@ -1,0 +1,104 @@
+# A failing probe is rechecked HOURLY. A landed car whose recorded probe
+# RAN and did not settle it carries a `proof_attempt` and stands in the
+# yard's inspection shed as "probe FAILING". Often that is correct and
+# early — on 2026-09-12 two cars waited on the first firing of a daily
+# timer — but until this rule the only way the probe would run again was
+# a human refiling `run-car-probe` by hand. Same handler and same
+# request shape as the arrival rule, scoped to every failing car
+# instead of one train's; a request already open for the car is not
+# filed twice. Backlog 9e3e07aa's neighbour: the shed names the failing
+# case, this is what clears it without a hand.
+#
+# WHY HOURLY, AND WHY NOT SOMETHING BETWEEN (backlog a9dafed6,
+# 2026-09-19). It was daily until then, and daily was the wrong number
+# for a reason that is measurable rather than aesthetic: the recheck was
+# slower than everything it waits for. The events these probes wait on
+# are sub-daily — the hourly chores (`maintenance-conservation-
+# invariants` and `maintenance-disk-floor-sweep`, both 60 min on the
+# silence roster), the 00:00Z daily sweeps, the 04:45Z CronJob, a crawl,
+# roughly-twice-a-day gate flakes. So a car became provable within an
+# hour or two of its convergence and then waited up to 24 hours for
+# anyone to look. MEASURED: all 18 cars in the shed carried exit 75 from
+# attempts at 2026-09-19T00:00 (13 of them within four seconds of each
+# other, the daily firing); filing `run-car-probe` by hand at 16:35 the
+# same day proved d0d5180b and c09204cb immediately, first try, with no
+# intervening change. Sixteen hours of provable-and-unlooked-at read as
+# a neglected shed.
+#
+# HOURLY IS THE CEILING WORTH BUYING, not a round number. The finest
+# producer any recorded probe waits on is hourly, so rechecking more
+# often than that buys nothing — the next firing would read the same
+# world. Rechecking LESS often (four-hourly, twice a day) is strictly
+# worse for the same cost per firing: it leaves a car waiting on an
+# hourly chore for up to the whole period, which is the defect this
+# change exists to remove. There is no value between daily and hourly
+# that is cheaper in kind, only later.
+#
+# AND IT IS CHEAPER PER FIRING THAN THE DAILY IT REPLACES. Measured
+# 2026-09-19 against the live system of record:
+#
+#   - One firing files one `ops-request` per car with a `proof_attempt`,
+#     an open `proven` step and no request already open. That set was 13
+#     this afternoon, 18 at the morning peak.
+#   - The forge ops-runner polls about every minute and answers the open
+#     requests SERIALLY in one oneshot run (systemd will not overlap
+#     it). Five simultaneous `run-car-probe` packets filed at 16:10:55
+#     all closed between 16:11:15.4 and 16:11:15.9 — a batch of five in
+#     well under a second of runner time; a batch of four at 16:51:54
+#     spread 0.5 s. The common probe is a fast read, and the caps are
+#     60 s (probe) / 120 s (verb) for the pathological one.
+#   - `run-car-probe` is already this host's dominant verb: 171 of the
+#     last 300 ops-requests, against 42 converges.
+#
+# So the bound to watch is not SoR write volume, it is the runner's
+# serial queue — a converge waits behind whatever probes are ahead of
+# it. Hourly does not make that tail worse, it makes it SMALLER: the
+# daily firing bunches the whole shed into one burst (26 packets at
+# 00:00 today), where an hourly firing asks only the cars still
+# unsettled, and the set shrinks every hour because a car that proves
+# drops out of it. The 18-car shed existed BECAUSE the recheck was
+# daily. Steady state is the genuinely not-yet cars, which is single
+# digits, at roughly a second of runner time each.
+#
+# NOT A DECLARED CADENCE, SO THE SILENCE SWEEP DOES NOT ALARM ON IT.
+# `cadence_roster::clock_cadences` reads only a scheduled `jobs.spawn`
+# (or `retro.open`) with a literal `(kind, subject)` as "a packet of
+# this identity arrives every N minutes"; this rule runs
+# `jobs.run-car-probes`, so it is classed `SpawnsNothing` and is
+# exempted BY NAME in
+# `tests/the_silence_roster_covers_the_clock_rules.rs`, with the reason
+# — on an hour with no failing probe it files nothing, and that zero is
+# the healthy reading. Raising the frequency does not change the
+# classification, and the trap backlog fbcac8b4 records (a
+# CONDITIONALLY-firing scheduled `jobs.spawn` declaring a cadence it
+# does not keep) cannot reach a rule that spawns no packet. The
+# exemption is keyed on the rule NAME, which is why the rename below is
+# part of this change and not cosmetic.
+#
+# THE RENAME IS THE HONEST HALF. A row named `-daily` firing hourly is
+# the drift between language and fact CLAUDE.md exists to refuse, and
+# the file name IS the rule name here. Per this directory's README,
+# retiring is deleting the file and adding is dropping one in: the same
+# converge retires `recheck-failing-probes-daily` and publishes this at
+# v1. Its firings ride the schedule runner's TICK path, not the sim-day
+# path (`Cadence::Hourly`, backlog 2d33e111) — the bucket cursor is
+# in-memory, so a dispatcher restart baselines and fires on the next
+# hour boundary rather than backfilling, which is the right posture for
+# a recheck that reads the world as it is now.
+[[rule]]
+name = "recheck-failing-probes-hourly"
+why = """
+A TIMER, the standing exemption: "an hour passed" is no packet's event,
+so no Workflow consequence can fire it. It adds no routing: it files the
+same ops-request the arrival rule files, for cars whose probe already
+ran and failed, so the proof a builder recorded is re-read by machine
+instead of by a human remembering to. One request per car per hour at
+most, and none for a car with a request still open — and a car already
+proven is nothing to run, exit 0. Hourly because that is the rate the
+events these probes wait on actually fire; daily left cars provable and
+unlooked-at for up to sixteen hours (a9dafed6, measured 2026-09-19).
+"""
+schedule = { cadence = "hourly", anchor_date = "2026-09-13" }
+[[rule.do]]
+handler = "jobs.run-car-probes"
+args = { scope = "\"failing\"" }
