@@ -750,3 +750,159 @@ fn the_excerpt_is_bounded_per_check_and_in_all_and_says_so() {
          above it:\n{first}"
     );
 }
+
+/// THE NOISE NAMED INSTEAD OF THE VERDICT (backlog 3a6f61d6). Measured
+/// 2026-09-18 on red-train alert 64a17c4b (train ccaf018e, gate
+/// c924dbe0): for the web-suite check the alert said "no cargo test
+/// failure in this check's output; 264 error line(s), first 5:" and
+/// quoted five `error: Unable to connect. Is the computer able to
+/// access the url?` lines — bun's proxy noise for the backend the mocked
+/// runner never starts, printed in every PASSING run too — while the
+/// same excerpt held Playwright's own verdict: the `✘ 15 …
+/// interaction-crawl … shard 2/4` line, `- Expected - 1 / + Received +
+/// 5`, `[/ux/views] id: not clickable: locator.click: Timeout 3000ms
+/// exceeded`, and `2 failed / 102 passed`. The operator had to pull the
+/// Job log to learn it was a 3 s click timeout. So for a check whose
+/// output carries Playwright's markers, `fails` ranks THEM: the ✘ lines,
+/// the `N failed` roll-up, the `Error:` line, the Expected/Received diff
+/// as one entry — and the connect noise is dropped from the count and
+/// named for what it is. The fixture is that excerpt, written by hand
+/// from those lines.
+const WEB_SUITE_RED: &str = "\
+::group::gate: web-suite
+  ✓  14 [chromium] › tests/mocked/interaction-crawl.spec.ts:40:5 › interaction crawl › shard 1/4 (28.1s)
+  ✘  15 [chromium] › tests/mocked/interaction-crawl.spec.ts:40:5 › interaction crawl › shard 2/4 (31.4s)
+  ✓  16 [chromium] › tests/mocked/interaction-crawl.spec.ts:40:5 › interaction crawl › shard 3/4 (27.9s)
+  ✘  17 [chromium] › tests/mocked/interaction-crawl.spec.ts:40:5 › interaction crawl › shard 4/4 (30.2s)
+
+
+  1) [chromium] › tests/mocked/interaction-crawl.spec.ts:40:5 › interaction crawl › shard 2/4
+
+    Error: expect(received).toEqual(expected) // deep equality
+
+    - Expected  - 1
+    + Received  + 5
+
+      Array [
+    -   Array [],
+    +   \"[/ux/views] id: not clickable: locator.click: Timeout 3000ms exceeded.\",
+    +   \"[/ux/views] id: not clickable: locator.click: Timeout 3000ms exceeded.\",
+    +   \"[/ux/views] id: not clickable: locator.click: Timeout 3000ms exceeded.\",
+    +   \"[/ux/views] id: not clickable: locator.click: Timeout 3000ms exceeded.\",
+    +   \"[/ux/views] id: not clickable: locator.click: Timeout 3000ms exceeded.\",
+      ]
+
+      64 |
+    > 65 |   expect(problems).toEqual([]);
+         |                    ^
+
+  2 failed
+    [chromium] › tests/mocked/interaction-crawl.spec.ts:40:5 › interaction crawl › shard 2/4
+    [chromium] › tests/mocked/interaction-crawl.spec.ts:40:5 › interaction crawl › shard 4/4
+  102 passed (2.1m)
+::endgroup::
+";
+
+/// One bun connect-refusal block, as the mocked runner's dev-server
+/// prints it for every `/api/**` call that misses the in-browser mock.
+const MOCK_PROXY_NOISE: &str = "\
+error: Unable to connect. Is the computer able to access the url?
+ path: \"http://127.0.0.1:7900/api/jobs\"
+ errno: 0
+ code: \"ConnectionRefused\"
+";
+
+fn web_suite_red_with_noise(blocks: usize) -> String {
+    let (head, tail) = WEB_SUITE_RED
+        .split_once("\n\n  1) ")
+        .expect("the fixture has a failure detail");
+    let noise: String = (0..blocks).map(|_| MOCK_PROXY_NOISE).collect();
+    format!("{head}\n{noise}\n  1) {tail}")
+}
+
+#[test]
+fn a_web_suite_red_names_the_failing_spec_not_the_mock_proxy_noise() {
+    if python3_missing() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    let log = web_suite_red_with_noise(264);
+    let got = run_extractor(
+        &red_receipt("{\"name\":\"web-suite\",\"result\":\"fail\"}"),
+        &log,
+    );
+    assert!(got.ok, "extractor failed: {}", got.stdout);
+    let fails = got.fails().expect("fails is on the receipt");
+    let joined = fails.join("\n");
+
+    let quoted: Vec<&String> = fails.iter().filter(|e| e.contains("| ")).collect();
+    assert!(
+        quoted.first().is_some_and(|e| e.contains("✘")
+            && e.contains("interaction-crawl")
+            && e.contains("shard 2/4")),
+        "the first quoted line is the failing spec, not the proxy noise:\n{joined}"
+    );
+    assert!(
+        joined.contains("2 failed"),
+        "the run's own roll-up is on the receipt:\n{joined}"
+    );
+    assert!(
+        joined.contains("Timeout 3000ms exceeded"),
+        "the Received value — the 3 s click timeout the operator had to pull the Job log \
+         for — rides the receipt:\n{joined}"
+    );
+    assert!(
+        !joined.contains("| error: Unable to connect"),
+        "bun's proxy noise, printed in every passing mocked run, is not quoted as a \
+         failure:\n{joined}"
+    );
+    assert!(
+        !joined.contains("264 error line"),
+        "the noise is not counted as error lines:\n{joined}"
+    );
+    assert!(
+        joined.contains("264") && joined.contains("mock-proxy connect line"),
+        "and what was dropped is stated, by count and by name:\n{joined}"
+    );
+    let v: Value = serde_json::from_str(&got.receipt).expect("receipt is JSON");
+    assert_eq!(
+        v["verdict"], "failed",
+        "two failed specs beside 264 connect lines is a verdict on the branch, not a \
+         network refusal:\n{}",
+        got.receipt
+    );
+}
+
+/// The same noise with NO failing spec beside it says exactly that,
+/// rather than counting the noise as 264 errors and quoting five.
+#[test]
+fn a_web_suite_whose_only_errors_are_mock_proxy_noise_says_so() {
+    if python3_missing() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    let noise: String = (0..264).map(|_| MOCK_PROXY_NOISE).collect();
+    let log = format!(
+        "::group::gate: web-suite\n  ✓  1 [chromium] › tests/mocked/a.spec.ts:1:1 › a (1.0s)\n\
+         {noise}  103 passed (2.0m)\nweb-suite: exit 137\n::endgroup::\n"
+    );
+    let got = run_extractor(
+        &red_receipt("{\"name\":\"web-suite\",\"result\":\"fail\"}"),
+        &log,
+    );
+    assert!(got.ok, "extractor failed: {}", got.stdout);
+    let joined = got.fails_joined();
+    assert!(
+        joined.contains("264 mock-proxy connect line") && joined.contains("no failing spec"),
+        "only noise: the receipt says so, by count and by name:\n{joined}"
+    );
+    assert!(
+        !joined.contains("| error: Unable to connect") && !joined.contains("264 error line"),
+        "and the noise is neither quoted nor counted as errors:\n{joined}"
+    );
+    assert!(
+        joined.contains("exit 137"),
+        "the check's last words are still quoted, because they are all the evidence there \
+         is:\n{joined}"
+    );
+}

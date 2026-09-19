@@ -23,6 +23,7 @@
   import {
     actorCards,
     CAR_WINDOW,
+    crews,
     fetchCrew,
     pipelineTrack,
     takenNotProgressed,
@@ -77,6 +78,15 @@
   const stalled = $derived(
     crew && crew.waits.kind === 'ready'
       ? takenNotProgressed(crew.waits.data, STALE_AFTER_DAYS)
+      : null,
+  );
+
+  // The shop floor (design 511fa7d4 car 2b): open sessions folded with
+  // the runs they dispatched, judged idle against the same clock every
+  // relative stamp on this page uses. Null until both reads are in.
+  const floor = $derived(
+    crew && crew.sessions.kind === 'ready' && crew.agentRuns.kind === 'ready'
+      ? crews(crew.sessions.data, crew.agentRuns.data, loadedAt.toISOString())
       : null,
   );
 
@@ -300,12 +310,85 @@
       </p>
     {/if}
 
+    <!-- ============================ CREWS ============================ -->
+    <!-- The shop floor upstream of the gates (design 511fa7d4 car 2b):
+         one row per open work-session packet — the SessionStart hook
+         files it, the prompt hook heartbeats it — with the runs linked
+         to it by `metadata.session`. Data only, on the table the
+         sections above already use; a visual redesign is pending. -->
+    <div class="crew-section">03 — CREWS ON THE FLOOR</div>
+
+    {#if crew.sessions.kind === 'failed'}
+      <p class="crew-fail load-failed">
+        The sessions did not answer: {crew.sessions.error}. An unreadable floor is not an empty
+        one.
+      </p>
+    {:else if floor === null}
+      <p class="crew-fail load-failed">
+        The crews cannot be folded: the agent-run read failed below.
+      </p>
+    {:else if floor.crews.length === 0}
+      <p class="crew-stage-blank">No operator session is open.</p>
+    {:else}
+      <table class="crew-table">
+        <thead>
+          <tr>
+            <th>actor</th><th>host</th><th>since</th><th>last prompt</th><th>prompts</th>
+            <th>runs</th><th>untracked</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each floor.crews as c (c.session.id)}
+            <tr>
+              <td>
+                {c.session.actor === null ? '—' : formatActor(c.session.actor)}
+                {#if c.idle === true}<span class="crew-unknown">· idle</span>{/if}
+              </td>
+              <td>{c.session.host ?? '—'}</td>
+              <td class="crew-num">
+                {#if c.session.startedAt === null}
+                  <span class="crew-unknown">not recorded</span>
+                {:else}
+                  <a href={href(`/ux/jobs/${c.session.id}`)}>{formatRelative(c.session.startedAt, loadedAt)}</a>
+                {/if}
+              </td>
+              <td class="crew-num">
+                {#if c.session.lastActiveAt === null}
+                  <span class="crew-unknown">none yet</span>
+                {:else}
+                  {formatRelative(c.session.lastActiveAt, loadedAt)}
+                {/if}
+              </td>
+              <td class="crew-num">{c.session.promptCount ?? '—'}</td>
+              <td>
+                {#if c.runs.length === 0}
+                  <span class="crew-unknown">none</span>
+                {:else}
+                  {#each c.runs as r (r.id)}
+                    <a href={href(`/ux/jobs/${r.id}`)}>{r.packet === null ? r.title : r.packet.slice(0, 8)}</a>
+                    {#if r.at !== null}· {r.at}{/if}<br />
+                  {/each}
+                {/if}
+              </td>
+              <td class="crew-num">{c.session.untrackedRuns ?? '—'}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+      <p class="crew-note">
+        Sessions are crews and their runs are the cars they are building. "Idle" is an hour
+        without a prompt, measured from the session's own heartbeat; the clock rule ends a
+        session at six. A run dispatched by hand, with no session on it, is listed only in the
+        runs table below.
+      </p>
+    {/if}
+
     <!-- ========================== AGENT RUNS ========================= -->
     <!-- The first first-party record of a build while it happens
          (design c87fb59b car 2): one row per open agent-run packet,
          as `boss dispatch` filed it. Data only, on the table the
          section above already uses — a visual redesign is pending. -->
-    <div class="crew-section">03 — AGENT RUNS</div>
+    <div class="crew-section">04 — AGENT RUNS</div>
 
     {#if crew.agentRuns.kind === 'failed'}
       <p class="crew-fail load-failed">

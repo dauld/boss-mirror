@@ -1,0 +1,50 @@
+# A session that goes silent is a session that ended (design 511fa7d4
+# car 2b, backlog da925366). The shop floor: an operator's session is a
+# packet, and a packet whose operator walked away must not sit at
+# `active` forever looking like a crew at work.
+#
+# WHAT SILENT MEANS HERE. A `work-session` whose `active` step is open
+# and whose packet has not MOVED for longer than the bound — and for a
+# session, movement is the HEARTBEAT: the UserPromptSubmit hook writes
+# `last_active_at` onto the packet's metadata on every prompt, and no
+# step completes between SessionStart and SessionEnd. So this rule
+# names `since_key = last_active_at`: `jobs.age_out_step` reads it as
+# a movement stamp alongside the newest `completed_at` (the trigger's,
+# on a packet that never prompted) and `metadata.opened_at`, and
+# measures from the newest of them. Without that arg the handler would
+# end a session six hours after it OPENED, however hard it was working
+# — the reason the arg exists (car 2b added it).
+#
+# THE BOUND IS 2x THE STEP'S DURATION, AND IT LIVES TWICE. The
+# work-session protocol authors `active` at `duration_hours = 3.0`;
+# the bound here is `hours = 6`, the design's "silent past 6h", and
+# `platform_bundle_work_session.rs` holds the two equal (CLAUDE.md 9a),
+# the same pin the agent-run's died rule carries.
+#
+# WHAT IT WRITES. `active` is completed with `ended = silent` and an
+# `aged_out` evidence object naming the silence measured, the bound,
+# and the tick; the session's own `ended` terminal closes it. The runs
+# the session dispatched are left exactly as they are — a run outlives
+# its session by design, and its own died rule reads its own silence.
+#
+# HOURLY, NOT DAILY: a bound of hours judged once a day is the same
+# silence one level up.
+[[rule]]
+name = "work-session-ends-when-silent"
+why = """
+A TIMER, the standing exemption: the condition is a packet that did
+NOT move, and no event says "six hours passed with no prompt". The
+SessionEnd hook that ends a session cleanly has a 1.5 s budget and a
+system of record it may not reach; a terminal closed by the operator's
+laptop lid, a pod roll, or a dropped tunnel fires no hook at all. The
+session is a packet precisely so that its silence can be read by
+something that does not depend on the terminal being alive — the same
+argument agent-run-dies-when-building-is-silent makes for a run. It
+adds no routing: one firing completes `active` with `ended = silent`
+on every silent session and the protocol's own terminal closes it.
+"""
+version = 1
+schedule = { cadence = "hourly", anchor_date = "2026-09-19" }
+[[rule.do]]
+handler = "jobs.age_out_step"
+args = { kind = "\"work-session\"", step = "\"active\"", hours = "\"6\"", since_key = "\"last_active_at\"", done_metadata = '"{\"ended\": \"silent\"}"' }

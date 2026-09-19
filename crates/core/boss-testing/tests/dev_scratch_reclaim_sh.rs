@@ -780,6 +780,34 @@ fn each_pass_installs_the_trees_cli_from_the_image_through_the_estate_installer(
         !String::from_utf8_lossy(&out.stdout).contains("worktree pass"),
         "--cli runs no reclaim pass\n{text}"
     );
+
+    // `--cli` is a STATUS the shim reads, not prose (backlog 49d9e99d,
+    // 2026-09-18): the shim runs this leg itself before a write and
+    // must tell "installed, proceed" from "not built yet, wait" without
+    // parsing the log. Not yet exits 75 — the installer's own code —
+    // while the hourly pass above still counts it as a wait, exit 0.
+    let out = Command::new("bash")
+        .arg(repo_root().join("infra/cluster/dev-scratch-reclaim.sh"))
+        .arg("--cli")
+        .env("BOSS_CLI_INSTALLER", stub_installer(&root))
+        .env("STUB_INSTALLER_RC", "75")
+        .env("STUB_INSTALL_LOG", root.join("install-log.txt"))
+        .env("SCRATCH_MOUNT", &root)
+        .env("WORK_MOUNT", root.join("work"))
+        .env("REPO_DIR", &yard.repo)
+        .env("BOSS_JOBS_URL", "http://sor.test:7900")
+        .output()
+        .expect("run --cli");
+    let text = say(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(75),
+        "--cli answers not yet with the installer's 75, so the shim can wait on it\n{text}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("not yet"),
+        "and still says so\n{text}"
+    );
 }
 
 /// A checkout with no origin/main — never fetched — names no sha to

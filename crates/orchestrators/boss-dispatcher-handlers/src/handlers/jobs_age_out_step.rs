@@ -40,6 +40,16 @@
 //! reported and left alone: "I cannot tell how old this is" is a
 //! finding, not a licence to guess.
 //!
+//! A kind whose life is a HEARTBEAT rather than a chain of completions
+//! names the stamp as `since_key` (design 511fa7d4 car 2b, backlog
+//! da925366): a `work-session` completes nothing between SessionStart
+//! and SessionEnd, and its UserPromptSubmit hook writes
+//! `metadata.last_active_at` on every prompt. With `since_key =
+//! "last_active_at"` that stamp counts as movement alongside the
+//! completions, and the newest of them all is what the silence is
+//! measured from — without it a session working for seven hours would
+//! be ended six hours after it opened.
+//!
 //! `now` is the tick's own `_at`, which the schedule runner writes onto
 //! every sub-day firing. The handler holds no clock: a rule that fires
 //! this on a DAILY cadence gets no `_at` and is refused as permanent —
@@ -96,14 +106,20 @@ impl JobsAgeOutStep {
 }
 
 /// The last instant this packet provably moved: the newest
-/// `completed_at` on any completed step, else `metadata.opened_at`.
-/// `None` when neither is readable.
-pub(crate) fn last_moved(job: &serde_json::Value) -> Option<DateTime<Utc>> {
+/// `completed_at` on any completed step — and, when the rule names a
+/// `since_key`, the newest of those and `metadata.<since_key>` (a
+/// heartbeat) — else `metadata.opened_at`. `None` when none is
+/// readable.
+pub(crate) fn last_moved(
+    job: &serde_json::Value,
+    since_key: Option<&str>,
+) -> Option<DateTime<Utc>> {
     let parse = |v: &serde_json::Value| {
         v.as_str()
             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
             .map(|t| t.with_timezone(&Utc))
     };
+    let metadata = |k: &str| job.get("metadata").and_then(|m| m.get(k)).and_then(parse);
     let newest_completion = job
         .get("steps")
         .and_then(|s| s.as_array())
@@ -112,16 +128,19 @@ pub(crate) fn last_moved(job: &serde_json::Value) -> Option<DateTime<Utc>> {
         .filter(|s| s.get("status").and_then(|v| v.as_str()) == Some("completed"))
         .filter_map(|s| s.get("completed_at").and_then(parse))
         .max();
-    newest_completion.or_else(|| {
-        job.get("metadata")
-            .and_then(|m| m.get("opened_at"))
-            .and_then(parse)
-    })
+    let heartbeat = since_key.and_then(metadata);
+    newest_completion
+        .max(heartbeat)
+        .or_else(|| metadata("opened_at"))
 }
 
 /// Hours of silence, or `None` when the packet's age cannot be read.
-pub(crate) fn silent_hours(job: &serde_json::Value, now: DateTime<Utc>) -> Option<f64> {
-    last_moved(job).map(|since| (now - since).num_seconds() as f64 / 3600.0)
+pub(crate) fn silent_hours(
+    job: &serde_json::Value,
+    since_key: Option<&str>,
+    now: DateTime<Utc>,
+) -> Option<f64> {
+    last_moved(job, since_key).map(|since| (now - since).num_seconds() as f64 / 3600.0)
 }
 
 /// The `hours` arg as a positive bound. A rule authored with a bound
@@ -155,6 +174,10 @@ impl Handler for JobsAgeOutStep {
             _ => DEFAULT_EVIDENCE_KEY,
         };
         let template = template_arg(args, "done_metadata", &ctx.rule_name);
+        let since_key = match arg(args, "since_key") {
+            Some(Value::String(s)) if !s.is_empty() => Some(s.as_str()),
+            _ => None,
+        };
 
         // The tick's own instant. Absent on a daily firing, which is a
         // rule-authoring error this handler cannot make good by
@@ -178,7 +201,7 @@ impl Handler for JobsAgeOutStep {
             let Some(step) = step_by_slug(job, step_slug).filter(|s| is_open(s)) else {
                 continue;
             };
-            let Some(silent) = silent_hours(job, now) else {
+            let Some(silent) = silent_hours(job, since_key, now) else {
                 tracing::warn!(
                     rule = %ctx.rule_name,
                     packet = %job_id,
@@ -476,16 +499,85 @@ mod tests {
             Some("2026-09-18T09:00:00Z"),
         );
         assert_eq!(
-            last_moved(&job).unwrap().to_rfc3339(),
+            last_moved(&job, None).unwrap().to_rfc3339(),
             "2026-09-18T10:00:00+00:00"
         );
         job["steps"][1]["completed_at"] = json!(null);
         assert_eq!(
-            last_moved(&job).unwrap().to_rfc3339(),
+            last_moved(&job, None).unwrap().to_rfc3339(),
             "2026-09-18T09:00:00+00:00"
         );
         job["metadata"]["opened_at"] = json!(null);
-        assert_eq!(last_moved(&job), None);
+        assert_eq!(last_moved(&job, None), None);
+    }
+
+    /// A kind whose life is a heartbeat, not a chain of completions: a
+    /// work-session prompts for hours and completes nothing between
+    /// SessionStart and SessionEnd (design 511fa7d4 car 2b, backlog
+    /// da925366). With `since_key = last_active_at` the heartbeat is
+    /// movement — a session that prompted an hour ago is left alone
+    /// however long ago it opened; one whose last prompt is past the
+    /// bound is ended, `ended = silent`, measured from that prompt and
+    /// not from its opening.
+    #[tokio::test]
+    async fn the_since_key_reads_a_heartbeat_as_movement() {
+        let session = |id: &str, last_active_at: Option<&str>| {
+            let mut metadata = json!({
+                "actor": "emp-david", "host": "boss-dev-0",
+                "started_at": "2026-09-19T00:00:00Z", "opened_at": "2026-09-19T00:00:00Z",
+            });
+            if let Some(t) = last_active_at {
+                metadata["last_active_at"] = json!(t);
+            }
+            json!({
+                "id": id, "kind": "work-session", "title": "session", "status": "open",
+                "metadata": metadata,
+                "steps": [
+                    { "id": format!("{id}-opened"), "spec_slug": "opened", "status": "completed",
+                      "completed_at": null, "metadata": {} },
+                    { "id": format!("{id}-active"), "spec_slug": "active", "status": "ready",
+                      "metadata": { "authority_role": "platform-admin" } },
+                ],
+            })
+        };
+        let (base, puts) = mock_jobs(vec![
+            // Opened 9h ago, prompted 1h ago: alive.
+            session(FRESH, Some("2026-09-19T08:00:00Z")),
+            // Opened 9h ago, last prompt 7h ago: silent past six.
+            session(SILENT, Some("2026-09-19T02:00:00Z")),
+            // Opened 9h ago, never prompted: measured from its opening.
+            session(AGELESS, None),
+        ])
+        .await;
+        let args = vec![
+            ("kind".to_string(), Value::String("work-session".into())),
+            ("step".to_string(), Value::String("active".into())),
+            ("hours".to_string(), Value::String("6".into())),
+            (
+                "since_key".to_string(),
+                Value::String("last_active_at".into()),
+            ),
+            (
+                "done_metadata".to_string(),
+                Value::String(r#"{"ended": "silent"}"#.into()),
+            ),
+        ];
+        let h = JobsAgeOutStep::with_client(reqwest::Client::new(), &base);
+        h.invoke(&args, &ctx(tick("2026-09-19T09:00:00Z")))
+            .await
+            .expect("the tick runs");
+        let written = puts.lock().unwrap().clone();
+        let mut ended: Vec<&str> = written.iter().map(|(j, _, _)| j.as_str()).collect();
+        ended.sort();
+        assert_eq!(ended, vec![SILENT, AGELESS], "{written:?}");
+        let silent = written.iter().find(|(j, _, _)| j == SILENT).unwrap();
+        assert_eq!(silent.2["metadata"]["ended"], "silent");
+        assert_eq!(
+            silent.2["metadata"]["aged_out"]["silent_hours"], 7.0,
+            "measured from the last prompt, not the opening"
+        );
+        let never = written.iter().find(|(j, _, _)| j == AGELESS).unwrap();
+        assert_eq!(never.2["metadata"]["aged_out"]["silent_hours"], 9.0);
     }
 
     #[test]

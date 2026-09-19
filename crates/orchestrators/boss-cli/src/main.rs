@@ -12,6 +12,7 @@ mod credential;
 mod delivery_policy;
 mod design;
 mod dispatch;
+mod dispatch_hook;
 mod dock_preview;
 mod doctor;
 mod documents;
@@ -414,6 +415,15 @@ enum Commands {
     /// the run id. The prompt is stdout and nothing else is, so
     /// `boss dispatch <packet> > prompt.txt` is what you paste.
     Dispatch {
+        /// The hook's door (design 511fa7d4 car 2b): read a Claude Code
+        /// PreToolUse payload on stdin and record the Agent call as a
+        /// run — dispatch the packet the prompt names with the prompt as
+        /// its brief (the run section comes back on stdout as the
+        /// tool's updatedInput), link a run the prompt already carries,
+        /// or count an untracked run. <PACKET> is then the work-session
+        /// packet the run belongs to, or `-` for none.
+        #[arg(long)]
+        from_hook: bool,
         /// The packet: its full uuid, 8+ characters of its id, or its
         /// branch. With --report, the RUN (the agent-run id `boss
         /// dispatch` printed).
@@ -1348,6 +1358,12 @@ async fn main() -> Result<()> {
         Commands::Orient { all } => orient::run(all).await,
         Commands::Brief { packet } => brief::run(packet).await,
         Commands::Dispatch {
+            from_hook: true,
+            packet,
+            ..
+        } => dispatch_hook::run(packet).await,
+        Commands::Dispatch {
+            from_hook: false,
             packet,
             step,
             model,

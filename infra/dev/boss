@@ -55,9 +55,36 @@
 # fix; a WRITE verb is REFUSED with the same facts and exit 78, the code
 # publish-workflow.sh uses for a binary that cannot say what it was
 # built from — a stale binary that refuses a valid verb, or accepts a
-# stale shape, names nothing; a refusal names the ten-second door. The
-# reads are a closed list below; everything else is a write, so a verb
-# this list does not know fails closed.
+# stale shape, names nothing. The reads are a closed list below;
+# everything else is a write, so a verb this list does not know fails
+# closed.
+#
+# THE SHIM RUNS THE DOOR IT USED TO NAME (backlog 49d9e99d, 2026-09-18).
+# Measured three times in one session and five across the day: a train
+# lands between the sidecar's hourly ticks, and every builder whose
+# build spans it is refused at the one moment it matters — its gate
+# launch — with a refusal naming a ten-second, idempotent, mechanical
+# fix (`dev-scratch-reclaim.sh --cli`); the operator's own gate sat 25
+# min behind a wait loop for the same reason. CLAUDE.md: mechanical
+# operations belong to the machine. So before refusing a write the
+# shim runs that same leg itself and reads its STATUS, never its prose:
+# 0 — the tree's CLI is confirmed in the store; `current` is re-read
+#     and the write runs on it, under one line saying so (the merge
+#     observed, never assumed: a confirm that did not land `current`
+#     on origin/main is still a refusal);
+# 75 — not yet: the deploy runner builds the image a few minutes after
+#     each train and it is not in the registry. The refusal stands and
+#     says how long ago origin/main landed (its committer epoch against
+#     now — integers, never ISO strings) so the caller waits rather
+#     than rebuilds;
+# anything else — the installer refused (registry dark, digest
+#     mismatch): its complete output rides the refusal, the only copy.
+# Reads keep their warning and install nothing; `--built` asked for
+# the build and is refused as before, since the image CLI is a
+# different binary than the one asked for. BOSS_SHIM_INSTALLER
+# replaces the leg (a test stubs it; the leg's own pin is
+# dev_scratch_reclaim_sh.rs), and the store the leg fills is handed
+# to it as BOSS_CLI_STORE — the one the shim reads (CLAUDE.md §9a).
 #
 # origin/main is read from THIS checkout's remote-tracking ref (the
 # shim lives in the operator's clone, which the startup protocol
@@ -70,6 +97,7 @@
 # The roots are overridable so the test never touches the pod's:
 #   BOSS_SHIM_TARGET_ROOT=/some/dir   the build's root (/scratch)
 #   BOSS_SHIM_IMAGE_STORE=/some/dir   the image store (/work/tools/image-cli)
+#   BOSS_SHIM_INSTALLER=/some/exe     the install leg (dev-scratch-reclaim.sh --cli)
 #   BOSS_SHIM_VERBOSE=1               say which candidate ran, and its sha
 #
 # The system of record has ONE spelling, in `sor-url` beside this
@@ -92,7 +120,8 @@ if [ "${1:-}" = "--built" ]; then prefer=build; shift; fi
 
 store="${BOSS_SHIM_IMAGE_STORE:-/work/tools/image-cli}"
 target="${BOSS_SHIM_TARGET_ROOT:-/scratch}/target"
-install="bash $(dirname "$here")/cluster/dev-scratch-reclaim.sh --cli"
+repo="$(dirname "$(dirname "$here")")"
+install="bash $repo/infra/cluster/dev-scratch-reclaim.sh --cli"
 rebuild="cargo build -p boss-cli"
 
 main="$(git -C "$here" rev-parse --verify -q refs/remotes/origin/main 2>/dev/null || true)"
@@ -184,5 +213,50 @@ if [ -n "$read_verb" ]; then
   [ -n "${BOSS_SHIM_VERBOSE:-}" ] && echo "boss: running $how at ${run_sha:-unknown} (behind origin/main ${main:0:8}) — $run" >&2
   exec "$run" "$@"
 fi
-echo "boss: REFUSED — $why; a write verb (${1}) is not run from a CLI that is not the tree's. Fix: $fix. Reads (orient, brief, receipt, …) still run under a warning." >&2
+refused="a write verb (${1}) is not run from a CLI that is not the tree's"
+still="Reads (orient, brief, receipt, …) still run under a warning."
+
+# A write, and the caller did not ask for the build: run the install
+# leg and read its status (the block above says why).
+if [ "$prefer" != build ] && [ -n "$main" ]; then
+  echo "boss: $why — installing the tree's CLI at ${main:0:8} from the cluster image ($install) before running ${1}" >&2
+  log="$(mktemp "${TMPDIR:-/tmp}/boss-shim-install.XXXXXX")"
+  rc=0
+  # The link follows the store: <tools>/image-cli -> <tools>/bin/boss-image,
+  # the leg's own default for the pod's paths — so a scratch store never
+  # relinks the pod's boss-image (a rehearsal did, 2026-09-19).
+  link="$(dirname "$store")/bin/boss-image"
+  if [ -n "${BOSS_SHIM_INSTALLER:-}" ]; then
+    BOSS_CLI_STORE="$store" BOSS_CLI_LINK="$link" "$BOSS_SHIM_INSTALLER" >"$log" 2>&1 || rc=$?
+  else
+    REPO_DIR="${REPO_DIR:-$repo}" BOSS_CLI_STORE="$store" BOSS_CLI_LINK="$link" \
+      bash "$repo/infra/cluster/dev-scratch-reclaim.sh" --cli >"$log" 2>&1 || rc=$?
+  fi
+  case "$rc" in
+    0)
+      rm -f "$log"
+      image_sha="$(readlink "$store/current" 2>/dev/null || true)"
+      if [ -n "$image_sha" ] && [ -x "$store/boss" ] && [ -x "$store/$image_sha/boss" ] && current "$image_sha"; then
+        [ -n "${BOSS_SHIM_VERBOSE:-}" ] && echo "boss: running the image CLI at ${image_sha:0:8} (installed just now) — $store/boss" >&2
+        exec "$store/boss" "$@"
+      fi
+      echo "boss: REFUSED — $why; $refused. The install leg confirmed, but $store/current is ${image_sha:-none}, not at origin/main ${main:0:8} — the store and the leg disagree; look at $store before retrying. $still" >&2
+      exit 78 ;;
+    75)
+      rm -f "$log"
+      landed="$(git -C "$here" log -1 --format=%ct "$main" 2>/dev/null || true)"
+      case "$landed" in
+        ''|*[!0-9]*) age="origin/main ${main:0:8} landed at a time git could not read" ;;
+        *) age="origin/main ${main:0:8} landed $(( ($(date +%s) - landed) / 60 )) min ago" ;;
+      esac
+      echo "boss: REFUSED — $why; $refused. Ran $install: not yet — the image for ${main:0:8} is not in the registry; $age, and the deploy runner builds the image a few minutes after each train. Wait and retry (this shim installs it then); a rebuild ($rebuild) takes longer than the wait. $still" >&2
+      exit 78 ;;
+    *)
+      sed 's/^/boss:   cli: /' "$log" >&2
+      rm -f "$log"
+      echo "boss: REFUSED — $why; $refused. Ran $install: exit $rc — its complete output is above. Fix: $fix. $still" >&2
+      exit 78 ;;
+  esac
+fi
+echo "boss: REFUSED — $why; $refused. Fix: $fix. $still" >&2
 exit 78

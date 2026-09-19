@@ -122,6 +122,16 @@ const SPAWNS_NOTHING_ON_PURPOSE: &[(&str, &str)] = &[
          act — a sweep keyed by kind would be watching the operator's cadence, not this \
          one's.",
     ),
+    (
+        "work-session-ends-when-silent",
+        "runs `jobs.age_out_step`, which completes the `active` step of every open \
+         work-session whose heartbeat is older than the bound (design 511fa7d4 car 2b, \
+         backlog da925366). The same shape as the agent-run rule above: it files nothing \
+         and CLOSES packets the SessionStart hook opened, so on an hour with no abandoned \
+         session it produces NOTHING, and that zero is the healthy reading. The packets it \
+         advances are opened by an operator sitting down at a terminal — a sweep keyed by \
+         kind would be watching the operator's working hours, not this rule.",
+    ),
 ];
 
 fn shipped() -> (Vec<ClockCadence>, Vec<NotACadence>) {

@@ -33,10 +33,23 @@
 //! asks for the build outright — a developer testing a branch — and the
 //! same age rule still applies to it.
 //!
-//! Every test plants its own image store (`BOSS_SHIM_IMAGE_STORE`) and
-//! build tree (`BOSS_SHIM_TARGET_ROOT`) under scratch, so nothing here
-//! touches /work/tools or /scratch. The shas are the real checkout's:
-//! `origin/main` and its parent, read from git, never typed.
+//! Since 2026-09-18 evening (backlog 49d9e99d) the shim RUNS the door
+//! it used to name: five builders in one day were refused at their
+//! gate launch because a train had landed between the sidecar's hourly
+//! ticks, and the operator's own gate sat 25 min behind a wait loop.
+//! Before refusing a write it runs the same idempotent installer the
+//! sidecar runs (`dev-scratch-reclaim.sh --cli`) and reads its STATUS:
+//! confirmed (0) — the verb runs on the freshly installed image CLI
+//! under one line saying so; not yet (75) — the refusal says how long
+//! ago origin/main landed, so the caller waits for the deploy runner
+//! rather than rebuilding. Reads keep their warning and install nothing.
+//!
+//! Every test plants its own image store (`BOSS_SHIM_IMAGE_STORE`),
+//! build tree (`BOSS_SHIM_TARGET_ROOT`) and installer
+//! (`BOSS_SHIM_INSTALLER`, a stub — the real leg's own pin is
+//! dev_scratch_reclaim_sh.rs) under scratch, so nothing here touches
+//! /work/tools, /scratch or the registry. The shas are the real
+//! checkout's: `origin/main` and its parent, read from git, never typed.
 
 use boss_testing::{repo_root, scratch_dir, write_exec};
 use std::path::{Path, PathBuf};
@@ -125,13 +138,72 @@ struct Fixture {
     root: PathBuf,
     /// Stands in for /work/tools/image-cli.
     store: PathBuf,
+    /// Stands in for `dev-scratch-reclaim.sh --cli`: a stub that
+    /// records the store it was handed and answers not yet (75) until
+    /// `installer_confirms` teaches it to lay the generation down.
+    installer: PathBuf,
 }
 
 impl Fixture {
     fn new(name: &str) -> Self {
         let root = scratch_dir(&format!("boss-shim-{name}"));
         let store = root.join("image-cli");
-        Self { root, store }
+        let installer = root.join("install-cli");
+        let f = Self {
+            root,
+            store,
+            installer,
+        };
+        f.installer_says_not_yet();
+        f
+    }
+
+    /// The installer answers 75 — the image for origin/main is not in
+    /// the registry yet — and installs nothing.
+    fn installer_says_not_yet(&self) {
+        write_exec(
+            &self.installer,
+            &format!(
+                "#!/usr/bin/env bash\n\
+                 echo \"store=${{BOSS_CLI_STORE:-unset}} link=${{BOSS_CLI_LINK:-unset}} args=$*\" >> {log}\n\
+                 echo \"stub-installer: not yet — no image for origin/main\"\n\
+                 exit 75\n",
+                log = self.root.join("install-log").display()
+            ),
+        );
+    }
+
+    /// The installer answers 0 and leaves the store the way the real
+    /// one does: `<store>/<sha>/boss`, `current -> <sha>`, the wrapper
+    /// at `<store>/boss` — copied from a staging dir this plants, so
+    /// the confirmed state is observed by the shim, never assumed.
+    fn installer_confirms(&self, sha: &str) {
+        let staged = self.root.join("staged");
+        boss_testing::create_dir(&staged.join(sha));
+        stub(&staged.join(sha).join("boss"), "image", "");
+        write_exec(
+            &staged.join("boss"),
+            &std::fs::read_to_string(repo_root().join(WRAPPER)).expect("read the wrapper"),
+        );
+        write_exec(
+            &self.installer,
+            &format!(
+                "#!/usr/bin/env bash\n\
+                 echo \"store=${{BOSS_CLI_STORE:-unset}} link=${{BOSS_CLI_LINK:-unset}} args=$*\" >> {log}\n\
+                 mkdir -p \"$BOSS_CLI_STORE\"\n\
+                 cp -R {staged}/. \"$BOSS_CLI_STORE\"/\n\
+                 ln -sfn {sha} \"$BOSS_CLI_STORE/current\"\n\
+                 echo \"stub-installer: CONFIRMED at {sha}\"\n",
+                log = self.root.join("install-log").display(),
+                staged = staged.display(),
+            ),
+        );
+    }
+
+    /// Every call the shim made to the installer, one per line:
+    /// `store=<path> link=<path> args=<argv>`.
+    fn install_log(&self) -> String {
+        std::fs::read_to_string(self.root.join("install-log")).unwrap_or_default()
     }
 
     /// A build under `target/<profile>/boss` that says it was built
@@ -164,6 +236,7 @@ impl Fixture {
         cmd.args(args)
             .env("BOSS_SHIM_TARGET_ROOT", &self.root)
             .env("BOSS_SHIM_IMAGE_STORE", &self.store)
+            .env("BOSS_SHIM_INSTALLER", &self.installer)
             .env_remove("BOSS_JOBS_URL")
             .env_remove("BOSS_SHIM_BUILT")
             .env_remove("BOSS_SHIM_VERBOSE");
@@ -194,10 +267,14 @@ fn the_shim_is_in_the_tree_and_executable() {
         "{SCRIPT} must be executable: the pod's /work/tools/bin/boss is a symlink to it"
     );
     let text = std::fs::read_to_string(&path).expect("read the boss shim");
-    for must in ["BOSS_SHIM_TARGET_ROOT", "BOSS_SHIM_IMAGE_STORE"] {
+    for must in [
+        "BOSS_SHIM_TARGET_ROOT",
+        "BOSS_SHIM_IMAGE_STORE",
+        "BOSS_SHIM_INSTALLER",
+    ] {
         assert!(
             text.contains(must),
-            "{must}: both roots must be read from the environment so a test never touches /scratch or /work/tools"
+            "{must}: both roots and the installer must be read from the environment so a test never touches /scratch, /work/tools or the registry"
         );
     }
     assert!(
@@ -275,7 +352,15 @@ fn a_build_behind_origin_main_warns_on_a_read_and_refuses_a_write() {
         ["orient", "--since", "two words"],
         "argv intact: {out}"
     );
+    assert!(
+        f.install_log().is_empty(),
+        "a read installs nothing — it warns and runs: {}",
+        f.install_log()
+    );
 
+    // The image for origin/main is not built yet (the fixture's default
+    // installer): the write is refused, and the refusal says how long
+    // ago origin/main landed so the caller waits rather than rebuilds.
     for write in [
         vec!["gate", "fix/x", "--wait"],
         vec!["ops", "sweep", "a", "b", "c", "d"],
@@ -295,7 +380,31 @@ fn a_build_behind_origin_main_warns_on_a_read_and_refuses_a_write() {
             !out.contains("ran="),
             "nothing is exec'd ({write:?}): {out}"
         );
+        assert!(
+            out.contains("not yet") && landed_minutes_in(&out).is_some(),
+            "the refusal says the image is not yet built and how long ago origin/main landed ({write:?}): {out}"
+        );
     }
+    assert_eq!(
+        f.install_log().lines().count(),
+        3,
+        "the installer ran once per refused write, handed the shim's store: {}",
+        f.install_log()
+    );
+    // The store the leg fills is the store the shim reads, and the link
+    // follows it (<tools>/image-cli -> <tools>/bin/boss-image, the leg's
+    // own default for the pod's paths) — a scratch store must never
+    // relink the pod's boss-image, which a rehearsal did (2026-09-19).
+    let handed = format!(
+        "store={} link={} ",
+        f.store.display(),
+        f.root.join("bin").join("boss-image").display()
+    );
+    assert!(
+        f.install_log().lines().all(|l| l.starts_with(&handed)),
+        "the leg is handed the shim's store and a link beside it, never the pod's:\n{}",
+        f.install_log()
+    );
 
     // `--help` on a write verb is a read.
     let (rc, out) = f.run(&["gate", "--help"], &[]);
@@ -329,6 +438,160 @@ fn a_stale_image_cli_is_weighed_like_a_stale_build() {
         out.contains("ran=build-debug") && !out.contains("WARNING"),
         "{out}"
     );
+}
+
+/// THE SHIM RUNS THE DOOR (backlog 49d9e99d, 2026-09-18). The image
+/// CLI is behind and the image for origin/main IS in the registry —
+/// the moment every builder hit five times in one day: the shim runs
+/// the installer, observes the store's `current` land on origin/main,
+/// says so in one line, and runs the write on the fresh image CLI.
+#[test]
+fn a_write_behind_origin_main_installs_the_trees_cli_and_runs_when_the_image_exists() {
+    let f = Fixture::new("installs");
+    let main = main_sha();
+    let behind = behind_sha();
+    f.image(&behind);
+    f.installer_confirms(&main);
+
+    let (rc, out) = f.run(&["gate", "fix/x", "--wait"], &[]);
+    assert_eq!(rc, 0, "the write runs after the install: {out}");
+    assert!(
+        out.contains("ran=image") && out.contains(&format!("built from {main}")),
+        "the freshly installed image CLI answers, at origin/main: {out}"
+    );
+    let args: Vec<&str> = out.lines().filter_map(|l| l.strip_prefix("arg=")).collect();
+    assert_eq!(args, ["gate", "fix/x", "--wait"], "argv intact: {out}");
+    let said = out
+        .lines()
+        .find(|l| l.starts_with("boss: ") && l.contains("installing"))
+        .unwrap_or_else(|| panic!("one line says the install happened: {out}"));
+    assert!(
+        said.contains(short(&behind)) && said.contains(short(&main)),
+        "and names both shas: {said}"
+    );
+    assert!(
+        !out.contains("REFUSED") && !out.contains("WARNING"),
+        "no refusal, no warning — the door was walked through: {out}"
+    );
+    assert_eq!(
+        f.install_log().lines().count(),
+        1,
+        "the installer ran once: {}",
+        f.install_log()
+    );
+    assert_eq!(
+        std::fs::read_link(f.store.join("current"))
+            .expect("current")
+            .to_string_lossy(),
+        main,
+        "the store's current is the tree's sha"
+    );
+
+    // With the image now current, the next write installs nothing.
+    let (rc, out) = f.run(&["gate", "fix/x"], &[]);
+    assert_eq!(rc, 0, "{out}");
+    assert!(!out.contains("installing"), "silent when current: {out}");
+    assert_eq!(f.install_log().lines().count(), 1, "{}", f.install_log());
+}
+
+/// The installer confirmed but the store did not land on origin/main
+/// (a wrapper fault, a race with the sidecar): the merge is observed,
+/// never assumed — the write is still refused, naming what was found.
+#[test]
+fn an_install_that_confirms_without_landing_on_origin_main_still_refuses() {
+    let f = Fixture::new("installs-elsewhere");
+    let main = main_sha();
+    let behind = behind_sha();
+    f.image(&behind);
+    // Confirms, but lays down origin/main's PARENT again.
+    f.installer_confirms(&behind);
+    let (rc, out) = f.run(&["gate", "x"], &[]);
+    assert_eq!(rc, 78, "a write is refused: {out}");
+    assert!(
+        out.contains("REFUSED") && out.contains(short(&main)) && out.contains(short(&behind)),
+        "{out}"
+    );
+    assert!(!out.contains("ran="), "nothing is exec'd: {out}");
+}
+
+/// The installer refused outright (registry dark, digest mismatch —
+/// anything but 0 or 75): the refusal names the exit and carries the
+/// installer's whole output, the only copy (CLAUDE.md §Diagnosis).
+#[test]
+fn an_installer_refusal_rides_the_shims_refusal_whole() {
+    let f = Fixture::new("installer-refuses");
+    f.image(&behind_sha());
+    write_exec(
+        &f.installer,
+        "#!/usr/bin/env bash\necho 'stub-installer: REFUSED — registry dark (line one)'\necho 'stub-installer: line two' >&2\nexit 1\n",
+    );
+    let (rc, out) = f.run(&["gate", "x"], &[]);
+    assert_eq!(rc, 78, "{out}");
+    assert!(
+        out.contains("exit 1")
+            && out.contains("registry dark (line one)")
+            && out.contains("line two"),
+        "the installer's exit and its complete output are in the refusal: {out}"
+    );
+    assert!(!out.contains("ran="), "nothing is exec'd: {out}");
+}
+
+/// The age in the not-yet refusal is origin/main's committer epoch
+/// against now — integers, never an ISO string — and it is the real
+/// age of this checkout's origin/main, within a minute.
+#[test]
+fn the_not_yet_refusal_names_how_long_ago_origin_main_landed() {
+    let f = Fixture::new("age");
+    f.image(&behind_sha());
+    let landed: u64 = git(
+        &repo_root(),
+        &["log", "-1", "--format=%ct", "refs/remotes/origin/main"],
+    )
+    .parse()
+    .expect("origin/main's committer epoch");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("now")
+        .as_secs();
+    let expect = now.saturating_sub(landed) / 60;
+    let (rc, out) = f.run(&["gate", "x"], &[]);
+    assert_eq!(rc, 78, "{out}");
+    let said = landed_minutes_in(&out)
+        .unwrap_or_else(|| panic!("the refusal says 'landed <n> min ago': {out}"));
+    assert!(
+        said.abs_diff(expect) <= 1,
+        "the age is origin/main's real age ({expect} min), not a guess ({said}): {out}"
+    );
+    assert!(
+        out.contains("wait"),
+        "and tells the caller to wait rather than rebuild: {out}"
+    );
+}
+
+/// `--built` asked for the build outright; a stale build is refused as
+/// before — the developer wanted THIS binary, and installing the image
+/// CLI would answer with a different one.
+#[test]
+fn built_behind_origin_main_is_refused_without_installing() {
+    let f = Fixture::new("built-stale");
+    let main = main_sha();
+    f.build("debug", &behind_sha());
+    f.installer_confirms(&main);
+    let (rc, out) = f.run(&["--built", "gate", "x"], &[]);
+    assert_eq!(rc, 78, "{out}");
+    assert!(
+        f.install_log().is_empty() && !out.contains("ran="),
+        "nothing installed, nothing exec'd: {out}"
+    );
+}
+
+/// The `<n>` in "landed <n> min ago", when the text says it.
+fn landed_minutes_in(out: &str) -> Option<u64> {
+    let (_, rest) = out.split_once("landed ")?;
+    let (n, rest) = rest.split_once(' ')?;
+    rest.starts_with("min ago")
+        .then(|| n.parse().ok())
+        .flatten()
 }
 
 /// A build that cannot say what it was built from — `built from

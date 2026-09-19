@@ -1,0 +1,82 @@
+# ---------------------------------------------------------------------------
+# work-session — one operator's session, as a packet.
+#
+# THE SHOP FLOOR (design 511fa7d4, decided 2026-09-18; car 2b of
+# c87fb59b, backlog da925366). Car 2 made a run a packet: `boss
+# dispatch` files an `agent-run` at the claim, so a builder that dies is
+# a packet that ages. What was still invisible was the SESSION the runs
+# came from — the operator's terminal, where every dispatch is decided
+# and every handback is read. It existed nowhere in the record: the
+# crew board could list open runs but not whose session they belonged
+# to, nor whether that session was still there to read them.
+#
+# The hooks Claude Code fires open and keep this packet
+# (.claude/settings.json, the scripts under infra/dev/hooks/):
+#   opened  — SessionStart files it: the actor the session signs as
+#             (BOSS_ACTOR, the same identity file every boss verb
+#             reads), the host, the cwd, the instant, the source
+#             (startup / resume / clear / compact).
+#   active  — the session's life. UserPromptSubmit writes a heartbeat
+#             onto the packet's metadata: `last_active_at` and
+#             `prompt_count`, and NEVER the prompt text — a session's
+#             existence and rhythm are the record; what was said in it
+#             is the transcript's, not the log's.
+#   ended   — SessionEnd completes `active` with `ended = clean`; a
+#             session that goes silent past twice this step's duration
+#             is completed with `ended = silent` by the hourly clock
+#             rule `work-session-ends-when-silent` (jobs.age_out_step,
+#             reading the heartbeat as movement). Either way the packet
+#             closes on the one terminal.
+#
+# Runs link BACK to the session: the PreToolUse hook on the Agent tool
+# runs `boss dispatch --from-hook`, which writes this packet's id as
+# `metadata.session` on the agent-run it files. The crew board folds
+# open sessions and their runs into crews — sessions as crews, runs as
+# the cars they are building.
+#
+# `ended` is REQUIRED and enum-checked on `active`, so a session cannot
+# close without saying whether a hook or the clock closed it. Every
+# hook exits 0 whatever the system of record answers: visibility is
+# best-effort, and the executor never waits on it.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "work-session"
+label = "Work session"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "One operator's Claude Code session, as a packet: opened by the SessionStart hook, kept alive by a heartbeat on every prompt (last_active_at and prompt_count, never the prompt text), ended by the SessionEnd hook or by the clock when it goes silent past twice the active step's duration. Runs dispatched from the session link back to it by metadata.session on each agent-run. The shop floor of the operator surface — sessions as crews, runs as the cars they are building."
+metadata = { owner_role = "platform-admin" }
+metadata_schema = { type = "object", required = ["actor", "host", "started_at"], properties = { actor = { type = "string", description = "The actor id the session signs as (BOSS_ACTOR)." }, host = { type = "string" }, cwd = { type = "string" }, started_at = { type = "string", description = "RFC3339, written by the SessionStart hook." }, session_id = { type = "string", description = "Claude Code's own session id, so a resumed session finds its packet." }, source = { type = "string", description = "startup | resume | clear | compact — SessionStart's own word." }, last_active_at = { type = "string", description = "The heartbeat: RFC3339 of the last prompt, written by UserPromptSubmit." }, prompt_count = { type = "number" }, untracked_runs = { type = "number", description = "Agent-tool calls the dispatch hook could parse no packet from — counted, never refused." }, ended_at = { type = "string" }, end_reason = { type = "string", description = "SessionEnd's own reason word." } } }
+
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+title_template = "Session opened"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "session-start" }
+
+# The session's life. Three hours is the measured shape of a pod session
+# between prompts at its longest (a build, a gate wait, a lunch), and
+# the clock rule reads its bound as 2x this value — the design's "silent
+# past 6h" — pinned equal by platform_bundle_work_session.rs, because the
+# number lives in two files (CLAUDE.md 9a).
+[[workflow.step]]
+title = "active"
+kind = "task"
+ready_when = "steps.opened.done"
+title_template = "Session active"
+authority_role = "platform-admin"
+duration_hours = 3.0
+fields = [
+  { name = "ended", field_type = "clean|silent", required = true },
+]
+
+[[workflow.step]]
+title = "ended"
+kind = "outcome"
+ready_when = "steps.active.done"
+title_template = "Session ended"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "ended" }

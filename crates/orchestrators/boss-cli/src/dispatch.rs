@@ -291,8 +291,35 @@ pub(crate) fn budget_line(budget_usd: f64) -> String {
     )
 }
 
+/// Where the brief comes from (design 511fa7d4 car 2b, backlog
+/// da925366). `Rendered` is the hand-run verb: `boss brief`'s
+/// rendering, printed to stdout. `Handed` is the hook's door
+/// (`--from-hook`, `dispatch_hook.rs`): the prompt the Agent tool was
+/// already given IS the brief — recorded verbatim, never printed, since
+/// the operator wrote it and the agent already has it — and `session`
+/// is the work-session packet the run belongs to, written as
+/// `metadata.session` so the crew board can fold runs under their
+/// crew.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum BriefSource<'a> {
+    Rendered,
+    Handed {
+        prompt: &'a str,
+        session: Option<&'a str>,
+    },
+}
+
+/// What a dispatch produced: the run's id and the exact prompt — the
+/// brief plus the run section — whether it was printed (`Rendered`) or
+/// handed back to the hook to put on the tool's input (`Handed`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Dispatched {
+    pub run_id: String,
+    pub prompt: String,
+}
+
 /// The whole verb against an explicit base — the seam the wire tests
-/// go through. Returns the prompt it printed.
+/// go through. Returns the run and the prompt.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch_at(
     http: &reqwest::Client,
@@ -305,7 +332,8 @@ pub(crate) async fn dispatch_at(
     owner: &str,
     worktree: &str,
     host: &str,
-) -> Result<String> {
+    source: BriefSource<'_>,
+) -> Result<Dispatched> {
     use reqwest::Method;
 
     // Every call signed as the actor the verb resolved: the run is
@@ -351,8 +379,13 @@ pub(crate) async fn dispatch_at(
     };
     let settings = resolve(block, over).map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    // The brief, rendered ONCE: it is the prompt and the record.
-    let brief = crate::brief::render(repo, Some(&job), &settings.profile)?;
+    // The brief, rendered ONCE: it is the prompt and the record. The
+    // hook hands the prompt the agent was already given, which is the
+    // same fact from the other side.
+    let brief = match source {
+        BriefSource::Rendered => crate::brief::render(repo, Some(&job), &settings.profile)?,
+        BriefSource::Handed { prompt, .. } => prompt.to_string(),
+    };
 
     // CLAIM FIRST. A step someone else holds is a refusal naming the
     // holder, and it must come before anything is filed.
@@ -364,15 +397,19 @@ pub(crate) async fn dispatch_at(
     .await
     .with_context(|| format!("claiming `{slug}` on {} as {actor}", &id[..8]))?;
 
-    let created = api_at(
-        Method::POST,
-        "/api/jobs".to_string(),
-        Some(run_body(
-            &id, &title, &slug, actor, &settings, worktree, host, &brief, owner,
-        )),
-    )
-    .await?
-    .context("the run's create returned no body")?;
+    let mut body = run_body(
+        &id, &title, &slug, actor, &settings, worktree, host, &brief, owner,
+    );
+    if let BriefSource::Handed {
+        session: Some(session),
+        ..
+    } = source
+    {
+        body["metadata"]["session"] = json!(session);
+    }
+    let created = api_at(Method::POST, "/api/jobs".to_string(), Some(body))
+        .await?
+        .context("the run's create returned no body")?;
     let run_id = created
         .get("data")
         .unwrap_or(&created)
@@ -398,7 +435,9 @@ pub(crate) async fn dispatch_at(
         .to_string();
 
     let prompt = format!("{brief}\n{}", run_section(&run_id, &settings));
-    print!("{prompt}");
+    if matches!(source, BriefSource::Rendered) {
+        print!("{prompt}");
+    }
     api_at(
         Method::PUT,
         format!("/api/jobs/{run_id}/steps/{briefed_id}"),
@@ -413,7 +452,7 @@ pub(crate) async fn dispatch_at(
         &id[..8],
         prompt.len()
     );
-    Ok(prompt)
+    Ok(Dispatched { run_id, prompt })
 }
 
 /// The step `--report` completes.
@@ -757,6 +796,7 @@ pub async fn run(
         &owner,
         &worktree,
         &host,
+        BriefSource::Rendered,
     )
     .await?;
     Ok(())
@@ -1287,9 +1327,11 @@ mod wire_tests {
             "emp-david",
             "/work/boss/.claude/worktrees/agent-x",
             "boss-dev-0",
+            BriefSource::Rendered,
         )
         .await
-        .expect("dispatches");
+        .expect("dispatches")
+        .prompt;
 
         let calls = log.calls.lock().unwrap().clone();
         let seq: Vec<(String, String)> = calls
@@ -1377,6 +1419,7 @@ mod wire_tests {
             "emp-david",
             "/wt",
             "h",
+            BriefSource::Rendered,
         )
         .await
         .expect_err("refused");
@@ -1409,6 +1452,7 @@ mod wire_tests {
             "emp-david",
             "/wt",
             "h",
+            BriefSource::Rendered,
         )
         .await
         .expect_err("refused");

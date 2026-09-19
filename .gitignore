@@ -35,8 +35,12 @@ dist/
 .DS_Store
 Thumbs.db
 
-# Claude Code
-.claude/
+# Claude Code — everything under .claude/ is per-machine (worktrees,
+# settings.local.json, locks) EXCEPT the project settings, which ship
+# the hooks that make a session a work-session packet (design 511fa7d4
+# car 2b, backlog da925366; pinned by dev_hooks_sh.rs).
+.claude/*
+!.claude/settings.json
 
 # Build artifacts
 *.log

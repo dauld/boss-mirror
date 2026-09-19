@@ -743,12 +743,17 @@ record_pass() {
         || log "could not complete the $RECLAIM_KIND run step — its packet stays open for the next acting pass to complete" >&2
 }
 
-# `--cli`: the CLI leg alone, its exit the verdict (0 confirmed, 1
-# failed; not yet is 0 — a wait, said above). What the shim's refusal
-# names as the fix, runnable from the dev container as well.
+# `--cli`: the CLI leg alone, its exit the verdict — 0 confirmed, 75
+# not yet (the installer's own code), 1 failed. The hourly pass above
+# counts not yet as a wait, exit 0; here it is a STATUS, because since
+# 2026-09-18 the shim (infra/dev/boss) runs this leg itself before a
+# write verb and must tell "installed, proceed" from "wait for the
+# deploy runner" without parsing the log (backlog 49d9e99d). Runnable
+# from the dev container by hand as well.
 if [ "${1:-}" = "--cli" ]; then
     install_tree_cli
     [ "$problems" -eq 0 ] || exit 1
+    [ "$CLI_RESULT" != "not yet" ] || exit 75
     exit 0
 fi
 

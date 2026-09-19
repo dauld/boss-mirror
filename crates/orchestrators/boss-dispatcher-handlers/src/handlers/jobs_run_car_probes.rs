@@ -30,9 +30,10 @@
 //! exit code with empty streams. `boss gate` now refuses a probe
 //! naming a tool in infra/forge/host-absent-tools.txt, and the runner
 //! records `unrunnable` with the tool named rather than a bare exit
-//! code. This rule does not restate either refusal; it applies the one
-//! of them nothing downstream can — see [`ship_refusal`], which is
-//! where that call is argued rather than described (23b2dffa).
+//! code. This rule does not restate every gate-side refusal; it applies
+//! the ones nothing downstream can (the unidentified read, the offset
+//! git date) — see [`ship_refusal`], which is where that call is argued
+//! rather than described (23b2dffa, 71ec5a58).
 //! The forge already answers
 //! ops-request packets through a reviewed verb allowlist
 //! (`infra/ops/verbs/run-car-probe.json`), so the run goes through that door:
@@ -144,10 +145,10 @@ pub(crate) struct Arrival {
     pub refusals: Vec<(String, Value)>,
 }
 
-/// WHY THIS DOOR RE-CHECKS ONE RULE AND NOT THE OTHER (backlog
-/// 23b2dffa, settled here rather than described).
+/// WHY THIS DOOR RE-CHECKS THE FAILS-OPEN RULES AND NOT THE OTHER
+/// (backlog 23b2dffa, settled here rather than described).
 ///
-/// `boss gate --park-probe` refuses both shapes of bad probe at park
+/// `boss gate --park-probe` refuses every shape of bad probe at park
 /// time, so most cars reaching this rule were already checked. Most is
 /// not all: a car's `proof_probe` can be written straight onto it with a
 /// metadata PATCH (a documented door), and cars parked before the
@@ -168,26 +169,53 @@ pub(crate) struct Arrival {
 /// car that then closes (61085a9e). By the time the text reaches the
 /// forge it is too late for anything but the refusal, and this is the
 /// last place that can make one.
+///
+/// THE OFFSET GIT DATE IS RE-CHECKED for the same reason (71ec5a58,
+/// left by the builder of c0ac92b8). A string compare of `%cI` against
+/// the SoR's UTC timestamps lies in BOTH directions — FAILED for a
+/// not-yet on 746a1fac, and PASS for an event that never happened with
+/// the offsets the other way round — and the runner sees only a compare
+/// that succeeded. The gate and `boss prove` refuse the token; a probe
+/// PATCHed onto a car met neither, so this door refuses it too, under
+/// the rule id both of them record.
 fn ship_refusal(probe: &str, expect: Option<&str>) -> Option<Value> {
-    let client = boss_jobs::probe::reads_the_sor_unidentified(probe)?;
+    let (rule, why) = if let Some(client) = boss_jobs::probe::reads_the_sor_unidentified(probe) {
+        (
+            boss_jobs::probe::UNIDENTIFIED_RULE,
+            format!(
+                "THE PROBE WAS NOT RUN: it reads the system of record with `{client}` and no \
+                 identity, so it would read as operator:unidentified and be answered with a \
+                 NARROWER WORLD, silently. {evidence} Re-park the car with a probe that reads \
+                 as a named reader ({reader} /api/...), or prove it by hand.",
+                evidence = boss_jobs::probe::UNIDENTIFIED_READ_EVIDENCE,
+                reader = boss_jobs::probe::SOR_READER,
+            ),
+        )
+    } else {
+        let token = boss_jobs::probe::reads_git_time_with_an_offset(probe)?;
+        (
+            boss_jobs::probe::GIT_TIME_RULE,
+            format!(
+                "THE PROBE WAS NOT RUN: it reads a git date with `{token}`, which carries the \
+                 committer's UTC offset, and a probe that compares that string against the \
+                 system of record's UTC timestamps lies in BOTH directions. {evidence} \
+                 Re-park the car with a probe that compares epochs (git log -1 --format=%ct \
+                 against date -u -d \"$ts\" +%s, the empty guard first), or prove it by hand.",
+                evidence = boss_jobs::probe::GIT_TIME_STRING_EVIDENCE,
+            ),
+        )
+    };
     // No `at`: this rule holds no clock (the dispatcher's time comes
     // from the clock port, which this handler does not carry), and the
     // PATCH that records the attempt is itself an audit-log event with
     // one. The same attempt re-written on a redelivered arrival is
     // idempotent by content, which is what at-least-once needs.
     Some(json!({
-        "refused": boss_jobs::probe::UNIDENTIFIED_RULE,
+        "refused": rule,
         "probe": probe,
         "expect": expect.unwrap_or(""),
         "unrunnable": false,
-        "why": format!(
-            "THE PROBE WAS NOT RUN: it reads the system of record with `{client}` and no \
-             identity, so it would read as operator:unidentified and be answered with a \
-             NARROWER WORLD, silently. {evidence} Re-park the car with a probe that reads as \
-             a named reader ({reader} /api/...), or prove it by hand.",
-            evidence = boss_jobs::probe::UNIDENTIFIED_READ_EVIDENCE,
-            reader = boss_jobs::probe::SOR_READER,
-        ),
+        "why": why,
     }))
 }
 
@@ -572,6 +600,47 @@ mod tests {
         assert_eq!(
             attempt["probe"],
             "curl -fsS $BOSS_JOBS_URL/api/jobs?kind=gate-run | grep -q c0ffee"
+        );
+    }
+
+    /// THE OTHER RULE WITH NO BACKSTOP DOWNSTREAM (backlog 71ec5a58,
+    /// left by the builder of c0ac92b8). A probe that compares `git log
+    /// --format=%cI` — a committer date carrying a -07:00 offset —
+    /// against the SoR's UTC timestamps as STRINGS lies in both
+    /// directions: it answered FAILED for a not-yet on car 746a1fac,
+    /// and with the offsets the other way it answers PASS for an event
+    /// that never happened. The forge runner cannot see that: the probe
+    /// runs, the compare succeeds, and a proof of nothing is recorded
+    /// on a car that then closes. The gate and `boss prove` refuse the
+    /// token; a PATCHed probe meets neither, so this door refuses it
+    /// too, under the same rule id.
+    #[test]
+    fn a_car_whose_probe_reads_git_time_with_an_offset_is_refused_not_shipped() {
+        let probe = "c=$(git log -1 --format=%cI HEAD); t=$(boss-sor-read /api/audit | jq -r \
+                     '.data[0].at // empty'); [ \"$t\" \\> \"$c\" ] && echo retire:after";
+        let cars = [car(
+            "c1",
+            "t1",
+            json!({"proof_probe": probe, "proof_expect": "retire:after"}),
+            "ready",
+        )];
+        let got = probe_requests(Scope::Train("t1"), &cars, &[], "r", "ev", "jobs.job.closed");
+        assert!(
+            got.requests.is_empty(),
+            "a probe that compares an offset git date as a string must not be shipped: {:?}",
+            got.requests
+        );
+        assert_eq!(got.refusals.len(), 1);
+        let (id, attempt) = &got.refusals[0];
+        assert_eq!(id, "c1");
+        assert_eq!(attempt["refused"], boss_jobs::probe::GIT_TIME_RULE);
+        assert_eq!(attempt["unrunnable"], false);
+        assert_eq!(attempt["probe"], probe);
+        assert_eq!(attempt["expect"], "retire:after");
+        let why = attempt["why"].as_str().unwrap_or_default();
+        assert!(
+            why.contains("%cI") && why.contains("%ct"),
+            "the attempt must name the token and the epoch rewrite: {attempt}"
         );
     }
 

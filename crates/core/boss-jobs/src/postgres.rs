@@ -1353,13 +1353,31 @@ impl JobsRepository for PgJobs {
         // two racing claims serialize on the row lock and exactly one
         // sees a matching predicate. Idempotent re-claim by the
         // holder matches too (ready or already active).
+        //
+        // THE HOLDER IN EITHER SPELLING (backlog d7fef617). The login
+        // door (design 6fda05ae) signs an agent's claim by its
+        // registered id, but a step nominated with the agent's LOGIN —
+        // every executor-lane nomination before 2026-09-19, and 142
+        // open-step assignments measured on 2026-09-11 — holds the
+        // alias. Comparing the two answered 409 to the holder itself.
+        // So `me` is the claimant plus every alias the registry maps to
+        // it, read inside the same transaction, and the SET rewrites
+        // the holder to the registered id: one spelling from here on.
+        // Directional on purpose — an alias claiming a step the
+        // registered id holds is not `me`, because nothing signs as
+        // the alias any more.
         let row = sqlx::query(
             r#"
+            WITH me AS (
+                SELECT $2::text AS id
+                UNION
+                SELECT alias FROM actor_aliases WHERE actor_id = $2
+            )
             UPDATE steps SET assignee_id = $2, status = 'active', updated_at = $3
             WHERE id = $1
               AND (
-                    (status = 'ready' AND (assignee_id IS NULL OR assignee_id = $2))
-                 OR (status = 'active' AND assignee_id = $2)
+                    (status = 'ready' AND (assignee_id IS NULL OR assignee_id IN (SELECT id FROM me)))
+                 OR (status = 'active' AND assignee_id IN (SELECT id FROM me))
               )
             RETURNING id
             "#,

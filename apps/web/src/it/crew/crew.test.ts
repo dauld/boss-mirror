@@ -25,6 +25,8 @@ import {
   parseYard,
   parseWaits,
   parseAgentRuns,
+  parseSessions,
+  crews,
   isBuilding,
   gatedBranches,
   pipelineTrack,
@@ -715,6 +717,98 @@ describe('parseAgentRuns', () => {
   });
 });
 
+/// `GET /api/jobs?kind=work-session&status=open` — the shop floor
+/// (design 511fa7d4 car 2b): one packet per operator session, as the
+/// SessionStart hook files it and the prompt hook heartbeats it.
+const SESSIONS_RAW = {
+  data: [
+    {
+      id: '7a1e2b3c-0000-4000-8000-00000000abcd',
+      kind: 'work-session',
+      status: 'open',
+      title: 'Session: emp-david on boss-dev-0',
+      metadata: {
+        actor: 'emp-david',
+        host: 'boss-dev-0',
+        cwd: '/work/boss',
+        started_at: '2026-09-19T01:00:00Z',
+        last_active_at: '2026-09-19T03:30:00Z',
+        prompt_count: 12,
+        untracked_runs: 1,
+        opened_at: '2026-09-19T01:00:00.000000Z',
+      },
+      steps: [
+        { spec_slug: 'opened', status: 'completed' },
+        { spec_slug: 'active', status: 'ready' },
+      ],
+    },
+    // A session that opened and never prompted: no heartbeat yet.
+    {
+      id: '7a1e2b3c-0000-4000-8000-00000000ef01',
+      kind: 'work-session',
+      status: 'open',
+      title: 'Session: claude@algedonic.dev on boss-dev-0',
+      metadata: { actor: 'claude@algedonic.dev', host: 'boss-dev-0', started_at: '2026-09-19T03:50:00Z' },
+      steps: [],
+    },
+    { kind: 'work-session', status: 'open', title: 'no id, not a row' },
+  ],
+  total: 3,
+};
+
+describe('parseSessions', () => {
+  it('reads the session keys, absence as null', () => {
+    const sessions = parseSessions(SESSIONS_RAW);
+    expect(sessions.length).toBe(2);
+    const s = sessions[0]!;
+    expect(s.actor).toBe('emp-david');
+    expect(s.host).toBe('boss-dev-0');
+    expect(s.cwd).toBe('/work/boss');
+    expect(s.startedAt).toBe('2026-09-19T01:00:00Z');
+    expect(s.lastActiveAt).toBe('2026-09-19T03:30:00Z');
+    expect(s.promptCount).toBe(12);
+    expect(s.untrackedRuns).toBe(1);
+    const quiet = sessions[1]!;
+    expect(quiet.lastActiveAt).toBeNull();
+    expect(quiet.promptCount).toBeNull();
+    expect(quiet.untrackedRuns).toBeNull();
+    expect(quiet.cwd).toBeNull();
+    expect(parseSessions(null)).toEqual([]);
+  });
+});
+
+describe('crews', () => {
+  const sessions = parseSessions(SESSIONS_RAW);
+  const linked = {
+    ...parseAgentRuns(AGENT_RUNS_RAW)[0]!,
+    session: '7a1e2b3c-0000-4000-8000-00000000abcd',
+  };
+  const unlinked = parseAgentRuns(AGENT_RUNS_RAW)[1]!;
+
+  it('folds each session with the runs linked to it, and leaves the rest', () => {
+    const out = crews(sessions, [linked, unlinked], '2026-09-19T04:00:00Z');
+    expect(out.crews.length).toBe(2);
+    expect(out.crews[0]!.session.id).toBe('7a1e2b3c-0000-4000-8000-00000000abcd');
+    expect(out.crews[0]!.runs.map((r) => r.id)).toEqual([linked.id]);
+    expect(out.crews[1]!.runs).toEqual([]);
+    // A run with no session, or a session this read did not return,
+    // is not lost: it stays in the unlinked list the runs table shows.
+    expect(out.unlinked.map((r) => r.id)).toEqual([unlinked.id]);
+  });
+
+  it('draws a session idle past an hour of silence, measured from the heartbeat', () => {
+    // 03:30 heartbeat, now 04:00 — thirty minutes, at work.
+    expect(crews(sessions, [], '2026-09-19T04:00:00Z').crews[0]!.idle).toBe(false);
+    // Now 04:31 — past the hour.
+    expect(crews(sessions, [], '2026-09-19T04:31:00Z').crews[0]!.idle).toBe(true);
+    // No heartbeat yet: measured from the start, 03:50 → 04:31 is idle;
+    // and with no clock at all nothing is judged — null, never false.
+    expect(crews(sessions, [], '2026-09-19T04:31:00Z').crews[1]!.idle).toBe(false);
+    expect(crews(sessions, [], '2026-09-19T05:00:00Z').crews[1]!.idle).toBe(true);
+    expect(crews(sessions, [], null).crews[0]!.idle).toBeNull();
+  });
+});
+
 // ---------------------------------------------------------------------
 // The page, pinned at source level
 // ---------------------------------------------------------------------
@@ -742,6 +836,14 @@ describe('CrewBoardPage wiring', () => {
     expect(moduleCode).toContain('/api/jobs/queue-age');
     // Open runs only, narrowed in the query — a closed run is history.
     expect(moduleCode).toContain('kind=agent-run&status=open');
+    // And the sixth (design 511fa7d4 car 2b): open sessions, the crews.
+    expect(moduleCode).toContain('kind=work-session&status=open');
+  });
+
+  it('renders the sessions as crew rows, data only', () => {
+    expect(pageCode).toContain('crews');
+    expect(pageCode).toContain('sessions');
+    expect(pageCode).not.toMatch(/\.crew-session[\s{]/);
   });
 
   it('renders the agent runs as rows of the same table shape, data only', () => {
