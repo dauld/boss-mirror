@@ -38,9 +38,14 @@ Thumbs.db
 # Claude Code — everything under .claude/ is per-machine (worktrees,
 # settings.local.json, locks) EXCEPT the project settings, which ship
 # the hooks that make a session a work-session packet (design 511fa7d4
-# car 2b, backlog da925366; pinned by dev_hooks_sh.rs).
+# car 2b, backlog da925366; pinned by dev_hooks_sh.rs), and the agent
+# definitions, which are the CONTROL a step's declared effort selects
+# (backlog e720dd00; pinned by boss_jobs::agent_spec's tests).
 .claude/*
 !.claude/settings.json
+!.claude/agents/
+.claude/agents/*
+!.claude/agents/*.md
 
 # Build artifacts
 *.log

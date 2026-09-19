@@ -4,6 +4,15 @@
 //!   AND OR NOT
 //!   =  !=  <  <=  >  >=
 //!
+//! AND and OR SHORT-CIRCUIT. `cheap_conjunct AND expensive_helper(...)`
+//! calls the helper only on the events whose cheap conjunct holds, so a
+//! guard may safely sit on a busy topic. The corollary is that a right
+//! operand the left one has already decided is never evaluated, and so
+//! never raises: an unregistered helper there is caught by
+//! `every_helper_a_when_guard_names_resolves`
+//! (crates/core/boss-dispatcher/tests/sweep_spawn_guards.rs) at gate
+//! time, not by evaluation in production (151d1e04).
+//!
 //! Operands:
 //!   - Literals: string "...", integer 123, boolean true/false, null
 //!   - Identifiers: bareword — resolved against caller-supplied state
@@ -564,6 +573,30 @@ pub fn eval(expr: &Expr, ctx: &Context<'_>) -> Result<Value, EvalError> {
             })?;
             Ok(Value::Bool(!b))
         }
+        // AND and OR short-circuit: once the left operand decides the
+        // answer the right one is not evaluated at all (151d1e04). The
+        // right operand of a rule's `when` is typically a helper that
+        // reads the jobs-api, so evaluating it unconditionally put that
+        // read on EVERY event on the topic — the publish-drift rule's
+        // first draft did exactly that on `jobs.job.closed` and would
+        // have dead-lettered system-wide on any jobs-api blip. Note
+        // what this does NOT change: `references()` is a structure walk
+        // over the whole tree, so the Workflow dependency index and the
+        // viability lint still see both sides.
+        Expr::BinaryOp(op @ (BinaryOp::And | BinaryOp::Or), lhs, rhs) => {
+            let l = eval(lhs, ctx)?;
+            // The left operand is still evaluated and still type-checked:
+            // a decision is skipped, never guessed.
+            let lb = l.as_bool().ok_or(EvalError::TypeError {
+                expected: "bool",
+                got: l.kind(),
+            })?;
+            if lb == matches!(op, BinaryOp::Or) {
+                return Ok(Value::Bool(lb));
+            }
+            let r = eval(rhs, ctx)?;
+            eval_binop(*op, &l, &r)
+        }
         Expr::BinaryOp(op, lhs, rhs) => {
             let l = eval(lhs, ctx)?;
             let r = eval(rhs, ctx)?;
@@ -1061,6 +1094,161 @@ mod tests {
         assert!(matches!(
             eval(&parse("a AND b").unwrap(), &c),
             Err(EvalError::TypeError { .. })
+        ));
+    }
+
+    // ----- short-circuit (151d1e04) -----
+    //
+    // AND/OR must not touch their right operand once the left one
+    // decides the answer. The property is about the CALL, not the
+    // result: a helper guard's whole job is to be expensive (a
+    // jobs-api read), and a test that only asserted `false` would
+    // pass with the bug present. So these count calls.
+    //
+    // The measured consequence that filed this: the publish-drift
+    // rule was first written on `jobs.job.closed` as
+    // `kind = "pr-train" AND outcome = "arrived" AND
+    // open_publish_exists(...)`, which put a jobs-api read on EVERY
+    // packet close in the system and reddened two unrelated
+    // dispatcher tests with PredicateFailed / UnknownHelper — which
+    // is exactly what a jobs-api blip would do in production:
+    // dead-letter on every close, system-wide.
+
+    /// Counts every helper invocation, so a test can observe that the
+    /// right operand was never reached rather than only that the
+    /// answer came out false.
+    #[derive(Default)]
+    struct CountingHelpers {
+        calls: std::cell::Cell<usize>,
+    }
+
+    impl HelperResolver for CountingHelpers {
+        fn call(&self, _name: &str, _args: &[Value]) -> Result<Value, EvalError> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(Value::Bool(true))
+        }
+    }
+
+    fn eval_counting(src: &str, payload: &serde_json::Value) -> (Result<Value, EvalError>, usize) {
+        let helpers = CountingHelpers::default();
+        let c = Context {
+            payload,
+            helpers: &helpers,
+        };
+        let out = eval(&parse(src).unwrap(), &c);
+        (out, helpers.calls.get())
+    }
+
+    #[test]
+    fn a_false_and_never_calls_the_helper_on_its_right() {
+        let payload = json!({ "kind": "backlog-item" });
+        let (out, calls) = eval_counting("kind = \"pr-train\" AND guard()", &payload);
+        assert_eq!(out.unwrap(), Value::Bool(false));
+        assert_eq!(
+            calls, 0,
+            "the helper ran on an event the cheap conjunct excluded"
+        );
+    }
+
+    #[test]
+    fn a_true_or_never_calls_the_helper_on_its_right() {
+        let payload = json!({ "kind": "pr-train" });
+        let (out, calls) = eval_counting("kind = \"pr-train\" OR guard()", &payload);
+        assert_eq!(out.unwrap(), Value::Bool(true));
+        assert_eq!(
+            calls, 0,
+            "the helper ran though the left disjunct already decided"
+        );
+    }
+
+    #[test]
+    fn the_right_operand_still_runs_when_the_left_does_not_decide() {
+        // The other half of the property: short-circuiting must not
+        // become "never evaluates the right side", which would pass
+        // the two tests above and break every real guard.
+        let payload = json!({ "kind": "pr-train" });
+        let (out, calls) = eval_counting("kind = \"pr-train\" AND guard()", &payload);
+        assert_eq!(out.unwrap(), Value::Bool(true));
+        assert_eq!(calls, 1);
+
+        let payload = json!({ "kind": "backlog-item" });
+        let (out, calls) = eval_counting("kind = \"pr-train\" OR guard()", &payload);
+        assert_eq!(out.unwrap(), Value::Bool(true));
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn the_guard_shape_that_filed_this_reads_nothing_off_topic() {
+        // Left-associative parsing makes a three-conjunct `when` nest
+        // as `((kind AND outcome) AND helper)`, so the trailing helper
+        // is reached only when BOTH cheap conjuncts hold. This is the
+        // predicate from the packet, verbatim in shape.
+        let src = "kind = \"pr-train\" AND outcome = \"arrived\" AND open_publish_exists(\"github-mirror\")";
+
+        let (out, calls) = eval_counting(
+            src,
+            &json!({ "kind": "backlog-item", "outcome": "arrived" }),
+        );
+        assert_eq!(out.unwrap(), Value::Bool(false));
+        assert_eq!(calls, 0, "wrong kind still paid for a jobs-api read");
+
+        let (out, calls) =
+            eval_counting(src, &json!({ "kind": "pr-train", "outcome": "cancelled" }));
+        assert_eq!(out.unwrap(), Value::Bool(false));
+        assert_eq!(calls, 0, "wrong outcome still paid for a jobs-api read");
+
+        let (out, calls) = eval_counting(src, &json!({ "kind": "pr-train", "outcome": "arrived" }));
+        assert_eq!(out.unwrap(), Value::Bool(true));
+        assert_eq!(
+            calls, 1,
+            "the helper must still run on the events the guard is for"
+        );
+    }
+
+    #[test]
+    fn an_absent_left_conjunct_short_circuits_too() {
+        // Absent reads false in boolean position (7b756357), and a
+        // rule guarded on optional metadata is the commonest cheap
+        // conjunct of all — it must not pay for the right side either.
+        let (out, calls) = eval_counting("job.metadata.publish AND guard()", &json!({}));
+        assert_eq!(out.unwrap(), Value::Bool(false));
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn short_circuit_does_not_excuse_a_non_bool_on_the_left() {
+        // The left operand is still evaluated and still type-checked:
+        // a decision is skipped, never guessed.
+        let payload = json!({ "a": "yes" });
+        let (out, calls) = eval_counting("a AND guard()", &payload);
+        assert!(matches!(out, Err(EvalError::TypeError { .. })));
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn a_skipped_right_operand_raises_nothing_at_all() {
+        // THE DELIBERATE TRADE (151d1e04). An unrecognised helper used
+        // to raise UnknownHelper on every event on the topic; once the
+        // left conjunct decides, it raises on none of them, so a
+        // malformed rule is no longer detected by evaluation alone.
+        // That is accepted because evaluation was never the right
+        // detector: `every_helper_a_when_guard_names_resolves`
+        // (crates/core/boss-dispatcher/tests/sweep_spawn_guards.rs)
+        // resolves every helper named by every rule `when` in the
+        // registry at GATE time, by name, before the rule can land — a
+        // check that does not depend on an event happening to take the
+        // branch. Detecting a typo at the gate beats detecting it in
+        // production on whatever fraction of traffic reaches it.
+        let payload = json!({ "kind": "backlog-item" });
+        let c = ctx(&payload); // NoHelpers: every call is UnknownHelper
+        assert_eq!(
+            eval(&parse("kind = \"pr-train\" AND mystery()").unwrap(), &c).unwrap(),
+            Value::Bool(false)
+        );
+        // …and it still raises when the left conjunct does not decide.
+        assert!(matches!(
+            eval(&parse("kind = \"backlog-item\" AND mystery()").unwrap(), &c),
+            Err(EvalError::UnknownHelper(_))
         ));
     }
 

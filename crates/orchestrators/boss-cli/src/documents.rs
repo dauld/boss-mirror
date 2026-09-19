@@ -205,10 +205,27 @@ mod tests {
         for phrase in [
             "wt-cargo test -p boss-testing --all-features",
             "reset --soft origin/main",
-            "git diff --stat origin/main",
+            "git diff --stat origin/main...HEAD",
+            "merge-base",
             "scratchpad/builders/<packet id>/",
         ] {
             assert!(text.contains(phrase), "the builder rules say `{phrase}`");
+        }
+        // 8d054cb2 (2026-09-19): the rule prescribed the TWO-dot form,
+        // which diffs the tips, so every commit that landed on main while
+        // a builder worked was reported back as the branch's own deletions
+        // (car 6e738252: two-dot said 47 files / 5235 deletions, three-dot
+        // said 7 files / 16 deletions, and the branch was one commit
+        // behind). That false alarm invites the merge-or-reset this same
+        // rule forbids, so no occurrence may be left in tip-to-tip form.
+        let check = "git diff --stat origin/main";
+        for (at, _) in text.match_indices(check) {
+            let three_dot = text[at + check.len()..].starts_with("...HEAD");
+            let named_wrong = text[..at].ends_with("the two-dot `");
+            assert!(
+                three_dot || named_wrong,
+                "a tip-to-tip diff check survives in the builder rules at byte {at}"
+            );
         }
     }
 

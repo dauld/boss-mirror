@@ -23,6 +23,20 @@
 //! workflow row in hand, the same reason `authority_role` and
 //! `claimable` ride there.
 //!
+//! **The effort must reach a control** (backlog e720dd00, 2026-09-19).
+//! A declared effort that nothing applies reads as fact and is not one:
+//! every builder dispatched before this recorded `effort = high` and
+//! ran at the session default. The harness takes reasoning effort from
+//! an agent DEFINITION, so [`definition_name`] is the mapping from a
+//! declared effort to the file under [`DEFINITIONS_DIR`] that runs at
+//! it, and `boss dispatch` names it on the Agent call. The definitions
+//! are one file written [`Effort::ALL`] times with one word changed —
+//! same [`DEFINITION_MODEL`] throughout, because a definition pairing a
+//! cheaper model with a lower effort would confound the measurement
+//! this exists to enable. The tests below pin the roster, the name, the
+//! effort line and the model; that the harness HONOURS the key is
+//! attested by its documentation, not measured here.
+//!
 //! **The model must be priced.** `agent_rate_card` is the registry of
 //! models the system can cost (`agent_runs`); a step naming a model the
 //! card does not hold would run unpriced, which is the failure that
@@ -48,6 +62,11 @@ pub enum Effort {
 }
 
 impl Effort {
+    /// Every effort a block may declare, and so every effort that
+    /// needs a definition to run at. The roster the definition tests
+    /// iterate — one set, not a second list beside this enum.
+    pub const ALL: [Effort; 3] = [Self::Low, Self::Medium, Self::High];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Low => "low",
@@ -55,6 +74,26 @@ impl Effort {
             Self::High => "high",
         }
     }
+}
+
+/// Where the agent definitions live, relative to the repo root — the
+/// project-level directory Claude Code reads a `subagent_type` from.
+pub const DEFINITIONS_DIR: &str = ".claude/agents";
+
+/// The model EVERY definition declares, and the family every `agent`
+/// block's model must belong to (backlog e720dd00). Fixed on purpose:
+/// the series this enables varies EFFORT and nothing else, and a
+/// definition pairing a cheaper model with a lower effort — the
+/// documentation's own example does exactly that — would make no
+/// observation attributable to either.
+pub const DEFINITION_MODEL: &str = "opus";
+
+/// The definition that runs a step at `effort` — the `subagent_type`
+/// the dispatched prompt names and the hook sets on the Agent call.
+/// THE mapping, in one place: the file is `<name>.md` under
+/// [`DEFINITIONS_DIR`] and its `effort:` line is `effort`.
+pub fn definition_name(effort: &str) -> String {
+    format!("effort-{effort}")
 }
 
 /// The block. Every key is required within it — a block that names a
@@ -304,5 +343,183 @@ mod tests {
             ..builder()
         };
         assert!(refusal(&blank).unwrap().contains("profile"));
+    }
+
+    // ---- The effort definitions (backlog e720dd00, 2026-09-19) ----
+
+    /// The `key: value` frontmatter of a definition file: the lines
+    /// between the opening and the closing `---`.
+    fn frontmatter(text: &str) -> Vec<(String, String)> {
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("---"), "a definition opens with ---");
+        lines
+            .take_while(|l| l.trim() != "---")
+            .filter_map(|l| l.split_once(':'))
+            .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+            .collect()
+    }
+
+    /// Whole-word blanking, so two definitions can be compared for
+    /// anything OTHER than the effort they declare — `low` is a
+    /// substring of `follow`, so a plain replace would not do.
+    fn blank(text: &str, word: &str) -> String {
+        let (b, w) = (text.as_bytes(), word.as_bytes());
+        let mut out: Vec<u8> = Vec::with_capacity(b.len());
+        let mut i = 0;
+        while i < b.len() {
+            let ends = i + w.len();
+            let whole = ends <= b.len()
+                && &b[i..ends] == w
+                && (i == 0 || !b[i - 1].is_ascii_alphanumeric())
+                && (ends == b.len() || !b[ends].is_ascii_alphanumeric());
+            if whole {
+                out.extend_from_slice(b"EFFORT");
+                i = ends;
+            } else {
+                // Byte-wise on purpose: the prose carries em dashes,
+                // and a char-boundary slice would panic on them.
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8(out).expect("the replacement is ASCII, the rest is copied verbatim")
+    }
+
+    fn definition_text(effort: Effort) -> String {
+        let path = boss_testing::repo_root()
+            .join(DEFINITIONS_DIR)
+            .join(format!("{}.md", definition_name(effort.as_str())));
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    /// The declaration must reach a control: every effort an `agent`
+    /// block is ALLOWED to declare has a definition under
+    /// `.claude/agents/`, and that definition declares that effort.
+    /// The set is exactly [`Effort::ALL`] in both directions — a
+    /// definition for a value [`Effort`] refuses would be a CPU no
+    /// block can ask for.
+    #[test]
+    fn every_declarable_effort_has_a_definition_that_declares_it() {
+        let dir = boss_testing::repo_root().join(DEFINITIONS_DIR);
+        for effort in Effort::ALL {
+            let name = definition_name(effort.as_str());
+            let text = definition_text(effort);
+            let fm = frontmatter(&text);
+            let get = |k: &str| {
+                fm.iter()
+                    .find(|(a, _)| a == k)
+                    .map(|(_, v)| v.trim_matches('"').to_string())
+            };
+            assert_eq!(
+                get("name").as_deref(),
+                Some(name.as_str()),
+                "{name}: the frontmatter name must equal the filename stem"
+            );
+            assert_eq!(
+                get("effort").as_deref(),
+                Some(effort.as_str()),
+                "{name}: the effort line must equal the effort in its name, or the block's \
+                 declaration selects a CPU running at some other budget"
+            );
+            assert_eq!(
+                get("model").as_deref(),
+                Some(DEFINITION_MODEL),
+                "{name}: hold the model FIXED across the definitions — a definition pairing a \
+                 cheaper model with a lower effort confounds the measurement this exists for"
+            );
+            assert!(
+                get("description").is_some_and(|d| !d.is_empty()),
+                "{name}: description is required frontmatter"
+            );
+            // Scope fence (e720dd00): permission is not effort.
+            assert!(
+                get("permissionMode").is_none(),
+                "{name}: permissionMode is unrelated to effort and must not ride this file"
+            );
+        }
+
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .expect("the definitions directory")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "md"))
+            .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+            .filter(|s| s.starts_with("effort-"))
+            .collect();
+        on_disk.sort();
+        let mut declarable: Vec<String> = Effort::ALL
+            .iter()
+            .map(|e| definition_name(e.as_str()))
+            .collect();
+        declarable.sort();
+        assert_eq!(
+            on_disk, declarable,
+            "the definitions and the efforts a block may declare are one set — widening one \
+             without the other leaves either a CPU nothing can ask for or a declaration with \
+             no CPU"
+        );
+    }
+
+    /// The experiment this enables is a series where EFFORT varies and
+    /// nothing else does, so the definitions must be one file written
+    /// three times with one word changed.
+    #[test]
+    fn the_definitions_differ_only_in_the_effort_they_declare() {
+        let blanked: Vec<(Effort, String)> = Effort::ALL
+            .iter()
+            .map(|e| (*e, blank(&definition_text(*e), e.as_str())))
+            .collect();
+        let (first_effort, first) = &blanked[0];
+        for (effort, text) in &blanked[1..] {
+            assert_eq!(
+                text,
+                first,
+                "{} and {} differ in more than their effort — the measurement would not be \
+                 attributable to effort",
+                definition_name(first_effort.as_str()),
+                definition_name(effort.as_str())
+            );
+        }
+    }
+
+    /// The other half of "its model matches the block's": every agent
+    /// block in the authored protocols names a model of the family the
+    /// definitions fix. A block declaring some other family would run
+    /// under a definition that silently changes the model too.
+    #[test]
+    fn every_authored_agent_block_names_a_model_the_definitions_model_covers() {
+        let dir = boss_testing::repo_root().join("infra/platform/workflows");
+        let mut seen = 0usize;
+        for entry in std::fs::read_dir(&dir).expect("the workflows directory") {
+            let path = entry.expect("a directory entry").path();
+            if path.extension().is_none_or(|x| x != "toml") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("readable");
+            for line in text.lines() {
+                let t = line.trim();
+                if !t.starts_with("agent = {") {
+                    continue;
+                }
+                let model = t
+                    .split_once("model = \"")
+                    .and_then(|(_, rest)| rest.split_once('"'))
+                    .map(|(m, _)| m)
+                    .unwrap_or_else(|| {
+                        panic!("{}: an agent block naming no model", path.display())
+                    });
+                seen += 1;
+                assert!(
+                    model.starts_with(DEFINITION_MODEL),
+                    "{}: the block declares model `{model}`, which the definitions' fixed \
+                     `model: {DEFINITION_MODEL}` does not cover — a run of it would change the \
+                     model as well as the effort",
+                    path.display()
+                );
+            }
+        }
+        assert!(
+            seen >= 10,
+            "the authored protocols carry agent blocks: {seen}"
+        );
     }
 }

@@ -54,6 +54,28 @@
 //!    with the prompt's size, so the run is at `building` the moment
 //!    the prompt exists.
 //!
+//! THE EFFORT SELECTS THE CPU (backlog e720dd00, 2026-09-19). The
+//! block's `effort` was resolved, validated, written onto the run
+//! packet and printed in the prompt — and applied by nothing: the
+//! harness takes reasoning effort from an agent DEFINITION, and there
+//! were none, so every builder recorded `effort = high` and ran at the
+//! session default. A packet asserting a property of a run that is not
+//! true of that run is the mostly-sure shape the correctness protocol
+//! refuses, and the honest repair is to make the declaration select
+//! something. It now names a definition — `.claude/agents/effort-<v>.md`,
+//! one per value [`boss_jobs::agent_spec::Effort`] admits, identical
+//! but for the `effort:` line so a series across them varies reasoning
+//! budget and nothing else — in the prompt ([`effort_line`]) and on the
+//! Agent call itself, where the hook sets `subagent_type`
+//! ([`crate::dispatch_hook::updated_input`]). What that buys is
+//! "declared and NAMED", not "provably applied": that the harness
+//! honours the key is attested by its documentation (sub-agents,
+//! Advanced Fields, v2.1.278), and a model cannot introspect its own
+//! thinking budget, so no probe available to us measures the effort
+//! took. The tests pin what is checkable — a definition for every
+//! declarable effort, its effort matching its name, its model fixed,
+//! and the prompt naming the right one.
+//!
 //! The prompt goes to stdout and every status line to stderr, so
 //! `boss dispatch <packet> > prompt.txt` is the prompt and nothing else.
 //!
@@ -364,6 +386,24 @@ pub(crate) fn briefed_body(existing: &Value, prompt_bytes: usize) -> Value {
     json!({ "status": "completed", "metadata": Value::Object(md) })
 }
 
+/// The agent definition a run's declared effort selects — the one
+/// mapping, in `boss_jobs::agent_spec`, never a name spelled here.
+pub(crate) fn subagent_type(settings: &Settings) -> String {
+    boss_jobs::agent_spec::definition_name(&settings.effort)
+}
+
+/// The definition in THIS checkout, or `None` when the file is not
+/// there. Named after the file it reads: a definition the harness
+/// cannot load is a `subagent_type` that fails the call, so the hook
+/// names one only when the tree holds it.
+pub(crate) fn definition_in(repo: &Path, settings: &Settings) -> Option<String> {
+    let name = subagent_type(settings);
+    let path = repo
+        .join(boss_jobs::agent_spec::DEFINITIONS_DIR)
+        .join(format!("{name}.md"));
+    path.is_file().then_some(name)
+}
+
 /// The last part of the prompt: the run's id, and the one export that
 /// ties the gate the builder launches back to it.
 pub(crate) fn run_section(run_id: &str, settings: &Settings) -> String {
@@ -372,13 +412,33 @@ pub(crate) fn run_section(run_id: &str, settings: &Settings) -> String {
          Your run is agent-run {run_id} (profile `{}`, model {}, budget ${}, effort {}).\n\
          Before `boss gate`, in the shell you gate from: export {}={run_id}\n\
          The gate-run then records this run, and a green lands it by itself.\n\
-         {}\n",
+         {}\n{}\n",
         settings.profile,
         settings.model,
         settings.budget_usd,
         settings.effort,
         crate::gate::AGENT_RUN_ENV,
         budget_line(settings.budget_usd),
+        effort_line(settings),
+    )
+}
+
+/// The effort as a CONTROL rather than a noun (backlog e720dd00,
+/// 2026-09-19). Until this landed the block's `effort` was validated,
+/// written onto the run packet and printed in the sentence above —
+/// and nothing applied it, so every builder recorded `effort=high`
+/// and ran at the session default. The harness takes reasoning effort
+/// from an agent DEFINITION, so the declaration selects one: the hook
+/// puts this name on the Agent call's `subagent_type`, and a prompt
+/// pasted by hand names it here for the operator who pastes it.
+pub(crate) fn effort_line(settings: &Settings) -> String {
+    let name = subagent_type(settings);
+    format!(
+        "Launched with subagent_type {name} ({}/{name}.md) — the definition whose `effort` line \
+         is the effort this block declares. The PreToolUse hook sets it on the Agent call; a \
+         prompt pasted by hand must name it, or the run takes the session's own effort and the \
+         record says something untrue of it.",
+        boss_jobs::agent_spec::DEFINITIONS_DIR
     )
 }
 
@@ -420,6 +480,11 @@ pub(crate) enum BriefSource<'a> {
 pub(crate) struct Dispatched {
     pub run_id: String,
     pub prompt: String,
+    /// The agent definition the declared effort selects, when this
+    /// checkout HAS it (backlog e720dd00). `None` in a tree without
+    /// the definitions — the hook then leaves the call's own type
+    /// rather than naming a CPU that does not exist here.
+    pub subagent_type: Option<String>,
 }
 
 /// The whole verb against an explicit base — the seam the wire tests
@@ -569,7 +634,11 @@ pub(crate) async fn dispatch_at(
         &id[..8],
         prompt.len()
     );
-    Ok(Dispatched { run_id, prompt })
+    Ok(Dispatched {
+        run_id,
+        prompt,
+        subagent_type: definition_in(repo, &settings),
+    })
 }
 
 /// The step `--report` completes.
@@ -1160,6 +1229,34 @@ mod tests {
         assert!(s.contains("opus-5[1m]") && s.contains("$5") && s.contains("high"));
         // The cap reaches the runner as the flag it passes (car 3).
         assert!(s.contains("--max-budget-usd 5"), "{s}");
+    }
+
+    /// The declared effort must reach a CONTROL (backlog e720dd00):
+    /// the prompt names the agent definition that runs at it, and the
+    /// name is `agent_spec`'s one mapping — not a word retyped here.
+    #[test]
+    fn the_run_section_names_the_definition_for_the_declared_effort() {
+        for effort in boss_jobs::agent_spec::Effort::ALL {
+            let settings = Settings {
+                effort: effort.as_str().into(),
+                ..block()
+            };
+            let name = boss_jobs::agent_spec::definition_name(effort.as_str());
+            let s = run_section("5b1d2c3e-0000-4000-8000-000000000001", &settings);
+            assert!(
+                s.contains(&format!("subagent_type {name}")),
+                "effort {} must name its definition: {s}",
+                effort.as_str()
+            );
+            assert!(
+                s.contains(&format!(
+                    "{}/{name}.md",
+                    boss_jobs::agent_spec::DEFINITIONS_DIR
+                )),
+                "{s}"
+            );
+            assert_eq!(subagent_type(&settings), name);
+        }
     }
 
     /// `--tokens` is a total or an input,output split, and the split is

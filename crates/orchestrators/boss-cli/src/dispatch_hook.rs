@@ -143,9 +143,19 @@ pub(crate) fn parse(input: &Value) -> Parsed {
 /// The hook's answer for a dispatch: the tool's input with the prompt
 /// replaced by the brief-plus-run-section, in the shape Claude Code
 /// reads off a PreToolUse hook's stdout.
-pub(crate) fn updated_input(input: &Value, prompt: &str) -> Value {
+pub(crate) fn updated_input(input: &Value, prompt: &str, subagent_type: Option<&str>) -> Value {
     let mut tool_input = input.get("tool_input").cloned().unwrap_or(json!({}));
     tool_input["prompt"] = json!(prompt);
+    // THE EFFORT REACHES A CONTROL HERE (backlog e720dd00, 2026-09-19).
+    // The block declares an effort; the harness takes reasoning effort
+    // from an agent definition named as `subagent_type`. So the door
+    // that already rewrites the prompt names the definition too, and
+    // the declaration selects the CPU instead of describing it. `None`
+    // — a checkout without the definitions — leaves the caller's own
+    // type rather than naming one that cannot be loaded.
+    if let Some(name) = subagent_type {
+        tool_input["subagent_type"] = json!(name);
+    }
     json!({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -270,7 +280,14 @@ pub(crate) async fn from_hook_at(
             )
             .await?;
             eprintln!("{RUN_LINE_PREFIX}{}", dispatched.run_id);
-            print!("{}", updated_input(input, &dispatched.prompt));
+            print!(
+                "{}",
+                updated_input(
+                    input,
+                    &dispatched.prompt,
+                    dispatched.subagent_type.as_deref()
+                )
+            );
             Ok(Outcome::Dispatched(dispatched))
         }
     }
@@ -396,12 +413,25 @@ mod tests {
     /// prompt; the count reads absent as zero.
     #[test]
     fn the_updated_input_keeps_the_calls_other_keys() {
-        let out = updated_input(&call("Packet: da925366"), "Packet: da925366\n== THE RUN ==");
+        let out = updated_input(
+            &call("Packet: da925366"),
+            "Packet: da925366\n== THE RUN ==",
+            None,
+        );
         let ti = &out["hookSpecificOutput"]["updatedInput"];
         assert_eq!(out["hookSpecificOutput"]["hookEventName"], "PreToolUse");
         assert_eq!(ti["prompt"], "Packet: da925366\n== THE RUN ==");
         assert_eq!(ti["description"], "build");
+        // No definition in this tree: the caller's own type stands.
         assert_eq!(ti["subagent_type"], "claude");
+
+        // The declared effort SELECTS the CPU: the door that rewrites
+        // the prompt names the definition on the call (e720dd00).
+        let named = updated_input(&call("Packet: da925366"), "p", Some("effort-high"));
+        let ti = &named["hookSpecificOutput"]["updatedInput"];
+        assert_eq!(ti["subagent_type"], "effort-high");
+        assert_eq!(ti["description"], "build");
+        assert_eq!(ti["prompt"], "p");
 
         assert_eq!(next_untracked(&json!({ "metadata": {} })), 1);
         assert_eq!(
@@ -579,6 +609,19 @@ mod wire_tests {
         assert!(
             d.prompt.contains(&format!("export BOSS_AGENT_RUN={RUN}")),
             "and the run section follows it"
+        );
+        // End to end (e720dd00): the block declares effort high, so the
+        // definition this checkout holds for `high` is what the call is
+        // rewritten to name — the declaration selecting the CPU.
+        assert_eq!(
+            d.subagent_type.as_deref(),
+            Some("effort-high"),
+            "the declared effort selects the definition"
+        );
+        assert!(
+            d.prompt.contains("subagent_type effort-high"),
+            "{}",
+            d.prompt
         );
         let calls = calls.lock().unwrap().clone();
         let filed = calls
