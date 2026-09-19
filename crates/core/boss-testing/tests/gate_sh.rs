@@ -482,9 +482,9 @@ fn the_gate_rechecks_headroom_as_the_run_proceeds() {
     let counter = dir.join("calls");
     let fake = dir.join("df");
     // 1st call: 900GB free. Every later call: 1GB.
-    std::fs::write(
+    boss_testing::write_exec(
         &fake,
-        format!(
+        &format!(
             "#!/usr/bin/env bash\n\
              n=$(cat {c} 2>/dev/null || echo 0)\n\
              echo $((n+1)) > {c}\n\
@@ -493,13 +493,7 @@ fn the_gate_rechecks_headroom_as_the_run_proceeds() {
              else echo '/dev/fake 1 1 1048576 99% /'; fi\n",
             c = counter.display()
         ),
-    )
-    .expect("write fake df");
-    std::fs::set_permissions(
-        &fake,
-        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
-    )
-    .expect("chmod");
+    );
 
     let out = gate_cmd(&["--auto"])
         .env("BOSS_GATE_DF_CMD", fake.to_str().expect("utf8"))
@@ -907,9 +901,9 @@ fn the_receipt_times_every_check() {
     // Calls 1 (startup) and 2 (before `fmt`) see plenty; call 3 (before
     // the first lint) trips, which is what makes the gate write a
     // receipt holding exactly one, real, timed check.
-    std::fs::write(
+    boss_testing::write_exec(
         &fake,
-        format!(
+        &format!(
             "#!/usr/bin/env bash\n\
              n=$(cat {c} 2>/dev/null || echo 0)\n\
              echo $((n+1)) > {c}\n\
@@ -918,13 +912,7 @@ fn the_receipt_times_every_check() {
              else echo '/dev/fake 1 1 1048576 99% /'; fi\n",
             c = counter.display()
         ),
-    )
-    .expect("write fake df");
-    std::fs::set_permissions(
-        &fake,
-        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
-    )
-    .expect("chmod");
+    );
 
     let out = gate_cmd(&["--quick"])
         .env("BOSS_GATE_DF_CMD", fake.to_str().expect("utf8"))

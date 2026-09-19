@@ -114,7 +114,7 @@ fn run_reader(case: &str, args: &[&str], env: &[(&str, &str)]) -> (i32, String, 
     let bin = dir.join("bin");
     boss_testing::create_dir(&bin);
     let log = dir.join("curl-argv");
-    boss_testing::write_file(
+    boss_testing::write_exec(
         &bin.join("curl"),
         &format!(
             "#!/usr/bin/env bash\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{}'\n\
@@ -122,12 +122,6 @@ fn run_reader(case: &str, args: &[&str], env: &[(&str, &str)]) -> (i32, String, 
             log.display()
         ),
     );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(bin.join("curl"), std::fs::Permissions::from_mode(0o755))
-            .expect("chmod stub curl");
-    }
     let mut cmd = Command::new(reader_path());
     cmd.args(args)
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))

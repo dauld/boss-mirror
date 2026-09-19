@@ -40,7 +40,7 @@
 //! derivation instead of itself. A test that only checked the answers
 //! would pass just as well against two copies that happen to agree today.
 
-use boss_testing::repo_root;
+use boss_testing::{repo_root, write_exec};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -58,12 +58,6 @@ const CANNOT_ANSWER: i32 = 4;
 /// test that reds cars for no reason.
 fn scratch(case: &str) -> PathBuf {
     boss_testing::scratch_dir(&format!("undeclared-objects-{case}"))
-}
-
-fn write_exec(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 /// One object, as JSON. The fixture writes JSON into `.yaml` files —
@@ -720,10 +714,10 @@ impl LintCase {
 
         let bin = c.root.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::copy(&c.kubectl, bin.join("kubectl")).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(bin.join("kubectl"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
+        // Not `std::fs::copy` + chmod: a copy holds the destination open
+        // for writing in this process, which is the same race.
+        let stub = std::fs::read_to_string(&c.kubectl).unwrap();
+        write_exec(&bin.join("kubectl"), &stub);
 
         for rel in [LINT_REL, DERIVE_REL] {
             let dst = c.tree.join(rel);

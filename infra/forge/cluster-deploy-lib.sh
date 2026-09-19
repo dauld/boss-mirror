@@ -718,6 +718,89 @@ tenant_stage() {
     fi
     return 0
 }
+# THE CHECK BEFORE THE APPLY (backlog 1af5119d, 2026-09-19). The
+# boss-tenant ConfigMap is what the gateway boots from, and the
+# Deployment is strategy Recreate with the gateway and the jobs API in
+# ONE container (infra/cluster/manifests/boss.yaml) — so a manifest
+# the gateway refuses (car 32bec388's unparseable-manifest refusal, an
+# unknown public_reads path, the launcher's 'not a tenant directory')
+# takes the system of record down until the delivered file is fixed,
+# and the watchdog rolls back IMAGES, not ConfigMaps. The 2026-09-07
+# class one layer out: a boot guard that refuses to start takes the
+# SoR down. So the converge judges the checkout with the product's
+# own loaders — `boss tenant check`, the tree's CLI that install.sh
+# takes out of the image on every tick (backlog 9f00a805) — BEFORE the
+# ConfigMap is applied, and a refusal keeps the previous ConfigMap:
+# the software converges, the tenant does not, and the packet says
+# which file and line.
+#
+# tenant_check SRC [REPORT] — MEASURES that the checkout SRC can boot.
+#   Runs `boss tenant check SRC` on the CHECKOUT (the contract's shape
+#   — tenant.toml + seeds/; the flat stage would read every seed as
+#   MISSING), which judges exactly the files the stage carries plus
+#   root files that never stage and cannot fail it (UNKNOWN). Three
+#   verdicts, never two:
+#     rc 0  every file passed; nothing printed.
+#     rc 1  REFUSED — prints `<path>:<line>` for the first MISSING or
+#           INVALID row (`<path>` alone when the loader named no
+#           line), the verb's whole report on stderr for the journal
+#           and in REPORT when one is named (the packet carries it).
+#     rc 3  COULD NOT CHECK — the CLI is not on this host, or it died
+#           without a verdict (any exit but 0 and 1, or a 1 with no
+#           refused row). Named on stderr. A caller treats it as a
+#           refusal for the apply and says 'could not check', never
+#           'checked': no evidence is not a pass.
+#   BOSS_CLI names the binary (a test's stub); the default is `boss`
+#   on PATH, /usr/local/bin/boss on the forge.
+tenant_check() {
+    local src="$1" report="${2:-}" cli="${BOSS_CLI:-boss}" out rc=0 row path
+    [ -z "$report" ] || rm -f "$report"
+    if ! command -v "$cli" >/dev/null 2>&1; then
+        echo "tenant_check: $cli is not on this host — the tenant was NOT checked (install.sh installs the tree's CLI from the image on each forge converge)" >&2
+        return 3
+    fi
+    out=$("$cli" tenant check "$src" 2>&1) || rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        1) ;;
+        *)
+            printf 'tenant_check: %s tenant check exited %s without a verdict — the tenant was NOT checked:\n%s\n' "$cli" "$rc" "$out" >&2
+            return 3 ;;
+    esac
+    printf '%s\n' "$out" >&2
+    [ -z "$report" ] || printf '%s\n' "$out" > "$report"
+    # The first refused row of the verb's render (tenant.rs
+    # Report::render: status, path, detail). A here-string, not a
+    # pipe: awk stops at its first match, and a producer still
+    # writing is SIGPIPE under pipefail.
+    row=$(awk '$1 == "INVALID" || $1 == "MISSING" { print; exit }' <<< "$out")
+    if [ -z "$row" ]; then
+        printf 'tenant_check: %s tenant check exited 1 but named no MISSING or INVALID file — the tenant was NOT checked:\n%s\n' "$cli" "$out" >&2
+        return 3
+    fi
+    path=$(awk '{ print $2 }' <<< "$row")
+    if [[ "$row" =~ [[:space:]]line[[:space:]]+([0-9]+) ]]; then
+        printf '%s:%s\n' "$path" "${BASH_REMATCH[1]}"
+    else
+        printf '%s\n' "$path"
+    fi
+    return 1
+}
+# tenant_check_alert TITLE DETAIL — the refusal as a PACKET for the
+#   platform owner, through the door the watchdog files with
+#   (alert-lib.sh: filed when the API answers, KEPT in the spool and
+#   filed by the next run that reaches it when it does not). In a
+#   subshell so the door's own refusals (no JOBS_API in the
+#   environment — sor.sh exits) cannot end the converge: visibility is
+#   never a precondition. Signed as this runner, not as the watchdog.
+tenant_check_alert() {
+    (
+        ALERT_ACTOR="automation:cluster-deploy-runner"
+        . "$(dirname "${BASH_SOURCE[0]}")/alert-lib.sh"
+        alert "$1" "$2"
+    ) || echo "cluster-deploy-runner: the alert door refused ($?) — the refusal is on this converge's packet and in this journal only" >&2
+    return 0
+}
 # site_stage SRC STAGE — the tenant checkout's site/ directory flattened
 #   into STAGE as ONE ConfigMap's keys (design b64c4377; backlog
 #   c8f6b233): every file directly under SRC/site — the company website

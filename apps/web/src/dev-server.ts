@@ -10,6 +10,9 @@
 //   3. Synthesise `x-boss-user` on every proxied API call from the
 //      `boss-persona` cookie so backend policy scoping reflects the
 //      "viewing as" persona chosen by the PersonaSwitcher.
+//   4. Under the mocked suite (BOSS_MOCKED=1, set by tests/run-mocked.ts)
+//      answer an `/api/**` miss locally instead of proxying it — see
+//      src/dev-mocked.ts.
 //
 // The `Bun.serve` routes object holds the bundled-HTML entries; the
 // `fetch` handler is the fallback for everything else. Hot reload
@@ -24,6 +27,7 @@ import { join } from 'node:path';
 // for this path, with HMR attached."
 import index from '../index.html';
 
+import { type Misses, apiHandler, isMocked, missSummary } from './dev-mocked';
 import { readyLine } from './dev-ready';
 import { DEFAULT_PORT, TREE_ID, TREE_PATH, treeResponse } from './dev-tree';
 
@@ -35,6 +39,13 @@ const PORT = Number(process.env['PORT'] ?? DEFAULT_PORT);
 // registry's PAIRED table). Solo services have no scratch variant
 // and stay on their prod ports.
 const SCRATCH = process.env['BOSS_SCRATCH'] === '1';
+
+// Mocked mode: the Playwright suite mocks every /api call in-browser
+// and runs no backend, so an /api/** miss is answered 404 here and
+// tallied for one summary line at shutdown (82b87a09).
+const MOCKED = isMocked(process.env);
+const misses: Misses = new Map();
+const handleApi = apiHandler(MOCKED, proxyApi, misses);
 const SCRATCH_OFFSET = 1000;
 import { PORTS, PAIRED_NAMES, portFor } from './_generated/ports';
 
@@ -260,7 +271,7 @@ serve({
       }),
     '/api/*': (req) => {
       const url = new URL(req.url);
-      return proxyApi(req, url.pathname, url);
+      return handleApi(req, url.pathname, url);
     },
     '/plugins/*': (req) => servePlugin(new URL(req.url).pathname),
     // Bun bundles index.html + all imported Svelte/TS/CSS sources
@@ -274,7 +285,22 @@ serve({
 console.log(readyLine(PORT));
 console.log('  HMR: enabled via bun-plugin-svelte + Bun.serve routes');
 console.log(
-  `  api proxy → ${SCRATCH ? 'SCRATCH ports (boss_scratch DB) for paired services' : 'prod service ports (boss DB)'}`,
+  MOCKED
+    ? '  api proxy → OFF (mocked mode: an /api/** miss answers 404 locally, summarised at exit)'
+    : `  api proxy → ${SCRATCH ? 'SCRATCH ports (boss_scratch DB) for paired services' : 'prod service ports (boss DB)'}`,
 );
 console.log('  /plugins/* → /var/lib/boss/step-plugins/');
 console.log(`  serving tree: ${TREE_ID} (named at ${TREE_PATH})`);
+
+// The runner stops this server with SIGTERM once Playwright is done;
+// that is when the misses are complete, so the one summary line prints
+// here. Bun's default SIGTERM handling exits without it.
+if (MOCKED) {
+  const summariseAndExit = (code: number): void => {
+    const line = missSummary(misses);
+    if (line !== null) console.log(line);
+    process.exit(code);
+  };
+  process.on('SIGTERM', () => summariseAndExit(143));
+  process.on('SIGINT', () => summariseAndExit(130));
+}

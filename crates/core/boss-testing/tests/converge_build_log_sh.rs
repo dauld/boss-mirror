@@ -25,7 +25,6 @@
 //! concurrent CI job) and a retry that PASSES is itself the finding.
 
 use boss_testing::repo_root;
-use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -61,29 +60,13 @@ fn build_block() -> String {
 fn run(dir: &PathBuf, docker_rc: i32, docker_out: &str) -> (i32, String, String) {
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let mut f = std::fs::File::create(bin.join("docker")).unwrap();
-    write!(
-        f,
-        "#!/bin/sh\ncat <<'OUT'\n{docker_out}\nOUT\nexit {docker_rc}\n"
-    )
-    .unwrap();
-    drop(f);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(bin.join("docker"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
-    }
+    boss_testing::write_exec(
+        &bin.join("docker"),
+        &format!("#!/bin/sh\ncat <<'OUT'\n{docker_out}\nOUT\nexit {docker_rc}\n"),
+    );
     // `git rev-parse HEAD` runs inside the block; a stub keeps the test
     // off any real repository.
-    let mut g = std::fs::File::create(bin.join("git")).unwrap();
-    write!(g, "#!/bin/sh\necho deadbeefdeadbeef\n").unwrap();
-    drop(g);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    boss_testing::write_exec(&bin.join("git"), "#!/bin/sh\necho deadbeefdeadbeef\n");
 
     // The block records its timing through run-summary.sh, the one
     // definition every unit's summary goes through; the file is where

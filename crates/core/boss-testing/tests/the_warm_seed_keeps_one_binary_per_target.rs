@@ -12,9 +12,8 @@
 //! executable but the newest per stem from the STAGED copy, before the
 //! rename; libraries and unhashed files are untouched.
 
-use boss_testing::{repo_root, scratch_dir};
+use boss_testing::{repo_root, scratch_dir, write_exec};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -42,8 +41,7 @@ fn prune(deps: &Path) -> String {
 
 fn exe(dir: &Path, name: &str, age_secs: u64) {
     let p = dir.join(name);
-    fs::write(&p, b"binary").unwrap();
-    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    write_exec(&p, "binary");
     fs::write(dir.join(format!("{name}.d")), b"dep").unwrap();
     let t = std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
     let ft = filetime_of(t);
@@ -77,8 +75,7 @@ fn only_the_newest_executable_per_stem_survives_and_libraries_are_untouched() {
     fs::write(deps.join("libboss-1111111111111111.rlib"), b"lib").unwrap();
     fs::write(deps.join("libboss-1111111111111111.rmeta"), b"meta").unwrap();
     let tool = deps.join("tool");
-    fs::write(&tool, b"t").unwrap();
-    fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+    write_exec(&tool, "t");
 
     let said = prune(&deps);
     assert_eq!(said, "pruned 2 binaries, 0 MiB", "{said}");

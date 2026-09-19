@@ -22,10 +22,11 @@
 // Bun upgrade could erase, and one that frays further as concurrency
 // pushes the bundle past 30s. When the probe loses the race the specs
 // connect to a server still mid-bundle: every `/api/**` call misses the
-// in-browser mock and hits the dev-server's real proxy (no backend in
-// mocked mode) — the `[WebServer] ... Unable to connect` lines — and the
-// page never mounts, so `toBeVisible` fails. It has false-redded
-// Rust-only cars that never touched the frontend.
+// in-browser mock and reaches the dev-server itself (it answers 404 in
+// mocked mode and names the miss in its exit summary; until 2026-09-19
+// it proxied on and printed `Unable to connect`) — and the page never
+// mounts, so `toBeVisible` fails. It has false-redded Rust-only cars
+// that never touched the frontend.
 //
 // THE FIX: own the readiness gate here, with a generous per-attempt
 // timeout we control. A GET to `/` both triggers the bundle and is held
@@ -47,6 +48,7 @@
 // answers the question that actually matters — is the server on that
 // port serving THIS tree — and refuses to reuse anything else. Under CI
 // it refuses unconditionally. See src/dev-tree.ts.
+import { MOCKED_FLAG } from '../src/dev-mocked';
 import { waitForReadyLine } from '../src/dev-ready';
 import { DEFAULT_PORT, chooseTarget } from '../src/dev-tree';
 
@@ -124,9 +126,18 @@ async function main(): Promise<never> {
   if (!target.reuse) {
     log(`starting dev-server on :${target.port} ...`);
     const started = Bun.spawn(['bun', 'src/dev-server.ts'], {
-      // BOSS_SCRATCH=0: every /api call is mocked in-browser, so the
-      // proxy target is irrelevant; 0 just avoids the scratch ports.
-      env: { ...process.env, PORT: String(target.port), BOSS_SCRATCH: '0' },
+      // BOSS_MOCKED=1: every /api call is mocked in-browser and no
+      // backend runs, so the dev-server answers a miss 404 locally and
+      // prints one summary line of them at exit instead of proxying to
+      // a port nothing listens on — six lines of bun connect noise per
+      // request until 2026-09-19 (82b87a09). BOSS_SCRATCH=0 keeps the
+      // (now unreached) proxy table off the scratch ports.
+      env: {
+        ...process.env,
+        PORT: String(target.port),
+        BOSS_SCRATCH: '0',
+        [MOCKED_FLAG]: '1',
+      },
       // Piped, not inherited: the ready line is read off it below, and
       // every line is echoed on so the "Bundled page in Xms" diagnostic
       // stays visible.
@@ -209,6 +220,12 @@ async function main(): Promise<never> {
   );
   const code = await playwright.exited;
   stopDevServer();
+  // Let the server print its miss summary (on SIGTERM) before this
+  // process exits, so the line lands inside the run's own output —
+  // bounded, because a server that will not stop is not worth waiting on.
+  if (devServer && weStartedIt) {
+    await Promise.race([devServer.exited, Bun.sleep(5_000)]);
+  }
   process.exit(code);
 }
 

@@ -41,8 +41,8 @@
 //!    train would cause the exact strike it exists to prevent, and the
 //!    hourly timer remains the independent floor.
 
-use boss_testing::repo_root;
-use std::path::{Path, PathBuf};
+use boss_testing::{repo_root, write_exec};
+use std::path::PathBuf;
 use std::process::{Command, Output};
 
 fn read(rel: &str) -> String {
@@ -62,15 +62,6 @@ fn fixture_dir(name: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir fixture");
     dir
-}
-
-fn write_exec(path: &Path, body: &str) {
-    std::fs::write(path, body).expect("write stub");
-    std::fs::set_permissions(
-        path,
-        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
-    )
-    .expect("chmod stub");
 }
 
 /// A stub `df` reporting a fixed number of free GB in POSIX columns, and

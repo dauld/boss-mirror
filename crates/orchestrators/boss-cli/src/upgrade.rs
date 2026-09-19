@@ -69,6 +69,7 @@ pub async fn run() -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        // mode-bits-ok: a downloaded binary renamed over the CLI, never exec'd by this process
         std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755))
             .context("failed to set executable permission")?;
     }

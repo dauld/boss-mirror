@@ -765,9 +765,11 @@ fn the_excerpt_is_bounded_per_check_and_in_all_and_says_so() {
 /// Job log to learn it was a 3 s click timeout. So for a check whose
 /// output carries Playwright's markers, `fails` ranks THEM: the ✘ lines,
 /// the `N failed` roll-up, the `Error:` line, the Expected/Received diff
-/// as one entry — and the connect noise is dropped from the count and
-/// named for what it is. The fixture is that excerpt, written by hand
-/// from those lines.
+/// as one entry. The fixture is that excerpt, written by hand from those
+/// lines. (The connect noise itself was deleted at its source on
+/// 2026-09-19, 82b87a09 — the mocked dev-server answers a miss locally —
+/// so the filter this test once pinned went with it; what remains
+/// pinned is the ranking.)
 const WEB_SUITE_RED: &str = "\
 ::group::gate: web-suite
   ✓  14 [chromium] › tests/mocked/interaction-crawl.spec.ts:40:5 › interaction crawl › shard 1/4 (28.1s)
@@ -803,38 +805,15 @@ const WEB_SUITE_RED: &str = "\
 ::endgroup::
 ";
 
-/// One bun connect-refusal block, as the mocked runner's dev-server
-/// prints it for every `/api/**` call that misses the in-browser mock -
-/// six lines, copied from gate c924dbe0's own excerpt (4077889a): bun's
-/// four, a blank, and the dev server's `GET - … failed` for the same
-/// refused call.
-const MOCK_PROXY_NOISE: &str = "\
-error: Unable to connect. Is the computer able to access the url?
-  path: \"http://127.0.0.1:7200/api/jobs/live\",
- errno: 0,
-  code: \"ConnectionRefused\"
-
-GET - http://127.0.0.1:5174/api/jobs/live failed
-";
-
-fn web_suite_red_with_noise(blocks: usize) -> String {
-    let (head, tail) = WEB_SUITE_RED
-        .split_once("\n\n  1) ")
-        .expect("the fixture has a failure detail");
-    let noise: String = (0..blocks).map(|_| MOCK_PROXY_NOISE).collect();
-    format!("{head}\n{noise}\n  1) {tail}")
-}
-
 #[test]
-fn a_web_suite_red_names_the_failing_spec_not_the_mock_proxy_noise() {
+fn a_web_suite_red_names_the_failing_spec_and_its_diff() {
     if python3_missing() {
         eprintln!("skipping: python3 not available");
         return;
     }
-    let log = web_suite_red_with_noise(264);
     let got = run_extractor(
         &red_receipt("{\"name\":\"web-suite\",\"result\":\"fail\"}"),
-        &log,
+        WEB_SUITE_RED,
     );
     assert!(got.ok, "extractor failed: {}", got.stdout);
     let fails = got.fails().expect("fails is on the receipt");
@@ -845,7 +824,7 @@ fn a_web_suite_red_names_the_failing_spec_not_the_mock_proxy_noise() {
         quoted.first().is_some_and(|e| e.contains("✘")
             && e.contains("interaction-crawl")
             && e.contains("shard 2/4")),
-        "the first quoted line is the failing spec, not the proxy noise:\n{joined}"
+        "the first quoted line is the failing spec:\n{joined}"
     );
     assert!(
         joined.contains("2 failed"),
@@ -856,45 +835,29 @@ fn a_web_suite_red_names_the_failing_spec_not_the_mock_proxy_noise() {
         "the Received value — the 3 s click timeout the operator had to pull the Job log \
          for — rides the receipt:\n{joined}"
     );
-    assert!(
-        !joined.contains("| error: Unable to connect"),
-        "bun's proxy noise, printed in every passing mocked run, is not quoted as a \
-         failure:\n{joined}"
-    );
-    assert!(
-        !joined.contains("264 error line"),
-        "the noise is not counted as error lines:\n{joined}"
-    );
-    assert!(
-        joined.contains("264") && joined.contains("mock-proxy connect line"),
-        "and what was dropped is stated, by count and by name:\n{joined}"
-    );
     let v: Value = serde_json::from_str(&got.receipt).expect("receipt is JSON");
     assert_eq!(
         v["verdict"], "failed",
-        "two failed specs beside 264 connect lines is a verdict on the branch, not a \
-         network refusal:\n{}",
+        "two failed specs is a verdict on the branch:\n{}",
         got.receipt
     );
 }
 
-/// THE WINDOW TAKEN BEFORE THE NOISE WAS DROPPED (backlog 4077889a).
-/// `fails` learned to rank Playwright's verdicts over the proxy noise
-/// (3a6f61d6), but `fails_excerpt` was still the replay's LAST 300
-/// lines of a ~1000-line check body: it began ~40 lines above the
-/// `Error:` marker, on connect blocks, and the per-spec `✘` line near
-/// the top of Playwright's list fell outside it. So the noise is
-/// filtered out of the body BEFORE the window is taken - the replay
-/// and the excerpt are one selection - and the excerpt's first line
-/// states how many lines that dropped. The fixture puts 100 noise
-/// blocks, each beside one passing-spec line, between the `✘` line and
-/// the failure detail: 700 lines, so a window of the raw tail cannot
-/// reach it, and a window of the signal holds it - the 100 passing
-/// lines between are more than the excerpt's character budget, so the
-/// budget is spent on the marker and the check's last words, not on
-/// the chatter between, and the middle cut states itself.
+/// THE BUDGET GOES TO THE MARKER AND THE LAST WORDS (backlog 4077889a).
+/// For a web-suite red the first failure marker is the per-spec `✘`
+/// near the top of Playwright's list, and the `Error:`, the
+/// Expected/Received diff and the `N failed` roll-up are at the END;
+/// a head-only cut from the marker held the passing-spec chatter
+/// between and lost the verdict. The fixture puts 100 passing-spec
+/// lines between the `✘` line and the failure detail - more than the
+/// excerpt's character budget - so the budget must be spent on the
+/// marker and the check's last words, and the middle cut must state
+/// itself. (Until 2026-09-19 the bulk in this fixture was the mocked
+/// runner's connect noise, filtered before the window; 82b87a09 deleted
+/// the noise at its source and the filter with it, and the window is
+/// the raw tail again.)
 #[test]
-fn the_web_suite_excerpt_holds_the_failing_spec_line_above_the_mock_proxy_noise() {
+fn the_web_suite_excerpt_holds_the_failing_spec_line_and_the_verdict_below_it() {
     if python3_missing() {
         eprintln!("skipping: python3 not available");
         return;
@@ -905,17 +868,13 @@ fn the_web_suite_excerpt_holds_the_failing_spec_line_above_the_mock_proxy_noise(
     let between: String = (0..100)
         .map(|i| {
             format!(
-                "{MOCK_PROXY_NOISE}  ✓  {} [chromium] › tests/mocked/pages.spec.ts:9:3 › page \
-                 {i} renders (1.2s)\n",
+                "  ✓  {} [chromium] › tests/mocked/pages.spec.ts:9:3 › page {i} renders \
+                 (1.2s)\n",
                 i + 18
             )
         })
         .collect();
     let log = format!("{head}\n{between}\n  1) {tail}");
-    assert!(
-        log.lines().count() > 500,
-        "the fixture must put the ✘ line further above the end than the replay window"
-    );
     let got = run_extractor(
         &red_receipt("{\"name\":\"web-suite\",\"result\":\"fail\"}"),
         &log,
@@ -924,7 +883,7 @@ fn the_web_suite_excerpt_holds_the_failing_spec_line_above_the_mock_proxy_noise(
     let excerpt = got.excerpt_of("web-suite");
     assert!(
         excerpt.contains("✘  15 [chromium]") && excerpt.contains("shard 2/4 (31.4s)"),
-        "the excerpt holds the per-spec ✘ line, which the raw tail's window cut:\n{excerpt}"
+        "the excerpt holds the per-spec ✘ line:\n{excerpt}"
     );
     assert!(
         excerpt.contains("Timeout 3000ms exceeded") && excerpt.contains("2 failed"),
@@ -935,61 +894,8 @@ fn the_web_suite_excerpt_holds_the_failing_spec_line_above_the_mock_proxy_noise(
         "the cut between them states itself:\n{excerpt}"
     );
     assert!(
-        !excerpt.contains("Unable to connect"),
-        "the 300 lines are 300 lines of signal - no connect block rides the excerpt:\n{excerpt}"
-    );
-    let first = excerpt.lines().next().unwrap_or_default();
-    assert!(
-        first.contains("600 line(s) of 100 mock-proxy connect block(s) dropped"),
-        "the excerpt's first line states the dropped count, by number and by name:\n{excerpt}"
-    );
-    assert!(
-        !excerpt.contains("/api/jobs/live failed"),
-        "the dev server's own `GET - … failed` line is the block's too:\n{excerpt}"
-    );
-    assert!(
-        got.replay.contains("shard 2/4 (31.4s)") && !got.replay.contains("Unable to connect"),
-        "the replay is the same selection - it holds the ✘ line and not the noise:\n{}",
+        got.replay.contains("shard 2/4 (31.4s)") && got.replay.contains("2 failed"),
+        "the replay holds the ✘ line and the verdict:\n{}",
         got.replay
-    );
-    assert!(
-        got.replay
-            .contains("600 line(s) of 100 mock-proxy connect block(s) dropped"),
-        "…and its header states the dropped count too:\n{}",
-        got.replay
-    );
-}
-
-/// The same noise with NO failing spec beside it says exactly that,
-/// rather than counting the noise as 264 errors and quoting five.
-#[test]
-fn a_web_suite_whose_only_errors_are_mock_proxy_noise_says_so() {
-    if python3_missing() {
-        eprintln!("skipping: python3 not available");
-        return;
-    }
-    let noise: String = (0..264).map(|_| MOCK_PROXY_NOISE).collect();
-    let log = format!(
-        "::group::gate: web-suite\n  ✓  1 [chromium] › tests/mocked/a.spec.ts:1:1 › a (1.0s)\n\
-         {noise}  103 passed (2.0m)\nweb-suite: exit 137\n::endgroup::\n"
-    );
-    let got = run_extractor(
-        &red_receipt("{\"name\":\"web-suite\",\"result\":\"fail\"}"),
-        &log,
-    );
-    assert!(got.ok, "extractor failed: {}", got.stdout);
-    let joined = got.fails_joined();
-    assert!(
-        joined.contains("264 mock-proxy connect line") && joined.contains("no failing spec"),
-        "only noise: the receipt says so, by count and by name:\n{joined}"
-    );
-    assert!(
-        !joined.contains("| error: Unable to connect") && !joined.contains("264 error line"),
-        "and the noise is neither quoted nor counted as errors:\n{joined}"
-    );
-    assert!(
-        joined.contains("exit 137"),
-        "the check's last words are still quoted, because they are all the evidence there \
-         is:\n{joined}"
     );
 }

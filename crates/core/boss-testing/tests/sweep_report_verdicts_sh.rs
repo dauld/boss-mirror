@@ -25,18 +25,12 @@
 //! `the_disk_report_judges_by_the_comparators_floor`), and
 //! conformance-report says clean at exactly zero undeclared objects.
 
-use boss_testing::repo_root;
+use boss_testing::{repo_root, write_exec};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn scratch(case: &str) -> PathBuf {
     boss_testing::scratch_dir(&format!("sweep-report-verdicts-{case}"))
-}
-
-fn write_exec(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 /// The last `verdict:` line of an output, the way the judging handler

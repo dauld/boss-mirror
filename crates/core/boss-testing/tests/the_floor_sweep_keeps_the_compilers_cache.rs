@@ -18,18 +18,11 @@
 //! registry loop are given stubs that do nothing, so the run reaches
 //! the builder step with nothing else moving the number.
 
-use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
 use std::process::{Command, Output};
 
 const SWEEP: &str = "infra/forge/disk-floor-sweep.sh";
 
-use boss_testing::repo_root;
-
-fn write_exec(path: &Path, body: &str) {
-    std::fs::write(path, body).expect("write stub");
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-}
+use boss_testing::{repo_root, write_exec};
 
 struct Run {
     out: Output,

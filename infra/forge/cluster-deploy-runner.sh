@@ -511,20 +511,51 @@ tenant_source_verdict() {
 # <repo>@<ref>)` or `… (no site/ in <repo>@<ref> — nothing staged,
 # the site answers 404)`. An instance without a site stages nothing
 # and records nothing.
+#
+# THE CHECK BEFORE THE APPLY (backlog 1af5119d, 2026-09-19; the lib's
+# tenant_check says why). The checkout is judged with `boss tenant
+# check` before anything is staged, and only a PASS reaches the
+# ConfigMap. A refusal — or a check that could not run — keeps the
+# previous ConfigMap, records `tenant unchanged: …` on this packet as
+# `tenant_check`, files a packet naming the file and line, and RETURNS
+# 0: the software converges and the train arrives; the tenant did not
+# change, and the record says so. The site rides on regardless — it is
+# a directory the gateway serves, not one it boots from.
 SITE_SOURCE=""
+TENANT_CHECK=""
 converge_tenant() {
-    local iname="$1" ns="$2" trepo="$3" tref="$4" site="${5:-}" dir stage kt sstage n from
+    local iname="$1" ns="$2" trepo="$3" tref="$4" site="${5:-}" dir stage kt sstage n from where check_rc=0 deliver=1
     [ -n "$trepo" ] || return 0
     dir="$TENANTS_DIR/$iname"
     stage="$TENANTS_DIR/$iname.configmap"
     mkdir -p "$TENANTS_DIR"
     tenant_checkout "$REPO" "$trepo" "$tref" "$dir"
-    rm -rf "$stage"
-    tenant_stage "$dir" "$stage"
-    kt="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro -v $stage:/tenant:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
-    echo "cluster-deploy-runner: converging the boss-tenant ConfigMap in $ns from $trepo@$tref ($(ls "$stage" | wc -l) files)"
-    $kt create configmap boss-tenant -n "$ns" --from-file=/tenant \
-        --dry-run=client -o yaml | $KAPPLY apply -f -
+    where=$(tenant_check "$dir" "$TENANTS_DIR/$iname.check") || check_rc=$?
+    case "$check_rc" in
+        0)
+            TENANT_CHECK="${TENANT_CHECK:+$TENANT_CHECK; }$ns: checked ($trepo@$tref)" ;;
+        1)
+            deliver=0
+            echo "cluster-deploy-runner: boss-tenant in $ns UNCHANGED — boss tenant check refused $trepo@$tref at $where; the previous ConfigMap stays and the pod never sees this manifest" >&2
+            TENANT_CHECK="${TENANT_CHECK:+$TENANT_CHECK; }$ns: tenant unchanged: check refused $where ($trepo@$tref)"
+            tenant_check_alert "tenant unchanged in $ns: boss tenant check refused $trepo@$tref at $where" \
+                "The cluster converge checked out $trepo@$tref for instance $iname ($ns) and boss tenant check refused it at $where, so the boss-tenant ConfigMap was NOT applied — the previous one stays and the pod boots from it (a refused manifest would take the system of record down: Recreate, one container). Fix the file in the tenant repository; the next converge delivers it. The verb's report: $(cat "$TENANTS_DIR/$iname.check" 2>/dev/null || echo 'in the cluster-deploy-runner journal')" ;;
+        *)
+            deliver=0
+            echo "cluster-deploy-runner: boss-tenant in $ns UNCHANGED — the tenant $trepo@$tref could NOT be checked (tenant_check rc $check_rc; boss is not on this host, or died without a verdict); an unchecked manifest is not applied" >&2
+            TENANT_CHECK="${TENANT_CHECK:+$TENANT_CHECK; }$ns: tenant unchanged: could not check ($trepo@$tref) — boss is not on this host or gave no verdict (tenant_check rc $check_rc)"
+            tenant_check_alert "tenant unchanged in $ns: could not check $trepo@$tref (boss tenant check did not run)" \
+                "The cluster converge checked out $trepo@$tref for instance $iname ($ns) but could not run boss tenant check on it (rc $check_rc: ${BOSS_CLI:-boss} is not on this host, or died without a verdict), so the boss-tenant ConfigMap was NOT applied — an unchecked manifest never reaches the pod. install.sh installs the tree's CLI from the image on each forge converge; read the cluster-deploy-runner journal." ;;
+    esac
+    run_summary_field tenant_check "$TENANT_CHECK"
+    if [ "$deliver" = 1 ]; then
+        rm -rf "$stage"
+        tenant_stage "$dir" "$stage"
+        kt="sudo docker run --rm --network host -v $KUBECONFIG_PATH:/kc:ro -v $stage:/tenant:ro alpine/k8s:1.33.3 kubectl --kubeconfig=/kc"
+        echo "cluster-deploy-runner: converging the boss-tenant ConfigMap in $ns from $trepo@$tref ($(ls "$stage" | wc -l) files)"
+        $kt create configmap boss-tenant -n "$ns" --from-file=/tenant \
+            --dry-run=client -o yaml | $KAPPLY apply -f -
+    fi
     [ -n "$site" ] || return 0
     sstage="$TENANTS_DIR/$iname.site.configmap"
     n=$(site_stage "$dir" "$sstage")

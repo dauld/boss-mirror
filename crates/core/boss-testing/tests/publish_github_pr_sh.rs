@@ -56,6 +56,7 @@ fn scratch(case: &str) -> PathBuf {
     // cannot be cleared — see `boss_testing::scratch`.
     let dir = boss_testing::scratch_dir(&format!("publish-github-pr-{case}"));
     // Traversable by the second uid the ownership cases drop to.
+    // mode-bits-ok: a directory, not an executable this process runs
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
         .unwrap_or_else(|e| panic!("chmod 0755 {}: {e}", dir.display()));
     dir
@@ -110,6 +111,7 @@ fn git_in(dir: &Path, args: &[&str]) -> String {
 fn control_fetch(root: &Path, src: &Path, uid: u32, exempt_via_c: bool) -> (bool, String) {
     let pen = root.join("control");
     std::fs::create_dir_all(&pen).unwrap();
+    // mode-bits-ok: a directory the second uid writes into
     std::fs::set_permissions(&pen, std::fs::Permissions::from_mode(0o777)).unwrap();
     let dst = pen.join(if exempt_via_c {
         "via-c.git"
@@ -162,6 +164,7 @@ fn control_fetch(root: &Path, src: &Path, uid: u32, exempt_via_c: bool) -> (bool
 fn stub_bin(root: &Path) -> PathBuf {
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
+    // mode-bits-ok: a directory on PATH, not an executable
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     for tool in ["gh", "jq", "curl"] {
         if Command::new("sh")
@@ -171,9 +174,7 @@ fn stub_bin(root: &Path) -> PathBuf {
         {
             continue;
         }
-        let stub = bin.join(tool);
-        std::fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        boss_testing::write_exec(&bin.join(tool), "#!/bin/sh\nexit 0\n");
     }
     bin
 }
@@ -183,6 +184,7 @@ fn stub_bin(root: &Path) -> PathBuf {
 fn base_env(root: &Path) -> Vec<(String, String)> {
     let state = root.join("state");
     std::fs::create_dir_all(&state).unwrap();
+    // mode-bits-ok: a directory any uid writes into
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o777)).unwrap();
     let token = root.join("github.token");
     std::fs::write(&token, "not-a-real-token\n").unwrap();

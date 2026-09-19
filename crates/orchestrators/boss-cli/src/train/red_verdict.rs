@@ -176,13 +176,17 @@ pub(crate) fn log_tail(
 /// summary line, the gate runner's own refusal, a rustc error code, a
 /// forge annotation, and bun's per-test failure marker.
 ///
-/// Deliberately absent is a bare `error:`. The mocked web suite prints
-/// hundreds of benign `error: Unable to connect` lines for backends it
-/// does not run, and a marker that matches those points the excerpt at
-/// noise — which is the defect this whole function exists to fix, in a
-/// new place. Checked against both red logs of 2026-09-09: four matches
-/// each across 9287 and 7300 lines, the first being the panic, and no
-/// false positive.
+/// Deliberately absent is a bare `error:`. Until 2026-09-19 the mocked
+/// web suite printed hundreds of benign `error: Unable to connect` lines
+/// for backends it does not run (deleted at the source by 82b87a09: the
+/// dev-server now answers a miss locally), and a marker that matched
+/// those pointed the excerpt at noise — the defect this whole function
+/// exists to fix, in a new place. A bare `error:` stays out because it
+/// is still not unambiguous (bun's own install retries print it, and
+/// the gate's network refusal exists because they judged nothing).
+/// Checked against both red logs of 2026-09-09: four matches each
+/// across 9287 and 7300 lines, the first being the panic, and no false
+/// positive.
 pub(crate) const FAILURE_MARKERS: &[&str] = &[
     "panicked at",
     "test result: FAILED",
@@ -927,10 +931,12 @@ mod red_verdict_log_tests {
     }
 
     #[test]
-    fn the_benign_connection_errors_of_the_mocked_suite_are_not_a_failure() {
-        // The mocked web suite prints hundreds of these for backends it
-        // does not run, and every one of its tests passes. A marker set
-        // that matched them would point the excerpt at noise.
+    fn a_bare_error_line_is_not_a_failure_marker() {
+        // Until 2026-09-19 the mocked web suite printed hundreds of these
+        // for backends it does not run, and every one of its tests
+        // passed (82b87a09 deleted them at the source). The property
+        // outlives the noise: a marker set that matched a bare `error:`
+        // would point the excerpt at whatever benign line carries it.
         let mut body = String::new();
         for i in 0..200 {
             body.push_str("error: Unable to connect. Is the computer able to access the url?\n");

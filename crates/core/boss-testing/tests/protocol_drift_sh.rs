@@ -22,7 +22,6 @@
 //! finds would be a fact about the fixture, not about the script.
 
 use boss_testing::repo_root;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
@@ -229,8 +228,7 @@ fn start_stub(case: &str, mode: &str) -> Stub {
     let _ = std::fs::remove_file(&log);
     let _ = std::fs::remove_file(&started);
     std::fs::write(&registry, registry_fixture().0).unwrap();
-    std::fs::write(&script, STUB).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    boss_testing::write_exec(&script, STUB);
     let child = Command::new("python3")
         .arg(&script)
         .arg(&log)

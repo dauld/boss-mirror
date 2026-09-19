@@ -559,27 +559,6 @@ def panics(body):
     return out
 
 
-# THE MOCKED RUNNER'S PROXY NOISE (backlog 3a6f61d6). The web-suite's
-# dev-server proxies every `/api/**` call that misses the in-browser
-# mock to a backend mocked mode never starts, and bun prints this
-# four-line block for each one - in every PASSING run too. Measured
-# 2026-09-18 on red-train alert 64a17c4b (gate c924dbe0): the alert
-# said "264 error line(s), first 5:" and quoted five of these, while
-# Playwright's own verdict sat in the same excerpt. A line of this block
-# is never evidence of a failure, so it is neither counted nor quoted
-# here; it is COUNTED SEPARATELY and named, because a reduction that
-# cannot say what it dropped is the defect this whole block is about.
-# Measured on gate c924dbe0's own excerpt (2026-09-19, 4077889a) the
-# block is SIX lines, not four: bun's four, a blank, then the dev
-# server's own `GET - http://127.0.0.1:5174/api/... failed` for the same
-# refused call - so that tail line is the block's too.
-RE_MOCK_PROXY_TAIL = re.compile(
-    r"^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) - https?://(127\.0\.0\.1|localhost)[:/]\S* failed$")
-RE_MOCK_PROXY = re.compile(
-    r"Unable to connect|^\s*path: |^\s*errno\b|code: \"?ConnectionRefused|"
-    + RE_MOCK_PROXY_TAIL.pattern)
-RE_MOCK_PROXY_HEAD = re.compile(r"Unable to connect")   # one per block: the count a reader sees
-
 # Playwright's own verdict lines, in the order a reader acts on them:
 # the per-spec `✘` marker (the spec's name), the run's `N failed`
 # roll-up, its `Error:` line, and the Expected/Received diff - whose
@@ -594,41 +573,13 @@ DIFF_LINES = 8         # `+`/`-` lines of one Expected/Received diff kept in its
 DIFF_SCAN = 60         # lines read past a diff header before giving up on its end
 
 
-def mock_proxy_blocks(body):
-    """How many of bun's connect-refusal blocks `body` holds - counted
-    by their first line, which is the count the old `fails` line quoted
-    as "264 error line(s)" and the one a reader can check against it."""
-    return sum(1 for line in body if RE_MOCK_PROXY_HEAD.search(line))
-
-
-def without_mock_proxy(body):
-    """`body` with every line of bun's connect-refusal blocks removed -
-    the four bun prints, the blank between them and the dev server's
-    `GET - ... failed`, and nothing else: a blank line is dropped only
-    while inside a block, so Playwright's own spacing survives."""
-    out, inside = [], False
-    for line in body:
-        if RE_MOCK_PROXY_TAIL.search(line):
-            inside = False
-            continue
-        if RE_MOCK_PROXY.search(line):
-            inside = True
-            continue
-        if inside and not line.strip():
-            continue
-        inside = False
-        out.append(line)
-    return out
-
-
 def error_lines(body):
     """Error lines with their `-->` location, for checks that are not
     cargo-test-shaped: a compile error, clippy, svelte-check. This is as
-    far as the evidence goes - no test name is invented from them. The
-    mocked runner's proxy noise is not an error line (RE_MOCK_PROXY)."""
+    far as the evidence goes - no test name is invented from them."""
     out = []
     for i, line in enumerate(body):
-        if RE_ERROR.match(line) and not RE_MOCK_PROXY.search(line):
+        if RE_ERROR.match(line):
             where = ""
             for nxt in body[i + 1:i + 3]:
                 m = RE_ARROW.match(nxt)
@@ -644,7 +595,11 @@ def spec_verdicts(body):
     not Playwright-shaped (no `✘` marker and no `N failed` roll-up), so
     an `Error:` line from svelte-check is never called a failing spec.
     Each Expected/Received diff is ONE entry: its two headers and up to
-    DIFF_LINES of its `+`/`-` lines, saying how many more there were."""
+    DIFF_LINES of its `+`/`-` lines, saying how many more there were.
+    (Backlog 3a6f61d6, 2026-09-18: until this ranking existed the alert
+    quoted five of the mocked runner's connect-noise lines over the
+    verdict beside them; the noise itself was deleted at its source on
+    2026-09-19, 82b87a09, so nothing here filters it any more.)"""
     fails, summary, errors, diffs = [], [], [], []
     i = 0
     while i < len(body):
@@ -674,8 +629,7 @@ def spec_verdicts(body):
                     len(rows) - DIFF_LINES))
             diffs.append(" / ".join(head + kept))
             continue
-        elif RE_ERROR.match(line) and line.lstrip().startswith("Error") \
-                and not RE_MOCK_PROXY.search(line):
+        elif RE_ERROR.match(line) and line.lstrip().startswith("Error"):
             errors.append(line.strip())
         i += 1
     if not fails and not summary:
@@ -734,11 +688,8 @@ RE_MARK = (RE_STDOUT, RE_PANIC_OLD, RE_PANIC_NEW, RE_ERROR, RE_SPEC_FAIL)
 
 
 def marks_a_failure(line):
-    """Does this line MARK a failure, for the excerpt's window? The
-    mocked runner's proxy noise matches RE_ERROR and is not one: an
-    excerpt anchored on the first of 264 such lines spends its budget
-    on noise and cuts the verdict below it (3a6f61d6)."""
-    return any(r.match(line) for r in RE_MARK) and not RE_MOCK_PROXY.search(line)
+    """Does this line MARK a failure, for the excerpt's window?"""
+    return any(r.match(line) for r in RE_MARK)
 
 
 def excerpt(lines, budget):
@@ -845,17 +796,10 @@ def detail(name, got):
                 name, len(loose) - PER_CHECK, len(loose)))
         return out
 
-    # What the mocked runner's proxy printed is stated on every rung
-    # below, never counted as evidence on any of them (3a6f61d6).
-    noise = mock_proxy_blocks(body)
-    dropped = "" if not noise else \
-        " (%d mock-proxy connect line(s) dropped - bun's Unable-to-connect block, printed " \
-        "in every passing mocked run)" % noise
-
     specs = spec_verdicts(body)
     if specs:
         out.append("%s: no cargo test failure in this check's output; %d playwright verdict "
-                   "line(s)%s, first %d:" % (name, len(specs), dropped, min(PER_CHECK, len(specs))))
+                   "line(s), first %d:" % (name, len(specs), min(PER_CHECK, len(specs))))
         out += ["%s: | %s" % (name, s) for s in specs[:PER_CHECK]]
         if len(specs) > PER_CHECK:
             out.append("%s: + %d more verdict line(s) not quoted here - the excerpt has "
@@ -864,21 +808,15 @@ def detail(name, got):
 
     errs = error_lines(body)
     if errs:
-        out.append("%s: no cargo test failure in this check's output; %d error line(s)%s, "
-                   "first %d:" % (name, len(errs), dropped, min(PER_CHECK, len(errs))))
+        out.append("%s: no cargo test failure in this check's output; %d error line(s), "
+                   "first %d:" % (name, len(errs), min(PER_CHECK, len(errs))))
         out += ["%s: | %s" % (name, e) for e in errs[:PER_CHECK]]
         return out
 
-    said = [line for line in body if line.strip() and not RE_MOCK_PROXY.search(line)]
+    said = [line for line in body if line.strip()]
     quoted = said[-QUOTE_LINES:]
-    if noise:
-        out.append("%s: %d mock-proxy connect line(s) and nothing else this parser recognises - "
-                   "no failing spec, test, panic or error line (bun's Unable-to-connect block "
-                   "is printed in every passing mocked run); last %d of %d line(s) quoted "
-                   "verbatim:" % (name, noise, len(quoted), total))
-    else:
-        out.append("%s: nothing this parser recognises - no failing test, no panic, no error "
-                   "line; last %d of %d line(s) quoted verbatim:" % (name, len(quoted), total))
+    out.append("%s: nothing this parser recognises - no failing test, no panic, no error "
+               "line; last %d of %d line(s) quoted verbatim:" % (name, len(quoted), total))
     out += ["%s: | %s" % (name, line) for line in quoted]
     return out
 
@@ -969,24 +907,8 @@ for name in failed:
         replay.append("  (the check produced no output at all)")
         excerpts[name] = "(the check produced no output at all)"
         continue
-    # THE NOISE IS DROPPED BEFORE THE WINDOW IS TAKEN (backlog 4077889a).
-    # `fails` ranks Playwright's verdicts over the proxy noise (3a6f61d6),
-    # but the window was still the last REPLAY_TAIL lines of the RAW body
-    # - ~1000 lines for a web-suite red, mostly bun's connect blocks - so
-    # the excerpt began on noise ~40 lines above the `Error:` marker and
-    # the per-spec `✘` line near the top of Playwright's list fell
-    # outside it. Filtering first makes the 300 lines 300 lines of
-    # signal; the count dropped is stated on the replay's header and the
-    # excerpt's first line, because a reduction that cannot say what it
-    # removed is the defect this whole block is about.
-    signal = without_mock_proxy(body)
-    noise_lines = len(body) - len(signal)
-    noise_note = "" if not noise_lines else \
-        " (%d line(s) of %d mock-proxy connect block(s) dropped before this window - " \
-        "bun's Unable-to-connect block, printed in every passing mocked run)" % (
-            noise_lines, mock_proxy_blocks(body))
-    tail = signal[-REPLAY_TAIL:]
-    replay.append("  last %d of %d line(s)%s:" % (len(tail), total, noise_note))
+    tail = body[-REPLAY_TAIL:]
+    replay.append("  last %d of %d line(s):" % (len(tail), total))
     replay += ["  " + line for line in tail]
     # The receipt's copy of the same lines, within what the total cap
     # has left. A check the total cannot fit still gets an entry that
@@ -997,8 +919,7 @@ for name in failed:
                          "in all and %d check(s) before this one used it; the Job log replay " \
                          "has it)" % (EXCERPT_TOTAL, len(excerpts))
     else:
-        head = "..." + noise_note + "\n" if noise_note else ""
-        excerpts[name] = head + excerpt(tail, min(left, EXCERPT_CHARS) - len(head))
+        excerpts[name] = excerpt(tail, left)
 write(entries, replay, excerpts)
 PY
 # --- failure detail (end) ---

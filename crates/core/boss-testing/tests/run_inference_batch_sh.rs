@@ -54,8 +54,6 @@ struct RunOutcome {
 /// Drive the real script with a fake curl. `fail` lists the model ids
 /// whose infer-batch should fail (curl exit 22, an HTTP error).
 fn run_with_failures(fail: &[&str]) -> RunOutcome {
-    use std::os::unix::fs::PermissionsExt;
-
     let root = repo_root();
     let dir = std::env::temp_dir().join(format!(
         "boss-infer-batch-{}-{:?}",
@@ -70,7 +68,7 @@ fn run_with_failures(fail: &[&str]) -> RunOutcome {
     // Fake curl: last arg is the URL; extract the model id between
     // `/models/` and `/infer-batch`, record it, then fail if it is in
     // FAKE_CURL_FAIL (space separated).
-    std::fs::write(
+    boss_testing::write_exec(
         &fake,
         "#!/usr/bin/env bash\n\
          url=\"\"\n\
@@ -82,9 +80,7 @@ fn run_with_failures(fail: &[&str]) -> RunOutcome {
            if [ \"$f\" = \"$id\" ]; then exit 22; fi\n\
          done\n\
          exit 0\n",
-    )
-    .expect("write fake curl");
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    );
 
     let out = std::process::Command::new("bash")
         .arg(root.join(SCRIPT))

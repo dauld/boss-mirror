@@ -35,7 +35,12 @@ ALERT_SPOOL="${ALERT_SPOOL:-/var/tmp/boss-alert-spool}"
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/sor.sh"
 sor_require JOBS_API
 ALERT_API="$JOBS_API"
-ALERT_USER='{"id":"automation:cluster-watchdog","role":"platform-admin","access_tier":"operator"}'
+# Who files: the watchdog unless the sourcing script names itself
+# (the cluster converge signs its tenant-check refusals as
+# automation:cluster-deploy-runner, backlog 1af5119d) — an alert that
+# credits the wrong loop sends a reader to the wrong journal.
+ALERT_ACTOR="${ALERT_ACTOR:-automation:cluster-watchdog}"
+ALERT_USER='{"id":"'"$ALERT_ACTOR"'","role":"platform-admin","access_tier":"operator"}'
 ALERT_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # alert_people_api — the people door: ALERT_API's host on the people
@@ -91,7 +96,7 @@ _esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' '; }
 python_free_json() {
     local title detail at owner
     title=$(_esc "$1"); detail=$(_esc "$2"); at="$3"; owner=$(_esc "${4:-}")
-    printf '{"kind":"backlog-item","status":"open","owner_id":"%s","priority":"urgent","tags":["alert","cluster"],"subject":{"subject_kind":"custom","id":"boss-cluster"},"title":"%s","metadata":{"area":"alert","filed_by":"automation:cluster-watchdog","raised_at":"%s","detail":"%s"}}' "$owner" "$title" "$at" "$detail"
+    printf '{"kind":"backlog-item","status":"open","owner_id":"%s","priority":"urgent","tags":["alert","cluster"],"subject":{"subject_kind":"custom","id":"boss-cluster"},"title":"%s","metadata":{"area":"alert","filed_by":"%s","raised_at":"%s","detail":"%s"}}' "$owner" "$title" "$ALERT_ACTOR" "$at" "$detail"
 }
 
 # alert_post JSON — POST one alert packet. Returns 0 on 201.

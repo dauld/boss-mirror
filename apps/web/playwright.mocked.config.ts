@@ -10,6 +10,7 @@
 
 import { defineConfig } from '@playwright/test';
 
+import { MOCKED_FLAG } from './src/dev-mocked';
 import { DEFAULT_PORT } from './src/dev-tree';
 
 // The port the runner chose. It is usually DEFAULT_PORT, but when the
@@ -104,9 +105,11 @@ export default defineConfig({
         timeout: 180_000,
         stdout: 'pipe',
         stderr: 'pipe',
-        // BOSS_SCRATCH is irrelevant (every /api call is mocked), but
-        // 0 avoids the dev-server trying to reach scratch services.
-        env: { BOSS_SCRATCH: '0' },
+        // The same environment tests/run-mocked.ts gives the server:
+        // mocked mode answers an /api/** miss locally (82b87a09), and
+        // BOSS_SCRATCH=0 keeps the unreached proxy table off the
+        // scratch ports.
+        env: { BOSS_SCRATCH: '0', [MOCKED_FLAG]: '1' },
       },
   projects: [
     {

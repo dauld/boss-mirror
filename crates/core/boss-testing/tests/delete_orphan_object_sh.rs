@@ -31,7 +31,7 @@
 //! Nothing here touches a cluster. `kubectl` is a stub on every path,
 //! and a `delete` it receives is appended to a file.
 
-use boss_testing::repo_root;
+use boss_testing::{repo_root, write_exec};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -97,12 +97,6 @@ fn scratch(case: &str) -> PathBuf {
 /// reports the errno and not the file, which is the whole diagnosis.
 fn write_file(path: &Path, body: &str) {
     std::fs::write(path, body).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
-}
-
-fn write_exec(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    write_file(path, body);
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 fn git(dir: &Path, args: &[&str]) {

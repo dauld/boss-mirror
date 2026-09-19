@@ -4,7 +4,6 @@
 //! exit 4, not as an empty answer.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -18,7 +17,7 @@ fn with_stub_systemctl(case: &str) -> String {
     let bin = boss_testing::scratch_dir(&format!("unit-cat-{case}")).join("bin");
     fs::create_dir_all(&bin).unwrap();
     let stub = bin.join("systemctl");
-    fs::write(
+    boss_testing::write_exec(
         &stub,
         r#"#!/usr/bin/env bash
 unit="${@: -1}"
@@ -47,9 +46,7 @@ fi
 echo "No files found for $unit." >&2
 exit 1
 "#,
-    )
-    .unwrap();
-    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     format!(
         "{}:{}",
         bin.display(),

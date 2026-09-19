@@ -13,15 +13,8 @@
 //! converge is the place to close the gap — before the build that
 //! needs it, against a stub-free `docker manifest inspect`.
 
-use boss_testing::repo_root;
-use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use boss_testing::{repo_root, write_exec};
 use std::process::Command;
-
-fn write_exec(path: &Path, body: &str) {
-    std::fs::write(path, body).expect("write stub");
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-}
 
 /// A stub docker: `manifest inspect` answers 0 for tags listed in the
 /// `present` file and 1 otherwise; pull/tag/push succeed; every call is

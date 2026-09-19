@@ -15,7 +15,6 @@
 //! carries enough landings that the row is well past 128 KiB.
 
 use boss_testing::repo_root;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
@@ -113,8 +112,7 @@ fn start_stub(case: &str) -> Stub {
     let log = dir.join("patches.log");
     let _ = std::fs::remove_file(&log);
     let _ = std::fs::remove_file(&started);
-    std::fs::write(&script, STUB).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    boss_testing::write_exec(&script, STUB);
     let child = Command::new("python3")
         .arg(&script)
         .arg(&log)
