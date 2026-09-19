@@ -153,6 +153,65 @@ mod tests {
         );
     }
 
+    /// The three sentences three builders left on backlog dafa4203
+    /// (2026-09-19), each a gate a builder reddened or nearly did:
+    ///
+    /// - 1b847556's first gate went red because a lint-only car (no
+    ///   Rust crate touched) changed what the boss-testing pins
+    ///   observe — they drive `infra/lint/*.sh` on the real bundle —
+    ///   and the builder read "the touched crates' whole suite" as
+    ///   none. The directories the rule names are read back from the
+    ///   pins themselves: each one must be a real directory that at
+    ///   least one boss-testing test references, so the list cannot
+    ///   name a directory nothing pins.
+    /// - 1b52c278 squashed with `reset --soft origin/main` after
+    ///   another session's fetch had moved that ref, and folded the
+    ///   other train's landed work into its commit as a reversal —
+    ///   caught only by the diff read before push.
+    /// - 0f2ecbda's `scratchpad/commit-msg.txt` was overwritten by a
+    ///   concurrent builder's: the scratchpad root is shared.
+    #[test]
+    fn the_builder_document_names_what_an_infra_only_car_must_still_run() {
+        let doc = read(&repo(), "builder")
+            .expect("readable")
+            .expect("infra/platform/documents/builder-rules.md is authored");
+        let text = body(&doc);
+        assert!(
+            text.contains("crates/core/boss-testing"),
+            "the builder rules name the crate whose pins drive infra scripts"
+        );
+        let tests = repo().join("crates/core/boss-testing/tests");
+        let pins: Vec<String> = std::fs::read_dir(&tests)
+            .expect("boss-testing/tests")
+            .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap_or_default())
+            .collect();
+        for dir in [
+            "infra/lint/",
+            "infra/forge/",
+            "infra/ops/",
+            "infra/dev/",
+            "infra/platform/",
+        ] {
+            assert!(repo().join(dir).is_dir(), "{dir} is a directory");
+            assert!(
+                pins.iter().any(|t| t.contains(dir.trim_end_matches('/'))),
+                "a boss-testing pin reads {dir}"
+            );
+            assert!(
+                text.contains(dir),
+                "the builder rules name {dir} as pinned by boss-testing"
+            );
+        }
+        for phrase in [
+            "wt-cargo test -p boss-testing --all-features",
+            "reset --soft origin/main",
+            "git diff --stat origin/main",
+            "scratchpad/builders/<packet id>/",
+        ] {
+            assert!(text.contains(phrase), "the builder rules say `{phrase}`");
+        }
+    }
+
     #[test]
     fn a_profile_with_no_document_is_a_line_that_names_the_file() {
         let s = section(&repo(), "no-such-profile").expect("a missing document is not an error");

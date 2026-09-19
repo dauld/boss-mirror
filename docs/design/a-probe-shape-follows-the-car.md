@@ -48,7 +48,15 @@ than out of experience:
   `200` with a narrowed world and a body-less `404` — no catch-all JSON,
   no 401, nothing that distinguishes a routed path from an unrouted one.
   A route probe that points at `:7900` proves nothing and says it
-  passed. Point it at the gateway.
+  passed. Point it at the gateway — and from the forge the way to do
+  that is `boss-gateway-read /api/path`, which prints the status code
+  alone (since backlog 240e03f3, 2026-09-19): the machine door carries
+  a `gateway=` row, the reader takes the host from the door's own
+  `BOSS_JOBS_URL` and the port from that row, and sends NO identity —
+  so `401` versus `200` is what the gateway answers a stranger, and
+  a probe never spells an address. The reader exits non-zero and
+  prints nothing when nothing answered; a probe turns that into
+  `exit 75`, never into a verdict.
 
 Why a server-issued session is admissible where a self-asserted header
 is not: a forged cookie (`-b 'boss_session=iamtheoperator'`) answers

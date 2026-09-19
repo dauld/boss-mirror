@@ -40,6 +40,17 @@
 # GET /api/dispatcher/rules (boss-dispatcher, 7950). Neither port was
 # here, so neither could be done through a door.
 #
+# The gateway joined on 2026-09-19 (backlog 240e03f3): the hardening
+# claim "an undeclared /api read answers 401 without a session"
+# (b4afd7b9) had no probe that could reach a gateway — this door
+# carried service ports only, prod's hostname answers Cloudflare
+# Access's 302 from the forge, and a probe may not spell an address.
+# The gateway's own LoadBalancer (boss.yaml, 10.20.0.30:80) is the
+# same process on the same LAN; this row lets the probe reader find it
+# from the ONE address it is handed. Its reader is
+# infra/forge/probe-bin/boss-gateway-read, which sends no identity by
+# design, and the row is the one entry here that no path routes to.
+#
 # The ports are boss-ports' prod ports under boss-ports' names, and
 # the all-in-one pod listens on each (generate-configs.sh binds
 # 0.0.0.0), so port == targetPort. Which services, on which port, is
@@ -69,3 +80,4 @@ spec:
     - {port: 7550, targetPort: 7550, name: accounts}
     - {port: 7080, targetPort: 7080, name: ledger}
     - {port: 7950, targetPort: 7950, name: dispatcher}
+    - {port: 4443, targetPort: 4443, name: gateway}

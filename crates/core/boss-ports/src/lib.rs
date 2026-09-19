@@ -220,6 +220,20 @@ pub const SOLO: &[PortSpec] = &[
         prod: 7950,
         scratch: None,
     },
+    // The gateway — the human door, and since backlog 240e03f3
+    // (2026-09-19) a row on the LAN machine door too, so a recorded
+    // probe can ask what it answers a caller with no session
+    // (`boss-gateway-read`). 4443 is what boss-gateway listened on
+    // from the start (BOSS_LISTEN's default, boss.yaml's
+    // containerPort, the quickstart's "SPA: http://localhost:4443");
+    // it lives here now so the manifest, sor-ports.env and the
+    // gateway's own default are one fact
+    // (the_machine_door_carries_every_read_surface.rs).
+    PortSpec {
+        name: "gateway",
+        prod: 4443,
+        scratch: None,
+    },
 ];
 
 /// All known services (paired + solo). Iteration order is
@@ -323,6 +337,7 @@ mod tests {
     fn lookups_resolve() {
         assert_eq!(prod("policy"), 7250);
         assert_eq!(prod("jobs"), 7900);
+        assert_eq!(prod("gateway"), 4443);
         assert_eq!(scratch("jobs"), Some(8900));
         assert_eq!(scratch("policy"), None);
         assert_eq!(url("policy"), "http://127.0.0.1:7250");

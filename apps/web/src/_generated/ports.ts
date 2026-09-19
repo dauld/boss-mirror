@@ -146,6 +146,11 @@ export const PORTS: ReadonlyArray<PortRow> = [
     "name": "dispatcher",
     "prod": 7950,
     "scratch": null
+  },
+  {
+    "name": "gateway",
+    "prod": 4443,
+    "scratch": null
   }
 ] as const;
 

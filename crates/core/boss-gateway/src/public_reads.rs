@@ -34,6 +34,20 @@
 //! write public. Undeclared, each of the four is routed through the
 //! session-gated proxy exactly like every other `/api` route and
 //! answers 401 to a sessionless caller.
+//!
+//! AND THE READS THAT ARE PUBLIC ON EVERY INSTANCE, BY DESIGN
+//! ([`PUBLIC_BY_DESIGN`], backlog 240e03f3, 2026-09-19). The hardening
+//! inventory found two `handle_public` routes left in the route table
+//! after the four moved here. Each was decided rather than left:
+//! the calendar feed stays public, with its reason as a row here, so
+//! the inventory reads ONE module to audit every sessionless door;
+//! the observability health alias was not by design — the page that
+//! reads it holds a session, as it does for every other
+//! `/api/<service>/health` — and now meets the gate like them
+//! (main.rs, `the_observability_health_alias_refuses_a_sessionless_caller`).
+//! A by-design row is never an `/api` path: an `/api` read that a
+//! stranger may make is a tenant's choice, and belongs in
+//! [`PUBLISHABLE`] behind a declaration.
 
 use std::sync::Arc;
 
@@ -76,6 +90,30 @@ pub static PUBLISHABLE: &[PublicRead] = &[
         upstream: &proxy::EVENTS,
     },
 ];
+
+/// One read that is sessionless on EVERY instance, and why. No
+/// declaration can close it, so the reason has to be one that holds
+/// for every tenant — which is what `why` is for, and what the
+/// hardening inventory reads.
+pub struct PublicByDesign {
+    /// The route-table matcher.
+    pub matcher: &'static str,
+    /// The upstream that serves it.
+    pub upstream: &'static ProxyConfig,
+    /// Why no session can be asked for here.
+    pub why: &'static str,
+}
+
+/// The closed table of by-design public reads. GET only, like
+/// [`PUBLISHABLE`]; never an `/api` path (pinned below).
+pub static PUBLIC_BY_DESIGN: &[PublicByDesign] = &[PublicByDesign {
+    matcher: "/ics/{*rest}",
+    upstream: &proxy::JOBS,
+    why: "the calendar feed: a calendar client subscribes by URL and cannot hold a \
+          session cookie, so the 256-bit token in the path IS the credential, minted \
+          per owner and validated by boss-jobs-api on every read; an undeclared \
+          instance answering 401 here would silently empty every subscribed calendar",
+}];
 
 /// The resolved declaration: which of [`PUBLISHABLE`] this instance
 /// answers without a session. Built once at boot; the route table
@@ -142,15 +180,23 @@ impl PublicReads {
     }
 }
 
-/// Register the four in the route table, each by what this instance
-/// declared: declared → GET through the sessionless proxy, every
-/// other method through the gated one (the same MethodRouter, or a
-/// POST to `/api/workflows` would answer 405 — the strict matcher
-/// shadows `/api/jobs/{*rest}`); undeclared → every method gated,
-/// exactly like the routes around it. Both branches register the
-/// same matchers, so the route table's SHAPE does not depend on the
-/// declaration — only which proxy answers a GET.
+/// Register every sessionless read in the route table. The by-design
+/// rows first, GET only, on every instance. Then the four, each by
+/// what this instance declared: declared → GET through the sessionless
+/// proxy, every other method through the gated one (the same
+/// MethodRouter, or a POST to `/api/workflows` would answer 405 — the
+/// strict matcher shadows `/api/jobs/{*rest}`); undeclared → every
+/// method gated, exactly like the routes around it. Both branches
+/// register the same matchers, so the route table's SHAPE does not
+/// depend on the declaration — only which proxy answers a GET.
 pub fn mount(app: axum::Router<Arc<AppState>>, reads: &PublicReads) -> axum::Router<Arc<AppState>> {
+    let app = PUBLIC_BY_DESIGN.iter().fold(app, |app, read| {
+        let upstream = read.upstream;
+        app.route(
+            read.matcher,
+            axum::routing::get(move |s, r| proxy::handle_public(s, r, upstream)),
+        )
+    });
     PUBLISHABLE.iter().fold(app, |app, read| {
         let upstream = read.upstream;
         let public = reads.is_public(read);
@@ -252,6 +298,40 @@ mod tests {
                 err.contains("/api/events/public-tail"),
                 "the refusal must list what is declarable: {err}"
             );
+        }
+    }
+
+    /// A BY-DESIGN ROW SAYS WHY, AND IS NEVER AN /api PATH. The reason
+    /// is what the hardening inventory reads; an `/api` read a stranger
+    /// may make is a tenant's choice and belongs in [`PUBLISHABLE`]
+    /// behind a declaration, not here where no declaration can close
+    /// it. And the two tables cannot overlap: a matcher registered
+    /// twice panics axum at boot, which is the wrong place to learn it.
+    #[test]
+    fn a_by_design_row_carries_its_reason_and_is_never_an_api_path() {
+        assert!(
+            !PUBLIC_BY_DESIGN.is_empty(),
+            "the by-design table is empty — if the calendar feed moved, the rule moved with it"
+        );
+        for row in PUBLIC_BY_DESIGN {
+            assert!(
+                row.why.len() > 40,
+                "{} is public by design without a reason an inventory can read",
+                row.matcher
+            );
+            assert!(
+                !row.matcher.starts_with("/api/") && row.matcher != "/api",
+                "{} is an /api read public on every instance — that is a tenant's \
+                 declaration (PUBLISHABLE), not a design",
+                row.matcher
+            );
+            for p in PUBLISHABLE {
+                assert!(
+                    !p.matchers.contains(&row.matcher),
+                    "{} is in both tables — one matcher, one row",
+                    row.matcher
+                );
+            }
         }
     }
 

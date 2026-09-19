@@ -47,6 +47,18 @@
 //! routing at all, so the agent could not do the first real step of the
 //! first real loop through any door. Same trust class as design
 //! 28d2bed9: the jobs API's writes are already on this IP.
+//!
+//! WHY THE GATEWAY IS ON THE DOOR (backlog 240e03f3, 2026-09-19). The
+//! hardening claim "an undeclared /api read answers 401 without a
+//! session" (b4afd7b9) had no probe that could reach a gateway: the
+//! door carried service ports only, and prod's hostname answers
+//! Cloudflare Access's 302 from the forge. The gateway is the ONE row
+//! here that is not path-routed — `boss-sor-read` never sends a path
+//! to it, because every read that reader makes is identified and the
+//! gateway's answer to an identified reader is not the fact under
+//! proof. Its reader is `boss-gateway-read` (boss_gateway_read_sh.rs),
+//! which sends no identity and prints the status alone. So the pin's
+//! expected set is the route table's services PLUS this named row.
 
 use boss_testing::repo_root;
 use std::collections::BTreeMap;
@@ -56,8 +68,21 @@ const PORTS_ENV: &str = "infra/forge/sor-ports.env";
 const ROUTES: &str = "infra/forge/probe-bin/sor-routes.sh";
 const ROUTES_BEGIN: &str = "# SOR-ROUTES-BEGIN";
 const ROUTES_END: &str = "# SOR-ROUTES-END";
-/// The two doors that must route by the one table, not by a copy.
-const DOORS: [&str; 2] = ["infra/forge/probe-bin/boss-sor-read", "infra/dev/boss-api"];
+/// The doors that must route by the one table, not by a copy: the two
+/// path-routed readers, and the gateway reader, which swaps the port by
+/// the same `sor_port_for_service` / `sor_base_on_port` pair.
+const DOORS: [&str; 3] = [
+    "infra/forge/probe-bin/boss-sor-read",
+    "infra/forge/probe-bin/boss-gateway-read",
+    "infra/dev/boss-api",
+];
+
+/// The rows on the door that NO path routes to: services a reader of
+/// its own reaches by name. Exactly one — the gateway, read by
+/// `boss-gateway-read` (backlog 240e03f3). A row added here needs a
+/// reader that names it; a row that a path routes to belongs in the
+/// route table instead.
+const NOT_PATH_ROUTED: [&str; 1] = ["gateway"];
 
 fn read(rel: &str) -> String {
     let p = repo_root().join(rel);
@@ -159,15 +184,23 @@ fn roster() -> BTreeMap<String, u16> {
         .collect()
 }
 
-/// THE PIN. The reader's route table names the services; the roster
+/// THE PIN. The reader's route table names the services, plus the
+/// rows a reader reaches by name ([`NOT_PATH_ROUTED`]); the roster
 /// gives each its port; the manifest and the env table must both say
-/// exactly that — no more (a port the reader can never reach is an
-/// exposure with no reader), no less (a route to a port the door does
-/// not carry is the 404 this car exists to remove).
+/// exactly that — no more (a port no reader can reach is an exposure
+/// with no reader), no less (a route to a port the door does not carry
+/// is the 404 this car exists to remove).
 #[test]
 fn the_door_the_table_and_the_reader_agree_with_boss_ports() {
     let roster = roster();
-    let services = reader_services();
+    let mut services = reader_services();
+    for s in NOT_PATH_ROUTED {
+        assert!(
+            !services.iter().any(|r| r == s),
+            "{ROUTES} routes a path to `{s}`, which is also listed as not path-routed — one or the other"
+        );
+        services.push(s.to_string());
+    }
     for s in &services {
         assert!(
             roster.contains_key(s),
@@ -203,6 +236,31 @@ fn the_door_the_table_and_the_reader_agree_with_boss_ports() {
 /// The one port that was always there stays: the jobs API on its
 /// boss-ports port is what every conductor and chore write through, and
 /// the reader's default when no prefix matches.
+/// The gateway row reaches the door the way every other row does —
+/// the manifest exposes it on its boss-ports port, the env table hands
+/// it to the probe — and its reader names it by exactly that string.
+/// A rename of the row in one place is caught here, by name.
+#[test]
+fn the_gateway_row_is_on_the_door_and_its_reader_names_it() {
+    let port = boss_ports::prod("gateway");
+    assert_eq!(
+        manifest_ports().get("gateway").map(|(p, _)| *p),
+        Some(port),
+        "{MANIFEST} does not expose the gateway on its boss-ports port — no probe can ask \
+         what the gateway answers a stranger"
+    );
+    assert_eq!(
+        env_ports().get("gateway").copied(),
+        Some(port),
+        "{PORTS_ENV} has no gateway row — boss-gateway-read refuses without one"
+    );
+    let reader = read("infra/forge/probe-bin/boss-gateway-read");
+    assert!(
+        reader.contains("sor_port_for_service gateway"),
+        "boss-gateway-read must look the row up by the name the table spells"
+    );
+}
+
 #[test]
 fn the_jobs_api_is_still_on_the_door() {
     assert_eq!(
@@ -216,10 +274,10 @@ fn the_jobs_api_is_still_on_the_door() {
     );
 }
 
-/// ONE ROUTE TABLE, TWO DOORS. The forge's probe reader and the pod's
-/// `boss-api` both source the route file from beside themselves, and
-/// neither carries a `case` of its own: the prefix rules live in one
-/// file, so a service added to the door reaches both readers in one
+/// ONE ROUTE TABLE, EVERY DOOR. The forge's two probe readers and the
+/// pod's `boss-api` all source the route file from beside themselves,
+/// and none carries a `case` of its own: the prefix rules live in one
+/// file, so a service added to the door reaches every reader in one
 /// edit (backlog de0989d2).
 #[test]
 fn both_doors_source_the_one_route_file_and_carry_no_table_of_their_own() {

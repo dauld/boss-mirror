@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# boss-gateway-read /api/path — the ONE way a car's recorded probe reads
+# the instance's GATEWAY, and the one reader here that sends NO identity
+# on purpose. GET only, no header, no cookie; prints the HTTP status
+# code and nothing else.
+#
+# WHY THIS EXISTS — backlog 240e03f3, left by the builder of b4afd7b9
+# (2026-09-18). The hardening claim "an undeclared /api read answers
+# 401 without a session" could not be proven by any recorded probe:
+# boss-sor-read reaches only the service ports on the LAN machine door
+# and identifies every read it makes (that is its whole point), and
+# prod's hostname sits behind Cloudflare Access, so a curl from the
+# forge answers Access's 302 — never the gateway's 401. The address
+# may not be spelled in a probe (the-estate-address-lives-once). So the
+# machine door carries a `gateway=<port>` row (infra/forge/sor-ports.env,
+# pinned to boss-ports), and this reader takes the HOST from
+# BOSS_JOBS_URL, the PORT from that row, and asks the gateway what it
+# answers a stranger. A probe then asserts 401 versus 200 BY EFFECT —
+# the shape docs/design/a-probe-shape-follows-the-car.md gives a
+# gateway route (401-vs-404, "point it at the gateway").
+#
+# WHY IT PRINTS THE STATUS AND NOT THE BODY. The body of a 401 is empty
+# and the body of a 200 is data a stranger should not have had; the
+# fact under proof is the status. Printing only the code also keeps a
+# probe from parsing a body it was not entitled to read into a claim.
+#
+# WHY IT IGNORES BOSS_SOR_USER. The unattended door exports the
+# read-scoped actor for boss-sor-read, and it sits in this reader's env
+# too. It is deliberately not read: a header the gateway would not
+# honour anyway (a forged header is accepted by a TRUSTING upstream;
+# the gateway trusts a session), and a reader that could be identified
+# by accident cannot prove what an unidentified caller gets.
+#
+# WHY NO FALLBACK TO THE JOBS PORT. A table without the gateway row
+# means the door does not carry the gateway; reading the jobs port
+# instead would answer a stranger 200 with a narrowed world (backlog
+# 61085a9e) — the exact defect a 401-versus-200 probe exists to see,
+# recorded as the gateway's answer. Refused, naming the row.
+#
+# NO ANSWER IS NOT A STATUS. curl prints `000` for %{http_code} when
+# nothing answered and exits 7; a probe that read `000` as "not 401"
+# would judge a door that has not converged yet as a false claim. On
+# curl's failure this prints nothing on stdout, says so on stderr and
+# exits with curl's status — a probe turns that into `exit 75` (not
+# yet), never into a verdict.
+#
+# Env (set by the door that runs the probe — boss-cli prove.rs):
+#   BOSS_JOBS_URL   the system of record's base URL — its HOST is used
+#   BOSS_SOR_PORTS  `name=port …`; the `gateway=` entry is required
+#
+# Exit: 0 and the status code on stdout; 2 on a refusal (nothing was
+# read); curl's own exit when the gateway did not answer.
+set -uo pipefail
+
+me="boss-gateway-read"
+refuse() { echo "$me: REFUSED — $*" >&2; exit 2; }
+
+[[ $# -eq 1 ]] || refuse \
+    "usage: $me /api/path — exactly one argument, and it is a PATH. There is no method
+  argument: this reads what the gateway answers a caller with no session, and prints
+  the status code. Got $# argument(s)."
+
+path="$1"
+case "$path" in
+    /*) ;;
+    *://*) refuse \
+        "'$path' is a URL. The host comes from BOSS_JOBS_URL, which the runner pins to the
+  system of record, because a probe that names its own host can read a different
+  instance and get a well-formed answer about different data (CLAUDE.md §Doors: a wrong
+  target answers instead of erroring). Pass the path alone: $me /api/jobs" ;;
+    *) refuse "the path must start with '/': got '$path'" ;;
+esac
+
+[[ -n "${BOSS_JOBS_URL:-}" ]] || refuse \
+    "BOSS_JOBS_URL is not set, and there is no safe default — the ops-runner's unit pins it
+  for boss prove --unattended. If you are running this by hand, set it to the system of record;
+  only its HOST is used here."
+
+# The port table both doors share (sor-routes.sh beside this file:
+# sor_port_for_service and sor_base_on_port). readlink -f: the runner
+# puts this DIRECTORY on the probe's PATH.
+routes="$(dirname "$(readlink -f "$0")")/sor-routes.sh"
+[[ -r "$routes" ]] || refuse \
+    "$routes is missing beside this reader — a checkout that carries $me without the
+  route table cannot swap the port."
+# shellcheck source=sor-routes.sh
+. "$routes"
+
+port=$(sor_port_for_service gateway "${BOSS_SOR_PORTS:-}") || refuse \
+    "BOSS_SOR_PORTS names no gateway port (table: '${BOSS_SOR_PORTS:-}'), so the machine
+  door this checkout describes does not carry the gateway. Reading the jobs port instead
+  would answer a stranger 200 with a narrowed world — the defect a 401-versus-200 probe
+  exists to see — so this refuses rather than guessing. The table is
+  infra/forge/sor-ports.env in the runner's checkout, pinned to boss-ports."
+base=$(sor_base_on_port "${BOSS_JOBS_URL%/}" "$port")
+
+# No -f: a 4xx is the ANSWER, not a failure. No -H, no -b: nothing on
+# the wire says who is asking. --connect-timeout as boss-sor-read: a
+# door port the cluster does not expose yet DROPS rather than refuses.
+status=$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 10 "${base}${path}")
+rc=$?
+if [[ $rc -ne 0 ]]; then
+    echo "$me: the gateway at ${base} did not answer ${path} (curl exit $rc, http_code '${status}')" >&2
+    exit "$rc"
+fi
+printf '%s\n' "$status"

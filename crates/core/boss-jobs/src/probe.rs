@@ -841,6 +841,12 @@ mod tests {
             "test -n \"$BOSS_JOBS_URL\" && echo claim-ok",
             "boss-sor-read /api/yard/status | grep -q dock_depth",
             "curl -fsS -H \"x-boss-user: $BOSS_SOR_USER\" $BOSS_JOBS_URL/api/yard/status | grep -q x",
+            // The gateway reader sends no identity BY DESIGN and prints
+            // only the status (backlog 240e03f3): the narrowed-world
+            // defect this rule refuses is the direct port's, and the
+            // gateway answers a stranger 401, loudly — which is the
+            // fact such a probe asserts.
+            "s=$(boss-gateway-read /api/jobs); case \"$s\" in 401) echo gateway-401:ok;; *) echo \"gateway answered $s\"; exit 1;; esac",
         ] {
             assert_eq!(
                 reads_the_sor_unidentified(probe),

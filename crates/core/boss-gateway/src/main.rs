@@ -99,7 +99,11 @@ async fn main() -> Result<()> {
         .compact()
         .init();
 
-    let listen = std::env::var("BOSS_LISTEN").unwrap_or_else(|_| "127.0.0.1:4443".into());
+    // The port is boss-ports' `gateway` row, the same fact the LAN
+    // machine door and the probe reader's table carry (backlog
+    // 240e03f3); loopback stays the default, the manifest widens it.
+    let listen = std::env::var("BOSS_LISTEN")
+        .unwrap_or_else(|_| format!("127.0.0.1:{}", boss_ports::prod("gateway")));
     let session_key_path: std::path::PathBuf = std::env::var("BOSS_SESSION_KEY")
         .unwrap_or_else(|_| "/var/lib/boss-gateway/session.key".into())
         .into();
@@ -462,14 +466,10 @@ fn build_router(
             "/api/scheduling/{*rest}",
             axum::routing::any(|s, r| proxy::handle(s, r, &proxy::JOBS)),
         )
-        // Public calendar-feed endpoint: /ics/{token}.ics. The token in
-        // the URL is the authentication — calendar clients can't carry
-        // auth cookies, so we proxy this one path without the cookie
-        // gate. Upstream (boss-jobs-api) validates the token.
-        .route(
-            "/ics/{*rest}",
-            axum::routing::get(|s, r| proxy::handle_public(s, r, &proxy::JOBS)),
-        )
+        // The calendar feed, /ics/{token}.ics, is registered by
+        // `public_reads::mount` below as a PUBLIC_BY_DESIGN row, with
+        // its reason beside it (backlog 240e03f3): every sessionless
+        // read is a row in that module, none is pinned here.
         .route(
             "/api/catalog/{*rest}",
             axum::routing::any(|s, r| proxy::handle(s, r, &proxy::CATALOG)),
@@ -669,10 +669,16 @@ fn build_router(
         // every PORTS entry. boss-observability exposes its routes
         // under different prefixes (/api/events, /api/snapshot,
         // /api/agents), so without this alias the monitoring page
-        // shows it as 'down' even when running.
+        // shows it as 'down' even when running. Session-gated like
+        // every other health path that page reads (`/api/jobs/health`
+        // rides the gated `/api/jobs/{*rest}`): it sat on the
+        // sessionless proxy until backlog 240e03f3 (2026-09-19) with
+        // nothing but that page reading it, and the page holds a
+        // session. Pinned by
+        // `the_observability_health_alias_refuses_a_sessionless_caller`.
         .route(
             "/api/observability/health",
-            axum::routing::get(|s, r| proxy::handle_public(s, r, &proxy::OBSERVABILITY)),
+            axum::routing::get(|s, r| proxy::handle(s, r, &proxy::OBSERVABILITY)),
         )
         // Simulator UX — boss-simulator hosts both the /simulator SPA
         // bundle and its /simulator/api/* control+status surface. The
@@ -1288,6 +1294,76 @@ mod routing_tests {
                 "`{path}` reached the /api catch-all: {body}"
             );
         }
+    }
+
+    /// The observability health alias needs a session like every other
+    /// `/api/<service>/health` (backlog 240e03f3, the hardening
+    /// inventory's audit of the two unconditional public routes,
+    /// 2026-09-19). It was pinned public for the IT Monitoring page,
+    /// which reads it WITH a session like the other health paths it
+    /// probes (`/api/jobs/health` rides `/api/jobs/{*rest}`, gated) —
+    /// so the pin's only effect was a sessionless `{"status":"ok"}`
+    /// on every instance. Nothing else reads it: no manifest probe, no
+    /// observer, no script (grep on 2026-09-19). Same discriminator as
+    /// the snapshot: 401 before any upstream.
+    #[tokio::test]
+    async fn the_observability_health_alias_refuses_a_sessionless_caller() {
+        let (status, body) = get(app(), "/api/observability/health").await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "`/api/observability/health` must be gated by the session proxy: {body}"
+        );
+        assert!(
+            !body.contains(MISS),
+            "`/api/observability/health` reached the /api catch-all: {body}"
+        );
+    }
+
+    /// The calendar feed is public BY DESIGN on every instance, whatever
+    /// the tenant declares (public_reads::PUBLIC_BY_DESIGN): the token
+    /// in the URL is the credential, because a calendar client cannot
+    /// hold a session cookie. The discriminator is the same as
+    /// everywhere in this module — the gated proxy answers 401 before
+    /// it forwards, the public one forwards (and, with no upstream in a
+    /// unit test, answers whatever the forward answers, never 401).
+    #[tokio::test]
+    async fn the_calendar_feed_is_public_by_design_on_an_instance_that_declares_nothing() {
+        let (status, body) = get(app(), "/ics/some-token.ics").await;
+        assert_ne!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "`/ics/{{token}}.ics` carries its own credential and must not meet the session gate: {body}"
+        );
+        assert!(
+            !body.contains(MISS),
+            "`/ics/some-token.ics` reached the /api catch-all: {body}"
+        );
+    }
+
+    /// EVERY SESSIONLESS READ IS A ROW. The route table in this file
+    /// registers no sessionless proxy of its own: the tenant-declared
+    /// reads and the by-design ones are both rows in public_reads.rs,
+    /// each with the reason it may be public, and that module is the
+    /// one place the hardening inventory reads to audit the door
+    /// (backlog 240e03f3). A `handle_public` written back into this
+    /// file is a door no inventory names. The needle is spelled in two
+    /// halves so this test's own text does not match it.
+    #[test]
+    fn the_route_table_registers_no_sessionless_proxy_of_its_own() {
+        let needle = concat!("proxy::handle_", "public");
+        let hits: Vec<usize> = include_str!("main.rs")
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| l.contains(needle) && !l.trim_start().starts_with("//"))
+            .map(|(n, _)| n + 1)
+            .collect();
+        assert!(
+            hits.is_empty(),
+            "main.rs registers a sessionless proxy directly at line(s) {hits:?} — every \
+             sessionless read is a row in public_reads.rs (PUBLISHABLE, declared by the \
+             tenant, or PUBLIC_BY_DESIGN, with its reason)"
+        );
     }
 
     /// Local-auth routes are registered AFTER the catch-all, on a
