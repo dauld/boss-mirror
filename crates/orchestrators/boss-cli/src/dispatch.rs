@@ -930,10 +930,17 @@ pub(crate) const BUILDING_SLUG: &str = "building";
 /// `"success"`, so a run that refused was recorded identically to one
 /// that landed green first try — all 24 rows in the live table said
 /// success). The `result` field on `building` is required and
-/// enum-checked by the Workflow row, so the three values below are the
-/// whole fork: `gated` is the gate's green, `refused` is a builder
-/// that stopped without building, `died` is the silence rule's verdict
-/// — and silence is refused exactly like failure.
+/// enum-checked by the Workflow row, so the four values below are the
+/// whole fork: `gated` is the gate's green, `delivered` is a run that
+/// ships no car finishing its work (backlog a9c6ed5b — an analyst has
+/// no gate to go green, and a success recorded as anything else is a
+/// packet asserting something untrue of the run), `refused` is an
+/// agent that stopped without doing it, `died` is the silence rule's
+/// verdict — and silence is refused exactly like failure. A value the
+/// protocol admits and this match does not reads as "no terminal
+/// reached", which would drop the run's spend from `agent_runs`
+/// entirely; `every_value_the_protocol_admits_is_an_outcome_this_records`
+/// holds the two equal (CLAUDE.md 9a).
 ///
 /// `None` is "the run has reached no terminal yet", which is not an
 /// outcome: the report can arrive before the green, and the row is
@@ -945,7 +952,7 @@ pub(crate) fn run_outcome(run: &Value) -> Option<&'static str> {
         .filter(|s| s.get("status").and_then(Value::as_str) == Some("completed"))
         .and_then(|s| s.pointer("/metadata/result").and_then(Value::as_str))?;
     match result {
-        "gated" => Some("success"),
+        "gated" | "delivered" => Some("success"),
         "refused" => Some("cancelled"),
         "died" => Some("failed"),
         _ => None,
@@ -1692,11 +1699,13 @@ mod tests {
         };
         let done = |result: &str| json!({ "spec_slug": "building", "status": "completed", "metadata": { "result": result } });
         // Every terminal the `result` fork can reach, and what each one
-        // says about the run: `gated` is the green, `refused` is a
-        // builder that stopped without building, `died` is the silence
+        // says about the run: `gated` is the green, `delivered` is a
+        // run that ships no car finishing its work, `refused` is an
+        // agent that stopped without doing it, `died` is the silence
         // rule's verdict — and silence is refused exactly like failure.
         for (result, outcome) in [
             ("gated", "success"),
+            ("delivered", "success"),
             ("refused", "cancelled"),
             ("died", "failed"),
         ] {
@@ -1724,6 +1733,53 @@ mod tests {
         // And the API still parses what the record says.
         let parsed: boss_jobs::agent_runs::NewAgentRun = serde_json::from_value(rec).unwrap();
         assert_eq!(parsed.outcome, boss_jobs::agent_runs::RunOutcome::Cancelled);
+    }
+
+    /// THE FACT THAT LIVES TWICE (CLAUDE.md 9a). The `result` fork is
+    /// authored in `infra/platform/workflows/agent-run.toml` as an
+    /// enum; [`run_outcome`] matches its values here. A value added to
+    /// the protocol and not to the match falls through to `None`, and
+    /// `None` means "no terminal reached" — so `--report` would decline
+    /// to record the run in `agent_runs` at all, and the spend of every
+    /// run ending that way would be missing from the table the claim
+    /// door reads. That is exactly what `delivered` would have done
+    /// (backlog a9c6ed5b). Pinned against the bundle rather than a list
+    /// spelled twice.
+    #[test]
+    fn every_value_the_protocol_admits_is_an_outcome_this_records() {
+        let run =
+            boss_jobs::seed_loader::load_workflows(boss_jobs::registry::platform_bundle_path())
+                .expect("the platform bundle parses")
+                .into_iter()
+                .find(|w| w.kind == RUN_KIND)
+                .expect("agent-run ships in the platform bundle");
+        let field_type = run
+            .steps
+            .iter()
+            .find(|s| s.title == BUILDING_SLUG)
+            .expect("agent-run has a `building` step")
+            .fields
+            .iter()
+            .find(|f| f.name == "result")
+            .expect("building declares `result`")
+            .field_type
+            .clone();
+        let values: Vec<&str> = field_type.split('|').collect();
+        assert!(values.len() >= 4, "the fork is an enum: {field_type}");
+        for value in values {
+            let packet = json!({
+                "id": "5b1d2c3e-0000-4000-8000-000000000002",
+                "kind": RUN_KIND,
+                "steps": [{
+                    "spec_slug": BUILDING_SLUG, "status": "completed",
+                    "metadata": { "result": value },
+                }],
+            });
+            assert!(
+                run_outcome(&packet).is_some(),
+                "the protocol admits `{value}` and this match does not"
+            );
+        }
     }
 
     #[test]

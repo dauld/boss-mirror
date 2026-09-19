@@ -6,16 +6,25 @@
 //! WHAT THIS PINS, AND WHY IT EXISTS
 //! ---------------------------------
 //! An agent's run of a protocol step is a packet: claimed at dispatch,
-//! briefed with the exact prompt, building until one of three hands
-//! closes it. The three terminals are reached by three DIFFERENT hands
-//! — a rule reading the gate (`landed`), a person recording a refusal
-//! (`refused`), a clock rule reading silence (`died`) — and the fork
-//! that routes them is one required enum on `building`. If that field
-//! stopped being required, a run could close without saying which way
-//! it went; if a value lost its branch, a run could wedge open with no
-//! terminal reachable. Both are pinned below, along with the one fact
-//! that lives twice: the silence bound the clock rule declares is 2x
-//! the `duration_hours` this file authors (CLAUDE.md 9a).
+//! briefed with the exact prompt, building until one of several hands
+//! closes it. The three terminals are reached by different hands — a
+//! rule reading the gate, or a hand recording work delivered with no
+//! car (`landed`), a person recording a refusal (`refused`), a clock
+//! rule reading silence (`died`) — and the fork that routes them is
+//! one required enum on `building`. If that field stopped being
+//! required, a run could close without saying which way it went; if a
+//! value lost its branch, a run could wedge open with no terminal
+//! reachable. Both are pinned below, along with the one fact that
+//! lives twice: the silence bound the clock rule declares is 2x the
+//! `duration_hours` this file authors (CLAUDE.md 9a).
+//!
+//! `delivered` is the ANALYST's ending (backlog a9c6ed5b, 2026-09-19):
+//! a run that ships no car has no gate to go green, so `gated` was
+//! untrue of it and `died` was both untrue and a failure. Measured on
+//! the tree that day: thirteen analyst blocks across six kinds, and
+//! the page march alone queues roughly 94 such runs. It routes through
+//! the SAME `reported` step as `gated`, because an analyst's handback
+//! is the work.
 
 use boss_jobs::registry::{StepSpec, WorkflowSpec, platform_bundle_path};
 use boss_jobs::seed_loader::load_workflows;
@@ -82,10 +91,11 @@ fn the_run_has_the_decided_steps_in_order() {
     assert_eq!(step(&run, "claimed").kind, "trigger");
     assert_eq!(step(&run, "briefed").ready_when, "steps.claimed.done");
     assert_eq!(step(&run, "building").ready_when, "steps.briefed.done");
-    // The report opens on the green, and the run lands on the report.
+    // The report opens on the green OR on delivered work, and the run
+    // lands on the report either way.
     assert_eq!(
         step(&run, "reported").ready_when,
-        "steps.building.done AND steps.building.metadata.result = \"gated\""
+        "steps.building.done AND (steps.building.metadata.result = \"gated\" OR steps.building.metadata.result = \"delivered\")"
     );
     assert_eq!(step(&run, "landed").ready_when, "steps.reported.done");
 }
@@ -101,7 +111,7 @@ fn building_says_how_it_ended_and_every_value_routes_once() {
         .find(|f| f.name == "result")
         .expect("building declares `result`");
     assert!(field.required);
-    assert_eq!(field.field_type, "gated|refused|died");
+    assert_eq!(field.field_type, "gated|delivered|refused|died");
 
     let outcomes: Vec<(&str, &str)> = run
         .steps
@@ -121,13 +131,17 @@ fn building_says_how_it_ended_and_every_value_routes_once() {
         ]
     );
 
-    for value in ["gated", "refused", "died"] {
+    for value in ["gated", "delivered", "refused", "died"] {
         let md = json!({ "result": value });
         let reached: Vec<&str> = ["reported", "refused", "died"]
             .into_iter()
             .filter(|t| reaches(&run, t, md.clone(), false))
             .collect();
-        let want = if value == "gated" { "reported" } else { value };
+        let want = if value == "gated" || value == "delivered" {
+            "reported"
+        } else {
+            value
+        };
         assert_eq!(reached, vec![want], "result = {value}");
     }
 }
@@ -145,6 +159,20 @@ fn landed_needs_the_gate_and_the_report() {
         false
     ));
     assert!(reaches(&run, "landed", json!({ "result": "gated" }), true));
+    // The analyst's ending is held to the same bar: work delivered
+    // without a handback is not a landing either.
+    assert!(!reaches(
+        &run,
+        "landed",
+        json!({ "result": "delivered" }),
+        false
+    ));
+    assert!(reaches(
+        &run,
+        "landed",
+        json!({ "result": "delivered" }),
+        true
+    ));
     // And never on a refusal or a death, whatever the report says.
     assert!(!reaches(
         &run,

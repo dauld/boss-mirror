@@ -18,25 +18,69 @@
 # prompt, and completes `briefed`. From there the run is a packet like
 # any other — it sits on /it/crew, it ages, and a rule closes it.
 #
-# THREE TERMINALS, EACH REACHED BY A DIFFERENT HAND:
-#   landed  — `building` is completed by the rule that reads the run's
-#             gate going green (`agent-run-lands-on-gate-green`:
+# THREE TERMINALS, REACHED BY FOUR DIFFERENT HANDS:
+#   landed  — either of two endings, both of which then require the
+#             report:
+#             `gated`, a BUILDER's ending — `building` is completed by
+#             the rule that reads the run's gate going green
+#             (`agent-run-lands-on-gate-green`:
 #             jobs.complete_linked_step keyed by `metadata.agent_run` on
 #             the gate-run, which `boss gate` records when BOSS_AGENT_RUN
-#             is set); that opens `reported`, which records the builder's
-#             handback — by the operator who read it today, by the
-#             runner later — and the run lands on it. No rule ever
-#             writes the report, because a summary the machine invents
-#             is not the builder's.
-#   refused — the builder stopped without building (the claim no longer
-#             held on main, the packet was a duplicate): `building`
-#             completed by hand with `result = refused`.
-#   died    — the builder went silent: `building` is completed with
+#             is set), or by the car's arrival one hop later
+#             (`agent-run-lands-on-car-merged`);
+#             `delivered`, an ANALYST's ending — the run executed a step
+#             that ships no car (a measure, a draft, a judgement), so
+#             there is no gate to go green and never was. Both open
+#             `reported`, which records the handback — by the operator
+#             who read it today, by the runner later — and the run lands
+#             on it. No rule ever writes the report, because a summary
+#             the machine invents is not the agent's.
+#   refused — the agent stopped without doing the work (the claim no
+#             longer held on main, the packet was a duplicate):
+#             `building` completed by hand with `result = refused`.
+#   died    — the agent went silent: `building` is completed with
 #             `result = died` by the hourly clock rule
 #             `agent-run-dies-when-building-is-silent` once the packet
 #             has not moved for 2x this step's `duration_hours`. A
 #             builder that dies is a packet that ages, which is the whole
 #             reason the run is a packet.
+#
+# WHY `delivered` EXISTS, AND WHY IT IS NOT SPELLED `reported` (backlog
+# a9c6ed5b, 2026-09-19). Until it did, an analyst run could not close
+# honestly: its only success was `gated`, which is untrue of work that
+# ships no car, so the two endings actually available were a hand
+# writing `gated` or the clock writing `died` — a packet asserting
+# something untrue of the run, which is the shape the correctness
+# protocol refuses. Counted on the tree that day: thirteen analyst
+# blocks across six kinds (department-retro 4, protocol-retro 4,
+# page-audit 2, plus backlog-item, user-feedback and publish-to-github),
+# and the page march alone dispatches measure and file across 47
+# routes — roughly 94 such runs queued behind it. The first was
+# already live: run d5e0f287 on the /ux/support page audit, whose
+# `measure` step on packet 9876ef0d was COMPLETED while its run sat at
+# `building` with nowhere true to go. `reported` was the obvious word
+# and is the wrong one HERE: this protocol already has a step by that
+# name, gated on a hand writing a summary, so `result = "reported"`
+# would claim a handback that does not exist yet. `delivered` names
+# what is true at that moment — the work was delivered — and leaves
+# the handback to the step that requires it.
+#
+# WHAT COMPLETES IT IS STILL A HAND, AND THAT IS THE REMAINING GAP.
+# The fact that means an analyst run succeeded is its own step
+# completing on its packet (`metadata.packet` / `metadata.step`), and
+# no rule can reach it today: `jobs.complete_linked_step` follows a
+# link on the JOB metadata of the packet in the event, and the
+# executing packet carries no `agent_run` key (one packet hosts a run
+# per step, so a single key could not name which); `jobs.complete_-
+# step_matching` wants the value on a COMPLETED STEP of the candidate
+# and needs `id` in the payload, where `step.done.<kind>` carries
+# `job_id`. So this file makes the vocabulary honest; the reacher — an
+# edge written at dispatch plus a rule that follows it — is a separate
+# change. Ordering, when it lands: the two gate-green/car-merged rules
+# can never fire for an analyst run (it launches no gate and parks no
+# car), and a completed `building` is every writer's first no-op, so a
+# fourth writer races nothing. A run silent past four hours still dies,
+# exactly as a builder's does.
 #
 # `result` is REQUIRED and enum-checked on `building`, so the fork below
 # is total: every value routes somewhere, and a run cannot close without
@@ -55,7 +99,7 @@ label = "Agent run"
 category = "platform"
 subject_kinds = ["custom"]
 owning_team = "platform"
-description = "One agent's execution of one protocol step, as a packet: claimed at dispatch, briefed with the exact prompt, building until the run's gate goes green (landed), the builder stops without building (refused), or the packet goes silent past twice the step's duration (died). The middle third of the operator surface — a builder that dies is a packet that ages."
+description = "One agent's execution of one protocol step, as a packet: claimed at dispatch, briefed with the exact prompt, building until the run's gate goes green or a run that ships no car delivers its work (landed), the agent stops without doing it (refused), or the packet goes silent past twice the step's duration (died). The middle third of the operator surface — a builder that dies is a packet that ages."
 metadata = { owner_role = "platform-admin" }
 metadata_schema = { type = "object", required = ["packet", "step", "agent", "model", "budget_usd", "effort"], properties = { packet = { type = "string", description = "The job whose step this run executes." }, step = { type = "string", description = "The step's spec_slug on that job." }, agent = { type = "string", description = "The actor id the run signs as." }, model = { type = "string" }, budget_usd = { type = "number" }, effort = { type = "string" }, worktree = { type = "string" }, host = { type = "string" }, gate_run = { type = "string" }, car = { type = "string" }, spend_usd = { type = "number" }, tokens = { type = "number" } } }
 
@@ -93,11 +137,13 @@ title_template = "Building"
 authority_role = "platform-admin"
 duration_hours = 2.0
 fields = [
-  { name = "result", field_type = "gated|refused|died", required = true },
+  { name = "result", field_type = "gated|delivered|refused|died", required = true },
 ]
 
-# The builder's handback (rule 8 of the rules document): packet, branch,
-# sha, gate packet, what changed, what it saw. Opens on the green —
+# The agent's handback (rule 8 of the rules document): packet, branch,
+# sha, gate packet, what changed, what it saw — or, for an analyst run,
+# what it measured and what it filed. Opens on the green or on
+# delivered work —
 # the handback itself arrives at gate launch, ten minutes earlier, and
 # until this step opens it rides the packet's metadata (`boss job
 # patch`), which any hand can write at any time; this step is the
@@ -111,7 +157,7 @@ fields = [
 [[workflow.step]]
 title = "reported"
 kind = "task"
-ready_when = "steps.building.done AND steps.building.metadata.result = \"gated\""
+ready_when = "steps.building.done AND (steps.building.metadata.result = \"gated\" OR steps.building.metadata.result = \"delivered\")"
 title_template = "Report recorded"
 authority_role = "platform-admin"
 fields = [
@@ -124,7 +170,7 @@ fields = [
 title = "landed"
 kind = "outcome"
 ready_when = "steps.reported.done"
-title_template = "Landed — gate green, report recorded"
+title_template = "Landed — the work is evidenced, report recorded"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "landed" }
 
