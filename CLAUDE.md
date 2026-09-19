@@ -794,6 +794,21 @@ a door that stops being true is a defect worth a car.
   forged `emp-david` actor, so the audit log credits a human with an
   agent's work.
 
+- **Reading a service no path can route to — `BOSS_SOR_SERVICE=<name>
+  boss-api GET …`.** The same door, aimed at that service's port:
+  `gateway` means 4443 rather than the jobs API's 7900. It reaches the
+  gateway BY NAME because the gateway fronts every path there is, so no
+  prefix could route to it — the machine-door pin
+  (`the_machine_door_carries_every_read_surface.rs`, `NOT_PATH_ROUTED`)
+  forbids a path route for that reason. Unnamed, nothing changes; a name
+  the port table cannot place is refused BEFORE curl, rather than falling
+  through to the jobs port, which would answer. Dogfooded 2026-09-19:
+  `BOSS_SOR_SERVICE=gateway boss-api GET /health` returns ok, HTTP:200
+  against the live gateway. It exists because the pod had no such reader
+  (the forge did), so a builder rehearsing a gateway probe set the host
+  and the port table by hand — which is this section's own failure mode
+  (backlog `bf1f5ad2`).
+
 - **Which deployment.** The system of record is
   **`http://10.20.0.34:7900`**, and since 2026-09-15 it is the ONLY
   jobs API in the estate. boss-gcp's `127.0.0.1:7900` was a *second,
