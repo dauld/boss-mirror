@@ -11,9 +11,25 @@
 //! decision — carry the block; every other step in the bundle carries
 //! none. The set is pinned here so a step that starts or stops
 //! declaring is a deliberate edit to this file, not drift.
+//!
+//! THE ROSTER CARRIES THE SETTINGS, NOT JUST THE NAMES (backlog
+//! 4a1b307c, 2026-09-19). Until page-audit this file held the profile
+//! and a second test held the claim that the profile FIXED the rest —
+//! a builder $5/high, an analyst $2/medium, "two settings, not two
+//! spellings". That was true while effort was a label. Car e720dd00
+//! made the declared effort select the definition the step actually
+//! runs under, and page-audit is the first kind to spend that: four
+//! steps of one march at three different efforts, argued step by step
+//! in `infra/platform/workflows/page-audit.toml`. A test asserting
+//! profile ⇒ effort would forbid exactly the control e720dd00 built,
+//! so the pairing pin is gone and the roster below holds the whole
+//! tuple instead — ONE home for every block's numbers, rather than a
+//! rule here and an exception per kind. The profile now says only
+//! which rules document the run is briefed with
+//! (`infra/platform/documents/<profile>-rules.md`).
 
 use boss_core::job::{JobId, StepId, Subject};
-use boss_jobs::agent_spec::{Effort, KEYS};
+use boss_jobs::agent_spec::KEYS;
 use boss_jobs::registry::{WorkflowSpec, materialize_steps, platform_bundle_path};
 use boss_jobs::seed_loader::load_workflows;
 use std::collections::BTreeSet;
@@ -22,15 +38,26 @@ fn bundle() -> Vec<WorkflowSpec> {
     load_workflows(platform_bundle_path()).expect("the platform bundle parses")
 }
 
-/// `(kind, step, profile)` for every step that declares an agent block.
-fn declared(bundle: &[WorkflowSpec]) -> BTreeSet<(String, String, String)> {
+/// Every block in the bundle, whole, one line each:
+/// `kind/step profile $budget effort`. A line rather than a tuple so
+/// the roster below reads as a table and a drifted row names itself in
+/// the diff. The model is checked separately — every block names the
+/// one priced model, so repeating it per row would be noise.
+fn declared(bundle: &[WorkflowSpec]) -> BTreeSet<String> {
     bundle
         .iter()
         .flat_map(|w| {
             w.steps.iter().filter_map(|s| {
-                s.agent
-                    .as_ref()
-                    .map(|a| (w.kind.clone(), s.title.clone(), a.profile.clone()))
+                s.agent.as_ref().map(|a| {
+                    format!(
+                        "{}/{} {} ${:.2} {}",
+                        w.kind,
+                        s.title,
+                        a.profile,
+                        a.budget_usd,
+                        a.effort.as_str()
+                    )
+                })
             })
         })
         .collect()
@@ -38,53 +65,65 @@ fn declared(bundle: &[WorkflowSpec]) -> BTreeSet<(String, String, String)> {
 
 #[test]
 fn the_steps_agents_execute_today_declare_their_agent_block() {
-    let want: BTreeSet<(String, String, String)> = [
-        ("backlog-item", "build", "builder"),
-        ("backlog-item", "draft-design", "analyst"),
-        ("user-feedback", "build", "builder"),
-        ("user-feedback", "draft-design", "analyst"),
-        ("protocol-retro", "collect", "analyst"),
-        ("protocol-retro", "analyze", "analyst"),
-        ("protocol-retro", "gaps", "analyst"),
-        ("protocol-retro", "report", "analyst"),
-        ("department-retro", "collect", "analyst"),
-        ("department-retro", "analyze", "analyst"),
-        ("department-retro", "gaps", "analyst"),
-        ("department-retro", "report", "analyst"),
+    let want: BTreeSet<String> = [
+        "backlog-item/build builder $5.00 high",
+        "backlog-item/draft-design analyst $2.00 medium",
+        "user-feedback/build builder $5.00 high",
+        "user-feedback/draft-design analyst $2.00 medium",
+        "protocol-retro/collect analyst $2.00 medium",
+        "protocol-retro/analyze analyst $2.00 medium",
+        "protocol-retro/gaps analyst $2.00 medium",
+        "protocol-retro/report analyst $2.00 medium",
+        "department-retro/collect analyst $2.00 medium",
+        "department-retro/analyze analyst $2.00 medium",
+        "department-retro/gaps analyst $2.00 medium",
+        "department-retro/report analyst $2.00 medium",
         // v7's judge step (backlog 321f1409, 2026-09-19): a disposition
         // per code-scanning rule off the reading on the packet — the
         // analyst setting, the same as the retros' work steps.
-        ("publish-to-github", "judge-checks", "analyst"),
+        "publish-to-github/judge-checks analyst $2.00 medium",
+        // The page march (backlog 4a1b307c, 2026-09-19). Three efforts
+        // across four steps of ONE kind, each argued in the TOML beside
+        // the step: `measure` subtracts a department's needs from a
+        // component tree it walked, `file` transcribes the numbered
+        // list `measure` already produced into packets, `test` writes
+        // the mocked spec AND the only thing the founder reads, and
+        // `revise` applies edits David has already decided.
+        "page-audit/measure analyst $3.00 high",
+        "page-audit/file analyst $1.00 low",
+        "page-audit/test builder $5.00 high",
+        "page-audit/revise builder $3.00 medium",
     ]
     .into_iter()
-    .map(|(k, s, p)| (k.to_string(), s.to_string(), p.to_string()))
+    .map(str::to_string)
     .collect();
     assert_eq!(declared(&bundle()), want);
 }
 
-/// The two profiles are two settings, not two spellings: a builder
-/// runs high effort under $5, an analyst medium under $2, both on the
-/// pod's own priced model. Every block in the bundle is one of the two.
+/// What the profile still fixes, now that it no longer fixes the
+/// effort: the rules document the run is briefed with, and so the two
+/// names a claim door knows. Plus the one priced model on every block
+/// — a step naming a model `agent_rate_card` cannot price would run
+/// unpriced — and a budget inside the cap a builder's car carries, so
+/// a typo'd `50` is a red test rather than an hour of the agent's
+/// budget reserved against one page.
 #[test]
-fn a_builder_and_an_analyst_are_the_two_settings_in_use() {
+fn every_block_names_a_known_profile_a_priced_model_and_a_bounded_budget() {
     for w in bundle() {
         for s in &w.steps {
             let Some(a) = &s.agent else { continue };
-            assert_eq!(a.model, "opus-5[1m]", "{}/{}", w.kind, s.title);
-            match a.profile.as_str() {
-                "builder" => {
-                    assert_eq!((a.budget_usd, a.effort), (5.0, Effort::High), "{}", s.title)
-                }
-                "analyst" => {
-                    assert_eq!(
-                        (a.budget_usd, a.effort),
-                        (2.0, Effort::Medium),
-                        "{}",
-                        s.title
-                    )
-                }
-                other => panic!("{}/{}: unexpected profile {other}", w.kind, s.title),
-            }
+            let at = format!("{}/{}", w.kind, s.title);
+            assert_eq!(a.model, "opus-5[1m]", "{at}");
+            assert!(
+                matches!(a.profile.as_str(), "builder" | "analyst"),
+                "{at}: unexpected profile {}",
+                a.profile
+            );
+            assert!(
+                a.budget_usd > 0.0 && a.budget_usd <= 5.0,
+                "{at}: budget {} is outside (0, 5]",
+                a.budget_usd
+            );
         }
     }
 }
@@ -105,7 +144,7 @@ fn every_declared_block_projects_onto_the_materialised_step() {
         for (spec, step) in w.steps.iter().zip(&steps) {
             let declares = declared
                 .iter()
-                .any(|(k, s, _)| k == &w.kind && s == &spec.title);
+                .any(|line| line.starts_with(&format!("{}/{} ", w.kind, spec.title)));
             match (&spec.agent, declares) {
                 (Some(a), true) => {
                     seen += 1;
@@ -137,5 +176,9 @@ fn every_declared_block_projects_onto_the_materialised_step() {
             }
         }
     }
-    assert_eq!(seen, 13, "every declared block was checked on a packet");
+    assert_eq!(
+        seen,
+        declared.len(),
+        "every declared block was checked on a packet"
+    );
 }

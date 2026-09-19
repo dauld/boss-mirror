@@ -77,6 +77,27 @@ title_template = "Inventory the page and the department's needs"
 # automation and declare it as an `individual`, which is right for a
 # conductor and wrong for a step any platform-admin may pick up.
 audience = { role = "platform-admin" }
+# HOW an agent runs it (backlog 4a1b307c). `human_only = false` above
+# says an agent MAY do this; without this block the dispatch door —
+# the one path that hands a step to an agent — refused every one of
+# the 47 packets opened on 2026-09-19, all of them sitting here.
+#
+# THE HARDEST STEP OF THE FOUR, and effort says so. The procedure
+# below is a join: walk the component tree from the router's branch
+# and enumerate every link, button, form, read and write; then read
+# the department's needs off three API surfaces; then SUBTRACT, as a
+# numbered list someone can file from. The subtraction is judgement —
+# a gap is a thing the department needs and the page does not show,
+# which no amount of listing produces on its own — and everything
+# downstream (`file`'s ids, `test`'s assertions, David's review) is
+# the difference this step found or did not. An `analyst`, not a
+# builder: it ships no car, writes no code, and the rules a builder
+# is briefed with (worktree, gate, push) would be prose about work
+# this step does not do — the same call `draft-design` makes.
+# Budget $3: it READS a lot (a component tree plus three joined API
+# reads) and compiles nothing, so it sits above the analyst's $2
+# design draft and well under a builder's car.
+agent = { profile = "analyst", model = "opus-5[1m]", budget_usd = 3, effort = "high" }
 metadata_defaults = { human_only = false, procedure = "Read the PAGE and the DEPARTMENT, and write the difference as a list. The route is `metadata.route` on this packet; the department is `metadata.department`.\n\nTHE CONTROLS INVENTORY (`controls_md`). From the component tree under apps/web/src — start at the router's branch for the route and follow the imports — list every control the page renders: each link and where it lands (a catalogued route, or not), each button and what its label promises, each form and what it submits. Beside them, the READS the page makes (every fetch path) and the WRITES (every non-GET), because the false-empty class lives there: a read that fails and paints as empty is a gap, and so is a write whose refusal the page swallows. Count what you list — 'seven links, three buttons, one form, four reads, one write' survives being reread; 'the usual controls' does not.\n\nTHE DEPARTMENT'S NEEDS (`needs_md`). What this department needs to see IN (what arrives for it), WORKING (what it is doing) and OUT (what it has finished) — read from its protocols, not from the page: GET /api/departments/{department}/readiness names the kinds whose active workflow row declares this department, with each one's packet count and newest terminal; GET /api/workflows/{kind} gives each kind's steps and the fields its executors fill; GET /api/jobs?department={department} is the join over those kinds. A Home surface (department `it`) is read against every department's use of it, and IT's own surfaces against the three thirds of the operator surface (queue management, actors building, delivery).\n\nTHE GAP (`gaps_md`) is needs minus controls, as a numbered list a reader can file from: what the page does not show, what it shows that no protocol produces, and every control whose honest behaviour nothing pins. A page needing nothing says so with the count that proves it — 'every one of the four reads has an honest failure line' — not with silence." }
 fields = [
   { name = "controls_md", field_type = "string", required = true },
@@ -90,6 +111,19 @@ kind = "task"
 ready_when = "steps.measure.done"
 title_template = "File every gap as work"
 audience = { role = "platform-admin" }
+# `low` ON PURPOSE, and this is the step that proves the knob is real.
+# The judgement was spent at `measure`: this step reads a numbered
+# list that already exists, files one backlog-item per entry with
+# `route` and `department` COPIED from this packet, and records the
+# ids beside the gap numbers. There is no decision left in it — the
+# one refusal it must make ('a filed_ids shorter than the gap list is
+# not a legitimate none') is a count, not a call. High effort here
+# would buy latency and re-litigation of gaps a later step and a human
+# both read anyway. If this step is ever seen INVENTING gaps or
+# editing the list, that is the signal the effort is wrong, not the
+# procedure. Budget $1: it mostly writes packets, one call each, and
+# 47 pages filing a handful of items apiece should not cost more.
+agent = { profile = "analyst", model = "opus-5[1m]", budget_usd = 1, effort = "low" }
 metadata_defaults = { human_only = false, procedure = "THE OUTPUT IS FILED WORK, NOT PROSE. Every numbered gap in `gaps_md` becomes ONE backlog-item — `boss job file --kind backlog-item` — whose metadata carries `route` and `department` copied from this packet, so the department's queue and the page both answer 'what is outstanding against me'. Record the ids in `filed_ids`, one per line, each beside the gap number it came from.\n\n'none' IS A LEGITIMATE ANSWER, WITH A REASON. A page whose inventory covers its department's needs files nothing and writes `filed_ids = none: <the count from measure that proves it>`. What is not legitimate is a gap list with entries and a `filed_ids` shorter than it — a gap that lives only in this packet's prose is a gap nobody acts on (protocol-retro's `gaps` step learned this on 2026-08-27: four proposals, two still unfiled a day later).\n\nDO NOT FIX HERE. The fix is the item's; this step's job is that every gap has an id. A gap small enough to fix inside the `test` step's car (a missing failure line, a link that lands off-catalog) is still filed, and the item closes when that car lands." }
 fields = [
   { name = "filed_ids", field_type = "string", required = true },
@@ -101,6 +135,19 @@ kind = "task"
 ready_when = "steps.file.done"
 title_template = "Pin every control in a mocked spec"
 audience = { role = "platform-admin" }
+# A `builder`: this step ships a car — a spec under apps/web/tests/
+# mocked/, gated and pushed — so the builder rules (worktree,
+# wt-cargo/wt-web, TDD, the gate script) are exactly the document it
+# needs, which is what the profile selects. `high` for the same
+# reason `measure` is high and for one more: the spec has to tell an
+# empty read from a failed one, and a swallowed refusal from a shown
+# one, on every control `controls_md` listed — the false-empty class
+# is precisely what a fast pass writes a green assertion over. It
+# also writes `sign_off_context`, the ONLY thing David reads at
+# `review`; a thin one wastes a founder's turn, which is the most
+# expensive thing in this march. Budget $5, a builder's car, the same
+# cap backlog-item's `build` carries.
+agent = { profile = "builder", model = "opus-5[1m]", budget_usd = 5, effort = "high" }
 metadata_defaults = { human_only = false, procedure = "Write the page's mocked Playwright spec under apps/web/tests/mocked/ and ship it as a car. Hermetic, gated, already in the image — 'more thorough' is more assertions per page, not a different tool. The generic crawl (design 0e07ce64, resolution `crawl`) already clicks every link, every button and back for every catalogued route; THIS spec carries the page's own meaning, and it pins EVERY control from `controls_md`:\n  - each link lands on a catalogued route (read apps/web/src/shell/nav-catalog.ts, never a second list);\n  - each button does what its label says against the mock, and answers honestly when the mock refuses;\n  - back returns to the page it came from;\n  - an EMPTY backend paints an honest empty state — the false-empty class: an empty list is 'nothing here', a failed read is `.load-failed` (tests/mocked/_routes.ts, FAILURE_MARKER), and the two are never the same paint;\n  - a REFUSED write shows the refusal, in the page's words, where the user was looking.\n\nRECORD `spec_path` (the file, repo-relative) and `car` (the ship-a-change id or branch that carries it) — a spec that is not on a car is not pinned.\n\nTHEN WRITE THE REVIEWER'S BRIEF. `sign_off_context` is REQUIRED on THIS step and it is what the founder reads at `review` — the UI renders THE STEP THE READER IS ON, so a sign-off carrying only its audience is an empty screen whatever the work steps hold (protocol-retro reached David empty three times running before that rule was written into it, 2026-08-28). Write it as `context_md` onto the `review` step as well, so the surface finds it where it looks. It must let the reviewer decide without opening anything else: the route and its department in one line; the GAP LIST with the filed ids; the CONTROLS INVENTORY with its counts; and THE PAGE'S STRINGS — every heading, label, button text, empty-state and failure line the page shows, verbatim — because the words are what David edits (design resolution `review`: the gap list and the words, not the spec). If the honest answer is 'nothing needs deciding except the sign-off itself', say that first.\n\nTHE CONSTRAINT LIVES HERE, NOT ON THE SIGN-OFF: required metadata is validated at COMPLETION, useless on the sign-off step itself and exactly right one step earlier — `review` cannot become ready until this completes." }
 fields = [
   { name = "spec_path", field_type = "string", required = true },
@@ -119,6 +166,13 @@ title_template = "Review the gap list and the page's words"
 # `pending` and `rejected`, which are not routes this packet has
 # (backlog-item's `verdict` is the same move, and for the same reason:
 # an authored enum on the step is versioned; the bundle's is not).
+#
+# AND NO `agent` BLOCK, deliberately (backlog 4a1b307c). The four work
+# steps declare one; this one must not, because a block is what the
+# dispatch door needs to hand a step to an agent, and this decision is
+# David's by the design's own resolution — the agent drafts, the
+# founder decides here. The markers carry none for the other reason:
+# the machine completes them.
 audience = { role = "platform-admin" }
 metadata_defaults = { procedure = "A HUMAN READS THIS STEP AND NOTHING ELSE. It arrives carrying `context_md` — the gap list with its filed ids, the controls inventory with its counts, and every string the page shows — written by the `test` step before this became ready.\n\nDECIDE TWO THINGS. (1) Is the gap list complete — is there something this department needs from this page that `measure` did not see? Name it in `comment`; it becomes a filed item. (2) Are the WORDS right — headings, labels, buttons, empty states, refusals? Edit them in `comment`, verbatim, old → new. Specs and styling are not yours to review (design 0e07ce64, resolution `review`).\n\n`approved` records the page as behaviour-pinned; `styled` then defers the visual pass to the redesign and the packet closes `audited`. `changes-requested` routes to `revise`, where the agent applies exactly the edits in `comment` and files anything larger.\n\nIF YOU ARE LOOKING AT THIS STEP AND IT IS EMPTY, that is a defect in the `test` step's completion, not the audit: the content is on measure / file / test; read it there, and say so." }
 fields = [{ name = "decision", field_type = "approved|changes-requested", required = true }]
@@ -129,6 +183,17 @@ kind = "task"
 ready_when = "steps.review.done AND steps.review.metadata.decision = \"changes-requested\""
 title_template = "Apply the requested changes"
 audience = { role = "platform-admin" }
+# A `builder` again — the word edits ride a car — but `medium`, not
+# high: the procedure below is deliberately bounded. What to change
+# was decided by David and is quoted verbatim in `comment`; anything
+# larger than an edit is FILED rather than built, and the DAG has no
+# cycle back to him. So the work is transcription plus a small car,
+# with one judgement in it (is this request an edit or an item?) that
+# the procedure already answers by example. High would invite exactly
+# the re-opening the no-cycle rule forbids. Budget $3: a car, but a
+# smaller one than `test` — no spec to design, a few strings to
+# change — and this step runs only on the changes-requested branch.
+agent = { profile = "builder", model = "opus-5[1m]", budget_usd = 3, effort = "medium" }
 metadata_defaults = { human_only = false, procedure = "Apply EXACTLY what the review's `comment` asked for — the word edits verbatim, the named gap filed as a backlog-item carrying route + department — on a car, and record what changed in `changes_md` with the car beside each change. A request larger than an edit (a control the page should have, a read it should make) is FILED, not built here: the review has already decided the page is behaviour-pinned as it stands, and a packet is not the place to grow it. Nothing loops back to the founder — the DAG has no cycle — so what you record here is what the record will say was done in his name; quote his words and yours." }
 fields = [
   { name = "changes_md", field_type = "string", required = true },

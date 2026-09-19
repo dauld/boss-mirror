@@ -258,3 +258,43 @@ fn a_materialised_audit_is_born_in_the_platform_admin_queue() {
         assert!(s.metadata.get("authority_role").is_none());
     }
 }
+
+/// Each of the four drafting steps declares HOW an agent runs it —
+/// the block the dispatch door refuses a step without (backlog
+/// 4a1b307c). All 47 page-audit packets opened on 2026-09-19 sat at
+/// `measure`, every one undispatchable: `human_only = false` said "an
+/// agent may do this" and the row said nothing about which agent, at
+/// what effort, under what spend.
+///
+/// THE SETTINGS THEMSELVES live in the bundle-wide roster
+/// (`platform_bundle_agent_blocks.rs`) and the reasoning for each
+/// lives beside its step in the TOML — three efforts across these
+/// four, because car e720dd00 made the declared effort select the
+/// definition the step actually runs under. This test asserts only
+/// that the four declare, so it cannot drift from that roster.
+#[test]
+fn the_four_agent_workable_steps_declare_how_an_agent_runs_them() {
+    let wf = bundled("page-audit");
+    for slug in ["measure", "file", "test", "revise"] {
+        assert!(
+            step(&wf, slug).agent.is_some(),
+            "`{slug}` is agent-workable and declares an agent block"
+        );
+    }
+}
+
+/// The founder's step is NOT an agent's, and neither is a marker. A
+/// block on `review` would hand the executor lane a sign-off the
+/// design reserved for David ("the agent drafts; David decides at
+/// `review`", design 0e07ce64), and a block on a marker would write
+/// four agent keys onto a step the machine completes on its own.
+#[test]
+fn the_sign_off_and_the_markers_declare_no_agent() {
+    let wf = bundled("page-audit");
+    for slug in ["opened", "review", "styled", "audited", "withdrawn"] {
+        assert!(
+            step(&wf, slug).agent.is_none(),
+            "`{slug}` is not an agent's step and declares no agent block"
+        );
+    }
+}

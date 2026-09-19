@@ -26,8 +26,8 @@ for Claude Code / scripted usage). Run `boss --help` or
 | `boss inspect jobs [--status …] [--kind …] [-n N] [--json]` | List jobs via HTTP |
 | `boss inspect employees [--role …] [-n N] [--json]` | List employees via HTTP |
 | `boss doctor install` | Post-install end-to-end health check |
-| `boss triage <item> <disposition> --evidence '…' [--of <packet>]` | Complete a backlog-item's or user-feedback's ready `triage` step; the disposition and the text field are read off the step's declared fields, `duplicate` records `--of` as `duplicate_of` |
-| `boss fold <design> --change '…'` | Complete a design-doc's ready `fold` step; refuses while the review is open, naming the anchors still undecided |
+| `boss triage <item> <disposition> --evidence '…' [--of <packet>]` | Complete a backlog-item's or user-feedback's ready `triage` step; the disposition and the text field are read off the step's declared fields, `duplicate` records `--of` as `duplicate_of`. SINGLE-quote the evidence, or pass `--evidence-file <PATH>`: in double quotes a backticked word is eaten by the shell before the verb sees it (2376b89e) |
+| `boss fold <design> --change '…'` | Complete a design-doc's ready `fold` step; refuses while the review is open, naming the anchors still undecided. `--change-file <PATH>` reads the text with no shell in the path |
 | `boss hold <car> --reason '…'` / `boss release <car>` | Put the `hold` marker on a parked car's review step (it stays at the dock), or take it off; a branch or 8+ chars of the id |
 
 The day-to-day operator playbook lives in

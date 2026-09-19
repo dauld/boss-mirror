@@ -868,10 +868,24 @@ a door that stops being true is a defect worth a car.
   REFRESHES the parked car (the fresh receipt rides it as
   `regate_receipt`) rather than filing a twin, and `boss rerail
   --finish` does the same once a green vouches for the head; and
-  **prose with backticks does not survive argv** — every `--park-*`
-  text goes through the shell, where a backtick is command substitution
-  and the phrase is replaced by nothing, silently. Single quotes, or no
-  backticks in car prose.
+  **prose with backticks does not survive argv**, and that is not a
+  `--park-*` rule — it belongs to EVERY flag that carries a sentence
+  (`boss triage --evidence`, `boss fold --change`, `boss design
+  --markdown`, `boss prove --verified`, `boss dispatch --summary`,
+  `boss job file --title`, and the six `--park-*`). Inside double
+  quotes, or unquoted, a backticked word is command substitution: the
+  shell runs it and the phrase is replaced by nothing, leaving a
+  grammatical sentence with its meaning removed. Measured, 2026-09-19:
+  a triage recorded "Ordering trap confirmed:  is required of every
+  rule", caught only because bash printed "why: command not found"
+  (backlog 2376b89e). **SINGLE-quote every prose value** — the backtick
+  then arrives intact — or pass the text through the flag's `-file`
+  twin (`--evidence-file`, `--change-file`, `--markdown-file`), where
+  no word expansion happens at all. **No verb can refuse this for
+  you**: the substitution happens before the process starts, so a
+  literal-backtick check would refuse the single-quoted spelling that
+  works and pass the double-quoted one that does not. The reasoning is
+  in `crates/orchestrators/boss-cli/src/prose.rs`, pinned by a test.
 
 - **The train's gate is the assembled tree's test — it belongs in the
   gate lane.** Since design 128b5496 (2026-09-13) the conductor files

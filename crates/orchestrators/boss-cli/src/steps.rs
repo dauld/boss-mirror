@@ -64,8 +64,14 @@ pub enum Cmd {
         disposition: String,
         /// What was measured. Written to the text field the row declares
         /// (`evidence` on a backlog-item, `finding` on user-feedback).
-        #[arg(long)]
-        evidence: String,
+        /// SINGLE-quote it: inside double quotes a backticked word is
+        /// run by the shell and lands as a hole (backlog 2376b89e).
+        #[arg(long, required_unless_present = "evidence_file")]
+        evidence: Option<String>,
+        /// The evidence, read from this file — no shell between the
+        /// bytes and the record. Exclusive with --evidence.
+        #[arg(long, conflicts_with = "evidence")]
+        evidence_file: Option<std::path::PathBuf>,
         /// With `duplicate`: the packet this one duplicates (8+ characters
         /// of its id, or the full uuid). Recorded as `duplicate_of`.
         #[arg(long)]
@@ -78,9 +84,16 @@ pub enum Cmd {
     Fold {
         /// The design-doc: 8+ characters of its id, or the full uuid.
         design: String,
-        /// What current truth gains from this doc, and where — the row's `fold_change`.
-        #[arg(long)]
-        change: String,
+        /// What current truth gains from this doc, and where — the row's
+        /// `fold_change`. SINGLE-quote it: inside double quotes a
+        /// backticked word is run by the shell and lands as a hole
+        /// (backlog 2376b89e).
+        #[arg(long, required_unless_present = "change_file")]
+        change: Option<String>,
+        /// The change, read from this file — no shell between the bytes
+        /// and the record. Exclusive with --change.
+        #[arg(long, conflicts_with = "change")]
+        change_file: Option<std::path::PathBuf>,
     },
     /// Hold a parked car at the dock: it stays gated green and does not board.
     ///
@@ -107,9 +120,30 @@ pub async fn dispatch(cmd: Cmd) -> Result<()> {
             item,
             disposition,
             evidence,
+            evidence_file,
             of,
-        } => triage(&wire, &item, &disposition, &evidence, of.as_deref()).await,
-        Cmd::Fold { design, change } => fold(&wire, &design, &change).await,
+        } => {
+            let evidence = crate::prose::text_or_file(
+                "--evidence",
+                "--evidence-file",
+                evidence,
+                evidence_file.as_deref(),
+            )?;
+            triage(&wire, &item, &disposition, &evidence, of.as_deref()).await
+        }
+        Cmd::Fold {
+            design,
+            change,
+            change_file,
+        } => {
+            let change = crate::prose::text_or_file(
+                "--change",
+                "--change-file",
+                change,
+                change_file.as_deref(),
+            )?;
+            fold(&wire, &design, &change).await
+        }
         Cmd::Hold { car, reason } => hold(&wire, &car, Some(&reason)).await,
         Cmd::Release { car } => hold(&wire, &car, None).await,
     }

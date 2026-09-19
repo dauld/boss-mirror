@@ -31,6 +31,7 @@ mod ops_request;
 mod orient;
 mod owner;
 mod park;
+mod prose;
 mod prove;
 mod publish;
 mod publish_requests;
@@ -1830,6 +1831,53 @@ mod tests {
     #[test]
     fn command_tree_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    /// The prose flags that carry a sentence have a shell-free twin,
+    /// and clap holds the pair exclusive and one-of. Prose through argv
+    /// has already been through word expansion, so a backticked word
+    /// inside double quotes reaches the record as a hole and no verb
+    /// can tell (backlog 2376b89e; see `crate::prose` for why the
+    /// obvious refusal points the wrong way). The file door is what
+    /// keeps the shell out of the path, as `--markdown-file` already
+    /// does for a design body.
+    #[test]
+    fn a_prose_flag_has_a_file_door() {
+        for (verb, args, text, file) in [
+            (
+                "triage",
+                vec!["boss", "triage", "abcd1234", "fixed"],
+                "--evidence",
+                "--evidence-file",
+            ),
+            (
+                "fold",
+                vec!["boss", "fold", "abcd1234"],
+                "--change",
+                "--change-file",
+            ),
+        ] {
+            // One of the pair is required.
+            assert!(
+                Cli::try_parse_from(args.clone()).is_err(),
+                "{verb} without {text} or {file} is refused"
+            );
+            // Either alone parses.
+            for flag in [text, file] {
+                let mut with = args.clone();
+                with.push(flag);
+                with.push("what was measured");
+                Cli::try_parse_from(with)
+                    .unwrap_or_else(|e| panic!("{verb} {flag} should parse: {e}"));
+            }
+            // Both together do not.
+            let mut both = args.clone();
+            both.extend([text, "inline", file, "docs/design/x.md"]);
+            assert!(
+                Cli::try_parse_from(both).is_err(),
+                "{verb} {text} and {file} are exclusive"
+            );
+        }
     }
 
     /// Every top-level verb resolves. This is the smoke contract for
