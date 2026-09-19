@@ -68,6 +68,10 @@ const EXPECTED_CONSOLE_ERRORS: ReadonlyArray<{ route: string; status: number; re
   { route: '/ux/marketing-assets/ma-1', status: 404, reason: GUEST_REFUSED },
   { route: '/it', status: 404, reason: GUEST_REFUSED },
   { route: '/it/codebase', status: 403, reason: GUEST_REFUSED },
+  // Measured on the crawl's first scheduled run (packet 304960d9,
+  // 2026-09-19 04:45Z): the one unexplained line, the same class as
+  // its sibling /it/codebase.
+  { route: '/it/design/codebase', status: 403, reason: GUEST_REFUSED },
 ];
 
 /// PURE: the expected entry a console.error matches, if any.

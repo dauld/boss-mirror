@@ -95,6 +95,30 @@ MIRROR_URL="${BOSS_MIRROR_URL:-https://github.com/${MIRROR_SLUG}.git}"
 # The forge's clone URL: BOSS_FORGE_PUSH_URL, else the forge base from
 # /etc/boss/sor.env (infra/lib/sor.sh) with the product repository's
 # path — the same owner every image repo lives under.
+# THE CREDENTIAL IS THE CONVERGE'S OWN. The push runs as $FORGE_PUSH_AS
+# over Forgejo's HTTP, and that user has no credential helper: measured
+# 2026-09-19 04:55Z on ops-request 3d9d5f58 (the second approved publish)
+# — `could not read Username for 'http://10.20.0.15:3000'` after the
+# ownership refusal of the first was fixed. What the converge fetches
+# through is the checkout's `forgejo` remote, whose URL carries the
+# credential as userinfo (cluster-deploy-lib.sh derives every tenant URL
+# from it, redacting it in every message). So with no BOSS_FORGE_PUSH_URL
+# the push target is that remote's URL, read AS THE OWNER (the checkout
+# is theirs); the bare sor.env URL is the fallback only when the checkout
+# has no such remote, and the userinfo never reaches a message.
+FORGE_PUSH_AS="${BOSS_FORGE_PUSH_AS-david}"
+FORGE_CHECKOUT="${BOSS_FORGE_CHECKOUT:-/home/david/boss}"
+redact_url() { sed -E 's#://[^/@[:space:]]+@#://<redacted>@#g'; }
+checkout_remote_url() {
+    if [ -n "$FORGE_PUSH_AS" ]; then
+        runuser -l "$FORGE_PUSH_AS" -c "git -C '$FORGE_CHECKOUT' remote get-url forgejo" 2>/dev/null
+    else
+        git -C "$FORGE_CHECKOUT" remote get-url forgejo 2>/dev/null
+    fi
+}
+if [ -z "${BOSS_FORGE_PUSH_URL:-}" ]; then
+    BOSS_FORGE_PUSH_URL="$(checkout_remote_url || true)"
+fi
 if [ -z "${BOSS_FORGE_PUSH_URL:-}" ]; then
     # shellcheck source=infra/lib/sor.sh
     . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/sor.sh"
@@ -102,7 +126,7 @@ if [ -z "${BOSS_FORGE_PUSH_URL:-}" ]; then
     BOSS_FORGE_PUSH_URL="$BOSS_FORGE_URL/${BOSS_FORGE_OWNER:-david}/boss.git"
 fi
 FORGE_PUSH_URL="$BOSS_FORGE_PUSH_URL"
-FORGE_PUSH_AS="${BOSS_FORGE_PUSH_AS-david}"
+FORGE_PUSH_URL_SHOWN="$(printf '%s' "$FORGE_PUSH_URL" | redact_url)"
 FORK_SLUG="${BOSS_FORK_SLUG:-dauld/boss-mirror}"
 FORK_URL="${BOSS_FORK_URL:-https://github.com/${FORK_SLUG}.git}"
 FORK_OWNER="${FORK_SLUG%%/*}"
@@ -542,12 +566,12 @@ chmod -R a+rX "$CLONE" 2>/dev/null || true
 forge_push_cmd="git -c 'safe.directory=$CLONE' -C '$CLONE' push -q --force '$FORGE_PUSH_URL' '$snapshot:refs/heads/$BRANCH'"
 if [ -n "$FORGE_PUSH_AS" ]; then
     runuser -l "$FORGE_PUSH_AS" -c "$forge_push_cmd" 2>"$workdir/err" \
-        || fail "pushing $BRANCH to the forge ($FORGE_PUSH_URL) as $FORGE_PUSH_AS: $(head -c 300 "$workdir/err" | tr '\n' ' '). Without it on the forge, the push mirror prunes the PR's head at the next train"
-    say "pushed publish/${BRANCH#publish/} to the forge as $FORGE_PUSH_AS ($FORGE_PUSH_URL) — the mirror carries it"
+        || fail "pushing $BRANCH to the forge ($FORGE_PUSH_URL_SHOWN) as $FORGE_PUSH_AS: $(head -c 300 "$workdir/err" | redact_url | tr '\n' ' '). Without it on the forge, the push mirror prunes the PR's head at the next train"
+    say "pushed publish/${BRANCH#publish/} to the forge as $FORGE_PUSH_AS ($FORGE_PUSH_URL_SHOWN) — the mirror carries it"
 else
     bash -c "$forge_push_cmd" 2>"$workdir/err" \
-        || fail "pushing $BRANCH to the forge ($FORGE_PUSH_URL): $(head -c 300 "$workdir/err" | tr '\n' ' ')"
-    say "pushed publish/${BRANCH#publish/} to the forge ($FORGE_PUSH_URL) — the mirror carries it"
+        || fail "pushing $BRANCH to the forge ($FORGE_PUSH_URL_SHOWN): $(head -c 300 "$workdir/err" | redact_url | tr '\n' ' ')"
+    say "pushed publish/${BRANCH#publish/} to the forge ($FORGE_PUSH_URL_SHOWN) — the mirror carries it"
 fi
 
 g -c "credential.helper=$helper" push -q --force fork "$snapshot:refs/heads/$BRANCH" 2>"$workdir/err" \

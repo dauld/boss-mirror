@@ -900,6 +900,13 @@ cat '{jobs}'
     /// The run with the forge push handed to `push_as` through
     /// `runuser` — a stub on the fixture's PATH in the test that uses it.
     fn go_as(&self, push_as: &str) -> (bool, String) {
+        self.go_with(&[("BOSS_FORGE_PUSH_AS", push_as.to_string())])
+    }
+
+    /// The run with extra environment laid over the fixture's — the
+    /// value `UNSET` removes the variable (so the verb takes its
+    /// default); an empty string is set empty, as the verb reads it.
+    fn go_with(&self, extra: &[(&str, String)]) -> (bool, String) {
         let outer = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
         // Ours first: `stub_bin` stands in for tools this box LACKS, and
         // gh/curl must be ours even where the box has them.
@@ -924,7 +931,14 @@ cat '{jobs}'
             // path: in production it is `runuser -l david` over Forgejo's
             // HTTP, which no test box can stand in for.
             .env("BOSS_FORGE_PUSH_URL", self.forge.display().to_string())
-            .env("BOSS_FORGE_PUSH_AS", push_as);
+            .env("BOSS_FORGE_PUSH_AS", "");
+        for (k, v) in extra {
+            if v == "UNSET" {
+                cmd.env_remove(k);
+            } else {
+                cmd.env(k, v);
+            }
+        }
         let out = cmd.output().expect("the verb runs");
         let mut text = String::from_utf8_lossy(&out.stdout).to_string();
         text.push_str(&String::from_utf8_lossy(&out.stderr));
@@ -1133,6 +1147,69 @@ fn the_forge_push_as_another_user_carries_its_own_safe_directory() {
     assert!(
         out.contains("to the forge as someone"),
         "the run says whom it pushed as: {out}"
+    );
+}
+
+/// The credential for the forge push is the converge's own: the
+/// checkout's `forgejo` remote URL carries it as userinfo, the way
+/// cluster-deploy-lib.sh derives every tenant URL from it. Measured
+/// 2026-09-19 04:55Z on ops-request 3d9d5f58, the second approved
+/// publish: with the URL built from sor.env the push as david died on
+/// `could not read Username for 'http://10.20.0.15:3000'` — no helper,
+/// no userinfo. With no BOSS_FORGE_PUSH_URL the verb reads the checkout's
+/// remote (as its owner) and pushes there; the userinfo never reaches a
+/// message (the FAILED line and the say line are redacted).
+#[test]
+fn the_forge_push_url_is_the_checkouts_own_credentialed_remote_and_is_redacted() {
+    if !have_real_jq() {
+        eprintln!("publish_github_pr_sh: SKIPPED — the run path needs a real jq");
+        return;
+    }
+    let run = Run::new("forge-push-url-from-checkout");
+    run.gh_repo(
+        FORK_SLUG,
+        &format!(
+            r#"{{"full_name":"{FORK_SLUG}","fork":true,
+                 "parent":{{"full_name":"{MIRROR_SLUG}"}},
+                 "source":{{"full_name":"{MIRROR_SLUG}"}},
+                 "default_branch":"main","private":false}}"#
+        ),
+    );
+    // A checkout whose forgejo remote carries a credential in its URL
+    // — the shape forge-converge.sh fetches through. The push target is
+    // the fixture forge, reached by a file URL; the userinfo is the
+    // thing under test, so it rides a URL git will accept without using
+    // it (a file:// URL ignores userinfo).
+    let checkout = run.root.join("checkout");
+    git_in(&run.root, &["init", "-q", "checkout"]);
+    let secret_url = format!("file://david:s3cr3t-token@{}", run.forge.display());
+    git_in(&checkout, &["remote", "add", "forgejo", &secret_url]);
+    let log = run.root.join("runuser.log");
+    boss_testing::write_exec(
+        &run.stubs.join("runuser"),
+        &format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$4\" >> '{}'\nexec bash -c \"$4\"\n",
+            log.display()
+        ),
+    );
+    let (ok, out) = run.go_with(&[
+        ("BOSS_FORGE_PUSH_URL", "UNSET".into()),
+        ("BOSS_FORGE_CHECKOUT", checkout.display().to_string()),
+        ("BOSS_FORGE_PUSH_AS", "someone".into()),
+    ]);
+    assert!(ok, "{out}");
+    let handed = std::fs::read_to_string(&log).expect("the stub runuser recorded the push");
+    assert!(
+        handed.contains(&secret_url),
+        "the push goes to the checkout's own remote URL, credential and all:\n{handed}"
+    );
+    assert!(
+        !out.contains("s3cr3t-token"),
+        "the credential must never reach a message:\n{out}"
+    );
+    assert!(
+        out.contains("<redacted>@"),
+        "the forge URL in the say line is redacted, not omitted: {out}"
     );
 }
 
