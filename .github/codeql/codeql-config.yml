@@ -1,0 +1,60 @@
+# CodeQL configuration for the public mirror's scan (codeql.yml hands it
+# to the init step as `config-file`; backlog 3ac9ad30, David 2026-09-19).
+#
+# WHY THIS FILE EXISTS. Publish PR #239 stalled on CodeQL for the second
+# publish in a row: with no config the default suites reported 100
+# annotations, and every one was a name heuristic — a value called
+# account_id / employee_id / uid / accounts written to a log or a URL, a
+# #[cfg(test)] key or nonce constant, a with_capacity(seed.len()). The
+# real residue (a path-injection pair in break_glass.rs, one request-
+# forgery in passkey.rs, one sanitizer in a yard test fixture) was
+# invisible under it. The companion readback item reads the remaining
+# alerts back onto every publish packet by rule, so an exclusion below
+# that hides a real class shows up as a real finding arriving late — and
+# the count each one records is what that reading is compared against.
+#
+# Every `- exclude:` here carries the PR it was read from and the count
+# read; crates/core/boss-testing/tests/the_mirrors_codeql_scan_records_its_exclusions.rs
+# refuses one that does not, and refuses any other filter shape.
+
+name: "BOSS CodeQL config"
+
+# Test code is out of scope for the scan. The test corpus is where the
+# hard-coded key/nonce constants live (#[cfg(test)] fixtures), where a
+# yard test asserts on a deliberately unsanitized string, and where
+# every boss-testing pin logs current_uid(...) on failure.
+paths-ignore:
+  - "**/tests/**"
+  - "**/*.test.ts"
+  - "**/*.spec.ts"
+  - "apps/web/tests/**"
+
+query-filters:
+  # 81 of 100 annotations on #239 (mirror PR, 2026-09-19). Fires on ANY
+  # value whose name contains account / uid / employee / secret reaching
+  # a log or a panic message: current_uid(...) in pin-failure messages
+  # (49 of the 81), ledger account CODES like "1200" in replay-check
+  # output (19), a DNS zone name (4), the sim's account counter, a
+  # registry's employee codes. Not one hit was a credential or a
+  # personal record — they are names, and the audit log's whole job is
+  # to name the account a posting is about.
+  - exclude:
+      id: rust/cleartext-logging
+  # 4 of 100 on #239. The same name heuristic with a URL for a sink:
+  # account_id / employee_id interpolated into the path of a request to
+  # a LAN service (boss-accounts, boss-people) over the cluster network.
+  # The id IS the resource's address; there is nothing else to send.
+  - exclude:
+      id: rust/cleartext-transmission
+  # 9 of 100 on #239. Every hit is a #[cfg(test)] constant — the session
+  # key, the passkey challenge nonce, the role-header HMAC key — in
+  # api.rs, passkey.rs and role_headers.rs, which live beside the code
+  # they test rather than under tests/ (so paths-ignore does not reach
+  # them). Production keys come from the environment, never a literal.
+  - exclude:
+      id: rust/hard-coded-cryptographic-value
+  # 2 of 100 on #239. Both in tax_registry.rs: Vec::with_capacity(
+  # seed.tax_kind.len()) and its sales_tax_rate twin — a pre-sizing
+  # hint bounded by a registry seed already held in memory.
+  - exclude:
+      id: rust/uncontrolled-allocation-size

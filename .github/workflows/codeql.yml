@@ -11,6 +11,14 @@
 # source without compiling, so this stays fast and never has to
 # reproduce the workspace build. Actions are pinned to a SHA (matching
 # scorecard.yml) so this doesn't reopen a Pinned-Dependencies alert.
+#
+# The scan runs from .github/codeql/codeql-config.yml (backlog 3ac9ad30):
+# unconfigured, the default suites stalled publish PR #239 on 100
+# name-heuristic annotations. The config records each excluded query
+# with the PR and count it was read from, and the pin in
+# crates/core/boss-testing/tests/the_mirrors_codeql_scan_records_its_exclusions.rs
+# refuses an exclusion without one — and a workflow that stops naming
+# the config.
 
 name: CodeQL
 
@@ -52,6 +60,7 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
+          config-file: ./.github/codeql/codeql-config.yml
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
