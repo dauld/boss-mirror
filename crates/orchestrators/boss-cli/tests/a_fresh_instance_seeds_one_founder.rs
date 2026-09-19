@@ -870,4 +870,32 @@ async fn a_successful_publish_stamps_the_database_once_per_run_and_published_rea
         out.contains(&format!("{date} tenant algedonic")) && out.contains("; 2 publishes, last "),
         "the first publish stays the stamp:\n{out}"
     );
+
+    // Each row projects a FACT the verb staged on the outbox with it
+    // (backlog dbdc4d31): one tenant.published per publish, payload =
+    // the row's columns, signed as the actor the row names — so the
+    // log, not the table, is the record of this database's publishes.
+    let events: Vec<(String, serde_json::Value)> = sqlx::query_as(
+        "SELECT source, payload FROM event_outbox WHERE kind = 'tenant.published' \
+         ORDER BY payload->>'published_at'",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(events.len(), 2, "{events:?}");
+    for (source, payload) in &events {
+        assert_eq!(source, "tenant");
+        assert_eq!(payload["tenant_id"], "algedonic");
+        assert_eq!(payload["published_by"], "automation:tenant-seed");
+        assert_eq!(payload["_actor"], "automation:tenant-seed");
+        assert!(
+            payload["boss_commit"]
+                .as_str()
+                .is_some_and(|c| !c.is_empty())
+        );
+        assert!(payload["writes"].as_i64().is_some_and(|w| w > 0));
+    }
+    assert_eq!(events[0].1["published_at"], date);
+    assert_eq!(events[0].1["took"], serde_json::json!([]));
+    assert_eq!(events[1].1["took"], serde_json::json!(["agents"]));
 }
