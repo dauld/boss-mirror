@@ -79,12 +79,14 @@ const SPAWNS_NOTHING_ON_PURPOSE: &[(&str, &str)] = &[
          as 'never fired' is the claim cf0f5e2d's first pass withdrew.",
     ),
     (
-        "recheck-failing-probes-daily",
+        "recheck-failing-probes-hourly",
         "runs `jobs.run-car-probes` scoped to cars whose probe already failed; it files \
-         a `run-car-probe` ops-request per such car, so on a day with no failing probe \
+         a `run-car-probe` ops-request per such car, so on an hour with no failing probe \
          it produces NOTHING, and that zero is the healthy reading. The packets it does \
          file are the same kind the arrival rule files, so a sweep keyed by kind could \
-         not tell the two apart either.",
+         not tell the two apart either. Hourly since a9dafed6 (2026-09-19) and still \
+         exempt for the same reason: the frequency is not what keeps it out of the \
+         roster, spawning no packet is.",
     ),
     (
         SWEEP_RULE,

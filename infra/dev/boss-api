@@ -94,6 +94,34 @@ esac
 # readlink -f: the pod invokes this through a symlink, and sor-url sits
 # beside the FILE, not the link.
 HERE="$(dirname "$(readlink -f "$0")")"
+
+# IS THIS DOOR THE TREE'S DOOR? (backlog 0b36dd65, 2026-09-19.) The pod
+# reaches this file through a symlink into the operator's checkout, and
+# nothing keeps that checkout on origin/main — it was two commits behind
+# for most of one working day while every door ran from it, and the
+# routing block below was among what was missing, so a builder's read
+# came back HTTP:404 from the jobs port. A stale copy ANSWERS; it does
+# not error. So a READ says so beside its answer, where the reader can
+# judge it, and a WRITE is refused: what a write lands in the audit log
+# is immutable, and there is no reading that back under a warning. The
+# judgement is local and never fetches (door-freshness.sh says why).
+FRESHNESS_FILE="$HERE/door-freshness.sh"
+if [ -r "$FRESHNESS_FILE" ]; then
+  # shellcheck source=door-freshness.sh
+  . "$FRESHNESS_FILE"
+  if STALE=$(door_is_stale "$0"); then
+    case "$METHOD" in
+      GET)
+        echo "boss-api: WARNING — $STALE" >&2
+        ;;
+      *)
+        echo "boss-api: REFUSED $METHOD $API_PATH: a write is not signed from a door that is not the tree's, and a read still runs under a warning (BOSS_DOOR_FRESHNESS=off runs this one anyway, if you mean it). $STALE" >&2
+        exit 78
+        ;;
+    esac
+  fi
+fi
+
 SOR_URL_FILE="$HERE/sor-url"
 BASE=${BOSS_JOBS_URL:-$(head -n1 "$SOR_URL_FILE" 2>/dev/null || true)}
 [ -n "$BASE" ] || {

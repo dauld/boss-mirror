@@ -316,8 +316,13 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 ),
                 "A -07:00 committer date compared as a STRING against the SoR's UTC".into(),
                 "timestamps answered FAILED for a not-yet (car 746a1fac). Compare epochs:".into(),
-                "git log -1 --format=%ct on one side, date -u -d \"$ts\" +%s on the other,".into(),
-                "-gt between them — and guard the empty case FIRST, because date -d ''".into(),
+                format!(
+                    "${} on one side (this car's own merge, handed to the probe — NOT",
+                    boss_jobs::probe::CAR_CONVERGED_AT_VAR
+                ),
+                "a HEAD that moves with every train, a92571a6; git log -1 --format=%ct only".into(),
+                "for a NAMED ref), date -u -d \"$ts\" +%s on the other, -gt between them —".into(),
+                "and guard the empty case FIRST, because date -d ''".into(),
                 "answers midnight rather than an error.".into(),
             ],
         },
@@ -734,6 +739,12 @@ mod tests {
         assert!(text.contains("--format=%ct"), "{text}");
         assert!(text.contains("date -u -d"), "{text}");
         assert!(text.contains("midnight"), "{text}");
+        // And the cutoff the brief names is the FIXED one (a92571a6):
+        // a builder who dates it from HEAD writes a car that starves.
+        assert!(
+            text.contains(boss_jobs::probe::CAR_CONVERGED_AT_VAR),
+            "{text}"
+        );
     }
 
     #[test]

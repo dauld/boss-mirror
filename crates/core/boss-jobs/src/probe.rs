@@ -135,7 +135,8 @@ const ACTOR_VARS: [&str; 2] = ["BOSS_ACTOR", "BOSS_ACTOR_FILE"];
 /// classification of its subcommands, and the split runs by flag as
 /// often as by verb — but an actor: the probe's env names none
 /// (the unattended door hands it exactly `BOSS_JOBS_URL`,
-/// `BOSS_PROBE_NOTFOUND`, [`SOR_USER_VAR`], `BOSS_SOR_PORTS` and
+/// `BOSS_PROBE_NOTFOUND`, [`SOR_USER_VAR`], `BOSS_SOR_PORTS`,
+/// [`CAR_MERGE_REF_VAR`], [`CAR_CONVERGED_AT_VAR`] and
 /// `PATH`), and the CLI refuses an unnamed WRITE by its own rule while
 /// an unnamed READ goes out signed `operator:unidentified` under the
 /// platform's own read role — `audit-readonly`, the one [`SOR_USER_VAR`]
@@ -647,11 +648,26 @@ pub fn reads_git_time_with_an_offset(probe: &str) -> Option<&'static str> {
 pub const GIT_TIME_WITH_AN_OFFSET: [&str; 6] =
     ["%cI", "%ci", "%aI", "%ai", "--date=iso", "--date=rfc"];
 
+/// THE REWRITE A DATED CLAIM TAKES, as a literal so the ONE copy can be
+/// `concat!`ed into [`GIT_TIME_STRING_EVIDENCE`] as well as stand on
+/// its own as [`CAR_INSTANT_RECIPE`] (CLAUDE.md §9a: a recipe that
+/// lived in two texts would drift, and this one is what a builder
+/// copies).
+macro_rules! car_instant_recipe {
+    () => {
+        "  since=${BOSS_CAR_CONVERGED_AT}\n  \
+case ${since:-empty} in empty|*[!0-9]*) echo 'not yet: this car has not converged here'; exit 75;; esac\n  \
+seen=$(date -u -d \"$ts\" +%s)\n  \
+[ \"$seen\" -gt \"$since\" ] && echo claim:ok"
+    };
+}
+
 /// The measured evidence for [`reads_git_time_with_an_offset`], in one
 /// copy, quoted by every door that refuses on it. The doors differ in
 /// what to do instead; they must not differ on what happened
 /// (CLAUDE.md §9a).
-pub const GIT_TIME_STRING_EVIDENCE: &str = "\
+pub const GIT_TIME_STRING_EVIDENCE: &str = concat!(
+    "\
 Measured 2026-09-18 (c0ac92b8, car 746a1fac): the arrival probe compared `git log \
 --format=%cI` — the train commit's committer date, which the conductor writes with a \
 -07:00 offset (2026-09-18T07:43:00-07:00) — against the audit tail's UTC timestamps as \
@@ -660,13 +676,13 @@ before the operator's act, saw a retire that predated the fix, and answered FAIL
 not-yet was true; the car stood red in the shed until an operator re-ran it. With the \
 offsets the other way round the same compare answers PASS for an event that never \
 happened.\n\
-Compare epochs, never ISO strings with mixed offsets:\n  \
-commit=$(git log -1 --format=%ct HEAD)\n  \
+Compare epochs, never ISO strings with mixed offsets — and date the cutoff from the car's \
+own converged instant, never from a HEAD that moves with every train (a92571a6):\n  \
 ts=$(boss-sor-read '/api/...' | jq -r '... // empty')\n  \
-[ -n \"$ts\" ] || { echo 'not yet: no <event> recorded'; exit 75; }\n  \
-seen=$(date -u -d \"$ts\" +%s)\n  \
-[ \"$seen\" -gt \"$commit\" ] && echo claim:ok\n\
-The empty guard comes FIRST: `date -d ''` answers today's midnight, not an error.";
+[ -n \"$ts\" ] || { echo 'not yet: no <event> recorded'; exit 75; }\n",
+    car_instant_recipe!(),
+    "\nThe empty guard comes FIRST: `date -d ''` answers today's midnight, not an error."
+);
 
 /// The rule id a door records when an operator overrides a refusal on
 /// it. Short, stable, and greppable across recorded proofs — an
@@ -676,6 +692,85 @@ pub const UNIDENTIFIED_RULE: &str = "reads-the-sor-unidentified";
 /// The rule id for [`reads_git_time_with_an_offset`], recorded the same
 /// way when overridden.
 pub const GIT_TIME_RULE: &str = "reads-git-time-with-an-offset";
+
+/// THE CAR'S OWN CONVERGENCE INSTANT, in epoch seconds — promised to
+/// every recorded probe by the doors that run one (`boss prove`, both
+/// unattended and by hand), resolved from the car's `merge_ref` in the
+/// checkout the probe runs in. FIXED: a car converges once, and the
+/// commit time of its own merge does not move afterwards.
+///
+/// A probe that needs "did the qualifying event happen after my change
+/// landed?" compares against this and nothing else. The variable is
+/// ABSENT when the car's merge is not in this checkout — which is the
+/// honest not-yet, and the reason the recipe guards it first.
+pub const CAR_CONVERGED_AT_VAR: &str = "BOSS_CAR_CONVERGED_AT";
+
+/// The merge commit [`CAR_CONVERGED_AT_VAR`] was read from, handed over
+/// beside it so a probe can name it in its own not-yet line.
+pub const CAR_MERGE_REF_VAR: &str = "BOSS_CAR_MERGE_REF";
+
+/// WHEN A PROBE DATES ITS CUTOFF FROM A TARGET THAT MOVES — the sixth
+/// shape, and a warning rather than a refusal because it fails CLOSED:
+/// the probe answers 75 (not yet) forever, never a false green.
+///
+/// THE DEFECT (backlog a92571a6, measured 2026-09-19). A probe of the
+/// common shape asks whether its qualifying event happened after the
+/// converged checkout's HEAD — `since=$(git log -1 --format=%ct HEAD)`
+/// — and the forge's checkout converges on main after EVERY train,
+/// about 28 a day. So the goalpost advances every ~50 minutes while
+/// the car sits, and the claim silently becomes "this change worked
+/// more recently than any other change landed", which is not what
+/// proven means. Car 372ac8fd answered not-yet twice with its event
+/// having fired both times, its message moving from a 2026-09-18T18:23
+/// packet to a 2026-09-19T08:52 one because HEAD had moved further
+/// each time. Worse for anything rarer than a train: car 1e7c5a98
+/// waits on a DAILY sweep and compared against a HEAD forty minutes
+/// old, so it is not slow to prove but effectively unprovable — any
+/// car whose qualifying event is less frequent than convergence is
+/// starved by construction.
+///
+/// Returns the offending command, as written. DELIBERATELY COARSE like
+/// its siblings: a segment that runs `git`, prints an epoch (`%ct`,
+/// `%at`, `--date=unix`) and names `HEAD` as a REVISION is reported.
+/// `git show HEAD:<path>` reads a file and is left alone — the "has my
+/// change converged?" leg of the same probe, which is correct.
+pub fn compares_against_a_moving_head(probe: &str) -> Option<&str> {
+    const EPOCH_FORMATS: [&str; 3] = ["%ct", "%at", "--date=unix"];
+    probe
+        .split(['|', '&', ';', '\n', '(', ')', '`', '{', '}'])
+        .map(str::trim)
+        .find(|segment| {
+            segment.contains("git")
+                && EPOCH_FORMATS.iter().any(|f| segment.contains(f))
+                && names_head_as_a_revision(segment)
+        })
+}
+
+/// Does this segment name `HEAD` as a revision rather than as the left
+/// half of a `HEAD:<path>` file read? The word must stand alone: not
+/// followed by `:`, and not part of a longer word (`AHEAD`, `HEADER`).
+fn names_head_as_a_revision(segment: &str) -> bool {
+    segment.match_indices("HEAD").any(|(i, _)| {
+        let before = segment[..i].chars().next_back();
+        let after = segment[i + 4..].chars().next();
+        before.is_none_or(|c| !c.is_alphanumeric() && c != '_')
+            && after.is_none_or(|c| c != ':' && !c.is_alphanumeric() && c != '_')
+    })
+}
+
+/// The measured evidence for [`compares_against_a_moving_head`], in one
+/// copy, quoted by every door that says it (CLAUDE.md §9a).
+pub const MOVING_HEAD_EVIDENCE: &str = "\
+Measured 2026-09-19 (a92571a6), running six shed cars by hand on the forge: 3 of 3 \
+residual failures shared this root cause, and the frequency of the waited-on event \
+predicted it exactly — hourly races the goalpost, daily loses it, twice-daily loses it. \
+Two different cars reported the SAME cutoff instant, 2026-09-19T16:00:56, the converged \
+HEAD of a train that had landed minutes earlier and had nothing to do with either car.";
+
+/// The promised instant, guarded the way a missing number is guarded
+/// everywhere else — because a car whose merge is not in this checkout
+/// has not converged, and NOT YET is the true answer there.
+pub const CAR_INSTANT_RECIPE: &str = car_instant_recipe!();
 
 /// The override a door records when it ran a probe its own rule
 /// refused: which rule, and the operator's stated reason. Recorded in
@@ -787,7 +882,8 @@ mod tests {
     /// A PROBE PROVES, IT DOES NOT ACT. The one thing that turns the
     /// forge's `boss` into a writer is an actor: the probe's env names
     /// none (the unattended prove door hands it exactly BOSS_JOBS_URL,
-    /// BOSS_PROBE_NOTFOUND, BOSS_SOR_USER, BOSS_SOR_PORTS and PATH), and
+    /// BOSS_PROBE_NOTFOUND, BOSS_SOR_USER, BOSS_SOR_PORTS, the car's own
+    /// BOSS_CAR_MERGE_REF and BOSS_CAR_CONVERGED_AT, and PATH), and
     /// the CLI refuses an unnamed write by its own rule
     /// (boss-cli identity.rs). So the probe's TEXT is the only place an
     /// actor could come from, and a text that spells one is refused
@@ -1262,11 +1358,11 @@ echo "ONE-HOME-FOR-A-DISPATCHER-RULE""#;
     #[test]
     fn a_probe_that_compares_epochs_is_not_reported() {
         for probe in [
-            "commit=$(git log -1 --format=%ct HEAD); \
+            "since=$BOSS_CAR_CONVERGED_AT; \
              ts=$(boss-sor-read '/api/audit?kind=class.retired&limit=1' | jq -r '.data[0].at // empty'); \
              [ -n \"$ts\" ] || { echo 'not yet: no retire recorded'; exit 75; }; \
              seen=$(date -u -d \"$ts\" +%s); \
-             [ \"$seen\" -gt \"$commit\" ] && echo retire:after-landing",
+             [ \"$seen\" -gt \"$since\" ] && echo retire:after-landing",
             "git log -1 --format=%at | grep -q . && echo claim:ok",
             "git log -1 --date=unix --format=%cd | grep -q . && echo claim:ok",
             "git show HEAD:infra/gate.sh | grep -c 'integer expression' && echo claim:ok",
@@ -1284,5 +1380,59 @@ echo "ONE-HOME-FOR-A-DISPATCHER-RULE""#;
         let r = override_record(UNIDENTIFIED_RULE, "measured: the header is supplied");
         assert_eq!(r["rule"], UNIDENTIFIED_RULE);
         assert_eq!(r["reason"], "measured: the header is supplied");
+    }
+
+    /// THE STARVED CUTOFF, NAMED WHERE IT IS STILL CHEAP (backlog
+    /// a92571a6). The idiom on three live cars dates the cutoff from
+    /// the converged checkout's CURRENT HEAD, which advances with every
+    /// train. The scan names the command and leaves the shapes beside
+    /// it alone: reading a FILE at HEAD says nothing about time, and a
+    /// cutoff taken from the promised variable is the fix itself.
+    #[test]
+    fn a_cutoff_dated_from_the_moving_head_is_named() {
+        let starved = "c=$(git show HEAD:infra/cluster/dev-scratch-reclaim.sh | grep -c ls-remote); \
+                       since=$(git log -1 --format=%ct HEAD); \
+                       ts=$(boss-sor-read '/api/jobs?kind=x' | jq -r '.data[0].at // empty')";
+        assert_eq!(
+            compares_against_a_moving_head(starved),
+            Some("git log -1 --format=%ct HEAD"),
+            "{starved}"
+        );
+        for probe in [
+            "git show -s --format=%ct HEAD~1 | cat",
+            "git log -1 --date=unix --format=%cd HEAD",
+        ] {
+            assert!(compares_against_a_moving_head(probe).is_some(), "{probe}");
+        }
+        for clean in [
+            "git show HEAD:infra/gate.sh | grep -c 'integer expression' && echo claim:ok",
+            "since=$BOSS_CAR_CONVERGED_AT; git log -1 --format=%ct $BOSS_CAR_MERGE_REF",
+            "boss-sor-read /api/yard/status | jq -e '.dock_depth == 1' >/dev/null",
+        ] {
+            assert_eq!(
+                compares_against_a_moving_head(clean),
+                None,
+                "clean: {clean}"
+            );
+        }
+    }
+
+    /// AND THE CORPUS DOES NOT TEACH THE SHAPE IT WARNS ABOUT. The
+    /// git-date evidence every door quotes prescribed
+    /// `commit=$(git log -1 --format=%ct HEAD)` as its rewrite until
+    /// a92571a6 — the starved idiom, recommended in the one text a
+    /// builder reads while typing a probe.
+    #[test]
+    fn the_quoted_rewrite_does_not_date_its_cutoff_from_head() {
+        assert_eq!(
+            compares_against_a_moving_head(GIT_TIME_STRING_EVIDENCE),
+            None,
+            "{GIT_TIME_STRING_EVIDENCE}"
+        );
+        assert!(
+            GIT_TIME_STRING_EVIDENCE.contains(CAR_CONVERGED_AT_VAR),
+            "the rewrite names the promised instant"
+        );
+        assert_eq!(compares_against_a_moving_head(MOVING_HEAD_EVIDENCE), None);
     }
 }

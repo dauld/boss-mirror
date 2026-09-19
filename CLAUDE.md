@@ -755,7 +755,18 @@ a door that stops being true is a defect worth a car.
   `infra/dev/`, pinned by a shell test in `crates/core/boss-testing/tests/`
   (`boss_api_sh`, `boss_shim_sh`, `wt_cargo_sh`, `wt_web_sh`), and
   `/work/tools/bin/<name>` is a SYMLINK to the main checkout's copy —
-  which is why the main checkout stays on `origin/main`. The pod's
+  so every door runs whatever that checkout last had. **Nothing keeps
+  it on `origin/main`**, and this document used to say it did: on
+  2026-09-19 it was two commits behind for most of the working day and
+  a builder's read came back `HTTP:404` from the wrong port (backlog
+  0b36dd65). Each door now judges its own copy first
+  (`infra/dev/door-freshness.sh`, locally, no fetch): a read WARNS,
+  naming both shas and the `git -C /work/boss merge --ff-only
+  origin/main` that repairs it, and a `boss-api` WRITE is REFUSED
+  (exit 78), because what a write lands in the log is immutable while
+  a read's warning rides beside its answer. Only a checkout that has
+  not pulled is judged stale — a branch, or a door being edited, is
+  silent — and `BOSS_DOOR_FRESHNESS=off` runs anything anyway. The pod's
   system-of-record spelling is `infra/dev/sor-url`, which both
   `boss-api` and the shim read — WRITTEN from the one tree source,
   `infra/estate/estate.toml`, and held equal to it by a test (since
@@ -782,6 +793,21 @@ a door that stops being true is a defect worth a car.
   calls before finding this door at all, ~14 of them writes carrying a
   forged `emp-david` actor, so the audit log credits a human with an
   agent's work.
+
+- **Reading a service no path can route to — `BOSS_SOR_SERVICE=<name>
+  boss-api GET …`.** The same door, aimed at that service's port:
+  `gateway` means 4443 rather than the jobs API's 7900. It reaches the
+  gateway BY NAME because the gateway fronts every path there is, so no
+  prefix could route to it — the machine-door pin
+  (`the_machine_door_carries_every_read_surface.rs`, `NOT_PATH_ROUTED`)
+  forbids a path route for that reason. Unnamed, nothing changes; a name
+  the port table cannot place is refused BEFORE curl, rather than falling
+  through to the jobs port, which would answer. Dogfooded 2026-09-19:
+  `BOSS_SOR_SERVICE=gateway boss-api GET /health` returns ok, HTTP:200
+  against the live gateway. It exists because the pod had no such reader
+  (the forge did), so a builder rehearsing a gateway probe set the host
+  and the port table by hand — which is this section's own failure mode
+  (backlog `bf1f5ad2`).
 
 - **Which deployment.** The system of record is
   **`http://10.20.0.34:7900`**, and since 2026-09-15 it is the ONLY
