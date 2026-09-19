@@ -51,7 +51,12 @@ use boss_testing::TestDb;
 /// here, and the same registry gap: an `individual` audience naming
 /// the automation is the declaration that would take all five off
 /// this list, once those actors are registered.
-const ORPHANS_PINNED: usize = 29;
+///
+/// 29 -> 30 on 2026-09-19 (backlog 321f1409): `publish-to-github/
+/// read-checks`, the second MACHINE step of that protocol — the forge
+/// ops-runner completes it through the read-publish-checks verb, the
+/// same class and the same registry gap as `open-pr` beside it.
+const ORPHANS_PINNED: usize = 30;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn every_persons_step_no_station_holds_is_named_and_the_count_is_pinned() {

@@ -1,0 +1,38 @@
+# publish-to-github v7's second machine step (backlog 321f1409, David
+# 2026-09-19). When the protocol's `read-checks` step becomes READY —
+# open-pr completed, the mirror PR is open — spawn an ops-request for
+# host=forge verb=read-publish-checks; the root ops-runner runs the
+# verb (wait for the head's check-runs, read the CodeQL annotations,
+# write the reading onto the packet as `code_scanning`) and completes
+# `read-checks` with conclusion / alerts / rules. The `judge-checks`
+# step that follows is the agent's: a disposition per rule, so David's
+# merge follows a judged reading instead of a red badge.
+#
+# Routed on the STEP's metadata marker, not its slug, exactly as
+# publish-github-pr-on-open-pr-ready is: `step.ready.*` payloads carry
+# the step's metadata_defaults and do not hoist spec_slug. The request
+# carries the publish packet's id back as `metadata.for_publish` — the
+# edge the answer's rule (complete-publish-read-checks-on-read-publish-
+# checks-answered) follows to the step on failure.
+[[rule]]
+name = "read-publish-checks-on-read-checks-ready"
+version = 1
+why = """
+A CROSS-PROTOCOL REACTOR spanning publish-to-github -> ops-request ->
+a verb on the forge host, which no single Workflow consequence can
+express: the publish protocol cannot name a host verb, and the
+ops-request protocol cannot know which publish asked. Measured
+2026-09-19 (backlog 321f1409): the mirror's CodeQL result never
+returned to the system of record — PR #238 was merged over 64 unread
+alerts and #239 stalled on 109 — because the check runs after the
+packet's sign-off on a surface only David sees. This files the READ
+the moment the PR is on the record; it adds no routing inside the
+protocol, which still owns open-pr -> read-checks -> judge-checks ->
+pr-opened. No authority widened: the verb holds no credential and
+writes only the publish packet's own reading and step.
+"""
+on_event = "step.ready.task"
+when = 'metadata.ops_verb = "read-publish-checks"'
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"ops-request\"", subject_kind = "\"custom\"", subject = "\"forge\"", title = "\"read the mirror PR's checks from the forge — a publish PR is open\"", "metadata.host" = "\"forge\"", "metadata.verb" = "\"read-publish-checks\"", "metadata.for_publish" = "job_id" }

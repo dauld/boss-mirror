@@ -338,6 +338,37 @@ impl Conductor {
     /// All three writes are idempotent — `get_job` reads, `complete_step`
     /// early-returns on a done step, `merge_job_metadata` merges — so a
     /// retry re-closes only the car that did not close before.
+    /// The squash commit's body for this train: `squash_message` over
+    /// the consist its `boarded_jobs` name (backlog f252cb1c). BEST-
+    /// EFFORT by construction — a car the API cannot hand back must
+    /// not stop a green train from landing, so a failed read logs and
+    /// the merge goes with an empty body, exactly what every train
+    /// carried before 2026-09-19. The arrival report still files the
+    /// same consist from the same ids on the sweep.
+    async fn squash_message_for(&self, train: &Value) -> String {
+        let boarded: Vec<&str> = train
+            .get("metadata")
+            .and_then(|m| m.get("boarded_jobs"))
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let mut cars = Vec::with_capacity(boarded.len());
+        for cid in boarded {
+            match self.get_job(cid).await {
+                Ok(car) => cars.push(car),
+                Err(e) => {
+                    log(format!(
+                        "train {}: car {} unreadable — merging without the consist body (non-fatal): {e}",
+                        id8(job_id(train).unwrap_or("?")),
+                        id8(cid)
+                    ));
+                    return String::new();
+                }
+            }
+        }
+        squash_message(&train_consist(&cars))
+    }
+
     async fn close_boarded_cars(
         &self,
         tid: &str,
@@ -1321,7 +1352,8 @@ impl Conductor {
                     "CI green — merging {pr_url} (train protocol 27ab7680)"
                 ));
                 if !self.cfg.dry {
-                    self.forge.merge(&pr_url).await?;
+                    let message = self.squash_message_for(&t).await;
+                    self.forge.merge(&pr_url, &message).await?;
                     info = self.forge.pr_info(&pr_url).await?;
                 }
             } else if let Some(why) = merge_declined_reason(self.cfg.auto_merge, verdict, pr_state)
@@ -3458,7 +3490,7 @@ mod tests {
         ) -> Result<String> {
             bail!("not exercised")
         }
-        async fn merge(&self, _url: &str) -> Result<()> {
+        async fn merge(&self, _url: &str, _message: &str) -> Result<()> {
             bail!("not exercised")
         }
         async fn close_pr(&self, _url: &str) -> Result<()> {
@@ -3617,7 +3649,7 @@ mod tests {
         ) -> Result<String> {
             bail!("not exercised")
         }
-        async fn merge(&self, _url: &str) -> Result<()> {
+        async fn merge(&self, _url: &str, _message: &str) -> Result<()> {
             bail!("not exercised")
         }
         async fn close_pr(&self, _url: &str) -> Result<()> {
@@ -3874,7 +3906,7 @@ mod tests {
         ) -> Result<String> {
             bail!("not exercised")
         }
-        async fn merge(&self, _url: &str) -> Result<()> {
+        async fn merge(&self, _url: &str, _message: &str) -> Result<()> {
             bail!("not exercised")
         }
         async fn close_pr(&self, _url: &str) -> Result<()> {
@@ -4357,7 +4389,7 @@ mod tests {
         ) -> Result<String> {
             bail!("not exercised")
         }
-        async fn merge(&self, _url: &str) -> Result<()> {
+        async fn merge(&self, _url: &str, _message: &str) -> Result<()> {
             bail!("not exercised")
         }
         async fn close_pr(&self, _url: &str) -> Result<()> {

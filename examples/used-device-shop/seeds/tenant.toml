@@ -31,6 +31,10 @@
 [meta]
 tenant_id = "used-device-shop"
 display_name = "Used Device Shop"
+# The hosting edit level (a479faf7): a tier name from
+# infra/platform/tiers.toml; the example tenants are the operator's
+# own, so everything. A hosted tenant starts at "data".
+edit_level = "core"
 seed = 0xcafebabe  # matches SimConfig::default().seed for reproducibility
 start_date = "2024-01-02"
 end_date = "2026-04-25"

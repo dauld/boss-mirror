@@ -211,7 +211,14 @@ pub const CONTRACT: &[Entry] = &[
                   boss-sim `TenantConfig` reads the same file with sim-only sections \
                   (`seed`, `start_date`, `[job_rates]`) for a tenant that has an engine",
         shape: "`[meta] tenant_id` (required by check: it is every workflow's `owning_team`), \
-                `display_name` (the tab title and wordmark); `[modules] <module> = bool` — a module \
+                `display_name` (the tab title and wordmark), `edit_level` (how far into the tree \
+                this tenant's IT department may edit: a tier NAME from infra/platform/tiers.toml, \
+                judged by rank — `data` is data-only, `tenants` adds the tenant's crate and site, \
+                `modules` the company layer, `core` everything; read by `boss dispatch` for a packet \
+                declaring `metadata.paths` and by the gate for a car's diff, both through the jobs \
+                API's `/api/tenant/edit-level`; absent is NO level, nothing enforced — `boss tenant \
+                init` writes the hosted default `data` explicitly, and a name the map lacks is \
+                INVALID; a479faf7, design 01c3cc3f); `[modules] <module> = bool` — a module \
                 is ON only when listed true, a missing key is off (ce68f137); the SPA reads \
                 `calendar`, `equipment`, `exec`, `finance`, `marketing-assets`, `parts`, `qa`, \
                 `shipping`, `shop`, `sim`, `support`, `warehouse`; `[labels] <dotted.key> = str`; \
@@ -545,9 +552,18 @@ fn parse_manifest(path: &Path, _: &Ctx) -> Result<String, String> {
             "[meta] tenant_id is required: it is the owning_team every workflow is stamped with"
                 .to_string()
         })?;
+    // The edit level is a tier NAME (a479faf7): the doors refuse a
+    // level the map does not know rather than read it as any level,
+    // so the check says so here, in the loader's own words.
+    if let Some(level) = t.meta.edit_level.as_deref() {
+        let map = boss_core::tiers::tier_map().map_err(|e| e.to_string())?;
+        map.first_above(level, std::iter::empty())
+            .map_err(|e| format!("[meta] {e}"))?;
+    }
     Ok(format!(
-        "tenant_id={id} display_name={}; {} modules, {} labels, {} public reads",
+        "tenant_id={id} display_name={} edit_level={}; {} modules, {} labels, {} public reads",
         t.meta.display_name.as_deref().unwrap_or("(unset)"),
+        t.meta.edit_level.as_deref().unwrap_or("(none)"),
         t.modules.len(),
         t.labels.len(),
         t.gateway.public_reads.len()
@@ -1278,6 +1294,17 @@ fn scaffold_manifest(s: &Scaffold) -> String {
 tenant_id = \"{name}\"\n\
 # What the SPA calls this deployment.\n\
 display_name = \"{display}\"\n\
+# How far into the product tree this tenant's IT department (its\n\
+# agents) may edit: a tier name from infra/platform/tiers.toml.\n\
+#   data     registries, Workflows, rules, seeds — this directory; no source\n\
+#   tenants  plus the tenant's own crate (crates/tenants/<name>) and site\n\
+#   modules  plus the company-modeling layer (crates/modules)\n\
+#   core     everything — the operator's own instance\n\
+# Read by boss dispatch (a packet declaring metadata.paths above it is\n\
+# refused before the claim) and by the gate (a car whose diff crosses\n\
+# it is refused naming the path). A hosted tenant starts data-only;\n\
+# raising it is a decision recorded on the instance, not a quiet edit.\n\
+edit_level = \"data\"\n\
 \n\
 # Which SPA modules to show. A module is on only when listed true here;\n\
 # absent is off. The names: docs/tenant-contract.md, the tenant.toml row.\n\
@@ -2017,6 +2044,50 @@ mod tests {
                 assert!(readme.contains(&rel), "README does not name {rel}");
             }
         }
+    }
+
+    /// The hosting edit level is a contract field (a479faf7; design
+    /// 01c3cc3f reader 3): the scaffold declares the HOSTED default
+    /// (`data`, data-only) explicitly rather than leaving it to a
+    /// reader's assumption; `check` reads it back; and a level that
+    /// is not a tier name is INVALID naming the vocabulary, since the
+    /// doors treat an unknown level as a refusal, not as any level.
+    #[test]
+    fn the_scaffold_declares_the_data_only_level_and_check_refuses_a_level_that_is_not_a_tier() {
+        let dir = scratch_dir("boss-cli-tenant-init-edit-level").join("acme");
+        init("acme", Some(&dir)).unwrap();
+        let manifest = std::fs::read_to_string(dir.join("tenant.toml")).unwrap();
+        assert!(
+            manifest.contains("\nedit_level = \"data\"\n"),
+            "the scaffold declares the hosted default explicitly:\n{manifest}"
+        );
+        let r = check(&dir);
+        let row = r.rows.iter().find(|r| r.path == "tenant.toml").unwrap();
+        assert!(
+            row.detail.contains("edit_level=data"),
+            "check reads the level back: {}",
+            row.detail
+        );
+
+        write_file(
+            &dir.join("tenant.toml"),
+            "[meta]\ntenant_id = \"acme\"\nedit_level = \"full\"\n",
+        );
+        let r = check(&dir);
+        let row = r.rows.iter().find(|r| r.path == "tenant.toml").unwrap();
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(
+            row.detail.contains("`full`") && row.detail.contains("core"),
+            "names the bad level and the vocabulary: {}",
+            row.detail
+        );
+
+        // Absent is not an error: the operator's own instance, no door.
+        write_file(&dir.join("tenant.toml"), "[meta]\ntenant_id = \"acme\"\n");
+        let r = check(&dir);
+        let row = r.rows.iter().find(|r| r.path == "tenant.toml").unwrap();
+        assert_eq!(row.status, Status::Ok, "{row:?}");
+        assert!(row.detail.contains("edit_level=(none)"), "{}", row.detail);
     }
 
     #[test]

@@ -53,6 +53,21 @@ pub enum TiersError {
     Empty,
     #[error("tiers.toml declares tier `{0}` twice")]
     Duplicate(String),
+    /// An edit level that is not a tier name. The message lists the
+    /// names so a tenant.toml author sees the vocabulary, not a guess.
+    #[error("edit level `{0}` is not a tier in infra/platform/tiers.toml (one of: {1})")]
+    NoSuchLevel(String, String),
+}
+
+/// The first path a set of changes touches ABOVE an edit level — the
+/// hosting door's one finding (a479faf7, design 01c3cc3f reader 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Above<'a> {
+    /// The offending path, as given.
+    pub path: &'a str,
+    /// Its tier, or `None` when no row claims it (the tree's own root:
+    /// `Cargo.toml`, `README.md`, `.forgejo/`).
+    pub tier: Option<&'a Tier>,
 }
 
 /// Parse a tier map from its TOML text.
@@ -143,6 +158,96 @@ impl TierMap {
     /// The tier a name denotes, for callers holding a stamped label.
     pub fn by_name(&self, name: &str) -> Option<&Tier> {
         self.tiers.iter().find(|t| t.name == name)
+    }
+
+    /// The innermost rank the map declares — 1 today (core, infra).
+    /// A level at this rank admits everything, root files included.
+    pub fn innermost_rank(&self) -> u8 {
+        self.tiers.iter().map(|t| t.rank).min().unwrap_or(u8::MAX)
+    }
+
+    /// The tier names, in file order, comma-joined — for a refusal
+    /// that has to say what the vocabulary is.
+    fn names(&self) -> String {
+        self.tiers
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// THE HOSTING PREDICATE (a479faf7; design 01c3cc3f reader 3): a
+    /// change is admitted for a tenant whose `edit_level` is `level`
+    /// iff every path it touches is in a tier of rank >= the level's
+    /// rank. Returns the FIRST path, in the order given, that is not
+    /// — its tier beside it — or `Ok(None)` when every path is
+    /// admitted. A path no row claims is the tree's own root and is
+    /// admitted only by a level at the innermost rank: `Cargo.toml` is
+    /// not a tenant's to edit at `tenants`, and `core` (the operator's
+    /// own instance) admits it like everything else.
+    ///
+    /// The level is a TIER NAME (`data`, `tenants`, `modules`, `core`
+    /// are the four David named as data-only / tenant / modules /
+    /// full; any name in the map is a level, judged by its rank), and
+    /// one that is not in the map is an error naming the vocabulary,
+    /// never a level that admits nothing. Mirrored in shell by
+    /// `edit_level_first_above` in infra/lint/lib/tiers.sh, held equal
+    /// to this by boss-testing/tests/tiers_sh.rs.
+    pub fn first_above<'a>(
+        &'a self,
+        level: &str,
+        paths: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Option<Above<'a>>, TiersError> {
+        let floor = self
+            .by_name(level)
+            .ok_or_else(|| TiersError::NoSuchLevel(level.to_string(), self.names()))?
+            .rank;
+        let innermost = self.innermost_rank();
+        Ok(paths.into_iter().find_map(|path| {
+            let tier = self.tier_of(path);
+            let admitted = match tier {
+                Some(t) => t.rank >= floor,
+                None => floor <= innermost,
+            };
+            (!admitted).then_some(Above { path, tier })
+        }))
+    }
+
+    /// The refusal a door prints for an `Above`: the path, what it is
+    /// (its tier and rank, or that no tier claims it), and the level
+    /// with its rank — every fact the author needs to see why, and
+    /// the same sentence at the dispatch door and the gate.
+    pub fn level_refusal(&self, level: &str, above: &Above<'_>) -> String {
+        let rank = self.by_name(level).map(|t| t.rank);
+        let level_text = match rank {
+            Some(r) => format!("edit level `{level}` (rank {r})"),
+            None => format!("edit level `{level}`"),
+        };
+        match above.tier {
+            Some(t) => format!(
+                "{level_text} does not admit `{}` — it is `{}` (rank {}), closer to the core \
+                 than the level allows this tenant's changes to reach",
+                above.path, t.name, t.rank
+            ),
+            None => {
+                let innermost: Vec<&str> = self
+                    .tiers
+                    .iter()
+                    .filter(|t| t.rank == self.innermost_rank())
+                    .map(|t| t.name.as_str())
+                    .collect();
+                format!(
+                    "{level_text} does not admit `{}` — no tier claims it (the tree's own \
+                     root), which only the innermost level admits ({})",
+                    above.path,
+                    innermost
+                        .iter()
+                        .map(|n| format!("`{n}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+        }
     }
 }
 
@@ -268,6 +373,121 @@ mod tests {
                 .map(|t| t.name.as_str()),
             Some("modules")
         );
+    }
+
+    // ---- the edit level (a479faf7, design 01c3cc3f reader 3) --------------
+
+    fn above(level: &str, paths: &[&str]) -> Option<String> {
+        map()
+            .first_above(level, paths.iter().copied())
+            .expect("a level the map names")
+            .map(|a| a.path.to_string())
+    }
+
+    #[test]
+    fn each_level_admits_its_own_rank_and_outward_and_refuses_the_first_path_inward() {
+        // One representative path per tier: core, infra (rank 1),
+        // modules, orchestrators (2), tenants, frontend (3), data (4).
+        let core = "crates/core/boss-a/src/lib.rs";
+        let infra = "infra/lint/a-lint.sh";
+        let modules = "crates/modules/boss-b/src/lib.rs";
+        let orchestrators = "crates/orchestrators/boss-c/src/main.rs";
+        let tenants = "crates/tenants/boss-acme-engine/src/main.rs";
+        let frontend = "apps/web/src/a-page/page.ts";
+        let data = "infra/platform/workflows/a-protocol.toml";
+
+        // data: only data.
+        assert_eq!(above("data", &[data]), None);
+        for p in [core, infra, modules, orchestrators, tenants, frontend] {
+            assert_eq!(above("data", &[data, p]), Some(p.to_string()), "{p}");
+        }
+        // tenants: tenants, frontend, data.
+        assert_eq!(above("tenants", &[tenants, frontend, data]), None);
+        for p in [core, infra, modules, orchestrators] {
+            assert_eq!(above("tenants", &[data, p]), Some(p.to_string()), "{p}");
+        }
+        // modules: modules, orchestrators and outward.
+        assert_eq!(
+            above(
+                "modules",
+                &[modules, orchestrators, tenants, frontend, data]
+            ),
+            None
+        );
+        for p in [core, infra] {
+            assert_eq!(above("modules", &[tenants, p]), Some(p.to_string()), "{p}");
+        }
+        // core: everything.
+        assert_eq!(
+            above(
+                "core",
+                &[core, infra, modules, orchestrators, tenants, frontend, data]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_first_offending_path_in_the_order_given_is_the_one_named() {
+        let paths = [
+            "docs/a.md",
+            "crates/modules/boss-b/x.rs",
+            "crates/core/boss-a/x.rs",
+        ];
+        let a = map().first_above("tenants", paths).unwrap().unwrap();
+        assert_eq!(a.path, "crates/modules/boss-b/x.rs");
+        assert_eq!(a.tier.map(|t| t.name.as_str()), Some("modules"));
+    }
+
+    #[test]
+    fn a_path_no_tier_claims_is_admitted_only_by_the_innermost_level() {
+        // The tree's own root files: Cargo.toml, README.md, .forgejo/.
+        assert_eq!(above("core", &["Cargo.toml"]), None);
+        assert_eq!(above("infra", &["Cargo.toml"]), None);
+        for level in ["modules", "tenants", "data"] {
+            assert_eq!(
+                above(level, &["Cargo.toml"]),
+                Some("Cargo.toml".into()),
+                "{level}"
+            );
+        }
+        let a = map().first_above("data", ["README.md"]).unwrap().unwrap();
+        assert!(a.tier.is_none());
+    }
+
+    #[test]
+    fn no_paths_is_admitted_at_every_level() {
+        for t in &map().tiers {
+            assert_eq!(above(&t.name, &[]), None, "{}", t.name);
+        }
+    }
+
+    #[test]
+    fn a_level_that_is_not_a_tier_is_refused_by_name() {
+        let err = map()
+            .first_above("full", ["docs/a.md"])
+            .expect_err("full is not a tier name");
+        assert!(
+            matches!(&err, TiersError::NoSuchLevel(n, _) if n == "full"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("core"), "{err}");
+    }
+
+    #[test]
+    fn the_refusal_names_the_path_its_tier_and_the_level_with_both_ranks() {
+        let a = map()
+            .first_above("tenants", ["crates/core/boss-a/x.rs"])
+            .unwrap()
+            .unwrap();
+        let text = map().level_refusal("tenants", &a);
+        assert!(text.contains("crates/core/boss-a/x.rs"), "{text}");
+        assert!(text.contains("`core` (rank 1)"), "{text}");
+        assert!(text.contains("edit level `tenants` (rank 3)"), "{text}");
+        let a = map().first_above("data", ["Cargo.toml"]).unwrap().unwrap();
+        let text = map().level_refusal("data", &a);
+        assert!(text.contains("no tier claims it"), "{text}");
+        assert!(text.contains("`core`"), "{text}");
     }
 
     #[test]

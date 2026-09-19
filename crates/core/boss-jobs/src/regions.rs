@@ -751,11 +751,37 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     region("shed", Some(n), None, state, why, trend)
 }
 
-/// ARRIVALS: trains that arrived in the window. Troubled when a train
-/// was cancelled in the window WITH cars aboard — a red train, whose
-/// cars went back to the dock (a board the consist check refused
-/// carries none and is not trouble); busy while an arrival's siding is
-/// still converging. The trend is arrivals per day.
+/// A car a cancelled train released, judged: is it still waiting on
+/// the repair the red asked for? Repaired means landed (the
+/// conductor's `merged` marker or a closed `outcome=merged`, the one
+/// definition in `car::is_landed`), re-gated (a fresh receipt rides
+/// the car as `regate_receipt`), boarded again (`train` names a
+/// train), or closed. A car released to the dock and not touched since
+/// is still the red, live.
+///
+/// WHY (a106309c, 2026-09-19): train #461 was cancelled at 21:50Z with
+/// two cars aboard; both re-parked and landed on #462 at 22:32Z, and
+/// the arrivals card stayed troubled for 16 hours — the rule counted
+/// that a red HAPPENED in the window, never asking what became of the
+/// cars. A repaired red must stop looking troubled the way a troubled
+/// packet must look troubled.
+fn awaiting_repair(car: &Job) -> bool {
+    let landed = serde_json::to_value(car).is_ok_and(|v| crate::car::is_landed(&v));
+    let regated = car.metadata.get("regate_receipt").is_some();
+    let reboarded = car
+        .metadata
+        .get("train")
+        .and_then(Value::as_str)
+        .is_some_and(|t| !t.is_empty());
+    car.status == boss_core::job::JobStatus::Open && !landed && !regated && !reboarded
+}
+
+/// ARRIVALS: trains that arrived in the window. Troubled while a train
+/// cancelled in the window WITH cars aboard — a red train, whose cars
+/// went back to the dock (a board the consist check refused carries
+/// none and is not trouble) — still has a car [`awaiting_repair`]; busy
+/// while an arrival's siding is still converging. The trend is
+/// arrivals per day; a cancellation stays in the record, not the state.
 fn arrivals(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     fn outcome(j: &Job) -> &str {
         j.metadata
@@ -763,12 +789,15 @@ fn arrivals(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
             .and_then(Value::as_str)
             .unwrap_or("")
     }
-    let cars_aboard = |j: &Job| {
+    fn cars_aboard(j: &Job) -> Vec<&str> {
         j.metadata
             .get("boarded_jobs")
             .and_then(Value::as_array)
-            .map_or(0, Vec::len)
-    };
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect()
+    }
     let arrived = inputs
         .closed_trains
         .iter()
@@ -776,12 +805,36 @@ fn arrivals(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
         .filter_map(|(j, _)| closed_at(j));
     let (cur, prev) = count_split(w, arrived);
     let trend = rate_trend("arrivals", w, cur, prev);
-    let red: Vec<&str> = inputs
+    // The cars read covers open cars and those closed within two
+    // windows, so every car aboard a train cancelled in THIS window is
+    // in it; one that is not is unread, and no evidence is not a pass —
+    // it stays the red, named by its id.
+    let car_by_id: std::collections::HashMap<String, &Job> = inputs
+        .cars
+        .iter()
+        .map(|(j, _)| (j.id.to_string(), j))
+        .collect();
+    let red: Vec<String> = inputs
         .closed_trains
         .iter()
-        .filter(|(j, _)| outcome(j) != "arrived" && cars_aboard(j) > 0)
+        .filter(|(j, _)| outcome(j) != "arrived")
         .filter(|(j, _)| closed_at(j).is_some_and(|t| w.current(t)))
-        .map(|(j, _)| j.title.as_str())
+        .filter_map(|(j, _)| {
+            let waiting: Vec<&str> = cars_aboard(j)
+                .into_iter()
+                .filter_map(|id| match car_by_id.get(id) {
+                    Some(car) if awaiting_repair(car) => Some(
+                        car.metadata
+                            .get("branch")
+                            .and_then(Value::as_str)
+                            .unwrap_or(car.title.as_str()),
+                    ),
+                    Some(_) => None,
+                    None => Some(id),
+                })
+                .collect();
+            (!waiting.is_empty()).then(|| format!("{} ({})", j.title, waiting.join(", ")))
+        })
         .collect();
     let converging = inputs
         .status
@@ -793,7 +846,7 @@ fn arrivals(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
         (
             RegionState::Troubled,
             format!(
-                "{} cancelled with cars aboard: {}",
+                "{} cancelled with cars aboard still awaiting repair: {}",
                 plural(red.len(), "train", "trains"),
                 red.join(", ")
             ),
@@ -1332,7 +1385,9 @@ mod tests {
         assert_eq!(track.previous, Some(40.0));
         assert_eq!((track.samples, track.previous_samples), (2, 1));
 
-        // A red train — cancelled with a car aboard — is trouble.
+        // A red train — cancelled with a car aboard — is trouble. The
+        // car is not in the cars read here: unread is not repaired, so
+        // the red stays and names the id (a106309c).
         let mut with_red = closed.clone();
         with_red.push((
             job(
@@ -1355,6 +1410,100 @@ mod tests {
         let a = by_name(&out, "arrivals");
         assert_eq!(a.state, RegionState::Troubled);
         assert!(a.why.contains("train #469"), "{}", a.why);
+    }
+
+    /// A cancelled train troubles the arrivals only while a car it
+    /// carried is still waiting on the repair (a106309c, measured
+    /// 2026-09-19: train #461 cancelled 21:50Z, its two cars landed on
+    /// #462 at 22:32Z, and the map stayed red for 16 hours — the rule
+    /// measured that trouble HAPPENED, not that it exists). A car that
+    /// since merged, was re-gated, boarded a newer train, or closed is
+    /// repaired; one still sitting unregated on the dock is not.
+    #[test]
+    fn a_cancelled_train_stops_troubling_arrivals_once_its_cars_are_repaired() {
+        let status = empty_status();
+        let cancelled = |cars: &[&Job]| {
+            let ids: Vec<String> = cars.iter().map(|c| c.id.to_string()).collect();
+            (
+                job(
+                    "pr-train",
+                    "train #461",
+                    JobStatus::Closed,
+                    json!({ "outcome": "cancelled", "closed_at": "2026-09-19T11:00:00Z", "boarded_jobs": ids }),
+                ),
+                vec![],
+            )
+        };
+        let car = |branch: &str, status: JobStatus, md: Value| {
+            let mut md = md;
+            md["branch"] = json!(branch);
+            (job("ship-a-change", branch, status, md), vec![])
+        };
+        let arrivals = |cars: Vec<(Job, Vec<Step>)>| {
+            let closed = vec![cancelled(&cars.iter().map(|(j, _)| j).collect::<Vec<_>>())];
+            let out = regions(&inputs(
+                &status,
+                &[],
+                &closed,
+                &cars,
+                &[],
+                Some(&[]),
+                Some(&[]),
+            ));
+            by_name(&out, "arrivals").clone()
+        };
+
+        // Released to the dock and not touched since: the red is live.
+        let a = arrivals(vec![car(
+            "fix/a",
+            JobStatus::Open,
+            json!({ "skip_reason": "returned to dock: train cancelled (red)" }),
+        )]);
+        assert_eq!(a.state, RegionState::Troubled, "{}", a.why);
+        assert!(a.why.contains("train #461"), "{}", a.why);
+
+        // The packet's case: the car since merged (the conductor's
+        // landing marker, before the dispatcher closes the Job).
+        let a = arrivals(vec![car(
+            "fix/a",
+            JobStatus::Open,
+            json!({ "merged": "true", "train": "a-newer-train" }),
+        )]);
+        assert_eq!(a.state, RegionState::Clear, "{}", a.why);
+        // Cancellations stay in the record, not in the state: the count
+        // and the trend are the arrivals', unchanged.
+        assert_eq!(a.count, Some(0));
+
+        // Re-gated (a fresh receipt rides the car), boarded a newer
+        // train, or closed: each is the repair under way or done.
+        let a = arrivals(vec![car(
+            "fix/a",
+            JobStatus::Open,
+            json!({ "regate_receipt": "GATE_VERDICT=green" }),
+        )]);
+        assert_eq!(a.state, RegionState::Clear, "{}", a.why);
+        let a = arrivals(vec![car(
+            "fix/a",
+            JobStatus::Open,
+            json!({ "train": "a-newer-train" }),
+        )]);
+        assert_eq!(a.state, RegionState::Clear, "{}", a.why);
+        let a = arrivals(vec![car(
+            "fix/a",
+            JobStatus::Closed,
+            json!({ "outcome": "abandoned" }),
+        )]);
+        assert_eq!(a.state, RegionState::Clear, "{}", a.why);
+
+        // Two cars aboard: one repaired, one not — still troubled, and
+        // the why names the car still waiting.
+        let a = arrivals(vec![
+            car("fix/a", JobStatus::Open, json!({ "merged": "true" })),
+            car("fix/b", JobStatus::Open, json!({})),
+        ]);
+        assert_eq!(a.state, RegionState::Troubled, "{}", a.why);
+        assert!(a.why.contains("fix/b"), "{}", a.why);
+        assert!(!a.why.contains("fix/a"), "{}", a.why);
     }
 
     /// The shed counts open cars at `proven`; an unproven one troubles

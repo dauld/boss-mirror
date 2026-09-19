@@ -23,7 +23,11 @@ pub(super) trait Forge: Send + Sync {
         title: &str,
         body: &str,
     ) -> Result<String>;
-    async fn merge(&self, url: &str) -> Result<()>;
+    /// Squash-merge the PR. `message` is the squash commit's BODY —
+    /// the consist, rendered by `squash_message` (backlog f252cb1c);
+    /// the subject stays the forge's own default. Empty = no body,
+    /// which is what every train carried until 2026-09-19.
+    async fn merge(&self, url: &str, message: &str) -> Result<()>;
     /// Close a PR WITHOUT merging — a cancelled train's PR must not
     /// sit open inviting a merge.
     async fn close_pr(&self, url: &str) -> Result<()>;
@@ -107,8 +111,14 @@ impl Forge for GitHubForge {
         Ok(out.trim().lines().last().unwrap_or_default().to_string())
     }
 
-    async fn merge(&self, url: &str) -> Result<()> {
-        sh(&["gh", "pr", "merge", url, "--squash"])?;
+    async fn merge(&self, url: &str, message: &str) -> Result<()> {
+        // `--body` alone leaves gh's default subject in place, which
+        // is what "keep the subject as it is today" means here.
+        let mut args = vec!["gh", "pr", "merge", url, "--squash"];
+        if !message.is_empty() {
+            args.extend(["--body", message]);
+        }
+        sh(&args)?;
         Ok(())
     }
 
@@ -487,12 +497,16 @@ impl Forge for ForgejoForge {
             .ok_or_else(|| anyhow!("create-PR response without html_url"))
     }
 
-    async fn merge(&self, url: &str) -> Result<()> {
+    async fn merge(&self, url: &str, message: &str) -> Result<()> {
         let idx = Self::index(url);
+        // No MergeTitleField: the forge composes its default subject,
+        // `<PR title> (#<idx>)`, and appends MergeMessageField beneath
+        // it — a blank one is dropped, which is the 610-commit history
+        // measured on 2026-09-19 (backlog f252cb1c).
         self.api(
             Method::POST,
             &format!("/repos/{}/pulls/{idx}/merge", self.repo),
-            Some(json!({"Do": "squash"})),
+            Some(json!({"Do": "squash", "MergeMessageField": message})),
         )
         .await?;
         Ok(())

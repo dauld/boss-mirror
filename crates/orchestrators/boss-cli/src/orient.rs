@@ -376,6 +376,61 @@ pub(crate) fn orphan_lines(orphans: &[String], shown: usize, all: bool) -> Vec<S
     out
 }
 
+/// The forge branches the mirror's pull requests stand on, keyed to
+/// their PR: `publish/<date>` is the daily GitHub-mirror snapshot,
+/// pushed to the forge FIRST so the push mirror does not prune the PR's
+/// head (ce5339d6), and it must stay there until GitHub reports the PR
+/// merged or closed. The claim is on the open-pr step of a
+/// publish-to-github packet, which records `head = <fork>:<branch>`
+/// beside `pr_url`; the forge holds the part after the colon. Read
+/// from every packet, not only open ones — a publish packet closes on
+/// `pr-opened` the instant the head is recorded, so an open-only read
+/// would see no claim at all (01915167: the first orient after PR #239
+/// opened listed `publish/2026-09-19` as 'a forge head no packet
+/// claims' with the archive-sweep hint). Deleting the branch once the
+/// PR is merged stays with the archive sweep, which knows the forge.
+pub(crate) fn published_heads(
+    publish_packets: &[Value],
+) -> std::collections::BTreeMap<String, String> {
+    publish_packets
+        .iter()
+        .flat_map(|p| {
+            p.get("steps")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter(|s| s.get("spec_slug").and_then(Value::as_str) == Some("open-pr"))
+        .filter_map(|s| {
+            let head = md_str(s, "head");
+            let branch = head.split_once(':').map_or(head, |(_, b)| b);
+            (!branch.is_empty()).then(|| (branch.to_string(), md_str(s, "pr_url").to_string()))
+        })
+        .collect()
+}
+
+/// The ORPHANS lane's two halves from one `git ls-remote --heads` read:
+/// the heads no packet claims, and the published heads the forge still
+/// holds, each with its PR. A published head is claimed — it is never
+/// an orphan — and it is drawn only while the forge has it, because
+/// the line says what is ON the forge, not what a packet once named.
+pub(crate) fn orphans_and_published(
+    ls_remote: &str,
+    claimed: &BTreeSet<String>,
+    published: &std::collections::BTreeMap<String, String>,
+) -> (Vec<String>, Vec<(String, String)>) {
+    let mut all_claimed = claimed.clone();
+    all_claimed.extend(published.keys().cloned());
+    let orphans = crate::census::orphan_branches(ls_remote, &all_claimed);
+    let on_forge = ls_remote
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(1))
+        .filter_map(|r| r.strip_prefix("refs/heads/"))
+        .filter_map(|b| published.get(b).map(|pr| (b.to_string(), pr.clone())))
+        .collect();
+    (orphans, on_forge)
+}
+
 /// A stranded green that is the second half of a `boss rerail` a killed
 /// waiter never finished: `<branch>-rerail` gated green while the car
 /// still points at `<branch>`. It lists as stranded (a green no car
@@ -872,13 +927,35 @@ pub async fn run(all: bool) -> Result<()> {
             .map(|g| md_str(g, "branch").to_string())
             .filter(|b| !b.is_empty()),
     );
+    // The mirror's publish branches are claimed by publish-to-github
+    // packets, whose open-pr step records the head — see
+    // [`published_heads`] for why the read is not status=open.
+    let published = published_heads(&rows(
+        api(
+            &http,
+            reqwest::Method::GET,
+            "/api/jobs?kind=publish-to-github&limit=200",
+            None,
+        )
+        .await?,
+    ));
     match crate::git_auth::command()
         .args(["ls-remote", "--heads", "origin"])
         .output()
     {
         Ok(out) if out.status.success() => {
-            let orphans =
-                crate::census::orphan_branches(&String::from_utf8_lossy(&out.stdout), &claimed);
+            let (orphans, on_forge) =
+                orphans_and_published(&String::from_utf8_lossy(&out.stdout), &claimed, &published);
+            if !on_forge.is_empty() {
+                println!(
+                    "\n  PUBLISHED — {} forge head(s) backing a mirror pull request (stays until \
+                     GitHub reports the PR merged or closed; the archive sweep deletes it):",
+                    on_forge.len()
+                );
+                for (branch, pr_url) in &on_forge {
+                    println!("    {branch}  {pr_url}");
+                }
+            }
             if orphans.is_empty() {
                 println!("\n  ORPHANS — none: every forge head is claimed by a packet");
             } else {
@@ -1272,6 +1349,62 @@ mod tests {
         let orphans: Vec<String> = (0..5).map(|i| format!("feat/b{i}")).collect();
         assert_eq!(super::orphan_lines(&orphans, 12, false).len(), 5);
         assert_eq!(super::orphan_lines(&orphans, 12, true).len(), 5);
+    }
+
+    /// A publish packet's open-pr step records the mirror PR's head as
+    /// `<fork owner>:<branch>` beside the pr_url; the forge holds the
+    /// branch under its bare name. A skipped open-pr (declined,
+    /// superseded, held) names no head and claims nothing.
+    #[test]
+    fn a_publish_packet_claims_the_branch_after_the_colon() {
+        use serde_json::json;
+        let opened = json!({"status": "closed", "steps": [{
+            "spec_slug": "open-pr", "status": "completed",
+            "metadata": {"head": "dauld:publish/2026-09-19",
+                         "pr_url": "https://github.com/algedonic-dev/boss/pull/239"}}]});
+        let skipped = json!({"status": "closed", "steps": [{
+            "spec_slug": "open-pr", "status": "skipped", "metadata": {}}]});
+        let heads = super::published_heads(&[opened, skipped]);
+        assert_eq!(
+            heads.into_iter().collect::<Vec<_>>(),
+            vec![(
+                "publish/2026-09-19".to_string(),
+                "https://github.com/algedonic-dev/boss/pull/239".to_string()
+            )]
+        );
+    }
+
+    /// One car branch, one publish branch, one true orphan: the car is
+    /// claimed, the publish head is drawn under PUBLISHED with its PR,
+    /// and only the third is an orphan (01915167: the daily mirror
+    /// snapshot read as 'a forge head no packet claims').
+    #[test]
+    fn a_published_head_is_not_an_orphan() {
+        let ls = "aaa\trefs/heads/main\n\
+                  bbb\trefs/heads/feat/claimed\n\
+                  ccc\trefs/heads/publish/2026-09-19\n\
+                  ddd\trefs/heads/docs/lost-work\n";
+        let claimed: BTreeSet<String> = ["feat/claimed".to_string()].into_iter().collect();
+        let published: std::collections::BTreeMap<String, String> = [(
+            "publish/2026-09-19".to_string(),
+            "https://github.com/algedonic-dev/boss/pull/239".to_string(),
+        )]
+        .into_iter()
+        .collect();
+        let (orphans, on_forge) = super::orphans_and_published(ls, &claimed, &published);
+        assert_eq!(orphans, vec!["docs/lost-work".to_string()]);
+        assert_eq!(
+            on_forge,
+            vec![(
+                "publish/2026-09-19".to_string(),
+                "https://github.com/algedonic-dev/boss/pull/239".to_string()
+            )]
+        );
+        // a publish head the forge no longer holds (swept after the merge)
+        // is not drawn: the line says what is ON the forge
+        let (_, gone) =
+            super::orphans_and_published("aaa\trefs/heads/main\n", &claimed, &published);
+        assert!(gone.is_empty());
     }
 
     use super::*;

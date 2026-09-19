@@ -98,3 +98,102 @@ fn publish_to_github_v6_keeps_its_decided_shape() {
         vec!["declined", "nothing-to-publish", "pr-opened", "superseded"]
     );
 }
+
+/// v7 (backlog 321f1409, David 2026-09-19) reads the mirror's checks
+/// back before the packet closes. Measured: PR #238 was merged over 64
+/// unread CodeQL alerts (18 critical) on 2026-09-12 and #239 stalled on
+/// 109, because v6 closed on `pr-opened` the moment the PR opened and
+/// the scan ran afterwards on a surface only David sees. This names
+/// which decided property broke if someone reshapes it:
+///
+/// (1) `read-checks` is a MACHINE step in the open-pr shape: nobody
+///     nominated, the `ops_verb` marker the rule
+///     `read-publish-checks-on-read-checks-ready` routes on, ready on
+///     open-pr done, and the three fields the verb writes and the
+///     answer rule copies.
+/// (2) `judge-checks` is the agent's, at the platform operator's queue,
+///     ready only when the scan did not conclude `success` — guarded
+///     by `read-checks.done` so the `!=` never reads over Absent — and
+///     it requires a disposition per rule plus the verdict enum.
+/// (3) `pr-opened` follows the judgement, or the reading alone when the
+///     scan was clean; never open-pr alone, which is the v6 defect.
+#[test]
+fn publish_to_github_v7_reads_the_checks_back_and_judges_them_before_closing() {
+    let wf = bundled("publish-to-github");
+    let step = |title: &str| {
+        wf.steps
+            .iter()
+            .find(|s| s.title == title)
+            .unwrap_or_else(|| panic!("publish-to-github has no `{title}` step"))
+    };
+
+    // (1) the reading is a machine step.
+    let read = step("read-checks");
+    assert_eq!(read.ready_when, "steps.open-pr.done");
+    assert_eq!(
+        read.authority_role, None,
+        "read-checks is the forge's, not a person's"
+    );
+    assert_eq!(
+        read.metadata_defaults
+            .get("ops_verb")
+            .and_then(|v| v.as_str()),
+        Some("read-publish-checks")
+    );
+    for name in ["conclusion", "alerts", "rules"] {
+        assert!(
+            read.fields.iter().any(|f| f.name == name && f.required),
+            "read-checks requires `{name}` at done"
+        );
+    }
+
+    // (2) the judgement is the agent's, and only when there is one.
+    let judge = step("judge-checks");
+    assert!(
+        judge.ready_when.starts_with("steps.read-checks.done AND"),
+        "judge-checks must be guarded by read-checks.done before any `!=`: {}",
+        judge.ready_when
+    );
+    assert!(
+        judge
+            .ready_when
+            .contains("steps.read-checks.metadata.conclusion != \"success\""),
+        "judge-checks is for a scan that did not pass: {}",
+        judge.ready_when
+    );
+    assert_eq!(
+        judge.agent.as_ref().map(|a| a.profile.as_str()),
+        Some("analyst"),
+        "judge-checks declares the analyst block"
+    );
+    let dispositions = judge
+        .fields
+        .iter()
+        .find(|f| f.name == "dispositions")
+        .expect("judge-checks requires `dispositions`");
+    assert!(dispositions.required);
+    assert_eq!(dispositions.field_type, "array");
+    assert_eq!(
+        dispositions.item_keys,
+        vec!["rule", "disposition", "reason"]
+    );
+    let verdict = judge
+        .fields
+        .iter()
+        .find(|f| f.name == "verdict")
+        .expect("judge-checks requires `verdict`");
+    assert!(verdict.required);
+    assert_eq!(verdict.field_type, "clean|noise|real");
+
+    // (3) the terminal never closes over an unread or unjudged scan.
+    let opened = step("pr-opened");
+    assert_eq!(
+        opened.ready_when,
+        "steps.judge-checks.done OR (steps.read-checks.done AND steps.read-checks.metadata.conclusion = \"success\")"
+    );
+    assert!(
+        !opened.ready_when.contains("steps.open-pr.done"),
+        "v6's terminal — open-pr done closes the packet — is back: {}",
+        opened.ready_when
+    );
+}

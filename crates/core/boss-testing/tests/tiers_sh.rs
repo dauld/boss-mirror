@@ -127,6 +127,114 @@ fn the_shell_reader_lists_a_tiers_prefixes_and_rank_from_the_same_file() {
     }
 }
 
+// ---- the third reader: the edit level's predicate, in both languages ----
+
+/// `edit_level_first_above <level>` through the lib, paths on stdin,
+/// as the gate's lint calls it: `Ok(Some(path))` for the first path
+/// above the level, `Ok(None)` when every path is admitted, `Err` when
+/// the lib refused the level (exit 3, the CANNOT ANSWER vocabulary).
+fn shell_first_above(level: &str, paths: &[&str]) -> Result<Option<String>, String> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let lib = repo_root().join("infra/lint/lib/tiers.sh");
+    let mut child = Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            ". '{}' || exit 3\nedit_level_first_above \"$1\"",
+            lib.display()
+        ))
+        .arg("tiers_sh")
+        .arg(level)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("bash runs");
+    {
+        let mut stdin = child.stdin.take().expect("piped");
+        for p in paths {
+            writeln!(stdin, "{p}").unwrap();
+        }
+    }
+    let out = child.wait_with_output().expect("bash finishes");
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    match out.status.code() {
+        Some(0) => Ok(None),
+        Some(1) => Ok(Some(
+            stdout.split('\t').next().unwrap_or_default().to_string(),
+        )),
+        other => Err(format!(
+            "exit {other:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )),
+    }
+}
+
+/// Every level in the map, against the whole fixture in one pass (the
+/// first path above wins) and against each path alone — so the pin
+/// asks the shell the same per-path question the Rust unit tests
+/// answer, at every rank, for a path in every tier and for the tree's
+/// own root. A disagreement names the level and the path.
+#[test]
+fn the_shell_predicate_names_the_same_first_path_above_every_level_as_the_rust_one() {
+    let map = boss_core::tiers::tier_map().expect("the embedded map parses");
+    let mut disagreements = Vec::new();
+    let mut refusals = 0usize;
+    for tier in &map.tiers {
+        let level = tier.name.as_str();
+        let mut cases: Vec<Vec<&str>> = FIXTURE.iter().map(|p| vec![*p]).collect();
+        cases.push(FIXTURE.to_vec());
+        cases.push(FIXTURE.iter().rev().copied().collect());
+        for paths in cases {
+            let rust = map
+                .first_above(level, paths.iter().copied())
+                .expect("a tier name is a level")
+                .map(|a| a.path.to_string());
+            let shell = shell_first_above(level, &paths)
+                .unwrap_or_else(|e| panic!("level {level}: the lib refused: {e}"));
+            if rust != shell {
+                disagreements.push(format!(
+                    "{level} over {paths:?}: rust={rust:?} shell={shell:?}"
+                ));
+            }
+            refusals += usize::from(rust.is_some());
+        }
+    }
+    assert!(
+        disagreements.is_empty(),
+        "infra/lint/lib/tiers.sh edit_level_first_above disagrees with boss_core::tiers:\n  {}",
+        disagreements.join("\n  ")
+    );
+    // The fixture must produce both answers at more than one level, or
+    // an always-admit pair would pass as agreement.
+    assert!(refusals > 10, "only {refusals} refusals across the levels");
+}
+
+#[test]
+fn the_shell_predicate_refuses_a_level_that_is_not_a_tier_with_exit_3() {
+    let err = shell_first_above("full", &["docs/a.md"]).expect_err("full is not a tier");
+    assert!(err.starts_with("exit Some(3)"), "{err}");
+    assert!(err.contains("full") && err.contains("core"), "{err}");
+}
+
+#[test]
+fn the_shell_reader_answers_the_innermost_rank_from_the_same_file() {
+    let map = boss_core::tiers::tier_map().expect("the embedded map parses");
+    let lib = repo_root().join("infra/lint/lib/tiers.sh");
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            ". '{}' || exit 3\ntier_innermost_rank",
+            lib.display()
+        ))
+        .output()
+        .expect("bash runs");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        map.innermost_rank().to_string()
+    );
+}
+
 // ---- the first consumer: tier-import-audit reads its roots from the map ----
 
 const AUDIT: &str = "infra/lint/tier-import-audit.sh";

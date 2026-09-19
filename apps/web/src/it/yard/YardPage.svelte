@@ -96,7 +96,7 @@
     withConverge,
   } from './yard-converge';
   import { yardAlerts, type Alert } from './yard-alerts';
-  import { floorSelection } from './regions';
+  import { fetchRegions, floorSelection, lampOf, type Regions } from './regions';
   import { yardSignals } from './yard-signals';
   import { production as productionOf } from './yard-production';
   import YardMap from './YardMap.svelte';
@@ -133,6 +133,16 @@
   // bays read "no reading" — rather than a false-empty approach.
   let status = $state<Remote<YardStatus>>({ kind: 'loading' });
   const statusData = $derived(status.kind === 'ready' ? status.data : null);
+  // THE REGION'S OWN VERDICT, at the head of the floor's panel — the
+  // same /api/yard/regions read the world map drew the territory from,
+  // so clicking in cannot contradict the map (a106309c, 2026-09-19:
+  // the arrivals territory said troubled and this floor showed green
+  // sidings, because the floor rendered none of the region's state or
+  // why). Read on every tick with the rest; a failed read is said.
+  let regionsRead = $state<Remote<Regions>>({ kind: 'loading' });
+  const focusRegion = $derived(
+    regionsRead.kind === 'ready' ? (regionsRead.data.regions.find(r => r.name === focus) ?? null) : null,
+  );
   const garage = $derived(statusData?.garage ?? []);
   // Operating info for the gates (David, feedback 3771438f): the
   // capacity is the live delivery policy, the usage is now, and the
@@ -441,16 +451,18 @@
   onMount(() => {
     let cancelled = false;
     async function tick() {
-      const [y, s, ops, health, conv] = await Promise.all([
+      const [y, s, ops, health, conv, regs] = await Promise.all([
         fetchYard(),
         fetchYardStatus(),
         fetchOpsRequests(),
         fetchHealth(),
         fetchConverges(),
+        fetchRegions(),
       ]);
       if (cancelled) return;
       if (y) yard = y;
       status = s;
+      regionsRead = regs;
       opsRequests = ops;
       converges = conv;
       const now = Date.now();
@@ -593,6 +605,26 @@
         <DepartureBoard scene={floor} {selected} onselect={select} {nowMs} />
       </div>
       <div class="yard-panel yard-entity" aria-live="polite">
+        {#if selected === floorSelection(focus)}
+          <!-- THE REGION'S VERDICT, first: the map's state and why for
+               the floor this page opened on, from the map's own read —
+               shown while the region's panel is what is selected. The
+               alerts strip's classes, so trouble looks like trouble. -->
+          {#if focusRegion}
+            <div
+              class="yard-alert yard-region-head {lampOf(focusRegion.state)}"
+              data-region={focusRegion.name}
+              data-state={focusRegion.state}>
+              <span class="yard-lamp-dot {lampOf(focusRegion.state)}"></span>
+              <span>{focusRegion.name} · {focusRegion.state} — {focusRegion.why}</span>
+            </div>
+          {:else if regionsRead.kind === 'failed'}
+            <div class="yard-alert yard-region-head err" data-region={focus} data-state="unread">
+              <span class="yard-lamp-dot err"></span>
+              <span>the region's state cannot be read — {regionsRead.error}</span>
+            </div>
+          {/if}
+        {/if}
         {#if sel.kind === 'car'}
           {@const w = wagonById.get(sel.id) ?? null}
           <h2 class="yard-panel-h">Entity · car</h2>
@@ -1537,6 +1569,9 @@
   .yard-alert.err { border-color: color-mix(in srgb, var(--err, #e2685c) 60%, var(--hairline, #2a3138)); }
   .yard-alert.warn { border-color: color-mix(in srgb, var(--warn, #d9a441) 55%, var(--hairline, #2a3138)); }
   .yard-alert time { color: var(--static, #7a838c); font-size: 11px; }
+  /* The region's verdict at the head of the entity panel wears the
+     alert's own look; it is a reading, not a button. */
+  .yard-region-head { cursor: default; margin-bottom: var(--s3, 12px); }
   .yard-quiet { color: var(--text-faint, #5c656e); font-size: 12.5px; padding: 6px 0; display: inline-flex; gap: var(--s2, 8px); align-items: center; }
 
   /* The small round lamps the strip, the entity panel and the board share. */

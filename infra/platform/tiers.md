@@ -54,9 +54,19 @@ layer: a registry row, a rule file, a seed, a doc.
    each closed train's merge commit so the series has a past. The
    production view drawing the series is car 2.
 3. **Hosting levels** (a479faf7). A tenant's `edit_level` is a tier
-   name; a change is admitted for that tenant's IT department iff
-   every path it touches is in a tier of rank ≥ the level's rank.
-   Not built yet; it reads the same loader when it is.
+   name — `[meta] edit_level` in its manifest (docs/tenant-contract.md;
+   `data` is data-only, `tenants`, `modules`, `core` is everything) —
+   and a change is admitted for that tenant's IT department iff every
+   path it touches is in a tier of rank ≥ the level's rank; a path no
+   row claims (the tree's root) only by a level at the innermost rank.
+   ONE predicate, `TierMap::first_above` / `edit_level_first_above`,
+   at BOTH doors: `boss dispatch` refuses a packet declaring
+   `metadata.paths` above the level before the claim, and the gate's
+   `a-car-stays-under-the-edit-level` lint refuses a car whose diff
+   crosses it, naming the first path. Both read the level off the
+   instance (`GET /api/tenant/edit-level` on the jobs API, which
+   answers the manifest the launcher hands every service), never the
+   checkout; an instance declaring none enforces nothing.
 
 ## The two loaders, and why there are two
 

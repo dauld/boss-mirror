@@ -51,6 +51,10 @@ fn the_steps_agents_execute_today_declare_their_agent_block() {
         ("department-retro", "analyze", "analyst"),
         ("department-retro", "gaps", "analyst"),
         ("department-retro", "report", "analyst"),
+        // v7's judge step (backlog 321f1409, 2026-09-19): a disposition
+        // per code-scanning rule off the reading on the packet — the
+        // analyst setting, the same as the retros' work steps.
+        ("publish-to-github", "judge-checks", "analyst"),
     ]
     .into_iter()
     .map(|(k, s, p)| (k.to_string(), s.to_string(), p.to_string()))
@@ -133,5 +137,5 @@ fn every_declared_block_projects_onto_the_materialised_step() {
             }
         }
     }
-    assert_eq!(seen, 12, "every declared block was checked on a packet");
+    assert_eq!(seen, 13, "every declared block was checked on a packet");
 }

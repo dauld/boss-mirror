@@ -39,6 +39,7 @@ mod regions;
 mod sim_clock;
 mod stations;
 mod steps;
+pub mod tenant;
 mod terminal_report;
 mod yard;
 
@@ -210,6 +211,10 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
         .route("/api/jobs/{id}/metadata", patch(patch_job_metadata::<R, B>))
         .route("/api/jobs/{id}/convert", post(convert_job::<R, B>))
         .route("/api/estate/nodes", get(list_estate_nodes::<R, B>))
+        // The instance's hosting edit level, off the tenant manifest
+        // (a479faf7): the word the dispatch door and the gate's
+        // a-car-stays-under-the-edit-level lint judge a change against.
+        .route("/api/tenant/edit-level", get(tenant::edit_level))
         // The tree's estate declaration (backlog ee368d0c): the
         // launcher publishes infra/estate/estate.toml on every start.
         .route(

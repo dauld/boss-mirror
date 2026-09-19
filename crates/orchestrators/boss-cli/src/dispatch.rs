@@ -30,6 +30,15 @@
 //!    a model the rate card cannot price and an effort outside
 //!    low|medium|high are refused the way the publish lint refuses
 //!    them, so a run is never priced against nothing.
+//!    THE HOSTING DOOR sits between 1 and 2 (a479faf7; design 01c3cc3f
+//!    reader 3): a packet that declares the paths its change will
+//!    touch (`metadata.paths`) is judged against the instance's edit
+//!    level (`GET /api/tenant/edit-level`, the tenant manifest's
+//!    `[meta] edit_level`) with the one predicate the gate's lint also
+//!    reads, `boss_core::tiers::TierMap::first_above` — refused before
+//!    an agent spends, naming the first path, its tier and the level.
+//!    A packet declaring no paths is admitted here; the gate decides
+//!    on the diff. An instance declaring no level enforces nothing.
 //! 3. Claims the step as the actor running the verb (`BOSS_ACTOR`;
 //!    unnamed, the claim is refused before anything is filed) through
 //!    the claim door — a Ready→Active compare-and-set that answers 409
@@ -214,6 +223,101 @@ pub(crate) fn choose_step<'a>(
     }
 }
 
+/// The paths a packet declares its change will touch — `metadata.paths`,
+/// an array of tree-relative path strings. The hosting door's input
+/// (a479faf7): a packet that declares none is admitted here and the
+/// gate decides on the diff.
+pub(crate) fn declared_paths(job: &Value) -> Vec<String> {
+    job.get("metadata")
+        .and_then(|m| m.get(PATHS_KEY))
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The packet metadata key the door reads.
+pub(crate) const PATHS_KEY: &str = "paths";
+
+/// The jobs API path the instance answers its edit level on.
+pub(crate) const EDIT_LEVEL_PATH: &str = "/api/tenant/edit-level";
+
+/// The instance's declared edit level: `Some(tier)` when it declares
+/// one, `None` when it declares none (`null`) — or when the instance
+/// has no level door at all (404, a server from before a479faf7):
+/// no level is no door, never a level that admits nothing. Anything
+/// else is an error, because a door that cannot read the level must
+/// not open a run.
+pub(crate) async fn edit_level_at(http: &reqwest::Client, base: &str) -> Result<Option<String>> {
+    let url = format!("{base}{EDIT_LEVEL_PATH}");
+    let resp = http
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("reading the instance's edit level at {url}"))?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        eprintln!(
+            "boss dispatch: {url} answered 404 — this instance has no edit-level door, so no \
+             level is enforced"
+        );
+        return Ok(None);
+    }
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        bail!(
+            "reading the instance's edit level: {url} -> {status}: {}",
+            body.trim()
+        );
+    }
+    let v: Value = serde_json::from_str(&body).with_context(|| {
+        format!("the edit-level door at {url} answered something other than JSON")
+    })?;
+    Ok(v.get("edit_level")
+        .and_then(Value::as_str)
+        .map(str::to_string))
+}
+
+/// THE HOSTING DOOR, the dispatch half (a479faf7; design 01c3cc3f
+/// reader 3; the gate half is infra/lint/a-car-stays-under-the-edit-level.sh
+/// and both read the one predicate, `boss_core::tiers`). The refusal
+/// for a declared scope above the level, or `None` when it is
+/// admitted. A level the map does not name is a refusal too: the
+/// manifest is wrong, and a run must not open on a guess.
+pub(crate) fn level_refusal(
+    short: &str,
+    slug: &str,
+    level: &str,
+    paths: &[String],
+) -> Option<String> {
+    let map = match boss_core::tiers::tier_map() {
+        Ok(m) => m,
+        Err(e) => {
+            return Some(format!(
+                "the tier map this binary carries does not parse: {e}"
+            ));
+        }
+    };
+    let above = match map.first_above(level, paths.iter().map(String::as_str)) {
+        Ok(a) => a?,
+        Err(e) => {
+            return Some(format!(
+                "this instance's manifest declares an edit level the tier map does not know — {e}"
+            ));
+        }
+    };
+    Some(format!(
+        "packet {short}'s `{slug}` declares a change this instance's edit level does not admit: \
+         {} — nothing claimed, nothing filed. Raise the level in the tenant's manifest \
+         ([meta] edit_level) or narrow the packet's metadata.{PATHS_KEY}",
+        map.level_refusal(level, &above)
+    ))
+}
+
 /// The run packet's body, through the one envelope every filing verb
 /// uses. The brief rides as `brief` — the record of what the agent was
 /// told, copied from the prompt and never retyped.
@@ -364,6 +468,19 @@ pub(crate) async fn dispatch_at(
         .and_then(Value::as_str)
         .context("the step has no id")?
         .to_string();
+
+    // THE HOSTING DOOR (a479faf7): a packet that declares the paths its
+    // change will touch is judged against the instance's edit level
+    // BEFORE anything is read further or claimed — dispatch refuses
+    // before an agent spends. A packet declaring none is admitted; the
+    // gate judges the diff with the same predicate.
+    let paths = declared_paths(&job);
+    if !paths.is_empty()
+        && let Some(level) = edit_level_at(http, base).await?
+        && let Some(why) = level_refusal(&id[..8], &slug, &level, &paths)
+    {
+        bail!("{why}");
+    }
 
     // The block: the packet's projection, else the active row's step.
     let block = match block_on_step(step) {
@@ -1220,14 +1337,35 @@ mod wire_tests {
     }
 
     /// The stub: a packet at `build`, the workflow row, and the run it
-    /// files. The claim answers 409 when `claim_conflict` is set.
+    /// files. The claim answers 409 when `claim_conflict` is set. The
+    /// instance declares no edit level (the converged, undeclared case
+    /// every instance is in today).
     async fn stub(packet: Value, row: Value, claim_conflict: bool) -> (String, Log) {
+        stub_at_level(packet, row, claim_conflict, Some(None)).await
+    }
+
+    /// `level`: `None` = the instance has no level door at all (404, a
+    /// server from before a479faf7); `Some(None)` = the door answers
+    /// `null`; `Some(Some(tier))` = a declared level.
+    async fn stub_at_level(
+        packet: Value,
+        row: Value,
+        claim_conflict: bool,
+        level: Option<Option<&'static str>>,
+    ) -> (String, Log) {
         let run: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
         serve(move |method, path, target, body| {
             let (status, resp): (&str, String) = match (method, path) {
                     ("GET", p) if p == format!("/api/jobs/{PACKET}") => {
                         ("200 OK", packet.to_string())
                     }
+                    ("GET", "/api/tenant/edit-level") => match level {
+                        None => ("404 Not Found", "no such route".into()),
+                        Some(l) => (
+                            "200 OK",
+                            json!({ "edit_level": l, "manifest": "/opt/boss/tenant/seeds/tenant.toml" }).to_string(),
+                        ),
+                    },
                     ("GET", "/api/workflows/backlog-item") => ("200 OK", row.to_string()),
                     ("POST", p) if p.ends_with("/claim") => {
                         if claim_conflict {
@@ -1434,6 +1572,162 @@ mod wire_tests {
             .filter(|(m, _, _)| m != "GET")
             .count();
         assert_eq!(writes, 0, "nothing claimed, nothing filed");
+    }
+
+    /// The packet, declaring the paths its change will touch.
+    fn packet_declaring(paths: &[&str]) -> Value {
+        let mut p = packet_without_projection();
+        p["metadata"]["paths"] = json!(paths);
+        p
+    }
+
+    fn writes_of(log: &Log) -> usize {
+        log.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _, _)| m != "GET")
+            .count()
+    }
+
+    fn asked_the_level(log: &Log) -> bool {
+        log.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(m, p, _)| m == "GET" && p.starts_with("/api/tenant/edit-level"))
+    }
+
+    /// THE HOSTING DOOR (a479faf7; design 01c3cc3f reader 3). A packet
+    /// declaring `metadata.paths` above the instance's edit level is
+    /// refused BEFORE the claim — nothing claimed, nothing filed — and
+    /// the refusal names the first offending path, its tier and the
+    /// level, in the same words the gate's lint prints.
+    #[tokio::test]
+    async fn a_packet_declaring_paths_above_the_edit_level_is_refused_before_the_claim() {
+        let (base, log) = stub_at_level(
+            packet_declaring(&["docs/a.md", "crates/core/boss-a/src/lib.rs"]),
+            row_with_block(),
+            false,
+            Some(Some("tenants")),
+        )
+        .await;
+        let err = dispatch_at(
+            &reqwest::Client::new(),
+            &base,
+            &repo(),
+            PACKET,
+            None,
+            &Overrides::default(),
+            "claude@algedonic.dev",
+            "emp-david",
+            "/wt",
+            "h",
+            BriefSource::Rendered,
+        )
+        .await
+        .expect_err("refused");
+        let text = format!("{err:#}");
+        assert!(text.contains("crates/core/boss-a/src/lib.rs"), "{text}");
+        assert!(text.contains("edit level `tenants` (rank 3)"), "{text}");
+        assert!(text.contains("`core` (rank 1)"), "{text}");
+        assert!(text.contains("[meta] edit_level"), "names the fix: {text}");
+        assert_eq!(writes_of(&log), 0, "nothing claimed, nothing filed");
+    }
+
+    /// The same declaration under a level that admits it is dispatched
+    /// as any other packet.
+    #[tokio::test]
+    async fn a_packet_declaring_paths_within_the_edit_level_is_dispatched() {
+        let (base, log) = stub_at_level(
+            packet_declaring(&["docs/a.md", "crates/tenants/boss-acme-engine/src/main.rs"]),
+            row_with_block(),
+            false,
+            Some(Some("tenants")),
+        )
+        .await;
+        let d = dispatch_at(
+            &reqwest::Client::new(),
+            &base,
+            &repo(),
+            PACKET,
+            None,
+            &Overrides::default(),
+            "claude@algedonic.dev",
+            "emp-david",
+            "/wt",
+            "h",
+            BriefSource::Handed {
+                prompt: "p",
+                session: None,
+            },
+        )
+        .await
+        .expect("dispatched");
+        assert_eq!(d.run_id, RUN);
+        assert!(asked_the_level(&log));
+    }
+
+    /// A packet that declares no paths is admitted WITHOUT reading the
+    /// level — the gate decides on the diff — and an instance that
+    /// declares no level (null) or has no level door (404, a server
+    /// from before this car) admits a declared scope: no level is no
+    /// door, never a level that admits nothing.
+    #[tokio::test]
+    async fn no_declared_paths_or_no_declared_level_admits_the_dispatch() {
+        let (base, log) = stub_at_level(
+            packet_without_projection(),
+            row_with_block(),
+            false,
+            Some(Some("data")),
+        )
+        .await;
+        let handed = BriefSource::Handed {
+            prompt: "p",
+            session: None,
+        };
+        dispatch_at(
+            &reqwest::Client::new(),
+            &base,
+            &repo(),
+            PACKET,
+            None,
+            &Overrides::default(),
+            "claude@algedonic.dev",
+            "emp-david",
+            "/wt",
+            "h",
+            handed,
+        )
+        .await
+        .expect("no paths declared: the gate decides");
+        assert!(!asked_the_level(&log), "no paths, no level read");
+
+        for level in [Some(None), None] {
+            let (base, log) = stub_at_level(
+                packet_declaring(&["crates/core/boss-a/src/lib.rs"]),
+                row_with_block(),
+                false,
+                level,
+            )
+            .await;
+            dispatch_at(
+                &reqwest::Client::new(),
+                &base,
+                &repo(),
+                PACKET,
+                None,
+                &Overrides::default(),
+                "claude@algedonic.dev",
+                "emp-david",
+                "/wt",
+                "h",
+                handed,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("level {level:?} enforces nothing: {e:#}"));
+            assert!(asked_the_level(&log));
+        }
     }
 
     /// A step someone else holds is a refusal naming the holder, and

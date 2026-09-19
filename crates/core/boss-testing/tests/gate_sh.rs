@@ -1347,3 +1347,221 @@ fn a_doc_a_test_module_reads_by_repo_path_scopes_the_crate_that_pins_it() {
         "the gate must say it scoped for {doc}, not fall to lints-only.\nstdout: {stdout}"
     );
 }
+
+// ---- the hosting door's gate half (a479faf7; design 01c3cc3f reader 3) ----
+
+/// The lint the gate runs the edit level through, by name.
+const EDIT_LEVEL_LINT: &str = "a-car-stays-under-the-edit-level";
+
+/// A synthetic tree carrying this tree's gate, its lint libs, the REAL
+/// tier map and the edit-level lint; `main` holds the tree, a `car`
+/// branch adds one core file and one doc. The instance is a one-shot
+/// HTTP server on a loopback port answering `edit_level` as the case
+/// says — the lint reads it the way the gate's other live lint reads
+/// the registry, through `BOSS_JOBS_URL`.
+struct LevelTree {
+    dir: std::path::PathBuf,
+    tree: std::path::PathBuf,
+}
+
+impl LevelTree {
+    fn new(tag: &str) -> LevelTree {
+        let dir = boss_testing::scratch_dir(&format!("gate-edit-level-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let tree = dir.join("tree");
+        boss_testing::copy_lint_libs(&tree);
+        for rel in [
+            "infra/gate.sh",
+            "infra/platform/tiers.toml",
+            &format!("infra/lint/{EDIT_LEVEL_LINT}.sh"),
+        ] {
+            let to = tree.join(rel);
+            boss_testing::create_dir(to.parent().unwrap());
+            std::fs::copy(repo_root().join(rel), &to)
+                .unwrap_or_else(|e| panic!("carry {rel} into the synthetic tree: {e}"));
+        }
+        boss_testing::write_file(
+            &tree.join("infra/lint/workspace-declares-what-it-runs.sh"),
+            "#!/usr/bin/env bash\nexit 0\n",
+        );
+        for web in ["apps/web", "libs/web-kit"] {
+            boss_testing::create_dir(&tree.join(web));
+        }
+        let t = LevelTree { dir, tree };
+        t.vcs(&["init", "-q", "-b", "main"]);
+        t.vcs(&["add", "."]);
+        t.commit("the tree");
+        t.vcs(&["checkout", "-q", "-b", "car"]);
+        for (rel, body) in [
+            ("docs/a.md", "# a\n"),
+            ("crates/core/boss-a/src/lib.rs", "// a\n"),
+        ] {
+            let to = t.tree.join(rel);
+            boss_testing::create_dir(to.parent().unwrap());
+            boss_testing::write_file(&to, body);
+        }
+        t.vcs(&["add", "."]);
+        t.commit("the car");
+        let bin = t.dir.join("bin");
+        boss_testing::create_dir(&bin);
+        for tool in ["cargo", "bun"] {
+            boss_testing::write_exec(&bin.join(tool), "#!/usr/bin/env bash\nexit 0\n");
+        }
+        boss_testing::write_exec(
+            &t.dir.join("df"),
+            "#!/usr/bin/env bash\n\
+             echo 'Filesystem 1024-blocks Used Available Capacity Mounted on'\n\
+             echo '/dev/fake 1 1 943718400 1% /'\n",
+        );
+        t
+    }
+
+    fn vcs(&self, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&self.tree)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn commit(&self, msg: &str) {
+        self.vcs(&[
+            "-c",
+            "user.email=edit-level@test",
+            "-c",
+            "user.name=edit-level",
+            "commit",
+            "-q",
+            "-m",
+            msg,
+        ]);
+    }
+
+    /// Serve `body` (a JSON object, or a 404 when `None`) to every
+    /// request on a loopback port, in a thread that answers a bounded
+    /// number of connections and then stops.
+    fn instance(body: Option<&'static str>) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(8) {
+                let Ok(mut s) = stream else { break };
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                let resp = match body {
+                    Some(b) => format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{b}",
+                        b.len()
+                    ),
+                    None => "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\
+                             connection: close\r\n\r\n"
+                        .to_string(),
+                };
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn quick(&self, jobs_url: &str) -> std::process::Output {
+        let path = std::env::var("PATH").unwrap_or_default();
+        std::process::Command::new("bash")
+            .arg(self.tree.join("infra/gate.sh"))
+            .arg("--quick")
+            .current_dir(&self.tree)
+            .env("PATH", format!("{}:{path}", self.dir.join("bin").display()))
+            .env("BOSS_GATE_DF_CMD", self.dir.join("df"))
+            .env("BOSS_GATE_MIN_FREE_GB", "12")
+            .env("BOSS_GATE_TRUNK", "main")
+            .env("BOSS_TRUNK_REF", "main")
+            .env("GIT_CEILING_DIRECTORIES", "")
+            .env("BOSS_JOBS_URL", jobs_url)
+            .output()
+            .expect("run gate.sh --quick")
+    }
+}
+
+impl Drop for LevelTree {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn both(out: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// THE REFUSAL. A car whose diff against the trunk touches a path
+/// closer to the core than the instance's edit level admits is a red
+/// naming the lint, the FIRST offending path, its tier and the level
+/// with both ranks — the same sentence `boss dispatch` prints, from
+/// the one predicate. A doc beside it is not named: only the first
+/// path above.
+#[test]
+fn the_gate_refuses_a_car_whose_diff_crosses_the_edit_level_naming_the_path_and_the_level() {
+    let tree = LevelTree::new("refuses");
+    let out = tree.quick(&LevelTree::instance(Some(
+        r#"{"edit_level":"tenants","manifest":"/opt/boss/tenant/seeds/tenant.toml"}"#,
+    )));
+    let t = both(&out);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a crossing is the car's red:\n{t}"
+    );
+    assert!(t.contains(EDIT_LEVEL_LINT), "{t}");
+    assert!(
+        t.contains("edit level `tenants` (rank 3) does not admit `crates/core/boss-a/src/lib.rs`"),
+        "names the level and the first offending path:\n{t}"
+    );
+    assert!(t.contains("`core` (rank 1)"), "names the path's tier:\n{t}");
+    assert!(
+        !t.contains("does not admit `docs/a.md`"),
+        "only the first path above:\n{t}"
+    );
+    assert!(t.contains("check(s) failed"), "{t}");
+}
+
+/// THE CONTROLS. The same car under `core` is clean; an instance that
+/// declares no level (`null`) or has no level door at all (404 — a
+/// server from before this car) enforces nothing and says so; and a
+/// dark instance is CANNOT ANSWER, which `--quick` warns about and the
+/// gate proper refuses (the generic pin on live-reading lints).
+#[test]
+fn the_edit_level_lint_admits_under_core_under_no_level_and_under_no_level_door() {
+    let tree = LevelTree::new("admits");
+    for (tag, body) in [
+        ("core", Some(r#"{"edit_level":"core","manifest":"/m"}"#)),
+        ("null", Some(r#"{"edit_level":null,"manifest":null}"#)),
+        ("404", None),
+    ] {
+        let out = tree.quick(&LevelTree::instance(body));
+        let t = both(&out);
+        assert_eq!(out.status.code(), Some(0), "[{tag}] admitted:\n{t}");
+        assert!(t.contains("pre-flight: clean"), "[{tag}] {t}");
+        if tag != "core" {
+            assert!(
+                t.contains("no edit level"),
+                "[{tag}] says nothing is enforced rather than staying silent:\n{t}"
+            );
+        }
+    }
+    let out = tree.quick("http://[::1]:9");
+    let t = both(&out);
+    assert_eq!(out.status.code(), Some(0), "--quick warns:\n{t}");
+    assert!(
+        t.contains(&format!("WARNING — '{EDIT_LEVEL_LINT}' could not answer")),
+        "{t}"
+    );
+}

@@ -140,7 +140,14 @@ No ssh from the pod. Three doors, all read-only:
   public mirror as a PR from the dauld fork; reads the dauld token at
   `/etc/boss-publish/github.token`, credentials registry
   `dauld-github-token`, and refuses loudly without it; `--check`
-  validates its inputs with no network), and `run-car-probe <car-uuid>`
+  validates its inputs with no network), `read-publish-checks` (the
+  second machine step of publish-to-github v7: waits for the mirror
+  PR's check-runs over the PUBLIC API — no token — reads the CodeQL
+  annotations and writes the reading onto the publish packet as
+  `code_scanning`, so the `judge-checks` step and David's merge follow a
+  judged reading instead of a red badge; the wait blocks this runner
+  for up to 25 minutes once per publish, stated in the script header;
+  `--check` validates with no network), and `run-car-probe <car-uuid>`
   (the machine half of `boss prove`: runs the probe a landed car
   recorded at park time — `boss gate --park-probe/--park-expect` — as
   david, never root, and completes the car's `proven` step with the

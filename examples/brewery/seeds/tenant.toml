@@ -29,6 +29,12 @@
 [meta]
 tenant_id = "brewery"
 display_name = "Algedonic Ales"
+# The hosting edit level (a479faf7): how far into the product tree
+# this tenant's IT department may edit — a tier name from
+# infra/platform/tiers.toml. The public demo is the operator's own
+# instance (the playground), so everything; a hosted tenant starts at
+# "data" (docs/tenant-contract.md, the tenant.toml row).
+edit_level = "core"
 seed = 0xdeadbeef
 start_date = "2024-01-02"
 end_date = "2026-04-25"

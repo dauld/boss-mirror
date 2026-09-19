@@ -1,0 +1,58 @@
+# The read-publish-checks verb's answer reaches the publish step it was
+# filed for — on success AND on failure (backlog 321f1409, 2026-09-19;
+# the same shape as complete-publish-pr-step-on-publish-github-pr-
+# answered, one machine step later).
+#
+# publish-to-github v7's `read-checks` step is a MACHINE step: the
+# filing rule (read-publish-checks-on-read-checks-ready) spawns an
+# ops-request for the forge the moment open-pr completes, and the verb
+# waits for the mirror PR's check-runs, writes the reading onto the
+# packet as `code_scanning`, and completes the step with conclusion /
+# alerts / rules by itself. Its last line is the answer:
+#
+#   read-publish-checks: read failure — 100 alerts in 7 rules over 50 files on 12d4a6827975 (https://github.com/…/pull/239)
+#
+# This rule is the reader. The request carries `for_publish`, so
+# `jobs.complete_linked_step` follows that edge:
+#
+# - exit 0 and a `read <conclusion> — <n> alerts in <r> rules` line:
+#   complete `read-checks` with the three fields COPIED from the verb's
+#   own line. The verb completes the step itself on its happy path, so
+#   this leg usually finds the step already done and writes nothing;
+#   it is the record for the day the verb's own PUT fails after the
+#   reading is on the packet.
+# - a non-zero exit — the deadline passed with a check still running,
+#   or GitHub could not be read: `on_failure = "annotate-and-alert"`
+#   writes the verb's last FAILED line onto the still-open step as
+#   `failed` and files an URGENT backlog-item naming the verb, the
+#   request and the line. The step stays open, because it is: the
+#   reading is partial (`code_scanning.complete = false`), the judge
+#   step never becomes ready, and the packet looks troubled instead of
+#   closing clean over an unread red — which is the whole defect.
+#
+# The pattern is written without a backslash: the arg passes through
+# two string lexers (TOML, then boss-expr's), and boss-expr reads `\d`
+# as `d` (ops_judge.rs). `.` stands for the em dash in the answer line.
+[[rule]]
+name = "complete-publish-read-checks-on-read-publish-checks-answered"
+why = """
+A CROSS-PROTOCOL REACTOR closing the loop read-publish-checks-on-read-
+checks-ready opened: ops-request -> publish-to-github, which no single
+Workflow consequence can express — the request's protocol cannot know
+which publish asked, and the publish's cannot read another packet's
+execute step. The class it guards against was measured on the step
+before this one (f47861a5, 2026-09-19): an ops-request that closed
+`answered` on a FAILED verb, and a publish step that sat ready for
+five hours with nothing on it. No authority widened: on success the
+only write is the step's own required fields, copied from the verb's
+line; on failure the step is ANNOTATED, never completed, and the alert
+is a backlog-item at the platform owner's queue — the same door every
+alarm handler files through. Self-filters to this one verb; every
+other answered request on the topic is somebody else's.
+"""
+version = 1
+on_event = "jobs.job.closed"
+when = 'kind = "ops-request" AND outcome = "answered"'
+[[rule.do]]
+handler = "jobs.complete_linked_step"
+args = { verb = '"read-publish-checks"', verdict_pattern = '"^read-publish-checks: read (?P<conclusion>[a-z_]+) . (?P<alerts>[0-9]+) alerts in (?P<rules>[0-9]+) rules over [0-9]+ files on [0-9a-f]+ [(]"', link = '"for_publish"', steps = '"read-checks"', done_metadata = '"{\"conclusion\": \"{conclusion}\", \"alerts\": \"{alerts}\", \"rules\": \"{rules}\"}"', evidence_key = '"read_by"', on_failure = '"annotate-and-alert"' }

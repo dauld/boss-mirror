@@ -28,14 +28,37 @@
 #      release and dependabot were deleted from the tree; codeql and
 #      scorecard stay as free security scans nothing on our side reads.
 #
+# v7 (backlog 321f1409, David 2026-09-19) reads that scan back. "Nothing
+# on our side reads" was the defect: the mirror's CodeQL ran after this
+# packet closed on `pr-opened`, on a surface only David sees, and PR
+# #238 was merged over 64 unread alerts (18 critical) while #239
+# stalled on 109 — 100 of 100 annotations name heuristics or test
+# constants, and nothing in the record said so. Two steps between
+# `open-pr` and the terminal:
+#
+#   5. `read-checks` is a second MACHINE step, the open-pr shape again:
+#      `ops_verb = "read-publish-checks"`, the rule
+#      `read-publish-checks-on-read-checks-ready` files the forge
+#      request when it goes ready, and the verb waits for the PR head's
+#      check-runs, writes the reading onto this packet as
+#      `code_scanning` (per-check conclusions; the scan's counts by
+#      rule, by file and by level) and completes the step with
+#      `conclusion` / `alerts` / `rules`.
+#   6. `judge-checks` is the agent's: a disposition per rule
+#      (heuristic-noise with the reason, or real with the backlog-item
+#      filed) and one verdict. It is ready only when the scan did not
+#      conclude `success`, so a clean run closes straight to
+#      `pr-opened`; a red one closes only judged. The merge on GitHub
+#      is still David's, and it now follows a judged reading.
+#
 # Cadence: the daily `publish-to-github-daily` rule (129/149) spawns one
 # packet per day, guarded to one open packet per mirror; most days land
 # on `nothing-to-publish`, which is the measurement that the mirror is
 # current.
 #
 # Seeding: this row lands on a FRESH database through the platform seed
-# (insert-if-missing). On the live system of record, where v1–v5 exist,
-# the seed leaves the kind alone and v6 goes live through
+# (insert-if-missing). On the live system of record, where v1–v6 exist,
+# the seed leaves the kind alone and v7 goes live through
 # `boss workflow publish publish-to-github infra/platform/workflows`,
 # which reads this same entry — one definition.
 # ---------------------------------------------------------------------
@@ -127,11 +150,64 @@ name = "pr_url"
 field_type = "string"
 required = true
 
+# The reading (5). A machine step like open-pr: nobody nominated, the
+# `ops_verb` marker routes it, the forge verb completes it. Required at
+# done: the scan's conclusion as GitHub spells it (`success`, `failure`,
+# … or `absent` when no scan check ran), the annotation count read, and
+# the count of distinct rules — the three numbers the judge step's
+# readiness and the answer line both carry.
+[[workflow.step]]
+title = "read-checks"
+kind = "task"
+ready_when = "steps.open-pr.done"
+title_template = "Read the pull request's check results back onto this packet (by machine, from the forge)"
+metadata_defaults = { ops_verb = "read-publish-checks" }
+[[workflow.step.fields]]
+name = "conclusion"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "alerts"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "rules"
+field_type = "string"
+required = true
+
+# The judgement (6). Ready only when the scan did not conclude
+# `success` — `!=` over a done step's required field, never over an
+# absent one (the v5 footgun), because `steps.read-checks.done` guards
+# it. Agent-workable at the platform operator's queue (the analyst
+# block department-retro's work steps carry, c87fb59b car 1): the
+# reading is on the packet as `code_scanning`, so the procedure is a
+# read of this packet, not of GitHub.
+[[workflow.step]]
+title = "judge-checks"
+kind = "task"
+ready_when = "steps.read-checks.done AND steps.read-checks.metadata.conclusion != \"success\""
+title_template = "Judge the code-scanning alerts: a disposition per rule"
+audience = { role = "platform-admin" }
+agent = { profile = "analyst", model = "opus-5[1m]", budget_usd = 2, effort = "medium" }
+metadata_defaults = { human_only = false, procedure = "The reading is ON THIS PACKET: `metadata.code_scanning` — every check on the PR head with its conclusion, and under `alerts` the scan's annotations counted by rule (`by_rule`, largest first, each with its file count), by file and by level, with `declared` (what the check-run says it holds) beside `read` (what the API exposed). Judge each RULE in `by_rule`, not each alert: record `dispositions` as one entry per rule — `{rule, disposition, reason}` — where disposition is `noise` (a heuristic that named a non-secret: an account_id / employee_id / uid in a log line, a #[cfg(test)] constant, an in-cluster http URL) with the reason that makes it noise, or `real` with the backlog-item you FILED for it (its id in the reason). Read the code behind a rule before calling it noise — `by_file` names the files, and the check-run's url the lines. Then `verdict`: `noise` when every rule is noise, `real` when any is, `clean` only when there were no alerts at all. The merge on GitHub is David's and follows this verdict; a rule left unjudged is a red badge he merges over by hand, which is the defect this step exists to end (backlog 321f1409: #238 merged over 64 unread alerts, #239 stalled on 109)." }
+[[workflow.step.fields]]
+name = "dispositions"
+field_type = "array"
+required = true
+item_keys = ["rule", "disposition", "reason"]
+[[workflow.step.fields]]
+name = "verdict"
+field_type = "clean|noise|real"
+required = true
+
+# The terminal follows the judgement when there was one, and the
+# reading alone when the scan was clean — so a clean run never waits
+# on a judge with nothing to judge, and a red one never closes unjudged.
 [[workflow.step]]
 title = "pr-opened"
 kind = "outcome"
-ready_when = "steps.open-pr.done"
-title_template = "Pull request opened"
+ready_when = "steps.judge-checks.done OR (steps.read-checks.done AND steps.read-checks.metadata.conclusion = \"success\")"
+title_template = "Pull request opened and its checks read"
 authority_role = "platform-admin"
 terminal = { outcome = "pr-opened" }
 

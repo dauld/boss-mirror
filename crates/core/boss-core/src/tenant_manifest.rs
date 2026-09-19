@@ -29,6 +29,22 @@ pub struct TenantMeta {
     /// Workflows are stamped with.
     #[serde(default)]
     pub tenant_id: Option<String>,
+    /// How far into the tree this tenant's IT department (its agents)
+    /// may edit: a tier NAME from infra/platform/tiers.toml, judged by
+    /// rank through `crate::tiers::TierMap::first_above` (a479faf7;
+    /// design 01c3cc3f reader 3). `data` is data-only, `tenants` adds
+    /// the tenant's own crate and site, `modules` the company layer,
+    /// `core` everything — the operator's own instance. Read by `boss
+    /// dispatch` (a packet declaring `metadata.paths` above the level
+    /// is refused before the claim) and by the gate (a car whose diff
+    /// crosses it is refused naming the path), both through the jobs
+    /// API's `GET /api/tenant/edit-level`. Absent is NO level: nothing
+    /// is enforced. The hosted default (`data`) is written where a
+    /// hosted tenant is made — `boss tenant init` scaffolds it — not
+    /// assumed by the reader, because every instance today is the
+    /// operator's own and its manifest predates the field.
+    #[serde(default)]
+    pub edit_level: Option<String>,
 }
 
 /// `[gateway]` — what the instance's front door does for this tenant.
@@ -118,6 +134,25 @@ mod tests {
         assert!(none.gateway.public_reads.is_empty());
         let empty_section = TenantToml::parse("[gateway]\n").unwrap();
         assert!(empty_section.gateway.public_reads.is_empty());
+    }
+
+    /// The hosting edit level (a479faf7; design 01c3cc3f reader 3) is
+    /// tenant data under `[meta]`: a tier name from
+    /// infra/platform/tiers.toml. Absent is NO level — the doors that
+    /// read it (boss dispatch, the gate) enforce nothing — because the
+    /// only instances today are the operator's own, and a data-only
+    /// default applied by the reader would have refused every code
+    /// car on the instance's own pipeline the converge after it
+    /// landed (the tenant repo's manifest declared none, measured
+    /// 2026-09-19). The hosted default is written by the door that
+    /// HOSTS: `boss tenant init` scaffolds `edit_level = "data"`
+    /// explicitly, and the provisioning protocol will too.
+    #[test]
+    fn the_edit_level_is_declared_under_meta_and_absent_is_none() {
+        let t = TenantToml::parse("[meta]\ntenant_id = \"a\"\nedit_level = \"tenants\"\n").unwrap();
+        assert_eq!(t.meta.edit_level.as_deref(), Some("tenants"));
+        let none = TenantToml::parse("[meta]\ntenant_id = \"a\"\n").unwrap();
+        assert_eq!(none.meta.edit_level, None);
     }
 
     #[test]

@@ -1,0 +1,20 @@
+{
+  "about": "READS the public mirror's check results back onto the publish packet (backlog 321f1409, David 2026-09-19): the machine step `read-checks` of publish-to-github v7. Runs infra/forge/read-publish-checks.sh with no packet-supplied text — the one arg it admits is the literal `--check`, its no-network input check. A run (no arg) finds the one open publish-to-github packet whose read-checks step is ready, takes the PR's head sha and url off its completed open-pr step (the sha publish-github-pr recorded when it pushed, never re-derived), reads GET /repos/algedonic-dev/boss/commits/<head>/check-runs over the PUBLIC API with no credential, waits until every check-run on the head is completed (Analyze (rust) took 13 minutes on both #238 and #239; the wait is bounded by the script's own deadline, below this timeout, so the packet sees the script's FAILED line naming the run still in flight rather than the runner's kill), reads the CodeQL check-run's annotations (every page the API exposes), PATCHes the reading onto the packet's metadata as `code_scanning` — one entry per check with its conclusion, and for CodeQL the counts by rule, by file and by level — and completes read-checks with conclusion / alerts / rules. Nothing on this host is mutated and nothing on GitHub is written: the only writes are the publish packet's own reading and step, and the merge on GitHub stays David's. Measured before this verb existed: PR #238 was merged over 64 unread alerts (18 critical) on 2026-09-12 and #239 stalled on 109 (10 critical) — 100 of 100 annotations name heuristics (account_id / employee_id / uid in a log line) or #[cfg(test)] constants, and nothing inside BOSS had read either. The dispatcher rule read-publish-checks-on-read-checks-ready files this when open-pr completes; complete-publish-read-checks-on-read-publish-checks-answered reads the answer line and, on a non-zero exit, annotates the step and files the alert. The wait blocks this host's ops-runner for its length (the runner answers serially) — a stated cost, once per publish; the script header names the alternatives and why they were declined.",
+  "hosts": [
+    "forge"
+  ],
+  "argv": [
+    "infra/forge/read-publish-checks.sh",
+    "{1}"
+  ],
+  "params": [
+    {
+      "name": "mode",
+      "one_of": [
+        "--check"
+      ],
+      "optional": true
+    }
+  ],
+  "timeout": 1800
+}

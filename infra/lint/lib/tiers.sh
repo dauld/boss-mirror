@@ -17,6 +17,12 @@
 #   tier_rank data               # its rank
 #   tier_of_path some/file.rs    # the tier name; exit 1 when no row
 #                                # claims the path (say so, never guess)
+#   tier_innermost_rank          # the lowest rank in the map (1)
+#   edit_level_first_above <level> < paths   # the hosting predicate:
+#                                # exit 0 = every path admitted; exit 1
+#                                # and `<path>\t<tier>` on stdout = the
+#                                # first path above the level; exit 3 =
+#                                # the level is not a tier name
 #   BOSS_TIERS_TOML=<file> overrides the file read, for the pin's fixtures.
 
 # The file this reader reads — resolved from this lib's own location so
@@ -118,4 +124,52 @@ tier_of_path() {
     done < <(_tiers_rows)
     [ -n "$best_name" ] || return 1
     printf '%s\n' "$best_name"
+}
+
+# tier_innermost_rank — the lowest rank any row declares (1 today:
+# core, infra). A level at this rank admits everything.
+tier_innermost_rank() {
+    local name rank paths best=
+    while IFS=$'\t' read -r name rank paths; do
+        if [ -z "$best" ] || [ "$rank" -lt "$best" ]; then best=$rank; fi
+    done < <(_tiers_rows)
+    [ -n "$best" ] || return 1
+    printf '%s\n' "$best"
+}
+
+# edit_level_first_above <level> — THE HOSTING PREDICATE (a479faf7,
+# design 01c3cc3f reader 3), the shell half of
+# boss_core::tiers::TierMap::first_above, held equal to it by
+# boss-testing/tests/tiers_sh.rs. Paths on stdin, one per line. A path
+# is admitted iff its tier's rank >= the level's rank; a path no row
+# claims (the tree's own root) is admitted only by a level at the
+# innermost rank. Prints the FIRST path not admitted, in the order
+# read, as `<path>\t<tier>` (the tier empty when none claims it) and
+# exits 1; exits 0 having printed nothing when every path is admitted;
+# exits 3 — the lint vocabulary's "cannot answer" — when the level is
+# not a tier name, naming the vocabulary, so a misspelt level is never
+# a level that admits nothing.
+edit_level_first_above() {
+    local level="$1" floor innermost path tier rank names
+    floor=$(tier_rank "$level") || {
+        names=$(_tiers_rows | cut -f1 | tr '\n' ' ')
+        names=${names% }; names=${names// /, }
+        printf 'tiers.sh: edit level `%s` is not a tier in %s (one of: %s)\n' \
+            "$level" "$(tiers_file)" "$names" >&2
+        return 3
+    }
+    innermost=$(tier_innermost_rank) || return 3
+    while IFS= read -r path || [ -n "$path" ]; do
+        [ -n "$path" ] || continue
+        if tier=$(tier_of_path "$path"); then
+            rank=$(tier_rank "$tier")
+            [ "$rank" -ge "$floor" ] && continue
+        else
+            tier=
+            [ "$floor" -le "$innermost" ] && continue
+        fi
+        printf '%s\t%s\n' "$path" "$tier"
+        return 1
+    done
+    return 0
 }

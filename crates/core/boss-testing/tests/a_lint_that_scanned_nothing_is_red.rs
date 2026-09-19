@@ -134,6 +134,10 @@ const NOT_SCANNERS: &[(&str, &str)] = &[
         "migrations-append-only",
         "branch-diff check on the migration set; empty on the trunk by construction",
     ),
+    (
+        "a-car-stays-under-the-edit-level",
+        "branch-diff check against the instance's edit level; empty on the trunk by construction",
+    ),
     // Environment reports and live reads: their subject is not the tree.
     (
         "a-deleted-manifest-leaves-no-object",
@@ -313,6 +317,12 @@ fn a_live_reading_lint_that_cannot_reach_its_registry_exits_3_and_scans_nothing(
         (
             "infra/lint/the-live-rules-are-the-authored-rules.sh",
             "BOSS_DISPATCHER_URL",
+        ),
+        // The hosting door's gate half (a479faf7) reads the instance's
+        // edit level off the jobs API; dark, it judges no path.
+        (
+            "infra/lint/a-car-stays-under-the-edit-level.sh",
+            "BOSS_JOBS_URL",
         ),
     ] {
         let out = Command::new("bash")
