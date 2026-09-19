@@ -71,5 +71,9 @@ required-features = ["postgres"]
 name = "example_reference_rows_sql"
 required-features = ["postgres"]
 
+[[test]]
+name = "a_department_is_a_subject_sql"
+required-features = ["postgres"]
+
 [lints]
 workspace = true

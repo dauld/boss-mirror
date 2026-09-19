@@ -20,6 +20,23 @@
 //! flake; a named re-gate records it, so the count on `boss orient` and
 //! the yard is a number read off gate-runs, not a feeling.
 //!
+//! THE OTHER HALF OF "NOT THE BRANCH'S FAULT", and it is decided at
+//! once rather than retrospectively (backlog bd4e8fb1, 2026-09-19).
+//! A gate that REFUSED — the disk floor, or a pre-flight lint that
+//! could not reach what it judges against — knows so the moment it
+//! happens, and `infra/gate.sh` records it: `verdict: refused` on the
+//! receipt, the refusing check's own entry `result: refused`, and
+//! `refused_because` in the lint's words. The gate-runner's verdict
+//! vocabulary is the protocol's closed `green|failed|lost`, so the
+//! packet still reads `failed`; the receipt is the specific record and
+//! every reader here takes it. Gate-run 924b4cbe is the measured case:
+//! `a-car-stays-under-the-edit-level` got HTTP 000 from the gate pod
+//! while the same read answered 200 elsewhere, and counting that as a
+//! red would have put the LINT's name in the flake tally below —
+//! blaming a check for a resolver stall, and making the one number the
+//! retro relies on untrue. So: a refused prior is [`Prior::Refused`],
+//! nothing is stamped, and the operator is told why in one line.
+//!
 //! WHY HERE. The writer is the CLI (`boss gate`), the stamper is a
 //! dispatcher handler, the readers are `boss orient` and the yard — four
 //! crates that cannot import each other. One module holds the key names
@@ -53,15 +70,33 @@ const RED_VERDICTS: [&str; 2] = ["failed", "lost"];
 /// The tally key for a flake whose prior run named no check at all.
 pub const NO_CHECK_NAMED: &str = "(no check named)";
 
+/// The word `infra/gate.sh` writes — as a receipt's `verdict` and as
+/// the refusing check's own `result` — when the gate declined to judge
+/// the branch at all. `check_lint`'s refusal and the disk floor share
+/// this one shape.
+pub const REFUSED: &str = "refused";
+
 /// The failed checks a receipt names, in its order: `checks` entries
-/// whose `result` is not `pass` (the record `infra/gate.sh` writes),
-/// else the `fails` list of the four-field receipts that sat on packets
-/// before 2026-09-09. `None` when neither shape is present.
+/// whose `result` is neither `pass` nor [`REFUSED`] (the record
+/// `infra/gate.sh` writes), else the `fails` list of the four-field
+/// receipts that sat on packets before 2026-09-09. `None` when neither
+/// shape is present.
+///
+/// A REFUSED ENTRY IS NOT A FAILURE (backlog bd4e8fb1). `check_lint`
+/// rewrites the entry of a lint that exited `LINT_CANNOT_ANSWER` to
+/// `result: refused` precisely so "a reader counting `fail` entries
+/// must not count this one"; a filter on `!= "pass"` counted it, and
+/// the name it carried was the lint's, not the branch's.
 pub fn failing_checks(receipt: &Value) -> Option<Vec<String>> {
     Some(match receipt.get("checks").and_then(Value::as_array) {
         Some(checks) => checks
             .iter()
-            .filter(|c| c.get("result").and_then(Value::as_str) != Some("pass"))
+            .filter(|c| {
+                !matches!(
+                    c.get("result").and_then(Value::as_str),
+                    Some("pass") | Some(REFUSED)
+                )
+            })
             .filter_map(|c| c.get("name").and_then(Value::as_str).map(str::to_string))
             .collect(),
         None => receipt
@@ -133,11 +168,40 @@ pub struct PriorRed {
     pub failed: Vec<String>,
 }
 
+/// What the run immediately before this one at the same head was, when
+/// it was not green: a red to re-gate, or a refusal that judged nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Prior {
+    /// The checks ran and one did not pass (or the runner died, which a
+    /// green at the same head afterwards disproves the same way).
+    Red(PriorRed),
+    /// The gate declined BEFORE ANY CHECK RAN — the disk floor, or a
+    /// pre-flight lint that could not read what it judges against. No
+    /// relation is stamped: there is no red to call a flake, and the
+    /// re-gate's green is simply a green.
+    Refused {
+        /// The refusing gate-run's packet id.
+        id: String,
+        /// Its receipt's `refused_because`, verbatim.
+        why: String,
+    },
+}
+
 /// THE PRIOR THAT COUNTS: the newest closed gate-run at exactly this
-/// branch and sha, if its verdict was red. A green newest run — the
+/// branch and sha, when it was not green. A green newest run — the
 /// head is already green and the operator is gating it again — is not a
 /// re-gate of anything, whatever older reds sit behind it; the relation
 /// recorded is to the run immediately before.
+///
+/// A REFUSAL IS READ OFF THE RECEIPT, NOT THE VERDICT WORD (backlog
+/// bd4e8fb1, measured on gate-run 924b4cbe). The gate-runner's verdict
+/// vocabulary is the protocol's closed `green|failed|lost`, so a gate
+/// that refused before any check ran is recorded `failed` — while its
+/// receipt says `verdict: refused` and carries the reason. The receipt
+/// is the specific record and it wins here, exactly as it already does
+/// in `train_gate::standing`, which reads the same two fields to spare
+/// the cars aboard a train. §Diagnosis: an infrastructure refusal is
+/// not a consist failure.
 ///
 /// FILTERED HERE AS WELL AS AT THE SERVER. The caller narrows the read
 /// with `metadata={"branch":…,"sha":…}`, but a server that does not know
@@ -145,7 +209,7 @@ pub struct PriorRed {
 /// (CLAUDE.md §Doors: a wrong target answers instead of erroring), and a
 /// re-gate stamped against another branch's red would count a flake
 /// that never happened.
-pub fn prior_red(runs: &[Value], branch: &str, sha: &str) -> Option<PriorRed> {
+pub fn prior(runs: &[Value], branch: &str, sha: &str) -> Option<Prior> {
     let newest = runs
         .iter()
         .filter(|r| r.get("status").and_then(Value::as_str) == Some("closed"))
@@ -163,13 +227,23 @@ pub fn prior_red(runs: &[Value], branch: &str, sha: &str) -> Option<PriorRed> {
     if !RED_VERDICTS.contains(&verdict) {
         return None;
     }
-    Some(PriorRed {
-        id: newest.get("id")?.as_str()?.to_string(),
+    let id = newest.get("id")?.as_str()?.to_string();
+    let receipt = receipt(newest);
+    if let Some(r) = &receipt
+        && r.get("verdict").and_then(Value::as_str) == Some(REFUSED)
+    {
+        let why = r
+            .get("refused_because")
+            .and_then(Value::as_str)
+            .unwrap_or("the gate refused before any check ran (no reason recorded)")
+            .to_string();
+        return Some(Prior::Refused { id, why });
+    }
+    Some(Prior::Red(PriorRed {
+        id,
         verdict: verdict.to_string(),
-        failed: receipt(newest)
-            .and_then(|r| failing_checks(&r))
-            .unwrap_or_default(),
-    })
+        failed: receipt.and_then(|r| failing_checks(&r)).unwrap_or_default(),
+    }))
 }
 
 /// The metadata a re-gate carries at launch, merged onto the fresh
@@ -190,6 +264,20 @@ pub fn launch_line(sha: &str, prior: &PriorRed) -> String {
         "boss gate: re-gating {}: the prior run {} was red on {on}; a green here records it as a flake",
         &sha[..12.min(sha.len())],
         &prior.id[..8.min(prior.id.len())]
+    )
+}
+
+/// `launch_line`'s sibling for a prior that REFUSED: what the operator
+/// is re-gating, and the fact that a green here records nothing —
+/// because there was never a verdict on this branch to overturn.
+/// Quiet here would be a loan: the previous run's packet says `failed`
+/// on its face, so the line that says otherwise is worth printing.
+pub fn refusal_line(sha: &str, id: &str, why: &str) -> String {
+    format!(
+        "boss gate: re-gating {}: the prior run {} refused before any check ran ({why}); it \
+         judged nothing about this branch, so a green here records no flake",
+        &sha[..12.min(sha.len())],
+        &id[..8.min(id.len())]
     )
 }
 
@@ -310,6 +398,11 @@ mod tests {
 
     const RED: &str = r#"{"verdict":"failed","head":"abc","checks":[{"name":"fmt","result":"pass","seconds":1},{"name":"test","result":"FAIL","seconds":90},{"name":"clippy","result":"pass","seconds":30}]}"#;
 
+    /// The shape `infra/gate.sh` writes when a pre-flight lint exits
+    /// `LINT_CANNOT_ANSWER` — structurally verbatim from gate-run
+    /// 924b4cbe, which recorded `verdict: failed` over exactly this.
+    const REFUSED: &str = r#"{"verdict":"refused","refused_because":"pre-flight lint a-car-stays-under-the-edit-level could not answer (exit 3): CANNOT ANSWER - the edit-level endpoint answered HTTP 000","head":"abc","checks":[{"name":"fmt","result":"pass","seconds":3},{"name":"a-car-stays-under-the-edit-level","result":"refused","seconds":0}]}"#;
+
     /// The retro's shape: a red at a head, re-gated at the SAME head.
     /// The prior is found, and it names the check that failed.
     #[test]
@@ -323,7 +416,9 @@ mod tests {
             Some("failed"),
             Some(RED),
         )];
-        let prior = prior_red(&runs, "fix/x", "abc").expect("a red at the same head counts");
+        let Some(Prior::Red(prior)) = prior(&runs, "fix/x", "abc") else {
+            panic!("a red at the same head counts")
+        };
         assert_eq!(prior.id, "aaaa1111");
         assert_eq!(prior.verdict, "failed");
         assert_eq!(prior.failed, vec!["test".to_string()]);
@@ -365,12 +460,9 @@ mod tests {
                 Some(RED),
             ),
         ];
-        assert!(prior_red(&runs, "fix/x", "def").is_none(), "moved head");
-        assert!(prior_red(&runs, "fix/y", "abc").is_none(), "another branch");
-        assert!(
-            prior_red(&[], "fix/x", "abc").is_none(),
-            "nothing gated yet"
-        );
+        assert!(prior(&runs, "fix/x", "def").is_none(), "moved head");
+        assert!(prior(&runs, "fix/y", "abc").is_none(), "another branch");
+        assert!(prior(&[], "fix/x", "abc").is_none(), "nothing gated yet");
     }
 
     /// The NEWEST run at the head decides. A red, then a green, then a
@@ -398,7 +490,7 @@ mod tests {
                 None,
             ),
         ];
-        assert!(prior_red(&runs, "fix/x", "abc").is_none(), "already green");
+        assert!(prior(&runs, "fix/x", "abc").is_none(), "already green");
         let runs = vec![
             run(
                 "cccc3333",
@@ -429,8 +521,12 @@ mod tests {
             ),
         ];
         assert_eq!(
-            prior_red(&runs, "fix/x", "abc").map(|p| p.id).as_deref(),
-            Some("aaaa1111")
+            prior(&runs, "fix/x", "abc"),
+            Some(Prior::Red(PriorRed {
+                id: "aaaa1111".into(),
+                verdict: "failed".into(),
+                failed: vec!["test".into()],
+            }))
         );
     }
 
@@ -449,9 +545,63 @@ mod tests {
             Some("lost"),
             Some("runner died before a receipt"),
         )];
-        let prior = prior_red(&runs, "fix/x", "abc").expect("lost counts");
+        let Some(Prior::Red(prior)) = prior(&runs, "fix/x", "abc") else {
+            panic!("lost counts")
+        };
         assert!(prior.failed.is_empty());
         assert!(launch_line("abc", &prior).contains("no named check (lost)"));
+    }
+
+    /// A REFUSAL IS NOT A RED, AND NOT A FLAKE (2026-09-19, backlog
+    /// bd4e8fb1; measured on gate-run 924b4cbe). The receipt already
+    /// said so — `verdict: refused`, the lint's own entry `result:
+    /// refused`, `refused_because` carrying the words — and this was
+    /// the reader that never consulted it. Counted as a red, a resolver
+    /// stall re-gated green stamps `flake_of` and puts
+    /// `a-car-stays-under-the-edit-level` in the FLAKES tally, blaming
+    /// a lint for a DNS flake it had no part in.
+    #[test]
+    fn a_refusal_at_the_same_head_is_not_a_red_and_names_its_reason() {
+        let runs = vec![run(
+            "aaaa1111",
+            "closed",
+            "fix/x",
+            "abc",
+            "2026-09-18T10:00:00Z",
+            Some("failed"),
+            Some(REFUSED),
+        )];
+        let Some(Prior::Refused { id, why }) = prior(&runs, "fix/x", "abc") else {
+            panic!("a receipt that says refused is a refusal, whatever the verdict word says")
+        };
+        assert_eq!(id, "aaaa1111");
+        assert!(why.contains("a-car-stays-under-the-edit-level"), "{why}");
+        let line = refusal_line("abcdef0123456789", &id, &why);
+        assert!(line.contains("abcdef012345"), "{line}");
+        assert!(line.contains("aaaa1111"), "{line}");
+        assert!(
+            line.contains("refused before any check ran"),
+            "the line says that nothing about the branch was judged: {line}"
+        );
+        assert!(
+            line.contains("records no flake"),
+            "a green after a refusal records no flake, and the line says so rather than \
+             promising one: {line}"
+        );
+    }
+
+    /// A CHECK THAT COULD NOT ANSWER IS NOT A FAILING CHECK. The
+    /// receipt's `checks` list carries three results — `pass`, a
+    /// failure, and `refused` (`infra/gate.sh`'s `check_lint`) — and a
+    /// reader counting "not pass" counted the third as the branch's.
+    #[test]
+    fn a_refused_check_is_not_counted_as_a_failing_check() {
+        let receipt: Value = serde_json::from_str(REFUSED).expect("the fixture is JSON");
+        assert_eq!(
+            failing_checks(&receipt),
+            Some(vec![]),
+            "a refused entry names nothing the author can fix"
+        );
     }
 
     /// GREEN AFTER RED: the stamp copies the prior's id and its checks.

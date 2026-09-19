@@ -1975,6 +1975,59 @@ went ready with no design filed — an empty decision, 4f6019d7 again) —
 question, and completes the draft with the `design_id`, and the publish
 rule closes the review exactly as before.
 
+## Agent memory and the record
+
+**A memory corpus is a second copy of the record that cannot be
+audited.** Decided in design `a5368918` (2026-09-19), on the
+measurement that opened it: the agent memory index loaded with
+`MEMORY.md is 24.5KB (limit: 24.4KB) — 1 of 152 lines were cut off`,
+and the line it dropped was David's world-map direction for `/it`, one
+day old and load-bearing for three cars then on the dock. Nothing
+failed loudly — the session read 151 lines and had no way to know the
+152nd existed. A store that sheds content by growing is the one
+forbidden failure mode, and the file has none of the properties the
+correctness protocol exists to guarantee: unversioned, outside the
+event log, mutable in place, no provenance per claim.
+
+**The rule: agent memory shrinks from a corpus to a kernel of
+USER-scoped facts, and the test for a survivor is "would a new repo
+need it?"** Everything project-scoped moves to where it can be
+audited, by class:
+
+- **A door is never remembered.** Each doors-class entry becomes a
+  CLAUDE.md line, a `boss brief` derivation from the file that decides
+  it, or a refusal in the verb itself. A remembered door can drift
+  from the door it describes, and unlike the §9a pairs no equality
+  test is possible against it.
+- **A decision lives in this document and nowhere else.** The memory
+  line is a lossy second copy of a decision the record holds in full.
+  If a decision is not discoverable from the record without a memory
+  prompt, that is a defect in the record SURFACE, not a reason to keep
+  the copy.
+- **The session-state class is deleted outright.** `boss orient`
+  computes trains, gates, the dock, stranded greens and MY WORK from
+  the record; a hand-written READ FIRST snapshot is a stale duplicate
+  of a live read. Each thing orient cannot yet compute is a car on
+  orient, not a memory line.
+- **Incident residue belongs to the packet that fixed it**, and to the
+  comment in the code that cites it by date and packet id. The rule
+  outlives the memory of it.
+
+Two consequences carry forward as work rather than prose. **The budget
+must FAIL rather than truncate** — we do not control the harness
+loader, so the refusal has to be ours: a check that reads MEMORY.md
+and refuses over budget naming the offending entries. Where that check
+runs is the one sub-question left open, because the file lives outside
+the repo at `/work/home/.claude/`. And **user-scoped data is a tenant
+Subject row**: David is an `employee` Subject with a Class, so
+timezone, company email and working hours are Subject and Class data
+read through the same door as everything else — which makes the kernel
+genuinely empty and deletes the concept rather than shrinking it.
+
+What was done on the day is a pin, not the destination: 131 over-long
+index hooks were trimmed (25,675 → 21,388 bytes, no entries deleted),
+purely to stop the live truncation.
+
 ## Open findings — where two live decisions disagree
 
 Flattening surfaced three places where a settled decision conflicts

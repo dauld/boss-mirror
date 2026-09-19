@@ -1674,9 +1674,9 @@ pub(crate) fn prior_runs_query(branch: &str, sha: &str) -> String {
     )
 }
 
-/// THE RED THIS LAUNCH RE-GATES, if any: the newest closed gate-run at
-/// the same branch and sha, judged `failed` or `lost` —
-/// `boss_jobs::flake::prior_red`, the one definition. Backlog
+/// WHAT THIS LAUNCH RE-GATES, if anything: the newest closed gate-run
+/// at the same branch and sha, when it was not green —
+/// `boss_jobs::flake::prior`, the one definition. Backlog
 /// 36cc4913: 4 of 11 red gates in two days were not the branch's
 /// fault, and each was recorded exactly like an author's red, so the
 /// flakiest check was a memory. A re-gate at an UNCHANGED head is the
@@ -1686,17 +1686,24 @@ pub(crate) fn prior_runs_query(branch: &str, sha: &str) -> String {
 /// verdict: a green stamps `flake_of` (the auto-park handler, which
 /// reads every green), a red stamps nothing.
 ///
+/// A PRIOR THAT REFUSED IS NOT A RED AND STAMPS NOTHING (backlog
+/// bd4e8fb1). It judged nothing about the branch, so there is no red to
+/// call a flake — the receipt says which it was, and `flake::prior`
+/// reads it. Gate-run 924b4cbe recorded `failed` over an edit-level
+/// lint that could not reach the registry; counted as a red, the green
+/// behind it would have put that lint's name in the FLAKES tally.
+///
 /// Never an automatic retry: a retry hides the flake; a named re-gate
 /// records it. BEST EFFORT: an unreadable record is `None` with a note,
 /// never a refusal — this is a stamp, not a gate condition, and a dark
 /// SoR must not stop a launch that `wait_for_verdict` is built to
 /// survive.
-async fn observe_prior_red(
+async fn observe_prior(
     http: &reqwest::Client,
     base: &str,
     branch: &str,
     sha: &str,
-) -> Option<boss_jobs::flake::PriorRed> {
+) -> Option<boss_jobs::flake::Prior> {
     match api_at(
         http,
         base,
@@ -1706,7 +1713,7 @@ async fn observe_prior_red(
     )
     .await
     {
-        Ok(body) => boss_jobs::flake::prior_red(&rows(body), branch, sha),
+        Ok(body) => boss_jobs::flake::prior(&rows(body), branch, sha),
         Err(e) => {
             eprintln!(
                 "boss gate: could not read earlier gate-runs at this head ({e:#}) — the gate \
@@ -2401,15 +2408,24 @@ pub async fn run(
     // here, AFTER the sha is final (a `--rebase` moves it, and a moved
     // head is the author's fix, not a re-gate), and before the packet,
     // so the operator reads the line beside the launch. See
-    // `observe_prior_red`.
-    let prior_red = if dry {
+    // `observe_prior`.
+    let prior = if dry {
         None
     } else {
-        observe_prior_red(&http, &jobs_base()?, branch, &sha).await
+        observe_prior(&http, &jobs_base()?, branch, &sha).await
     };
-    if let Some(p) = &prior_red {
-        println!("{}", boss_jobs::flake::launch_line(&sha, p));
-    }
+    // A REFUSAL SAYS SO AND STAMPS NOTHING; only a red carries forward.
+    let prior_red = match &prior {
+        Some(boss_jobs::flake::Prior::Red(p)) => {
+            println!("{}", boss_jobs::flake::launch_line(&sha, p));
+            Some(p)
+        }
+        Some(boss_jobs::flake::Prior::Refused { id, why }) => {
+            println!("{}", boss_jobs::flake::refusal_line(&sha, id, why));
+            None
+        }
+        None => None,
+    };
 
     // EVERY REFUSAL IS DECIDED HERE, BEFORE A PACKET EXISTS (fd217c65).
     // The bound, the queue cap, the legacy-workspace law and an
@@ -2532,7 +2548,7 @@ pub async fn run(
     // PATCH, best effort, a record and not an instruction. What acts on
     // it is the green verdict — `jobs.auto-park` reads `regate_of` off
     // the gate-run and stamps `flake_of` (backlog 36cc4913).
-    if let Some(p) = prior_red.as_ref().filter(|_| !dry)
+    if let Some(p) = prior_red.filter(|_| !dry)
         && let Err(e) = api(
             &http,
             reqwest::Method::PATCH,
@@ -6432,6 +6448,21 @@ mod regate_tests {
         .to_string()
     }
 
+    /// A run the gate REFUSED before any check ran — the packet says
+    /// `failed` (the protocol's only word for it) while the receipt says
+    /// `refused` and carries the reason. Gate-run 924b4cbe's shape.
+    fn refused_run(id: &str, branch: &str, sha: &str) -> String {
+        json!({
+            "id": id, "kind": "gate-run", "status": "closed", "opened_on": "2026-09-19",
+            "metadata": { "branch": branch, "sha": sha, "opened_at": "2026-09-19T17:24:26Z" },
+            "steps": [{ "spec_slug": "record-verdict", "metadata": {
+                "verdict": "failed",
+                "receipt": "{\"verdict\":\"refused\",\"refused_because\":\"pre-flight lint a-car-stays-under-the-edit-level could not answer (exit 3): the edit-level endpoint answered HTTP 000\",\"checks\":[{\"name\":\"a-car-stays-under-the-edit-level\",\"result\":\"refused\",\"seconds\":0}]}"
+            }}]
+        })
+        .to_string()
+    }
+
     fn page(run: String) -> &'static str {
         Box::leak(format!(r#"{{"data":[{run}],"total":1}}"#).into_boxed_str())
     }
@@ -6460,9 +6491,11 @@ mod regate_tests {
     async fn a_prior_red_at_the_same_head_is_read_off_the_record() {
         let (base, stub) = one_request(page(red_run("aaaa1111-0000", "fix/x", "abc123"))).await;
         let http = reqwest::Client::new();
-        let prior = observe_prior_red(&http, &base, "fix/x", "abc123")
-            .await
-            .expect("a closed red at the same head is the prior");
+        let Some(boss_jobs::flake::Prior::Red(prior)) =
+            observe_prior(&http, &base, "fix/x", "abc123").await
+        else {
+            panic!("a closed red at the same head is the prior")
+        };
         assert_eq!(prior.id, "aaaa1111-0000");
         assert_eq!(prior.failed, vec!["test".to_string()]);
         let head = stub.await.unwrap().expect("the stub read a request");
@@ -6477,6 +6510,25 @@ mod regate_tests {
         );
     }
 
+    /// A PRIOR THAT REFUSED IS NOT A RED (backlog bd4e8fb1, measured on
+    /// gate-run 924b4cbe). The packet's verdict word is `failed` — the
+    /// gate-run protocol has no other — and the receipt beside it says
+    /// `refused` with the reason. The receipt wins here, so nothing is
+    /// stamped and the flake tally never learns the lint's name.
+    #[tokio::test]
+    async fn a_prior_that_refused_is_read_as_a_refusal_and_stamps_nothing() {
+        let (base, _stub) =
+            one_request(page(refused_run("bbbb2222-0000", "fix/x", "abc123"))).await;
+        let http = reqwest::Client::new();
+        let Some(boss_jobs::flake::Prior::Refused { id, why }) =
+            observe_prior(&http, &base, "fix/x", "abc123").await
+        else {
+            panic!("a receipt that says refused is a refusal, whatever the packet's word is")
+        };
+        assert_eq!(id, "bbbb2222-0000");
+        assert!(why.contains("a-car-stays-under-the-edit-level"), "{why}");
+    }
+
     /// A moved head is the author's fix, not a re-gate. The stub hands
     /// back a red at ANOTHER sha — what a server that ignored the
     /// `metadata=` parameter would do — and nothing is stamped.
@@ -6485,7 +6537,7 @@ mod regate_tests {
         let (base, _stub) = one_request(page(red_run("aaaa1111-0000", "fix/x", "def456"))).await;
         let http = reqwest::Client::new();
         assert!(
-            observe_prior_red(&http, &base, "fix/x", "abc123")
+            observe_prior(&http, &base, "fix/x", "abc123")
                 .await
                 .is_none()
         );
@@ -6497,7 +6549,7 @@ mod regate_tests {
     async fn an_unreachable_record_stamps_nothing_and_refuses_nothing() {
         let http = reqwest::Client::new();
         assert!(
-            observe_prior_red(&http, "http://127.0.0.1:9", "fix/x", "abc123")
+            observe_prior(&http, "http://127.0.0.1:9", "fix/x", "abc123")
                 .await
                 .is_none()
         );

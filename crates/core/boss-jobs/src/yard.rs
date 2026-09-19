@@ -6291,6 +6291,45 @@ mod tests {
         assert_eq!(failing_check(&steps).as_deref(), Some("clippy, test"));
     }
 
+    /// A REFUSAL NAMES NO FAILING CHECK, AND STILL SAYS WHY (backlog
+    /// bd4e8fb1; gate-run 924b4cbe's shape). `check_lint` rewrites the
+    /// entry of a lint that could not answer to `result: refused`
+    /// exactly so a reader counting failures does not count it — the
+    /// branch failed nothing. The garage keeps the whole story anyway:
+    /// `failed_line` falls back to the receipt's only excerpt, which is
+    /// the lint's own CANNOT ANSWER line and names it.
+    #[test]
+    fn a_refused_check_names_no_failure_and_the_line_still_says_why() {
+        let raw = serde_json::to_string(&json!({
+            "verdict": "refused",
+            "refused_because": "pre-flight lint a-car-stays-under-the-edit-level could not answer (exit 3)",
+            "head": "e16708f69bc5b0a0a3f4bd1572f9db6dec76e7c8",
+            "checks": [
+                { "name": "fmt", "result": "pass", "seconds": 3 },
+                { "name": "a-car-stays-under-the-edit-level", "result": "refused", "seconds": 0 },
+            ],
+            "fails_excerpt": {
+                "a-car-stays-under-the-edit-level":
+                    "a-car-stays-under-the-edit-level: CANNOT ANSWER - the edit-level endpoint answered HTTP 000",
+            },
+        }))
+        .unwrap();
+        let steps = vec![step(
+            "record-verdict",
+            "Record the receipt",
+            StepStatus::Completed,
+            json!({ "verdict": "failed", "receipt": raw }),
+        )];
+        assert_eq!(
+            failing_check(&steps),
+            None,
+            "a check that could not answer is not a failure of the branch"
+        );
+        let line = failed_line(&steps).expect("the refusal's own words are still carried");
+        assert!(line.contains("a-car-stays-under-the-edit-level"), "{line}");
+        assert!(line.contains("CANNOT ANSWER"), "{line}");
+    }
+
     // ---- the ETA on a train in flight ----
     //
     // MEASURED 2026-09-10 against the live record (1,014 pr-trains):
