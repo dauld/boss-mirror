@@ -2472,19 +2472,21 @@ pub async fn run(
                 "dry-run-packet".to_string()
             } else {
                 let owner = crate::owner::for_filing_at(&jobs_base()?).await;
-                let created = api(
-                    &http,
-                    reqwest::Method::POST,
-                    "/api/jobs",
-                    Some(gate_run_body(
-                        branch,
-                        &sha,
-                        &manifest_path.display().to_string(),
-                        crate::channels::delivery_channel_for(branch).as_deref(),
-                        &owner,
-                    )),
-                )
-                .await?;
+                let mut body = gate_run_body(
+                    branch,
+                    &sha,
+                    &manifest_path.display().to_string(),
+                    crate::channels::delivery_channel_for(branch).as_deref(),
+                    &owner,
+                );
+                // The tiers the same diff touched (ba429e7f), beside the
+                // channel: `software_tiers` + `software_tier`, which the
+                // auto-park handler copies onto the car verbatim. Empty
+                // when the diff would not resolve — nothing stamped.
+                if let Some(md) = body.get_mut("metadata").and_then(Value::as_object_mut) {
+                    md.extend(crate::channels::tier_stamps_for(branch));
+                }
+                let created = api(&http, reqwest::Method::POST, "/api/jobs", Some(body)).await?;
                 created
                     .as_ref()
                     .and_then(|c| c.get("data").unwrap_or(c).get("id"))

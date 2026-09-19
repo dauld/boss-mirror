@@ -23,3 +23,4 @@ pub mod roles;
 pub mod sim_origin;
 pub mod startup;
 pub mod tenant_manifest;
+pub mod tiers;

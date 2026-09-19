@@ -451,6 +451,9 @@ pub(crate) async fn run(
             m.extend(boss_jobs::car::regate_prose(
                 summary, excludes, test, verified,
             ));
+            // The tiers the re-gated diff touches (ba429e7f), re-read
+            // beside the channel for the same reason the channel is.
+            m.extend(crate::channels::tier_stamps_for(branch));
         }
         crate::gate::api(
             &http,

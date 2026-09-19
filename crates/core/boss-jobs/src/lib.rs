@@ -48,6 +48,7 @@ pub mod protocol_conversion;
 #[cfg(feature = "postgres")]
 pub mod rebuild;
 pub mod refusals;
+pub mod regions;
 pub mod registry;
 pub mod scheduling;
 pub mod station_flow;

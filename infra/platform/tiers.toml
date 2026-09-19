@@ -1,0 +1,49 @@
+# The tier map — ONE definition of which tier a path in this tree
+# belongs to, read three ways (design 01c3cc3f, decided 2026-09-19;
+# tiers.md beside this file says why). One row per tier: its `name`,
+# its `rank` (1 is the innermost; the headline of a change touching
+# several tiers is the LOWEST rank), and the path prefixes it owns. The
+# most specific matching prefix wins, so `infra/platform/` is data even
+# though `infra/` is infra; `**/seeds/` matches a `seeds/` directory at
+# any depth. A `#` line is a comment.
+#
+# THE SHAPE IS PART OF THE CONTRACT. infra/lint/lib/tiers.sh reads this
+# file line by line — one key per line, `paths` on one line — because
+# a shell has no TOML parser, and boss_core::tiers reads it with one.
+# The two are held equal over a fixture of paths by
+# crates/core/boss-testing/tests/tiers_sh.rs (CLAUDE.md §9a).
+
+[[tier]]
+name = "core"
+rank = 1
+paths = ["crates/core/"]
+
+[[tier]]
+name = "modules"
+rank = 2
+paths = ["crates/modules/"]
+
+[[tier]]
+name = "orchestrators"
+rank = 2
+paths = ["crates/orchestrators/"]
+
+[[tier]]
+name = "tenants"
+rank = 3
+paths = ["crates/tenants/", "examples/"]
+
+[[tier]]
+name = "frontend"
+rank = 3
+paths = ["apps/", "libs/web-kit/"]
+
+[[tier]]
+name = "infra"
+rank = 1
+paths = ["infra/"]
+
+[[tier]]
+name = "data"
+rank = 4
+paths = ["infra/platform/", "infra/dispatcher/rules/", "**/seeds/", "docs/"]

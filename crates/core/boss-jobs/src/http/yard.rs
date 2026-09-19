@@ -55,7 +55,49 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
     }
     let scope = job_scope_from_predicate(&user, &predicate);
     let now = boss_clock_client::now_from(&state.clock).await;
+    let YardRead {
+        status,
+        dock_reading,
+        health,
+        gate_runs_truncated,
+        ..
+    } = match read_yard(&state, &user, scope, now).await {
+        Ok(read) => read,
+        Err(resp) => return resp,
+    };
+    Json(with_gate_run_window(
+        with_dock_source(with_conductor(with_now(status, now), health), dock_reading),
+        gate_runs_truncated,
+    ))
+    .into_response()
+}
 
+/// What one pass over the yard's rows read: the assembled status with
+/// the readings that qualify it, and the rows themselves, so a second
+/// read-model over the same pass — the regions map
+/// (`http/regions.rs`, design 0524fc95) — is a function of the SAME
+/// rows the status is, not a second set of queries free to disagree.
+pub(super) struct YardRead {
+    pub status: yard::YardStatus,
+    pub dock_reading: yard::Reading,
+    pub health: yard::ConductorHealth,
+    pub gate_runs_truncated: bool,
+    /// Open pr-trains with their steps — the train-gate wait
+    /// (`regions::train_gate_troubled`) is a fact on the job's metadata
+    /// that the status does not carry.
+    pub open_trains: Vec<(boss_core::job::Job, Vec<boss_core::job::Step>)>,
+}
+
+/// The yard status handler's read sequence, as a function. Every read
+/// that used to `return` a response returns it as `Err` here; the
+/// posture of each read (fail the request, or degrade to an admitted
+/// `None`) is unchanged and documented at each site.
+pub(super) async fn read_yard<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &JobsApiState<R, B>,
+    user: &boss_policy_client::User,
+    scope: crate::port::JobScope,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<YardRead, Response> {
     // Trains: two reads, because one cannot hold both. The in-flight
     // trains are read whole — `status=open`, a handful at most — and the
     // recent tail through the retention window. They used to be ONE
@@ -84,11 +126,11 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
         .await
     {
         Ok((rows, _)) => rows,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()),
     };
     let recent_rows = match state.jobs.list_jobs(&recent, yard::TRAIN_WINDOW, 0).await {
         Ok((rows, _)) => rows,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()),
     };
 
     // Attach each train's steps — the phase and the block reason are facts
@@ -108,7 +150,9 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
     for job in open_rows {
         let steps = match state.jobs.list_steps(&job.id).await {
             Ok(steps) => steps,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            Err(e) => {
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response());
+            }
         };
         open_trains.push((job, steps));
     }
@@ -119,7 +163,9 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
     {
         let steps = match state.jobs.list_steps(&job.id).await {
             Ok(steps) => steps,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            Err(e) => {
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response());
+            }
         };
         closed_trains.push((job, steps));
     }
@@ -162,7 +208,7 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
     // the same one the departure board uses. `None` when the row cannot
     // be read: the dock is then UNREAD, which the payload says rather
     // than drawing an empty lane (see [`dock_cars`]).
-    let dock_read = dock_cars(&state, scope.clone(), &user).await;
+    let dock_read = dock_cars(state, scope.clone(), user).await;
     // Derived ONCE, because two consumers answer with it: the boarding
     // block's depth, verdict and sentences, and `dock_source` beside the
     // dock lane. They were two reads of this same `Option` — honest, but
@@ -426,11 +472,13 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
         heartbeat_minutes,
         Some(now),
     );
-    Json(with_gate_run_window(
-        with_dock_source(with_conductor(with_now(status, now), health), dock_reading),
+    Ok(YardRead {
+        status,
+        dock_reading,
+        health,
         gate_runs_truncated,
-    ))
-    .into_response()
+        open_trains,
+    })
 }
 
 /// Whether the recency lanes were cut, stated on the payload beside the

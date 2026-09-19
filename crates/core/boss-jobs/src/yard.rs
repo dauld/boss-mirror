@@ -114,7 +114,7 @@ fn is_done(step: Option<&Step>) -> bool {
 /// same rule off the API's JSON — the typed read model and that JSON
 /// cannot share one signature, so each side's test names the other
 /// (CLAUDE.md §9a).
-fn holds_the_track(steps: &[Step]) -> bool {
+pub(crate) fn holds_the_track(steps: &[Step]) -> bool {
     !is_done(find_step(steps, &MERGED))
 }
 

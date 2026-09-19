@@ -248,6 +248,12 @@ async fn repoint(
         dc.as_deref(),
     );
     patch["branch"] = json!(new_branch);
+    // And the tiers the new branch's diff touches (ba429e7f), beside
+    // the channel — empty when the diff will not resolve, so nothing is
+    // stripped.
+    if let Some(m) = patch.as_object_mut() {
+        m.extend(crate::channels::tier_stamps_for(new_branch));
+    }
     // The branch the car is leaving, so the arrival sweep can take it
     // too (473fda1b). Omitted, never nulled, when nothing moved.
     if let Some(origins) = origins {

@@ -95,7 +95,7 @@ async fn station_policy_check<R: JobsRepository, B: EventBus>(
 /// authored rows. Serving four stations where there should be
 /// fifty-five, with a 200 and no explanation, is the exact shape of
 /// defect this whole change exists to remove.
-async fn effective_stations<R: JobsRepository, B: EventBus>(
+pub(super) async fn effective_stations<R: JobsRepository, B: EventBus>(
     state: &JobsApiState<R, B>,
     reg: &Arc<dyn StationRegistry>,
 ) -> Result<Vec<StationSpec>, Response> {

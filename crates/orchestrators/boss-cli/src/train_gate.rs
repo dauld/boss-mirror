@@ -52,13 +52,15 @@ pub(crate) const KEY_LAUNCHED_AT: &str = "train_gate_launched_at";
 pub(crate) const KEY_RELAUNCHES: &str = "train_gate_relaunches";
 pub(crate) const KEY_REFUSALS: &str = "train_gate_refusals";
 pub(crate) const KEY_LAUNCH_FAILURES: &str = "train_gate_launch_failures";
-pub(crate) const KEY_FALLBACK: &str = "train_gate_fallback";
+/// ONE spelling, in boss-jobs, because the yard's regions read judges a
+/// train troubled by it (design 0524fc95).
+pub(crate) const KEY_FALLBACK: &str = boss_jobs::regions::TRAIN_GATE_FALLBACK;
 /// WHY the gate is not filed yet, verbatim from the last failed launch
 /// (the bound line names the running gates). On 2026-09-18 train
 /// ccd8b08e sat two hours at CI carrying `train_gate_launch_failures=5`
 /// and no reason; the yard drew a healthy train (48f7aba1). Cleared the
 /// pass the gate is filed.
-pub(crate) const KEY_WAIT_REASON: &str = "train_gate_wait_reason";
+pub(crate) const KEY_WAIT_REASON: &str = boss_jobs::regions::TRAIN_GATE_WAIT_REASON;
 
 /// Launch attempts the conductor makes (one per reconcile pass, a minute
 /// apart) before a gate it cannot file is read as unavailable.

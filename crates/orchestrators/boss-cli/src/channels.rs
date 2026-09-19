@@ -19,7 +19,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// The lane a work-originating job entered through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -164,8 +164,14 @@ pub(crate) fn proactive_share(mix: &BTreeMap<InputChannel, usize>) -> Option<f64
 }
 
 /// `boss channels` — read recent work-originating jobs and report the
-/// input-channel mix with the proactive-vs-reactive reading.
-pub async fn run() -> Result<()> {
+/// input-channel mix with the proactive-vs-reactive reading, the
+/// delivery mix over the dock, and the per-tier mix (ba429e7f) over the
+/// dock and over the trains landed since `since` (default: the last
+/// [`TIER_WINDOW_DAYS`]).
+pub async fn run(
+    since: Option<chrono::NaiveDate>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
     let http = reqwest::Client::new();
 
     // Backlog items are classified one by one, so they must all be
@@ -272,6 +278,10 @@ pub async fn run() -> Result<()> {
 
     let mut dmix: std::collections::BTreeMap<DeliveryChannel, usize> =
         std::collections::BTreeMap::new();
+    // The same diffs, read a second way: which tiers each car touches
+    // (a car in several counts once in each) and its headline tier.
+    let mut dock_tiers: BTreeMap<String, usize> = BTreeMap::new();
+    let mut dock_headlines: BTreeMap<String, usize> = BTreeMap::new();
     let mut skipped = 0usize;
     for car in &boardable {
         let branch = car
@@ -283,7 +293,16 @@ pub async fn run() -> Result<()> {
             .then(|| changed_paths_for(branch))
             .flatten()
         {
-            Some(paths) => *dmix.entry(delivery_channel(&paths)).or_insert(0) += 1,
+            Some(paths) => {
+                *dmix.entry(delivery_channel(&paths)).or_insert(0) += 1;
+                let tiers = software_tiers(&paths);
+                for t in &tiers {
+                    *dock_tiers.entry(t.clone()).or_insert(0) += 1;
+                }
+                *dock_headlines
+                    .entry(software_tier(&tiers).unwrap_or_else(|| UNCLASSIFIED_TIER.to_string()))
+                    .or_insert(0) += 1;
+            }
             None => skipped += 1,
         }
     }
@@ -321,8 +340,62 @@ pub async fn run() -> Result<()> {
             }
         );
     }
+
+    // The per-tier mix (ba429e7f): over the dock, from the same diffs,
+    // and over the trains landed in the window, from the stamp the
+    // arrival wrote (or the backfill read off the merge commit).
+    println!("\n  TIERS touched — {dtotal} car(s) in the dock (a car counts once per tier)");
+    print_tier_mix(&dock_tiers, dtotal);
+    println!("  headline tier (lowest rank wins) — {dtotal} car(s)");
+    print_tier_mix(&dock_headlines, dtotal);
+
+    let since =
+        since.unwrap_or_else(|| (now - chrono::Duration::days(TIER_WINDOW_DAYS)).date_naive());
+    let trains = crate::train::list_all_pages(|offset| {
+        let http = http.clone();
+        async move {
+            crate::gate::api(
+                &http,
+                reqwest::Method::GET,
+                &format!(
+                    "/api/jobs?kind=pr-train&status=closed&limit={}&offset={offset}",
+                    crate::train::PAGE_LIMIT
+                ),
+                None,
+            )
+            .await
+        }
+    })
+    .await?;
+    let landed: Vec<&Value> = trains
+        .iter()
+        .filter(|t| merge_ref_of(t).is_some())
+        .filter(|t| {
+            t.get("closed_on")
+                .and_then(Value::as_str)
+                .and_then(|d| d.parse::<chrono::NaiveDate>().ok())
+                .is_some_and(|closed| closed >= since)
+        })
+        .collect();
+    let tmix = tier_mix(landed.iter().copied());
+    let unread = tmix.get(UNCLASSIFIED_TIER).copied().unwrap_or(0);
+    println!(
+        "\n  TIERS over landed trains since {since} — {} train(s){}",
+        landed.len(),
+        if unread > 0 {
+            format!(" ({unread} unstamped: run boss channels --backfill-tiers)")
+        } else {
+            String::new()
+        }
+    );
+    print_tier_mix(&tmix, landed.len());
     Ok(())
 }
+
+/// The default window for the landed-trains tier mix. Consolidation's
+/// own cars touch core on purpose (the packet's data note), so the
+/// reading is honest only over a window long enough to see them pass.
+pub(crate) const TIER_WINDOW_DAYS: i64 = 30;
 
 /// A car is in the dock when its "Open for review" step is ready — the
 /// same predicate the conductor boards on.
@@ -471,6 +544,290 @@ pub(crate) fn delivery_channel(paths: &[String]) -> DeliveryChannel {
 /// branch has no forge diff to classify (already merged / not pushed).
 pub(crate) fn delivery_channel_for(branch: &str) -> Option<String> {
     changed_paths_for(branch).map(|paths| delivery_channel(&paths).label().to_string())
+}
+
+// ---- the tiers a change touched (ba429e7f, design 01c3cc3f) ---------------
+//
+// `software` is one delivery channel, and the question the consolidation
+// period asks — is the core settling while work moves outward — had no
+// reading in it (David, 2026-09-18). Beside the channel, a change now
+// records the SET of tiers it touched, read off the one tier map
+// (`infra/platform/tiers.toml`, through `boss_core::tiers`): a car
+// touching crates/core and apps/ is {core, frontend}, and its headline
+// is the lowest rank, core — the way the channel is the heaviest path.
+// A path no tier claims (a root file) is left out, so a root-only change
+// is the empty set: a reading, not a guess.
+
+/// The tiers a set of changed paths touched, sorted by name.
+pub(crate) fn software_tiers(paths: &[String]) -> Vec<String> {
+    boss_core::tiers::tier_map()
+        .map(|m| m.tiers_of(paths.iter().map(String::as_str)))
+        .unwrap_or_default()
+}
+
+/// The headline tier among a set: the lowest rank (core over
+/// frontend; ties by the map's row order). `None` for the empty set.
+pub(crate) fn software_tier(tiers: &[String]) -> Option<String> {
+    boss_core::tiers::tier_map()
+        .ok()?
+        .headline(tiers.iter().map(String::as_str))
+        .map(|t| t.name.clone())
+}
+
+/// Both tier keys as the metadata map every stamp site merges — the
+/// set under `software_tiers`, the headline under `software_tier`
+/// (omitted for the empty set: absent, never null, since the metadata
+/// door deletes a null key).
+pub(crate) fn tier_stamps(paths: &[String]) -> serde_json::Map<String, Value> {
+    let tiers = software_tiers(paths);
+    let mut m = serde_json::Map::new();
+    if let Some(head) = software_tier(&tiers) {
+        m.insert(boss_jobs::car::SOFTWARE_TIER.to_string(), json!(head));
+    }
+    m.insert(boss_jobs::car::SOFTWARE_TIERS.to_string(), json!(tiers));
+    m
+}
+
+/// The tier stamps for a branch's forge diff — empty (stamping
+/// nothing, stripping nothing) when the diff will not resolve, the
+/// same rule `delivery_channel_for` answers `None` by.
+pub(crate) fn tier_stamps_for(branch: &str) -> serde_json::Map<String, Value> {
+    changed_paths_for(branch)
+        .map(|paths| tier_stamps(&paths))
+        .unwrap_or_default()
+}
+
+/// The car with no stamp, named in a train's counts rather than
+/// guessed into a tier: a car parked before the stamp existed is an
+/// honest hole in the reading, the way `InputChannel::Unclassified` is.
+pub(crate) const UNCLASSIFIED_TIER: &str = "unclassified";
+
+/// A TRAIN's tiers from its cars' stamps: the union (sorted) and the
+/// number of cars touching each tier — stamped on the train at arrival
+/// as `software_tiers` / `software_tier_counts`, beside the arrival
+/// report, so the series has one row per train without opening every
+/// car. A car carrying no set counts under [`UNCLASSIFIED_TIER`] and
+/// adds nothing to the union.
+pub(crate) fn train_tiers<'a>(
+    cars: impl IntoIterator<Item = &'a Value>,
+) -> (Vec<String>, BTreeMap<String, usize>) {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut union: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for car in cars {
+        match car
+            .pointer(&format!("/metadata/{}", boss_jobs::car::SOFTWARE_TIERS))
+            .and_then(Value::as_array)
+        {
+            Some(set) => {
+                for tier in set.iter().filter_map(Value::as_str) {
+                    *counts.entry(tier.to_string()).or_insert(0) += 1;
+                    union.insert(tier.to_string());
+                }
+            }
+            None => *counts.entry(UNCLASSIFIED_TIER.to_string()).or_insert(0) += 1,
+        }
+    }
+    (union.into_iter().collect(), counts)
+}
+
+/// The per-tier mix over a set of trains' stamps: how many trains
+/// touched each tier. A train without the stamp is counted as
+/// [`UNCLASSIFIED_TIER`] so the window says how much of it is unread.
+pub(crate) fn tier_mix<'a>(trains: impl IntoIterator<Item = &'a Value>) -> BTreeMap<String, usize> {
+    let mut mix: BTreeMap<String, usize> = BTreeMap::new();
+    for train in trains {
+        match train
+            .pointer(&format!("/metadata/{}", boss_jobs::car::SOFTWARE_TIERS))
+            .and_then(Value::as_array)
+        {
+            Some(set) => {
+                for tier in set.iter().filter_map(Value::as_str) {
+                    *mix.entry(tier.to_string()).or_insert(0) += 1;
+                }
+            }
+            None => *mix.entry(UNCLASSIFIED_TIER.to_string()).or_insert(0) += 1,
+        }
+    }
+    mix
+}
+
+/// The merge ref a closed train records — its arrival report's
+/// `merged_sha`, or the merged step's `merge_ref` (12 characters; the
+/// caller resolves it). `None` for a train that never merged.
+pub(crate) fn merge_ref_of(train: &Value) -> Option<&str> {
+    train
+        .pointer("/metadata/arrival_report/merged_sha")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            boss_jobs::car::find_step(train, "merged", "Merged into main")
+                .and_then(|s| s.pointer("/metadata/merge_ref"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+        })
+}
+
+/// Whether a closed train's tiers are still to be read: it has no
+/// `software_tiers`, it merged, and — with a `since` date — it closed
+/// on or after that date. The pure half of `--backfill-tiers`, so the
+/// skip (idempotence) and the window are tested without git or HTTP.
+pub(crate) fn needs_tier_backfill(train: &Value, since: Option<chrono::NaiveDate>) -> bool {
+    if train
+        .pointer(&format!("/metadata/{}", boss_jobs::car::SOFTWARE_TIERS))
+        .is_some()
+    {
+        return false;
+    }
+    if merge_ref_of(train).is_none() {
+        return false;
+    }
+    match since {
+        None => true,
+        Some(since) => train
+            .get("closed_on")
+            .and_then(Value::as_str)
+            .and_then(|d| d.parse::<chrono::NaiveDate>().ok())
+            .is_some_and(|closed| closed >= since),
+    }
+}
+
+/// The paths a merge commit changed against its first parent, from
+/// `git show --name-only --format= --first-parent <sha>` — one path per
+/// line, which is what makes this parse a filter and not a grammar.
+/// (`--stat` prints the same files with a histogram and wraps a long
+/// path in `{a => b}`; the name-only form is the same command's
+/// answer without either.)
+pub(crate) fn paths_of_name_only(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The tier stamp a backfill writes on a closed train: the set read
+/// from its merge commit, and where it came from — so a row the arrival
+/// stamped live and one read back from git are told apart.
+pub(crate) fn backfill_patch(paths: &[String], merge_sha: &str) -> Value {
+    let mut m = tier_stamps(paths);
+    m.insert(
+        "software_tiers_source".to_string(),
+        json!(format!("merge-commit {merge_sha}")),
+    );
+    Value::Object(m)
+}
+
+/// A merge commit's changed paths, from the checkout. A 12-character
+/// `merge_ref` is resolved by git itself; `None` when the commit is not
+/// in this checkout (never fetched here — the caller's checkout is the
+/// record) or the diff is empty.
+fn merge_commit_paths(merge_ref: &str) -> Option<Vec<String>> {
+    let out = std::process::Command::new("git")
+        .args([
+            "show",
+            "--name-only",
+            "--format=",
+            "--first-parent",
+            merge_ref,
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let paths = paths_of_name_only(&String::from_utf8_lossy(&out.stdout));
+    if paths.is_empty() { None } else { Some(paths) }
+}
+
+/// Print one per-tier mix: `<tier> <n> <pct>`, over `total` rows.
+fn print_tier_mix(mix: &BTreeMap<String, usize>, total: usize) {
+    // Rank order, as the map lists them, then anything the map does
+    // not know (an unclassified count, a tier a later map dropped).
+    let order: Vec<String> = boss_core::tiers::tier_map()
+        .map(|m| m.tiers.iter().map(|t| t.name.clone()).collect())
+        .unwrap_or_default();
+    let known = order
+        .iter()
+        .filter_map(|t| mix.get(t).map(|n| (t.clone(), *n)));
+    let unknown = mix
+        .iter()
+        .filter(|(t, _)| !order.contains(t))
+        .map(|(t, n)| (t.clone(), *n));
+    for (tier, n) in known.chain(unknown) {
+        let pct = if total > 0 {
+            (n as f64) * 100.0 / (total as f64)
+        } else {
+            0.0
+        };
+        println!("    {:<14} {:>4}  {:>5.1}%", tier, n, pct);
+    }
+}
+
+/// `boss channels --backfill-tiers [--since <date>]`: read each closed
+/// train's merge commit in this checkout and PATCH `software_tiers`
+/// onto the train. Idempotent — a train carrying the key is skipped —
+/// so the verb can be re-run after every convergence without
+/// rewriting what an arrival stamped live.
+pub async fn backfill_tiers(since: Option<chrono::NaiveDate>) -> Result<()> {
+    let http = reqwest::Client::new();
+    let trains = crate::train::list_all_pages(|offset| {
+        let http = http.clone();
+        async move {
+            crate::gate::api(
+                &http,
+                reqwest::Method::GET,
+                &format!(
+                    "/api/jobs?kind=pr-train&status=closed&limit={}&offset={offset}",
+                    crate::train::PAGE_LIMIT
+                ),
+                None,
+            )
+            .await
+        }
+    })
+    .await?;
+    let (mut written, mut skipped, mut unreadable) = (0usize, 0usize, 0usize);
+    for train in &trains {
+        if !needs_tier_backfill(train, since) {
+            skipped += 1;
+            continue;
+        }
+        let id = train.get("id").and_then(Value::as_str).unwrap_or("?");
+        let merge_ref = merge_ref_of(train).unwrap_or_default();
+        let Some(paths) = merge_commit_paths(merge_ref) else {
+            println!(
+                "  {}  {merge_ref}: not in this checkout or an empty diff — left unread",
+                &id[..8.min(id.len())]
+            );
+            unreadable += 1;
+            continue;
+        };
+        let patch = backfill_patch(&paths, merge_ref);
+        crate::gate::api(
+            &http,
+            reqwest::Method::PATCH,
+            &format!("/api/jobs/{id}/metadata"),
+            Some(patch.clone()),
+        )
+        .await?;
+        println!(
+            "  {}  {merge_ref}: {}",
+            &id[..8.min(id.len())],
+            patch
+                .get(boss_jobs::car::SOFTWARE_TIERS)
+                .map(|v| v.to_string())
+                .unwrap_or_default()
+        );
+        written += 1;
+    }
+    println!(
+        "boss channels --backfill-tiers: {} closed train(s) read; {written} stamped, \
+         {skipped} skipped (already stamped, never merged, or outside --since), \
+         {unreadable} unreadable here",
+        trains.len()
+    );
+    Ok(())
 }
 
 /// A car's changed files, best-effort, from the forge ref against
@@ -666,6 +1023,156 @@ mod tests {
     #[test]
     fn an_empty_change_is_data() {
         assert_eq!(delivery_channel(&[]), DeliveryChannel::Data);
+    }
+
+    // ---- the tiers a change touched (ba429e7f) ----------------------------
+
+    fn paths(ps: &[&str]) -> Vec<String> {
+        ps.iter().map(|p| p.to_string()).collect()
+    }
+
+    #[test]
+    fn a_car_touching_core_and_the_frontend_is_both_with_core_as_the_headline() {
+        let p = paths(&[
+            "crates/core/boss-jobs/src/car.rs",
+            "apps/web/src/it/yard/yard.ts",
+            "apps/web/src/it/yard/yard-production.ts",
+        ]);
+        assert_eq!(software_tiers(&p), ["core", "frontend"]);
+        assert_eq!(software_tier(&software_tiers(&p)).as_deref(), Some("core"));
+        let stamps = tier_stamps(&p);
+        assert_eq!(stamps["software_tiers"], json!(["core", "frontend"]));
+        assert_eq!(stamps["software_tier"], "core");
+        // Beside, not instead of: the delivery channel still reads software.
+        assert_eq!(delivery_channel(&p), DeliveryChannel::Software);
+    }
+
+    #[test]
+    fn a_docs_only_car_is_data_and_a_root_only_car_is_the_empty_set() {
+        let p = paths(&["docs/design/x.md", "docs/architecture-decisions.md"]);
+        assert_eq!(software_tiers(&p), ["data"]);
+        assert_eq!(software_tier(&software_tiers(&p)).as_deref(), Some("data"));
+        // A file no tier claims: the set is empty and there is no
+        // headline — stamped as the empty set (a reading), with the
+        // headline key absent (never null).
+        let root = paths(&["README.md", "Cargo.toml"]);
+        assert!(software_tiers(&root).is_empty());
+        let stamps = tier_stamps(&root);
+        assert_eq!(stamps["software_tiers"], json!([]));
+        assert!(!stamps.contains_key("software_tier"));
+    }
+
+    #[test]
+    fn a_platform_registry_row_is_data_even_though_it_lives_under_infra() {
+        let p = paths(&[
+            "infra/platform/workflows/ship-a-change.toml",
+            "infra/gate.sh",
+        ]);
+        assert_eq!(software_tiers(&p), ["data", "infra"]);
+        // infra is rank 1, data rank 4: the headline is infra.
+        assert_eq!(software_tier(&software_tiers(&p)).as_deref(), Some("infra"));
+    }
+
+    #[test]
+    fn a_train_aggregates_its_cars_tiers_and_names_an_unstamped_car() {
+        let cars = [
+            json!({ "metadata": { "software_tiers": ["core", "frontend"] } }),
+            json!({ "metadata": { "software_tiers": ["frontend"] } }),
+            json!({ "metadata": { "software_tiers": [] } }),
+            json!({ "metadata": {} }),
+        ];
+        let (union, counts) = train_tiers(cars.iter());
+        assert_eq!(union, ["core", "frontend"]);
+        assert_eq!(counts.get("core"), Some(&1));
+        assert_eq!(counts.get("frontend"), Some(&2));
+        assert_eq!(counts.get(UNCLASSIFIED_TIER), Some(&1));
+        // The empty set is a stamp: it is not unclassified.
+        assert_eq!(counts.values().sum::<usize>(), 4);
+    }
+
+    #[test]
+    fn the_landed_mix_counts_trains_per_tier_and_the_unstamped_ones() {
+        let trains = [
+            json!({ "metadata": { "software_tiers": ["core", "data"] } }),
+            json!({ "metadata": { "software_tiers": ["data"] } }),
+            json!({ "metadata": { "delivery_channel": "software" } }),
+        ];
+        let mix = tier_mix(trains.iter());
+        assert_eq!(mix.get("core"), Some(&1));
+        assert_eq!(mix.get("data"), Some(&2));
+        assert_eq!(mix.get(UNCLASSIFIED_TIER), Some(&1));
+    }
+
+    // ---- the backfill's pure parts ----------------------------------------
+
+    fn closed_train(merge_ref: Option<&str>, closed_on: &str, stamped: bool) -> Value {
+        let mut t = json!({
+            "id": "t",
+            "status": "closed",
+            "closed_on": closed_on,
+            "metadata": {},
+            "steps": [],
+        });
+        if let Some(r) = merge_ref {
+            t["steps"] = json!([{ "spec_slug": "merged", "title": "DEPARTED — merged into main",
+                                  "status": "completed", "metadata": { "merge_ref": r } }]);
+        }
+        if stamped {
+            t["metadata"]["software_tiers"] = json!(["core"]);
+        }
+        t
+    }
+
+    #[test]
+    fn the_merge_ref_is_read_off_the_arrival_report_or_the_merged_step() {
+        let by_step = closed_train(Some("d284168bcd78"), "2026-09-19", false);
+        assert_eq!(merge_ref_of(&by_step), Some("d284168bcd78"));
+        let mut by_report = by_step.clone();
+        by_report["metadata"]["arrival_report"] = json!({ "merged_sha": "d284168bcd78aaaa" });
+        assert_eq!(merge_ref_of(&by_report), Some("d284168bcd78aaaa"));
+        assert_eq!(merge_ref_of(&closed_train(None, "2026-09-19", false)), None);
+    }
+
+    #[test]
+    fn the_backfill_skips_a_stamped_train_a_never_merged_one_and_one_outside_the_window() {
+        let since = "2026-09-10".parse::<chrono::NaiveDate>().unwrap();
+        // Idempotent: a train carrying the key is never rewritten.
+        assert!(!needs_tier_backfill(
+            &closed_train(Some("abc"), "2026-09-19", true),
+            None
+        ));
+        // Never merged (cancelled): nothing to read.
+        assert!(!needs_tier_backfill(
+            &closed_train(None, "2026-09-19", false),
+            None
+        ));
+        // Merged, unstamped: read it — inside the window or with none.
+        assert!(needs_tier_backfill(
+            &closed_train(Some("abc"), "2026-09-19", false),
+            None
+        ));
+        assert!(needs_tier_backfill(
+            &closed_train(Some("abc"), "2026-09-10", false),
+            Some(since)
+        ));
+        assert!(!needs_tier_backfill(
+            &closed_train(Some("abc"), "2026-09-09", false),
+            Some(since)
+        ));
+    }
+
+    #[test]
+    fn a_name_only_diff_is_one_path_per_line_and_the_patch_names_its_source() {
+        let out = "apps/web/src/a.ts\ncrates/core/boss-jobs/src/lib.rs\n\n";
+        let paths = paths_of_name_only(out);
+        assert_eq!(
+            paths,
+            ["apps/web/src/a.ts", "crates/core/boss-jobs/src/lib.rs"]
+        );
+        let patch = backfill_patch(&paths, "d284168bcd78");
+        assert_eq!(patch["software_tiers"], json!(["core", "frontend"]));
+        assert_eq!(patch["software_tier"], "core");
+        assert_eq!(patch["software_tiers_source"], "merge-commit d284168bcd78");
     }
 
     // ---- the train's channel: the heaviest of its cars' (cffef553) ----

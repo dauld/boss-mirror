@@ -460,8 +460,20 @@ enum Commands {
     },
     /// Where the IT department's work comes from — the input-channel
     /// mix (user-feedback vs monitoring/error-discovery), the algedonic
-    /// reading over recent work (docs/design/it-delivery-channels.md).
-    Channels,
+    /// reading over recent work (docs/design/it-delivery-channels.md) —
+    /// plus the delivery mix over the dock and the per-tier mix
+    /// (ba429e7f): is the core settling while work moves outward.
+    Channels {
+        /// Read each CLOSED train's merge commit in this checkout and
+        /// stamp software_tiers on the train (idempotent: a train that
+        /// carries it is skipped) instead of printing the mixes.
+        #[arg(long)]
+        backfill_tiers: bool,
+        /// The window: trains closed on or after this date (YYYY-MM-DD).
+        /// Default for the mix: the last 30 days; for the backfill: all.
+        #[arg(long)]
+        since: Option<chrono::NaiveDate>,
+    },
     /// A conflict-skipped car back aboard, with the traps encoded:
     /// new branch from current main (never a force-push), rebase with
     /// ONE human stop on a real conflict, gate, receipt machine-copied
@@ -1387,7 +1399,16 @@ async fn main() -> Result<()> {
                 dispatch::run(packet, step, model, budget, effort).await
             }
         }
-        Commands::Channels => channels::run().await,
+        Commands::Channels {
+            backfill_tiers,
+            since,
+        } => {
+            if backfill_tiers {
+                channels::backfill_tiers(since).await
+            } else {
+                channels::run(since, chrono::Utc::now()).await
+            }
+        }
         Commands::Design {
             title,
             markdown,

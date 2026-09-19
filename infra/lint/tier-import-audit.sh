@@ -8,9 +8,20 @@
 # domain rebuilder, boss-cli exposes operator commands across
 # domains, etc).
 #
-# Walks every Cargo.toml under crates/core/ and reports any
-# `path = "../../modules/..."` or `path = "../../tenants/..."`
-# reference. Exit code 0 = clean, 1 = violations.
+# Walks every Cargo.toml under the core tier's root and reports any
+# `path = "../../<a modules or tenants directory>/..."` reference.
+# Exit code 0 = clean, 1 = violations.
+#
+# WHERE THE ROOTS COME FROM (design 01c3cc3f, 2026-09-19). Until then
+# this script carried the core root and the forbidden directories as
+# its own text — the only place in the tree that could answer "which
+# tier is this path in", and about to be joined by two more copies
+# (the arrival classifier, the hosting edit level). The map is now
+# infra/platform/tiers.toml, read here through lib/tiers.sh: the core
+# root is the `core` tier's prefixes, and the forbidden edges are the
+# `modules` and `tenants` tiers' directories under the crates root,
+# relative to a core crate. A collapse, not a pin — this file holds no
+# prefix of its own, and boss-testing/tests/tiers_sh.rs refuses one.
 #
 # Wire into CI by adding to the PR-time check matrix; today this
 # script is invoked manually + on-demand.
@@ -20,11 +31,32 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 # shellcheck source=infra/lint/lib/scanned.sh
 . infra/lint/lib/scanned.sh || exit 3
+# shellcheck source=infra/lint/lib/tiers.sh
+. infra/lint/lib/tiers.sh || exit 3
+
+# The core tier's roots, from the map; a map that names no core tier
+# cannot be audited against, and says so (exit 3: the machine could
+# not answer, lib/git-answer.sh's meaning).
+core_roots=$(tier_paths core) || { echo "tier-import-audit: the tier map names no core tier" >&2; exit 3; }
+crates_root=${core_roots%%/*}
+# The directories a core crate must not reach by `../../<dir>/`: every
+# forbidden tier's prefix under the same crates root, relative to it,
+# joined into one alternation for the grep below.
+forbidden=
+for tier in modules tenants; do
+  for prefix in $(tier_paths "$tier"); do
+    case "$prefix" in
+      "$crates_root"/*) dir=${prefix#*/}; forbidden="${forbidden:+$forbidden|}${dir%/}" ;;
+    esac
+  done
+done
+[ -n "$forbidden" ] || { echo "tier-import-audit: the tier map names no forbidden tier under $crates_root/" >&2; exit 3; }
+crate_tomls() { find $core_roots -name Cargo.toml -type f; }
 
 violations=0
-for toml in $(find crates/core -name Cargo.toml -type f); do
+for toml in $(crate_tomls); do
   src_crate=$(basename "$(dirname "$toml")")
-  hits=$(grep -nE 'path\s*=\s*"\.\./\.\./(modules|tenants)/' "$toml" 2>/dev/null || true)
+  hits=$(grep -nE "path\\s*=\\s*\"\\.\\./\\.\\./($forbidden)/" "$toml" 2>/dev/null || true)
   if [ -n "$hits" ]; then
     echo "VIOLATION: core crate \"$src_crate\" depends on a non-core crate"
     echo "$hits" | sed 's/^/  /'
@@ -57,8 +89,8 @@ if [ -d "$SCHEMA_DIR" ]; then
 fi
 
 if [ "$violations" -eq 0 ]; then
-  lint_scanned tier-import-audit "$(find crates/core -name Cargo.toml | wc -l | tr -d ' ')" "core crate(s)"
-  echo "tier-import-audit: clean ($(find crates/core -name Cargo.toml | wc -l) core crates; no cross-tier crate imports or core->module schema FKs)"
+  lint_scanned tier-import-audit "$(crate_tomls | wc -l | tr -d ' ')" "core crate(s)"
+  echo "tier-import-audit: clean ($(crate_tomls | wc -l | tr -d ' ') core crates; no cross-tier crate imports or core->module schema FKs)"
   exit 0
 else
   echo

@@ -171,6 +171,13 @@ struct AutoParkInputs {
     /// on the gate-run only, so a car that arrived through a re-gate or
     /// a rerail left its run at `building`.
     agent_run: serde_json::Map<String, Value>,
+    /// THE TIERS THIS CAR TOUCHES (ba429e7f, design 01c3cc3f): the
+    /// gate-run's `software_tiers` + `software_tier`, stamped by `boss
+    /// gate` from the same diff as `delivery_channel` and copied onto
+    /// the car verbatim (`car::tier_stamps`) so the arrival can
+    /// aggregate a train's tiers without a checkout. Empty when the
+    /// gate could not classify the diff: absent, never nulled.
+    tiers: serde_json::Map<String, Value>,
 }
 
 /// PURE: what a green verdict stamps on a gate-run that re-gated a red
@@ -204,6 +211,7 @@ fn refresh_patch(inputs: &AutoParkInputs, note: &str) -> Value {
         m.extend(inputs.proof.clone());
         m.extend(inputs.flake.clone());
         m.extend(inputs.agent_run.clone());
+        m.extend(inputs.tiers.clone());
         m.extend(car::regate_prose(
             &inputs.summary,
             &inputs.excludes,
@@ -303,6 +311,7 @@ fn auto_park_inputs(
             .and_then(|v| v.as_object().cloned())
             .unwrap_or_default(),
         agent_run: agent_run_of(md),
+        tiers: car::tier_stamps(md),
     })
 }
 
@@ -471,6 +480,7 @@ fn adopt_patch(car: &Value, inputs: &AutoParkInputs) -> Value {
     patch.extend(inputs.item_provenance.clone());
     patch.extend(inputs.flake.clone());
     patch.extend(inputs.agent_run.clone());
+    patch.extend(inputs.tiers.clone());
     patch.extend(clear_stale_item_answer(car, inputs));
     if let Some(dc) = inputs.delivery_channel.as_deref() {
         patch.insert("delivery_channel".to_string(), json!(dc));
@@ -717,6 +727,7 @@ fn car_body_with_proof(inputs: &AutoParkInputs, owner: &str) -> Value {
         md.extend(inputs.item_provenance.clone());
         md.extend(inputs.flake.clone());
         md.extend(inputs.agent_run.clone());
+        md.extend(inputs.tiers.clone());
     }
     body
 }
@@ -1372,6 +1383,43 @@ mod tests {
             );
             assert!(refresh_patch(&got, "n").get("agent_run").is_none());
             assert!(adopt_patch(&car, &got).get("agent_run").is_none());
+        }
+    }
+
+    /// THE TIERS THE GATE READ RIDE ONTO THE CAR (ba429e7f, design
+    /// 01c3cc3f). `boss gate` stamps `software_tiers` + `software_tier`
+    /// beside `delivery_channel` from the same diff; the handler has no
+    /// checkout to re-derive them, so they are COPIED — on all three park
+    /// paths, verbatim, the empty set included — and a gate-run without
+    /// them writes nothing and nulls nothing.
+    #[test]
+    fn the_gates_tier_stamps_ride_onto_the_car_on_every_park_path() {
+        let gr = gate_run(json!({
+            "park_summary": "s", "park_excludes": "e", "park_test": "t", "park_verified": "v",
+            "software_tiers": ["core", "frontend"], "software_tier": "core",
+        }));
+        let got = auto_park_inputs(&gr, &green_step_meta()).expect("parks");
+        let car = json!({ "metadata": { "branch": "fix/x" } });
+        for md in [
+            car_body_with_proof(&got, "emp-owner")["metadata"].clone(),
+            refresh_patch(&got, "n"),
+            adopt_patch(&car, &got),
+        ] {
+            assert_eq!(md["software_tiers"], json!(["core", "frontend"]));
+            assert_eq!(md["software_tier"], "core");
+        }
+
+        let plain = gate_run(json!({
+            "park_summary": "s", "park_excludes": "e", "park_test": "t", "park_verified": "v",
+        }));
+        let got = auto_park_inputs(&plain, &green_step_meta()).expect("parks");
+        for md in [
+            car_body_with_proof(&got, "o")["metadata"].clone(),
+            refresh_patch(&got, "n"),
+            adopt_patch(&car, &got),
+        ] {
+            assert!(md.get("software_tiers").is_none());
+            assert!(md.get("software_tier").is_none());
         }
     }
 
@@ -2117,6 +2165,7 @@ mod building_car_tests {
             proof: car::proof_intent(Some("echo hi"), Some("hi"), None),
             flake: serde_json::Map::new(),
             agent_run: serde_json::Map::new(),
+            tiers: serde_json::Map::new(),
         };
         let now = chrono::DateTime::parse_from_rfc3339("2026-09-10T18:30:00Z")
             .unwrap()
@@ -2176,6 +2225,7 @@ mod building_car_tests {
             proof: serde_json::Map::new(),
             flake: serde_json::Map::new(),
             agent_run: serde_json::Map::new(),
+            tiers: serde_json::Map::new(),
         };
         let patch = adopt_patch(&building(), &inputs);
         assert_eq!(
@@ -2230,6 +2280,7 @@ mod building_car_tests {
             proof: serde_json::Map::new(),
             flake: serde_json::Map::new(),
             agent_run: serde_json::Map::new(),
+            tiers: serde_json::Map::new(),
         };
         let patch = adopt_patch(&opened, &inputs);
         assert_explicit_null!(
@@ -2298,6 +2349,7 @@ mod building_car_tests {
             proof: serde_json::Map::new(),
             flake: serde_json::Map::new(),
             agent_run: serde_json::Map::new(),
+            tiers: serde_json::Map::new(),
         };
 
         // ONE PIECE, stated at open and confirmed at the gate.
@@ -2371,6 +2423,7 @@ mod building_car_tests {
                 proof: serde_json::Map::new(),
                 flake: serde_json::Map::new(),
                 agent_run: serde_json::Map::new(),
+                tiers: serde_json::Map::new(),
             }
         };
         let opened = |key: &str, value: &str| {
@@ -2444,6 +2497,7 @@ mod building_car_tests {
                 proof: serde_json::Map::new(),
                 flake: serde_json::Map::new(),
                 agent_run: serde_json::Map::new(),
+                tiers: serde_json::Map::new(),
             }
         };
         // The gate names the closing edge too: agreement, not conflict.
@@ -2495,6 +2549,7 @@ mod building_car_tests {
             proof: car::proof_intent(Some("echo hi"), Some("hi"), None),
             flake: serde_json::Map::new(),
             agent_run: serde_json::Map::new(),
+            tiers: serde_json::Map::new(),
         };
         let patch = adopt_patch(&building(), &inputs);
         assert!(

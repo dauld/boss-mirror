@@ -2126,10 +2126,22 @@ impl Conductor {
         // belonged anyway. `summary` is written as `arrival_summary`
         // because a bare `summary` on job metadata is a name anything
         // could want.
+        // THE TRAIN'S TIERS (ba429e7f, design 01c3cc3f), beside the
+        // report: the union of its cars' `software_tiers` and the cars
+        // per tier — one row per train for the series `boss channels`
+        // and the production view read, written at arrival because
+        // that is when the consist is final. A car parked before the
+        // stamp existed counts as unclassified rather than as a tier.
+        let (tiers, counts) = crate::channels::train_tiers(cars.iter());
         self.api(
             Method::PATCH,
             &format!("/api/jobs/{tid}/metadata"),
-            Some(json!({"arrival_report": report, "arrival_summary": summary})),
+            Some(json!({
+                "arrival_report": report,
+                "arrival_summary": summary,
+                boss_jobs::car::SOFTWARE_TIERS: tiers,
+                "software_tier_counts": counts,
+            })),
         )
         .await?;
         log(format!(
@@ -4403,12 +4415,19 @@ mod tests {
         // A landed car: closed + merged, its branch and boarded head on
         // record, so `deletable_branches` yields it and the guard reads
         // Delete.
+        // Car B carries the gate's tier stamp (ba429e7f); car A does
+        // not — so the arrival PATCH this harness records shows both
+        // the union and the unclassified count.
         let car = |tid: &str, branch: &str| {
-            json!({
+            let mut c = json!({
                 "id": format!("car-{tid}"), "kind": "ship-a-change", "status": "closed",
                 "metadata": { "train": tid, "branch": branch, "outcome": "merged", "boarded_head": HEAD },
                 "steps": []
-            })
+            });
+            if tid == "tB" {
+                c["metadata"]["software_tiers"] = json!(["core", "frontend"]);
+            }
+            c
         };
 
         let train_a = train("tA");
@@ -4432,6 +4451,7 @@ mod tests {
 
         let list_route = closed_list.clone();
         let by_id_get = by_id.clone();
+        let patched: Arc<Mutex<Vec<(String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
         let app = Router::new()
             .route(
                 "/api/jobs",
@@ -4459,13 +4479,17 @@ mod tests {
             )
             .route(
                 "/api/jobs/{id}/metadata",
-                axum::routing::patch(|Path(id): Path<String>, _b: Json<Value>| async move {
-                    // Train A's arrival report cannot be written — the
-                    // persistent per-train failure this test isolates.
-                    if id == "tA" {
-                        (StatusCode::INTERNAL_SERVER_ERROR, "boom").into_response()
-                    } else {
-                        Json(json!({})).into_response()
+                axum::routing::patch({
+                    let patched = patched.clone();
+                    move |Path(id): Path<String>, Json(b): Json<Value>| async move {
+                        // Train A's arrival report cannot be written — the
+                        // persistent per-train failure this test isolates.
+                        if id == "tA" {
+                            (StatusCode::INTERNAL_SERVER_ERROR, "boom").into_response()
+                        } else {
+                            patched.lock().unwrap().push((id, b));
+                            Json(json!({})).into_response()
+                        }
                     }
                 }),
             );
@@ -4502,6 +4526,20 @@ mod tests {
             !deleted.contains(&"fix/a".to_string()),
             "train A aborted before its branch loop, so its branch is untouched \
              this pass and retried next: {deleted:?}"
+        );
+
+        // THE TRAIN'S TIERS RIDE THE ARRIVAL PATCH (ba429e7f): train B's
+        // report carries the union of its cars' stamps and the cars per
+        // tier, beside the report — one row per train for the series.
+        let patched = patched.lock().unwrap().clone();
+        let (_, body) = patched
+            .iter()
+            .find(|(id, b)| id == "tB" && b.get("arrival_report").is_some())
+            .expect("train B's arrival report was written");
+        assert_eq!(body["software_tiers"], json!(["core", "frontend"]));
+        assert_eq!(
+            body["software_tier_counts"],
+            json!({ "core": 1, "frontend": 1 })
         );
     }
 

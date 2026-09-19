@@ -455,6 +455,37 @@ pub fn item_provenance(
     m
 }
 
+/// The SET of tiers a change touched (`infra/platform/tiers.toml`,
+/// design 01c3cc3f), sorted, stamped on the gate-run by `boss gate`
+/// beside `delivery_channel` and carried onto the car — a sorted JSON
+/// array of tier names, empty for a change no tier claims.
+pub const SOFTWARE_TIERS: &str = "software_tiers";
+/// The headline among [`SOFTWARE_TIERS`]: the lowest-ranked tier the
+/// change touched (core wins over frontend), the way `delivery_channel`
+/// is the heaviest of a mixed car's paths. Absent when the set is empty.
+pub const SOFTWARE_TIER: &str = "software_tier";
+
+/// The tier stamps a gate-run carries, copied VERBATIM for the car —
+/// the same copy-don't-rebuild rule the receipt and the proof intent
+/// live by (ba429e7f, 2026-09-19). A set that is not an array, or a
+/// headline that is not a non-empty string, is omitted (never nulled:
+/// the metadata door deletes a null key, and a re-gate that classified
+/// nothing must not strip what the first park recorded).
+pub fn tier_stamps(md: &serde_json::Map<String, Value>) -> serde_json::Map<String, Value> {
+    let mut m = serde_json::Map::new();
+    if let Some(set) = md.get(SOFTWARE_TIERS).filter(|v| v.is_array()) {
+        m.insert(SOFTWARE_TIERS.to_string(), set.clone());
+    }
+    if let Some(head) = md
+        .get(SOFTWARE_TIER)
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+    {
+        m.insert(SOFTWARE_TIER.to_string(), json!(head));
+    }
+    m
+}
+
 /// A step by its registry slug, falling back to its title. The same
 /// lookup the conductor uses; one definition (CLAUDE.md 9a).
 pub fn find_step<'a>(job: &'a Value, slug: &str, title: &str) -> Option<&'a Value> {
@@ -885,6 +916,33 @@ mod tests {
         let e = proof_intent(None, None, Some("event-bound — the next yard cancel"));
         assert_eq!(e.len(), 1);
         assert_eq!(e[PROOF_EVENT], "event-bound — the next yard cancel");
+    }
+
+    /// THE TIER STAMPS ARE COPIED, NOT REBUILT (ba429e7f): the set rides
+    /// as the gate-run wrote it, an empty set included (a root-only
+    /// change touched no tier, and that is a reading); a headline that
+    /// is blank or a set that is not an array is left out, never nulled.
+    #[test]
+    fn tier_stamps_copy_the_set_and_headline_verbatim_and_omit_what_is_malformed() {
+        let md = json!({
+            "software_tiers": ["core", "frontend"],
+            "software_tier": "core",
+            "delivery_channel": "software",
+        });
+        let t = tier_stamps(md.as_object().unwrap());
+        assert_eq!(t.len(), 2);
+        assert_eq!(t[SOFTWARE_TIERS], json!(["core", "frontend"]));
+        assert_eq!(t[SOFTWARE_TIER], "core");
+        assert!(!t.contains_key("delivery_channel"));
+
+        let empty = json!({ "software_tiers": [] });
+        let t = tier_stamps(empty.as_object().unwrap());
+        assert_eq!(t[SOFTWARE_TIERS], json!([]));
+        assert!(!t.contains_key(SOFTWARE_TIER));
+
+        let bad = json!({ "software_tiers": "core", "software_tier": " " });
+        assert!(tier_stamps(bad.as_object().unwrap()).is_empty());
+        assert!(tier_stamps(&serde_json::Map::new()).is_empty());
     }
 
     /// PROVENANCE WITHOUT THE CLOSE. Same write-only-what-was-stated

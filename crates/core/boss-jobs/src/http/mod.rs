@@ -35,6 +35,7 @@ mod kinds;
 mod plugins;
 mod queue_age;
 mod refusals;
+mod regions;
 mod sim_clock;
 mod stations;
 mod steps;
@@ -47,6 +48,7 @@ use kinds::*;
 use plugins::*;
 use queue_age::*;
 use refusals::*;
+use regions::*;
 use sim_clock::*;
 use stations::*;
 use steps::*;
@@ -191,6 +193,11 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
         // rows, recent arrivals. Read-only, own row shape; Job and Step
         // untouched, `terminal-report` and `queue-age` the precedents.
         .route("/api/yard/status", get(yard_status::<R, B>))
+        // The IT system map's KPI read (design 0524fc95, car 1): eight
+        // regions with count / state / trend, computed from the SAME
+        // pass as the status above so the map, the yard and `boss
+        // orient` cannot disagree.
+        .route("/api/yard/regions", get(yard_regions::<R, B>))
         .route("/api/jobs", get(list_jobs::<R, B>))
         .route("/api/jobs", post(create_job::<R, B>))
         .route("/api/jobs/{id}", get(get_job::<R, B>))

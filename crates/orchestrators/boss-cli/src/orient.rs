@@ -298,59 +298,16 @@ fn bases_behind(checks: &[(String, Option<i32>)]) -> Vec<&str> {
 /// set, and the tail line names the flag that shows the rest.
 pub(crate) const ORPHANS_SHOWN: usize = 12;
 
-/// Where a landed, unproven car stands — the yard's inspection shed
-/// read in words (`apps/web/src/it/yard/yard-shed.ts`, `shedPlace`).
-/// Four landed cars sat at `Proven in prod` on 2026-09-12 with a
-/// recorded proof EVENT rather than a probe, which is correct: each
-/// can only be proven when a real fault or a real timer firing happens.
-/// But `boss orient` did not list them at all, and the yard's counter
-/// once rendered them exactly like a car nobody proved (9e3e07aa). A
-/// reader must be able to tell "waiting on the next red train" from
-/// "nobody ran boss prove"; the difference is the whole question. The
-/// three places are disjoint and total, the probe winning over an event
-/// (a probe can be run; an event has to happen).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Shed {
-    /// A probe is recorded; `last` is the failed attempt's `why`, if any
-    /// (a succeeding attempt completes the step and the car leaves).
-    ProbePending { last: Option<String> },
-    /// The probe ran and exited 75: NOT YET — the world cannot judge the
-    /// claim until something happens, and the probe said what. Early,
-    /// not wrong; the daily recheck runs it again.
-    ProbeNotYet { said: String },
-    /// Only an event is recorded: prose naming what has to happen.
-    WaitingOn(String),
-    /// Neither — the forgotten case, and the only troubled one.
-    Unproven,
-}
+/// Where a landed, unproven car stands — `boss_jobs::regions::ShedPlace`,
+/// the ONE classification the yard's regions read and this verb share
+/// (design 0524fc95). Until 2026-09-19 it lived here alone; the read
+/// that bubbles the shed's state up to the map needed the same rule,
+/// and a second copy would have been the drift the design exists to
+/// end (CLAUDE.md §9a).
+pub(crate) use boss_jobs::regions::ShedPlace as Shed;
 
 pub(crate) fn shed_place(car: &Value) -> Shed {
-    let probe = md_str(car, "proof_probe");
-    let event = md_str(car, "proof_event");
-    if !probe.is_empty() {
-        let attempt = car.pointer("/metadata/proof_attempt");
-        let not_yet = attempt
-            .map(|a| {
-                a.get("not_yet").and_then(Value::as_bool) == Some(true)
-                    || a.get("exit").and_then(Value::as_i64) == Some(75)
-            })
-            .unwrap_or(false);
-        let last = attempt
-            .and_then(|a| a.get("why"))
-            .and_then(Value::as_str)
-            .filter(|w| !w.is_empty())
-            .map(str::to_string);
-        if not_yet {
-            return Shed::ProbeNotYet {
-                said: last.unwrap_or_else(|| "the probe said not yet".to_string()),
-            };
-        }
-        Shed::ProbePending { last }
-    } else if !event.is_empty() {
-        Shed::WaitingOn(event.to_string())
-    } else {
-        Shed::Unproven
-    }
+    boss_jobs::regions::shed_place(car.get("metadata").unwrap_or(&Value::Null))
 }
 
 /// One terminal line's worth of a probe verdict or an event's prose.
@@ -631,6 +588,75 @@ pub(crate) fn my_work_section(
     out
 }
 
+/// The REGIONS header — the IT system map's eight KPI cards, one line
+/// each, from `GET /api/yard/regions` (design 0524fc95, car 1). The
+/// server owns these numbers now: the count, the clear/busy/troubled
+/// state and the trend are ONE definition in `boss_jobs::regions`, the
+/// same one the map reads, so this verb and the yard cannot disagree
+/// about how many trains are in transit or what the time at CI is. The
+/// lanes below still list WHAT is there — the header says how much and
+/// whether it is trouble.
+///
+/// Pure over the payload, so the shape is testable; a state other than
+/// `clear` is printed upper-case so trouble reads as trouble. The
+/// `window_hours` the server answered rides the heading, because a
+/// rate without its window is not a number.
+pub(crate) fn region_lines(map: &Value) -> Vec<String> {
+    let hours = map.get("window_hours").and_then(Value::as_i64).unwrap_or(0);
+    let mut out = vec![format!(
+        "  REGIONS — the IT system map over the last {hours}h (count · state · trend)"
+    )];
+    let regions = map
+        .get("regions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for r in &regions {
+        let name = r.get("name").and_then(Value::as_str).unwrap_or("?");
+        let count = match r.get("count") {
+            Some(Value::Number(n)) => n.to_string(),
+            _ => "?".to_string(),
+        };
+        let bound = r
+            .get("bound")
+            .and_then(Value::as_i64)
+            .map(|b| format!(" of {b}"))
+            .unwrap_or_default();
+        let state = r.get("state").and_then(Value::as_str).unwrap_or("?");
+        let state = if state == "clear" {
+            state.to_string()
+        } else {
+            state.to_uppercase()
+        };
+        let why = r.get("why").and_then(Value::as_str).unwrap_or("");
+        out.push(format!(
+            "    {name:<12} {count:>5}{bound:<6} {state:<9} {}  — {why}",
+            trend_text(r.get("trend").unwrap_or(&Value::Null))
+        ));
+    }
+    out
+}
+
+/// `dock wait 1.5h (was 2.0h)` / `arrivals 17/day (was 12/day)` /
+/// `time at CI — (was —)`: the trend as a phrase, with a null half
+/// printed as `—` rather than as a zero.
+fn trend_text(t: &Value) -> String {
+    let metric = t.get("metric").and_then(Value::as_str).unwrap_or("?");
+    let unit = t.get("unit").and_then(Value::as_str).unwrap_or("");
+    let one = |key: &str| -> String {
+        match t.get(key).and_then(Value::as_f64) {
+            None => "—".to_string(),
+            Some(v) => match unit {
+                "hours" => format!("{v:.1}h"),
+                "minutes" => format!("{v:.0}m"),
+                "per day" => format!("{v:.1}/day"),
+                _ => format!("{v:.1} {unit}"),
+            },
+        }
+    };
+    format!("{metric} {} (was {})", one("current"), one("previous"))
+}
+
 pub async fn run(all: bool) -> Result<()> {
     let http = reqwest::Client::new();
 
@@ -648,6 +674,21 @@ pub async fn run(all: bool) -> Result<()> {
             crate::built_from::origin_main_head().as_deref()
         )
     );
+
+    // THE REGIONS — the map's numbers, from the server's one definition
+    // (design 0524fc95). A server without the read (older than this
+    // verb) says so and the approach still prints; the lanes below are
+    // unchanged and still list what is there.
+    println!();
+    match api(&http, reqwest::Method::GET, "/api/yard/regions", None).await {
+        Ok(Some(map)) => {
+            for line in region_lines(&map) {
+                println!("{line}");
+            }
+        }
+        Ok(None) => println!("  REGIONS — unavailable: the read answered nothing"),
+        Err(e) => println!("  REGIONS — unavailable: {e}"),
+    }
 
     // Trains in transit.
     let trains = rows(
@@ -1869,5 +1910,140 @@ mod tests {
         assert!(refused.contains("MY WORK — REFUSED"), "{refused}");
         assert!(refused.contains("BOSS_ACTOR"), "{refused}");
         assert!(refused.contains(".config/boss/actor"), "{refused}");
+    }
+
+    /// `boss orient` reads the map from the server rather than deriving
+    /// the numbers itself (design 0524fc95): the fixture is built with
+    /// the SERVER's own types, so a renamed field on `boss_jobs::regions`
+    /// breaks this before it can print `?` at an operator.
+    #[test]
+    fn the_regions_header_prints_the_servers_eight_cards() {
+        use boss_jobs::regions::{Region, RegionState, Regions, Trend};
+        let trend = |metric: &str, unit: &str, cur: Option<f64>, prev: Option<f64>| Trend {
+            metric: metric.into(),
+            unit: unit.into(),
+            current: cur,
+            previous: prev,
+            samples: usize::from(cur.is_some()),
+            previous_samples: usize::from(prev.is_some()),
+        };
+        let region =
+            |name: &str, count: Option<usize>, bound: Option<usize>, state, why: &str, trend| {
+                Region {
+                    name: name.into(),
+                    count,
+                    bound,
+                    state,
+                    why: why.into(),
+                    trend,
+                }
+            };
+        let map = Regions {
+            window_hours: 24,
+            regions: vec![
+                region(
+                    "dock",
+                    Some(2),
+                    Some(4),
+                    RegionState::Clear,
+                    "2 cars parked",
+                    trend("dock wait", "hours", Some(1.5), Some(2.0)),
+                ),
+                region(
+                    "gates",
+                    Some(3),
+                    Some(3),
+                    RegionState::Busy,
+                    "3 of 3 bays in use — at the bound",
+                    trend("gate duration", "minutes", Some(14.0), None),
+                ),
+                region(
+                    "track",
+                    Some(1),
+                    Some(1),
+                    RegionState::Troubled,
+                    "blocked: train #470",
+                    trend("time at CI", "minutes", None, None),
+                ),
+                region(
+                    "shed",
+                    Some(0),
+                    None,
+                    RegionState::Clear,
+                    "every landed car is proven",
+                    trend("proven", "per day", Some(17.0), Some(12.0)),
+                ),
+                region(
+                    "arrivals",
+                    Some(17),
+                    None,
+                    RegionState::Clear,
+                    "17 arrivals in 24h",
+                    trend("arrivals", "per day", Some(17.0), Some(12.0)),
+                ),
+                region(
+                    "garage",
+                    Some(0),
+                    None,
+                    RegionState::Clear,
+                    "nothing held, stranded or red",
+                    trend("reds", "per day", Some(0.0), Some(1.0)),
+                ),
+                region(
+                    "receiving",
+                    None,
+                    None,
+                    RegionState::Troubled,
+                    "the workflow registry that names the inbound kinds could not be read",
+                    trend("inbound", "per day", None, None),
+                ),
+                region(
+                    "marshalling",
+                    Some(4),
+                    None,
+                    RegionState::Busy,
+                    "4 packets standing at 2 stations",
+                    trend("served", "per day", Some(6.0), Some(6.0)),
+                ),
+            ],
+        };
+        let lines = region_lines(&serde_json::to_value(&map).unwrap());
+        assert_eq!(
+            lines.len(),
+            9,
+            "a heading and eight cards:\n{}",
+            lines.join("\n")
+        );
+        assert!(lines[0].contains("last 24h"), "{}", lines[0]);
+        assert!(
+            lines[1].starts_with("    dock ")
+                && lines[1].contains(" 2 of 4 ")
+                && lines[1].contains("clear")
+                && lines[1].contains("dock wait 1.5h (was 2.0h)"),
+            "{}",
+            lines[1]
+        );
+        assert!(
+            lines[2].contains("BUSY") && lines[2].contains("gate duration 14m (was —)"),
+            "{}",
+            lines[2]
+        );
+        assert!(
+            lines[3].contains("TROUBLED")
+                && lines[3].contains("blocked: train #470")
+                && lines[3].contains("time at CI — (was —)"),
+            "{}",
+            lines[3]
+        );
+        assert!(
+            lines[5].contains("arrivals 17.0/day (was 12.0/day)"),
+            "{}",
+            lines[5]
+        );
+        assert!(
+            lines[7].contains("    receiving        ?") && lines[7].contains("TROUBLED"),
+            "{}",
+            lines[7]
+        );
     }
 }
