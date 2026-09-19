@@ -125,3 +125,28 @@ async fn a_held_calendar_is_kept_by_default_and_replaced_only_under_take() {
         [day("2026-12-25")].into_iter().collect::<BTreeSet<_>>()
     );
 }
+
+/// The list read `boss tenant export` writes the file from (backlog
+/// e618f3ac): every code the tables hold, sorted, each with its closed
+/// set — so the export of an instance is the batch's own input.
+#[tokio::test(flavor = "multi_thread")]
+async fn list_answers_every_code_sorted_with_its_closed_set() {
+    let db = TestDb::new().await;
+    let cal = PgCalendar::new(db.pool.clone());
+    let mut second = calendar("Second", &[6], &["2026-11-26"]);
+    second.code = "aaa-second".into();
+    let first = calendar("Founder", &[5, 6], &["2026-12-25", "2026-01-01"]);
+    cal.publish_business_calendars(&[first, second], PublishMode::InsertIfAbsent)
+        .await
+        .unwrap();
+    let rows = cal.list_business_calendars().await.unwrap();
+    let codes: Vec<&str> = rows.iter().map(|c| c.code.as_str()).collect();
+    assert_eq!(codes, ["aaa-second", "acme-founder"]);
+    assert_eq!(
+        rows[1].closed,
+        [day("2026-01-01"), day("2026-12-25")]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    );
+    assert_eq!(rows[0].weekend, [6u8].into_iter().collect::<BTreeSet<_>>());
+}

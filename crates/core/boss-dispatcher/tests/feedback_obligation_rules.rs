@@ -171,7 +171,17 @@ async fn a_merged_car_fires_the_completion_with_its_edge_and_branches() {
         results.iter().all(|r| r.outcome.is_ok()),
         "dispatch reported a failure: {results:?}"
     );
-    assert_eq!(handler.calls().await.len(), 1, "the completion fired once");
+    // Counted BY RULE, not by handler name: `jobs.complete_linked_step`
+    // is shared — `agent-run-lands-on-car-merged` (c87fb59b car 3)
+    // follows a different edge off the same close — and this test is
+    // about THIS rule firing once, exactly as the comment above says.
+    let fired = handler
+        .calls()
+        .await
+        .into_iter()
+        .filter(|c| c.rule_name == COMPLETE_RULE)
+        .count();
+    assert_eq!(fired, 1, "the completion fired once");
 }
 
 /// An abandoned car answers nothing. The packet stays open for

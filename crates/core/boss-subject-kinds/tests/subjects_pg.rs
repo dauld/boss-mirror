@@ -394,3 +394,57 @@ async fn the_mint_door_keeps_a_held_label_by_default_and_overwrites_only_under_t
     assert_eq!(v["updated"][0]["changes"][0]["to"], "Acme, LLC");
     assert_eq!(label().await.as_deref(), Some("Acme, LLC"));
 }
+
+/// The list read `boss tenant export` writes `tenant.toml`'s
+/// display_name from (design e187198f car 3, backlog e618f3ac).
+/// Measured 2026-09-18: the company Subject lives in `subjects` (kind
+/// `company`, the label the mint door lands), and the only read was
+/// the per-id exists probe — an export could confirm a company it
+/// already knew and never learn its label. `GET /api/subjects/{kind}`
+/// is every identity row of the kind, sorted by id, with its label.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kind_lists_every_identity_row_sorted_with_its_label() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    let db = TestDb::new().await;
+    upsert_subject(&db.pool, "company", "zeta", Some("Zeta, LLC"))
+        .await
+        .unwrap();
+    upsert_subject(&db.pool, "company", "acme", None)
+        .await
+        .unwrap();
+    upsert_subject(&db.pool, "vendor", "vnd-1", Some("not a company"))
+        .await
+        .unwrap();
+
+    let rows = boss_subject_kinds::subjects::list_subjects(&db.pool, "company")
+        .await
+        .unwrap();
+    let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, ["acme", "zeta"], "sorted by id, the kind's rows only");
+    assert_eq!(rows[0].label, None, "a row minted without a label says so");
+    assert_eq!(rows[1].label.as_deref(), Some("Zeta, LLC"));
+
+    let app = boss_subject_kinds::subjects::subjects_router(db.pool.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/subjects/company")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!([
+            {"kind": "company", "id": "acme", "label": null},
+            {"kind": "company", "id": "zeta", "label": "Zeta, LLC"},
+        ])
+    );
+}

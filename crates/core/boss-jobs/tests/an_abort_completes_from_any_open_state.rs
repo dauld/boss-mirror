@@ -171,6 +171,7 @@ fn harness() -> Harness {
         clock: Arc::new(boss_clock_client::WallClockClient),
         cadence: None,
         delivery: None,
+        agent_budget: None,
     };
     Harness {
         app: router(state),

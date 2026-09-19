@@ -120,6 +120,13 @@ pub struct JobsApiState<R: JobsRepository, B: EventBus> {
     /// the conductor enforces, read from the live policy row rather than
     /// a constant.
     pub delivery: Option<Arc<dyn crate::delivery::DeliveryPolicyRepository>>,
+    /// THE CLAIM DOOR'S BUDGET GATE (design c87fb59b car 3, backlog
+    /// cb78818d): the agents registry and the run log, read together
+    /// when a step with an agent block is claimed — the claimant's row
+    /// (its cap, and the model a station capability compares) and its
+    /// hour-window spend. `None` is a deployment without the two
+    /// registries, where every claim is admitted exactly as before.
+    pub agent_budget: Option<Arc<crate::agent_budget::BudgetDoor>>,
 }
 
 /// `GET /api/jobs/job-edges` — the declared job-to-job link fields.

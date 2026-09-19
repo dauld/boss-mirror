@@ -112,6 +112,7 @@ fn gated_station() -> StationSpec {
     s.status = boss_jobs::registry::WorkflowStatus::Active;
     s.capability = Some(StationCapability {
         roles: vec!["head-brewer".into()],
+        ..Default::default()
     });
     s
 }
@@ -179,6 +180,7 @@ fn app() -> (axum::Router, Arc<InMemoryJobs>) {
         clock: Arc::new(boss_clock_client::WallClockClient),
         cadence: None,
         delivery: None,
+        agent_budget: None,
     };
     (router(state), jobs)
 }

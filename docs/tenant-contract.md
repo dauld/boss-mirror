@@ -269,8 +269,24 @@ How it lands.
 The playground published its example tenant at every boot until the
 stamp (car 2); with insert-if-absent as the default that publish
 changed nothing on a running instance, and now it does not run at all
-there. `boss tenant export`, which writes the live registries back into
-this shape, is the car after.
+there.
+
+**`boss tenant export <dir>` writes the live registries back into this
+shape** (car 3, backlog `e618f3ac`) — the inverse of `check`'s loaders,
+so the exported directory is OK on every row and a publish of it back
+into the same instance writes nothing. Deterministic: rows and keys
+sorted, one formatting, nulls and defaults omitted, so exporting an
+unchanged instance into the directory it last wrote changes no file;
+the verb prints `added` / `changed` / `unchanged` / `skipped` per file
+and never deletes one. A registry that marks ownership is exported for
+the tenant only (Workflows by `owning_team`, dispatcher and posting
+rules by `source`, sensors by `tenant_id`); one that does not (classes,
+locations, the chart, tax, calendars, policy, credentials, projections)
+is exported whole, platform rows included. Two files are not rewritten
+wholesale because the instance does not hold everything they say:
+`tenant.toml` has only its `display_name` line set (to the company
+Subject's label), and a rule's `why` is kept from the `seeds/rules.toml`
+being overwritten — a rule with none gets a `why` saying so.
 <!-- contract-truth:end -->
 
 ## The chart of accounts is the tenant's

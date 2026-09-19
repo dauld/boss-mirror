@@ -107,6 +107,7 @@ fn app() -> (axum::Router, Arc<InMemoryJobs>, Arc<RecordingEventBus>) {
         clock: Arc::new(boss_clock_client::WallClockClient),
         cadence: None,
         delivery: None,
+        agent_budget: None,
     };
     let registry = Arc::new(InMemoryAgents::new().with_agent(AGENT, [ALIAS]));
     let door = Arc::new(LoginDoor::new(registry, publisher));

@@ -1,0 +1,36 @@
+# An agent's run lands when the car it built ARRIVES, too (design
+# c87fb59b car 3, backlog cb78818d — car 2's first loose end).
+#
+# THE SAME EDGE, ONE HOP LATER. `agent-run-lands-on-gate-green` follows
+# `metadata.agent_run` on the closing gate-run. The car auto-park files
+# on that green now carries the same key (jobs_auto_park copies it from
+# the gate-run on every park path, the way it copies `flake_of`), so a
+# run whose gate-run never closed green under this rule's eye — a
+# re-gate that refreshed a parked car, a rerail, a green that closed
+# while the dispatcher was rolling — still lands when the car merges.
+# Both rules complete the SAME step with the SAME `result`; the handler
+# is idempotent (a completed `building` is guard 2's first return, a
+# closed run guard 1's), so the second to fire writes nothing.
+#
+# WHAT DIFFERS is only the evidence key: `car` here, `gate_run` there,
+# so the step says WHICH closing packet landed it. A car with no
+# `agent_run` key — every hand-gated car — is the handler's first
+# return: no declared edge, no obligation, nothing written.
+[[rule]]
+name = "agent-run-lands-on-car-merged"
+why = """
+A CROSS-PROTOCOL REACTOR: a `ship-a-change` packet's arrival advances
+an `agent-run` packet — two protocols, so no single Workflow
+definition can declare it. The gate-green rule alone left a measured
+gap (car 2's handback, 2026-09-18): auto-park built the car from
+`park_*` keys and never carried `agent_run`, so a run whose car
+arrived by any path other than its first green stayed at `building`
+until the silence rule aged it out as died — a run that landed,
+recorded as one that did not.
+"""
+version = 1
+on_event = "jobs.job.closed"
+when = "kind = \"ship-a-change\" AND outcome = \"merged\""
+[[rule.do]]
+handler = "jobs.complete_linked_step"
+args = { link = "\"agent_run\"", steps = "\"building\"", evidence_key = "\"car\"", done_metadata = '"{\"result\": \"gated\"}"' }

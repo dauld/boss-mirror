@@ -358,6 +358,16 @@ async fn run_server<R: JobsRepository + 'static>(
         // operator doors below and this read-model.
         cadence: cadence.as_ref().map(|(repo, _)| repo.clone()),
         delivery: delivery.clone(),
+        // The claim door's budget gate (c87fb59b car 3) reads the same
+        // two registries the /api/agents and /api/agent-runs doors
+        // serve; without a run log there is no spend to measure and
+        // every claim is admitted as before.
+        agent_budget: agent_runs.as_ref().map(|log| {
+            Arc::new(boss_jobs::agent_budget::BudgetDoor {
+                agents: agents.clone(),
+                runs: log.clone(),
+            })
+        }),
     };
     let mut app = router(state);
     if let Some(repo) = scheduling {

@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use super::*;
 
-type AccountRow = (Uuid, String, String, String, String, bool);
+type AccountRow = (Uuid, String, String, String, String, bool, Option<String>);
 type TrialBalanceRowTuple = (String, String, String, String, i64, i64);
 
 // --- chart of accounts ----------------------------------------------------
@@ -22,12 +22,17 @@ pub struct Account {
     pub kind: String,
     pub normal_side: String,
     pub is_active: bool,
+    /// The parent account's CODE — the key `seeds/chart_of_accounts.toml`
+    /// declares a parent by, so `boss tenant export` can write the chart
+    /// back in the file's shape (backlog e618f3ac). `None` at the root.
+    pub parent: Option<String>,
 }
 
 pub(super) async fn list_accounts(State(state): State<Arc<LedgerApiState>>) -> Response {
     let rows: Result<Vec<AccountRow>, _> = sqlx::query_as(
-        "SELECT id, code, name, kind, normal_side, is_active \
-         FROM gl_accounts WHERE is_active = true ORDER BY code",
+        "SELECT a.id, a.code, a.name, a.kind, a.normal_side, a.is_active, p.code \
+         FROM gl_accounts a LEFT JOIN gl_accounts p ON p.id = a.parent_id \
+         WHERE a.is_active = true ORDER BY a.code",
     )
     .fetch_all(&state.pool)
     .await;
@@ -36,14 +41,17 @@ pub(super) async fn list_accounts(State(state): State<Arc<LedgerApiState>>) -> R
         Ok(rows) => {
             let accounts: Vec<Account> = rows
                 .into_iter()
-                .map(|(id, code, name, kind, normal_side, is_active)| Account {
-                    id,
-                    code,
-                    name,
-                    kind,
-                    normal_side,
-                    is_active,
-                })
+                .map(
+                    |(id, code, name, kind, normal_side, is_active, parent)| Account {
+                        id,
+                        code,
+                        name,
+                        kind,
+                        normal_side,
+                        is_active,
+                        parent,
+                    },
+                )
                 .collect();
             Json(accounts).into_response()
         }

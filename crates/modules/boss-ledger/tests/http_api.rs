@@ -2904,6 +2904,21 @@ async fn chart_batch_inserts_if_absent_keeps_a_starter_code_and_names_the_differ
         codes.contains(&"4300") && codes.contains(&"4310"),
         "{codes:?}"
     );
+    // ... and each row names its parent by CODE, the declaration's own
+    // key, so `boss tenant export` can write the chart back in the
+    // file's shape (backlog e618f3ac: the list carried only `parent_id`'s
+    // absence — no parent at all — until 2026-09-18).
+    let by_code = |code: &str| {
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["code"] == code)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(by_code("4310")["parent"], "4300");
+    assert_eq!(by_code("4300")["parent"], Value::Null);
 
     // One fact per inserted row, staged on the outbox with the row and
     // declared_by = the actor the request signed with.

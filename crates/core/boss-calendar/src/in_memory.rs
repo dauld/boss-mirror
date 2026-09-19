@@ -206,6 +206,13 @@ impl CalendarClient for InMemoryCalendar {
         Ok(self.business_calendars.read().unwrap().get(code).cloned())
     }
 
+    async fn list_business_calendars(&self) -> Result<Vec<BusinessCalendar>, CalendarError> {
+        let store = self.business_calendars.read().unwrap();
+        let mut rows: Vec<BusinessCalendar> = store.values().cloned().collect();
+        rows.sort_by(|a, b| a.code.cmp(&b.code));
+        Ok(rows)
+    }
+
     async fn publish_business_calendars(
         &self,
         calendars: &[BusinessCalendar],

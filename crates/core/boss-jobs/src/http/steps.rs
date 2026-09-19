@@ -1417,6 +1417,25 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
     // reads its Subject identity.
     let parent_job = state.jobs.get_job(&job_id).await.ok().flatten();
 
+    // The claimant's agents row, read once for the two gates below:
+    // the station's model capability and the budget reservation.
+    // `None` is a person or an unregistered login — neither gate
+    // applies — and a registry that cannot answer is a 500, not a
+    // silent pass (no evidence is not a pass).
+    let agent_row = match state.agent_budget.as_ref() {
+        Some(door) => match door.agent_row(&user.id).await {
+            Ok(row) => row,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("agents registry could not answer for {}: {e}", user.id),
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+
     // Station capability gate (stations.md Q3): when the claim names
     // the station it pulls from, the packet must actually be a
     // member of that station's queue, and the station's capability
@@ -1480,6 +1499,59 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
                 })),
             )
                 .into_response();
+        }
+        // The MODEL half of the capability (c87fb59b car 3): a
+        // `(role, model)` station admits an agent that runs one of its
+        // models; a person runs none and is gated by the roles above.
+        if let Some(capability) = &row.capability
+            && !capability.models.is_empty()
+        {
+            let models: Vec<String> = agent_row.iter().map(|a| a.default_model.clone()).collect();
+            if !capability.allows_model(&models) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": "model not admitted by station capability",
+                        "station": station_name,
+                        "actor": user.id,
+                        "models": models,
+                        "allowed_models": capability.models,
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // THE BUDGET GATE (design c87fb59b car 3, backlog cb78818d). A step
+    // with an agent block names what one run of it may spend
+    // (`agent_budget_usd`, car 1's projection); an agent claiming it
+    // reserves that much of its hour — the priced spend of its runs
+    // finished in the last hour plus this budget must fit under the
+    // row's `hourly_budget_usd_micros` — or is refused with the
+    // numbers, BEFORE the CAS, so a claim the budget does not admit
+    // never enters the race. A person, an unregistered login, and a
+    // row with no cap reserve nothing (see `agent_budget`).
+    if let (Some(door), Some(row), Some(budget_usd)) = (
+        state.agent_budget.as_ref(),
+        agent_row.as_ref(),
+        old.metadata
+            .get(crate::agent_spec::BUDGET_KEY)
+            .and_then(|v| v.as_f64()),
+    ) {
+        let now = boss_clock_client::now_from(&state.clock).await;
+        match door.reserve(row, budget_usd, now).await {
+            Ok(reservation) if reservation.decision.is_allowed() => {}
+            Ok(reservation) => {
+                return (StatusCode::CONFLICT, Json(reservation.refusal_body())).into_response();
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("budget gate could not measure the actor's hour: {e}"),
+                )
+                    .into_response();
+            }
         }
     }
 

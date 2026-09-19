@@ -161,6 +161,16 @@ struct AutoParkInputs {
     /// its first red was not its own. Empty for a plain green — absent,
     /// never nulled, so a refresh does not strip an earlier stamp.
     flake: serde_json::Map<String, Value>,
+    /// THE RUN THAT BUILT THIS CAR (design c87fb59b car 3, backlog
+    /// cb78818d): the gate-run's `agent_run` — stamped by `boss gate`
+    /// from BOSS_AGENT_RUN — copied onto the car under the same key so
+    /// `agent-run-lands-on-car-merged` can land the run on the car's
+    /// arrival, the way `agent-run-lands-on-gate-green` lands it on the
+    /// gate. Empty for a hand-launched gate: absent, never nulled, like
+    /// `flake`. Measured on car 2's own loose end: the landing rule keyed
+    /// on the gate-run only, so a car that arrived through a re-gate or
+    /// a rerail left its run at `building`.
+    agent_run: serde_json::Map<String, Value>,
 }
 
 /// PURE: what a green verdict stamps on a gate-run that re-gated a red
@@ -193,6 +203,7 @@ fn refresh_patch(inputs: &AutoParkInputs, note: &str) -> Value {
     if let Some(m) = patch.as_object_mut() {
         m.extend(inputs.proof.clone());
         m.extend(inputs.flake.clone());
+        m.extend(inputs.agent_run.clone());
         m.extend(car::regate_prose(
             &inputs.summary,
             &inputs.excludes,
@@ -291,7 +302,24 @@ fn auto_park_inputs(
         flake: flake_stamp(gate_run, verdict_meta)
             .and_then(|v| v.as_object().cloned())
             .unwrap_or_default(),
+        agent_run: agent_run_of(md),
     })
+}
+
+/// PURE: the `agent_run` stamp a gate-run carries, as the map the three
+/// park paths merge — one entry, or none. A blank value is none: `boss
+/// gate` refuses to stamp one, and this is the second door on the rule.
+fn agent_run_of(md: &serde_json::Map<String, Value>) -> serde_json::Map<String, Value> {
+    md.get("agent_run")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|id| {
+            let mut out = serde_json::Map::new();
+            out.insert("agent_run".to_string(), json!(id));
+            out
+        })
+        .unwrap_or_default()
 }
 
 /// PURE: the record written on the gate-run INSTEAD of a car, when a car
@@ -442,6 +470,7 @@ fn adopt_patch(car: &Value, inputs: &AutoParkInputs) -> Value {
     patch.extend(inputs.proof.clone());
     patch.extend(inputs.item_provenance.clone());
     patch.extend(inputs.flake.clone());
+    patch.extend(inputs.agent_run.clone());
     patch.extend(clear_stale_item_answer(car, inputs));
     if let Some(dc) = inputs.delivery_channel.as_deref() {
         patch.insert("delivery_channel".to_string(), json!(dc));
@@ -687,6 +716,7 @@ fn car_body_with_proof(inputs: &AutoParkInputs, owner: &str) -> Value {
         md.extend(inputs.proof.clone());
         md.extend(inputs.item_provenance.clone());
         md.extend(inputs.flake.clone());
+        md.extend(inputs.agent_run.clone());
     }
     body
 }
@@ -1292,6 +1322,57 @@ mod tests {
         // The rest of the body is the shared builder's, untouched.
         assert_eq!(md["branch"], "fix/x");
         assert_eq!(body["kind"], "ship-a-change");
+    }
+
+    /// THE RUN THAT BUILT THE CAR RIDES ONTO IT (design c87fb59b car 3,
+    /// backlog cb78818d). `boss gate` stamps `agent_run` on the gate-run
+    /// when a dispatched builder exports BOSS_AGENT_RUN; car 2's landing
+    /// rule followed that edge on the gate-run ONLY, and auto-park built
+    /// the car from `park_*` keys and never carried it — so a car's
+    /// arrival could not land the run. Now the key rides the car on all
+    /// three park paths (file, refresh, adopt), absent-never-nulled like
+    /// `flake_of`, and `agent-run-lands-on-car-merged` follows it.
+    #[test]
+    fn the_gates_agent_run_rides_onto_the_car_on_every_park_path() {
+        let gr = gate_run(json!({
+            "park_summary": "s", "park_excludes": "e", "park_test": "t", "park_verified": "v",
+            "agent_run": "5b1d2c3e-0000-4000-8000-000000000001",
+        }));
+        let got = auto_park_inputs(&gr, &green_step_meta()).expect("parks");
+        let body = car_body_with_proof(&got, "emp-owner");
+        assert_eq!(
+            body["metadata"]["agent_run"],
+            "5b1d2c3e-0000-4000-8000-000000000001"
+        );
+        assert_eq!(
+            refresh_patch(&got, "n")["agent_run"],
+            "5b1d2c3e-0000-4000-8000-000000000001"
+        );
+        let car = json!({ "metadata": { "branch": "fix/x" } });
+        assert_eq!(
+            adopt_patch(&car, &got)["agent_run"],
+            "5b1d2c3e-0000-4000-8000-000000000001"
+        );
+
+        // A hand-launched gate names no run: nothing written, nothing
+        // nulled — a blank export is the same as none.
+        for md in [json!({}), json!({ "agent_run": "  " })] {
+            let mut plain = json!({
+                "park_summary": "s", "park_excludes": "e", "park_test": "t", "park_verified": "v",
+            });
+            plain
+                .as_object_mut()
+                .unwrap()
+                .extend(md.as_object().unwrap().clone());
+            let got = auto_park_inputs(&gate_run(plain), &green_step_meta()).expect("parks");
+            assert!(
+                car_body_with_proof(&got, "o")["metadata"]
+                    .get("agent_run")
+                    .is_none()
+            );
+            assert!(refresh_patch(&got, "n").get("agent_run").is_none());
+            assert!(adopt_patch(&car, &got).get("agent_run").is_none());
+        }
     }
 
     /// THE ORDERING EDGE REACHES THE CAR (d3320278). `--park-after`
@@ -2035,6 +2116,7 @@ mod building_car_tests {
             },
             proof: car::proof_intent(Some("echo hi"), Some("hi"), None),
             flake: serde_json::Map::new(),
+            agent_run: serde_json::Map::new(),
         };
         let now = chrono::DateTime::parse_from_rfc3339("2026-09-10T18:30:00Z")
             .unwrap()
@@ -2093,6 +2175,7 @@ mod building_car_tests {
             },
             proof: serde_json::Map::new(),
             flake: serde_json::Map::new(),
+            agent_run: serde_json::Map::new(),
         };
         let patch = adopt_patch(&building(), &inputs);
         assert_eq!(
@@ -2146,6 +2229,7 @@ mod building_car_tests {
             },
             proof: serde_json::Map::new(),
             flake: serde_json::Map::new(),
+            agent_run: serde_json::Map::new(),
         };
         let patch = adopt_patch(&opened, &inputs);
         assert_explicit_null!(
@@ -2213,6 +2297,7 @@ mod building_car_tests {
             },
             proof: serde_json::Map::new(),
             flake: serde_json::Map::new(),
+            agent_run: serde_json::Map::new(),
         };
 
         // ONE PIECE, stated at open and confirmed at the gate.
@@ -2285,6 +2370,7 @@ mod building_car_tests {
                 },
                 proof: serde_json::Map::new(),
                 flake: serde_json::Map::new(),
+                agent_run: serde_json::Map::new(),
             }
         };
         let opened = |key: &str, value: &str| {
@@ -2357,6 +2443,7 @@ mod building_car_tests {
                 },
                 proof: serde_json::Map::new(),
                 flake: serde_json::Map::new(),
+                agent_run: serde_json::Map::new(),
             }
         };
         // The gate names the closing edge too: agreement, not conflict.
@@ -2407,6 +2494,7 @@ mod building_car_tests {
             },
             proof: car::proof_intent(Some("echo hi"), Some("hi"), None),
             flake: serde_json::Map::new(),
+            agent_run: serde_json::Map::new(),
         };
         let patch = adopt_patch(&building(), &inputs);
         assert!(

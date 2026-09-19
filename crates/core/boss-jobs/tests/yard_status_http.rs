@@ -232,6 +232,7 @@ fn app_with_cadence_repo(
         )),
         cadence: Some(cadence),
         delivery: Some(delivery),
+        agent_budget: None,
     };
     (router(state), jobs)
 }
@@ -1337,6 +1338,7 @@ async fn no_cadence_or_policy_wired_degrades_gracefully() {
         clock: Arc::new(boss_clock_client::WallClockClient),
         cadence: None,
         delivery: None,
+        agent_budget: None,
     };
     let app = router(state);
     seed_full(&jobs).await;

@@ -411,6 +411,45 @@ async fn handle_event(
         .and_then(|k| ctx.registry.get(k))
         .map(|t| t.decision_shaped)
         .unwrap_or(true);
+    // THE CAPABILITY PICK FIRST (c87fb59b car 3): a step whose block
+    // names a model goes to the registered agent whose row holds the
+    // role and runs the model. The roster is read only when a block is
+    // declared, so a step without one costs nothing here; a roster
+    // read that fails falls through to the env executor rather than
+    // NAKing — the pick below is the prior behaviour, never worse.
+    let step_model = step
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get(boss_jobs::agent_spec::MODEL_KEY))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty());
+    if step_model.is_some() {
+        match capability_executor_for(
+            ctx,
+            partition,
+            decision_shaped,
+            &role_candidates,
+            step_model,
+        )
+        .await
+        {
+            Ok(Some(agent)) => {
+                assign(ctx, job_id, step_id, &agent).await?;
+                debug!(
+                    job_id,
+                    step_id,
+                    agent,
+                    model = step_model.unwrap_or_default(),
+                    "dispatcher assigned the step to the agent serving its (role, model)"
+                );
+                return Ok(());
+            }
+            Ok(None) => {}
+            Err(e) => {
+                debug!(job_id, step_id, error = %e, "roster read failed for the capability pick; using the env executor");
+            }
+        }
+    }
     if let Some(executor) = executor_for(
         partition,
         decision_shaped,
@@ -578,6 +617,72 @@ fn executor_for(
     if eligible { Some(id.to_string()) } else { None }
 }
 
+/// THE CAPABILITY PICK (design c87fb59b car 3, backlog cb78818d): the
+/// registered agent that serves the `(role, model)` a step's agent
+/// block declares — the same pair `station_projection::agent_stations`
+/// gates a station on — nominated ahead of the env executor.
+///
+/// Fires only for a REAL, executable step that carries `agent_model`
+/// (car 1's projection of the block onto the packet) and a role among
+/// its candidates; the agent must be active, hold that role and run
+/// that model. Lowest id wins, so the pick is deterministic. `None` is
+/// "this pick says nothing", and the caller falls through to
+/// `executor_for` — the env's single executor, which is the FALLBACK
+/// now and retires when every deployment's agents row holds the roles
+/// its blocks are declared under. Measured 2026-09-18 on the live
+/// registry: agent-claude holds `engineering-agent`, every block sits
+/// under `platform-admin`, so this pick names nobody and prod keeps
+/// nominating claude@algedonic.dev through BOSS_DISPATCH_EXECUTOR_ID.
+/// The retirement is one registry edit (the row's `role`) and one
+/// manifest edit (drop the two env lines), in that order.
+fn capability_executor(
+    partition: Partition,
+    decision_shaped: bool,
+    role_candidates: &[&str],
+    step_model: Option<&str>,
+    roster: &[Employee],
+) -> Option<String> {
+    if partition.fails_closed() || decision_shaped {
+        return None;
+    }
+    let model = step_model?.trim();
+    if model.is_empty() {
+        return None;
+    }
+    roster
+        .iter()
+        .filter(|e| e.is_agent && e.status == "active")
+        .filter(|e| role_candidates.contains(&e.role.as_str()))
+        .filter(|e| e.models.iter().any(|m| m == model))
+        .map(|e| e.id.as_str())
+        .min()
+        .map(str::to_string)
+}
+
+/// `capability_executor` over the SAME TTL-cached roster the role pick
+/// and the owner check read, so the three picks never see different
+/// rosters.
+async fn capability_executor_for(
+    ctx: &DispatcherCtx,
+    partition: Partition,
+    decision_shaped: bool,
+    role_candidates: &[&str],
+    step_model: Option<&str>,
+) -> Result<Option<String>> {
+    let mut cache = ctx.roster.lock().await;
+    if roster_is_stale(&cache) {
+        cache.employees = fetch_active_roster(ctx).await?;
+        cache.fetched_at = Some(std::time::Instant::now());
+    }
+    Ok(capability_executor(
+        partition,
+        decision_shaped,
+        role_candidates,
+        step_model,
+        &cache.employees,
+    ))
+}
+
 /// A decision-shaped step routes to the packet OWNER when the owner is
 /// an active holder of one of its authority roles — the owner is who the
 /// work is *for*. Pure so the routing rule is testable without a roster
@@ -635,7 +740,7 @@ async fn pick_employee_with_role_fallback(
 
 /// One roster row: a person as `/api/people` answers it, or a
 /// registered agent that holds a role, folded in by `roster_union`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct Employee {
     id: String,
     role: String,
@@ -646,6 +751,12 @@ struct Employee {
     /// executor's three guards and nowhere else.
     #[serde(default)]
     is_agent: bool,
+    /// The models a registered agent runs — its row's `default_model`,
+    /// folded in by `roster_union` (design c87fb59b car 3). Empty for a
+    /// person, who runs none. Read by `capability_executor`, which
+    /// nominates an agent for a step whose block names one of these.
+    #[serde(default)]
+    models: Vec<String>,
 }
 
 /// The one roster every reader shares: the people roster plus each
@@ -665,6 +776,7 @@ fn roster_union(
                 role,
                 status: "active".to_string(),
                 is_agent: true,
+                models: vec![a.default_model],
             })
         }))
         .collect()
@@ -986,8 +1098,8 @@ async fn assign(ctx: &DispatcherCtx, job_id: &str, step_id: &str, emp_id: &str) 
 #[cfg(test)]
 mod tests {
     use super::{
-        Partition, StepEventPayload, born_placed, eligible_candidates, event_partition,
-        executor_for, is_active_holder, left_for_role_queue, owner_assignee,
+        Partition, StepEventPayload, born_placed, capability_executor, eligible_candidates,
+        event_partition, executor_for, is_active_holder, left_for_role_queue, owner_assignee,
         owner_id_from_job_body, partition_permits, pick_index, pick_index_for, roster_union,
         stable_hash,
     };
@@ -1122,6 +1234,100 @@ mod tests {
         );
     }
 
+    /// THE CAPABILITY PICK (design c87fb59b car 3, backlog cb78818d):
+    /// a step whose materialised metadata carries the agent block's
+    /// `agent_model` beside its `authority_role` is nominated to the
+    /// registered agent whose row holds that role and runs that model —
+    /// the same `(role, model)` the station projection gates on — and
+    /// to nobody else. In every direction it must NOT fire: a decision,
+    /// a non-real packet, a step with no block, a role the agent does not
+    /// hold, a model the agent does not run, a person of the right role
+    /// (people run no model). The env executor stays the FALLBACK, read
+    /// only when this pick names nobody — which on the live registry it
+    /// does today: agent-claude's row holds `engineering-agent` while
+    /// every agent block sits under `platform-admin`, so prod keeps
+    /// nominating claude@algedonic.dev through BOSS_DISPATCH_EXECUTOR_*
+    /// until the row holds the role (measured 2026-09-18).
+    #[test]
+    fn a_step_with_an_agent_block_is_nominated_by_capability_match() {
+        let agent = |id: &str, role: &str, model: &str| super::Employee {
+            id: id.into(),
+            role: role.into(),
+            status: "active".into(),
+            is_agent: true,
+            models: vec![model.into()],
+        };
+        let mut roster = partition_roster();
+        roster.push(agent("agent-zed", "platform-admin", "opus-5[1m]"));
+        roster.push(agent("agent-claude", "platform-admin", "opus-5[1m]"));
+        roster.push(agent("agent-haiku", "platform-admin", "haiku-4-5"));
+        roster.push(agent("agent-eng", "engineering-agent", "opus-5[1m]"));
+        let platform = ["platform-admin"];
+        let pick = |partition, decision, roles: &[&str], model: Option<&str>| {
+            capability_executor(partition, decision, roles, model, &roster)
+        };
+        // The case the rule exists for — and the lowest id wins, so the
+        // pick is deterministic across a roster of equals.
+        assert_eq!(
+            pick(Partition::Real, false, &platform, Some("opus-5[1m]")),
+            Some("agent-claude".to_string())
+        );
+        assert_eq!(
+            pick(Partition::Real, false, &platform, Some("haiku-4-5")),
+            Some("agent-haiku".to_string())
+        );
+        // A model no platform-admin agent runs: nobody, so the env
+        // fallback decides.
+        assert_eq!(
+            pick(Partition::Real, false, &platform, Some("sonnet-4-5")),
+            None
+        );
+        // A role the agents do not hold: nobody, even on the right model.
+        assert_eq!(
+            pick(Partition::Real, false, &["bookkeeper"], Some("opus-5[1m]")),
+            None
+        );
+        // No block on the step: this pick says nothing.
+        assert_eq!(pick(Partition::Real, false, &platform, None), None);
+        // A decision, or a packet that is not real: never.
+        assert_eq!(
+            pick(Partition::Real, true, &platform, Some("opus-5[1m]")),
+            None
+        );
+        assert_eq!(
+            pick(Partition::Simulated, false, &platform, Some("opus-5[1m]")),
+            None
+        );
+        // The people of the role are not candidates here: emp-agent and
+        // emp-david hold platform-admin and run no model.
+        let people_only = partition_roster();
+        assert_eq!(
+            capability_executor(
+                Partition::Real,
+                false,
+                &platform,
+                Some("opus-5[1m]"),
+                &people_only
+            ),
+            None
+        );
+        // An inactive agent is not nominated.
+        let mut retired = roster.clone();
+        for e in retired.iter_mut().filter(|e| e.is_agent) {
+            e.status = "inactive".into();
+        }
+        assert_eq!(
+            capability_executor(
+                Partition::Real,
+                false,
+                &platform,
+                Some("opus-5[1m]"),
+                &retired
+            ),
+            None
+        );
+    }
+
     /// The owner-routing pick (be264fa2), in every direction it must and
     /// must not fire.
     #[test]
@@ -1175,6 +1381,7 @@ mod tests {
             role: role.into(),
             status: status.into(),
             is_agent: false,
+            models: vec![],
         };
         let roster = vec![
             emp("emp-david", "platform-admin", "active"),
@@ -1272,6 +1479,7 @@ mod tests {
             role: role.into(),
             status: status.into(),
             is_agent: false,
+            models: vec![],
         };
         vec![
             emp("emp-aa-100", "brewer", "active"),
@@ -1358,6 +1566,7 @@ mod tests {
             role: role.into(),
             status: "active".into(),
             is_agent: true,
+            models: vec![],
         };
         let mut roster = partition_roster();
         roster.push(agent("agent-claude", "engineering-agent"));
@@ -1447,6 +1656,12 @@ mod tests {
         );
         assert_eq!(roster[3].role, "engineering-agent");
         assert_eq!(roster[3].status, "active");
+        assert_eq!(
+            roster[3].models,
+            vec!["opus-5[1m]".to_string()],
+            "the agent's default_model is the capability the executor pick matches"
+        );
+        assert!(roster[0].models.is_empty(), "a person runs no model");
     }
 
     /// REAL packets are byte-for-byte unaffected: same candidates, same

@@ -1643,37 +1643,17 @@ pub fn publish(plan: &Plan, bases: &Bases, take: &Take, out: &mut dyn FnMut(Stri
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod stub {
+    //! The recording stub the publish tests run against, and the
+    //! real tenant's fixture — shared with `tenant_export`'s tests,
+    //! whose round trip publishes this fixture into the stub and
+    //! exports it back out (backlog e618f3ac).
     use super::*;
     use boss_testing::scratch::{create_dir, scratch_dir, write_file};
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
-    /// One actor in two spellings: the header every door sees and the
-    /// id the stamp records.
-    #[test]
-    fn the_seed_actor_is_the_seed_users_id() {
-        let user: Value = serde_json::from_str(SEED_USER).unwrap();
-        assert_eq!(user["id"].as_str(), Some(SEED_ACTOR));
-    }
-
-    #[test]
-    fn take_names_what_it_was_given_in_name_order() {
-        assert_eq!(
-            Take::parse(Some("workflows,agents")).unwrap().names(),
-            vec!["agents".to_string(), "workflows".to_string()]
-        );
-        assert!(Take::parse(None).unwrap().names().is_empty());
-    }
-
-    // ------------------------------------------------------------------
-    // A fixture in the real tenant's shape (its names swapped for a
-    // neutral tenant: the vocabulary ratchet counts a real tenant's
-    // name here; the check-found defects fixed): every contract file
-    // publish sends, plus the two nothing reads.
-    // ------------------------------------------------------------------
-
-    fn put(dir: &Path, rel: &str, body: &str) {
+    pub(crate) fn put(dir: &Path, rel: &str, body: &str) {
         let path = dir.join(rel);
         if let Some(parent) = path.parent() {
             create_dir(parent);
@@ -1681,7 +1661,7 @@ mod tests {
         write_file(&path, body);
     }
 
-    const WORKFLOWS: &str = r#"[[workflow]]
+    pub(crate) const WORKFLOWS: &str = r#"[[workflow]]
 kind = "receive-a-sponsorship"
 label = "Receive a sponsorship"
 category = "sales"
@@ -1711,7 +1691,7 @@ metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "sponsored" }
 "#;
 
-    fn real_shape(name: &str) -> PathBuf {
+    pub(crate) fn real_shape(name: &str) -> PathBuf {
         let dir = scratch_dir(&format!("boss-cli-tenant-publish-{name}"));
         put(
             &dir,
@@ -1830,7 +1810,7 @@ terminal = { outcome = "sponsored" }
         dir
     }
 
-    fn rules_toml(version: u32, handler: &str) -> String {
+    pub(crate) fn rules_toml(version: u32, handler: &str) -> String {
         format!(
             "[[rule]]\nname = \"complete-site-live-on-converge-closed\"\n\
              why = \"\"\"\nA cross-protocol reactor: the converge packet's close is the site's evidence.\n\"\"\"\n\
@@ -1839,6 +1819,900 @@ terminal = { outcome = "sponsored" }
              [[rule.do]]\nhandler = \"{handler}\"\n"
         )
     }
+
+    // ------------------------------------------------------------------
+    // The doors, against a recording stub that keeps state — so a
+    // second run can be judged to write nothing new.
+    // ------------------------------------------------------------------
+
+    #[derive(Default)]
+    pub(crate) struct Stub {
+        /// Every request: (method, path, lowercased head, body).
+        pub(crate) log: Vec<(String, String, String, String)>,
+        /// What "exists" server-side: policy rules by id (the row the
+        /// GET answers, so the bootstrap's comparison sees it),
+        /// employee ids, published workflow kinds (kind -> the live
+        /// spec the GET answers), design Job ids.
+        pub(crate) policy: BTreeMap<String, Value>,
+        pub(crate) people: BTreeMap<String, Value>,
+        pub(crate) workflows: BTreeMap<String, Value>,
+        pub(crate) jobs: usize,
+        /// Published sensors, id -> the declared row (insert-if-absent,
+        /// like the door; a held row that differs is named).
+        pub(crate) sensors: BTreeMap<String, Value>,
+        /// Published business calendars, code -> the row (insert-if-
+        /// absent; `?mode=take` replaces).
+        pub(crate) calendars: BTreeMap<String, Value>,
+        /// The company subject, once minted: (id, label).
+        pub(crate) company: Option<(String, String)>,
+        /// What the stub's "publish" lands as a kind's live row: the
+        /// fixture file's own specs (`stub_for`), so a second publish
+        /// reads the row as the file declares it — the real registry
+        /// lands the spec through the design Job's publish step, which
+        /// this stub does not walk.
+        pub(crate) file_specs: BTreeMap<String, Value>,
+        /// Published classes, "kind/code" -> the row (insert-if-absent;
+        /// `PUT /api/classes/{kind}/{code}` edits one).
+        pub(crate) classes: BTreeMap<String, Value>,
+        /// Declared credentials, id -> the row (insert-if-absent, like
+        /// the door).
+        pub(crate) credentials: BTreeMap<String, Value>,
+        /// Published locations, id -> the row (insert-if-absent, like
+        /// the door).
+        pub(crate) locations: BTreeMap<String, Value>,
+        /// Registered agents: id -> the row (insert-if-absent by
+        /// default, `?mode=take` overwrites; a test's "migration"
+        /// pre-registers agent-claude under the platform's own name,
+        /// as the real schema does).
+        pub(crate) agents: BTreeMap<String, Value>,
+        /// Published posting rules, "fact_kind v<n>" -> the row
+        /// (insert-if-absent).
+        pub(crate) posting_rules: BTreeMap<String, Value>,
+        /// Published projections, "event_kind when" -> the row
+        /// (insert-if-absent).
+        pub(crate) projections: BTreeMap<String, Value>,
+        /// The chart of accounts: code -> the row (insert-if-absent by
+        /// code; a test pre-seeds the starter's rows the way
+        /// 40-ledger.sql does).
+        pub(crate) accounts: BTreeMap<String, Value>,
+        /// The tax regime: "tax_kind <kind>" / "sales_tax_rate <ST>" ->
+        /// the row (insert-if-absent; a test pre-seeds the migration's
+        /// rows the way 40-ledger.sql does).
+        pub(crate) tax: BTreeMap<String, Value>,
+        /// The dispatcher's rule registry, one row per (name, version):
+        /// the stored draft/active/retired rows with their `source`,
+        /// the append-only shape `dispatcher_rules` has.
+        pub(crate) rules: Vec<Value>,
+    }
+
+    impl Stub {
+        pub(crate) fn writes(&self) -> usize {
+            self.policy.len()
+                + self.people.len()
+                + self.workflows.len()
+                + self.jobs
+                + self.sensors.len()
+                + self.credentials.len()
+                + self.locations.len()
+                + self.agents.len()
+                + self.posting_rules.len()
+                + self.projections.len()
+                + self.accounts.len()
+                + self.tax.len()
+                + self.rules.len()
+                + self.calendars.len()
+                + self.classes.len()
+                + usize::from(self.company.is_some())
+        }
+
+        pub(crate) fn active_rule(&self, name: &str) -> Option<&Value> {
+            self.rules
+                .iter()
+                .find(|r| r["name"] == name && r["status"] == "active")
+        }
+    }
+
+    /// The dispatcher's authoring door, as the real one behaves
+    /// (boss_dispatcher::rules::authoring): `_validate` answers
+    /// `{ok, error}`; a draft lands at max(declared, MAX + 1) carrying
+    /// its `source`, refused when another source holds a LIVE row of
+    /// the name (a retired name is free, backlog 70bc5725); publish
+    /// promotes the newest draft and retires the incumbent.
+    pub(crate) fn route_dispatcher(
+        st: &mut Stub,
+        method: &str,
+        path: &str,
+        body: &str,
+    ) -> (u16, String) {
+        let seg = |i: usize| path.split('/').nth(i).unwrap_or("").to_string();
+        match (method, path) {
+            ("GET", "/api/dispatcher/rules") => {
+                // The cascade-viz feed the export reads: every ACTIVE
+                // row with its `source` label (`product` when NULL).
+                let rules: Vec<Value> = st
+                    .rules
+                    .iter()
+                    .filter(|r| r["status"] == "active")
+                    .map(|r| {
+                        let mut row = r.clone();
+                        row["why"] = Value::Null;
+                        row["authored"] = json!(false);
+                        if row.get("source").is_none_or(Value::is_null) {
+                            row["source"] = json!("product");
+                        }
+                        row
+                    })
+                    .collect();
+                (200, json!({"rules": rules}).to_string())
+            }
+            ("POST", "/api/dispatcher/rules/_validate") => {
+                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                let when = v["when"].as_str().unwrap_or("");
+                if when.contains("(") {
+                    (
+                        200,
+                        json!({"ok": false, "error": format!("rule {}: when: unbalanced parenthesis", v["name"])}).to_string(),
+                    )
+                } else {
+                    (200, json!({"ok": true, "error": null}).to_string())
+                }
+            }
+            ("POST", "/api/dispatcher/rules") => {
+                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                let name = v["name"].as_str().unwrap_or("").to_string();
+                let source = v["source"].clone();
+                if let Some(other) = st.rules.iter().find(|r| {
+                    r["name"] == name && r["status"] != "retired" && r["source"] != source
+                }) {
+                    return (
+                        400,
+                        format!(
+                            "invalid rule: rule `{name}` is owned by {}; a draft from {} cannot supersede it",
+                            other["source"].as_str().unwrap_or("product"),
+                            source.as_str().unwrap_or("product")
+                        ),
+                    );
+                }
+                let max = st
+                    .rules
+                    .iter()
+                    .filter(|r| r["name"] == name)
+                    .filter_map(|r| r["version"].as_u64())
+                    .max()
+                    .unwrap_or(0);
+                let version = (max + 1).max(v["version"].as_u64().unwrap_or(1));
+                let mut row = v.clone();
+                row["version"] = json!(version);
+                row["status"] = json!("draft");
+                row["created_at"] = json!("2026-09-17T00:00:00Z");
+                st.rules.push(row.clone());
+                (201, row.to_string())
+            }
+            ("GET", p) if p.starts_with("/api/dispatcher/rules/") && p.ends_with("/versions") => {
+                let name = seg(4);
+                let rows: Vec<&Value> = st.rules.iter().filter(|r| r["name"] == name).collect();
+                (200, serde_json::to_string(&rows).unwrap())
+            }
+            ("POST", p) if p.starts_with("/api/dispatcher/rules/") && p.ends_with("/publish") => {
+                let name = seg(4);
+                let Some(draft_at) = st
+                    .rules
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| r["name"] == name && r["status"] == "draft")
+                    .max_by_key(|(_, r)| r["version"].as_u64())
+                    .map(|(i, _)| i)
+                else {
+                    return (404, format!("not found: no draft to publish for {name}"));
+                };
+                for r in st.rules.iter_mut() {
+                    if r["name"] == name && r["status"] == "active" {
+                        r["status"] = json!("retired");
+                    }
+                }
+                st.rules[draft_at]["status"] = json!("active");
+                (200, st.rules[draft_at].to_string())
+            }
+            _ => (500, format!("stub: unrouted {method} {path}")),
+        }
+    }
+
+    /// The declared fields of `declared` that `held` reads differently
+    /// — the comparison every insert-if-absent stub route answers a
+    /// kept row with, over the keys the declaration carries.
+    pub(crate) fn differs(held: &Value, declared: &Value) -> Vec<String> {
+        declared
+            .as_object()
+            .map(|d| {
+                d.iter()
+                    .filter(|(k, v)| *k != "id" && *k != "code" && held.get(*k) != Some(v))
+                    .map(|(k, _)| k.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The changes from `held` to `declared` on `fields`, the take's
+    /// answer.
+    pub(crate) fn changes(held: &Value, declared: &Value, fields: &[String]) -> Vec<Value> {
+        fields
+            .iter()
+            .map(|f| {
+                json!({"field": f, "from": held.get(f).cloned().unwrap_or(Value::Null),
+                            "to": declared.get(f).cloned().unwrap_or(Value::Null)})
+            })
+            .collect()
+    }
+
+    /// One insert-if-absent / take batch over a `key -> row` map, the
+    /// real doors' answer shape: `{received, inserted, kept, updated,
+    /// unchanged}`.
+    pub(crate) fn batch_into(
+        store: &mut BTreeMap<String, Value>,
+        rows: &[Value],
+        key_of: impl Fn(&Value) -> String,
+        take: bool,
+    ) -> Value {
+        let (mut inserted, mut unchanged) = (0usize, 0usize);
+        let (mut kept, mut updated) = (Vec::new(), Vec::new());
+        for r in rows {
+            let key = key_of(r);
+            match store.get(&key).cloned() {
+                None => {
+                    store.insert(key, r.clone());
+                    inserted += 1;
+                }
+                Some(held) => {
+                    let d = differs(&held, r);
+                    if d.is_empty() {
+                        unchanged += 1;
+                    } else if take {
+                        updated.push(json!({"id": key, "changes": changes(&held, r, &d)}));
+                        store.insert(key, r.clone());
+                    } else {
+                        kept.push(json!({"id": key, "differs": d}));
+                    }
+                }
+            }
+        }
+        json!({"received": rows.len(), "inserted": inserted, "kept": kept,
+               "updated": updated, "unchanged": unchanged})
+    }
+
+    pub(crate) fn route(st: &mut Stub, method: &str, path: &str, body: &str) -> (u16, String) {
+        // The mode rides the query string; the path is matched bare
+        // (the two list reads that filter by a query read `query`).
+        let (path, query) = match path.split_once('?') {
+            Some((p, q)) => (p, q),
+            None => (path, ""),
+        };
+        let take = query == "mode=take";
+        let seg = |i: usize| path.split('/').nth(i).unwrap_or("").to_string();
+        match (method, path) {
+            ("POST", "/api/classes/batch") => {
+                let rows = serde_json::from_str::<Vec<Value>>(body).unwrap_or_default();
+                let key = |r: &Value| {
+                    format!(
+                        "{}/{}",
+                        r["subject_kind"].as_str().unwrap_or(""),
+                        r["code"].as_str().unwrap_or("")
+                    )
+                };
+                // The real batch has no take: insert-if-absent, kept
+                // rows named; the edit door below is the take.
+                let mut out = batch_into(&mut st.classes, &rows, key, false);
+                out.as_object_mut().unwrap().remove("updated");
+                (200, out.to_string())
+            }
+            ("GET", p) if p.starts_with("/api/classes/") => {
+                let key = format!("{}/{}", seg(3), seg(4));
+                match st.classes.get(&key) {
+                    Some(v) => (200, v.to_string()),
+                    None => (404, "no such class".into()),
+                }
+            }
+            ("PUT", p) if p.starts_with("/api/classes/") => {
+                let key = format!("{}/{}", seg(3), seg(4));
+                let row: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                match st.classes.get_mut(&key) {
+                    Some(held) => {
+                        *held = row.clone();
+                        (200, row.to_string())
+                    }
+                    None => (404, "no such class".into()),
+                }
+            }
+            ("POST", "/api/locations/batch") => {
+                // The classes batch shape: a bare JSON array of rows.
+                let rows = serde_json::from_str::<Vec<Value>>(body).unwrap_or_default();
+                let inserted = rows
+                    .iter()
+                    .filter(|r| {
+                        let id = r["id"].as_str().unwrap_or("").to_string();
+                        !st.locations.contains_key(&id) && {
+                            st.locations.insert(id, (*r).clone());
+                            true
+                        }
+                    })
+                    .count();
+                (
+                    200,
+                    json!({"received": rows.len(), "inserted": inserted}).to_string(),
+                )
+            }
+            ("POST", "/api/agents/batch") => {
+                // Insert by id; a held row that differs on the declared
+                // field (here: display_name only) is kept and named by
+                // default, updated with the change named from → to
+                // under `?mode=take`, as the real door answers.
+                let rows = serde_json::from_str::<Vec<Value>>(body).unwrap_or_default();
+                let mut inserted = 0usize;
+                let mut unchanged = 0usize;
+                let mut updated = Vec::new();
+                let mut kept = Vec::new();
+                for r in &rows {
+                    let id = r["id"].as_str().unwrap_or("").to_string();
+                    let name = r["display_name"].clone();
+                    match st.agents.get(&id).cloned() {
+                        Some(have) if have["display_name"] == name => unchanged += 1,
+                        Some(have) if take => {
+                            updated.push(json!({
+                                "id": id,
+                                "changes": [{"field": "display_name", "from": have["display_name"], "to": name}]
+                            }));
+                            st.agents.insert(id, r.clone());
+                        }
+                        Some(_) => kept.push(json!({"id": id, "differs": ["display_name"]})),
+                        None => {
+                            st.agents.insert(id, r.clone());
+                            inserted += 1;
+                        }
+                    }
+                }
+                (
+                    200,
+                    json!({
+                        "received": rows.len(), "inserted": inserted,
+                        "updated": updated, "kept": kept, "unchanged": unchanged
+                    })
+                    .to_string(),
+                )
+            }
+            ("POST", "/api/ledger/accounts/batch") => {
+                // Insert-if-absent by code; a kept row reports which
+                // declared fields differ (here: name only).
+                let rows = serde_json::from_str::<Vec<Value>>(body).unwrap_or_default();
+                let mut inserted = 0usize;
+                let mut kept = Vec::new();
+                for r in &rows {
+                    let code = r["code"].as_str().unwrap_or("").to_string();
+                    match st.accounts.get(&code) {
+                        Some(have) => kept.push(json!({
+                            "code": code,
+                            "differs": if have["name"] == r["name"] { json!([]) } else { json!(["name"]) }
+                        })),
+                        None => {
+                            st.accounts.insert(code, r.clone());
+                            inserted += 1;
+                        }
+                    }
+                }
+                (
+                    200,
+                    json!({"received": rows.len(), "inserted": inserted, "kept": kept}).to_string(),
+                )
+            }
+            ("POST", "/api/ledger/tax/batch") => {
+                // Insert-if-absent by kind and by state; a kept row
+                // reports which declared fields differ, in the one
+                // KeptRow shape.
+                let seed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                let mut rows: Vec<(String, Value)> = Vec::new();
+                for k in seed["tax_kind"].as_array().cloned().unwrap_or_default() {
+                    rows.push((format!("tax_kind {}", k["kind"].as_str().unwrap_or("")), k));
+                }
+                for r in seed["sales_tax_rate"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                {
+                    rows.push((
+                        format!("sales_tax_rate {}", r["state"].as_str().unwrap_or("")),
+                        r,
+                    ));
+                }
+                let mut inserted = 0usize;
+                let mut kept = Vec::new();
+                for (id, row) in &rows {
+                    match st.tax.get(id) {
+                        Some(have) => kept.push(json!({
+                            "id": id,
+                            "differs": differs(have, row)
+                        })),
+                        None => {
+                            st.tax.insert(id.clone(), row.clone());
+                            inserted += 1;
+                        }
+                    }
+                }
+                (
+                    200,
+                    json!({"received": rows.len(), "inserted": inserted, "kept": kept}).to_string(),
+                )
+            }
+            ("POST", "/api/calendar/business-calendars/batch") => {
+                let rows = serde_json::from_str::<Vec<Value>>(body).unwrap_or_default();
+                let key = |r: &Value| r["code"].as_str().unwrap_or("").to_string();
+                let out = batch_into(&mut st.calendars, &rows, key, take);
+                (200, out.to_string())
+            }
+            ("POST", "/api/subjects/company") => {
+                // The mint, for one row: insert-if-absent by id, the
+                // label kept and named by default, taken under take.
+                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                let label = v["label"].as_str().unwrap_or("").to_string();
+                let id = v["id"].as_str().unwrap_or("").to_string();
+                match st.company.clone().map(|(_, label)| label) {
+                    None => {
+                        st.company = Some((id, label));
+                        (201, json!({"received": 1, "inserted": 1, "kept": [], "updated": [], "unchanged": 0}).to_string())
+                    }
+                    Some(have) if have == label => (
+                        200,
+                        json!({"received": 1, "inserted": 0, "kept": [], "updated": [], "unchanged": 1}).to_string(),
+                    ),
+                    Some(have) if take => {
+                        st.company = Some((id, label.clone()));
+                        (
+                            200,
+                            json!({"received": 1, "inserted": 0, "kept": [],
+                                   "updated": [{"id": v["id"], "changes": [{"field": "label", "from": have, "to": label}]}],
+                                   "unchanged": 0})
+                            .to_string(),
+                        )
+                    }
+                    Some(_) => (
+                        200,
+                        json!({"received": 1, "inserted": 0, "kept": [{"id": v["id"], "differs": ["label"]}],
+                               "updated": [], "unchanged": 0})
+                        .to_string(),
+                    ),
+                }
+            }
+            ("GET", p) if p.starts_with("/api/policy/rules/") => match st.policy.get(&seg(4)) {
+                Some(rule) => (200, rule.to_string()),
+                None => (404, String::new()),
+            },
+            ("POST", "/api/policy/rules") => {
+                let rule = serde_json::from_str::<Value>(body)
+                    .map(|v| v["rule"].clone())
+                    .unwrap_or(Value::Null);
+                let id = rule["id"].as_str().unwrap_or_default().to_string();
+                st.policy.insert(id, rule);
+                (201, "{}".into())
+            }
+            ("GET", "/api/subject-kinds") => {
+                let kinds: BTreeSet<&str> = st
+                    .classes
+                    .values()
+                    .filter_map(|c| c["subject_kind"].as_str())
+                    .collect();
+                let rows: Vec<Value> = kinds.iter().map(|k| json!({"kind": k})).collect();
+                (200, Value::Array(rows).to_string())
+            }
+            ("GET", "/api/classes") => {
+                let kind = query.strip_prefix("subject_kind=").unwrap_or("");
+                let rows: Vec<Value> = st
+                    .classes
+                    .values()
+                    .filter(|c| c["subject_kind"] == kind)
+                    .cloned()
+                    .collect();
+                (200, Value::Array(rows).to_string())
+            }
+            ("GET", "/api/ledger/accounts") => {
+                // The real list's shape: normal_side, plus the parent's code.
+                let rows: Vec<Value> = st
+                    .accounts
+                    .values()
+                    .map(|a| {
+                        json!({
+                            "id": "00000000-0000-0000-0000-000000000000",
+                            "code": a["code"], "name": a["name"], "kind": a["kind"],
+                            "normal_side": a["normal_balance"], "is_active": true,
+                            "parent": a.get("parent").cloned().unwrap_or(Value::Null),
+                        })
+                    })
+                    .collect();
+                (200, Value::Array(rows).to_string())
+            }
+            ("GET", "/api/ledger/tax-kinds") => {
+                let rows: Vec<Value> = st
+                    .tax
+                    .iter()
+                    .filter(|(k, _)| k.starts_with("tax_kind "))
+                    .map(|(_, v)| v.clone())
+                    .collect();
+                (200, Value::Array(rows).to_string())
+            }
+            ("GET", "/api/ledger/sales-tax-rates") => {
+                let rows: Vec<Value> = st
+                    .tax
+                    .iter()
+                    .filter(|(k, _)| k.starts_with("sales_tax_rate "))
+                    .map(|(_, v)| v.clone())
+                    .collect();
+                (200, Value::Array(rows).to_string())
+            }
+            ("GET", "/api/locations") => {
+                // Roots, or the direct children of one id — the real
+                // list's two shapes; the export walks the tree.
+                let parent = query.strip_prefix("parent_id=");
+                let rows: Vec<Value> = st
+                    .locations
+                    .values()
+                    .filter(|l| l.get("parent_id").and_then(Value::as_str) == parent)
+                    .cloned()
+                    .collect();
+                (200, Value::Array(rows).to_string())
+            }
+            ("GET", "/api/calendar/business-calendars") => (
+                200,
+                Value::Array(st.calendars.values().cloned().collect()).to_string(),
+            ),
+            ("GET", "/api/subjects/company") => {
+                let rows: Vec<Value> = st
+                    .company
+                    .iter()
+                    .map(|(id, label)| json!({"kind": "company", "id": id, "label": label}))
+                    .collect();
+                (200, Value::Array(rows).to_string())
+            }
+            ("GET", "/api/policy/rules") => (
+                200,
+                Value::Array(st.policy.values().cloned().collect()).to_string(),
+            ),
+            ("GET", "/api/agents") => {
+                // The real registry's row: every column present, `null`
+                // until declared, aliases sorted.
+                let rows: Vec<Value> = st
+                    .agents
+                    .values()
+                    .map(|a| {
+                        let mut aliases: Vec<Value> =
+                            a["aliases"].as_array().cloned().unwrap_or_default();
+                        aliases.sort_by_key(|v| v.as_str().unwrap_or("").to_string());
+                        json!({
+                            "id": a["id"], "display_name": a["display_name"],
+                            "default_model": a["default_model"],
+                            "role": a.get("role").cloned().unwrap_or(Value::Null),
+                            "department": a.get("department").cloned().unwrap_or(Value::Null),
+                            "hourly_budget_usd_micros": a.get("hourly_budget_usd_micros").cloned().unwrap_or(Value::Null),
+                            "max_concurrent_runs": a.get("max_concurrent_runs").cloned().unwrap_or(Value::Null),
+                            "aliases": aliases,
+                        })
+                    })
+                    .collect();
+                (200, json!({"data": rows, "total": rows.len()}).to_string())
+            }
+            ("GET", "/api/workflows") => (
+                200,
+                Value::Array(st.workflows.values().cloned().collect()).to_string(),
+            ),
+            ("GET", "/api/credentials") => {
+                let rows: Vec<Value> = st
+                    .credentials
+                    .values()
+                    .map(|c| {
+                        let mut row = c.clone();
+                        row["rotated_at"] = Value::Null;
+                        row["created_at"] = json!("2026-09-18T00:00:00Z");
+                        row
+                    })
+                    .collect();
+                (200, Value::Array(rows).to_string())
+            }
+            ("GET", "/api/sensors") => {
+                // The real row spells `opens_kind` and carries the
+                // tenant and the poller's book-keeping.
+                let rows: Vec<Value> = st
+                    .sensors
+                    .values()
+                    .map(|s| {
+                        json!({
+                            "id": s["id"], "source": s["source"],
+                            "credential": s.get("credential").cloned().unwrap_or(json!("")),
+                            "every_minutes": s.get("every_minutes").cloned().unwrap_or(json!(0)),
+                            "opens_kind": s["opens"], "subject_kind": s["subject_kind"],
+                            "enabled": s.get("enabled").cloned().unwrap_or(json!(true)),
+                            "tenant_id": "acme",
+                            "published_at": "2026-09-18T00:00:00Z",
+                            "last_polled_at": null, "cursor_at": null,
+                        })
+                    })
+                    .collect();
+                (200, json!({"data": rows, "total": rows.len()}).to_string())
+            }
+            ("GET", "/api/ledger/posting-rules") => {
+                let rows: Vec<Value> = st
+                    .posting_rules
+                    .values()
+                    .map(|r| {
+                        let mut row = r.clone();
+                        row["source"] = json!("tenant:acme");
+                        row
+                    })
+                    .collect();
+                (200, json!({"data": rows, "total": rows.len()}).to_string())
+            }
+            ("GET", "/api/ledger/fact-projection-rules") => {
+                let rows: Vec<Value> = st.projections.values().cloned().collect();
+                (200, json!({"data": rows, "total": rows.len()}).to_string())
+            }
+            ("GET", "/api/people") => (
+                200,
+                Value::Array(st.people.values().cloned().collect()).to_string(),
+            ),
+            ("POST", "/api/people") => {
+                let row: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                let id = row["id"].as_str().unwrap_or("").to_string();
+                match st.people.entry(id) {
+                    std::collections::btree_map::Entry::Occupied(_) => (409, "duplicate".into()),
+                    std::collections::btree_map::Entry::Vacant(e) => {
+                        e.insert(row);
+                        (201, "{}".into())
+                    }
+                }
+            }
+            ("GET", p) if p.starts_with("/api/people/") => match st.people.get(&seg(3)) {
+                Some(v) => (200, v.to_string()),
+                None => (404, String::new()),
+            },
+            ("PUT", p) if p.starts_with("/api/people/") => {
+                let row: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                st.people.insert(seg(3), row);
+                (200, "{}".into())
+            }
+            ("GET", p) if p.starts_with("/api/workflows/") => match st.workflows.get(&seg(3)) {
+                Some(live) => (200, live.to_string()),
+                None => (404, String::new()),
+            },
+            ("POST", "/api/jobs") => {
+                // A design Job for the kind: the stub's "publish" lands
+                // the live row from the fixture's own file (its facets
+                // are what the bootstrap compares against next time),
+                // marked operator-published by its authoring_job_id.
+                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                let kind = v["subject"]["id"].as_str().unwrap_or("").to_string();
+                st.jobs += 1;
+                let mut live = st.file_specs.get(&kind).cloned().unwrap_or_else(
+                    || json!({"kind": kind, "label": "", "category": "", "steps": []}),
+                );
+                live["authoring_job_id"] = json!(format!("job-{}", st.jobs));
+                st.workflows.insert(kind, live);
+                (200, json!({"id": format!("job-{}", st.jobs)}).to_string())
+            }
+            ("POST", "/api/credentials/batch") => {
+                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                assert_eq!(v["tenant_id"], "acme", "the batch names the tenant: {body}");
+                let rows = v["credentials"].as_array().cloned().unwrap_or_default();
+                for r in &rows {
+                    assert!(
+                        r.get("value").is_none() && r.get("token").is_none(),
+                        "a declaration carries locations, never a value: {r}"
+                    );
+                }
+                let inserted = rows
+                    .iter()
+                    .filter(|r| {
+                        let id = r["id"].as_str().unwrap_or("").to_string();
+                        !st.credentials.contains_key(&id) && {
+                            st.credentials.insert(id, (*r).clone());
+                            true
+                        }
+                    })
+                    .count();
+                (
+                    200,
+                    json!({"received": rows.len(), "inserted": inserted}).to_string(),
+                )
+            }
+            ("POST", "/api/sensors/batch") => {
+                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                assert_eq!(v["tenant_id"], "acme", "the batch names the tenant: {body}");
+                let rows = v["sensors"].as_array().cloned().unwrap_or_default();
+                let key = |r: &Value| r["id"].as_str().unwrap_or("").to_string();
+                // No take at this door: insert-if-absent, kept named.
+                let mut out = batch_into(&mut st.sensors, &rows, key, false);
+                out.as_object_mut().unwrap().remove("updated");
+                (200, out.to_string())
+            }
+            ("POST", "/api/ledger/posting-rules/batch") => {
+                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                assert_eq!(v["tenant_id"], "acme", "the batch names the tenant: {body}");
+                let rows = v["rules"].as_array().cloned().unwrap_or_default();
+                let inserted = rows
+                    .iter()
+                    .filter(|r| {
+                        let k = format!("{} v{}", r["fact_kind"], r["version"]);
+                        !st.posting_rules.contains_key(&k) && {
+                            st.posting_rules.insert(k, (*r).clone());
+                            true
+                        }
+                    })
+                    .count();
+                (
+                    200,
+                    json!({"received": rows.len(), "inserted": inserted, "differs": []})
+                        .to_string(),
+                )
+            }
+            ("POST", "/api/ledger/fact-projection-rules/batch") => {
+                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                let rows = v["rules"].as_array().cloned().unwrap_or_default();
+                let inserted = rows
+                    .iter()
+                    .filter(|r| {
+                        let k = format!("{} {}", r["event_kind"], r["when"]);
+                        !st.projections.contains_key(&k) && {
+                            st.projections.insert(k, (*r).clone());
+                            true
+                        }
+                    })
+                    .count();
+                (
+                    200,
+                    json!({"received": rows.len(), "inserted": inserted, "differs": []})
+                        .to_string(),
+                )
+            }
+            ("GET", p) if p.starts_with("/api/jobs/") && p.ends_with("/steps") => {
+                // No steps to walk: the bootstrap's own walk is
+                // boss-jobs' to test; this proves the door is
+                // reached with the right identity.
+                (200, "[]".into())
+            }
+            (_, p) if p.starts_with("/api/dispatcher/") => route_dispatcher(st, method, path, body),
+            _ => (500, format!("stub: unrouted {method} {path}")),
+        }
+    }
+
+    /// A stateful HTTP stub on an ephemeral port, routed by `router`.
+    /// Reads one request per connection (the head, then
+    /// content-length bytes of body), answers with `connection:
+    /// close`, and logs every request on the shared state.
+    pub(crate) async fn spawn_stub_with<F>(st: Arc<Mutex<Stub>>, router: F) -> String
+    where
+        F: Fn(&mut Stub, &str, &str, &str) -> (u16, String) + Send + Sync + 'static,
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let router = Arc::new(router);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let st = st.clone();
+                let router = router.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let head_end = loop {
+                        match sock.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break i + 4;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..head_end]).to_lowercase();
+                    let len: usize = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    while buf.len() < head_end + len {
+                        match sock.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    let body = String::from_utf8_lossy(&buf[head_end..head_end + len]).into_owned();
+                    let mut first = head.lines().next().unwrap_or("").split_whitespace();
+                    let method = first.next().unwrap_or("").to_uppercase();
+                    let path = first.next().unwrap_or("/").to_string();
+                    let (code, resp_body) = {
+                        let mut st = st.lock().unwrap();
+                        let r = router(&mut st, &method, &path, &body);
+                        st.log.push((method, path, head, body));
+                        r
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {code} X\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{resp_body}",
+                        resp_body.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    pub(crate) async fn spawn_stub(st: Arc<Mutex<Stub>>) -> String {
+        spawn_stub_with(st, route).await
+    }
+
+    /// A stub whose "publish" of a workflow kind lands the fixture's
+    /// own spec as the live row (see `Stub::file_specs`).
+    pub(crate) fn stub_for(dir: &Path) -> Arc<Mutex<Stub>> {
+        let specs = boss_jobs::seed_loader::load_workflows_with_owning_team(
+            dir.join("seeds/workflows.toml"),
+            "acme",
+        )
+        .unwrap();
+        let mut st = Stub::default();
+        for s in specs {
+            st.file_specs
+                .insert(s.kind.clone(), serde_json::to_value(&s).unwrap());
+        }
+        Arc::new(Mutex::new(st))
+    }
+
+    pub(crate) async fn run_publish(p: Plan, base: String) -> Result<Vec<String>> {
+        run_publish_taking(p, base, Take::default()).await
+    }
+
+    pub(crate) async fn run_publish_taking(
+        p: Plan,
+        base: String,
+        take: Take,
+    ) -> Result<Vec<String>> {
+        tokio::task::spawn_blocking(move || {
+            let bases = Bases::resolve(Some(&base));
+            let mut lines = Vec::new();
+            publish(&p, &bases, &take, &mut |l| lines.push(l))?;
+            Ok(lines)
+        })
+        .await
+        .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stub::*;
+    use super::*;
+    use boss_testing::scratch::scratch_dir;
+    use std::sync::{Arc, Mutex};
+
+    /// One actor in two spellings: the header every door sees and the
+    /// id the stamp records.
+    #[test]
+    fn the_seed_actor_is_the_seed_users_id() {
+        let user: Value = serde_json::from_str(SEED_USER).unwrap();
+        assert_eq!(user["id"].as_str(), Some(SEED_ACTOR));
+    }
+
+    #[test]
+    fn take_names_what_it_was_given_in_name_order() {
+        assert_eq!(
+            Take::parse(Some("workflows,agents")).unwrap().names(),
+            vec!["agents".to_string(), "workflows".to_string()]
+        );
+        assert!(Take::parse(None).unwrap().names().is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // A fixture in the real tenant's shape (its names swapped for a
+    // neutral tenant: the vocabulary ratchet counts a real tenant's
+    // name here; the check-found defects fixed): every contract file
+    // publish sends, plus the two nothing reads.
+    // ------------------------------------------------------------------
 
     fn step<'a>(p: &'a Plan, path: &str) -> &'a Step {
         p.steps
@@ -2130,656 +3004,6 @@ terminal = { outcome = "sponsored" }
         assert!(g.describe(Some("http://gw:8080")).contains("gateway"));
     }
 
-    // ------------------------------------------------------------------
-    // The doors, against a recording stub that keeps state — so a
-    // second run can be judged to write nothing new.
-    // ------------------------------------------------------------------
-
-    #[derive(Default)]
-    struct Stub {
-        /// Every request: (method, path, lowercased head, body).
-        log: Vec<(String, String, String, String)>,
-        /// What "exists" server-side: policy rules by id (the row the
-        /// GET answers, so the bootstrap's comparison sees it),
-        /// employee ids, published workflow kinds (kind -> the live
-        /// spec the GET answers), design Job ids.
-        policy: BTreeMap<String, Value>,
-        people: BTreeMap<String, Value>,
-        workflows: BTreeMap<String, Value>,
-        jobs: usize,
-        /// Published sensors, id -> the declared row (insert-if-absent,
-        /// like the door; a held row that differs is named).
-        sensors: BTreeMap<String, Value>,
-        /// Published business calendars, code -> the row (insert-if-
-        /// absent; `?mode=take` replaces).
-        calendars: BTreeMap<String, Value>,
-        /// The company subject's label, once minted.
-        company: Option<String>,
-        /// What the stub's "publish" lands as a kind's live row: the
-        /// fixture file's own specs (`stub_for`), so a second publish
-        /// reads the row as the file declares it — the real registry
-        /// lands the spec through the design Job's publish step, which
-        /// this stub does not walk.
-        file_specs: BTreeMap<String, Value>,
-        /// Published classes, "kind/code" -> the row (insert-if-absent;
-        /// `PUT /api/classes/{kind}/{code}` edits one).
-        classes: BTreeMap<String, Value>,
-        /// Declared credential ids (insert-if-absent, like the door).
-        credentials: BTreeSet<String>,
-        /// Published location ids (insert-if-absent, like the door).
-        locations: BTreeSet<String>,
-        /// Registered agents: id -> display_name (insert-if-absent by
-        /// default, `?mode=take` overwrites; a test's "migration"
-        /// pre-registers agent-claude under the platform's own name,
-        /// as the real schema does).
-        agents: BTreeMap<String, String>,
-        /// Published posting rules, "fact_kind v<n>" (insert-if-absent).
-        posting_rules: BTreeSet<String>,
-        /// Published projections, "event_kind when" (insert-if-absent).
-        projections: BTreeSet<String>,
-        /// The chart of accounts: code -> name (insert-if-absent by
-        /// code; a test pre-seeds the starter's rows the way
-        /// 40-ledger.sql does).
-        accounts: BTreeMap<String, String>,
-        /// The tax regime: "tax_kind <kind>" / "sales_tax_rate <ST>" ->
-        /// the row (insert-if-absent; a test pre-seeds the migration's
-        /// rows the way 40-ledger.sql does).
-        tax: BTreeMap<String, Value>,
-        /// The dispatcher's rule registry, one row per (name, version):
-        /// the stored draft/active/retired rows with their `source`,
-        /// the append-only shape `dispatcher_rules` has.
-        rules: Vec<Value>,
-    }
-
-    impl Stub {
-        fn writes(&self) -> usize {
-            self.policy.len()
-                + self.people.len()
-                + self.workflows.len()
-                + self.jobs
-                + self.sensors.len()
-                + self.credentials.len()
-                + self.locations.len()
-                + self.agents.len()
-                + self.posting_rules.len()
-                + self.projections.len()
-                + self.accounts.len()
-                + self.tax.len()
-                + self.rules.len()
-                + self.calendars.len()
-                + self.classes.len()
-                + usize::from(self.company.is_some())
-        }
-
-        fn active_rule(&self, name: &str) -> Option<&Value> {
-            self.rules
-                .iter()
-                .find(|r| r["name"] == name && r["status"] == "active")
-        }
-    }
-
-    /// The dispatcher's authoring door, as the real one behaves
-    /// (boss_dispatcher::rules::authoring): `_validate` answers
-    /// `{ok, error}`; a draft lands at max(declared, MAX + 1) carrying
-    /// its `source`, refused when another source holds a LIVE row of
-    /// the name (a retired name is free, backlog 70bc5725); publish
-    /// promotes the newest draft and retires the incumbent.
-    fn route_dispatcher(st: &mut Stub, method: &str, path: &str, body: &str) -> (u16, String) {
-        let seg = |i: usize| path.split('/').nth(i).unwrap_or("").to_string();
-        match (method, path) {
-            ("POST", "/api/dispatcher/rules/_validate") => {
-                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-                let when = v["when"].as_str().unwrap_or("");
-                if when.contains("(") {
-                    (
-                        200,
-                        json!({"ok": false, "error": format!("rule {}: when: unbalanced parenthesis", v["name"])}).to_string(),
-                    )
-                } else {
-                    (200, json!({"ok": true, "error": null}).to_string())
-                }
-            }
-            ("POST", "/api/dispatcher/rules") => {
-                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-                let name = v["name"].as_str().unwrap_or("").to_string();
-                let source = v["source"].clone();
-                if let Some(other) = st.rules.iter().find(|r| {
-                    r["name"] == name && r["status"] != "retired" && r["source"] != source
-                }) {
-                    return (
-                        400,
-                        format!(
-                            "invalid rule: rule `{name}` is owned by {}; a draft from {} cannot supersede it",
-                            other["source"].as_str().unwrap_or("product"),
-                            source.as_str().unwrap_or("product")
-                        ),
-                    );
-                }
-                let max = st
-                    .rules
-                    .iter()
-                    .filter(|r| r["name"] == name)
-                    .filter_map(|r| r["version"].as_u64())
-                    .max()
-                    .unwrap_or(0);
-                let version = (max + 1).max(v["version"].as_u64().unwrap_or(1));
-                let mut row = v.clone();
-                row["version"] = json!(version);
-                row["status"] = json!("draft");
-                row["created_at"] = json!("2026-09-17T00:00:00Z");
-                st.rules.push(row.clone());
-                (201, row.to_string())
-            }
-            ("GET", p) if p.starts_with("/api/dispatcher/rules/") && p.ends_with("/versions") => {
-                let name = seg(4);
-                let rows: Vec<&Value> = st.rules.iter().filter(|r| r["name"] == name).collect();
-                (200, serde_json::to_string(&rows).unwrap())
-            }
-            ("POST", p) if p.starts_with("/api/dispatcher/rules/") && p.ends_with("/publish") => {
-                let name = seg(4);
-                let Some(draft_at) = st
-                    .rules
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, r)| r["name"] == name && r["status"] == "draft")
-                    .max_by_key(|(_, r)| r["version"].as_u64())
-                    .map(|(i, _)| i)
-                else {
-                    return (404, format!("not found: no draft to publish for {name}"));
-                };
-                for r in st.rules.iter_mut() {
-                    if r["name"] == name && r["status"] == "active" {
-                        r["status"] = json!("retired");
-                    }
-                }
-                st.rules[draft_at]["status"] = json!("active");
-                (200, st.rules[draft_at].to_string())
-            }
-            _ => (500, format!("stub: unrouted {method} {path}")),
-        }
-    }
-
-    /// The declared fields of `declared` that `held` reads differently
-    /// — the comparison every insert-if-absent stub route answers a
-    /// kept row with, over the keys the declaration carries.
-    fn differs(held: &Value, declared: &Value) -> Vec<String> {
-        declared
-            .as_object()
-            .map(|d| {
-                d.iter()
-                    .filter(|(k, v)| *k != "id" && *k != "code" && held.get(*k) != Some(v))
-                    .map(|(k, _)| k.clone())
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// The changes from `held` to `declared` on `fields`, the take's
-    /// answer.
-    fn changes(held: &Value, declared: &Value, fields: &[String]) -> Vec<Value> {
-        fields
-            .iter()
-            .map(|f| {
-                json!({"field": f, "from": held.get(f).cloned().unwrap_or(Value::Null),
-                            "to": declared.get(f).cloned().unwrap_or(Value::Null)})
-            })
-            .collect()
-    }
-
-    /// One insert-if-absent / take batch over a `key -> row` map, the
-    /// real doors' answer shape: `{received, inserted, kept, updated,
-    /// unchanged}`.
-    fn batch_into(
-        store: &mut BTreeMap<String, Value>,
-        rows: &[Value],
-        key_of: impl Fn(&Value) -> String,
-        take: bool,
-    ) -> Value {
-        let (mut inserted, mut unchanged) = (0usize, 0usize);
-        let (mut kept, mut updated) = (Vec::new(), Vec::new());
-        for r in rows {
-            let key = key_of(r);
-            match store.get(&key).cloned() {
-                None => {
-                    store.insert(key, r.clone());
-                    inserted += 1;
-                }
-                Some(held) => {
-                    let d = differs(&held, r);
-                    if d.is_empty() {
-                        unchanged += 1;
-                    } else if take {
-                        updated.push(json!({"id": key, "changes": changes(&held, r, &d)}));
-                        store.insert(key, r.clone());
-                    } else {
-                        kept.push(json!({"id": key, "differs": d}));
-                    }
-                }
-            }
-        }
-        json!({"received": rows.len(), "inserted": inserted, "kept": kept,
-               "updated": updated, "unchanged": unchanged})
-    }
-
-    fn route(st: &mut Stub, method: &str, path: &str, body: &str) -> (u16, String) {
-        // The mode rides the query string; the path is matched bare.
-        let (path, take) = match path.split_once('?') {
-            Some((p, q)) => (p, q == "mode=take"),
-            None => (path, false),
-        };
-        let seg = |i: usize| path.split('/').nth(i).unwrap_or("").to_string();
-        match (method, path) {
-            ("POST", "/api/classes/batch") => {
-                let rows = serde_json::from_str::<Vec<Value>>(body).unwrap_or_default();
-                let key = |r: &Value| {
-                    format!(
-                        "{}/{}",
-                        r["subject_kind"].as_str().unwrap_or(""),
-                        r["code"].as_str().unwrap_or("")
-                    )
-                };
-                // The real batch has no take: insert-if-absent, kept
-                // rows named; the edit door below is the take.
-                let mut out = batch_into(&mut st.classes, &rows, key, false);
-                out.as_object_mut().unwrap().remove("updated");
-                (200, out.to_string())
-            }
-            ("GET", p) if p.starts_with("/api/classes/") => {
-                let key = format!("{}/{}", seg(3), seg(4));
-                match st.classes.get(&key) {
-                    Some(v) => (200, v.to_string()),
-                    None => (404, "no such class".into()),
-                }
-            }
-            ("PUT", p) if p.starts_with("/api/classes/") => {
-                let key = format!("{}/{}", seg(3), seg(4));
-                let row: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-                match st.classes.get_mut(&key) {
-                    Some(held) => {
-                        *held = row.clone();
-                        (200, row.to_string())
-                    }
-                    None => (404, "no such class".into()),
-                }
-            }
-            ("POST", "/api/locations/batch") => {
-                // The classes batch shape: a bare JSON array of rows.
-                let rows = serde_json::from_str::<Vec<Value>>(body).unwrap_or_default();
-                let inserted = rows
-                    .iter()
-                    .filter_map(|r| r["id"].as_str().map(str::to_string))
-                    .filter(|id| st.locations.insert(id.clone()))
-                    .count();
-                (
-                    200,
-                    json!({"received": rows.len(), "inserted": inserted}).to_string(),
-                )
-            }
-            ("POST", "/api/agents/batch") => {
-                // Insert by id; a held row that differs on the declared
-                // field (here: display_name only) is kept and named by
-                // default, updated with the change named from → to
-                // under `?mode=take`, as the real door answers.
-                let rows = serde_json::from_str::<Vec<Value>>(body).unwrap_or_default();
-                let mut inserted = 0usize;
-                let mut unchanged = 0usize;
-                let mut updated = Vec::new();
-                let mut kept = Vec::new();
-                for r in &rows {
-                    let id = r["id"].as_str().unwrap_or("").to_string();
-                    let name = r["display_name"].as_str().unwrap_or("").to_string();
-                    match st.agents.get(&id).cloned() {
-                        Some(have) if have == name => unchanged += 1,
-                        Some(have) if take => {
-                            updated.push(json!({
-                                "id": id,
-                                "changes": [{"field": "display_name", "from": have, "to": name}]
-                            }));
-                            st.agents.insert(id, name);
-                        }
-                        Some(_) => kept.push(json!({"id": id, "differs": ["display_name"]})),
-                        None => {
-                            st.agents.insert(id, name);
-                            inserted += 1;
-                        }
-                    }
-                }
-                (
-                    200,
-                    json!({
-                        "received": rows.len(), "inserted": inserted,
-                        "updated": updated, "kept": kept, "unchanged": unchanged
-                    })
-                    .to_string(),
-                )
-            }
-            ("POST", "/api/ledger/accounts/batch") => {
-                // Insert-if-absent by code; a kept row reports which
-                // declared fields differ (here: name only).
-                let rows = serde_json::from_str::<Vec<Value>>(body).unwrap_or_default();
-                let mut inserted = 0usize;
-                let mut kept = Vec::new();
-                for r in &rows {
-                    let code = r["code"].as_str().unwrap_or("").to_string();
-                    let name = r["name"].as_str().unwrap_or("").to_string();
-                    match st.accounts.get(&code) {
-                        Some(have) => kept.push(json!({
-                            "code": code,
-                            "differs": if *have == name { json!([]) } else { json!(["name"]) }
-                        })),
-                        None => {
-                            st.accounts.insert(code, name);
-                            inserted += 1;
-                        }
-                    }
-                }
-                (
-                    200,
-                    json!({"received": rows.len(), "inserted": inserted, "kept": kept}).to_string(),
-                )
-            }
-            ("POST", "/api/ledger/tax/batch") => {
-                // Insert-if-absent by kind and by state; a kept row
-                // reports which declared fields differ, in the one
-                // KeptRow shape.
-                let seed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-                let mut rows: Vec<(String, Value)> = Vec::new();
-                for k in seed["tax_kind"].as_array().cloned().unwrap_or_default() {
-                    rows.push((format!("tax_kind {}", k["kind"].as_str().unwrap_or("")), k));
-                }
-                for r in seed["sales_tax_rate"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default()
-                {
-                    rows.push((
-                        format!("sales_tax_rate {}", r["state"].as_str().unwrap_or("")),
-                        r,
-                    ));
-                }
-                let mut inserted = 0usize;
-                let mut kept = Vec::new();
-                for (id, row) in &rows {
-                    match st.tax.get(id) {
-                        Some(have) => kept.push(json!({
-                            "id": id,
-                            "differs": differs(have, row)
-                        })),
-                        None => {
-                            st.tax.insert(id.clone(), row.clone());
-                            inserted += 1;
-                        }
-                    }
-                }
-                (
-                    200,
-                    json!({"received": rows.len(), "inserted": inserted, "kept": kept}).to_string(),
-                )
-            }
-            ("POST", "/api/calendar/business-calendars/batch") => {
-                let rows = serde_json::from_str::<Vec<Value>>(body).unwrap_or_default();
-                let key = |r: &Value| r["code"].as_str().unwrap_or("").to_string();
-                let out = batch_into(&mut st.calendars, &rows, key, take);
-                (200, out.to_string())
-            }
-            ("POST", "/api/subjects/company") => {
-                // The mint, for one row: insert-if-absent by id, the
-                // label kept and named by default, taken under take.
-                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-                let label = v["label"].as_str().unwrap_or("").to_string();
-                match st.company.clone() {
-                    None => {
-                        st.company = Some(label);
-                        (201, json!({"received": 1, "inserted": 1, "kept": [], "updated": [], "unchanged": 0}).to_string())
-                    }
-                    Some(have) if have == label => (
-                        200,
-                        json!({"received": 1, "inserted": 0, "kept": [], "updated": [], "unchanged": 1}).to_string(),
-                    ),
-                    Some(have) if take => {
-                        st.company = Some(label.clone());
-                        (
-                            200,
-                            json!({"received": 1, "inserted": 0, "kept": [],
-                                   "updated": [{"id": v["id"], "changes": [{"field": "label", "from": have, "to": label}]}],
-                                   "unchanged": 0})
-                            .to_string(),
-                        )
-                    }
-                    Some(_) => (
-                        200,
-                        json!({"received": 1, "inserted": 0, "kept": [{"id": v["id"], "differs": ["label"]}],
-                               "updated": [], "unchanged": 0})
-                        .to_string(),
-                    ),
-                }
-            }
-            ("GET", p) if p.starts_with("/api/policy/rules/") => match st.policy.get(&seg(4)) {
-                Some(rule) => (200, rule.to_string()),
-                None => (404, String::new()),
-            },
-            ("POST", "/api/policy/rules") => {
-                let rule = serde_json::from_str::<Value>(body)
-                    .map(|v| v["rule"].clone())
-                    .unwrap_or(Value::Null);
-                let id = rule["id"].as_str().unwrap_or_default().to_string();
-                st.policy.insert(id, rule);
-                (201, "{}".into())
-            }
-            ("GET", "/api/people") => (
-                200,
-                Value::Array(st.people.values().cloned().collect()).to_string(),
-            ),
-            ("POST", "/api/people") => {
-                let row: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-                let id = row["id"].as_str().unwrap_or("").to_string();
-                match st.people.entry(id) {
-                    std::collections::btree_map::Entry::Occupied(_) => (409, "duplicate".into()),
-                    std::collections::btree_map::Entry::Vacant(e) => {
-                        e.insert(row);
-                        (201, "{}".into())
-                    }
-                }
-            }
-            ("GET", p) if p.starts_with("/api/people/") => match st.people.get(&seg(3)) {
-                Some(v) => (200, v.to_string()),
-                None => (404, String::new()),
-            },
-            ("PUT", p) if p.starts_with("/api/people/") => {
-                let row: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-                st.people.insert(seg(3), row);
-                (200, "{}".into())
-            }
-            ("GET", p) if p.starts_with("/api/workflows/") => match st.workflows.get(&seg(3)) {
-                Some(live) => (200, live.to_string()),
-                None => (404, String::new()),
-            },
-            ("POST", "/api/jobs") => {
-                // A design Job for the kind: the stub's "publish" lands
-                // the live row from the fixture's own file (its facets
-                // are what the bootstrap compares against next time),
-                // marked operator-published by its authoring_job_id.
-                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-                let kind = v["subject"]["id"].as_str().unwrap_or("").to_string();
-                st.jobs += 1;
-                let mut live = st.file_specs.get(&kind).cloned().unwrap_or_else(
-                    || json!({"kind": kind, "label": "", "category": "", "steps": []}),
-                );
-                live["authoring_job_id"] = json!(format!("job-{}", st.jobs));
-                st.workflows.insert(kind, live);
-                (200, json!({"id": format!("job-{}", st.jobs)}).to_string())
-            }
-            ("POST", "/api/credentials/batch") => {
-                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-                assert_eq!(v["tenant_id"], "acme", "the batch names the tenant: {body}");
-                let rows = v["credentials"].as_array().cloned().unwrap_or_default();
-                for r in &rows {
-                    assert!(
-                        r.get("value").is_none() && r.get("token").is_none(),
-                        "a declaration carries locations, never a value: {r}"
-                    );
-                }
-                let inserted = rows
-                    .iter()
-                    .filter_map(|r| r["id"].as_str().map(str::to_string))
-                    .filter(|id| st.credentials.insert(id.clone()))
-                    .count();
-                (
-                    200,
-                    json!({"received": rows.len(), "inserted": inserted}).to_string(),
-                )
-            }
-            ("POST", "/api/sensors/batch") => {
-                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-                assert_eq!(v["tenant_id"], "acme", "the batch names the tenant: {body}");
-                let rows = v["sensors"].as_array().cloned().unwrap_or_default();
-                let key = |r: &Value| r["id"].as_str().unwrap_or("").to_string();
-                // No take at this door: insert-if-absent, kept named.
-                let mut out = batch_into(&mut st.sensors, &rows, key, false);
-                out.as_object_mut().unwrap().remove("updated");
-                (200, out.to_string())
-            }
-            ("POST", "/api/ledger/posting-rules/batch") => {
-                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-                assert_eq!(v["tenant_id"], "acme", "the batch names the tenant: {body}");
-                let rows = v["rules"].as_array().cloned().unwrap_or_default();
-                let inserted = rows
-                    .iter()
-                    .map(|r| format!("{} v{}", r["fact_kind"], r["version"]))
-                    .filter(|k| st.posting_rules.insert(k.clone()))
-                    .count();
-                (
-                    200,
-                    json!({"received": rows.len(), "inserted": inserted, "differs": []})
-                        .to_string(),
-                )
-            }
-            ("POST", "/api/ledger/fact-projection-rules/batch") => {
-                let v: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-                let rows = v["rules"].as_array().cloned().unwrap_or_default();
-                let inserted = rows
-                    .iter()
-                    .map(|r| format!("{} {}", r["event_kind"], r["when"]))
-                    .filter(|k| st.projections.insert(k.clone()))
-                    .count();
-                (
-                    200,
-                    json!({"received": rows.len(), "inserted": inserted, "differs": []})
-                        .to_string(),
-                )
-            }
-            ("GET", p) if p.starts_with("/api/jobs/") && p.ends_with("/steps") => {
-                // No steps to walk: the bootstrap's own walk is
-                // boss-jobs' to test; this proves the door is
-                // reached with the right identity.
-                (200, "[]".into())
-            }
-            (_, p) if p.starts_with("/api/dispatcher/") => route_dispatcher(st, method, path, body),
-            _ => (500, format!("stub: unrouted {method} {path}")),
-        }
-    }
-
-    /// A stateful HTTP stub on an ephemeral port, routed by `router`.
-    /// Reads one request per connection (the head, then
-    /// content-length bytes of body), answers with `connection:
-    /// close`, and logs every request on the shared state.
-    async fn spawn_stub_with<F>(st: Arc<Mutex<Stub>>, router: F) -> String
-    where
-        F: Fn(&mut Stub, &str, &str, &str) -> (u16, String) + Send + Sync + 'static,
-    {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let router = Arc::new(router);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            loop {
-                let Ok((mut sock, _)) = listener.accept().await else {
-                    break;
-                };
-                let st = st.clone();
-                let router = router.clone();
-                tokio::spawn(async move {
-                    let mut buf = Vec::new();
-                    let mut chunk = [0u8; 4096];
-                    let head_end = loop {
-                        match sock.read(&mut chunk).await {
-                            Ok(0) | Err(_) => return,
-                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                        }
-                        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                            break i + 4;
-                        }
-                    };
-                    let head = String::from_utf8_lossy(&buf[..head_end]).to_lowercase();
-                    let len: usize = head
-                        .lines()
-                        .find_map(|l| l.strip_prefix("content-length:"))
-                        .and_then(|v| v.trim().parse().ok())
-                        .unwrap_or(0);
-                    while buf.len() < head_end + len {
-                        match sock.read(&mut chunk).await {
-                            Ok(0) | Err(_) => return,
-                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                        }
-                    }
-                    let body = String::from_utf8_lossy(&buf[head_end..head_end + len]).into_owned();
-                    let mut first = head.lines().next().unwrap_or("").split_whitespace();
-                    let method = first.next().unwrap_or("").to_uppercase();
-                    let path = first.next().unwrap_or("/").to_string();
-                    let (code, resp_body) = {
-                        let mut st = st.lock().unwrap();
-                        let r = router(&mut st, &method, &path, &body);
-                        st.log.push((method, path, head, body));
-                        r
-                    };
-                    let resp = format!(
-                        "HTTP/1.1 {code} X\r\ncontent-type: application/json\r\n\
-                         content-length: {}\r\nconnection: close\r\n\r\n{resp_body}",
-                        resp_body.len()
-                    );
-                    let _ = sock.write_all(resp.as_bytes()).await;
-                    let _ = sock.shutdown().await;
-                });
-            }
-        });
-        format!("http://{addr}")
-    }
-
-    async fn spawn_stub(st: Arc<Mutex<Stub>>) -> String {
-        spawn_stub_with(st, route).await
-    }
-
-    /// A stub whose "publish" of a workflow kind lands the fixture's
-    /// own spec as the live row (see `Stub::file_specs`).
-    fn stub_for(dir: &Path) -> Arc<Mutex<Stub>> {
-        let specs = boss_jobs::seed_loader::load_workflows_with_owning_team(
-            dir.join("seeds/workflows.toml"),
-            "acme",
-        )
-        .unwrap();
-        let mut st = Stub::default();
-        for s in specs {
-            st.file_specs
-                .insert(s.kind.clone(), serde_json::to_value(&s).unwrap());
-        }
-        Arc::new(Mutex::new(st))
-    }
-
-    async fn run_publish(p: Plan, base: String) -> Result<Vec<String>> {
-        run_publish_taking(p, base, Take::default()).await
-    }
-
-    async fn run_publish_taking(p: Plan, base: String, take: Take) -> Result<Vec<String>> {
-        tokio::task::spawn_blocking(move || {
-            let bases = Bases::resolve(Some(&base));
-            let mut lines = Vec::new();
-            publish(&p, &bases, &take, &mut |l| lines.push(l))?;
-            Ok(lines)
-        })
-        .await
-        .unwrap()
-    }
-
     fn line_of<'a>(lines: &'a [String], path: &str) -> &'a str {
         lines
             .iter()
@@ -2808,7 +3032,7 @@ terminal = { outcome = "sponsored" }
             1,
             "one batch for the locations file"
         );
-        assert_eq!(st.locations.iter().collect::<Vec<_>>(), ["loc-acme-hq"]);
+        assert_eq!(st.locations.keys().collect::<Vec<_>>(), ["loc-acme-hq"]);
         assert_eq!(
             hit("POST", "/api/ledger/accounts/batch"),
             1,
@@ -2844,7 +3068,7 @@ terminal = { outcome = "sponsored" }
             "one batch for the credentials file"
         );
         assert_eq!(
-            st.credentials.iter().collect::<Vec<_>>(),
+            st.credentials.keys().collect::<Vec<_>>(),
             ["stripe-restricted-read"]
         );
         assert_eq!(
@@ -2858,7 +3082,7 @@ terminal = { outcome = "sponsored" }
         );
         assert_eq!(hit("POST", "/api/ledger/posting-rules/batch"), 1);
         assert_eq!(
-            st.posting_rules.iter().collect::<Vec<_>>(),
+            st.posting_rules.keys().collect::<Vec<_>>(),
             ["\"finance.sponsorship.received\" v1"]
         );
         assert_eq!(hit("POST", "/api/ledger/fact-projection-rules/batch"), 1);
@@ -3018,8 +3242,14 @@ terminal = { outcome = "sponsored" }
         let st = Arc::new(Mutex::new(Stub::default()));
         {
             let mut st = st.lock().unwrap();
-            st.accounts.insert("1000".into(), "Cash".into());
-            st.accounts.insert("1010".into(), "Cash in Transit".into());
+            st.accounts.insert(
+                "1000".into(),
+                json!({"code": "1000", "name": "Cash", "kind": "asset", "normal_balance": "debit"}),
+            );
+            st.accounts.insert(
+                "1010".into(),
+                json!({"code": "1010", "name": "Cash in Transit", "kind": "asset", "normal_balance": "debit"}),
+            );
         }
         let base = spawn_stub(st.clone()).await;
         let lines = run_publish(p, base).await.unwrap();
@@ -3036,10 +3266,10 @@ terminal = { outcome = "sponsored" }
         );
         let st = st.lock().unwrap();
         assert_eq!(
-            st.accounts["1000"], "Cash",
+            st.accounts["1000"]["name"], "Cash",
             "kept as the starter registered it"
         );
-        assert_eq!(st.accounts["4200"], "Support revenue");
+        assert_eq!(st.accounts["4200"]["name"], "Support revenue");
     }
 
     /// A TAX ROW THE INSTANCE HOLDS IS KEPT AND NAMED (backlog
@@ -3459,7 +3689,12 @@ terminal = { outcome = "sponsored" }
         let st = Arc::new(Mutex::new(Stub::default()));
         st.lock().unwrap().agents.insert(
             "agent-claude".into(),
-            "Claude (Claude Code sessions on the dev pod)".into(),
+            json!({
+                "id": "agent-claude",
+                "display_name": "Claude (Claude Code sessions on the dev pod)",
+                "default_model": "opus-5[1m]",
+                "aliases": [],
+            }),
         );
         let base = spawn_stub(st.clone()).await;
         let lines = run_publish(p.clone(), base.clone()).await.unwrap();
@@ -3475,7 +3710,8 @@ terminal = { outcome = "sponsored" }
         {
             let st = st.lock().unwrap();
             assert_eq!(
-                st.agents["agent-claude"], "Claude (Claude Code sessions on the dev pod)",
+                st.agents["agent-claude"]["display_name"],
+                "Claude (Claude Code sessions on the dev pod)",
                 "the instance's row is kept"
             );
             assert!(
@@ -3501,7 +3737,7 @@ terminal = { outcome = "sponsored" }
         {
             let st = st.lock().unwrap();
             assert_eq!(
-                st.agents["agent-claude"], "Claude (engineering)",
+                st.agents["agent-claude"]["display_name"], "Claude (engineering)",
                 "the declaration wins under take"
             );
             assert!(
@@ -3699,7 +3935,7 @@ terminal = { outcome = "sponsored" }
                 json!("Founder & CEO");
             st.calendars.get_mut("acme-founder").unwrap()["closed"] =
                 json!(["2026-12-25", "2026-12-26"]);
-            st.company = Some("Acme Holdings, LLC".into());
+            st.company = Some(("acme".into(), "Acme Holdings, LLC".into()));
             st.policy.get_mut("founder:job:read").unwrap()["scope"] = json!("team");
             st.sensors.get_mut("stripe-sponsorships").unwrap()["every_minutes"] = json!(60);
             let live = st.workflows.get_mut("receive-a-sponsorship").unwrap();
@@ -3808,7 +4044,10 @@ terminal = { outcome = "sponsored" }
                 st.calendars["acme-founder"]["closed"],
                 json!(["2026-12-25"])
             );
-            assert_eq!(st.company.as_deref(), Some("Acme, LLC"));
+            assert_eq!(
+                st.company.as_ref().map(|(_, l)| l.as_str()),
+                Some("Acme, LLC")
+            );
             assert_eq!(st.policy["founder:job:read"]["scope"], "all");
             assert!(
                 st.log

@@ -40,6 +40,7 @@ mod running;
 mod script;
 mod steps;
 mod tenant;
+mod tenant_export;
 mod tenant_publish;
 mod tenant_stamp;
 mod train;
@@ -414,20 +415,38 @@ enum Commands {
     /// `boss dispatch <packet> > prompt.txt` is what you paste.
     Dispatch {
         /// The packet: its full uuid, 8+ characters of its id, or its
-        /// branch.
+        /// branch. With --report, the RUN (the agent-run id `boss
+        /// dispatch` printed).
         packet: String,
         /// The step's slug. Omit it when the packet is at exactly one.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "report")]
         step: Option<String>,
         /// Override the block's model (must be on the rate card).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "report")]
         model: Option<String>,
         /// Override the block's budget, in USD.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "report")]
         budget: Option<f64>,
         /// Override the block's effort: low, medium or high.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "report")]
         effort: Option<String>,
+        /// The other end of the run: record the builder's handback on
+        /// the run named by <PACKET>, complete its `reported` step when
+        /// the green has opened it, and write the finish to agent_runs.
+        #[arg(long, requires = "summary")]
+        report: bool,
+        /// With --report: the handback (packet, branch, sha, gate, what
+        /// changed, what it saw).
+        #[arg(long, requires = "report")]
+        summary: Option<String>,
+        /// With --report: what the run cost in dollars, as the session's
+        /// usage line reports it.
+        #[arg(long, requires = "report")]
+        spend_usd: Option<f64>,
+        /// With --report: the token count — a total (761000) or the
+        /// input,output split (740000,21000); only a split is priced.
+        #[arg(long, requires = "report")]
+        tokens: Option<String>,
     },
     /// Where the IT department's work comes from — the input-channel
     /// mix (user-feedback vs monitoring/error-discovery), the algedonic
@@ -1334,7 +1353,24 @@ async fn main() -> Result<()> {
             model,
             budget,
             effort,
-        } => dispatch::run(packet, step, model, budget, effort).await,
+            report,
+            summary,
+            spend_usd,
+            tokens,
+        } => {
+            if report {
+                dispatch::report(
+                    packet,
+                    summary.unwrap_or_default(),
+                    spend_usd,
+                    tokens,
+                    chrono::Utc::now(),
+                )
+                .await
+            } else {
+                dispatch::run(packet, step, model, budget, effort).await
+            }
+        }
         Commands::Channels => channels::run().await,
         Commands::Design {
             title,

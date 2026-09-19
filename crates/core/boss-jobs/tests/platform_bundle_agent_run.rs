@@ -231,6 +231,55 @@ fn the_landing_rule_follows_the_gates_agent_run_edge() {
     );
 }
 
+/// THE CAR'S ARRIVAL LANDS THE RUN TOO (car 3, backlog cb78818d — car
+/// 2's first loose end). Auto-park copies the gate-run's `agent_run`
+/// onto the car; this rule follows it from the car's `merged` terminal
+/// and completes the SAME step with the SAME result the gate-green rule
+/// writes, so whichever fires second finds it done. Pinned equal to the
+/// gate rule on every arg but the evidence key, because two rules that
+/// drifted on `result` would route one run to two terminals.
+#[test]
+fn the_cars_arrival_follows_the_same_agent_run_edge_as_the_gates_green() {
+    let rules = boss_testing::repo_root().join("infra/dispatcher/rules");
+    let read = |name: &str| -> toml::Value {
+        toml::from_str(
+            &std::fs::read_to_string(rules.join(name))
+                .unwrap_or_else(|e| panic!("{name} is authored: {e}")),
+        )
+        .expect("the rule file parses")
+    };
+    let on_car = read("agent-run-lands-on-car-merged.toml");
+    let on_gate = read("agent-run-lands-on-gate-green.toml");
+    let car = &on_car["rule"][0];
+    let gate = &on_gate["rule"][0];
+    assert_eq!(car["on_event"].as_str(), Some("jobs.job.closed"));
+    assert_eq!(
+        car["when"].as_str(),
+        Some("kind = \"ship-a-change\" AND outcome = \"merged\"")
+    );
+    let (car_do, gate_do) = (&car["do"][0], &gate["do"][0]);
+    assert_eq!(car_do["handler"], gate_do["handler"]);
+    for arg in ["link", "steps", "done_metadata"] {
+        assert_eq!(
+            car_do["args"][arg], gate_do["args"][arg],
+            "the two landing rules must agree on `{arg}`"
+        );
+    }
+    assert_eq!(car_do["args"]["evidence_key"].as_str(), Some("\"car\""));
+    assert_eq!(
+        gate_do["args"]["evidence_key"].as_str(),
+        Some("\"gate_run\"")
+    );
+    // `merged` is the car's own terminal label for arrival.
+    let ship = bundled("ship-a-change");
+    assert!(
+        ship.steps
+            .iter()
+            .any(|s| s.terminal.as_ref().is_some_and(|t| t.outcome == "merged")),
+        "ship-a-change has a `merged` terminal"
+    );
+}
+
 /// What `boss dispatch` writes is what the schema requires, and nothing
 /// a later hand adds is.
 #[test]

@@ -382,6 +382,37 @@ impl CalendarClient for PgCalendar {
         }))
     }
 
+    async fn list_business_calendars(&self) -> Result<Vec<BusinessCalendar>, CalendarError> {
+        // Two reads, joined here: the headers in code order, then every
+        // closed day grouped by its calendar — one round trip per table
+        // rather than one per code.
+        let headers: Vec<(String, String, Vec<i16>)> =
+            sqlx::query_as("SELECT code, name, weekend FROM business_calendars ORDER BY code")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| CalendarError::Storage(e.to_string()))?;
+        let days: Vec<(String, NaiveDate)> = sqlx::query_as(
+            "SELECT calendar_code, day FROM business_calendar_closed_days ORDER BY calendar_code, day",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| CalendarError::Storage(e.to_string()))?;
+        let mut closed: std::collections::BTreeMap<String, BTreeSet<NaiveDate>> =
+            std::collections::BTreeMap::new();
+        for (code, day) in days {
+            closed.entry(code).or_default().insert(day);
+        }
+        Ok(headers
+            .into_iter()
+            .map(|(code, name, weekend)| BusinessCalendar {
+                closed: closed.remove(&code).unwrap_or_default(),
+                code,
+                name,
+                weekend: weekend.into_iter().map(|d| d as u8).collect(),
+            })
+            .collect())
+    }
+
     async fn publish_business_calendars(
         &self,
         calendars: &[BusinessCalendar],

@@ -1,5 +1,7 @@
 //! `boss tenant init <name> [--into <dir>]` / `boss tenant check <dir>`
-//! — a tenant is a directory of its own (backlog fcc1d57b).
+//! — a tenant is a directory of its own (backlog fcc1d57b). `publish`
+//! (tenant_publish.rs) lands one in an instance; `export`
+//! (tenant_export.rs) writes the instance back into the same shape.
 //!
 //! WHY THIS IS A VERB. Until 2026-09-16 a tenant had no home outside
 //! the product tree: the only tenants were `examples/brewery` and
@@ -178,8 +180,24 @@ How it lands.
 The playground published its example tenant at every boot until the
 stamp (car 2); with insert-if-absent as the default that publish
 changed nothing on a running instance, and now it does not run at all
-there. `boss tenant export`, which writes the live registries back into
-this shape, is the car after.
+there.
+
+**`boss tenant export <dir>` writes the live registries back into this
+shape** (car 3, backlog `e618f3ac`) — the inverse of `check`'s loaders,
+so the exported directory is OK on every row and a publish of it back
+into the same instance writes nothing. Deterministic: rows and keys
+sorted, one formatting, nulls and defaults omitted, so exporting an
+unchanged instance into the directory it last wrote changes no file;
+the verb prints `added` / `changed` / `unchanged` / `skipped` per file
+and never deletes one. A registry that marks ownership is exported for
+the tenant only (Workflows by `owning_team`, dispatcher and posting
+rules by `source`, sensors by `tenant_id`); one that does not (classes,
+locations, the chart, tax, calendars, policy, credentials, projections)
+is exported whole, platform rows included. Two files are not rewritten
+wholesale because the instance does not hold everything they say:
+`tenant.toml` has only its `display_name` line set (to the company
+Subject's label), and a rule's `why` is kept from the `seeds/rules.toml`
+being overwritten — a rule with none gets a `why` saying so.
 "#;
 
 /// The contract. Measured 2026-09-16 by grepping every reader of
@@ -992,6 +1010,12 @@ impl Report {
 /// a placeholder when it cannot be read so the workflow loader still
 /// runs (the manifest row carries the real refusal).
 fn tenant_id_of(dir: &Path) -> String {
+    declared_tenant_id(dir).unwrap_or_else(|| "tenant".to_string())
+}
+
+/// The `[meta] tenant_id` the directory declares, or `None` — what
+/// `export` needs before it can ask an instance whose rows to read.
+pub fn declared_tenant_id(dir: &Path) -> Option<String> {
     ["tenant.toml", "seeds/tenant.toml"]
         .iter()
         .map(|p| dir.join(p))
@@ -1000,7 +1024,6 @@ fn tenant_id_of(dir: &Path) -> String {
         .and_then(|t| TenantToml::parse(&t).ok())
         .and_then(|t| t.meta.tenant_id)
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "tenant".to_string())
 }
 
 /// Validate `dir` against [`CONTRACT`]. Pure over the filesystem: it
@@ -1707,6 +1730,23 @@ pub enum TenantAction {
         #[arg(long, value_name = "REGISTRY[,REGISTRY]")]
         take: Option<String>,
     },
+    /// Write the instance's registries back into a tenant directory in
+    /// the contract's shape — the inverse of `publish` (design e187198f
+    /// car 3, backlog e618f3ac). Deterministic: an unchanged instance
+    /// exported into the directory it last wrote changes no file. Prints
+    /// added / changed / unchanged / skipped per file. Never deletes.
+    Export {
+        dir: PathBuf,
+        /// Route every /api prefix through one gateway URL (default:
+        /// each service's own localhost port).
+        #[arg(long)]
+        gateway: Option<String>,
+        /// The tenant whose rows to export (default: the directory's
+        /// own `[meta] tenant_id`; required when the directory has no
+        /// manifest yet).
+        #[arg(long)]
+        tenant: Option<String>,
+    },
     /// Has a tenant been published into THIS database? Reads the stamp
     /// a successful publish leaves (tenant_publishes, through
     /// BOSS_POSTGRES_URL) and prints one line, the date first. Exit 0
@@ -1824,6 +1864,37 @@ pub async fn dispatch(cmd: Cmd) -> Result<()> {
             )
             .await?;
             println!("{line}");
+            Ok(())
+        }
+        Cmd::Tenant(TenantAction::Export {
+            dir,
+            gateway,
+            tenant,
+        }) => {
+            let Some(tenant_id) = tenant
+                .filter(|t| !t.trim().is_empty())
+                .or_else(|| declared_tenant_id(&dir))
+            else {
+                bail!(
+                    "{} declares no [meta] tenant_id and --tenant was not given: the export \
+                     reads one tenant's rows (its Workflows by owning_team, its rules by \
+                     source) and must know which",
+                    dir.display()
+                );
+            };
+            let bases = crate::tenant_publish::Bases::resolve(gateway.as_deref());
+            println!("{}", bases.describe(gateway.as_deref()));
+            // The doors are blocking reqwest, like publish's.
+            let snap = tokio::task::spawn_blocking({
+                let tenant_id = tenant_id.clone();
+                move || crate::tenant_export::read_instance(&bases, &tenant_id)
+            })
+            .await??;
+            let changes = crate::tenant_export::export_into(&snap, &dir)?;
+            print!(
+                "{}",
+                crate::tenant_export::render_changes(&dir, &tenant_id, &changes)
+            );
             Ok(())
         }
         Cmd::Tenant(TenantAction::Published) => {

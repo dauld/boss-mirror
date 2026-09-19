@@ -47,6 +47,20 @@
 //!
 //! The prompt goes to stdout and every status line to stderr, so
 //! `boss dispatch <packet> > prompt.txt` is the prompt and nothing else.
+//!
+//! `boss dispatch --report <run> --summary S [--spend-usd D] [--tokens
+//! N | IN,OUT]` is the OTHER end of the run (car 3, backlog cb78818d —
+//! car 2's second loose end): the builder's handback, recorded by the
+//! operator who read it today and by the runner later. It writes the
+//! report onto the run packet (`report`, `spend_usd`, `tokens` — the
+//! keys the agent-run schema names for a later hand), completes the
+//! run's `reported` step when the green has opened it (the run lands
+//! on that), and records the finish in `agent_runs` — the row the claim
+//! door reads an actor's hour-window spend from, priced by the rate
+//! card when the tokens are a split, unpriced when they are a total
+//! (`TokenUsage`'s own rule). Idempotent end to end: the packet PATCH
+//! merges, a completed `reported` is left as it is, and the run row is
+//! keyed on the run's id.
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -253,12 +267,27 @@ pub(crate) fn run_section(run_id: &str, settings: &Settings) -> String {
         "== THE RUN ==\n\n\
          Your run is agent-run {run_id} (profile `{}`, model {}, budget ${}, effort {}).\n\
          Before `boss gate`, in the shell you gate from: export {}={run_id}\n\
-         The gate-run then records this run, and a green lands it by itself.\n",
+         The gate-run then records this run, and a green lands it by itself.\n\
+         {}\n",
         settings.profile,
         settings.model,
         settings.budget_usd,
         settings.effort,
         crate::gate::AGENT_RUN_ENV,
+        budget_line(settings.budget_usd),
+    )
+}
+
+/// The spend cap as the runner takes it (car 3, backlog cb78818d): the
+/// block's `budget_usd` rendered as the `--max-budget-usd` flag a
+/// runner passes to its session, and as a sentence for the operator
+/// who pastes the prompt by hand today. The claim door admitted this
+/// run against the agent's hourly budget with exactly this number, so
+/// the runner's cap and the door's reservation are one value.
+pub(crate) fn budget_line(budget_usd: f64) -> String {
+    format!(
+        "Spend cap: --max-budget-usd {budget_usd} — the claim door reserved this much of the \
+         agent's hourly budget for the run; stop and report before you pass it."
     )
 }
 
@@ -385,6 +414,309 @@ pub(crate) async fn dispatch_at(
         prompt.len()
     );
     Ok(prompt)
+}
+
+/// The step `--report` completes.
+pub(crate) const REPORTED_SLUG: &str = "reported";
+
+/// What a run spent, in the two shapes a reporter can be in — the
+/// same two `boss_jobs::agent_runs::TokenUsage` records, parsed from
+/// `--tokens N` (a total) or `--tokens IN,OUT` (a split, priceable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tokens {
+    Total(u64),
+    Split { input: u64, output: u64 },
+}
+
+impl Tokens {
+    pub(crate) fn total(self) -> u64 {
+        match self {
+            Tokens::Total(t) => t,
+            Tokens::Split { input, output } => input.saturating_add(output),
+        }
+    }
+}
+
+/// `--tokens` as typed: digits, or two digit runs joined by a comma.
+pub(crate) fn parse_tokens(s: &str) -> std::result::Result<Tokens, String> {
+    let bad = || {
+        format!(
+            "--tokens {s:?} is not a count: give a total (--tokens 761000) or the split the \
+             usage line shows (--tokens 740000,21000 as input,output) — only a split is \
+             priced by the rate card"
+        )
+    };
+    let n = |t: &str| t.trim().replace('_', "").parse::<u64>().map_err(|_| bad());
+    match s.split_once(',') {
+        Some((i, o)) => Ok(Tokens::Split {
+            input: n(i)?,
+            output: n(o)?,
+        }),
+        None => Ok(Tokens::Total(n(s)?)),
+    }
+}
+
+/// The builder's handback as `--report` takes it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Report {
+    pub summary: String,
+    pub spend_usd: Option<f64>,
+    pub tokens: Option<Tokens>,
+}
+
+/// The merging PATCH the report writes onto the run packet: the keys
+/// the agent-run schema names for the report (`spend_usd`, `tokens`,
+/// numbers) and the summary as `report` — so the handback is on the
+/// record the moment it arrives, whether or not `reported` has opened.
+pub(crate) fn report_patch(r: &Report) -> Value {
+    let mut md = serde_json::Map::new();
+    md.insert("report".into(), json!(r.summary));
+    if let Some(d) = r.spend_usd {
+        md.insert("spend_usd".into(), json!(d));
+    }
+    if let Some(t) = r.tokens {
+        md.insert("tokens".into(), json!(t.total()));
+    }
+    Value::Object(md)
+}
+
+/// The `reported` completion: the step's three declared fields
+/// (`summary` required; `spend_usd` and `tokens` are string fields on
+/// the row) over the step's own metadata, since PATCH-on-PUT replaces
+/// `metadata` wholesale.
+pub(crate) fn reported_body(existing: &Value, r: &Report) -> Value {
+    let mut md = match existing.get("metadata") {
+        Some(Value::Object(m)) => m.clone(),
+        _ => serde_json::Map::new(),
+    };
+    md.insert("summary".into(), json!(r.summary));
+    if let Some(d) = r.spend_usd {
+        md.insert("spend_usd".into(), json!(d.to_string()));
+    }
+    if let Some(t) = r.tokens {
+        md.insert("tokens".into(), json!(t.total().to_string()));
+    }
+    json!({ "status": "completed", "metadata": Value::Object(md) })
+}
+
+/// The registered id the run's `agent` signs as, off `GET /api/agents`:
+/// the id itself when it already is one, else the row whose aliases
+/// hold the login. `None` is "no row names it" — the record cannot
+/// name its CPU, and the refusal says how to register one.
+pub(crate) fn resolve_agent(agents: &[Value], login: &str) -> Option<String> {
+    let id_of = |a: &Value| a.get("id").and_then(Value::as_str).map(str::to_string);
+    agents
+        .iter()
+        .find(|a| {
+            id_of(a).as_deref() == Some(login)
+                || a.get("aliases")
+                    .and_then(Value::as_array)
+                    .is_some_and(|al| al.iter().any(|x| x.as_str() == Some(login)))
+        })
+        .and_then(id_of)
+}
+
+/// The `agent_runs` record for a run packet: keyed on the run's own id
+/// (idempotent), the CPU as its registered id, the model and packet
+/// off the run's metadata, started when `briefed` completed (the
+/// instant the build began — the same stamp the silence rule reads)
+/// or when the packet opened, finished at the report. A total-only
+/// `--tokens` is recorded in full and priced by nothing; a split is
+/// priced by the rate card. The reporter's own dollar figure rides
+/// `detail` beside it, for the comparison, never as the price.
+pub(crate) fn run_record(
+    run: &Value,
+    actor_id: &str,
+    r: &Report,
+    finished_at: chrono::DateTime<chrono::Utc>,
+) -> Result<Value> {
+    let run_id = crate::envelope::job_id(run).context("the run has no id")?;
+    let md = run.get("metadata").cloned().unwrap_or(Value::Null);
+    let text = |k: &str| md.get(k).and_then(Value::as_str).map(str::to_string);
+    let started_at = crate::envelope::steps(run)
+        .into_iter()
+        .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some(BRIEFED_SLUG))
+        .and_then(|s| s.get("completed_at").and_then(Value::as_str))
+        .map(str::to_string)
+        .or_else(|| text("opened_at"))
+        .with_context(|| format!("run {run_id} has neither a briefed stamp nor opened_at"))?;
+    let tokens = match r.tokens {
+        Some(Tokens::Split { input, output }) => {
+            json!({ "input_tokens": input, "output_tokens": output })
+        }
+        Some(Tokens::Total(t)) => json!({ "total_tokens": t }),
+        // A report with no count is still a record of the run — the
+        // API refuses a run with neither, so a report without tokens
+        // records zero and says so in the detail.
+        None => json!({ "total_tokens": 0 }),
+    };
+    let mut body = json!({
+        "run_id": run_id,
+        "actor_id": actor_id,
+        "model": text("model"),
+        "started_at": started_at,
+        "finished_at": finished_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "outcome": "success",
+        "job_id": text("packet"),
+        "detail": {
+            "agent_run": run_id,
+            "step": text("step"),
+            "reported_spend_usd": r.spend_usd,
+            "tokens_reported": r.tokens.is_some(),
+        },
+    });
+    if let (Some(dst), Some(src)) = (body.as_object_mut(), tokens.as_object()) {
+        dst.extend(src.clone());
+    }
+    Ok(body)
+}
+
+/// The report, against an explicit base — the seam the wire tests go
+/// through.
+pub(crate) async fn report_at(
+    http: &reqwest::Client,
+    base: &str,
+    run_ref: &str,
+    report: &Report,
+    actor: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    use reqwest::Method;
+    let api_at = |method: Method, path: String, body: Option<Value>| {
+        let signature = crate::identity::Signature::As(actor.to_string());
+        async move { crate::gate::api_at_signed(http, base, method, &path, body, signature).await }
+    };
+
+    let run_id = crate::job::fetch_and_resolve(http, run_ref).await?;
+    let run = api_at(Method::GET, format!("/api/jobs/{run_id}"), None)
+        .await?
+        .context("the run read returned no body")?;
+    let short = &run_id[..8.min(run_id.len())];
+    let kind = run.get("kind").and_then(Value::as_str).unwrap_or("?");
+    if kind != RUN_KIND {
+        bail!(
+            "{short} is a {kind}, not an {RUN_KIND} — --report takes the run `boss dispatch` printed"
+        );
+    }
+
+    // THE RECORD FIRST: the handback rides the packet whether or not
+    // the green has opened `reported` yet (rule 8 of the builder
+    // rules: the report arrives at gate launch, ten minutes earlier).
+    api_at(
+        Method::PATCH,
+        format!("/api/jobs/{run_id}/metadata"),
+        Some(report_patch(report)),
+    )
+    .await
+    .with_context(|| format!("recording the report on run {short}"))?;
+
+    let reported = crate::envelope::steps(&run)
+        .into_iter()
+        .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some(REPORTED_SLUG))
+        .cloned()
+        .with_context(|| format!("run {short} has no `{REPORTED_SLUG}` step"))?;
+    let line = crate::envelope::step_line(&reported);
+    if line.now {
+        let step_id = reported
+            .get("id")
+            .and_then(Value::as_str)
+            .context("the reported step has no id")?;
+        api_at(
+            Method::PUT,
+            format!("/api/jobs/{run_id}/steps/{step_id}"),
+            Some(reported_body(&reported, report)),
+        )
+        .await
+        .with_context(|| format!("completing `{REPORTED_SLUG}` on run {short}"))?;
+        eprintln!(
+            "boss dispatch: run {short} reported — `{REPORTED_SLUG}` completed, the run lands on it"
+        );
+    } else if line.status == "completed" {
+        eprintln!(
+            "boss dispatch: run {short} already reported — `{REPORTED_SLUG}` is completed; the record was refreshed"
+        );
+    } else {
+        eprintln!(
+            "boss dispatch: run {short}'s `{REPORTED_SLUG}` is {} — it opens on the gate's green; \
+             the report rides the packet, run --report again once the run is at reported",
+            line.status
+        );
+    }
+
+    // THE FINISH RECORD: what the run cost, where the claim door reads
+    // it. The CPU is the registered id, never the login.
+    let login = run
+        .pointer("/metadata/agent")
+        .and_then(Value::as_str)
+        .with_context(|| format!("run {short} names no agent"))?;
+    let agents = crate::gate::rows(api_at(Method::GET, "/api/agents".to_string(), None).await?);
+    let actor_id = resolve_agent(&agents, login).with_context(|| {
+        format!(
+            "run {short} signs as {login:?}, which no agents row names — register it (an \
+             `[[agent]]` in seeds/agents.toml with that login among its aliases, then `boss \
+             tenant publish`) so the run's record can name its CPU; the report itself is on \
+             the packet"
+        )
+    })?;
+    let record = run_record(&run, &actor_id, report, now)?;
+    let out = api_at(Method::POST, "/api/agent-runs".to_string(), Some(record))
+        .await
+        .with_context(|| format!("recording run {short} in agent_runs"))?;
+    let priced = out
+        .as_ref()
+        .and_then(|o| o.pointer("/run/usd_micros"))
+        .and_then(Value::as_u64);
+    match priced {
+        Some(micros) => eprintln!(
+            "boss dispatch: agent_runs holds run {short} for {actor_id} at ${:.4} (rate card)",
+            micros as f64 / 1_000_000.0
+        ),
+        None => eprintln!(
+            "boss dispatch: agent_runs holds run {short} for {actor_id}, unpriced — a total-only \
+             token count is recorded in full and priced by nothing; give --tokens IN,OUT to price it"
+        ),
+    }
+    Ok(())
+}
+
+/// `boss dispatch --report <run> …` — the handback, by whichever hand
+/// read it. `now` is the finish instant the record carries, read once
+/// at the CLI boundary like every verb's.
+pub async fn report(
+    run_ref: String,
+    summary: String,
+    spend_usd: Option<f64>,
+    tokens: Option<String>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    if summary.trim().is_empty() {
+        bail!("--summary is the report; it cannot be blank");
+    }
+    if let Some(d) = spend_usd
+        && !(d.is_finite() && d >= 0.0)
+    {
+        bail!("--spend-usd must be a non-negative number of dollars, got {d}");
+    }
+    let tokens = tokens
+        .as_deref()
+        .map(parse_tokens)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let base = crate::gate::resolve_jobs_base(None)?;
+    let actor = crate::identity::sign(&reqwest::Method::POST, "/api/jobs")?;
+    report_at(
+        &reqwest::Client::new(),
+        &base,
+        &run_ref,
+        &Report {
+            summary,
+            spend_usd,
+            tokens,
+        },
+        &actor,
+        now,
+    )
+    .await
 }
 
 pub async fn run(
@@ -617,6 +949,141 @@ mod tests {
         let s = run_section("5b1d2c3e-0000-4000-8000-000000000001", &block());
         assert!(s.contains("export BOSS_AGENT_RUN=5b1d2c3e-0000-4000-8000-000000000001"));
         assert!(s.contains("opus-5[1m]") && s.contains("$5") && s.contains("high"));
+        // The cap reaches the runner as the flag it passes (car 3).
+        assert!(s.contains("--max-budget-usd 5"), "{s}");
+    }
+
+    /// `--tokens` is a total or an input,output split, and the split is
+    /// the only shape the rate card can price — the record says which.
+    #[test]
+    fn tokens_parse_as_a_total_or_a_split_and_the_record_carries_the_shape() {
+        assert_eq!(parse_tokens("761000"), Ok(Tokens::Total(761_000)));
+        assert_eq!(
+            parse_tokens("740_000, 21000"),
+            Ok(Tokens::Split {
+                input: 740_000,
+                output: 21_000
+            })
+        );
+        let why = parse_tokens("lots").unwrap_err();
+        assert!(why.contains("input,output"), "{why}");
+        assert!(parse_tokens("1,2,3").is_err());
+
+        let run = json!({
+            "id": "5b1d2c3e-0000-4000-8000-000000000001",
+            "kind": "agent-run",
+            "metadata": {
+                "packet": "39d0b528-ff69-4cb8-ba82-408b641da66c", "step": "build",
+                "agent": "claude@algedonic.dev", "model": "opus-5[1m]",
+                "opened_at": "2026-09-18T17:00:00Z",
+            },
+            "steps": [
+                { "spec_slug": "briefed", "status": "completed", "completed_at": "2026-09-18T17:05:00Z" },
+                { "spec_slug": "reported", "status": "ready" },
+            ],
+        });
+        let at = "2026-09-18T19:00:00Z".parse().unwrap();
+        let split = Report {
+            summary: "done".into(),
+            spend_usd: Some(4.2),
+            tokens: Some(Tokens::Split {
+                input: 10,
+                output: 5,
+            }),
+        };
+        let rec = run_record(&run, "agent-claude", &split, at).unwrap();
+        assert_eq!(rec["run_id"], "5b1d2c3e-0000-4000-8000-000000000001");
+        assert_eq!(
+            rec["actor_id"], "agent-claude",
+            "the registered id, never the login"
+        );
+        assert_eq!(rec["model"], "opus-5[1m]");
+        assert_eq!(
+            rec["started_at"], "2026-09-18T17:05:00Z",
+            "the briefed stamp"
+        );
+        assert_eq!(rec["finished_at"], "2026-09-18T19:00:00.000Z");
+        assert_eq!(rec["job_id"], "39d0b528-ff69-4cb8-ba82-408b641da66c");
+        assert_eq!(
+            (rec["input_tokens"].as_u64(), rec["output_tokens"].as_u64()),
+            (Some(10), Some(5))
+        );
+        assert!(
+            rec.get("total_tokens").is_none(),
+            "a split states no total of its own"
+        );
+        assert_eq!(rec["detail"]["reported_spend_usd"], 4.2);
+        // The record deserialises as the run the API parses.
+        let parsed: boss_jobs::agent_runs::NewAgentRun = serde_json::from_value(rec).unwrap();
+        assert!(parsed.actor_id.is_agent());
+
+        let total = Report {
+            summary: "done".into(),
+            spend_usd: None,
+            tokens: Some(Tokens::Total(761_000)),
+        };
+        let rec = run_record(&run, "agent-claude", &total, at).unwrap();
+        assert_eq!(rec["total_tokens"], 761_000);
+        assert!(rec.get("input_tokens").is_none());
+        // No stamp on briefed: the packet's opened_at is the start.
+        let mut bare = run.clone();
+        bare["steps"] = json!([{ "spec_slug": "reported", "status": "ready" }]);
+        assert_eq!(
+            run_record(&bare, "agent-claude", &total, at).unwrap()["started_at"],
+            "2026-09-18T17:00:00Z"
+        );
+    }
+
+    #[test]
+    fn the_report_rides_the_packet_and_the_step_as_their_own_fields() {
+        let r = Report {
+            summary: "packet x, branch y, sha z".into(),
+            spend_usd: Some(3.5),
+            tokens: Some(Tokens::Total(1000)),
+        };
+        let patch = report_patch(&r);
+        assert_eq!(patch["report"], "packet x, branch y, sha z");
+        assert_eq!(
+            patch["spend_usd"], 3.5,
+            "a number on the packet, as the schema says"
+        );
+        assert_eq!(patch["tokens"], 1000);
+        let existing = json!({ "metadata": { "authority_role": "platform-admin" } });
+        let body = reported_body(&existing, &r);
+        assert_eq!(body["status"], "completed");
+        assert_eq!(body["metadata"]["authority_role"], "platform-admin");
+        assert_eq!(body["metadata"]["summary"], "packet x, branch y, sha z");
+        assert_eq!(
+            body["metadata"]["spend_usd"], "3.5",
+            "string fields on the row"
+        );
+        assert_eq!(body["metadata"]["tokens"], "1000");
+        // Nothing is written for what was not given.
+        let bare = Report {
+            summary: "s".into(),
+            spend_usd: None,
+            tokens: None,
+        };
+        assert!(report_patch(&bare).get("spend_usd").is_none());
+        assert!(
+            reported_body(&existing, &bare)["metadata"]
+                .get("tokens")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn the_runs_cpu_is_resolved_to_its_registered_id() {
+        let agents = vec![json!({ "id": "agent-claude", "aliases": ["claude@algedonic.dev"] })];
+        assert_eq!(
+            resolve_agent(&agents, "claude@algedonic.dev").as_deref(),
+            Some("agent-claude")
+        );
+        assert_eq!(
+            resolve_agent(&agents, "agent-claude").as_deref(),
+            Some("agent-claude")
+        );
+        assert_eq!(resolve_agent(&agents, "nobody@example.test"), None);
     }
 }
 
@@ -640,9 +1107,16 @@ mod wire_tests {
         calls: Arc<Mutex<Vec<(String, String, Value)>>>,
     }
 
-    /// The stub: a packet at `build`, the workflow row, and the run it
-    /// files. The claim answers 409 when `claim_conflict` is set.
-    async fn stub(packet: Value, row: Value, claim_conflict: bool) -> (String, Log) {
+    /// One request as the stub reads it: method, path (query stripped),
+    /// the full target, and the JSON body.
+    type Answer = (&'static str, String);
+
+    /// The HTTP loop every stub here shares: reads one request per
+    /// connection, logs it, and answers with what `route` says.
+    async fn serve<F>(route: F) -> (String, Log)
+    where
+        F: Fn(&str, &str, &str, &Value) -> Answer + Send + Sync + 'static,
+    {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -650,7 +1124,6 @@ mod wire_tests {
             calls: Arc::new(Mutex::new(Vec::new())),
         };
         let l = log.clone();
-        let run: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
         tokio::spawn(async move {
             loop {
                 let Ok((mut sock, _)) = listener.accept().await else {
@@ -693,7 +1166,25 @@ mod wire_tests {
                     .unwrap()
                     .push((method.clone(), target.clone(), body.clone()));
                 let path = target.split('?').next().unwrap_or("").to_string();
-                let (status, resp): (&str, String) = match (method.as_str(), path.as_str()) {
+                let (status, resp) = route(&method, &path, &target, &body);
+                let out = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{resp}",
+                    resp.len()
+                );
+                let _ = sock.write_all(out.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        (format!("http://{addr}"), log)
+    }
+
+    /// The stub: a packet at `build`, the workflow row, and the run it
+    /// files. The claim answers 409 when `claim_conflict` is set.
+    async fn stub(packet: Value, row: Value, claim_conflict: bool) -> (String, Log) {
+        let run: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+        serve(move |method, path, target, body| {
+            let (status, resp): (&str, String) = match (method, path) {
                     ("GET", p) if p == format!("/api/jobs/{PACKET}") => {
                         ("200 OK", packet.to_string())
                     }
@@ -731,16 +1222,9 @@ mod wire_tests {
                     }
                     _ => ("404 Not Found", format!("unstubbed {method} {target}")),
                 };
-                let out = format!(
-                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n\
-                     content-length: {}\r\nconnection: close\r\n\r\n{resp}",
-                    resp.len()
-                );
-                let _ = sock.write_all(out.as_bytes()).await;
-                let _ = sock.shutdown().await;
-            }
-        });
-        (format!("http://{addr}"), log)
+            (status, resp)
+        })
+        .await
     }
 
     fn repo() -> std::path::PathBuf {
@@ -938,5 +1422,199 @@ mod wire_tests {
             .iter()
             .any(|(m, p, _)| m == "POST" && p == "/api/jobs");
         assert!(!filed, "no run for a step this actor does not hold");
+    }
+
+    /// The run packet as `--report` reads it, with `reported` in the
+    /// given state.
+    fn run_packet(reported_status: &str) -> Value {
+        json!({
+            "id": RUN,
+            "kind": "agent-run",
+            "title": "builder run: Agent controls car 3",
+            "status": "open",
+            "metadata": {
+                "packet": PACKET, "step": "build", "agent": "claude@algedonic.dev",
+                "model": "opus-5[1m]", "budget_usd": 5, "effort": "high",
+                "opened_at": "2026-09-18T17:00:00Z",
+            },
+            "steps": [
+                { "id": "run-claimed", "spec_slug": "claimed", "status": "completed", "metadata": {} },
+                { "id": "run-briefed", "spec_slug": "briefed", "status": "completed",
+                  "completed_at": "2026-09-18T17:05:00Z", "metadata": { "prompt_bytes": "4242" } },
+                { "id": "run-building", "spec_slug": "building", "status": "completed",
+                  "metadata": { "result": "gated" } },
+                { "id": "run-reported", "spec_slug": "reported", "status": reported_status,
+                  "metadata": { "authority_role": "platform-admin" } },
+            ],
+        })
+    }
+
+    /// The report's stub: the run, the agents registry, and the three
+    /// writes answered.
+    async fn report_stub(run: Value) -> (String, Log) {
+        serve(move |method, path, target, _body| match (method, path) {
+            ("GET", p) if p == format!("/api/jobs/{RUN}") => ("200 OK", run.to_string()),
+            ("PATCH", p) if p == format!("/api/jobs/{RUN}/metadata") => {
+                ("204 No Content", String::new())
+            }
+            ("PUT", p) if p.starts_with(&format!("/api/jobs/{RUN}/steps/")) => {
+                ("204 No Content", String::new())
+            }
+            ("GET", "/api/agents") => (
+                "200 OK",
+                json!({ "data": [{ "id": "agent-claude", "aliases": ["claude@algedonic.dev"],
+                                   "default_model": "opus-5[1m]" }], "total": 1 })
+                .to_string(),
+            ),
+            ("POST", "/api/agent-runs") => (
+                "200 OK",
+                json!({ "recorded": true, "run": { "run_id": RUN, "usd_micros": 4_200_000 } })
+                    .to_string(),
+            ),
+            _ => ("404 Not Found", format!("unstubbed {method} {target}")),
+        })
+        .await
+    }
+
+    /// The handback, end to end: the packet holds the report, `reported`
+    /// is completed with the row's own fields, and agent_runs holds the
+    /// finish under the run's id with the CPU as its registered id.
+    #[tokio::test]
+    async fn a_report_lands_on_the_packet_the_step_and_the_run_record() {
+        let (base, log) = report_stub(run_packet("ready")).await;
+        let report = Report {
+            summary: "packet cb78818d, branch feat/x, sha abc1234, gate e47f2238".into(),
+            spend_usd: Some(4.2),
+            tokens: Some(Tokens::Split {
+                input: 740_000,
+                output: 21_000,
+            }),
+        };
+        report_at(
+            &reqwest::Client::new(),
+            &base,
+            RUN,
+            &report,
+            "claude@algedonic.dev",
+            "2026-09-18T19:00:00Z".parse().unwrap(),
+        )
+        .await
+        .expect("reports");
+
+        let calls = log.calls.lock().unwrap().clone();
+        let seq: Vec<(String, String)> = calls
+            .iter()
+            .map(|(m, p, _)| (m.clone(), p.split('?').next().unwrap().to_string()))
+            .collect();
+        assert_eq!(
+            seq,
+            vec![
+                ("GET".to_string(), format!("/api/jobs/{RUN}")),
+                ("PATCH".to_string(), format!("/api/jobs/{RUN}/metadata")),
+                (
+                    "PUT".to_string(),
+                    format!("/api/jobs/{RUN}/steps/run-reported")
+                ),
+                ("GET".to_string(), "/api/agents".to_string()),
+                ("POST".to_string(), "/api/agent-runs".to_string()),
+            ],
+            "the packet record first, then the step, then the finish record"
+        );
+        let patch = &calls[1].2;
+        assert_eq!(
+            patch["report"],
+            "packet cb78818d, branch feat/x, sha abc1234, gate e47f2238"
+        );
+        assert_eq!(patch["spend_usd"], 4.2);
+        assert_eq!(patch["tokens"], 761_000);
+        let put = &calls[2].2;
+        assert_eq!(put["status"], "completed");
+        assert_eq!(put["metadata"]["summary"], patch["report"]);
+        assert_eq!(put["metadata"]["spend_usd"], "4.2");
+        assert_eq!(put["metadata"]["tokens"], "761000");
+        assert_eq!(put["metadata"]["authority_role"], "platform-admin");
+        let rec = &calls[4].2;
+        assert_eq!(rec["run_id"], RUN);
+        assert_eq!(rec["actor_id"], "agent-claude");
+        assert_eq!(rec["job_id"], PACKET);
+        assert_eq!(rec["started_at"], "2026-09-18T17:05:00Z");
+        assert_eq!(rec["input_tokens"], 740_000);
+        assert_eq!(rec["detail"]["reported_spend_usd"], 4.2);
+    }
+
+    /// Before the green, `reported` is pending: the report rides the
+    /// packet and the finish is recorded; the step is left for the
+    /// green to open. Nothing is written to a step that is not open.
+    #[tokio::test]
+    async fn a_report_before_the_green_rides_the_packet_and_touches_no_step() {
+        let (base, log) = report_stub(run_packet("pending")).await;
+        let report = Report {
+            summary: "handback".into(),
+            spend_usd: None,
+            tokens: Some(Tokens::Total(1000)),
+        };
+        report_at(
+            &reqwest::Client::new(),
+            &base,
+            RUN,
+            &report,
+            "claude@algedonic.dev",
+            "2026-09-18T19:00:00Z".parse().unwrap(),
+        )
+        .await
+        .expect("reports");
+        let calls = log.calls.lock().unwrap().clone();
+        assert!(
+            !calls.iter().any(|(m, _, _)| m == "PUT"),
+            "no step write: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|(m, p, _)| m == "PATCH" && p.ends_with("/metadata"))
+        );
+        let rec = &calls
+            .iter()
+            .find(|(m, _, _)| m == "POST")
+            .expect("recorded")
+            .2;
+        assert_eq!(rec["total_tokens"], 1000);
+        assert!(rec.get("input_tokens").is_none());
+    }
+
+    /// A run whose login no agents row names: the report is on the
+    /// packet and the step, and the refusal names the registration —
+    /// the record cannot name a CPU the registry does not hold.
+    #[tokio::test]
+    async fn a_report_for_an_unregistered_login_is_refused_at_the_record_naming_the_fix() {
+        let mut run = run_packet("ready");
+        run["metadata"]["agent"] = json!("stranger@example.test");
+        let (base, log) = report_stub(run).await;
+        let err = report_at(
+            &reqwest::Client::new(),
+            &base,
+            RUN,
+            &Report {
+                summary: "s".into(),
+                spend_usd: None,
+                tokens: None,
+            },
+            "claude@algedonic.dev",
+            "2026-09-18T19:00:00Z".parse().unwrap(),
+        )
+        .await
+        .expect_err("refused");
+        let text = format!("{err:#}");
+        assert!(text.contains("stranger@example.test"), "{text}");
+        assert!(text.contains("seeds/agents.toml"), "{text}");
+        let calls = log.calls.lock().unwrap().clone();
+        assert!(
+            calls.iter().any(|(m, _, _)| m == "PUT"),
+            "the step was still completed"
+        );
+        assert!(
+            !calls.iter().any(|(m, _, _)| m == "POST"),
+            "nothing recorded under a CPU nobody registered"
+        );
     }
 }

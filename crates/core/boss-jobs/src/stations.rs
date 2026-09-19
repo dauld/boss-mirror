@@ -73,12 +73,24 @@ impl std::str::FromStr for StationKind {
 }
 
 /// Who may claim a packet FROM this station — Class-registry
-/// vocabulary (role slugs). Checked at the claim CAS when the claim
-/// names its station. Absent = any actor may claim.
+/// vocabulary (role slugs), and since design c87fb59b car 3 the
+/// rate-card models an agent must run. Checked at the claim CAS when
+/// the claim names its station. Absent = any actor may claim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct StationCapability {
     #[serde(default)]
     pub roles: Vec<String>,
+    /// The models an AGENT claimant must run one of, as
+    /// `agent_rate_card` spells them (`opus-5[1m]`). Written by the
+    /// `(role, model)` projection (`station_projection::agent_stations`)
+    /// so a station stands for "a `platform-admin`-role agent on
+    /// opus-5[1m]"; an agents-registry row serves the station when its
+    /// `default_model` is one of these. Empty gates no agent out, and
+    /// a person — who runs no model — is gated by `roles` alone.
+    /// Skipped on the wire when empty so every roles-only row the
+    /// registry already holds reads back unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
 }
 
 impl StationCapability {
@@ -87,6 +99,16 @@ impl StationCapability {
     /// capability is a vacuous constraint, not a lockout).
     pub fn allows_role(&self, role: &str) -> bool {
         self.roles.is_empty() || self.roles.iter().any(|r| r == role)
+    }
+
+    /// Whether an actor that runs `models` (an agent's `default_model`;
+    /// empty for a person) may claim from this station. Empty on
+    /// either side gates nobody out: no models declared is a roles-only
+    /// station, and no models run is not an agent.
+    pub fn allows_model(&self, models: &[String]) -> bool {
+        self.models.is_empty()
+            || models.is_empty()
+            || models.iter().any(|m| self.models.contains(m))
     }
 }
 
@@ -1282,11 +1304,50 @@ mod tests {
     async fn capability_allows_role() {
         let cap = StationCapability {
             roles: vec!["head-brewer".into(), "brewer".into()],
+            ..Default::default()
         };
         assert!(cap.allows_role("brewer"));
         assert!(!cap.allows_role("bookkeeper"));
         // Declared-but-empty gates nobody out.
         assert!(StationCapability::default().allows_role("anyone"));
+    }
+
+    /// The model half of a capability (design c87fb59b car 3): an agent
+    /// serves a station whose `models` name one it runs; a person
+    /// (no models) is gated by `roles` alone; a station with no models
+    /// declared gates no agent out. The wire shape of a roles-only
+    /// capability is unchanged — every row the registry already holds
+    /// reads back byte-for-byte.
+    #[tokio::test]
+    async fn capability_allows_model() {
+        let cap = StationCapability {
+            roles: vec!["platform-admin".into()],
+            models: vec!["opus-5[1m]".into()],
+        };
+        assert!(cap.allows_model(&["opus-5[1m]".to_string()]));
+        assert!(cap.allows_model(&["haiku-4-5".to_string(), "opus-5[1m]".to_string()]));
+        assert!(!cap.allows_model(&["haiku-4-5".to_string()]));
+        assert!(
+            cap.allows_model(&[]),
+            "a claimant with no model is not an agent; roles decide"
+        );
+        assert!(StationCapability::default().allows_model(&["haiku-4-5".to_string()]));
+
+        let roles_only = StationCapability {
+            roles: vec!["bookkeeper".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&roles_only).unwrap(),
+            serde_json::json!({ "roles": ["bookkeeper"] })
+        );
+        let read: StationCapability =
+            serde_json::from_value(serde_json::json!({ "roles": ["bookkeeper"] })).unwrap();
+        assert_eq!(read, roles_only);
+        assert_eq!(
+            serde_json::to_value(&cap).unwrap(),
+            serde_json::json!({ "roles": ["platform-admin"], "models": ["opus-5[1m]"] })
+        );
     }
 
     // -----------------------------------------------------------

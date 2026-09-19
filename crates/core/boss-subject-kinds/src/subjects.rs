@@ -150,6 +150,38 @@ pub async fn publish_subject(
     Ok(out)
 }
 
+/// One identity row as the list read answers it: the kind, the id and
+/// the label the mint door landed (`None` when nothing ever labelled
+/// it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubjectRow {
+    pub kind: String,
+    pub id: String,
+    pub label: Option<String>,
+}
+
+/// Every identity row of `kind`, sorted by id, with its label — the
+/// read `boss tenant export` writes the company's display name from
+/// (design e187198f car 3, backlog e618f3ac). Until 2026-09-18 the
+/// only read of this table was the per-id exists probe, so an export
+/// could confirm a company it already knew and never learn its label.
+pub async fn list_subjects(pool: &PgPool, kind: &str) -> Result<Vec<SubjectRow>, String> {
+    let rows: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT id, label FROM subjects WHERE kind = $1 ORDER BY id")
+            .bind(kind)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, label)| SubjectRow {
+            kind: kind.to_string(),
+            id,
+            label,
+        })
+        .collect())
+}
+
 /// The uniform existence probe — one indexed lookup for every kind,
 /// tenant-defined included. Retired subjects still exist (historical
 /// jobs reference them); retirement semantics for NEW references are
@@ -172,14 +204,19 @@ struct SubjectsApiState {
 /// the read-only kinds router. POST is the mint path (the company
 /// identity at every tenant publish, operator tooling, R3's single
 /// minting authority later) — insert-if-absent, `?mode=take` to
-/// overwrite a held label ([`publish_subject`]); GET is the
+/// overwrite a held label ([`publish_subject`]); GET on a kind lists
+/// its rows with their labels ([`list_subjects`]); GET on an id is the
 /// cross-service existence probe.
 pub fn subjects_router(pool: PgPool) -> Router {
     Router::new()
         .route("/api/subjects", post(post_subject))
         // Kind-scoped mint: the sim's birth event routes POST their
-        // synthesized payload (id + label, no kind field) here.
-        .route("/api/subjects/{kind}", post(post_subject_for_kind))
+        // synthesized payload (id + label, no kind field) here. The
+        // GET beside it is the export's read.
+        .route(
+            "/api/subjects/{kind}",
+            get(list_subjects_of_kind).post(post_subject_for_kind),
+        )
         .route("/api/subjects/{kind}/{id}", get(get_subject))
         .with_state(SubjectsApiState { pool })
 }
@@ -223,6 +260,16 @@ async fn mint(
             format!("unregistered subject kind `{kind}`"),
         )
             .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+async fn list_subjects_of_kind(
+    State(state): State<SubjectsApiState>,
+    Path(kind): Path<String>,
+) -> Response {
+    match list_subjects(&state.pool, &kind).await {
+        Ok(rows) => axum::Json(rows).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
 }

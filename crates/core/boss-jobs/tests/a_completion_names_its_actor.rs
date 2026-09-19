@@ -100,6 +100,7 @@ fn app(with_registry: bool) -> axum::Router {
         clock: Arc::new(boss_clock_client::WallClockClient),
         cadence: None,
         delivery: None,
+        agent_budget: None,
     };
     router(state)
 }

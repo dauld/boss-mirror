@@ -1324,10 +1324,29 @@ pub(crate) const AGENT_RUN_KEY: &str = "agent_run";
 /// The merging PATCH that records the run, or `None` when nothing
 /// names one. A blank value is nothing: an `export BOSS_AGENT_RUN=`
 /// must not stamp an empty edge the handler would refuse as unusable.
-pub(crate) fn agent_run_patch(env: Option<String>) -> Option<Value> {
-    env.map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .map(|id| json!({ AGENT_RUN_KEY: id }))
+///
+/// A NON-UUID IS A REFUSAL, not a stamp (car 3, backlog cb78818d —
+/// car 2's loose end). The landing handler skips a link that is not a
+/// full Job id with a warn in the dispatcher's journal, which the
+/// builder never reads: the gate would go green, the run would sit at
+/// `building` until the silence rule aged it out as died, and nothing
+/// would say the export was the 8-character prefix the prompt's
+/// `boss dispatch:` line prints. The shape here is the handler's own
+/// (`jobs_complete_linked_step::unusable_link`), and the refusal is
+/// raised before any packet is filed.
+pub(crate) fn agent_run_patch(env: Option<String>) -> Result<Option<Value>> {
+    let Some(id) = env.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    if uuid::Uuid::try_parse(&id).is_err() || id.len() != 36 {
+        anyhow::bail!(
+            "{AGENT_RUN_ENV}={id:?} is not a full agent-run id ({} chars): the landing \
+             rule follows `{AGENT_RUN_KEY}` only when it is the 36-character id `boss \
+             dispatch` printed under THE RUN — export that, or unset it for a hand gate",
+            id.len()
+        );
+    }
+    Ok(Some(json!({ AGENT_RUN_KEY: id })))
 }
 
 /// The HOLD a gate carries: `--hold <reason>` stamps `hold: <reason>`
@@ -2170,6 +2189,10 @@ pub async fn run(
         eprintln!("{w}");
     }
     let hold = hold_guard(hold.as_deref(), &park)?;
+    // The run this gate belongs to, judged BEFORE any packet exists: a
+    // malformed export is refused here rather than stamped and skipped
+    // an hour later in a journal nobody reads.
+    let agent_run = agent_run_patch(std::env::var(AGENT_RUN_ENV).ok())?;
     let http = reqwest::Client::new();
     // EVERY PACKET THE PARK INTENT NAMES MUST EXIST, checked here at the
     // terminal. The auto-park handler writes these as job edges on
@@ -2531,7 +2554,7 @@ pub async fn run(
     // re-gate relationship, and BEST EFFORT for the same reason: this
     // is a record — the run is completed by hand if it is lost — and
     // losing it to a rolling SoR must not cost the gate.
-    if let Some(patch) = agent_run_patch(std::env::var(AGENT_RUN_ENV).ok()).filter(|_| !dry) {
+    if let Some(patch) = agent_run.clone().filter(|_| !dry) {
         match api(
             &http,
             reqwest::Method::PATCH,
@@ -6180,12 +6203,27 @@ mod agent_run_tests {
     #[test]
     fn the_run_is_stamped_only_when_something_names_it() {
         assert_eq!(
-            agent_run_patch(Some("5b1d2c3e-0000-4000-8000-000000000001".into())),
+            agent_run_patch(Some("5b1d2c3e-0000-4000-8000-000000000001".into())).unwrap(),
             Some(json!({ "agent_run": "5b1d2c3e-0000-4000-8000-000000000001" }))
         );
-        assert_eq!(agent_run_patch(Some("  ".into())), None);
-        assert_eq!(agent_run_patch(None), None);
+        assert_eq!(agent_run_patch(Some("  ".into())).unwrap(), None);
+        assert_eq!(agent_run_patch(None).unwrap(), None);
         assert_eq!(AGENT_RUN_ENV, "BOSS_AGENT_RUN");
+    }
+
+    /// A prefix, a branch, or anything the landing handler would skip
+    /// as an unusable link is refused at the terminal, naming the fix
+    /// — pinned to the handler's shape (36 chars, hex and dashes).
+    #[test]
+    fn a_run_id_the_landing_rule_could_not_follow_is_refused_before_launch() {
+        for bad in ["5b1d2c3e", "feat/x", "5b1d2c3e-0000-4000-8000-00000000000g"] {
+            let why = agent_run_patch(Some(bad.into()))
+                .expect_err("refused")
+                .to_string();
+            assert!(why.contains("BOSS_AGENT_RUN"), "{why}");
+            assert!(why.contains("36-character"), "{why}");
+            assert!(why.contains("unset it"), "{why}");
+        }
     }
 }
 

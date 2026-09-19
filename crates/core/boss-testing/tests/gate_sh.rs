@@ -540,6 +540,44 @@ fn the_gate_rechecks_headroom_as_the_run_proceeds() {
     );
 }
 
+/// THE LISTINGS ANSWER BEFORE THE FLOOR. `--exclusions` and `--roster`
+/// read no tree and run no check — they list `infra/lint/` and what its
+/// headers declare — and the conductor's consist check asks the
+/// assembled tree's gate.sh for them. Until 2026-09-18 the disk floor
+/// ran before ANY mode dispatched, so at 9GB free on the conductor's
+/// volume `gate.sh --exclusions` was refused with "9GB free, need
+/// 12GB. Refusing to start." and the consist check recorded a failure
+/// it could not judge (backlog 13700f6f; CLAUDE.md Diagnosis: an
+/// infrastructure refusal is not a consist failure). The floor guards a
+/// gate run, not a question about the roster — and the impossible
+/// floor is set the way `the_gate_refuses_to_run_without_headroom`
+/// sets it, so the two tests disagree only about the mode.
+#[test]
+fn the_listings_answer_below_the_disk_floor() {
+    for mode in ["--exclusions", "--roster"] {
+        let out = gate_cmd(&[mode])
+            .env("BOSS_GATE_MIN_FREE_GB", "99999999")
+            .output()
+            .expect("run gate.sh");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "`gate.sh {mode}` is a read-only listing and must answer below the disk floor \
+             (the conductor's consist check reads it, and a refusal there was recorded as \
+             a consist failure at 9GB free on 2026-09-18).\nstderr: {stderr}"
+        );
+        assert!(
+            !stderr.contains("Refusing to start"),
+            "the floor must not speak on a listing.\nstderr: {stderr}"
+        );
+        assert!(
+            stdout.contains("infra/lint/"),
+            "`gate.sh {mode}` answered nothing.\nstdout: {stdout}"
+        );
+    }
+}
+
 /// THE HEADROOM CHECK MUST COME BEFORE SCOPE DERIVATION.
 ///
 /// It landed after `--auto`'s derivation, which made the two tests

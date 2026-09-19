@@ -95,6 +95,7 @@ fn app_with_clock(
         clock,
         cadence: None,
         delivery: None,
+        agent_budget: None,
     };
     (router(state), jobs)
 }

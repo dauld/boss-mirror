@@ -252,6 +252,7 @@ async fn app() -> axum::Router {
         )),
         cadence: None,
         delivery: None,
+        agent_budget: None,
     };
     router(state)
 }

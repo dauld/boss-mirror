@@ -9,6 +9,7 @@
 //! Hexagonal: the domain defines a `JobsRepository` port (trait).
 //! Postgres, in-memory, and other adapters implement the same trait.
 
+pub mod agent_budget;
 pub mod agent_runs;
 pub mod agent_spec;
 pub mod agents;

@@ -143,6 +143,14 @@ pub trait CalendarClient: Send + Sync {
         code: &str,
     ) -> Result<Option<BusinessCalendar>, CalendarError>;
 
+    /// Every business calendar the store holds, sorted by `code`, each
+    /// with its full closed-day set — the batch's own input shape, so
+    /// `boss tenant export` (design e187198f car 3, backlog e618f3ac)
+    /// can write `seeds/business_calendars.json` back from the
+    /// instance. Until 2026-09-18 the only read was per code, so an
+    /// export could not learn which codes the instance held.
+    async fn list_business_calendars(&self) -> Result<Vec<BusinessCalendar>, CalendarError>;
+
     /// Publish business calendars, insert-if-absent by `code` (design
     /// e187198f: THE INSTANCE IS THE TRUTH). A code the table holds is
     /// KEPT and the outcome names the declared fields it differs on

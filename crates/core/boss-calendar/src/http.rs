@@ -21,6 +21,10 @@
 //!   Body: `Vec<BusinessCalendar>`. Operator-gated
 //!   (with the `x-sim-origin` bypass). Returns
 //!   `{ received, inserted, kept: [{id, differs}], updated: [{id, changes}], unchanged }`.
+//! - `GET  /api/calendar/business-calendars` — every business calendar
+//!   with its closed-day set, sorted by code (the batch's own input
+//!   shape: what `boss tenant export` writes the seed file from, backlog
+//!   e618f3ac). Open read.
 //! - `GET  /api/calendar/business-calendars/{code}` — fetch one business
 //!   calendar with its full closed-day set, or 404. Open read.
 
@@ -64,6 +68,10 @@ pub fn router(state: CalendarApiState) -> Router {
             delete(cancel_reservation),
         )
         .route("/api/calendar/cancel-by-reason", post(cancel_by_reason))
+        .route(
+            "/api/calendar/business-calendars",
+            get(list_business_calendars),
+        )
         .route(
             "/api/calendar/business-calendars/batch",
             post(batch_business_calendars),
@@ -250,6 +258,15 @@ async fn batch_business_calendars(
         .await
     {
         Ok(out) => Json(out).into_response(),
+        Err(e) => calendar_error_response(e),
+    }
+}
+
+/// Every business calendar, sorted by code, each with its closed-day
+/// set. Open read, like the per-code GET.
+async fn list_business_calendars(State(state): State<CalendarApiState>) -> Response {
+    match state.calendar.list_business_calendars().await {
+        Ok(rows) => Json(rows).into_response(),
         Err(e) => calendar_error_response(e),
     }
 }
@@ -481,6 +498,53 @@ mod tests {
             .await
             .unwrap();
         (status, Some(serde_json::from_slice(&bytes).unwrap()))
+    }
+
+    /// `boss tenant export` writes the instance's calendars back into
+    /// `seeds/business_calendars.json` (design e187198f car 3, backlog
+    /// e618f3ac): until 2026-09-18 the only read was per code, so an
+    /// export had no way to learn WHICH codes the instance held. The
+    /// list is every calendar with its closed set, sorted by code —
+    /// the batch's own input shape, so export and publish are inverses.
+    #[tokio::test]
+    async fn list_business_calendars_answers_every_code_sorted_in_the_batch_shape() {
+        let app = app();
+        let body = serde_json::json!([
+            {"code": "us-tax", "name": "US Tax", "weekend": [5, 6], "closed": ["2026-04-15"]},
+            {"code": "us-banking", "name": "US Banking", "weekend": [5, 6], "closed": ["2026-01-01"]},
+        ]);
+        let resp = app
+            .clone()
+            .oneshot(batch_request(Some(&operator_header()), body))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/calendar/business-calendars")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let rows: Vec<BusinessCalendar> = serde_json::from_slice(&bytes).unwrap();
+        let codes: Vec<&str> = rows.iter().map(|c| c.code.as_str()).collect();
+        assert_eq!(codes, ["us-banking", "us-tax"], "sorted by code");
+        assert_eq!(
+            rows[1]
+                .closed
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>(),
+            ["2026-04-15"],
+            "each row carries its full closed set, as the per-code GET does"
+        );
     }
 
     #[tokio::test]

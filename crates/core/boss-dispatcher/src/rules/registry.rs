@@ -301,7 +301,7 @@ fn read_rule_text(path: &Path) -> Result<String, RegistryError> {
 /// refuses a file without it at the door, and [`authored_why`] maps it
 /// for the read surface. Two readers of the same field would be the
 /// §9a pair again, one level down.
-fn why_in(src: &str, stem: &str) -> Result<Option<String>, String> {
+pub fn why_in(src: &str, stem: &str) -> Result<Option<String>, String> {
     let meta: RuleFileMeta = toml::from_str(src).map_err(|e| e.to_string())?;
     Ok(meta
         .rules

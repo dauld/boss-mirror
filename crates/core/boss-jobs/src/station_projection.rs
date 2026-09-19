@@ -26,6 +26,21 @@
 //! projection therefore ADDS to the registry rather than replacing it,
 //! and a derived station never silently overwrites an authored row of
 //! the same name (see [`derived_stations`]).
+//!
+//! THE SECOND PROJECTION — `(role, model)` (design c87fb59b car 3,
+//! backlog cb78818d). Car 1 put an `agent` block on a step, and its
+//! projection writes `agent_model` onto the packet beside
+//! `authority_role`. A step that says "a `platform-admin` on
+//! opus-5[1m] does this" has declared a queue for exactly that
+//! capability the way `(kind, role)` declares a constraint queue, and
+//! it is projected the same way: one station per distinct pair the
+//! active protocols declare, named `a.<role>.<model-slug>`, predicate
+//! on both projected keys, capability `{ roles, models }` — the half
+//! the dispatcher's executor lane and the claim door read to decide
+//! which registered agent serves it (an agents row serves the station
+//! when its role and `default_model` match). Nine agent blocks across
+//! five platform protocols on 2026-09-18, all `(platform-admin,
+//! opus-5[1m])`: one station, which is the point.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -91,7 +106,115 @@ pub fn station_name(c: &Constraint) -> String {
     format!("q.{}.{}", c.role, c.step_kind)
 }
 
-/// Project the protocol set into the stations it requires.
+/// One `(role, model)` an `agent` block declares under a role: an agent
+/// of this role, running this model, does this step. Not `(kind, role,
+/// model)`: the model is the capability, and an agent that runs it
+/// serves every step kind the role serves.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AgentConstraint {
+    pub role: String,
+    pub model: String,
+}
+
+/// Every `(role, model)` the active protocol set declares. A block
+/// under no role projects nothing: there is no role to gate the claim
+/// on, and a station gated on a model alone would hand any agent's
+/// work to any other.
+pub fn agent_constraints_of(workflows: &[WorkflowSpec]) -> BTreeSet<AgentConstraint> {
+    workflows
+        .iter()
+        .filter(|w| w.status == WorkflowStatus::Active)
+        .flat_map(|w| w.steps.iter())
+        .filter_map(|s| {
+            let agent = s.agent.as_ref()?;
+            let role = s.selectors().authority_role?;
+            Some(AgentConstraint {
+                role,
+                model: agent.model.clone(),
+            })
+        })
+        .collect()
+}
+
+/// A rate-card model as a URL path segment: `opus-5[1m]` → `opus-5-1m`.
+/// The brackets the card spells the context window with are not
+/// path-safe (`a_derived_name_survives_a_url_path_segment`), so the
+/// name carries a slug and the capability carries the model as
+/// spelled — the name is for routes and logs, the capability is what
+/// the claim compares.
+pub fn model_slug(model: &str) -> String {
+    let mut out = String::with_capacity(model.len());
+    for c in model.chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+/// `a.<role>.<model-slug>` — its own namespace beside `q.`, so a
+/// `(role, model)` station can never collide with a `(role, kind)` one
+/// even when a model and a step kind share a spelling.
+pub fn agent_station_name(c: &AgentConstraint) -> String {
+    format!("a.{}.{}", c.role, model_slug(&c.model))
+}
+
+/// Project the `(role, model)` pairs into the stations they require —
+/// the same merge rule as [`derived_stations`] (authored wins), the
+/// same actionable-only status filter, and a predicate on BOTH
+/// projected keys so the queue holds that role's work on that model
+/// and nothing else.
+pub fn agent_stations(
+    workflows: &[WorkflowSpec],
+    authored: &[String],
+    now: DateTime<Utc>,
+) -> Vec<StationSpec> {
+    agent_constraints_of(workflows)
+        .into_iter()
+        .map(|c| {
+            let name = agent_station_name(&c);
+            (c, name)
+        })
+        .filter(|(_, name)| !authored.iter().any(|a| a == name))
+        .map(|(c, name)| StationSpec {
+            title: format!("{} — {}", c.role, c.model),
+            name,
+            version: 1,
+            status: WorkflowStatus::Active,
+            kind: StationKind::Constraint,
+            predicate: StationPredicate {
+                status: Some(JobStatus::Open),
+                step: Some(StepMatch {
+                    kind: None,
+                    metadata_equals: BTreeMap::from([
+                        ("authority_role".to_string(), c.role.clone()),
+                        (crate::agent_spec::MODEL_KEY.to_string(), c.model.clone()),
+                    ]),
+                    status_in: vec![StepStatus::Ready, StepStatus::Active],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            discipline: default_discipline(),
+            wip_limit: None,
+            terminal_window_days: None,
+            capability: Some(StationCapability {
+                roles: vec![c.role.clone()],
+                models: vec![c.model.clone()],
+            }),
+            rollup_parent: None,
+            upstream: None,
+            lens: None,
+            created_at: now,
+        })
+        .collect()
+}
+
+/// Project the protocol set into the stations it requires: every
+/// `(kind, role)` constraint queue, then every `(role, model)` agent
+/// queue ([`agent_stations`]).
 ///
 /// `authored` is the existing registry. A projected station whose name
 /// already exists is DROPPED rather than merged: two sources for one
@@ -101,6 +224,17 @@ pub fn station_name(c: &Constraint) -> String {
 /// leaving them at their defaults here, so that an operator wanting
 /// something else authors a row and that row visibly wins.
 pub fn derived_stations(
+    workflows: &[WorkflowSpec],
+    authored: &[String],
+    now: DateTime<Utc>,
+) -> Vec<StationSpec> {
+    let mut out = constraint_stations(workflows, authored, now);
+    out.extend(agent_stations(workflows, authored, now));
+    out
+}
+
+/// The `(kind, role)` half of [`derived_stations`].
+fn constraint_stations(
     workflows: &[WorkflowSpec],
     authored: &[String],
     now: DateTime<Utc>,
@@ -161,6 +295,7 @@ pub fn derived_stations(
             // "who may act here" is data, not a convention.
             capability: Some(StationCapability {
                 roles: vec![c.role.clone()],
+                models: Vec::new(),
             }),
             rollup_parent: None,
             upstream: None,
@@ -518,5 +653,132 @@ mod tests {
             roles,
             vec!["bookkeeper".to_string(), "head-brewer".to_string()]
         );
+    }
+
+    /// ONE STATION PER (ROLE, MODEL) — design c87fb59b car 3, backlog
+    /// cb78818d. A step whose `agent` block names a model, under a
+    /// role, has declared a queue for "an agent of that role on that
+    /// model" exactly as a `(kind, role)` pair declares a constraint
+    /// queue: two protocols declaring the same pair share one station;
+    /// a second model is a second station; a block under no role is no
+    /// station (there is no role to gate the claim on). The predicate
+    /// filters what the queue HOLDS on both projected keys — the
+    /// lesson `a_derived_queue_matches_the_role_not_just_the_kind`
+    /// paid for — and the capability carries both halves for the claim.
+    #[test]
+    fn an_agent_block_projects_one_station_per_role_and_model() {
+        use crate::agent_spec::{AgentSpec, Effort};
+        let block = |model: &str| AgentSpec {
+            profile: "builder".into(),
+            model: model.into(),
+            budget_usd: 5.0,
+            effort: Effort::High,
+        };
+        let mut a = seedable_platform_workflows()
+            .into_iter()
+            .find(|w| !w.steps.is_empty())
+            .expect("a platform kind with steps");
+        a.status = WorkflowStatus::Active;
+        a.steps.truncate(1);
+        a.steps[0].kind = "task".into();
+        a.steps[0].authority_role = Some("platform-admin".into());
+        a.steps[0].audience = None;
+        a.steps[0].agent = Some(block("opus-5[1m]"));
+        let mut b = a.clone();
+        a.kind = "backlog-item".into();
+        b.kind = "user-feedback".into();
+        b.steps[0].kind = "answer-question".into();
+
+        let found = agent_constraints_of(&[a.clone(), b.clone()]);
+        assert_eq!(
+            found.len(),
+            1,
+            "two protocols, one (role, model): {found:#?}"
+        );
+        let only = found.iter().next().expect("one");
+        assert_eq!(agent_station_name(only), "a.platform-admin.opus-5-1m");
+
+        let out = agent_stations(&[a.clone(), b.clone()], &[], now());
+        assert_eq!(out.len(), 1, "{out:#?}");
+        let s = &out[0];
+        assert_eq!(s.name, "a.platform-admin.opus-5-1m");
+        assert_eq!(s.kind, StationKind::Constraint);
+        let step = s.predicate.step.as_ref().expect("matches a step");
+        assert_eq!(
+            step.kind, None,
+            "any step kind: the model is the constraint"
+        );
+        assert_eq!(
+            step.metadata_equals,
+            BTreeMap::from([
+                ("agent_model".to_string(), "opus-5[1m]".to_string()),
+                ("authority_role".to_string(), "platform-admin".to_string()),
+            ])
+        );
+        assert_eq!(step.status_in, vec![StepStatus::Ready, StepStatus::Active]);
+        let cap = s.capability.as_ref().expect("gated");
+        assert_eq!(cap.roles, vec!["platform-admin".to_string()]);
+        assert_eq!(cap.models, vec!["opus-5[1m]".to_string()]);
+
+        // A second model under the same role is a second station; the
+        // whole projection carries both kinds of derived row.
+        b.steps[0].agent = Some(block("haiku-4-5"));
+        let names: Vec<String> = derived_stations(&[a.clone(), b.clone()], &[], now())
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert!(
+            names.contains(&"a.platform-admin.opus-5-1m".to_string()),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&"a.platform-admin.haiku-4-5".to_string()),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&"q.platform-admin.task".to_string()),
+            "{names:?}"
+        );
+
+        // No role, no station: nothing to gate the claim on.
+        a.steps[0].authority_role = None;
+        assert!(agent_constraints_of(std::slice::from_ref(&a)).is_empty());
+        // An authored name still wins.
+        let taken = ["a.platform-admin.haiku-4-5".to_string()];
+        assert!(
+            !agent_stations(&[b], &taken, now())
+                .iter()
+                .any(|s| s.name == taken[0])
+        );
+    }
+
+    /// The platform bundle declares agent blocks (car 1 put them on the
+    /// backlog-item, user-feedback and retro steps), so the live
+    /// projection carries at least one `(role, model)` station — the
+    /// row the probe on this car reads back from `/api/stations`.
+    #[test]
+    fn the_platform_set_projects_an_agent_station_with_a_url_safe_name() {
+        let derived = agent_stations(&seedable_platform_workflows(), &[], now());
+        assert!(!derived.is_empty(), "the bundle declares agent blocks");
+        for s in &derived {
+            assert!(s.name.starts_with("a."), "{}", s.name);
+            assert!(
+                s.name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-._".contains(c)),
+                "`{}` needs percent-encoding to appear in a URL — the model is slugged",
+                s.name
+            );
+            let cap = s.capability.as_ref().expect("gated");
+            assert_eq!((cap.roles.len(), cap.models.len()), (1, 1), "{}", s.name);
+            assert!(
+                crate::agent_spec::known_models().contains(&cap.models[0]),
+                "{}: {} is priced",
+                s.name,
+                cap.models[0]
+            );
+        }
+        assert_eq!(model_slug("opus-5[1m]"), "opus-5-1m");
+        assert_eq!(model_slug("Haiku 4.5"), "haiku-4-5");
     }
 }
