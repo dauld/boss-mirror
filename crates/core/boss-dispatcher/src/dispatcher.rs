@@ -46,6 +46,14 @@ pub struct DispatcherCtx {
 struct RosterCache {
     fetched_at: Option<std::time::Instant>,
     employees: Vec<Employee>,
+    /// login → registered agent id, folded by `alias_map` from the
+    /// same `/api/agents` listing the roster reads (backlog d7fef617).
+    /// Not a roster row: an agent with no role is not on the roster,
+    /// but its login still resolves — so the map has its own stamp
+    /// and its own refresh (`canonical_executor_for`) rather than
+    /// riding on the roster rows.
+    aliases: std::collections::HashMap<String, String>,
+    aliases_fetched_at: Option<std::time::Instant>,
 }
 
 impl DispatcherCtx {
@@ -420,6 +428,10 @@ async fn handle_event(
             .as_deref(),
         &role_candidates,
     ) {
+        // Nominate the REGISTERED id, not the env spelling: the claim
+        // door signs this actor by its registered id and the CAS
+        // compares the two (d7fef617, `canonical_executor`).
+        let executor = canonical_executor_for(ctx, &executor).await;
         assign(ctx, job_id, step_id, &executor).await?;
         debug!(
             job_id,
@@ -691,10 +703,17 @@ fn roster_is_stale(cache: &RosterCache) -> bool {
 /// only an agent holds, silently, which is the defect ab192a9f names.
 async fn fetch_active_roster(ctx: &DispatcherCtx) -> Result<Vec<Employee>> {
     let people = format!("{}/api/people", ctx.people_api_url.trim_end_matches('/'));
-    let agents = format!("{}/api/agents", ctx.jobs_api_url.trim_end_matches('/'));
     let employees: Vec<Employee> = fetch_json(ctx, &people).await?;
-    let listing: AgentsListing = fetch_json(ctx, &agents).await?;
-    Ok(roster_union(employees, listing.data))
+    let agents = fetch_agents(ctx).await?;
+    Ok(roster_union(employees, agents))
+}
+
+/// The registered agents, as `GET /api/agents` lists them — the one
+/// read behind both folds of that listing (`roster_union`, `alias_map`).
+async fn fetch_agents(ctx: &DispatcherCtx) -> Result<Vec<boss_jobs::agents::AgentRow>> {
+    let url = format!("{}/api/agents", ctx.jobs_api_url.trim_end_matches('/'));
+    let listing: AgentsListing = fetch_json(ctx, &url).await?;
+    Ok(listing.data)
 }
 
 /// `GET /api/agents` answers `{data, total}`; the rows are the
@@ -702,6 +721,69 @@ async fn fetch_active_roster(ctx: &DispatcherCtx) -> Result<Vec<Employee>> {
 #[derive(Debug, Deserialize)]
 struct AgentsListing {
     data: Vec<boss_jobs::agents::AgentRow>,
+}
+
+/// THE EXECUTOR LANE NOMINATES THE REGISTERED ID (backlog d7fef617).
+/// The id `executor_for` returns is the raw env value
+/// (`BOSS_DISPATCH_EXECUTOR_ID`), and the deployment spells it as the
+/// agent's LOGIN — `claude@algedonic.dev`. The jobs API's login door
+/// (design 6fda05ae) rewrites that login to the registered id
+/// `agent-claude` before any write is read, so the actor's own claim
+/// arrives as `agent-claude` and the claim CAS (`assignee_id = $2`)
+/// refused the holder to itself: 409 {holder: claude@algedonic.dev,
+/// status: ready}, measured 2026-09-19 00:50Z on `boss dispatch`
+/// da925366. One definition: every writer of assignee_id spells the
+/// actor the way the door does, so the nomination resolves through the
+/// same alias relation the door reads, folded here from the registry's
+/// rows. Pure: an alias resolves to the agent that lists it; anything
+/// else — a registered id, a person, an id the registry does not know
+/// — passes through unchanged, because this lane never invents an
+/// identity.
+fn canonical_executor(env_id: &str, aliases: &std::collections::HashMap<String, String>) -> String {
+    aliases
+        .get(env_id)
+        .cloned()
+        .unwrap_or_else(|| env_id.to_string())
+}
+
+/// login → registered id, over every agent row — with or without a
+/// role, which is why this is not a roster row's field: the roster
+/// holds only agents that hold a role, and a login resolves either way.
+fn alias_map(agents: &[boss_jobs::agents::AgentRow]) -> std::collections::HashMap<String, String> {
+    agents
+        .iter()
+        .flat_map(|a| {
+            a.aliases
+                .iter()
+                .map(move |alias| (alias.clone(), a.id.clone()))
+        })
+        .collect()
+}
+
+/// `canonical_executor` over the alias map cached beside the roster,
+/// refreshed on the roster's TTL from the same `/api/agents` listing.
+/// A registry that cannot be read leaves the env spelling as it was —
+/// the prior behaviour, and one the claim CAS now admits (the other
+/// half of d7fef617) — rather than NAKing a lane that never depended
+/// on a registry read before; the miss is logged.
+async fn canonical_executor_for(ctx: &DispatcherCtx, env_id: &str) -> String {
+    let mut cache = ctx.roster.lock().await;
+    let stale = cache
+        .aliases_fetched_at
+        .map(|t| t.elapsed() >= ROSTER_TTL)
+        .unwrap_or(true);
+    if stale {
+        match fetch_agents(ctx).await {
+            Ok(agents) => {
+                cache.aliases = alias_map(&agents);
+                cache.aliases_fetched_at = Some(std::time::Instant::now());
+            }
+            Err(e) => {
+                debug!(env_id, error = %e, "agents read failed; nominating the executor as the env spells it");
+            }
+        }
+    }
+    canonical_executor(env_id, &cache.aliases)
 }
 
 async fn fetch_json<T: serde::de::DeserializeOwned>(ctx: &DispatcherCtx, url: &str) -> Result<T> {
@@ -1410,6 +1492,70 @@ mod tests {
             &["engineering-agent"],
             Partition::Real
         ));
+    }
+
+    /// THE EXECUTOR LANE NOMINATES THE REGISTERED ID (backlog d7fef617).
+    /// Measured 2026-09-19 00:50Z: the lane wrote the raw env value
+    /// `claude@algedonic.dev` as assignee_id while the jobs API's login
+    /// door signs that same actor's claim as `agent-claude`, so the
+    /// claim CAS refused the holder to itself (409, holder = the alias).
+    /// The rule, pure over the alias map folded from the registry's
+    /// rows: an alias resolves to the agent that lists it — whether or
+    /// not that agent holds a role, since a login is not a roster fact
+    /// — and a registered id or an id the registry does not know passes
+    /// through unchanged.
+    #[test]
+    fn the_env_executor_resolves_through_the_registry_aliases() {
+        let agent = |id: &str, role: Option<&str>, aliases: &[&str]| boss_jobs::agents::AgentRow {
+            id: id.into(),
+            display_name: id.into(),
+            default_model: "opus-5[1m]".into(),
+            role: role.map(str::to_string),
+            department: None,
+            hourly_budget_usd_micros: None,
+            max_concurrent_runs: None,
+            aliases: aliases.iter().map(|a| (*a).to_string()).collect(),
+        };
+        let aliases = super::alias_map(&[
+            agent(
+                "agent-claude",
+                Some("engineering-agent"),
+                &["claude@algedonic.dev"],
+            ),
+            agent("agent-mute", None, &["mute@algedonic.dev"]),
+        ]);
+        // An alias resolves — the packet's exact pair.
+        assert_eq!(
+            super::canonical_executor("claude@algedonic.dev", &aliases),
+            "agent-claude"
+        );
+        // A role-less agent's login resolves too: the roster would not
+        // list it, the alias relation does.
+        assert_eq!(
+            super::canonical_executor("mute@algedonic.dev", &aliases),
+            "agent-mute"
+        );
+        // A registered id passes through.
+        assert_eq!(
+            super::canonical_executor("agent-claude", &aliases),
+            "agent-claude"
+        );
+        // An id the registry does not know passes through unchanged —
+        // this lane never invents an identity.
+        assert_eq!(
+            super::canonical_executor("nobody@example.test", &aliases),
+            "nobody@example.test"
+        );
+        assert_eq!(
+            super::canonical_executor("emp-david", &aliases),
+            "emp-david"
+        );
+        // No registry rows at all: every spelling passes through.
+        let none = super::alias_map(&[]);
+        assert_eq!(
+            super::canonical_executor("claude@algedonic.dev", &none),
+            "claude@algedonic.dev"
+        );
     }
 
     /// The roster union, pure: an agent row with a role becomes a
