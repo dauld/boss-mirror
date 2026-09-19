@@ -239,44 +239,6 @@ fn bill_account_for(category: &str) -> Result<&'static str, LedgerError> {
         })
 }
 
-/// Tax kind → liability account code. Same TOML-backed shape as
-/// `revenue_account_for`; sim-bridge + ledger both resolve through
-/// this single source of truth so the snapshot the bridge emits and
-/// the account the rule posts to can never drift. Per-tenant
-/// overrides via `BOSS_LEDGER_TAX_LIABILITY_ACCOUNTS_TOML`.
-const TAX_LIABILITY_ACCOUNTS_TOML: &str = include_str!("../seeds/tax_liability_accounts.toml");
-
-fn tax_liability_accounts() -> &'static std::collections::HashMap<String, &'static str> {
-    static CACHE: std::sync::OnceLock<std::collections::HashMap<String, &'static str>> =
-        std::sync::OnceLock::new();
-    CACHE.get_or_init(|| {
-        let body = match std::env::var("BOSS_LEDGER_TAX_LIABILITY_ACCOUNTS_TOML") {
-            Ok(path) => std::fs::read_to_string(&path).unwrap_or_else(|e| {
-                tracing::warn!(
-                    path = %path,
-                    error = %e,
-                    "BOSS_LEDGER_TAX_LIABILITY_ACCOUNTS_TOML unreadable; falling back to embedded defaults"
-                );
-                TAX_LIABILITY_ACCOUNTS_TOML.to_string()
-            }),
-            Err(_) => TAX_LIABILITY_ACCOUNTS_TOML.to_string(),
-        };
-        let parsed: std::collections::HashMap<String, String> =
-            toml::from_str(&body).expect("tax_liability_accounts.toml must parse");
-        parsed
-            .into_iter()
-            .map(|(k, v)| (k, &*Box::leak(v.into_boxed_str())))
-            .collect()
-    })
-}
-
-/// Public so the sim-bridge can resolve through the same source of
-/// truth the ledger's posting rules use; the bridge stamps the
-/// account onto the snapshot payload and the rule cross-checks it.
-pub fn liability_account_for(tax_kind: &str) -> Option<&'static str> {
-    tax_liability_accounts().get(tax_kind).copied()
-}
-
 fn invoice_paid(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> {
     let amount = cents_from_payload(fact.payload.get("amount_cents"))
         .ok_or_else(|| payload_err(fact.kind, "amount_cents missing"))?;
@@ -434,10 +396,10 @@ fn tax_accrued(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> {
     // Payload:
     //   {
     //     "filing_id":         "tf-income-US-FEDERAL-2026-Q1",
-    //     "kind":              "income" | "sales" | "payroll_941" | "payroll_940",
+    //     "kind":              a `tax_kinds` row on this instance,
     //     "jurisdiction":      "US-FEDERAL",
     //     "expense_account":   "6500",          -- must be debit-normal
-    //     "liability_account": "2310",          -- must be credit-normal
+    //     "liability_account": "2310",          -- the account that row names
     //     "amount_cents":      ...,
     //   }
     //
@@ -451,6 +413,13 @@ fn tax_accrued(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> {
     // as part of the payroll-run compound entry). Without this rule
     // the remit step would over-debit the liability and leave a
     // negative balance.
+    //
+    // The liability account is NOT judged here: this function is pure
+    // and the tenant's regime is a table. The posting path
+    // (`post_fact_in_tx`) holds the account to the `tax_kinds` row the
+    // instance holds for `kind` and refuses a kind with no row, by name
+    // (backlog e021be29 — until 2026-09-19 a `matches!` here carried
+    // the demo tenant's four accounts and refused every other tenant's).
     let amount = cents_from_payload(fact.payload.get("amount_cents"))
         .ok_or_else(|| payload_err(fact.kind, "amount_cents missing"))?;
     if amount <= 0 {
@@ -472,12 +441,6 @@ fn tax_accrued(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> {
         .get("liability_account")
         .and_then(|v| v.as_str())
         .ok_or_else(|| payload_err(fact.kind, "liability_account missing"))?;
-    if !matches!(liability, "2150" | "2300" | "2310" | "2320") {
-        return Err(payload_err(
-            fact.kind,
-            &format!("liability_account `{liability}` not allowed"),
-        ));
-    }
 
     Ok(JournalEntryDraft {
         posted_on: fact.happened_on,
@@ -513,17 +476,20 @@ fn tax_remitted(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> {
     // arrives. Payload:
     //   {
     //     "filing_id":          "tf-sales-US-CA-2026-03",
-    //     "kind":               "sales" | "income" | "payroll_941" | "payroll_940",
+    //     "kind":               a `tax_kinds` row on this instance,
     //     "jurisdiction":       "US-CA",
-    //     "liability_account":  "2300" | "2310" | "2150",
+    //     "liability_account":  the account that row names,
     //     "amount_cents":       ...,
     //     "period_start":       "YYYY-MM-DD",
     //     "period_end":         "YYYY-MM-DD",
     //   }
     //
     // Entry:
-    //   DR 2300/2310/2150  amount_cents
-    //   CR 1000 Cash       amount_cents
+    //   DR liability_account  amount_cents
+    //   CR 1000 Cash          amount_cents
+    //
+    // As in `tax_accrued`: the account is held to the `tax_kinds` row
+    // by the posting path, not judged here (backlog e021be29).
     let amount = cents_from_payload(fact.payload.get("amount_cents"))
         .ok_or_else(|| payload_err(fact.kind, "amount_cents missing"))?;
     if amount <= 0 {
@@ -534,12 +500,6 @@ fn tax_remitted(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> {
         .get("liability_account")
         .and_then(|v| v.as_str())
         .ok_or_else(|| payload_err(fact.kind, "liability_account missing"))?;
-    if !matches!(liability, "2300" | "2310" | "2150" | "2320") {
-        return Err(payload_err(
-            fact.kind,
-            &format!("liability_account `{liability}` not allowed"),
-        ));
-    }
 
     Ok(JournalEntryDraft {
         posted_on: fact.happened_on,

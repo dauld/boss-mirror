@@ -18,6 +18,13 @@
 //! kind to collapse (CLAUDE.md §9a: collapse if you can; deletion is
 //! the goal), so the module and its bundle are gone and this pins that
 //! no crate grows one back.
+//!
+//! The same collapse took the kind → liability-account map next
+//! (e021be29, 2026-09-19): boss-ledger bundled
+//! `seeds/tax_liability_accounts.toml` behind a silent env fallback
+//! while the tenant's `tax_kinds` rows carried `liability_account` per
+//! kind; the bundle had no reader, so it is gone too and the posting
+//! path reads the row. The pins below cover both names.
 
 use boss_testing::repo_root;
 use std::path::{Path, PathBuf};
@@ -50,15 +57,15 @@ fn no_crate_bundles_a_sales_tax_rate_table() {
     let named: Vec<_> = files
         .iter()
         .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.contains("sales_tax") || n.contains("tax_rates"))
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                n.contains("sales_tax") || n.contains("tax_rates") || n.contains("tax_liability")
+            })
         })
         .map(|p| p.strip_prefix(&root).unwrap_or(p).display().to_string())
         .collect();
     assert!(
         named.is_empty(),
-        "a crate carries a sales-tax rate file — the tenant's seeds/tax.toml is the one definition: {named:?}"
+        "a crate carries a tax regime file — the tenant's seeds/tax.toml is the one definition: {named:?}"
     );
 
     let bundled: Vec<_> = files
@@ -66,14 +73,14 @@ fn no_crate_bundles_a_sales_tax_rate_table() {
         .filter(|p| p.extension().is_some_and(|e| e == "rs"))
         .filter_map(|p| {
             let text = std::fs::read_to_string(p).ok()?;
-            // A rate TABLE, specifically: boss-ledger bundles a kind ->
-            // liability-account map (`tax_liability_accounts.toml`), a
-            // different fact with its own history.
             // (The macro name is assembled so this file's own line
             // does not match itself.)
             let bundle = format!("include_{}!", "str");
             let hit = text.lines().find(|l| {
-                l.contains(&bundle) && (l.contains("sales_tax") || l.contains("tax_rate"))
+                l.contains(&bundle)
+                    && (l.contains("sales_tax")
+                        || l.contains("tax_rate")
+                        || l.contains("tax_liability"))
             })?;
             Some(format!(
                 "{}: {}",

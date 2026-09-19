@@ -1953,6 +1953,14 @@ elif [ "${#SCOPE[@]}" -eq 0 ]; then
     # onto the next item and is invisible to every --all-features step
     # (see #180). One cheap build closes the class.
     check "build (default features)" cargo build --workspace
+    # The tenant bundles the image ships, judged by the `boss` the
+    # build above just produced (backlog fd8ee021). Out of the
+    # pre-flight for the same reason as no-snapshot-arrays below —
+    # the roster runs before any binary exists — and run here so the
+    # exclusion is not a lint nobody runs. Before `test`: a bundle a
+    # gateway would refuse to boot from is the cheaper, louder
+    # verdict, and the train's assembled-tree gate runs this branch.
+    check "an-image-sourced-tenant-passes-its-check" infra/lint/an-image-sourced-tenant-passes-its-check.sh
     check "test"    cargo test --all-features
     # Kept out of the pre-flight because it reads the built
     # boss-ports-list; the build above just produced it. This line was
@@ -1969,6 +1977,15 @@ else
     if changed_paths | grep -qE '^(crates/core/boss-ports/|apps/(web|simulator)/src/_generated/ports\.ts$)'; then
         check "build boss-ports-list" cargo build -p boss-ports
         check "no-snapshot-arrays" infra/lint/no-snapshot-arrays.sh
+    fi
+    # Likewise the tenant bundles (backlog fd8ee021): a car that edits
+    # a shipped bundle, the verb that judges it, or the lint itself
+    # pays for the CLI. Built by name — a bundle car's derived scope is
+    # its engine crate (`examples/<t>/seeds/*` -> boss-<t>-engine),
+    # not boss-cli — then judged with it.
+    if changed_paths | grep -qE '^(examples/[^/]+/|crates/orchestrators/boss-cli/|infra/lint/an-image-sourced-tenant-passes-its-check\.sh$)'; then
+        check "build boss-cli" cargo build -p boss-cli
+        check "an-image-sourced-tenant-passes-its-check" infra/lint/an-image-sourced-tenant-passes-its-check.sh
     fi
 fi
 

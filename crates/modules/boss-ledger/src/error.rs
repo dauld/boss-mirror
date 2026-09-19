@@ -55,6 +55,17 @@ pub enum LedgerError {
     #[error("tax seed refused: {0}")]
     InvalidTaxSeed(String),
 
+    /// A tax fact (`finance.tax.accrued` / `finance.tax.remitted`) names
+    /// a kind this instance's `tax_kinds` registry does not hold, or a
+    /// liability account other than the one that kind's row names —
+    /// the tenant's declaration (`POST /api/ledger/tax/batch`) is the
+    /// one definition of which account a kind hits, and a kind with no
+    /// row cannot post (backlog e021be29: until 2026-09-19 the posting
+    /// rules held the demo tenant's four accounts in a `matches!` and
+    /// refused every other tenant's as "not allowed").
+    #[error("fact `{fact_kind}` refused: {reason}")]
+    TaxKindNotRegistered { fact_kind: String, reason: String },
+
     /// Postgres failure during insert, lookup, or trigger check.
     #[error("storage failure: {0}")]
     Storage(String),

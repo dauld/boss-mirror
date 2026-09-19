@@ -13,7 +13,7 @@
 import { test, expect } from '@playwright/test';
 import { mountPage } from './_helpers';
 import { AA_FLOOR, describeUnreadable, measureContrast } from './_contrast';
-import { DEPARTMENT_CLASSES } from './_smokeMocks';
+import { DEPARTMENT_CLASSES, installApiFloor } from './_smokeMocks';
 
 /// Surfaces that render the chrome through different code paths:
 /// a normal AppShell route, the full-page step route (rendered
@@ -32,9 +32,11 @@ const MANIFEST = {
 
 test.describe('chrome bar', () => {
   test.beforeEach(async ({ page }) => {
-    // `mountPage` does not install the smoke-mock backend, so the
-    // manifest is mocked here — the brand comes from it now — and so
-    // are the department Classes the bar derives its tabs from.
+    // `mountPage` does not install the smoke-mock backend: the floor
+    // answers the shell's own reads, the manifest is mocked here — the
+    // brand comes from it now — and so are the department Classes the
+    // bar derives its tabs from.
+    await installApiFloor(page);
     await page.route(/\/api\/tenant\/manifest$/, (r) => r.fulfill({ json: MANIFEST }));
     await page.route(/\/api\/classes(\?|$)/, (r) => r.fulfill({ json: DEPARTMENT_CLASSES }));
   });

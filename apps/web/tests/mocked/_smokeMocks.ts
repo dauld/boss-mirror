@@ -113,24 +113,46 @@ export const OBJECT_ENDPOINTS: ReadonlyArray<RegExp> = [
   MARKETING_ASSET_DETAIL, VIEW_RESULTS, SHIPMENT_DETAIL,
 ];
 
-export async function installSmokeMocks(page: Page): Promise<void> {
-  // Strip the bun dev-server HMR overlay. Identity comes from the
-  // mocked `/api/session` below, not from anything stored client-side.
-  await page.addInitScript(() => {
-    setInterval(() => document.querySelector('bun-hmr')?.remove(), 200);
-  });
-
-  // Catch-all FIRST (lowest priority): unknown endpoints → empty list, 200,
-  // so the shell's incidental fetches resolve and the page mounts. Routes
-  // registered later (below) take precedence.
+/// The floor under every mocked spec's backend (backlog f88e7908,
+/// 2026-09-19). Installed FIRST, so everything a spec registers after
+/// it wins (routes match last-registered-first), it answers whatever
+/// the spec did not: `[]` to any /api/** read, and the empty-but-valid
+/// shape of its own endpoint where that shape is not a list. Without
+/// it a spec that mocked only what it tested let the shell's reads
+/// reach the dev-server — 403 misses across 16 paths per full run,
+/// from five specs — and eight of those paths never showed in the old
+/// connect noise because the proxy had no port for them.
+///
+/// What it does NOT do: mock an identity. `/api/session` stays with
+/// the dev-server's own audit-readonly demo session, and `/api/auth/me`
+/// answers 401 — the gateway's answer for that session, and what
+/// SignInControl reads as "Sign in". A spec that needs a persona mocks
+/// `/api/people` + `/api/session` itself (installSmokeMocks does). A
+/// detail read for an id nothing seeded answers 404, the registry's
+/// own answer for a kind it does not hold; a spec that relies on a 404
+/// for its error-state rendering now gets it from here rather than
+/// from the dev-server's miss.
+export async function installApiFloor(page: Page): Promise<void> {
   await page.route('**/api/**', (r) => json(r, []));
 
-  // Identity / session.
-  await page.route(/\/api\/people$/, (r) => json(r, [EMP]));
-  await page.route(/\/api\/session$/, (r) => json(r, {}));
-  await page.route(/\/api\/auth\/me$/, (r) => json(r, {}));
+  // Identity probes: nobody. The SPA's 401 interceptor exempts
+  // `/api/auth/*`, so this is the answer, not a redirect.
+  await page.route(/\/api\/auth\/me$/, (r) => json(r, 'no session', 401));
+  // The two /login availability probes (`.enabled === true` is the
+  // read): neither door is offered.
+  await page.route(/\/api\/auth\/(guest|oidc\/available)$/, (r) => json(r, { enabled: false }));
 
-  // Live job state (objects, not lists — the catch-all `[]` would break these).
+  // What the chrome asks on every mount.
+  // The unread badge: `{ count }` (boss-messages' UnreadResponse).
+  await page.route(/\/api\/messages\/unread\/[^/]+(\?|$)/, (r) => json(r, { count: 0 }));
+  // The route-open record: a fire-and-forget POST the API answers 204.
+  await page.route(/\/api\/surface-opens$/, (r) => r.fulfill({ status: 204 }));
+  // Server-sent streams (the sim clock, a job's, the event pulse's): a
+  // 204 fails the EventSource cleanly — no reconnect — so the client
+  // falls back to its poll, which the objects below answer.
+  await page.route(/\/api\/.+\/stream(\?|$)/, (r) => r.fulfill({ status: 204 }));
+
+  // Live job state (objects, not lists — `[]` would break these).
   await page.route(JOBS_LIVE, (r) => json(r, { counts: {}, open_total: 0, recent: [], sim_clock: {} }));
   await page.route(JOBS_SUMMARY, (r) => json(r, { counts: {}, total: 0 }));
   // The yard status read-model (object, not a list). An empty-but-well-
@@ -163,6 +185,31 @@ export async function installSmokeMocks(page: Page): Promise<void> {
       })),
     }),
   );
+
+  // The other object reads, empty; the detail reads, absent.
+  await page.route(DISPATCHER_RULES, (r) => json(r, { rules: [], handler_emits: {}, system_edges: [] }));
+  await page.route(GATEWAY_PERF, (r) => json(r, { endpoints: [], window_started_at: '2026-01-01T00:00:00Z' }));
+  for (const detail of [WORKFLOW_DETAIL, MARKETING_ASSET_DETAIL, SHIPMENT_DETAIL, VIEW_RESULTS]) {
+    await page.route(detail, (r) => json(r, 'not found', 404));
+  }
+}
+
+export async function installSmokeMocks(page: Page): Promise<void> {
+  // Strip the bun dev-server HMR overlay. Identity comes from the
+  // mocked `/api/session` below, not from anything stored client-side.
+  await page.addInitScript(() => {
+    setInterval(() => document.querySelector('bun-hmr')?.remove(), 200);
+  });
+
+  // The floor FIRST (lowest priority): every read the fixtures below
+  // do not name still resolves, so the page mounts. Routes registered
+  // later take precedence.
+  await installApiFloor(page);
+
+  // Identity / session: a persona, so `/api/auth/me` is someone.
+  await page.route(/\/api\/people$/, (r) => json(r, [EMP]));
+  await page.route(/\/api\/session$/, (r) => json(r, {}));
+  await page.route(/\/api\/auth\/me$/, (r) => json(r, {}));
 
   // Workflow registry + the adversarial kind (omitted-terminal step).
   await page.route(/\/api\/workflows$/, (r) => json(r, [WORKFLOW]));

@@ -13,6 +13,7 @@
 
 import { test, expect } from '@playwright/test';
 import { mountPage } from './_helpers';
+import { installApiFloor } from './_smokeMocks';
 
 const MANIFEST = { display_name: 'Algedonic Ales', modules: {}, labels: {} };
 
@@ -24,6 +25,7 @@ async function stubAuth(
   page: import('@playwright/test').Page,
   opts: { guestEnabled: boolean },
 ): Promise<void> {
+  await installApiFloor(page);
   await page.route(/\/api\/tenant\/manifest$/, (r) => r.fulfill({ json: MANIFEST }));
   // Not signed in — otherwise the page redirects to home instead of
   // rendering the form we are testing.

@@ -148,3 +148,7 @@ required-features = ["postgres"]
 [[test]]
 name = "chart_pg"
 required-features = ["postgres"]
+
+[[test]]
+name = "the_posting_path_reads_the_tax_kinds_row"
+required-features = ["postgres"]

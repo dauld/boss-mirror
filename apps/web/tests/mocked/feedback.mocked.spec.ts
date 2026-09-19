@@ -11,6 +11,7 @@
 
 import { test, expect } from '@playwright/test';
 import { mountPage } from './_helpers';
+import { installApiFloor } from './_smokeMocks';
 
 const MANIFEST = { display_name: 'Algedonic Ales', modules: {}, labels: {} };
 
@@ -26,6 +27,7 @@ const chromeFeedback = (page: import('@playwright/test').Page) =>
 
 test.describe('feedback control', () => {
   test.beforeEach(async ({ page }) => {
+    await installApiFloor(page);
     await page.route(/\/api\/tenant\/manifest$/, (r) => r.fulfill({ json: MANIFEST }));
   });
 

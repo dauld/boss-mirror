@@ -351,7 +351,8 @@ fn ledger_err(e: crate::error::LedgerError) -> Response {
         | LedgerError::InvalidPayload { .. }
         | LedgerError::Unbalanced { .. }
         | LedgerError::LockedPeriod { .. }
-        | LedgerError::UnknownFactKind(_) => StatusCode::BAD_REQUEST,
+        | LedgerError::UnknownFactKind(_)
+        | LedgerError::TaxKindNotRegistered { .. } => StatusCode::BAD_REQUEST,
         // A caller error naming the row (the classes door's 422 for an
         // unregistered kind), never a storage failure.
         LedgerError::InvalidChart(_) | LedgerError::InvalidTaxSeed(_) => {

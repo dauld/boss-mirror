@@ -2,7 +2,8 @@
 # Loaded once by `boss_events::integrity::foreign_ref_rules()` via
 # `include_str!` + `OnceLock`. Same data-as-data shape as D1
 # (step_types.toml), D2 (phase_two_models.toml), D3
-# (revenue_accounts.toml), D4 (tax_liability_accounts.toml).
+# (revenue_accounts.toml). (D4, tax_liability_accounts.toml, was
+# collapsed into the tenant's `tax_kinds` rows on 2026-09-19, e021be29.)
 #
 # Adding a new cross-event reference (e.g. a `jobs.job.created.assigned_to`
 # → `employees.employee.created` invariant) is a TOML row append +

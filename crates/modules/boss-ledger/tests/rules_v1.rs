@@ -552,20 +552,9 @@ fn tax_remitted_drains_payroll_liability_2150() {
     assert_eq!(line_for(&draft.lines, "1000").credit_cents, 1_800_000i64);
 }
 
-#[test]
-fn tax_remitted_rejects_unknown_liability() {
-    let payload = json!({
-        "filing_id": "tf-bad",
-        "kind": "sales",
-        "jurisdiction": "US-CA",
-        "liability_account": "6100",
-        "amount_cents": 100,
-    });
-    assert!(matches!(
-        evaluate(&BossRuleSet, &fact("finance.tax.remitted", &payload)),
-        Err(LedgerError::InvalidPayload { .. })
-    ));
-}
+// Which liability account a tax fact may name is no longer the rule's
+// call: the posting path holds it to the instance's `tax_kinds` row
+// (tests/the_posting_path_reads_the_tax_kinds_row.rs, e021be29).
 
 #[test]
 fn tax_accrued_books_expense_to_liability() {
@@ -614,22 +603,6 @@ fn tax_accrued_rejects_zero_amount() {
         "expense_account": "6500",
         "liability_account": "2310",
         "amount_cents": 0,
-    });
-    assert!(matches!(
-        evaluate(&BossRuleSet, &fact("finance.tax.accrued", &payload)),
-        Err(LedgerError::InvalidPayload { .. })
-    ));
-}
-
-#[test]
-fn tax_accrued_rejects_unknown_liability() {
-    let payload = json!({
-        "filing_id": "tf-bad",
-        "kind": "income",
-        "jurisdiction": "US-FEDERAL",
-        "expense_account": "6500",
-        "liability_account": "1000",
-        "amount_cents": 100,
     });
     assert!(matches!(
         evaluate(&BossRuleSet, &fact("finance.tax.accrued", &payload)),

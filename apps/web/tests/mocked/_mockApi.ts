@@ -10,6 +10,7 @@
 // workflow rail can be driven author → validate → approve → publish.
 
 import type { Page, Route } from '@playwright/test';
+import { installApiFloor } from './_smokeMocks';
 
 export const JOB_ID = 'design-mock-1';
 export const KIND_SLUG = 'seasonal-release';
@@ -69,9 +70,9 @@ export async function installAuthoringMocks(page: Page): Promise<void> {
   };
   const order = ['s-author', 's-validate', 's-approve', 's-publish'];
 
-  // 1) Catch-all (lowest priority): empty 200 so nothing reaches a real
-  //    backend and the shell's incidental fetches don't hang.
-  await page.route('**/api/**', (r) => json(r, []));
+  // 1) The floor (lowest priority): empty-but-valid answers so nothing
+  //    reaches the dev-server and the shell's incidental fetches resolve.
+  await installApiFloor(page);
 
   // 2) Session/roster → deterministic demo persona (emp-001 is the
   //    SPA's default stored persona, so session.user resolves to it).
