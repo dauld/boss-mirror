@@ -70,7 +70,7 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 
 # --- the layer map ---------------------------------------------------------
 # Rank order. A crate may depend downward and sideways, never upward.

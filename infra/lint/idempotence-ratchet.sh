@@ -43,7 +43,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 
 # Files permitted to carry accumulating mutations, with the reason.
 #

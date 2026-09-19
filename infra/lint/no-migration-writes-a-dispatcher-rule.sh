@@ -57,7 +57,7 @@ set -uo pipefail
 
 cd "$(dirname "$0")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 
 # The collapse landed 2026-09-11. Migrations at or after this prefix are
 # checked; everything before it is applied history.

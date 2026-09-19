@@ -189,7 +189,7 @@ self_test || exit 1
 
 cd "$here/../.."
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 API=crates/core/boss-jobs/src/bin/boss_jobs_api.rs
 verdict=$(judge "$API" crates/core/boss-jobs/src)
 if [ "$verdict" != ok ]; then

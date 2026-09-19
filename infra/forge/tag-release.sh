@@ -16,13 +16,22 @@
 #
 # WHAT IT REFUSES, each named on stdout with exit 1 and NOTHING written
 # (the refusals run before the tag exists anywhere):
-#   * a version not shaped vMAJOR.MINOR.PATCH, a sha shorter than 40
-#     hex, a packet id that is not a full uuid — the allowlist refuses
-#     these first (patterns in the verb file), and the script does not
-#     rely on it;
+#   * a version not shaped vMAJOR.MINOR.PATCH, a sha shorter than 7
+#     hex or not hex, a packet id that is not a full uuid — the
+#     allowlist refuses these first (patterns in the verb file), and
+#     the script does not rely on it;
 #   * a tag of that name already on the forge (`git ls-remote --tags`):
 #     a release is cut once, and a second push would be a silent no-op
 #     or a moved tag, both worse than a refusal;
+#   * a sha PREFIX that names no commit, or more than one, in the
+#     converged checkout (`git rev-parse --verify <sha>^{commit}`; git's
+#     own "is ambiguous" rides the refusal). The record holds a closed
+#     train's merge_ref as the conductor's TWELVE chars, so the rule
+#     that files this request (file-tag-release-on-release-tag-ready,
+#     backlog 89c95245) can only hand over a prefix; resolving it here
+#     is one rev-parse in the checkout the ancestry check already
+#     reads. Every bound below, the tag, the read-back and the answer
+#     line run on the FULL forty-hex id it resolves to;
 #   * a sha that no CLOSED pr-train's `merged` step records as its
 #     `merge_ref`, read off the system of record: the version names a
 #     TRAIN THAT LANDED, never an arbitrary commit — `merge_ref` is the
@@ -62,7 +71,7 @@
 # David merges the mirror PR (backlog 05d301be names it). Not here.
 #
 # USAGE
-#   tag-release.sh v1.2.3 <40-hex sha> <release packet uuid>
+#   tag-release.sh v1.2.3 <sha, 7 to 40 hex> <release packet uuid>
 #
 # EXIT
 #   0  the tag is on the forge at the sha, read back; the answer line is last
@@ -112,12 +121,12 @@ TRAINS_PATH="/api/jobs?kind=pr-train&status=closed&limit=$TRAINS_LIMIT"
 READER_USER='{"id":"automation:tag-release-reader","role":"audit-readonly","access_tier":"auditor","territory_account_ids":[],"direct_report_ids":[],"department":"platform"}'
 
 # --- bound 1: the arguments -------------------------------------------------
-[ $# -eq 3 ] || refuse "usage: $ME <version vMAJOR.MINOR.PATCH> <40-hex sha> <release packet uuid> — got $# argument(s)"
+[ $# -eq 3 ] || refuse "usage: $ME <version vMAJOR.MINOR.PATCH> <sha, 7 to 40 hex> <release packet uuid> — got $# argument(s)"
 VERSION="$1"; SHA="$2"; RELEASE="$3"
 [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
     || refuse "version '$VERSION' is malformed — a release is named vMAJOR.MINOR.PATCH (v1.2.3), nothing else"
-[[ "$SHA" =~ ^[0-9a-f]{40}$ ]] \
-    || refuse "sha '$SHA' is not a full 40-hex commit id — a tag is placed on a commit the record names in full, never a prefix"
+[[ "$SHA" =~ ^[0-9a-f]{7,40}$ ]] \
+    || refuse "sha '$SHA' is not a commit id of 7 to 40 hex — a tag is placed on a commit the record names (a closed train's merge_ref, twelve chars) or its full id"
 [[ "$RELEASE" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
     || refuse "release packet id '$RELEASE' is not a full uuid — the tag message names the cut-a-release packet in full"
 
@@ -184,6 +193,19 @@ if [ -n "$EXISTS" ]; then
     refuse "tag $VERSION already exists on the forge at ${at:0:12} — a release is cut once; a different commit wants a different version"
 fi
 say "forge: no tag $VERSION on remote $REMOTE"
+
+# --- the sha, resolved in full --------------------------------------------
+# A prefix (the record's twelve-char merge_ref, or any seven-plus) is
+# resolved to the one commit it names in the converged checkout; git
+# refuses a prefix naming none or more than one, and its reason rides
+# the refusal. From here on $SHA is the FULL id: the train match, the
+# ancestry, the tag and the read-back all speak it, and the answer
+# line names it — never the prefix given.
+GIVEN="$SHA"
+if ! SHA=$(as_owner "$G rev-parse --verify '$GIVEN^{commit}'" 2> "$TMP/resolve.err") || [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    refuse "sha '$GIVEN' does not name one commit in the converged checkout ($TREE); git said: $(said_why < "$TMP/resolve.err")"
+fi
+say "converged checkout: $GIVEN resolves to $SHA"
 
 # --- bound 3: the sha is a CLOSED train's merge commit ---------------------
 [ -x "$SOR_READ" ] || refuse "the trains reader $SOR_READ is not here, so a landed train cannot be told from an arbitrary commit (the record is read through boss-sor-read, which the converged checkout carries at infra/forge/probe-bin)"

@@ -29,7 +29,7 @@ cd "$(dirname "$0")/../.."
 # run, and on 2026-09-11 this lint printed `clean` and exited 0 in a
 # workspace where every git command was refusing (backlog 6b2f4a1a).
 # A scan that did not happen is not a clean tree.
-. "$(dirname "$0")/lib/pattern-scan.sh"
+. "$(dirname "$0")/lib/pattern-scan.sh" || exit 3
 #
 # ONE PROTOCOL FILE IS EXEMPT, by name, for the docs/ reason. A step's
 # `procedure` is the runbook riding in the packet, and ship-a-change's

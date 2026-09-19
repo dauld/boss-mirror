@@ -24,6 +24,7 @@ import { join } from 'node:path';
 // for this path, with HMR attached."
 import index from '../index.html';
 
+import { readyLine } from './dev-ready';
 import { DEFAULT_PORT, TREE_ID, TREE_PATH, treeResponse } from './dev-tree';
 
 const PORT = Number(process.env['PORT'] ?? DEFAULT_PORT);
@@ -269,7 +270,8 @@ serve({
   },
 });
 
-console.log(`boss-web dev server: http://127.0.0.1:${PORT}`);
+// The runner's readiness signal — see src/dev-ready.ts.
+console.log(readyLine(PORT));
 console.log('  HMR: enabled via bun-plugin-svelte + Bun.serve routes');
 console.log(
   `  api proxy → ${SCRATCH ? 'SCRATCH ports (boss_scratch DB) for paired services' : 'prod service ports (boss DB)'}`,

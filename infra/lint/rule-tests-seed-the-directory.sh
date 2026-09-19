@@ -57,7 +57,7 @@ set -uo pipefail
 NAME="rule-tests-seed-the-directory"
 cd "$(dirname "$0")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 
 LOAD="load_active_rules"
 SEED="seed_authored_rules"

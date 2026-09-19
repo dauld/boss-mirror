@@ -129,7 +129,7 @@ NAME="a-fixture-path-cannot-be-a-literal"
 LINT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$LINT_DIR/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
-. "$LINT_DIR/lib/scanned.sh"
+. "$LINT_DIR/lib/scanned.sh" || exit 3
 
 # The shared helper when the tree has it, an equivalent inline when it
 # does not. The car that adds lib/git-answer.sh is in flight alongside
@@ -141,7 +141,7 @@ cd "$LINT_DIR/../.." || exit 1
 # each already speak exit 3 for "could not answer".
 if [ -r "$LINT_DIR/lib/git-answer.sh" ]; then
     # shellcheck source=/dev/null
-    . "$LINT_DIR/lib/git-answer.sh"
+    . "$LINT_DIR/lib/git-answer.sh" || exit 3
 fi
 if ! declare -F git_answer >/dev/null 2>&1; then
     LINT_CANNOT_ANSWER=3

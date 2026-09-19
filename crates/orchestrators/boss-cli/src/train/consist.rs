@@ -311,6 +311,59 @@ pub(crate) fn consist_verdict(runs: &[LintRun], files_named: usize) -> ConsistVe
     }
 }
 
+/// Why a `Proceed` is UNCHECKED rather than clean: `Some` when it ran
+/// nothing, carrying every warning that explains the zero. A verdict
+/// that ran at least one lint is checked, however partially, and
+/// answers `None`.
+///
+/// This is the line between "the tree passed" and "the tree was never
+/// looked at" (backlog 699145ac, 2026-09-19): after a could-not-list
+/// warning the conductor logged '0 cheap lint(s) clean' and departed,
+/// and a reader of the journal took a check that never ran for a
+/// check that passed. Green-with-warnings fails the same way as
+/// permanently-red (CLAUDE.md §Diagnosis), so the zero has to say
+/// what it is.
+pub(crate) fn consist_unchecked_reason(verdict: &ConsistVerdict) -> Option<String> {
+    if verdict.ran() > 0 {
+        return None;
+    }
+    let warnings = verdict.warnings();
+    Some(if warnings.is_empty() {
+        "no lint ran and nothing said why".to_string()
+    } else {
+        warnings.join("; ")
+    })
+}
+
+/// The one journal line a departing consist gets. UNCHECKED names its
+/// reason and still departs — a broken check must not hold a train —
+/// but it never says "clean" about a tree nothing looked at.
+pub(crate) fn consist_departure_line(verdict: &ConsistVerdict) -> String {
+    match consist_unchecked_reason(verdict) {
+        Some(why) => format!(
+            "consist check: UNCHECKED — {why}; departing, a broken check must not hold a train"
+        ),
+        None => format!(
+            "consist check: {} cheap lint(s) clean on the assembled tree",
+            verdict.ran()
+        ),
+    }
+}
+
+/// The same fact for the train packet's `assemble` step — the step
+/// that records the assembled branch, which is what the consist
+/// check tested — so the yard reads what the journal said. Step
+/// fields are strings (`complete_step`), hence "true"/"false"; a
+/// checked consist carries its count and no reason.
+pub(crate) fn consist_step_fields(verdict: &ConsistVerdict) -> Vec<(&'static str, Option<String>)> {
+    let unchecked = consist_unchecked_reason(verdict);
+    vec![
+        ("consist_checked", Some(unchecked.is_none().to_string())),
+        ("consist_lints_ran", Some(verdict.ran().to_string())),
+        ("consist_unchecked_reason", unchecked),
+    ]
+}
+
 /// Point the clone's `origin/main` at CURRENT forge main before the
 /// consist lints resolve their baseline against it.
 ///
@@ -835,6 +888,82 @@ mod tests {
             verdict.warnings().iter().any(|w| w.contains("mute.sh")),
             "the warning names the lint whose declaration is broken: {:?}",
             verdict.warnings()
+        );
+    }
+
+    /// Left by the builder of 13700f6f (backlog 699145ac, 2026-09-19):
+    /// after a could-not-list warning the conductor still logged
+    /// 'consist check: 0 cheap lint(s) clean on the assembled tree' and
+    /// departed — a green-sounding line after zero lints ran, which
+    /// CLAUDE.md files with permanently-red ("green-with-warnings fails
+    /// the same way"). A Proceed that ran nothing is UNCHECKED: the
+    /// journal line says so and the train packet's assemble step
+    /// carries the same fact, so the yard and the journal cannot
+    /// disagree about whether the tree was looked at.
+    #[test]
+    fn a_proceed_that_ran_no_lints_says_unchecked_on_the_line_and_the_packet() {
+        let unchecked = ConsistVerdict::Proceed {
+            ran: 0,
+            warnings: vec!["could not list the tree's lints (boom)".to_string()],
+        };
+        let line = consist_departure_line(&unchecked);
+        assert_eq!(
+            line,
+            "consist check: UNCHECKED — could not list the tree's lints (boom); departing, a \
+             broken check must not hold a train"
+        );
+        assert!(
+            !line.contains("clean"),
+            "nothing ran, so nothing is clean: {line}"
+        );
+        let fields = consist_step_fields(&unchecked);
+        assert!(
+            fields.contains(&("consist_checked", Some("false".to_string()))),
+            "{fields:?}"
+        );
+        assert!(
+            fields.contains(&(
+                "consist_unchecked_reason",
+                Some("could not list the tree's lints (boom)".to_string())
+            )),
+            "{fields:?}"
+        );
+
+        // The real ran=0 tree — a skip declaration with no reason —
+        // reads the same way, naming the lint.
+        let (_g, tree) = consist_fixture("mute-skip-unchecked", &twelve_migrations());
+        std::fs::write(
+            tree.join("infra/lint/mute.sh"),
+            "#!/usr/bin/env bash\n# consist: skip\nexit 0\n",
+        )
+        .expect("write the mute lint");
+        let verdict = consist_check(&tree, &policy());
+        let line = consist_departure_line(&verdict);
+        assert!(line.starts_with("consist check: UNCHECKED — "), "{line}");
+        assert!(line.contains("mute.sh"), "{line}");
+
+        // And a consist that DID run still reads clean, with the count
+        // on the packet.
+        let clean = ConsistVerdict::Proceed {
+            ran: 82,
+            warnings: vec![],
+        };
+        assert_eq!(
+            consist_departure_line(&clean),
+            "consist check: 82 cheap lint(s) clean on the assembled tree"
+        );
+        let fields = consist_step_fields(&clean);
+        assert!(
+            fields.contains(&("consist_checked", Some("true".to_string()))),
+            "{fields:?}"
+        );
+        assert!(
+            fields.contains(&("consist_lints_ran", Some("82".to_string()))),
+            "{fields:?}"
+        );
+        assert!(
+            fields.contains(&("consist_unchecked_reason", None)),
+            "a checked consist carries no unchecked reason: {fields:?}"
         );
     }
 

@@ -51,7 +51,7 @@ set -uo pipefail
 NAME="a-lint-writes-only-where-it-owns"
 cd "$(dirname "$0")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 
 # Paths exempted from the rule, as `<file>:<line-text-fragment>`, each
 # with the reason it is tolerated. A NAMED SET, never a count, so adding

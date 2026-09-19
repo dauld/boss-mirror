@@ -160,6 +160,13 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         // args), and its answer is a different line, so the chain ends
         // at the follow-on by construction.
         ("ops.judge", vec!["jobs.job.created", "jobs.job.updated"]),
+        // A release packet's `tag` step going ready files the
+        // tag-release ops-request for the forge (89c95245): one
+        // `jobs.job.created`, an ops-request, never a task step, so
+        // the shared step.ready.task topic it fires on cannot re-enter
+        // it; the request's answer completes the step through
+        // complete-release-tag-on-tag-release-answered.
+        ("ops.file_tag_release", vec!["jobs.job.created"]),
         // A chore that closed red opens one backlog-item per RED route
         // on its recorded step (ac3270c7): items (`jobs.job.created`)
         // and a `judged` note on the chore it read (`jobs.job.updated`).

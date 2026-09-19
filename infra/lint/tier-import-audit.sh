@@ -19,7 +19,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 
 violations=0
 for toml in $(find crates/core -name Cargo.toml -type f); do

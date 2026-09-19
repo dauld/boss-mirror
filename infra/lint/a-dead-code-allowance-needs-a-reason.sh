@@ -54,7 +54,7 @@ set -uo pipefail
 NAME="a-dead-code-allowance-needs-a-reason"
 cd "$(dirname "$0")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 
 # The files under judgement: every .rs under $1 outside tests/ and
 # target/. One definition, read by the scan and by the scanned count.

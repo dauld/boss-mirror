@@ -89,7 +89,7 @@ set -uo pipefail
 LINT=no-tenant-vocabulary-above-its-tier
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 
 BASELINE="infra/lint/tenant-vocabulary.baseline"
 

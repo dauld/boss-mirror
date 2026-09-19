@@ -83,9 +83,9 @@ set -uo pipefail
 
 cd "$(dirname "$0")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 # shellcheck source=infra/lint/lib/git-answer.sh
-. infra/lint/lib/git-answer.sh
+. infra/lint/lib/git-answer.sh || exit 3
 
 RULES_DIR="infra/dispatcher/rules"
 BASE="${BOSS_DISPATCHER_URL:-http://boss-dispatcher-internal.boss.svc.cluster.local:7950}"

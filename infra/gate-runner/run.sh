@@ -569,8 +569,15 @@ def panics(body):
 # is never evidence of a failure, so it is neither counted nor quoted
 # here; it is COUNTED SEPARATELY and named, because a reduction that
 # cannot say what it dropped is the defect this whole block is about.
+# Measured on gate c924dbe0's own excerpt (2026-09-19, 4077889a) the
+# block is SIX lines, not four: bun's four, a blank, then the dev
+# server's own `GET - http://127.0.0.1:5174/api/... failed` for the same
+# refused call - so that tail line is the block's too.
+RE_MOCK_PROXY_TAIL = re.compile(
+    r"^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) - https?://(127\.0\.0\.1|localhost)[:/]\S* failed$")
 RE_MOCK_PROXY = re.compile(
-    r"Unable to connect|^\s*path: |^\s*errno\b|code: \"?ConnectionRefused")
+    r"Unable to connect|^\s*path: |^\s*errno\b|code: \"?ConnectionRefused|"
+    + RE_MOCK_PROXY_TAIL.pattern)
 RE_MOCK_PROXY_HEAD = re.compile(r"Unable to connect")   # one per block: the count a reader sees
 
 # Playwright's own verdict lines, in the order a reader acts on them:
@@ -592,6 +599,26 @@ def mock_proxy_blocks(body):
     by their first line, which is the count the old `fails` line quoted
     as "264 error line(s)" and the one a reader can check against it."""
     return sum(1 for line in body if RE_MOCK_PROXY_HEAD.search(line))
+
+
+def without_mock_proxy(body):
+    """`body` with every line of bun's connect-refusal blocks removed -
+    the four bun prints, the blank between them and the dev server's
+    `GET - ... failed`, and nothing else: a blank line is dropped only
+    while inside a block, so Playwright's own spacing survives."""
+    out, inside = [], False
+    for line in body:
+        if RE_MOCK_PROXY_TAIL.search(line):
+            inside = False
+            continue
+        if RE_MOCK_PROXY.search(line):
+            inside = True
+            continue
+        if inside and not line.strip():
+            continue
+        inside = False
+        out.append(line)
+    return out
 
 
 def error_lines(body):
@@ -732,25 +759,45 @@ def excerpt(lines, budget):
     text = "\n".join(lines)
     if len(text) <= cap:
         return text
-    start = next((i for i, l in enumerate(lines) if marks_a_failure(l)), None)
-    if start is not None:
-        start = max(start - EXCERPT_CONTEXT, 0)
+    mark = next((i for i, l in enumerate(lines) if marks_a_failure(l)), None)
     budget_note = "this check's excerpt budget was %d char(s): %d per check, %d in all" % (
         cap, EXCERPT_CHARS, EXCERPT_TOTAL)
-    if start is None:
+    if mark is None:
         kept = text[-cap:]
         return "... (%d char(s) before this omitted - %s; the Job log replay has them)\n%s" % (
             len(text) - cap, budget_note, kept)
-    note = ""
-    if start:
-        note = "... (%d line(s) before the first failure marker omitted; the Job log replay " \
-               "has them)\n" % start
-    text = "\n".join(lines[start:])
+
+    def from_line(start):
+        note = ""
+        if start:
+            note = "... (%d line(s) before the first failure marker omitted; the Job log " \
+                   "replay has them)\n" % start
+        return note, "\n".join(lines[start:])
+
+    note, text = from_line(max(mark - EXCERPT_CONTEXT, 0))
+    if len(note) + len(text) <= cap:
+        return note + text
+    # TIGHT: the budget goes to the marker and the check's last words,
+    # and the context above the marker is the first thing to go
+    # (4077889a). For a web-suite red the marker is the per-spec `✘`
+    # deep in Playwright's list, the 40 lines above it are passing
+    # specs, and the `Error:`, the Expected/Received diff and the
+    # `N failed` roll-up are at the END - a head-only cut from 40 lines
+    # above held the chatter and lost the verdict. Cargo reads the same
+    # way: the panic block at the marker, the `failures:` roll-call last.
+    note, text = from_line(mark)
     if len(note) + len(text) <= cap:
         return note + text
     room = max(cap - len(note), 0)
-    return note + text[:room] + "\n... (+%d char(s) omitted - %s; the Job log replay has the " \
-           "full text)" % (len(text) - room, budget_note)
+    mid = "\n... (%%d char(s) omitted between the first failure marker and the check's last " \
+          "words - %s; the Job log replay has the full text)\n" % budget_note
+    share = room - len(mid % 0)
+    if share < 2 * EXCERPT_FLOOR:
+        return note + text[:room] + "\n... (+%d char(s) omitted - %s; the Job log replay " \
+               "has the full text)" % (len(text) - room, budget_note)
+    head = share // 2
+    tail = share - head
+    return note + text[:head] + mid % (len(text) - head - tail) + text[-tail:]
 
 
 def detail(name, got):
@@ -922,8 +969,24 @@ for name in failed:
         replay.append("  (the check produced no output at all)")
         excerpts[name] = "(the check produced no output at all)"
         continue
-    tail = body[-REPLAY_TAIL:]
-    replay.append("  last %d of %d line(s):" % (len(tail), total))
+    # THE NOISE IS DROPPED BEFORE THE WINDOW IS TAKEN (backlog 4077889a).
+    # `fails` ranks Playwright's verdicts over the proxy noise (3a6f61d6),
+    # but the window was still the last REPLAY_TAIL lines of the RAW body
+    # - ~1000 lines for a web-suite red, mostly bun's connect blocks - so
+    # the excerpt began on noise ~40 lines above the `Error:` marker and
+    # the per-spec `✘` line near the top of Playwright's list fell
+    # outside it. Filtering first makes the 300 lines 300 lines of
+    # signal; the count dropped is stated on the replay's header and the
+    # excerpt's first line, because a reduction that cannot say what it
+    # removed is the defect this whole block is about.
+    signal = without_mock_proxy(body)
+    noise_lines = len(body) - len(signal)
+    noise_note = "" if not noise_lines else \
+        " (%d line(s) of %d mock-proxy connect block(s) dropped before this window - " \
+        "bun's Unable-to-connect block, printed in every passing mocked run)" % (
+            noise_lines, mock_proxy_blocks(body))
+    tail = signal[-REPLAY_TAIL:]
+    replay.append("  last %d of %d line(s)%s:" % (len(tail), total, noise_note))
     replay += ["  " + line for line in tail]
     # The receipt's copy of the same lines, within what the total cap
     # has left. A check the total cannot fit still gets an entry that
@@ -934,7 +997,8 @@ for name in failed:
                          "in all and %d check(s) before this one used it; the Job log replay " \
                          "has it)" % (EXCERPT_TOTAL, len(excerpts))
     else:
-        excerpts[name] = excerpt(tail, left)
+        head = "..." + noise_note + "\n" if noise_note else ""
+        excerpts[name] = head + excerpt(tail, min(left, EXCERPT_CHARS) - len(head))
 write(entries, replay, excerpts)
 PY
 # --- failure detail (end) ---

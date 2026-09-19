@@ -11,7 +11,7 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 f="infra/cluster/manifests/boss.yaml"
 [ -f "$f" ] || { echo "sor-control-plane: $f is missing"; exit 1; }
 

@@ -52,9 +52,9 @@ set -uo pipefail
 NAME="no-personal-address-in-infra"
 LINT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=infra/lint/lib/scanned.sh
-. "$LINT_DIR/lib/scanned.sh"
+. "$LINT_DIR/lib/scanned.sh" || exit 3
 # shellcheck source=infra/lint/lib/git-answer.sh
-. "$LINT_DIR/lib/git-answer.sh"
+. "$LINT_DIR/lib/git-answer.sh" || exit 3
 cd "$LINT_DIR/../.." || exit 1
 
 COMPANY_DOMAIN="algedonic.dev"

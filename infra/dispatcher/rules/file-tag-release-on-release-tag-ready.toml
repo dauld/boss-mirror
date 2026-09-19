@@ -1,0 +1,56 @@
+# A release packet's `tag` step going ready files the forge's
+# tag-release request (backlog 89c95245, 2026-09-19).
+#
+# The tenant's cut-a-release protocol (design 3613f0af) has a `tag`
+# step whose two fields — the tag name and the sha the forge holds it
+# at — are COPIED onto it by complete-release-tag-on-tag-release-
+# answered from the tag-release verb's read-back (car 05d301be). What
+# that car left was the FILING: an ops-request host=forge
+# verb=tag-release args [vX.Y.Z, <sha>, <release packet id>] with
+# metadata.release = the same id, typed by the founder. Every word of
+# it is on the record already — the version on the packet, the sha as
+# the newest closed pr-train's merge_ref, the id on the step's own
+# packet — so the filing is the machine's (David, 2026-09-16: nothing
+# by hand unless absolutely required).
+#
+# WHY A HANDLER, NOT jobs.spawn. Measured: the step.ready.task payload
+# carries job_id, step_id, the step kind and the step's metadata (the
+# tenant's procedure text) — no workflow kind, no spec_slug — so no
+# `when` can name the release packet; the version is on the PACKET,
+# and the sha is a read of another packet altogether; and jobs.spawn
+# cannot carry an args list. ops.file_tag_release fetches the packet,
+# self-filters to the kind and slug named here (the way dns.observe
+# requires its packet kind on the same shared topic), reads the newest
+# merged train, and files the request. The sha it passes is the
+# record's twelve-char merge_ref: the verb resolves it in the
+# converged checkout and refuses one naming none or more than one
+# commit (same car), so a wrong pick is a refusal on the request,
+# visible on both packets, never a tag in the wrong place.
+#
+# Rides the shared `step.ready.task` subscription with no `when`: the
+# payload holds nothing that names the packet, and the handler's first
+# read is the one GET that does.
+[[rule]]
+name = "file-tag-release-on-release-tag-ready"
+why = """
+A CROSS-PROTOCOL REACTOR spanning cut-a-release -> ops-request -> a
+verb on the forge host, which no single Workflow consequence can
+express: the release protocol cannot name a host verb or read
+another packet's merge_ref, and the ops-request protocol cannot know
+which release asked. Measured 2026-09-18 (backlog 89c95245): with
+the tag-release verb and its completing rule landed, the one hand
+act left on a release was typing version, sha and packet id into an
+ops-request — a copy of three facts the record already holds. This
+rule files that request when the `tag` step becomes ready; the
+completing rule copies the forge's read-back onto the step. It adds
+no routing inside the protocol: the row still owns decided ->
+changelog -> approve -> tag -> mirror -> announce, and this only
+files the packet that runs one step. Redelivery-safe: an open
+tag-release request linked by `release` is found before a twin is
+filed.
+"""
+version = 1
+on_event = "step.ready.task"
+[[rule.do]]
+handler = "ops.file_tag_release"
+args = { workflow_kind = "\"cut-a-release\"", step = "\"tag\"" }

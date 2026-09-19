@@ -47,9 +47,18 @@
 // answers the question that actually matters — is the server on that
 // port serving THIS tree — and refuses to reuse anything else. Under CI
 // it refuses unconditionally. See src/dev-tree.ts.
+import { waitForReadyLine } from '../src/dev-ready';
 import { DEFAULT_PORT, chooseTarget } from '../src/dev-tree';
 
 const PREFERRED_PORT = Number(process.env['PORT'] ?? DEFAULT_PORT);
+
+// How long a server we started gets to SAY it is listening (the line
+// dev-server.ts prints once serve() returns — src/dev-ready.ts) before
+// the first `/` probe. Binding is milliseconds; the bound is for a
+// host so starved that even the import graph crawls, and a server that
+// dies or hangs before it fails loudly, naming the port, instead of
+// spending READY_DEADLINE_MS on probes of a port nothing serves.
+const LISTENING_TIMEOUT_MS = 60_000;
 
 // Overall budget to reach a served 200 on `/` (i.e. the SPA bundle has
 // compiled). Generous enough to survive concurrent-gate I/O pressure,
@@ -114,15 +123,26 @@ async function main(): Promise<never> {
 
   if (!target.reuse) {
     log(`starting dev-server on :${target.port} ...`);
-    devServer = Bun.spawn(['bun', 'src/dev-server.ts'], {
+    const started = Bun.spawn(['bun', 'src/dev-server.ts'], {
       // BOSS_SCRATCH=0: every /api call is mocked in-browser, so the
       // proxy target is irrelevant; 0 just avoids the scratch ports.
       env: { ...process.env, PORT: String(target.port), BOSS_SCRATCH: '0' },
-      stdout: 'inherit', // keep the "Bundled page in Xms" diagnostic line visible
+      // Piped, not inherited: the ready line is read off it below, and
+      // every line is echoed on so the "Bundled page in Xms" diagnostic
+      // stays visible.
+      stdout: 'pipe',
       stderr: 'inherit',
       stdin: 'ignore',
     });
+    devServer = started;
     weStartedIt = true;
+    // The server's own statement that it is listening comes first: a
+    // spec launched before it connects to nothing, and that is the 261
+    // `Unable to connect` lines that redded a gate and were green on
+    // the re-gate (backlog aa828f3e, class 63a242ca). The HTTP probe
+    // below still gates the BUNDLE; this gates the bind.
+    await waitForReadyLine(started.stdout, target.port, LISTENING_TIMEOUT_MS, (line) => console.log(line));
+    log(`server reports listening on :${target.port}`);
   }
 
   // Readiness is checked the same way either way — a reused server that
@@ -170,8 +190,12 @@ async function main(): Promise<never> {
   // fragile 30s-capped probe. PORT carries the chosen port through to the
   // config's baseURL — the suite must point at the server we vetted, not
   // at the default.
+  // Anything after the script (a spec path, -g, --repeat-each) goes to
+  // Playwright: until 2026-09-18 `bun tests/run-mocked.ts -- one.spec.ts`
+  // ran the WHOLE suite and said nothing about the argument it dropped.
+  const extra = process.argv.slice(2).filter((a, i) => !(i === 0 && a === '--'));
   const playwright = Bun.spawn(
-    ['bun', 'x', 'playwright', 'test', '-c', 'playwright.mocked.config.ts'],
+    ['bun', 'x', 'playwright', 'test', '-c', 'playwright.mocked.config.ts', ...extra],
     {
       env: {
         ...process.env,

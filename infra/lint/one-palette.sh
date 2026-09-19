@@ -50,7 +50,7 @@ cd "$(dirname "$0")/../.."
 # `clean` and exited 0 on a tree git had refused to read (measured
 # 2026-09-11, backlog 6b2f4a1a), and it would have had to be fixed twice
 # otherwise. `|| exit $?` carries the scan's refusal out.
-. "$(dirname "$0")/lib/pattern-scan.sh"
+. "$(dirname "$0")/lib/pattern-scan.sh" || exit 3
 hits=$(pattern_scan 'prefers-color-scheme' -- 'apps/' 'libs/') || exit $?
 if [ -n "$hits" ]; then
     echo "one-palette: a frontend surface branches on the viewer's OS theme:" >&2

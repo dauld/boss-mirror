@@ -346,6 +346,143 @@ fn a_live_reading_lint_that_cannot_reach_its_registry_exits_3_and_scans_nothing(
     }
 }
 
+/// `LINT_CANNOT_ANSWER`, read from its one definition in
+/// infra/lint/lib/git-answer.sh — never typed here (CLAUDE.md §9a).
+fn cannot_answer(root: &Path) -> String {
+    let text = std::fs::read_to_string(root.join("infra/lint/lib/git-answer.sh"))
+        .expect("infra/lint/lib/git-answer.sh");
+    text.lines()
+        .find_map(|l| l.strip_prefix("LINT_CANNOT_ANSWER="))
+        .expect("git-answer.sh defines LINT_CANNOT_ANSWER=<n>")
+        .trim()
+        .to_string()
+}
+
+/// Every line in a lint (or a lib) that sources a lint helper —
+/// `. <anything>lib/<name>.sh` — as (file, line number, text).
+fn helper_source_lines(root: &Path) -> Vec<(String, usize, String)> {
+    let mut found = Vec::new();
+    for dir in ["infra/lint", "infra/lint/lib"] {
+        let mut paths: Vec<_> = std::fs::read_dir(root.join(dir))
+            .unwrap_or_else(|e| panic!("read {dir}: {e}"))
+            .map(|e| e.expect("an entry").path())
+            .filter(|p| p.extension().is_some_and(|e| e == "sh"))
+            .collect();
+        paths.sort();
+        for path in paths {
+            let rel = path
+                .strip_prefix(root)
+                .expect("under the root")
+                .display()
+                .to_string();
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+            for (i, line) in text.lines().enumerate() {
+                let t = line.trim_start();
+                let Some(rest) = t.strip_prefix(". ") else {
+                    continue;
+                };
+                // The sourced path is the first word; a helper is one
+                // whose path ends in `.sh` and names it under a lib dir
+                // (`lib/scanned.sh`, `$LINT_DIR/lib/git-answer.sh`,
+                // `$(dirname "${BASH_SOURCE[0]}")/git-answer.sh` inside
+                // lib/ itself).
+                let word = rest.split("||").next().unwrap_or("").trim();
+                let is_helper = word.ends_with(".sh\"") || word.ends_with(".sh");
+                let names_lib = word.contains("lib/") || rel.starts_with("infra/lint/lib/");
+                if is_helper && names_lib {
+                    found.push((rel.clone(), i + 1, line.to_string()));
+                }
+            }
+        }
+    }
+    found
+}
+
+/// A LINT WHOSE HELPER FAILS TO SOURCE EXITS 3, NOT 0 (backlog c3364c85,
+/// 2026-09-18). Every lint sourced its helpers with a bare
+/// `. "$LINT_DIR/lib/x.sh"` under `set -uo pipefail` (no -e), so a
+/// failed source was one line on stderr and the lint kept running with
+/// the functions it needed missing: no_employee_id_literal_sh.rs built
+/// its synthetic tree without lib/scanned.sh, the lint under test ran
+/// with `lint_scanned` undefined — command-not-found, then `ok`, exit 0
+/// — and the pin passed for as long as it had existed. Under `set -e`
+/// the same failure is exit 1: a red on the BRANCH for a fault of the
+/// MACHINE. The idiom is `. <helper> || exit 3` — git-answer.sh's
+/// vocabulary, "the machine could not answer" — on every helper source
+/// line, in every lint and in every lib that sources a sibling. This
+/// pin reads them all back, so a new lint that forgets the idiom is
+/// named here.
+#[test]
+fn every_helper_source_in_a_lint_exits_cannot_answer_when_it_fails() {
+    let root = repo_root();
+    let n = cannot_answer(&root);
+    let lines = helper_source_lines(&root);
+    assert!(
+        lines.len() > 60,
+        "the scan found {} helper source lines under infra/lint — the idiom it reads has moved; fix the scan, not the tree",
+        lines.len()
+    );
+    let idiom = format!("|| exit {n}");
+    let bare: Vec<String> = lines
+        .iter()
+        .filter(|(_, _, line)| !line.trim_end().ends_with(&idiom))
+        .map(|(rel, no, line)| format!("  {rel}:{no}: {}", line.trim()))
+        .collect();
+    assert!(
+        bare.is_empty(),
+        "{} of {} helper source lines do not end with `{idiom}` — a helper that fails to source          must be a refusal (exit {n}, LINT_CANNOT_ANSWER), never a lint that runs on without          its functions:\n{}",
+        bare.len(),
+        lines.len(),
+        bare.join("\n")
+    );
+}
+
+/// The idiom, exercised: a lint copied into a tree that lacks one of
+/// its helpers exits 3 and prints neither `clean` nor a `scanned`
+/// count. One lint per source form — the cwd-relative
+/// `. infra/lint/lib/scanned.sh` and the `$LINT_DIR`-relative
+/// `. "$LINT_DIR/lib/git-answer.sh"` — each run with a full copy of
+/// infra/lint minus the one helper it needs.
+#[test]
+fn a_lint_whose_helper_is_missing_exits_cannot_answer_not_clean() {
+    let root = repo_root();
+    let n: i32 = cannot_answer(&root).parse().expect("a number");
+    for (lint, missing) in [
+        ("no-todo-citation", "scanned.sh"),
+        ("no-personal-address-in-infra", "git-answer.sh"),
+    ] {
+        let tree = boss_testing::scratch_dir(&format!("lint-without-{missing}"));
+        boss_testing::copy_lint_libs(&tree);
+        std::fs::remove_file(tree.join("infra/lint/lib").join(missing)).expect("remove the helper");
+        let rel = format!("infra/lint/{lint}.sh");
+        boss_testing::write_exec(
+            &tree.join(&rel),
+            &std::fs::read_to_string(root.join(&rel)).expect("read the lint"),
+        );
+        let out = Command::new("bash")
+            .arg(tree.join(&rel))
+            .current_dir(&tree)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap_or_else(|e| panic!("run {rel}: {e}"));
+        let code = out.status.code().unwrap_or(-1);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            code, n,
+            "{lint} without lib/{missing}: the machine could not answer — exit {n}, never 0 and              never 1 — got {code}:\n{stdout}\n{stderr}"
+        );
+        assert!(
+            stderr.contains(missing),
+            "{lint}: the refusal names the helper it could not read:\n{stderr}"
+        );
+        assert!(
+            !stdout.contains("clean") && scanned_count(&format!("{stdout}\n{stderr}")).is_none(),
+            "{lint}: a lint that never got its helpers must not read as a pass:\n{stdout}"
+        );
+    }
+}
+
 /// The helper itself: a positive count prints the line, a zero exits 1
 /// naming the lint, a non-number exits 1 — and none of the refusals
 /// reaches stdout, where a `scanned` line would be read as evidence.

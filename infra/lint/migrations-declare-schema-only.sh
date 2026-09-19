@@ -54,11 +54,11 @@ set -uo pipefail
 NAME="migrations-declare-schema-only"
 LINT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=infra/lint/lib/scanned.sh
-. "$LINT_DIR/lib/scanned.sh"
+. "$LINT_DIR/lib/scanned.sh" || exit 3
 cd "$LINT_DIR/../.." || exit 1
 
 # shellcheck source=/dev/null
-. "$LINT_DIR/lib/git-answer.sh"
+. "$LINT_DIR/lib/git-answer.sh" || exit 3
 
 SCHEMA_DIR="infra/postgres/schema"
 

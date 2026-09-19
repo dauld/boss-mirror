@@ -190,6 +190,51 @@ impl Case {
         (out.status.code().unwrap_or(-1), text)
     }
 
+    /// A seven-hex prefix that names MORE THAN ONE commit in the
+    /// checkout: `n` deterministic root commits (fixed committer and
+    /// time, message "noise i") fast-imported onto refs/heads/noise in
+    /// one process, then the first seven-char prefix two of them
+    /// share. Deterministic content makes the pair the same on every
+    /// run; the count makes one certain (the birthday bound at 28
+    /// bits: n²/2²⁹ expected pairs, seven at n = 50 000).
+    fn ambiguous_prefix(&self, n: usize) -> String {
+        use std::io::Write;
+        let mut stream = String::new();
+        for i in 0..n {
+            let msg = format!("noise {i}\n");
+            stream.push_str(&format!(
+                "commit refs/heads/noise\ncommitter noise <n@example.invalid> 1000000000 +0000\ndata {}\n{msg}\n",
+                msg.len()
+            ));
+        }
+        let mut child = Command::new("git")
+            .args(["fast-import", "--quiet"])
+            .current_dir(&self.tree)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("git fast-import runs");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(stream.as_bytes())
+            .expect("the stream is written");
+        let out = child.wait_with_output().expect("fast-import finishes");
+        assert!(
+            out.status.success(),
+            "fast-import: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let ids = git(&self.tree, &["rev-list", "refs/heads/noise"]);
+        let mut seen = std::collections::HashSet::new();
+        ids.lines()
+            .map(|id| id[..7].to_string())
+            .find(|p| !seen.insert(p.clone()))
+            .unwrap_or_else(|| panic!("no two of {n} commits share a seven-hex prefix"))
+    }
+
     fn forge_tags(&self) -> String {
         git(&self.forge, &["tag", "-l"])
     }
@@ -277,11 +322,18 @@ fn a_malformed_version_is_refused_before_anything_is_read() {
         );
         c.assert_untouched(&text);
     }
-    // A short sha and a short packet id are refused the same way — the
-    // allowlist refuses them first, and the script does not rely on it.
-    let (code, text) = c.run(&["v1.2.3", &c.b[..12], RELEASE]);
-    assert_eq!(code, 1, "{text}");
-    assert!(text.contains("REFUSED") && text.contains("sha"), "{text}");
+    // A sha shorter than the seven hex a prefix needs, a non-hex one
+    // and a short packet id are refused the same way — the allowlist
+    // refuses them first, and the script does not rely on it.
+    for bad in [&c.b[..6], "train/x@abc", "HEAD"] {
+        let (code, text) = c.run(&["v1.2.3", bad, RELEASE]);
+        assert_eq!(code, 1, "{bad}: {text}");
+        assert!(
+            text.contains("REFUSED") && text.contains("sha"),
+            "{bad}: {text}"
+        );
+        c.assert_untouched(&text);
+    }
     let (code, text) = c.run(&["v1.2.3", &c.b, "7d3a9c1e"]);
     assert_eq!(code, 1, "{text}");
     assert!(
@@ -370,6 +422,63 @@ fn a_sha_no_closed_train_merged_is_refused() {
     );
 }
 
+/// A MERGE_REF PREFIX IS RESOLVED IN THE CONVERGED CHECKOUT (backlog
+/// 89c95245). The system of record holds a closed train's merge_ref
+/// as the conductor's twelve chars, so a rule filing this request
+/// cannot hand the verb forty; the verb resolves the prefix with
+/// `git rev-parse --verify <prefix>^{commit}` in the converged
+/// checkout and every later bound — the train match, the ancestry,
+/// the tag, the read-back and the answer line — runs on the FULL id,
+/// which is what the rule's verdict_pattern then reads.
+#[test]
+fn a_merge_ref_prefix_resolves_to_the_landed_commit_and_is_tagged_in_full() {
+    let c = Case::new("prefix");
+    let (code, text) = c.run(&["v1.2.3", &c.b[..12], RELEASE]);
+    assert_eq!(code, 0, "{text}");
+    assert_eq!(c.forge_tags(), "v1.2.3");
+    assert_eq!(git(&c.forge, &["rev-parse", "v1.2.3^{commit}"]), c.b);
+    let last = text.lines().last().unwrap_or("");
+    assert_eq!(
+        last,
+        format!("tag-release: v1.2.3 at {} (packet {RELEASE})", c.b),
+        "the answer names the commit in full, never the prefix given"
+    );
+    assert_eq!(&rule_pattern().captures(last).unwrap()["sha"], c.b);
+    assert!(
+        text.contains(&format!("resolves to {}", c.b)),
+        "the resolution is said, so a reader sees what the prefix became:\n{text}"
+    );
+}
+
+/// A prefix that names NO commit, or MORE THAN ONE, is refused with
+/// nothing written. The ambiguity is real: fifty thousand
+/// deterministic commits fast-imported onto a throwaway ref (~2 s)
+/// hold seven pairs sharing a seven-hex prefix — measured, not
+/// assumed — and git answers `<prefix>^{commit}` on one of them with
+/// "is ambiguous".
+#[test]
+fn a_prefix_naming_no_commit_or_more_than_one_is_refused() {
+    let c = Case::new("ambiguous_prefix");
+    let (code, text) = c.run(&["v1.2.3", "abcdef0123", RELEASE]);
+    assert_eq!(code, 1, "{text}");
+    assert!(
+        text.contains("REFUSED") && text.contains("does not name one commit"),
+        "{text}"
+    );
+    c.assert_untouched(&text);
+
+    let ambiguous = c.ambiguous_prefix(50_000);
+    let (code, text) = c.run(&["v1.2.3", &ambiguous, RELEASE]);
+    assert_eq!(code, 1, "{text}");
+    assert!(
+        text.contains("REFUSED")
+            && text.contains("does not name one commit")
+            && text.contains("ambiguous"),
+        "the refusal carries git's own reason:\n{text}"
+    );
+    c.assert_untouched(&text);
+}
+
 #[test]
 fn the_verb_file_serves_the_forge_mutates_and_takes_three_bounded_params() {
     let v = verb_file();
@@ -404,9 +513,14 @@ fn the_verb_file_serves_the_forge_mutates_and_takes_three_bounded_params() {
                 .collect::<String>()
         )
     );
+    // A PREFIX of seven hex or more is admitted (backlog 89c95245: the
+    // record holds a closed train's merge_ref as twelve chars, and the
+    // rule that files this request copies it); anything shorter, or
+    // not hex, cannot name a commit.
+    assert!(sha.is_match("2683908") && sha.is_match("2683908abcde"));
     assert!(
-        !sha.is_match("2683908"),
-        "a short sha cannot name a release"
+        !sha.is_match("268390") && !sha.is_match("train/x@2683908") && !sha.is_match("HEAD"),
+        "fewer than seven hex, or a non-hex word, cannot name a release"
     );
     let release = pat(2, "release");
     assert!(release.is_match(RELEASE));

@@ -47,9 +47,9 @@ set -uo pipefail
 NAME="a-sh-script-parses-under-sh"
 LINT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=infra/lint/lib/scanned.sh
-. "$LINT_DIR/lib/scanned.sh"
+. "$LINT_DIR/lib/scanned.sh" || exit 3
 # shellcheck source=infra/lint/lib/git-answer.sh
-. "$LINT_DIR/lib/git-answer.sh"
+. "$LINT_DIR/lib/git-answer.sh" || exit 3
 cd "$LINT_DIR/../.." || exit 1
 
 SH="${LINT_SH:-dash}"

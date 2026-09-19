@@ -18,7 +18,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 
 INSTALL="infra/forge/install.sh"
 RUNBOOK="infra/forge/OPERATIONS.md"

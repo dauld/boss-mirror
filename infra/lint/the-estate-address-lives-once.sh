@@ -40,9 +40,9 @@ set -uo pipefail
 LINT=the-estate-address-lives-once
 LINT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=infra/lint/lib/git-answer.sh
-. "$LINT_DIR/lib/git-answer.sh"
+. "$LINT_DIR/lib/git-answer.sh" || exit 3
 # shellcheck source=infra/lint/lib/scanned.sh
-. "$LINT_DIR/lib/scanned.sh"
+. "$LINT_DIR/lib/scanned.sh" || exit 3
 
 # The tree to judge: the repository this lint lives in, or the one the
 # self-test names (a scratch repository holding a planted violation).

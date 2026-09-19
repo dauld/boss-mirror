@@ -43,7 +43,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NAME=the-image-carries-what-build-scripts-read
 cd "$here/../.."
 # shellcheck source=infra/lint/lib/scanned.sh
-. "$here/lib/scanned.sh"
+. "$here/lib/scanned.sh" || exit 3
 
 DOCKERFILE=infra/oss-quickstart/Dockerfile
 [ -f "$DOCKERFILE" ] || { echo "$NAME: $DOCKERFILE does not exist" >&2; exit 1; }

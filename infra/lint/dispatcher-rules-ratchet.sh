@@ -44,7 +44,7 @@
 set -euo pipefail
 
 # shellcheck source=infra/lint/lib/scanned.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib/scanned.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/lib/scanned.sh" || exit 3
 
 RULES_DIR="infra/dispatcher/rules"
 

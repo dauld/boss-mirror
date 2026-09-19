@@ -25,9 +25,9 @@
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/strip-comments.sh
-. "$here/lib/strip-comments.sh"
+. "$here/lib/strip-comments.sh" || exit 3
 # shellcheck source=infra/lint/lib/scanned.sh
-. "$here/lib/scanned.sh"
+. "$here/lib/scanned.sh" || exit 3
 export -f strip_comments
 # The product sources this lint reads, one path per line.
 sources() {

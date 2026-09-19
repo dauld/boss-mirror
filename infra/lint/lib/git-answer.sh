@@ -70,8 +70,25 @@
 #   record was rolling (backlog a26f92c4). gate.sh sources THIS file for
 #   the number, so the two cannot drift.
 #
+# SOURCING A HELPER IS THE FIRST QUESTION THE MACHINE MUST ANSWER
+# (backlog c3364c85, 2026-09-18). Every lint sourced its helpers with a
+# bare `. "$LINT_DIR/lib/x.sh"` under `set -uo pipefail` (no -e), so a
+# failed source was one line on stderr and the lint kept running with
+# the functions it needed missing: a pin built its synthetic tree
+# without lib/scanned.sh, the lint under test ran with `lint_scanned`
+# undefined — command-not-found, then `ok`, exit 0 — and the pin passed
+# for months. Under `set -e` the same failure is exit 1, a red on the
+# branch for a fault of the machine. So every helper source line reads
+#
+#   . "$LINT_DIR/lib/x.sh" || exit 3
+#
+# — the literal, because this constant is what the line is failing to
+# load. The pin every_helper_source_in_a_lint_exits_cannot_answer_when_
+# it_fails (a_lint_that_scanned_nothing_is_red.rs) reads the number
+# from the definition below and names any source line without it.
+#
 # USAGE
-#   . "$LINT_DIR/lib/git-answer.sh"
+#   . "$LINT_DIR/lib/git-answer.sh" || exit 3
 #   LINT=my-lint
 #   hits=$(git_answer "$LINT" 0,1 grep -nE "$pat" -- apps/) || exit $?
 #   #                          ^ the statuses that are ANSWERS; anything

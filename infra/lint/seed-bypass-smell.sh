@@ -41,9 +41,9 @@ set -euo pipefail
 LINT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$LINT_DIR/../.." && pwd)"
 # shellcheck source=infra/lint/lib/scanned.sh
-. "$LINT_DIR/lib/scanned.sh"
+. "$LINT_DIR/lib/scanned.sh" || exit 3
 # shellcheck source=infra/lint/lib/allowlist.sh
-. "$LINT_DIR/lib/allowlist.sh"
+. "$LINT_DIR/lib/allowlist.sh" || exit 3
 
 LINT=seed-bypass-smell
 

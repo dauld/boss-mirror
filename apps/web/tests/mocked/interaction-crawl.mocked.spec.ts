@@ -44,7 +44,7 @@
 //   CRAWL_ROUTES=/ux/inbox,/it   crawl only these routes
 //   CRAWL_VERBOSE=1              print every click's outcome
 
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Page, type Request } from '@playwright/test';
 import { DISPATCHER_RULES, OBJECT_ENDPOINTS, SHELL_ENDPOINTS, VIEW_RESULTS, installSmokeMocks } from './_smokeMocks';
 import { FAILURE_MARKER, LANDING_FALLBACK, ROUTES } from './_routes';
 import { parseRoute } from '../../src/router';
@@ -155,6 +155,15 @@ type Scope = 'page' | 'chrome' | 'dialog';
 /// on a starved renderer no longer reds a train.
 const CLICK_TIMEOUT_MS = 15_000;
 
+/// How long a click that navigates nowhere gets to answer before the
+/// page is read. It is the TIMEOUT of a wait for the click's
+/// navigation, never a sleep the navigation must fit inside (see the
+/// race in clickLeg), and it starts only once every request the click
+/// issued has been answered — that wait has its own bound, generous
+/// because a mock answers in-process and only a starved host is slow.
+const SETTLE_MS = 250;
+const ANSWER_TIMEOUT_MS = 10_000;
+
 /// Every visible, enabled button in scope, keyed so the same control
 /// rendered twice (a row action repeated per row) is clicked once:
 /// identical label + tag + stable classes is the same code path.
@@ -188,6 +197,20 @@ async function controls(page: Page, scope: Scope): Promise<ReadonlyArray<Control
 /// so "the click changed the page" is measurable without knowing what
 /// the page is.
 async function paint(page: Page): Promise<string> {
+  try {
+    return await paintNow(page);
+  } catch {
+    // A document navigation began after the click settled (clickLeg
+    // awaits the click's answers and races its navigation, so this is
+    // the late edge, not the rule): the read landed on a destroyed
+    // context. Read the document that replaced it, once, rather than
+    // red the crawl on the host's timing.
+    await page.waitForLoadState('domcontentloaded', { timeout: 10_000 }).catch(() => undefined);
+    return paintNow(page);
+  }
+}
+
+async function paintNow(page: Page): Promise<string> {
   return page.evaluate(() => {
     const values = [...document.querySelectorAll('input, select, textarea')]
       .map((f) => (f as HTMLInputElement).type === 'checkbox' || (f as HTMLInputElement).type === 'radio'
@@ -266,11 +289,25 @@ async function clickLeg(
   errors: string[],
 ): Promise<Finding[]> {
   const findings: Finding[] = [];
+  // The route's OPEN is judged before any of its controls: the one
+  // pageerror listener is on the page from before the first goto, so
+  // a throw while the route loads lands in `errors` — and until
+  // 2026-09-18 nothing read it there. The first click cleared it, and
+  // a route with no controls never read it at all, so the
+  // /it/registry/dispatcher crash the nightly playground crawl found
+  // (backlog ee86a789) was invisible here even with the reproducing
+  // fixture installed. A load-time throw is a finding of its own kind,
+  // named `page (load)`, reported once (on the main leg; the refused
+  // leg opens the same page again).
+  errors.length = 0;
   if (!(await open(page, route))) {
     findings.push({ route, control: `page (${leg} leg)`, what: 'shell never painted' });
     return findings;
   }
-  if (leg === 'main') tally.routes += 1;
+  if (leg === 'main') {
+    tally.routes += 1;
+    if (errors.length) findings.push({ route, control: 'page (load)', what: `pageerror: ${errors.join(' | ')}` });
+  }
 
   // (a) every in-app href is served.
   if (leg === 'main' && scope === 'page') {
@@ -295,14 +332,26 @@ async function clickLeg(
   page.on('dialog', onDialog);
   let requests: string[] = [];
   let writes: string[] = [];
-  const onRequest = (r: { method(): string; url(): string }): void => {
+  // Every API request the page has issued and not yet been answered
+  // on. A click is judged only once this is empty (bounded): what the
+  // page does with an answer — paint a refusal, navigate after a
+  // confirmed sign-out — cannot be read before the answer arrives.
+  const inFlight = new Set<Request>();
+  const onRequest = (r: Request): void => {
     const url = r.url();
-    if (!url.includes('/api/') || SILENT_WRITES.some((re) => re.test(url))) return;
+    if (!url.includes('/api/')) return;
+    inFlight.add(r);
+    if (SILENT_WRITES.some((re) => re.test(url))) return;
     const line = `${r.method()} ${new URL(url).pathname}`;
     requests.push(line);
     if (r.method() !== 'GET') writes.push(line);
   };
+  const onAnswered = (r: Request): void => {
+    inFlight.delete(r);
+  };
   page.on('request', onRequest);
+  page.on('requestfinished', onAnswered);
+  page.on('requestfailed', onAnswered);
 
   for (let guard = 0; guard < 120; guard++) {
     // While a dialog is open, its controls are the page; once they are
@@ -326,6 +375,7 @@ async function clickLeg(
     requests = [];
     writes = [];
     nativeDialog = null;
+    const urlBefore = page.url();
     const target = page.locator('button, [role="button"]').nth(next.index);
     try {
       // A non-<button> control falls through to dispatchEvent below when
@@ -345,7 +395,22 @@ async function clickLeg(
         continue;
       }
     }
-    await page.waitForTimeout(250);
+    // The click's answers and its navigation, if it caused one, are
+    // AWAITED — not given a fixed 250 ms to happen in. The chrome leg
+    // flaked once under parallel workers (2026-09-18) with
+    // `page.evaluate: Execution context was destroyed` in paint():
+    // Sign out's logout round-trip outlasted the wait, the URL still
+    // read as the route, and paint() ran into the document navigation
+    // that followed. So first every request the click issued is
+    // answered (bounded), then the settle is the TIMEOUT of a race
+    // against a URL change, and a change that wins is followed to a
+    // committed, parsed document before anything reads the page.
+    const answeredBy = Date.now() + ANSWER_TIMEOUT_MS;
+    while (inFlight.size && Date.now() < answeredBy) await page.waitForTimeout(25);
+    const navigated = await page
+      .waitForURL((u) => u.href !== urlBefore, { waitUntil: 'commit', timeout: SETTLE_MS })
+      .then(() => true, () => false);
+    if (navigated) await page.waitForLoadState('domcontentloaded', { timeout: 10_000 }).catch(() => undefined);
     if (writes.length) tally.writes += writes.length;
     if (errors.length) findings.push({ route, control: next.label, what: `pageerror: ${errors.join(' | ')}` });
 
@@ -395,6 +460,8 @@ async function clickLeg(
   }
   page.off('dialog', onDialog);
   page.off('request', onRequest);
+  page.off('requestfinished', onAnswered);
+  page.off('requestfailed', onAnswered);
   return findings;
 }
 
@@ -431,6 +498,12 @@ type Gap = Readonly<{ route: string; control: string; chrome?: true; why: string
 /// Where the chrome is crawled. Any route would do — the chrome is the
 /// same everywhere — and this is the one sign-in lands on.
 const CHROME_ROUTE = '/ux/me';
+
+/// The route the load-time-throw pin opens, and what it throws. Any
+/// crawled route would do — the pin is about the crawl, not the page —
+/// and this one carries few controls, so the pin is short.
+const LOAD_THROW_ROUTE = '/ux/manual';
+const LOAD_THROW_TEXT = 'crawl pin: thrown while the route loaded';
 
 const KNOWN_GAPS: ReadonlyArray<Gap> = [
 ];
@@ -508,6 +581,35 @@ test.describe('the interaction crawl — every link lands, every control answers
     const closed = KNOWN_GAPS.filter((g) => g.route === CHROME_ROUTE && !found.some((f) => f.control === g.control));
     expect(unexpected.map((f) => `[${f.route}] ${f.control}: ${f.what}`)).toEqual([]);
     expect(closed.map((g) => `[${g.route}] ${g.control}`), 'these KNOWN_GAPS entries produced no finding — delete their lines').toEqual([]);
+  });
+
+  test('a route that throws while it loads is a finding of its own, before any control is clicked', async ({ page }) => {
+    // The /it/registry/dispatcher crash the first nightly playground
+    // crawl found (2026-09-18, backlog ee86a789) threw while the page
+    // LOADED, and this crawl could not see it even with the reproducing
+    // fixture installed: it read pageerrors only after a click, and
+    // cleared them before each one. The reproducing shape is fixed on
+    // main, so this pin manufactures the class instead of the instance:
+    // the route's open throws, and the crawl must name it as the
+    // route's own finding — `page (load)` — not silence, and not a
+    // control's.
+    test.setTimeout(120_000);
+    const mode: Mode = { refuse: false, empty: false };
+    await installLegs(page, mode);
+    await page.addInitScript(([route, text]) => {
+      if (location.pathname === route) {
+        setTimeout(() => {
+          throw new Error(text);
+        }, 0);
+      }
+    }, [LOAD_THROW_ROUTE, LOAD_THROW_TEXT] as const);
+    const errors: string[] = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    const tally: Tally = { routes: 0, links: 0, clicks: 0, refusedClicks: 0, writes: 0 };
+    const found = await clickLeg(page, LOAD_THROW_ROUTE, 'main', 'page', tally, errors);
+    expect(found.map((f) => `[${f.route}] ${f.control}: ${f.what}`)).toContain(
+      `[${LOAD_THROW_ROUTE}] page (load): pageerror: ${LOAD_THROW_TEXT}`,
+    );
   });
 
   test('every crawled route is one the router serves', () => {

@@ -52,7 +52,7 @@ set -uo pipefail
 
 cd "$(dirname "$0")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 DIR="infra/postgres/schema"
 [ -d "$DIR" ] || { echo "migration-numbers-unique: $DIR not found" >&2; exit 1; }
 

@@ -59,7 +59,7 @@ set -uo pipefail
 
 cd "$(dirname "$0")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 
 INSTALLER="infra/gcp/install-units.sh"
 # The FORGE host's own installer, added 2026-08-17. This lint read

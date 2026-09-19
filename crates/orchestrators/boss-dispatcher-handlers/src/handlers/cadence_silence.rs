@@ -32,7 +32,12 @@
 //! 2. For each, read the newest packet of that identity from the system
 //!    of record.
 //! 3. Age past [`SILENCE_MULTIPLIER`]x the declared interval — or no
-//!    packet at all, ever — is a finding.
+//!    packet at all, ever — is a finding. With no packet ever the age is
+//!    measured from the kind's DECLARATION (its earliest workflow
+//!    version) plus one interval, the bound on its first slot — not
+//!    from the beginning of time (48690ed6: the playground crawl was
+//!    raised eighty minutes after landing, four hours before its first
+//!    slot). A kind inside that window is a `NotYetDue` READING.
 //! 4. For a cadence with a dedup guard, ask the guard's own question
 //!    before raising: a silence a still-open packet explains is reported
 //!    as SUPPRESSED and names that packet, and stays quiet entirely
@@ -399,6 +404,16 @@ impl Watched {
             None => format!("/api/jobs?kind={}&limit=1", self.kind),
         }
     }
+
+    /// The listing that answers "when was this kind declared?" — every
+    /// version of its workflow, read only when no packet has ever
+    /// arrived (see [`declared_at`]). A clock-rule cadence is identified
+    /// by subject as well, and its subject's rule row carries no landing
+    /// stamp, so the KIND's declaration stands in for it — the record
+    /// holds nothing finer.
+    fn declaration_path(&self) -> String {
+        format!("/api/workflows/{}/versions", self.kind)
+    }
 }
 
 /// THE roster: both sources, merged, label-sorted so a pass is
@@ -496,7 +511,38 @@ pub enum Verdict {
     /// No packet of this kind has EVER been filed — the ML batch's
     /// shape, and the loudest one, because there is not even a
     /// history to be stale.
-    NeverFiled { interval_min: i64 },
+    ///
+    /// `declared_at` is the instant the silence was measured FROM (see
+    /// [`Verdict::NotYetDue`]); `None` when the declaration could not
+    /// be read, in which case the sweep falls back to its older
+    /// judgement — silent from the beginning of time — and says so.
+    NeverFiled {
+        interval_min: i64,
+        declared_at: Option<String>,
+    },
+    /// No packet yet, and none is OWED yet: the kind was declared
+    /// recently enough that its silence window has not run out. A
+    /// reading, never a finding (backlog 48690ed6, measured 2026-09-19:
+    /// the playground crawl's CronJob landed at 23:18Z with a 04:45
+    /// slot and was raised at 00:40Z as "never arrived").
+    ///
+    /// Silence starts at the LATER of the declaration and the first
+    /// slot. The sweep cannot read the cron expression — it lives on
+    /// the CronJob manifest or the `.timer` unit, not on the record it
+    /// reads — but the declared interval bounds the first slot at
+    /// `declared_at + interval`, and measuring from that bound can only
+    /// ever be late, never a false alarm. So `first_slot_by` is that
+    /// bound, `silent_at` is [`silence_window_min`] past it, and
+    /// `first_slot_passed` tells the headline which of two true things
+    /// to say: "not yet due" before the bound, "inside its window"
+    /// after it.
+    NotYetDue {
+        interval_min: i64,
+        declared_at: String,
+        first_slot_by: String,
+        silent_at: String,
+        first_slot_passed: bool,
+    },
     /// Silent, and the cadence's OWN dedup guard is why: an open packet
     /// the guard asks about has been sitting there. Not a dead chore — a
     /// BLOCKED one, whose remedy is the named packet.
@@ -531,6 +577,8 @@ impl Verdict {
     pub fn is_finding(&self) -> bool {
         match self {
             Verdict::Fresh => false,
+            // Nothing owed yet is nothing missing (48690ed6).
+            Verdict::NotYetDue { .. } => false,
             // A suppression inside its window is the guard doing its job.
             Verdict::Suppressed { alarming, .. } => *alarming,
             _ => true,
@@ -633,9 +681,38 @@ pub fn silence_window_min(interval_min: i64) -> i64 {
     (SILENCE_MULTIPLIER * interval_min).max(MIN_SILENCE_WINDOW_MIN)
 }
 
+/// When a kind was DECLARED, as the record holds it: the `created_at`
+/// of its earliest workflow version (`GET /api/workflows/{kind}/versions`).
+///
+/// Why that row and not the cadence declaration itself: the interval
+/// is an arg on this sweep's rule row, and a rule row carries no
+/// landing time (`RawRule` has a version, not a stamp). The workflow
+/// row is written insert-if-missing by the platform seed on the
+/// converge that lands the kind — for the playground crawl, the same
+/// converge that applied its CronJob (#463) — so it is the one instant
+/// on the record that says "this kind exists as of here". The EARLIEST
+/// version, because a re-versioned kind was declared when v1 landed.
+/// A row whose stamp cannot be read is skipped; no readable row at all
+/// is `None`, and the caller falls back to the loud judgement.
+pub fn declared_at(versions: &[Value]) -> Option<DateTime<Utc>> {
+    versions
+        .iter()
+        .filter_map(|v| v.get("created_at").and_then(Value::as_str))
+        .filter_map(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.with_timezone(&Utc))
+        .min()
+}
+
 /// THE decision, pure: given one declaration, the newest packet's
-/// instant (if any) and `now`, is this cadence silent?
-pub fn verdict(declared: &Declared, newest: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Verdict {
+/// instant (if any), the instant the kind was declared (if readable —
+/// consulted only when there is no packet) and `now`, is this cadence
+/// silent?
+pub fn verdict(
+    declared: &Declared,
+    newest: Option<DateTime<Utc>>,
+    declared_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Verdict {
     let interval_min = match declared {
         Declared::Undetermined(reason) => {
             return Verdict::Undetermined {
@@ -645,7 +722,30 @@ pub fn verdict(declared: &Declared, newest: Option<DateTime<Utc>>, now: DateTime
         Declared::Minutes(m) => *m,
     };
     let Some(last) = newest else {
-        return Verdict::NeverFiled { interval_min };
+        // No packet ever. Silence starts at the first slot, bounded by
+        // one interval after the declaration (see `NotYetDue`), and the
+        // window past that is the same 2x the Silent arm uses.
+        let Some(declared_at) = declared_at else {
+            return Verdict::NeverFiled {
+                interval_min,
+                declared_at: None,
+            };
+        };
+        let first_slot_by = declared_at + chrono::Duration::minutes(interval_min);
+        let silent_at = first_slot_by + chrono::Duration::minutes(silence_window_min(interval_min));
+        if now > silent_at {
+            return Verdict::NeverFiled {
+                interval_min,
+                declared_at: Some(declared_at.to_rfc3339()),
+            };
+        }
+        return Verdict::NotYetDue {
+            interval_min,
+            declared_at: declared_at.to_rfc3339(),
+            first_slot_by: first_slot_by.to_rfc3339(),
+            silent_at: silent_at.to_rfc3339(),
+            first_slot_passed: now > first_slot_by,
+        };
     };
     let age_min = (now - last).num_minutes();
     if age_min > silence_window_min(interval_min) {
@@ -753,10 +853,40 @@ fn headline(label: &str, v: &Verdict) -> String {
             human_minutes(*age_min),
             human_minutes(*interval_min)
         ),
-        Verdict::NeverFiled { interval_min } => format!(
-            "{label} is declared every {} and NO packet of that kind has ever been filed",
-            human_minutes(*interval_min)
+        Verdict::NeverFiled {
+            interval_min,
+            declared_at,
+        } => format!(
+            "{label} is declared every {} and NO packet of that kind has ever been filed{}",
+            human_minutes(*interval_min),
+            match declared_at {
+                Some(d) => format!(" — declared {d}, silent from one interval after that"),
+                None => " — its declaration instant could not be read, so silence is \
+                          measured from the beginning of time"
+                    .to_string(),
+            }
         ),
+        Verdict::NotYetDue {
+            interval_min,
+            declared_at,
+            first_slot_by,
+            silent_at,
+            first_slot_passed,
+        } => {
+            if *first_slot_passed {
+                format!(
+                    "{label} is declared every {} and has no packet yet, inside its window — \
+                     declared {declared_at}, first slot by {first_slot_by}, silent at {silent_at}",
+                    human_minutes(*interval_min)
+                )
+            } else {
+                format!(
+                    "{label} is declared every {} and not yet due (first slot by \
+                     {first_slot_by}) — declared {declared_at}, silent at {silent_at}",
+                    human_minutes(*interval_min)
+                )
+            }
+        }
         Verdict::Suppressed {
             interval_min,
             age_min,
@@ -844,10 +974,29 @@ pub fn measurement(w: &Watched, v: &Verdict, now: DateTime<Utc>) -> Map<String, 
             m.insert("silent_for_minutes".into(), json!(age_min));
             m.insert("last_packet_at".into(), json!(last));
         }
-        Verdict::NeverFiled { interval_min } => {
+        Verdict::NeverFiled {
+            interval_min,
+            declared_at,
+        } => {
             m.insert("expected_interval_minutes".into(), json!(interval_min));
             m.insert("silent_for_minutes".into(), Value::Null);
             m.insert("last_packet_at".into(), Value::Null);
+            m.insert("declared_at".into(), json!(declared_at));
+        }
+        Verdict::NotYetDue {
+            interval_min,
+            declared_at,
+            first_slot_by,
+            silent_at,
+            first_slot_passed,
+        } => {
+            m.insert("expected_interval_minutes".into(), json!(interval_min));
+            m.insert("silent_for_minutes".into(), Value::Null);
+            m.insert("last_packet_at".into(), Value::Null);
+            m.insert("declared_at".into(), json!(declared_at));
+            m.insert("first_slot_by".into(), json!(first_slot_by));
+            m.insert("silent_at".into(), json!(silent_at));
+            m.insert("first_slot_passed".into(), json!(first_slot_passed));
         }
         Verdict::Suppressed {
             interval_min,
@@ -934,6 +1083,11 @@ fn alarm_title(label: &str, v: &Verdict) -> String {
         ),
         Verdict::NeverFiled { .. } => {
             format!("CADENCE SILENT: {label} — no packet has ever arrived")
+        }
+        // Never filed as a packet (`is_finding` is false); the title
+        // exists so a clear's evidence and a log line have one wording.
+        Verdict::NotYetDue { first_slot_by, .. } => {
+            format!("CADENCE NOT YET DUE: {label} — first slot by {first_slot_by}")
         }
         // A blocked cadence reads differently from a dead one on
         // purpose: the title carries the remedy's shape, because the
@@ -1027,7 +1181,7 @@ impl Handler for CadenceSilenceSweep {
             // An undetermined declaration needs no read: the finding is
             // that we cannot measure it.
             if let Declared::Undetermined(_) = &w.declared {
-                findings.push((w, verdict(&w.declared, None, now)));
+                findings.push((w, verdict(&w.declared, None, None, now)));
                 continue;
             }
             let listing = match get_json(
@@ -1051,7 +1205,35 @@ impl Handler for CadenceSilenceSweep {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            let mut v = verdict(&w.declared, newest_packet_at(&rows), now);
+            let newest = newest_packet_at(&rows);
+            // No packet ever gets ONE more read: when was the kind
+            // declared? Silence starts there, not at the beginning of
+            // time (48690ed6). A failed read still judges — loud, from
+            // the beginning of time, and says so — because losing the
+            // declaration is better than losing the alarm; the error
+            // NAKs the pass so the next one reads it again.
+            let declared_at = if newest.is_none() {
+                match get_json(
+                    &self.client,
+                    &format!("{}{}", self.base(), w.declaration_path()),
+                    &ctx.rule_name,
+                )
+                .await
+                {
+                    Ok(versions) => declared_at(versions.as_array().map_or(&[], Vec::as_slice)),
+                    Err(e) => {
+                        errors.push(format!(
+                            "declaration read for {} failed, so its silence is measured from \
+                             the beginning of time: {e}",
+                            w.label
+                        ));
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let mut v = verdict(&w.declared, newest, declared_at, now);
             // A silence with a guard gets ONE more question: is the
             // cadence blocked rather than dead? Asked only when there is
             // already a finding — a cadence arriving on time needs no
@@ -1093,6 +1275,17 @@ impl Handler for CadenceSilenceSweep {
                     "cadence.silence.sweep: suppressed by an open packet, inside the window"
                 );
             } else {
+                if let Verdict::NotYetDue { .. } = &v {
+                    // The sweep's READING of a kind that owes nothing
+                    // yet — logged so the journal shows it was looked
+                    // at, and cleared like a fresh kind so a premature
+                    // alarm (8f9df2b1's shape) closes itself.
+                    tracing::info!(
+                        cadence = %w.label,
+                        reading = %headline(&w.label, &v),
+                        "cadence.silence.sweep: no packet yet and none owed yet"
+                    );
+                }
                 clear.push((w, v));
             }
         }
@@ -1359,7 +1552,7 @@ mod tests {
                 "{kind} must be undetermined, got {d:?}"
             );
             assert!(
-                verdict(d, None, at("2026-09-08T12:00:00Z")).is_finding(),
+                verdict(d, None, None, at("2026-09-08T12:00:00Z")).is_finding(),
                 "{kind} must produce a finding"
             );
         }
@@ -1403,6 +1596,7 @@ mod tests {
         let v = verdict(
             &Declared::Minutes(5),
             newest_packet_at(&[packet("2026-09-04T09:15:00+00:00")]),
+            None,
             now,
         );
         match v {
@@ -1428,9 +1622,124 @@ mod tests {
     /// excuse to stay quiet.
     #[test]
     fn a_declared_kind_with_no_packet_at_all_is_a_finding() {
-        let v = verdict(&Declared::Minutes(1440), None, at("2026-09-08T12:00:00Z"));
-        assert_eq!(v, Verdict::NeverFiled { interval_min: 1440 });
+        let v = verdict(
+            &Declared::Minutes(1440),
+            None,
+            None,
+            at("2026-09-08T12:00:00Z"),
+        );
+        assert_eq!(
+            v,
+            Verdict::NeverFiled {
+                interval_min: 1440,
+                declared_at: None
+            }
+        );
         assert!(v.is_finding());
+    }
+
+    /// THE measured false alarm (backlog 48690ed6): the nightly
+    /// playground crawl's CronJob landed 2026-09-18 23:18Z (#463,
+    /// schedule 45 4 * * *) and at 00:40Z — eighty-two minutes later,
+    /// four hours before its first slot — the sweep raised "no packet
+    /// has ever arrived" (8f9df2b1). A kind declared minutes ago cannot
+    /// be silent yet: its silence starts at its first slot, which the
+    /// interval bounds at one interval after the declaration.
+    #[test]
+    fn a_kind_declared_minutes_ago_with_its_first_slot_hours_away_is_not_yet_due() {
+        let declared = at("2026-09-18T23:18:00Z");
+        let now = at("2026-09-19T00:40:00Z");
+        let v = verdict(&Declared::Minutes(1440), None, Some(declared), now);
+        match &v {
+            Verdict::NotYetDue {
+                interval_min,
+                declared_at,
+                first_slot_by,
+                silent_at,
+                first_slot_passed,
+            } => {
+                assert_eq!(*interval_min, 1440);
+                assert_eq!(declared_at, "2026-09-18T23:18:00+00:00");
+                assert_eq!(first_slot_by, "2026-09-19T23:18:00+00:00");
+                assert_eq!(
+                    silent_at, "2026-09-21T23:18:00+00:00",
+                    "silent only after 2x the interval past the first slot"
+                );
+                assert!(!first_slot_passed);
+            }
+            other => panic!("expected NotYetDue, got {other:?}"),
+        }
+        assert!(!v.is_finding(), "a reading, not an alarm");
+        assert!(!v.is_explained());
+        let line = headline("maintenance-playground-crawl", &v);
+        assert!(
+            line.contains("not yet due (first slot by 2026-09-19T23:18:00+00:00)"),
+            "{line}"
+        );
+    }
+
+    /// Past its first slot but inside its window the kind is DUE, not
+    /// silent — the same one-missed-firing-is-weather reading a packet
+    /// gets. Still a reading: nothing has arrived, so the headline must
+    /// not say "not yet due" either.
+    #[test]
+    fn a_kind_past_its_first_slot_but_inside_the_window_is_a_reading_not_a_finding() {
+        let declared = at("2026-09-18T23:18:00Z");
+        let now = at("2026-09-20T12:00:00Z");
+        let v = verdict(&Declared::Minutes(1440), None, Some(declared), now);
+        match &v {
+            Verdict::NotYetDue {
+                first_slot_passed, ..
+            } => assert!(first_slot_passed),
+            other => panic!("expected NotYetDue, got {other:?}"),
+        }
+        assert!(!v.is_finding());
+        let line = headline("maintenance-playground-crawl", &v);
+        assert!(!line.contains("not yet due"), "{line}");
+        assert!(line.contains("inside its window"), "{line}");
+    }
+
+    /// Two intervals past the first slot with no packet is the ML
+    /// batch's shape again — raised, and the alarm carries the
+    /// declaration instant it was measured from.
+    #[test]
+    fn a_kind_whose_first_slot_passed_two_intervals_ago_with_no_packet_is_raised() {
+        let declared = at("2026-09-18T23:18:00Z");
+        // first slot by 09-19 23:18; 2x1440 past that is 09-21 23:18.
+        let now = at("2026-09-21T23:19:00Z");
+        let v = verdict(&Declared::Minutes(1440), None, Some(declared), now);
+        assert_eq!(
+            v,
+            Verdict::NeverFiled {
+                interval_min: 1440,
+                declared_at: Some("2026-09-18T23:18:00+00:00".into()),
+            }
+        );
+        assert!(v.is_finding());
+        // One minute earlier it is still inside the window.
+        assert!(
+            !verdict(
+                &Declared::Minutes(1440),
+                None,
+                Some(declared),
+                at("2026-09-21T23:18:00Z")
+            )
+            .is_finding()
+        );
+    }
+
+    /// The declaration instant on the record is the kind's EARLIEST
+    /// workflow version — a re-versioned kind was declared when v1
+    /// landed, not when v3 did.
+    #[test]
+    fn the_declaration_instant_is_the_earliest_workflow_version() {
+        let versions = vec![
+            json!({"kind": "k", "version": 2, "created_at": "2026-09-18T23:18:00Z"}),
+            json!({"kind": "k", "version": 1, "created_at": "2026-09-10T08:00:00Z"}),
+            json!({"kind": "k", "version": 3}),
+        ];
+        assert_eq!(declared_at(&versions), Some(at("2026-09-10T08:00:00Z")));
+        assert_eq!(declared_at(&[]), None);
     }
 
     #[test]
@@ -1440,6 +1749,7 @@ mod tests {
         let v = verdict(
             &Declared::Minutes(1440),
             newest_packet_at(&[packet("2026-09-08T03:30:01+00:00")]),
+            None,
             now,
         );
         assert_eq!(v, Verdict::Fresh);
@@ -1454,6 +1764,7 @@ mod tests {
         let v = verdict(
             &Declared::Minutes(1440),
             Some(at("2026-09-06T13:00:00Z")), // 2820 minutes, under 2880
+            None,
             now,
         );
         assert_eq!(v, Verdict::Fresh);
@@ -1478,12 +1789,25 @@ mod tests {
         // Twenty minutes quiet — four missed firings of a five-minute
         // observer, and nothing worth waking anyone for.
         assert_eq!(
-            verdict(&Declared::Minutes(5), Some(at("2026-09-08T11:40:00Z")), now),
+            verdict(
+                &Declared::Minutes(5),
+                Some(at("2026-09-08T11:40:00Z")),
+                None,
+                now
+            ),
             Verdict::Fresh
         );
         // Seven hours quiet is past the floor, and the same observer's
         // real four-day silence is far past it.
-        assert!(verdict(&Declared::Minutes(5), Some(at("2026-09-08T05:00:00Z")), now).is_finding());
+        assert!(
+            verdict(
+                &Declared::Minutes(5),
+                Some(at("2026-09-08T05:00:00Z")),
+                None,
+                now
+            )
+            .is_finding()
+        );
     }
 
     // -- idempotence -----------------------------------------------------
@@ -1495,7 +1819,10 @@ mod tests {
     fn a_second_pass_finds_the_open_alarm_by_its_key() {
         let now = at("2026-09-09T12:00:00Z");
         let kind = "maintenance-ml-inference-batch";
-        let v = Verdict::NeverFiled { interval_min: 1440 };
+        let v = Verdict::NeverFiled {
+            interval_min: 1440,
+            declared_at: None,
+        };
         let raised = alarm_body(
             &watched(kind),
             &v,
@@ -1694,7 +2021,7 @@ mod tests {
             roster[0].declared
         );
         assert!(
-            verdict(&roster[0].declared, None, at("2026-09-10T12:00:00Z")).is_finding(),
+            verdict(&roster[0].declared, None, None, at("2026-09-10T12:00:00Z")).is_finding(),
             "a double declaration is reported, not silently resolved"
         );
     }
@@ -1712,6 +2039,7 @@ mod tests {
         let base = verdict(
             &Declared::Minutes(1440),
             newest_packet_at(&[blocking_packet()]),
+            None,
             now,
         );
         assert!(matches!(base, Verdict::Silent { .. }), "{base:?}");
@@ -1828,8 +2156,21 @@ mod tests {
             opened: at("2026-01-01T00:00:00Z"),
             guard: "g".into(),
         };
-        let v = explained_by(Verdict::NeverFiled { interval_min: 1440 }, &block, now);
-        assert_eq!(v, Verdict::NeverFiled { interval_min: 1440 });
+        let v = explained_by(
+            Verdict::NeverFiled {
+                interval_min: 1440,
+                declared_at: None,
+            },
+            &block,
+            now,
+        );
+        assert_eq!(
+            v,
+            Verdict::NeverFiled {
+                interval_min: 1440,
+                declared_at: None
+            }
+        );
         assert!(v.is_finding());
     }
 

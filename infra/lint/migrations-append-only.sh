@@ -55,7 +55,7 @@ set -uo pipefail
 LINT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$LINT_DIR/../.." || exit 1
 # shellcheck source=infra/lint/lib/trunk-ref.sh
-. "$LINT_DIR/lib/trunk-ref.sh"
+. "$LINT_DIR/lib/trunk-ref.sh" || exit 3
 
 LINT=migrations-append-only
 SCHEMA_DIR="infra/postgres/schema"

@@ -37,7 +37,7 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 
 MANIFESTS="infra/cluster/manifests"
 DECLARATION="infra/cluster/dns/access.toml"

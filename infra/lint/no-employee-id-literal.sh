@@ -71,13 +71,13 @@ set -uo pipefail
 NAME="no-employee-id-literal"
 LINT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=infra/lint/lib/scanned.sh
-. "$LINT_DIR/lib/scanned.sh"
+. "$LINT_DIR/lib/scanned.sh" || exit 3
 cd "$LINT_DIR/../.." || exit 1
 
 # shellcheck source=/dev/null
-. "$LINT_DIR/lib/git-answer.sh"
+. "$LINT_DIR/lib/git-answer.sh" || exit 3
 # shellcheck source=infra/lint/lib/test-file.sh
-. "$LINT_DIR/lib/test-file.sh"
+. "$LINT_DIR/lib/test-file.sh" || exit 3
 
 # The platform identities: the bootstrap identity boss-people declares,
 # plus every id the operator baseline hires — read from the file, so a

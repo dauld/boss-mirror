@@ -70,7 +70,7 @@ set -euo pipefail
 # The helper, the connection rule and the verdict are shared with the
 # brewery's sweep — one definition of run_invariant.
 # shellcheck source=infra/lint/lib/conservation.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib/conservation.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/lib/conservation.sh" || exit 3
 
 echo "Conservation-invariant sweep starting…"
 echo

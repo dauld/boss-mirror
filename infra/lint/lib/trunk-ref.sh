@@ -28,7 +28,7 @@
 # not answer at all.
 
 # shellcheck source=infra/lint/lib/git-answer.sh
-. "$(dirname "${BASH_SOURCE[0]}")/git-answer.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/git-answer.sh" || exit 3
 
 # The candidates, and the ONE list the message is also built from, so the
 # sentence a lint prints cannot drift from the walk it describes (the

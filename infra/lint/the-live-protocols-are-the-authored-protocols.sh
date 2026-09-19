@@ -184,9 +184,9 @@ set -uo pipefail
 
 cd "$(dirname "$0")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 # shellcheck source=infra/lint/lib/git-answer.sh
-. infra/lint/lib/git-answer.sh
+. infra/lint/lib/git-answer.sh || exit 3
 
 BUNDLE="infra/platform/workflows"
 TENANT_GLOB="examples/*/seeds/workflows.toml"

@@ -67,7 +67,7 @@ set -uo pipefail
 NAME="a-manifest-the-converge-ignores-is-refused"
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 
 DIR="infra/cluster/manifests"
 LIB="infra/forge/cluster-deploy-lib.sh"

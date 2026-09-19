@@ -61,7 +61,7 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 
 GRANDFATHERED='crates/core/boss-jobs/src/http/steps.rs: fn update_step
 crates/core/boss-jobs/src/http/jobs.rs: fn create_job'

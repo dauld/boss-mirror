@@ -44,16 +44,13 @@ struct Tree(PathBuf);
 impl Tree {
     fn new(tag: &str) -> Tree {
         let root = scratch::scratch_dir(&format!("no-personal-address-in-infra-{tag}"));
-        scratch::create_dir(&root.join("infra/lint/lib"));
-        for rel in [
-            LINT,
-            "infra/lint/lib/git-answer.sh",
-            "infra/lint/lib/scanned.sh",
-        ] {
-            let body = std::fs::read_to_string(repo_root().join(rel))
-                .unwrap_or_else(|e| panic!("read {rel}: {e}"));
-            scratch::write_exec(&root.join(rel), &body);
-        }
+        // The whole lib directory, from its one definition (c3364c85):
+        // a hand-typed helper list is how a sibling pin ran its lint
+        // for months with a function undefined.
+        boss_testing::copy_lint_libs(&root);
+        let body = std::fs::read_to_string(repo_root().join(LINT))
+            .unwrap_or_else(|e| panic!("read {LINT}: {e}"));
+        scratch::write_exec(&root.join(LINT), &body);
         git(&root, &["init", "-q", "-b", "main"]);
         git(&root, &["add", "."]);
         Tree(root)
@@ -105,6 +102,19 @@ fn text(out: &Output) -> String {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     )
+}
+
+/// How many helpers `copy_lint_libs` carries into a tree — the .sh files
+/// under infra/lint/lib/, counted from the directory, never typed.
+fn lint_lib_count() -> usize {
+    std::fs::read_dir(repo_root().join("infra/lint/lib"))
+        .expect("infra/lint/lib")
+        .filter(|e| {
+            e.as_ref()
+                .ok()
+                .is_some_and(|e| e.path().extension().is_some_and(|x| x == "sh"))
+        })
+        .count()
 }
 
 /// The pattern and the domain rule prove themselves on every invocation
@@ -163,11 +173,12 @@ fn company_and_reserved_addresses_are_clean_and_the_count_is_files_read() {
         text(&out)
     );
     let said = text(&out);
-    // Six fixtures, plus the lint and its two helpers — which live
-    // under infra/ themselves and are read like any other file.
+    // Six fixtures, plus the lint and every helper under lib/ — which
+    // live under infra/ themselves and are read like any other file.
+    let want = format!("scanned {} file(s)", 6 + 1 + lint_lib_count());
     assert!(
-        said.contains("scanned 9 file(s)"),
-        "the count is the nine files under infra/ read:\n{said}"
+        said.contains(&want),
+        "the count is every file under infra/ read ({want}):\n{said}"
     );
     assert!(said.contains("no personal address"), "{said}");
 }
@@ -236,23 +247,18 @@ fn files_outside_infra_and_untracked_files_are_not_read() {
         out.status.code(),
         text(&out)
     );
-    // One fixture under infra/, plus the lint and its two helpers.
-    assert!(text(&out).contains("scanned 4 file(s)"), "{}", text(&out));
+    // One fixture under infra/, plus the lint and every helper under lib/.
+    let want = format!("scanned {} file(s)", 1 + 1 + lint_lib_count());
+    assert!(text(&out).contains(&want), "{want}:\n{}", text(&out));
 }
 
 /// BEHAVIOUR 4 — a tree git cannot list is exit 3, never clean.
 #[test]
 fn a_tree_it_cannot_read_is_a_refusal_not_a_pass() {
     let root = scratch::scratch_dir("no-personal-address-in-infra-nogit");
-    scratch::create_dir(&root.join("infra/lint/lib"));
-    for rel in [
-        LINT,
-        "infra/lint/lib/git-answer.sh",
-        "infra/lint/lib/scanned.sh",
-    ] {
-        let body = std::fs::read_to_string(repo_root().join(rel)).unwrap();
-        scratch::write_exec(&root.join(rel), &body);
-    }
+    boss_testing::copy_lint_libs(&root);
+    let body = std::fs::read_to_string(repo_root().join(LINT)).unwrap();
+    scratch::write_exec(&root.join(LINT), &body);
     let out = Command::new("bash")
         .arg(root.join(LINT))
         .current_dir(&root)

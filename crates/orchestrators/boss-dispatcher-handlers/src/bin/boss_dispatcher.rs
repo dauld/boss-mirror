@@ -56,6 +56,7 @@ use boss_dispatcher_handlers::handlers::{
     messages_notify::MessagesNotify,
     messages_notify_job_terminal::MessagesNotifyJobTerminal,
     network_census::NetworkCensus,
+    ops_file_tag_release::OpsFileTagRelease,
     ops_judge::OpsJudge,
     packaging_allocate::PackagingAllocate,
     people_hire::PeopleHire,
@@ -386,6 +387,14 @@ async fn main() -> Result<()> {
             // (a1d3c762: publish-drift's --for-real by rule). Every noun
             // rides the rule row, so the next verb chain is a rule file.
             handlers.register(OpsJudge::new(cfg.jobs_api_url.clone()));
+            // A release packet's `tag` step going ready files the
+            // forge's tag-release request itself — v<version> off the
+            // packet, the newest closed train's merge_ref off the
+            // record, the packet id as the `release` edge the
+            // completing rule follows (89c95245: the last hand act on
+            // a release). Inert until a rule on step.ready.task names
+            // it with the packet kind and step slug.
+            handlers.register(OpsFileTagRelease::new(cfg.jobs_api_url.clone()));
             // A chore that closed red opens one backlog-item per RED
             // route on its recorded step (ac3270c7): on the close, parse
             // `RED <route> <kind>: <error>` lines off the step the rule

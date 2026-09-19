@@ -32,7 +32,7 @@ set -uo pipefail
 
 cd "$(dirname "$0")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 
 WORKFLOW=".forgejo/workflows/ci.yml"
 # The image required-tools.txt describes, matched by REPO not tag. The

@@ -42,7 +42,7 @@
 # which is what exit 1 means.
 #
 # USAGE
-#   . "$LINT_DIR/lib/scanned.sh"
+#   . "$LINT_DIR/lib/scanned.sh" || exit 3    # lib/git-answer.sh says why
 #   lint_scanned "$LINT" "$n" "Rust file(s)"    # prints, or exits 1
 #
 # Call it AFTER the lint's own verdict is decided and BEFORE the final

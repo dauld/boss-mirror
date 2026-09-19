@@ -53,9 +53,9 @@ set -uo pipefail
 LINT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$LINT_DIR/../.." || exit 1
 # shellcheck source=infra/lint/lib/trunk-ref.sh
-. "$LINT_DIR/lib/trunk-ref.sh"
+. "$LINT_DIR/lib/trunk-ref.sh" || exit 3
 # shellcheck source=infra/lint/lib/scanned.sh
-. "$LINT_DIR/lib/scanned.sh"
+. "$LINT_DIR/lib/scanned.sh" || exit 3
 
 LINT=steptype-bundle-ratchet
 BUNDLE="crates/core/boss-jobs/seeds/step_types.toml"

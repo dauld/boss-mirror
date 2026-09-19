@@ -42,7 +42,7 @@ set -uo pipefail
 NAME="a-migration-prefix-carries-seconds"
 LINT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=infra/lint/lib/scanned.sh
-. "$LINT_DIR/lib/scanned.sh"
+. "$LINT_DIR/lib/scanned.sh" || exit 3
 SCHEMA_REL="infra/postgres/schema"
 # The seconds migration's own minute: a twelve-digit stamp above this
 # was written after the convention it ignores.

@@ -39,7 +39,7 @@ set -uo pipefail
 
 cd "$(dirname "$0")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 SCHEMA="infra/postgres/schema"
 ROWS="infra/platform/step-plugins"
 BUNDLES="infra/step-plugins"

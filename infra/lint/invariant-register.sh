@@ -64,7 +64,7 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 
 REGISTER_DIR="docs/invariants"
 REQUIRED_KEYS="id claim source enforcement mechanism last_verified note"

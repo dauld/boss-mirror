@@ -25,6 +25,18 @@
 //! database, and the services container is where both the verb and
 //! the URL are. A publish run with no URL says so and leaves no row.
 //!
+//! THE ROW PROJECTS A FACT IN THE LOG (backlog dbdc4d31, 2026-09-19).
+//! Until this car the row was the only record: no audit_log event said
+//! "this database was published from <boss_commit> by <actor>, taking
+//! <registries>", and a publish that wrote N registry rows plus a
+//! stamp left nothing in the system of record for a rebuilder to see.
+//! Now every stamp stages ONE `tenant.published` event — payload = the
+//! stamp's columns, `_actor` = the actor it names — on the
+//! transactional outbox in the SAME transaction as the row, the door
+//! the ledger verbs use (`boss ledger lock` → record_ledger_event_in_tx
+//! → boss_events::outbox), and boss-event-relay lands it in audit_log
+//! post-commit. The row stays as the launcher's fast read.
+//!
 //! A PORT WITH TWO ADAPTERS, the crate's shape: [`PublishStamps`] is
 //! what the verb needs, [`InMemoryStamps`] proves the verb's decisions
 //! without a database, [`PgStamps`] is the one the binary runs and is
@@ -32,7 +44,15 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use boss_core::actor::ActorId;
+use boss_core::event::Event;
+use boss_core::publisher::EventStamp;
 use chrono::{DateTime, Utc};
+
+/// The one event kind a publish leaves: declared in event_kinds
+/// (20260919-a-tenant-publish-is-a-fact-in-the-log.sql), which the
+/// emitted-kinds-are-declared lint holds against this constant.
+pub const TENANT_PUBLISHED: &str = "tenant.published";
 
 /// One recorded publish — the row as `tenant_publishes` holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +84,31 @@ fn rfc3339(t: &DateTime<Utc>) -> String {
     t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
+/// PURE: the fact a stamp projects — `tenant.published` with the
+/// stamp's columns as its payload, signed as the actor the stamp
+/// names (one value, read from one place, so `published_by` and
+/// `_actor` cannot disagree). The event's own timestamp is minted
+/// wall-clock by the stamp builder, as every live record is;
+/// `published_at` rides in the payload as the column it is.
+pub fn published_event(stamp: &Stamp) -> Event {
+    // `ActorId: FromStr<Err = Infallible>`: every spelling parses.
+    let actor: ActorId = stamp
+        .published_by
+        .parse()
+        .unwrap_or_else(|never: std::convert::Infallible| match never {});
+    EventStamp::new("tenant", actor).event(
+        TENANT_PUBLISHED,
+        serde_json::json!({
+            "tenant_id": stamp.tenant_id,
+            "published_at": rfc3339(&stamp.published_at),
+            "published_by": stamp.published_by,
+            "boss_commit": stamp.boss_commit,
+            "took": stamp.took,
+            "writes": stamp.writes,
+        }),
+    )
+}
+
 impl Published {
     /// ONE line, the date first: tenant-launch.sh takes the first word
     /// as the stamp date for its own line, and an operator reads the
@@ -89,28 +134,41 @@ pub trait PublishStamps: Send + Sync {
     /// The first publish recorded in this database, with the count,
     /// or `None` for a database no publish has stamped.
     async fn published(&self) -> Result<Option<Published>>;
-    /// Append one stamp. Never updates, never deletes.
+    /// Append one stamp AND the [`published_event`] it projects, as
+    /// one atomic write. Never updates, never deletes.
     async fn record(&self, stamp: &Stamp) -> Result<()>;
 }
 
-/// In memory, for the verb's tests: the same port, no database.
+/// In memory, for the verb's tests: the same port, no database. Holds
+/// the rows and the events beside them, so a test reads what the
+/// adapter recorded on both sides.
 #[cfg(test)]
 #[derive(Default)]
-pub struct InMemoryStamps(std::sync::Mutex<Vec<Stamp>>);
+pub struct InMemoryStamps(std::sync::Mutex<Vec<(Stamp, Event)>>);
+
+#[cfg(test)]
+impl InMemoryStamps {
+    pub fn events(&self) -> Vec<Event> {
+        self.0
+            .lock()
+            .map(|rows| rows.iter().map(|(_, e)| e.clone()).collect())
+            .unwrap_or_default()
+    }
+}
 
 #[cfg(test)]
 #[async_trait]
 impl PublishStamps for InMemoryStamps {
     async fn published(&self) -> Result<Option<Published>> {
         let rows = self.0.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
-        Ok(summarise(rows.iter().cloned()))
+        Ok(summarise(rows.iter().map(|(s, _)| s.clone())))
     }
 
     async fn record(&self, stamp: &Stamp) -> Result<()> {
         self.0
             .lock()
             .map_err(|e| anyhow::anyhow!("{e}"))?
-            .push(stamp.clone());
+            .push((stamp.clone(), published_event(stamp)));
         Ok(())
     }
 }
@@ -185,6 +243,16 @@ impl PublishStamps for PgStamps {
     }
 
     async fn record(&self, stamp: &Stamp) -> Result<()> {
+        // The row and its fact commit or abort together: the event is
+        // staged on the outbox inside the row's transaction (backlog
+        // dbdc4d31), so a stamp never exists without the log entry a
+        // rebuilder would reproduce it from, nor the entry without
+        // the row.
+        let mut tx = self
+            .0
+            .begin()
+            .await
+            .context("opening the tenant publish stamp transaction")?;
         sqlx::query(
             "INSERT INTO tenant_publishes \
              (tenant_id, published_at, published_by, boss_commit, took, writes) \
@@ -196,9 +264,16 @@ impl PublishStamps for PgStamps {
         .bind(&stamp.boss_commit)
         .bind(&stamp.took)
         .bind(stamp.writes)
-        .execute(&self.0)
+        .execute(&mut *tx)
         .await
         .context("recording the tenant publish stamp in tenant_publishes")?;
+        boss_events::outbox::record_event_in_tx(&mut tx, &published_event(stamp))
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+            .context("staging tenant.published on the event outbox")?;
+        tx.commit()
+            .await
+            .context("committing the tenant publish stamp and its event")?;
         Ok(())
     }
 }
@@ -342,6 +417,38 @@ mod tests {
              by automation:tenant-seed (boss 478231fb); took employees,agents"
         );
         assert_eq!(s.published().await.unwrap().unwrap().count, 1);
+        // The row is a projection; the FACT is the event recorded
+        // with it (backlog dbdc4d31): one tenant.published carrying
+        // the stamp's columns.
+        let events = s.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, TENANT_PUBLISHED);
+        assert_eq!(events[0].payload, published_event(&st).payload);
+    }
+
+    /// The event a publish leaves in the log — the stamp's columns as
+    /// the payload, signed by the actor the stamp names, so the
+    /// tenant_publishes row can be rebuilt from it (backlog dbdc4d31).
+    #[test]
+    fn the_published_event_carries_the_stamps_columns() {
+        let st = stamp("acme", "2026-09-18T19:00:00", &["employees", "agents"]);
+        let e = published_event(&st);
+        assert_eq!(e.kind, TENANT_PUBLISHED);
+        assert_eq!(e.kind, "tenant.published");
+        assert_eq!(e.source, "tenant");
+        assert_eq!(e.payload["tenant_id"], "acme");
+        assert_eq!(e.payload["published_at"], "2026-09-18T19:00:00Z");
+        assert_eq!(e.payload["published_by"], "automation:tenant-seed");
+        assert_eq!(e.payload["boss_commit"], "478231fb");
+        assert_eq!(
+            e.payload["took"],
+            serde_json::json!(["employees", "agents"])
+        );
+        assert_eq!(e.payload["writes"], 12);
+        // Provenance: `_actor` is the same value as published_by, read
+        // from one place, never two arguments that can disagree.
+        assert_eq!(e.payload["_actor"], "automation:tenant-seed");
+        assert_eq!(e.payload.as_object().unwrap().len(), 7);
     }
 
     /// The adapter the binary runs, against the real table: the SQL's
@@ -389,5 +496,31 @@ mod tests {
                 ("acme".to_string(), vec!["agents".to_string()], 12),
             ]
         );
+
+        // Each row's fact is staged on the transactional outbox in
+        // the SAME transaction (backlog dbdc4d31): one tenant.published
+        // per stamp, payload = the columns, for the relay to land in
+        // audit_log.
+        let events: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
+            "SELECT source, kind, payload FROM event_outbox WHERE kind = $1 \
+             ORDER BY payload->>'published_at'",
+        )
+        .bind(TENANT_PUBLISHED)
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(events.len(), 2);
+        for (source, kind, payload) in &events {
+            assert_eq!(source, "tenant");
+            assert_eq!(kind, "tenant.published");
+            assert_eq!(payload["tenant_id"], "acme");
+            assert_eq!(payload["boss_commit"], "478231fb");
+            assert_eq!(payload["published_by"], "automation:tenant-seed");
+            assert_eq!(payload["_actor"], "automation:tenant-seed");
+            assert_eq!(payload["writes"], 12);
+        }
+        assert_eq!(events[0].2["published_at"], "2026-09-18T19:00:00Z");
+        assert_eq!(events[0].2["took"], serde_json::json!([]));
+        assert_eq!(events[1].2["took"], serde_json::json!(["agents"]));
     }
 }

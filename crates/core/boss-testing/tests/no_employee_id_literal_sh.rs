@@ -46,17 +46,13 @@ struct Tree(PathBuf);
 impl Tree {
     fn new(tag: &str) -> Tree {
         let root = scratch::scratch_dir(&format!("no-employee-id-literal-{tag}"));
-        scratch::create_dir(&root.join("infra/lint/lib"));
-        for rel in [
-            LINT,
-            "infra/lint/lib/git-answer.sh",
-            "infra/lint/lib/scanned.sh",
-            "infra/lint/lib/test-file.sh",
-        ] {
-            let body = std::fs::read_to_string(repo_root().join(rel))
-                .unwrap_or_else(|e| panic!("read {rel}: {e}"));
-            scratch::write_exec(&root.join(rel), &body);
-        }
+        // The whole lib directory, from its one definition — this pin
+        // once carried a hand-typed list missing lib/scanned.sh and ran
+        // the lint for months with lint_scanned undefined (c3364c85).
+        boss_testing::copy_lint_libs(&root);
+        let body = std::fs::read_to_string(repo_root().join(LINT))
+            .unwrap_or_else(|e| panic!("read {LINT}: {e}"));
+        scratch::write_exec(&root.join(LINT), &body);
         git(&root, &["init", "-q", "-b", "main"]);
         git(&root, &["add", "."]);
         Tree(root)

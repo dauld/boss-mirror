@@ -47,7 +47,7 @@ set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 # shellcheck source=infra/lint/lib/scanned.sh
-. "$here/lib/scanned.sh"
+. "$here/lib/scanned.sh" || exit 3
 observer="$repo/infra/estate/observe-units.sh"
 installer="$repo/infra/gcp/install-units.sh"
 unit="$repo/infra/estate/boss-estate-observe-units.service"

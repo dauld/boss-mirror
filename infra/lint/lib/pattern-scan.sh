@@ -45,9 +45,9 @@
 # under `set -e` rather than a silent green.
 
 # shellcheck source=infra/lint/lib/git-answer.sh
-. "$(dirname "${BASH_SOURCE[0]}")/git-answer.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/git-answer.sh" || exit 3
 # shellcheck source=infra/lint/lib/scanned.sh
-. "$(dirname "${BASH_SOURCE[0]}")/scanned.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/scanned.sh" || exit 3
 
 pattern_scan() {
     local pattern="$1"; shift

@@ -21,7 +21,7 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 
 HANDLERS=crates/orchestrators/boss-dispatcher-handlers/src/handlers
 # The assignment dispatcher lives in the core crate and carries its

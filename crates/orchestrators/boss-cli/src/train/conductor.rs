@@ -2866,10 +2866,12 @@ impl Conductor {
             }));
             return Ok(());
         }
-        log(format!(
-            "consist check: {} cheap lint(s) clean on the assembled tree",
-            verdict.ran()
-        ));
+        // "0 cheap lint(s) clean" was the line a could-not-list
+        // warning left here, and it read as green (699145ac). A
+        // consist that ran nothing is UNCHECKED — the line says so, and
+        // `consist_step_fields` puts the same words on the assemble
+        // step below so the yard cannot read it as clean either.
+        log(consist_departure_line(&verdict));
 
         sh(&["git", "-C", clone, "push", "fork", &train_branch])?;
         let train_ref_out = sh(&["git", "-C", clone, "rev-parse", "--short", "HEAD"])?;
@@ -3002,21 +3004,28 @@ impl Conductor {
             &[("boarded", Some(boarded_note))],
         )
         .await?;
+        // The consist verdict rides the assemble step — the step that
+        // names the assembled branch, which is what the check tested.
+        // Until 699145ac a green consist left nothing on the packet at
+        // all, so the yard could not tell a checked tree from one the
+        // conductor never managed to look at.
+        let mut assemble_fields: Vec<(&str, Option<String>)> = vec![
+            ("train_ref", Some(format!("{train_branch}@{train_ref}"))),
+            ("car_heads", (!heads_note.is_empty()).then_some(heads_note)),
+            (
+                "skipped",
+                Some(if skipped_names.is_empty() {
+                    "none".to_string()
+                } else {
+                    skipped_names.clone()
+                }),
+            ),
+        ];
+        assemble_fields.extend(consist_step_fields(&verdict));
         self.complete_step(
             &train,
             find_step(&train, "assemble", "Assemble the train branch"),
-            &[
-                ("train_ref", Some(format!("{train_branch}@{train_ref}"))),
-                ("car_heads", (!heads_note.is_empty()).then_some(heads_note)),
-                (
-                    "skipped",
-                    Some(if skipped_names.is_empty() {
-                        "none".to_string()
-                    } else {
-                        skipped_names.clone()
-                    }),
-                ),
-            ],
+            &assemble_fields,
         )
         .await?;
         self.complete_step(

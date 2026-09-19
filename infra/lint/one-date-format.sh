@@ -42,7 +42,7 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 
 hits=$(grep -rn --include='*.svelte' --include='*.ts' \
     -E '_at\.slice\(0, ?10\)' apps/ libs/ 2>/dev/null || true)

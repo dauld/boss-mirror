@@ -69,7 +69,7 @@ self_test || exit 1
 
 repo="$(cd "$here/../.." && pwd)"
 # shellcheck source=infra/lint/lib/scanned.sh
-. "$here/lib/scanned.sh"
+. "$here/lib/scanned.sh" || exit 3
 launcher="$repo/infra/oss-quickstart/services-launcher.sh"
 df="$repo/infra/oss-quickstart/Dockerfile"
 if [[ -z "$(sourced_files "$launcher")" ]]; then

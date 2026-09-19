@@ -37,7 +37,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
-. infra/lint/lib/scanned.sh
+. infra/lint/lib/scanned.sh || exit 3
 
 # The registry, from the one tree source (infra/estate/estate.toml,
 # backlog 5222163e) — never typed here.
