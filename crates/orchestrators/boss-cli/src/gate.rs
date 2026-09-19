@@ -4161,9 +4161,9 @@ mod tests {
         );
         // The rewrite it names is admitted.
         p.probe = Some(
-            "commit=$(git log -1 --format=%ct HEAD); last=$(boss-sor-read /api/audit | jq -r '.data[0].at // empty'); \
+            "since=$BOSS_CAR_CONVERGED_AT; last=$(boss-sor-read /api/audit | jq -r '.data[0].at // empty'); \
              [ -n \"$last\" ] || { echo 'not yet: no retire'; exit 75; }; \
-             [ \"$(date -u -d \"$last\" +%s)\" -gt \"$commit\" ] && echo retire:after-landing"
+             [ \"$(date -u -d \"$last\" +%s)\" -gt \"$since\" ] && echo retire:after-landing"
                 .into(),
         );
         p.require_complete().expect("epochs compare");
