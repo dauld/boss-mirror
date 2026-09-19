@@ -186,6 +186,8 @@ seed_sets() {
         --argjson excise_jurisdictions "$(toml_field "$SEEDS/excise_rates.toml" schedule jurisdiction | lines_to_json)" \
         --argjson subject_kinds "$(toml_field "$SEEDS/subject_kinds.toml" subject_kind kind | lines_to_json)" \
         --argjson workflows "$(toml_field "$SEEDS/workflows.toml" workflow kind | lines_to_json)" \
+        --argjson tax_kinds "$(toml_field "$SEEDS/tax.toml" tax_kind kind | lines_to_json)" \
+        --argjson sales_tax_states "$(toml_field "$SEEDS/tax.toml" sales_tax_rate state | lines_to_json)" \
         '{
             tenant_id: $tenant_id,
             employees: $employees, classes: $classes, accounts: $accounts,
@@ -196,7 +198,8 @@ seed_sets() {
             business_calendars: $business_calendars,
             excise_jurisdictions: $excise_jurisdictions,
             subject_kinds: $subject_kinds, workflows: $workflows,
-            not_keyed: ["subject_edges", "companies", "sales_tax_rate_by_state", "tax_kinds"]
+            tax_kinds: $tax_kinds, sales_tax_states: $sales_tax_states,
+            not_keyed: ["subject_edges", "companies"]
         }'
 }
 
@@ -244,8 +247,11 @@ TENANT_ID=$(printf '%s' "$SEED_JSON" | jq -r .tenant_id)
 #     policy_rules.role (04-policy.sql) · business_calendars.code and
 #     business_calendar_closed_days.calendar_code ·
 #     excise_rate_schedules.jurisdiction (153-…) · subject_kinds.kind ·
-#     workflows.kind (03-jobs.sql) · subjects.id, any kind, across the
-#     union of every id set above (01-registries.sql)
+#     workflows.kind (03-jobs.sql) · tax_kinds.kind and
+#     sales_tax_rate_by_state.state (40-ledger.sql; the tenant's regime
+#     from seeds/tax.toml since 7f163e58, keyed here since fc27a0ce) ·
+#     subjects.id, any kind, across the union of every id set above
+#     (01-registries.sql)
 
 sql_seed_ctes() { # the CTEs every seed-keyed query starts from
     cat <<SQL
@@ -269,6 +275,8 @@ cal AS (SELECT jsonb_array_elements_text(s->'business_calendars') AS code FROM s
 exc AS (SELECT jsonb_array_elements_text(s->'excise_jurisdictions') AS jurisdiction FROM seed),
 skind AS (SELECT jsonb_array_elements_text(s->'subject_kinds') AS kind FROM seed),
 wf AS (SELECT jsonb_array_elements_text(s->'workflows') AS kind FROM seed),
+tk AS (SELECT jsonb_array_elements_text(s->'tax_kinds') AS kind FROM seed),
+stx AS (SELECT jsonb_array_elements_text(s->'sales_tax_states') AS state FROM seed),
 subject_ids AS (
     SELECT id FROM emp UNION SELECT id FROM acc UNION SELECT id FROM ven UNION SELECT id FROM loc
     UNION SELECT sku FROM prod UNION SELECT part_sku FROM part UNION SELECT id FROM mkt
@@ -333,6 +341,8 @@ SELECT json_build_object(
     'excise_rate_schedules', (SELECT json_build_object('key', 'jurisdiction', 'seeded', (SELECT count(*) FROM exc), 'present', count(*), 'unmatched', (SELECT count(*) FROM excise_rate_schedules) - count(*), 'sample', coalesce((array_agg(jurisdiction || '@' || effective_from::text ORDER BY jurisdiction, effective_from))[1:20], '{}')) FROM excise_rate_schedules WHERE jurisdiction IN (SELECT jurisdiction FROM exc)),
     'subject_kinds', (SELECT json_build_object('key', 'kind', 'seeded', (SELECT count(*) FROM skind), 'present', count(*), 'unmatched', (SELECT count(*) FROM subject_kinds) - count(*), 'sample', coalesce((array_agg(kind ORDER BY kind))[1:20], '{}')) FROM subject_kinds WHERE kind IN (SELECT kind FROM skind)),
     'workflows', (SELECT json_build_object('key', 'kind', 'seeded', (SELECT count(*) FROM wf), 'present', count(*), 'unmatched', (SELECT count(*) FROM workflows) - count(*), 'sample', coalesce((array_agg(kind || '@v' || version::text ORDER BY kind, version))[1:20], '{}')) FROM workflows WHERE kind IN (SELECT kind FROM wf)),
+    'tax_kinds', (SELECT json_build_object('key', 'kind', 'seeded', (SELECT count(*) FROM tk), 'present', count(*), 'unmatched', (SELECT count(*) FROM tax_kinds) - count(*), 'sample', coalesce((array_agg(kind ORDER BY kind))[1:20], '{}')) FROM tax_kinds WHERE kind IN (SELECT kind FROM tk)),
+    'sales_tax_rate_by_state', (SELECT json_build_object('key', 'state', 'seeded', (SELECT count(*) FROM stx), 'present', count(*), 'unmatched', (SELECT count(*) FROM sales_tax_rate_by_state) - count(*), 'sample', coalesce((array_agg(state ORDER BY state))[1:20], '{}')) FROM sales_tax_rate_by_state WHERE state IN (SELECT state FROM stx)),
     'subjects', (SELECT json_build_object('key', 'id (any kind, across every seed id set)', 'present', count(*), 'unmatched', (SELECT count(*) FROM subjects) - count(*), 'sample', coalesce((array_agg(kind || ':' || id ORDER BY kind, id))[1:20], '{}')) FROM subjects WHERE id IN (SELECT id FROM subject_ids)),
     'not_keyed', (SELECT s->'not_keyed' FROM seed)
 )

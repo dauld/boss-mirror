@@ -152,14 +152,31 @@ async fn the_census_queries_run_read_only_against_the_real_schema() {
         serde_json::json!(["morning-brew@v1"])
     );
     assert_eq!(doc["seed_owned"]["classes"]["key"], "(subject_kind, code)");
+    // The tenant's tax regime is keyed from seeds/tax.toml (backlog
+    // fc27a0ce): kinds by `kind`, rates by `state`. The migration still
+    // carries the demo's rows into a fresh schema, so every one of them
+    // is present and owned here.
+    let kinds = &doc["seed_owned"]["tax_kinds"];
+    assert_eq!(kinds["key"], "kind");
+    assert_eq!(kinds["seeded"], 5);
+    assert_eq!(kinds["present"], 5);
+    assert_eq!(kinds["unmatched"], 0);
+    let rates = &doc["seed_owned"]["sales_tax_rate_by_state"];
+    assert_eq!(rates["key"], "state");
+    assert_eq!(rates["seeded"], 27);
+    assert_eq!(rates["present"], 27);
+    assert_eq!(rates["unmatched"], 0);
+    assert!(
+        rates["sample"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("CA")),
+        "{}",
+        rates["sample"]
+    );
     assert_eq!(
         doc["seed_owned"]["not_keyed"],
-        serde_json::json!([
-            "subject_edges",
-            "companies",
-            "sales_tax_rate_by_state",
-            "tax_kinds"
-        ])
+        serde_json::json!(["subject_edges", "companies"])
     );
 
     // (c) partitions: jobs by its own column, steps through job_id, the

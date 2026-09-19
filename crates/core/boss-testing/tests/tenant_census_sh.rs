@@ -293,6 +293,20 @@ fn the_seed_keys_are_read_from_the_checkout_not_typed() {
         headers("subject_kinds.toml", "subject_kind")
     );
     assert_eq!(len("workflows"), headers("workflows.toml", "workflow"));
+    // The tax regime, keyed from tax.toml the way the chart's neighbours
+    // are (backlog fc27a0ce): one kind per [[tax_kind]], one state per
+    // [[sales_tax_rate]].
+    assert_eq!(len("tax_kinds"), headers("tax.toml", "tax_kind"));
+    assert_eq!(
+        len("sales_tax_states"),
+        headers("tax.toml", "sales_tax_rate")
+    );
+    assert!(
+        seeds["sales_tax_states"]
+            .as_array()
+            .unwrap()
+            .contains(&"CA".into())
+    );
     // accounts.toml is arrays, not tables: the `names = [ ... ]` block.
     let accounts = std::fs::read_to_string(seeds_dir.join("accounts.toml")).unwrap();
     let names_block = accounts

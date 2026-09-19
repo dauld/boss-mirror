@@ -2969,9 +2969,14 @@ pub(crate) fn verdict_line(verdict: &str, packet: &str, body: &Value) -> String 
 /// scoped runs where a check failed without naming a test.
 /// `refused_because` covers a REFUSAL, which fails no check at all and
 /// is not a statement about the branch (§Diagnosis: "an infrastructure
-/// refusal is not a consist failure"). `None` when there is no readable
-/// receipt — a runner that died before writing one leaves the bare
-/// verdict line, and inventing a cause would be worse than silence.
+/// refusal is not a consist failure"). A refusal LEADS with it: since
+/// 2026-09-18 a lint that cannot read the registry refuses the gate and
+/// its receipt records that check as `refused`, which the checks rung
+/// dressed as `<lint>: failed (this receipt names no test)` — a red's
+/// shape on a verdict that judged nothing (backlog c7bea0e2). `None`
+/// when there is no readable receipt — a runner that died before
+/// writing one leaves the bare verdict line, and inventing a cause
+/// would be worse than silence.
 ///
 /// BOUNDED, WITH THE REMAINDER COUNTED. A console line is not a receipt,
 /// so at most [`DETAIL_LINES`] entries are printed and what is left is
@@ -2988,6 +2993,16 @@ fn red_verdict_detail(body: &Value) -> Option<String> {
         .pointer("/metadata/receipt")?
         .as_str()?;
     let receipt: Value = serde_json::from_str(raw).ok()?;
+
+    let refused_because = receipt
+        .get("refused_because")
+        .and_then(Value::as_str)
+        .map(|why| format!("the gate refused before any check ran: {why}"));
+    if receipt.get("verdict").and_then(Value::as_str) == Some("refused")
+        && let Some(why) = refused_because
+    {
+        return Some(format!("  {why}"));
+    }
 
     let fails: Vec<String> = receipt
         .get("fails")
@@ -3015,11 +3030,7 @@ fn red_verdict_detail(body: &Value) -> Option<String> {
         fails
     };
     if lines.is_empty() {
-        lines = receipt
-            .get("refused_because")
-            .and_then(Value::as_str)
-            .map(|why| vec![format!("the gate refused before any check ran: {why}")])
-            .unwrap_or_default();
+        lines = refused_because.into_iter().collect();
     }
     if lines.is_empty() {
         return None;
@@ -6109,6 +6120,40 @@ kind: Job\n\
             }))
             .is_none(),
             "nothing to read must stay silent rather than invent a cause"
+        );
+    }
+
+    /// A REFUSAL LEADS WITH ITS REASON. Since 2026-09-18 a pre-flight
+    /// lint that cannot read the registry refuses the gate (backlog
+    /// a26f92c4) and its receipt carries that check as `refused` beside
+    /// the passes. Read through the ladder bottom-up that showed as
+    /// `<lint>: failed (this receipt names no test)` — a red's shape on
+    /// a verdict that judged nothing (backlog c7bea0e2). When the
+    /// verdict is `refused`, `refused_because` is the first line and no
+    /// refused check is dressed as a failure.
+    #[test]
+    fn a_refused_verdict_leads_with_why_it_refused() {
+        let body = json!({
+            "steps": [{
+                "spec_slug": "record-verdict",
+                "metadata": {"verdict": "refused", "receipt":
+                    "{\"verdict\":\"refused\",\
+                      \"refused_because\":\"pre-flight lint the-live-protocols-are-the-authored-protocols \
+                      could not answer (exit 3): http://[::1]:9/api/workflows answered HTTP 000\",\
+                      \"checks\":[{\"name\":\"fmt\",\"result\":\"pass\"},\
+                      {\"name\":\"the-live-protocols-are-the-authored-protocols\",\"result\":\"refused\"}],\
+                      \"fails\":[]}"}
+            }]
+        });
+        let detail = red_verdict_detail(&body).expect("a refusal says why");
+        let first = detail.lines().next().unwrap_or_default();
+        assert!(
+            first.contains("refused") && first.contains("answered HTTP 000"),
+            "the first line is refused_because, the one fact a reader acts on: {detail}"
+        );
+        assert!(
+            !detail.contains("failed (this receipt names no test)"),
+            "a refused check is not a failure that forgot its test name: {detail}"
         );
     }
 

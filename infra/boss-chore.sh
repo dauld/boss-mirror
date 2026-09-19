@@ -37,8 +37,9 @@
 #      the pod log keeps the whole, the packet gets an excerpt).
 #   3. records the verdict through boss-step.sh: `result=ok` or
 #      `result=failed`, `exit_status=<rc>` (the key the systemd leg uses,
-#      so both legs read alike), and `output=` — the check's own words,
-#      head and tail of the capture with the omitted count named.
+#      so both legs read alike), and `output=` — the check's own words:
+#      every verdict-shaped line wherever it sits, head and tail of the
+#      rest with the omitted count named.
 #      BEST-EFFORT too: a lost HTTP call must not report a good run as
 #      failed, nor spend backoffLimit re-running a whole check for it.
 #   4. exits with the CHECK's status, so the Kubernetes Job shows Failed
@@ -80,6 +81,32 @@ STEP="$here/boss-step.sh";             [ -x "$STEP" ] || STEP=boss-step.sh
 HEAD_LINES=20
 TAIL_LINES=40
 LINE_CHARS=1000
+# THE VERDICT LINES ARE NOT THE REST (backlog 11395970). The nightly
+# playground crawl prints one `RED <route> <kind>: <error>` per red
+# surface (apps/web/tests/live/playground-crawl.spec.ts) and the rule
+# file-backlog-items-on-playground-crawl-red files one item per RED
+# route it reads off the run step - so a night with more than ~38 reds
+# lost RED lines to the window BEFORE the record was stored, and the
+# judge filed only what survived (found by the builder of ac3270c7,
+# 2026-09-18). A line a reader or a rule acts on survives the window
+# wherever it sits: the crawl's RED lines, its `crawled N routes`
+# roll-up and its console.error lines (explained ones too - the reader
+# scans them apart), the sweep verbs' `verdict: ` line
+# (infra/cluster/conformance-report.sh, read by sweep_judge_report),
+# and GREEN for the same reason as RED. The head/tail reduction
+# applies to the rest, and its marker counts only the rest.
+#
+# The bound on verdict lines is the transport's, measured: the record
+# rides as ONE argv string three times (this script's `output=` pair,
+# boss-step.sh's `jq --arg`, curl's `-d`), and Linux caps one argv
+# string at 128 KiB; the jobs API itself sets no body limit (axum's
+# default is 2 MiB). The rest is at most 60 lines of LINE_CHARS, so
+# 48 KB of verdict lines - ~200 RED lines of the crawl's usual length,
+# against a 56-route roster - keeps the whole record under the cap
+# with JSON escaping's overhead to spare. Past it, verdict lines are
+# DROPPED and the drop is stated with its count, never silent.
+VERDICT_RE='^(RED |GREEN |verdict: |crawled [0-9]+ routes |[[:space:]]*(expected )?console[.]error [[])'
+VERDICT_CHARS=48000
 
 # 1. The packet — best-effort, loud.
 rc=0
@@ -96,18 +123,33 @@ set +e
 check_rc=${PIPESTATUS[0]}
 set -e
 
-# 3. The verdict — best-effort, loud; the excerpt is the check's own words.
-total=$(wc -l < "$capture")
-if [ "$total" -le $((HEAD_LINES + TAIL_LINES)) ]; then
-    excerpt=$(cut -c1-"$LINE_CHARS" -- "$capture")
-else
-    omitted=$((total - HEAD_LINES - TAIL_LINES))
-    excerpt=$(
-        head -n "$HEAD_LINES" -- "$capture" | cut -c1-"$LINE_CHARS"
-        echo "[... $omitted lines omitted — the pod log has the whole output ...]"
-        tail -n "$TAIL_LINES" -- "$capture" | cut -c1-"$LINE_CHARS"
-    )
-fi
+# 3. The verdict — best-effort, loud; the excerpt is the check's own words,
+#    in the capture's own order. Two passes over the file: the first
+#    counts the non-verdict lines so the second knows where its tail
+#    begins; the marker is printed in place of the first line it drops.
+#    Plain POSIX awk: the boss image is bookworm-slim, whose awk is mawk.
+excerpt=$(awk -v re="$VERDICT_RE" -v head="$HEAD_LINES" -v tail="$TAIL_LINES" \
+              -v chars="$LINE_CHARS" -v vchars="$VERDICT_CHARS" '
+    FNR == NR { if ($0 !~ re) rest++; next }
+    $0 ~ re {
+        line = substr($0, 1, chars)
+        if (vkept + length(line) + 1 > vchars) { vdropped++; next }
+        vkept += length(line) + 1
+        print line
+        next
+    }
+    {
+        i++
+        if (rest <= head + tail || i <= head || i > rest - tail) { print substr($0, 1, chars); next }
+        if (!marked) {
+            marked = 1
+            printf "[... %d non-verdict lines omitted — every RED, GREEN, verdict: and console.error line is kept; the pod log has the whole output ...]\n", rest - head - tail
+        }
+    }
+    END {
+        if (vdropped) printf "[... %d verdict line(s) DROPPED past %d chars of them — the record rides one argv and Linux caps that at 128 KiB; the pod log has the whole output ...]\n", vdropped, vchars
+    }
+' "$capture" "$capture")
 # $(...) strips the trailing newline; put one back so the excerpt reads
 # as the lines it is.
 [ -z "$excerpt" ] || excerpt="$excerpt"$'\n'

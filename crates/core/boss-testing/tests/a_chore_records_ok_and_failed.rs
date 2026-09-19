@@ -373,13 +373,110 @@ fn a_long_output_rides_as_head_and_tail_with_the_omission_named() {
         "the middle is not carried — a step's metadata is a record, not a log:\n{output}"
     );
     assert!(
-        output.contains("140 lines omitted"),
+        output.contains("140 non-verdict lines omitted"),
         "and the excerpt says how much it left out, so nobody mistakes it for the whole:\n{output}"
     );
     assert!(
         r.stdout.contains("\nline 100\n"),
         "the WHOLE output still went to the container log — capture whole, excerpt the record:\n{}",
         r.stdout.len()
+    );
+}
+
+/// THE WINDOW ATE THE VERDICT (backlog 11395970, left by the builder of
+/// ac3270c7). The nightly playground crawl prints one
+/// `RED <route> <kind>: <error>` line per red surface, and the rule
+/// file-backlog-items-on-playground-crawl-red files one item per RED
+/// route it reads off the run step. The step held head-20 + tail-40 of
+/// the capture, so a night with more than ~38 reds lost RED lines to
+/// the marker BEFORE the record was stored - the reduction CLAUDE.md
+/// §Diagnosis names, paid by the judge that reads the record. So a
+/// verdict-shaped line (`RED `, `GREEN `, `verdict: `, the crawl's own
+/// roll-up and its console.error lines) survives the window wherever
+/// it sits, the head/tail reduction applies to the rest, and the marker
+/// says how many NON-verdict lines it dropped. Sixty reds beneath a
+/// hundred lines of crawl chatter, with thirty more after them: every
+/// one reaches the step, in order.
+#[test]
+fn every_verdict_line_reaches_the_step_and_only_the_rest_is_reduced() {
+    let bin = planted("chore-verdicts");
+    let r = run_chore(
+        &bin,
+        &[],
+        &[
+            "maintenance-playground-crawl",
+            "Playground crawl",
+            "--",
+            "sh",
+            "-c",
+            "i=1; while [ $i -le 100 ]; do echo \"[crawl 1] /route-$i 120ms\"; i=$((i+1)); done; \
+             echo 'crawled 56 routes at http://gw.test: 60 red, 1 console.error, 1 expected console.error'; \
+             echo '  console.error [/ux/views] TypeError: x is not a function'; \
+             echo '  expected console.error [/it/design] Failed to load resource: 403 — a guest may not read it'; \
+             i=1; while [ $i -le 60 ]; do echo \"RED /it/route-$i pageerror: TypeError: cannot read $i\"; i=$((i+1)); done; \
+             i=1; while [ $i -le 30 ]; do echo \"teardown $i\"; i=$((i+1)); done; exit 1",
+        ],
+    );
+    assert_eq!(r.rc, 1, "{}", r.stderr);
+    let closes = r.closes();
+    let output = Run::pair(&closes[0], "output").unwrap();
+    let reds: Vec<&str> = output.lines().filter(|l| l.starts_with("RED ")).collect();
+    assert_eq!(
+        reds.len(),
+        60,
+        "every RED line reaches the step - the judge files from this record and nothing \
+         else:\n{output}"
+    );
+    for i in 1..=60 {
+        assert!(
+            reds.contains(
+                &format!("RED /it/route-{i} pageerror: TypeError: cannot read {i}").as_str()
+            ),
+            "RED line {i} is on the record, copied not retyped:\n{output}"
+        );
+    }
+    for needle in [
+        "crawled 56 routes at http://gw.test: 60 red",
+        "  console.error [/ux/views] TypeError: x is not a function",
+        "  expected console.error [/it/design] Failed to load resource: 403",
+    ] {
+        assert!(
+            output.contains(needle),
+            "the crawl's roll-up and its console.error lines are verdict-shaped too:\n{output}"
+        );
+    }
+    assert!(
+        output.starts_with("[crawl 1] /route-1 120ms\n") && output.contains("\nteardown 30\n"),
+        "the rest still rides as head and tail:\n{output}"
+    );
+    assert!(
+        !output.contains("[crawl 1] /route-50 120ms")
+            && !output.contains("[crawl 1] /route-80 120ms"),
+        "and only the rest is reduced - the middle of the chatter is not carried:\n{output}"
+    );
+    // 100 chatter + 30 teardown = 130 non-verdict lines; 20 + 40 kept,
+    // so the tail is chatter 91-100 and the teardown.
+    assert!(
+        output.contains("70 non-verdict lines omitted"),
+        "the marker counts what it dropped, and says none of it was a verdict:\n{output}"
+    );
+    let order: Vec<usize> = [
+        "[crawl 1] /route-1 ",
+        "non-verdict lines omitted",
+        "RED /it/route-1 ",
+        "RED /it/route-60 ",
+        "teardown 30",
+    ]
+    .iter()
+    .map(|n| {
+        output
+            .find(n)
+            .unwrap_or_else(|| panic!("{n} missing:\n{output}"))
+    })
+    .collect();
+    assert!(
+        order.windows(2).all(|w| w[0] < w[1]),
+        "the record keeps the capture's order - head, the marker, the verdicts, the tail:\n{output}"
     );
 }
 

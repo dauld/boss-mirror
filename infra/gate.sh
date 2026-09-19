@@ -1389,8 +1389,11 @@ lint_keeping_stderr() { # <file> <cmd...>
     return "$status"
 }
 
+# The lints `--quick` could not run to a verdict, named in its closing
+# line (see the warning branch in `check_lint`). Only `--quick` fills it.
+CANNOT_READ=()
 check_lint() {
-    local name="$1" keep why
+    local name="$1" keep why target
     shift
     keep="$(mktemp)" || {
         echo "gate: could not make a file to keep a lint's stderr — refusing rather than running a lint whose words would be lost." >&2
@@ -1419,7 +1422,29 @@ check_lint() {
     # flattened, bounded so a chatty lint cannot bloat the receipt.
     why="$(grep -m1 -F "$LINT_CANNOT_ANSWER_MARKER" "$keep" || grep -m1 '[^[:space:]]' "$keep" || true)"
     why="$(printf '%s' "${why:-(the lint printed nothing on stderr)}" | tr -d '"\\' | tr '[:cntrl:]' ' ' | cut -c1-400)"
+    # The lint's own `target: <url> (override with <VAR>)` line, when it
+    # prints one — the two live lints read different variables
+    # (BOSS_JOBS_URL, BOSS_DISPATCHER_URL), and the lint knows which.
+    target="$(grep -m1 -F 'override with' "$keep" | tr -s '[:space:]' ' ' | sed -e 's/^ *//' -e 's/ *$//' || true)"
     rm -f "$keep"
+    # `--quick` WARNS instead. It is not a gate and says so — its whole
+    # claim is "you will not lose a gate to a lint", and it judges
+    # nothing a gate will not re-judge on the receipt that counts. The
+    # refusal above, landing here for every mode, made a workstation
+    # with no route to the registry (the Mac off the LAN) lose the 80
+    # lints that can read a bare tree to the two that cannot (backlog
+    # c7bea0e2). So: the lint's own CANNOT ANSWER line as a WARNING,
+    # the address it was reading so the operator sees WHICH registry,
+    # and the closing line counts these rather than saying `clean`
+    # bare — a pre-flight must not claim what it could not check.
+    # `--lint` and the gate proper keep refusing: their receipts are
+    # read as verdicts, and a refused check is not a warning there.
+    if [ "$QUICK" -eq 1 ]; then
+        CANNOT_READ+=("$name")
+        echo "pre-flight: WARNING — '${name}' could not answer: ${why}" >&2
+        echo "pre-flight: WARNING — ${target:-BOSS_JOBS_URL=${BOSS_JOBS_URL:-<unset, the lint used its default>}}; the gate will run this lint against the registry it CAN reach." >&2
+        return 0
+    fi
     echo "gate: REFUSED — the pre-flight lint '${name}' could not answer (exit ${LINT_CANNOT_ANSWER}), so this run judged nothing about the branch." >&2
     echo "  ${why}" >&2
     echo "  An infrastructure refusal, recorded as one (the GATE FAIL line above is check's" >&2
@@ -1807,6 +1832,14 @@ if [ "$QUICK" -eq 1 ]; then
         echo "pre-flight: ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
         echo "pre-flight: fix these before spending a gate on them." >&2
         exit 1
+    fi
+    if [ "${#CANNOT_READ[@]}" -gt 0 ]; then
+        # Never a bare `clean` here: the count is the claim's honest
+        # edge, and the WARNING lines above name each lint and why.
+        echo "pre-flight: clean except ${#CANNOT_READ[@]} lint(s) that could not read the registry: ${CANNOT_READ[*]}"
+        echo "pre-flight: no build ran, so this is NOT a gate; the gate runs those lints itself."
+        echo "pre-flight: clippy, build and the test suites are still unproven."
+        exit 0
     fi
     echo "pre-flight: clean — no build ran, so this is NOT a gate."
     echo "pre-flight: clippy, build and the test suites are still unproven."
