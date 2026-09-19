@@ -63,6 +63,10 @@
 #   `PUT .../steps/{id}` swaps `metadata` wholesale, so sending only
 #   new keys silently wipes the rest, including `authority_role`
 #   (the boss-step.sh lesson).
+# - Writes the verb's exit onto the REQUEST's metadata (`exit`) before
+#   the step completes, so the `answered` close carries it where the
+#   yard and the rules read (f47861a5). `answered` means the verb ran;
+#   `exit` says how it went.
 # - A per-packet problem (refusal, missing step) never kills the loop;
 #   a transport failure to the SoR fails the unit loudly, systemd
 #   records it red, and the same loud-local-failure posture as the
@@ -329,6 +333,31 @@ ARGV
         + (if $d == "refused" then {reason: $out} else {} end)')
     payloadf="$workdir/payload"
     printf '%s' "$merged" | jq -c '{status: "completed", metadata: .}' > "$payloadf"
+
+    # THE EXIT RIDES THE REQUEST, not only the step (backlog f47861a5,
+    # measured 2026-09-19 on c98a782f): publish-github-pr printed FAILED
+    # and exited 1, this runner recorded `exit_code: "1"` on the step,
+    # the request closed `answered` — the verb RAN, which is all the
+    # outcome names — and nothing at the request level said so, so the
+    # yard drew it like any answered request and the publish step it was
+    # filed for sat ready for five hours. The verb's exit goes onto the
+    # request's own metadata through the merge door FIRST, so the close
+    # the step completion triggers is read with the exit already on it.
+    # A refusal ran nothing and carries none. A failed merge does not
+    # withhold the answer — the step completion below still lands — but
+    # it is counted, and the unit goes red for it.
+    if [ "$disp" = "answered" ]; then
+        exitf="$workdir/exit"
+        jq -cn --arg rc "$rc_str" '{exit: $rc}' > "$exitf"
+        if ! patch_err=$(curl -fsS -X PATCH -H "content-type: application/json" \
+                -H "x-boss-user: $BOSS_USER" \
+                ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
+                --data-binary @"$exitf" \
+                "$BASE/api/jobs/$job_id/metadata" 2>&1 >/dev/null); then
+            echo "ops-runner: PATCH exit=$rc_str failed on $short — $patch_err" >&2
+            failed=$((failed + 1))
+        fi
+    fi
 
     if ! put_err=$(curl -fsS -X PUT -H "content-type: application/json" \
             -H "x-boss-user: $BOSS_USER" \

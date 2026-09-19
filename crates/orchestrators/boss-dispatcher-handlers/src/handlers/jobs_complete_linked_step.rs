@@ -107,6 +107,27 @@
 //!   ends, the way a dead link is noted. A pattern that is not a regex
 //!   is rule authoring — `Permanent`, never retried.
 //!
+//! ## Reading the failure (v6, f47861a5)
+//!
+//! An ops-request closes `answered` when its verb RAN — the runner
+//! records how it went as `exit_code` on the execute step, and nothing
+//! in v5 read it. Measured 2026-09-19 on publish 254177e2: the
+//! publish-github-pr verb printed `FAILED — … dubious ownership …`,
+//! exited 1, and its request closed `answered`; v5 found no answer
+//! line, noted the noop on both ends, and the publish's open-pr step
+//! sat `ready` for five hours with nothing on it and no packet filed —
+//! the yard drew a healthy publish. One optional arg:
+//!
+//! - `on_failure = "annotate-and-alert"` — when the closing packet's
+//!   execute step records a non-zero exit, the step on the far end is
+//!   NOT completed (it is not done) and NOT left alone: the verb's
+//!   last FAILED line lands on it as `failed` (with `failed_exit`,
+//!   `failed_source` = the request, and `alert`), and an URGENT
+//!   backlog-item naming the verb, the request and the line is filed
+//!   to the platform owner through the door every alarm handler uses.
+//!   One alert per failed request (`for_request` dedups while open).
+//!   Without the arg, v5's answer stands.
+//!
 //! ## Idempotence
 //!
 //! JetStream is at-least-once and the close marker is emitted from
@@ -142,22 +163,35 @@ const OPEN_STATUSES: [&str; 2] = ["ready", "active"];
 pub struct JobsCompleteLinkedStep {
     client: reqwest::Client,
     jobs_base: String,
+    /// Who the failure alert (v6) is filed to — the platform owner as
+    /// the port answers it, resolved per invocation by
+    /// `common::owner_for_filing`; never a literal (3c23662d).
+    owner: Arc<dyn boss_core::platform_owner::PlatformOwner>,
 }
 
 impl JobsCompleteLinkedStep {
-    pub fn new(jobs_base: impl Into<String>) -> Arc<Self> {
+    pub fn new(
+        jobs_base: impl Into<String>,
+        owner: Arc<dyn boss_core::platform_owner::PlatformOwner>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             client: crate::handlers::common::api_client(),
             jobs_base: jobs_base.into(),
+            owner,
         })
     }
 
     /// Construct with a custom reqwest client (tests point it at a
     /// local stand-in for jobs-api).
-    pub fn with_client(client: reqwest::Client, jobs_base: impl Into<String>) -> Arc<Self> {
+    pub fn with_client(
+        client: reqwest::Client,
+        jobs_base: impl Into<String>,
+        owner: Arc<dyn boss_core::platform_owner::PlatformOwner>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             client,
             jobs_base: jobs_base.into(),
+            owner,
         })
     }
 
@@ -495,6 +529,29 @@ impl Handler for JobsCompleteLinkedStep {
             return Ok(());
         }
 
+        // THE FAILURE (v6, f47861a5). A verb that RAN and exited
+        // non-zero is an answered request — the outcome says the verb
+        // ran, the execute step says how it went — and a rule that
+        // asked for the failure mode gets it here, before the answer
+        // pattern is consulted: a FAILED verb has no answer line, and
+        // v5's "no line matched" note on both ends is what left the
+        // publish step ready and silent for five hours.
+        if let (Some(OnFailure::AnnotateAndAlert), Some(failure)) =
+            (answer.on_failure, verb_failure(&closing))
+        {
+            return self
+                .annotate_and_alert(
+                    closing_id,
+                    &closing_meta,
+                    target_id,
+                    &target,
+                    &allowed,
+                    &failure,
+                    ctx,
+                )
+                .await;
+        }
+
         // THE ANSWER (v5). A rule that asked for one gets it or gets
         // nothing: a closing packet whose recorded output carries no
         // line the pattern matches did not answer — the verb refused,
@@ -689,7 +746,23 @@ struct Shipped {
 struct AnswerSpec {
     verb: Option<String>,
     pattern: Option<regex::Regex>,
+    /// What to do when the closing packet's verb FAILED (v6) — `None`
+    /// keeps v5's answer: a failed verb has no answer line, and the
+    /// noop note lands on both ends.
+    on_failure: Option<OnFailure>,
 }
+
+/// The one failure mode a rule may ask for (v6, f47861a5): the verb's
+/// last FAILED line is written onto the still-open step and an urgent
+/// backlog-item is filed for it. A second mode is a new variant here
+/// and a new word in `from_args`, never a string compared elsewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnFailure {
+    AnnotateAndAlert,
+}
+
+/// The word a rule file spells the mode as.
+const ANNOTATE_AND_ALERT: &str = "annotate-and-alert";
 
 impl AnswerSpec {
     fn from_args(args: &[(String, Value)]) -> Result<Self, HandlerError> {
@@ -705,7 +778,21 @@ impl AnswerSpec {
             }
             _ => None,
         };
-        Ok(Self { verb, pattern })
+        let on_failure = match arg(args, "on_failure") {
+            Some(Value::String(s)) if s == ANNOTATE_AND_ALERT => Some(OnFailure::AnnotateAndAlert),
+            Some(Value::String(s)) if !s.is_empty() => {
+                // Rule authoring, identical on every redelivery.
+                return Err(HandlerError::Permanent(format!(
+                    "on_failure {s:?} is not a mode this handler knows; the one mode is {ANNOTATE_AND_ALERT:?}"
+                )));
+            }
+            _ => None,
+        };
+        Ok(Self {
+            verb,
+            pattern,
+            on_failure,
+        })
     }
 
     /// PURE over the closing packet: the answer's named groups, or why
@@ -891,7 +978,217 @@ fn fill(
     }
 }
 
+/// What a verb that ran and failed left behind (v6): its exit, and the
+/// line that says why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerbFailure {
+    pub exit: String,
+    pub line: String,
+}
+
+/// The dedup key a failure alert carries: the request whose verb
+/// failed. One alert per failed request while it is open.
+pub(crate) const FOR_REQUEST: &str = "for_request";
+
+/// PURE over the closing packet: `Some` when its `execute` step records
+/// a non-zero `exit_code` — the ops-runner's record of a verb that RAN
+/// and failed (a refusal ran nothing and carries no exit, and closes
+/// `refused`, which no answered-rule fires on). The line is the LAST
+/// one containing `FAILED` (the forge verbs' `fail()` spelling), else
+/// the last non-empty line: the runner records both streams merged and
+/// a verb says why it stopped last. c98a782f's line was the 4th of 4.
+pub(crate) fn verb_failure(closing: &serde_json::Value) -> Option<VerbFailure> {
+    let meta = step_by_slug(closing, super::ops_judge::REPORT_STEP)?.get("metadata")?;
+    let exit = match meta.get("exit_code")? {
+        serde_json::Value::String(s) => s.trim().to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        _ => return None,
+    };
+    if exit.is_empty() || exit == "0" {
+        return None;
+    }
+    let output = meta.get("output").and_then(|v| v.as_str()).unwrap_or("");
+    let mut lines = output.lines().map(str::trim).filter(|l| !l.is_empty());
+    let line = lines
+        .clone()
+        .rfind(|l| l.contains("FAILED"))
+        .or_else(|| lines.next_back())
+        .unwrap_or("(no output recorded)")
+        .to_string();
+    Some(VerbFailure { exit, line })
+}
+
+/// PURE: the urgent packet one failed verb becomes — named after the
+/// verb, the request and the step it leaves open, the FAILED line
+/// verbatim under `failed`, the request under `for_request` (the dedup
+/// key). Subject: the troubled packet's own, so "what went wrong with
+/// this publish" answers from Subject history.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn failure_alert_body(
+    closing_id: &str,
+    verb: &str,
+    target_id: &str,
+    target: &serde_json::Value,
+    step_slug: &str,
+    failure: &VerbFailure,
+    owner: &str,
+    ctx: &InvocationContext,
+) -> serde_json::Value {
+    let target_kind = target
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("packet");
+    let target_title = target.get("title").and_then(|v| v.as_str()).unwrap_or("");
+    let req8 = closing_id.get(..8).unwrap_or(closing_id);
+    let tgt8 = target_id.get(..8).unwrap_or(target_id);
+    let subject = target
+        .get("subject")
+        .filter(|s| {
+            s.get("id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|id| !id.is_empty())
+        })
+        .cloned()
+        .unwrap_or_else(|| json!({ "subject_kind": "custom", "id": "bosspipeline" }));
+    json!({
+        "kind": "backlog-item",
+        "title": format!(
+            "{verb} FAILED (exit {}) on ops-request {req8}: {target_kind} {tgt8} stays at {step_slug}",
+            failure.exit
+        ),
+        "subject": subject,
+        // The platform owner as the registry answers it, or nobody for
+        // the jobs API to resolve from the kind's owner_role (3c23662d).
+        "owner_id": owner,
+        "priority": "urgent",
+        "status": "open",
+        "tags": [],
+        "metadata": {
+            "area": "platform",
+            FOR_REQUEST: closing_id,
+            "for_packet": target_id,
+            "verb": verb,
+            "exit": failure.exit,
+            "failed": failure.line,
+            "step": step_slug,
+            "reporter": ctx.rule_name,
+            "triggered_by_event_id": ctx.triggering_event_id,
+            "detail": format!(
+                "Filed by {} (backlog f47861a5): ops-request {req8} ran `{verb}` on the host and \
+                 the verb FAILED (exit {}); the request closed `answered`, because the verb ran. \
+                 The {target_kind} it was filed for ({tgt8}, \"{target_title}\") is left at its \
+                 `{step_slug}` step, which stays open with the same line under `failed` — the \
+                 verb did not do what the step records. The verb's last line: {}",
+                ctx.rule_name, failure.exit, failure.line
+            ),
+        },
+    })
+}
+
 impl JobsCompleteLinkedStep {
+    /// THE FAILURE MODE (v6, f47861a5): `on_failure = "annotate-and-
+    /// alert"`. The verb the closing request ran FAILED, so the open
+    /// step on the far end is not completed — it is not done — and it
+    /// is not left untouched either, which is what happened to publish
+    /// 254177e2's open-pr for five hours. The alert is filed FIRST and
+    /// the step annotated second, naming the alert: a redelivery after
+    /// the alert landed but before the note did finds the open alert
+    /// by `for_request` and reuses it, and one after both landed finds
+    /// `failed_source` on the step and writes nothing. Nothing open to
+    /// annotate (a person completed it, or the fork never opened it)
+    /// is silent, like a redelivery against a completed branch.
+    #[allow(clippy::too_many_arguments)]
+    async fn annotate_and_alert(
+        &self,
+        closing_id: &str,
+        closing_meta: &serde_json::Value,
+        target_id: &str,
+        target: &serde_json::Value,
+        allowed: &[&str],
+        failure: &VerbFailure,
+        ctx: &InvocationContext,
+    ) -> Result<(), HandlerError> {
+        let rule = ctx.rule_name.as_str();
+        let Some(step) = open_step(target, allowed) else {
+            return Ok(());
+        };
+        let Some(step_id) = step.get("id").and_then(|v| v.as_str()) else {
+            return Ok(());
+        };
+        if step
+            .get("metadata")
+            .and_then(|m| m.get("failed_source"))
+            .and_then(|v| v.as_str())
+            == Some(closing_id)
+        {
+            return Ok(());
+        }
+        let slug = step
+            .get("spec_slug")
+            .and_then(|v| v.as_str())
+            .unwrap_or(allowed.first().copied().unwrap_or("step"));
+        let verb = closing_meta
+            .get("verb")
+            .and_then(|v| v.as_str())
+            .unwrap_or("the verb");
+        let base = self.jobs_base.trim_end_matches('/');
+
+        let open =
+            super::common::open_jobs_of_kind(&self.client, base, "backlog-item", rule).await?;
+        let alert_id = match open
+            .iter()
+            .find(|j| {
+                j.get("metadata")
+                    .and_then(|m| m.get(FOR_REQUEST))
+                    .and_then(|v| v.as_str())
+                    == Some(closing_id)
+            })
+            .and_then(|j| j.get("id").and_then(|v| v.as_str()))
+        {
+            Some(existing) => existing.to_string(),
+            None => {
+                let owner = super::common::owner_for_filing(self.owner.as_ref(), rule).await;
+                let body = failure_alert_body(
+                    closing_id, verb, target_id, target, slug, failure, &owner, ctx,
+                );
+                super::common::post_json_minted_id(
+                    &self.client,
+                    &format!("{base}/api/jobs"),
+                    &body,
+                    rule,
+                )
+                .await?
+            }
+        };
+
+        // The step-side merge door (PATCH .../steps/{id}/metadata):
+        // top-level keys merged server-side, status untouched — the
+        // step stays open, because it is.
+        super::common::write_json(
+            &self.client,
+            reqwest::Method::PATCH,
+            &format!("{base}/api/jobs/{target_id}/steps/{step_id}/metadata"),
+            &json!({
+                "failed": failure.line,
+                "failed_exit": failure.exit,
+                "failed_source": closing_id,
+                "alert": alert_id,
+            }),
+            rule,
+        )
+        .await?;
+        tracing::warn!(
+            rule = %rule,
+            request = %closing_id,
+            packet = %target_id,
+            alert = %alert_id,
+            "{verb} FAILED (exit {}) — `{slug}` annotated and left open; {}",
+            failure.exit,
+            failure.line
+        );
+        Ok(())
+    }
+
     /// The evidence. "The work you asked for shipped" is only worth
     /// saying if it names WHAT shipped — an id and a title a reader
     /// can go look at, plus the train that carried it and the
@@ -1051,6 +1348,14 @@ mod tests {
             triggering_topic: "jobs.job.closed".into(),
             event_payload: payload,
         }
+    }
+
+    /// The owner port every case here constructs the handler with. No
+    /// case in this module files an alert (the failure mode's tests
+    /// live in tests/publish_pr_answer.rs, where a fixture may spell
+    /// the forge's address), so the fixed owner is never read.
+    pub(super) fn test_owner() -> Arc<dyn boss_core::platform_owner::PlatformOwner> {
+        Arc::new(boss_core::platform_owner::Fixed("emp-owner".into()))
     }
 
     fn args() -> Vec<(String, Value)> {
@@ -1345,7 +1650,7 @@ mod tests {
             train(),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&args(), &ctx(close_marker())).await.expect("runs");
 
         assert!(
@@ -1406,7 +1711,7 @@ mod tests {
             train(),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&args_with_route(), &ctx(close_marker()))
             .await
             .expect("runs");
@@ -1456,7 +1761,7 @@ mod tests {
             train(),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&args_with_route(), &ctx(close_marker()))
             .await
             .expect("runs");
@@ -1492,7 +1797,7 @@ mod tests {
             train(),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&args_with_route(), &ctx(close_marker()))
             .await
             .expect("runs");
@@ -1543,7 +1848,7 @@ mod tests {
             train(),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&args_with_route(), &ctx(close_marker()))
             .await
             .expect("runs");
@@ -1564,7 +1869,7 @@ mod tests {
         .await;
         let mut a = args_with_done_metadata();
         a.push(("route".to_string(), Value::String("not json".into())));
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&a, &ctx(close_marker())).await.expect("runs");
 
         assert!(puts.lock().unwrap().is_empty());
@@ -1596,7 +1901,7 @@ mod tests {
             train(),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&args_with_routes(), &ctx(close_marker()))
             .await
             .expect("runs");
@@ -1639,7 +1944,7 @@ mod tests {
             train(),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&args_with_routes(), &ctx(close_marker()))
             .await
             .expect("runs");
@@ -1664,7 +1969,7 @@ mod tests {
             train(),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&args_with_routes(), &ctx(close_marker()))
             .await
             .expect("runs");
@@ -1687,7 +1992,7 @@ mod tests {
             train(),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&args(), &ctx(close_marker())).await.expect("runs");
 
         let calls = puts.lock().unwrap().clone();
@@ -1730,7 +2035,7 @@ mod tests {
             train(),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&args_with_done_metadata(), &ctx(close_marker()))
             .await
             .expect("runs");
@@ -1766,7 +2071,7 @@ mod tests {
             train(),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&args_with_done_metadata(), &ctx(close_marker()))
             .await
             .expect("runs");
@@ -1794,7 +2099,7 @@ mod tests {
             packet("ready"),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&args(), &ctx(close_marker())).await.expect("runs");
         assert!(
             puts.lock().unwrap().is_empty(),
@@ -1819,7 +2124,7 @@ mod tests {
             packet("ready"),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&args_with_route(), &ctx(close_marker()))
             .await
             .expect("runs");
@@ -1839,7 +2144,7 @@ mod tests {
             packet("ready"),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&args(), &ctx(close_marker())).await.expect("runs");
         assert!(puts.lock().unwrap().is_empty(), "nothing to complete");
     }
@@ -1851,7 +2156,7 @@ mod tests {
         let mut closed = packet("ready");
         closed["status"] = json!("closed");
         let (base, puts, _) = mock_jobs(vec![car(json!({ "backlog_item": PACKET })), closed]).await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&args(), &ctx(close_marker())).await.expect("runs");
         assert!(puts.lock().unwrap().is_empty(), "a closed packet is done");
     }
@@ -1867,7 +2172,7 @@ mod tests {
             packet("completed"),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&args(), &ctx(close_marker())).await.expect("runs");
         assert!(
             puts.lock().unwrap().is_empty(),
@@ -1884,7 +2189,7 @@ mod tests {
         stamped["steps"][2]["metadata"]["arrived_from"] = json!({ "car": CAR });
         let (base, puts, _) =
             mock_jobs(vec![car(json!({ "backlog_item": PACKET })), stamped]).await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&args(), &ctx(close_marker())).await.expect("runs");
         assert!(puts.lock().unwrap().is_empty(), "already stamped by us");
     }
@@ -1898,7 +2203,7 @@ mod tests {
         nothing_open["status"] = json!("open");
         let (base, puts, _) =
             mock_jobs(vec![car(json!({ "backlog_item": PACKET })), nothing_open]).await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&args(), &ctx(close_marker())).await.expect("runs");
         assert!(
             puts.lock().unwrap().is_empty(),
@@ -1916,7 +2221,7 @@ mod tests {
             packet("ready"),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&args(), &ctx(close_marker())).await.expect("runs");
 
         let calls = puts.lock().unwrap().clone();
@@ -1929,7 +2234,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_rule_missing_its_link_arg_is_a_permanent_error() {
-        let h = JobsCompleteLinkedStep::new("http://127.0.0.1:1");
+        let h = JobsCompleteLinkedStep::new("http://127.0.0.1:1", test_owner());
         let res = h
             .invoke(
                 &[("steps".to_string(), Value::String("build".into()))],
@@ -1941,7 +2246,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_rule_with_an_empty_steps_arg_is_a_permanent_error() {
-        let h = JobsCompleteLinkedStep::new("http://127.0.0.1:1");
+        let h = JobsCompleteLinkedStep::new("http://127.0.0.1:1", test_owner());
         let res = h
             .invoke(
                 &[
@@ -1956,7 +2261,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_close_marker_with_no_id_is_a_no_op() {
-        let h = JobsCompleteLinkedStep::new("http://127.0.0.1:1");
+        let h = JobsCompleteLinkedStep::new("http://127.0.0.1:1", test_owner());
         // Unreachable base URL: a no-op is the only outcome that
         // cannot error here, which is what proves nothing was fetched.
         let res = h
@@ -2053,7 +2358,7 @@ mod tests {
             feedback_routed_to_design("ready"),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         let mut ctx = ctx(design_close_marker());
         ctx.rule_name = "complete-feedback-design-review-on-design-doc-published".into();
         h.invoke(&design_rule_args(), &ctx).await.expect("runs");
@@ -2145,7 +2450,7 @@ mod tests {
             feedback_drafted_for_design("completed", "ready"),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         let mut ctx = ctx(design_close_marker());
         ctx.rule_name = "complete-feedback-design-review-on-design-doc-published".into();
         h.invoke(&design_rule_args(), &ctx).await.expect("runs");
@@ -2178,7 +2483,7 @@ mod tests {
             feedback_drafted_for_design("ready", "pending"),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         let mut ctx = ctx(design_close_marker());
         ctx.rule_name = "complete-feedback-design-review-on-design-doc-published".into();
         h.invoke(&design_rule_args(), &ctx).await.expect("runs");
@@ -2203,7 +2508,7 @@ mod tests {
             feedback_routed_to_design("completed"),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&design_rule_args(), &ctx(design_close_marker()))
             .await
             .expect("runs");
@@ -2253,7 +2558,7 @@ mod tests {
         open_design["status"] = json!("open");
         let (base, puts, patches) =
             mock_jobs(vec![open_design, feedback_routed_to_design("ready")]).await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         let mut ctx = ctx(design_review_done_marker());
         ctx.rule_name = "complete-feedback-design-review-on-design-review-decided".into();
         ctx.triggering_topic = "step.done.review-design".into();
@@ -2400,6 +2705,7 @@ mod noop_reason_tests {
 /// the closing packet's recorded output and write what it says.
 #[cfg(test)]
 mod answer_tests {
+    use super::tests::test_owner;
     use super::*;
     use boss_dispatcher::rules::expr::NoHelpers;
     use boss_dispatcher::rules::registry::{Registry, match_event};
@@ -2510,7 +2816,7 @@ mod answer_tests {
             release_packet("ready"),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&tag_release_rule_args(), &ctx(request_close_marker()))
             .await
             .expect("runs");
@@ -2543,7 +2849,7 @@ mod answer_tests {
             release_packet("ready"),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&tag_release_rule_args(), &ctx(request_close_marker()))
             .await
             .expect("runs");
@@ -2572,7 +2878,7 @@ mod answer_tests {
             release_packet("ready"),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&tag_release_rule_args(), &ctx(request_close_marker()))
             .await
             .expect("runs");
@@ -2589,7 +2895,7 @@ mod answer_tests {
             release_packet("completed"),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         h.invoke(&tag_release_rule_args(), &ctx(request_close_marker()))
             .await
             .expect("runs");
@@ -2606,7 +2912,7 @@ mod answer_tests {
             release_packet("ready"),
         ])
         .await;
-        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
         let mut a = tag_release_rule_args();
         for (k, v) in a.iter_mut() {
             if k == "verdict_pattern" {

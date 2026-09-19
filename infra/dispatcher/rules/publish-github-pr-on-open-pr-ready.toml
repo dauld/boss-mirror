@@ -13,8 +13,18 @@
 # 202609081200-publish-github-pr-on-open-pr-ready.sql, applied history: this
 # FILE is now the definition, and the registry row is published from
 # it at boot (rules::seed — backlog 41ba00cd).
+#
+# v2 (f47861a5, 2026-09-19): the request carries the publish packet's
+# id back as `metadata.for_publish` — the edge the answer's rule
+# (complete-publish-pr-step-on-publish-github-pr-answered) follows to
+# the open-pr step, the way the sweeps' measure rules write `for_sweep`.
+# Until now the request named no packet: the verb found the publish by
+# itself, and when it FAILED (c98a782f, dubious ownership on the forge
+# push) nothing could reach the step it was filed for — it sat ready
+# for five hours behind an `answered` request.
 [[rule]]
 name = "publish-github-pr-on-open-pr-ready"
+version = 2
 why = """
 A CROSS-PROTOCOL REACTOR spanning three protocols — publish-to-github
 -> ops-request -> a verb on the forge host — which no single Workflow
@@ -30,4 +40,4 @@ on_event = "step.ready.task"
 when = 'metadata.ops_verb = "publish-github-pr"'
 [[rule.do]]
 handler = "jobs.spawn"
-args = { kind = "\"ops-request\"", subject_kind = "\"custom\"", subject = "\"forge\"", title = "\"publish the mirror PR from the forge — a publish was approved\"", "metadata.host" = "\"forge\"", "metadata.verb" = "\"publish-github-pr\"" }
+args = { kind = "\"ops-request\"", subject_kind = "\"custom\"", subject = "\"forge\"", title = "\"publish the mirror PR from the forge — a publish was approved\"", "metadata.host" = "\"forge\"", "metadata.verb" = "\"publish-github-pr\"", "metadata.for_publish" = "job_id" }

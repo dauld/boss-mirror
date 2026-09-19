@@ -79,6 +79,17 @@ fn the_open_pr_step_spawns_a_forge_publish_ops_request() {
         vals.contains(&Value::String("forge".into())),
         "the ops-request is addressed to the forge host; got {args:?}"
     );
+    // The request carries the publish packet's id back as
+    // `for_publish` (f47861a5): the answer's rule
+    // (complete-publish-pr-step-on-publish-github-pr-answered) follows
+    // that edge to the open-pr step. Until 2026-09-19 the request named
+    // no packet, so a FAILED verb could reach nothing — the publish step
+    // sat ready for five hours behind an `answered` request.
+    assert_eq!(
+        get("metadata.for_publish"),
+        Value::String("p1".into()),
+        "for_publish must carry the publish packet's own job id"
+    );
 }
 
 /// Every other `task` step shares the topic. A step with no marker, or

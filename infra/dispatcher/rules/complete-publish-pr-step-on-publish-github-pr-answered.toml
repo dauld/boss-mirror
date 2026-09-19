@@ -1,0 +1,62 @@
+# The publish-github-pr verb's answer reaches the publish step it was
+# filed for — on success AND on failure (backlog f47861a5, 2026-09-19).
+#
+# publish-to-github v6's `open-pr` step is a MACHINE step: the filing
+# rule (publish-github-pr-on-open-pr-ready) spawns an ops-request for
+# the forge the moment David approves, and the verb opens the mirror PR
+# as dauld and completes the step with `pr_url` by itself. Measured on
+# publish 254177e2: David approved at 23:05Z, the request (c98a782f)
+# was ANSWERED within the minute with its last line
+#
+#   publish-github-pr: FAILED — pushing publish/2026-09-18 to the forge (…) as david: fatal: detected dubious ownership …
+#
+# and for five hours nothing happened. The request closed `answered` —
+# the verb RAN, which is all that outcome names; the runner had
+# recorded `exit_code: "1"` on the execute step — and no rule read it:
+# the open-pr step stayed `ready`, no packet was filed, and the yard
+# drew the publish exactly like one in progress. CLAUDE.md §Diagnosis:
+# silence is the only forbidden failure mode.
+#
+# This rule is the reader. The request now carries `for_publish` (the
+# filing rule's v2), so `jobs.complete_linked_step` follows that edge:
+#
+# - exit 0 and an `opened <url>` (or `reusing <url>`) line: complete
+#   `open-pr` with the url COPIED from the verb's own line. The verb
+#   completes the step itself on its happy path, so this leg usually
+#   finds the step already done and writes nothing; it is the record
+#   for the day the verb's own PUT fails after the PR is open.
+# - a non-zero exit: `on_failure = "annotate-and-alert"` — the verb's
+#   last FAILED line is written onto the still-open step as `failed`
+#   and an URGENT backlog-item is filed naming the verb, the request
+#   and the line (the alert door estate.alarm and chore.file_reds use).
+#   The step stays open, because it is: the PR is not open, and the
+#   yard now shows a troubled publish instead of a healthy one.
+#
+# The pattern is written without a backslash: the arg passes through
+# two string lexers (TOML, then boss-expr's), and boss-expr reads `\d`
+# as `d` (ops_judge.rs). `.` stands for the em dash in the reuse line.
+[[rule]]
+name = "complete-publish-pr-step-on-publish-github-pr-answered"
+why = """
+A CROSS-PROTOCOL REACTOR closing the loop publish-github-pr-on-open-pr-
+ready opened: ops-request -> publish-to-github, which no single
+Workflow consequence can express — the request's protocol cannot know
+which publish asked, and the publish's cannot read another packet's
+execute step. Measured 2026-09-19 (backlog f47861a5): ops-request
+c98a782f answered with `publish-github-pr: FAILED — … dubious
+ownership …`, exit 1, and the publish step it was filed for sat ready
+for five hours with nothing on it and no packet filed, because
+`answered` says the verb ran and nothing read how it went. No
+authority widened: on success the only write is the step's own
+required field, copied from the verb's line; on failure the step is
+ANNOTATED, never completed, and the alert is a backlog-item at the
+platform owner's queue — the same door every alarm handler files
+through. Self-filters to this one verb; every other answered request
+on the topic is somebody else's.
+"""
+version = 1
+on_event = "jobs.job.closed"
+when = 'kind = "ops-request" AND outcome = "answered"'
+[[rule.do]]
+handler = "jobs.complete_linked_step"
+args = { verb = '"publish-github-pr"', verdict_pattern = '"^publish-github-pr: (opened|PR already open for [^ ]+ . reusing) (?P<pr_url>https://github[.]com/[^ ]+)$"', link = '"for_publish"', steps = '"open-pr"', done_metadata = '"{\"pr_url\": \"{pr_url}\"}"', evidence_key = '"published_by"', on_failure = '"annotate-and-alert"' }

@@ -410,8 +410,13 @@ async fn main() -> Result<()> {
             // A closing Job completes the open step it was authorized
             // by, on the Job its declared edge names — the merged car
             // → feedback-packet obligation (2c4ae549). Generic: which
-            // edge and which steps ride the rule row.
-            handlers.register(JobsCompleteLinkedStep::new(cfg.jobs_api_url.clone()));
+            // edge and which steps ride the rule row. Files to the
+            // platform owner when a rule asks for the failure mode
+            // (f47861a5: a FAILED verb annotates the step and alerts).
+            handlers.register(JobsCompleteLinkedStep::new(
+                cfg.jobs_api_url.clone(),
+                platform_owner.clone(),
+            ));
             // A closing Job completes a step on every open packet whose
             // RECORDED step metadata matches a value it carries — the
             // converge that records a site's hash making the packet
