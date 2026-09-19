@@ -30,9 +30,13 @@ use std::path::Path;
 /// Repo-relative home of the bundle.
 pub(crate) const DIR: &str = "infra/platform/documents";
 
-/// The profile a step is briefed under when it declares none. The
-/// only profile with a document today; a step that declares another
-/// gets a one-line note naming the file that would serve it.
+/// The profile a step is briefed under when it declares none. Two
+/// profiles have a document today — `builder` and `analyst`, the two
+/// settings the platform bundle declares (8d32cc88) — and a step
+/// declaring any other gets a one-line note naming the file that
+/// would serve it, which is what every analyst dispatch got until
+/// then. The test below reads that roster off the bundle, so the
+/// count in this sentence is not a third copy of it.
 pub(crate) const DEFAULT_PROFILE: &str = "builder";
 
 /// The repo-relative path of a profile's rules document.
@@ -225,6 +229,123 @@ mod tests {
             assert!(
                 three_dot || named_wrong,
                 "a tip-to-tip diff check survives in the builder rules at byte {at}"
+            );
+        }
+    }
+
+    /// THE ANALYST DOCUMENT — what the OTHER profile owes (backlog
+    /// 8d32cc88, 2026-09-19). Eleven steps in the platform bundle
+    /// declare `analyst` and every one of them was dispatched with the
+    /// one-line note naming the file that would have served it; the
+    /// page march is about to add two more at 47 packets of volume.
+    /// An analyst ships no car, so the phrases pinned here are the
+    /// ones its own failures are made of: the empty read that is a
+    /// denied scope rather than data, the wholesale `metadata`
+    /// replacement a step PUT performs, the gap list longer than the
+    /// ids filed, and the context a sign-off reader sees instead of
+    /// the work steps.
+    #[test]
+    fn the_analyst_document_says_what_evidence_and_refusal_mean() {
+        let doc = read(&repo(), "analyst")
+            .expect("readable")
+            .expect("infra/platform/documents/analyst-rules.md is authored");
+        assert_eq!(profile_of(&doc).as_deref(), Some("analyst"));
+        let text = body(&doc);
+        for phrase in [
+            // The doors it writes through (each checked against the
+            // CLI's own roster by the test below).
+            "boss-api PUT /api/jobs/",
+            "boss job file",
+            "boss job patch",
+            // The evidence rules, in the words the incidents left.
+            "total",
+            "wholesale",
+            "read it back",
+            "control",
+            "count",
+            "Measure now",
+            "sign_off_context",
+            "context_md",
+            "single quotes",
+        ] {
+            assert!(text.contains(phrase), "the analyst rules say `{phrase}`");
+        }
+        // NOT A FORK OF THE BUILDER'S (the packet's own instruction):
+        // an analyst has no worktree, no branch and no gate, so the
+        // builder's doors must not appear here at all. A document that
+        // tells an analyst to run cargo has been copied, not written.
+        for builders_only in ["wt-cargo", "git push", "--park-", "cargo clippy"] {
+            assert!(
+                !text.contains(builders_only),
+                "the analyst rules carry the builder's `{builders_only}`"
+            );
+        }
+        assert!(
+            !text.starts_with("---"),
+            "the body is the document without its front-matter"
+        );
+    }
+
+    /// The doors the analyst document names are doors that EXIST: the
+    /// `boss job` verbs it points at are variants of `JobAction`, and
+    /// the jobs-API shim it invokes bare is the versioned one under
+    /// infra/dev/. A rules document naming a verb nobody shipped sends
+    /// the agent to build the path by hand, which is the class the
+    /// doors list exists to close (CLAUDE.md, Doors).
+    #[test]
+    fn the_analyst_documents_doors_are_doors_that_exist() {
+        let text = body(
+            &read(&repo(), "analyst")
+                .expect("readable")
+                .expect("the analyst rules are authored"),
+        );
+        let cli = std::fs::read_to_string(repo().join("crates/orchestrators/boss-cli/src/main.rs"))
+            .expect("the CLI's command roster");
+        let actions = cli
+            .split_once("enum JobAction")
+            .expect("`boss job` groups its verbs in JobAction")
+            .1;
+        for (verb, variant) in [
+            ("boss job file", "    File {"),
+            ("boss job patch", "    Patch {"),
+        ] {
+            assert!(text.contains(verb), "the analyst rules name `{verb}`");
+            assert!(actions.contains(variant), "`{verb}` is a JobAction variant");
+        }
+        assert!(
+            repo().join("infra/dev/boss-api").is_file(),
+            "the jobs-API shim the rules invoke is versioned in the tree"
+        );
+        assert!(text.contains("boss-api"), "the analyst rules name the shim");
+    }
+
+    /// THE ROSTER IS THE BUNDLE, NOT A LIST HERE (CLAUDE.md 9a). The
+    /// profiles that need a document are exactly the ones the platform
+    /// Workflow rows' `agent` blocks declare, so this reads them from
+    /// the bundle rather than naming them: a step that starts declaring
+    /// a third profile fails here until a document serves it, instead
+    /// of dispatching an agent with no rules at all — which is how
+    /// `analyst` went eleven steps unserved.
+    #[test]
+    fn every_profile_the_platform_bundle_declares_has_a_document() {
+        let bundle =
+            boss_jobs::seed_loader::load_workflows(boss_jobs::registry::platform_bundle_path())
+                .expect("the platform bundle parses");
+        let profiles: std::collections::BTreeSet<String> = bundle
+            .iter()
+            .flat_map(|w| w.steps.iter().filter_map(|s| s.agent.as_ref()))
+            .map(|a| a.profile.clone())
+            .collect();
+        assert!(
+            profiles.contains(DEFAULT_PROFILE) && profiles.contains("analyst"),
+            "the two settings in use are declared in the bundle: {profiles:?}"
+        );
+        for profile in &profiles {
+            let rendered = section(&repo(), profile).expect("the section renders");
+            assert!(
+                !rendered.contains("has no document"),
+                "{} declares profile `{profile}` and nothing serves it",
+                path_for(profile)
             );
         }
     }

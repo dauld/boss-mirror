@@ -1,16 +1,21 @@
-//! `retro.open` — the week's retros, one per department the classes
-//! registry holds, plus the platform's own (design 3613f0af, backlog
-//! 1dffde5d).
+//! `retro.open` — the week's retros, one per department the
+//! departments registry holds, plus the platform's own (design
+//! 3613f0af, backlog 1dffde5d).
 //!
 //! WHY A HANDLER AND NOT SEVEN `jobs.spawn` RULES. `jobs.spawn` opens
 //! exactly one packet per invocation from literal args, and a rule's
 //! `when` cannot iterate; so "one department-retro per department" as
 //! rule data alone is one file PER DEPARTMENT, each naming a code the
-//! classes registry already holds — a list living twice (CLAUDE.md
-//! §9a), and a department declared on Tuesday with no retro until
-//! someone lands a file. This handler reads the list at fire time from
-//! `GET /api/departments` (the jobs API's classes-backed read), so the
-//! rule stays ONE file and the registry stays the one definition.
+//! registry already holds — a list living twice (CLAUDE.md §9a), and a
+//! department declared on Tuesday with no retro until someone lands a
+//! file. This handler reads the list at fire time from
+//! `GET /api/departments` (the jobs API's read over the `departments`
+//! table), so the rule stays ONE file and the registry stays the one
+//! definition. WHICH registry that endpoint reads is not this
+//! handler's business and changed under it on 2026-09-19 without an
+//! edit here (backlog 80a77466): it served the employee Class drawer,
+//! nine codes overlapping the real thirteen by five, which this rule
+//! would have turned into nine wrong retros on its first firing.
 //!
 //! THE DEDUP IS A WEEK WINDOW, NOT `open_job_exists`. A clock rule
 //! guarded by an open packet stops firing FOREVER once one packet is
@@ -260,7 +265,7 @@ impl Handler for RetroOpen {
         if departments.is_empty() {
             tracing::warn!(
                 rule = %ctx.rule_name,
-                "retro.open: the classes registry holds no department — nothing to review"
+                "retro.open: the departments registry holds no department — nothing to review"
             );
         }
 

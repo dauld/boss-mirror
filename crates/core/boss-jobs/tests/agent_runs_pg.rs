@@ -172,18 +172,59 @@ async fn the_database_refuses_half_a_split() {
     );
 }
 
-/// And a row with neither shape is still a refusal: a run that reports
-/// no tokens at all is not a record of what it cost.
+/// A run that reports NO count is a row with a NULL total — unknown,
+/// not zero, the same distinction `usd_micros` draws for an unpriced
+/// run (backlog 65c9c05a). Until 2026-09-19 the column was NOT NULL,
+/// so `boss dispatch --report` without `--tokens` wrote a 0 with a
+/// `detail.tokens_reported: false` beside it, and 13 of 42 live rows
+/// read as a measurement of zero to any query that did not know to
+/// check the flag.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_database_refuses_a_run_reporting_no_tokens_at_all() {
+async fn the_database_holds_a_run_that_reported_no_tokens_as_null() {
     let db = TestDb::new().await;
 
-    let err = insert_raw(&db, "run-nothing", None, None, None)
+    insert_raw(&db, "run-nothing", None, None, None)
         .await
-        .expect_err("no tokens is not a run");
+        .expect("a run with no count is a record of the run");
+
+    let (total, input, output): (Option<i64>, Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT total_tokens, input_tokens, output_tokens FROM agent_runs WHERE run_id = $1",
+    )
+    .bind("run-nothing")
+    .fetch_one(&db.pool)
+    .await
+    .expect("the row");
+    assert_eq!((total, input, output), (None, None, None));
+
+    // And it reads back through the adapter as the shape that means
+    // unknown, rather than as a zero the port invented.
+    let held = PgAgentRuns::new(db.pool.clone())
+        .list_runs(&RunFilter::default())
+        .await
+        .expect("lists")
+        .pop()
+        .expect("the row is there");
+    assert_eq!(held.run.tokens, TokenUsage::Unreported);
+    assert_eq!(held.run.tokens.total(), None);
+    assert_eq!(held.usd_micros, None, "no tokens is no price");
+}
+
+/// A measured split with no total is refused. The equality CHECK was
+/// total while `total_tokens` was NOT NULL; once it can be NULL the
+/// comparison evaluates to NULL for such a row, and Postgres treats a
+/// NULL CHECK as SATISFIED — so the constraint had to state the
+/// presence explicitly or the split would have lost its pin silently
+/// (backlog 65c9c05a).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_database_refuses_a_split_with_no_total_beside_it() {
+    let db = TestDb::new().await;
+
+    let err = insert_raw(&db, "run-untotalled", None, Some(10), Some(2))
+        .await
+        .expect_err("a measured split has a total, and it equals the split");
     assert!(
-        err.contains("total_tokens"),
-        "the refusal names the missing column: {err}"
+        err.contains("agent_runs_total_matches_split_check"),
+        "the refusal names the constraint: {err}"
     );
 }
 

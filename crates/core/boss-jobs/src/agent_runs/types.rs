@@ -101,21 +101,34 @@ pub struct RateCardRow {
     pub note: String,
 }
 
-/// What a run spent, in the two shapes a reporter can actually be in.
+/// What a run spent, in the three shapes a reporter can actually be in.
 ///
 /// **The total is one fact with one definition.** For a [`Split`] it is
 /// DERIVED from the halves, so a stored total cannot drift from them
 /// (§9a); for [`TotalOnly`] it is the only thing measured. There is no
-/// third state where both are stored independently and can disagree,
-/// because this type cannot express one.
+/// state where both are stored independently and can disagree, because
+/// this type cannot express one.
 ///
 /// A `TotalOnly` run is unpriceable by construction: the rate card
 /// charges input and output at different rates. That is not a gap to
 /// paper over with an assumed ratio — an assumed ratio is a number that
 /// looks measured and is not.
 ///
+/// **[`Unreported`] is UNKNOWN, never zero** (backlog 65c9c05a,
+/// 2026-09-19). A harness that printed no usage line leaves the
+/// reporter with nothing to say, and the record has to say that. Until
+/// this variant existed, `boss dispatch --report` without `--tokens`
+/// sent `total_tokens: 0` with a `detail.tokens_reported: false`
+/// beside it, so 13 of 42 live rows read as a measurement of zero to
+/// any query that did not know to check the companion flag — an
+/// average over the column silently included 13 zeros. NULL for
+/// unknown is the distinction [`AgentRun::usd_micros`] already draws
+/// in this same table (unpriced, not free), followed here rather than
+/// a third convention invented beside it.
+///
 /// [`Split`]: TokenUsage::Split
 /// [`TotalOnly`]: TokenUsage::TotalOnly
+/// [`Unreported`]: TokenUsage::Unreported
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenUsage {
     /// Both halves measured. Priceable.
@@ -123,11 +136,15 @@ pub enum TokenUsage {
     /// One number, which is everything the reporter had. Recorded in
     /// full; priced by nothing.
     TotalOnly { total: u64 },
+    /// No count at all, stated as such: `"total_tokens": null` on the
+    /// wire and a NULL column in the row. The run is recorded in full;
+    /// what it spent is unknown, and unknown is not zero.
+    Unreported,
 }
 
 impl TokenUsage {
     /// Build from the three wire keys, refusing every combination that
-    /// is not one of the two shapes — and naming the fix, because the
+    /// is not one of the three shapes — and naming the fix, because the
     /// caller hitting this is a reporter that has to change what it
     /// sends.
     ///
@@ -135,11 +152,26 @@ impl TokenUsage {
     /// with the halves; the split stays the definition either way. That
     /// is the validate half of §9a's "derive it or pin it", for callers
     /// that send all three.
+    ///
+    /// **`total` is a DOUBLE option and the two Nones are different
+    /// facts.** `Some(None)` is a reporter that said in as many words
+    /// that it has no count — an explicit `null` on the wire, a NULL
+    /// column in the row — and records [`TokenUsage::Unreported`]. The
+    /// outer `None` is a payload that never mentioned tokens, which is
+    /// silence, and silence is refused here exactly as it is
+    /// everywhere else: a report that forgot to say is not the same
+    /// fact as one that says it does not know, and no caller should
+    /// reach the honest shape by omission (backlog 65c9c05a).
     pub fn from_parts(
         input: Option<u64>,
         output: Option<u64>,
-        total: Option<u64>,
+        total: Option<Option<u64>>,
     ) -> Result<Self, String> {
+        // The stated "no count", ahead of the shapes that carry one.
+        if let (None, None, Some(None)) = (input, output, total) {
+            return Ok(TokenUsage::Unreported);
+        }
+        let total = total.flatten();
         match (input, output, total) {
             (Some(input), Some(output), supplied) => {
                 let derived = input.saturating_add(output);
@@ -172,12 +204,16 @@ impl TokenUsage {
         }
     }
 
-    /// Every run has one. Derived for a split, so the two can never
-    /// disagree.
-    pub fn total(&self) -> u64 {
+    /// What the run spent, when anyone measured it. Derived for a
+    /// split, so the two can never disagree; `None` for
+    /// [`TokenUsage::Unreported`], which makes every caller that wants
+    /// a number decide out loud what to do without one — the whole
+    /// point of the variant.
+    pub fn total(&self) -> Option<u64> {
         match self {
-            TokenUsage::Split { input, output } => input.saturating_add(*output),
-            TokenUsage::TotalOnly { total } => *total,
+            TokenUsage::Split { input, output } => Some(input.saturating_add(*output)),
+            TokenUsage::TotalOnly { total } => Some(*total),
+            TokenUsage::Unreported => None,
         }
     }
 
@@ -185,7 +221,7 @@ impl TokenUsage {
     pub fn input(&self) -> Option<u64> {
         match self {
             TokenUsage::Split { input, .. } => Some(*input),
-            TokenUsage::TotalOnly { .. } => None,
+            TokenUsage::TotalOnly { .. } | TokenUsage::Unreported => None,
         }
     }
 
@@ -193,7 +229,7 @@ impl TokenUsage {
     pub fn output(&self) -> Option<u64> {
         match self {
             TokenUsage::Split { output, .. } => Some(*output),
-            TokenUsage::TotalOnly { .. } => None,
+            TokenUsage::TotalOnly { .. } | TokenUsage::Unreported => None,
         }
     }
 }
@@ -207,8 +243,20 @@ struct TokenFields {
     input_tokens: Option<u64>,
     #[serde(default)]
     output_tokens: Option<u64>,
-    #[serde(default)]
-    total_tokens: Option<u64>,
+    /// A DOUBLE option, so the deserializer can tell an explicit
+    /// `null` (`Some(None)` — no count, said out loud) from an absent
+    /// key (`None` — a payload that forgot to say). `deserialize_with`
+    /// runs only when the key is present, which is what makes the two
+    /// readable apart; a plain `Option<u64>` collapses both to `None`
+    /// (backlog 65c9c05a).
+    #[serde(default, deserialize_with = "stated_total")]
+    total_tokens: Option<Option<u64>>,
+}
+
+/// Called only when `total_tokens` IS present, so the wrapping `Some`
+/// is what marks the value as stated — `null` included.
+fn stated_total<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<u64>>, D::Error> {
+    Ok(Some(Option::<u64>::deserialize(d)?))
 }
 
 impl Serialize for TokenUsage {
@@ -220,6 +268,9 @@ impl Serialize for TokenUsage {
         TokenFields {
             input_tokens: self.input(),
             output_tokens: self.output(),
+            // Always the key, and `null` as its value for an
+            // unreported run: an absent key would read as a payload
+            // that forgot to say.
             total_tokens: Some(self.total()),
         }
         .serialize(s)
@@ -398,7 +449,7 @@ impl AgentRun {
                 output_tokens: output,
                 usd_micros: self.usd_micros.unwrap_or(0),
             }),
-            TokenUsage::TotalOnly { .. } => None,
+            TokenUsage::TotalOnly { .. } | TokenUsage::Unreported => None,
         }
     }
 }
@@ -410,11 +461,13 @@ impl AgentRun {
 /// 1. The run names no model — a non-agent actor, or a registered
 ///    agent's run that was never resolved through the registry.
 /// 2. No card row covers the model.
-/// 3. **The run reported only a total.** The card charges input and
-///    output at different rates, so there is no arithmetic from one
-///    number to a price. Assuming a ratio would produce a figure with a
+/// 3. **The run reported only a total, or no count at all.** The card
+///    charges input and output at different rates, so there is no
+///    arithmetic from one number to a price — and none whatsoever from
+///    no number. Assuming a ratio would produce a figure with a
 ///    measurement's authority and a guess's accuracy; the roll-up
-///    counts these out loud instead (`total_only_runs`).
+///    counts these out loud instead (`total_only_runs` and
+///    `unreported_runs`).
 ///
 /// Integer arithmetic throughout, in `u128` so a run cannot overflow
 /// the multiply before the divide, rounded to the nearest micro-USD
@@ -460,15 +513,16 @@ pub struct RunFilter {
 
 /// Spend for one model, or for one car.
 ///
-/// `total_tokens` always answers; the split halves are `None` the
-/// moment a total-only run joins, for the same reason `usd_micros` is
-/// — see [`RunSummary`].
+/// The split halves go `None` the moment a total-only run joins, and
+/// `total_tokens` the moment an unreported one does, for the same
+/// reason `usd_micros` does — see [`RunSummary`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupSpend {
     /// The model string, or the branch name.
     pub key: String,
     pub runs: u64,
-    pub total_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: Option<u64>,
     #[serde(default)]
     pub input_tokens: Option<u64>,
     #[serde(default)]
@@ -479,27 +533,33 @@ pub struct GroupSpend {
     pub usd_micros: Option<u64>,
     pub unpriced_runs: u64,
     pub total_only_runs: u64,
+    pub unreported_runs: u64,
 }
 
 /// The answer to "what did this cost to build".
 ///
-/// **Three fields refuse to look more complete than the set they cover.**
+/// **Four fields refuse to look more complete than the set they cover.**
 /// `usd_micros` is `Some` only when EVERY run was priced; `input_tokens`
-/// and `output_tokens` are `Some` only when every run reported a split.
-/// A partial figure that looked whole is the failure this avoids: one
-/// missing rate-card row, or one reporter with only a total, would
-/// otherwise understate the bill while reading as an answer.
+/// and `output_tokens` are `Some` only when every run reported a split;
+/// `total_tokens` only when every run reported a count at all. A
+/// partial figure that looked whole is the failure this avoids: one
+/// missing rate-card row, one reporter with only a total, or one
+/// harness that printed no usage line would otherwise understate the
+/// bill while reading as an answer.
 ///
-/// `total_tokens` always answers, because every run has one.
-///
-/// Two counters say WHY a total went missing, because the fixes differ:
-/// `unpriced_runs` is how many could not be priced at all, and
-/// `total_only_runs` is how many of those reported no split to price.
+/// Three counters say WHY a total went missing, because the fixes
+/// differ: `unpriced_runs` is how many could not be priced at all,
+/// `total_only_runs` is how many of those reported no split to price,
+/// and `unreported_runs` is how many reported no tokens at all
+/// (backlog 65c9c05a).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunSummary {
     pub runs: u64,
-    /// Always summable — every run reports a total, derived or measured.
-    pub total_tokens: u64,
+    /// `None` once any run in the set reported no count — unknown, not
+    /// zero, and a sum that quietly treated it as zero would be the
+    /// defect this field exists to refuse.
+    #[serde(default)]
+    pub total_tokens: Option<u64>,
     /// `None` once any run in the set reported only a total.
     #[serde(default)]
     pub input_tokens: Option<u64>,
@@ -515,6 +575,10 @@ pub struct RunSummary {
     /// How many runs reported a bare total, which is why a price could
     /// not be computed for them. A subset of `unpriced_runs`.
     pub total_only_runs: u64,
+    /// How many runs reported no token count at all. Also a subset of
+    /// `unpriced_runs`, and disjoint from `total_only_runs`: the fixes
+    /// differ, so the counters do.
+    pub unreported_runs: u64,
     pub by_model: Vec<GroupSpend>,
     pub by_branch: Vec<GroupSpend>,
 }
@@ -557,6 +621,7 @@ pub fn summarize(runs: &[AgentRun]) -> RunSummary {
         usd_micros: total.usd_micros,
         unpriced_runs: total.unpriced_runs,
         total_only_runs: total.total_only_runs,
+        unreported_runs: total.unreported_runs,
         by_model: by_model.into_values().collect(),
         by_branch: by_branch.into_values().collect(),
     }
@@ -566,7 +631,7 @@ fn blank(key: &str) -> GroupSpend {
     GroupSpend {
         key: key.to_string(),
         runs: 0,
-        total_tokens: 0,
+        total_tokens: Some(0),
         input_tokens: Some(0),
         output_tokens: Some(0),
         tool_calls: 0,
@@ -574,15 +639,23 @@ fn blank(key: &str) -> GroupSpend {
         usd_micros: Some(0),
         unpriced_runs: 0,
         total_only_runs: 0,
+        unreported_runs: 0,
     }
 }
 
-/// Add one run into a bucket. `usd_micros` and the two split halves go
-/// to `None` and STAY `None` the moment a run joins that cannot supply
-/// them — see [`RunSummary`].
+/// Add one run into a bucket. `usd_micros`, `total_tokens` and the two
+/// split halves go to `None` and STAY `None` the moment a run joins
+/// that cannot supply them — see [`RunSummary`].
 fn fold(into: &mut GroupSpend, run: &AgentRun) {
     into.runs += 1;
-    into.total_tokens = into.total_tokens.saturating_add(run.run.tokens.total());
+    // `and_then`, not `map`: a bucket that has already met an
+    // unreported run stays unanswered, and a bucket meeting its first
+    // one stops answering. Adding zero for it would be the projection
+    // telling the same lie the column used to.
+    into.total_tokens = match run.run.tokens.total() {
+        Some(t) => into.total_tokens.map(|s| s.saturating_add(t)),
+        None => None,
+    };
     match run.run.tokens {
         TokenUsage::Split { input, output } => {
             into.input_tokens = into.input_tokens.map(|t| t.saturating_add(input));
@@ -592,6 +665,11 @@ fn fold(into: &mut GroupSpend, run: &AgentRun) {
             into.input_tokens = None;
             into.output_tokens = None;
             into.total_only_runs += 1;
+        }
+        TokenUsage::Unreported => {
+            into.input_tokens = None;
+            into.output_tokens = None;
+            into.unreported_runs += 1;
         }
     }
     into.tool_calls = into
@@ -649,7 +727,7 @@ mod tests {
 
     fn with_tokens(actor: &str, tokens: TokenUsage) -> NewAgentRun {
         NewAgentRun {
-            run_id: format!("run-{actor}-{}", tokens.total()),
+            run_id: format!("run-{actor}-{:?}", tokens.total()),
             actor_id: actor.parse().expect("ActorId::from_str is infallible"),
             started_at: "2026-09-10T01:00:00Z".parse().unwrap(),
             finished_at: "2026-09-10T01:10:00Z".parse().unwrap(),
@@ -790,7 +868,7 @@ mod tests {
         let s = summarize(&runs);
         assert_eq!(s.runs, 2);
         assert_eq!(s.input_tokens, Some(2_000_000));
-        assert_eq!(s.total_tokens, 2_000_000);
+        assert_eq!(s.total_tokens, Some(2_000_000));
         assert_eq!(s.tool_calls, 14);
         assert_eq!(s.wall_secs, 1200);
         assert_eq!(s.usd_micros, Some(6_000_000));
@@ -913,7 +991,7 @@ mod tests {
             input: 128_684,
             output: 14_298,
         };
-        assert_eq!(tokens.total(), 142_982);
+        assert_eq!(tokens.total(), Some(142_982));
         assert_eq!(tokens.input(), Some(128_684));
         assert_eq!(tokens.output(), Some(14_298));
     }
@@ -921,7 +999,7 @@ mod tests {
     #[test]
     fn a_total_only_run_reports_its_total_and_no_split() {
         let tokens = TokenUsage::TotalOnly { total: 142_982 };
-        assert_eq!(tokens.total(), 142_982);
+        assert_eq!(tokens.total(), Some(142_982));
         assert_eq!(tokens.input(), None);
         assert_eq!(tokens.output(), None);
     }
@@ -938,7 +1016,7 @@ mod tests {
         );
         assert_eq!(run.priced_by, None, "nothing priced it");
         // The run is still a RECORD: tokens, tool calls and duration.
-        assert_eq!(run.run.tokens.total(), 142_982);
+        assert_eq!(run.run.tokens.total(), Some(142_982));
         assert_eq!(run.duration_secs(), 600);
     }
 
@@ -953,15 +1031,93 @@ mod tests {
     }
 
     #[test]
-    fn a_run_reporting_neither_a_total_nor_a_split_is_refused() {
-        let err = TokenUsage::from_parts(None, None, None).expect_err("neither is not a run");
+    fn a_report_that_says_it_has_no_count_records_one_rather_than_a_zero() {
+        // Backlog 65c9c05a: 13 of 42 live rows carried `total_tokens`
+        // 0 for "the harness printed no usage line", distinguishable
+        // from a genuine zero only by a companion `detail` flag. An
+        // average over the column silently included them.
+        let json = r#"{
+            "run_id": "run-silent",
+            "actor_id": "claude:opus-5",
+            "started_at": "2026-09-19T01:00:00Z",
+            "finished_at": "2026-09-19T01:10:00Z",
+            "outcome": "success",
+            "total_tokens": null
+        }"#;
+        let run: NewAgentRun = serde_json::from_str(json).expect("an explicit null is a shape");
+        assert_eq!(run.tokens, TokenUsage::Unreported);
+        assert_eq!(
+            run.tokens.total(),
+            None,
+            "unknown, not zero — the same distinction usd_micros draws"
+        );
+        let back = serde_json::to_value(&run).expect("serializes");
+        assert_explicit_null!(
+            back,
+            "total_tokens",
+            "an absent key reads as a payload that forgot to say"
+        );
+    }
+
+    #[test]
+    fn an_unreported_run_is_unpriced_and_the_roll_up_reports_no_total_at_all() {
+        let card = card();
+        let mut silent = a_total_run("claude:opus-5", 0);
+        silent.run_id = "run-silent".into();
+        silent.tokens = TokenUsage::Unreported;
+        let runs = vec![
+            recorded(a_run("claude:opus-5", 9, 1), &card),
+            recorded(silent, &card),
+        ];
+        let s = summarize(&runs);
+        assert_eq!(
+            s.total_tokens, None,
+            "a sum over a set holding an unmeasured run understates it while looking whole"
+        );
+        assert_eq!(s.unreported_runs, 1);
+        assert_eq!(s.unpriced_runs, 1, "no tokens is no price");
+        assert_eq!(
+            s.total_only_runs, 0,
+            "a bare total and no count at all are different facts with different fixes"
+        );
+        assert_eq!(runs[1].usd_micros, None);
+    }
+
+    #[test]
+    fn a_run_that_never_mentions_tokens_is_refused_where_a_stated_null_is_not() {
+        // The two Nones differ: an absent key is silence and is
+        // refused; `Some(None)` is a reporter saying it has no count
+        // and is the honest record (backlog 65c9c05a).
+        let err = TokenUsage::from_parts(None, None, None).expect_err("silence is not a run");
         assert!(err.contains("total_tokens"), "{err}");
         assert!(err.contains("input_tokens"), "{err}");
+        assert_eq!(
+            TokenUsage::from_parts(None, None, Some(None)),
+            Ok(TokenUsage::Unreported),
+            "said out loud, it is a shape"
+        );
+    }
+
+    #[test]
+    fn a_payload_that_never_mentions_tokens_is_refused_on_the_wire_too() {
+        // The wire half of the rule above: the double option is only
+        // worth having if serde can still tell the two apart after
+        // flattening, and nothing else proves that.
+        let json = r#"{
+            "run_id": "run-quiet",
+            "actor_id": "claude:opus-5",
+            "started_at": "2026-09-19T01:00:00Z",
+            "finished_at": "2026-09-19T01:10:00Z",
+            "outcome": "success"
+        }"#;
+        let err = serde_json::from_str::<NewAgentRun>(json)
+            .expect_err("a payload that says nothing about tokens is not a report");
+        assert!(err.to_string().contains("total_tokens"), "{err}");
     }
 
     #[test]
     fn half_a_split_is_refused_rather_than_completed_by_subtraction() {
-        let err = TokenUsage::from_parts(Some(10), None, Some(12))
+        let err = TokenUsage::from_parts(Some(10), None, Some(Some(12)))
             .expect_err("a half split must not be completed from the total");
         assert!(err.contains("output_tokens"), "{err}");
         let err = TokenUsage::from_parts(None, Some(2), None).expect_err("half a split");
@@ -970,7 +1126,7 @@ mod tests {
 
     #[test]
     fn a_supplied_total_that_disagrees_with_the_split_is_refused_naming_both() {
-        let err = TokenUsage::from_parts(Some(10), Some(2), Some(11))
+        let err = TokenUsage::from_parts(Some(10), Some(2), Some(Some(11)))
             .expect_err("11 is not 10 + 2, and guessing which is right is not available");
         assert!(err.contains("11"), "{err}");
         assert!(err.contains("12"), "{err}");
@@ -978,7 +1134,8 @@ mod tests {
 
     #[test]
     fn a_supplied_total_that_agrees_is_accepted_and_the_split_remains_the_definition() {
-        let tokens = TokenUsage::from_parts(Some(10), Some(2), Some(12)).expect("12 is 10 + 2");
+        let tokens =
+            TokenUsage::from_parts(Some(10), Some(2), Some(Some(12))).expect("12 is 10 + 2");
         assert_eq!(
             tokens,
             TokenUsage::Split {
@@ -1086,7 +1243,7 @@ mod tests {
         ];
         let s = summarize(&runs);
         assert_eq!(s.runs, 2);
-        assert_eq!(s.total_tokens, 361_200, "the totals still add up");
+        assert_eq!(s.total_tokens, Some(361_200), "the totals still add up");
         assert_eq!(
             s.usd_micros, None,
             "a set of total-only runs must not report a confident cost"
@@ -1113,7 +1270,7 @@ mod tests {
             recorded(only_total, &card),
         ];
         let s = summarize(&runs);
-        assert_eq!(s.total_tokens, 110);
+        assert_eq!(s.total_tokens, Some(110));
         assert_eq!(s.input_tokens, None);
         assert_eq!(s.output_tokens, None);
         assert_eq!(s.usd_micros, None);
@@ -1136,6 +1293,6 @@ mod tests {
             Some(9),
             "the split was reported, so it sums"
         );
-        assert_eq!(s.total_tokens, 10);
+        assert_eq!(s.total_tokens, Some(10));
     }
 }

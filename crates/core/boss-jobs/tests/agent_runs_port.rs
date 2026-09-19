@@ -220,7 +220,7 @@ async fn what_did_the_whole_session_cost() {
 
     assert_eq!(summary.runs, 4);
     // The packet's headline number, now answerable: ~761,000 tokens.
-    assert_eq!(summary.total_tokens, 761_578);
+    assert_eq!(summary.total_tokens, Some(761_578));
     assert_eq!(summary.input_tokens, Some(685_422), "every run had a split");
     assert_eq!(summary.tool_calls, 52 + 91 + 68 + 98);
     assert_eq!(summary.wall_secs, (10 + 14 + 15 + 18) * 60);
@@ -398,7 +398,7 @@ async fn a_run_that_only_knows_its_total_is_still_a_record() {
         .expect("a total-only run is a well-formed run");
 
     assert!(out.recorded, "the run is on the record");
-    assert_eq!(out.run.run.tokens.total(), 142_982, "what it spent");
+    assert_eq!(out.run.run.tokens.total(), Some(142_982), "what it spent");
     assert_eq!(out.run.run.tokens.input(), None, "no split was measured");
     assert_eq!(out.run.model(), Some("opus-5"), "which model ran");
     assert_eq!(out.run.duration_secs(), 600, "how long it took");
@@ -446,7 +446,11 @@ async fn a_nights_worth_of_total_only_runs_rolls_up_without_inventing_a_cost() {
     let summary = summarize(&log.list_runs(&RunFilter::default()).await.expect("lists"));
 
     assert_eq!(summary.runs, 3);
-    assert_eq!(summary.total_tokens, 633_285, "the tokens are all recorded");
+    assert_eq!(
+        summary.total_tokens,
+        Some(633_285),
+        "the tokens are all recorded"
+    );
     assert_eq!(summary.tool_calls, 52 + 91 + 85);
     assert_eq!(summary.wall_secs, (10 + 14 + 18) * 60);
     assert_eq!(
@@ -468,7 +472,7 @@ async fn a_nights_worth_of_total_only_runs_rolls_up_without_inventing_a_cost() {
         summary
             .by_branch
             .iter()
-            .all(|g| g.usd_micros.is_none() && g.total_tokens > 0),
+            .all(|g| g.usd_micros.is_none() && g.total_tokens > Some(0)),
         "each car reports its tokens and declines to report a price"
     );
 }
@@ -490,7 +494,7 @@ async fn a_mixed_night_keeps_every_token_and_refuses_a_partial_bill() {
 
     let summary = summarize(&log.list_runs(&RunFilter::default()).await.expect("lists"));
     assert_eq!(summary.runs, 2);
-    assert_eq!(summary.total_tokens, 1_142_982);
+    assert_eq!(summary.total_tokens, Some(1_142_982));
     assert_eq!(summary.usd_micros, None);
     assert_eq!(summary.unpriced_runs, 1);
     assert_eq!(summary.total_only_runs, 1);

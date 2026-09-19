@@ -27,11 +27,14 @@
 //! (`readiness`, `http`; design 3613f0af, backlog 1dffde5d): a
 //! department's protocols are the kinds declaring it, and everything
 //! else the read reports — sensors, rules, the newest retro — hangs
-//! off that kind set. `GET /api/departments` lists what the classes
-//! registry holds, which is what the weekly retro rule iterates.
+//! off that kind set. `GET /api/departments` lists what the DEPARTMENTS
+//! registry holds (`registry` — it was the employee Class drawer
+//! until backlog 80a77466), which is what the weekly retro rule
+//! iterates.
 
 pub mod http;
 pub mod readiness;
+pub mod registry;
 pub mod rules;
 
 use crate::registry::WorkflowSpec;

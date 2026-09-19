@@ -111,6 +111,50 @@ pub enum Cmd {
         /// The car: its branch, or 8+ characters of its id.
         car: String,
     },
+    /// Step verbs that belong to no one protocol — today, the generic completion.
+    Step {
+        #[command(subcommand)]
+        action: StepAction,
+    },
+}
+
+/// The generic half of this module. A new step verb lands INSIDE this
+/// enum rather than as another top-level variant: a group's action enum
+/// touches no shared line, so two in-flight cars adding one merge clean
+/// (the rule `main::Commands` states, 84f9fbc0).
+#[derive(clap::Subcommand)]
+pub enum StepAction {
+    /// Complete any step, in the shape its Workflow row declares.
+    ///
+    /// The five specific verbs above cover five step kinds; this one
+    /// covers the rest, and it is what the page march's ~94 completions
+    /// go through. It reads the step's declared fields off the packet,
+    /// REFUSES a name the row does not declare (the API would store it
+    /// as an annotation and answer success), merges the writes over the
+    /// step's own metadata rather than replacing it, judges the result
+    /// by the registry's own validator before the round trip, and reads
+    /// the packet back — a 204 is not evidence.
+    Complete {
+        /// The packet: 8+ characters of its id, or the full uuid.
+        packet: String,
+        /// The step's slug, as the Workflow row titles it (`measure`, `file`, `test`).
+        #[arg(long)]
+        step: String,
+        /// One declared field: `--field name=value`, repeatable. Typed
+        /// by what the row declares — a `number` is written as a
+        /// number, an enum value is checked against its set, an
+        /// `array`/`object` value is parsed as JSON. SINGLE-quote
+        /// prose: inside double quotes a backticked word is run by the
+        /// shell and lands as a hole (backlog 2376b89e).
+        #[arg(long = "field", value_name = "NAME=VALUE")]
+        field: Vec<String>,
+        /// A field whose value is read from a file: `--field-file
+        /// name=PATH`, repeatable. The door for a long body — the
+        /// march's `controls_md`, `needs_md`, `gaps_md` are whole
+        /// documents — with no shell between the bytes and the record.
+        #[arg(long = "field-file", value_name = "NAME=PATH")]
+        field_file: Vec<String>,
+    },
 }
 
 pub async fn dispatch(cmd: Cmd) -> Result<()> {
@@ -146,6 +190,17 @@ pub async fn dispatch(cmd: Cmd) -> Result<()> {
         }
         Cmd::Hold { car, reason } => hold(&wire, &car, Some(&reason)).await,
         Cmd::Release { car } => hold(&wire, &car, None).await,
+        Cmd::Step { action } => match action {
+            StepAction::Complete {
+                packet,
+                step,
+                field,
+                field_file,
+            } => {
+                let given = given_values(&field, &field_file)?;
+                complete(&wire, &packet, &step, &given).await
+            }
+        },
     }
 }
 
@@ -786,6 +841,262 @@ pub(crate) async fn hold(wire: &Wire, car: &str, reason: Option<&str>) -> Result
             bail!("the API answered the PUT but the review step still reads as held: {held:?}")
         }
     }
+    Ok(())
+}
+
+// ----------------------------------------------------------------------
+// `boss step complete` — the generic completion.
+//
+// WHY (backlog d7d28a54). The five verbs above cover five step kinds.
+// Every other completion is a hand-built `boss-api PUT
+// /api/jobs/{id}/steps/{sid}` whose body must be read off the packet
+// first, and the page march is about to ask for ~94 of them (47 routes
+// x `measure` + `file`). The three hazards that PUT carries are all in
+// `boss-jobs/src/http/steps.rs`: `metadata` is REPLACED wholesale by
+// the body's top-level keys (only `authority_role` and `human_only`
+// carry forward), so a naive completion deletes the step's `procedure`
+// and its `agent` block; an UNKNOWN field name is not refused but
+// stored beside the real ones, so a name typed from memory reads as
+// success and records nothing (retro 27fad542, class B); and a 204 is
+// a claim, not a fact.
+// ----------------------------------------------------------------------
+
+/// A field the caller supplied, with its value already off the shell —
+/// from `--field name=value` or read from `--field-file name=PATH`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Given {
+    pub name: String,
+    pub value: String,
+}
+
+/// `name=rest`, split on the FIRST `=`: a value carries `=` of its own
+/// (a branch, a query, a probe line), and a name never does.
+pub(crate) fn parse_pair(flag: &str, raw: &str) -> Result<(String, String), String> {
+    match raw.split_once('=') {
+        Some((name, value)) if !name.trim().is_empty() => {
+            Ok((name.trim().to_string(), value.to_string()))
+        }
+        _ => Err(format!(
+            "{flag} takes `name=value` (everything after the first `=` is the value) — got {raw:?}"
+        )),
+    }
+}
+
+/// The two flags read into one ordered list. The shell is removed here
+/// and nowhere else: an argv value is trimmed, a file's bytes lose only
+/// the editor's final newline.
+pub(crate) fn given_values(fields: &[String], files: &[String]) -> Result<Vec<Given>> {
+    let mut out = Vec::new();
+    for raw in fields {
+        let (name, value) = parse_pair("--field", raw).map_err(|e| anyhow!("{e}"))?;
+        let value = value.trim().to_string();
+        if value.is_empty() {
+            // The one artifact of the 2376b89e defect that is
+            // unambiguous, refused the way `prose::text_or_file`
+            // refuses it and naming this flag's own file door.
+            bail!(
+                "--field {name}= is empty — nothing would be recorded. If a command \
+                 substitution ate it, quote the value with SINGLE quotes or pass it through \
+                 `--field-file {name}=<PATH>`: backticks inside double quotes are run by the \
+                 shell before this verb sees them."
+            );
+        }
+        out.push(Given { name, value });
+    }
+    for raw in files {
+        let (name, path) = parse_pair("--field-file", raw).map_err(|e| anyhow!("{e}"))?;
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("--field-file {name}={path}: reading it"))?;
+        let value = text.trim_end().to_string();
+        if value.trim().is_empty() {
+            bail!("--field-file {name}={path} is empty — nothing would be recorded");
+        }
+        out.push(Given { name, value });
+    }
+    Ok(out)
+}
+
+/// The row's contract, rendered for a refusal: what it declares, with
+/// each field's type and whether it is required.
+pub(crate) fn declares(fields: &[Field]) -> String {
+    if fields.is_empty() {
+        return "nothing".to_string();
+    }
+    fields
+        .iter()
+        .map(|f| {
+            format!(
+                "{} ({}{})",
+                f.name,
+                if f.required { "required " } else { "" },
+                f.field_type
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One value, typed by what the ROW declares rather than by what argv
+/// carries. Everything reaching a verb through argv is a string; a
+/// `number` field given `"3"` would be stored as a string and refused
+/// at done by `validate_field_type`, one round trip later and in the
+/// API's words rather than this flag's.
+pub(crate) fn coerce(field: &Field, raw: &str) -> Result<Value, String> {
+    let wrong = |want: &str| {
+        format!(
+            "`{}` is declared `{}` — {raw:?} is not {want}",
+            field.name, field.field_type
+        )
+    };
+    if let Some(allowed) = enum_values(&field.field_type) {
+        return if allowed.contains(&raw) {
+            Ok(json!(raw))
+        } else {
+            Err(format!(
+                "`{raw}` is not a value `{}` declares — one of [{}]",
+                field.name,
+                allowed.join(", ")
+            ))
+        };
+    }
+    match field.field_type.as_str() {
+        "number" => raw
+            .parse::<f64>()
+            .ok()
+            .filter(|n| n.is_finite())
+            .map(|n| json!(n))
+            .ok_or_else(|| wrong("a number")),
+        "integer" => raw
+            .parse::<i64>()
+            .map(|n| json!(n))
+            .map_err(|_| wrong("an integer")),
+        "boolean" => match raw {
+            "true" => Ok(json!(true)),
+            "false" => Ok(json!(false)),
+            _ => Err(wrong("`true` or `false`")),
+        },
+        // A structured field's value is JSON, and JSON on a command
+        // line is quoting the shell will fight: the refusal names the
+        // file door, which is where a questions array belongs anyway.
+        kind @ ("array" | "object") => {
+            let value: Value = serde_json::from_str(raw).map_err(|e| {
+                format!(
+                    "`{}` is declared `{kind}` and its value must be JSON — {e}. JSON through \
+                     argv is a quoting fight: write it to a file and pass `--field-file {}=<PATH>`",
+                    field.name, field.name
+                )
+            })?;
+            let ok = if kind == "array" {
+                value.is_array()
+            } else {
+                value.is_object()
+            };
+            if ok {
+                Ok(value)
+            } else {
+                Err(wrong(&format!("a JSON {kind}")))
+            }
+        }
+        // string / uri / date / date-time, and any type spec this
+        // version does not know: the text as given. The registry's own
+        // validator below judges it, so an unknown spec is not guessed
+        // at here.
+        _ => Ok(json!(raw)),
+    }
+}
+
+/// What the completion writes, decided against the step's declared
+/// fields. THE UNDECLARED KEY IS THE HAZARD: `update_step` merges the
+/// body over the step and stores a name no field declares, so a typo
+/// answers 204 and records an annotation nobody reads. Refused here, by
+/// name, naming what the row does declare.
+pub(crate) fn field_writes(step: &Value, given: &[Given]) -> Result<Map<String, Value>, String> {
+    let declared = declared_fields(step);
+    let mut writes = Map::new();
+    for g in given {
+        let field = declared.iter().find(|f| f.name == g.name).ok_or_else(|| {
+            format!(
+                "this step's row declares no `{}` field — it declares: {}. The API would not \
+                 refuse it: an undeclared key is STORED beside the real ones and answers 204, \
+                 so a name typed from memory reads as success and records nothing (retro \
+                 27fad542)",
+                g.name,
+                declares(&declared)
+            )
+        })?;
+        if writes.contains_key(&g.name) {
+            return Err(format!(
+                "`{}` was given twice — one value would silently win",
+                g.name
+            ));
+        }
+        writes.insert(g.name.clone(), coerce(field, &g.value)?);
+    }
+    Ok(writes)
+}
+
+/// The completion judged by the SERVER'S OWN rule before the round
+/// trip: `StepRegistry::validate_authored_fields`, the very function
+/// `update_step` runs at done (one definition, not a restatement of it
+/// — the move `boss job list --where` makes with the containment
+/// parser). So a missing required field is refused HERE, with the list,
+/// rather than as a 422 the caller then guesses against.
+pub(crate) fn contract_check(step: &Value, metadata: &Value) -> Result<(), String> {
+    let declared: Vec<boss_core::job::StepField> =
+        serde_json::from_value(step.get("fields").cloned().unwrap_or_else(|| json!([])))
+            .unwrap_or_default();
+    boss_jobs::step_registry::StepRegistry::validate_authored_fields(&declared, metadata).map_err(
+        |errors| {
+            format!(
+                "this completion is not the shape the row declares:\n{}\n  the row declares: {}\
+                 \n  supply each with `--field <name>=<value>`, or `--field-file <name>=<PATH>` \
+                 for a long body",
+                errors
+                    .iter()
+                    .map(|e| format!("  - {e}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                declares(&declared_fields(step))
+            )
+        },
+    )
+}
+
+pub(crate) async fn complete(
+    wire: &Wire,
+    packet_ref: &str,
+    slug: &str,
+    given: &[Given],
+) -> Result<()> {
+    let packet = wire.resolve(packet_ref, None).await?;
+    let step = open_step(&packet, slug).map_err(|e| anyhow!("{e}"))?;
+    let writes =
+        field_writes(step, given).map_err(|e| anyhow!("{} `{slug}`: {e}", short(&packet)))?;
+    // Merged, not replaced — the step keeps its `procedure`, its
+    // `agent` block and its audience — and the MERGED document is what
+    // the registry judges, exactly as the API judges it after its own
+    // merge.
+    let body = completion(step, &writes);
+    contract_check(step, &body["metadata"])
+        .map_err(|e| anyhow!("{} `{slug}`: {e}", short(&packet)))?;
+    let jid = crate::envelope::job_id(&packet).context("the packet has no id")?;
+    let sid = step_id(step)?;
+    wire.put_step(jid, sid, body).await?;
+
+    let after = wire.packet(jid).await?;
+    confirm_completed(step_after(&after, sid)?, &writes)?;
+    let names = writes.keys().cloned().collect::<Vec<_>>().join(", ");
+    println!(
+        "boss step complete: {} \"{}\" — `{slug}` completed{}\n  {}",
+        short(&packet),
+        title_of(&packet),
+        if names.is_empty() {
+            String::new()
+        } else {
+            format!(" with {names}")
+        },
+        standing(&after)
+    );
     Ok(())
 }
 
@@ -1630,5 +1941,378 @@ mod tests {
             "{err}"
         );
         assert!(s.puts.lock().unwrap().is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // `boss step complete` — the generic completion (backlog d7d28a54)
+    // ------------------------------------------------------------------
+
+    /// The page-audit `measure` step, in the shape the live row
+    /// declares it (infra/platform/workflows/page-audit.toml): three
+    /// required markdown bodies, and a metadata block carrying the
+    /// procedure and the agent's own keys — the keys a wholesale
+    /// metadata PUT deletes.
+    fn measure_step(status: &str) -> Value {
+        json!({
+            "id": "33333333-3333-3333-3333-333333333333",
+            "spec_slug": "measure",
+            "status": status,
+            "assignee_id": "claude@algedonic.dev",
+            "fields": [
+                field("controls_md", "string", true),
+                field("needs_md", "string", true),
+                field("gaps_md", "string", true),
+            ],
+            "metadata": {
+                "human_only": false,
+                "authority_role": "platform-admin",
+                "procedure": "Read the PAGE and the DEPARTMENT, and write the difference.",
+                "agent_profile": "analyst",
+            },
+        })
+    }
+
+    fn given(pairs: &[(&str, &str)]) -> Vec<Given> {
+        pairs
+            .iter()
+            .map(|(n, v)| Given {
+                name: (*n).to_string(),
+                value: (*v).to_string(),
+            })
+            .collect()
+    }
+
+    /// A value carries `=` of its own — a query, a branch, a probe line
+    /// — so the split is on the FIRST one and never on the last.
+    #[test]
+    fn a_pair_splits_on_the_first_equals_and_a_nameless_one_is_refused() {
+        assert_eq!(
+            parse_pair("--field", "car=fix/a?x=1&y=2"),
+            Ok(("car".to_string(), "fix/a?x=1&y=2".to_string()))
+        );
+        for bad in ["no-equals", "=value"] {
+            let err = parse_pair("--field", bad).expect_err("refused");
+            assert!(err.contains("--field takes `name=value`"), "{err}");
+        }
+    }
+
+    /// HAZARD 2, the one the API does not guard: an undeclared key is
+    /// stored beside the real fields and answers 204. Refused here BY
+    /// NAME, and the refusal names what the row does declare so the
+    /// next attempt is right.
+    #[test]
+    fn an_undeclared_field_is_refused_by_name_and_names_what_the_row_declares() {
+        let err = field_writes(
+            &measure_step("ready"),
+            &given(&[("controls", "seven links")]),
+        )
+        .expect_err("refused");
+        assert!(err.contains("no `controls` field"), "{err}");
+        assert!(
+            err.contains("controls_md (required string)") && err.contains("gaps_md"),
+            "names the declared contract: {err}"
+        );
+        // And a step whose row declares nothing at all says so rather
+        // than printing an empty list.
+        let bare = json!({ "id": "s", "spec_slug": "build", "status": "ready", "metadata": {} });
+        let err = field_writes(&bare, &given(&[("anything", "x")])).expect_err("refused");
+        assert!(err.contains("it declares: nothing"), "{err}");
+    }
+
+    /// The same value twice is a silent overwrite, whichever flag it
+    /// came from.
+    #[test]
+    fn the_same_field_given_twice_is_refused() {
+        let err = field_writes(
+            &measure_step("ready"),
+            &given(&[("gaps_md", "one"), ("gaps_md", "two")]),
+        )
+        .expect_err("refused");
+        assert!(err.contains("`gaps_md` was given twice"), "{err}");
+    }
+
+    /// Everything through argv is a string; the ROW decides the type.
+    /// A `number` stored as `"3"` passes this verb and is refused at
+    /// done by the API, one round trip later.
+    #[test]
+    fn a_value_is_typed_by_what_the_row_declares() {
+        let f = |t: &str| Field {
+            name: "n".into(),
+            field_type: t.into(),
+            required: false,
+        };
+        assert_eq!(coerce(&f("number"), "3.5"), Ok(json!(3.5)));
+        assert_eq!(coerce(&f("integer"), "42"), Ok(json!(42)));
+        assert_eq!(coerce(&f("boolean"), "true"), Ok(json!(true)));
+        assert_eq!(coerce(&f("string"), "42"), Ok(json!("42")));
+        // An unknown type spec is not guessed at — the text as given,
+        // for the registry's own validator to judge.
+        assert_eq!(coerce(&f("date"), "2026-09-19"), Ok(json!("2026-09-19")));
+
+        let err = coerce(&f("number"), "seven").expect_err("refused");
+        assert!(err.contains("is not a number"), "{err}");
+        let err = coerce(&f("number"), "NaN").expect_err("refused");
+        assert!(
+            err.contains("is not a number"),
+            "a non-finite is not a number: {err}"
+        );
+        let err = coerce(&f("boolean"), "yes").expect_err("refused");
+        assert!(err.contains("`true` or `false`"), "{err}");
+    }
+
+    /// An enum value is checked against the row's set, and the refusal
+    /// names the set — the same contract `boss triage` holds its
+    /// disposition to, generalised.
+    #[test]
+    fn an_enum_value_outside_the_rows_set_is_refused_naming_the_set() {
+        let decision = Field {
+            name: "decision".into(),
+            field_type: "approved|changes-requested".into(),
+            required: true,
+        };
+        assert_eq!(coerce(&decision, "approved"), Ok(json!("approved")));
+        let err = coerce(&decision, "accepted").expect_err("refused");
+        assert!(
+            err.contains("not a value `decision` declares")
+                && err.contains("approved, changes-requested"),
+            "{err}"
+        );
+    }
+
+    /// A structured field takes JSON, and a broken one names the file
+    /// door rather than leaving the caller fighting shell quoting.
+    #[test]
+    fn a_structured_field_takes_json_and_a_broken_one_names_the_file_door() {
+        let questions = Field {
+            name: "questions".into(),
+            field_type: "array".into(),
+            required: true,
+        };
+        assert_eq!(
+            coerce(&questions, r#"[{"anchor":"a"}]"#),
+            Ok(json!([{ "anchor": "a" }]))
+        );
+        let err = coerce(&questions, "[{anchor}]").expect_err("refused");
+        assert!(err.contains("--field-file questions=<PATH>"), "{err}");
+        let err = coerce(&questions, r#"{"anchor":"a"}"#).expect_err("an object is not an array");
+        assert!(err.contains("is not a JSON array"), "{err}");
+    }
+
+    /// HAZARD 1: the completion is the writes laid OVER the step's own
+    /// metadata, so the procedure and the agent keys survive a PUT that
+    /// replaces metadata wholesale.
+    #[test]
+    fn the_completion_keeps_the_steps_procedure_and_agent_keys() {
+        let step = measure_step("ready");
+        let writes = field_writes(
+            &step,
+            &given(&[
+                ("controls_md", "seven links, three buttons"),
+                ("needs_md", "in / working / out"),
+                ("gaps_md", "1. no failure line on the queue read"),
+            ]),
+        )
+        .expect("all three are declared");
+        let body = completion(&step, &writes);
+        assert_eq!(body["status"], "completed");
+        assert_eq!(
+            body["metadata"]["procedure"],
+            "Read the PAGE and the DEPARTMENT, and write the difference.",
+            "a wholesale metadata PUT would have deleted this"
+        );
+        assert_eq!(body["metadata"]["agent_profile"], "analyst");
+        assert_eq!(body["metadata"]["human_only"], false);
+        assert_eq!(
+            body["metadata"]["gaps_md"],
+            "1. no failure line on the queue read"
+        );
+        contract_check(&step, &body["metadata"]).expect("the row's contract is satisfied");
+    }
+
+    /// A completion short of a required field is refused HERE, in the
+    /// registry's own words, rather than as a 422 the caller guesses
+    /// against — the class `boss job file` was built to stop.
+    #[test]
+    fn a_missing_required_field_is_refused_before_the_round_trip() {
+        let step = measure_step("ready");
+        let writes =
+            field_writes(&step, &given(&[("controls_md", "seven links")])).expect("declared");
+        let body = completion(&step, &writes);
+        let err = contract_check(&step, &body["metadata"]).expect_err("two are missing");
+        assert!(
+            err.contains("required field 'needs_md' is missing")
+                && err.contains("required field 'gaps_md' is missing"),
+            "names every missing field: {err}"
+        );
+        assert!(
+            err.contains("--field-file <name>=<PATH>"),
+            "names the door: {err}"
+        );
+    }
+
+    /// Both flags read into one list: an argv value is trimmed, a
+    /// file's bytes lose only the editor's final newline, and an
+    /// emptied value is refused naming the quoting rule.
+    #[test]
+    fn the_two_flags_read_into_one_list_and_an_emptied_value_is_refused() {
+        let dir = boss_testing::scratch::scratch_dir("boss-cli-step-field-file");
+        let path = dir.join("gaps.md");
+        boss_testing::scratch::write_file(&path, "1. the queue read has no failure line\n");
+        let got = given_values(
+            &["controls_md=  seven links ".to_string()],
+            &[format!("gaps_md={}", path.display())],
+        )
+        .expect("both read");
+        assert_eq!(
+            got,
+            given(&[
+                ("controls_md", "seven links"),
+                ("gaps_md", "1. the queue read has no failure line"),
+            ])
+        );
+        let err = given_values(&["gaps_md=".to_string()], &[])
+            .expect_err("an emptied value records nothing")
+            .to_string();
+        assert!(
+            err.contains("SINGLE quotes") && err.contains("--field-file gaps_md="),
+            "{err}"
+        );
+    }
+
+    /// The whole verb against the stub: the PUT carries the merged
+    /// metadata, the packet is read back, and the standing printed is
+    /// the next step.
+    #[tokio::test]
+    async fn step_complete_merges_the_writes_and_confirms_by_reading_back() {
+        let s = stub(vec![json!({
+            "id": "0c4ff12b-1111-4000-8000-000000000001",
+            "kind": "page-audit", "status": "open", "title": "Page audit: /it/queue",
+            "metadata": { "route": "/it/queue", "department": "it" },
+            "steps": [measure_step("ready"), step("file", "pending")],
+        })])
+        .await;
+        let wire = Wire::at(s.base.clone(), named());
+        complete(
+            &wire,
+            "0c4ff12b",
+            "measure",
+            &given(&[
+                ("controls_md", "seven links, three buttons, four reads"),
+                ("needs_md", "in / working / out"),
+                ("gaps_md", "1. the queue read paints empty on failure"),
+            ]),
+        )
+        .await
+        .expect("completed");
+
+        let puts = s.puts.lock().unwrap();
+        assert_eq!(puts.len(), 1, "one PUT: {puts:?}");
+        let (path, body) = &puts[0];
+        assert!(
+            path.ends_with("/33333333-3333-3333-3333-333333333333"),
+            "{path}"
+        );
+        assert_eq!(body["status"], "completed");
+        assert_eq!(body["metadata"]["agent_profile"], "analyst");
+        assert_eq!(
+            body["metadata"]["gaps_md"],
+            "1. the queue read paints empty on failure"
+        );
+        drop(puts);
+        // ONE PUT, from a step that is still open, is the whole
+        // sequence — and the stored step is READ, not assumed. The
+        // freeze in `update_step` is scoped to a step whose OLD status
+        // is already terminal, so a `ready` step takes its metadata and
+        // its completion in the same body (what `boss triage` and `boss
+        // fold` have done since they landed). What a two-PUT sequence
+        // would buy is a window where the fields are written and the
+        // step is not completed — and if the completion were then
+        // refused at done, a half-written open step to clean up by
+        // hand.
+        let after = s.packets.lock().unwrap();
+        assert_eq!(after[0]["steps"][0]["status"], "completed");
+        assert_eq!(
+            after[0]["steps"][0]["metadata"]["procedure"],
+            "Read the PAGE and the DEPARTMENT, and write the difference.",
+            "the key that silently disappears: the STORED step still carries its procedure"
+        );
+        assert_eq!(after[0]["steps"][0]["metadata"]["agent_profile"], "analyst");
+        assert_eq!(after[0]["steps"][0]["metadata"]["human_only"], false);
+    }
+
+    /// Every refusal happens BEFORE the write: an undeclared name, a
+    /// missing required field, and a step that is not open each leave
+    /// the stub with no PUT at all.
+    #[tokio::test]
+    async fn every_step_complete_refusal_happens_before_any_write() {
+        let s = stub(vec![
+            json!({
+                "id": "0c4ff12b-1111-4000-8000-000000000001",
+                "kind": "page-audit", "status": "open", "title": "Page audit: /it/queue",
+                "metadata": {}, "steps": [measure_step("ready"), step("file", "pending")],
+            }),
+            json!({
+                "id": "0c4ff12b-2222-4000-8000-000000000002",
+                "kind": "page-audit", "status": "open", "title": "Page audit: /it/design",
+                "metadata": {}, "steps": [measure_step("completed")],
+            }),
+        ])
+        .await;
+        let wire = Wire::at(s.base.clone(), named());
+
+        let err = complete(
+            &wire,
+            "0c4ff12b-1111-4000-8000-000000000001",
+            "measure",
+            &given(&[("controls", "x")]),
+        )
+        .await
+        .expect_err("undeclared");
+        assert!(err.to_string().contains("no `controls` field"), "{err}");
+
+        let err = complete(
+            &wire,
+            "0c4ff12b-1111-4000-8000-000000000001",
+            "measure",
+            &given(&[("controls_md", "x")]),
+        )
+        .await
+        .expect_err("short of the contract");
+        assert!(err.to_string().contains("'gaps_md' is missing"), "{err}");
+
+        let err = complete(
+            &wire,
+            "0c4ff12b-2222-4000-8000-000000000002",
+            "measure",
+            &[],
+        )
+        .await
+        .expect_err("already completed");
+        assert!(err.to_string().contains("`measure` is completed"), "{err}");
+
+        assert!(s.puts.lock().unwrap().is_empty(), "nothing was written");
+    }
+
+    /// A 204 that changed nothing is a failure, not a completion — the
+    /// same read-back `boss job patch` insists on.
+    #[tokio::test]
+    async fn a_step_complete_the_packet_does_not_reflect_is_a_failure() {
+        let s = stub(vec![json!({
+            "id": "0c4ff12b-1111-4000-8000-000000000001",
+            "kind": "page-audit", "status": "open", "title": "Page audit: /it/queue",
+            "metadata": {}, "steps": [measure_step("ready")],
+        })])
+        .await;
+        s.drop_puts.store(true, std::sync::atomic::Ordering::SeqCst);
+        let wire = Wire::at(s.base.clone(), named());
+        let err = complete(
+            &wire,
+            "0c4ff12b",
+            "measure",
+            &given(&[("controls_md", "a"), ("needs_md", "b"), ("gaps_md", "c")]),
+        )
+        .await
+        .expect_err("the packet does not hold it");
+        assert!(err.to_string().contains("reads back as ready"), "{err}");
     }
 }

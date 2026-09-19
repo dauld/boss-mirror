@@ -92,7 +92,14 @@ async fn insert_run(
         .bind(run.run.finished_at)
         .bind(run.run.outcome.as_str())
         .bind(run.run.error.as_deref())
-        .bind(i64::try_from(run.run.tokens.total()).unwrap_or(i64::MAX))
+        // NULL for a run that reported no count — unknown, not zero,
+        // the way the recorder wrote it (backlog 65c9c05a).
+        .bind(
+            run.run
+                .tokens
+                .total()
+                .map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
+        )
         .bind(
             run.run
                 .tokens

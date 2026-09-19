@@ -952,6 +952,36 @@ pub(crate) fn run_outcome(run: &Value) -> Option<&'static str> {
     }
 }
 
+/// The car the run produced, off the evidence the landing rule stamped
+/// onto `building` (backlog 65c9c05a). `jobs.complete_linked_step`
+/// writes the closing packet's own `metadata.branch` under the rule's
+/// `evidence_key`: `gate_run` for the gate's green
+/// (`agent-run-lands-on-gate-green`), `car` for the arrival one hop
+/// later (`agent-run-lands-on-car-merged`). Both name the same branch;
+/// the gate one is read first because it fires first, and on
+/// 2026-09-19 every one of the 25 landed runs in the system of record
+/// carried it while none carried `car` — the second rule is idempotent
+/// and writes nothing when the first already completed the step.
+///
+/// `None` is honest and common: a run that refused or died reached its
+/// terminal by hand or by the clock and produced no car, so there is
+/// no branch to name. Until this read existed the column was filled by
+/// nobody at all — 0 of 24 rows, while `job_id` was 24 of 24 — so
+/// answering "what did this car cost" meant going through the run
+/// packet on every read.
+pub(crate) fn run_branch(run: &Value) -> Option<String> {
+    let building = crate::envelope::steps(run)
+        .into_iter()
+        .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some(BUILDING_SLUG))?;
+    ["gate_run", "car"].into_iter().find_map(|key| {
+        building
+            .pointer(&format!("/metadata/{key}/branch"))
+            .and_then(Value::as_str)
+            .filter(|b| !b.is_empty())
+            .map(str::to_string)
+    })
+}
+
 /// The `agent_runs` record for a run packet: keyed on the run's own id
 /// (idempotent), the CPU as its registered id, the model and packet
 /// off the run's metadata, started when `briefed` completed (the
@@ -961,7 +991,9 @@ pub(crate) fn run_outcome(run: &Value) -> Option<&'static str> {
 /// priced by the rate card. The reporter's own dollar figure rides
 /// `detail` beside it, for the comparison, never as the price. The
 /// `outcome` is what [`run_outcome`] read off the run's terminal, and
-/// the effort it was dispatched at rides `detail` beside the spend —
+/// the effort it was dispatched at rides `detail` beside the spend,
+/// and the `branch` is the car it produced, off the terminal's own
+/// evidence ([`run_branch`]) —
 /// the two together are what makes reliability-vs-cost a query rather
 /// than a guess (backlog 8f1de7bf).
 pub(crate) fn run_record(
@@ -986,10 +1018,17 @@ pub(crate) fn run_record(
             json!({ "input_tokens": input, "output_tokens": output })
         }
         Some(Tokens::Total(t)) => json!({ "total_tokens": t }),
-        // A report with no count is still a record of the run — the
-        // API refuses a run with neither, so a report without tokens
-        // records zero and says so in the detail.
-        None => json!({ "total_tokens": 0 }),
+        // A report with no count is still a record of the run, and it
+        // says so: an EXPLICIT null, which the API reads as
+        // `TokenUsage::Unreported` and stores as a NULL column —
+        // unknown, not zero, the same distinction `usd_micros` draws
+        // for an unpriced run. Until 2026-09-19 this sent `0` with a
+        // `detail.tokens_reported: false` beside it, and 13 of the 42
+        // rows then live read as a measurement of zero to any query
+        // that did not know to check the flag (backlog 65c9c05a).
+        // Omitting the key instead would be refused, which is the
+        // point: silence and a stated null are different facts.
+        None => json!({ "total_tokens": null }),
     };
     let mut body = json!({
         "run_id": run_id,
@@ -999,6 +1038,7 @@ pub(crate) fn run_record(
         "finished_at": finished_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         "outcome": outcome,
         "job_id": text("packet"),
+        "branch": run_branch(run),
         "detail": {
             "agent_run": run_id,
             "step": text("step"),
@@ -1008,7 +1048,13 @@ pub(crate) fn run_record(
             // graduate once the comparison says what it needs.
             "effort": text("effort"),
             "reported_spend_usd": r.spend_usd,
-            "tokens_reported": r.tokens.is_some(),
+            // No `tokens_reported` flag: the column says it now. The
+            // flag existed because a zero could not, and keeping both
+            // would be the same fact in two places with nothing
+            // holding them equal (CLAUDE.md §9a). Rows written before
+            // 2026-09-19 still carry it, and for that window it is the
+            // only way to read a 0 correctly — see backlog 65c9c05a
+            // and fd5ce137, which covers the pre-instrumentation era.
         },
     });
     if let (Some(dst), Some(src)) = (body.as_object_mut(), tokens.as_object()) {
@@ -1225,6 +1271,9 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // An EXPLICIT null says "nothing measured this"; an absent key is
+    // a payload that forgot to say, and the API refuses that one.
+    use boss_testing::assert_explicit_null;
 
     fn block() -> Settings {
         Settings {
@@ -1519,6 +1568,101 @@ mod tests {
         assert_eq!(
             run_record(&bare, "agent-claude", &total, at, "success").unwrap()["started_at"],
             "2026-09-18T17:00:00Z"
+        );
+    }
+
+    /// THE CAR THE RUN PRODUCED, AND THE COUNT NOBODY TOOK — the two
+    /// ways a row answered where it had nothing (backlog 65c9c05a,
+    /// 2026-09-19). Measured against the live table: `branch` on 0 of
+    /// 24 rows while `job_id` was on 24 of 24, and `total_tokens` a
+    /// flat 0 on 13, meaning "not reported". The branch is on the
+    /// evidence the landing rule stamped onto `building`; the absent
+    /// count is a stated null, which the API records as NULL.
+    #[test]
+    fn the_record_names_the_car_and_says_null_where_no_count_was_taken() {
+        let run = |building: Value| {
+            json!({
+                "id": "5b1d2c3e-0000-4000-8000-000000000001",
+                "kind": "agent-run",
+                "metadata": {
+                    "packet": "39d0b528-ff69-4cb8-ba82-408b641da66c", "step": "build",
+                    "agent": "claude@algedonic.dev", "model": "opus-5[1m]", "effort": "high",
+                    "opened_at": "2026-09-18T17:00:00Z",
+                },
+                "steps": [
+                    { "spec_slug": "briefed", "status": "completed", "completed_at": "2026-09-18T17:05:00Z" },
+                    building,
+                ],
+            })
+        };
+        // The evidence object `jobs.complete_linked_step` writes: the
+        // CLOSING packet's own metadata.branch, under the rule's
+        // evidence_key.
+        let landed = |key: &str, branch: &str| {
+            json!({
+                "spec_slug": "building", "status": "completed",
+                "metadata": {
+                    "result": "gated",
+                    key: { "car": "e47f2238-0000-4000-8000-000000000002", "branch": branch },
+                },
+            })
+        };
+        let gated = run(landed(
+            "gate_run",
+            "fix/a-probe-dates-its-cutoff-from-its-own-merge",
+        ));
+        assert_eq!(
+            run_branch(&gated).as_deref(),
+            Some("fix/a-probe-dates-its-cutoff-from-its-own-merge"),
+            "the gate's green is what lands the run, and it fires first"
+        );
+        // The arrival rule one hop later stamps the same branch under
+        // `car`; a run landed by that path alone must still name it.
+        let merged = run(landed(
+            "car",
+            "feat/the-durable-inbox-claims-from-its-station",
+        ));
+        assert_eq!(
+            run_branch(&merged).as_deref(),
+            Some("feat/the-durable-inbox-claims-from-its-station")
+        );
+        // A run that refused or died produced no car. `None` is the
+        // honest answer, not an empty string dressed as one.
+        let refused = json!({ "spec_slug": "building", "status": "completed", "metadata": { "result": "refused" } });
+        assert_eq!(run_branch(&run(refused)), None);
+        let blank = json!({
+            "spec_slug": "building", "status": "completed",
+            "metadata": { "result": "gated", "gate_run": { "branch": "" } },
+        });
+        assert_eq!(
+            run_branch(&run(blank)),
+            None,
+            "an empty branch is no branch"
+        );
+
+        let at = "2026-09-18T19:00:00Z".parse().unwrap();
+        let silent = Report {
+            summary: "done".into(),
+            spend_usd: None,
+            tokens: None,
+        };
+        let rec = run_record(&gated, "agent-claude", &silent, at, "success").unwrap();
+        assert_eq!(
+            rec["branch"], "fix/a-probe-dates-its-cutoff-from-its-own-merge",
+            "the column nothing used to fill"
+        );
+        assert_explicit_null!(
+            rec,
+            "total_tokens",
+            "unknown, not zero — and a stated null, not an absent key the API would refuse"
+        );
+        // The API parses it as the shape that means unknown.
+        let parsed: boss_jobs::agent_runs::NewAgentRun = serde_json::from_value(rec).unwrap();
+        assert_eq!(parsed.tokens, boss_jobs::agent_runs::TokenUsage::Unreported);
+        assert_eq!(parsed.tokens.total(), None);
+        assert_eq!(
+            parsed.branch.as_deref(),
+            Some("fix/a-probe-dates-its-cutoff-from-its-own-merge")
         );
     }
 

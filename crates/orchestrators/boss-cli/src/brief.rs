@@ -285,12 +285,22 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "a cold local build that is never pushed parks a car with nothing on it.".into(),
             ],
         },
+        // Three dots on the diff, and not as a matter of taste: two-dot
+        // diffs the two TIPS, so it is right only while the line above
+        // it has already exited 0 — origin/main an ancestor of HEAD is
+        // exactly where the two forms agree. That made the pair
+        // ORDER-dependent with nothing holding the order, and the
+        // failing guard is the case a builder actually reads: one
+        // commit behind, car 6e738252 saw 47 files / 5235 deletions
+        // from the tips and 7 files / 16 from the merge-base. Three-dot
+        // is correct whether or not the guard ran (9843aeb9,
+        // 2026-09-19; 8d054cb2 made the same correction in the rules).
         Invariant {
             name: "base check",
             authority: freshness.to_string(),
             lines: vec![
                 "git merge-base --is-ancestor origin/main HEAD     # must exit 0".into(),
-                "git diff --numstat origin/main HEAD               # only your files".into(),
+                "git diff --numstat origin/main...HEAD             # only your files".into(),
                 "A branch on an old base merges clean and reverts landed work.".into(),
             ],
         },
@@ -745,6 +755,48 @@ mod tests {
             text.contains(boss_jobs::probe::CAR_CONVERGED_AT_VAR),
             "{text}"
         );
+    }
+
+    /// 9843aeb9 (2026-09-19): the base-check invariant prescribed the
+    /// TWO-dot `git diff --numstat origin/main HEAD`, which diffs the
+    /// two TIPS. That was correct only by ADJACENCY to the
+    /// `--is-ancestor` line above it — the forms agree exactly when
+    /// origin/main IS an ancestor of HEAD, and the builder is told to
+    /// run the guard first. But the guard is the line that FAILS when
+    /// main has moved, and a builder reading that failure runs the diff
+    /// next: the one case where tip-to-tip reports every commit that
+    /// landed on main while it worked as the branch's own deletions
+    /// (car 6e738252, one commit behind: 47 files / 5235 deletions
+    /// against the three-dot form's 7 files / 16). Three dots diff from
+    /// the MERGE-BASE, so the line is correct whether or not the guard
+    /// ran, and the ordering stops being load-bearing. Same argument
+    /// 8d054cb2 made for the rules document; that car's pin walks the
+    /// document's `--stat` occurrences, so this literal — Rust source,
+    /// a different flag — needs its own.
+    #[test]
+    fn the_base_check_invariant_diffs_from_the_merge_base_not_the_tips() {
+        let invs = invariants(&repo()).expect("the invariants derive");
+        let inv = invs
+            .iter()
+            .find(|i| i.name == "base check")
+            .expect("a base-check invariant");
+        assert_eq!(
+            inv.authority,
+            "crates/orchestrators/boss-cli/src/freshness.rs"
+        );
+        let text = inv.lines.join("\n");
+        assert!(
+            text.contains("merge-base --is-ancestor origin/main HEAD"),
+            "{text}"
+        );
+        let check = "git diff --numstat origin/main";
+        assert!(text.contains(check), "{text}");
+        for (at, _) in text.match_indices(check) {
+            assert!(
+                text[at + check.len()..].starts_with("...HEAD"),
+                "a tip-to-tip diff survives in the base-check invariant at byte {at}: {text}"
+            );
+        }
     }
 
     #[test]

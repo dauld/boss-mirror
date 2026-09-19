@@ -2,16 +2,16 @@
 //! — the department list, and which of the six template parts each
 //! department has (design 3613f0af, backlog 1dffde5d).
 //!
-//! Both are READS over live registries and nothing else: the classes
-//! registry for what a department IS, the workflow registry for its
+//! Both are READS over live registries and nothing else: the
+//! departments registry for what a department IS, the workflow registry for its
 //! protocols, the jobs table for their packets and the newest
 //! `department-retro`, the sensor registry for what observes on its
 //! behalf, and the dispatcher's read surface for the rules that open
 //! its kinds. No seed file is opened — David, 2026-09-18: seeds are
 //! for OSS bootstrap and the playground; the instance runs on data.
 //!
-//! A department the classes registry does not hold is a 404 that names
-//! the registry and the row shape it looked for, so a typo reads as a
+//! A department the departments registry does not hold is a 404 that
+//! names the registry and the row it looked for, so a typo reads as a
 //! typo and not as "a department with nothing". A registry that is not
 //! wired is a 503, the posture every registry-backed door here takes;
 //! a registry that is wired and cannot answer leaves that ONE part
@@ -28,14 +28,12 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use boss_classes_client::ClassesClient;
 use boss_core::job::JobStatus;
 use boss_policy_client::CurrentUser;
 use serde_json::{Value, json};
 
-use super::readiness::{
-    self, Department, KindReadiness, NewestRetro, NewestTerminal, Part, Readiness,
-};
+use super::readiness::{self, KindReadiness, NewestRetro, NewestTerminal, Part, Readiness};
+use super::registry::{Department, DepartmentRegistry};
 use super::rules::DispatcherRules;
 use crate::port::{JobFilter, JobsRepository};
 use crate::registry::WorkflowRegistry;
@@ -48,8 +46,12 @@ use crate::trust::can_read;
 pub const RETRO_KIND: &str = "department-retro";
 
 pub struct DepartmentsApiState {
-    /// What a department IS. `None` → 503 on both routes.
-    pub classes: Option<Arc<dyn ClassesClient>>,
+    /// What a department IS: the `departments` table (backlog
+    /// 80a77466). `None` → 503 on both routes. It was the classes
+    /// registry's employee drawer until that packet, which is a
+    /// different question — the values an employee's `department`
+    /// column may take, not the departments the company has.
+    pub departments: Option<Arc<dyn DepartmentRegistry>>,
     /// The protocols declaring a department. `None` → 503.
     pub kinds: Option<Arc<dyn WorkflowRegistry>>,
     pub jobs: Arc<dyn JobsRepository>,
@@ -75,24 +77,22 @@ fn unavailable(what: &str) -> Response {
         .into_response()
 }
 
-/// The departments the classes registry holds, or the reason it could
-/// not say.
+/// The departments the registry holds, or the reason it could not say.
+/// An error is never flattened to an empty roster: the retro rule
+/// opens one packet per row this answers, so "no departments" and "the
+/// registry did not answer" must not read the same.
 async fn departments_or_response(state: &DepartmentsApiState) -> Result<Vec<Department>, Response> {
-    let classes = state
-        .classes
+    let registry = state
+        .departments
         .as_ref()
-        .ok_or_else(|| unavailable("classes registry"))?;
-    let rows = classes
-        .list_for_subject_kind(readiness::SUBJECT_KIND)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("classes registry unreachable: {e}"),
-            )
-                .into_response()
-        })?;
-    Ok(readiness::departments(&rows))
+        .ok_or_else(|| unavailable("departments registry"))?;
+    registry.list().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("departments registry unreachable: {e}"),
+        )
+            .into_response()
+    })
 }
 
 async fn list(
@@ -124,11 +124,10 @@ async fn readiness(
         return (
             StatusCode::NOT_FOUND,
             format!(
-                "no department `{code}` in the classes registry (an active Class with \
-                 subject_kind {}, member_attribute {}) — declare it there first, as for an \
-                 employee's department",
-                readiness::SUBJECT_KIND,
-                readiness::MEMBER_ATTRIBUTE
+                "no department `{code}` in the departments registry (an un-retired row of the \
+                 `departments` table, whose id IS the code a packet carries) — declare it there \
+                 first. An employee Class on the `department` attribute is the employee drawer, \
+                 which is a different roster and is not read here (backlog 80a77466)"
             ),
         )
             .into_response();

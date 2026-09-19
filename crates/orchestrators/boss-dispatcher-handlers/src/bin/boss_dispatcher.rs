@@ -343,8 +343,10 @@ async fn main() -> Result<()> {
                 platform_owner.clone(),
             ));
             // The week's retros (design 3613f0af, backlog 1dffde5d):
-            // one department-retro per department the classes registry
-            // holds, read at fire time through GET /api/departments, and
+            // one department-retro per department the departments
+            // registry holds, read at fire time through
+            // GET /api/departments (backlog 80a77466 — it served the
+            // employee Class drawer until then), and
             // the platform's own protocol-retro under the same ISO-week
             // window. Needs the clock for the firing day the window is
             // judged against. Inert until a scheduled rule names it

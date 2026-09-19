@@ -37,11 +37,15 @@
 //!   "who is this for"; an audience shape nothing derives a selector
 //!   from yet (`department`, until f5ebd2e1 car 2) would publish a step
 //!   no queue holds. Both refused, naming the step.
-//! - **Phase 8 — an agent block is runnable.** `agent = { … }` names a
-//!   model the rate card prices (else a run of it could not be costed)
-//!   and a positive budget, and does not sit on a `human_only` step —
-//!   two answers to "who executes this". Refused naming the step and,
-//!   for the model, the models it could have named.
+//! - **Phase 8 — an agent block is runnable, and an agent-workable
+//!   step has one.** `agent = { … }` names a model the rate card
+//!   prices (else a run of it could not be costed) and a positive
+//!   budget. And the block and `metadata_defaults.human_only` are held
+//!   equal in BOTH directions: a block on a `human_only = true` step is
+//!   two answers to "who executes this", and a step declaring
+//!   `human_only = false` with no block claims agent-workability the
+//!   dispatch door cannot honour. Refused naming the step and, for the
+//!   model, the models it could have named.
 //!
 //! Runs at author time (`POST /api/workflows/_validate`), publish
 //! time (every registry path that can set a row ACTIVE — see
@@ -111,8 +115,9 @@ pub fn validate_workflow(spec: &WorkflowSpec, registry: &StepRegistry) -> Vec<Wo
     errs
 }
 
-/// Phase 8: a step's `agent` block can actually be run (design
-/// c87fb59b car 1, backlog 028891cf).
+/// Phase 8: a step's `agent` block can actually be run, and a step that
+/// says an agent may run it has one (design c87fb59b car 1, backlog
+/// 028891cf; the second half backlog bf7cebc2).
 ///
 /// The block's shape is serde's to refuse (every key required, effort a
 /// closed set); this is the part a parse cannot know. The model must be
@@ -121,21 +126,51 @@ pub fn validate_workflow(spec: &WorkflowSpec, registry: &StepRegistry) -> Vec<Wo
 /// recorded unpriced, which is exactly the "component answering
 /// instead of erroring" that table's comment refuses — so the refusal
 /// names every model it does price. The budget must be positive: zero
-/// would read as "free" the same way. And a `human_only` step that also
-/// says how an agent runs it carries two answers to "who executes
-/// this", the same defect Phase 7 refuses for audiences.
+/// would read as "free" the same way.
+///
+/// THE BLOCK AND `human_only` ARE ONE FACT SPELLED TWICE, so this holds
+/// them equal in both directions — the §9a shape, and both readings are
+/// incoherent on their own:
+///
+/// - **A block on `human_only = true`** carries two answers to "who
+///   executes this", the same defect Phase 7 refuses for audiences.
+/// - **`human_only = false` with no block** claims an agent may do the
+///   step and funds no agent, so `boss dispatch` refuses it — nothing
+///   says which model, at what effort, under what spend. Found the
+///   expensive way on 2026-09-19: 47 page-audit packets sat
+///   undispatchable because the kind declared four steps agent-workable
+///   and carried zero blocks, and the only thing that noticed was
+///   somebody trying the door.
+///
+/// ONLY AN EXPLICIT `false` IS THE CLAIM. Silence is not, which is why
+/// this reads `human_only::declaration` rather than `declared` — the
+/// bundle's steps overwhelmingly say nothing here, and demanding a
+/// block of every one of them would make this a lint nobody could
+/// introduce.
 fn check_agent_block_is_runnable(
     spec: &WorkflowSpec,
     step: &StepSpec,
     errs: &mut Vec<WorkflowLintError>,
 ) {
+    let declaration = crate::human_only::declaration(&step.metadata_defaults);
     let Some(agent) = &step.agent else {
+        if declaration == Some(false) {
+            errs.push(err(
+                spec,
+                &step.title,
+                "declares `human_only = false` — an agent may run this step — and no `agent` \
+                 block, so nothing says which model, at what effort, under what spend, and \
+                 `boss dispatch` refuses it; add `agent = { profile = \"builder\", model = \
+                 \"opus-5[1m]\", budget_usd = 5, effort = \"high\" }` to the step, or drop the \
+                 `human_only = false` default if a person does this one",
+            ));
+        }
         return;
     };
     if let Some(why) = crate::agent_spec::refusal(agent) {
         errs.push(err(spec, &step.title, why));
     }
-    if crate::human_only::declared(&step.metadata_defaults) {
+    if declaration == Some(true) {
         errs.push(err(
             spec,
             &step.title,
@@ -1384,9 +1419,68 @@ mod tests {
         let errs = validate_workflow(&spec, &reg);
         assert_eq!(errs.len(), 1, "{errs:?}");
         assert!(errs[0].reason.contains("human_only"), "{}", errs[0].reason);
-        // The `false` the retro bundles write is not a declaration.
+        // The `false` the retro bundles write is not a declaration of
+        // human-only — and with the block present it is the coherent
+        // pair the other direction below demands.
         spec.steps[1].metadata_defaults = json!({ "human_only": false });
         assert!(validate_workflow(&spec, &reg).is_empty());
+        // Both spellings the live registry carries.
+        spec.steps[1].metadata_defaults = json!({ "human_only": "true" });
+        assert_eq!(validate_workflow(&spec, &reg).len(), 1);
+    }
+
+    /// The other direction of the same fact (backlog bf7cebc2): a step
+    /// that says an agent may run it and funds no agent is refused at
+    /// publish, because `boss dispatch` refuses it at the door — which
+    /// is how 47 page-audit packets came to sit undispatchable.
+    #[test]
+    fn a_step_declaring_human_only_false_with_no_agent_block_is_refused() {
+        let reg = StepRegistry::v1();
+        for value in [json!(false), json!("false"), json!("FALSE")] {
+            let mut spec = viable_spec("agent");
+            spec.steps[1].metadata_defaults = json!({ "human_only": value });
+            let errs = validate_workflow(&spec, &reg);
+            assert_eq!(errs.len(), 1, "{value}: {errs:?}");
+            assert_eq!(errs[0].step, "finish");
+            assert!(errs[0].reason.contains("human_only"), "{}", errs[0].reason);
+            assert!(errs[0].reason.contains("agent"), "{}", errs[0].reason);
+            // The refusal names the fix in the row's own syntax, so the
+            // author does not go re-derive it.
+            assert!(errs[0].reason.contains("budget_usd"), "{}", errs[0].reason);
+            // And the publish gate every ACTIVE write runs refuses it.
+            assert!(gate_active(&spec).is_err(), "{value}");
+        }
+    }
+
+    /// ...and silence is not the claim. Almost every step in the bundle
+    /// says nothing about `human_only`; a lint that demanded a block of
+    /// all of them could not be introduced without exceptions.
+    #[test]
+    fn a_step_that_says_nothing_about_human_only_needs_no_agent_block() {
+        let reg = StepRegistry::v1();
+        for defaults in [
+            json!({}),
+            json!({ "human_only": null }),
+            json!({ "authority_role": "platform-admin" }),
+        ] {
+            let mut spec = viable_spec("agent");
+            spec.steps[1].metadata_defaults = defaults.clone();
+            assert!(
+                validate_workflow(&spec, &reg).is_empty(),
+                "{defaults}: {:?}",
+                validate_workflow(&spec, &reg)
+            );
+        }
+    }
+
+    /// The coherent pair passes: the claim and the funding together.
+    #[test]
+    fn human_only_false_beside_an_agent_block_is_viable() {
+        let reg = StepRegistry::v1();
+        let mut spec = with_agent(builder());
+        spec.steps[1].metadata_defaults = json!({ "human_only": false });
+        assert!(validate_workflow(&spec, &reg).is_empty());
+        assert!(gate_active(&spec).is_ok());
     }
 
     #[test]

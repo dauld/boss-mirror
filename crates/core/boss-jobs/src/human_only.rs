@@ -46,10 +46,36 @@ pub const KEY: &str = "human_only";
 /// bool `true` and the string `"true"` (case-insensitive); anything
 /// else — absent, `false`, `"false"`, `null` — is not a declaration.
 pub fn declared(metadata: &Value) -> bool {
+    declaration(metadata) == Some(true)
+}
+
+/// The declaration this metadata makes about who may execute the step,
+/// when it makes one at all: `Some(true)` for human-only, `Some(false)`
+/// for "an agent may do this", `None` when the key is absent or holds a
+/// value neither spelling reads.
+///
+/// ABSENT IS NOT `false`. Almost every step in the bundle says nothing
+/// here, and saying nothing is not a claim about agents — which is why
+/// [`declared`] alone could not answer the question the publish lint
+/// needed (backlog bf7cebc2): the lint refuses a step that CLAIMS
+/// agent-workability and funds no agent, and a step that never made
+/// the claim must be left alone. Both spellings the live registry
+/// carries are read here, so the claim is the same fact whichever way
+/// a protocol author wrote it.
+pub fn declaration(metadata: &Value) -> Option<bool> {
     match metadata.get(KEY) {
-        Some(Value::Bool(b)) => *b,
-        Some(Value::String(s)) => s.trim().eq_ignore_ascii_case("true"),
-        _ => false,
+        Some(Value::Bool(b)) => Some(*b),
+        Some(Value::String(s)) => {
+            let s = s.trim();
+            if s.eq_ignore_ascii_case("true") {
+                Some(true)
+            } else if s.eq_ignore_ascii_case("false") {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }
 
@@ -149,6 +175,29 @@ mod tests {
         assert!(!declared(&json!({ "human_only": null })));
         assert!(!declared(&json!({ "authority_role": "platform-admin" })));
         assert!(!declared(&json!(null)));
+    }
+
+    /// The publish lint asks a question `declared` cannot answer: did
+    /// the step CLAIM agent-workability, or say nothing? Absent and
+    /// `false` are both "not human-only" and only the second is a
+    /// claim (backlog bf7cebc2).
+    #[test]
+    fn declaration_separates_an_explicit_false_from_an_absent_key() {
+        assert_eq!(declaration(&json!({ "human_only": false })), Some(false));
+        assert_eq!(declaration(&json!({ "human_only": "false" })), Some(false));
+        assert_eq!(declaration(&json!({ "human_only": "FALSE" })), Some(false));
+        assert_eq!(
+            declaration(&json!({ "human_only": " false " })),
+            Some(false)
+        );
+        assert_eq!(declaration(&json!({ "human_only": true })), Some(true));
+        assert_eq!(declaration(&json!({ "human_only": "true" })), Some(true));
+        // No key, a null, and a value neither spelling reads are all
+        // silence — nothing to hold to an agent block.
+        assert_eq!(declaration(&json!({ "authority_role": "x" })), None);
+        assert_eq!(declaration(&json!({ "human_only": null })), None);
+        assert_eq!(declaration(&json!({ "human_only": "maybe" })), None);
+        assert_eq!(declaration(&json!(null)), None);
     }
 
     struct Roster(Vec<&'static str>);

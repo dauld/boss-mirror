@@ -20,43 +20,12 @@
 //! finding; undetermined is a different fact, answered as one.
 
 use boss_core::job::{Job, JobStatus};
-use boss_core::primitives::Class;
 use serde::Serialize;
 use serde_json::Value;
 
+use super::registry::Department;
 use crate::registry::WorkflowSpec;
 use crate::sensors::types::SensorRow;
-
-/// The `member_attribute` a department Class carries, and the
-/// `subject_kind` it is a Class of: an employee's `department` column.
-pub const SUBJECT_KIND: &str = "employee";
-pub const MEMBER_ATTRIBUTE: &str = "department";
-
-/// One department as the classes registry declares it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Department {
-    pub code: String,
-    pub display_name: String,
-}
-
-/// The departments the registry holds: the active `employee` Classes
-/// whose `member_attribute` is `department`, in the registry's own
-/// `sort_order` then by code. Retired rows are not departments.
-pub fn departments(classes: &[Class]) -> Vec<Department> {
-    let mut rows: Vec<&Class> = classes
-        .iter()
-        .filter(|c| c.subject_kind == SUBJECT_KIND)
-        .filter(|c| c.member_attribute.as_deref() == Some(MEMBER_ATTRIBUTE))
-        .filter(|c| c.retired_at.is_none())
-        .collect();
-    rows.sort_by(|a, b| (a.sort_order, &a.code).cmp(&(b.sort_order, &b.code)));
-    rows.into_iter()
-        .map(|c| Department {
-            code: c.code.clone(),
-            display_name: c.display_name.clone(),
-        })
-        .collect()
-}
 
 /// A sensor whose readings open one of the department's kinds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -353,36 +322,6 @@ pub fn probes_part() -> Part {
 mod tests {
     use super::*;
 
-    fn class(code: &str, attribute: &str, sort: i32, retired: bool) -> Class {
-        Class {
-            subject_kind: "employee".into(),
-            code: code.into(),
-            display_name: code.to_uppercase(),
-            parent_code: None,
-            member_attribute: Some(attribute.into()),
-            metadata: Value::Null,
-            sort_order: sort,
-            retired_at: retired.then(chrono::Utc::now),
-        }
-    }
-
-    #[test]
-    fn departments_are_the_active_employee_classes_on_the_department_attribute() {
-        let rows = vec![
-            class("sales", "department", 20, false),
-            class("finance", "department", 10, false),
-            class("engineer", "role", 5, false),
-            class("shuttered", "department", 1, true),
-        ];
-        let got = departments(&rows);
-        assert_eq!(
-            got.iter().map(|d| d.code.as_str()).collect::<Vec<_>>(),
-            vec!["finance", "sales"],
-            "sorted by sort_order; a role is not a department; a retired row is gone"
-        );
-        assert_eq!(got[0].display_name, "FINANCE");
-    }
-
     fn rule(name: &str, source: Option<&str>, spawns: &[&str]) -> Value {
         let steps: Vec<Value> = spawns
             .iter()
@@ -437,6 +376,7 @@ mod tests {
             Department {
                 code: "sales".into(),
                 display_name: "Sales".into(),
+                function: "revenue".into(),
             },
             surfaces_part("sales"),
             Part::judged(false, serde_json::json!({ "sensors": [] })),

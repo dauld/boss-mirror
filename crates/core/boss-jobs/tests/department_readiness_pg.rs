@@ -4,23 +4,31 @@
 //!
 //! Two departments at different completeness, the shape the packet
 //! asked for: `sales` has protocols with packets, a sensor, a tenant
-//! rule and a retro; `support` is declared as a Class and has nothing
-//! else. Then the refusals: a code the classes registry does not hold
-//! is a 404 that NAMES the registry, and a registry that is not wired
-//! is a 503, not an answer. Every part is computed from a registry row
-//! written in this test — no seed file is opened.
+//! rule and a retro; `warehouse` is a declared department with nothing
+//! else. Then the refusals: a code the departments registry does not
+//! hold is a 404 that NAMES the registry, and a registry that is not
+//! wired is a 503, not an answer. Every part is computed from a
+//! registry row — no seed file is opened.
+//!
+//! WHICH REGISTRY ANSWERS "what departments are there" is the subject
+//! of `the_department_list_is_the_departments_table`: until backlog
+//! 80a77466 it was the active `employee` Classes on the `department`
+//! attribute — the drawer of values an employee's column may take —
+//! and the live endpoint served nine codes against the thirteen the
+//! roster holds, an overlap of five. The weekly retro rule reads this
+//! endpoint at fire time, so the drawer would have opened retros for
+//! four departments that do not exist and none for eight that do.
 
 use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use boss_classes_client::{ClassesClient, FakeClassesClient};
 use boss_core::actor::ActorId;
 use boss_core::job::{Job, JobId, JobStatus, Priority, Subject};
-use boss_core::primitives::Class;
 use boss_jobs::JobsRepository;
 use boss_jobs::department::http::{DepartmentsApiState, router};
+use boss_jobs::department::registry::{DepartmentRegistry, PgDepartments};
 use boss_jobs::department::rules::{DispatcherRules, FakeDispatcherRules};
 use boss_jobs::registry::{PgWorkflows, WorkflowRegistry, WorkflowSpec, platform_bundle_path};
 use boss_jobs::seed_loader::load_workflows;
@@ -36,29 +44,6 @@ use uuid::Uuid;
 
 fn day(y: i32, m: u32, d: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(y, m, d).expect("valid date")
-}
-
-fn class(code: &str, attribute: &str, sort: i32) -> Class {
-    Class {
-        subject_kind: "employee".into(),
-        code: code.into(),
-        display_name: code.to_uppercase(),
-        parent_code: None,
-        member_attribute: Some(attribute.into()),
-        metadata: Value::Null,
-        sort_order: sort,
-        retired_at: None,
-    }
-}
-
-/// The registry as the tenant declares it: two departments and a role
-/// that happens to share the `employee` subject kind.
-fn classes() -> Arc<dyn ClassesClient> {
-    Arc::new(FakeClassesClient::with_classes(vec![
-        class("support", "department", 20),
-        class("sales", "department", 10),
-        class("engineer", "role", 1),
-    ]))
 }
 
 /// A viable workflow row declaring `department`: the platform bundle's
@@ -136,14 +121,13 @@ fn rules() -> Arc<dyn DispatcherRules> {
 
 struct Fixture {
     app: Router,
-    _db: TestDb,
+    db: TestDb,
 }
 
-/// Sales complete but for the probe; support declared and empty.
-async fn fixture(
-    classes: Option<Arc<dyn ClassesClient>>,
-    rules: Option<Arc<dyn DispatcherRules>>,
-) -> Fixture {
+/// Sales complete but for the probe; warehouse declared and empty.
+/// `wired` false leaves the departments registry unconfigured, the
+/// 503 case.
+async fn fixture(wired: bool, rules: Option<Arc<dyn DispatcherRules>>) -> Fixture {
     let db = TestDb::new().await;
     let jobs = Arc::new(boss_jobs::PgJobs::new(db.pool.clone()));
     let kinds = PgWorkflows::new(db.pool.clone());
@@ -184,7 +168,8 @@ async fn fixture(
         .expect("sensor");
 
     let state = DepartmentsApiState {
-        classes,
+        departments: wired
+            .then(|| Arc::new(PgDepartments::new(db.pool.clone())) as Arc<dyn DepartmentRegistry>),
         kinds: Some(Arc::new(kinds) as Arc<dyn WorkflowRegistry>),
         jobs: jobs as Arc<dyn JobsRepository>,
         sensors: Some(Arc::new(sensors) as Arc<dyn Sensors>),
@@ -192,7 +177,7 @@ async fn fixture(
     };
     Fixture {
         app: router(state),
-        _db: db,
+        db,
     }
 }
 
@@ -236,10 +221,14 @@ async fn readiness(app: &Router, code: &str) -> Value {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_filled_out_department_reads_five_of_six_with_the_probe_undetermined() {
-    let f = fixture(Some(classes()), Some(rules())).await;
+    let f = fixture(true, Some(rules())).await;
     let v = readiness(&f.app, "sales").await;
     assert_eq!(v["department"]["code"], "sales");
-    assert_eq!(v["department"]["display_name"], "SALES");
+    assert_eq!(v["department"]["display_name"], "Sales");
+    assert_eq!(
+        v["department"]["function"], "revenue",
+        "the function is Class data on the department kind"
+    );
 
     assert_eq!(v["surfaces"]["has"], true);
     assert_eq!(v["surfaces"]["jobs_view"], "/api/jobs?department=sales");
@@ -308,8 +297,11 @@ async fn a_filled_out_department_reads_five_of_six_with_the_probe_undetermined()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_declared_but_empty_department_reads_one_of_six() {
-    let f = fixture(Some(classes()), Some(rules())).await;
-    let v = readiness(&f.app, "support").await;
+    let f = fixture(true, Some(rules())).await;
+    // `warehouse` is a department the EMPLOYEE drawer never held, so
+    // this read answering at all is the fix: before 80a77466 it was a
+    // 404 and the weekly retro rule would never have opened its retro.
+    let v = readiness(&f.app, "warehouse").await;
     assert_eq!(
         v["surfaces"]["has"], true,
         "the jobs view exists for every department"
@@ -326,50 +318,93 @@ async fn a_declared_but_empty_department_reads_one_of_six() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_unknown_code_is_a_404_that_names_the_classes_registry() {
-    let f = fixture(Some(classes()), Some(rules())).await;
-    let (status, body) = get(&f.app, "/api/departments/engineer/readiness").await;
+async fn an_unknown_code_is_a_404_that_names_the_departments_registry() {
+    let f = fixture(true, Some(rules())).await;
+    // `engineering` is one of the four codes the employee drawer served
+    // that no department, route or packet has (measured live
+    // 2026-09-19, backlog 80a77466). It must read as the typo it is.
+    let (status, body) = get(&f.app, "/api/departments/engineering/readiness").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
-    assert!(body.contains("classes registry"), "{body}");
-    assert!(body.contains("member_attribute department"), "{body}");
+    assert!(body.contains("departments registry"), "{body}");
+    assert!(body.contains("`departments` table"), "{body}");
     assert!(
-        body.contains("`engineer`"),
-        "a role is not a department: {body}"
+        body.contains("`engineering`"),
+        "an employee Class is not a department: {body}"
     );
 }
 
+/// THE DEFECT THIS CAR FIXED, pinned: the list is the `departments`
+/// table and nothing else. The assertions are derived from the table
+/// in the same test rather than retyped, so this cannot become a
+/// second copy of the roster (CLAUDE.md §9a) — and one retired row
+/// proves the filter, since a retired department must not draw a
+/// retro.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_department_list_is_the_registrys_department_rows() {
-    let f = fixture(Some(classes()), Some(rules())).await;
+async fn the_department_list_is_the_departments_table() {
+    let f = fixture(true, Some(rules())).await;
+    sqlx::query("UPDATE departments SET retired_at = NOW() WHERE id = 'maintenance'")
+        .execute(&f.db.pool)
+        .await
+        .expect("retire a department");
+    let expected: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM departments WHERE retired_at IS NULL ORDER BY sort_order, id",
+    )
+    .fetch_all(&f.db.pool)
+    .await
+    .expect("the roster");
+
     let (status, body) = get(&f.app, "/api/departments").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let v: Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(v["total"], 2);
+    let served: Vec<String> = v["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .map(|d| d["code"].as_str().unwrap_or_default().to_string())
+        .collect();
     assert_eq!(
-        v["data"]
-            .as_array()
-            .expect("data")
-            .iter()
-            .map(|d| d["code"].as_str().unwrap_or_default())
-            .collect::<Vec<_>>(),
-        vec!["sales", "support"],
-        "sorted by the registry's sort_order; the role is not listed"
+        served, expected,
+        "the table's un-retired rows, in its order"
     );
+    assert_eq!(v["total"], served.len());
+    assert!(
+        !served.iter().any(|c| c == "maintenance"),
+        "a retired department draws no retro: {served:?}"
+    );
+    // The eight the employee drawer was missing on 2026-09-19 are here,
+    // and the four it served that are not departments are not.
+    for real in [
+        "distribution",
+        "executive",
+        "people",
+        "production",
+        "qa",
+        "service",
+        "warehouse",
+    ] {
+        assert!(served.iter().any(|c| c == real), "{real}: {served:?}");
+    }
+    for drawer_only in ["engineering", "hosting", "product", "operations"] {
+        assert!(
+            !served.iter().any(|c| c == drawer_only),
+            "{drawer_only} is an employee Class, not a department: {served:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn without_a_classes_registry_the_question_is_refused() {
-    let f = fixture(None, Some(rules())).await;
+async fn without_a_departments_registry_the_question_is_refused() {
+    let f = fixture(false, Some(rules())).await;
     let (status, body) = get(&f.app, "/api/departments/sales/readiness").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-    assert!(body.contains("classes registry"), "{body}");
+    assert!(body.contains("departments registry"), "{body}");
     let (status, _) = get(&f.app, "/api/departments").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_part_whose_registry_is_not_wired_is_undetermined_not_absent() {
-    let f = fixture(Some(classes()), None).await;
+    let f = fixture(true, None).await;
     let v = readiness(&f.app, "sales").await;
     assert_eq!(v["rules"]["has"], Value::Null);
     assert!(
@@ -385,7 +420,7 @@ async fn a_part_whose_registry_is_not_wired_is_undetermined_not_absent() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_user_tier_caller_is_refused() {
-    let f = fixture(Some(classes()), Some(rules())).await;
+    let f = fixture(true, Some(rules())).await;
     let user = User {
         access_tier: AccessTier::User,
         ..operator()

@@ -119,7 +119,19 @@
   // `focus` is the map's name for the region; regions.ts maps it to
   // the selection the entity deck opens on, and an unknown name falls
   // back to the track, as the bare page always has.
-  let { focus = 'track' }: Readonly<{ focus?: string }> = $props();
+  //
+  // CAR 3 (design d2154293): this page is also mounted UNDER the
+  // zoomed world, by MapPage, at /it/yard/<region>. `embedded` drops
+  // the page header, because the world above already carries one, and
+  // that is ALL it drops — everything the floor shows, this page still
+  // shows. `onfloor` hands the scene up so the zoomed territory's
+  // interior is drawn from the reads this page already makes, rather
+  // than a second copy of them.
+  let {
+    focus = 'track',
+    embedded = false,
+    onfloor = (_scene: Scene | null) => {},
+  }: Readonly<{ focus?: string; embedded?: boolean; onfloor?: (scene: Scene | null) => void }> = $props();
 
   let yard = $state<YardState | null>(null);
   let loading = $state(true);
@@ -191,6 +203,12 @@
 
   // THE FLOOR: the pure scene both the map and the board draw.
   const floor = $derived<Scene | null>(yard ? sceneOf(yard, statusData, nowMs, feeds) : null);
+  // Handed up to whoever mounted this page (car 3: the world above, so
+  // the zoomed territory's interior draws the SAME wagons this floor
+  // does, from one read rather than a second copy of it).
+  $effect(() => {
+    onfloor(floor);
+  });
   const wagonById = $derived(new Map((floor?.wagons ?? []).map(w => [w.id, w])));
   // The shed and its two sidings, in the order the board reads them —
   // the inspection panel's rows.
@@ -564,11 +582,13 @@
 </script>
 
 <div class="theme-exec yard-root">
-  <PageHeader
-    eyebrow="IT · Forge line"
-    title="The train yard"
-    subtitle="Gated → parked → boarded → departed → arrived → proven — every change is a wagon you can follow from the approach siding to the arrivals yard"
-  />
+  {#if !embedded}
+    <PageHeader
+      eyebrow="IT · Forge line"
+      title="The train yard"
+      subtitle="Gated → parked → boarded → departed → arrived → proven — every change is a wagon you can follow from the approach siding to the arrivals yard"
+    />
+  {/if}
 
   {#if loading}
     <div class="yard-empty">Reading the yard…</div>
@@ -596,7 +616,16 @@
       {/if}
     </div>
 
-    <!-- THE MAP -->
+    <!-- THE MAP — the region's floor in full: the sidings, the ladder,
+         the bays with their progress, the locomotives along the
+         stages. STILL DRAWN when embedded, deliberately. Car 3 zooms
+         the world into a territory and paints one plate per wagon
+         standing in it, which answers "what is moving in here" but is
+         a SUMMARY of this; re-homing these sidings and locomotives
+         inside the territory's rect is the work left before YardPage
+         can retire (design d2154293, cars 4-5). Hiding this in the
+         meantime would have taken detail off the founder's main
+         surface in the same change that added the zoom. -->
     <YardMap scene={floor} {selected} onselect={select} />
 
     <!-- THE DECK: the departure board and the entity panel -->

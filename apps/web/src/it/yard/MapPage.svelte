@@ -15,8 +15,20 @@
   // page derives nothing — it used to be the other way: yard.ts read
   // six endpoints and derived every number the Train Yard showed, boss
   // orient derived the same numbers again, and nothing held the two
-  // equal. Clicking a territory still opens /it/yard/<region>, the
-  // floor that already exists, one click deeper.
+  // equal.
+  //
+  // CAR 3 — CLICKING IS A ZOOM. /it/yard/<region> is this same page
+  // with `region` set: the camera walks into that territory and the
+  // territory shows what is moving inside it. Nothing navigates to a
+  // separate surface, which is the whole of David's ask (feedback
+  // c3105b2a: "zoom into the region by clicking to see"). The floor's
+  // panels — the departure board, the entity deck and its verbs —
+  // mount UNDER the zoomed world, and they are still the Train Yard's
+  // own (YardPage, `embedded`: it drops its page header and its second
+  // copy of the map, keeps everything else). The interiors are fed by
+  // the scene YardPage ALREADY reads, handed up through `onfloor`: one
+  // read of the floor on the page, not two — the same rule that made
+  // the regions endpoint the only reading of a region.
   //
   // NO NEW STYLING (the visual redesign reskins): the world is drawn in
   // the yard's own strokes and tokens.
@@ -26,9 +38,31 @@
   // never an empty map that reads as a calm one.
   import { onMount } from 'svelte';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
+  import { navigate } from '@boss/web-kit/nav';
   import type { Remote } from '../../data/remote';
   import { fetchRegions, type Regions } from './regions';
+  import { territoryOf } from './world';
+  import { hasInterior } from './world-zoom';
+  import type { Scene } from './yard-floor';
   import WorldMap from './WorldMap.svelte';
+  import YardPage from './YardPage.svelte';
+
+  type Props = Readonly<{
+    /** The territory the camera is in — the `/it/yard/<region>` route.
+     *  Absent at `/it`, which is the whole world. */
+    region?: string | null;
+  }>;
+  let { region = null }: Props = $props();
+
+  /** A region the layout has no territory for leaves the camera at the
+   *  world rather than flying to nowhere. */
+  const zoomed = $derived(region !== null && territoryOf(region) !== undefined ? region : null);
+  /** The six regions whose floor is the yard's own; receiving and
+   *  marshalling keep their pages until car 4 grows their interiors. */
+  const floorRegion = $derived(zoomed !== null && hasInterior(zoomed) ? zoomed : null);
+  /** The floor, handed up by the yard page below — the scene its own
+   *  reads already built. Null until the first read lands. */
+  let floor = $state<Scene | null>(null);
 
   let regions = $state<Remote<Regions>>({ kind: 'loading' });
   let readAt = $state<number | null>(null);
@@ -67,10 +101,21 @@
          a map that could not be read must not look like a clear one. -->
     <div class="yard-empty load-failed">The regions cannot be read — {regions.error}</div>
   {:else}
-    <WorldMap regions={regions.data} />
+    <WorldMap regions={regions.data} {zoomed} {floor} onleave={() => navigate('/it')} />
     <div class="yard-flow">
       window {regions.data.window_hours}h against the {regions.data.window_hours}h before{readAt !== null ? ` · read ${clock(readAt)}` : ''}
     </div>
+  {/if}
+
+  {#if floorRegion !== null}
+    <!-- THE FLOOR, under the territory the camera is in: the Train
+         Yard's own panels, mounted in place rather than on a page of
+         their own. Keyed on the region so a move from one territory to
+         another opens the new region's panel rather than keeping the
+         old selection. -->
+    {#key floorRegion}
+      <YardPage focus={floorRegion} embedded onfloor={(s) => (floor = s)} />
+    {/key}
   {/if}
 </div>
 
