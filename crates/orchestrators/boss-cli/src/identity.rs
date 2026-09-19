@@ -212,16 +212,24 @@ pub(crate) fn reader() -> String {
 }
 
 /// Said ONCE per process, so a `--wait` poll does not scroll the same
-/// line a hundred times.
+/// line a hundred times. It names the ROLE the read carries, because
+/// that is the fact backlog d843abf2 changed and the one a reader of
+/// an unexpectedly narrow answer needs first.
 fn warn_unidentified() {
     static WARNED: std::sync::Once = std::sync::Once::new();
     WARNED.call_once(|| {
-        eprintln!(
-            "boss: nothing names the actor running this command — reading as \
-             `{UNIDENTIFIED}`. Writes will be refused until `{ACTOR_ENV}` (or the \
-             actor file) names you."
-        );
+        eprintln!("{}", unidentified_notice());
     });
+}
+
+/// The one stderr line an unnamed read prints. Pure, so the wording a
+/// recorded probe greps for is pinned by a test rather than by hope.
+pub(crate) fn unidentified_notice() -> String {
+    format!(
+        "boss: nothing names the actor running this command — reading as \
+         `{UNIDENTIFIED}` under the {READER_ROLE} role. Writes will be refused until \
+         `{ACTOR_ENV}` (or the actor file) names you."
+    )
 }
 
 /// The id the CONDUCTOR's own verbs sign with: whatever names the
@@ -240,16 +248,58 @@ pub(crate) fn conductor_from(caller: Option<Caller>) -> String {
     caller.map_or_else(|| CONDUCTOR.to_string(), |c| c.id)
 }
 
+/// THE ROLE NOBODY-IN-PARTICULAR READS AS. Its one home is
+/// `boss_core::roles` (the policy defaults grant it Read at Scope::All
+/// on every shipped resource and no other action anywhere —
+/// `the_probes_reader_role_can_read_everything_and_write_nothing` in
+/// prove.rs holds that); this is a reference to it, not a second
+/// spelling. It is the role a recorded probe's reader already carries
+/// (backlog 61085a9e), and since backlog d843abf2 the role an
+/// UNIDENTIFIED read carries too.
+pub(crate) const READER_ROLE: &str = boss_core::roles::AUDIT_READONLY_ROLE;
+
 /// The `x-boss-user` header for an id — the ONE place the header's
 /// shape is written. Role and tier are what the policy layer reads;
 /// the id is what provenance reads. Both matter: a read under a role
 /// the policy does not grant comes back as an EMPTY collection rather
 /// than an error (memory: empty API reads mean wrong actor).
+///
+/// WHO GETS WHICH ROLE (backlog d843abf2, measured 2026-09-18). A
+/// named caller gets the operator's platform-admin header. The
+/// [`UNIDENTIFIED`] reader does NOT: until this car it did, so any
+/// unnamed CLI read — a forge probe shelling to a verb, a stray shell
+/// on a box with no actor file — saw the whole world under a role the
+/// deployment had granted to nobody in particular. Nobody-in-particular
+/// gets [`READER_ROLE`] at the auditor tier: full-width READ (the same
+/// world the operator sees on every list, verified by effect on
+/// 61085a9e), and a 403 on every write — which an unnamed write never
+/// reaches anyway, being refused before the socket.
 pub(crate) fn header(id: &str) -> String {
+    if id == UNIDENTIFIED {
+        return reader_header(id);
+    }
     json!({
         "id": id,
         "role": "platform-admin",
         "access_tier": "operator",
+        "territory_account_ids": [],
+        "direct_report_ids": [],
+        "department": "platform",
+    })
+    .to_string()
+}
+
+/// The `x-boss-user` header for a READ-SCOPED identity: [`READER_ROLE`]
+/// at the auditor tier — the tier `boss_jobs::trust::can_read` admits
+/// on an operator door's read and `is_trusted` refuses on its write.
+/// Two callers, one shape: the unidentified reader above, and the
+/// reader a recorded probe is handed as `BOSS_SOR_USER` (prove.rs),
+/// which `boss-sor-read` puts on the wire verbatim.
+pub(crate) fn reader_header(id: &str) -> String {
+    json!({
+        "id": id,
+        "role": READER_ROLE,
+        "access_tier": "auditor",
         "territory_account_ids": [],
         "direct_report_ids": [],
         "department": "platform",
@@ -422,5 +472,49 @@ mod tests {
         assert_eq!(v["id"], "emp-david");
         assert_eq!(v["role"], "platform-admin");
         assert_eq!(v["access_tier"], "operator");
+    }
+
+    /// Backlog d843abf2, measured 2026-09-18: an unnamed read went out
+    /// as `operator:unidentified` under the same platform-admin header
+    /// every named verb gets, so a stray shell or a forge probe read
+    /// the whole world. Nobody-in-particular gets the platform's own
+    /// read role — the one a recorded probe's reader already carries —
+    /// and NOT the operator's.
+    #[test]
+    fn an_unidentified_read_carries_the_reader_role_not_platform_admin() {
+        let v: serde_json::Value = serde_json::from_str(&header(UNIDENTIFIED)).unwrap();
+        assert_eq!(v["id"], UNIDENTIFIED);
+        assert_eq!(v["role"], boss_core::roles::AUDIT_READONLY_ROLE);
+        assert_eq!(v["access_tier"], "auditor");
+        assert_ne!(v["role"], "platform-admin");
+        // ...and it is the SAME header a recorded probe's reader sends:
+        // one shape for a read-scoped identity, not two.
+        assert_eq!(header(UNIDENTIFIED), reader_header(UNIDENTIFIED));
+    }
+
+    /// The role name has one home, `boss_core::roles`; the CLI reads
+    /// it from there rather than spelling it a second time (CLAUDE.md
+    /// §9a). This pins the tier that goes with it: `auditor` is what
+    /// `boss_jobs::trust::can_read` admits on an operator door's READ
+    /// and `is_trusted` refuses on its WRITE.
+    #[test]
+    fn the_reader_role_is_read_from_core_not_retyped() {
+        assert_eq!(READER_ROLE, boss_core::roles::AUDIT_READONLY_ROLE);
+        let v: serde_json::Value = serde_json::from_str(&reader_header("x")).unwrap();
+        assert_eq!(v["access_tier"], "auditor");
+    }
+
+    /// The stderr line names the role the read went out under — the
+    /// phrase the car's recorded probe greps for on the forge, where
+    /// the installed CLI's unnamed read is the one that changed.
+    #[test]
+    fn the_unidentified_notice_names_the_role_and_the_fix() {
+        let line = unidentified_notice();
+        assert!(line.contains(UNIDENTIFIED), "{line}");
+        assert!(
+            line.contains(&format!("under the {} role", READER_ROLE)),
+            "{line}"
+        );
+        assert!(line.contains(ACTOR_ENV), "{line}");
     }
 }

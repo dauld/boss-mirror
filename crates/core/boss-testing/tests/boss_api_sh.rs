@@ -326,9 +326,20 @@ fn the_actor_header_comes_from_env_then_the_actor_file_and_an_unnamed_read_is_ma
         !user.contains(FORMER_DEFAULT_ACTOR),
         "the pod copy's fixed id must never ride unasked: {user}"
     );
+    // Backlog d843abf2 (measured 2026-09-18): nobody-in-particular
+    // reads under the platform's own READ role, not the operator's —
+    // the same rule as the CLI's identity.rs. The role's one home is
+    // boss_core::roles; a shell script cannot import it, so this pins
+    // the copy (CLAUDE.md §9a).
+    let reader_role = boss_core::roles::AUDIT_READONLY_ROLE;
     assert!(
-        user.contains(r#""role":"platform-admin""#) && user.contains(r#""access_tier":"operator""#),
-        "the role and tier the pod copy sent are kept: {user}"
+        user.contains(&format!(r#""role":"{reader_role}""#))
+            && user.contains(r#""access_tier":"auditor""#),
+        "an unnamed read carries {reader_role} at the auditor tier: {user}"
+    );
+    assert!(
+        !user.contains("platform-admin"),
+        "an unnamed read must not carry the operator's role: {user}"
     );
     assert!(
         r.stderr.contains(UNIDENTIFIED) && r.stderr.contains("BOSS_ACTOR"),
@@ -350,6 +361,10 @@ fn the_actor_header_comes_from_env_then_the_actor_file_and_an_unnamed_read_is_ma
     assert!(
         user.contains(r#""id":"emp-from-file""#),
         "the actor file's one line names the actor, trailing newline dropped: {user}"
+    );
+    assert!(
+        user.contains(r#""role":"platform-admin""#) && user.contains(r#""access_tier":"operator""#),
+        "a NAMED caller keeps the operator's role and tier: {user}"
     );
     assert_eq!(r.stderr, "HTTP:200\n", "a named read says nothing extra");
 

@@ -1630,27 +1630,24 @@ fn proven_metadata(
 /// (boss-policy-client::defaults) grants Read at Scope::All on every
 /// shipped resource and NO other action anywhere: verified by effect on
 /// the live deployment, a PATCH and a step PUT under it both answered
-/// 403 while every list read matched the operator's. The fact lives
-/// here and in the policy defaults, and
+/// 403 while every list read matched the operator's. The role is
+/// NAMED in `boss_core::roles` and DEFINED by the policy defaults, and
 /// `the_probes_reader_role_can_read_everything_and_write_nothing` holds
-/// them equal (CLAUDE.md §9a). The id is the one the credentials door
-/// already names for this reader (`boss_jobs::credentials`).
+/// them equal (CLAUDE.md §9a); this crate reads the name from core
+/// (`identity::READER_ROLE`) rather than spelling it again — until
+/// backlog d843abf2 (2026-09-19) it was a literal here, the second
+/// spelling the unidentified reader in identity.rs would have needed a
+/// third of. The id is the one the credentials door already names for
+/// this reader (`boss_jobs::credentials`).
 pub(crate) const READER_ACTOR: &str = "automation:run-car-probe-reader";
-pub(crate) const READER_ROLE: &str = "audit-readonly";
+pub(crate) use crate::identity::READER_ROLE;
 
 /// The `x-boss-user` header a recorded probe's reader sends —
-/// `boss-sor-read` puts it on the wire verbatim.
-pub(crate) fn reader_header(id: &str) -> String {
-    json!({
-        "id": id,
-        "role": READER_ROLE,
-        "access_tier": "auditor",
-        "territory_account_ids": [],
-        "direct_report_ids": [],
-        "department": "platform",
-    })
-    .to_string()
-}
+/// `boss-sor-read` puts it on the wire verbatim. One shape with the
+/// CLI's own unidentified read (identity.rs), because they are the
+/// same identity: a reader nobody-in-particular is, with the
+/// platform's own read role.
+pub(crate) use crate::identity::reader_header;
 
 /// The reader's port table, from `infra/forge/sor-ports.env` in the
 /// checkout the probe runs in: `name=port` lines, `#` comments and

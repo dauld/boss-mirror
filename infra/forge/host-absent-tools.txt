@@ -74,10 +74,14 @@ kubectl
 #     actor could come from.
 #
 #   - An unnamed `boss` READ goes out signed `operator:unidentified`
-#     under the CLI's header, whose role is platform-admin — a
-#     whole-world read, unlike the header-less curl the next block
-#     refuses. It prints one line on stderr saying so; that is
-#     expected, not a defect in the probe.
+#     under the platform's own read role — audit-readonly, the same
+#     one boss-sor-read's BOSS_SOR_USER carries: full-width on every
+#     list, 403 on every write — unlike the header-less curl the next
+#     block refuses. It prints one line on stderr saying so; that is
+#     expected, not a defect in the probe. (Until 2026-09-19 that read
+#     rode the CLI's platform-admin header, so any unnamed read saw
+#     the whole world under a role granted to nobody in particular —
+#     backlog d843abf2.)
 #
 # NOT listed, and now for a stated reason: `boss-api`. Asked properly
 # on 2026-09-10 (61085a9e), and the honest answer is that it is still

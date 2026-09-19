@@ -1032,12 +1032,13 @@ impl ParkIntent {
                  The forge runs a recorded probe with NO actor in its env, on purpose: the \
                  CLI there refuses an unnamed write by its own rule, and that refusal is \
                  what keeps a probe a read. A `boss` READ needs no actor — it goes out \
-                 signed operator:unidentified under the CLI's own platform-admin header, \
-                 which reads the whole world (one stderr line says so). Drop the \
-                 assignment; if the claim needs a write to be observed, it is not a probe \
-                 but an event — record the car as --park-proof-event.\n\n\
+                 signed operator:unidentified under the platform's own read role, \
+                 {reader_role}, the same one the probe's reader carries (one stderr line \
+                 says so). Drop the assignment; if the claim needs a write to be observed, \
+                 it is not a probe but an event — record the car as --park-proof-event.\n\n\
                  The rule is stated with the forge's tool list, \
-                 infra/forge/host-absent-tools.txt (the `boss` block)."
+                 infra/forge/host-absent-tools.txt (the `boss` block).",
+                reader_role = identity::READER_ROLE
             );
         }
         if let Some(probe) = &self.probe
@@ -6399,6 +6400,18 @@ mod signing_tests {
             "an unnamed read must say so; head was:\n{head}"
         );
         assert!(!head.contains(crate::identity::CONDUCTOR), "{head}");
+        // Backlog d843abf2: and it arrives under the platform's own
+        // READ role, not the operator's — the header a stray shell or
+        // a forge probe reads with must not be a whole-world one.
+        assert!(
+            head.contains(&format!(r#""role":"{}""#, crate::identity::READER_ROLE)),
+            "an unnamed read must carry {}; head was:\n{head}",
+            crate::identity::READER_ROLE
+        );
+        assert!(
+            !head.contains("platform-admin"),
+            "an unnamed read must not carry the operator's role; head was:\n{head}"
+        );
     }
 }
 

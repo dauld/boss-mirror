@@ -22,8 +22,10 @@
 # (crates/orchestrators/boss-cli/src/identity.rs, backlog 5083d6f5):
 # BOSS_ACTOR, else the actor file, else NOBODY — and nobody is loud. A
 # WRITE with no actor is refused, naming both fixes; a READ, which
-# attributes nothing, goes out marked operator:unidentified and says so
-# once on stderr. Until 2026-09-14 (backlog 416d503c) the pod copy fell
+# attributes nothing, goes out marked operator:unidentified under the
+# platform's own read role (audit-readonly — never the operator's
+# platform-admin, backlog d843abf2) and says so once on stderr. Until
+# 2026-09-14 (backlog 416d503c) the pod copy fell
 # back to a fixed id instead, so a builder pod or a fresh session with
 # no actor file wrote history as the operator's agent identity — two
 # doors to one system of record with two provenance rules.
@@ -111,11 +113,20 @@ fi
 ACTOR_FILE=${BOSS_ACTOR_FILE:-$HOME/.config/boss/actor}
 ACTOR_ID=$(printf '%s' "${BOSS_ACTOR:-}" | tr -d '[:space:]')
 [ -n "$ACTOR_ID" ] || ACTOR_ID=$(head -n1 "$ACTOR_FILE" 2>/dev/null | tr -d '[:space:]' || true)
+# A NAMED caller gets the operator's role. Nobody-in-particular does NOT
+# (backlog d843abf2, measured 2026-09-18: an unnamed read rode the same
+# platform-admin header and saw the whole world): it reads under the
+# platform's own read role, audit-readonly at the auditor tier — the
+# one a recorded probe's reader carries — full-width on every list and
+# 403 on every write. The role's one home is boss_core::roles
+# (identity.rs reads it from there); this copy is pinned equal by
+# crates/core/boss-testing/tests/boss_api_sh.rs.
+ROLE=platform-admin; TIER=operator
 if [ -z "$ACTOR_ID" ]; then
   case "$METHOD" in
     GET)
-      ACTOR_ID=operator:unidentified
-      echo "boss-api: nothing names the actor running this command — reading as \`$ACTOR_ID\`. Writes will be refused until \`BOSS_ACTOR\` (or the actor file) names you." >&2
+      ACTOR_ID=operator:unidentified; ROLE=audit-readonly; TIER=auditor
+      echo "boss-api: nothing names the actor running this command — reading as \`$ACTOR_ID\` under the $ROLE role. Writes will be refused until \`BOSS_ACTOR\` (or the actor file) names you." >&2
       ;;
     *)
       # The CLI's refusal, with the identity THIS door used to fall back
@@ -126,7 +137,7 @@ if [ -z "$ACTOR_ID" ]; then
       ;;
   esac
 fi
-ACTOR='{"id":"'"$ACTOR_ID"'","role":"platform-admin","access_tier":"operator","territory_account_ids":[],"direct_report_ids":[],"department":null}'
+ACTOR='{"id":"'"$ACTOR_ID"'","role":"'"$ROLE"'","access_tier":"'"$TIER"'","territory_account_ids":[],"direct_report_ids":[],"department":null}'
 
 args=( -sS -X "$METHOD" -H 'Content-Type: application/json' -H "X-Boss-User: $ACTOR" -w '\n%{http_code}' )
 TOK=$(cat "${BOSS_MACHINE_TOKEN_FILE:-/etc/boss/machine-token}" 2>/dev/null || true)

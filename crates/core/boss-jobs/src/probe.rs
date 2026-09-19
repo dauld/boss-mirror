@@ -138,8 +138,11 @@ const ACTOR_VARS: [&str; 2] = ["BOSS_ACTOR", "BOSS_ACTOR_FILE"];
 /// `BOSS_PROBE_NOTFOUND`, [`SOR_USER_VAR`], `BOSS_SOR_PORTS` and
 /// `PATH`), and the CLI refuses an unnamed WRITE by its own rule while
 /// an unnamed READ goes out signed `operator:unidentified` under the
-/// header's platform-admin role — a whole-world read, not the
-/// header-less narrowed one 61085a9e measured. So the probe's TEXT is
+/// platform's own read role — `audit-readonly`, the one [`SOR_USER_VAR`]
+/// carries, full-width on every list and 403 on every write (backlog
+/// d843abf2; until 2026-09-19 it was the operator's platform-admin
+/// header) — not the header-less narrowed one 61085a9e measured. So
+/// the probe's TEXT is
 /// the only place an actor could come from, and a text that assigns
 /// one is refused naming the variable. A mention is not an assignment:
 /// the CLI's own refusal names `BOSS_ACTOR`, and a probe may grep for
