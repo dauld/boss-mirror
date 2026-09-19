@@ -201,6 +201,14 @@ fn resolvable_merge_ref(raw: &str) -> Option<&str> {
 fn converged_at(dir: &Path, merge_ref: &str) -> Option<String> {
     let o = std::process::Command::new("git")
         .args([
+            // The unattended door runs as root in the probe user's
+            // checkout, and git refuses a repository owned by somebody
+            // else ("dubious ownership") by answering nonzero rather
+            // than erroring loudly — which here would silently hand
+            // over NO instant and starve the probe the other way. This
+            // one command is a read; say so rather than find out.
+            "-c",
+            &format!("safe.directory={}", dir.display()),
             "-C",
             &dir.display().to_string(),
             "show",
