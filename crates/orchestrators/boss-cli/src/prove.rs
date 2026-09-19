@@ -656,7 +656,7 @@ pub(crate) fn not_yet_why(host: &str, said: &str) -> String {
     format!(
         "NOT YET: the probe ran on {host} and said the claim cannot be judged until \
          something happens — {said}. Not a verdict against the change; \
-         recheck-failing-probes-daily runs it again."
+         recheck-failing-probes-hourly runs it again."
     )
 }
 
@@ -1589,7 +1589,7 @@ fn proven_metadata(
 // (infra/ops/verbs/run-car-probe.json), filed by the dispatcher rule
 // run-car-probes-on-train-arrived for every car aboard an arrived
 // train that recorded a probe at park time, and again by
-// recheck-failing-probes-daily for a car whose last run settled
+// recheck-failing-probes-hourly for a car whose last run settled
 // nothing. Until backlog 9f00a805 (consolidation H8, car 2) the verb
 // ran infra/forge/run-car-probe.sh — 482 lines of shell re-implementing
 // this file's judge, verdict and records, because the forge had no
@@ -2226,7 +2226,7 @@ pub(crate) async fn run(
         // change, so nothing is refused — and not a proof, so nothing
         // completes. What lands is the forge's record, from this door:
         // `proof_attempt{not_yet:true}` on the car, `proven` untouched,
-        // and the daily recheck (recheck-failing-probes-daily picks up
+        // and the hourly recheck (recheck-failing-probes-hourly picks up
         // any car carrying an attempt) runs it again. Exit 75, as the
         // probe did and as the forge does.
         Verdict::NotYet { said } => {

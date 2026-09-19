@@ -236,7 +236,7 @@ fn ship_refusal(probe: &str, expect: Option<&str>) -> Option<Value> {
 /// whatever train it rode. On 2026-09-12 two such cars sat at `proven`
 /// waiting on tomorrow's timer firing, correct but early, and the only
 /// way their probe would run again was a human refiling
-/// `run-car-probe` by hand (rule `recheck-failing-probes-daily`).
+/// `run-car-probe` by hand (rule `recheck-failing-probes-hourly`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Scope<'a> {
     Train(&'a str),
@@ -497,7 +497,7 @@ mod tests {
             Scope::Failing,
             &cars,
             &open,
-            "recheck-failing-probes-daily",
+            "recheck-failing-probes-hourly",
             "clock-day:2026-09-13",
             "clock.day",
         );
@@ -511,7 +511,7 @@ mod tests {
         assert_eq!(got.requests[0]["metadata"]["recheck"], true);
         assert_eq!(
             got.requests[0]["metadata"]["spawned_by_rule"],
-            "recheck-failing-probes-daily"
+            "recheck-failing-probes-hourly"
         );
     }
 

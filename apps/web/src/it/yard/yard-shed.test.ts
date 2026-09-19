@@ -312,7 +312,7 @@ describe('the shed as a whole', () => {
         host: 'forge',
         stdout: 'no disk-report request carrying for_sweep yet — the sweeps fire daily',
         stderr: null,
-        why: 'NOT YET: the probe ran on forge and said the claim cannot be judged until something happens — no disk-report request carrying for_sweep yet. Not a verdict against the change; recheck-failing-probes-daily runs it again.',
+        why: 'NOT YET: the probe ran on forge and said the claim cannot be judged until something happens — no disk-report request carrying for_sweep yet. Not a verdict against the change; recheck-failing-probes-hourly runs it again.',
         missingTools: [],
         notYet: true,
       },
