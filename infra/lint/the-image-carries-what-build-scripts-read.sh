@@ -34,6 +34,16 @@
 # place we had just decided not to look. Requiring all of them costs a
 # COPY line per file and removes the distinction entirely.
 #
+# ONLY THE STAGE THAT RUNS CARGO COUNTS (2026-09-19). Train #473 could
+# not build its image: boss-core had gained
+# `include_str!("../../../../infra/platform/tiers.toml")` and the
+# rust-build stage never copied it — yet this lint said "carried",
+# because the RUNTIME stage has `COPY infra/platform /opt/boss/...`
+# for the services to read at run time and the ancestor probe matched
+# that line. A COPY in another stage is a different filesystem; rustc
+# never sees it. So the lines this lint reads are the COPYs of the
+# stage(s) whose RUN invokes cargo, and nothing after the next FROM.
+#
 # WHAT IT CANNOT SEE. A path assembled at run time from variables
 # rather than written as a literal. It says so rather than implying the
 # check is total.
@@ -45,8 +55,26 @@ cd "$here/../.."
 # shellcheck source=infra/lint/lib/scanned.sh
 . "$here/lib/scanned.sh" || exit 3
 
-DOCKERFILE=infra/oss-quickstart/Dockerfile
+DOCKERFILE=${BOSS_IMAGE_DOCKERFILE:-infra/oss-quickstart/Dockerfile}
 [ -f "$DOCKERFILE" ] || { echo "$NAME: $DOCKERFILE does not exist" >&2; exit 1; }
+
+# The COPY lines of every stage that runs cargo — a stage is the text
+# from one FROM to the next, and a stage runs cargo when a non-comment
+# line of it invokes `cargo build` or `cargo install`. Buffered per
+# stage because the RUN comes after the COPYs it depends on.
+build_stage_copies() {
+    awk '
+        /^FROM[[:space:]]/ { if (cargo) printf "%s", buf; buf = ""; cargo = 0; next }
+        /^COPY[[:space:]]/ { buf = buf $0 "\n" }
+        /^[^#]*cargo[[:space:]]+(build|install)([[:space:]]|$)/ { cargo = 1 }
+        END { if (cargo) printf "%s", buf }
+    ' "$DOCKERFILE"
+}
+BUILD_COPIES=$(build_stage_copies)
+if [ -z "$BUILD_COPIES" ]; then
+    echo "$NAME: no stage of $DOCKERFILE both runs cargo and COPYs anything — the build stage has moved and this lint no longer knows where rustc reads from" >&2
+    exit 1
+fi
 
 # Literal out-of-crate reaches, from both mechanisms, resolved to
 # repo-relative paths.
@@ -78,19 +106,22 @@ for path in $(reaches); do
     covered=0
     probe="$path"
     while [ "$probe" != "." ] && [ "$probe" != "/" ]; do
-        if grep -qE "^COPY[[:space:]]+${probe}[[:space:]]" "$DOCKERFILE"; then
+        # A here-string, not a pipe: grep -q exits at its match and a
+        # piped list would SIGPIPE its writer under pipefail (9840e529).
+        if grep -qE "^COPY[[:space:]]+${probe}[[:space:]]" <<< "$BUILD_COPIES"; then
             covered=1
             break
         fi
         probe="$(dirname "$probe")"
     done
     [ "$covered" -eq 0 ] || continue
-    echo "$NAME: a crate reads $path at build time and $DOCKERFILE never COPYs it." >&2
+    echo "$NAME: a crate reads $path at build time and the cargo stage of $DOCKERFILE never COPYs it." >&2
     echo "  A build.rs runs INSIDE the image's build stage and an include_str! is read" >&2
     echo "  while compiling in it; that stage is a SUBSET of the repo. This compiles on" >&2
     echo "  any full checkout — including the gate's — and fails in the image, where on" >&2
-    echo "  2026-09-09 it stopped delivery twice in one hour." >&2
-    echo "  Add:  COPY $path ./$path" >&2
+    echo "  2026-09-09 it stopped delivery twice in one hour and on 2026-09-19 once more." >&2
+    echo "  A COPY in the runtime stage does not count: rustc never sees that filesystem." >&2
+    echo "  Add, in the stage that runs cargo:  COPY $path ./$path" >&2
     fail=1
 done
 

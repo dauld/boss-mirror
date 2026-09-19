@@ -94,6 +94,12 @@ COPY infra/postgres ./infra/postgres
 # Rust build layer every time a shell script moved.
 COPY infra/estate/observe-lib.sh ./infra/estate/observe-lib.sh
 COPY infra/forge/host-absent-tools.txt ./infra/forge/host-absent-tools.txt
+# boss-core `include_str!`s the tiers registry (ba429e7f). The runtime
+# stage copies all of infra/platform for the services to READ at run
+# time; that copy is a different stage and does not feed rustc here —
+# train #473 could not build its image for want of this one line while
+# the lint counted the runtime COPY as coverage (2026-09-19).
+COPY infra/platform/tiers.toml ./infra/platform/tiers.toml
 # `boss ops` compiles the ops allowlist in — the DIRECTORY of verb files
 # the host runner enforces (one per verb, 5086842d), listed by boss-cli's
 # build.rs; the terminal applies the same rules first.

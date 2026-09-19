@@ -25,12 +25,14 @@
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import { href, navigate } from '../../router';
   import type { Remote } from '../../data/remote';
+  import { failedVerbPhrase } from '../../steps/failedVerb';
   import {
     AGE_THRESHOLDS,
     CHANNELS,
     CHANNEL_LABEL,
     arrivalsByDay,
     daysEndingOn,
+    failedStep,
     inboundKinds,
     loadKind,
     loadWorkflows,
@@ -144,6 +146,14 @@
 
   const shortLabel = (c: Channel): string => CHANNEL_LABEL[c].split(' ·')[0] ?? c;
   const openPacket = (jobId: string) => navigate(`/jobs/${jobId}`);
+  // A car whose ready step's verb FAILED says so in its title, and the
+  // manifest prints the verb's line with the alert it filed (backlog
+  // 074e1287): the step is still ready, the packet is troubled, and
+  // until now this yard drew it like any standing packet.
+  const carTitle = (r: WaitingRow): string => {
+    const f = failedStep(r)?.failed ?? null;
+    return `${r.title} — ${r.age} d, on ${r.holder.label}${f ? ` — ${failedVerbPhrase(f)}` : ''}`;
+  };
 </script>
 
 <div class="ry-root">
@@ -267,7 +277,7 @@
                 <a
                   class="car {r.band} h-{r.holder.who}"
                   href={href(`/jobs/${r.id}`)}
-                  title="{r.title} — {r.age} d, on {r.holder.label}"
+                  title={carTitle(r)}
                   onclick={(e) => {
                     e.preventDefault();
                     openPacket(r.id);
@@ -304,6 +314,7 @@
           </thead>
           <tbody>
             {#each standing as r (r.id)}
+              {@const failed = failedStep(r)?.failed ?? null}
               <tr>
                 <td class="num {r.band}">{r.age} d</td>
                 <td>
@@ -322,7 +333,29 @@
                   >
                   <span class="id">{r.id.slice(0, 8)}{#if r.priority === 'urgent'} · urgent{/if}</span>
                 </td>
-                <td class="mono dim">{r.ready.map((s) => s.kind).join(', ') || '—'}</td>
+                <td class="mono dim">
+                  {r.ready.map((s) => s.kind).join(', ') || '—'}
+                  {#if failed}
+                    <!-- The verb's own line, in the error colour the
+                         page already uses for a failed read, with the
+                         alert it filed — a troubled packet must look
+                         troubled (CLAUDE.md §Diagnosis). -->
+                    <span class="load-failed" role="alert">
+                      {failedVerbPhrase(failed)}
+                      {#if failed.alert}
+                        {@const alert = failed.alert}
+                        · alert
+                        <a
+                          href={href(`/jobs/${alert}`)}
+                          onclick={(e) => {
+                            e.preventDefault();
+                            openPacket(alert);
+                          }}>{alert.slice(0, 8)}</a
+                        >
+                      {/if}
+                    </span>
+                  {/if}
+                </td>
                 <td class="hold h-{r.holder.who}">{r.holder.label}</td>
               </tr>
             {/each}

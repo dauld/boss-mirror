@@ -1291,3 +1291,59 @@ fn a_platform_bundle_edit_scopes_the_crate_whose_pins_hold_it_to_the_migrations(
         );
     }
 }
+
+/// THE PACKET (backlog 1b52c278). Train #470's car 4f1ba1f9 edited
+/// `docs/tenant-contract.md` (one sentence on the tenant.toml row)
+/// without touching `CONTRACT` in boss-cli's tenant.rs. The equality pin
+/// `the_contract_doc_carries_the_codes_table` lives in boss-cli, which
+/// the car did not change, so neither the car's gate nor the train gate
+/// (both `--auto`, both scoped to boss-gateway) ran it; origin/main went
+/// red on that pin at 04:38Z and struck the next car gated on top of it
+/// (5e4951a4) — the FIRST time the pin ran at all.
+///
+/// Measured through the gate's own `file_input_index` at #471: 191
+/// (path, crate) pairs, and `docs/tenant-contract.md` in none of them.
+/// The index counted a repo-relative literal only inside a crate's
+/// `tests/` directory and, elsewhere, only a `../`-escaping one — and
+/// the pin is a `#[cfg(test)]` module under `src/` that reads the doc
+/// through `boss_testing::repo_root().join("docs/tenant-contract.md")`,
+/// which is neither. Eight (path, crate) pairs sat outside the map for
+/// the same reason (estate.toml, sor-ports.env, pod-build.env,
+/// as-gate-uid.sh, access.toml, tax.toml, this doc). The idiom is the
+/// discriminator the index lacked: a literal that is the argument of
+/// `.join(` is a path being read, not a sentence that mentions one, so
+/// the gate now counts it under `src/` too. This gates a scratch edit to
+/// the doc and asserts the crate holding its pin is in scope.
+#[test]
+fn a_doc_a_test_module_reads_by_repo_path_scopes_the_crate_that_pins_it() {
+    // The doc's path is read off the pin's own source rather than
+    // restated here: a repo-path literal in this file would be a second
+    // reader the index counts (this crate), and a pin that stops
+    // reading the doc must fail by name rather than pass about nothing.
+    let pin = read("crates/orchestrators/boss-cli/src/tenant.rs");
+    let doc = pin
+        .split("repo_root().join(\"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .find(|p| p.starts_with("docs/"))
+        .unwrap_or_else(|| {
+            panic!(
+                "boss-cli's tenant.rs no longer reads a doc through repo_root().join(\"docs/…\") — \
+                 move this test to whichever crate pins the contract doc now"
+            )
+        })
+        .to_string();
+    let (stdout, receipt) = auto_scope_of("gate-scope-doc-read-by-a-pin", &[&doc]);
+    let scope = scope_of(&receipt);
+    assert!(
+        scope.iter().any(|c| c == "boss-cli"),
+        "a car that only edits {doc} must scope boss-cli — that crate's tenant.rs holds \
+         the doc's table equal to CONTRACT, and a docs-only car that gates lints-only \
+         never runs the pin that exists to reject it (train #470).\n\
+         scope: {scope:?}\nstdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("--auto scoping to"),
+        "the gate must say it scoped for {doc}, not fall to lints-only.\nstdout: {stdout}"
+    );
+}

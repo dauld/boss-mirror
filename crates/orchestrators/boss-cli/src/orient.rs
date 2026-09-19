@@ -667,12 +667,15 @@ pub async fn run(all: bool) -> Result<()> {
     );
     // The tool reading the approach must say what IT is: a binary that
     // lags main runs older verbs silently (895c9a3b).
+    let built = crate::built_from::built_from();
+    let main = crate::built_from::origin_main_head();
+    let ancestry = main
+        .as_deref()
+        .map(|m| crate::built_from::ancestry(built, m))
+        .unwrap_or(crate::built_from::Ancestry::Unknown);
     println!(
         "{}",
-        crate::built_from::freshness_line(
-            crate::built_from::built_from(),
-            crate::built_from::origin_main_head().as_deref()
-        )
+        crate::built_from::freshness_line(built, main.as_deref(), ancestry)
     );
 
     // THE REGIONS — the map's numbers, from the server's one definition

@@ -32,6 +32,7 @@
 
 import { isHumanActor } from '../../data/actor';
 import { fetchRemote, type Remote } from '../../data/remote';
+import { failedVerb, type FailedVerb } from '../../steps/failedVerb';
 
 // ---------------------------------------------------------------------
 // Which kinds are inbound
@@ -155,7 +156,10 @@ export function channelOf(job: unknown): ChannelReading {
 // Rows — one parse at the fetch site
 // ---------------------------------------------------------------------
 
-export type ReadyStep = Readonly<{ kind: string; who: string | null }>;
+/** A ready step, and — when the ops verb it waits on FAILED — the
+ *  note the dispatcher left on it (backlog 074e1287): the step is
+ *  still ready, the packet is troubled, and the manifest must say so. */
+export type ReadyStep = Readonly<{ kind: string; who: string | null; failed: FailedVerb | null }>;
 
 export type InboundRow = Readonly<{
   id: string;
@@ -197,7 +201,11 @@ export function parseJobsPage(raw: unknown): JobsPage {
         channelBasis: ch.basis,
         ready: steps
           .filter((s) => s.status === 'ready')
-          .map((s) => ({ kind: str(s.kind) ?? '', who: str(s.assignee_id) })),
+          .map((s) => ({
+            kind: str(s.kind) ?? '',
+            who: str(s.assignee_id),
+            failed: failedVerb(s.metadata),
+          })),
       },
     ];
   });
@@ -219,6 +227,14 @@ export function holderOf(row: InboundRow): Holder {
   const agent = row.ready.find((s) => s.who !== null);
   if (agent) return { who: 'agent', label: 'the agent' };
   return { who: 'nobody', label: 'unassigned' };
+}
+
+/** The first ready step whose verb FAILED, or null for a packet with
+ *  none: what the manifest's troubled reading and the track's car
+ *  title both read. Measured 2026-09-19: publish 254177e2's open-pr
+ *  sat annotated for hours and this yard drew a healthy publish. */
+export function failedStep(row: InboundRow): ReadyStep | null {
+  return row.ready.find((s) => s.failed !== null) ?? null;
 }
 
 const DAY_MS = 86_400_000;

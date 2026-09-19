@@ -678,6 +678,55 @@ fn check_still_says_not_live_for_an_object_that_is_absent() {
     names_all(&all, &["boss-ghost", "not live"], "the absent case");
 }
 
+/// The line that fired once in five full-suite runs on 2026-09-19
+/// (backlog 0f2ecbda, found by the builder of 2a056500 under load):
+///
+///   REFUSED Service/boss/boss-docs-internal — the tree does not own
+///   namespace `boss` (no Namespace manifest in infra/cluster/manifests),
+///     so nothing here can be called undeclared. Owned: boss boss-dev
+///
+/// `boss` refused as unowned in the line that lists it as owned. The
+/// owned set was a newline-joined string and the membership test piped
+/// it into `grep -q`; bash's printf wrote `boss` and `boss-dev` as two
+/// writes, grep matched the first and exited, the second was SIGPIPE,
+/// and pipefail turned a PRESENT member into "not found". It is now one
+/// array and one loop, and this asks the derivation for every owned
+/// namespace in the order the string was written — `boss` first, the
+/// one whose match ended grep early — that an object it declares there
+/// is refused as DECLARED and never as unowned. The shape itself is
+/// refused, deterministically, by the producer-coin pin in
+/// a_lint_that_cannot_read_does_not_say_clean.rs; this is the fact.
+#[test]
+fn an_owned_namespace_is_never_refused_as_unowned() {
+    let c = Case::new("owned-is-owned", &[]);
+    for (kind, ns, name) in [
+        ("Service", "boss", "svc-a"),
+        ("Service", "boss-dev", "boss-dev"),
+    ] {
+        let (rc, _stdout, all) = c.run(&["--check", &format!("{kind}/{ns}/{name}")]);
+        assert_eq!(rc, 3, "a declared object was not refused:\n{all}");
+        assert!(
+            !all.contains("does not own namespace"),
+            "the tree owns `{ns}` and the derivation said otherwise — the refusal that \
+             read `Owned: boss boss-dev` and `does not own namespace boss` in one line \
+             (backlog 0f2ecbda):\n{all}"
+        );
+        names_all(&all, &["DECLARES it"], "the declared case");
+    }
+    // The refusal a foreign namespace earns names the owned set, and the
+    // set it names is the set it tested against.
+    let (rc, _stdout, all) = c.run(&["--check", "Service/kube-system/kube-dns"]);
+    assert_eq!(rc, 3, "a foreign namespace was not refused:\n{all}");
+    names_all(
+        &all,
+        &[
+            "does not own namespace `kube-system`",
+            "Owned: boss boss-dev",
+        ],
+        "the foreign-namespace refusal",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The consumer. Moving the silence one layer up is not a fix.
 // ---------------------------------------------------------------------------

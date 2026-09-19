@@ -5,6 +5,7 @@ import {
   arrivalsByDay,
   channelOf,
   daysEndingOn,
+  failedStep,
   holderOf,
   inboundKinds,
   parseJobsPage,
@@ -104,8 +105,58 @@ describe('the page is parsed once', () => {
     const r = page.rows[0];
     expect(r?.id).toBe('0123456789abcdef');
     expect(r?.openedOn).toBe('2026-09-11');
-    expect(r?.ready).toEqual([{ kind: 'task', who: 'claude@algedonic.dev' }]);
+    expect(r?.ready).toEqual([{ kind: 'task', who: 'claude@algedonic.dev', failed: null }]);
     expect(r?.channel).toBe('unrecorded');
+  });
+  // A failed verb answer (backlog 074e1287): jobs.complete_linked_step
+  // leaves the step OPEN and writes the verb's last FAILED line on it
+  // as `failed` with the alert it filed. Publish 254177e2's open-pr sat
+  // ready for five hours on 2026-09-19 and this yard drew it like any
+  // ready step — the packet was troubled and did not look it.
+  test('a ready step a failed verb annotated carries the FAILED line and its alert', () => {
+    const line = 'publish-github-pr: FAILED — pushing publish/2026-09-18: dubious ownership';
+    const page = parseJobsPage({
+      data: [
+        job({
+          kind: 'publish-to-github',
+          steps: [
+            { kind: 'approval', status: 'completed', assignee_id: 'emp-david' },
+            {
+              kind: 'task',
+              status: 'ready',
+              assignee_id: null,
+              metadata: {
+                ops_verb: 'publish-github-pr',
+                failed: line,
+                failed_exit: '1',
+                failed_source: 'c98a782f-0000-4000-8000-000000000000',
+                alert: 'a1e57000-0000-4000-8000-000000000000',
+              },
+            },
+          ],
+        }),
+      ],
+      total: 1,
+    });
+    const r = page.rows[0];
+    expect(r?.ready).toEqual([
+      {
+        kind: 'task',
+        who: null,
+        failed: {
+          line,
+          exit: '1',
+          source: 'c98a782f-0000-4000-8000-000000000000',
+          alert: 'a1e57000-0000-4000-8000-000000000000',
+        },
+      },
+    ]);
+    if (!r) throw new Error('fixture parsed to nothing');
+    expect(failedStep(r)?.failed?.line).toBe(line);
+    // A healthy packet has no failed step — the yard says nothing.
+    const healthy = parseJobsPage({ data: [job({})], total: 1 }).rows[0];
+    if (!healthy) throw new Error('fixture parsed to nothing');
+    expect(failedStep(healthy)).toBeNull();
   });
   test('a malformed envelope is an empty page with total 0, not a throw', () => {
     expect(parseJobsPage(null)).toEqual({ rows: [], total: 0 });
@@ -119,15 +170,15 @@ describe('who holds a standing packet', () => {
     return { ...base, ready };
   };
   test('an agent, a human, nobody', () => {
-    expect(holderOf(row([{ kind: 'task', who: 'claude@algedonic.dev' }]))).toEqual({
+    expect(holderOf(row([{ kind: 'task', who: 'claude@algedonic.dev', failed: null }]))).toEqual({
       who: 'agent',
       label: 'the agent',
     });
-    expect(holderOf(row([{ kind: 'answer-question', who: 'emp-david' }]))).toEqual({
+    expect(holderOf(row([{ kind: 'answer-question', who: 'emp-david', failed: null }]))).toEqual({
       who: 'human',
       label: 'emp-david',
     });
-    expect(holderOf(row([{ kind: 'task', who: null }]))).toEqual({
+    expect(holderOf(row([{ kind: 'task', who: null, failed: null }]))).toEqual({
       who: 'nobody',
       label: 'unassigned',
     });
@@ -137,8 +188,8 @@ describe('who holds a standing packet', () => {
     expect(
       holderOf(
         row([
-          { kind: 'task', who: 'claude@algedonic.dev' },
-          { kind: 'sign-off', who: 'emp-david' },
+          { kind: 'task', who: 'claude@algedonic.dev', failed: null },
+          { kind: 'sign-off', who: 'emp-david', failed: null },
         ]),
       ).who,
     ).toBe('human');

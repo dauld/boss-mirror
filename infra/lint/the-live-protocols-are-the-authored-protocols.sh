@@ -1077,7 +1077,7 @@ authored=$(printf '%s\n%s\n%s\n%s\n' \
 # pre-flight exclusions off the excluded lints' own headers, where a
 # lint that no longer exists cannot be named.
 for kind in ${EXEMPT[@]+"${EXEMPT[@]}"}; do
-    if printf '%s\n' "$authored" | LC_ALL=C grep -qxF "$kind"; then
+    if LC_ALL=C grep -qxF "$kind" <<<"$authored"; then
         fail "the exemption for \`$kind\` is stale — the tree now authors it"
         echo "" >&2
         echo "  Drop \`$kind\` from EXEMPT in this script. An exemption that" >&2
@@ -1213,7 +1213,7 @@ fi
 # live. Same reason as the authored check above — it would excuse a
 # future kind of that name that nobody decided to excuse.
 for kind in ${EXEMPT[@]+"${EXEMPT[@]}"}; do
-    if ! printf '%s\n' "$live_kinds" | LC_ALL=C grep -qxF "$kind"; then
+    if ! LC_ALL=C grep -qxF "$kind" <<<"$live_kinds"; then
         fail "the exemption for \`$kind\` is stale — the live registry does not admit it"
         echo "" >&2
         echo "  Drop \`$kind\` from EXEMPT in this script." >&2

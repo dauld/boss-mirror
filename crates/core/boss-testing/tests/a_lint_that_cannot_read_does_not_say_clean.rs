@@ -755,15 +755,7 @@ fn is_a_list_piped_into_an_early_exiting_reader(line: &str) -> bool {
     if !left.contains("printf '%s\\n' \"$") {
         return false;
     }
-    let mut words = right.split_whitespace();
-    match words.next() {
-        Some("grep") => words
-            .take_while(|w| w.starts_with('-') && *w != "--")
-            .any(|w| !w.starts_with("--") && (w.contains('q') || w.contains('m'))),
-        Some("head") | Some("read") => true,
-        Some(w) if w.starts_with("IFS=") => words.next() == Some("read"),
-        _ => false,
-    }
+    reader_exits_early(right)
 }
 
 /// Every `*.sh` under `dir`, recursively — the roster is the directory.
@@ -986,17 +978,37 @@ fn producer_word(left: &str) -> &str {
     }
 }
 
-/// `read`, a lone `IFS=… read`, `head`, or `grep` with `-q` / `-m`.
+/// `read`, `head`, or `grep` with `-q` / `-m` — behind any number of
+/// environment assignments (`IFS= read`, `LC_ALL=C grep -q`). The ONE
+/// definition of "a reader that exits early", for both classes: the two
+/// pins each carried a copy that knew `IFS=` and nothing else, so
+/// `printf '%s\n' "$managed_ns" | LC_ALL=C grep -qxF` stood through two
+/// sweeps and refused `boss` as unowned in the line that listed it as
+/// owned (backlog 0f2ecbda, 2026-09-19).
 fn reader_exits_early(stage: &str) -> bool {
-    let mut words = stage.split_whitespace();
+    let mut words = stage
+        .split_whitespace()
+        .skip_while(|w| is_environment_assignment(w));
     match words.next() {
         Some("grep") => words
             .take_while(|w| w.starts_with('-') && *w != "--")
             .any(|w| !w.starts_with("--") && (w.contains('q') || w.contains('m'))),
         Some("head") | Some("read") => true,
-        Some(w) if w.starts_with("IFS=") => words.next() == Some("read"),
         _ => false,
     }
+}
+
+/// `NAME=…` where NAME is a shell identifier: a per-command environment
+/// assignment, not the command.
+fn is_environment_assignment(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// A producer on the left of a `|` whose reader on the right exits
@@ -1217,6 +1229,50 @@ fn the_producer_check_reads_the_pipe_and_not_the_prose() {
         // The producer is on the previous line: not judged by a line check.
         r#"    | grep -q '"ready":[[:space:]]*true'; then"#,
     ] {
+        assert!(
+            !is_a_producer_piped_into_an_early_exiting_reader(not_refused),
+            "a shape that cannot SIGPIPE its writer must not be refused: {not_refused}"
+        );
+    }
+}
+
+/// The line that fired on 2026-09-19 (backlog 0f2ecbda): undeclared-
+/// objects.sh refused `Service/boss/…` as "the tree does not own
+/// namespace `boss`" in the same breath as "Owned: boss boss-dev". Its
+/// membership test was `printf '%s\n' "$managed_ns" | LC_ALL=C grep
+/// -qxF "$1"` — the first class exactly, and BOTH pins above read the
+/// reader as `LC_ALL=C`, not `grep`, so the line stood through two sweeps.
+/// An environment assignment before the command is not the command;
+/// `IFS= read` was the one instance either pin had learned.
+#[test]
+fn a_reader_behind_an_environment_assignment_is_the_same_reader() {
+    for coin in [
+        r#"owns_ns() { printf '%s\n' "$managed_ns" | LC_ALL=C grep -qxF "$1"; }"#,
+        r#"    if ! printf '%s\n' "$names" | LC_ALL=C grep -qxF "$name"; then"#,
+        r#"registry_line=$(printf '%s\n' "$read_out" | LC_ALL=C grep -m1 '^REGISTRY' || true)"#,
+        r#"    first=$(printf '%s\n' "$rows" | LANG=C LC_ALL=C head -1)"#,
+    ] {
+        assert!(
+            is_a_list_piped_into_an_early_exiting_reader(coin),
+            "a list piped into `VAR=… grep -q` is the list-into-grep coin: {coin}"
+        );
+        assert!(
+            is_a_producer_piped_into_an_early_exiting_reader(coin),
+            "a producer piped into `VAR=… grep -q` is the producer coin: {coin}"
+        );
+    }
+    for not_refused in [
+        // The repair: the array is read by a loop, and the here-string is not a pipe.
+        r#"owns_ns() { in_set "$1" "${managed_ns[@]}"; }"#,
+        r#"    if ! LC_ALL=C grep -qxF "$name" <<<"$names"; then"#,
+        // A drainer behind the same assignment.
+        r#"    printf '%s\n' "$rows" | LC_ALL=C sort -u"#,
+        r#"    printf '%s\n' "$rows" | LC_ALL=C grep '^RULE' || true"#,
+    ] {
+        assert!(
+            !is_a_list_piped_into_an_early_exiting_reader(not_refused),
+            "a shape that cannot SIGPIPE its writer must not be refused: {not_refused}"
+        );
         assert!(
             !is_a_producer_piped_into_an_early_exiting_reader(not_refused),
             "a shape that cannot SIGPIPE its writer must not be refused: {not_refused}"

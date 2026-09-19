@@ -47,11 +47,44 @@ pub fn version() -> &'static str {
 pub const REBUILD: &str = "set -a; . infra/dev/pod-build.env; set +a; \
                            CARGO_TARGET_DIR=/scratch/target cargo build -p boss-cli";
 
-/// One line for `boss orient`: current, stale (with the rebuild line),
-/// or unknown — never silent, because silence is what let the lag last.
+/// Where the built commit stands against `origin/main`, by ancestry —
+/// the question the pod shim (infra/dev/boss) already answers with
+/// `git merge-base --is-ancestor`. Equality was the first comparison
+/// and it read a CLI built from a car branch on CURRENT main as STALE
+/// (f63da97f, 2026-09-19): the tree was newer, and the rebuild the
+/// line prescribed would have produced the same verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ancestry {
+    /// origin/main is an ancestor of the built commit: a branch cut
+    /// from current main, or main itself.
+    MainIsAncestor,
+    /// It is not: the binary predates main, or sits on a stale base.
+    MainIsNotAncestor,
+    /// git could not say (the built commit is not in this repository,
+    /// or git is absent) — not evidence of either.
+    Unknown,
+}
+
+/// `git merge-base --is-ancestor <main> <built>` in the cwd: exit 0
+/// is an ancestor, 1 is not, anything else is a question git could
+/// not answer (an unfetched commit, no repository).
+pub fn ancestry(built: &str, main: &str) -> Ancestry {
+    match std::process::Command::new("git")
+        .args(["merge-base", "--is-ancestor", main, built])
+        .output()
+    {
+        Ok(out) if out.status.success() => Ancestry::MainIsAncestor,
+        Ok(out) if out.status.code() == Some(1) => Ancestry::MainIsNotAncestor,
+        _ => Ancestry::Unknown,
+    }
+}
+
+/// One line for `boss orient`: current (main itself, or ahead of it on
+/// a current base), stale (with the rebuild line), unplaceable, or
+/// unknown — never silent, because silence is what let the lag last.
 /// `main` is `None` when origin/main could not be read; that is said
 /// too, since "could not compare" is not "current".
-pub fn freshness_line(built: &str, main: Option<&str>) -> String {
+pub fn freshness_line(built: &str, main: Option<&str>, ancestry: Ancestry) -> String {
     let short = |s: &str| s.chars().take(7).collect::<String>();
     match main {
         _ if built == "unknown" => "  binary    built from an unknown commit (no git and no \
@@ -63,12 +96,25 @@ pub fn freshness_line(built: &str, main: Option<&str>) -> String {
             short(built)
         ),
         Some(m) if m == built => format!("  binary    built from {} = origin/main", short(built)),
-        Some(m) => format!(
-            "  binary    built from {} but origin/main is {} — STALE: this verb and every \
-             other ran an older tree. Rebuild: {REBUILD}",
-            short(built),
-            short(m)
-        ),
+        Some(m) => match ancestry {
+            Ancestry::MainIsAncestor => format!(
+                "  binary    built from {} — AHEAD of origin/main {} on a current base: current",
+                short(built),
+                short(m)
+            ),
+            Ancestry::MainIsNotAncestor => format!(
+                "  binary    built from {} but origin/main is {} — STALE: this verb and every \
+                 other ran an older tree. Rebuild: {REBUILD}",
+                short(built),
+                short(m)
+            ),
+            Ancestry::Unknown => format!(
+                "  binary    built from {} — git cannot place it against origin/main {} (not \
+                 fetched here?), so freshness is UNKNOWN; if in doubt rebuild: {REBUILD}",
+                short(built),
+                short(m)
+            ),
+        },
     }
 }
 
@@ -101,6 +147,7 @@ mod tests {
         let l = freshness_line(
             "85e102f6551451709546c535aa3e785fccd2a7aa",
             Some("85e102f6551451709546c535aa3e785fccd2a7aa"),
+            Ancestry::MainIsAncestor,
         );
         assert!(l.contains("85e102f = origin/main"), "{l}");
         assert!(!l.contains("STALE"));
@@ -111,6 +158,7 @@ mod tests {
         let l = freshness_line(
             "131a783fa05a229d0d2492c2bf62e4826515df15",
             Some("85e102f6551451709546c535aa3e785fccd2a7aa"),
+            Ancestry::MainIsNotAncestor,
         );
         for must in [
             "131a783",
@@ -125,14 +173,75 @@ mod tests {
 
     #[test]
     fn an_unreadable_main_is_unknown_not_current() {
-        let l = freshness_line("131a783fa05a229d0d2492c2bf62e4826515df15", None);
+        let l = freshness_line(
+            "131a783fa05a229d0d2492c2bf62e4826515df15",
+            None,
+            Ancestry::Unknown,
+        );
         assert!(l.contains("UNKNOWN") && l.contains("131a783"), "{l}");
         assert!(!l.contains("= origin/main"));
     }
 
+    /// The 2026-09-19 reading: a CLI built from a car branch whose base
+    /// IS origin/main printed STALE and prescribed a rebuild that would
+    /// have printed the same. Ancestry, not equality, places it.
+    #[test]
+    fn a_binary_ahead_of_main_on_a_current_base_is_current_not_stale() {
+        let l = freshness_line(
+            "b688791d678c9c08cf51648740ca01b50fcc766c",
+            Some("be78c8150000000000000000000000000000abcd"),
+            Ancestry::MainIsAncestor,
+        );
+        assert!(
+            l.contains("AHEAD of origin/main be78c81") && l.contains("current"),
+            "{l}"
+        );
+        assert!(!l.contains("STALE") && !l.contains("cargo build"), "{l}");
+    }
+
+    #[test]
+    fn a_binary_git_cannot_place_is_unknown_with_the_rebuild_line_not_stale() {
+        let l = freshness_line(
+            "b688791d678c9c08cf51648740ca01b50fcc766c",
+            Some("be78c8150000000000000000000000000000abcd"),
+            Ancestry::Unknown,
+        );
+        assert!(
+            l.contains("UNKNOWN") && l.contains("cargo build -p boss-cli"),
+            "{l}"
+        );
+        assert!(!l.contains("STALE"), "{l}");
+    }
+
+    /// The ancestry read is git's own answer, on this repository.
+    #[test]
+    fn ancestry_reads_git_merge_base() {
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git");
+        let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        assert_eq!(ancestry(&head, &head), Ancestry::MainIsAncestor);
+        let parent = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD~1"])
+            .output()
+            .expect("git");
+        let parent = String::from_utf8_lossy(&parent.stdout).trim().to_string();
+        assert_eq!(ancestry(&head, &parent), Ancestry::MainIsAncestor);
+        assert_eq!(ancestry(&parent, &head), Ancestry::MainIsNotAncestor);
+        assert_eq!(
+            ancestry(&head, "0000000000000000000000000000000000000000"),
+            Ancestry::Unknown
+        );
+    }
+
     #[test]
     fn an_unstamped_binary_says_so() {
-        let l = freshness_line("unknown", Some("85e102f6551451709546c535aa3e785fccd2a7aa"));
+        let l = freshness_line(
+            "unknown",
+            Some("85e102f6551451709546c535aa3e785fccd2a7aa"),
+            Ancestry::Unknown,
+        );
         assert!(l.contains("unknown commit"), "{l}");
         assert!(!l.contains("STALE") && !l.contains("= origin/main"));
     }

@@ -429,7 +429,14 @@ scan_tree() {
         echo "$NAME: could not compare the declared and scraped name sets" >&2
         return 1
     fi
-    if ! LC_ALL=C comm -12 "$tmp/declared" "$tmp/scraped" | LC_ALL=C grep -q .; then
+    # Written to a file and tested for size, not piped into `grep -q`:
+    # the reader would exit at the first line and comm's next write is
+    # SIGPIPE, which pipefail reports as "found none" (backlog 0f2ecbda).
+    if ! LC_ALL=C comm -12 "$tmp/declared" "$tmp/scraped" > "$tmp/recognised"; then
+        echo "$NAME: could not compare the declared and scraped name sets" >&2
+        return 1
+    fi
+    if ! [ -s "$tmp/recognised" ]; then
         echo "$NAME: the migration scrape found NONE of the $(LC_ALL=C grep -c . < "$tmp/declared") declared rules in $SCHEMA_REL" >&2
         echo "" >&2
         echo "  The pre-collapse seeds are applied history that names rules the tree" >&2

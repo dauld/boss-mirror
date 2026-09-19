@@ -352,7 +352,11 @@ if [ -z "$declared_tree" ]; then
 fi
 
 # A `Kind<TAB>ns<TAB>name` line the tree declares?
-is_declared() { printf '%s\n' "$declared_tree" | LC_ALL=C grep -qxF "$1"; }
+# A here-string, not a pipe: bash's printf leaves a multi-line variable
+# in several writes and `grep -q` exits at its match, so under pipefail
+# the pipe answered "not declared" for a declared line by chance
+# (backlog 0f2ecbda, 2026-09-19 — the same coin in undeclared-objects.sh).
+is_declared() { LC_ALL=C grep -qxF "$1" <<<"$declared_tree"; }
 
 unreadable=0
 unreadable_names=()

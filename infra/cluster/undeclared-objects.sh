@@ -476,19 +476,38 @@ is_excluded_kind() { # kind
 }
 
 # --- the namespaces the tree owns ------------------------------------------
-managed_ns=$(LC_ALL=C awk -F'\t' '$1 == "Namespace" { print $3 }' "$declared_converged" | LC_ALL=C sort -u)
-if [ -z "$managed_ns" ]; then
+# EACH SET BELOW IS ONE ARRAY, AND ITS MEMBERSHIP TEST IS ONE LOOP OVER
+# THAT ARRAY. Until 2026-09-19 each was a newline-joined string tested
+# with `printf '%s\n' "$set" | grep -qxF` — and bash's printf leaves a
+# multi-line variable in several write() calls, `grep -q` exits at its
+# match, the next write is SIGPIPE, and under pipefail the pipeline
+# answers "not a member" for a member that IS there. `boss` sorts first
+# of the two owned namespaces, so the match came on the first write and
+# the second was the one killed: `--check Service/boss/…` was REFUSED as
+# "the tree does not own namespace boss" in the same line that listed
+# "Owned: boss boss-dev" (backlog 0f2ecbda; once in five full-suite runs
+# under load). Nothing here pipes a set into a reader any more.
+in_set() { # needle member...
+    local needle="$1" e
+    shift
+    for e in "$@"; do
+        [ "$e" = "$needle" ] && return 0
+    done
+    return 1
+}
+mapfile -t managed_ns < <(LC_ALL=C awk -F'\t' '$1 == "Namespace" { print $3 }' "$declared_converged" | LC_ALL=C sort -u)
+if [ "${#managed_ns[@]}" -eq 0 ]; then
     cannot_answer "$DIR declares no Namespace object — cannot tell which namespaces the tree owns"
 fi
-owns_ns() { printf '%s\n' "$managed_ns" | LC_ALL=C grep -qxF "$1"; }
+owns_ns() { in_set "$1" "${managed_ns[@]}"; }
 
 # (kind, namespace) pairs in scope: a kind the tree declares in a
 # namespace the tree owns.
-pairs=$(LC_ALL=C awk -F'\t' -v mns="$managed_ns" '
+mapfile -t pairs < <(LC_ALL=C awk -F'\t' -v mns="$(printf '%s\n' "${managed_ns[@]}")" '
     BEGIN { n = split(mns, a, "\n"); for (i = 1; i <= n; i++) if (a[i] != "") own[a[i]] = 1 }
     $2 != "" && ($2 in own) { print $1 "\t" $2 }
 ' "$declared_converged" | LC_ALL=C sort -u)
-declares_pair() { printf '%s\n' "$pairs" | LC_ALL=C grep -qxF "$(printf '%s\t%s' "$1" "$2")"; }
+declares_pair() { in_set "$(printf '%s\t%s' "$1" "$2")" ${pairs[@]+"${pairs[@]}"}; }
 
 # The tree's own mark on what it creates; every manifest under $DIR
 # carries it. An object without it in an undeclared pair is not ours to
@@ -496,13 +515,13 @@ declares_pair() { printf '%s\n' "$pairs" | LC_ALL=C grep -qxF "$(printf '%s\t%s'
 BOSS_LABEL="app.kubernetes.io/part-of=boss"
 # Kinds the tree declares in SOME owned namespace — the kinds that can
 # be in scope by label where a namespace no longer declares them.
-declared_kinds=$(printf '%s\n' "$pairs" | LC_ALL=C cut -f1 | LC_ALL=C sort -u)
-declares_kind_somewhere() { printf '%s\n' "$declared_kinds" | LC_ALL=C grep -qxF "$1"; }
+mapfile -t declared_kinds < <(printf '%s\n' ${pairs[@]+"${pairs[@]}"} | LC_ALL=C awk -F'\t' '$1 != "" { print $1 }' | LC_ALL=C sort -u)
+declares_kind_somewhere() { in_set "$1" ${declared_kinds[@]+"${declared_kinds[@]}"}; }
 # (kind, namespace) pairs in scope BY LABEL ONLY: a declared-somewhere
 # kind in an owned namespace that does not itself declare the kind.
-label_pairs=$(for k in $declared_kinds; do for ns in $managed_ns; do
+label_pairs=$(for k in ${declared_kinds[@]+"${declared_kinds[@]}"}; do for ns in "${managed_ns[@]}"; do
     printf '%s\t%s\n' "$k" "$ns"
-done; done | LC_ALL=C sort -u | LC_ALL=C comm -23 - <(printf '%s\n' "$pairs" | LC_ALL=C sort -u))
+done; done | LC_ALL=C sort -u | LC_ALL=C comm -23 - <(printf '%s\n' ${pairs[@]+"${pairs[@]}"} | LC_ALL=C sort -u))
 
 # --- the cluster ----------------------------------------------------------
 # Live names of one kind in one namespace, excluding anything a
@@ -565,7 +584,7 @@ if [ "$MODE" = "--check" ]; then
 
     if ! owns_ns "$ns"; then
         say "REFUSED $kind/$ns/$name — the tree does not own namespace \`$ns\` (no Namespace manifest in ${DIR#"$TREE"/}),"
-        say "  so nothing here can be called undeclared. Owned: $(printf '%s ' $managed_ns)"
+        say "  so nothing here can be called undeclared. Owned: ${managed_ns[*]}"
         exit 3
     fi
     if is_excluded_kind "$kind"; then
@@ -610,7 +629,7 @@ if [ "$MODE" = "--check" ]; then
         say "  'could not look' is not 'undeclared'. Point KUBECONFIG at a credential that can read it."
         exit "$CANNOT_ANSWER"
     fi
-    if ! printf '%s\n' "$names" | LC_ALL=C grep -qxF "$name"; then
+    if ! LC_ALL=C grep -qxF "$name" <<<"$names"; then
         if owner=$(owner_of "$kind" "$ns" "$name"); then
             if [ -n "$owner" ]; then
                 say "REFUSED $kind/$ns/$name — a controller owns it (ownerReferences[0].kind=$owner)."
@@ -626,7 +645,7 @@ if [ "$MODE" = "--check" ]; then
         # not live" states a fact about the cluster from evidence about
         # the credential.
         owner_err=$(read_error "$TMP/owner.err")
-        if ! printf '%s' "$owner_err" | LC_ALL=C grep -qiE 'notfound|not found'; then
+        if ! LC_ALL=C grep -qiE 'notfound|not found' <<<"$owner_err"; then
             say "CANNOT ANSWER for $kind/$ns/$name — it was not in the listing and it cannot be read either:"
             say "    $owner_err"
             say "  'could not read it' is not 'it is not there'. Point KUBECONFIG at a credential that can."
@@ -682,9 +701,7 @@ while IFS=$'\t' read -r kind ns; do
     done <<EOF
 $names
 EOF
-done <<EOF
-$pairs
-EOF
+done < <(printf '%s\n' ${pairs[@]+"${pairs[@]}"})
 
 # Pairs in scope BY LABEL ONLY: the tree declares the kind elsewhere,
 # not here, and only objects carrying its own label are its business.
@@ -714,7 +731,7 @@ EOF
 
 [ "${#orphans[@]}" -eq 0 ] || printf '%s\n' "${orphans[@]}"
 
-say "${#orphans[@]} undeclared object(s) in $pairs_checked of $pairs_total in-scope (kind, namespace) pair(s) across $(printf '%s ' $managed_ns)"
+say "${#orphans[@]} undeclared object(s) in $pairs_checked of $pairs_total in-scope (kind, namespace) pair(s) across ${managed_ns[*]}"
 say "  plus $label_pairs_checked of $label_pairs_total pair(s) in scope by label only ($BOSS_LABEL on a kind the tree declares elsewhere)"
 [ "${#excluded_pairs[@]}" -eq 0 ] || say "  excluded by kind: $(printf '%s; ' "${excluded_pairs[@]}")"
 if [ "$unreadable" -gt 0 ]; then

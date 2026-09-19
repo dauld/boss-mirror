@@ -36,7 +36,9 @@
   import { session } from '@boss/web-kit/session/session.svelte';
   import WriteGate from '@boss/web-kit/ui/WriteGate.svelte';
   import FileAttachments from '../content/FileAttachments.svelte';
-  import type { StepStatus } from '../jobs/types';
+  import { isTerminal, type StepStatus } from '../jobs/types';
+  import { failedVerb, failedVerbPhrase } from './failedVerb';
+  import { href, navigate } from '../router';
 
   type StepData = {
     id: string;
@@ -135,6 +137,15 @@
     procurement: ProcurementSurface,
   };
   let Platform = $derived(PLATFORM_SURFACES[surfaceOf(step.kind)] ?? null);
+
+  // The verb this step waited on FAILED and the step is still open
+  // (backlog 074e1287): the dispatcher's note is on the metadata, the
+  // alert it filed is a packet, and until now neither reached the
+  // surface — publish 254177e2's open-pr read as any ready step for
+  // hours. A terminal step's note is history and stays in its
+  // metadata; an OPEN one is trouble and is drawn as such.
+  let failure = $derived(isTerminal(step.status) ? null : failedVerb(step.metadata));
+  const packetLink = (id: string) => href(`/jobs/${id}`);
 </script>
 
 <!-- Every step surface — platform, generic fallback, and mounted
@@ -143,6 +154,37 @@
      StepFocusPage, DecideModal all mount it), so gating HERE is the
      one edit instead of one per surface. -->
 <WriteGate>
+{#if failure}
+  <!-- Same voice as a failed registry read: the record's own words,
+       in the error colour, with the packets to open. The line is the
+       verb's, verbatim — a troubled packet must look troubled
+       (CLAUDE.md §Diagnosis), and no paraphrase beats the receipt. -->
+  <p class="load-failed" role="alert" data-testid="step-failed-verb">
+    {failedVerbPhrase(failure)}
+    {#if failure.alert}
+      {@const alert = failure.alert}
+      · alert
+      <a
+        href={packetLink(alert)}
+        onclick={(e) => {
+          e.preventDefault();
+          navigate(packetLink(alert));
+        }}>{alert.slice(0, 8)}</a
+      >
+    {/if}
+    {#if failure.source}
+      {@const request = failure.source}
+      · request
+      <a
+        href={packetLink(request)}
+        onclick={(e) => {
+          e.preventDefault();
+          navigate(packetLink(request));
+        }}>{request.slice(0, 8)}</a
+      >
+    {/if}
+  </p>
+{/if}
 <!-- The step's authored instructions, above BOTH sides of the plugin
      fork (backlog 3c640ac3). The decision panel below is exempt for
      plugin-backed steps because a mounted plugin is its own

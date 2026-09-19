@@ -622,6 +622,25 @@ crates_from_paths() {
 #   boss-jobs' port defaults mention it in comments), and mapping those
 #   would compile three crates for a shell-script edit.
 #
+#   A PATH BEING JOINED is a path being read, wherever it sits. The
+#   two shapes above left one idiom uncounted: a `#[cfg(test)]` module
+#   under src/ reading `boss_testing::repo_root().join("docs/
+#   tenant-contract.md")` — repo-relative, so not escaping, and not in
+#   tests/. On 2026-09-19 train #470's car 4f1ba1f9 edited that doc
+#   without editing the CONTRACT it is held equal to; the pin lives in
+#   boss-cli's src/tenant.rs, the car derived boss-gateway alone, the
+#   train gate derived the same, and origin/main went red on the pin
+#   the first time anything ran it, striking the next car gated on top
+#   (backlog 1b52c278). Measured at #471: eight (path, crate) pairs sat
+#   outside the index this way (estate.toml, sor-ports.env,
+#   pod-build.env, as-gate-uid.sh, access.toml, tax.toml, the contract
+#   doc). What separates them from the prose the src/ restriction
+#   exists for is the call around the literal: `.join("…")` is a path
+#   being built, and a sentence never sits inside one. So a literal
+#   whose immediate prefix is `.join(` counts in src/ too — still
+#   subject to the existence test, so `dir.join("seeds/x.toml")` on a
+#   scratch base maps to nothing because no such file sits at the root.
+#
 # RESOLVED AGAINST TWO BASES because the two idioms differ:
 # `include_str!` is relative to the source FILE, while
 # `env!("CARGO_MANIFEST_DIR").join("../../../x")` is relative to the
@@ -689,13 +708,15 @@ file_input_index() {
             rest = $0
             while (match(rest, /"[^"]*"/)) {
                 spec = substr(rest, RSTART + 1, RLENGTH - 2)
+                joined = (substr(rest, 1, RSTART - 1) ~ /\.join\($/)
                 rest = substr(rest, RSTART + RLENGTH)
                 if (spec !~ /\//) continue
                 # A literal with whitespace in it is a sentence that
                 # mentions a path, not a path.
                 if (spec ~ /[[:space:]]/) continue
-                # Outside tests/, only an ESCAPING literal counts.
-                if (!intests && spec !~ /^\.\.\//) continue
+                # Outside tests/, only an ESCAPING literal counts —
+                # or one being `.join`ed onto a base (backlog 1b52c278).
+                if (!intests && !joined && spec !~ /^\.\.\//) continue
                 print resolve(dir, spec) " " crate
                 print resolve(root, spec) " " crate
             }
@@ -994,6 +1015,15 @@ scope_self_test() {
     # nobody had to notice this one.
     _case "a runbook a test reads implies that crate" "boss-testing" \
         "docs/runbooks/dev-environment-bootstrap.md"
+    # THE FOURTH RE-PIN (backlog 1b52c278). The runbook above is read
+    # from boss-testing's tests/, which the index always counted; this
+    # doc is read from a #[cfg(test)] module under boss-cli's src/
+    # through repo_root().join(...), which it did not — so a docs-only
+    # car derived NO crate, gated lints-only, and train #470 landed a
+    # doc edit that reddened main on the equality pin holding the doc's
+    # table to CONTRACT. The `.join(` prefix is what counts it now.
+    _case "a doc a crate's own test module reads by repo path implies that crate" \
+        "boss-cli" "docs/tenant-contract.md"
     _case "the web app implies no crate" "" "apps/web/src/me/MePage.svelte"
     # THE SECOND RE-PIN (backlog 4711828d). Until this car the line here
     # asserted "a migration implies no crate", with a note that mapping

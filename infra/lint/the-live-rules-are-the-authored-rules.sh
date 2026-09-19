@@ -193,7 +193,7 @@ surface, or an error body; either way nothing read the registry"
     *) skip "could not read rule names from the response" ;;
 esac
 
-registry_line=$(printf '%s\n' "$read_out" | LC_ALL=C grep -m1 '^REGISTRY' || true)
+registry_line=$(LC_ALL=C grep -m1 '^REGISTRY' <<<"$read_out" || true)
 registry_dir=$(printf '%s\n' "$registry_line" | cut -f2)
 registry_count=$(printf '%s\n' "$registry_line" | cut -f3)
 registry_error=$(printf '%s\n' "$registry_line" | cut -f4)
