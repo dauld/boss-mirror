@@ -68,17 +68,36 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// The lanes an invariant can be filed under, and a profile's document
+/// declares which one it is briefed in (`lane:` in its front-matter,
+/// `boss_cli::documents::lane_of`).
+///
+/// `car` is the lane that ships one: base, gate, push. `step` is the
+/// lane whose deliverable is the step itself — it opens no worktree and
+/// enters no gate, so the gate's phase list, uid, fixture paths and
+/// probe-time rule are forty lines it cannot act on (backlog c8faa7f3,
+/// measured on analyst run d5e0f287).
+pub(crate) const LANE_CAR: &str = "car";
+pub(crate) const LANE_STEP: &str = "step";
+pub(crate) const LANES: [&str; 2] = [LANE_CAR, LANE_STEP];
+
 /// One invariant a brief can reference instead of restating, and the
 /// file in the tree that DECIDES it.
 ///
 /// `authority` is repo-relative and is checked to exist: an invariant
 /// whose authority is missing is not a weaker invariant, it is a
 /// sentence, and this verb exists to stop printing those.
+///
+/// `lanes` is which readers it is TRUE FOR. An invariant printed to a
+/// profile that cannot act on it is not free: it crowds out the rules
+/// that profile does act on, and it teaches the reader to skim the
+/// section (c8faa7f3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Invariant {
     pub(crate) name: &'static str,
     pub(crate) authority: String,
     pub(crate) lines: Vec<String>,
+    pub(crate) lanes: Vec<&'static str>,
 }
 
 /// The gate container's uid and gid, read from the gate-runner manifest.
@@ -196,6 +215,23 @@ fn preflight_lint_count(repo: &Path) -> Result<usize> {
         .count())
 }
 
+/// The system of record's address, read from the ONE tree file that
+/// spells it (`infra/estate/estate.toml`, backlog 5222163e).
+///
+/// Parsed rather than retyped for the same reason as every other
+/// authority here, and for one more: the lint
+/// `the-estate-address-lives-once` refuses that literal anywhere but
+/// the source, so a brief that stated the address could not exist.
+pub(crate) fn sor_url(estate_toml: &str) -> Option<String> {
+    estate_toml
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("sor_url"))
+        .and_then(|l| l.split('"').nth(1))
+        .map(str::to_string)
+        .filter(|v| !v.is_empty())
+}
+
 fn read(repo: &Path, rel: &str) -> Result<String> {
     std::fs::read_to_string(repo.join(rel)).with_context(|| format!("reading {rel}"))
 }
@@ -235,6 +271,7 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "Nothing else bounds cargo here (there is no .cargo/config.toml), so the".into(),
                 "default is one job per CPU — 32 on this pod, against a 16 GiB cgroup.".into(),
             ],
+            lanes: vec![LANE_CAR],
         },
         Invariant {
             name: "verify as the gate",
@@ -249,6 +286,7 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 format!("uid {uid} CREATE the workspace (bundle -> fetch) and prints what it did."),
                 "Quote its last line in a receipt's `verified` field.".into(),
             ],
+            lanes: vec![LANE_CAR],
         },
         Invariant {
             name: "gate uid / gid",
@@ -256,6 +294,7 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
             lines: vec![format!(
                 "uid {uid}, gid {gid} — read from the `gate` container, not from prose"
             )],
+            lanes: vec![LANE_CAR],
         },
         Invariant {
             name: "fixture paths",
@@ -265,6 +304,7 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "A fixed /tmp path is shared with every account on this long-lived pod;".into(),
                 "the lint named above is in the pre-flight roster and refuses one.".into(),
             ],
+            lanes: vec![LANE_CAR],
         },
         Invariant {
             name: "the database",
@@ -275,6 +315,7 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "makes it the PRODUCTION cluster database, and it answers instead of".into(),
                 "erroring.".into(),
             ],
+            lanes: vec![LANE_CAR],
         },
         Invariant {
             name: "order",
@@ -284,6 +325,7 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "-> then any optional local check. The gate is the compile authority;".into(),
                 "a cold local build that is never pushed parks a car with nothing on it.".into(),
             ],
+            lanes: vec![LANE_CAR],
         },
         // Three dots on the diff, and not as a matter of taste: two-dot
         // diffs the two TIPS, so it is right only while the line above
@@ -303,6 +345,7 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "git diff --numstat origin/main...HEAD             # only your files".into(),
                 "A branch on an old base merges clean and reverts landed work.".into(),
             ],
+            lanes: vec![LANE_CAR],
         },
         Invariant {
             name: "gate phases",
@@ -312,6 +355,7 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "Derived from the gate's own `check` call sites and `--roster`, so this".into(),
                 "list cannot fall behind the gate that judges the car.".into(),
             ],
+            lanes: vec![LANE_CAR],
         },
         // The tokens come from the constant the refusal reads, not from
         // prose: a brief that named a token the gate does not refuse is
@@ -335,8 +379,33 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "and guard the empty case FIRST, because date -d ''".into(),
                 "answers midnight rather than an error.".into(),
             ],
+            lanes: vec![LANE_CAR],
         },
     ];
+    // THE STEP LANE'S OWN INVARIANT (c8faa7f3). A profile that ships no
+    // car still has one fact it must not get from memory: WHICH
+    // INSTANCE it is reading. A wrong or dark target answers `total: 0`
+    // rather than erroring (CLAUDE.md §Doors), which is the analyst
+    // failure mode the rules document calls a confident empty answer —
+    // so the address is derived here from the file that spells it, and
+    // the control read is named beside it.
+    let estate = "infra/estate/estate.toml";
+    let sor = sor_url(&read(repo, estate)?)
+        .with_context(|| format!("{estate} does not spell sor_url"))?;
+    out.push(Invariant {
+        name: "the system of record",
+        authority: estate.to_string(),
+        lines: vec![
+            format!("BOSS_JOBS_URL={sor} — the one spelling, read from this file"),
+            "`boss-api METHOD /api/path` pins it and signs as the actor running it.".into(),
+            "A wrong or dark instance answers total: 0 instead of erroring, and so does".into(),
+            "a denied policy scope: before reporting that something does not exist, run".into(),
+            "a control read on the same connection whose answer you already know, and".into(),
+            "say beside the finding what the control returned.".into(),
+        ],
+        lanes: vec![LANE_STEP],
+    });
+
     out.sort_by_key(|i| i.name);
 
     // EVERY authority must exist. An invariant whose file is gone is a
@@ -354,12 +423,25 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
     Ok(out)
 }
 
-/// The invariant half, rendered.
-pub(crate) fn invariant_section(invs: &[Invariant]) -> String {
-    let mut out = String::from(
-        "== THE INVARIANTS — derived from the file named after each, not restated ==\n",
+/// The invariant half, rendered FOR ONE LANE: the invariants that lane
+/// can act on, and no line from the other (c8faa7f3).
+///
+/// A lane with no invariant in this tree gets a line saying so rather
+/// than an empty header — silence reads as "nothing to know here",
+/// which is a claim this function is in no position to make.
+pub(crate) fn invariant_section(invs: &[Invariant], lane: &str) -> String {
+    let mine: Vec<&Invariant> = invs.iter().filter(|i| i.lanes.contains(&lane)).collect();
+    let mut out = format!(
+        "== THE INVARIANTS — for the `{lane}` lane, derived from the file named after \
+         each, not restated ==\n"
     );
-    for inv in invs {
+    if mine.is_empty() {
+        out.push_str(&format!(
+            "\nNo invariant in this tree is filed under the `{lane}` lane.\n"
+        ));
+        return out;
+    }
+    for inv in mine {
         out.push_str(&format!("\n{}   [{}]\n", inv.name, inv.authority));
         for l in &inv.lines {
             out.push_str(&format!("    {l}\n"));
@@ -388,15 +470,35 @@ pub(crate) fn packet_section(job: &Value) -> String {
         g("priority"),
         g("opened_on"),
     );
-    let at = crate::envelope::steps(job)
-        .into_iter()
-        .map(crate::envelope::step_line)
-        .find(|l| l.now)
-        .map(|l| format!("{} ({})", l.slug, l.status));
-    out.push_str(&format!(
-        "now at: {}\n",
-        at.as_deref().unwrap_or("no ready or active step")
-    ));
+    match now_step(job) {
+        // THE STEP IS NAMED THE WAY THE SURFACE NAMES IT (c8faa7f3).
+        // This line used to print the `spec_slug` alone — "now at:
+        // measure (ready)" — and there is no step TITLED measure: the
+        // title is "Inventory the page and the department's needs",
+        // and the slug is a key no page shows. A reader who cannot
+        // find the thing the brief named learns to mistrust the brief,
+        // so both are printed, the title first, with the handle beside
+        // it.
+        Some(step) => {
+            let l = crate::envelope::step_line(step);
+            out.push_str(&format!("now at: {}\n", l.title));
+            out.push_str(&format!(
+                "        step `{}`, kind {}, status {}, {}{}\n",
+                l.slug,
+                l.kind,
+                l.status,
+                match &l.assignee {
+                    Some(a) => format!("held by {a}"),
+                    None => "unassigned".to_string(),
+                },
+                match &l.authority_role {
+                    Some(r) => format!(", authority role {r}"),
+                    None => String::new(),
+                },
+            ));
+        }
+        None => out.push_str("now at: no ready or active step\n"),
+    }
 
     let md: BTreeMap<String, Value> = job
         .get("metadata")
@@ -418,6 +520,95 @@ pub(crate) fn packet_section(job: &Value) -> String {
         }
     }
     out
+}
+
+/// The step the packet is AT — ready or active — if it has one.
+pub(crate) fn now_step(job: &Value) -> Option<&Value> {
+    crate::envelope::steps(job)
+        .into_iter()
+        .find(|s| crate::envelope::step_line(s).now)
+}
+
+/// The keys of a step's metadata that are NOT its specification: the
+/// agent block (the run section already states model, budget and
+/// effort) and the two the `now at` line already printed.
+fn not_the_spec(key: &str) -> bool {
+    key.starts_with("agent_") || key == "authority_role" || key == "audience"
+}
+
+/// THE STEP'S OWN SPECIFICATION, VERBATIM — the half a brief withheld
+/// (backlog c8faa7f3, measured on analyst run d5e0f287, 2026-09-19).
+///
+/// The packet half prints JOB metadata. The thing an executor works
+/// FROM lives on the STEP: its `procedure` (1915 characters on the
+/// page-audit `measure` step) and its `fields`, which are what
+/// required-at-done will refuse a completion for. Neither was printed,
+/// so the brief's own premise — that it saves the reader a fetch of
+/// the packet — was false for every profile whose deliverable is the
+/// step.
+///
+/// Rendered whenever the step HAS a specification, not when a profile
+/// is guessed to want one: a `build` step that carries only its agent
+/// block has nothing to show and prints nothing, which is why a
+/// builder's brief is unchanged by this.
+pub(crate) fn step_section(job: &Value) -> Option<String> {
+    let step = now_step(job)?;
+    let l = crate::envelope::step_line(step);
+    let fields: Vec<&Value> = step
+        .get("fields")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().collect())
+        .unwrap_or_default();
+    let spec: BTreeMap<String, Value> = step
+        .get("metadata")
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .filter(|(k, _)| !not_the_spec(k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if fields.is_empty() && spec.is_empty() {
+        return None;
+    }
+
+    let mut out = format!(
+        "== THE STEP — its own specification, verbatim from the step ==\n\n{} — step `{}`, \
+         kind {}, status {}\n",
+        l.title, l.slug, l.kind, l.status
+    );
+    if !fields.is_empty() {
+        out.push_str("\nrequired at done — the step's own `fields`:\n");
+        for f in fields {
+            let g = |k: &str| f.get(k).and_then(Value::as_str).unwrap_or("?");
+            let required = match f.get("required").and_then(Value::as_bool) {
+                Some(true) => "REQUIRED",
+                _ => "optional",
+            };
+            out.push_str(&format!(
+                "  {}   {}   {}   filled by {}\n",
+                g("name"),
+                g("field_type"),
+                required,
+                g("filled_by"),
+            ));
+        }
+    }
+    for (k, v) in &spec {
+        let rendered = match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        out.push_str(&format!("\n  {k}:\n"));
+        for line in rendered.lines() {
+            out.push_str(&format!("    {line}\n"));
+        }
+        if rendered.is_empty() {
+            out.push_str("    (empty)\n");
+        }
+    }
+    Some(out)
 }
 
 /// The line that tells the brief-writer what to do with this output: a
@@ -457,40 +648,80 @@ pub(crate) fn repo_root() -> Result<PathBuf> {
 /// the default, because the rules document is what the reader came
 /// for and a blank brief helps nobody.
 pub(crate) fn profile_for(job: Option<&Value>) -> String {
-    job.and_then(|j| {
-        crate::envelope::steps(j)
-            .into_iter()
-            .find(|s| crate::envelope::step_line(s).now)
-            .and_then(|s| s.get("metadata"))
-            .and_then(|m| m.get(boss_jobs::agent_spec::PROFILE_KEY))
-            .and_then(Value::as_str)
-            .map(str::to_string)
-    })
-    .unwrap_or_else(|| crate::documents::DEFAULT_PROFILE.to_string())
+    profile_on_step(job).unwrap_or_else(|| crate::documents::DEFAULT_PROFILE.to_string())
 }
 
-/// The whole brief, rendered: the packet (when there is one), the
-/// invariants, the line that says how to use them, and the rules
-/// document for `profile`. One function so `boss brief` and the
+/// The `agent_profile` PROJECTED ONTO THE STEP, if there is one.
+pub(crate) fn profile_on_step(job: Option<&Value>) -> Option<String> {
+    job.and_then(now_step)
+        .and_then(|s| s.get("metadata"))
+        .and_then(|m| m.get(boss_jobs::agent_spec::PROFILE_KEY))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// The profile the packet's CURRENT WORKFLOW ROW declares for the step
+/// it is at — the same fallback `boss dispatch` makes (`block_in_row`),
+/// so a hand-run brief renders the lane the dispatch will use.
+///
+/// Measured 2026-09-19 on page-audit c0d2caf0: the live `measure` step
+/// carries `procedure`, `audience` and `authority_role` but NO agent
+/// block — the projection is not on these packets — so reading only the
+/// step answered `builder` for a step the Workflow row declares
+/// `analyst`, and the brief a human read before dispatching was the
+/// other lane's.
+///
+/// Best effort: the row read is an extra call, and a brief that cannot
+/// make it is still worth printing, so a failure falls through to the
+/// default rather than refusing.
+async fn profile_in_row(http: &reqwest::Client, job: &Value) -> Option<String> {
+    let kind = job.get("kind").and_then(Value::as_str)?;
+    let slug = now_step(job)?.get("spec_slug").and_then(Value::as_str)?;
+    let row = crate::gate::api(
+        http,
+        reqwest::Method::GET,
+        &format!("/api/workflows/{kind}"),
+        None,
+    )
+    .await
+    .ok()??;
+    crate::dispatch::block_in_row(&row, slug).map(|s| s.profile)
+}
+
+/// The whole brief, rendered FOR A PROFILE: the packet (when there is
+/// one), the step's own specification (when it has one), the
+/// invariants OF THAT PROFILE'S LANE, the line that says how to use
+/// them, and the rules document. One function so `boss brief` and the
 /// prompt `boss dispatch` prints cannot drift apart (CLAUDE.md 9a).
+///
+/// The profile decides ONE thing here — the lane — and it decides it
+/// through the document bundle, so what a profile is briefed with and
+/// what it is told are edited in one place (c8faa7f3). There is no
+/// second renderer: a lane that files no invariant of its own simply
+/// prints none.
 pub(crate) fn render(repo: &Path, job: Option<&Value>, profile: &str) -> Result<String> {
     let invs = invariants(repo)?;
+    let lane = crate::documents::lane(repo, profile)?;
     let mut out = String::new();
     if let Some(job) = job {
         out.push_str(&packet_section(job));
         out.push('\n');
+        if let Some(step) = step_section(job) {
+            out.push_str(&step);
+            out.push('\n');
+        }
     }
-    out.push_str(&invariant_section(&invs));
+    out.push_str(&invariant_section(&invs, &lane));
     out.push_str(&format!("\n{HOW_TO_USE}\n\n"));
     out.push_str(&crate::documents::section(repo, profile)?);
     Ok(out)
 }
 
-pub async fn run(packet_ref: Option<String>) -> Result<()> {
+pub async fn run(packet_ref: Option<String>, profile_override: Option<String>) -> Result<()> {
     let repo = repo_root()?;
+    let http = reqwest::Client::new();
     let job = match packet_ref {
         Some(r) => {
-            let http = reqwest::Client::new();
             let id = crate::job::fetch_and_resolve(&http, &r).await?;
             Some(
                 crate::gate::api(
@@ -505,7 +736,25 @@ pub async fn run(packet_ref: Option<String>) -> Result<()> {
         }
         None => None,
     };
-    let profile = profile_for(job.as_ref());
+    // WHAT A HAND-RUN BRIEF RENDERS AS (c8faa7f3). `boss brief
+    // <packet>` is also read by a human before dispatching, with no
+    // profile implied. It renders as THE DISPATCH WOULD: the step's own
+    // `agent_profile` when the projection carries one, else the
+    // Workflow row's block for that step — the same two places
+    // `dispatch` looks, in the same order — so the human reads what the
+    // agent will read. With no packet, or nothing declaring a profile
+    // anywhere, it is `builder`, exactly as before profiles existed.
+    // `--profile` names a lane without dispatching anything.
+    let profile = match (profile_override, profile_on_step(job.as_ref())) {
+        (Some(p), _) => p,
+        (None, Some(p)) => p,
+        (None, None) => match job.as_ref() {
+            Some(j) => profile_in_row(&http, j)
+                .await
+                .unwrap_or_else(|| crate::documents::DEFAULT_PROFILE.to_string()),
+            None => crate::documents::DEFAULT_PROFILE.to_string(),
+        },
+    };
     print!("{}", render(&repo, job.as_ref(), &profile)?);
     Ok(())
 }
@@ -802,8 +1051,8 @@ mod tests {
     #[test]
     fn the_rendered_invariants_name_their_authority_beside_each_statement() {
         let invs = invariants(&repo()).expect("the invariants derive");
-        let rendered = invariant_section(&invs);
-        for inv in &invs {
+        let rendered = invariant_section(&invs, LANE_CAR);
+        for inv in invs.iter().filter(|i| i.lanes.contains(&LANE_CAR)) {
             assert!(
                 rendered.contains(&inv.authority),
                 "{:?} is printed without the file that decides it",
@@ -851,5 +1100,207 @@ mod tests {
         let alone = render(&repo(), None, "builder").expect("renders");
         assert!(!alone.contains("== THE PACKET"));
         assert!(alone.contains("== THE RULES"));
+    }
+
+    /// A page-audit `measure` step, in the shape the live one has
+    /// (read from the system of record 2026-09-19, packet c0d2caf0).
+    fn a_step_with_a_specification() -> Value {
+        json!({
+            "id": "c0d2caf0-bfc5-4163-b81e-97f9273a0404",
+            "kind": "page-audit",
+            "metadata": { "route": "/it/auth-admin", "department": "it" },
+            "steps": [
+                { "spec_slug": "opened", "status": "completed", "metadata": {} },
+                {
+                    "spec_slug": "measure",
+                    "kind": "task",
+                    "status": "active",
+                    "title": "Inventory the page and the department's needs",
+                    "assignee_id": "claude@algedonic.dev",
+                    "fields": [
+                        { "name": "controls_md", "field_type": "string",
+                          "required": true, "filled_by": "executor" },
+                        { "name": "needs_md", "field_type": "string",
+                          "required": false, "filled_by": "executor" },
+                    ],
+                    "metadata": {
+                        "agent_profile": "analyst",
+                        "agent_budget_usd": 4.0,
+                        "audience": { "role": "platform-admin" },
+                        "authority_role": "platform-admin",
+                        "human_only": false,
+                        "procedure": "Read the PAGE and the DEPARTMENT, and write the \
+                                      difference as a list.\nCount what you list.",
+                    },
+                },
+            ],
+        })
+    }
+
+    /// THE BRIEF CARRIES THE THING IT SENDS THE READER TO FOLLOW
+    /// (c8faa7f3, measured on analyst run d5e0f287). The brief rendered
+    /// JOB metadata and a one-line `now at`; the 1915-character
+    /// `procedure` that IS the step's specification lives in STEP
+    /// metadata, and so did the `fields` a completion is refused for.
+    /// The whole premise of the verb is that it saves the reader a
+    /// fetch of the packet, and it did not.
+    #[test]
+    fn the_step_half_carries_the_procedure_and_the_fields_required_at_done() {
+        let job = a_step_with_a_specification();
+        let out = step_section(&job).expect("a step with a procedure has a section");
+        assert!(out.contains("Read the PAGE and the DEPARTMENT"), "{out}");
+        assert!(out.contains("Count what you list."), "{out}");
+        assert!(out.contains("controls_md"), "{out}");
+        assert!(out.contains("REQUIRED"), "{out}");
+        assert!(
+            out.contains("needs_md") && out.contains("optional"),
+            "{out}"
+        );
+        assert!(out.contains("human_only"), "{out}");
+        // The agent block is the run's, not the specification's: the
+        // run section states model, budget and effort already.
+        assert!(!out.contains("agent_budget_usd"), "{out}");
+
+        // A `build` step carrying only its agent block has no
+        // specification to print, so a builder's brief is unchanged.
+        let build = json!({
+            "steps": [{
+                "spec_slug": "build", "kind": "task", "status": "active",
+                "title": "Build the change", "fields": [],
+                "metadata": { "agent_profile": "builder", "agent_effort": "high",
+                              "authority_role": "platform-admin" },
+            }],
+        });
+        assert_eq!(step_section(&build), None);
+        let rendered = render(&repo(), Some(&build), "builder").expect("renders");
+        assert!(!rendered.contains("== THE STEP"), "{rendered}");
+    }
+
+    /// THE ONE LINE IT DID RENDER WAS WRONG TWICE (c8faa7f3). It read
+    /// `now at: measure (ready)`: `measure` is the `spec_slug`, a key
+    /// no surface shows — the title is "Inventory the page and the
+    /// department's needs" — and the status was already `active`,
+    /// because the claim door had moved it. The status half is fixed
+    /// at the other end (dispatch renders after the claim, from a
+    /// re-read); this is the naming half.
+    #[test]
+    fn the_now_at_line_names_the_step_the_way_a_surface_names_it() {
+        let out = packet_section(&a_step_with_a_specification());
+        assert!(
+            out.contains("now at: Inventory the page and the department's needs"),
+            "{out}"
+        );
+        assert!(out.contains("step `measure`"), "{out}");
+        assert!(out.contains("status active"), "{out}");
+        assert!(out.contains("held by claude@algedonic.dev"), "{out}");
+        assert!(
+            !out.contains("now at: measure"),
+            "the slug alone is the line that taught a reader to mistrust the brief: {out}"
+        );
+    }
+
+    /// AN INVARIANT IS PRINTED TO A LANE THAT CAN ACT ON IT, AND TO NO
+    /// OTHER (c8faa7f3). The analyst dispatch got the gate's phase
+    /// list, its uid and gid, fixture paths, the base check and the
+    /// probe-time rule — about forty lines for a profile that ships no
+    /// car, enters no gate and pushes nothing — crowding out the ones
+    /// it could use.
+    #[test]
+    fn a_lane_is_briefed_with_its_own_invariants_and_none_of_the_others() {
+        let job = a_step_with_a_specification();
+        let analyst = render(&repo(), Some(&job), "analyst").expect("renders");
+        let builder = render(&repo(), Some(&job), "builder").expect("renders");
+
+        // The car lane's invariants are absent from the step lane...
+        for car_only in [
+            "gate uid / gid",
+            "pre-flight lints",
+            "infra/dev/as-gate-uid.sh",
+            "--park-probe",
+            "CARGO_BUILD_JOBS",
+        ] {
+            assert!(
+                !analyst.contains(car_only),
+                "the analyst brief carries the car lane's `{car_only}`"
+            );
+            assert!(
+                builder.contains(car_only),
+                "the builder brief lost `{car_only}` — it must still see what it saw"
+            );
+        }
+        // ...and the step lane's is absent from the car lane.
+        assert!(analyst.contains("the system of record"), "{analyst}");
+        assert!(analyst.contains("control read"), "{analyst}");
+        assert!(!builder.contains("== THE INVARIANTS — for the `step` lane"));
+        assert!(analyst.contains("# Analyst rules"), "{analyst}");
+        assert!(builder.contains("# Builder rules"));
+        // Both lanes get the step's own specification: it is the
+        // packet's content, not a profile's preference.
+        assert!(analyst.contains("== THE STEP"), "{analyst}");
+        assert!(builder.contains("== THE STEP"));
+
+        // The section says which lane it is, so a reader knows what it
+        // is NOT being told.
+        assert!(
+            analyst.contains("== THE INVARIANTS — for the `step` lane"),
+            "{analyst}"
+        );
+        assert!(builder.contains("== THE INVARIANTS — for the `car` lane"));
+    }
+
+    /// Every invariant is filed under at least one lane a document can
+    /// declare: one filed under a lane no profile reads is printed to
+    /// nobody, which is the same defect as printing it to everybody.
+    #[test]
+    fn every_invariant_is_filed_under_a_lane_a_document_can_declare() {
+        let invs = invariants(&repo()).expect("the invariants derive");
+        for inv in &invs {
+            assert!(!inv.lanes.is_empty(), "{:?} names no lane", inv.name);
+            for lane in &inv.lanes {
+                assert!(
+                    LANES.contains(lane),
+                    "{:?} is filed under `{lane}`, which is not a lane: {LANES:?}",
+                    inv.name
+                );
+            }
+        }
+        for lane in LANES {
+            assert!(
+                invs.iter().any(|i| i.lanes.contains(&lane)),
+                "no invariant is filed under the `{lane}` lane, so a profile briefed \
+                 in it reads a section that says nothing"
+            );
+        }
+    }
+
+    /// The step lane's own invariant names the address from the ONE
+    /// file that spells it — the lint `the-estate-address-lives-once`
+    /// refuses that literal anywhere else, so a brief could not state
+    /// it even if it wanted to.
+    #[test]
+    fn the_system_of_record_invariant_reads_the_address_from_the_estate_file() {
+        let live = std::fs::read_to_string(repo().join("infra/estate/estate.toml"))
+            .expect("the estate file");
+        let url = sor_url(&live).expect("the estate file spells sor_url");
+        assert!(url.starts_with("http"), "{url}");
+        // The cluster spelling is a different key and must not be read
+        // as this one.
+        assert_eq!(sor_url("sor_cluster_url = \"http://x:7900\"\n"), None);
+        assert_eq!(
+            sor_url("sor_url = \"http://example:7900\"\n").as_deref(),
+            Some("http://example:7900")
+        );
+        let invs = invariants(&repo()).expect("the invariants derive");
+        let inv = invs
+            .iter()
+            .find(|i| i.name == "the system of record")
+            .expect("a system-of-record invariant");
+        assert_eq!(inv.authority, "infra/estate/estate.toml");
+        assert!(
+            inv.lines.iter().any(|l| l.contains(&url)),
+            "{:?}",
+            inv.lines
+        );
+        assert_eq!(inv.lanes, vec![LANE_STEP]);
     }
 }

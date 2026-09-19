@@ -571,14 +571,6 @@ pub(crate) async fn dispatch_at(
     };
     let settings = resolve(block, over).map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    // The brief, rendered ONCE: it is the prompt and the record. The
-    // hook hands the prompt the agent was already given, which is the
-    // same fact from the other side.
-    let brief = match source {
-        BriefSource::Rendered => crate::brief::render(repo, Some(&job), &settings.profile)?,
-        BriefSource::Handed { prompt, .. } => prompt.to_string(),
-    };
-
     // CLAIM FIRST. A step someone else holds is a refusal naming the
     // holder, and it must come before anything is filed. The ONE door:
     // it runs the station's capability gate when a station is named
@@ -592,6 +584,32 @@ pub(crate) async fn dispatch_at(
     api_at(Method::POST, claim_path, None)
         .await
         .with_context(|| format!("claiming `{slug}` on {} as {actor}", &id[..8]))?;
+
+    // The brief, rendered ONCE: it is the prompt and the record. The
+    // hook hands the prompt the agent was already given, which is the
+    // same fact from the other side.
+    //
+    // RENDERED AFTER THE CLAIM, FROM A RE-READ (backlog c8faa7f3). It
+    // used to be rendered before, so its `now at` line said `ready`
+    // while the agent reading it held a step the claim door had
+    // already made `active` — a status one write out of date on every
+    // dispatch there has ever been. The claim is the door's effect, so
+    // the brief reads it back rather than assuming it.
+    let brief = match source {
+        BriefSource::Rendered => {
+            let claimed = api_at(Method::GET, format!("/api/jobs/{id}"), None)
+                .await?
+                .with_context(|| {
+                    format!(
+                        "claimed `{slug}` on {} and then could not read the packet back to \
+                         brief from — the step is held by {actor} and needs releasing",
+                        &id[..8]
+                    )
+                })?;
+            crate::brief::render(repo, Some(&claimed), &settings.profile)?
+        }
+        BriefSource::Handed { prompt, .. } => prompt.to_string(),
+    };
 
     let mut body = run_body(
         &id, &title, &slug, actor, &settings, worktree, host, &brief, owner,
@@ -2077,6 +2095,12 @@ mod wire_tests {
                     "POST".to_string(),
                     format!("/api/jobs/{PACKET}/steps/s-build/claim")
                 ),
+                // THE BRIEF IS RENDERED FROM A RE-READ, AFTER THE
+                // CLAIM (c8faa7f3): the claim door moves the step to
+                // `active`, and the brief used to be rendered before
+                // it, so every dispatched agent read `status ready`
+                // about a step it already held.
+                ("GET".to_string(), format!("/api/jobs/{PACKET}")),
                 ("POST".to_string(), "/api/jobs".to_string()),
                 ("GET".to_string(), format!("/api/jobs/{RUN}")),
                 (
@@ -2084,10 +2108,10 @@ mod wire_tests {
                     format!("/api/jobs/{RUN}/steps/run-briefed")
                 ),
             ],
-            "the claim precedes the filing, and the brief precedes the completion"
+            "the claim precedes the brief's read, which precedes the filing"
         );
 
-        let filed = &calls[3].2;
+        let filed = &calls[4].2;
         assert_eq!(filed["kind"], "agent-run");
         assert_eq!(filed["metadata"]["packet"], PACKET);
         assert_eq!(filed["metadata"]["step"], "build");
@@ -2119,7 +2143,7 @@ mod wire_tests {
         assert!(brief.contains("# Builder rules"), "the profile's document");
         assert!(prompt.contains(&format!("export BOSS_AGENT_RUN={RUN}")));
 
-        let briefed = &calls[5].2;
+        let briefed = &calls[6].2;
         assert_eq!(briefed["status"], "completed");
         assert_eq!(
             briefed["metadata"]["prompt_bytes"],

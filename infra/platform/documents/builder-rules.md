@@ -1,5 +1,6 @@
 ---
 profile: builder
+lane: car
 ---
 
 # Builder rules (BOSS dev pod) — read fully before the first command

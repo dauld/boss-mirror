@@ -44,18 +44,72 @@ pub(crate) fn path_for(profile: &str) -> String {
     format!("{DIR}/{profile}-rules.md")
 }
 
-/// The `profile:` a document's front-matter names, or `None` when the
-/// file carries no front-matter block.
-pub(crate) fn profile_of(doc: &str) -> Option<String> {
+/// One key of a document's front-matter block, or `None` when the
+/// file carries no block or the block does not name that key.
+pub(crate) fn front_matter(doc: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}:");
     let mut lines = doc.lines();
     if lines.next()?.trim() != "---" {
         return None;
     }
     lines
         .take_while(|l| l.trim() != "---")
-        .find_map(|l| l.trim().strip_prefix("profile:"))
+        .find_map(|l| l.trim().strip_prefix(prefix.as_str()))
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
+}
+
+/// The `profile:` a document's front-matter names, or `None` when the
+/// file carries no front-matter block.
+pub(crate) fn profile_of(doc: &str) -> Option<String> {
+    front_matter(doc, "profile")
+}
+
+/// The LANE a document declares — which invariants the profile it
+/// serves can actually act on (backlog c8faa7f3, 2026-09-19).
+///
+/// The invariants half of a brief was one set for everybody: the gate's
+/// phase list, its uid and gid, fixture paths, the base check, the
+/// probe-time rule — about forty lines, all of them about shipping a
+/// car. The page-march pilot's first analyst dispatch (run d5e0f287)
+/// measured what that costs the OTHER profile: an analyst ships no car,
+/// enters no gate and pushes nothing, so not one of those lines was
+/// actionable, and they crowded out what was.
+///
+/// The lane is declared HERE, in the front-matter beside the rules it
+/// goes with, because a profile's rules and the invariants it is
+/// briefed with are one editorial decision — and adding a profile stays
+/// what the README says it is: dropping one file in.
+pub(crate) fn lane_of(doc: &str) -> Option<String> {
+    front_matter(doc, "lane")
+}
+
+/// The lane a brief renders under when no document declares one: the
+/// lane that ships a car, which is what every brief carried before
+/// c8faa7f3. A profile with no document — or a document with no `lane:`
+/// line — is briefed exactly as it was.
+pub(crate) const DEFAULT_LANE: &str = "car";
+
+/// The lane for `profile`, read from its document in `repo`.
+///
+/// A lane no invariant is filed under is REFUSED, naming the file and
+/// the lanes there are: rendered instead, it would print an empty
+/// invariants section under a confident header — a brief that says
+/// nothing where it used to say forty lines, and says it silently.
+pub(crate) fn lane(repo: &Path, profile: &str) -> Result<String> {
+    let declared = read(repo, profile)?
+        .as_deref()
+        .and_then(lane_of)
+        .unwrap_or_else(|| DEFAULT_LANE.to_string());
+    if !crate::brief::LANES.contains(&declared.as_str()) {
+        anyhow::bail!(
+            "{} declares lane `{declared}`, which no invariant is filed under; the lanes \
+             are {:?}",
+            path_for(profile),
+            crate::brief::LANES
+        );
+    }
+    Ok(declared)
 }
 
 /// The document without its front-matter block — what a reader is
@@ -319,6 +373,51 @@ mod tests {
         assert!(text.contains("boss-api"), "the analyst rules name the shim");
     }
 
+    /// THE VERB IS THE DOOR AND THE PUT IS THE FALLBACK (backlog
+    /// d1c03a44, 2026-09-19). This document is read once per analyst
+    /// dispatch and the page march is about to be ~94 of them, so a
+    /// mechanics section that teaches the hand-built PUT is ~94
+    /// opportunities for the three silent failures `boss step complete`
+    /// exists to refuse: an undeclared name stored as an annotation, a
+    /// wholesale `metadata` replace, and a 204 read as evidence.
+    ///
+    /// Pinned BY NAME: the verb, the file door its long fields need
+    /// (`controls_md`, `needs_md`, `gaps_md` are whole documents), and
+    /// that the verb named is a `StepAction` variant that ships. The
+    /// raw PUT's hazards stay pinned by the test above — the fallback
+    /// keeps them on the page, it does not delete them.
+    #[test]
+    fn the_analyst_document_names_the_generic_completion_verb() {
+        let text = body(
+            &read(&repo(), "analyst")
+                .expect("readable")
+                .expect("the analyst rules are authored"),
+        );
+        for phrase in ["boss step complete", "--field ", "--field-file"] {
+            assert!(text.contains(phrase), "the analyst rules name `{phrase}`");
+        }
+        let steps =
+            std::fs::read_to_string(repo().join("crates/orchestrators/boss-cli/src/steps.rs"))
+                .expect("the step verbs' module");
+        let actions = steps
+            .split_once("enum StepAction")
+            .expect("`boss step` groups its verbs in StepAction")
+            .1;
+        assert!(
+            actions.contains("    Complete {"),
+            "`boss step complete` is a StepAction variant"
+        );
+        // ONE PUT, NOT TWO. The freeze in `boss-jobs/src/http/steps.rs`
+        // is gated on the step's OLD status, so a step still ready
+        // takes its metadata and its completion in one body; a
+        // document that teaches a write and THEN a completion teaches
+        // a second write the API answers with a 409.
+        assert!(
+            text.contains("one PUT"),
+            "the analyst rules say a completion is one PUT, not two"
+        );
+    }
+
     /// THE ROSTER IS THE BUNDLE, NOT A LIST HERE (CLAUDE.md 9a). The
     /// profiles that need a document are exactly the ones the platform
     /// Workflow rows' `agent` blocks declare, so this reads them from
@@ -369,9 +468,76 @@ mod tests {
         assert!(s.contains("# Builder rules"));
     }
 
+    /// THE LANE IS DECLARED BY EVERY DOCUMENT IN THE BUNDLE
+    /// (c8faa7f3). A profile whose document names no lane is briefed
+    /// with the car lane's forty lines — which is exactly what the
+    /// analyst dispatch measured — so the bundle is walked rather than
+    /// the two known names being asserted: a third document dropped in
+    /// without a `lane:` line fails here instead of reaching an agent
+    /// with the other profile's invariants.
+    #[test]
+    fn every_document_in_the_bundle_declares_the_lane_it_is_briefed_under() {
+        let dir = repo().join(DIR);
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&dir).expect("the document bundle") {
+            let path = entry.expect("a bundle entry").path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Some(profile) = name.strip_suffix("-rules.md") else {
+                continue;
+            };
+            let doc = std::fs::read_to_string(&path).expect("the document reads");
+            let declared = lane_of(&doc)
+                .unwrap_or_else(|| panic!("{name} declares no `lane:` in its front-matter"));
+            assert!(
+                crate::brief::LANES.contains(&declared.as_str()),
+                "{name} declares lane `{declared}`, which no invariant is filed under: {:?}",
+                crate::brief::LANES
+            );
+            assert_eq!(
+                lane(&repo(), profile).expect("the lane reads"),
+                declared,
+                "the lane read for `{profile}` is the one its document declares"
+            );
+            seen += 1;
+        }
+        assert!(seen >= 2, "the bundle has both documents, saw {seen}");
+        // The two settings in use, and they are NOT the same lane —
+        // the whole point of the key.
+        assert_eq!(lane(&repo(), "builder").expect("builder"), "car");
+        assert_eq!(lane(&repo(), "analyst").expect("analyst"), "step");
+        // A profile nothing serves is briefed as it always was.
+        assert_eq!(
+            lane(&repo(), "no-such-profile").expect("no document is not an error"),
+            DEFAULT_LANE
+        );
+    }
+
+    /// A lane nothing is filed under is refused rather than rendered:
+    /// the reader would get an empty invariants section under a
+    /// confident header, which is silence where forty lines were.
+    #[test]
+    fn a_document_declaring_a_lane_no_invariant_uses_is_refused() {
+        let dir = boss_testing::scratch_dir("documents-unknown-lane");
+        let bundle = dir.join(DIR);
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(
+            bundle.join("courier-rules.md"),
+            "---\nprofile: courier\nlane: sidings\n---\n\n# Courier rules\n",
+        )
+        .unwrap();
+        let err = lane(&dir, "courier").expect_err("refused");
+        assert!(err.to_string().contains("`sidings`"), "{err}");
+        assert!(err.to_string().contains("courier-rules.md"), "{err}");
+    }
+
     #[test]
     fn front_matter_is_parsed_and_stripped() {
-        let doc = "---\nprofile: analyst\n---\n\n# Analyst rules\n\n1. Read.\n";
+        let doc = "---\nprofile: analyst\nlane: step\n---\n\n# Analyst rules\n\n1. Read.\n";
+        assert_eq!(front_matter(doc, "lane").as_deref(), Some("step"));
+        assert_eq!(lane_of(doc).as_deref(), Some("step"));
+        assert_eq!(lane_of("---\nprofile: builder\n---\n"), None);
         assert_eq!(profile_of(doc).as_deref(), Some("analyst"));
         assert_eq!(body(doc), "# Analyst rules\n\n1. Read.\n");
         assert_eq!(profile_of("# No front matter\n"), None);

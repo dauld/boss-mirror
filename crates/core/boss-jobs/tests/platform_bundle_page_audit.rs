@@ -183,6 +183,47 @@ fn the_sign_off_is_fed_by_the_test_step() {
     }
 }
 
+/// THE TWO DRAFTING PROCEDURES NAME THE COMPLETION VERB (backlog
+/// d1c03a44, 2026-09-19). `boss brief` renders the procedure, and the
+/// procedure is all an analyst reads about how to record what it
+/// found. Left silent, each of the ~94 measure/file completions is a
+/// hand-built `boss-api PUT` — and each one is an opportunity for the
+/// three failures `boss step complete` refuses: an undeclared name
+/// stored as an annotation and answered 204, a wholesale `metadata`
+/// replace that deletes the step's own `procedure` and `agent` block,
+/// and a 204 read as evidence.
+///
+/// `measure` names the FILE door as well, because its three required
+/// fields are whole markdown documents: a document through argv is a
+/// quoting fight, and a backtick inside it is command substitution
+/// (backlog 2376b89e).
+#[test]
+fn the_drafting_procedures_name_the_completion_verb() {
+    let wf = bundled("page-audit");
+    for slug in ["measure", "file"] {
+        let procedure = step(&wf, slug).metadata_defaults["procedure"]
+            .as_str()
+            .unwrap_or_else(|| panic!("`{slug}` carries a procedure"));
+        assert!(
+            procedure.contains("boss step complete"),
+            "`{slug}` names the completion verb"
+        );
+        assert!(
+            procedure.contains(&format!("--step {slug}")),
+            "`{slug}` names its own slug in the call"
+        );
+    }
+    let measure = step(&wf, "measure").metadata_defaults["procedure"]
+        .as_str()
+        .expect("measure carries a procedure");
+    for field in ["controls_md", "needs_md", "gaps_md"] {
+        assert!(
+            measure.contains(&format!("--field-file {field}=")),
+            "measure passes `{field}` through the file door"
+        );
+    }
+}
+
 /// `styled` is the deferral, recorded by name: a marker the machine
 /// completes when the review approves (or the revision lands), feeding
 /// the ONE happy terminal. Two terminals off one decision would race;

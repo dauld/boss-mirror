@@ -407,6 +407,12 @@ enum Commands {
         /// The packet: its full uuid, 8+ characters of its id, or its
         /// branch. Omit it to print the invariants alone.
         packet: Option<String>,
+        /// Render for this profile instead of the one the step
+        /// declares — the lane's invariants and that profile's rules.
+        /// A brief is rendered FOR A PROFILE (c8faa7f3): with no
+        /// packet, or a step declaring none, it is `builder`.
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Hand a protocol step to an agent, as a packet (design c87fb59b
     /// car 2): claims the step as you, opens an `agent-run` with the
@@ -1385,7 +1391,7 @@ async fn main() -> Result<()> {
             JobAction::Patch { job, patch } => job::patch(&job, &patch).await,
         },
         Commands::Orient { all } => orient::run(all).await,
-        Commands::Brief { packet } => brief::run(packet).await,
+        Commands::Brief { packet, profile } => brief::run(packet, profile).await,
         Commands::Dispatch {
             from_hook: true,
             packet,
