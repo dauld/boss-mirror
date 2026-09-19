@@ -755,7 +755,18 @@ a door that stops being true is a defect worth a car.
   `infra/dev/`, pinned by a shell test in `crates/core/boss-testing/tests/`
   (`boss_api_sh`, `boss_shim_sh`, `wt_cargo_sh`, `wt_web_sh`), and
   `/work/tools/bin/<name>` is a SYMLINK to the main checkout's copy —
-  which is why the main checkout stays on `origin/main`. The pod's
+  so every door runs whatever that checkout last had. **Nothing keeps
+  it on `origin/main`**, and this document used to say it did: on
+  2026-09-19 it was two commits behind for most of the working day and
+  a builder's read came back `HTTP:404` from the wrong port (backlog
+  0b36dd65). Each door now judges its own copy first
+  (`infra/dev/door-freshness.sh`, locally, no fetch): a read WARNS,
+  naming both shas and the `git -C /work/boss merge --ff-only
+  origin/main` that repairs it, and a `boss-api` WRITE is REFUSED
+  (exit 78), because what a write lands in the log is immutable while
+  a read's warning rides beside its answer. Only a checkout that has
+  not pulled is judged stale — a branch, or a door being edited, is
+  silent — and `BOSS_DOOR_FRESHNESS=off` runs anything anyway. The pod's
   system-of-record spelling is `infra/dev/sor-url`, which both
   `boss-api` and the shim read — WRITTEN from the one tree source,
   `infra/estate/estate.toml`, and held equal to it by a test (since

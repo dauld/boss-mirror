@@ -25,6 +25,22 @@
 # are overridable (WT_SEED, WT_TARGET_ROOT) so the test never touches
 # /scratch; the defaults are the pod's.
 set -euo pipefail
+here=$(dirname "$(readlink -f "$0")")
+
+# AND THIS FILE'S OWN AGE (backlog 0b36dd65, 2026-09-19). The symlink
+# under /work/tools/bin resolves into the operator's checkout, which
+# nothing keeps on origin/main; a stale wt-cargo bounds a build by
+# yesterday's rule. It warns and builds — a builder stopped mid-run by
+# a door is worse than a build at the wrong -j — and the warning names
+# the ten-second fix.
+if [ -r "$here/door-freshness.sh" ]; then
+    # shellcheck source=door-freshness.sh
+    . "$here/door-freshness.sh"
+    if stale=$(door_is_stale "$0"); then
+        echo "wt-cargo: WARNING — $stale" >&2
+    fi
+fi
+
 root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "wt-cargo: not in a git worktree" >&2; exit 2; }
 name=$(basename "$root")
 seed=${WT_SEED:-/scratch/target}
@@ -64,8 +80,8 @@ export CARGO_TARGET_DIR="$dir"
 # under /work/tools/bin is resolved so the checkout it points at is the
 # one consulted. A missing file is refused rather than defaulted: an
 # unbounded cargo here is 32 jobs against a 16 GiB cgroup, which is the
-# failure pod-build.env exists to prevent.
-here=$(dirname "$(readlink -f "$0")")
+# failure pod-build.env exists to prevent. `here` is resolved at the
+# top of the file, beside the freshness check.
 env_file=$here/pod-build.env
 [ -f "$env_file" ] || { echo "wt-cargo: $env_file is missing — the cargo bound has no home to read; refusing to build unbounded" >&2; exit 2; }
 set -a; . "$env_file"; set +a
