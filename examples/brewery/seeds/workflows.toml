@@ -3584,8 +3584,10 @@ terminal = { outcome = "completed" }
 # rule, which is why the field-bearing steps matter downstream.
 #
 # Authored live through the API and never written back until 2026-09-10.
-# Rendered from the live row rather than retyped. `owning_team` records
-# the live value; the tenant loader stamps `brewery` and ignores the key.
+# Rendered from the live row rather than retyped, less `owning_team`:
+# the tenant loader stamps the tenant id, so a file naming the live
+# team (`distribution`, `brewing`) is refused rather than dropped
+# (backlog a2358e7c). The team lives on the live row.
 # ---------------------------------------------------------------------------
 
 [[workflow]]
@@ -3593,7 +3595,6 @@ kind = "keg-return"
 label = "Keg Fleet Return"
 category = "sales"
 subject_kinds = ["account"]
-owning_team = "distribution"
 description = "The half of keg commerce every real brewery tracks and this one never did: kegs are returnable assets with deposit liability. One packet per delivered wholesale order follows its fleet back - out, returned-vs-lost, washed, reconciled. Loss rate becomes a measured series."
 
 [[workflow.step]]
@@ -3655,8 +3656,10 @@ terminal = { outcome = "completed" }
 # someone forgot to close.
 #
 # Authored live through the API and never written back until 2026-09-10.
-# Rendered from the live row rather than retyped. `owning_team` records
-# the live value; the tenant loader stamps `brewery` and ignores the key.
+# Rendered from the live row rather than retyped, less `owning_team`:
+# the tenant loader stamps the tenant id, so a file naming the live
+# team (`distribution`, `brewing`) is refused rather than dropped
+# (backlog a2358e7c). The team lives on the live row.
 # ---------------------------------------------------------------------------
 
 [[workflow]]
@@ -3664,7 +3667,6 @@ kind = "tasting-panel"
 label = "Tasting Panel"
 category = "production"
 subject_kinds = ["company"]
-owning_team = "brewing"
 description = "Sensory QC on every packaged batch: a real brewery tastes before it ships. A held verdict is the feeder batch-qc-hold never had. Labor-honest: a flight pour and a panel sitting are short human tasks for QA roles inside a normal day."
 
 [[workflow.step]]

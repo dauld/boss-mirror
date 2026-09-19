@@ -26,7 +26,7 @@ kind = "doc-flatten"
 label = "Documentation flatten"
 category = "platform"
 subject_kinds = ["custom"]
-owning_team = "it"
+owning_team = "platform"
 description = "Periodic curation: fold settled decisions into the one current-truth record, retire what they supersede, and prove the corpus still resolves. Born from David's ruling that the corpus is a working surface rather than an archive - history is kept, but edited - and from the audit finding that the declared flatten process had never actually run."
 metadata = { surfaces = ["system-design"] }
 
