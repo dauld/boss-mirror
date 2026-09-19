@@ -23,7 +23,7 @@ kind = "incident"
 label = "Incident"
 category = "platform"
 subject_kinds = ["custom"]
-owning_team = "it"
+owning_team = "platform"
 description = "An outage or degradation, worked as a packet: raise what was seen, stabilize the live system first, diagnose honestly, ship the prevention, ratify. Authored 2026-08-13 from the boot-viability outage, using the validate-before-publish discipline that incident taught."
 metadata = { surfaces = ["system-design"] }
 

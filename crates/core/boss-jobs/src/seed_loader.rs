@@ -87,7 +87,16 @@ struct WorkflowsFile {
     workflows: Vec<WorkflowToml>,
 }
 
+/// The key set is CLOSED, like every other bundle struct here
+/// (`StationToml`, `StepPluginToml`, `CadenceRuleToml`,
+/// `DeliveryPolicyToml`). It was open until 2026-09-19, and
+/// `owning_team` is what that cost: 64 files declared it, serde
+/// dropped it, and three platform files said `it` while every live row
+/// said `platform` — a declaration that reads as fact and reaches no
+/// mechanism (backlog a2358e7c). A typo'd `ready_when` had the same
+/// silence available to it.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WorkflowToml {
     kind: String,
     label: String,
@@ -112,6 +121,15 @@ struct WorkflowToml {
     /// column. Same reason, same shape.
     #[serde(default)]
     entitlements: serde_json::Value,
+    /// The team the row belongs to. The loader STAMPS `default_owner`
+    /// — `platform` for the platform bundle, the tenant id for a
+    /// tenant's — so the only thing a file may say here is that same
+    /// value; anything else is a claim no publish could ever make true
+    /// (which is why `the-live-protocols-are-the-authored-protocols`
+    /// took this field off its comparison list). Carried so that a
+    /// disagreement is REFUSED rather than dropped.
+    #[serde(default)]
+    owning_team: Option<String>,
     /// Inline step list — flat; the DAG is implicit in each step's
     /// `ready_when` predicate.
     #[serde(default, rename = "step")]
@@ -123,6 +141,7 @@ struct WorkflowToml {
 /// arrives as an inline `{ outcome = "..." }` table) without leaking
 /// serde attributes onto the registry type.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StepToml {
     /// Stable kebab-case slug, unique within the Workflow. Referenced
     /// by other steps' `ready_when` predicates as `steps.<title>.…`.
@@ -219,6 +238,7 @@ fn parse_agent(
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TerminalToml {
     outcome: String,
 }
@@ -440,6 +460,20 @@ fn workflow_toml_to_spec(
     }
     if !toml.entitlements.is_null() {
         spec.entitlements = toml.entitlements;
+    }
+    // The stamp is the truth; the file's key may only agree with it.
+    if let Some(claimed) = toml.owning_team.as_deref()
+        && claimed != default_owner
+    {
+        return Err(SeedLoaderError::Parse(
+            source.to_string(),
+            format!(
+                "workflow `{}`: owning_team is \"{claimed}\" but this bundle is loaded as \
+                 \"{default_owner}\", which is what the row will carry — say \
+                 \"{default_owner}\" or drop the key",
+                spec.kind
+            ),
+        ));
     }
     spec.owning_team = default_owner.to_string();
     Ok(spec)
@@ -1853,6 +1887,89 @@ terminal = { outcome = "completed" }
         let plain = parse_workflows(&viable_row("plain"), "platform", "<test>").unwrap();
         assert_eq!(plain[0].metadata_schema, serde_json::json!({}));
         assert_eq!(plain[0].entitlements, serde_json::json!({}));
+    }
+
+    /// A bundle key the loader does not read is a declaration that
+    /// reaches no mechanism — CLAUDE.md's mostly-sure/absolutely-sure
+    /// distinction as a code smell (backlog a2358e7c). `owning_team`
+    /// was the measured instance: 64 files declared it, the loader
+    /// dropped it on the floor and stamped `default_owner`, and three
+    /// platform files said `it` while every live row said `platform`.
+    /// Every sibling bundle struct in this file already carries
+    /// `deny_unknown_fields`; the workflow one did not, so a typo'd
+    /// `ready_when` would have been dropped just as quietly.
+    #[test]
+    fn a_bundle_key_the_loader_does_not_read_is_refused() {
+        let unknown_on_workflow = r#"
+[[workflow]]
+kind = "typo"
+label = "Typo"
+category = "platform"
+subject_kinds = ["custom"]
+owning_teams = "platform"
+
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+
+[[workflow.step]]
+title = "done"
+kind = "outcome"
+ready_when = "steps.opened.done"
+terminal = { outcome = "completed" }
+"#;
+        let e = parse_workflows(unknown_on_workflow, "platform", "<test>")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("owning_teams"), "{e}");
+
+        let unknown_on_step = r#"
+[[workflow]]
+kind = "typo"
+label = "Typo"
+category = "platform"
+subject_kinds = ["custom"]
+
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+readywhen = "true"
+"#;
+        let e = parse_workflows(unknown_on_step, "platform", "<test>")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("readywhen"), "{e}");
+    }
+
+    /// `owning_team` is now READ, and the only thing it may say is the
+    /// owner this loader stamps: the tenant loader stamps the tenant
+    /// id and the platform loader stamps `platform`, so a file naming
+    /// a third value is claiming something no publish could ever make
+    /// true (the drift lint took the field off its comparison list for
+    /// exactly this reason). Refused by kind, naming both values.
+    #[test]
+    fn an_owning_team_the_loader_will_not_honour_is_refused() {
+        let mut row = viable_row("owned");
+        row.insert_str(
+            row.find("[[workflow.step]]").expect("the row has steps"),
+            "owning_team = \"it\"\n",
+        );
+        let e = parse_workflows(&row, "platform", "<test>")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("owned"), "names the kind: {e}");
+        assert!(e.contains("owning_team"), "{e}");
+        assert!(e.contains("\"it\""), "names what the file claims: {e}");
+        assert!(e.contains("platform"), "names what is stamped: {e}");
+
+        // Agreeing is fine, and still stamps the same value.
+        let agrees = parse_workflows(&row, "it", "<test>").unwrap();
+        assert_eq!(agrees[0].owning_team, "it");
+
+        // Omitted is fine, and stamps the owner the caller gave.
+        let silent = parse_workflows(&viable_row("silent"), "a-tenant", "<test>").unwrap();
+        assert_eq!(silent[0].owning_team, "a-tenant");
     }
 
     fn viable_row(kind: &str) -> String {
