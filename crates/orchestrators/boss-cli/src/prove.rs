@@ -50,9 +50,10 @@
 //! in `verified` stays human, because what a change MEANS is judgement.
 //! Only the evidence under it is mechanised.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
+use boss_jobs::probe::{CAR_CONVERGED_AT_VAR, CAR_MERGE_REF_VAR};
 use serde_json::{Value, json};
 
 /// The step this verb fills. Job step titles come from the registry, so
@@ -150,7 +151,8 @@ const KILL_AFTER_SECS: u64 = 5;
 /// `boss prove --unattended` to do: drop from root to the probe user,
 /// run in the converged checkout, under a timeout, with exactly the
 /// environment a recorded probe is promised — the system of record's
-/// address, the read-only reader's identity and port table, and
+/// address, the read-only reader's identity and port table, the car's
+/// own converged instant ([`Shell::with_car_instant`]), and
 /// `probe-bin` first on PATH — and WITHOUT the actor this verb writes
 /// as, which is a write credential handed to program text a builder
 /// wrote if it leaks.
@@ -172,7 +174,83 @@ pub(crate) struct Shell {
     pub path_prefix: Option<std::path::PathBuf>,
 }
 
+/// THE CAR'S OWN CONVERGENCE INSTANT, read off the car: the `merge_ref`
+/// the conductor wrote when its train landed. `None` when the car has
+/// not merged, or when what it carries is not an object name — which is
+/// also the guard on what this verb hands to `git`, since a car's
+/// metadata is data from the system of record, not a literal here.
+pub(crate) fn car_merge_ref(car: &Value) -> Option<&str> {
+    car.pointer("/metadata/merge_ref")
+        .and_then(Value::as_str)
+        .and_then(resolvable_merge_ref)
+}
+
+/// An abbreviated or full object name, and nothing else.
+fn resolvable_merge_ref(raw: &str) -> Option<&str> {
+    let r = raw.trim();
+    ((7..=40).contains(&r.len()) && r.chars().all(|c| c.is_ascii_hexdigit())).then_some(r)
+}
+
+/// The commit time of `merge_ref` in the checkout at `dir`, in epoch
+/// seconds — an epoch because that is the only form that compares
+/// honestly against the system of record's UTC timestamps
+/// (`boss_jobs::probe::GIT_TIME_STRING_EVIDENCE`). `None` when the
+/// merge is not in this checkout: the car's change has not converged
+/// here, and a probe that gets no instant says NOT YET rather than
+/// inventing one.
+fn converged_at(dir: &Path, merge_ref: &str) -> Option<String> {
+    let o = std::process::Command::new("git")
+        .args([
+            // The unattended door runs as root in the probe user's
+            // checkout, and git refuses a repository owned by somebody
+            // else ("dubious ownership") by answering nonzero rather
+            // than erroring loudly — which here would silently hand
+            // over NO instant and starve the probe the other way. This
+            // one command is a read; say so rather than find out.
+            "-c",
+            &format!("safe.directory={}", dir.display()),
+            "-C",
+            &dir.display().to_string(),
+            "show",
+            "-s",
+            "--format=%ct",
+            merge_ref,
+            "--",
+        ])
+        .output()
+        .ok()?;
+    let ct = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    (o.status.success() && !ct.is_empty() && ct.chars().all(|c| c.is_ascii_digit())).then_some(ct)
+}
+
 impl Shell {
+    /// THE FIXED CUTOFF A RECORDED PROBE COMPARES AGAINST (backlog
+    /// a92571a6, measured 2026-09-19). A probe asking "did my
+    /// qualifying event happen after my change landed?" had nothing
+    /// fixed to ask it of, so the idiom that grew was `git log -1
+    /// --format=%ct HEAD` — the converged checkout's CURRENT head,
+    /// which advances with every train. The car's change converged
+    /// ONCE; that instant is what the question means, it is derivable
+    /// from the `merge_ref` already on the car, and handing it over is
+    /// what makes the correct comparison available rather than merely
+    /// documented.
+    ///
+    /// Both names are STRIPPED first, so a value left in the runner's
+    /// environment can never stand in for one this door resolved.
+    pub(crate) fn with_car_instant(mut self, merge_ref: Option<&str>) -> Self {
+        self.strip.push(CAR_MERGE_REF_VAR.into());
+        self.strip.push(CAR_CONVERGED_AT_VAR.into());
+        let Some(r) = merge_ref.and_then(resolvable_merge_ref) else {
+            return self;
+        };
+        self.env.push((CAR_MERGE_REF_VAR.into(), r.to_string()));
+        let dir = self.cwd.clone().unwrap_or_else(|| PathBuf::from("."));
+        if let Some(at) = converged_at(&dir, r) {
+            self.env.push((CAR_CONVERGED_AT_VAR.into(), at));
+        }
+        self
+    }
+
     /// The hand door's shell: as the operator, in `cwd` when given.
     pub(crate) fn here(cwd: Option<&Path>) -> Self {
         Self {
@@ -217,12 +295,6 @@ fn running_as_root() -> bool {
         .output()
         .ok()
         .is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
-}
-
-/// As [`execute`], but in a stated directory — what `--recheck` uses to
-/// put the probe back where it was recorded.
-pub(crate) fn execute_in(probe: &str, cwd: Option<&Path>) -> Result<Outcome> {
-    execute_with(probe, &Shell::here(cwd))
 }
 
 /// Run `probe` in `shell` and capture everything it did.
@@ -906,13 +978,15 @@ pub(crate) fn admit(probe: &str, from_car: bool) -> Admission {
     Admission { refusal, warnings }
 }
 
-/// THE THREE SHAPE WARNINGS, in the wording every door can use (the
+/// THE FOUR SHAPE WARNINGS, in the wording every door can use (the
 /// prefix is the door's). All read the probe TEXT, like the two rules
 /// above them, and all are host-independent — so they are said at every
 /// door a human is standing at, `--from-car` or not. The third
 /// (0df3af1c) joined the first two for the same reason they exist: `[`
 /// exits 2 on a non-integer, so the shape fails CLOSED, and the one
-/// place its stderr has a reader is the terminal it is typed at.
+/// place its stderr has a reader is the terminal it is typed at. The
+/// fourth (a92571a6) is the same argument again: a cutoff dated from a
+/// moving HEAD answers 75 forever, never a false green.
 pub(crate) fn shape_warnings(probe: &str) -> impl Iterator<Item = String> {
     let inverted = boss_jobs::probe::asserts_its_own_negation(probe).then(|| {
         format!(
@@ -954,7 +1028,30 @@ pub(crate) fn shape_warnings(probe: &str) -> impl Iterator<Item = String> {
              strands a car but never records a proof of nothing."
         )
     });
-    inverted.into_iter().chain(rewritten).chain(unguarded)
+    let moving = boss_jobs::probe::compares_against_a_moving_head(probe).map(|cmd| {
+        format!(
+            "THIS PROBE DATES ITS CUTOFF FROM A TARGET THAT MOVES — `{cmd}` reads the \
+             converged checkout's CURRENT head, which advances with every train (about 28 a \
+             day), so the claim quietly becomes 'this change worked more recently than any \
+             other change landed'. The car's change converged ONCE; an unrelated train \
+             landing afterwards is not evidence against it.\n  {evidence}\n  \
+             Date it from the car's own merge, which is fixed and handed to every recorded \
+             probe as `${var}` — absent only when the car has not converged here, which is \
+             what the guard reports:\n{recipe}\n  \
+             This is a warning, not a refusal: the shape fails CLOSED — a starved probe \
+             answers 75 (not yet), never a false green — but a car whose qualifying event \
+             is rarer than a train starves by construction, and a daily one is effectively \
+             unprovable.",
+            evidence = boss_jobs::probe::MOVING_HEAD_EVIDENCE,
+            var = CAR_CONVERGED_AT_VAR,
+            recipe = boss_jobs::probe::CAR_INSTANT_RECIPE,
+        )
+    });
+    inverted
+        .into_iter()
+        .chain(rewritten)
+        .chain(unguarded)
+        .chain(moving)
 }
 
 /// The override, resolved once: `None` when the flag was not given,
@@ -1610,8 +1707,11 @@ fn proven_metadata(
 //     BOSS_SOR_USER (backlog 61085a9e — never this verb's own write
 //     actor, which is stripped), the reader's port table as
 //     BOSS_SOR_PORTS (design 28d2bed9, read as data from the checkout's
-//     infra/forge/sor-ports.env), and infra/forge/probe-bin first on
-//     PATH so `boss-sor-read` is the cheap thing to type;
+//     infra/forge/sor-ports.env), infra/forge/probe-bin first on
+//     PATH so `boss-sor-read` is the cheap thing to type, and the
+//     car's OWN converged instant (backlog a92571a6 — the fixed cutoff
+//     a dated claim compares against, since the checkout's HEAD moves
+//     with every train);
 //   - every outcome lands on the car: PROVEN completes `proven` with
 //     the proof record (and `proven_by`, which the yard reads); every
 //     other verdict — NOT YET, NOT RUN, NOT PROVEN — stamps
@@ -1874,7 +1974,7 @@ pub(crate) async fn run_unattended(car_id: &str, now: chrono::DateTime<chrono::U
         std::process::exit(REFUSED_EXIT);
     }
 
-    let shell = Shell::unattended(&base)?;
+    let shell = Shell::unattended(&base)?.with_car_instant(car_merge_ref(&car));
     println!("boss prove: {short}  $ {probe}");
     let o = execute_with(&probe, &shell)?;
     let at = now.to_rfc3339();
@@ -2062,10 +2162,15 @@ pub(crate) async fn run(
             );
         }
         println!("boss prove: re-running the recorded probe for {short}\n  $ {probe}");
-        let o = match rec.cwd.as_deref() {
-            Some(dir) if !dir.is_empty() => execute_in(&probe, Some(Path::new(dir)))?,
-            _ => execute(&probe)?,
-        };
+        // The recorded cwd, and the car's own converged instant read
+        // there — a re-run compares against the same fixed cutoff the
+        // unattended door hands over, or the claim means a different
+        // thing at each door (a92571a6).
+        let cwd = rec.cwd.as_deref().filter(|d| !d.is_empty());
+        let o = execute_with(
+            &probe,
+            &Shell::here(cwd.map(Path::new)).with_car_instant(car_merge_ref(car)),
+        )?;
         // THREE READINGS, and which record they are read against
         // decides the sentence: a PROOF that fails now has decayed; an
         // ATTEMPT was never a proof. --recheck writes nothing on any of
@@ -2186,7 +2291,10 @@ pub(crate) async fn run(
     };
 
     println!("boss prove: {short}  $ {probe}");
-    let o = execute(&probe)?;
+    let o = execute_with(
+        &probe,
+        &Shell::here(None).with_car_instant(car_merge_ref(car)),
+    )?;
     let at = now.to_rfc3339();
     match verdict(&probe, &o, expect.as_deref()) {
         Verdict::Proven => {}
@@ -3995,6 +4103,126 @@ mod tests {
         assert_eq!(user["id"], READER_ACTOR);
         assert_eq!(user["role"], READER_ROLE);
         assert_eq!(user["access_tier"], "auditor");
+    }
+
+    /// THE CAR'S OWN CONVERGED INSTANT IS PART OF THAT PROMISE
+    /// (backlog a92571a6). A probe that needs a cutoff gets one that
+    /// does NOT move: the commit time of the car's own merge, read
+    /// from the checkout the probe runs in. A merge that is not in
+    /// this checkout hands over no instant at all — the honest not-yet
+    /// — and a ref that is not an object name is never handed to git.
+    #[test]
+    fn the_probe_is_handed_its_cars_own_converged_instant() {
+        let dir = boss_testing::scratch::scratch_dir("prove-car-instant");
+        let git = |args: &[&str]| {
+            let o = std::process::Command::new("git")
+                .args(["-C", &dir.display().to_string()])
+                .args(args)
+                .env("GIT_AUTHOR_DATE", "@1700000000 +0000")
+                .env("GIT_COMMITTER_DATE", "@1700000000 +0000")
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+                .output()
+                .expect("git runs");
+            assert!(o.status.success(), "git {args:?}: {o:?}");
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(dir.join("f"), "x").unwrap();
+        git(&["add", "f"]);
+        git(&["commit", "-q", "-m", "landed"]);
+        let sha = git(&["rev-parse", "HEAD"]);
+
+        let shell = Shell::here(Some(&dir)).with_car_instant(Some(&sha[..12]));
+        let at = |s: &Shell, k: &str| s.env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        assert_eq!(
+            at(&shell, boss_jobs::probe::CAR_CONVERGED_AT_VAR).as_deref(),
+            Some("1700000000"),
+            "the merge's own commit time, in epoch seconds: {shell:?}"
+        );
+        assert_eq!(
+            at(&shell, boss_jobs::probe::CAR_MERGE_REF_VAR).as_deref(),
+            Some(&sha[..12])
+        );
+        // The probe sees it, and a stale one from the runner's own
+        // environment cannot reach it.
+        assert!(
+            shell
+                .strip
+                .iter()
+                .any(|n| n == boss_jobs::probe::CAR_CONVERGED_AT_VAR)
+        );
+        let o =
+            execute_with("printf '[%s]\\n' \"$BOSS_CAR_CONVERGED_AT\"", &shell).expect("bash runs");
+        assert!(o.stdout.contains("[1700000000]"), "{o:?}");
+
+        // A merge this checkout does not have: the ref rides, the
+        // instant does not, and the recipe's guard says not yet.
+        let absent = Shell::here(Some(&dir)).with_car_instant(Some("0123456789ab"));
+        assert_eq!(at(&absent, boss_jobs::probe::CAR_CONVERGED_AT_VAR), None);
+        assert_eq!(
+            at(&absent, boss_jobs::probe::CAR_MERGE_REF_VAR).as_deref(),
+            Some("0123456789ab")
+        );
+        // Not an object name — never handed to git, so neither rides.
+        for bad in ["--upload-pack=touch /tmp/x", "main", ""] {
+            let s = Shell::here(Some(&dir)).with_car_instant(Some(bad));
+            assert!(s.env.is_empty(), "{bad:?}: {s:?}");
+        }
+        assert!(
+            Shell::here(Some(&dir))
+                .with_car_instant(None)
+                .env
+                .is_empty()
+        );
+    }
+
+    /// AND THE CAR SAYS WHICH MERGE THAT WAS — the `merge_ref` the
+    /// conductor wrote on it, read the way every other door reads it.
+    #[test]
+    fn the_cars_merge_ref_is_read_off_its_metadata() {
+        let car = json!({"metadata": {"merge_ref": "ead63bba8aff"}});
+        assert_eq!(car_merge_ref(&car), Some("ead63bba8aff"));
+        assert_eq!(car_merge_ref(&json!({"metadata": {}})), None);
+        assert_eq!(
+            car_merge_ref(&json!({"metadata": {"merge_ref": "not-a-sha"}})),
+            None
+        );
+    }
+
+    /// THE STARVED CUTOFF IS SAID AT THE DOOR A BUILDER IS STANDING AT,
+    /// with the promised variable named (a92571a6). Car 372ac8fd's
+    /// recorded probe is the live instance.
+    #[test]
+    fn a_probe_that_dates_its_cutoff_from_head_is_warned_about() {
+        let probe = "c=$(git show HEAD:infra/cluster/dev-scratch-reclaim.sh | grep -c ls-remote); \
+                     since=$(git log -1 --format=%ct HEAD); \
+                     j=$(boss-sor-read '/api/jobs?kind=maintenance-dev-scratch-reclaim')";
+        let w: Vec<String> = shape_warnings(probe).collect();
+        let said = w
+            .iter()
+            .find(|w| w.contains("DATES ITS CUTOFF"))
+            .unwrap_or_else(|| panic!("{w:?}"));
+        assert!(
+            said.contains(boss_jobs::probe::CAR_CONVERGED_AT_VAR),
+            "{said}"
+        );
+        assert!(
+            said.contains(boss_jobs::probe::MOVING_HEAD_EVIDENCE),
+            "{said}"
+        );
+        assert!(said.contains("warning, not a refusal"), "{said}");
+        // The rewrite it names is not warned about in turn.
+        let fixed = "c=$(git show HEAD:infra/cluster/dev-scratch-reclaim.sh | grep -c ls-remote); \
+                     since=${BOSS_CAR_CONVERGED_AT}; \
+                     case ${since:-empty} in empty|*[!0-9]*) echo 'not yet'; exit 75;; esac";
+        assert!(
+            !shape_warnings(fixed).any(|w| w.contains("DATES ITS CUTOFF")),
+            "{:?}",
+            shape_warnings(fixed).collect::<Vec<_>>()
+        );
     }
 
     /// AND THE STRIP IS REAL. The door's `env_remove` cannot be shown
