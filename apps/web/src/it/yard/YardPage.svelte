@@ -96,6 +96,7 @@
     withConverge,
   } from './yard-converge';
   import { yardAlerts, type Alert } from './yard-alerts';
+  import { floorSelection } from './regions';
   import { yardSignals } from './yard-signals';
   import { production as productionOf } from './yard-production';
   import YardMap from './YardMap.svelte';
@@ -109,6 +110,16 @@
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import { entityHref } from '@boss/web-kit/ui/entity-href';
   import { navigate } from '@boss/web-kit/nav';
+
+  // THE FLOOR THIS PAGE OPENS ON (design 0524fc95, car 2). /it is the
+  // MAP now — eight region cards read from /api/yard/regions
+  // (MapPage.svelte) — and each yard card opens this page at
+  // /it/yard/<region>, focused on that region's panel: the floor IS
+  // this page, nothing split out, every panel one click deeper.
+  // `focus` is the map's name for the region; regions.ts maps it to
+  // the selection the entity deck opens on, and an unknown name falls
+  // back to the track, as the bare page always has.
+  let { focus = 'track' }: Readonly<{ focus?: string }> = $props();
 
   let yard = $state<YardState | null>(null);
   let loading = $state(true);
@@ -235,8 +246,13 @@
   const shasMatch = (a: string, b: string): boolean => a.startsWith(b) || b.startsWith(a);
 
   // THE SELECTION — one string the map, the board and the alerts all
-  // speak. The track by default: the thing most often worth watching.
-  let selected = $state<string>('track');
+  // speak. The floor's region by default; the track when the page is
+  // opened bare: the thing most often worth watching. The initial
+  // value is all `focus` decides — App.svelte keys this page on the
+  // region, so a card-to-card move remounts it rather than fighting
+  // a selection the operator has since made.
+  // svelte-ignore state_referenced_locally
+  let selected = $state<string>(floorSelection(focus));
   const sel = $derived(parseSelection(selected));
 
   // The selected packet's own steps (a car's journey, a train's steps
@@ -545,7 +561,11 @@
   {#if loading}
     <div class="yard-empty">Reading the yard…</div>
   {:else if !yard || !floor}
-    <div class="yard-empty">The yard is unreachable right now.</div>
+    <!-- A failed read, marked as one (`load-failed`, the one class the
+         outage crawl reads) — the yard's floors are crawled routes
+         since 0524fc95 car 2, and a floor that says nothing when its
+         reads fail is the false-empty class. -->
+    <div class="yard-empty load-failed">The yard is unreachable right now.</div>
   {:else}
     {@const prod = productionOf(yard, statusData, nowMs)}
     <!-- THE ALERTS STRIP: what is wrong right now, each a button to

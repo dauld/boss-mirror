@@ -97,6 +97,11 @@ export type Route =
   | { kind: 'systemStepPluginDetail'; pluginSlug: string }
   | { kind: 'systemDesign' }
   | { kind: 'systemYard' }
+  /** One of the yard's floors — the Train Yard focused on a region's
+   *  panel (design 0524fc95, car 2). `region` is the map's name for it
+   *  (dock, gates, track, shed, arrivals, garage); the page maps it to
+   *  a selection and an unknown name falls back to the track. */
+  | { kind: 'systemYardFloor'; region: string }
   /// Yard status — where each train sits and why, computed from the SoR
   /// (the-cluster-is-the-system.md Phase 0). An Operate tab, beside the
   /// live-pipeline dashboards it belongs with.
@@ -166,8 +171,14 @@ export function parseRoute(pathname: string): Route {
   // falls through to the catch-all like any other unknown route.
   if (raw === '/it' || raw.startsWith('/it/')) {
     const p = raw.slice('/it'.length) || '/';
-    // 1. The landing is the yard — delivery truth first.
+    // 1. The landing is the yard — delivery truth first. Since design
+    //    0524fc95 (car 2) the landing is the yard's MAP: eight region
+    //    cards, each a door to a floor. The floors are the yard page
+    //    itself, opened on a region's panel, at /it/yard[/<region>].
     if (p === '/') return { kind: 'systemYard' };
+    if (p === '/yard') return { kind: 'systemYardFloor', region: 'track' };
+    const floorM = p.match(/^\/yard\/([a-z-]+)$/);
+    if (floorM) return { kind: 'systemYardFloor', region: floorM[1]! };
     // 2. Operate — incidents lead; audit/perf/atlas/bottlenecks tabs.
     if (p === '/operate') return { kind: 'incidents' };
     if (p === '/operate/audit') return { kind: 'systemMonitoringEvents' };

@@ -54,6 +54,21 @@ export const ROUTES: ReadonlyArray<string> = [
   // Yard status renders the empty yard under the mock's `[]` catch-all
   // for /api/yard/status — chrome + "no trains / no cars", no crash.
   '/it/operate/yard-status',
+  // The yard's FLOORS (design 0524fc95, car 2). /it above is the MAP —
+  // eight region cards read from /api/yard/regions — and each yard
+  // card opens the Train Yard at /it/yard/<region>, focused on that
+  // region's panel; the bare /it/yard is the yard on the track. The
+  // page is the same one /it used to mount, so each floor renders the
+  // yard's empty states under the mocks and its `load-failed` line
+  // under the outage. Receiving and marshalling floors are the two
+  // pages below.
+  '/it/yard',
+  '/it/yard/dock',
+  '/it/yard/gates',
+  '/it/yard/track',
+  '/it/yard/shed',
+  '/it/yard/arrivals',
+  '/it/yard/garage',
   // The Marshalling Yard — the upstream third. Under the mock's `[]`
   // catch-all, /api/stations/load and /api/stations/flow come back as
   // collections with no rows, so the page renders its "every watched

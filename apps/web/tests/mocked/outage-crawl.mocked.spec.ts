@@ -78,7 +78,6 @@ const SILENT: ReadonlyMap<string, string> = new Map([
   ['/ux/hr', 'HR: the workflow + step reads fire on the Workflows tab, not on load (see false-empty.mocked.spec.ts, which pins them)'],
   ['/ux/sales', 'sales: /api/jobs + /api/workflows'],
   ['/ux/shop', 'shop: /api/inventory/items + /api/workflows'],
-  ['/it', 'IT hub: /api/jobs, the two station queues, /api/yard/status, /api/jobs/health'],
   ['/it/registry/subjects', 'subjects+classes: reads /api/subject-kinds + /api/classes, which HEALTHY keeps up'],
   ['/it/registry/dispatcher', 'dispatcher cascade: /api/dispatcher/rules'],
   ['/it/registry/rules', 'rules: /api/dispatcher/rules'],

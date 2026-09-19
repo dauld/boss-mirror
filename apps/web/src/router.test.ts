@@ -85,6 +85,13 @@ describe('parseRoute — every specific path matches its specific case', () => {
     ['/it/design/feedback', { kind: 'systemFeedback' }],
     ['/it/design/codebase', { kind: 'systemCodebase' }],
     ['/it', { kind: 'systemYard' }],
+    // The yard's FLOORS (design 0524fc95, car 2): /it is the map of
+    // eight region cards; each yard card opens the Train Yard focused
+    // on its panel, and the bare /it/yard is the yard on its default
+    // selection, the track.
+    ['/it/yard', { kind: 'systemYardFloor', region: 'track' }],
+    ['/it/yard/dock', { kind: 'systemYardFloor', region: 'dock' }],
+    ['/it/yard/shed', { kind: 'systemYardFloor', region: 'shed' }],
     ['/it/crew', { kind: 'systemCrew' }],
     ['/it/estate', { kind: 'systemEstate' }],
     

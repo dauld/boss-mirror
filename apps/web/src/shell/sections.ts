@@ -146,6 +146,9 @@ export const SECTION_FOR_ROUTE: Readonly<Record<Route['kind'], string>> = {
   systemFeedback: 'system-feedback',
   systemBacklog: 'system-backlog',
   systemYard: 'system-yard',
+  // A yard floor is the Train Yard opened on one panel (0524fc95 car
+  // 2): it highlights the yard's own row.
+  systemYardFloor: 'system-yard',
   systemCrew: 'system-crew',
   systemEstate: 'system-estate',
   incidents: 'system-incidents',

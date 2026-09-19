@@ -101,6 +101,7 @@ export const SHELL_ENDPOINTS: ReadonlyArray<RegExp> = [
 export const JOBS_LIVE = /\/api\/jobs\/live$/;
 export const JOBS_SUMMARY = /\/api\/jobs\/summary(\?|$)/;
 export const YARD_STATUS = /\/api\/yard\/status$/;
+export const YARD_REGIONS = /\/api\/yard\/regions(\?|$)/;
 export const WORKFLOW_DETAIL = /\/api\/workflows\/[^/]+$/;
 export const DISPATCHER_RULES = /\/api\/dispatcher\/rules$/;
 export const GATEWAY_PERF = /\/api\/gateway\/perf$/;
@@ -108,7 +109,7 @@ export const MARKETING_ASSET_DETAIL = /\/api\/catalog\/marketing-assets\/[^/]+$/
 export const VIEW_RESULTS = /\/api\/views\/[^/]+\/results/;
 export const SHIPMENT_DETAIL = /\/api\/shipping\/shipments\/[^/]+$/;
 export const OBJECT_ENDPOINTS: ReadonlyArray<RegExp> = [
-  JOBS_LIVE, JOBS_SUMMARY, YARD_STATUS, WORKFLOW_DETAIL, DISPATCHER_RULES, GATEWAY_PERF,
+  JOBS_LIVE, JOBS_SUMMARY, YARD_STATUS, YARD_REGIONS, WORKFLOW_DETAIL, DISPATCHER_RULES, GATEWAY_PERF,
   MARKETING_ASSET_DETAIL, VIEW_RESULTS, SHIPMENT_DETAIL,
 ];
 
@@ -142,6 +143,24 @@ export async function installSmokeMocks(page: Page): Promise<void> {
       garage: [],
       policy: { stall_hours: null, max_red_trains: null },
       now: '2026-09-03T12:00:00Z',
+    }),
+  );
+
+  // The IT system map's regions (design 0524fc95, car 2): the /it
+  // landing reads this ONE endpoint. An empty-but-well-formed map —
+  // eight regions, each clear with a count of 0 and a trend with no
+  // samples — so the page draws eight cards and the crawl walks eight
+  // doors. Under the `[]` catch-all the page would render a failure
+  // line (a list where the map is due is a malformed read), which is
+  // right for an outage and wrong for the empty leg.
+  await page.route(YARD_REGIONS, (r) =>
+    json(r, {
+      window_hours: 24,
+      now: '2026-09-03T12:00:00Z',
+      regions: ['dock', 'gates', 'track', 'shed', 'arrivals', 'garage', 'receiving', 'marshalling'].map((name) => ({
+        name, count: 0, state: 'clear', why: 'nothing here',
+        trend: { metric: 'nothing measured', unit: 'per day', current: null, previous: null, samples: 0, previous_samples: 0 },
+      })),
     }),
   );
 

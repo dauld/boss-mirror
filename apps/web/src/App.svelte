@@ -62,6 +62,7 @@
   import DispatcherRuleEditPage from './dispatcher/DispatcherRuleEditPage.svelte';
   import SubjectsClassesPage from './it/subjects/SubjectsClassesPage.svelte';
   import YardPage from './it/yard/YardPage.svelte';
+  import MapPage from './it/yard/MapPage.svelte';
   import YardStatusPage from './it/yard/YardStatusPage.svelte';
   import CrewBoardPage from './it/crew/CrewBoardPage.svelte';
   import EstatePage from './it/estate/EstatePage.svelte';
@@ -384,7 +385,16 @@
       <ItTabs group="design" active="/it/design" />
       <DesignReviewPage />
     {:else if route.kind === 'systemYard'}
-      <YardPage />
+      <!-- The /it landing is the MAP (design 0524fc95, car 2): eight
+           region cards, each a door to a floor below. -->
+      <MapPage />
+    {:else if route.kind === 'systemYardFloor'}
+      <!-- A floor: the Train Yard itself, opened on the region's panel.
+           Keyed on the region so a card-to-card move remounts the page
+           on the new selection rather than keeping the old one. -->
+      {#key route.region}
+        <YardPage focus={route.region} />
+      {/key}
     {:else if route.kind === 'systemCrew'}
       <!-- No ItTabs: the Crew Board is its own sidebar row, not a tab on
            an existing family (backlog 04c5bbc0, David 2026-09-11). -->

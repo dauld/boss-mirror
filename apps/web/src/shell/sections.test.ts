@@ -57,6 +57,7 @@ describe('sections resolve in the nav catalog', () => {
     expect(appForRoute({ kind: 'department', code: 'operations' })).toBe('operations');
     // Every other route still answers through the catalog.
     expect(appForRoute({ kind: 'systemYard' })).toBe('it');
+    expect(appForRoute({ kind: 'systemYardFloor', region: 'dock' })).toBe('it');
     expect(appForRoute({ kind: 'accounts' })).toBe('sales');
     expect(appForRoute({ kind: 'jobs' })).toBe('home');
     expect(appForRoute({ kind: 'me' })).toBe('home');
