@@ -348,6 +348,7 @@ mod tests {
             do_steps: steps,
             delay: None,
             version: 1,
+            why: None,
         }
     }
 
@@ -609,6 +610,7 @@ mod tests {
             ])],
             delay: None,
             version: 1,
+            why: None,
         };
         let (cadences, skipped) = clock_cadences(&[rule]);
         assert!(

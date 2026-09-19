@@ -83,6 +83,8 @@ impl RuleVersion {
             do_steps: self.do_steps.clone(),
             delay: self.delay.clone(),
             version: self.version.max(0) as u32,
+            // Authoring metadata, not a column: see `RawRule::why`.
+            why: None,
         }
     }
 }

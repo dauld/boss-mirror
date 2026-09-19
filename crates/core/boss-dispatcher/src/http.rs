@@ -253,28 +253,49 @@ fn authoring_err(e: AuthoringError) -> Response {
     (code, e.to_string()).into_response()
 }
 
-/// The draft door's body: the rule spec, plus who declares it.
-/// `source` is absent from the SPA's editor (the product's own) and
-/// `tenant:<tenant_id>` from `boss tenant publish` (backlog 458971ef).
-/// Flattened so the rule's shape on the wire is exactly [`RawRule`].
-#[derive(Debug, serde::Deserialize)]
-struct DraftBody {
-    #[serde(flatten)]
-    rule: RawRule,
-    #[serde(default)]
-    source: Option<String>,
+/// The draft door's body, split by hand: the rule spec, plus who
+/// declares it. `source` is absent from the SPA's editor (the product's
+/// own) and `tenant:<tenant_id>` from `boss tenant publish` (backlog
+/// 458971ef); the rest of the object is exactly [`RawRule`], so the
+/// wire shape is unchanged.
+///
+/// NOT `#[serde(flatten)]`, which was the shape until 2026-09-19
+/// (backlog a2358e7c F3): serde hands a flattened struct only the keys
+/// it names, so `RawRule`'s `deny_unknown_fields` is INERT underneath a
+/// flatten — measured, a body carrying `onevent` parsed clean and
+/// landed a draft with no trigger at all. Closing the FILE door while
+/// the HTTP door stayed open would have been the worse outcome of the
+/// two: the same registry, refusing a typo from a file and accepting it
+/// from a POST.
+fn split_draft_body(body: serde_json::Value) -> Result<(RawRule, Option<String>), String> {
+    let mut obj = match body {
+        serde_json::Value::Object(m) => m,
+        other => return Err(format!("expected a rule object, got {other}")),
+    };
+    let source = match obj.remove("source") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => Some(s),
+        Some(other) => return Err(format!("`source` must be a string, got {other}")),
+    };
+    let rule: RawRule = serde_json::from_value(serde_json::Value::Object(obj))
+        .map_err(|e| format!("the rule did not parse: {e}"))?;
+    Ok((rule, source))
 }
 
 /// `POST /api/dispatcher/rules` — append a new draft version of a rule.
 /// Body is the rule spec (name, on_event, when?, do[], delay?, version?)
-/// plus an optional `source` ([`DraftBody`]). The draft is validated
+/// plus an optional `source` ([`split_draft_body`]). The draft is validated
 /// (must load via `Rule::from_raw`) before it persists; `201` on success
 /// returns the stored draft. A name another source owns is refused 400.
 async fn create_rule_draft(
     State(state): State<HttpState>,
-    Json(body): Json<DraftBody>,
+    Json(body): Json<serde_json::Value>,
 ) -> Response {
-    match authoring::create_draft(&state.pool, &body.rule, body.source.as_deref()).await {
+    let (rule, source) = match split_draft_body(body) {
+        Ok(split) => split,
+        Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, e).into_response(),
+    };
+    match authoring::create_draft(&state.pool, &rule, source.as_deref()).await {
         Ok(v) => (StatusCode::CREATED, Json(v)).into_response(),
         Err(e) => authoring_err(e),
     }
@@ -344,6 +365,7 @@ mod tests {
             }],
             delay: None,
             version: 3,
+            why: None,
         }
     }
 
@@ -406,24 +428,48 @@ mod tests {
 
     /// The draft door's body is the rule plus WHO declares it: the
     /// SPA's editor sends the rule alone (the product's), `boss tenant
-    /// publish` adds `source`. Flattened, so the rule's own shape on
-    /// the wire is unchanged.
+    /// publish` adds `source`. The rule's own shape on the wire is
+    /// unchanged.
     #[test]
     fn a_draft_body_is_the_rule_with_an_optional_source() {
-        let plain: DraftBody = serde_json::from_str(
-            r#"{"name":"r","on_event":"a.b","do":[{"handler":"jobs.spawn","args":{}}]}"#,
+        let (rule, source) = split_draft_body(
+            serde_json::from_str(
+                r#"{"name":"r","on_event":"a.b","when":null,"delay":null,"do":[{"handler":"jobs.spawn","args":{}}]}"#,
+            )
+            .unwrap(),
         )
         .unwrap();
-        assert_eq!(plain.rule.name, "r");
-        assert_eq!(plain.rule.version, 1, "the default the editor sends");
-        assert!(plain.source.is_none());
+        assert_eq!(rule.name, "r");
+        assert_eq!(rule.version, 1, "the default the editor sends");
+        assert!(source.is_none());
 
-        let sourced: DraftBody = serde_json::from_str(
-            r#"{"name":"r","version":4,"on_event":"a.b","do":[{"handler":"jobs.spawn","args":{}}],"source":"tenant:acme"}"#,
+        let (rule, source) = split_draft_body(
+            serde_json::from_str(
+                r#"{"name":"r","version":4,"on_event":"a.b","do":[{"handler":"jobs.spawn","args":{}}],"source":"tenant:acme"}"#,
+            )
+            .unwrap(),
         )
         .unwrap();
-        assert_eq!(sourced.rule.version, 4);
-        assert_eq!(sourced.source.as_deref(), Some("tenant:acme"));
+        assert_eq!(rule.version, 4);
+        assert_eq!(source.as_deref(), Some("tenant:acme"));
+    }
+
+    /// The POST door refuses the key the FILE door refuses (backlog
+    /// a2358e7c F3). `RawRule` carries `deny_unknown_fields`, but serde
+    /// hands a `#[serde(flatten)]`ed struct only the keys it names, so
+    /// under the flatten this body parsed CLEAN and landed a draft with
+    /// no trigger at all — one registry answering a typo two different
+    /// ways depending on which door it came through.
+    #[test]
+    fn a_draft_key_the_registry_does_not_read_is_refused() {
+        let e = split_draft_body(
+            serde_json::from_str(
+                r#"{"name":"r","onevent":"a.b","do":[{"handler":"jobs.spawn","args":{}}],"source":"tenant:acme"}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(e.contains("onevent"), "{e}");
     }
 
     /// A rule the system enforces that NO authored file records reads as

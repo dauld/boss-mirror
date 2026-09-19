@@ -23,6 +23,7 @@ fn rule(name: &str, on_event: &str, when: Option<&str>) -> RawRule {
         }],
         delay: None,
         version: 1,
+        why: None,
     }
 }
 

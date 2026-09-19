@@ -29,6 +29,7 @@ use thiserror::Error;
 
 /// Top-level TOML document: `[[rule]] ...` blocks.
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawRegistry {
     #[serde(default, rename = "rule")]
     pub rules: Vec<RawRule>,
@@ -40,7 +41,15 @@ pub struct RawRegistry {
 /// A rule is triggered EITHER by an incoming event (`on_event`) OR by
 /// a schedule (`schedule`) — exactly one of the two. `from_raw`
 /// enforces the XOR; a rule with both or neither is a load error.
+///
+/// CLOSED key set (backlog a2358e7c F3, 2026-09-19): a key a rule file
+/// declares and this struct does not read would be dropped in silence,
+/// in a registry whose whole purpose is that behaviour lands as DATA
+/// rather than as a code path. A misspelled `on_event` reads as a rule
+/// with no trigger at all; that is the hole that let `owning_team` be
+/// decorative on 64 Workflow bundle rows (F1/F2 of the same sweep).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RawRule {
     pub name: String,
     /// The NATS topic this rule listens for. Mutually exclusive with
@@ -61,6 +70,16 @@ pub struct RawRule {
     pub delay: Option<String>,
     #[serde(default = "default_version")]
     pub version: u32,
+    /// The standing exemption this rule claims, as the rule file says
+    /// it — AUTHORING metadata, read here only so the closed key set
+    /// above accepts the field every rule file is required to carry.
+    /// Never serialized: the runtime registry is the `dispatcher_rules`
+    /// table, whose rows hold no justification, and [`super::seed`]
+    /// publishes a `RawRule` into it verbatim. So a row loaded back
+    /// from the table has `None` here, and the read surface joins the
+    /// live rows against [`authored_why`] instead.
+    #[serde(default, skip_serializing)]
+    pub why: Option<String>,
 }
 
 fn default_version() -> u32 {
@@ -73,6 +92,7 @@ fn default_version() -> u32 {
 /// or, for a sub-day cadence (`hourly`, `every-<n>-minutes`), once per
 /// period from the clock tick (schedule_runner's tick path, 2d33e111).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RawSchedule {
     pub cadence: Cadence,
     pub anchor_date: NaiveDate,
@@ -112,6 +132,7 @@ pub fn schedule_fires_on(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RawDoStep {
     pub handler: String,
     #[serde(default)]
@@ -141,27 +162,6 @@ pub fn parse_raw(src: &str) -> Result<RawRegistry, RegistryError> {
 // `infra/postgres/schema/` and `infra/platform/workflows/` were: the
 // listing IS the definition and every reader derives it independently.
 // Adding a rule is dropping a file in; no shared line is touched.
-
-/// `why` is AUTHORING metadata, deliberately outside [`RawRule`]: the
-/// runtime registry is the `dispatcher_rules` table, whose rows carry no
-/// justification, and [`super::seed`] publishes a `RawRule` into it
-/// verbatim. A `why` on `RawRule` would be a column the table does not
-/// have. So it is parsed from the same text by its own shape and checked
-/// here, at the door — which is also why the `why` is the second of the
-/// three measurements that made this directory the DEFINITION rather
-/// than the table: a reviewed justification cannot live in a row.
-#[derive(Debug, Deserialize)]
-struct RuleFileMeta {
-    #[serde(default, rename = "rule")]
-    rules: Vec<RuleMetaEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RuleMetaEntry {
-    name: String,
-    #[serde(default)]
-    why: Option<String>,
-}
 
 /// The rule files of the registry directory, in the order the loader
 /// reads them: every `*.toml` directly inside `dir`, sorted by file name.
@@ -300,14 +300,18 @@ fn read_rule_text(path: &Path) -> Result<String, RegistryError> {
 /// ONE definition of "does this rule say why it exists": `parse_raw_dir`
 /// refuses a file without it at the door, and [`authored_why`] maps it
 /// for the read surface. Two readers of the same field would be the
-/// §9a pair again, one level down.
+/// §9a pair again, one level down — which is what a second, permissive
+/// `RuleFileMeta` shape was until 2026-09-19 (backlog a2358e7c F3). It
+/// existed because `why` could not sit on [`RawRule`] while that key
+/// set was open; closing the set required the field, and the field
+/// retired the second parser.
 pub fn why_in(src: &str, stem: &str) -> Result<Option<String>, String> {
-    let meta: RuleFileMeta = toml::from_str(src).map_err(|e| e.to_string())?;
-    Ok(meta
+    let parsed = parse_raw(src).map_err(|e| e.to_string())?;
+    Ok(parsed
         .rules
         .iter()
-        .find(|m| m.name == stem)
-        .and_then(|m| m.why.as_deref())
+        .find(|r| r.name == stem)
+        .and_then(|r| r.why.as_deref())
         .map(str::trim)
         .filter(|w| !w.is_empty())
         .map(str::to_string))
@@ -318,7 +322,7 @@ pub fn why_in(src: &str, stem: &str) -> Result<Option<String>, String> {
 ///
 /// This is what lets a reader ask the running system not only WHICH
 /// rules it enforces but WHY each one exists — the `dispatcher_rules`
-/// table holds no justification (see [`RuleFileMeta`]), so the read
+/// table holds no justification (see [`RawRule::why`]), so the read
 /// surface joins the live rows against this map and reports
 /// `authored: false` for any rule no file records. That gap is the
 /// §9a drift: a reaction the system runs that the `why` guard never saw.
@@ -499,6 +503,9 @@ pub async fn load_active_rules(pool: &sqlx::PgPool) -> Result<RawRegistry, Regis
             do_steps,
             delay: r.delay,
             version: r.version as u32,
+            // A table row carries no justification; the read surface
+            // joins it against the authored directory (`authored_why`).
+            why: None,
         });
     }
     Ok(RawRegistry { rules })
@@ -1471,6 +1478,7 @@ handler = "h"
             do_steps: vec![],
             delay: None,
             version: 1,
+            why: None,
         };
         let v = serde_json::to_value(&raw_sched).unwrap();
         assert!(v.get("on_event").is_none(), "schedule rule omits on_event");
@@ -1484,6 +1492,7 @@ handler = "h"
             do_steps: vec![],
             delay: None,
             version: 1,
+            why: None,
         };
         let v = serde_json::to_value(&raw_event).unwrap();
         assert_eq!(v["on_event"], "step.done.x");
@@ -1909,6 +1918,32 @@ handler = "h"
     #[test]
     fn the_enforced_status_is_the_one_the_query_selects() {
         assert_eq!(ENFORCED_STATUS, "active");
+    }
+
+    /// A rule-file key the loader does not read is a declaration that
+    /// reaches no mechanism — the same hole that let `owning_team` be
+    /// decorative on 64 Workflow bundle rows (backlog a2358e7c, F1/F2;
+    /// this is F3). A registry whose whole point is that behaviour
+    /// lands as DATA cannot drop a key in silence: a misspelled
+    /// `on_event` would read as a schedule-less, event-less rule, and
+    /// a misspelled `handler` arg as a handler called with nothing.
+    #[test]
+    fn a_rule_key_the_loader_does_not_read_is_refused() {
+        let unknown_on_rule = "[[rule]]\nname = \"typo\"\nwhy = \"\"\"a timer\"\"\"\n\
+             onevent = \"x.y\"\n[[rule.do]]\nhandler = \"noop\"\n";
+        let e = parse_raw(unknown_on_rule).unwrap_err().to_string();
+        assert!(e.contains("onevent"), "{e}");
+
+        let unknown_on_do = "[[rule]]\nname = \"typo\"\nwhy = \"\"\"a timer\"\"\"\n\
+             on_event = \"x.y\"\n[[rule.do]]\nhandler = \"noop\"\nargz = {}\n";
+        let e = parse_raw(unknown_on_do).unwrap_err().to_string();
+        assert!(e.contains("argz"), "{e}");
+
+        let unknown_on_schedule = "[[rule]]\nname = \"typo\"\nwhy = \"\"\"a timer\"\"\"\n\
+             schedule = { cadence = \"daily\", anchor_date = 2026-01-01, calendar = \"us-banking\" }\n\
+             [[rule.do]]\nhandler = \"noop\"\n";
+        let e = parse_raw(unknown_on_schedule).unwrap_err().to_string();
+        assert!(e.contains("calendar"), "{e}");
     }
 
     /// `why` is authoring metadata, not part of the rule's runtime

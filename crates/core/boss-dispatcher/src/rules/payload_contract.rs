@@ -120,6 +120,7 @@ mod tests {
             }],
             delay: None,
             version: 1,
+            why: None,
         };
         Rule::from_raw(raw).expect("test rule parses")
     }

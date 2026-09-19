@@ -2743,10 +2743,16 @@ terminal = { outcome = "sponsored" }
         assert_eq!(row.status, Status::Invalid, "{row:?}");
         assert!(row.detail.contains("broken"), "{row:?}");
 
-        // The wrong table name parses to zero rules; refused, naming both.
+        // The wrong table name is refused by the parser itself, naming
+        // both names — it used to parse to zero rules and be caught a
+        // step later by the stray guard, until the registry's key set
+        // was closed (backlog a2358e7c F3, 2026-09-19).
         let row = rules("[[rules]]\nname = \"x\"\n");
         assert_eq!(row.status, Status::Invalid, "{row:?}");
-        assert!(row.detail.contains("[[rule]]"), "{row:?}");
+        assert!(
+            row.detail.contains("`rules`") && row.detail.contains("`rule`"),
+            "{row:?}"
+        );
 
         // Empty is a tenant with no reactors, not a defect.
         let row = rules("# none yet\n");

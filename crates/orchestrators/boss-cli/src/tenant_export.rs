@@ -38,8 +38,9 @@
 //!   label; an absent manifest is written minimal.
 //! - `seeds/rules.toml`'s `why` is authoring metadata the
 //!   `dispatcher_rules` table deliberately does not carry
-//!   (`registry::RuleFileMeta`), so each rule's `why` is kept from the
-//!   file the export overwrites; a rule the file did not record gets
+//!   (`registry::RawRule::why` is read from the file and never
+//!   serialized), so each rule's `why` is kept from the file the
+//!   export overwrites; a rule the file did not record gets
 //!   a `why` that SAYS it was exported without one, which `check`
 //!   accepts and a reader cannot mistake for a justification.
 //!

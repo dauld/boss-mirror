@@ -626,6 +626,7 @@ async fn a_name_the_seed_retired_is_free_for_a_tenant_to_take_over() {
         }],
         delay: None,
         version: product_version as u32,
+        why: Some("a cross-protocol reactor".into()),
     };
     let draft = create_draft(&db.pool, &file, Some("tenant:brewery"))
         .await
