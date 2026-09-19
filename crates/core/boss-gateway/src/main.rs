@@ -419,6 +419,17 @@ fn build_router(
             "/api/yard/status",
             axum::routing::any(|s, r| proxy::handle(s, r, &proxy::JOBS)),
         )
+        // The yard's REGIONS — the eight-card system map at /it (design
+        // 0524fc95 car 2, train #475). Shipped on the jobs upstream and
+        // fetched by the landing page, unrouted here: the fourth
+        // instance of the stations shape, and the one David found on
+        // his own screen (the /it landing rendered `HTTP 404`,
+        // 2026-09-19). Since then `every_api_path_the_web_fetches_is_routed`
+        // reads the bundle's fetches and refuses a fifth at the gate.
+        .route(
+            "/api/yard/regions",
+            axum::routing::get(|s, r| proxy::handle(s, r, &proxy::JOBS)),
+        )
         // The agent-run record — which actor built what, and what it
         // cost. `GET /api/agent-runs[?actor_id=&branch=&since=]` lists
         // the rows and `/cost` rolls them up; both live on the jobs
@@ -1152,6 +1163,10 @@ mod routing_tests {
             // slots and the garage entirely (the sections are
             // `{#if}`-gated on a status that never became ready).
             "/api/yard/status",
+            // The regions map (train #475): fourth instance, found on
+            // David's screen; `every_api_path_the_web_fetches_is_routed`
+            // below now derives this list from the bundle instead.
+            "/api/yard/regions",
             // The agent-run record — what each actor built and what it
             // cost. Shipped on the jobs upstream in train #294 and
             // unreachable at the human door ever since: the Crew Board
@@ -1178,6 +1193,147 @@ mod routing_tests {
                  shadowing a real service route"
             );
         }
+    }
+
+    /// Every `/api/...` path the web bundle fetches, read from
+    /// `apps/web/src` itself. Each string or template literal that opens
+    /// `/api/` yields one probe path:
+    /// - a template cut by `${…}` probes with a placeholder segment
+    ///   (`/api/jobs/${id}` → `/api/jobs/probe`);
+    /// - a literal assigned to a name (`const API_BASE = '/api/ledger'`)
+    ///   is a base every fetch suffixes, so it probes `/api/ledger/probe`;
+    /// - a literal ending in `/` is a `startsWith` prefix, not a fetch;
+    /// - a mention in a comment is prose.
+    /// Test files are fixtures, and `dev-server.ts` is the dev proxy's
+    /// own route table, not the bundle — both skipped.
+    fn api_paths_the_web_fetches() -> Vec<(String, String)> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../apps/web/src")
+            .canonicalize()
+            .expect("apps/web/src exists beside the crates");
+        let mut files = Vec::new();
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("readable dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    walk(&path, out);
+                    continue;
+                }
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let is_source = name.ends_with(".ts") || name.ends_with(".svelte");
+                let is_fixture =
+                    name.contains(".test.") || name.contains(".spec.") || name == "dev-server.ts";
+                if is_source && !is_fixture {
+                    out.push(path);
+                }
+            }
+        }
+        walk(&root, &mut files);
+        files.sort();
+        let mut found: Vec<(String, String)> = Vec::new();
+        for file in files {
+            let text = std::fs::read_to_string(&file).expect("readable source");
+            let rel = file
+                .strip_prefix(&root)
+                .unwrap_or(&file)
+                .display()
+                .to_string();
+            for (i, _) in text.match_indices("/api/") {
+                // The literal must OPEN here — the byte before is a quote
+                // or a backtick — and not inside a comment.
+                if i == 0 || !matches!(text.as_bytes()[i - 1], b'\'' | b'"' | b'`') {
+                    continue;
+                }
+                let line_start = text[..i].rfind('\n').map_or(0, |n| n + 1);
+                let before = &text[line_start..i - 1];
+                if before.contains("//") || before.trim_start().starts_with('*') {
+                    continue;
+                }
+                let rest = &text[i..];
+                let end = rest
+                    .find(|c: char| {
+                        !(c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
+                    })
+                    .unwrap_or(rest.len());
+                let mut path = rest[..end].to_string();
+                let cut_by_template = rest[end..].starts_with("${");
+                // `const API_BASE = '…'` — with the spaces; an HTML
+                // `href="…"` has none and is a fetch of exactly that path.
+                let assigned = before.ends_with(" = ");
+                if cut_by_template {
+                    if path.ends_with('/') {
+                        path.push_str("probe");
+                    }
+                } else if assigned {
+                    path.push_str("/probe");
+                } else if path.ends_with('/') {
+                    continue;
+                }
+                // The prefix of a fully dynamic path names no route.
+                if path == "/api/probe" {
+                    continue;
+                }
+                if !found.iter().any(|(p, _)| *p == path) {
+                    found.push((path, rel.clone()));
+                }
+            }
+        }
+        found
+    }
+
+    /// A local-auth state with an empty credential store — enough to
+    /// mount the `/api/auth/*` routes, which `app()` leaves off.
+    fn empty_local_auth() -> Arc<LocalAuthState> {
+        let store = CredentialStore::load("/nonexistent/boss-test-credentials.toml")
+            .expect("empty credential store");
+        Arc::new(LocalAuthState {
+            store,
+            session_key: vec![0u8; 32],
+            http: reqwest::Client::new(),
+            audit: boss_gateway::audit::AuthAudit::disabled(),
+            guest_access: true,
+            oidc: None,
+            mail: boss_gateway::mail::from_env(),
+            public_url: "https://boss.test".into(),
+            forgot_seen: Default::default(),
+        })
+    }
+
+    /// The list above, derived — not remembered. `/api/stations` (#10),
+    /// `/api/yard/status` (#192), `/api/agent-runs` (#294) and
+    /// `/api/yard/regions` (#475) each shipped on the jobs upstream,
+    /// were fetched by a page, and 404'd at the human door because the
+    /// gateway's route table is the one place the path was not written
+    /// — and the REAL list above needed the same author to remember it
+    /// a second time. The fourth instance was found on David's screen
+    /// (the Train Yard's landing rendered `HTTP 404`). So the check now
+    /// reads the consumer: every `/api/...` literal in `apps/web/src`
+    /// must resolve on this router to something other than the
+    /// catch-all. A page cannot fetch a route the gateway does not have
+    /// without redding the gate.
+    #[tokio::test]
+    async fn every_api_path_the_web_fetches_is_routed() {
+        let paths = api_paths_the_web_fetches();
+        assert!(
+            paths.len() > 50,
+            "the scan found only {} paths — the web source moved or the scan broke",
+            paths.len()
+        );
+        let la = empty_local_auth();
+        let mut unrouted = Vec::new();
+        for (path, file) in &paths {
+            let (_, body) = get(app_with(Some(la.clone())), path).await;
+            if body.contains(MISS) {
+                unrouted.push(format!("{path}  (fetched by {file})"));
+            }
+        }
+        assert!(
+            unrouted.is_empty(),
+            "the web fetches {} path(s) the gateway does not route — each 404s at the \
+             human door; add the route beside its service's block in main.rs:\n  {}",
+            unrouted.len(),
+            unrouted.join("\n  ")
+        );
     }
 
     /// The four former landing-page pins, on an instance whose manifest
