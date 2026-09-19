@@ -28,6 +28,22 @@ set -euo pipefail
 root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "wt-web: not in a git worktree" >&2; exit 2; }
 source=${WT_WEB_SOURCE:-/work/boss}
 
+# AND THIS FILE'S OWN AGE (backlog 0b36dd65, 2026-09-19). Reached
+# through /work/tools/bin, this script comes from the operator's
+# checkout, which nothing keeps on origin/main — two commits behind for
+# most of one day. It warns and links: the linking is idempotent and a
+# builder stopped by a door is worse than a stale link list. The
+# warning goes to stderr whatever the report's fd, so `wt-web` with no
+# arguments does not mix it into its output.
+here=$(dirname "$(readlink -f "$0")")
+if [ -r "$here/door-freshness.sh" ]; then
+    # shellcheck source=door-freshness.sh
+    . "$here/door-freshness.sh"
+    if stale=$(door_is_stale "$0"); then
+        echo "wt-web: WARNING — $stale" >&2
+    fi
+fi
+
 # With a command to run, the report stays out of its stdout (so
 # `wt-web bun test … | grep` sees only bun); with none, the report IS
 # the output.

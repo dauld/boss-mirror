@@ -104,6 +104,25 @@
 # script (boss-api reads the same file); readlink -f because the pod
 # reaches this through a symlink. A caller's BOSS_JOBS_URL is kept.
 here="$(dirname "$(readlink -f "$0")")"
+
+# AND THIS FILE'S OWN AGE (backlog 0b36dd65, 2026-09-19). Everything
+# above judges the BINARY; this shim is itself a symlink target in the
+# operator's checkout, which nothing keeps on origin/main — measured
+# two commits behind for most of one day. A stale shim can be missing
+# the very rules below. It WARNS and runs, for a read and a write
+# alike: refusing a write here would refuse `boss gate`, and a builder
+# refused at its gate launch is the failure counted five times in one
+# day in backlog 49d9e99d — worse than the stale answer it prevents.
+# The binary check keeps its own refusal, because the binary is what
+# decides what a verb does.
+if [ -r "$here/door-freshness.sh" ]; then
+  # shellcheck source=door-freshness.sh
+  . "$here/door-freshness.sh"
+  if shim_stale="$(door_is_stale "$0")"; then
+    echo "boss: WARNING — $shim_stale" >&2
+  fi
+fi
+
 if [ -z "${BOSS_JOBS_URL:-}" ]; then
   if [ -s "$here/sor-url" ]; then
     BOSS_JOBS_URL="$(tr -d '[:space:]' < "$here/sor-url")"
