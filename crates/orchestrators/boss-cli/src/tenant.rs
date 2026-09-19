@@ -217,7 +217,9 @@ pub const CONTRACT: &[Entry] = &[
                 `shipping`, `shop`, `sim`, `support`, `warehouse`; `[labels] <dotted.key> = str`; \
                 `[gateway] public_reads = [path, ...]` — the API reads the instance answers WITHOUT \
                 a session, from the four the gateway can offer (`/api/workflows`, `/api/jobs/summary`, \
-                `/api/jobs/live`, `/api/events/public-tail`); absent is none (design 11e60367)",
+                `/api/jobs/live`, `/api/events/public-tail`); absent is none (design 11e60367). \
+                A manifest that EXISTS but does not parse refuses the gateway's boot naming the \
+                file and toml's line (backlog 4f1ba1f9); only an absent file is an empty manifest",
         parse: parse_manifest,
         scaffold: Some(scaffold_manifest),
     },

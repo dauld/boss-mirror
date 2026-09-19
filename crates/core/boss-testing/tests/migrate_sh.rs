@@ -13,8 +13,9 @@
 //!   name: applied migrations are history, changes go in a new file.
 //!
 //! Each test creates its own scratch database (dropped at the end; a
-//! panic can leak one — the `test_boss_mig_` prefix makes orphans easy to
-//! find, same tradeoff as TestDb). The synthetic-schema tests copy the
+//! panic can leak one — it is named through `scratch_database_name`, so
+//! TestDb's orphan sweep finds it by the same stamp and leaves it alone
+//! until then). The synthetic-schema tests copy the
 //! script into a temp dir beside a tiny schema/ so they can grow, break,
 //! and edit migrations without touching the repo's real schema files.
 
@@ -23,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::str::FromStr;
 
+use boss_testing::test_db::scratch_database_name;
 use sqlx::postgres::PgConnectOptions;
 use sqlx::{Connection, Executor, PgConnection, Row};
 use uuid::Uuid;
@@ -66,9 +68,20 @@ async fn admin_conn() -> PgConnection {
 }
 
 /// Create an empty scratch database and return `(name, url)`.
+///
+/// THE RACE THIS HAD (2026-09-19, backlog 2a056500). The name was
+/// `test_boss_mig_<hex>` — TestDb's prefix with no stamp, which its
+/// orphan sweep reads as ancient litter and drops the moment no session
+/// is connected. Every `TestDb::new` in every other test process runs
+/// that sweep, and between `CREATE DATABASE` here and migrate.sh's
+/// first connection nothing is connected — so under the full
+/// `--all-features` run `editing_an_applied_migration_fails_the_next_
+/// run_by_name` redded 1-in-N with `FATAL: database "test_boss_mig_
+/// 09977214ad4e" does not exist — It seems to have just been dropped or
+/// renamed`, and passed alone, where nothing sweeps. A stamped name
+/// lives its TTL like TestDb's own.
 async fn scratch_db() -> (String, String) {
-    let suffix = Uuid::new_v4().simple().to_string();
-    let name = format!("test_boss_mig_{}", &suffix[..12]);
+    let name = scratch_database_name("mig");
     let mut admin = admin_conn().await;
     admin
         .execute(format!(r#"CREATE DATABASE "{name}""#).as_str())

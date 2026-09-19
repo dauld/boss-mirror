@@ -44,15 +44,21 @@ fn write_exec(path: &Path, body: &str) {
 }
 
 /// The stubbed system of record: `bin/curl` serves `jobs.json` on any
-/// GET and copies a PUT's `--data-binary @file` payload to `put.json`.
-/// A `gh` stub stands in for the publish verb's `--check` tool probe.
+/// GET, copies a PUT's `--data-binary @file` payload to `put.json`,
+/// and a PATCH's to `patch.json` — the request-level `exit` the runner
+/// writes through the job metadata door (f47861a5). A `gh` stub stands
+/// in for the publish verb's `--check` tool probe.
 fn stub_sor(root: &Path) -> PathBuf {
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     write_exec(
         &bin.join("curl"),
         "#!/bin/sh\n\
-         for a in \"$@\"; do case \"$a\" in @*) cp \"${a#@}\" \"$STUB_PUT\"; exit 0;; esac; done\n\
+         m=GET; prev=\n\
+         for a in \"$@\"; do [ \"$prev\" = -X ] && m=\"$a\"; prev=\"$a\"; done\n\
+         for a in \"$@\"; do case \"$a\" in @*)\n\
+             if [ \"$m\" = PATCH ]; then cp \"${a#@}\" \"$STUB_PATCH\"; else cp \"${a#@}\" \"$STUB_PUT\"; fi\n\
+             exit 0;; esac; done\n\
          cat \"$STUB_JOBS\"\n",
     );
     write_exec(&bin.join("gh"), "#!/bin/sh\nexit 0\n");
@@ -90,6 +96,7 @@ fn run(
 ) -> (String, Option<serde_json::Value>) {
     let put = root.join("put.json");
     let _ = std::fs::remove_file(&put);
+    let _ = std::fs::remove_file(root.join("patch.json"));
     let path = format!(
         "{}:{}",
         root.join("bin").display(),
@@ -103,7 +110,8 @@ fn run(
         .env("BOSS_JOBS_URL", "http://sor.invalid")
         .env("OPS_VERBS_DIR", verbs)
         .env("STUB_JOBS", root.join("jobs.json"))
-        .env("STUB_PUT", &put);
+        .env("STUB_PUT", &put)
+        .env("STUB_PATCH", root.join("patch.json"));
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
@@ -737,5 +745,65 @@ fn a_cli_verb_signs_as_the_runners_own_account() {
     assert!(
         !repo_root().join("infra/forge/run-car-probe.sh").exists(),
         "the shell twin was retired with 9f00a805 car 2; a script here is a second definition"
+    );
+}
+
+/// THE EXIT RIDES THE REQUEST, not only the step (backlog f47861a5,
+/// measured 2026-09-19 on ops-request c98a782f): publish-github-pr
+/// printed `FAILED` and exited 1, the runner completed `execute` with
+/// `exit_code: "1"`, the request closed `answered` — the verb RAN, which
+/// is what the outcome names — and nothing above the step level said
+/// so: the yard drew the request like any answered one and the publish
+/// step it was filed for sat ready for five hours. The runner now
+/// writes the verb's exit onto the request's own metadata through the
+/// merge door BEFORE completing the step, so every reader of the close
+/// (the yard, a rule's handler) sees the exit where the outcome is.
+/// The outcome stays `answered`: every judge rule keys on it, and a
+/// verb that ran and said no is an answer, not a refusal.
+#[test]
+fn an_answered_verbs_exit_rides_the_request_metadata() {
+    needs_jq!();
+    let root = scratch("exit-on-request");
+    stub_sor(&root);
+    let fails = root.join("fails.sh");
+    write_exec(
+        &fails,
+        "#!/bin/sh\necho 'fails: step one ok'\necho 'fails: FAILED — the thing did not happen' >&2\nexit 3\n",
+    );
+    let verbs = verbs_dir(
+        &root,
+        &[(
+            "fails",
+            &format!(
+                r#"{{"about":"a verb that fails","hosts":["forge"],"argv":["{}"],"params":[]}}"#,
+                fails.display()
+            ),
+        )],
+    );
+    packet(&root, "fails", "[]");
+    let (out, payload) = run(&root, &verbs, &[]);
+    let md = payload.unwrap_or_else(|| panic!("no step completed: {out}"));
+    assert_eq!(md["disposition"], "answered", "{md} / {out}");
+    assert_eq!(md["exit_code"], "3", "{md} / {out}");
+    let patch: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("patch.json"))
+            .unwrap_or_else(|e| panic!("no PATCH on the request's metadata: {e}; {out}")),
+    )
+    .expect("the PATCH body is JSON");
+    assert_eq!(
+        patch,
+        serde_json::json!({"exit": "3"}),
+        "the request carries the verb's exit, and nothing else changes: {patch}"
+    );
+    assert!(out.contains("answered fails"), "{out}");
+
+    // A refusal ran nothing, so the request has no exit to carry.
+    packet(&root, "not-a-verb", "[]");
+    let (out, payload) = run(&root, &verbs, &[]);
+    let md = payload.unwrap_or_else(|| panic!("no step completed: {out}"));
+    assert_eq!(md["disposition"], "refused", "{md} / {out}");
+    assert!(
+        !root.join("patch.json").exists(),
+        "a refusal writes no exit on the request: {out}"
     );
 }

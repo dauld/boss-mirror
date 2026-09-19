@@ -183,7 +183,14 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         // is what closes the loop: jobs.step.completed → step.done.* →
         // the packet's own `closed` terminal → jobs.job.closed, which
         // re-enters the rule set at notify-filer-on-feedback-terminal.
-        ("jobs.complete_linked_step", vec!["jobs.step.completed"]),
+        // Under `on_failure = "annotate-and-alert"` (f47861a5) a FAILED
+        // verb files one urgent backlog-item instead (`jobs.job.created`)
+        // and annotates the open step, which is not a completion; the
+        // item is the operator's queue, where the chain ends.
+        (
+            "jobs.complete_linked_step",
+            vec!["jobs.step.completed", "jobs.job.created"],
+        ),
         // Completes a step on every open packet whose recorded step
         // metadata matches a value the closing Job carries — the
         // converge that records a site's hash making that site's

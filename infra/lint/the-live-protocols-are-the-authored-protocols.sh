@@ -124,7 +124,9 @@
 # file over the row — the obvious fix for the drift it DID report —
 # would have deleted both. Predicates, kinds, field types and
 # metadata_defaults stay out; they need the publish path's
-# normalisation before an equality means anything.
+# normalisation before an equality means anything. The step's `agent`
+# block joined the facets on 2026-09-19 (backlog 1b847556): it is
+# structural like `fields`, and a live row lacking it read "agree".
 #
 # NOT A CASE FOR WIDENING `kind_body_matches`. That function governs
 # every bootstrap-created row, so widening it would change reconcile's
@@ -290,7 +292,8 @@ bundle_dir, live_path, floor = pathlib.Path(sys.argv[1]), sys.argv[2], int(sys.a
 # DELIBERATELY NOT COMPARED: `subject_kinds`, `metadata_schema`,
 # `entitlements`, `metadata`, `on_complete_create`, and the parts of
 # `steps` that STEP_FACETS below does not render (predicates, kinds,
-# field types, metadata_defaults). Those are STRUCTURAL — they decide
+# field types, metadata_defaults; NOT `agent`, which is compared — see
+# the facet list). Those are STRUCTURAL — they decide
 # what the protocol does — and they need the same normalisation the
 # publish path applies (defaults filled, predicates parsed) before an
 # equality means anything, which is a check of its own, not a line in
@@ -326,6 +329,24 @@ FIELDS = ("label", "description", "category")
 #                               and where pr-train's live v17 (yard
 #                               grammar) differed from its file with
 #                               nothing else to show for it
+#   steps.<title>.agent         WHO runs the step (design c87fb59b car
+#                               1): the block's keys as canonical JSON,
+#                               `<absent>` when neither side has one.
+#                               Added 2026-09-19 (backlog 1b847556):
+#                               measured 2026-09-18 23:25Z, the live
+#                               backlog-item v2 had no block on any
+#                               step, its file had two, and this read
+#                               "54 live rows agree with their file".
+#                               Numbers compare as floats — the file
+#                               spells `budget_usd = 5`, the registry
+#                               hands back 5.0 through AgentSpec's f64
+#                               — the same rule the publish path's
+#                               step_view applies (publish-workflow.sh,
+#                               #464). Held out for one day after that
+#                               fix so a landing did not red every gate
+#                               before the publish behind it; the loop
+#                               closed on 2026-09-19 (live v3 carries
+#                               both blocks).
 #
 # Per-step facets are compared only for titles BOTH sides hold, so a
 # missing step is one finding (in `steps.titles`), not one per facet.
@@ -346,7 +367,23 @@ def step_facets(steps):
         )
         out[f"steps.{t}.required"] = ",".join(required)
         out[f"steps.{t}.title_template"] = str(s.get("title_template", ""))
+        out[f"steps.{t}.agent"] = agent_facet(s.get("agent"))
     return out, titles
+
+def agent_facet(block):
+    """The agent block as one canonical string, or None for no block.
+
+    Every numeric value is rendered as a float so the TOML integer and
+    the JSON float the registry hands back for it compare equal; a
+    bool is not a number here (Python's is), so it is left alone.
+    """
+    if not isinstance(block, dict):
+        return None
+    canon = {
+        k: (float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else v)
+        for k, v in block.items()
+    }
+    return json.dumps(canon, sort_keys=True, ensure_ascii=False)
 
 def facets_to_compare(tree_titles, live_titles):
     both = set(tree_titles) & set(live_titles)
@@ -356,6 +393,7 @@ def facets_to_compare(tree_titles, live_titles):
         if t in both:
             yield f"steps.{t}.required"
             yield f"steps.{t}.title_template"
+            yield f"steps.{t}.agent"
 
 try:
     doc = json.load(open(live_path))
@@ -401,8 +439,8 @@ def drift_line(kind, field, row, tree, live):
         kind, field, row.get("version", "?"), at,
         len(tree) if isinstance(tree, str) else "-",
         len(live) if isinstance(live, str) else "-",
-        window(tree if isinstance(tree, str) else str(tree), at),
-        window(live if isinstance(live, str) else str(live), at),
+        window(tree if isinstance(tree, str) or tree is None else str(tree), at),
+        window(live if isinstance(live, str) or live is None else str(live), at),
     )
 
 files = sorted(bundle_dir.glob("*.toml"))
@@ -735,6 +773,68 @@ owning_team = "platform"
 description = "The second protocol."
 FX
 
+    # 3c. THE AGENT BLOCK (2026-09-19, backlog 1b847556). The file says
+    #    WHO runs `proven` — a profile, a model, a budget, an effort —
+    #    and the live row does not. Measured 2026-09-18 23:25Z: the live
+    #    backlog-item v2 carried no block on any step beside a file with
+    #    two, and this comparator answered "54 live rows agree with
+    #    their file", so a drift in who executes a step was invisible
+    #    to the daily measurement. The finding must name the STEP; the
+    #    same block on both sides must agree although the file spells
+    #    the budget as the integer 5 and the registry hands back 5.0
+    #    (a TOML integer becomes a JSON float through AgentSpec's f64).
+    cat > "$t/bundle/beta.toml" <<'FX'
+[[workflow]]
+kind = "beta"
+label = "Beta"
+category = "platform"
+owning_team = "platform"
+description = "The second protocol."
+
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+title_template = "Opened"
+
+[[workflow.step]]
+title = "proven"
+kind = "task"
+ready_when = "steps.opened.done"
+title_template = "Proven"
+agent = { profile = "builder", model = "opus-5[1m]", budget_usd = 5, effort = "high" }
+FX
+    printf '%s' '[{"kind":"alpha","version":1,"status":"active","label":"Alpha","category":"platform","owning_team":"platform","description":"The first protocol."},
+                  {"kind":"beta","version":3,"status":"active","label":"Beta","category":"platform","owning_team":"platform","description":"The second protocol.",
+                   "steps":[{"title":"opened","kind":"trigger","ready_when":"true","title_template":"Opened","fields":[],"agent":null},
+                            {"title":"proven","kind":"task","ready_when":"steps.opened.done","title_template":"Proven","fields":[],"agent":null}]}]' > "$t/agent-missing.json"
+    out=$(fields_report "$t/bundle" "$t/agent-missing.json" 2>&1); rc=$?
+    [ "$rc" -eq 0 ] || { echo "self-test FAILED: a live row lacking an agent block exited $rc: $out" >&2; rm -rf "$t"; return 1; }
+    grep -qF "DRIFT	beta	steps.proven.agent	v3" <<< "$out" \
+        || { echo "self-test FAILED: a live step lacking the agent block its file declares was not named by its step: $out" >&2; rm -rf "$t"; return 1; }
+    grep -qF '"profile": "builder"' <<< "$out" \
+        || { echo "self-test FAILED: the agent finding carries no excerpt of the block the file declares: $out" >&2; rm -rf "$t"; return 1; }
+    grep -qF "drifted=1" <<< "$out" \
+        || { echo "self-test FAILED: one agent block adrift was not counted as one: $out" >&2; rm -rf "$t"; return 1; }
+    grep -q "steps\.opened\.agent" <<< "$out" \
+        && { echo "self-test FAILED: a step with no block on either side was named: $out" >&2; rm -rf "$t"; return 1; }
+    printf '%s' '[{"kind":"alpha","version":1,"status":"active","label":"Alpha","category":"platform","owning_team":"platform","description":"The first protocol."},
+                  {"kind":"beta","version":3,"status":"active","label":"Beta","category":"platform","owning_team":"platform","description":"The second protocol.",
+                   "steps":[{"title":"opened","kind":"trigger","ready_when":"true","title_template":"Opened","fields":[],"agent":null},
+                            {"title":"proven","kind":"task","ready_when":"steps.opened.done","title_template":"Proven","fields":[],"agent":{"profile":"builder","model":"opus-5[1m]","budget_usd":5.0,"effort":"high"}}]}]' > "$t/agent-equal.json"
+    out=$(fields_report "$t/bundle" "$t/agent-equal.json" 2>&1); rc=$?
+    [ "$rc" -eq 0 ] || { echo "self-test FAILED: a live row carrying the file's agent block exited $rc: $out" >&2; rm -rf "$t"; return 1; }
+    grep -qF "drifted=0" <<< "$out" \
+        || { echo "self-test FAILED: the same agent block on both sides (TOML 5, JSON 5.0) read as drift: $out" >&2; rm -rf "$t"; return 1; }
+    cat > "$t/bundle/beta.toml" <<'FX'
+[[workflow]]
+kind = "beta"
+label = "Beta"
+category = "platform"
+owning_team = "platform"
+description = "The second protocol."
+FX
+
     # 4. THE FLOOR. A registry answering about kinds this bundle does
     #    not hold finds no drift, which must never read as clean.
     out=$(fields_report "$t/bundle" "$t/elsewhere.json" 2>&1); rc=$?
@@ -813,7 +913,7 @@ PY
     fi
 
     rm -rf "$t"
-    [ "$SELF_TEST" -eq 1 ] && echo "$NAME: self-test ok — agreement is silent and counted, a drifting description is named by kind/field/version with an excerpt, a field the file does not claim is named and not counted as drift, a step the file lacks is named by count and title list and a required field or step label that differs is named by its step, a comparison below the floor and a retired-only row are refused, an unparseable answer and an unreadable bundle file each refuse distinctly, and --require-live exits 75 naming the target it could not reach, and the JSON report carries the same kind/field/version/excerpt, counts and verdict as the text"
+    [ "$SELF_TEST" -eq 1 ] && echo "$NAME: self-test ok — agreement is silent and counted, a drifting description is named by kind/field/version with an excerpt, a field the file does not claim is named and not counted as drift, a step the file lacks is named by count and title list and a required field or step label that differs is named by its step, a live step lacking the agent block its file declares is named by its step while the same block on both sides agrees with the budget as 5 and 5.0, a comparison below the floor and a retired-only row are refused, an unparseable answer and an unreadable bundle file each refuse distinctly, and --require-live exits 75 naming the target it could not reach, and the JSON report carries the same kind/field/version/excerpt, counts and verdict as the text"
     return 0
 }
 

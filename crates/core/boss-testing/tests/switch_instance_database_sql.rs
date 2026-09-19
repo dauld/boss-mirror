@@ -18,6 +18,7 @@
 //! database named `boss` (test_db.rs), which is what a port-forward to
 //! the cluster looks like from here — never against production.
 
+use boss_testing::test_db::scratch_database_name;
 use boss_testing::{TestDb, repo_root, scratch_dir, write_exec, write_file};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -210,9 +211,18 @@ async fn the_switch_creates_a_real_empty_database_and_dumps_the_real_schema() {
     let db = TestDb::new().await;
     let dir = scratch_dir("switch-instance-database-sql");
     let old = db.name().to_string();
-    // The same prefix TestDb uses, so an orphan is found by the same
-    // administrative sweep.
-    let new = format!("test_boss_switch_{}", std::process::id());
+    // TestDb's own naming, so an orphan is found by the same sweep AND
+    // a live one is left alone by it. THE RACE THIS HAD (2026-09-19,
+    // backlog 2a056500): `test_boss_switch_<pid>` carried the prefix and
+    // no stamp, which the sweep every other test's `TestDb::new` runs
+    // reads as ancient and drops as soon as no session is connected —
+    // the gap between the script's psql invocations. Under the full
+    // `--all-features` run this test redded 1-in-N (45 s under load
+    // against 2 s alone made the gaps wide) with `FATAL: database
+    // "test_boss_switch_1092622" does not exist — It seems to have just
+    // been dropped or renamed`; reproduced on demand with the sweep's
+    // query in a loop beside it.
+    let new = scratch_database_name("switch");
     let password = "s3cretpw0123";
     write_file(
         &dir.join("secret.url"),

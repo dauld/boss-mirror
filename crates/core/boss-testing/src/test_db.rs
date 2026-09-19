@@ -125,6 +125,26 @@ async fn connect_admin(opts: &PgConnectOptions, admin_url: &str) -> PgConnection
 
 const SCRATCH_PREFIX: &str = "test_boss_";
 
+/// The name for a scratch database a test creates for itself — the ONE
+/// shape the orphan sweep understands: `test_boss_<secs>_<tag><hex>`.
+///
+/// A test that needs a database `TestDb` cannot hand it (an empty one
+/// for `migrate.sh` to fill, the target of a `switch-instance-database`
+/// run) still creates it on the shared server, and every `TestDb::new`
+/// in every other test process sweeps that server. `is_orphan` reads a
+/// name with no stamp as ancient — right for the legacy shape, and
+/// fatal for a hand-rolled one: `test_boss_switch_<pid>` and
+/// `test_boss_mig_<hex>` were both dropped mid-test the moment no
+/// session was connected (2026-09-19, backlog 2a056500; reproduced on
+/// demand: `FATAL: database "test_boss_mig_09977214ad4e" does not
+/// exist — It seems to have just been dropped or renamed`). Naming
+/// through here gives the database the same TTL as TestDb's own; the
+/// tag keeps it identifiable in `pg_database` when it is left behind.
+pub fn scratch_database_name(tag: &str) -> String {
+    let suffix = Uuid::new_v4().simple().to_string();
+    format!("{SCRATCH_PREFIX}{}_{tag}{}", now_secs(), &suffix[..12])
+}
+
 /// How old a scratch database must be before another test process will
 /// drop it. Generous on purpose: the point is to reclaim yesterday's
 /// litter, not to race a suite that is running right now. A slow
@@ -486,10 +506,9 @@ impl TestDb {
         let admin_url = std::env::var("BOSS_TEST_POSTGRES_ADMIN_URL")
             .unwrap_or_else(|_| DEFAULT_ADMIN_URL.to_string());
 
-        let suffix = Uuid::new_v4().simple().to_string();
         // The stamp is what lets a later process tell litter from live
         // work without asking whether a test is still running.
-        let db_name = format!("{SCRATCH_PREFIX}{}_{}", now_secs(), &suffix[..12]);
+        let db_name = scratch_database_name("");
 
         let admin_opts = PgConnectOptions::from_str(&admin_url)
             .unwrap_or_else(|e| panic!("parsing BOSS_TEST_POSTGRES_ADMIN_URL: {e}"));
@@ -1034,9 +1053,101 @@ mod generated_schema_list {
 /// is precisely the one you must not set up to test.
 #[cfg(test)]
 mod orphan_sweep {
-    use super::{ORPHAN_TTL_SECS, is_orphan, stamp_of};
+    use super::{ORPHAN_TTL_SECS, is_orphan, scratch_database_name, stamp_of};
 
     const NOW: u64 = 1_786_800_000;
+
+    /// THE RACE TWO TESTS HAD (2026-09-19, backlog 2a056500). A test
+    /// that names its own scratch database `test_boss_switch_<pid>` or
+    /// `test_boss_mig_<hex>` has written the LEGACY shape: no stamp, so
+    /// `is_orphan` reads it as ancient and the sweep every
+    /// `TestDb::new` runs drops it the moment no session is connected —
+    /// which is every gap between two psql invocations. Reproduced on
+    /// demand with the sweeper's query in a loop beside each test:
+    /// `FATAL: database "test_boss_mig_09977214ad4e" does not exist —
+    /// It seems to have just been dropped or renamed`, and the same for
+    /// `test_boss_switch_1092622`. Under the full `--all-features` run
+    /// the gaps are wide enough to lose 1-in-N; alone, nothing sweeps.
+    #[test]
+    fn a_hand_rolled_name_without_a_stamp_is_swept_at_once() {
+        assert!(is_orphan("test_boss_switch_1092622", NOW, ORPHAN_TTL_SECS));
+        assert!(is_orphan(
+            "test_boss_mig_09977214ad4e",
+            NOW,
+            ORPHAN_TTL_SECS
+        ));
+    }
+
+    /// The pin behind the door (CLAUDE.md §9a: a fact that lives twice
+    /// gets an equality test). A `test_boss_` literal in any test file
+    /// of this workspace is a name the sweep will read as ancient; the
+    /// one place the prefix may be spelled is this module, and a test
+    /// that needs its own database calls `scratch_database_name`.
+    #[test]
+    fn no_test_file_spells_the_scratch_prefix_itself() {
+        let root = crate::repo_root().join("crates");
+        let mut offenders = Vec::new();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read a crates dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|n| n == "target") {
+                        continue;
+                    }
+                    stack.push(path);
+                } else if path.extension().is_some_and(|x| x == "rs")
+                    && !path.ends_with("boss-testing/src/test_db.rs")
+                    && std::fs::read_to_string(&path)
+                        .expect("read a source file")
+                        .lines()
+                        // A comment may quote the failure text; code
+                        // may not spell the name.
+                        .filter(|l| !l.trim_start().starts_with("//"))
+                        .any(|l| l.contains("test_boss_"))
+                {
+                    offenders.push(path);
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these files spell a scratch database name by hand; the sweep reads an \
+             unstamped test_boss_* name as litter and drops it mid-test — name it \
+             through boss_testing::test_db::scratch_database_name instead:\n{}",
+            offenders
+                .iter()
+                .map(|p| format!("  {}", p.display()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    /// The door: a tagged name from `scratch_database_name` is stamped
+    /// like TestDb's own, so it lives its TTL and ages out like any
+    /// other litter, and the tag still says which test made it.
+    #[test]
+    fn a_tagged_scratch_name_is_stamped_and_lives_its_ttl() {
+        let name = scratch_database_name("switch");
+        let stamp = stamp_of(&name).expect("a tagged scratch name carries a stamp");
+        assert!(!is_orphan(&name, stamp, ORPHAN_TTL_SECS));
+        assert!(!is_orphan(&name, stamp + ORPHAN_TTL_SECS, ORPHAN_TTL_SECS));
+        assert!(is_orphan(
+            &name,
+            stamp + ORPHAN_TTL_SECS + 1,
+            ORPHAN_TTL_SECS
+        ));
+        assert!(name.contains("_switch"), "the tag names the test: {name}");
+        assert!(
+            name.len() <= 63,
+            "a Postgres identifier is at most 63 bytes: {name}"
+        );
+        assert_ne!(
+            name,
+            scratch_database_name("switch"),
+            "two calls in one second must not collide"
+        );
+    }
 
     #[test]
     fn a_stamped_name_carries_its_creation_time() {

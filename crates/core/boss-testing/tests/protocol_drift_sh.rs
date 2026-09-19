@@ -82,6 +82,33 @@ fn script() -> PathBuf {
     repo_root().join("infra/protocol-drift.sh")
 }
 
+/// A step's `agent` block in the row's shape: the registry hands
+/// `budget_usd` back as a float (AgentSpec's f64) where the file spells
+/// an integer, and `null` where the file has no block. The lint
+/// compares the block since 2026-09-19 (backlog 1b847556), so a fixture
+/// without it would plant an agent drift on every step that declares
+/// one — twelve findings across four kinds when this was first run —
+/// and the two DELIBERATE disagreements below would drown in it.
+fn agent_as_the_registry_hands_it_back(block: Option<&toml::Value>) -> serde_json::Value {
+    let Some(table) = block.and_then(|b| b.as_table()) else {
+        return serde_json::Value::Null;
+    };
+    serde_json::Value::Object(
+        table
+            .iter()
+            .map(|(k, v)| {
+                let v = match v {
+                    toml::Value::Integer(n) => serde_json::json!(*n as f64),
+                    toml::Value::Float(x) => serde_json::json!(*x),
+                    toml::Value::Boolean(b) => serde_json::json!(*b),
+                    other => serde_json::json!(other.as_str()),
+                };
+                (k.clone(), v)
+            })
+            .collect(),
+    )
+}
+
 /// The live registry as a fixture: every kind this tree's bundle authors,
 /// rendered from the files themselves at version 7, plus the two planted
 /// disagreements. Returns the JSON and the number of bundle files read.
@@ -134,6 +161,7 @@ fn registry_fixture() -> (String, usize) {
                             "ready_when": s.get("ready_when").and_then(|v| v.as_str()),
                             "title_template": s.get("title_template").and_then(|v| v.as_str()).unwrap_or(""),
                             "fields": fields,
+                            "agent": agent_as_the_registry_hands_it_back(s.get("agent")),
                         })
                     })
                     .collect()
