@@ -642,7 +642,10 @@ mod tests {
         let root = boss_testing::scratch_dir("gateway-inquiries");
         boss_testing::create_dir(&root);
         let site = Site::from_values(HOST, root.to_str().unwrap());
-        let app = site::mount(crate::build_router(None).with_state(state), site);
+        let app = site::mount(
+            crate::build_router(None, &crate::public_reads::PublicReads::none()).with_state(state),
+            site,
+        );
         mount(app, Some(Door::new(HOST, stub)))
     }
 

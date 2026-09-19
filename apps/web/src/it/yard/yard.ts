@@ -1066,14 +1066,17 @@ function readCancelRefused(j: JobLite): boolean {
 
 /** What the train records about its gate-run: the packet id while it
  *  runs (train metadata), the conductor's one-line reading and the
- *  forge's own result once the ci step completes, and the fallback
- *  stamp when the gate could not be filed and CI alone judged the
- *  train. Every field is a packet field; nothing is derived. */
+ *  forge's own result once the ci step completes, the fallback stamp
+ *  when the gate could not be filed and CI alone judged the train, and
+ *  WHY the gate is not filed yet while the conductor keeps trying (the
+ *  bound line naming the running gates; nulled the pass it is filed).
+ *  Every field is a packet field; nothing is derived. */
 export type TrainGateReading = Readonly<{
   run: string | null;
   line: string | null;
   forge: string | null;
   fallback: string | null;
+  wait_reason: string | null;
   relaunches: number;
 }>;
 
@@ -1081,6 +1084,7 @@ export function readTrainGate(j: JobLite): TrainGateReading | null {
   const md = (j.metadata ?? {}) as {
     train_gate_run?: unknown;
     train_gate_fallback?: unknown;
+    train_gate_wait_reason?: unknown;
     train_gate_relaunches?: unknown;
   };
   const ci = (step(j, 'ci', 'CI verdict')?.metadata ?? {}) as {
@@ -1093,20 +1097,32 @@ export function readTrainGate(j: JobLite): TrainGateReading | null {
   const line = text(ci.train_gate);
   const forge = text(ci.forge_result);
   const fallback = text(md.train_gate_fallback);
+  const wait_reason = text(md.train_gate_wait_reason);
   const relaunches = typeof md.train_gate_relaunches === 'number' ? md.train_gate_relaunches : 0;
-  if (run === null && line === null && forge === null && fallback === null) return null;
-  return { run, line, forge, fallback, relaunches };
+  if (run === null && line === null && forge === null && fallback === null && wait_reason === null) return null;
+  return { run, line, forge, fallback, wait_reason, relaunches };
 }
 
 /** The verdict row's one line: both halves, in words the conductor
- *  already used. A train whose gate is still running says so; one that
- *  fell back to CI alone says that in the trouble style. */
+ *  already used. A train whose gate is still running says so; one
+ *  whose gate is waiting to be filed says why (backlog 0d16df6f: train
+ *  ccd8b08e sat two hours at the bound drawn like a healthy transit);
+ *  one that fell back to CI alone says that. The last two are trouble. */
 export function trainGateLabel(g: TrainGateReading): string {
   const forge = g.forge ? `forge ${g.forge}` : 'forge pending';
   if (g.fallback) return `${forge} · gate UNAVAILABLE — CI alone judged this train`;
   if (g.line) return `${forge} · ${g.line.replace(/^train gate: /, 'gate ')}`;
+  if (g.wait_reason) return `${forge} · gate waiting: ${g.wait_reason}`;
   if (g.run) return `${forge} · gate running (${g.run.slice(0, 8)})${g.relaunches > 0 ? ` · relaunched ${g.relaunches}×` : ''}`;
   return forge;
+}
+
+/** Whether the verdict row wears the yard's trouble style: a gate that
+ *  could not be filed, whether the conductor gave up (fallback) or is
+ *  still waiting at the bound (wait_reason). A troubled packet must
+ *  look troubled — the same rule the label follows, in one place. */
+export function trainGateTroubled(g: TrainGateReading): boolean {
+  return g.fallback !== null || g.wait_reason !== null;
 }
 
 export function ciLamp(j: JobLite): Lamp {

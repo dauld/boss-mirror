@@ -168,11 +168,18 @@
     {
       label: 'IT',
       items: [
+        // The three yards and the Crew Board lead, in flow order —
+        // receiving, marshalling, train yard, crew — then the desk
+        // work (design 55417146 on feedback 92921c2f, 2026-09-18).
+        // The Train Yard is third here and still the /it landing:
+        // the landing is catalog order, not this list.
+        ROUTE_CATALOG['system-receiving'],
+        ROUTE_CATALOG['system-marshalling'],
         ROUTE_CATALOG['system-yard'],
+        ROUTE_CATALOG['system-crew'],
         ROUTE_CATALOG['system-incidents'],
         ROUTE_CATALOG.workflows,
         ROUTE_CATALOG['system-design'],
-        ROUTE_CATALOG['system-crew'],
         ROUTE_CATALOG['system-codebase'],
         ROUTE_CATALOG['system-estate'],
         ROUTE_CATALOG['system-kb'],

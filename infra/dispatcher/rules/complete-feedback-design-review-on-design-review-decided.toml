@@ -1,0 +1,64 @@
+# The decision is the review's completion, not the fold's (backlog
+# 8f83cade; David, 2026-09-18, two designs in his queue after deciding
+# them).
+#
+# complete-feedback-design-review-on-design-doc-published (5f0b2661)
+# made deciding the design decide the feedback — but it fired on the
+# design-doc's PUBLISHED terminal, and between the review and
+# `published` sits `fold`: the agent's write-up (`boss fold`), minutes
+# to hours after the founder answered. Measured 2026-09-18 23:10Z:
+# David answered both open designs (11e60367, 55417146) on /it/design
+# — the review-design step completed with resolutions — and then saw
+# two 'Decide the design' steps (b4afd7b9, 92921c2f) still in his queue
+# with nothing to do. 5f0b2661 said one decision, not two; this was one
+# decision recorded twice, minutes apart, and the human's queue lied in
+# between.
+#
+# THE SAME OBLIGATION, FIRED WHEN THE DECISION IS MADE. `step.done.
+# review-design` is emitted the moment the design's review completes;
+# the marker carries the design's id as `job_id` (the handler reads
+# `id` or `job_id`), and `jobs.complete_linked_step` follows the
+# design's DECLARED `answers` edge to the packet and completes its open
+# `design-review` exactly as the published-time rule did — the
+# packet's own `ready_when` then opens `build`. The fold stays what it
+# is: the design packet's own obligation, on the agent, and nothing
+# the founder waits on.
+#
+# WHY THE VERDICT IS STILL `approved`. design-doc's review step
+# declares `resolutions` required at done with `covers = "questions"`,
+# so the step cannot complete until EVERY question carries a decision
+# — "review done" IS "every question decided", read off the Workflow,
+# the same reading the published-time rule made one step later. There
+# is no declined review in the protocol today; when there is, the
+# mapping to `verdict = declined` is a v2 of this file, not a new
+# mechanism.
+#
+# `workflow_kind = "design-doc"` is load-bearing: `design-doc-review`
+# (the legacy indexer-era protocol) has a `review-design` step too,
+# and its packets carry no `answers` edge — a match there would be a
+# silent no-op at best. `spec_slug = "review"` names the one step.
+# Both identifiers are hoisted to the marker's root, always present.
+#
+# The published-time rule STAYS as the backstop for a design whose
+# review completed before this rule was live and whose fold happens
+# after (its `why` says so): when this rule has already completed the
+# packet's step, that one finds it completed and writes nothing.
+[[rule]]
+name = "complete-feedback-design-review-on-design-review-decided"
+why = """
+A CROSS-PROTOCOL REACTOR: it advances a `user-feedback` (or
+`backlog-item`) packet from a `design-doc` step's completion, spanning
+two protocols by construction, so no single Workflow definition can
+declare it. Measured 2026-09-18 23:10Z: David decided both open
+designs (11e60367, 55417146) and two 'Decide the design' steps
+(b4afd7b9, 92921c2f) stayed in his queue until the agent folded,
+because the completion fired on `published`, one agent step later.
+The founder's decision is made at the review; the packet it answers
+says so at the same moment, not after the fold.
+"""
+version = 1
+on_event = "step.done.review-design"
+when = 'workflow_kind = "design-doc" AND spec_slug = "review"'
+[[rule.do]]
+handler = "jobs.complete_linked_step"
+args = { link = "\"answers\"", steps = "\"design-review\"", done_metadata = '"{\"verdict\": \"approved\", \"answer\": \"design decided: {title} ({car}) — every question resolved at the review; the build goes ahead as it proposes\"}"', evidence_key = "\"decided_by\"" }

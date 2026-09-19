@@ -31,7 +31,10 @@ describe('the roster is the catalog', () => {
     expect(new Set(paths)).toEqual(catalogued);
     // The design measured 45 on #451; the number is the catalog's to
     // move, and this line is what makes a move visible in the diff.
-    expect(paths.length).toBe(45);
+    // 47 since feedback 92921c2f (2026-09-18): the Receiving Yard and
+    // the Marshalling Yard became catalog rows, so their two paths —
+    // routed all along, as Operate tabs — joined the march.
+    expect(paths.length).toBe(47);
     // The doubled key (two rule-editor ids on one path) collapses.
     expect(paths.filter((p) => p === '/it/registry/rules')).toHaveLength(1);
   });

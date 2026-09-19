@@ -694,6 +694,51 @@ fn a_declared_audience_compares_equal_to_its_projected_authority_role() {
     );
 }
 
+/// A step's `agent` block is part of what the tree says (design
+/// c87fb59b car 1, 2026-09-18): a tree step that gains one over an
+/// otherwise-equal live row is the tree AHEAD, and the same block on
+/// both sides is equal. Measured the day the block landed: the live
+/// backlog-item v2 carried no agent block while its file did, this
+/// comparison answered "equal — nothing to publish", the lint agreed,
+/// and `boss dispatch` refused every build step for want of the block
+/// nobody had published. A field the comparison does not read cannot
+/// reach the registry through this door.
+#[test]
+fn a_step_that_gains_an_agent_block_is_the_tree_ahead_and_an_equal_block_is_equal() {
+    if !ready() {
+        return;
+    }
+    let c = Case::new("agent-block");
+    let file = c.repo.join(format!("infra/platform/workflows/{KIND}.toml"));
+    let with_agent = REV2_KIND_FILE.replace(
+        "authority_role = \"platform-admin\"",
+        "authority_role = \"platform-admin\"\nagent = { profile = \"builder\", model = \"opus-5[1m]\", budget_usd = 5, effort = \"high\" }",
+    );
+    assert_ne!(
+        with_agent, REV2_KIND_FILE,
+        "the fixture must declare an agent block"
+    );
+    write_file(&file, &with_agent);
+    // Live: REV2 without the block — the tree is ahead by the block alone.
+    write_file(&c.live, &live_row(2, REV2_DESC, REV2_STEPS));
+    let (rc, out) = c.run(&[KIND, "--check"]);
+    assert_eq!(
+        rc, 0,
+        "a step that gained an agent block is the tree ahead:\n{out}"
+    );
+    contains_all(&out, &["would publish"], "the ahead verdict");
+    // Live: the same block projected — equal, nothing to publish.
+    let projected = REV2_STEPS.replace(
+        "\"authority_role\":\"platform-admin\"",
+        "\"authority_role\":\"platform-admin\",\"agent\":{\"profile\":\"builder\",\"model\":\"opus-5[1m]\",\"budget_usd\":5.0,\"effort\":\"high\"}",
+    );
+    assert_ne!(projected, REV2_STEPS);
+    write_file(&c.live, &live_row(2, REV2_DESC, &projected));
+    let (rc, out) = c.run(&[KIND, "--check"]);
+    assert_eq!(rc, 5, "the same block on both sides is equal:\n{out}");
+    contains_all(&out, &["nothing to publish"], "the equal verdict");
+}
+
 // ---------------------------------------------------------------------------
 // The host's CLI must be able to read what it is asked to publish.
 // ---------------------------------------------------------------------------

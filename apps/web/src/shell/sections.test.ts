@@ -62,6 +62,19 @@ describe('sections resolve in the nav catalog', () => {
     expect(appForRoute({ kind: 'me' })).toBe('home');
   });
 
+  test('a yard with its own sidebar row highlights that row, not Operate', () => {
+    // Feedback 92921c2f / design 55417146 (2026-09-18): the Receiving
+    // Yard and the Marshalling Yard are sidebar rows now. The row that
+    // highlights is `activeSection === item.id`, so their route kinds
+    // must resolve to their own catalog keys — left on
+    // 'system-incidents' they would light the Operate row while the
+    // operator stands in a yard that has a row of its own.
+    expect(SECTION_FOR_ROUTE.systemReceivingYard).toBe('system-receiving');
+    expect(SECTION_FOR_ROUTE.systemMarshallingYard).toBe('system-marshalling');
+    expect(appForRoute({ kind: 'systemReceivingYard' })).toBe('it');
+    expect(appForRoute({ kind: 'systemMarshallingYard' })).toBe('it');
+  });
+
   test('no exception names a section no longer produced', () => {
     // An exemption for a dead id reads as "handled" while covering
     // nothing, and quietly widens the hole when an id is renamed onto it.

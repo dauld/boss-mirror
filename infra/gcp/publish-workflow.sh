@@ -299,7 +299,22 @@ def step_view(s):
         "metadata_defaults": norm(s.get("metadata_defaults")),
         "fields": norm([[f.get("name"), f.get("field_type"), bool(f.get("required", False))]
                         for f in (s.get("fields") or [])]),
+        # The step's agent block (design c87fb59b car 1) is what the
+        # tree says about WHO runs the step; a step that gains one is
+        # the tree ahead. Measured 2026-09-18: without this line the
+        # live backlog-item v2 read equal to a file that carried the
+        # block, and `boss dispatch` refused every build step for want
+        # of it. Numbers compare as floats: TOML `5` and JSON `5.0`.
+        "agent": norm(agent_view(s.get("agent"))),
     }
+
+def agent_view(a):
+    if not isinstance(a, dict):
+        return None
+    out = dict(a)
+    if isinstance(out.get("budget_usd"), (int, float)):
+        out["budget_usd"] = float(out["budget_usd"])
+    return out
 
 def row_view(r, steps_key):
     return {"label": r.get("label"), "description": r.get("description"),

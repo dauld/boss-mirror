@@ -11,7 +11,7 @@
 # Written 2026-09-16 from the lint's measurement of origin/main b4d7a0fd
 # plus this car — the brewery's and the used-device shop's VOCABULARY
 # together, 23 terms, with a tenant's name as a path or an id exempt.
-crates/core 376
+crates/core 375
 crates/modules 445
 crates/orchestrators 836
 apps/web/src 310

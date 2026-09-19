@@ -57,10 +57,18 @@ export const ROUTES: ReadonlyArray<string> = [
   // The Marshalling Yard — the upstream third. Under the mock's `[]`
   // catch-all, /api/stations/load and /api/stations/flow come back as
   // collections with no rows, so the page renders its "every watched
-  // station is clear" state. Crawled here rather than via a catalog
-  // entry because it is a tab, not a sidebar row (same as yard-status
-  // above): pages live in their department.
+  // station is clear" state. It was crawled here as a tab before it
+  // had a catalog row; since feedback 92921c2f (2026-09-18) it is a
+  // sidebar row and the drift test in route-smoke.mocked.spec.ts
+  // enforces this line instead of the line being its whole coverage.
   '/it/operate/marshalling',
+  // The Receiving Yard — the intake floor, a sidebar row with the
+  // Marshalling Yard (92921c2f). Its reads are /api/workflows and
+  // `/api/jobs?kind=…&closed_within=…`; under the mock's `[]` catch-all
+  // both come back empty, so the page renders its no-intake state,
+  // and every read goes through fetchRemote, so the outage renders a
+  // failure line rather than an empty yard.
+  '/it/operate/receiving',
   // The codebase — its own sidebar row since feedback 9827c699
   // (2026-09-14; a Design tab before, backlog 06048ade). Its one read is
   // `/api/jobs?kind=maintenance-codebase-metrics`; under the mock's `[]`

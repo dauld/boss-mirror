@@ -196,7 +196,10 @@ pub const CONTRACT: &[Entry] = &[
                 `display_name` (the tab title and wordmark); `[modules] <module> = bool` — a module \
                 is ON only when listed true, a missing key is off (ce68f137); the SPA reads \
                 `calendar`, `equipment`, `exec`, `finance`, `marketing-assets`, `parts`, `qa`, \
-                `shipping`, `shop`, `sim`, `support`, `warehouse`; `[labels] <dotted.key> = str`",
+                `shipping`, `shop`, `sim`, `support`, `warehouse`; `[labels] <dotted.key> = str`; \
+                `[gateway] public_reads = [path, ...]` — the API reads the instance answers WITHOUT \
+                a session, from the four the gateway can offer (`/api/workflows`, `/api/jobs/summary`, \
+                `/api/jobs/live`, `/api/events/public-tail`); absent is none (design 11e60367)",
         parse: parse_manifest,
         scaffold: Some(scaffold_manifest),
     },
@@ -523,10 +526,11 @@ fn parse_manifest(path: &Path, _: &Ctx) -> Result<String, String> {
                 .to_string()
         })?;
     Ok(format!(
-        "tenant_id={id} display_name={}; {} modules, {} labels",
+        "tenant_id={id} display_name={}; {} modules, {} labels, {} public reads",
         t.meta.display_name.as_deref().unwrap_or("(unset)"),
         t.modules.len(),
-        t.labels.len()
+        t.labels.len(),
+        t.gateway.public_reads.len()
     ))
 }
 
@@ -1257,7 +1261,15 @@ display_name = \"{display}\"\n\
 # Display strings keyed by dotted path, e.g.\n\
 #   \"finance.revenue_category.sponsorship\" = \"Sponsorship\"\n\
 # becomes a row in /api/finance/revenue-categories.\n\
-[labels]\n",
+[labels]\n\
+\n\
+# The API reads the instance answers WITHOUT a session. Absent is\n\
+# none — every /api read needs a session — which is what a company\n\
+# wants; a public demo lists the reads its landing page makes, from\n\
+# the four the gateway can offer (docs/tenant-contract.md, the\n\
+# tenant.toml row). A path outside them refuses the gateway's boot.\n\
+[gateway]\n\
+# public_reads = [\"/api/workflows\", \"/api/jobs/summary\", \"/api/jobs/live\", \"/api/events/public-tail\"]\n",
         display = s.display_name,
         name = s.name,
     )

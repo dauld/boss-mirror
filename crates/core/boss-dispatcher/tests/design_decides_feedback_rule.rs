@@ -30,8 +30,23 @@
 //!    it — the handler follows the edge to whatever kind it names.)
 //! 4. The outcome the rule's `when` names IS the design-doc Workflow's
 //!    terminal — rename it and the rule silently stops firing.
+//!
+//! THE MOMENT (backlog 8f83cade, 2026-09-18). `published` was one agent
+//! step too late: between the review and the terminal sits `fold`, so
+//! a design David had decided stayed undecided on the packet it
+//! answers until the agent folded — two 'Decide the design' steps in
+//! his queue after he had answered both designs. The same obligation
+//! now fires at the review's completion
+//! (`complete-feedback-design-review-on-design-review-decided`, on
+//! `step.done.review-design`), and the published-time rule stays as
+//! the backstop for a design decided before it was live. What this
+//! layer pins for the review-time rule: (5) it selects the design-doc
+//! Workflow's `review` step and nothing else on its topic — the legacy
+//! `design-doc-review` protocol has a `review-design` step too, with no
+//! `answers` edge to follow; and (3) applies to it unchanged, since
+//! it completes the same live step with the same verdict.
 
-use boss_dispatcher::rules::expr::{EvalError, HelperResolver, Value};
+use boss_dispatcher::rules::expr::{EvalError, HelperResolver, NoHelpers, Value};
 use boss_dispatcher::rules::handler::{HandlerRegistry, RecordingHandler, dispatch};
 use boss_dispatcher::rules::registry::{MatchedRule, match_event};
 use boss_jobs::job_edges::{InMemoryJobEdges, JobEdgesRegistry};
@@ -44,7 +59,74 @@ mod common;
 use common::shipped_registry;
 
 const RULE: &str = "complete-feedback-design-review-on-design-doc-published";
+const REVIEW_RULE: &str = "complete-feedback-design-review-on-design-review-decided";
 const HANDLER: &str = "jobs.complete_linked_step";
+
+/// A `step.done.review-design` marker in the shape `http/steps.rs`
+/// emits: `workflow_kind` and `spec_slug` hoisted to the root, always
+/// present, and the design's id as `job_id`.
+fn review_done_marker(workflow_kind: &str, spec_slug: &str) -> serde_json::Value {
+    json!({
+        "job_id": "c6bd173e-3dc9-426f-8fff-866a3b2a6117",
+        "step_id": "s-review",
+        "kind": "review-design",
+        "workflow_kind": workflow_kind,
+        "spec_slug": spec_slug,
+        "subject_kind": "custom",
+        "subject_id": "boss-platform",
+        "completed_on": "2026-09-18",
+        "metadata": { "resolutions": [{ "anchor": "q1", "decision": "yes" }] },
+        "notify_on_done": false,
+    })
+}
+
+/// (5): the review-time rule fires on the design-doc Workflow's own
+/// `review` step, follows the same `answers` edge to the same step,
+/// and ignores every other `review-design` completion on its topic.
+#[test]
+fn a_decided_design_review_fires_the_completion_and_a_legacy_review_does_not() {
+    let reg = common::authored_rule(REVIEW_RULE);
+
+    let outcome = match_event(
+        &reg,
+        "step.done.review-design",
+        &review_done_marker("design-doc", "review"),
+        &NoHelpers,
+    );
+    assert!(
+        outcome.skipped.is_empty(),
+        "the predicate failed on a design-doc review completion: {:?}",
+        outcome.skipped
+    );
+    let m = matched_named(&outcome.matched, REVIEW_RULE)
+        .unwrap_or_else(|| panic!("{REVIEW_RULE} did not match a decided design review"));
+    assert_eq!(arg_of(m, "link").as_deref(), Some("answers"));
+    assert_eq!(arg_of(m, "steps").as_deref(), Some("design-review"));
+    assert!(
+        arg_of(m, "route").is_none(),
+        "no route: a design triages nothing"
+    );
+
+    // The legacy design-doc-review protocol's review-design step, and
+    // a design-doc step that is not the review, must not fire it.
+    for (workflow_kind, spec_slug) in [("design-doc-review", "review"), ("design-doc", "fold")] {
+        let outcome = match_event(
+            &reg,
+            "step.done.review-design",
+            &review_done_marker(workflow_kind, spec_slug),
+            &NoHelpers,
+        );
+        assert!(
+            outcome.skipped.is_empty(),
+            "the predicate failed rather than answering false on {workflow_kind}.{spec_slug}: {:?}",
+            outcome.skipped
+        );
+        assert!(
+            matched_named(&outcome.matched, REVIEW_RULE).is_none(),
+            "{REVIEW_RULE} must not fire on {workflow_kind}.{spec_slug}"
+        );
+    }
+}
 
 /// A `jobs.job.closed` marker in the shape all three emit sites
 /// produce: every key present, null where there is no answer.
@@ -224,6 +306,7 @@ async fn the_link_the_rule_follows_is_a_declared_design_doc_edge() {
 /// them: rename the step, retire the `approved` verdict, or add a
 /// required field, and the completion would 400 on every published
 /// design, silently — the exact failure this car exists to remove.
+/// Both rules write the same completion, so both are held to it.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_step_the_rule_completes_is_the_live_design_review_on_both_kinds() {
     let db = TestDb::new().await;
@@ -231,7 +314,20 @@ async fn the_step_the_rule_completes_is_the_live_design_review_on_both_kinds() {
     let payload = close_marker("design-doc", json!("published"));
     let matched = match_event(&reg, "jobs.job.closed", &payload, &NoOpenCars).matched;
     let m = matched_named(&matched, RULE).expect("the rule matched");
+    completion_matches_the_live_step_contract(m);
 
+    let matched = match_event(
+        &reg,
+        "step.done.review-design",
+        &review_done_marker("design-doc", "review"),
+        &NoOpenCars,
+    )
+    .matched;
+    let m = matched_named(&matched, REVIEW_RULE).expect("the review-time rule matched");
+    completion_matches_the_live_step_contract(m);
+}
+
+fn completion_matches_the_live_step_contract(m: &MatchedRule) {
     let steps: Vec<String> = arg_of(m, "steps")
         .expect("steps arg")
         .split(',')

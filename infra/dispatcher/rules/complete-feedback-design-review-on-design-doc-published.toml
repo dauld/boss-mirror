@@ -52,6 +52,21 @@
 # `evidence_key = decided_by`: the default `arrived_from` says a change
 # landed, and nothing landed here — a design was decided. The evidence
 # object still names the closing packet, its title and its outcome.
+#
+# v2 (backlog 8f83cade, 2026-09-18): THE BACKSTOP, NOT THE DECISION.
+# `published` was the wrong moment: between the review and the
+# terminal sits `fold`, the agent's write-up, so a design David had
+# decided stayed undecided on the packet it answers for minutes to
+# hours (two 'Decide the design' steps sat in his queue after he had
+# answered both designs). The completion now fires at the review's
+# completion — complete-feedback-design-review-on-design-review-decided,
+# on `step.done.review-design`. This rule stays for the one case that
+# one cannot reach: a design whose review completed BEFORE that rule
+# was live and whose fold happens after (measured at the change: one
+# open design, 01c3cc3f, still at review; the two decided ones had
+# already published). When the review-time rule has already completed
+# the packet's step, the handler's second guard finds it completed and
+# this rule writes nothing — no second `step.done`, no noop note.
 [[rule]]
 name = "complete-feedback-design-review-on-design-doc-published"
 why = """
@@ -64,9 +79,12 @@ their own design-review steps still open — an empty second decision
 for the same person, linked to the first only by a string nothing
 read (David's bug 4f6019d7: "There is no question, just a statement").
 The design decision is the feedback decision; this rule makes the
-system say so instead of an operator.
+system say so instead of an operator. Since v2 (8f83cade) the
+review-time rule says it at the review, and this one is the backstop
+for a design decided before that rule was live: idempotent, silent
+when the step is already complete.
 """
-version = 1
+version = 2
 on_event = "jobs.job.closed"
 when = "kind = \"design-doc\" AND outcome = \"published\""
 [[rule.do]]

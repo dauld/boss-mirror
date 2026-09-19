@@ -175,8 +175,10 @@ pub(crate) fn design_job_body(
     // DECLARED `design-doc.answers` job edge — ref-checked and
     // prefix-normalised at the write like ship-a-change's
     // `backlog_item`, and the link the dispatcher follows when the
-    // design closes to complete that packet's design-review
-    // (complete-feedback-design-review-on-design-doc-published).
+    // design's review completes to complete that packet's
+    // design-review (complete-feedback-design-review-on-design-
+    // review-decided; the -on-design-doc-published rule is the
+    // backstop for a design decided before it was live, 8f83cade).
     // Absent, not null, when there is none: the edge guard resolves a
     // present key.
     if let Some(feedback) = answers {

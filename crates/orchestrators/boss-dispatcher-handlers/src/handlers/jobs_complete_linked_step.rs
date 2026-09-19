@@ -436,10 +436,19 @@ impl Handler for JobsCompleteLinkedStep {
         // delivery, and dying on it after the reads wastes them.
         let answer = AnswerSpec::from_args(args)?;
 
-        // The `jobs.job.closed` payload carries the closing Job's id.
+        // The `jobs.job.closed` payload carries the closing Job's id;
+        // a `step.done.<kind>` marker carries the same Job under
+        // `job_id` (backlog 8f83cade: a design DECIDES its linked
+        // packet at its review's completion, minutes to hours before
+        // it closes, and the rule that says so listens on the step).
         // A malformed marker is not something a redelivery can fix, so
         // it is a no-op rather than an error that retries forever.
-        let Some(closing_id) = ctx.event_payload.get("id").and_then(|v| v.as_str()) else {
+        let Some(closing_id) = ctx
+            .event_payload
+            .get("id")
+            .or_else(|| ctx.event_payload.get("job_id"))
+            .and_then(|v| v.as_str())
+        else {
             return Ok(());
         };
 
@@ -2205,6 +2214,76 @@ mod tests {
         assert!(
             patches.lock().unwrap().is_empty(),
             "the work was done — nothing to say on either end"
+        );
+    }
+
+    /// A `step.done.review-design` marker in the shape `http/steps.rs`
+    /// emits: the design is still OPEN (its fold is the agent's next
+    /// step), and the packet's own id rides as `job_id`, not `id`.
+    fn design_review_done_marker() -> serde_json::Value {
+        json!({
+            "job_id": DESIGN,
+            "step_id": "s-review",
+            "kind": "review-design",
+            "workflow_kind": "design-doc",
+            "spec_slug": "review",
+            "subject_kind": "custom",
+            "subject_id": "boss-platform",
+            "completed_on": "2026-09-18",
+            "metadata": { "resolutions": [{ "anchor": "q1", "decision": "yes" }] },
+            "notify_on_done": false,
+        })
+    }
+
+    /// Backlog 8f83cade — the decision is the review's completion, not
+    /// the fold's. Measured 2026-09-18 23:10Z: David answered both open
+    /// designs (11e60367, 55417146) and saw two 'Decide the design'
+    /// steps (b4afd7b9, 92921c2f) still in his queue with nothing to
+    /// do, because the completion fired on `published`, and between
+    /// the review and `published` sits `fold` — the agent's write-up,
+    /// minutes to hours later. Fired from `step.done.review-design`
+    /// instead: the design is still open, the marker carries `job_id`
+    /// rather than `id`, and the linked Decide step completes with the
+    /// verdict all the same. The fold stays the design packet's own
+    /// obligation.
+    #[tokio::test]
+    async fn a_decided_review_completes_the_linked_decide_step_while_the_design_is_still_open() {
+        let mut open_design =
+            design(json!({ "answers": PACKET, "title": "A car lands where its change goes live" }));
+        open_design["status"] = json!("open");
+        let (base, puts, patches) =
+            mock_jobs(vec![open_design, feedback_routed_to_design("ready")]).await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base);
+        let mut ctx = ctx(design_review_done_marker());
+        ctx.rule_name = "complete-feedback-design-review-on-design-review-decided".into();
+        ctx.triggering_topic = "step.done.review-design".into();
+        h.invoke(&design_rule_args(), &ctx).await.expect("runs");
+
+        let calls = puts.lock().unwrap().clone();
+        assert_eq!(
+            calls.len(),
+            1,
+            "the design-review completes at the review, not at the fold: {calls:?}"
+        );
+        let (step_id, body) = &calls[0];
+        assert_eq!(step_id, REVIEW_STEP);
+        assert_eq!(body["status"], "completed");
+        assert_eq!(
+            body["metadata"]["verdict"], "approved",
+            "a completed review has every question resolved — `resolutions` covers `questions` \
+             at done — so the verdict is approved without waiting for the fold"
+        );
+        assert_eq!(
+            body["metadata"]["decided_by"]["car"], DESIGN,
+            "the evidence names the design read off the marker's job_id"
+        );
+        assert!(
+            body["metadata"]["decided_by"]["outcome"].is_null(),
+            "the design has not closed; the evidence says null rather than inventing an outcome"
+        );
+        assert!(
+            patches.lock().unwrap().is_empty(),
+            "nothing to apologise for"
         );
     }
 

@@ -29,6 +29,7 @@ import {
   troubleLabel,
   toTrainRow,
   trainGateLabel,
+  trainGateTroubled,
   cancelRequestBody,
   canOfferCancel,
   CANCEL_ROLE,
@@ -1624,7 +1625,7 @@ describe('TrainRow reads the train gate off the train and its ci step', () => {
       none,
       false,
     ).gate;
-    expect(g).toEqual({ run: '0123456789abcdef', line: null, forge: null, fallback: null, relaunches: 1 });
+    expect(g).toEqual({ run: '0123456789abcdef', line: null, forge: null, fallback: null, wait_reason: null, relaunches: 1 });
     expect(g && trainGateLabel(g)).toBe('forge pending · gate running (01234567) · relaunched 1×');
   });
 
@@ -1666,5 +1667,37 @@ describe('TrainRow reads the train gate off the train and its ci step', () => {
     ).gate;
     expect(g?.fallback).toContain('CI alone');
     expect(g && trainGateLabel(g)).toBe('forge green · gate UNAVAILABLE — CI alone judged this train');
+    expect(g && trainGateTroubled(g)).toBe(true);
+  });
+
+  // Backlog 0d16df6f: the conductor writes `train_gate_wait_reason`
+  // (the bound line naming the running gates) on a train whose gate
+  // could not be filed, and nulls it once it is. Train ccd8b08e sat two
+  // hours that way on 2026-09-18 drawn exactly like a healthy transit
+  // at CI — the yard read run/line/forge/fallback and nothing else. A
+  // troubled packet must look troubled: the reason is read, the label
+  // says it is waiting and why, and the row is marked in the yard's
+  // existing trouble style.
+  test('a train whose gate is waiting at the bound says why, in the trouble style', () => {
+    const why = 'train gate not filed: 2 gates running (fix/a, fix/b), bound is 2';
+    const g = toTrainRow(
+      train({ metadata: { train_gate_launch_failures: 5, train_gate_wait_reason: why }, steps: [s('ci', 'ready')] }),
+      none,
+      false,
+    ).gate;
+    expect(g?.wait_reason).toBe(why);
+    expect(g && trainGateLabel(g)).toBe(`forge pending · gate waiting: ${why}`);
+    expect(g && trainGateTroubled(g)).toBe(true);
+  });
+
+  test('once the gate is filed the conductor nulls the reason and the train is running, not waiting', () => {
+    const g = toTrainRow(
+      train({ metadata: { train_gate_run: '0123456789abcdef', train_gate_wait_reason: null }, steps: [s('ci', 'ready')] }),
+      none,
+      false,
+    ).gate;
+    expect(g?.wait_reason).toBeNull();
+    expect(g && trainGateLabel(g)).toBe('forge pending · gate running (01234567)');
+    expect(g && trainGateTroubled(g)).toBe(false);
   });
 });

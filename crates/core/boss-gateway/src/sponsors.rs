@@ -456,7 +456,10 @@ mod tests {
         boss_testing::create_dir(&root);
         let site = Site::from_values(HOST, root.to_str().unwrap())
             .map(|s| s.with_sponsors(SponsorRoll::new(stub)));
-        site::mount(crate::build_router(None).with_state(state), site)
+        site::mount(
+            crate::build_router(None, &crate::public_reads::PublicReads::none()).with_state(state),
+            site,
+        )
     }
 
     async fn get(app: &axum::Router, host: &str) -> (StatusCode, HeaderMap, String) {
@@ -725,7 +728,10 @@ mod tests {
         let root = boss_testing::scratch_dir("gateway-sponsors-unwired");
         boss_testing::create_dir(&root);
         let site = Site::from_values(HOST, root.to_str().unwrap());
-        let bare = site::mount(crate::build_router(None).with_state(state), site);
+        let bare = site::mount(
+            crate::build_router(None, &crate::public_reads::PublicReads::none()).with_state(state),
+            site,
+        );
         let (status, _, _) = get(&bare, HOST).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }

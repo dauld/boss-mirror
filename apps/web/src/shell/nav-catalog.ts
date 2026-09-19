@@ -80,6 +80,12 @@ export type UngatedSurfaceId =
   // adding a permKey would mean widening the RouteName vocabulary in
   // libs/web-kit and every tenant's declared `surfaces` lists.
   | 'system-crew'
+  // 'system-receiving' / 'system-marshalling' (the Receiving Yard and
+  // Marshalling Yard rows): permKey-less for the Crew Board's reason —
+  // a yard is the department's own floor, readable by any operator
+  // (feedback 92921c2f, design 55417146, 2026-09-18).
+  | 'system-receiving'
+  | 'system-marshalling'
   // 'system-codebase' (the Codebase row): the department's own numbers,
   // readable by any operator — same shape as the Crew Board, and for
   // the same reason (feedback 9827c699, 2026-09-14).
@@ -129,8 +135,21 @@ export const ROUTE_CATALOG: Readonly<Record<RouteName | UngatedSurfaceId, NavIte
   // for them; map/flow/model died outright and fleet became Operate's
   // Bottlenecks tab.
   // First IT surface in catalog order = the IT app's landing
-  // (departure-board.md Q1): the yard, now AT /it itself.
+  // (departure-board.md Q1): the yard, now AT /it itself. Catalog
+  // order decides the LANDING (`departmentHref`), not the IT sidebar's
+  // order — that is AppShell's IT_GROUPS list — which is how design
+  // 55417146 (2026-09-18) keeps the Train Yard the /it landing while
+  // the sidebar leads with the two yards upstream of it.
   'system-yard':              { id: 'system-yard',              label: 'Train Yard',          path: '/it',              permKey: 'system-yard',             app: 'it' },
+  // The Receiving Yard and the Marshalling Yard — SIDEBAR ROWS since
+  // David's feedback 92921c2f (2026-09-18): "graduate Receiving Yard
+  // and Marshalling Yard to the left navbar ... the three yards plus
+  // the Crew Board as the top 4". Second doors onto the Operate tabs
+  // that already answer these paths — the routes did not move, and
+  // the tabs stay. PermKey-less like the Crew Board: a yard is the
+  // department's own floor, readable by any operator.
+  'system-receiving':        { id: 'system-receiving',        label: 'Receiving Yard',      path: '/it/operate/receiving', app: 'it' },
+  'system-marshalling':      { id: 'system-marshalling',      label: 'Marshalling Yard',    path: '/it/operate/marshalling', app: 'it' },
   // The Operate row is permKey-less like the incidents surface it
   // leads with — readable by any operator; the tabs behind it keep
   // their own gates.
@@ -203,6 +222,10 @@ export function departmentJobsPath(code: string): string {
 /// Where a department's tab lands: its first surface in catalog order
 /// — the same order the sidebar lists them in, so the tab opens on the
 /// row the sidebar shows first — or its jobs view when it owns none.
+/// IT is the one department whose sidebar order is its own list
+/// (AppShell's IT_GROUPS): it leads with the two yards upstream of the
+/// Train Yard and still lands on the Train Yard, because the catalog
+/// keeps 'system-yard' first (design 55417146, 2026-09-18).
 function departmentHref(code: string): string {
   return Object.values(ROUTE_CATALOG).find((e) => e.app === code)?.path ?? departmentJobsPath(code);
 }

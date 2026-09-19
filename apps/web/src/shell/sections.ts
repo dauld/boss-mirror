@@ -133,8 +133,11 @@ export const SECTION_FOR_ROUTE: Readonly<Record<Route['kind'], string>> = {
   systemMonitoringAtlas: 'system-incidents',
   systemMonitoringConductor: 'system-incidents',
   systemFleet: 'system-incidents',
-  systemMarshallingYard: 'system-incidents',
-  systemReceivingYard: 'system-incidents',
+  // The two yards have rows of their own since feedback 92921c2f
+  // (2026-09-18); they highlight those, not Operate, though the
+  // Operate tab strip still lists them.
+  systemMarshallingYard: 'system-marshalling',
+  systemReceivingYard: 'system-receiving',
   systemYardStatus: 'system-incidents',
   systemStepPlugins: 'system-step-plugins',
   systemStepPluginDetail: 'system-step-plugins',

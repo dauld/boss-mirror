@@ -31,6 +31,25 @@ pub struct TenantMeta {
     pub tenant_id: Option<String>,
 }
 
+/// `[gateway]` — what the instance's front door does for this tenant.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct TenantGateway {
+    /// `public_reads` — the API reads this instance answers WITHOUT a
+    /// session, by path. A per-instance declaration defaulting to
+    /// NONE (design 11e60367 Q1, decided 2026-09-18; backlog
+    /// b4afd7b9): until then the demo tenant's four landing-page reads
+    /// were a constant in boss-gateway's route table, so the company's own
+    /// instance answered `/api/workflows`, `/api/jobs/summary`,
+    /// `/api/jobs/live` and `/api/events/public-tail` to anyone,
+    /// with Cloudflare Access the only thing in front. The gateway
+    /// resolves the list at boot against the reads that CAN be public
+    /// (boss-gateway `public_reads.rs`) and refuses to start on one it
+    /// does not know — a declaration cannot make a write public. A
+    /// manifest that says nothing asks for nothing.
+    #[serde(default)]
+    pub public_reads: Vec<String>,
+}
+
 /// The whole file as the platform reads it. Every section is
 /// optional and unknown sections are ignored, which is what lets the
 /// simulator's sections ride in the same file.
@@ -46,6 +65,9 @@ pub struct TenantToml {
     /// category list, for one).
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
+    /// `[gateway]` — the sessionless read set, and nothing else yet.
+    #[serde(default)]
+    pub gateway: TenantGateway,
 }
 
 impl TenantToml {
@@ -73,6 +95,29 @@ mod tests {
     fn an_empty_file_is_an_unnamed_tenant_not_an_error() {
         let t = TenantToml::parse("").unwrap();
         assert_eq!(t, TenantToml::default());
+    }
+
+    /// The reads an instance answers without a session are the
+    /// tenant's declaration, not a gateway constant (design 11e60367
+    /// Q1, decided 2026-09-18; backlog b4afd7b9). Absent means NONE:
+    /// a manifest that says nothing about public reads asks for no
+    /// sessionless read, which is what a company's instance wants
+    /// and what the public demo tenant opts out of by naming its four.
+    #[test]
+    fn public_reads_are_declared_under_gateway_and_default_to_none() {
+        let t = TenantToml::parse(
+            "[meta]\ntenant_id = \"b\"\n[gateway]\npublic_reads = [\"/api/workflows\", \"/api/jobs/live\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            t.gateway.public_reads,
+            vec!["/api/workflows".to_string(), "/api/jobs/live".to_string()]
+        );
+
+        let none = TenantToml::parse("[meta]\ntenant_id = \"a\"\n").unwrap();
+        assert!(none.gateway.public_reads.is_empty());
+        let empty_section = TenantToml::parse("[gateway]\n").unwrap();
+        assert!(empty_section.gateway.public_reads.is_empty());
     }
 
     #[test]

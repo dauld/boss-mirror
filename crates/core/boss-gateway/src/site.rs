@@ -279,7 +279,10 @@ mod tests {
             proxy_client: reqwest::Client::new(),
             perf: Arc::new(PerfCollector::new()),
         });
-        mount(crate::build_router(None).with_state(state), site)
+        mount(
+            crate::build_router(None, &crate::public_reads::PublicReads::none()).with_state(state),
+            site,
+        )
     }
 
     async fn get(app: axum::Router, host: &str, path: &str) -> (StatusCode, HeaderMap, String) {

@@ -159,6 +159,15 @@ describe('nav catalog — app assignment', () => {
     // packet rendered (4ae9969e, car 2 of 8f4e9cc0). A TAB, not a row:
     // it gates under `workflows` like the registry it is a view of.
     'system-registry-drift',
+    // The Receiving Yard and the Marshalling Yard — SIDEBAR ROWS onto
+    // the two Operate tabs that already answered /it/operate/receiving
+    // and /it/operate/marshalling. David's feedback 92921c2f
+    // (2026-09-18): "graduate Receiving Yard and Marshalling Yard to
+    // the left navbar ... the three yards plus the Crew Board as the
+    // top 4"; design 55417146 decided the order. The routes did not
+    // move; the rows are a second door onto the same pages.
+    'system-receiving',
+    'system-marshalling',
   ];
 
   it('the IT app contains the System Model set plus what we added deliberately', () => {
@@ -179,7 +188,7 @@ describe('nav catalog — app assignment', () => {
   // Source-level because the groups live inside a component. Crude,
   // but it fails when someone adds an IT surface and forgets the
   // sidebar, which is exactly the mistake it exists for.
-  it('the IT sidebar holds exactly the seven rows, and every other IT surface is a tab or a documented door', () => {
+  it('the IT sidebar holds exactly ten rows, and every other IT surface is a tab or a documented door', () => {
     // The 2026-08-31 consolidation (packet 1f6d55e0): David — "we do
     // have too many IT pages though. We should consolidate." The
     // sidebar is EXACTLY seven rows; every remaining IT catalog entry
@@ -196,14 +205,16 @@ describe('nav catalog — app assignment', () => {
       shell.indexOf('// Home —'),
     );
     const SIDEBAR_ROWS: ReadonlyArray<string> = [
-      'system-yard',      // /it — the landing
-      'system-incidents', // Operate
-      'workflows',        // Registry
-      'system-design',    // Design
-      'system-crew',      // Crew Board — see below
-      'system-codebase',  // Codebase — see below
-      'system-estate',    // Estate
-      'system-kb',        // Knowledge Base
+      'system-receiving',   // Receiving Yard — see below
+      'system-marshalling', // Marshalling Yard — see below
+      'system-yard',        // /it — the landing
+      'system-crew',        // Crew Board — see below
+      'system-incidents',   // Operate
+      'workflows',          // Registry
+      'system-design',      // Design
+      'system-codebase',    // Codebase — see below
+      'system-estate',      // Estate
+      'system-kb',          // Knowledge Base
     ];
     for (const k of SIDEBAR_ROWS) {
       expect(
@@ -226,8 +237,15 @@ describe('nav catalog — app assignment', () => {
     // 9827c699 (2026-09-14), "Let's add a page to the IT department
     // showing the Code base stats", filed while the trend was a tab on
     // Design. The tab is gone; the row is the page.
+    //
+    // The ninth and tenth are the Receiving Yard and the Marshalling
+    // Yard, and they have one too: David's feedback 92921c2f
+    // (2026-09-18), "Let's graduate Receiving Yard and Marshalling Yard
+    // to the left navbar. We can have the three yards plus the Crew
+    // Board as the top 4." Design 55417146 settled the order (the test
+    // below). The tabs STAY: the row is a second door onto the same page.
     const rowRefs = (groups.match(/ROUTE_CATALOG(\.\w[\w-]*|\['[^']+'\])/g) ?? []).length;
-    expect(rowRefs, 'the IT sidebar must hold exactly eight rows').toBe(8);
+    expect(rowRefs, 'the IT sidebar must hold exactly ten rows').toBe(10);
 
     const tabs = readFileSync(
       new URL('../it/ItTabs.svelte', import.meta.url),
@@ -249,6 +267,47 @@ describe('nav catalog — app assignment', () => {
       unreachable.map(([k]) => k),
       `IT surfaces neither sidebar, tab, nor documented door: ${unreachable.map(([k]) => k).join(', ')}`,
     ).toEqual([]);
+  });
+
+  it('the IT sidebar leads with the three yards and the Crew Board, and the IT tab still lands on the Train Yard', () => {
+    // Design 55417146 (answers feedback 92921c2f, David 2026-09-18):
+    // flow order, upstream to downstream — Receiving Yard, Marshalling
+    // Yard, Train Yard, Crew Board — then the department's desk work.
+    // The sidebar order is AppShell's IT_GROUPS list; the landing is a
+    // DIFFERENT mechanism (the first `app: 'it'` entry in catalog
+    // order, `departmentHref`), which is why the Train Yard can be the
+    // third row and still the page the IT tab opens on: "the departure
+    // board is what an operator opens the department to see".
+    const shell = readFileSync(new URL('./AppShell.svelte', import.meta.url), 'utf8');
+    const groups = shell.slice(shell.indexOf('const IT_GROUPS'), shell.indexOf('// Home —'));
+    const rows = [...groups.matchAll(/ROUTE_CATALOG(?:\.(\w[\w-]*)|\['([^']+)'\])/g)].map(
+      (m) => m[1] ?? m[2],
+    );
+    expect(rows.slice(0, 4)).toEqual([
+      'system-receiving',
+      'system-marshalling',
+      'system-yard',
+      'system-crew',
+    ]);
+    expect(rows.slice(4)).toEqual([
+      'system-incidents',
+      'workflows',
+      'system-design',
+      'system-codebase',
+      'system-estate',
+      'system-kb',
+    ]);
+    // The labels David used, on the rows he asked for.
+    expect(ROUTE_CATALOG['system-receiving'].label).toBe('Receiving Yard');
+    expect(ROUTE_CATALOG['system-marshalling'].label).toBe('Marshalling Yard');
+    // Second doors, not moved routes: the Operate tabs keep answering.
+    expect(ROUTE_CATALOG['system-receiving'].path).toBe('/it/operate/receiving');
+    expect(ROUTE_CATALOG['system-marshalling'].path).toBe('/it/operate/marshalling');
+    expect(parseRoute('/it/operate/receiving').kind).toBe('systemReceivingYard');
+    expect(parseRoute('/it/operate/marshalling').kind).toBe('systemMarshallingYard');
+    // And the IT tab still opens on the Train Yard at /it.
+    expect(APPS.find((a) => a.id === 'it')?.href).toBe(ROUTE_CATALOG['system-yard'].path);
+    expect(ROUTE_CATALOG['system-yard'].path).toBe('/it');
   });
 
   it('nothing from the original System Model set has left the IT app', () => {

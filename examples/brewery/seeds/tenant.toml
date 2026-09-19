@@ -218,6 +218,25 @@ marketing-assets = true  # Marketing-asset library seeded under
 sim         = true   # Simulator surface (admin-gated)
 it          = true   # IT integrations panel (Chase / Stripe / ADP / DOR)
 
+[gateway]
+# The API reads this instance answers WITHOUT a session (design
+# 11e60367 Q1, decided 2026-09-18; backlog b4afd7b9). The public
+# landing page at `/` — the live window into the brewery — is served
+# to anyone, and it renders from these four: the workflow list and
+# each kind's step graph, the open-job summary, the live feed, and
+# the curated event tail. A tenant that says nothing here answers
+# nothing without a session, which is what a real company's instance
+# wants; the brewery is the public demo and opts in. The gateway
+# refuses to boot on a path outside the four it can offer
+# (boss-gateway public_reads.rs) — a declaration cannot make a write
+# public.
+public_reads = [
+    "/api/workflows",           # + /api/workflows/{kind}
+    "/api/jobs/summary",
+    "/api/jobs/live",
+    "/api/events/public-tail",
+]
+
 # ---------------------------------------------------------------------------
 # Workflow creation rates (jobs/day at steady state).
 #

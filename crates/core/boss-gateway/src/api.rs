@@ -150,7 +150,11 @@ fn tenant_toml_path() -> Option<String> {
     None
 }
 
-fn load_tenant_toml() -> Option<TenantToml> {
+/// The manifest as parsed, or None when there is no file or it does
+/// not parse — every reader treats that as an empty manifest. The
+/// boot-time reader of `[gateway] public_reads` (main.rs) is the
+/// third door on the one parser.
+pub(crate) fn load_tenant_toml() -> Option<TenantToml> {
     let path = tenant_toml_path()?;
     let text = std::fs::read_to_string(&path).ok()?;
     TenantToml::parse(&text).ok()

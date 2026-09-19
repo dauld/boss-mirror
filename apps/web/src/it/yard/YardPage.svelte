@@ -37,6 +37,7 @@
     fetchYard,
     splitAtDeparture,
     trainGateLabel,
+    trainGateTroubled,
     troubleLabel,
     wipAdvisory,
     type CancelRequest,
@@ -683,9 +684,10 @@
               {#if t.gate}
                 <!-- THE TRAIN GATE (128b5496): the verdict is the forge's
                      and the cluster gate's read together; both halves
-                     are shown, and a train CI alone judged says so. -->
+                     are shown; a train CI alone judged, or one whose gate is
+                     waiting at the bound (0d16df6f), says so in the trouble style. -->
                 <dt>verdict</dt>
-                <dd class:yard-trouble={t.gate.fallback !== null}>{trainGateLabel(t.gate)}</dd>
+                <dd class:yard-trouble={trainGateTroubled(t.gate)}>{trainGateLabel(t.gate)}</dd>
               {/if}
             </dl>
             <div class="yard-label">Its steps</div>
