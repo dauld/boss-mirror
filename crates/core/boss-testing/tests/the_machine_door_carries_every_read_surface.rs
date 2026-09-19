@@ -79,9 +79,10 @@ const DOORS: [&str; 3] = [
 
 /// The rows on the door that NO path routes to: services a reader of
 /// its own reaches by name. Exactly one — the gateway, read by
-/// `boss-gateway-read` (backlog 240e03f3). A row added here needs a
-/// reader that names it; a row that a path routes to belongs in the
-/// route table instead.
+/// `boss-gateway-read` on the forge (backlog 240e03f3) and by the
+/// pod's `boss-api` under `BOSS_SOR_SERVICE=gateway` (backlog
+/// bf1f5ad2). A row added here needs a reader that names it; a row
+/// that a path routes to belongs in the route table instead.
 const NOT_PATH_ROUTED: [&str; 1] = ["gateway"];
 
 fn read(rel: &str) -> String {

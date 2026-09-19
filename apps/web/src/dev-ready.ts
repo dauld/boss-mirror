@@ -23,16 +23,30 @@ export const readyLine = (port: number): string => `boss-web dev server: http://
 /// when `output` ends first or `timeoutMs` passes first, each naming
 /// the port. Every line is handed to `echo` as it completes — before
 /// AND after the ready line, because the drain outlives the resolve:
-/// the server's later lines (`Bundled page in Xms`) are the run's own
-/// measurement, and a pipe nobody reads would stall the server.
+/// the server's later lines (`Bundled page in Xms`, and the exit-time
+/// miss summary) are the run's own measurement, and a pipe nobody reads
+/// would stall the server.
+///
+/// The resolved value carries `drained`, which settles when stdout has
+/// ENDED and every line has reached `echo`. The runner waits on it
+/// before judging the miss summary (backlog 06038ed8): the process
+/// having exited does not mean its last line has been read, and the
+/// summary is the last line the server prints.
 export function waitForReadyLine(
   output: AsyncIterable<Uint8Array | string>,
   port: number,
   timeoutMs: number,
   echo: (line: string) => void,
-): Promise<void> {
+): Promise<{ drained: Promise<void> }> {
   const wanted = readyLine(port);
-  return new Promise<void>((resolve, reject) => {
+  // Never rejects: a drain that ends in an error has still stopped
+  // producing lines, which is all a waiter on it wants to know. The
+  // ready-line promise below is where a failure is reported.
+  let drainDone = (): void => undefined;
+  const drained = new Promise<void>((resolve) => {
+    drainDone = resolve;
+  });
+  return new Promise<{ drained: Promise<void> }>((resolve, reject) => {
     let settled = false;
     const settle = (outcome: () => void): void => {
       if (settled) return;
@@ -53,12 +67,16 @@ export function waitForReadyLine(
         pending = lines.pop() ?? '';
         for (const line of lines) {
           echo(line);
-          if (line.trim() === wanted) settle(resolve);
+          if (line.trim() === wanted) settle(() => resolve({ drained }));
         }
       }
       if (pending) echo(pending);
+      drainDone();
       settle(() => reject(new Error(`dev-server stdout ended before it reported listening on :${port}`)));
     };
-    drain().catch((err: unknown) => settle(() => reject(err instanceof Error ? err : new Error(String(err)))));
+    drain().catch((err: unknown) => {
+      drainDone();
+      settle(() => reject(err instanceof Error ? err : new Error(String(err))));
+    });
   });
 }

@@ -672,6 +672,36 @@ pub(crate) fn resolve_agent(agents: &[Value], login: &str) -> Option<String> {
         .and_then(id_of)
 }
 
+/// The step whose `result` says which terminal the run reached.
+pub(crate) const BUILDING_SLUG: &str = "building";
+
+/// The run's outcome, READ from the terminal it reached rather than
+/// asserted (backlog 8f1de7bf, 2026-09-19: `run_record` hardcoded
+/// `"success"`, so a run that refused was recorded identically to one
+/// that landed green first try — all 24 rows in the live table said
+/// success). The `result` field on `building` is required and
+/// enum-checked by the Workflow row, so the three values below are the
+/// whole fork: `gated` is the gate's green, `refused` is a builder
+/// that stopped without building, `died` is the silence rule's verdict
+/// — and silence is refused exactly like failure.
+///
+/// `None` is "the run has reached no terminal yet", which is not an
+/// outcome: the report can arrive before the green, and the row is
+/// insert-once, so a guess made here would be the permanent record.
+pub(crate) fn run_outcome(run: &Value) -> Option<&'static str> {
+    let result = crate::envelope::steps(run)
+        .into_iter()
+        .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some(BUILDING_SLUG))
+        .filter(|s| s.get("status").and_then(Value::as_str) == Some("completed"))
+        .and_then(|s| s.pointer("/metadata/result").and_then(Value::as_str))?;
+    match result {
+        "gated" => Some("success"),
+        "refused" => Some("cancelled"),
+        "died" => Some("failed"),
+        _ => None,
+    }
+}
+
 /// The `agent_runs` record for a run packet: keyed on the run's own id
 /// (idempotent), the CPU as its registered id, the model and packet
 /// off the run's metadata, started when `briefed` completed (the
@@ -679,12 +709,17 @@ pub(crate) fn resolve_agent(agents: &[Value], login: &str) -> Option<String> {
 /// or when the packet opened, finished at the report. A total-only
 /// `--tokens` is recorded in full and priced by nothing; a split is
 /// priced by the rate card. The reporter's own dollar figure rides
-/// `detail` beside it, for the comparison, never as the price.
+/// `detail` beside it, for the comparison, never as the price. The
+/// `outcome` is what [`run_outcome`] read off the run's terminal, and
+/// the effort it was dispatched at rides `detail` beside the spend —
+/// the two together are what makes reliability-vs-cost a query rather
+/// than a guess (backlog 8f1de7bf).
 pub(crate) fn run_record(
     run: &Value,
     actor_id: &str,
     r: &Report,
     finished_at: chrono::DateTime<chrono::Utc>,
+    outcome: &str,
 ) -> Result<Value> {
     let run_id = crate::envelope::job_id(run).context("the run has no id")?;
     let md = run.get("metadata").cloned().unwrap_or(Value::Null);
@@ -712,11 +747,16 @@ pub(crate) fn run_record(
         "model": text("model"),
         "started_at": started_at,
         "finished_at": finished_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        "outcome": "success",
+        "outcome": outcome,
         "job_id": text("packet"),
         "detail": {
             "agent_run": run_id,
             "step": text("step"),
+            // The thinking budget the run was dispatched at, off the
+            // packet `resolve` wrote it onto. `detail` rather than a
+            // column: it is free-form on purpose, and a field can
+            // graduate once the comparison says what it needs.
+            "effort": text("effort"),
             "reported_spend_usd": r.spend_usd,
             "tokens_reported": r.tokens.is_some(),
         },
@@ -799,8 +839,20 @@ pub(crate) async fn report_at(
         );
     }
 
-    // THE FINISH RECORD: what the run cost, where the claim door reads
-    // it. The CPU is the registered id, never the login.
+    // THE FINISH RECORD: what the run cost and how it went, where the
+    // claim door reads it. The outcome is the terminal the run
+    // reached; a run that has reached none is not recorded at all,
+    // because the row is insert-once and the guess would stick
+    // (backlog 8f1de7bf).
+    let Some(outcome) = run_outcome(&run) else {
+        eprintln!(
+            "boss dispatch: run {short} has no terminal yet — `{BUILDING_SLUG}` carries no \
+             `result`, so agent_runs would have to assert an outcome the packet does not hold. \
+             The report is on the packet; run --report again once the run has landed, refused \
+             or died, and the cost is recorded with the outcome it reached"
+        );
+        return Ok(());
+    };
     let login = run
         .pointer("/metadata/agent")
         .and_then(Value::as_str)
@@ -814,7 +866,7 @@ pub(crate) async fn report_at(
              the packet"
         )
     })?;
-    let record = run_record(&run, &actor_id, report, now)?;
+    let record = run_record(&run, &actor_id, report, now, outcome)?;
     let out = api_at(Method::POST, "/api/agent-runs".to_string(), Some(record))
         .await
         .with_context(|| format!("recording run {short} in agent_runs"))?;
@@ -1148,7 +1200,7 @@ mod tests {
                 output: 5,
             }),
         };
-        let rec = run_record(&run, "agent-claude", &split, at).unwrap();
+        let rec = run_record(&run, "agent-claude", &split, at, "success").unwrap();
         assert_eq!(rec["run_id"], "5b1d2c3e-0000-4000-8000-000000000001");
         assert_eq!(
             rec["actor_id"], "agent-claude",
@@ -1179,16 +1231,76 @@ mod tests {
             spend_usd: None,
             tokens: Some(Tokens::Total(761_000)),
         };
-        let rec = run_record(&run, "agent-claude", &total, at).unwrap();
+        let rec = run_record(&run, "agent-claude", &total, at, "success").unwrap();
         assert_eq!(rec["total_tokens"], 761_000);
         assert!(rec.get("input_tokens").is_none());
         // No stamp on briefed: the packet's opened_at is the start.
         let mut bare = run.clone();
         bare["steps"] = json!([{ "spec_slug": "reported", "status": "ready" }]);
         assert_eq!(
-            run_record(&bare, "agent-claude", &total, at).unwrap()["started_at"],
+            run_record(&bare, "agent-claude", &total, at, "success").unwrap()["started_at"],
             "2026-09-18T17:00:00Z"
         );
+    }
+
+    /// EFFORT AND OUTCOME — the two fields the record dropped (backlog
+    /// 8f1de7bf, 2026-09-19). Measured against the live table that
+    /// morning: 24 rows, `outcome` the literal `success` on every one
+    /// and `effort` on none, so "was high effort more reliable than
+    /// low" had no substrate to answer from. The effort is on the run
+    /// packet this function already reads; the outcome is the terminal
+    /// the run reached, read from `building.result`, never asserted.
+    #[test]
+    fn the_record_carries_the_effort_and_the_terminal_the_run_reached() {
+        let run = |building: Value| {
+            json!({
+                "id": "5b1d2c3e-0000-4000-8000-000000000001",
+                "kind": "agent-run",
+                "metadata": {
+                    "packet": "39d0b528-ff69-4cb8-ba82-408b641da66c", "step": "build",
+                    "agent": "claude@algedonic.dev", "model": "opus-5[1m]", "effort": "high",
+                    "opened_at": "2026-09-18T17:00:00Z",
+                },
+                "steps": [
+                    { "spec_slug": "briefed", "status": "completed", "completed_at": "2026-09-18T17:05:00Z" },
+                    building,
+                ],
+            })
+        };
+        let done = |result: &str| json!({ "spec_slug": "building", "status": "completed", "metadata": { "result": result } });
+        // Every terminal the `result` fork can reach, and what each one
+        // says about the run: `gated` is the green, `refused` is a
+        // builder that stopped without building, `died` is the silence
+        // rule's verdict — and silence is refused exactly like failure.
+        for (result, outcome) in [
+            ("gated", "success"),
+            ("refused", "cancelled"),
+            ("died", "failed"),
+        ] {
+            assert_eq!(run_outcome(&run(done(result))), Some(outcome), "{result}");
+        }
+        // No terminal reached, and a value the fork does not name:
+        // neither is an outcome, and a record that cannot read one is
+        // not written at all.
+        let open = json!({ "spec_slug": "building", "status": "ready", "metadata": {} });
+        assert_eq!(run_outcome(&run(open)), None, "building is still open");
+        assert_eq!(run_outcome(&run(done("wat"))), None, "not a terminal");
+
+        let at = "2026-09-18T19:00:00Z".parse().unwrap();
+        let r = Report {
+            summary: "done".into(),
+            spend_usd: None,
+            tokens: Some(Tokens::Total(761_000)),
+        };
+        let rec = run_record(&run(done("refused")), "agent-claude", &r, at, "cancelled").unwrap();
+        assert_eq!(rec["outcome"], "cancelled", "the terminal, not a literal");
+        assert_eq!(
+            rec["detail"]["effort"], "high",
+            "the effort the run was dispatched at, off the packet"
+        );
+        // And the API still parses what the record says.
+        let parsed: boss_jobs::agent_runs::NewAgentRun = serde_json::from_value(rec).unwrap();
+        assert_eq!(parsed.outcome, boss_jobs::agent_runs::RunOutcome::Cancelled);
     }
 
     #[test]
@@ -1878,6 +1990,49 @@ mod wire_tests {
         assert_eq!(rec["started_at"], "2026-09-18T17:05:00Z");
         assert_eq!(rec["input_tokens"], 740_000);
         assert_eq!(rec["detail"]["reported_spend_usd"], 4.2);
+        // What the run was dispatched at, and how it went — the two
+        // halves of reliability-vs-cost (backlog 8f1de7bf).
+        assert_eq!(rec["detail"]["effort"], "high");
+        assert_eq!(rec["outcome"], "success", "`building` reached gated");
+    }
+
+    /// A run that has reached no terminal records no cost row: the
+    /// `outcome` column would have to assert something the packet does
+    /// not say, and the row is insert-once, so the assertion would
+    /// stick. The report still rides the packet, and a later
+    /// `--report` — after the green, the refusal, or the silence
+    /// rule — writes the row with the outcome it can then read.
+    #[tokio::test]
+    async fn a_report_before_any_terminal_records_no_outcome_it_cannot_read() {
+        let mut run = run_packet("pending");
+        run["steps"][2] = json!({ "id": "run-building", "spec_slug": "building",
+                                  "status": "ready", "metadata": {} });
+        let (base, log) = report_stub(run).await;
+        report_at(
+            &reqwest::Client::new(),
+            &base,
+            RUN,
+            &Report {
+                summary: "handback".into(),
+                spend_usd: None,
+                tokens: Some(Tokens::Total(1000)),
+            },
+            "claude@algedonic.dev",
+            "2026-09-18T19:00:00Z".parse().unwrap(),
+        )
+        .await
+        .expect("reports");
+        let calls = log.calls.lock().unwrap().clone();
+        assert!(
+            calls
+                .iter()
+                .any(|(m, p, _)| m == "PATCH" && p.ends_with("/metadata")),
+            "the handback is still on the packet: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|(m, _, _)| m == "POST"),
+            "no row asserting an outcome the run has not reached: {calls:?}"
+        );
     }
 
     /// Before the green, `reported` is pending: the report rides the

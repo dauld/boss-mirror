@@ -48,7 +48,7 @@
 // answers the question that actually matters — is the server on that
 // port serving THIS tree — and refuses to reuse anything else. Under CI
 // it refuses unconditionally. See src/dev-tree.ts.
-import { MOCKED_FLAG } from '../src/dev-mocked';
+import { MOCKED_FLAG, isMissSummary, missRefusal } from '../src/dev-mocked';
 import { waitForReadyLine } from '../src/dev-ready';
 import { DEFAULT_PORT, chooseTarget } from '../src/dev-tree';
 
@@ -94,6 +94,13 @@ async function isServed(readyUrl: string, timeoutMs: number): Promise<boolean> {
 
 let devServer: ReturnType<typeof Bun.spawn> | null = null;
 let weStartedIt = false;
+// The dev-server's exit-time miss summary, read off its stdout — and
+// the promise that says stdout has ended, so the summary has been read
+// before the verdict is taken (backlog 06038ed8). A reused server is
+// somebody else's process: nothing is piped, so nothing is judged, and
+// the run says so below.
+const missSummaryLines: string[] = [];
+let serverDrained: Promise<void> | null = null;
 
 function stopDevServer(): void {
   if (devServer && weStartedIt) {
@@ -152,7 +159,11 @@ async function main(): Promise<never> {
     // `Unable to connect` lines that redded a gate and were green on
     // the re-gate (backlog aa828f3e, class 63a242ca). The HTTP probe
     // below still gates the BUNDLE; this gates the bind.
-    await waitForReadyLine(started.stdout, target.port, LISTENING_TIMEOUT_MS, (line) => console.log(line));
+    const wait = await waitForReadyLine(started.stdout, target.port, LISTENING_TIMEOUT_MS, (line) => {
+      console.log(line);
+      if (isMissSummary(line)) missSummaryLines.push(line);
+    });
+    serverDrained = wait.drained;
     log(`server reports listening on :${target.port}`);
   }
 
@@ -223,8 +234,24 @@ async function main(): Promise<never> {
   // Let the server print its miss summary (on SIGTERM) before this
   // process exits, so the line lands inside the run's own output —
   // bounded, because a server that will not stop is not worth waiting on.
+  // The wait is on the stdout DRAIN, not on the exit: the process being
+  // gone does not mean its last line has been read, and that line is
+  // the verdict below.
   if (devServer && weStartedIt) {
-    await Promise.race([devServer.exited, Bun.sleep(5_000)]);
+    await Promise.race([serverDrained ?? devServer.exited, Bun.sleep(5_000)]);
+  }
+  // REFUSE a run that leaked reads to the dev-server (backlog 06038ed8).
+  // installApiFloor(page) is the one lowest layer every mounter starts
+  // from; car f88e7908 took a full run from 403 unanswered /api/** reads
+  // (16 paths) to none, and until now nothing held it there — the line
+  // was printed and the run exited green anyway.
+  if (!weStartedIt) {
+    log('reused server: its stdout is not ours to read, so this run cannot judge unanswered /api/** reads');
+  }
+  const refusal = missRefusal(missSummaryLines.at(-1) ?? null);
+  if (refusal !== null) {
+    log(refusal);
+    process.exit(1);
   }
   process.exit(code);
 }

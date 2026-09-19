@@ -290,8 +290,13 @@ fn build_router(
     local_auth_state: Option<Arc<LocalAuthState>>,
     public_reads: &public_reads::PublicReads,
 ) -> axum::Router<Arc<AppState>> {
+    // `/health` is NOT here: the gateway's own liveness answer is a
+    // sessionless read like any other, so it is a row in
+    // `public_reads::PUBLIC_BY_DESIGN` with its reason, registered by
+    // `public_reads::mount` below (backlog bf1f5ad2, 2026-09-19). It
+    // sat here as a route returning a constant, which made the set of
+    // sessionless answers "that module, plus this line".
     let app = axum::Router::new()
-        .route("/health", axum::routing::get(handle_health))
         .route("/api/session", axum::routing::get(api::session))
         .route(
             "/api/tenant/manifest",
@@ -871,10 +876,6 @@ fn build_router(
     } else {
         app
     }
-}
-
-async fn handle_health() -> &'static str {
-    "ok"
 }
 
 /// Anything under `/api` that matched no service above is a routing
@@ -1474,6 +1475,19 @@ mod routing_tests {
             !body.contains(MISS),
             "`/api/observability/health` reached the /api catch-all: {body}"
         );
+    }
+
+    /// The gateway's own liveness answer keeps answering a stranger,
+    /// now that the table and not this file registers it (backlog
+    /// bf1f5ad2, 2026-09-19). `boss doctor` reads it with no session
+    /// and the tunnel rotation verifies a new connector by asking for
+    /// it through the edge, so the move had to be invisible on the
+    /// wire: 200, `ok`, no session.
+    #[tokio::test]
+    async fn the_liveness_answer_is_still_ok_to_a_sessionless_caller() {
+        let (status, body) = get(app(), "/health").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, "ok", "the constant is the answer, unchanged");
     }
 
     /// The calendar feed is public BY DESIGN on every instance, whatever

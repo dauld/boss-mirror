@@ -38,7 +38,13 @@
 //!     (`infra/forge/probe-bin/sor-routes.sh`); the `name=port` table is
 //!     `BOSS_SOR_PORTS`, else `infra/forge/sor-ports.env` read from
 //!     beside the script; absent both, nothing is routed. A table that
-//!     lacks the routed service is refused before curl.
+//!     lacks the routed service is refused before curl;
+//!   * `BOSS_SOR_SERVICE` names the service when no path can route to
+//!     it (backlog bf1f5ad2, 2026-09-19) — the gateway fronts every
+//!     path, so it is reached by name, the way the forge's
+//!     `boss-gateway-read` reaches it. Without this a builder
+//!     rehearsing a gateway probe hand-set the host and the port table
+//!     and was not using the door at all.
 
 use boss_testing::{create_dir, repo_root, scratch_dir, write_exec, write_file};
 use std::path::{Path, PathBuf};
@@ -143,8 +149,11 @@ impl Fixture {
             .env_remove("BOSS_ACTOR")
             .env_remove("BOSS_ACTOR_FILE")
             // The port table comes from the tree's file unless a test
-            // sets it — never from the caller's shell.
+            // sets it — never from the caller's shell. Nor does the
+            // named-service override leak in from the shell that ran
+            // the suite.
             .env_remove("BOSS_SOR_PORTS")
+            .env_remove("BOSS_SOR_SERVICE")
             .env_remove("STUB_BODY")
             .env_remove("STUB_CODE");
         cmd
@@ -741,6 +750,117 @@ fn a_table_that_lacks_the_service_is_refused_before_curl_and_the_env_table_wins(
     assert_eq!(
         f.curl_argv().last().map(String::as_str),
         Some("http://sor.test:9999/api/people/accounts")
+    );
+}
+
+// =====================================================================
+// THE ONE SERVICE NO PATH ROUTES TO (backlog bf1f5ad2, 2026-09-19).
+// The gateway fronts every path there is, so no prefix can route to it
+// — the machine door carries it as a row a reader reaches BY NAME
+// (the_machine_door_carries_every_read_surface.rs, NOT_PATH_ROUTED).
+// The forge has such a reader, `boss-gateway-read`; the pod had none,
+// so a builder rehearsing a gateway probe set the host AND the port
+// table by hand and the door was not the door. `BOSS_SOR_SERVICE` is
+// that name on this door: the path decides the service unless a name
+// is given, and then the name decides it.
+// =====================================================================
+
+/// Named, the read leaves on the gateway's port with the host kept —
+/// and the SAME path with no name is the jobs API, which is what makes
+/// the name (not the path) the thing that routed it.
+#[test]
+fn a_named_service_sends_the_read_to_that_services_port() {
+    let f = Fixture::new("route-named-service");
+
+    let r = f.run(
+        &["GET", "/health"],
+        &[("BOSS_ACTOR", "agent-x"), ("BOSS_SOR_SERVICE", "gateway")],
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        f.curl_argv().last().map(String::as_str),
+        Some(format!("http://sor.test:{}/health", boss_ports::prod("gateway")).as_str()),
+        "the named service decides the port; the host is still the system of record's"
+    );
+
+    let r = f.run(&["GET", "/health"], &[("BOSS_ACTOR", "agent-x")]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        f.curl_argv().last().map(String::as_str),
+        Some("http://sor.test:7900/health"),
+        "unnamed, /health is not a routed prefix and stays on the base"
+    );
+
+    // Blank is not a name: it falls through to the path, exactly as a
+    // blank BOSS_ACTOR falls through to the file.
+    let r = f.run(
+        &["GET", "/api/people/accounts"],
+        &[("BOSS_ACTOR", "agent-x"), ("BOSS_SOR_SERVICE", "  ")],
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        f.curl_argv().last().map(String::as_str),
+        Some(
+            format!(
+                "http://sor.test:{}/api/people/accounts",
+                boss_ports::prod("accounts")
+            )
+            .as_str()
+        ),
+        "a blank name is not an answer; the path still routes"
+    );
+}
+
+/// A name the table cannot place, or a name with no table at all, is
+/// refused before curl — never sent to the jobs port. Reading the jobs
+/// port under a gateway question answers 200 with a narrowed world
+/// (the defect boss-gateway-read refuses for the same reason), and a
+/// wrong target answers instead of erroring.
+#[test]
+fn a_named_service_the_table_cannot_place_is_refused_before_curl() {
+    let f = Fixture::new("route-named-missing");
+
+    let r = f.run(
+        &["GET", "/health"],
+        &[
+            ("BOSS_ACTOR", "agent-x"),
+            ("BOSS_SOR_SERVICE", "gateway"),
+            ("BOSS_SOR_PORTS", "jobs=7900 people=7500"),
+        ],
+    );
+    assert_eq!(
+        r.code, 2,
+        "a table without the service refuses: {}",
+        r.stderr
+    );
+    assert!(f.curl_argv().is_empty(), "curl must not run");
+    assert!(
+        r.stderr.contains("gateway") && r.stderr.contains("jobs=7900 people=7500"),
+        "the refusal names the service and the table it read: {}",
+        r.stderr
+    );
+    assert!(!r.stderr.contains("HTTP:"), "no request: {}", r.stderr);
+
+    // No table at all is the same refusal, not the silent fall-through
+    // an unnamed path gets: a name that cannot be placed must never
+    // leave on the base.
+    let lone = f.root.join("lone-named");
+    create_dir(&lone);
+    let script_text = std::fs::read_to_string(repo_root().join(SCRIPT)).expect("read boss-api");
+    write_exec(&lone.join("boss-api"), &script_text);
+    write_file(&lone.join("sor-url"), "http://lone.test:7900\n");
+    f.clear_argv();
+    let r = Fixture::finish(
+        f.command(&lone.join("boss-api")),
+        &["GET", "/health"],
+        &[("BOSS_ACTOR", "agent-x"), ("BOSS_SOR_SERVICE", "gateway")],
+    );
+    assert_eq!(r.code, 2, "no table, no placing the name: {}", r.stderr);
+    assert!(f.curl_argv().is_empty(), "curl must not run");
+    assert!(
+        r.stderr.contains("gateway") && r.stderr.contains("BOSS_SOR_PORTS"),
+        "the refusal names the service and where a table comes from: {}",
+        r.stderr
     );
 }
 

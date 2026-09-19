@@ -48,6 +48,18 @@
 //! A by-design row is never an `/api` path: an `/api` read that a
 //! stranger may make is a tenant's choice, and belongs in
 //! [`PUBLISHABLE`] behind a declaration.
+//!
+//! AND THE ONE THE GATEWAY ANSWERS ITSELF (backlog bf1f5ad2,
+//! 2026-09-19). That inventory left `/health` outside every table —
+//! not a proxy at all, a route in `main.rs` returning a constant, so
+//! the set of sessionless answers was "this module, plus one line you
+//! have to know about". It is now a row like the others, decided
+//! rather than inherited, with [`Served::ByTheGatewayItself`] for the
+//! kind of answer it is: the gateway's own liveness, which its readers
+//! (`boss doctor`, the tunnel rotation's verify) ask for with no
+//! session because they have none to hold. `mount` registers it from
+//! the row, so THE TABLE IS THE SET — nothing else in this binary
+//! answers a caller who has not signed in.
 
 use std::sync::Arc;
 
@@ -98,22 +110,52 @@ pub static PUBLISHABLE: &[PublicRead] = &[
 pub struct PublicByDesign {
     /// The route-table matcher.
     pub matcher: &'static str,
-    /// The upstream that serves it.
-    pub upstream: &'static ProxyConfig,
+    /// What answers it.
+    pub served: Served,
     /// Why no session can be asked for here.
     pub why: &'static str,
 }
 
+/// What answers a by-design public read. A sessionless answer either
+/// comes from a service — and then the row says which — or from this
+/// process, and then the row carries the answer itself: there is no
+/// third kind, and a route in `main.rs` answering a constant of its
+/// own was the fourth (backlog bf1f5ad2).
+#[derive(Clone, Copy)]
+pub enum Served {
+    /// Proxied, without a session, to a service.
+    Upstream(&'static ProxyConfig),
+    /// Answered by the gateway process itself, from the constant the
+    /// row holds — no upstream, no state, nothing of the tenant in it.
+    ByTheGatewayItself(fn() -> &'static str),
+}
+
 /// The closed table of by-design public reads. GET only, like
 /// [`PUBLISHABLE`]; never an `/api` path (pinned below).
-pub static PUBLIC_BY_DESIGN: &[PublicByDesign] = &[PublicByDesign {
-    matcher: "/ics/{*rest}",
-    upstream: &proxy::JOBS,
-    why: "the calendar feed: a calendar client subscribes by URL and cannot hold a \
-          session cookie, so the 256-bit token in the path IS the credential, minted \
-          per owner and validated by boss-jobs-api on every read; an undeclared \
-          instance answering 401 here would silently empty every subscribed calendar",
-}];
+pub static PUBLIC_BY_DESIGN: &[PublicByDesign] = &[
+    PublicByDesign {
+        matcher: "/ics/{*rest}",
+        served: Served::Upstream(&proxy::JOBS),
+        why: "the calendar feed: a calendar client subscribes by URL and cannot hold a \
+              session cookie, so the 256-bit token in the path IS the credential, minted \
+              per owner and validated by boss-jobs-api on every read; an undeclared \
+              instance answering 401 here would silently empty every subscribed calendar",
+    },
+    PublicByDesign {
+        matcher: "/health",
+        served: Served::ByTheGatewayItself(|| "ok"),
+        why: "liveness: a probe with no session must still be able to learn that this \
+              process is up, and the answer carries nothing — the constant beside this \
+              row, from the gateway itself, with no upstream, no session and no tenant \
+              data in it. Its readers hold no session and cannot: `boss doctor` asks the \
+              loopback port before there is anyone to be (boss-cli doctor.rs), and the \
+              Cloudflare tunnel credential rotation verifies a freshly minted connector \
+              by asking for this path THROUGH the edge (credential_rotate_cloudflare_\
+              tunnel.rs VERIFY_PATH), where a 401 would fail every rotation. Gating it \
+              would buy nothing either: the cluster readiness probe already reads `/` \
+              (boss.yaml), so what a session would protect here is the word ok",
+    },
+];
 
 /// The resolved declaration: which of [`PUBLISHABLE`] this instance
 /// answers without a session. Built once at boot; the route table
@@ -181,7 +223,8 @@ impl PublicReads {
 }
 
 /// Register every sessionless read in the route table. The by-design
-/// rows first, GET only, on every instance. Then the four, each by
+/// rows first, GET only, on every instance — proxied to the row's
+/// upstream, or answered here from the row's own constant. Then the four, each by
 /// what this instance declared: declared → GET through the sessionless
 /// proxy, every other method through the gated one (the same
 /// MethodRouter, or a POST to `/api/workflows` would answer 405 — the
@@ -190,13 +233,18 @@ impl PublicReads {
 /// register the same matchers, so the route table's SHAPE does not
 /// depend on the declaration — only which proxy answers a GET.
 pub fn mount(app: axum::Router<Arc<AppState>>, reads: &PublicReads) -> axum::Router<Arc<AppState>> {
-    let app = PUBLIC_BY_DESIGN.iter().fold(app, |app, read| {
-        let upstream = read.upstream;
-        app.route(
-            read.matcher,
-            axum::routing::get(move |s, r| proxy::handle_public(s, r, upstream)),
-        )
-    });
+    let app = PUBLIC_BY_DESIGN
+        .iter()
+        .fold(app, |app, read| match read.served {
+            Served::Upstream(upstream) => app.route(
+                read.matcher,
+                axum::routing::get(move |s, r| proxy::handle_public(s, r, upstream)),
+            ),
+            Served::ByTheGatewayItself(answer) => app.route(
+                read.matcher,
+                axum::routing::get(move || async move { answer() }),
+            ),
+        });
     PUBLISHABLE.iter().fold(app, |app, read| {
         let upstream = read.upstream;
         let public = reads.is_public(read);
@@ -332,6 +380,37 @@ mod tests {
                     row.matcher
                 );
             }
+        }
+    }
+
+    /// THE GATEWAY'S OWN LIVENESS ANSWER IS A ROW LIKE ANY OTHER
+    /// (backlog bf1f5ad2, 2026-09-19). `/health` was the one
+    /// sessionless answer this module did not hold: a route in
+    /// `main.rs` answering a constant, decided by nobody and findable
+    /// only by reading the route table. The set of sessionless answers
+    /// is this table or it is nothing — so the liveness answer is a
+    /// row, and one the gateway serves ITSELF, which is the whole
+    /// reason no session can be asked for it.
+    #[test]
+    fn the_gateways_own_liveness_answer_is_a_row_served_by_the_gateway_itself() {
+        let row = PUBLIC_BY_DESIGN
+            .iter()
+            .find(|r| r.matcher == "/health")
+            .expect(
+                "the gateway answers /health without a session (boss doctor and the tunnel \
+                 rotation's verify both read it unidentified) — it belongs in this table with \
+                 its reason, or it must stop answering",
+            );
+        match row.served {
+            Served::ByTheGatewayItself(answer) => assert_eq!(
+                answer(),
+                "ok",
+                "the row serves the liveness constant, so the table holds the ANSWER too"
+            ),
+            Served::Upstream(_) => panic!(
+                "/health is answered by the gateway process itself; a row that proxied it \
+                 would be asserting something about a service, not about this process"
+            ),
         }
     }
 

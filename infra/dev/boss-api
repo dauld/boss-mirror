@@ -55,9 +55,29 @@
 # refused before curl, because a 404 from the wrong port is the defect
 # this removes, not a fallback.
 #
+# WHEN NO PATH CAN ROUTE — `BOSS_SOR_SERVICE=<name>` (backlog bf1f5ad2,
+# 2026-09-19). The gateway fronts every path there is, so no prefix
+# routes to it; the machine door carries it as the one row a reader
+# reaches BY NAME (the_machine_door_carries_every_read_surface.rs,
+# NOT_PATH_ROUTED). The forge has such a reader — probe-bin/boss-gateway-read
+# — and the pod had none, so a builder rehearsing a gateway probe set
+# the host and the port table by hand and the door stopped being the
+# door. Named, the name decides the service and the path decides
+# nothing; unnamed, nothing changes. A name the table cannot place is
+# refused before curl, with or without a table: the fall-through an
+# unrouted path gets would send a gateway question to the jobs port,
+# which answers. This door still SIGNS its calls, and a signed read is
+# not a stranger's read — but the gateway strips every client
+# `x-boss-*` header at its edge (role_headers.rs: identity comes from
+# the session cookie, full stop), so what comes back is what a caller
+# with no session gets. For a RECORDED probe, use the forge's reader:
+# it sends nothing at all and prints the status alone.
+#
 # The pod-specific constants are env-overridable:
 #   BOSS_JOBS_URL            the base URL; else the line in ./sor-url
 #   BOSS_SOR_PORTS           `name=port …`; else ../forge/sor-ports.env
+#   BOSS_SOR_SERVICE         the service to read, when no path routes to
+#                              it (`gateway`); else the path decides
 #   BOSS_ACTOR               who the call signs as — the id; else the one
 #   BOSS_ACTOR_FILE            line in this file ($HOME/.config/boss/actor,
 #                              as the boss CLI reads it)
@@ -90,6 +110,15 @@ if [ -z "$SOR_PORTS" ] && [ -r "$SOR_PORTS_FILE" ]; then
   SOR_PORTS=$(grep -Ev '^[[:space:]]*(#|$)' "$SOR_PORTS_FILE" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//' || true)
   SOR_PORTS_FROM=$SOR_PORTS_FILE
 fi
+# A NAME, when no path can route (backlog bf1f5ad2). Blank is not a
+# name, as everywhere else here. Absent a table there is nothing to
+# place it against, and leaving on the base would send a gateway
+# question to the jobs port — refuse instead.
+NAMED_SERVICE=$(printf '%s' "${BOSS_SOR_SERVICE:-}" | tr -d '[:space:]')
+if [ -n "$NAMED_SERVICE" ] && [ -z "$SOR_PORTS" ]; then
+  echo "boss-api: refusing $METHOD $API_PATH: BOSS_SOR_SERVICE names \`$NAMED_SERVICE\`, and no port table was found (BOSS_SOR_PORTS is unset and $SOR_PORTS_FILE is not readable) — so there is nothing to place that name against. Sending it to the base would ask $NAMED_SERVICE's question of the jobs port, which answers instead of erroring." >&2
+  exit 2
+fi
 if [ -n "$SOR_PORTS" ]; then
   SOR_ROUTES="$HERE/../forge/probe-bin/sor-routes.sh"
   [ -r "$SOR_ROUTES" ] || {
@@ -98,10 +127,14 @@ if [ -n "$SOR_PORTS" ]; then
   }
   # shellcheck source=../forge/probe-bin/sor-routes.sh
   . "$SOR_ROUTES"
-  SERVICE=$(sor_service_for_path "$API_PATH")
+  if [ -n "$NAMED_SERVICE" ]; then
+    SERVICE=$NAMED_SERVICE; SERVICE_FROM="BOSS_SOR_SERVICE names it"
+  else
+    SERVICE=$(sor_service_for_path "$API_PATH"); SERVICE_FROM="the path is served by $SERVICE"
+  fi
   if [ "$SERVICE" != jobs ]; then
     PORT=$(sor_port_for_service "$SERVICE" "$SOR_PORTS") || {
-      echo "boss-api: refusing $METHOD $API_PATH: it is served by $SERVICE, and the port table names no port for it (table: '$SOR_PORTS', from $SOR_PORTS_FROM). Sending it to the jobs port would answer 404 about a surface that exists — refusing rather than guessing." >&2
+      echo "boss-api: refusing $METHOD $API_PATH: $SERVICE_FROM, and the port table names no port for $SERVICE (table: '$SOR_PORTS', from $SOR_PORTS_FROM). Sending it to the jobs port would answer 404 about a surface that exists — refusing rather than guessing." >&2
       exit 2
     }
     BASE=$(sor_base_on_port "$BASE" "$PORT")

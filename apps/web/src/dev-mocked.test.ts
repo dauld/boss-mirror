@@ -7,7 +7,7 @@
 
 import { describe, expect, test } from 'bun:test';
 
-import { MOCKED_FLAG, apiHandler, isMocked, missSummary } from './dev-mocked';
+import { MOCKED_FLAG, apiHandler, isMissSummary, isMocked, missRefusal, missSummary } from './dev-mocked';
 
 const url = (path: string): URL => new URL(`http://127.0.0.1:5174${path}`);
 
@@ -97,5 +97,46 @@ describe('missSummary', () => {
     expect(line).toContain('46 /api/** request(s)');
     expect(line).toContain('3 distinct');
     expect(line).toMatch(/GET \/api\/people x42.*GET \/api\/jobs x3.*POST \/api\/surface-opens x1/);
+  });
+});
+
+// THE RUNNER'S REFUSAL (backlog 06038ed8). Until 2026-09-19 the summary
+// line was only echoed: tests/run-mocked.ts exited on Playwright's code
+// alone, so a spec that mounted without installApiFloor leaked its
+// reads to the dev-server again and the run still read green — the
+// 403-misses-per-run measurement that car f88e7908 drove to zero had
+// nothing mechanical holding it there. These two functions are the
+// decision the runner makes, pure: what the summary line looks like,
+// and what a run that printed one is told.
+describe('isMissSummary', () => {
+  test('recognises the line the dev-server prints at exit', () => {
+    const line = missSummary(new Map([['GET /api/jobs', 3]]));
+    expect(line).not.toBeNull();
+    expect(isMissSummary(line ?? '')).toBe(true);
+  });
+
+  test('is not any other line the dev-server prints', () => {
+    for (const other of [
+      'boss-web dev server: http://127.0.0.1:5174',
+      '  api proxy → OFF (mocked mode: an /api/** miss answers 404 locally, summarised at exit)',
+      'Bundled page in 5966ms: index.html',
+      '',
+    ]) {
+      expect(isMissSummary(other)).toBe(false);
+    }
+  });
+});
+
+describe('missRefusal', () => {
+  test('is null when no summary was printed — the mock answered everything', () => {
+    expect(missRefusal(null)).toBeNull();
+  });
+
+  test('names the paths that leaked and the floor that answers them', () => {
+    const line = missSummary(new Map([['GET /api/workflows', 12]])) ?? '';
+    const refusal = missRefusal(line);
+    expect(refusal).not.toBeNull();
+    expect(refusal).toContain('GET /api/workflows x12');
+    expect(refusal).toContain('installApiFloor');
   });
 });

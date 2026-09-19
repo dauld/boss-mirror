@@ -907,6 +907,12 @@ cat '{jobs}'
     /// value `UNSET` removes the variable (so the verb takes its
     /// default); an empty string is set empty, as the verb reads it.
     fn go_with(&self, extra: &[(&str, String)]) -> (bool, String) {
+        self.go_argv("", extra)
+    }
+
+    /// `go_with`, with the verb's one argument — empty for a publish
+    /// run, `--measure` for the drift refresh (design cb38d806).
+    fn go_argv(&self, argv1: &str, extra: &[(&str, String)]) -> (bool, String) {
         let outer = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
         // Ours first: `stub_bin` stands in for tools this box LACKS, and
         // gh/curl must be ours even where the box has them.
@@ -917,6 +923,9 @@ cat '{jobs}'
         );
         let mut cmd = Command::new("bash");
         cmd.arg(script()).env_clear().env("PATH", path);
+        if !argv1.is_empty() {
+            cmd.arg(argv1);
+        }
         for (k, v) in base_env(&self.root) {
             cmd.env(k, v);
         }
@@ -1350,5 +1359,174 @@ fn the_default_fork_is_the_mirrors_real_fork() {
     assert!(
         !out.contains("https://github.com/dauld/boss.git"),
         "the fork default is still dauld/boss, David's unrelated private repository: {out}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// `--measure` — the drift re-measurement onto a HELD publish packet
+// (design cb38d806, backlog e1b6ddf7).
+//
+// A publish packet held at its approve sign-off used to cost the
+// cadence every day behind it: `publish-to-github-daily` fires only on
+// `NOT open_publish_exists("github-mirror")`, so the PII hold of
+// 2026-09-17 -> 09-18 skipped a week and #239 arrived as a 396-commit
+// / 1319-file snapshot no reader — and no CodeQL run — can read as a
+// change. `--measure` is the other half of the answer: the same two
+// fetches a publish makes, no token, no push, no PR, and the numbers
+// land on the open packet with the instant they were taken, so the
+// packet David signs carries today's measurement.
+// ---------------------------------------------------------------------
+
+impl Run {
+    /// Replace the fixture's curl with one that answers the GET from
+    /// `jobs.json`, SAVES a PATCH body and echoes it back under
+    /// `data.metadata` the way the jobs API answers a metadata merge —
+    /// the verb verifies its own write from that response, because an
+    /// API's answer is not an API's effect.
+    fn echoing_curl(&self) {
+        boss_testing::write_exec(
+            &self.stubs.join("curl"),
+            &format!(
+                r#"#!/bin/sh
+echo "$*" >> '{log}'
+payload=
+for a in "$@"; do
+    case "$a" in
+        @*) payload="${{a#@}}" ;;
+    esac
+done
+for a in "$@"; do
+    if [ "$a" = "PATCH" ]; then
+        cp "$payload" '{patch}'
+        printf '{{"data":{{"metadata":%s}}}}\n' "$(cat "$payload")"
+        exit 0
+    fi
+    if [ "$a" = "PUT" ]; then exit 0; fi
+done
+cat '{jobs}'
+"#,
+                log = self.root.join("curl.log").display(),
+                patch = self.root.join("patch.json").display(),
+                jobs = self.root.join("jobs.json").display(),
+            ),
+        );
+    }
+
+    /// A secrets scan the measure run calls instead of the published
+    /// tree's own `infra/lint/no-secrets.sh` — the fixture's tree is
+    /// one file and holds no lint. `verdict` is what it answers.
+    fn planted_scan(&self, verdict: i32) -> String {
+        let scan = self.root.join("scan.sh");
+        boss_testing::write_exec(
+            &scan,
+            &format!("#!/bin/sh\necho 'no-secrets: scanned'\nexit {verdict}\n"),
+        );
+        scan.display().to_string()
+    }
+
+    fn measure(&self, extra: &[(&str, String)]) -> (bool, String) {
+        self.echoing_curl();
+        self.go_argv("--measure", extra)
+    }
+
+    /// The PATCH body the run sent, as JSON.
+    fn patched(&self) -> serde_json::Value {
+        let body = std::fs::read_to_string(self.root.join("patch.json"))
+            .expect("the run wrote no PATCH body");
+        serde_json::from_str(&body).expect("the PATCH body is JSON")
+    }
+}
+
+#[test]
+fn a_measure_run_records_todays_drift_on_the_open_packet() {
+    if !have_real_jq() {
+        eprintln!("publish_github_pr_sh: SKIPPED — the measure path needs a real jq");
+        return;
+    }
+    let run = Run::new("measure-refresh");
+    let scan = run.planted_scan(0);
+    let (ok, out) = run.measure(&[("BOSS_SECRETS_SCAN", scan)]);
+    assert!(ok, "--measure refused a complete input set: {out}");
+    // The numbers, from the fixture's own two trees: one commit ahead,
+    // one file differing, no file that never existed on the mirror.
+    let body = run.patched();
+    let d = &body["drift_refresh"];
+    assert_eq!(d["commits_ahead"], "1", "commits_ahead: {body}");
+    assert_eq!(d["files_changed"], "1", "files_changed: {body}");
+    assert_eq!(d["newly_public"], "0", "newly_public: {body}");
+    assert_eq!(d["secrets_scan"], "clean", "secrets_scan: {body}");
+    assert_eq!(d["has_drift"], "true", "has_drift: {body}");
+    // The refresh time is the point: a held packet whose measurement
+    // carries no instant is last week's number wearing today's date.
+    assert!(
+        body["drift_refreshed_at"]
+            .as_str()
+            .is_some_and(|s| s.len() >= 20),
+        "no drift_refreshed_at on the annotation: {body}"
+    );
+    // A measurement, never a publication: no push, no PR.
+    assert!(!run.pushed(), "--measure pushed to the fork: {out}");
+    assert!(
+        !run.gh_log().contains("pr create"),
+        "--measure opened a pull request: {}",
+        run.gh_log()
+    );
+    assert!(
+        run.curl_log().contains("PATCH"),
+        "the measurement never reached the packet: {}",
+        run.curl_log()
+    );
+}
+
+#[test]
+fn a_measure_run_with_no_open_packet_writes_nothing() {
+    if !have_real_jq() {
+        eprintln!("publish_github_pr_sh: SKIPPED — the measure path needs a real jq");
+        return;
+    }
+    let run = Run::new("measure-no-packet");
+    boss_testing::write_file(&run.root.join("jobs.json"), r#"{"data":[]}"#);
+    let scan = run.planted_scan(0);
+    let (ok, out) = run.measure(&[("BOSS_SECRETS_SCAN", scan)]);
+    assert!(ok, "an empty board is not a failure: {out}");
+    assert!(
+        !run.curl_log().contains("PATCH"),
+        "a run with no open packet wrote anyway: {}",
+        run.curl_log()
+    );
+}
+
+/// A scan that FINDS something is a finding ON the packet, not a
+/// refusal: the reviewer must see what today's tree would publish. A
+/// scan that cannot RUN is the opposite — no evidence is not a pass —
+/// and the run answers `not yet` (75) having written nothing.
+#[test]
+fn a_secrets_finding_rides_the_annotation_and_an_unrunnable_scan_writes_nothing() {
+    if !have_real_jq() {
+        eprintln!("publish_github_pr_sh: SKIPPED — the measure path needs a real jq");
+        return;
+    }
+    let found = Run::new("measure-secrets");
+    let scan = found.planted_scan(1);
+    let (ok, out) = found.measure(&[("BOSS_SECRETS_SCAN", scan)]);
+    assert!(ok, "a secrets finding is recorded, not refused: {out}");
+    assert_eq!(
+        found.patched()["drift_refresh"]["secrets_scan"],
+        "FAILED",
+        "the finding did not reach the packet: {out}"
+    );
+
+    let blind = Run::new("measure-noscan");
+    let absent = blind.root.join("absent.sh").display().to_string();
+    let (ok, out) = blind.measure(&[("BOSS_SECRETS_SCAN", absent)]);
+    assert!(!ok, "a measurement with no scan behind it passed: {out}");
+    assert!(
+        out.contains("not yet"),
+        "an unrunnable scan must answer `not yet`: {out}"
+    );
+    assert!(
+        !blind.curl_log().contains("PATCH"),
+        "it wrote a drift with no scan behind it: {}",
+        blind.curl_log()
     );
 }

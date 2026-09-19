@@ -1,0 +1,69 @@
+# Measure the mirror's drift onto the OPEN publish packet, every day.
+#
+# THE DEFECT (design cb38d806, backlog e1b6ddf7). `publish-to-github-
+# daily` fires only on `NOT open_publish_exists("github-mirror")`. That
+# guard is right about twins (9f0c566a: two identical packets one day
+# apart) and wrong about HOLDS: one packet left open at its approve
+# sign-off retires the cadence for every day behind it — the fourth
+# instance of `a-dedup-guard-silently-retires-a-cadence`. The PII hold
+# of 2026-09-17 -> 09-18 skipped the week, b831512f closed `superseded`,
+# and #239 arrived as a 396-commit / 1319-file snapshot that no reader
+# and no CodeQL run can read as a change. The design's answer is that a
+# hold must not cost the days behind it: the drift is measured AGAIN
+# onto the packet already open, so the numbers David signs are today's.
+#
+# THIS RULE CARRIES NO GUARD, and that is the whole point. A dedup
+# guard is what retired the cadence it is paired with; adding one here
+# would be the same defect one level over. Instead the IDEMPOTENCE
+# lives in the verb: `mirror-drift` finds the one open publish packet,
+# overwrites `drift_refresh` on it and writes nothing else, and on a
+# day with no open packet answers `nothing to refresh` and exits 0
+# before it fetches anything. So this rule fires every day, and what it
+# costs on a quiet day is one jobs-API read. (Compare
+# `design-review-level-sweep`, the one rule that kept working through
+# the nineteen-day silence of 2026-09-10: it had no `when` at all.)
+#
+# WHY NOT A TRAIN'S ARRIVAL, which is when the drift actually changes.
+# A `when` helper is evaluated for EVERY event on its topic — the
+# expression language has no short-circuit (boss-expr `eval`, measured
+# 2026-09-19 on this car) — so `open_publish_exists` on
+# `jobs.job.closed` would put a jobs-API read on every packet close in
+# the system and a dead-letter on every blip. Daily asks it once, in
+# the verb, where the answer is already needed.
+#
+# THE VERB IS ITS OWN FILE, NOT A MODE THIS RULE SELECTS. `jobs.spawn`
+# carries no args list, so a packet a rule files can only take a verb's
+# defaults — and `publish-github-pr`'s default is the publish itself.
+# So the re-measurement is `mirror-drift`
+# (infra/ops/verbs/mirror-drift.json), whose argv fixes `--measure`:
+# this rule cannot file a publication even by mistake, and the approve
+# sign-off stays the only door to one.
+#
+# The packet's subject is the MIRROR, not the host that runs the verb
+# (`metadata.host` is what the ops-runner routes on): one identity this
+# rule alone files, so `cadence_roster::clock_cadences` derives a
+# cadence the silence sweep can actually measure — a daily
+# `ops-request/github-mirror` — rather than one hidden inside the
+# forge's ordinary traffic.
+[[rule]]
+name = "refresh-publish-drift-daily"
+why = """
+A TIMER, the standing exemption: no packet causes "a day passed", and
+the packet this one refreshes is by definition sitting still — a held
+publish packet emits nothing while it waits for a sign-off, so there
+is no event a Workflow `on` consequence could hang the re-measurement
+from. Decided in design cb38d806 (David, 2026-09-19: publishing to
+GitHub is smooth by 1.0.0), measured on backlog e1b6ddf7: the daily
+publish rule's `NOT open_publish_exists` guard skipped 2026-09-17 ->
+09-18 behind a PII hold and #239 arrived as a 396-commit / 1319-file
+snapshot. It files a MEASUREMENT (the mirror-drift verb's argv fixes
+`--measure`: two fetches, a secrets scan of the tree that would be
+published, and a metadata annotation — no token, no push, no pull
+request), so the packet David signs always carries today's numbers and
+a hold never costs the days behind it. It adds no routing: one firing
+spawns one ops-request, and what happens next is that protocol's row.
+"""
+schedule = { cadence = "daily", anchor_date = "2026-09-19" }
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"ops-request\"", subject_kind = "\"custom\"", subject = "\"github-mirror\"", title = "\"re-measure the mirror drift onto the open publish packet\"", "metadata.host" = "\"forge\"", "metadata.verb" = "\"mirror-drift\"", "metadata.area" = "\"platform\"" }

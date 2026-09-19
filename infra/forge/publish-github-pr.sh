@@ -273,6 +273,12 @@ FORGE_SAFE_CONFIG="$workdir/forge-safe.gitconfig"
 printf '[safe]\n\tdirectory = %s\n' "$FORGE_REPO" > "$FORGE_SAFE_CONFIG"
 forge_git() { GIT_CONFIG_GLOBAL="$FORGE_SAFE_CONFIG" git "$@"; }
 
+# The private bare clone both a publish and a --measure read through:
+# defined here rather than in the run path below because --measure
+# exits before it (one definition, not two — CLAUDE.md §9a).
+g() { git -C "$CLONE" "$@"; }
+set_remote() { g remote get-url "$1" >/dev/null 2>&1 && g remote set-url "$1" "$2" || g remote add "$1" "$2"; }
+
 # ---------------------------------------------------------------------
 # Preconditions — the same list --check reports on.
 # ---------------------------------------------------------------------
@@ -413,6 +419,140 @@ if [ "${1:-}" = "--check" ]; then
 fi
 
 # ---------------------------------------------------------------------
+# --measure: RE-MEASURE the drift onto the OPEN publish packet.
+#
+# WHY (design cb38d806, backlog e1b6ddf7). `publish-to-github-daily`
+# fires only on `NOT open_publish_exists("github-mirror")`, so one
+# packet held at its approve sign-off retires the cadence for every day
+# behind it — the fourth instance of a dedup guard silently retiring a
+# cadence. The PII hold of 2026-09-17 -> 09-18 cost a week, and #239
+# arrived as a 396-commit / 1319-file snapshot that no reader and no
+# CodeQL run can read as a change. The answer decided in that design is
+# that a hold must not cost the days behind it: the drift is measured
+# again onto the packet already open, so the numbers the sign-off is
+# given are today's.
+#
+# A MEASUREMENT, NOT A PUBLICATION. It makes the same two fetches a
+# publish makes — the forge as a path on this host, the mirror
+# anonymously — and stops there: no token is read, nothing is pushed,
+# no pull request is opened. That is why its own verb file
+# (infra/ops/verbs/mirror-drift.json) carries the word as a FIXED argv
+# rather than a mode a packet selects: a rule can file the refresh
+# without being able to file a publish.
+#
+# THE SECRETS SCAN RUNS OVER THE TREE THAT WOULD BE PUBLISHED — a
+# throwaway worktree of forge main, whose own infra/lint/no-secrets.sh
+# is the definition — never over this host's checkout, which is a
+# different sha and belongs to another user. A scan that FINDS
+# something is recorded as a finding for the reviewer (`FAILED`); a
+# scan that cannot RUN answers `not yet` (75) and writes nothing, because
+# no evidence is not a pass.
+# ---------------------------------------------------------------------
+if [ "${1:-}" = "--measure" ]; then
+    not_yet() { echo "$me: not yet: $*" >&2; exit 75; }
+    [ -n "${BOSS_JOBS_URL:-}" ] || refuse "BOSS_JOBS_URL is not set; the ops-runner pins it on its Exec line and a hand run must name the system of record"
+    BASE="${BOSS_JOBS_URL%/}"
+    for tool in git curl jq; do
+        command -v "$tool" >/dev/null 2>&1 || refuse "missing tool on PATH: $tool"
+    done
+    problem=$(forge_repo_problem)
+    [ -z "$problem" ] || refuse "$problem"
+    mkdir -p "$STATE_DIR" 2>/dev/null || true
+    [ -w "$STATE_DIR" ] || refuse "state dir $STATE_DIR is not writable (BOSS_PUBLISH_STATE_DIR)"
+
+    # 1. The packet. ANY open publish-to-github packet, at whatever step
+    #    it is held — unlike a publish, which needs open-pr ready. One
+    #    mirror, one open packet (the daily rule's guard), so the first
+    #    open one is the one.
+    if ! curl -fsS -H "x-boss-user: $BOSS_USER" \
+            "$BASE/api/jobs?kind=publish-to-github&status=open&limit=20" > "$workdir/jobs" 2>"$workdir/err"; then
+        fail "jobs API unreachable at $BASE — $(cat "$workdir/err")"
+    fi
+    job_id=$(jq -r '(if type == "object" and has("data") then .data else . end)
+        | map(select(.status == "open")) | .[0].id // empty' "$workdir/jobs") \
+        || fail "the jobs API answered something this verb cannot read as a packet list"
+    if [ -z "$job_id" ]; then
+        say "--measure: no open publish-to-github packet — nothing to refresh"
+        exit 0
+    fi
+
+    # 2. The two refs, in the same private bare clone a publish uses.
+    [ -d "$CLONE" ] || git init -q --bare "$CLONE"
+    set_remote forge "$FORGE_REPO"
+    set_remote mirror "$MIRROR_URL"
+    forge_git -C "$CLONE" fetch -q forge "+refs/heads/main:refs/remotes/forge/main" 2>"$workdir/err" \
+        || fail "fetching forge main from $FORGE_REPO ($FORGE_REPO_FROM) — git said: $(head -c 300 "$workdir/err" | tr '\n' ' ')"
+    g fetch -q mirror "+refs/heads/main:refs/remotes/mirror/main" 2>"$workdir/err" \
+        || fail "fetching mirror main from $MIRROR_URL — git said: $(head -c 300 "$workdir/err" | tr '\n' ' ')"
+    forge_head=$(g rev-parse refs/remotes/forge/main)
+    mirror_head=$(g rev-parse refs/remotes/mirror/main)
+    ahead=$(g rev-list --count refs/remotes/mirror/main..refs/remotes/forge/main)
+    behind=$(g rev-list --count refs/remotes/forge/main..refs/remotes/mirror/main)
+    g diff --name-only refs/remotes/mirror/main refs/remotes/forge/main > "$workdir/changed"
+    g diff --name-only --diff-filter=A refs/remotes/mirror/main refs/remotes/forge/main > "$workdir/new-files"
+    files=$(grep -c . "$workdir/changed" || true)
+    new_count=$(grep -c . "$workdir/new-files" || true)
+    # The newly-public files a reviewer is asked to look at by name:
+    # runbooks and infra topology describe how to reach and recover the
+    # live system, which is a different disclosure from source code.
+    grep -E '^(docs/runbooks/|infra/(cluster|caddy|forge)/)' "$workdir/new-files" > "$workdir/sensitive" || true
+    sens_count=$(grep -c . "$workdir/sensitive" || true)
+
+    # 3. The secrets scan, over the tree that would be published.
+    tree="$workdir/tree"
+    g worktree add -q --detach "$tree" refs/remotes/forge/main 2>"$workdir/err" \
+        || not_yet "a worktree of forge main ($forge_head) could not be created under $workdir — git said: $(head -c 300 "$workdir/err" | tr '\n' ' '); nothing was measured"
+    scan="${BOSS_SECRETS_SCAN:-$tree/infra/lint/no-secrets.sh}"
+    if [ ! -f "$scan" ]; then
+        g worktree remove --force "$tree" 2>/dev/null || true
+        g worktree prune 2>/dev/null || true
+        not_yet "no secrets scan at $scan, so what this tree would publish was never scanned; the drift was NOT written to ${job_id:0:8}"
+    fi
+    if ( cd "$tree" && bash "$scan" ) > "$workdir/scan" 2>&1; then
+        secrets="clean"
+    else
+        secrets="FAILED"
+    fi
+    g worktree remove --force "$tree" 2>/dev/null || true
+    g worktree prune 2>/dev/null || true
+
+    # 4. The annotation. PATCH /api/jobs/{id}/metadata MERGES top-level
+    #    keys, so the refresh lands beside everything the packet already
+    #    carries; the job PUT would replace them.
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    if [ "$ahead" -gt 0 ]; then has_drift="true"; else has_drift="false"; fi
+    jq -n --arg ahead "$ahead" --arg behind "$behind" --arg files "$files" \
+          --arg new_count "$new_count" --arg sens "$sens_count" --arg secrets "$secrets" \
+          --arg has_drift "$has_drift" --arg ts "$ts" \
+          --arg forge_head "$forge_head" --arg mirror_head "$mirror_head" \
+          --rawfile sensitive "$workdir/sensitive" '
+        {drift_refresh: {
+            commits_ahead: $ahead, commits_behind: $behind, files_changed: $files,
+            newly_public: $new_count, newly_public_sensitive: $sens,
+            newly_public_review: ($sensitive | split("\n") | map(select(. != "")) | .[0:20]),
+            secrets_scan: $secrets, has_drift: $has_drift,
+            forge_head: $forge_head, mirror_head: $mirror_head,
+            measured_at: $ts, measured_by: "publish-github-pr --measure"},
+         drift_refreshed_at: $ts}' > "$workdir/refresh" \
+        || fail "the refresh could not be rendered as JSON"
+    if ! curl -fsS -X PATCH -H "content-type: application/json" -H "x-boss-user: $BOSS_USER" \
+            ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
+            --data-binary @"$workdir/refresh" \
+            "$BASE/api/jobs/$job_id/metadata" > "$workdir/patched" 2>"$workdir/err"; then
+        fail "annotating ${job_id:0:8} with the refreshed drift failed — $(head -c 300 "$workdir/err" | tr '\n' ' ')"
+    fi
+    # An API's answer is not an API's effect: the merge comes back in the
+    # response body, so the instant is read from what the packet now holds.
+    jq -e --arg ts "$ts" '((.data // .) | .metadata // {}) | .drift_refreshed_at == $ts' \
+        "$workdir/patched" > /dev/null \
+        || fail "the jobs API accepted the refresh for ${job_id:0:8} but does not carry $ts back — the measurement is not on the packet"
+
+    say "--measure: refreshed ${job_id:0:8} — $ahead commit(s) ahead, $files file(s), $new_count newly public ($sens_count under runbooks/infra), secrets $secrets; forge ${forge_head:0:8} over mirror ${mirror_head:0:8} at $ts"
+    exit 0
+fi
+
+
+# ---------------------------------------------------------------------
 # A run.
 # ---------------------------------------------------------------------
 [ -n "${BOSS_JOBS_URL:-}" ] || refuse "BOSS_JOBS_URL is not set; the ops-runner pins it on its Exec line and a hand run must name the system of record"
@@ -444,8 +584,6 @@ say "packet ${job_id:0:8} — open-pr ready; publishing forge main as $BRANCH"
 #    as a path on this host, the mirror anonymously.
 mkdir -p "$STATE_DIR" "$GH_CONFIG_DIR"
 [ -d "$CLONE" ] || git init -q --bare "$CLONE"
-g() { git -C "$CLONE" "$@"; }
-set_remote() { g remote get-url "$1" >/dev/null 2>&1 && g remote set-url "$1" "$2" || g remote add "$1" "$2"; }
 set_remote forge "$FORGE_REPO"
 set_remote mirror "$MIRROR_URL"
 set_remote fork "$FORK_URL"

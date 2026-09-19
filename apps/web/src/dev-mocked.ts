@@ -51,6 +51,11 @@ export function apiHandler(mocked: boolean, proxy: ApiHandler, misses: Misses): 
   };
 }
 
+// The one spelling of the summary line's opening, so the server that
+// PRINTS it and the runner that reads it off stdout cannot drift
+// (CLAUDE.md §9a).
+export const MISS_SUMMARY_PREFIX = 'boss-web dev server (mocked): ';
+
 // The one line printed at shutdown, or null when the mock answered
 // everything. Most frequent first: the route a reader should mock next
 // is the one that missed most.
@@ -60,7 +65,31 @@ export function missSummary(misses: ReadonlyMap<string, number>): string | null 
   const total = rows.reduce((n, [, count]) => n + count, 0);
   const listed = rows.map(([key, count]) => `${key} x${count}`).join(', ');
   return (
-    `boss-web dev server (mocked): ${total} /api/** request(s) the in-browser mock did not ` +
+    `${MISS_SUMMARY_PREFIX}${total} /api/** request(s) the in-browser mock did not ` +
     `answer, ${rows.length} distinct, each answered 404 {"mock":"unanswered"} locally: ${listed}`
+  );
+}
+
+// Is this line of the dev-server's stdout the summary above? The runner
+// reads every line the server prints; this is how it tells that one
+// from the ready line and the bundle timings.
+export function isMissSummary(line: string): boolean {
+  return line.startsWith(MISS_SUMMARY_PREFIX);
+}
+
+// What a run that printed a summary is told, or null when there was
+// none. Backlog 06038ed8: echoing the line kept the fact visible but
+// let the run stay green, so the floor car f88e7908 built (403 misses
+// to zero) had nothing holding it there — a spec that mounts without
+// installApiFloor leaks its reads again and nothing refuses. The line
+// already names every path and count; this says what it means and what
+// to do.
+export function missRefusal(summaryLine: string | null): string | null {
+  if (summaryLine === null) return null;
+  return (
+    `refusing this run: the dev-server answered /api/** reads the in-browser mock did not. ` +
+    `Every mocked spec starts from installApiFloor(page) (tests/mocked/_smokeMocks.ts) and mocks ` +
+    `only what it tests; a leaked read means the page under test saw a 404 nobody intended. ` +
+    `${summaryLine}`
   );
 }

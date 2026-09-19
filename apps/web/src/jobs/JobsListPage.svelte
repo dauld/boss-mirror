@@ -164,6 +164,14 @@
    *  null until then and null for a tenant that registers none. */
   const adHoc = $derived(registeredAdHoc(kinds));
   let kindsLoading = $state(false);
+  /** A FAILED registry read is held here, not retried (backlog
+   *  06038ed8). The guard in loadKinds() is read inside the mount
+   *  effect below, so kinds/kindsLoading are effect dependencies: a
+   *  failure used to reset kindsLoading, re-trigger the effect and
+   *  fetch again — 554 /api/workflows reads from one mocked mount,
+   *  measured 2026-09-19. Holding the failure ends the loop; the
+   *  operator gestures that need the registry ask again explicitly. */
+  let kindsError = $state<string | null>(null);
   let owners = $state<Owner[]>([]);
   let formKind = $state('');
   let formSubjectKind = $state('');
@@ -223,8 +231,12 @@
       : kinds,
   );
 
-  async function loadKinds() {
-    if (kinds.length > 0 || kindsLoading) return;
+  /// `retry: true` is an operator gesture (focusing the Kind filter,
+  /// opening the new-job form) clearing a held failure and asking
+  /// again. The mount effect never passes it.
+  async function loadKinds(opts?: { retry?: boolean }) {
+    if (opts?.retry) kindsError = null;
+    if (kinds.length > 0 || kindsLoading || kindsError !== null) return;
     kindsLoading = true;
     try {
       const resp = await fetch('/api/workflows');
@@ -234,7 +246,8 @@
       // what's about to happen.
       kinds = (await resp.json()) as WorkflowRow[];
     } catch (e) {
-      formError = e instanceof Error ? e.message : String(e);
+      kindsError = e instanceof Error ? e.message : String(e);
+      formError = kindsError;
     } finally {
       kindsLoading = false;
     }
@@ -327,7 +340,10 @@
     // who's about to run the new Job. The user can override before
     // submit.
     formOwnerId = userId ?? '';
-    void loadKinds();
+    // Opening the form is a gesture too, and the form is unusable
+    // without the registry — but it is reached from the deep-link
+    // effect as well, which is why that effect guards on newJobOpen.
+    void loadKinds({ retry: true });
     void loadOwners();
     // If the deep-link picked a subject_kind, prime its
     // autocomplete list right away so the input is useful by the
@@ -451,7 +467,7 @@
   <div class="job-filters">
     <label class="job-filter">
       <span>Kind</span>
-      <select bind:value={kind} onfocus={() => void loadKinds()}>
+      <select bind:value={kind} onfocus={() => void loadKinds({ retry: true })}>
         <option value="">All kinds</option>
         {#each kinds.slice().sort((a, b) => a.kind.localeCompare(b.kind)) as k (k.kind)}
           <option value={k.kind}>{k.kind}</option>
