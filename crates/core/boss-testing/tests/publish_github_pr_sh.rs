@@ -894,6 +894,12 @@ cat '{jobs}'
     }
 
     fn go(&self) -> (bool, String) {
+        self.go_as("")
+    }
+
+    /// The run with the forge push handed to `push_as` through
+    /// `runuser` — a stub on the fixture's PATH in the test that uses it.
+    fn go_as(&self, push_as: &str) -> (bool, String) {
         let outer = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
         // Ours first: `stub_bin` stands in for tools this box LACKS, and
         // gh/curl must be ours even where the box has them.
@@ -918,7 +924,7 @@ cat '{jobs}'
             // path: in production it is `runuser -l david` over Forgejo's
             // HTTP, which no test box can stand in for.
             .env("BOSS_FORGE_PUSH_URL", self.forge.display().to_string())
-            .env("BOSS_FORGE_PUSH_AS", "");
+            .env("BOSS_FORGE_PUSH_AS", push_as);
         let out = cmd.output().expect("the verb runs");
         let mut text = String::from_utf8_lossy(&out.stdout).to_string();
         text.push_str(&String::from_utf8_lossy(&out.stderr));
@@ -1077,6 +1083,59 @@ fn the_snapshot_is_pushed_to_the_forge_so_the_mirror_carries_it() {
 /// question either. Both must be refused by name, and neither may push:
 /// GitHub accepts the push (it is our own repository) and only the PR
 /// fails, one step too late to undo.
+/// The production forge push runs as ANOTHER user (`runuser -l david
+/// -c "git -C <clone> push …"`) over a clone root owns, and git ≥ 2.35.2
+/// refuses that as "dubious ownership" unless the pushing user's own
+/// config exempts it. The script's exemption is root's GIT_CONFIG_GLOBAL
+/// file in a 0700 workdir, which `runuser -l` neither carries nor could
+/// read — measured 2026-09-18 23:05Z on ops-request c98a782f, the first
+/// approved publish: `fatal: detected dubious ownership in repository at
+/// '/var/lib/boss-publish/boss.git'`, five hours unread. The command the
+/// other user runs must carry the exemption ITSELF (`-c safe.directory=
+/// <clone>`); a stub runuser records what it was handed and runs it as
+/// this uid, so the production shape is pinned without a second account.
+#[test]
+fn the_forge_push_as_another_user_carries_its_own_safe_directory() {
+    if !have_real_jq() {
+        eprintln!("publish_github_pr_sh: SKIPPED — the run path needs a real jq");
+        return;
+    }
+    let run = Run::new("forge-push-as-user");
+    run.gh_repo(
+        FORK_SLUG,
+        &format!(
+            r#"{{"full_name":"{FORK_SLUG}","fork":true,
+                 "parent":{{"full_name":"{MIRROR_SLUG}"}},
+                 "source":{{"full_name":"{MIRROR_SLUG}"}},
+                 "default_branch":"main","private":false}}"#
+        ),
+    );
+    let log = run.root.join("runuser.log");
+    boss_testing::write_exec(
+        &run.stubs.join("runuser"),
+        &format!(
+            "#!/usr/bin/env bash\n# stub: runuser -l <user> -c <cmd> — record the command, run it here\nprintf '%s\\n' \"$4\" >> '{}'\nexec bash -c \"$4\"\n",
+            log.display()
+        ),
+    );
+    let (ok, out) = run.go_as("someone");
+    assert!(ok, "{out}");
+    let handed = std::fs::read_to_string(&log).expect("the stub runuser recorded the push command");
+    let clone = run.root.join("state/boss.git");
+    assert!(
+        handed.contains(&format!("-c 'safe.directory={}'", clone.display())),
+        "the command handed to the other user must carry the exemption for the clone it pushes from:\n{handed}"
+    );
+    assert!(
+        handed.contains("push"),
+        "the recorded command is the forge push:\n{handed}"
+    );
+    assert!(
+        out.contains("to the forge as someone"),
+        "the run says whom it pushed as: {out}"
+    );
+}
+
 #[test]
 fn a_namesake_that_is_not_a_fork_of_the_mirror_is_refused_before_the_push() {
     if !have_real_jq() {

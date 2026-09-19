@@ -529,7 +529,17 @@ fi
 # never the state dir's other contents — traversable, not listable.
 chmod a+x "$STATE_DIR" 2>/dev/null || true
 chmod -R a+rX "$CLONE" 2>/dev/null || true
-forge_push_cmd="git -C '$CLONE' push -q --force '$FORGE_PUSH_URL' '$snapshot:refs/heads/$BRANCH'"
+# The push runs as $FORGE_PUSH_AS over a clone ROOT owns, and git ≥ 2.35.2
+# refuses that as "dubious ownership" unless the PUSHING user's config
+# exempts it. $FORGE_SAFE_CONFIG above is root's file in a 0700 workdir —
+# `runuser -l` neither carries GIT_CONFIG_GLOBAL nor could that user read
+# it. Measured 2026-09-18 23:05Z on ops-request c98a782f, the FIRST
+# approved publish: `fatal: detected dubious ownership in repository at
+# '/var/lib/boss-publish/boss.git'`, and the step sat ready five hours.
+# `-c` is right here where the file was right above: a push reads the
+# clone in THIS process (pack-objects stays in the same repository, so
+# GIT_CONFIG_PARAMETERS survives); the fetch-source caveat does not apply.
+forge_push_cmd="git -c 'safe.directory=$CLONE' -C '$CLONE' push -q --force '$FORGE_PUSH_URL' '$snapshot:refs/heads/$BRANCH'"
 if [ -n "$FORGE_PUSH_AS" ]; then
     runuser -l "$FORGE_PUSH_AS" -c "$forge_push_cmd" 2>"$workdir/err" \
         || fail "pushing $BRANCH to the forge ($FORGE_PUSH_URL) as $FORGE_PUSH_AS: $(head -c 300 "$workdir/err" | tr '\n' ' '). Without it on the forge, the push mirror prunes the PR's head at the next train"

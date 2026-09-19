@@ -189,8 +189,13 @@ async fn main() -> Result<()> {
 
     // The sessionless read set — the tenant's declaration, resolved
     // once, refused by name if it names a door the gateway does not
-    // offer (public_reads.rs). Absent → none.
+    // offer (public_reads.rs). Absent → none. A manifest that exists
+    // but does not parse is refused here too, naming the file and
+    // toml's line (api.rs `load_tenant_toml`, backlog 4f1ba1f9): the
+    // configuration the router is built from, not a boot check.
     let declared = api::load_tenant_toml()
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .context("reading the tenant manifest")?
         .map(|t| t.gateway.public_reads)
         .unwrap_or_default();
     let public_reads = public_reads::PublicReads::resolve(&declared)
