@@ -426,8 +426,24 @@ enum Commands {
         from_hook: bool,
         /// The packet: its full uuid, 8+ characters of its id, or its
         /// branch. With --report, the RUN (the agent-run id `boss
-        /// dispatch` printed).
-        packet: String,
+        /// dispatch` printed). Omit it with --next, which takes the
+        /// packet from the queue instead.
+        #[arg(required_unless_present = "next")]
+        packet: Option<String>,
+        /// THE DURABLE INBOX (design 8382bbb2): take the first piece of
+        /// waiting work at --station and dispatch that, instead of a
+        /// packet named here. The queue is the record, so the work
+        /// outlives whatever put it there — a dispatch that lived in a
+        /// session orphaned fifteen runs when that session died on
+        /// 2026-09-19.
+        #[arg(long, requires = "station", conflicts_with_all = ["report", "from_hook", "step"])]
+        next: bool,
+        /// With --next: the station to pull from, e.g.
+        /// `a.platform-admin.opus-5-1m`. Named, never inferred: an
+        /// agents row's role and a station's role are two vocabularies,
+        /// and a guessed queue answers empty instead of erroring.
+        #[arg(long, requires = "next")]
+        station: Option<String>,
         /// The step's slug. Omit it when the packet is at exactly one.
         #[arg(long, conflicts_with = "report")]
         step: Option<String>,
@@ -1373,7 +1389,23 @@ async fn main() -> Result<()> {
             from_hook: true,
             packet,
             ..
-        } => dispatch_hook::run(packet).await,
+        } => dispatch_hook::run(packet.unwrap_or_default()).await,
+        Commands::Dispatch {
+            next: true,
+            station,
+            model,
+            budget,
+            effort,
+            ..
+        } => {
+            dispatch::next(
+                station.expect("clap requires --station with --next"),
+                model,
+                budget,
+                effort,
+            )
+            .await
+        }
         Commands::Dispatch {
             from_hook: false,
             packet,
@@ -1385,7 +1417,9 @@ async fn main() -> Result<()> {
             summary,
             spend_usd,
             tokens,
+            ..
         } => {
+            let packet = packet.expect("clap requires a packet without --next");
             if report {
                 dispatch::report(
                     packet,

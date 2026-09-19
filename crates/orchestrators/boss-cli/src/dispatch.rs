@@ -1,6 +1,11 @@
 //! `boss dispatch <packet> [--step <slug>] [--model M --budget B
 //! --effort E]` — hand a protocol step to an agent, as a packet.
 //!
+//! `boss dispatch --next --station <name>` is the same verb taking its
+//! packet from a QUEUE instead of from the caller (design 8382bbb2,
+//! backlog 923b6571) — the durable inbox. See the section above
+//! [`next_at`] for why that is the whole difference that matters.
+//!
 //! WHY THIS IS A VERB (design c87fb59b, decided 2026-09-18; car 2,
 //! backlog 39d0b528). Until this landed, dispatching a builder was
 //! five hand acts in the operator's terminal: read the packet, write a
@@ -496,6 +501,11 @@ pub(crate) async fn dispatch_at(
     repo: &Path,
     packet_ref: &str,
     step_slug: Option<&str>,
+    // The station the claim PULLS FROM, when this dispatch came out
+    // of a queue (`--next`). Named on the claim, so the door checks
+    // membership and capability against the queue the work was taken
+    // from — a dispatch that names no station keeps today's claim.
+    station: Option<&str>,
     over: &Overrides,
     actor: &str,
     owner: &str,
@@ -570,14 +580,18 @@ pub(crate) async fn dispatch_at(
     };
 
     // CLAIM FIRST. A step someone else holds is a refusal naming the
-    // holder, and it must come before anything is filed.
-    api_at(
-        Method::POST,
-        format!("/api/jobs/{id}/steps/{step_id}/claim"),
-        None,
-    )
-    .await
-    .with_context(|| format!("claiming `{slug}` on {} as {actor}", &id[..8]))?;
+    // holder, and it must come before anything is filed. The ONE door:
+    // it runs the station's capability gate when a station is named
+    // and the budget reservation always (`boss_jobs::agent_budget` —
+    // the block's budget against the actor's hour, before the CAS), so
+    // a queued dispatch and a hand dispatch are gated by one rule.
+    let claim_path = match station {
+        Some(s) => format!("/api/jobs/{id}/steps/{step_id}/claim?station={s}"),
+        None => format!("/api/jobs/{id}/steps/{step_id}/claim"),
+    };
+    api_at(Method::POST, claim_path, None)
+        .await
+        .with_context(|| format!("claiming `{slug}` on {} as {actor}", &id[..8]))?;
 
     let mut body = run_body(
         &id, &title, &slug, actor, &settings, worktree, host, &brief, owner,
@@ -639,6 +653,173 @@ pub(crate) async fn dispatch_at(
         prompt,
         subagent_type: definition_in(repo, &settings),
     })
+}
+
+// ---------------------------------------------------------------------------
+// The durable inbox — `boss dispatch --next --station <name>`
+// ---------------------------------------------------------------------------
+//
+// WHY (design 8382bbb2, backlog 923b6571, decided 2026-09-19). Until
+// this, a dispatch lived in the session that made it: `boss dispatch
+// <packet>` printed a prompt and the session held the thread, so when
+// the session died at ~15:39Z on 2026-09-19 fifteen `agent-run`
+// packets were orphaned — twelve green but never handed back, three
+// with a prompt printed and no executor ever started — and recovery
+// was by hand.
+//
+// The fix is not a coordinator. The QUEUE already exists as data: a
+// step declaring an `agent` block under a role projects an
+// `a.<role>.<model-slug>` station (`station_projection::agent_stations`),
+// and the packet sits in it while the step is ready. What was missing
+// was the door OUT of it — this verb, which asks the record what is
+// waiting and takes the first piece of it. Nothing is handed from the
+// process that filed the work to the one that runs it; the record is
+// the whole hand-off, which is what makes the work outlive either.
+//
+// The station is NAMED, never inferred. An agents row's `role` is a
+// Class code (`engineering-agent` on this instance) and a station's
+// role is the step's `authority_role` (`platform-admin`); nothing
+// reconciles the two, so guessing an actor's inbox from its row would
+// resolve a queue that does not exist and answer "nothing waiting"
+// instead of erroring — the wrong-target shape CLAUDE.md warns about.
+
+/// The step an inbox hands out: ready, nobody's, and carrying the
+/// agent model — which is exactly what made the packet a member of an
+/// `a.<role>.<model>` station, so the verb selects on the same fact
+/// the queue did rather than a second opinion about it.
+///
+/// ACTIVE steps are deliberately not candidates although the station
+/// holds them (a queue shows what is being worked as well as what is
+/// waiting): they are somebody's, and the claim would 409.
+pub(crate) fn waiting_step(job: &Value) -> Option<&Value> {
+    crate::envelope::steps(job).into_iter().find(|s| {
+        s.get("status").and_then(Value::as_str) == Some("ready")
+            && s.get("assignee_id").and_then(Value::as_str).is_none()
+            && s.get("metadata")
+                .and_then(|m| m.get(boss_jobs::agent_spec::MODEL_KEY))
+                .is_some()
+    })
+}
+
+/// Take the first piece of waiting work at `station` and dispatch it.
+/// `Ok(None)` is an empty inbox — a runner asking again in a minute is
+/// the normal case, not an error.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn next_at(
+    http: &reqwest::Client,
+    base: &str,
+    repo: &Path,
+    station: &str,
+    over: &Overrides,
+    actor: &str,
+    owner: &str,
+    worktree: &str,
+    host: &str,
+) -> Result<Option<Dispatched>> {
+    use reqwest::Method;
+
+    let api_at = |method: Method, path: String| {
+        let signature = crate::identity::Signature::As(actor.to_string());
+        async move { crate::gate::api_at_signed(http, base, method, &path, None, signature).await }
+    };
+
+    // The queue read is the ONLY input: no packet is passed in, and a
+    // station that does not exist is a refusal, not an empty answer.
+    let queue = api_at(Method::GET, format!("/api/stations/{station}/queue"))
+        .await
+        .with_context(|| format!("reading the {station} queue as {actor}"))?
+        .with_context(|| format!("the {station} queue returned no body"))?;
+    let members: Vec<String> = queue
+        .get("data")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|j| crate::envelope::job_id(j).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    for id in &members {
+        let job = api_at(Method::GET, format!("/api/jobs/{id}"))
+            .await?
+            .with_context(|| format!("packet {} read returned no body", &id[..8.min(id.len())]))?;
+        let Some(step) = waiting_step(&job) else {
+            continue;
+        };
+        let slug = step
+            .get("spec_slug")
+            .and_then(Value::as_str)
+            .context("a waiting step with no spec_slug")?
+            .to_string();
+        eprintln!(
+            "boss dispatch --next: {station} holds {} packet(s); taking {} `{slug}`",
+            members.len(),
+            &id[..8.min(id.len())]
+        );
+        return dispatch_at(
+            http,
+            base,
+            repo,
+            id,
+            Some(&slug),
+            Some(station),
+            over,
+            actor,
+            owner,
+            worktree,
+            host,
+            BriefSource::Rendered,
+        )
+        .await
+        .map(Some);
+    }
+
+    eprintln!(
+        "boss dispatch --next: {station} holds {} packet(s), none of them waiting for an \
+         executor — nothing claimed, nothing filed",
+        members.len()
+    );
+    Ok(None)
+}
+
+/// `boss dispatch --next --station <name>` at the resolved base.
+pub async fn next(
+    station: String,
+    model: Option<String>,
+    budget: Option<f64>,
+    effort: Option<String>,
+) -> Result<()> {
+    let base = crate::gate::resolve_jobs_base(None)?;
+    let repo = crate::brief::repo_root()?;
+    let actor = crate::identity::sign(&reqwest::Method::POST, "/api/jobs")?;
+    let owner = crate::owner::for_filing_at(&base).await;
+    let host = crate::prove::host();
+    let worktree = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let over = Overrides {
+        model,
+        budget_usd: budget,
+        effort,
+    };
+    if let Some(b) = over.budget_usd
+        && !(b.is_finite() && b > 0.0)
+    {
+        bail!("--budget must be a positive number of dollars, got {b}");
+    }
+    next_at(
+        &reqwest::Client::new(),
+        &base,
+        &repo,
+        &station,
+        &over,
+        &actor,
+        &owner,
+        &worktree,
+        &host,
+    )
+    .await?;
+    Ok(())
 }
 
 /// The step `--report` completes.
@@ -1029,6 +1210,7 @@ pub async fn run(
         &repo,
         &packet_ref,
         step.as_deref(),
+        None,
         &over,
         &actor,
         &owner,
@@ -1669,6 +1851,7 @@ mod wire_tests {
             &repo(),
             PACKET,
             None,
+            None,
             &over,
             "claude@algedonic.dev",
             "emp-david",
@@ -1761,6 +1944,7 @@ mod wire_tests {
             &repo(),
             PACKET,
             None,
+            None,
             &Overrides::default(),
             "claude@algedonic.dev",
             "emp-david",
@@ -1827,6 +2011,7 @@ mod wire_tests {
             &repo(),
             PACKET,
             None,
+            None,
             &Overrides::default(),
             "claude@algedonic.dev",
             "emp-david",
@@ -1860,6 +2045,7 @@ mod wire_tests {
             &base,
             &repo(),
             PACKET,
+            None,
             None,
             &Overrides::default(),
             "claude@algedonic.dev",
@@ -1901,6 +2087,7 @@ mod wire_tests {
             &repo(),
             PACKET,
             None,
+            None,
             &Overrides::default(),
             "claude@algedonic.dev",
             "emp-david",
@@ -1926,6 +2113,7 @@ mod wire_tests {
                 &repo(),
                 PACKET,
                 None,
+                None,
                 &Overrides::default(),
                 "claude@algedonic.dev",
                 "emp-david",
@@ -1950,6 +2138,7 @@ mod wire_tests {
             &repo(),
             PACKET,
             Some("build"),
+            None,
             &Overrides::default(),
             "claude@algedonic.dev",
             "emp-david",
@@ -2206,5 +2395,232 @@ mod wire_tests {
             !calls.iter().any(|(m, _, _)| m == "POST"),
             "nothing recorded under a CPU nobody registered"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // The durable inbox (design 8382bbb2, backlog 923b6571): the verb is
+    // handed NO packet, so everything it dispatches it learned from the
+    // record.
+    // -----------------------------------------------------------------
+    mod inbox {
+        use super::*;
+
+        const STATION: &str = "a.platform-admin.opus-5-1m";
+        /// Head of the queue, and not takeable: its step is somebody's
+        /// already. A station holds what is being worked as well as
+        /// what is waiting, so the inbox has to tell them apart.
+        const HELD: &str = "11111111-0000-4000-8000-000000000001";
+        /// The waiting one, behind it.
+        const WAITING: &str = "22222222-0000-4000-8000-000000000002";
+        const INBOX_RUN: &str = "33333333-0000-4000-8000-000000000003";
+
+        fn agent_metadata() -> Value {
+            json!({
+                "authority_role": "platform-admin",
+                "agent_profile": "builder",
+                "agent_model": "opus-5[1m]",
+                "agent_budget_usd": 5,
+                "agent_effort": "high",
+            })
+        }
+
+        fn held_packet() -> Value {
+            json!({
+                "id": HELD, "kind": "backlog-item", "title": "Already being built",
+                "status": "open", "priority": "standard", "opened_on": "2026-09-19",
+                "metadata": {},
+                "steps": [
+                    { "id": "h-build", "spec_slug": "build", "status": "active", "title": "Build",
+                      "assignee_id": "agent-someone", "metadata": agent_metadata() },
+                ],
+            })
+        }
+
+        fn waiting_packet() -> Value {
+            json!({
+                "id": WAITING, "kind": "backlog-item", "title": "Waiting for an executor",
+                "status": "open", "priority": "standard", "opened_on": "2026-09-19",
+                "metadata": { "detail": "The queue is the record." },
+                "steps": [
+                    { "id": "w-triage", "spec_slug": "triage", "status": "completed",
+                      "metadata": {} },
+                    { "id": "w-build", "spec_slug": "build", "status": "ready", "title": "Build",
+                      "metadata": agent_metadata() },
+                ],
+            })
+        }
+
+        /// The station queue, the packets it names, and the usual
+        /// dispatch wire behind them.
+        async fn inbox_stub(members: Vec<Value>) -> (String, Log) {
+            let queue = json!({
+                "station": STATION, "kind": "constraint", "total": members.len(),
+                "discipline": ["priority", "age"], "data": members,
+            });
+            let row = row_with_block();
+            let run: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+            serve(move |method, path, target, body| {
+                let (status, resp): (&str, String) = match (method, path) {
+                    ("GET", p) if p == format!("/api/stations/{STATION}/queue") => {
+                        ("200 OK", queue.to_string())
+                    }
+                    ("GET", p) if p == format!("/api/jobs/{HELD}") => {
+                        ("200 OK", held_packet().to_string())
+                    }
+                    ("GET", p) if p == format!("/api/jobs/{WAITING}") => {
+                        ("200 OK", waiting_packet().to_string())
+                    }
+                    ("GET", "/api/tenant/edit-level") => (
+                        "200 OK",
+                        json!({ "edit_level": Value::Null, "manifest": "t.toml" }).to_string(),
+                    ),
+                    ("GET", "/api/workflows/backlog-item") => ("200 OK", row.to_string()),
+                    ("POST", p) if p.ends_with("/claim") => {
+                        ("200 OK", json!({ "status": "active" }).to_string())
+                    }
+                    ("POST", "/api/jobs") => {
+                        let mut filed = body.clone();
+                        filed["id"] = json!(INBOX_RUN);
+                        filed["steps"] = json!([
+                            { "id": "run-briefed", "spec_slug": "briefed", "status": "ready",
+                              "metadata": {} },
+                        ]);
+                        *run.lock().unwrap() = Some(filed);
+                        ("201 Created", json!({ "id": INBOX_RUN }).to_string())
+                    }
+                    ("GET", p) if p == format!("/api/jobs/{INBOX_RUN}") => {
+                        match run.lock().unwrap().clone() {
+                            Some(r) => ("200 OK", r.to_string()),
+                            None => ("404 Not Found", "no such job".into()),
+                        }
+                    }
+                    ("PUT", p) if p.starts_with(&format!("/api/jobs/{INBOX_RUN}/steps/")) => {
+                        ("204 No Content", String::new())
+                    }
+                    _ => ("404 Not Found", format!("unstubbed {method} {target}")),
+                };
+                (status, resp)
+            })
+            .await
+        }
+
+        async fn take_next(base: &str) -> Result<Option<Dispatched>> {
+            next_at(
+                &reqwest::Client::new(),
+                base,
+                &repo(),
+                STATION,
+                &Overrides::default(),
+                "agent-claude",
+                "emp-david",
+                "/work/boss/.claude/worktrees/agent-x",
+                "boss-dev-0",
+            )
+            .await
+        }
+
+        /// THE HAND-OFF IS THE RECORD. The verb is given a station name
+        /// and nothing else — no packet, no step, no prompt — and what
+        /// it dispatches it learned from the queue. That is the
+        /// property the inbox exists for: on 2026-09-19 fifteen runs
+        /// were orphaned because the hand-off lived in a session.
+        #[tokio::test]
+        async fn the_inbox_takes_waiting_work_the_caller_never_named() {
+            let (base, log) =
+                inbox_stub(vec![json!({ "id": HELD }), json!({ "id": WAITING })]).await;
+            let dispatched = take_next(&base)
+                .await
+                .expect("dispatches")
+                .expect("took one");
+
+            let calls = log.calls.lock().unwrap().clone();
+            assert_eq!(
+                calls[0].1,
+                format!("/api/stations/{STATION}/queue"),
+                "the queue read is the first thing it does, because it is the only input"
+            );
+            // The head of the queue is somebody else's work: held, not
+            // taken, and not raced for.
+            let claims: Vec<String> = calls
+                .iter()
+                .filter(|(m, p, _)| m == "POST" && p.contains("/claim"))
+                .map(|(_, p, _)| p.clone())
+                .collect();
+            assert_eq!(claims.len(), 1, "one claim, on one packet: {claims:?}");
+            assert_eq!(
+                claims[0],
+                format!("/api/jobs/{WAITING}/steps/w-build/claim?station={STATION}"),
+                "the claim names the station it pulled from, so the door gates on that queue"
+            );
+
+            let filed = calls
+                .iter()
+                .find(|(m, p, _)| m == "POST" && p == "/api/jobs")
+                .map(|(_, _, b)| b.clone())
+                .expect("a run is filed");
+            assert_eq!(filed["kind"], "agent-run");
+            assert_eq!(filed["metadata"]["packet"], WAITING);
+            assert_eq!(filed["metadata"]["step"], "build");
+            assert_eq!(dispatched.run_id, INBOX_RUN);
+            assert!(
+                dispatched.prompt.contains(&INBOX_RUN[..8]),
+                "the prompt carries the run the record now holds"
+            );
+        }
+
+        /// An empty inbox is a normal answer, not an error — a runner
+        /// asks again — and it files nothing.
+        #[tokio::test]
+        async fn an_empty_inbox_claims_nothing_and_files_nothing() {
+            let (base, log) = inbox_stub(vec![]).await;
+            assert!(take_next(&base).await.expect("reads the queue").is_none());
+            let calls = log.calls.lock().unwrap().clone();
+            assert_eq!(
+                calls.len(),
+                1,
+                "the queue read, and nothing else: {calls:?}"
+            );
+        }
+
+        /// A queue of work that is all somebody's: nothing to take, and
+        /// still nothing filed.
+        #[tokio::test]
+        async fn a_queue_of_held_work_takes_none_of_it() {
+            let (base, log) = inbox_stub(vec![json!({ "id": HELD })]).await;
+            assert!(take_next(&base).await.expect("reads the queue").is_none());
+            let calls = log.calls.lock().unwrap().clone();
+            assert!(
+                !calls.iter().any(|(m, _, _)| m == "POST"),
+                "an active step is not raced for: {calls:?}"
+            );
+        }
+
+        /// What the inbox will hand out, as a pure question about a
+        /// packet.
+        #[test]
+        fn a_waiting_step_is_ready_nobodys_and_carries_the_model() {
+            assert_eq!(
+                waiting_step(&waiting_packet()).and_then(|s| s["spec_slug"].as_str()),
+                Some("build")
+            );
+            assert!(
+                waiting_step(&held_packet()).is_none(),
+                "active is not waiting"
+            );
+
+            let mut assigned = waiting_packet();
+            assigned["steps"][1]["assignee_id"] = json!("agent-someone");
+            assert!(
+                waiting_step(&assigned).is_none(),
+                "ready but held is not waiting — the claim would 409"
+            );
+
+            let mut no_block = waiting_packet();
+            no_block["steps"][1]["metadata"] = json!({ "authority_role": "platform-admin" });
+            assert!(
+                waiting_step(&no_block).is_none(),
+                "no agent model is not agent work, which is what the station matched on"
+            );
+        }
     }
 }

@@ -275,3 +275,7 @@ required-features = ["postgres"]
 [[test]]
 name = "a_claim_over_the_agents_hourly_budget_is_refused_pg"
 required-features = ["postgres"]
+
+[[test]]
+name = "the_inbox_outlives_the_session_that_filled_it_pg"
+required-features = ["postgres"]

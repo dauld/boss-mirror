@@ -123,6 +123,35 @@ pub(super) async fn effective_stations<R: JobsRepository, B: EventBus>(
     Ok(all)
 }
 
+/// One station by name, resolved the way EVERY reader of a station
+/// must resolve one: the authored row first, then the projection the
+/// listing serves — the same two sources in the same order.
+///
+/// It is a function because it was two (923b6571, 2026-09-19). The
+/// queue read fell back to the projection and the CLAIM did not, so a
+/// claim naming a DERIVED station answered 404 — and since every
+/// `(role, model)` agent inbox is derived (nothing authors
+/// `a.platform-admin.opus-5-1m`; it is projected from the protocols'
+/// agent blocks), no agent could claim from its own queue. A queue
+/// that renders but cannot be claimed from is a display, not a
+/// station. §9a: one definition, because two lookups of the same fact
+/// drifted.
+pub(super) async fn station_by_name<R: JobsRepository, B: EventBus>(
+    state: &JobsApiState<R, B>,
+    reg: &Arc<dyn StationRegistry>,
+    name: &str,
+) -> Result<StationSpec, Response> {
+    match reg.get_active(name).await {
+        Ok(s) => Ok(s),
+        Err(StationError::NotFound(msg)) => effective_stations(state, reg)
+            .await?
+            .into_iter()
+            .find(|s| s.name == name)
+            .ok_or_else(|| station_err_response(StationError::NotFound(msg))),
+        Err(e) => Err(station_err_response(e)),
+    }
+}
+
 /// `GET /api/stations` — every active station row. The registry rows
 /// themselves carry no packet data; the policy gate mirrors the job
 /// list's posture (scope predicate on the `job` resource; a caller
@@ -404,20 +433,11 @@ pub(super) async fn station_queue<R: JobsRepository + 'static, B: EventBus + 'st
     // Authored first, then the projection. A station that /api/stations
     // lists must have a queue that answers, or the registry advertises
     // doors that open onto nothing — so the lookup consults exactly the
-    // same two sources the listing does, in the same order.
-    let row = match reg.get_active(&name).await {
+    // same two sources the listing does, in the same order, through the
+    // one resolver the claim door also uses.
+    let row = match station_by_name(&state, reg, &name).await {
         Ok(s) => s,
-        Err(StationError::NotFound(msg)) => {
-            let found = match effective_stations(&state, reg).await {
-                Ok(rows) => rows.into_iter().find(|s| s.name == name),
-                Err(r) => return r,
-            };
-            match found {
-                Some(s) => s,
-                None => return station_err_response(StationError::NotFound(msg)),
-            }
-        }
-        Err(e) => return station_err_response(e),
+        Err(r) => return r,
     };
     let today = boss_clock_client::now_from(&state.clock).await.date_naive();
 

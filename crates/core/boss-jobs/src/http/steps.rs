@@ -1450,14 +1450,13 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
             )
                 .into_response();
         };
-        let row = match reg.get_active(station_name).await {
+        // Authored row first, then the projection — the SAME resolver
+        // the queue read uses (923b6571). A derived station was 404
+        // here and a queue there, so every `(role, model)` agent inbox
+        // rendered and could not be claimed from.
+        let row = match super::stations::station_by_name(&state, reg, station_name).await {
             Ok(s) => s,
-            Err(crate::stations::StationError::NotFound(msg)) => {
-                return (StatusCode::NOT_FOUND, msg).into_response();
-            }
-            Err(e) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-            }
+            Err(r) => return r,
         };
         // Same binding as the queue read: "is this packet at MY
         // station" is the question a per-actor station asks, and an
