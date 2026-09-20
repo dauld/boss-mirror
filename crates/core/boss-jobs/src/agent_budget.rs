@@ -20,6 +20,34 @@
 //! both answered as a [`BudgetDecision`] value so the refusal reads the
 //! same way in both places.
 //!
+//! THE OTHER HALF OF THE DOOR — CONCURRENCY (backlog 57c108c2,
+//! 2026-09-20). The reservation above measures the hour from
+//! `agent_runs`, and that table is written AT FINISH: a run that has
+//! been claimed and has not reported yet is priced at nothing, because
+//! it has no row. So the money gate cannot bound how many runs an
+//! actor has going at once — with nothing finished, `spent` stays 0
+//! and the cap admits every claim. That is exactly the failure a
+//! PULLER would cause: `boss dispatch --next` fired on an interval
+//! against a station holding 47 ready packets would claim all 47, each
+//! admitted by a budget that could not yet see the previous one.
+//!
+//! [`in_flight_claims`] is the measurement the money one structurally
+//! cannot make: the actor's own steps that are ACTIVE and declare an
+//! agent block — claimed, running, not yet finished. [`Concurrency`]
+//! judges it against `agents.max_concurrent_runs`, through the SAME
+//! one rule ([`BudgetDecision::decide`]) the recorder uses, so "at the
+//! cap" does not come to mean two things in two places (§9a). Until
+//! this, that column was read in exactly one place — the recorder,
+//! AFTER a run finished, against an `in_flight` measured over finished
+//! rows — where it can record a fact and stop nothing (backlog
+//! 4b103f0f called it "read by nothing", which was one step too kind).
+//!
+//! The NUMBER is not here, on purpose. A default in this file would be
+//! a policy hidden in the substrate; the cap is a registry row per
+//! actor, and a row that declares none is unbounded exactly as an
+//! undeclared budget is. This car ships the mechanism; an instance
+//! that wants a bound writes it into `agents.max_concurrent_runs`.
+//!
 //! What it deliberately is NOT: a person's gate. A person has no
 //! agents row and runs no model; the budget is the agent's, and a
 //! person claiming an agent-blocked step is a person doing the work by
@@ -30,7 +58,8 @@
 
 use std::sync::Arc;
 
-use boss_core::agent::BudgetDecision;
+use boss_core::agent::{AgentCaps, AgentLoad, BudgetDecision};
+use boss_core::job::{Step, StepStatus};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
@@ -174,6 +203,93 @@ impl BudgetDoor {
     }
 }
 
+/// Does this step declare an agent run at all? The `agent_model` key
+/// car 1 projects onto a materialised step — the same fact that made
+/// the packet a member of an `a.<role>.<model>` station and the same
+/// one `dispatch::waiting_step` selects on, so what a queue hands out
+/// and what this counts are one predicate rather than two opinions.
+pub fn declares_an_agent_run(metadata: &serde_json::Value) -> bool {
+    metadata.get(crate::agent_spec::MODEL_KEY).is_some()
+}
+
+/// How many agent runs `held_by` has IN FLIGHT: its steps that are
+/// Active and declare an agent block. Active is the whole test — a
+/// step goes Active at the claim and leaves it at completion — so this
+/// counts precisely the runs handed out and not yet finished, which is
+/// the population `agent_runs` cannot hold because it is written at
+/// finish.
+///
+/// `held_by` is a LIST because an actor is spelled more than one way:
+/// the registered id and every alias that resolves to it (design
+/// 6fda05ae). The claim CAS rewrites an alias holder to the registered
+/// id, but a step nominated before that landed still carries the
+/// alias, and a bound that missed those would under-refuse.
+pub fn in_flight_claims(steps: &[Step], held_by: &[String]) -> u32 {
+    let n = steps
+        .iter()
+        .filter(|s| s.status == StepStatus::Active)
+        .filter(|s| {
+            s.assignee_id
+                .as_deref()
+                .is_some_and(|a| held_by.iter().any(|h| h == a))
+        })
+        .filter(|s| declares_an_agent_run(&s.metadata))
+        .count();
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// What the concurrency half measured and decided — the same shape
+/// [`Reservation`] has, for the same reason: a refusal carries every
+/// number it rests on.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Concurrency {
+    pub actor: String,
+    pub in_flight: u32,
+    pub max_concurrent_runs: Option<u32>,
+    pub decision: BudgetDecision,
+}
+
+impl Concurrency {
+    /// Judge `in_flight` against the row's cap. A `None` cap admits
+    /// everything — the boot-guard rule every cap reader here follows.
+    pub fn measure(actor: &str, cap: Option<u32>, in_flight: u32) -> Concurrency {
+        Concurrency {
+            actor: actor.to_string(),
+            in_flight,
+            max_concurrent_runs: cap,
+            // The ONE rule, with the money half deliberately absent:
+            // [`BudgetDoor::reserve`] has already judged that, and
+            // asking it again here would report a budget refusal the
+            // caller has already passed.
+            decision: BudgetDecision::decide(
+                AgentCaps {
+                    hourly_budget_usd_micros: None,
+                    max_concurrent_runs: cap,
+                },
+                AgentLoad {
+                    spent_usd_micros: 0,
+                    in_flight,
+                },
+            ),
+        }
+    }
+
+    /// The 409 body: what the door counted and the cap it counted
+    /// against, so the reader never re-derives what the door measured.
+    pub fn refusal_body(&self) -> serde_json::Value {
+        serde_json::json!({
+            "error": "claim past the agent's concurrent-run cap",
+            "actor": self.actor,
+            "in_flight": self.in_flight,
+            "max_concurrent_runs": self.max_concurrent_runs,
+            "reason": match &self.decision {
+                BudgetDecision::Deny { reason } => reason.clone(),
+                BudgetDecision::Allow { .. } => String::new(),
+            },
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,5 +344,102 @@ mod tests {
         assert_eq!(body["hourly_budget_usd_micros"], 3_000_000);
         assert_eq!(body["window_from"], "2026-09-18T18:00:00Z");
         assert!(body["reason"].as_str().unwrap().contains("over the cap"));
+    }
+
+    /// A step in whatever state the case needs. Only the four fields
+    /// `in_flight_claims` reads carry meaning here.
+    fn step(status: StepStatus, assignee: Option<&str>, agent: bool) -> Step {
+        use boss_core::job::{JobId, StepId};
+        Step {
+            id: StepId::from_uuid(uuid::Uuid::new_v4()),
+            job_id: JobId::from_uuid(uuid::Uuid::new_v4()),
+            kind: "task".into(),
+            title: "build".into(),
+            spec_slug: Some("build".into()),
+            assignee_id: assignee.map(str::to_string),
+            status,
+            sort_order: 0,
+            blocked_by: vec![],
+            sign_offs_required: Vec::new(),
+            assurance_required: None,
+            sign_offs: Vec::new(),
+            fields: Vec::new(),
+            completed_on: None,
+            completed_by: None,
+            completed_at: None,
+            metadata: if agent {
+                serde_json::json!({crate::agent_spec::MODEL_KEY: "opus-5[1m]"})
+            } else {
+                serde_json::json!({})
+            },
+            notes: None,
+            step_plugin_version: 0,
+            embedded_job: None,
+        }
+    }
+
+    #[test]
+    fn in_flight_counts_the_actors_active_agent_claims_and_nothing_else() {
+        let held_by = vec![
+            "agent-claude".to_string(),
+            "claude@algedonic.dev".to_string(),
+        ];
+        let steps = vec![
+            // Two runs genuinely in flight — one held under the
+            // registered id, one under an alias the CAS had not yet
+            // rewritten.
+            step(StepStatus::Active, Some("agent-claude"), true),
+            step(StepStatus::Active, Some("claude@algedonic.dev"), true),
+            // Ready and claimed is not running: the queue read hands
+            // these out, and counting them would refuse the claim the
+            // door is judging.
+            step(StepStatus::Ready, Some("agent-claude"), true),
+            // Somebody else's run.
+            step(StepStatus::Active, Some("agent-other"), true),
+            // The actor's own hand work: active, theirs, no agent
+            // block — not a run, so not a run in flight.
+            step(StepStatus::Active, Some("agent-claude"), false),
+            // Unassigned.
+            step(StepStatus::Active, None, true),
+        ];
+        assert_eq!(in_flight_claims(&steps, &held_by), 2);
+        assert_eq!(in_flight_claims(&[], &held_by), 0);
+    }
+
+    #[test]
+    fn the_cap_refuses_at_it_and_an_undeclared_cap_admits_everything() {
+        // Under the cap is admitted.
+        assert!(
+            Concurrency::measure("agent-claude", Some(2), 1)
+                .decision
+                .is_allowed()
+        );
+        // AT the cap refuses: the claim would make it cap+1.
+        let at = Concurrency::measure("agent-claude", Some(2), 2);
+        assert!(!at.decision.is_allowed());
+        let body = at.refusal_body();
+        assert_eq!(body["actor"], "agent-claude");
+        assert_eq!(body["in_flight"], 2);
+        assert_eq!(body["max_concurrent_runs"], 2);
+        assert!(
+            body["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("2 of 2 runs in flight"),
+            "{body}"
+        );
+        // A cap of zero refuses every run — declared, not absent.
+        assert!(
+            !Concurrency::measure("agent-claude", Some(0), 0)
+                .decision
+                .is_allowed()
+        );
+        // No cap declared is unbounded, the boot-guard rule.
+        let none = Concurrency::measure("agent-claude", None, 47);
+        assert!(none.decision.is_allowed());
+        assert_eq!(
+            none.refusal_body()["max_concurrent_runs"],
+            serde_json::Value::Null
+        );
     }
 }
