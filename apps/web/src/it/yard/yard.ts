@@ -661,7 +661,32 @@ export type ArrivalCar = Readonly<{
   car_id_short: string | null;
   title: string | null;
   branch: string | null;
+  /** This car IS that item's build — the edge that CLOSES it at arrival. */
+  backlog_item: string | null;
+  /** This car is ONE PIECE of that item; the item stays open. */
+  partial_item: string | null;
+  /** This car answers no item, and which kind of item-less car it is. */
+  no_item_reason: string | null;
 }>;
+
+/** WHICH of the three answers a car gave about its item.
+ *
+ *  Every car states exactly one — `boss gate` refuses to launch
+ *  without it — so a consist entry with none is a car filed before
+ *  that refusal existed, and only THAT renders blank. Until backlog
+ *  7f90c2ce this panel drew no item at all, so every car in every
+ *  train read as unlinked; the operator who read one concluded the
+ *  cars were not carrying their link, filed a packet naming that as
+ *  the cause, and a later measurement of 188 closed cars found 100%
+ *  of them answering. The data was right and the rendering was the
+ *  defect — an absent field is not an absent fact. */
+export type ItemAnswer = Readonly<{ kind: 'item' | 'part' | 'none'; text: string }>;
+export function itemAnswer(c: ArrivalCar): ItemAnswer | null {
+  if (c.backlog_item !== null) return { kind: 'item', text: `item ${c.backlog_item}` };
+  if (c.partial_item !== null) return { kind: 'part', text: `part of ${c.partial_item}` };
+  if (c.no_item_reason !== null) return { kind: 'none', text: `no item: ${c.no_item_reason}` };
+  return null;
+}
 export type ArrivalSkip = Readonly<{ car_id_short: string | null; reason: string | null }>;
 export type ArrivalTimings = Readonly<{
   boarded_at: string | null;
@@ -721,6 +746,9 @@ export function arrivalReport(j: WithSteps): ArrivalReport | null {
         car_id_short: asText(o.car_id_short),
         title: asText(o.title),
         branch: asText(o.branch),
+        backlog_item: asText(o.backlog_item),
+        partial_item: asText(o.partial_item),
+        no_item_reason: asText(o.no_item_reason),
       };
     }),
     left_behind: (Array.isArray(raw.left_behind) ? raw.left_behind : []).map(c => {

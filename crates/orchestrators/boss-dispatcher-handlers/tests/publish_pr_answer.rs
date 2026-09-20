@@ -105,8 +105,8 @@ fn rule_args_of(rule: &str) -> Vec<(String, Value)> {
 }
 
 /// The answered request as the runner leaves it: the verb's output and
-/// exit on `execute`, the publish's id under `for_publish` (the filing
-/// rule's v2), the exit on the request itself.
+/// exit on `execute` — the one place the exit is recorded (50fede8b) —
+/// and the publish's id under `for_publish` (the filing rule's v2).
 fn request(exit: &str, output: &str) -> serde_json::Value {
     json!({
         "id": REQUEST,
@@ -115,7 +115,7 @@ fn request(exit: &str, output: &str) -> serde_json::Value {
         "status": "closed",
         "subject": { "subject_kind": "custom", "id": "forge" },
         "metadata": { "host": "forge", "verb": "publish-github-pr",
-                      "for_publish": PUBLISH, "exit": exit, "outcome": "answered",
+                      "for_publish": PUBLISH, "outcome": "answered",
                       "spawned_by_rule": "publish-github-pr-on-open-pr-ready" },
         "steps": [
             { "id": "r-filed", "spec_slug": "filed", "status": "completed", "metadata": {} },
@@ -567,7 +567,7 @@ fn tag_request(output: &str) -> serde_json::Value {
         "title": "tag-release v1.4.0 on forge",
         "subject": { "subject_kind": "custom", "id": "forge" },
         "metadata": { "host": "forge", "verb": "tag-release", "release": RELEASE,
-                      "exit": "1", "outcome": "answered" },
+                      "outcome": "answered" },
         "steps": [
             { "id": "t-execute", "spec_slug": "execute", "status": "completed",
               "metadata": { "disposition": "answered", "exit_code": "1",

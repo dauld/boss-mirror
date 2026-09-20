@@ -68,10 +68,11 @@
 #   `PUT .../steps/{id}` swaps `metadata` wholesale, so sending only
 #   new keys silently wipes the rest, including `authority_role`
 #   (the boss-step.sh lesson).
-# - Writes the verb's exit onto the REQUEST's metadata (`exit`) before
-#   the step completes, so the `answered` close carries it where the
-#   yard and the rules read (f47861a5). `answered` means the verb ran;
-#   `exit` says how it went.
+# - Records the verb's exit ONCE, as `exit_code` on that step.
+#   `answered` means the verb ran; `exit_code` says how it went, and
+#   every reader — `boss ops --wait`, the answered-ops-request judges,
+#   the yard — takes it from there (50fede8b; see the merge door below
+#   for the request-level copy this replaced).
 # - A per-packet problem (refusal, missing step) never kills the loop;
 #   a transport failure to the SoR fails the unit loudly, systemd
 #   records it red, and the same loud-local-failure posture as the
@@ -392,35 +393,42 @@ ARGV
     payloadf="$workdir/payload"
     printf '%s' "$merged" | jq -c '{status: "completed", metadata: .}' > "$payloadf"
 
-    # THE EXIT RIDES THE REQUEST, not only the step (backlog f47861a5,
-    # measured 2026-09-19 on c98a782f): publish-github-pr printed FAILED
-    # and exited 1, this runner recorded `exit_code: "1"` on the step,
-    # the request closed `answered` — the verb RAN, which is all the
-    # outcome names — and nothing at the request level said so, so the
-    # yard drew it like any answered request and the publish step it was
-    # filed for sat ready for five hours. The verb's exit goes onto the
-    # request's own metadata through the merge door FIRST, so the close
-    # the step completion triggers is read with the exit already on it.
-    # A refusal ran nothing and carries none. A failed merge does not
-    # withhold the answer — the step completion below still lands — but
-    # it is counted, and the unit goes red for it.
+    # THE QUEUE READING RIDES THE REQUEST (1ffb3305): the depth this
+    # run faced, and what THIS request waited before the runner reached
+    # it. Both are facts about the queue, not about the verb, so they
+    # have no home on the execute step — and riding the merge door
+    # makes the depth a question the jobs API answers, which the
+    # journal line alone does not. (n10's sibling packet adds the
+    # verb's own duration; this is the wait BEFORE it, not the run.)
+    #
+    # THE VERB'S EXIT DOES NOT RIDE HERE (backlog 50fede8b). It used to:
+    # f47861a5 added `exit` beside the step's `exit_code` so a reader of
+    # the close would see it where the outcome is. Nothing ever read the
+    # copy — `boss ops --wait`, `verb_failure` (the whole answered-ops-
+    # request judge family) and the yard's shed and signals all read
+    # `exit_code` off the execute step, and a list read carries each
+    # row's steps, so a request-level reader never had to fetch them
+    # separately. Two spellings of one fact, written by one act and held
+    # equal by nothing, is what CLAUDE.md §9a refuses: the first writer
+    # to move one without the other (a retry, a hand correction, a
+    # second runner) hands a reader a stale exit. One spelling now:
+    # `exit_code`, on the step, written by the PUT below.
+    #
+    # A refusal ran nothing and waited in no queue this run answered,
+    # so it writes nothing here. A failed merge does not withhold the
+    # answer — the step completion below still lands — but it is
+    # counted, and the unit goes red for it.
     if [ "$disp" = "answered" ]; then
         exitf="$workdir/exit"
-        # The queue reading rides here too (1ffb3305): the depth this
-        # run faced, and what THIS request waited before the runner
-        # reached it. Same door, same merge — and it makes the depth a
-        # question the jobs API answers, which the journal line alone
-        # does not. (n10's sibling packet adds the verb's own duration;
-        # this is the wait BEFORE it, not the run.)
-        jq -cn --arg rc "$rc_str" --arg w "$wait_s" --argjson d "$n" '
-            {exit: $rc, queue_depth: $d}
+        jq -cn --arg w "$wait_s" --argjson d "$n" '
+            {queue_depth: $d}
             + (if $w == "-" then {} else {queued_s: ($w | tonumber)} end)' > "$exitf"
         if ! patch_err=$(curl -fsS -X PATCH -H "content-type: application/json" \
                 -H "x-boss-user: $BOSS_USER" \
                 ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
                 --data-binary @"$exitf" \
                 "$BASE/api/jobs/$job_id/metadata" 2>&1 >/dev/null); then
-            echo "ops-runner: PATCH exit=$rc_str failed on $short — $patch_err" >&2
+            echo "ops-runner: PATCH queue_depth=$n failed on $short — $patch_err" >&2
             failed=$((failed + 1))
         fi
     fi

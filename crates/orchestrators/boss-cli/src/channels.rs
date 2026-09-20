@@ -63,6 +63,68 @@ impl InputChannel {
             InputChannel::UserFeedback | InputChannel::Roadmap | InputChannel::DesignResolution
         )
     }
+
+    /// The inverse of [`InputChannel::label`] over the fileable lanes —
+    /// derived from that one list, so a lane can never be nameable and
+    /// unreadable at once. An unknown or misspelled label is `None`: a
+    /// typo must not masquerade as a recorded fact.
+    pub(crate) fn parse(label: &str) -> Option<InputChannel> {
+        FILEABLE_LANES.into_iter().find(|c| c.label() == label)
+    }
+}
+
+/// Every lane a FILER may name, in one list — the vocabulary `boss job
+/// file --channel` parses and its refusal prints, so the door's help and
+/// the report's labels cannot drift apart (CLAUDE.md §9a).
+/// `Unclassified` is deliberately absent: it is what the ABSENCE of an
+/// answer reads as, never an answer.
+pub(crate) const FILEABLE_LANES: [InputChannel; 10] = [
+    InputChannel::UserFeedback,
+    InputChannel::Roadmap,
+    InputChannel::DesignResolution,
+    InputChannel::Review,
+    InputChannel::Telemetry,
+    InputChannel::PipelineFailure,
+    InputChannel::Discovery,
+    InputChannel::PostMortem,
+    InputChannel::Dependency,
+    InputChannel::Scheduled,
+];
+
+/// The metadata key the lane is RECORDED under, written at filing.
+pub(crate) const RECORDED_KEY: &str = "input_channel";
+
+/// When `metadata.input_channel` started being written (c5dc81a1, the
+/// car that added the field). Packets opened before it predate the
+/// field: they keep the keyword inference, MARKED as inference, the way
+/// `agent_runs` marks its pre-instrumentation era rather than
+/// back-filling a guess into rows nobody measured. A packet opened after
+/// it with no lane means the filer did not say — which is actionable.
+/// Midnight AFTER the car lands, so the boundary never accuses a filer
+/// who used a door that was not yet live.
+const FIELD_LIVE_AT: &str = "2026-09-21T00:00:00Z";
+
+/// How a job's lane was arrived at — the distinction is the whole point
+/// of c5dc81a1. A RECORDED lane is a fact its filer wrote; an INFERRED
+/// one is keyword overlap, kept only for the pre-field era; NOT-SAID is
+/// a filer who skipped the field. Reporting the three together is what
+/// stops a share computed over the minority from reading as a measure of
+/// the whole (367b2dbe).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Provenance {
+    Recorded,
+    Inferred,
+    NotSaid,
+}
+
+/// The three counts behind any reading of the mix.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Provenances {
+    pub(crate) recorded: usize,
+    /// Pre-field rows: no `input_channel`, lane guessed from words
+    /// (possibly to `unclassified`, when the words matched nothing).
+    pub(crate) inferred: usize,
+    pub(crate) not_stated: usize,
 }
 
 fn field<'a>(job: &'a Value, key: &str) -> &'a str {
@@ -72,17 +134,64 @@ fn field<'a>(job: &'a Value, key: &str) -> &'a str {
         .unwrap_or("")
 }
 
-/// Classify a work-originating job by its input lane. Pure: same job,
-/// same lane. Order matters — most specific signal wins.
-pub(crate) fn input_channel(job: &Value) -> InputChannel {
+/// Was this packet filed before `metadata.input_channel` existed? A
+/// packet with no readable `opened_at` is treated as pre-field, because
+/// the conservative error is to keep inferring, never to report a filer
+/// as silent when we cannot date them.
+fn pre_field(job: &Value) -> bool {
+    let opened = match field(job, "opened_at") {
+        "" => job.get("opened_at").and_then(Value::as_str).unwrap_or(""),
+        s => s,
+    };
+    match chrono::DateTime::parse_from_rfc3339(opened) {
+        Ok(t) => match chrono::DateTime::parse_from_rfc3339(FIELD_LIVE_AT) {
+            Ok(live) => t < live,
+            Err(_) => true,
+        },
+        Err(_) => true,
+    }
+}
+
+/// Classify a work-originating job by its input lane AND say how that
+/// lane was arrived at. Pure: same job, same answer.
+///
+/// The order is the fix (c5dc81a1). A lane the filer RECORDED wins over
+/// every keyword, because the filer knows the origin and a heuristic
+/// never will: the words in a title like "deny_unknown_fields is inert
+/// under serde flatten" are unclassifiable by construction while its
+/// origin — a builder found it mid-car — is perfectly well known.
+/// Measured over 310 backlog-items on 2026-09-20, the keywords matched
+/// 58 and missed 252, and the miss rate CLIMBED (59% on 09-17, 83% on
+/// 09-18, 91% on 09-19) as more of the work came from one session whose
+/// vocabulary the classifier never held.
+pub(crate) fn classify(job: &Value) -> (InputChannel, Provenance) {
+    if let Some(lane) = InputChannel::parse(field(job, RECORDED_KEY)) {
+        return (lane, Provenance::Recorded);
+    }
+    // A kind that names its own lane is a recorded fact too — structured
+    // data, not vocabulary overlap — so it needs no field.
     let kind = job.get("kind").and_then(Value::as_str).unwrap_or("");
     if kind == "user-feedback" {
-        return InputChannel::UserFeedback;
+        return (InputChannel::UserFeedback, Provenance::Recorded);
     }
     if kind.starts_with("maintenance-") || kind == "rotate-a-credential" {
-        return InputChannel::Scheduled;
+        return (InputChannel::Scheduled, Provenance::Recorded);
     }
+    if pre_field(job) {
+        return (infer(job), Provenance::Inferred);
+    }
+    (InputChannel::Unclassified, Provenance::NotSaid)
+}
 
+/// The lane alone, for callers that only count. See [`classify`].
+pub(crate) fn input_channel(job: &Value) -> InputChannel {
+    classify(job).0
+}
+
+/// The pre-field guess: keyword overlap over reporter/source/area/title.
+/// Kept ONLY as the fallback for rows filed before the field existed —
+/// not extended. Better keywords were never the fix.
+fn infer(job: &Value) -> InputChannel {
     let title = job
         .get("title")
         .and_then(Value::as_str)
@@ -145,6 +254,32 @@ pub(crate) fn input_mix(jobs: &[Value]) -> BTreeMap<InputChannel, usize> {
         *mix.entry(input_channel(job)).or_insert(0) += 1;
     }
     mix
+}
+
+/// Count jobs per lane over RECORDED rows only — the denominator any
+/// health reading is entitled to. See [`proactive_share`].
+pub(crate) fn recorded_mix(jobs: &[Value]) -> BTreeMap<InputChannel, usize> {
+    let mut mix: BTreeMap<InputChannel, usize> = BTreeMap::new();
+    for job in jobs {
+        let (lane, how) = classify(job);
+        if how == Provenance::Recorded {
+            *mix.entry(lane).or_insert(0) += 1;
+        }
+    }
+    mix
+}
+
+/// How the lanes were arrived at, across a set of jobs.
+pub(crate) fn provenances(jobs: &[Value]) -> Provenances {
+    let mut p = Provenances::default();
+    for job in jobs {
+        match classify(job).1 {
+            Provenance::Recorded => p.recorded += 1,
+            Provenance::Inferred => p.inferred += 1,
+            Provenance::NotSaid => p.not_stated += 1,
+        }
+    }
+    p
 }
 
 /// The proactive share: fraction of classified work coming from lanes
@@ -214,8 +349,17 @@ pub async fn run(
         .unwrap_or(0) as usize;
 
     let mut mix = input_mix(&backlog);
+    // The same rows read a second way: how each lane was ARRIVED at.
+    // Printed beside the mix because a lane guessed from a title's words
+    // is not the same kind of fact as one its filer recorded (c5dc81a1).
+    let mut how = provenances(&backlog);
+    let mut rmix = recorded_mix(&backlog);
     if uf_total > 0 {
         *mix.entry(InputChannel::UserFeedback).or_insert(0) += uf_total;
+        // Counted without fetching the rows: the KIND is the lane, which
+        // is a recorded fact whatever the packet's words say.
+        *rmix.entry(InputChannel::UserFeedback).or_insert(0) += uf_total;
+        how.recorded += uf_total;
     }
     let total: usize = mix.values().sum();
     println!("boss channels — where the work comes from (input mix)");
@@ -248,17 +392,33 @@ pub async fn run(
             }
         );
     }
-    match proactive_share(&mix) {
+    println!(
+        "\n  how the lane is known: {} recorded · {} inferred from words (pre-field rows) \
+         · {} filed without one",
+        how.recorded, how.inferred, how.not_stated
+    );
+    // The headline is computed over RECORDED rows ONLY. It used to be
+    // computed over every row and printed with no caveat, which made it
+    // a confident number over the minority the keywords happened to
+    // match — 58 of 310 on 2026-09-20 (367b2dbe, retired here). A
+    // denominator that is mostly guesswork produces a reading nobody can
+    // act on, so say what it covers or say n/a.
+    let rtotal: usize = rmix.values().sum();
+    match proactive_share(&rmix) {
         Some(s) => println!(
-            "\n  proactive share: {:.0}%  — {}",
+            "  proactive share: {:.0}% over the {} packet(s) whose lane is recorded  — {}",
             s * 100.0,
+            rtotal,
             if s >= 0.5 {
                 "building what is wanted"
             } else {
                 "tilted toward firefighting"
             }
         ),
-        None => println!("\n  proactive share: n/a — no classified work in the window"),
+        None => println!(
+            "  proactive share: n/a — no packet in the window carries a recorded lane, \
+             and keyword overlap is not a reading"
+        ),
     }
 
     // Delivery mix over the dock: how the work about to ship will ship.
@@ -966,6 +1126,166 @@ mod tests {
     #[test]
     fn proactive_share_is_none_on_empty() {
         assert_eq!(proactive_share(&BTreeMap::new()), None);
+    }
+
+    /// The FIX for c5dc81a1: a lane the filer WROTE is read off the
+    /// packet, not guessed from its words. A title carrying none of the
+    /// keywords still classifies, because the filer said so.
+    #[test]
+    fn a_recorded_channel_is_read_not_guessed() {
+        let j = json!({
+            "kind": "backlog-item",
+            "metadata": {
+                "input_channel": "discovery-while-working",
+                "title": "deny_unknown_fields is inert under serde flatten",
+                "opened_at": "2026-09-25T00:00:00Z",
+            },
+        });
+        assert_eq!(
+            classify(&j),
+            (InputChannel::Discovery, Provenance::Recorded)
+        );
+        // And the recorded lane WINS over a keyword the heuristic would
+        // have matched: the filer knows the origin, the words do not.
+        let j = json!({
+            "kind": "backlog-item",
+            "metadata": {
+                "input_channel": "roadmap",
+                "reporter": "claude@algedonic.dev",
+                "title": "forge disk at the floor",
+                "opened_at": "2026-09-25T00:00:00Z",
+            },
+        });
+        assert_eq!(classify(&j), (InputChannel::Roadmap, Provenance::Recorded));
+    }
+
+    /// The era boundary (c5dc81a1, the agent_runs handling): rows filed
+    /// BEFORE the field existed keep the keyword inference, marked as
+    /// inference; rows filed after it without one are `unclassified`
+    /// meaning the filer did not say — which is actionable.
+    #[test]
+    fn the_pre_field_era_keeps_the_guess_and_the_new_era_does_not() {
+        let old = json!({
+            "kind": "backlog-item",
+            "metadata": {
+                "reporter": "claude@algedonic.dev",
+                "title": "a bug found mid-car",
+                "opened_at": "2026-09-19T03:55:29Z",
+            },
+        });
+        assert_eq!(
+            classify(&old),
+            (InputChannel::Discovery, Provenance::Inferred)
+        );
+        let new = json!({
+            "kind": "backlog-item",
+            "metadata": {
+                "reporter": "claude@algedonic.dev",
+                "title": "a bug found mid-car",
+                "opened_at": "2026-09-25T03:55:29Z",
+            },
+        });
+        assert_eq!(
+            classify(&new),
+            (InputChannel::Unclassified, Provenance::NotSaid)
+        );
+    }
+
+    /// A lane spelled wrong is not silently a guess: an unreadable
+    /// recorded value falls back to the same reading as no value, so a
+    /// typo can never masquerade as a fact.
+    #[test]
+    fn an_unreadable_recorded_lane_is_not_a_fact() {
+        let j = json!({
+            "kind": "backlog-item",
+            "metadata": {"input_channel": "vibes", "opened_at": "2026-09-25T00:00:00Z"},
+        });
+        assert_eq!(
+            classify(&j),
+            (InputChannel::Unclassified, Provenance::NotSaid)
+        );
+    }
+
+    /// `unclassified` is what the ABSENCE of an answer reads as, so it
+    /// is not in the vocabulary a filer may name.
+    #[test]
+    fn the_fileable_vocabulary_excludes_unclassified() {
+        assert_eq!(
+            InputChannel::parse("discovery-while-working"),
+            Some(InputChannel::Discovery)
+        );
+        assert_eq!(InputChannel::parse("unclassified"), None);
+        assert_eq!(InputChannel::parse("nonsense"), None);
+        // One list, so the help text and the parser cannot drift (§9a).
+        for lane in FILEABLE_LANES {
+            assert_eq!(
+                InputChannel::parse(lane.label()),
+                Some(lane),
+                "{}",
+                lane.label()
+            );
+        }
+        assert!(!FILEABLE_LANES.contains(&InputChannel::Unclassified));
+    }
+
+    /// 367b2dbe, retired: the headline used to be computed over the
+    /// minority the keywords matched and printed with no caveat. It is
+    /// now computed over RECORDED rows only, and is `n/a` when nothing
+    /// recorded a lane — a number over a guess is worse than no number.
+    #[test]
+    fn the_proactive_headline_counts_only_recorded_lanes() {
+        let jobs = vec![
+            // Pre-field era, inferred roadmap — NOT a recorded fact.
+            job(
+                "backlog-item",
+                json!({"reporter":"David","title":"a feature","opened_at":"2026-09-01T00:00:00Z"}),
+            ),
+            // New era, filer said nothing.
+            job(
+                "backlog-item",
+                json!({"title":"x","opened_at":"2026-09-25T00:00:00Z"}),
+            ),
+        ];
+        let p = provenances(&jobs);
+        assert_eq!((p.recorded, p.inferred, p.not_stated), (0, 1, 1));
+        assert_eq!(proactive_share(&recorded_mix(&jobs)), None);
+
+        // One recorded roadmap row and one recorded discovery row: the
+        // share is 50% over TWO, not over the four rows.
+        let mut jobs = jobs;
+        jobs.push(job(
+            "backlog-item",
+            json!({"input_channel":"roadmap","opened_at":"2026-09-25T00:00:00Z"}),
+        ));
+        jobs.push(job(
+            "backlog-item",
+            json!({"input_channel":"discovery-while-working","opened_at":"2026-09-25T00:00:00Z"}),
+        ));
+        let p = provenances(&jobs);
+        assert_eq!((p.recorded, p.inferred, p.not_stated), (2, 1, 1));
+        assert_eq!(proactive_share(&recorded_mix(&jobs)), Some(0.5));
+        // The full mix still counts every row, so nothing goes missing.
+        assert_eq!(input_mix(&jobs).values().sum::<usize>(), 4);
+    }
+
+    /// A packet whose KIND names its lane needs no field: the kind is
+    /// already a recorded fact, not vocabulary overlap.
+    #[test]
+    fn a_kind_that_names_its_lane_is_recorded_by_the_kind() {
+        assert_eq!(
+            classify(&job(
+                "user-feedback",
+                json!({"opened_at":"2026-09-25T00:00:00Z"})
+            )),
+            (InputChannel::UserFeedback, Provenance::Recorded)
+        );
+        assert_eq!(
+            classify(&job(
+                "maintenance-backup",
+                json!({"opened_at":"2026-09-25T00:00:00Z"})
+            )),
+            (InputChannel::Scheduled, Provenance::Recorded)
+        );
     }
 
     #[test]

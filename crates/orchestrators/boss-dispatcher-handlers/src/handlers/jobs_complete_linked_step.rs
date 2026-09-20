@@ -1204,15 +1204,15 @@ mod verb_failure_tests {
     use super::*;
 
     /// The answered request as the ops-runner completes it: the exit on
-    /// the EXECUTE step, under `exit_code`. That is the spelling every
-    /// reader here takes — `boss ops --wait` reads it, the step surface
-    /// is fed from it, and the sibling packet 50fede8b names the step
-    /// as the home that survives the collapse of the request-level
-    /// `metadata.exit` the runner writes beside it.
+    /// the EXECUTE step, under `exit_code`, and nowhere else. That is
+    /// the spelling every reader here takes — `boss ops --wait` reads
+    /// it, the step surface is fed from it — and since 50fede8b it is
+    /// the only one: the request-level `metadata.exit` the runner used
+    /// to write beside it was a second spelling nothing read.
     fn answered(exit: &str, output: &str) -> serde_json::Value {
         json!({
             "id": "r", "kind": "ops-request", "status": "closed",
-            "metadata": { "verb": "publish-drift", "exit": exit },
+            "metadata": { "verb": "publish-drift" },
             "steps": [{
                 "id": "r-execute", "spec_slug": "execute", "status": "completed",
                 "metadata": { "disposition": "answered", "exit_code": exit, "output": output },

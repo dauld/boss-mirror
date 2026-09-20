@@ -10,7 +10,7 @@
   // train that landed before the conductor started writing reports —
   // renders nothing at all.
   import Section from '@boss/web-kit/ui/Section.svelte';
-  import { arrivalReport, type WithSteps } from './yard';
+  import { arrivalReport, itemAnswer, type WithSteps } from './yard';
 
   type Props = Readonly<{ job: WithSteps }>;
   let { job }: Props = $props();
@@ -59,15 +59,23 @@
     <!-- The consist as a list, not packet cards: the report carries
          each car's SHORT id, and `/api/jobs/{id}` wants the full one —
          a card would offer a click that dead-ends. Same facts, no
-         promise the data can't keep. -->
+         promise the data can't keep.
+
+         The item answer rides each line (backlog 7f90c2ce). Drawing
+         nothing made every car read as unlinked, which is a WRONG
+         answer rather than an empty one: the gate refuses to launch
+         without one of the three, so a blank line here means a car
+         older than that refusal and nothing else. -->
     {#if r.consist.length > 0}
       <div class="ar-label">CONSIST</div>
       <ul class="ar-list">
         {#each r.consist as c, i (c.car_id_short ?? i)}
+          {@const answer = itemAnswer(c)}
           <li>
             <span class="ar-id">{c.car_id_short ?? '—'}</span>
             <span class="ar-title">{c.title ?? '(untitled car)'}</span>
             {#if c.branch !== null}<span class="ar-branch">{c.branch}</span>{/if}
+            {#if answer}<span class="ar-item ar-item-{answer.kind}">{answer.text}</span>{/if}
           </li>
         {/each}
       </ul>
@@ -151,6 +159,29 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* The item answer: a closing link reads as an ordinary fact, one
+     piece of an item reads as a link that does NOT close, and a
+     stated no-item reason reads as prose because that is what it is. */
+  .ar-item {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-dim, #7a838c);
+    flex: none;
+    margin-left: auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 40%;
+  }
+  .ar-item-part {
+    color: var(--accent, #6ea8d8);
+  }
+  .ar-item-none {
+    font-family: inherit;
+    font-size: 12.5px;
+    font-style: italic;
   }
   .ar-skip {
     font-size: 12.5px;

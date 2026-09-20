@@ -37,9 +37,28 @@ fn deployed_generation(summary: &str) -> Option<&str> {
 }
 
 /// The consist as the record states it — one entry per boarded car:
-/// its short id, title, branch, and the backlog-item short id when
-/// the car names one (`metadata.backlog_item`, absent otherwise —
-/// never an empty string, so a reader can `get` rather than test).
+/// its short id, title, branch, and WHICH of the three item answers
+/// the car gave.
+///
+/// ALL THREE, NOT ONLY THE CLOSING ONE (backlog 7f90c2ce). A car
+/// states exactly one of `backlog_item` (this car IS the item's
+/// build), `partial_item` (one piece of it) or `no_item_reason` (no
+/// item, and which kind) — `ParkIntent::require_item_answer` refuses
+/// to launch a gate without one, so the report's SOURCE cannot be
+/// absent. Carrying only the closing edge made the other two answers
+/// render as a missing field, which reads as "this car named no
+/// item": a wrong answer where the record holds a right one. Measured
+/// 2026-09-20 over the 200 most recent closed cars — 187 closing
+/// links, 6 partial, 7 reasons — so 13 cars in that window reported
+/// as unlinked while each had answered. The class is this codebase's
+/// oldest: a wrong target answers instead of erroring, here applied
+/// to a report rather than a query.
+///
+/// Ids are shortened (`id8`); the reason rides verbatim, because it
+/// IS the answer. Absent keys are still omitted rather than nulled,
+/// so a car filed before the refusal existed carries none of the
+/// three and a reader can `get` rather than test.
+///
 /// ONE definition, two readers: the arrival report files it, and
 /// the squash commit's body renders it (`squash_message`), so the
 /// changelog git carries is the consist the packet record carries.
@@ -47,7 +66,7 @@ pub(crate) fn train_consist(boarded_cars: &[Value]) -> Vec<Value> {
     boarded_cars
         .iter()
         .map(|c| {
-            let mut car = json!({
+            let mut entry = json!({
                 "car_id_short": id8(c.get("id").and_then(Value::as_str).unwrap_or("?")),
                 "title": c.get("title").and_then(Value::as_str).unwrap_or_default(),
                 "branch": c
@@ -56,15 +75,22 @@ pub(crate) fn train_consist(boarded_cars: &[Value]) -> Vec<Value> {
                     .and_then(Value::as_str)
                     .unwrap_or_default(),
             });
-            if let Some(item) = c
-                .get("metadata")
-                .and_then(|m| m.get("backlog_item"))
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-            {
-                car["backlog_item"] = json!(id8(item));
+            let stated = |key: &str| -> Option<&str> {
+                c.get("metadata")
+                    .and_then(|m| m.get(key))
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+            };
+            if let Some(item) = stated("backlog_item") {
+                entry["backlog_item"] = json!(id8(item));
             }
-            car
+            if let Some(item) = stated(car::PARTIAL_ITEM) {
+                entry[car::PARTIAL_ITEM] = json!(id8(item));
+            }
+            if let Some(reason) = stated(car::NO_ITEM_REASON) {
+                entry[car::NO_ITEM_REASON] = json!(reason);
+            }
+            entry
         })
         .collect()
 }
@@ -87,14 +113,27 @@ pub(crate) fn squash_message(consist: &[Value]) -> String {
             .unwrap_or_default()
             .to_string()
     };
+    // The item answer, in the spelling that says WHICH answer it was —
+    // a closing link, one piece of an item, or a stated reason for
+    // naming none (backlog 7f90c2ce). git log is a reader of this line
+    // too, so "no item: ..." beats a blank the reader cannot tell from
+    // an omission.
+    let item_answer = |c: &Value| -> String {
+        let text = |k: &str| c.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
+        if let Some(i) = text("backlog_item") {
+            format!(", backlog-item {i}")
+        } else if let Some(i) = text(car::PARTIAL_ITEM) {
+            format!(", part of {i}")
+        } else if let Some(r) = text(car::NO_ITEM_REASON) {
+            format!(", no item: {r}")
+        } else {
+            String::new()
+        }
+    };
     consist
         .iter()
         .map(|c| {
-            let item = c
-                .get("backlog_item")
-                .and_then(Value::as_str)
-                .map(|i| format!(", backlog-item {i}"))
-                .unwrap_or_default();
+            let item = item_answer(c);
             format!(
                 "{} — {} [ship-a-change {}{item}]",
                 field(c, "branch"),
@@ -1114,6 +1153,48 @@ mod tests {
              feat/y — Add the widget [ship-a-change car-2-uu]"
         );
         assert_eq!(squash_message(&[]), "");
+    }
+
+    // ALL THREE ANSWERS RIDE THE CONSIST, not only the closing one
+    // (backlog 7f90c2ce). `require_item_answer` guarantees a car
+    // states exactly one of three, so the report's source cannot be
+    // absent — but until this landed only `backlog_item` was carried,
+    // and a car that answered `--park-partial-item` or `--park-no-item`
+    // rendered with NO field at all, identical to a car that answered
+    // nothing. Measured 2026-09-20 over the 200 most recent closed
+    // cars: 187 closing links, 6 partial, 7 reasons — so 13 in that
+    // window read as unlinked when each had given an answer. A missing
+    // field must not be how a stated fact is reported.
+    #[test]
+    fn every_item_answer_rides_the_consist_not_only_the_closing_one() {
+        let cars = vec![
+            json!({"id": "car-1-uuid-long", "title": "Fix the thing",
+                   "metadata": {"branch": "feat/x",
+                                "backlog_item": "f252cb1c-1555-4cf6-9f93-19024bb166c3"}}),
+            json!({"id": "car-2-uuid-long", "title": "Add the widget",
+                   "metadata": {"branch": "feat/y",
+                                "partial_item": "9f00a805-cdbe-44de-94b1-c2e4dbb607b2"}}),
+            json!({"id": "car-3-uuid-long", "title": "Tidy the stray",
+                   "metadata": {"branch": "chore/z",
+                                "no_item_reason": "found while building something else"}}),
+        ];
+        let consist = train_consist(&cars);
+        assert_eq!(consist[0]["backlog_item"], json!("f252cb1c"));
+        assert_eq!(consist[1]["partial_item"], json!("9f00a805"));
+        assert_eq!(
+            consist[2]["no_item_reason"],
+            json!("found while building something else")
+        );
+        // Each car states ONE answer, so no entry carries a second.
+        assert!(consist[1].get("backlog_item").is_none(), "{}", consist[1]);
+        assert!(consist[2].get("partial_item").is_none(), "{}", consist[2]);
+        assert_eq!(
+            squash_message(&consist),
+            "feat/x — Fix the thing [ship-a-change car-1-uu, backlog-item f252cb1c]\n\
+             feat/y — Add the widget [ship-a-change car-2-uu, part of 9f00a805]\n\
+             chore/z — Tidy the stray [ship-a-change car-3-uu, no item: found while \
+             building something else]"
+        );
     }
 
     #[test]

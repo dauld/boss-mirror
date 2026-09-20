@@ -1166,6 +1166,15 @@ enum JobAction {
         /// Subject id (default bosspipeline; kind is always custom).
         #[arg(long)]
         subject_id: Option<String>,
+        /// Which lane this work came in through — RECORDED, not later
+        /// guessed from the title's words (c5dc81a1). Required of a
+        /// backlog-item; the refusal names the vocabulary. One of:
+        /// user-feedback, roadmap, design-resolution, review-finding,
+        /// telemetry/monitoring, pipeline-failure,
+        /// discovery-while-working, post-mortem, dependency/external,
+        /// scheduled.
+        #[arg(long, value_name = "LANE")]
+        channel: Option<String>,
     },
     /// Merge keys into a packet's metadata (null removes a key), then
     /// read it back and FAIL unless every key actually took — a 204
@@ -1394,7 +1403,8 @@ async fn main() -> Result<()> {
                 priority,
                 metadata,
                 subject_id,
-            } => job::file(&kind, &title, priority, metadata, subject_id).await,
+                channel,
+            } => job::file(&kind, &title, priority, metadata, subject_id, channel).await,
             JobAction::Patch { job, patch } => job::patch(&job, &patch).await,
         },
         Commands::Orient { all } => orient::run(all).await,

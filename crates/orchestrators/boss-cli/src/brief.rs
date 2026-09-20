@@ -611,6 +611,115 @@ pub(crate) fn step_section(job: &Value) -> Option<String> {
     Some(out)
 }
 
+/// The stored `procedure` on the step the packet is AT, with the slug
+/// it belongs to — the text [`step_section`] renders as the executor's
+/// specification.
+fn stored_procedure(job: &Value) -> Option<(String, String)> {
+    let step = now_step(job)?;
+    let text = step
+        .get("metadata")?
+        .get(PROCEDURE_KEY)?
+        .as_str()?
+        .to_string();
+    Some((crate::envelope::step_line(step).slug, text))
+}
+
+/// The `procedure` the CURRENT Workflow row authors for that step —
+/// `steps[].metadata_defaults`, which is the place a step's procedure
+/// is copied FROM at materialisation.
+fn authored_procedure(row: &Value, slug: &str) -> Option<String> {
+    row.get("steps")?
+        .as_array()?
+        .iter()
+        .find(|s| s.get("title").and_then(Value::as_str) == Some(slug))?
+        .get("metadata_defaults")?
+        .get(PROCEDURE_KEY)?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// The one key this section dates. Spelled once here rather than at
+/// each of the three reads.
+const PROCEDURE_KEY: &str = "procedure";
+
+/// WHICH VERSION OF THE SPECIFICATION BELOW THIS PACKET IS RUNNING
+/// (backlog 794e8d61).
+///
+/// A step's `procedure` is copied out of the Workflow row's
+/// `metadata_defaults` at MATERIALISATION, so a packet carries the
+/// prose that was current when it was OPENED, permanently: publishing
+/// v3 changes what future packets materialise and nothing else. The
+/// brief renders that stored text as the executor's specification and
+/// said nothing about its age, so the lag could not be seen, measured,
+/// or decided about — 47 page-audit packets were open on v2 when this
+/// was filed, and roughly 94 completions were due to run against
+/// superseded instructions.
+///
+/// THE VERSION PAIR ALONE OVER-REPORTS, so the verdict is the
+/// comparison: a packet two versions behind whose own step was never
+/// edited is running current prose. `active` is the registry's active
+/// row (`GET /api/workflows/{kind}`), read best-effort by the caller —
+/// what is NOT known is said rather than assumed, because a brief that
+/// silently claims currency is this defect wearing a different face.
+///
+/// It reports a TEXT difference, not an edit: a `{token}` in the
+/// authored default expands at materialisation, so the two strings can
+/// differ without the protocol having moved. Naming the two versions
+/// is what makes the difference checkable by hand.
+pub(crate) fn protocol_section(job: &Value, active: Option<&Value>) -> Option<String> {
+    let pinned = job.get("workflow_version").and_then(Value::as_i64)?;
+    let kind = job.get("kind").and_then(Value::as_str).unwrap_or("-");
+    let mut out = String::from(
+        "== THE PROTOCOL — which version of the specification below this packet is running \
+         ==\n\n",
+    );
+    let current = active
+        .and_then(|r| r.get("version"))
+        .and_then(Value::as_i64);
+    let Some(current) = current else {
+        out.push_str(&format!(
+            "{kind} v{pinned}, pinned at admission. The registry's current version was not \
+             read, so whether the specification below is still the published one is \
+             unknown.\n"
+        ));
+        return Some(out);
+    };
+    if current <= pinned {
+        out.push_str(&format!(
+            "{kind} v{pinned}, pinned at admission, and v{current} is the registry's active \
+             version — the specification below is current.\n"
+        ));
+        return Some(out);
+    }
+    let behind = current - pinned;
+    out.push_str(&format!(
+        "{kind} v{pinned}, pinned at admission. The registry's active version is v{current}, \
+         so this packet is {behind} {} behind it — in-flight packets stay on the version \
+         they were admitted under.\n",
+        if behind == 1 { "version" } else { "versions" }
+    ));
+    if let Some((slug, stored)) = stored_procedure(job) {
+        match active.and_then(|r| authored_procedure(r, &slug)) {
+            Some(authored) if authored == stored => out.push_str(&format!(
+                "The `{slug}` procedure below is the v{pinned} text and v{current}'s text for \
+                 that step is identical — the published versions did not touch it.\n"
+            )),
+            Some(_) => out.push_str(&format!(
+                "The `{slug}` procedure below is the v{pinned} text and v{current}'s text for \
+                 that step is DIFFERENT, so an edit published since this packet opened did \
+                 NOT reach it: a procedure is copied out of the Workflow row at \
+                 materialisation and never re-read. Read v{current}'s at \
+                 /api/workflows/{kind} before completing this step.\n"
+            )),
+            None => out.push_str(&format!(
+                "v{current} authors no `{PROCEDURE_KEY}` for step `{slug}`, so the text below \
+                 has no current counterpart to be compared against.\n"
+            )),
+        }
+    }
+    Some(out)
+}
+
 /// The line that tells the brief-writer what to do with this output: a
 /// brief REFERENCES the invariants and lets the builder read the packet,
 /// rather than carrying a retyped copy of either.
@@ -674,18 +783,24 @@ pub(crate) fn profile_on_step(job: Option<&Value>) -> Option<String> {
 /// Best effort: the row read is an extra call, and a brief that cannot
 /// make it is still worth printing, so a failure falls through to the
 /// default rather than refusing.
-async fn profile_in_row(http: &reqwest::Client, job: &Value) -> Option<String> {
-    let kind = job.get("kind").and_then(Value::as_str)?;
+fn profile_in_row(row: &Value, job: &Value) -> Option<String> {
     let slug = now_step(job)?.get("spec_slug").and_then(Value::as_str)?;
-    let row = crate::gate::api(
+    crate::dispatch::block_in_row(row, slug).map(|s| s.profile)
+}
+
+/// The registry's ACTIVE Workflow row for this packet's kind, read
+/// best-effort. Two readers now — the lane fallback above and
+/// [`protocol_section`] — so it is ONE call, not two (794e8d61).
+pub(crate) async fn active_row(http: &reqwest::Client, job: &Value) -> Option<Value> {
+    let kind = job.get("kind").and_then(Value::as_str)?;
+    crate::gate::api(
         http,
         reqwest::Method::GET,
         &format!("/api/workflows/{kind}"),
         None,
     )
     .await
-    .ok()??;
-    crate::dispatch::block_in_row(&row, slug).map(|s| s.profile)
+    .ok()?
 }
 
 /// The whole brief, rendered FOR A PROFILE: the packet (when there is
@@ -699,13 +814,24 @@ async fn profile_in_row(http: &reqwest::Client, job: &Value) -> Option<String> {
 /// what it is told are edited in one place (c8faa7f3). There is no
 /// second renderer: a lane that files no invariant of its own simply
 /// prints none.
-pub(crate) fn render(repo: &Path, job: Option<&Value>, profile: &str) -> Result<String> {
+pub(crate) fn render(
+    repo: &Path,
+    job: Option<&Value>,
+    profile: &str,
+    active: Option<&Value>,
+) -> Result<String> {
     let invs = invariants(repo)?;
     let lane = crate::documents::lane(repo, profile)?;
     let mut out = String::new();
     if let Some(job) = job {
         out.push_str(&packet_section(job));
         out.push('\n');
+        // ABOVE the specification it dates (794e8d61): a reader meets
+        // the age of the prose before the prose.
+        if let Some(protocol) = protocol_section(job, active) {
+            out.push_str(&protocol);
+            out.push('\n');
+        }
         if let Some(step) = step_section(job) {
             out.push_str(&step);
             out.push('\n');
@@ -745,17 +871,23 @@ pub async fn run(packet_ref: Option<String>, profile_override: Option<String>) -
     // agent will read. With no packet, or nothing declaring a profile
     // anywhere, it is `builder`, exactly as before profiles existed.
     // `--profile` names a lane without dispatching anything.
+    let active = match job.as_ref() {
+        Some(j) => active_row(&http, j).await,
+        None => None,
+    };
     let profile = match (profile_override, profile_on_step(job.as_ref())) {
         (Some(p), _) => p,
         (None, Some(p)) => p,
-        (None, None) => match job.as_ref() {
-            Some(j) => profile_in_row(&http, j)
-                .await
+        (None, None) => match (job.as_ref(), active.as_ref()) {
+            (Some(j), Some(row)) => profile_in_row(row, j)
                 .unwrap_or_else(|| crate::documents::DEFAULT_PROFILE.to_string()),
-            None => crate::documents::DEFAULT_PROFILE.to_string(),
+            _ => crate::documents::DEFAULT_PROFILE.to_string(),
         },
     };
-    print!("{}", render(&repo, job.as_ref(), &profile)?);
+    print!(
+        "{}",
+        render(&repo, job.as_ref(), &profile, active.as_ref())?
+    );
     Ok(())
 }
 
@@ -1086,7 +1218,7 @@ mod tests {
         assert_eq!(profile_for(Some(&undeclared)), "builder");
         assert_eq!(profile_for(None), "builder");
 
-        let out = render(&repo(), Some(&undeclared), "builder").expect("renders");
+        let out = render(&repo(), Some(&undeclared), "builder", None).expect("renders");
         let packet = out.find("== THE PACKET").expect("the packet half");
         let invariants = out.find("== THE INVARIANTS").expect("the invariant half");
         let rules = out.find("== THE RULES").expect("the rules half");
@@ -1097,7 +1229,7 @@ mod tests {
         assert!(out.contains("# Builder rules"));
         assert!(out.contains(HOW_TO_USE));
         // No packet: invariants and rules alone.
-        let alone = render(&repo(), None, "builder").expect("renders");
+        let alone = render(&repo(), None, "builder", None).expect("renders");
         assert!(!alone.contains("== THE PACKET"));
         assert!(alone.contains("== THE RULES"));
     }
@@ -1172,7 +1304,7 @@ mod tests {
             }],
         });
         assert_eq!(step_section(&build), None);
-        let rendered = render(&repo(), Some(&build), "builder").expect("renders");
+        let rendered = render(&repo(), Some(&build), "builder", None).expect("renders");
         assert!(!rendered.contains("== THE STEP"), "{rendered}");
     }
 
@@ -1208,8 +1340,8 @@ mod tests {
     #[test]
     fn a_lane_is_briefed_with_its_own_invariants_and_none_of_the_others() {
         let job = a_step_with_a_specification();
-        let analyst = render(&repo(), Some(&job), "analyst").expect("renders");
-        let builder = render(&repo(), Some(&job), "builder").expect("renders");
+        let analyst = render(&repo(), Some(&job), "analyst", None).expect("renders");
+        let builder = render(&repo(), Some(&job), "builder", None).expect("renders");
 
         // The car lane's invariants are absent from the step lane...
         for car_only in [
@@ -1302,5 +1434,107 @@ mod tests {
             inv.lines
         );
         assert_eq!(inv.lanes, vec![LANE_STEP]);
+    }
+
+    /// A page-audit packet pinned to v2, at its `measure` step, holding
+    /// the procedure that was current when it was OPENED — the live
+    /// shape read from the system of record (794e8d61, 2026-09-19).
+    fn pinned_at_v2() -> Value {
+        json!({
+            "id": "c0d2caf0-bfc5-4163-b81e-97f9273a0404",
+            "kind": "page-audit",
+            "workflow_version": 2,
+            "steps": [{
+                "spec_slug": "measure",
+                "kind": "task",
+                "status": "active",
+                "title": "Inventory the page and the department's needs",
+                "metadata": { "procedure": "Read the PAGE and the DEPARTMENT." },
+            }],
+        })
+    }
+
+    /// The registry's ACTIVE row, as `GET /api/workflows/{kind}` serves
+    /// it: `version` plus `steps[].metadata_defaults`, which is where a
+    /// step's `procedure` is copied FROM at materialisation.
+    fn active_row(version: i64, procedure: &str) -> Value {
+        json!({
+            "kind": "page-audit",
+            "version": version,
+            "steps": [{
+                "title": "measure",
+                "metadata_defaults": { "procedure": procedure },
+            }],
+        })
+    }
+
+    /// NOTHING SAID WHICH VERSION OF A PROCEDURE A PACKET WAS RUNNING
+    /// (backlog 794e8d61). A step's `procedure` is copied out of the
+    /// Workflow row at materialisation, so a packet carries the prose
+    /// that was current when it OPENED, permanently — publishing v3
+    /// changes what future packets materialise and nothing else. The
+    /// brief renders that stored text as the executor's specification
+    /// and said nothing about its age, so the lag could not be seen,
+    /// measured, or decided about: 47 page-audit packets were open on
+    /// v2 and ~94 completions were due to run against superseded
+    /// instructions.
+    #[test]
+    fn the_protocol_section_names_the_version_the_stored_procedure_came_from() {
+        let job = pinned_at_v2();
+
+        // BEHIND, AND THE TEXT REALLY MOVED: the version pair alone
+        // over-reports, so the verdict is the comparison.
+        let out = protocol_section(
+            &job,
+            Some(&active_row(3, "Read the PAGE, then COMPLETE it.")),
+        )
+        .expect("a packet with a pinned version has a protocol section");
+        assert!(out.contains("page-audit v2"), "{out}");
+        assert!(out.contains("1 version behind"), "{out}");
+        assert!(out.contains("did NOT reach"), "{out}");
+
+        // BEHIND BY A VERSION THAT DID NOT TOUCH THIS STEP: the stored
+        // text is old and current at the same time, which is the case
+        // a bare version line would call stale.
+        let same = protocol_section(
+            &job,
+            Some(&active_row(3, "Read the PAGE and the DEPARTMENT.")),
+        )
+        .expect("section");
+        assert!(same.contains("identical"), "{same}");
+        assert!(!same.contains("did NOT reach"), "{same}");
+
+        // PINNED TO THE CURRENT VERSION: nothing is lagging.
+        let current = protocol_section(
+            &job,
+            Some(&active_row(2, "Read the PAGE and the DEPARTMENT.")),
+        )
+        .expect("section");
+        assert!(current.contains("is current"), "{current}");
+
+        // THE ROW COULD NOT BE READ. The pin is still a fact and is
+        // still printed; what is NOT known is said rather than assumed
+        // — a brief that silently claims currency is the defect.
+        let unread = protocol_section(&job, None).expect("section");
+        assert!(unread.contains("page-audit v2"), "{unread}");
+        assert!(unread.contains("not read"), "{unread}");
+        assert!(!unread.contains("is current"), "{unread}");
+
+        // A packet with no pinned version prints no claim about one.
+        assert_eq!(protocol_section(&json!({"kind": "page-audit"}), None), None);
+    }
+
+    /// The section rides in the brief, ABOVE the specification it
+    /// dates, and a rendered brief cannot carry the stored procedure
+    /// without saying which version it came from.
+    #[test]
+    fn the_brief_dates_the_specification_it_renders() {
+        let job = pinned_at_v2();
+        let row = active_row(3, "Read the PAGE, then COMPLETE it.");
+        let out = render(&repo(), Some(&job), "analyst", Some(&row)).expect("renders");
+        let packet = out.find("== THE PACKET").expect("the packet half");
+        let protocol = out.find("== THE PROTOCOL").expect("the protocol half");
+        let step = out.find("== THE STEP").expect("the step half");
+        assert!(packet < protocol && protocol < step, "{out}");
     }
 }

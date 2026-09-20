@@ -310,6 +310,10 @@ mod tests {
             // CLI's own roster by the test below).
             "boss-api PUT /api/jobs/",
             "boss job file",
+            // The lane a filing RECORDS, required of a backlog-item
+            // (c5dc81a1) — a required flag whose door document does not
+            // name it is a trap the analyst walks into once per filing.
+            "--channel",
             "boss job patch",
             // The evidence rules, in the words the incidents left.
             "total",

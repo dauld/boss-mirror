@@ -748,20 +748,31 @@ fn a_cli_verb_signs_as_the_runners_own_account() {
     );
 }
 
-/// THE EXIT RIDES THE REQUEST, not only the step (backlog f47861a5,
-/// measured 2026-09-19 on ops-request c98a782f): publish-github-pr
-/// printed `FAILED` and exited 1, the runner completed `execute` with
-/// `exit_code: "1"`, the request closed `answered` — the verb RAN, which
-/// is what the outcome names — and nothing above the step level said
-/// so: the yard drew the request like any answered one and the publish
-/// step it was filed for sat ready for five hours. The runner now
-/// writes the verb's exit onto the request's own metadata through the
-/// merge door BEFORE completing the step, so every reader of the close
-/// (the yard, a rule's handler) sees the exit where the outcome is.
-/// The outcome stays `answered`: every judge rule keys on it, and a
-/// verb that ran and said no is an answer, not a refusal.
+/// THE VERB'S EXIT IS RECORDED ONCE, ON THE STEP (backlog 50fede8b).
+/// It used to be recorded twice under two names — `exit_code` on the
+/// execute step and `exit` on the request — written by one act and
+/// held equal by nothing, which is the fact-that-lives-twice shape
+/// CLAUDE.md §9a refuses. It was benign only while one writer wrote
+/// both; a retry, a hand correction or a second runner writing one
+/// without the other hands a reader a stale exit and a verdict on a
+/// run that did not have it. Measured 2026-09-20 before the collapse:
+/// every consumer already read the STEP — `boss ops --wait`'s verdict
+/// line, `verb_failure` for the whole answered-ops-request judge
+/// family, the yard's runner shed and signals — and no rule predicate,
+/// handler or surface read the request-level copy. The request level
+/// needs no copy to be readable, either: `GET /api/jobs?kind=ops-request`
+/// returns each row WITH its steps, which is how the yard reads the
+/// exit off `execute` from a list.
+///
+/// f47861a5's finding stands and is served by the step: a verb that
+/// ran and failed must be visible above `answered` (publish-github-pr
+/// printed `FAILED`, exited 1, and the publish step it was filed for
+/// sat ready for five hours). What reads it is the
+/// `complete-publish-pr-step-on-publish-github-pr-answered` rule, off
+/// `exit_code`. The outcome stays `answered`: every judge rule keys on
+/// it, and a verb that ran and said no is an answer, not a refusal.
 #[test]
-fn an_answered_verbs_exit_rides_the_request_metadata() {
+fn an_answered_verbs_exit_is_recorded_once_on_its_step() {
     needs_jq!();
     let root = scratch("exit-on-request");
     stub_sor(&root);
@@ -791,23 +802,26 @@ fn an_answered_verbs_exit_rides_the_request_metadata() {
     )
     .expect("the PATCH body is JSON");
     assert_eq!(
-        // `queue_depth` joined the exit on this door with 1ffb3305;
-        // this fixture's packet carries no `opened_at`, so it has no
-        // `queued_s`. Nothing ELSE reaches the request's metadata.
+        // What is left on this door is the queue reading (1ffb3305) —
+        // a request-level fact with no home on the step, unlike the
+        // exit. This fixture's packet carries no `opened_at`, so it
+        // has no `queued_s`. Nothing ELSE reaches the request's
+        // metadata, and in particular no second spelling of the exit.
         patch,
-        serde_json::json!({"exit": "3", "queue_depth": 1}),
-        "the request carries the verb's exit and the queue it waited in, and nothing else: {patch}"
+        serde_json::json!({"queue_depth": 1}),
+        "the request carries the queue it waited in and nothing else — the exit lives once, on the step: {patch}"
     );
     assert!(out.contains("answered fails"), "{out}");
 
-    // A refusal ran nothing, so the request has no exit to carry.
+    // A refusal ran nothing, so there is nothing to record about it
+    // on the request at all.
     packet(&root, "not-a-verb", "[]");
     let (out, payload) = run(&root, &verbs, &[]);
     let md = payload.unwrap_or_else(|| panic!("no step completed: {out}"));
     assert_eq!(md["disposition"], "refused", "{md} / {out}");
     assert!(
         !root.join("patch.json").exists(),
-        "a refusal writes no exit on the request: {out}"
+        "a refusal writes nothing on the request: {out}"
     );
 }
 

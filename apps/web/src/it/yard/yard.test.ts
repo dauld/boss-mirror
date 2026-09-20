@@ -11,6 +11,7 @@ import {
   disciplineLabel,
   etaPhase,
   fetchYard,
+  itemAnswer,
   trainEta,
   trainOutcome,
   trainStatus,
@@ -712,8 +713,22 @@ describe('the arrivals board', () => {
 
 const REPORT = {
   consist: [
-    { car_id_short: 'a1b2c3d4', title: 'Fix the lamp', branch: 'feat/lamp' },
-    { car_id_short: 'e5f6a7b8', title: 'Yard ETAs', branch: 'feat/eta' },
+    {
+      car_id_short: 'a1b2c3d4',
+      title: 'Fix the lamp',
+      branch: 'feat/lamp',
+      backlog_item: 'f47861a5',
+      partial_item: null,
+      no_item_reason: null,
+    },
+    {
+      car_id_short: 'e5f6a7b8',
+      title: 'Yard ETAs',
+      branch: 'feat/eta',
+      backlog_item: null,
+      partial_item: null,
+      no_item_reason: null,
+    },
   ],
   left_behind: [{ car_id_short: 'c9d0e1f2', reason: 'conflict in yard.ts' }],
   generation: 'g41',
@@ -758,6 +773,31 @@ describe('arrivalReport', () => {
       merged_sha: null,
       timings: null,
     });
+  });
+
+  // The landing report is what an operator READS, and until this
+  // landed it dropped the item answer on the floor: the parser never
+  // took the field and the panel never drew one, so every car in
+  // every train rendered unlinked. That false null cost a packet
+  // filed with a wrong cause and an agent run to disprove it
+  // (backlog 7f90c2ce) — the surface must say WHICH of the three
+  // answers the car gave, because the record always holds one.
+  test('a consist entry states which item answer its car gave', () => {
+    const report = {
+      consist: [
+        { car_id_short: 'a1', title: 'Closes it', branch: 'feat/a', backlog_item: 'f47861a5' },
+        { car_id_short: 'b2', title: 'One piece', branch: 'feat/b', partial_item: '9f00a805' },
+        { car_id_short: 'c3', title: 'No item', branch: 'chore/c', no_item_reason: 'a one-file tidy' },
+        { car_id_short: 'd4', title: 'Older than the rule', branch: 'feat/d' },
+      ],
+    };
+    const r = arrivalReport(train({ steps: [s('arrived', 'completed', { arrival_report: report })] }));
+    expect(r?.consist.map(itemAnswer)).toEqual([
+      { kind: 'item', text: 'item f47861a5' },
+      { kind: 'part', text: 'part of 9f00a805' },
+      { kind: 'none', text: 'no item: a one-file tidy' },
+      null,
+    ]);
   });
 
   test('found wherever the conductor stamped it', () => {

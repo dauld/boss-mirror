@@ -719,15 +719,20 @@ pub(crate) async fn dispatch_at(
     }
 
     // The block: the packet's projection, else the active row's step.
-    let block = match block_on_step(step) {
-        Some(b) => b,
+    // The row is KEPT when it is read, because the brief dates the
+    // step's procedure against the same row (794e8d61) and one
+    // dispatch should read it at most once.
+    let (block, row_already_read) = match block_on_step(step) {
+        Some(b) => (b, None),
         None => {
             let row = api_at(Method::GET, format!("/api/workflows/{kind}"), None)
                 .await
                 .with_context(|| format!("reading the {kind} Workflow row for its agent block"))?;
-            row.as_ref()
+            let block = row
+                .as_ref()
                 .and_then(|r| block_in_row(r, &slug))
-                .ok_or_else(|| anyhow::anyhow!("{}", no_block_refusal(&kind, &slug)))?
+                .ok_or_else(|| anyhow::anyhow!("{}", no_block_refusal(&kind, &slug)))?;
+            (block, row)
         }
     };
     let settings = resolve(block, over).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -767,7 +772,20 @@ pub(crate) async fn dispatch_at(
                         &id[..8]
                     )
                 })?;
-            crate::brief::render(repo, Some(&claimed), &settings.profile)?
+            // The active Workflow row, so the brief can date the
+            // procedure it is about to hand the agent (794e8d61) —
+            // the copy the block already read when there is one, else
+            // a best-effort read of its own. An unreachable read says
+            // so in the brief; it never stops a dispatch the claim has
+            // already made.
+            let active = match row_already_read {
+                Some(row) => Some(row),
+                None => api_at(Method::GET, format!("/api/workflows/{kind}"), None)
+                    .await
+                    .ok()
+                    .flatten(),
+            };
+            crate::brief::render(repo, Some(&claimed), &settings.profile, active.as_ref())?
         }
         BriefSource::Handed { prompt, .. } => prompt.to_string(),
     };

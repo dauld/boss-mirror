@@ -671,10 +671,11 @@ mod tests {
             "id": id,
             "kind": "ops-request",
             "status": "closed",
-            // The runner writes the exit here too (`metadata.exit`);
-            // this handler reads the STEP's `exit_code` — see the
-            // module doc, and sibling packet 50fede8b.
-            "metadata": { "host": "boss-gcp", "verb": verb, "args": req_args, "for_converge": CONVERGE, "exit": exit },
+            // The exit is recorded ONCE, on the execute step below
+            // (50fede8b collapsed the request-level `metadata.exit`
+            // the runner used to write beside it); this handler reads
+            // it there — see the module doc.
+            "metadata": { "host": "boss-gcp", "verb": verb, "args": req_args, "for_converge": CONVERGE },
             "steps": [
                 { "id": "r-filed", "spec_slug": "filed", "status": "completed", "metadata": {} },
                 { "id": "r-execute", "spec_slug": "execute", "status": "completed",

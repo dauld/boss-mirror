@@ -674,12 +674,71 @@ pub async fn list(
     Ok(())
 }
 
+/// Kinds whose INPUT LANE is a question — work-originating packets,
+/// the ones `boss channels` reads. Filing one without saying where it
+/// came from is refused (c5dc81a1): the filer knows the origin, and the
+/// keyword classifier that used to guess it missed 252 of 310 items
+/// measured on 2026-09-20, climbing to 91% missed on 09-19. A kind that
+/// is not work-originating has no lane to state.
+const LANE_IS_REQUIRED_OF: [&str; 1] = ["backlog-item"];
+
+/// The lane this filing records, validated against the one vocabulary
+/// (`channels::FILEABLE_LANES`). `Ok(None)` means nothing to merge —
+/// either the kind has no lane, or the metadata file already carries
+/// one. Refuses BEFORE the POST, the way an unnamed actor is refused,
+/// so the fix arrives instead of a packet nobody can classify.
+fn resolve_channel(kind: &str, flag: Option<&str>, md: &Option<Value>) -> Result<Option<String>> {
+    let in_md = md
+        .as_ref()
+        .and_then(|m| m.get(crate::channels::RECORDED_KEY))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let vocabulary = || {
+        crate::channels::FILEABLE_LANES
+            .iter()
+            .map(|c| c.label())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
+    let check = |lane: &str| -> Result<()> {
+        if crate::channels::InputChannel::parse(lane).is_none() {
+            bail!("{lane} is not an input lane — one of: {}", vocabulary());
+        }
+        Ok(())
+    };
+    if let Some(lane) = flag {
+        check(lane)?;
+        if let Some(said) = &in_md
+            && said != lane
+        {
+            bail!(
+                "--channel {lane} disagrees with the metadata's {} {said} — say it once",
+                crate::channels::RECORDED_KEY
+            );
+        }
+        return Ok(Some(lane.to_string()));
+    }
+    if let Some(lane) = &in_md {
+        check(lane)?;
+        // Already in the body the caller hands us; nothing to merge.
+        return Ok(None);
+    }
+    if LANE_IS_REQUIRED_OF.contains(&kind) {
+        bail!(
+            "a {kind} must say which lane it came in through: --channel <{}>",
+            vocabulary()
+        );
+    }
+    Ok(None)
+}
+
 pub async fn file(
     kind: &str,
     title: &str,
     priority: Option<String>,
     metadata: Option<std::path::PathBuf>,
     subject_id: Option<String>,
+    channel: Option<String>,
 ) -> Result<()> {
     let http = reqwest::Client::new();
     let md = match &metadata {
@@ -692,6 +751,17 @@ pub async fn file(
         ),
         None => None,
     };
+    // The lane is RECORDED here, at the point it is known, rather than
+    // inferred later from the title's words (c5dc81a1).
+    let mut md = md;
+    if let Some(lane) = resolve_channel(kind, channel.as_deref(), &md)? {
+        match md.get_or_insert_with(|| json!({})).as_object_mut() {
+            Some(o) => {
+                o.insert(crate::channels::RECORDED_KEY.to_string(), json!(lane));
+            }
+            None => bail!("--metadata must be a JSON object to carry the input lane"),
+        }
+    }
     // The packet is owned by whoever filed it. This used to stamp the
     // train conductor's id on every hand-filed packet — the same
     // mis-attribution `completed_by` exposed on steps (backlog
@@ -781,6 +851,47 @@ mod tests {
     }
 
     use super::*;
+
+    /// c5dc81a1: the input channel is RECORDED at filing, not guessed
+    /// from the title's words later. A backlog item is refused without
+    /// one, and the refusal names the vocabulary rather than leaving the
+    /// filer to find it - the filer knows the origin and a heuristic
+    /// never will.
+    #[test]
+    fn a_backlog_item_must_name_the_lane_it_came_in_through() {
+        let said = resolve_channel("backlog-item", None, &None)
+            .unwrap_err()
+            .to_string();
+        assert!(said.contains("--channel"), "{said}");
+        // Every fileable lane is offered, from the one list.
+        for lane in crate::channels::FILEABLE_LANES {
+            assert!(
+                said.contains(lane.label()),
+                "{} missing from: {said}",
+                lane.label()
+            );
+        }
+        // `unclassified` is never an answer a filer may give.
+        assert!(!said.contains("unclassified"), "{said}");
+
+        // The flag records the lane.
+        assert_eq!(
+            resolve_channel("backlog-item", Some("discovery-while-working"), &None).unwrap(),
+            Some("discovery-while-working".to_string())
+        );
+        // A metadata file that already carries it satisfies the
+        // requirement - the same field, written through the other door.
+        let md = Some(json!({"input_channel": "roadmap"}));
+        assert_eq!(resolve_channel("backlog-item", None, &md).unwrap(), None);
+        // A misspelled lane is refused, not filed as a lane nothing reads.
+        let said = resolve_channel("backlog-item", Some("vibes"), &None)
+            .unwrap_err()
+            .to_string();
+        assert!(said.contains("vibes"), "{said}");
+        // Other kinds are unaffected: only work-originating packets have
+        // an input lane to state.
+        assert_eq!(resolve_channel("ops-request", None, &None).unwrap(), None);
+    }
 
     #[test]
     fn the_envelope_defaults_land_and_explicit_values_win() {
