@@ -9,11 +9,11 @@
 // own — that is what the map is for, one definition per number, where
 // yard.ts and boss orient used to hold two.
 //
-// EVERY CARD IS A DOOR. A region's floor is a surface that already
-// exists: the six yard regions open the Train Yard focused on their
+// EVERY CARD IS A DOOR, and since car 4 of design d2154293 every door
+// is a ZOOM: the six yard regions open the Train Yard focused on their
 // panel (the selection keys yard-floor.ts already speaks), receiving
-// and marshalling open their own pages. Nothing is deleted; every
-// panel is one click deeper.
+// and marshalling open their queue board under the same zoomed world.
+// Nothing is deleted; every panel is one click deeper.
 
 import { fetchRemote, type Remote } from '../../data/remote';
 
@@ -142,17 +142,17 @@ const YARD_SELECTION: Readonly<Record<string, string>> = {
   garage: 'garage',
 };
 
-/** The two regions whose floor is a page of its own. */
-const PAGE_FLOORS: Readonly<Record<string, string>> = {
-  receiving: '/it/operate/receiving',
-  marshalling: '/it/operate/marshalling',
-};
+/** The two regions whose floor is a queue board. Since car 4 of design
+ *  d2154293 they are zooms like every other territory: the board
+ *  mounts UNDER the zoomed world, and /it/operate/receiving and
+ *  /it/operate/marshalling — the pages they used to be — resolve to
+ *  the same route. */
+const BOARD_FLOORS: ReadonlyArray<string> = ['receiving', 'marshalling'];
 
 /** Where a card leads. A name this client does not know opens the
  *  yard itself — a door that opens somewhere, never a dead link. */
 export function floorHref(name: string): string {
-  const page = PAGE_FLOORS[name];
-  if (page !== undefined) return page;
+  if (BOARD_FLOORS.includes(name)) return `/it/yard/${name}`;
   return name in YARD_SELECTION ? `/it/yard/${name}` : '/it/yard';
 }
 

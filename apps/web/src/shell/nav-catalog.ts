@@ -148,8 +148,8 @@ export const ROUTE_CATALOG: Readonly<Record<RouteName | UngatedSurfaceId, NavIte
   // that already answer these paths — the routes did not move, and
   // the tabs stay. PermKey-less like the Crew Board: a yard is the
   // department's own floor, readable by any operator.
-  'system-receiving':        { id: 'system-receiving',        label: 'Receiving Yard',      path: '/it/operate/receiving', app: 'it' },
-  'system-marshalling':      { id: 'system-marshalling',      label: 'Marshalling Yard',    path: '/it/operate/marshalling', app: 'it' },
+  'system-receiving':        { id: 'system-receiving',        label: 'Receiving Yard',      path: '/it/yard/receiving', app: 'it' },
+  'system-marshalling':      { id: 'system-marshalling',      label: 'Marshalling Yard',    path: '/it/yard/marshalling', app: 'it' },
   // The Operate row is permKey-less like the incidents surface it
   // leads with — readable by any operator; the tabs behind it keep
   // their own gates.

@@ -63,7 +63,27 @@ export const DYNAMIC_APP_SECTIONS: ReadonlyMap<string, string> = new Map([
 /// packet was filed on ("lands on All jobs with Home highlighted").
 export function appForRoute(route: Route): AppId {
   if (route.kind === 'department') return route.code;
-  return appForSection(SECTION_FOR_ROUTE[route.kind]);
+  return appForSection(sectionForRoute(route));
+}
+
+/// The two yards that kept rows of their own (feedback 92921c2f,
+/// 2026-09-18) are REGIONS of the world since car 4 of design
+/// d2154293, so their route is a yard floor like any other. The kind
+/// alone can no longer say which row to light: the region does, and
+/// this is the one place that reads it. Without it both would light
+/// the Train Yard's row, and a sidebar row that never highlights is
+/// a row an operator stops trusting.
+export const REGION_SECTIONS: Readonly<Record<string, string>> = {
+  receiving: 'system-receiving',
+  marshalling: 'system-marshalling',
+};
+
+/// Which sidebar row a route lights.
+export function sectionForRoute(route: Route): string {
+  if (route.kind === 'systemYardFloor') {
+    return REGION_SECTIONS[route.region] ?? SECTION_FOR_ROUTE.systemYardFloor!;
+  }
+  return SECTION_FOR_ROUTE[route.kind];
 }
 
 export const SECTION_FOR_ROUTE: Readonly<Record<Route['kind'], string>> = {
@@ -133,11 +153,6 @@ export const SECTION_FOR_ROUTE: Readonly<Record<Route['kind'], string>> = {
   systemMonitoringAtlas: 'system-incidents',
   systemMonitoringConductor: 'system-incidents',
   systemFleet: 'system-incidents',
-  // The two yards have rows of their own since feedback 92921c2f
-  // (2026-09-18); they highlight those, not Operate, though the
-  // Operate tab strip still lists them.
-  systemMarshallingYard: 'system-marshalling',
-  systemReceivingYard: 'system-receiving',
   systemYardStatus: 'system-incidents',
   systemStepPlugins: 'system-step-plugins',
   systemStepPluginDetail: 'system-step-plugins',
@@ -147,7 +162,9 @@ export const SECTION_FOR_ROUTE: Readonly<Record<Route['kind'], string>> = {
   systemBacklog: 'system-backlog',
   systemYard: 'system-yard',
   // A yard floor is the Train Yard opened on one panel (0524fc95 car
-  // 2): it highlights the yard's own row.
+  // 2): it highlights the yard's own row — except for the two floors
+  // that are queue boards with sidebar rows of their own, which
+  // `sectionForRoute` answers for.
   systemYardFloor: 'system-yard',
   systemCrew: 'system-crew',
   systemEstate: 'system-estate',

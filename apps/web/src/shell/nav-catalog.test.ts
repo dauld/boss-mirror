@@ -300,11 +300,15 @@ describe('nav catalog — app assignment', () => {
     // The labels David used, on the rows he asked for.
     expect(ROUTE_CATALOG['system-receiving'].label).toBe('Receiving Yard');
     expect(ROUTE_CATALOG['system-marshalling'].label).toBe('Marshalling Yard');
-    // Second doors, not moved routes: the Operate tabs keep answering.
-    expect(ROUTE_CATALOG['system-receiving'].path).toBe('/it/operate/receiving');
-    expect(ROUTE_CATALOG['system-marshalling'].path).toBe('/it/operate/marshalling');
-    expect(parseRoute('/it/operate/receiving').kind).toBe('systemReceivingYard');
-    expect(parseRoute('/it/operate/marshalling').kind).toBe('systemMarshallingYard');
+    // Since car 4 of design d2154293 both rows are ZOOM LINKS: the
+    // yards are regions of the world, and their board mounts under
+    // the zoomed territory. The old /it/operate paths still resolve
+    // to the same route — one surface, two spellings.
+    expect(ROUTE_CATALOG['system-receiving'].path).toBe('/it/yard/receiving');
+    expect(ROUTE_CATALOG['system-marshalling'].path).toBe('/it/yard/marshalling');
+    expect(parseRoute('/it/yard/receiving')).toEqual({ kind: 'systemYardFloor', region: 'receiving' });
+    expect(parseRoute('/it/operate/receiving')).toEqual({ kind: 'systemYardFloor', region: 'receiving' });
+    expect(parseRoute('/it/operate/marshalling')).toEqual({ kind: 'systemYardFloor', region: 'marshalling' });
     // And the IT tab still opens on the Train Yard at /it.
     expect(APPS.find((a) => a.id === 'it')?.href).toBe(ROUTE_CATALOG['system-yard'].path);
     expect(ROUTE_CATALOG['system-yard'].path).toBe('/it');

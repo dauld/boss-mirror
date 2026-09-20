@@ -98,10 +98,10 @@ export function regionOfStation(station: Station): RegionName {
   return STATION_REGION[station];
 }
 
-/** The regions that have an interior to zoom into — the six the yard's
- *  floor stands wagons in. Receiving and marshalling have pages of
- *  their own and grow interiors on car 4; until then a click on one of
- *  them opens its page, as it did before this car. */
+/** The regions whose interior is WAGONS IN TRANSIT — the six the
+ *  yard's floor stands rolling stock in. Receiving and marshalling
+ *  hold queues instead, and their interior is a platform deck
+ *  (world-interior.ts, car 4), so they are absent here by design. */
 export const INTERIOR_REGIONS: ReadonlyArray<RegionName> = REGION_NAMES.filter((name) =>
   Object.values(STATION_REGION).includes(name),
 );
@@ -141,7 +141,7 @@ const GAP = 4;
  *  full count/trend/why block the world draws at rest is not drawn
  *  when a territory is zoomed: the rect's room goes to the interior,
  *  which is what the zoom was for. */
-const HEAD = 64;
+export const INTERIOR_HEAD = 64;
 const EDGE = 8;
 
 /** Lay the wagons out inside the territory. What does not fit is
@@ -150,8 +150,8 @@ const EDGE = 8;
 export function interiorLayout(t: Territory, wagons: ReadonlyArray<Wagon>): Readonly<{ placed: ReadonlyArray<Placed>; hidden: number }> {
   const availW = t.w - 2 * EDGE;
   // The garage is wide and low: it gets its plates nearer its own head,
-  // because HEAD is measured for a full-height line territory.
-  const head = Math.min(HEAD, Math.max(24, t.h - PLATE_H - EDGE));
+  // because INTERIOR_HEAD is measured for a full-height line territory.
+  const head = Math.min(INTERIOR_HEAD, Math.max(24, t.h - PLATE_H - EDGE));
   const availH = t.h - head - EDGE;
   const cols = Math.max(1, Math.floor((availW + GAP) / (PLATE_W + GAP)));
   const rows = Math.max(1, Math.floor((availH + GAP) / (PLATE_H + GAP)));

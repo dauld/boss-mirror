@@ -69,8 +69,12 @@ describe('parseRoute — every specific path matches its specific case', () => {
     ['/it/operate/audit', { kind: 'systemMonitoringEvents' }],
     ['/it/operate/atlas', { kind: 'systemMonitoringAtlas' }],
     ['/it/operate/bottlenecks', { kind: 'systemFleet' }],
-    ['/it/operate/marshalling', { kind: 'systemMarshallingYard' }],
-    ['/it/operate/receiving', { kind: 'systemReceivingYard' }],
+    // The two queue boards retired as pages on car 4 of design
+    // d2154293: each is a region of the world, and the old path
+    // resolves to that region rather than 404ing.
+    ['/it/operate/marshalling', { kind: 'systemYardFloor', region: 'marshalling' }],
+    ['/it/operate/receiving', { kind: 'systemYardFloor', region: 'receiving' }],
+    ['/it/yard/receiving', { kind: 'systemYardFloor', region: 'receiving' }],
     ['/it/operate/conductor', { kind: 'systemMonitoringConductor' }],
     ['/it/kb', { kind: 'systemKb' }],
     ['/it/registry/subjects', { kind: 'systemSubjects' }],

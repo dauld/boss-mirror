@@ -16,7 +16,11 @@
   // the stations it covers, off the floor's own Scene — under a
   // compact header carrying the region's count, state and why; the
   // full trend block the world draws at rest gives up its room to
-  // them. The arithmetic of both halves is world-zoom.ts, unit-pinned;
+  // them. Two territories hold queues rather than rolling stock —
+  // receiving and marshalling — and since car 4 they draw a PLATFORM
+  // PER QUEUE instead (world-interior.ts), which is what "this
+  // region's floor is a page of its own" used to stand in for.
+  // The arithmetic of all three is world-zoom.ts and world-interior.ts, unit-pinned;
   // this owns the animation frames and the strokes. NO NEW STYLING —
   // the classes here are YardMap's, by name and by token, so the
   // visual redesign reskins one grammar (Q1, decided 2026-09-19).
@@ -36,6 +40,7 @@
     zoomBoxOf,
     type Box,
   } from './world-zoom';
+  import { hasPlatforms, platformLayout, type Deck, type Platform } from './world-interior';
   import type { Scene } from './yard-floor';
 
   type Props = Readonly<{
@@ -46,10 +51,15 @@
      *  — a zoomed territory then says so rather than drawing an empty
      *  region, which would read as a calm one. */
     floor?: Scene | null;
+    /** The queues standing in a zoomed receiving or marshalling — the
+     *  platform deck those two regions show instead of wagons in
+     *  transit (car 4). Handed up by the page that owns the read, so
+     *  the map derives nothing; null for every other territory. */
+    deck?: Deck | null;
     /** Back to the world: Escape, or the frame around the territory. */
     onleave?: () => void;
   }>;
-  let { regions, zoomed = null, floor = null, onleave = () => {} }: Props = $props();
+  let { regions, zoomed = null, floor = null, deck = null, onleave = () => {} }: Props = $props();
 
   const byName = $derived(new Map(regions.regions.map((r) => [r.name, r] as const)));
   /** A region the server answered that the layout has no territory
@@ -61,6 +71,15 @@
   // why gets the lines the outline has room for below the trend.
   const chars = (t: Territory): number => Math.floor((t.w - 16) / 5.8);
   const whyLines = (t: Territory): number => Math.max(1, Math.min(4, Math.floor((t.h - 116) / 12)));
+  /** What stands on a platform, over its bound where it has one. A
+   *  count nobody could take is `?` — it gets the unknown band, and it
+   *  is not the same picture as a 0 (car 2's rule, the same token). */
+  const standingText = (p: Platform): string =>
+    p.standing === null ? '?' : p.bound === null ? String(p.standing) : `${p.standing} / ${p.bound}`;
+  /** What LEFT the queue in the window, or `?` where the log could not
+   *  be made to count it — never a 0, which on a queue reads as
+   *  "nothing is being worked". */
+  const rateText = (p: Platform): string => (p.rate === null ? '?' : `${p.rate}\u2193`);
   const stateOf = (r: Region | undefined) => r?.state ?? 'troubled';
   const whyOf = (r: Region | undefined) => r?.why ?? 'the server answered no reading for this region';
 
@@ -202,11 +221,67 @@
                draws, because they are the same wagons. A plate is keyed
                on the wagon id, so a wagon that moves between polls
                moves rather than being torn down and rebuilt. -->
-          {#if !hasInterior(t.name)}
-            <!-- receiving and marshalling keep pages of their own until
-                 car 4 grows their interiors; say so rather than draw an
-                 empty region, which would read as an idle one. -->
-            <text x={t.x + 8} y={t.y + 84} class="tiny">this region's floor is a page of its own</text>
+          {#if hasPlatforms(t.name)}
+            <!-- A REGION THAT HOLDS QUEUES (car 4). Receiving and
+                 marshalling stand no rolling stock in transit, so their
+                 interior is a platform per queue — a station here, a
+                 channel there — with its packets standing on the track,
+                 its bound drawn where the bound falls, and the packets
+                 past it flagged. The numbers are the region's own read
+                 model, handed up by the page below; the marks are the
+                 count drawn, and the count beside the name is the
+                 figure to read when a track runs out of room. -->
+            {#if deck === null || deck.kind === 'reading'}
+              <text x={t.x + 8} y={t.y + 84} class="tiny">reading what is standing here…</text>
+            {:else if deck.kind === 'unavailable'}
+              <!-- a read that failed is a failure, never an empty region -->
+              <text x={t.x + 8} y={t.y + 84} class="tiny err why">
+                {#each wrapWords(`the queues cannot be read — ${deck.why}`, chars(t), 3) as line, i (i)}
+                  <tspan x={t.x + 8} dy={i === 0 ? 0 : 12}>{line}</tspan>
+                {/each}
+              </text>
+            {:else if deck.platforms.length === 0}
+              <text x={t.x + 8} y={t.y + 84} class="tiny">no queue is declared here</text>
+            {:else}
+              {@const laid = platformLayout(t, deck.platforms)}
+              <g class="interior" data-interior={t.name}>
+                {#each laid.placed as p (p.platform.name)}
+                  <g class="platform" data-platform={p.platform.name}>
+                    <title
+                      >{p.platform.name} — {p.platform.note}{p.perMark > 1
+                        ? ` · the track is the whole queue: one mark is ${Math.round(p.perMark)} packets`
+                        : ''}</title>
+                    <text x={p.x} y={p.y + 8} class="tiny plate-tag">{p.platform.name}</text>
+                    <text
+                      x={p.x + p.w}
+                      y={p.y + 8}
+                      text-anchor="end"
+                      class="tiny standing"
+                      class:err={p.platform.flag.n > 0}
+                      class:unknown={p.platform.standing === null}>{standingText(p.platform)}</text>
+                    <line class="track" x1={p.x} y1={p.trackY + 9} x2={p.x + p.w} y2={p.trackY + 9} />
+                    {#each p.marks as m, i (i)}
+                      <rect class="mark" class:flagged={m.flagged} x={m.x} y={m.y} width={m.w} height={m.h} />
+                    {/each}
+                    {#if p.boundX !== null}
+                      <!-- the WIP bound, where it falls on the track -->
+                      <line class="bound" x1={p.boundX} y1={p.trackY - 2} x2={p.boundX} y2={p.trackY + 10} />
+                    {/if}
+                    <text
+                      x={p.x + p.w}
+                      y={p.trackY + 7}
+                      text-anchor="end"
+                      class="tiny rate"
+                      class:unknown={p.platform.rate === null}>{rateText(p.platform)}</text>
+                  </g>
+                {/each}
+                {#if laid.hidden > 0}
+                  <!-- what did not fit is COUNTED, never quietly dropped -->
+                  <text x={t.x + t.w - 8} y={t.y + t.h - 6} text-anchor="end" class="tiny"
+                    >+{laid.hidden} more</text>
+                {/if}
+              </g>
+            {/if}
           {:else if interior === null}
             <text x={t.x + 8} y={t.y + 84} class="tiny">reading what is inside…</text>
           {:else if interior.placed.length === 0}
@@ -331,6 +406,19 @@
   .plate .wagon.warn { stroke: var(--warn, #d9a441); }
   .plate .wagon.red { stroke: var(--err, #e2685c); }
   .yard text.plate-tag { fill: var(--fog, #e8ecef); letter-spacing: 0; }
+  /* THE PLATFORMS (car 4), in the same grammar: the track is a tie, a
+     mark is a wagon body, the bound is a signal on the track. Every
+     colour is a named token — a state or a surface never enters this
+     file as a hex (42f66fb3). An UNKNOWN number gets its own band:
+     dimmer than a figure and never the same ink as a 0, because the
+     two are different facts. */
+  .platform .track { stroke: var(--tie); stroke-width: 1; }
+  .platform .mark { fill: var(--static); }
+  .platform .mark.flagged { fill: var(--err); }
+  .platform .bound { stroke: var(--warn); stroke-width: 1; }
+  .yard text.standing { fill: var(--fog); letter-spacing: 0; }
+  .yard text.rate { fill: var(--static); letter-spacing: 0; }
+  .yard text.unknown { fill: var(--static); opacity: 0.6; font-style: italic; }
   .lamp.working { fill: var(--warn, #d9a441); }
   .lamp.off { fill: var(--border-strong, #3a434d); }
   .machine:hover .shed, .machine:focus-visible .shed { stroke: var(--fog, #e8ecef); }

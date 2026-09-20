@@ -42,6 +42,18 @@
     type InboundRow,
     type WaitingRow,
   } from './receiving';
+  import { receivingPlatforms, type Deck } from '../yard/world-interior';
+
+  // CAR 4 (design d2154293): this page is also mounted UNDER the world
+  // zoomed into the receiving territory, at /it/yard/receiving.
+  // `embedded` drops the page header, because the world above already
+  // carries one, and that is ALL it drops. `ondeck` hands the inbound
+  // rows up so the territory's platforms are drawn from the reads this
+  // page already makes — one read of a region, never two.
+  let {
+    embedded = false,
+    ondeck = (_deck: Deck) => {},
+  }: Readonly<{ embedded?: boolean; ondeck?: (deck: Deck) => void }> = $props();
 
   /** The window: a week of days, today included. Departures are read
    *  from the same rows, so a packet that closed inside the window
@@ -154,14 +166,33 @@
     const f = failedStep(r)?.failed ?? null;
     return `${r.title} — ${r.age} d, on ${r.holder.label}${f ? ` — ${failedVerbPhrase(f)}` : ''}`;
   };
+
+  // What the zoomed territory draws: a platform per inbound channel,
+  // or the honest reason there is none. The registry read decides
+  // which kinds are inbound, so a registry that did not answer is an
+  // unavailable deck rather than an empty one.
+  const deck = $derived<Deck>(
+    registry.kind === 'failed'
+      ? { kind: 'unavailable', why: registry.error }
+      : rows.kind === 'failed'
+        ? { kind: 'unavailable', why: rows.error }
+        : registry.kind === 'loading' || rows.kind === 'loading'
+          ? { kind: 'reading' }
+          : { kind: 'ready', region: 'receiving', platforms: receivingPlatforms(all, today, days) },
+  );
+  $effect(() => {
+    ondeck(deck);
+  });
 </script>
 
 <div class="ry-root">
-  <PageHeader
-    eyebrow="IT · Inbound · Before anyone builds it"
-    title="Receiving Yard"
-    subtitle="What came in, and what is still standing on the inbound track — every packet that asks the platform for something, from the moment it is opened until an actor takes it into a build, a review or a decision."
-  />
+  {#if !embedded}
+    <PageHeader
+      eyebrow="IT · Inbound · Before anyone builds it"
+      title="Receiving Yard"
+      subtitle="What came in, and what is still standing on the inbound track — every packet that asks the platform for something, from the moment it is opened until an actor takes it into a build, a review or a decision."
+    />
+  {/if}
 
   {#if registry.kind === 'failed'}
     <p class="ry-fail load-failed">

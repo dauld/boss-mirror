@@ -17,8 +17,11 @@
       { label: 'Performance', path: '/it/operate/perf' },
       { label: 'Atlas', path: '/it/operate/atlas' },
       { label: 'Bottlenecks', path: '/it/operate/bottlenecks' },
-      { label: 'Receiving Yard', path: '/it/operate/receiving' },
-      { label: 'Marshalling Yard', path: '/it/operate/marshalling' },
+      // The two queue boards are REGIONS of the world since car 4 of
+      // design d2154293 — the tab walks to the zoomed territory, not
+      // to a page of its own.
+      { label: 'Receiving Yard', path: '/it/yard/receiving' },
+      { label: 'Marshalling Yard', path: '/it/yard/marshalling' },
     ],
     registry: [
       { label: 'Workflows', path: '/it/registry' },

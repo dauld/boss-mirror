@@ -16,13 +16,17 @@ import { describe, expect, test } from 'bun:test';
 import {
   DYNAMIC_APP_SECTIONS,
   HOME_CHROME_SECTIONS,
+  REGION_SECTIONS,
   SECTION_FOR_ROUTE,
   appForRoute,
+  sectionForRoute,
 } from './sections';
 import { ROUTE_CATALOG, appForSection } from './nav-catalog';
 
 const catalogKeys = new Set(Object.keys(ROUTE_CATALOG));
-const sections = new Set(Object.values(SECTION_FOR_ROUTE));
+// Every section a route can light: the kind's own, plus the two a
+// yard floor's REGION answers for (car 4 of design d2154293).
+const sections = new Set([...Object.values(SECTION_FOR_ROUTE), ...Object.values(REGION_SECTIONS)]);
 
 describe('sections resolve in the nav catalog', () => {
   test('every section id is a catalog key or a documented exception', () => {
@@ -70,10 +74,15 @@ describe('sections resolve in the nav catalog', () => {
     // must resolve to their own catalog keys — left on
     // 'system-incidents' they would light the Operate row while the
     // operator stands in a yard that has a row of its own.
-    expect(SECTION_FOR_ROUTE.systemReceivingYard).toBe('system-receiving');
-    expect(SECTION_FOR_ROUTE.systemMarshallingYard).toBe('system-marshalling');
-    expect(appForRoute({ kind: 'systemReceivingYard' })).toBe('it');
-    expect(appForRoute({ kind: 'systemMarshallingYard' })).toBe('it');
+    // Car 4 of design d2154293 retired the two PAGES: each yard is a
+    // region of the world now, so the route is a yard floor and the
+    // REGION decides the row — `sectionForRoute`, not the kind alone.
+    // Read off the kind, both would light the Train Yard's row.
+    expect(sectionForRoute({ kind: 'systemYardFloor', region: 'receiving' })).toBe('system-receiving');
+    expect(sectionForRoute({ kind: 'systemYardFloor', region: 'marshalling' })).toBe('system-marshalling');
+    expect(sectionForRoute({ kind: 'systemYardFloor', region: 'dock' })).toBe('system-yard');
+    expect(appForRoute({ kind: 'systemYardFloor', region: 'receiving' })).toBe('it');
+    expect(appForRoute({ kind: 'systemYardFloor', region: 'marshalling' })).toBe('it');
   });
 
   test('no exception names a section no longer produced', () => {

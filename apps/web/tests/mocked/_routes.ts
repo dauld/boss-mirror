@@ -60,8 +60,9 @@ export const ROUTES: ReadonlyArray<string> = [
   // region's panel; the bare /it/yard is the yard on the track. The
   // page is the same one /it used to mount, so each floor renders the
   // yard's empty states under the mocks and its `load-failed` line
-  // under the outage. Receiving and marshalling floors are the two
-  // pages below.
+  // under the outage. Receiving and marshalling are floors too since
+  // car 4 of design d2154293, and are listed below with the paths
+  // their retired pages answered at.
   '/it/yard',
   '/it/yard/dock',
   '/it/yard/gates',
@@ -69,20 +70,25 @@ export const ROUTES: ReadonlyArray<string> = [
   '/it/yard/shed',
   '/it/yard/arrivals',
   '/it/yard/garage',
-  // The Marshalling Yard — the upstream third. Under the mock's `[]`
+  // The Marshalling Yard — the upstream third, a REGION of the world
+  // since car 4 of design d2154293: the territory draws a platform per
+  // station and the board mounts under it. Under the mock's `[]`
   // catch-all, /api/stations/load and /api/stations/flow come back as
-  // collections with no rows, so the page renders its "every watched
-  // station is clear" state. It was crawled here as a tab before it
-  // had a catalog row; since feedback 92921c2f (2026-09-18) it is a
-  // sidebar row and the drift test in route-smoke.mocked.spec.ts
-  // enforces this line instead of the line being its whole coverage.
+  // collections with no rows, so it renders its "every watched station
+  // is clear" state. The drift test in route-smoke.mocked.spec.ts
+  // enforces the catalog row's path, which is this one.
+  '/it/yard/marshalling',
+  // The Receiving Yard — the intake floor, a region beside it. Its
+  // reads are /api/workflows and `/api/jobs?kind=…&closed_within=…`;
+  // under the mock's `[]` catch-all both come back empty, so it
+  // renders its no-intake state, and every read goes through
+  // fetchRemote, so the outage renders a failure line rather than an
+  // empty yard.
+  '/it/yard/receiving',
+  // The two paths the pages answered at before car 4. They still
+  // route — to the same region — and are crawled so a bookmark, a
+  // packet or a brief that names one cannot rot unnoticed.
   '/it/operate/marshalling',
-  // The Receiving Yard — the intake floor, a sidebar row with the
-  // Marshalling Yard (92921c2f). Its reads are /api/workflows and
-  // `/api/jobs?kind=…&closed_within=…`; under the mock's `[]` catch-all
-  // both come back empty, so the page renders its no-intake state,
-  // and every read goes through fetchRemote, so the outage renders a
-  // failure line rather than an empty yard.
   '/it/operate/receiving',
   // The codebase — its own sidebar row since feedback 9827c699
   // (2026-09-14; a Design tab before, backlog 06048ade). Its one read is

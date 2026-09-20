@@ -109,10 +109,6 @@ export type Route =
   /// Fleet lives on as Operate's Bottlenecks tab (1f6d55e0 Q3: the
   /// per-kind dashboard is unique, not a duplicate rendering).
   | { kind: 'systemFleet' }
-  | { kind: 'systemMarshallingYard' }
-  /// The Receiving Yard — the INBOUND third: what asked the platform for
-  /// something and is still standing, before the Marshalling Yard sorts it.
-  | { kind: 'systemReceivingYard' }
   /// The Crew Board — who is building what, right now. The MIDDLE third
   /// of the operator surface (backlog 04c5bbc0): the Train Yard shows
   /// landed work, the Marshalling Yard shows work waiting, and the
@@ -185,8 +181,14 @@ export function parseRoute(pathname: string): Route {
     if (p === '/operate/perf') return { kind: 'systemMonitoringPerf' };
     if (p === '/operate/atlas') return { kind: 'systemMonitoringAtlas' };
     if (p === '/operate/bottlenecks') return { kind: 'systemFleet' };
-    if (p === '/operate/marshalling') return { kind: 'systemMarshallingYard' };
-    if (p === '/operate/receiving') return { kind: 'systemReceivingYard' };
+    // The Receiving Yard and the Marshalling Yard RETIRED as pages on
+    // car 4 of design d2154293: each is a region of the world, and its
+    // board mounts under the world zoomed into that region. The two
+    // old paths resolve to the same route rather than 404ing, because
+    // they are written down in packets, briefs and this session's own
+    // notes — one surface, two spellings, not two surfaces.
+    if (p === '/operate/marshalling') return { kind: 'systemYardFloor', region: 'marshalling' };
+    if (p === '/operate/receiving') return { kind: 'systemYardFloor', region: 'receiving' };
     if (p === '/operate/yard-status') return { kind: 'systemYardStatus' };
     if (p === '/operate/conductor') return { kind: 'systemMonitoringConductor' };
     // 3. Registry — one surface over the registry family.

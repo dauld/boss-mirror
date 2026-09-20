@@ -16,7 +16,7 @@
   import AppShell from './shell/AppShell.svelte';
   import UpdateBar from './shell/UpdateBar.svelte';
   import { appsFor, APP_SUBJECT_KINDS, type AppId } from './shell/nav-catalog';
-  import { SECTION_FOR_ROUTE, appForRoute } from './shell/sections';
+  import { appForRoute, sectionForRoute } from './shell/sections';
   import { makeSurfaceOpenRecorder, postSurfaceOpen, routePattern } from './shell/surface-opens';
   import StepFocusPage from './steps/StepFocusPage.svelte';
   import PerspectiveTabs from '@boss/web-kit/PerspectiveTabs.svelte';
@@ -66,8 +66,6 @@
   import CrewBoardPage from './it/crew/CrewBoardPage.svelte';
   import EstatePage from './it/estate/EstatePage.svelte';
   import FleetPage from './it/monitoring/FleetPage.svelte';
-  import MarshallingYardPage from './it/marshalling/MarshallingYardPage.svelte';
-  import ReceivingYardPage from './it/receiving/ReceivingYardPage.svelte';
   import ItTabs from './it/ItTabs.svelte';
   import DesignReviewPage from './it/design/DesignReviewPage.svelte';
   import ExperimentsPage from './it/experiments/ExperimentsPage.svelte';
@@ -219,7 +217,7 @@
   // shell/sections.ts as a typed Record so a new route kind cannot fall
   // through silently, and sections.test.ts pins every section id to a
   // ROUTE_CATALOG key.
-  let activeSection = $derived(SECTION_FOR_ROUTE[route.kind]);
+  let activeSection = $derived(sectionForRoute(route));
 
   // Which app tab is active. Derived from the route: through
   // `activeSection` and the catalog's `app` field for every surface
@@ -403,12 +401,6 @@
     {:else if route.kind === 'systemFleet'}
       <ItTabs group="operate" active="/it/operate/bottlenecks" />
       <FleetPage />
-    {:else if route.kind === 'systemMarshallingYard'}
-      <ItTabs group="operate" active="/it/operate/marshalling" />
-      <MarshallingYardPage />
-    {:else if route.kind === 'systemReceivingYard'}
-      <ItTabs group="operate" active="/it/operate/receiving" />
-      <ReceivingYardPage />
     {:else if route.kind === 'systemYardStatus'}
       <ItTabs group="operate" active="/it/operate/yard-status" />
       <YardStatusPage />

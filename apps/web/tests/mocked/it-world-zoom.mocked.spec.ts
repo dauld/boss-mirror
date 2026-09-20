@@ -171,13 +171,123 @@ test('Escape puts the camera back at the world, and so does the frame around the
   await expect(svg.locator('[data-interior]')).toHaveCount(0);
 });
 
-test('a region whose floor is a page of its own says so rather than drawing an empty interior', async ({ page }) => {
+// ---------------------------------------------------------------------
+// CAR 4 — the two territories that hold QUEUES.
+// ---------------------------------------------------------------------
+//
+// Until this car receiving and marshalling printed "this region's
+// floor is a page of its own" where their activity belonged. They now
+// draw a platform per queue: the station's or channel's name, what is
+// standing over its bound, a mark per packet on the track, the bound
+// where it falls, and what left in the window. What this spec can
+// observe is the picture the operator gets — the platforms, the marks
+// and, the reason the car has a rule of its own, that a number the
+// server could not count renders as `?` and NOT as 0.
+
+/** Two stations, one of them blind to the flow cube — the honest case
+ *  the marshalling read model already models (`basis: unavailable`). */
+const STATION_LOAD = {
+  data: [
+    { station: 'q.platform-admin.task', kind: 'constraint', depth: 30, wip_limit: 24, over_limit: true, oldest_age_days: 3, capability_roles: ['platform-admin'] },
+    { station: 'my-watchlist', kind: 'actor', depth: 2, wip_limit: null, over_limit: false, oldest_age_days: 1, capability_roles: null },
+  ],
+};
+const STATION_FLOW = {
+  window_hours: 24,
+  as_of: '2026-09-19T05:00:00Z',
+  data: [
+    { station: 'q.platform-admin.task', basis: 'step-events', arrived: 9, served: 4, net: 5 },
+    { station: 'my-watchlist', basis: 'unavailable', arrived: null, served: null, net: null, unavailable_reason: 'a per-actor watchlist is not a log predicate' },
+  ],
+};
+
+/** One inbound kind, with a packet standing well past the 14-day band. */
+const INBOUND_WORKFLOWS = [{ kind: 'user-feedback', category: 'platform', status: 'active' }];
+const INBOUND_JOBS = {
+  total: 1,
+  data: [
+    { id: 'fb-1', kind: 'user-feedback', title: 'the map should feel like a world', status: 'open', opened_on: '2026-08-01', priority: 'standard', steps: [] },
+  ],
+};
+
+test('a zoomed marshalling draws a platform per station — its packets, its bound, and a rate it could not count as unknown', async ({ page }) => {
   await mocks(page);
-  // Typed by hand: receiving has a territory but no interior until car 4.
+  const json = (r: Route, b: unknown) =>
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(b) });
+  await page.route(/\/api\/stations\/load$/, (r) => json(r, STATION_LOAD));
+  await page.route(/\/api\/stations\/flow/, (r) => json(r, STATION_FLOW));
+
+  await page.goto('/it/yard/marshalling');
+  const marshalling = page.locator(`${WORLD_SVG} .territory[data-region="marshalling"]`);
+  await expect(marshalling).toHaveClass(/here/);
+
+  const interior = page.locator(`${WORLD_SVG} .interior[data-interior="marshalling"]`);
+  await expect(interior.locator('.platform')).toHaveCount(2);
+  await expect(interior).not.toContainText("page of its own");
+
+  // The station over its WIP bound: 30 standing against 24, the marks
+  // past the bound flagged, and the bound drawn on the track.
+  const over = interior.locator('.platform[data-platform="q.platform-admin.task"]');
+  await expect(over).toContainText('30 / 24');
+  await expect(over.locator('.mark')).not.toHaveCount(0);
+  await expect(over.locator('.mark.flagged')).not.toHaveCount(0);
+  await expect(over.locator('.bound')).toHaveCount(1);
+  await expect(over.locator('title')).toHaveText(/oldest 3 d/);
+
+  // THE UNKNOWN. The watchlist's depth was read, so it stands; its
+  // rate was not, so the platform says `?` — in its own band, and
+  // never the 0 that would read as "nothing is being worked".
+  const blind = interior.locator('.platform[data-platform="my-watchlist"]');
+  await expect(blind).toContainText('2');
+  await expect(blind.locator('text.rate')).toHaveText('?');
+  await expect(blind.locator('text.rate')).toHaveClass(/unknown/);
+  await expect(blind.locator('title')).toHaveText(/a per-actor watchlist is not a log predicate/);
+  // A counted rate is a figure, not the unknown band — the two must
+  // not look alike.
+  await expect(over.locator('text.rate')).not.toHaveClass(/unknown/);
+
+  // The board itself is mounted under the zoomed world: the page that
+  // used to live at /it/operate/marshalling, minus its page header.
+  await expect(page.locator('.my-root')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Marshalling Yard' })).toHaveCount(0);
+});
+
+test('a zoomed receiving stands its inbound packets by channel and flags what is past the age band', async ({ page }) => {
+  await mocks(page);
+  const json = (r: Route, b: unknown) =>
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(b) });
+  await page.route(/\/api\/workflows$/, (r) => json(r, INBOUND_WORKFLOWS));
+  await page.route(/\/api\/jobs\?kind=user-feedback/, (r) => json(r, INBOUND_JOBS));
+
   await page.goto('/it/yard/receiving');
   const receiving = page.locator(`${WORLD_SVG} .territory[data-region="receiving"]`);
   await expect(receiving).toHaveClass(/here/);
-  await expect(receiving).toContainText("this region's floor is a page of its own");
+  await expect(receiving).not.toContainText("page of its own");
+
+  const interior = page.locator(`${WORLD_SVG} .interior[data-interior="receiving"]`);
+  const feedback = interior.locator('.platform[data-platform="feedback"]');
+  await expect(feedback).toContainText('1');
+  // Opened 2026-08-01: past the 14-day band, so its mark is flagged —
+  // the trouble is drawn where the trouble is.
+  await expect(feedback.locator('.mark.flagged')).toHaveCount(1);
+  await expect(feedback.locator('title')).toHaveText(/past the 14-day band/);
+  // A channel nothing stands on is drawn empty, not omitted: "where
+  // is the work NOT" is an answer a board still owes.
+  await expect(interior.locator('.platform[data-platform="design"] .mark')).toHaveCount(0);
+
+  // And the inbound board is mounted under the world, header dropped.
+  await expect(page.locator('.ry-root')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Receiving Yard' })).toHaveCount(0);
+});
+
+test('a queue read that failed is said, never drawn as an empty region', async ({ page }) => {
+  await mocks(page);
+  await page.route(/\/api\/stations\/load$/, (r) =>
+    r.fulfill({ status: 500, contentType: 'application/json', body: '"the station registry is down"' }));
+
+  await page.goto('/it/yard/marshalling');
+  const marshalling = page.locator(`${WORLD_SVG} .territory[data-region="marshalling"]`);
+  await expect(marshalling).toContainText('cannot be read');
   await expect(page.locator(`${WORLD_SVG} [data-interior]`)).toHaveCount(0);
 });
 

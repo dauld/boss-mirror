@@ -126,10 +126,12 @@ test('a territory click opens its floor, and the floor opens with the region\'s 
   await expect(page.locator('.yard-panel-h', { hasText: 'Entity · loading dock' })).toBeVisible();
   await expect(page.locator('.yard-region-head')).toContainText('dock · clear — 3 cars parked');
 
-  // A region with a page of its own.
+  // A region whose floor is a QUEUE BOARD. Its page retired on car 4
+  // of design d2154293: the click is a zoom into the region like every
+  // other, and the board mounts under it.
   await page.goto('/it');
   await page.locator('section.yard svg .territory[data-region="receiving"]').click();
-  await expect(page).toHaveURL(/\/it\/operate\/receiving$/);
+  await expect(page).toHaveURL(/\/it\/yard\/receiving$/);
 });
 
 test('a regions read that fails is said, never drawn as a clear world', async ({ page }) => {

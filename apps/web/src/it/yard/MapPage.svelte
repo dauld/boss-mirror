@@ -43,9 +43,12 @@
   import { fetchRegions, type Regions } from './regions';
   import { territoryOf } from './world';
   import { hasInterior } from './world-zoom';
+  import { hasPlatforms, type Deck } from './world-interior';
   import type { Scene } from './yard-floor';
   import WorldMap from './WorldMap.svelte';
   import YardPage from './YardPage.svelte';
+  import ReceivingYardPage from '../receiving/ReceivingYardPage.svelte';
+  import MarshallingYardPage from '../marshalling/MarshallingYardPage.svelte';
 
   type Props = Readonly<{
     /** The territory the camera is in — the `/it/yard/<region>` route.
@@ -57,12 +60,23 @@
   /** A region the layout has no territory for leaves the camera at the
    *  world rather than flying to nowhere. */
   const zoomed = $derived(region !== null && territoryOf(region) !== undefined ? region : null);
-  /** The six regions whose floor is the yard's own; receiving and
-   *  marshalling keep their pages until car 4 grows their interiors. */
+  /** The six regions whose floor is the yard's own. */
   const floorRegion = $derived(zoomed !== null && hasInterior(zoomed) ? zoomed : null);
+  /** The two whose floor is a queue board — receiving and marshalling
+   *  (car 4). Their territory draws PLATFORMS rather than wagons in
+   *  transit, and the board itself mounts under the zoomed world the
+   *  way the yard's floor does. */
+  const platformRegion = $derived(zoomed !== null && hasPlatforms(zoomed) ? zoomed : null);
   /** The floor, handed up by the yard page below — the scene its own
    *  reads already built. Null until the first read lands. */
   let floor = $state<Scene | null>(null);
+  /** The platform deck, handed up by whichever queue board is mounted,
+   *  WITH the region it was read for: a deck left over from the region
+   *  the camera just left would draw the wrong queues for a moment. */
+  let held = $state<Readonly<{ region: string; deck: Deck }> | null>(null);
+  const deck = $derived<Deck | null>(
+    platformRegion !== null && held !== null && held.region === platformRegion ? held.deck : null,
+  );
 
   let regions = $state<Remote<Regions>>({ kind: 'loading' });
   let readAt = $state<number | null>(null);
@@ -101,7 +115,7 @@
          a map that could not be read must not look like a clear one. -->
     <div class="yard-empty load-failed">The regions cannot be read — {regions.error}</div>
   {:else}
-    <WorldMap regions={regions.data} {zoomed} {floor} onleave={() => navigate('/it')} />
+    <WorldMap regions={regions.data} {zoomed} {floor} {deck} onleave={() => navigate('/it')} />
     <div class="yard-flow">
       window {regions.data.window_hours}h against the {regions.data.window_hours}h before{readAt !== null ? ` · read ${clock(readAt)}` : ''}
     </div>
@@ -115,6 +129,21 @@
          old selection. -->
     {#key floorRegion}
       <YardPage focus={floorRegion} embedded onfloor={(s) => (floor = s)} />
+    {/key}
+  {/if}
+
+  {#if platformRegion !== null}
+    <!-- THE QUEUE BOARD, under the territory the camera is in (car 4).
+         The two /it/operate pages this replaced are the SAME
+         components, mounted here with their page header dropped: the
+         territory above draws the platforms from the very reads these
+         make, so nothing is read twice and nothing is derived twice. -->
+    {#key platformRegion}
+      {#if platformRegion === 'receiving'}
+        <ReceivingYardPage embedded ondeck={(d) => (held = { region: 'receiving', deck: d })} />
+      {:else}
+        <MarshallingYardPage embedded ondeck={(d) => (held = { region: 'marshalling', deck: d })} />
+      {/if}
     {/key}
   {/if}
 </div>

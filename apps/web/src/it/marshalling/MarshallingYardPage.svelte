@@ -38,6 +38,18 @@
     type StationFlowEnvelope,
     type StationLoadRow,
   } from './marshalling';
+  import { marshallingPlatforms, type Deck } from '../yard/world-interior';
+
+  // CAR 4 (design d2154293): this page is also mounted UNDER the world
+  // zoomed into the marshalling territory, at /it/yard/marshalling.
+  // `embedded` drops the page header, because the world above already
+  // carries one, and that is ALL it drops. `ondeck` hands the joined
+  // sidings up so the territory's platforms are drawn from the reads
+  // this page already makes — one read of a region, never two.
+  let {
+    embedded = false,
+    ondeck = (_deck: Deck) => {},
+  }: Readonly<{ embedded?: boolean; ondeck?: (deck: Deck) => void }> = $props();
 
   // Offered windows. A day is the default: the shortest span in which
   // every queue on this network has had a chance to be worked once, so
@@ -99,14 +111,32 @@
   }
 
   const openPacket = (jobId: string) => navigate(`/jobs/${jobId}`);
+
+  // What the zoomed territory draws: a platform per station, or the
+  // honest reason there is none. A failed read is a FAILURE up there
+  // too — a region drawn empty would read as a quiet one.
+  const deck = $derived<Deck>(
+    load.kind === 'failed'
+      ? { kind: 'unavailable', why: load.error }
+      : flow.kind === 'failed'
+        ? { kind: 'unavailable', why: flow.error }
+        : load.kind === 'loading' || flow.kind === 'loading'
+          ? { kind: 'reading' }
+          : { kind: 'ready', region: 'marshalling', platforms: marshallingPlatforms(sidings, windowHours) },
+  );
+  $effect(() => {
+    ondeck(deck);
+  });
 </script>
 
 <div class="my-root">
-  <PageHeader
-    eyebrow="IT · Upstream · Before the dock"
-    title="Marshalling Yard"
-    subtitle="What waits, on whom, for how long — and which queue is the constraint right now. Depth says what is waiting; the rate beside it says whether a bottleneck is forming."
-  />
+  {#if !embedded}
+    <PageHeader
+      eyebrow="IT · Upstream · Before the dock"
+      title="Marshalling Yard"
+      subtitle="What waits, on whom, for how long — and which queue is the constraint right now. Depth says what is waiting; the rate beside it says whether a bottleneck is forming."
+    />
+  {/if}
 
   <div class="my-controls" role="group" aria-label="Measurement window">
     <span class="my-controls-label">window</span>
