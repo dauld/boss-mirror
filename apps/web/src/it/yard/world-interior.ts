@@ -33,7 +33,7 @@
 
 import { AGE_THRESHOLDS, CHANNELS, ageDays, type Channel, type InboundRow } from '../receiving/receiving';
 import type { Siding } from '../marshalling/marshalling';
-import { INTERIOR_HEAD } from './world-zoom';
+import { INTERIOR_HEAD } from './region-contents';
 import type { Territory } from './world';
 
 /** Which standing packets are flagged, and from which end of the
@@ -65,7 +65,7 @@ export type Deck =
   | Readonly<{ kind: 'ready'; region: string; platforms: ReadonlyArray<Platform> }>;
 
 /** The two regions whose interior is platforms rather than wagons in
- *  transit. The other six are world-zoom.ts's INTERIOR_REGIONS. */
+ *  transit. The other six are region-contents.ts's INTERIOR_REGIONS. */
 export const PLATFORM_REGIONS: ReadonlyArray<string> = ['receiving', 'marshalling'];
 
 export function hasPlatforms(region: string): boolean {

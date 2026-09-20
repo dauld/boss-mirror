@@ -3,27 +3,21 @@ import { REGION_NAMES } from './regions';
 import { TERRITORIES, WORLD, territoryOf } from './world';
 import {
   INTERIOR_REGIONS,
-  WORLD_BOX,
-  ZOOM_MS,
-  easeInOut,
   hasInterior,
   interiorLayout,
   interiorWagons,
-  lerpBox,
   regionOfStation,
-  viewBoxText,
-  zoomBoxOf,
-} from './world-zoom';
+} from './region-contents';
 import type { Scene, Station, Wagon } from './yard-floor';
 
-// CLICK IS A ZOOM, NOT A DEPARTURE (design d2154293, car 3). The world
-// is one coordinate space and one SVG; zooming into a territory is a
-// viewBox that walks from the whole world to that territory's rect,
-// and the territory then shows WHAT IS MOVING INSIDE IT — the wagons
-// standing at the stations that territory covers. These pin the
-// arithmetic of both halves: the box the zoom walks to, and which
-// wagons belong to which territory. Nothing here touches a DOM, so a
-// broken zoom is a failing unit test before it is a broken picture.
+// WHAT A REGION CONTAINS, AND WHERE IT GOES IN THE RECT (backlog
+// ca37478f). A click no longer walks a camera into a territory — the
+// world map is REPLACED by that region's own map — so what is pinned
+// here is the part that survived: which wagons belong to which region,
+// and where each plate lands inside whatever rect it is handed. The
+// camera's arithmetic (zoomBoxOf, lerpBox, easeInOut, viewBoxText) is
+// deleted, and so are its tests. Nothing here touches a DOM, so a
+// broken layout is a failing unit test before it is a broken picture.
 
 const wagon = (id: string, station: Station, slot = 0): Wagon => ({
   id,
@@ -44,60 +38,6 @@ const wagon = (id: string, station: Station, slot = 0): Wagon => ({
 
 const sceneOf = (wagons: readonly Wagon[]): Scene =>
   ({ now: '2026-09-19T05:00:00Z', wagons, locos: [], bays: [], signals: [], boardRows: [], machines: {} }) as unknown as Scene;
-
-describe('the box a click zooms to', () => {
-  it('holds the whole world when nothing is zoomed, and a territory when one is', () => {
-    expect(zoomBoxOf(null)).toEqual(WORLD_BOX);
-    expect(WORLD_BOX).toEqual({ x: 0, y: 0, w: WORLD.width, h: WORLD.height });
-    const dock = territoryOf('dock')!;
-    const box = zoomBoxOf('dock');
-    // The territory, with room around it — the zoom must not crop the
-    // outline it zoomed INTO, and the rails leaving it stay in view.
-    expect(box.x).toBeLessThan(dock.x);
-    expect(box.y).toBeLessThan(dock.y);
-    expect(box.x + box.w).toBeGreaterThan(dock.x + dock.w);
-    expect(box.y + box.h).toBeGreaterThan(dock.y + dock.h);
-    // And it is a real zoom: strictly smaller than the world.
-    expect(box.w).toBeLessThan(WORLD_BOX.w);
-    expect(box.h).toBeLessThan(WORLD_BOX.h);
-  });
-
-  it('every territory has a zoom box, and a name the world does not know stays at the world', () => {
-    for (const t of TERRITORIES) expect(zoomBoxOf(t.name).w, t.name).toBeLessThan(WORLD_BOX.w);
-    expect(zoomBoxOf('siding')).toEqual(WORLD_BOX);
-    expect(zoomBoxOf('')).toEqual(WORLD_BOX);
-  });
-
-  it('walks from one box to the other and arrives exactly', () => {
-    const a = WORLD_BOX;
-    const b = zoomBoxOf('gates');
-    expect(lerpBox(a, b, 0)).toEqual(a);
-    expect(lerpBox(a, b, 1)).toEqual(b);
-    const half = lerpBox(a, b, 0.5);
-    expect(half.w).toBeCloseTo((a.w + b.w) / 2, 6);
-    expect(half.x).toBeCloseTo((a.x + b.x) / 2, 6);
-    // The walk is monotone: the box only ever gets smaller on the way in.
-    const widths = [0, 0.25, 0.5, 0.75, 1].map((k) => lerpBox(a, b, k).w);
-    expect([...widths].sort((x, y) => y - x)).toEqual(widths);
-  });
-
-  it('eases in and out, pinned at both ends', () => {
-    expect(easeInOut(0)).toBe(0);
-    expect(easeInOut(1)).toBe(1);
-    expect(easeInOut(0.5)).toBeCloseTo(0.5, 6);
-    expect(easeInOut(0.25)).toBeLessThan(0.25);
-    expect(easeInOut(0.75)).toBeGreaterThan(0.75);
-    expect(ZOOM_MS).toBeGreaterThan(0);
-  });
-
-  it('prints a viewBox SVG accepts — four numbers, no exponent, no NaN', () => {
-    expect(viewBoxText(WORLD_BOX)).toBe('0 0 1240 400');
-    const text = viewBoxText(lerpBox(WORLD_BOX, zoomBoxOf('dock'), 1 / 3));
-    expect(text.split(' ')).toHaveLength(4);
-    for (const n of text.split(' ')) expect(Number.isFinite(Number(n)), n).toBe(true);
-    expect(text).not.toContain('e');
-  });
-});
 
 describe('what is moving inside a territory', () => {
   it('sends every station a wagon can stand at to exactly one territory', () => {
@@ -146,7 +86,7 @@ describe('what is moving inside a territory', () => {
   });
 });
 
-describe('the interior lays out inside the territory it belongs to', () => {
+describe('the interior lays out inside the rect it is handed', () => {
   const dock = territoryOf('dock')!;
 
   it('places every plate inside the outline, in a grid, and counts what did not fit', () => {

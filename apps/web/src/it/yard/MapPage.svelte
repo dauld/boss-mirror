@@ -17,13 +17,18 @@
   // orient derived the same numbers again, and nothing held the two
   // equal.
   //
-  // CAR 3 — CLICKING IS A ZOOM. /it/yard/<region> is this same page
-  // with `region` set: the camera walks into that territory and the
-  // territory shows what is moving inside it. Nothing navigates to a
-  // separate surface, which is the whole of David's ask (feedback
-  // c3105b2a: "zoom into the region by clicking to see"). The floor's
+  // CLICKING SWAPS THE VIEW (David, 2026-09-20; backlog ca37478f).
+  // /it/yard/<region> is this same page with `region` set, and it
+  // renders the REGION's map in place of the world's — not the world
+  // drawn nearer. Car 3 read "zoom into the region by clicking to see"
+  // (feedback c3105b2a) as a camera walking the viewBox into a
+  // territory's rect; David's correction: "I just wanted the world map
+  // view to get replaced with the more detailed region map view on
+  // click but not literally increase the size of content on the world
+  // map." The route was already right — only what it drew was wrong,
+  // and the camera is gone. The floor's
   // panels — the departure board, the entity deck and its verbs —
-  // mount UNDER the zoomed world, and they are still the Train Yard's
+  // mount UNDER the region map, and they are still the Train Yard's
   // own (YardPage, `embedded`: it drops its page header and its second
   // copy of the map, keeps everything else). The interiors are fed by
   // the scene YardPage ALREADY reads, handed up through `onfloor`: one
@@ -42,7 +47,8 @@
   import type { Remote } from '../../data/remote';
   import { fetchRegions, type Regions } from './regions';
   import { territoryOf } from './world';
-  import { hasInterior } from './world-zoom';
+  import { hasInterior } from './region-contents';
+  import RegionMap from './RegionMap.svelte';
   import { hasPlatforms, type Deck } from './world-interior';
   import type { Scene } from './yard-floor';
   import { fetchBorders, summaryLine, type Borders } from './borders';
@@ -58,22 +64,22 @@
   }>;
   let { region = null }: Props = $props();
 
-  /** A region the layout has no territory for leaves the camera at the
-   *  world rather than flying to nowhere. */
-  const zoomed = $derived(region !== null && territoryOf(region) !== undefined ? region : null);
+  /** A region the layout does not know leaves the WORLD on screen
+   *  rather than swapping to a map of nothing. */
+  const shown = $derived(region !== null && territoryOf(region) !== undefined ? region : null);
   /** The six regions whose floor is the yard's own. */
-  const floorRegion = $derived(zoomed !== null && hasInterior(zoomed) ? zoomed : null);
+  const floorRegion = $derived(shown !== null && hasInterior(shown) ? shown : null);
   /** The two whose floor is a queue board — receiving and marshalling
-   *  (car 4). Their territory draws PLATFORMS rather than wagons in
-   *  transit, and the board itself mounts under the zoomed world the
-   *  way the yard's floor does. */
-  const platformRegion = $derived(zoomed !== null && hasPlatforms(zoomed) ? zoomed : null);
+   *  (car 4). Their map draws PLATFORMS rather than wagons in transit,
+   *  and the board itself mounts under it the way the yard's floor
+   *  does. */
+  const platformRegion = $derived(shown !== null && hasPlatforms(shown) ? shown : null);
   /** The floor, handed up by the yard page below — the scene its own
    *  reads already built. Null until the first read lands. */
   let floor = $state<Scene | null>(null);
   /** The platform deck, handed up by whichever queue board is mounted,
    *  WITH the region it was read for: a deck left over from the region
-   *  the camera just left would draw the wrong queues for a moment. */
+   *  just left would draw the wrong queues for a moment. */
   let held = $state<Readonly<{ region: string; deck: Deck }> | null>(null);
   const deck = $derived<Deck | null>(
     platformRegion !== null && held !== null && held.region === platformRegion ? held.deck : null,
@@ -120,13 +126,21 @@
          a map that could not be read must not look like a clear one. -->
     <div class="yard-empty load-failed">The regions cannot be read — {regions.error}</div>
   {:else}
-    <WorldMap
-      regions={regions.data}
-      {zoomed}
-      {floor}
-      {deck}
-      borders={borders.kind === 'ready' ? borders.data : null}
-      onleave={() => navigate('/it')} />
+    {#if shown !== null}
+      <!-- THE REGION'S OWN MAP, in place of the world's. Its canvas is
+           its own, so what it shows is laid out for the region rather
+           than for the slot its rectangle occupies on the world line. -->
+      <RegionMap
+        region={shown}
+        regions={regions.data}
+        {floor}
+        {deck}
+        onleave={() => navigate('/it')} />
+    {:else}
+      <WorldMap
+        regions={regions.data}
+        borders={borders.kind === 'ready' ? borders.data : null} />
+    {/if}
     <!-- The activity summary, bubbled up to the high-level view: how
          much crossed the world this window, what stands at the borders,
          and which rails are troubled (design d2154293 car 2). A failed
@@ -143,18 +157,17 @@
   {/if}
 
   {#if floorRegion !== null}
-    <!-- THE FLOOR, under the territory the camera is in: the Train
-         Yard's own panels, mounted in place rather than on a page of
-         their own. Keyed on the region so a move from one territory to
-         another opens the new region's panel rather than keeping the
-         old selection. -->
+    <!-- THE FLOOR, under the region's map: the Train Yard's own
+         panels, mounted in place rather than on a page of their own.
+         Keyed on the region so a move from one to another opens the
+         new region's panel rather than keeping the old selection. -->
     {#key floorRegion}
       <YardPage focus={floorRegion} embedded onfloor={(s) => (floor = s)} />
     {/key}
   {/if}
 
   {#if platformRegion !== null}
-    <!-- THE QUEUE BOARD, under the territory the camera is in (car 4).
+    <!-- THE QUEUE BOARD, under the region's map (car 4).
          The two /it/operate pages this replaced are the SAME
          components, mounted here with their page header dropped: the
          territory above draws the platforms from the very reads these

@@ -39,7 +39,7 @@ import type { Machine, MachineState } from './regions';
 import type { Territory } from './world';
 
 /** The strip a territory reserves along its bottom edge for machinery.
- *  `world-zoom.ts` subtracts it from the room the interior's wagon
+ *  `region-contents.ts` subtracts it from the room the interior's wagon
  *  plates get, so a machine and a wagon never draw over each other —
  *  one definition of the height, read by both. */
 export const MACHINERY_STRIP_H = 20;

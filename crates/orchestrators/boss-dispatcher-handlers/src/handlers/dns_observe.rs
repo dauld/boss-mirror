@@ -182,7 +182,18 @@ pub fn parse_comparison(stdout: &str) -> Result<Comparison, String> {
 /// redirects are read by the lint
 /// `a-public-url-names-a-registered-oidc-redirect.sh`, not here; they
 /// are parsed so a malformed entry is refused at the same place.
+///
+/// CLOSED KEY SET, every table (backlog 1c1591fa, 2026-09-19; the same
+/// sweep as the rule registry's a2358e7c F3). This file is authored
+/// tree data — a registry by any other name — and until this it was
+/// read by an OPEN set, so a typo'd key was dropped in silence and the
+/// sentence above was untrue of exactly the entries it spoke for. The
+/// compounding part was the redirect lint: it would report green over
+/// a `[[oidc_redirect]]` the observer never saw, a check passing on
+/// absence. A key this struct set does not read is now a refusal at
+/// the read, naming the key.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AccessDeclaration {
     pub account_zone: String,
     #[serde(default)]
@@ -192,6 +203,7 @@ pub struct AccessDeclaration {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeclaredApp {
     pub name: String,
     pub domain: String,
@@ -204,6 +216,7 @@ pub struct DeclaredApp {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeclaredPolicy {
     pub name: String,
     pub decision: String,
@@ -211,6 +224,7 @@ pub struct DeclaredPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeclaredInclude {
     #[serde(default)]
     pub emails: Vec<String>,
@@ -256,6 +270,7 @@ impl DeclaredInclude {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeclaredRedirect {
     pub hostname: String,
     pub redirect: String,
@@ -2005,6 +2020,62 @@ why = "x"
 "#;
         let err = parse_access_declaration(elsewhere, "z.dev").unwrap_err();
         assert!(err.contains("a.other.dev"), "{err}");
+    }
+    /// CLOSED KEY SET (backlog 1c1591fa, 2026-09-19). access.toml is
+    /// authored tree data, the way the dispatcher's rule registry is,
+    /// and an open key set drops a typo in silence — worse here than
+    /// in most places, because the lint
+    /// a-public-url-names-a-registered-oidc-redirect.sh then reports
+    /// green over a redirect the observer never saw: a check passing on
+    /// absence. Every table in the declaration is closed, so a
+    /// misspelled key is refused where the file is read, by name.
+    #[test]
+    fn a_misspelled_key_in_the_access_declaration_is_refused_by_name() {
+        let base = r#"
+account_zone = "z.dev"
+[[application]]
+name = "a"
+domain = "a.z.dev"
+type = "self_hosted"
+session_duration = "24h"
+why = "x"
+[[application.policy]]
+name = "p"
+decision = "allow"
+include.emails = ["a@z.dev"]
+[[oidc_redirect]]
+hostname = "a.z.dev"
+redirect = "https://a.z.dev/api/auth/oidc/callback"
+registered = true
+measured = "2026-09-19: read from the IdP"
+"#;
+        parse_access_declaration(base, "z.dev").expect("the base declaration is well formed");
+        // One typo per table: the top-level document, an application,
+        // a policy, a policy's include, and a redirect — the five
+        // shapes access.toml is written in.
+        for (typo, line, after) in [
+            (
+                "oidc_redirects",
+                "oidc_redirects = []",
+                "account_zone = \"z.dev\"",
+            ),
+            ("domian", "domian = \"a.z.dev\"", "domain = \"a.z.dev\""),
+            ("decission", "decission = \"allow\"", "decision = \"allow\""),
+            (
+                "email",
+                "include.email = [\"a@z.dev\"]",
+                "include.emails = [\"a@z.dev\"]",
+            ),
+            ("registerd", "registerd = true", "registered = true"),
+        ] {
+            let text = base.replace(after, &format!("{after}\n{line}"));
+            let err = parse_access_declaration(&text, "z.dev")
+                .expect_err("a key the parser does not read is refused, never dropped");
+            assert!(
+                err.contains(typo) && err.contains(ACCESS_DECLARATION),
+                "the refusal names the misspelled key and the file: {err}"
+            );
+        }
     }
 
     #[test]

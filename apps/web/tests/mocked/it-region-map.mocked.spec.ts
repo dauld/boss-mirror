@@ -1,24 +1,27 @@
-// CLICKING A TERRITORY IS A ZOOM, NOT A DEPARTURE — design d2154293,
-// car 3, over car 1's world (it-map.mocked.spec.ts). David's feedback
-// c3105b2a asked to "zoom into the region by clicking to see" what is
-// moving inside it, and the packet's claim is stronger than "a floor
-// opens": the world NEVER LEAVES. /it/yard/dock is the same SVG, the
-// same node, with the camera walked into the dock's rect and the dock's
-// own wagons drawn inside it.
+// CLICKING A TERRITORY SWAPS THE VIEW — David's correction,
+// 2026-09-20 (backlog ca37478f), over design d2154293 car 3.
 //
-// WHAT THIS SPEC CAN OBSERVE, and what it cannot. It CAN observe that
-// the SVG element the world was drawn in is the SAME DOM node after the
-// click (a node handle, checked for identity — a route that swapped
-// pages would tear it down); that the settled viewBox contains the
-// clicked territory's own rect and is a fraction of the world's; that
-// the plates inside carry the ids and tags of the cars the fixtures put
-// on the dock; and that Escape puts the camera back exactly where it
-// started. It CANNOT observe that the walk between the two boxes LOOKS
-// like a camera move — the frames are requestAnimationFrame work, and
-// the assertions here read the ends, not the middle. The easing and the
-// interpolation are unit-pinned in world-zoom.test.ts instead; what is
-// left unpinned by both, honestly, is whether the motion reads well to
-// a person, which is a thing to look at rather than a thing to assert.
+// Car 3 built the literal reading of "zoom into the region by clicking
+// to see" (feedback c3105b2a): one SVG, one coordinate space, the
+// viewBox walking into a territory's rect, every mark growing in
+// proportion. David: "I realize I made the 'zoom the world map'
+// direction way too literal. I just wanted the world map view to get
+// replaced with the more detailed region map view on click but not
+// literally increase the size of content on the world map."
+//
+// So this spec now asserts the OPPOSITE of what it used to. The world
+// map is REPLACED by the region's own map, which owns its whole canvas
+// and lays out for what the region contains rather than for the slot
+// its rectangle occupied on the world line. The route is unchanged —
+// /it/yard/<region> was already right; only what it drew was wrong.
+//
+// WHAT THIS SPEC CAN OBSERVE: that the world map is gone from the DOM
+// and the region's map is present; that the region map carries the
+// region's own head (its count, its state, its why) and its interior
+// with the ids and tags the fixtures put there; that the floor panels
+// still mount beneath it; and that Escape and the way-out control both
+// return to the world. There is no camera left to observe, and the
+// easing and interpolation it needed are deleted rather than unused.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
 import { YARD_REGIONS, installSmokeMocks } from './_smokeMocks';
@@ -61,114 +64,80 @@ async function mocks(page: Page): Promise<void> {
   await page.route(/\/api\/stations\/loading-dock\/queue$/, (r) => json(r, DOCK_QUEUE));
 }
 
-/** The world's own SVG. Scoped by the map's aria-label because the
- *  yard's detailed floor map below it is a `section.yard svg` too —
- *  until cars 4-5 re-home its sidings inside the territories, both are
- *  on the page. */
+/** The world map's own SVG, scoped by its aria-label: the yard's
+ *  detailed floor map below it is a `section.yard svg` too. */
 const WORLD_SVG = 'section[aria-label="the IT world map"] svg';
 
-/** The four numbers of the SVG's viewBox, as the browser has them now. */
-async function viewBox(page: Page): Promise<readonly number[]> {
-  const raw = await page.locator(WORLD_SVG).getAttribute('viewBox');
-  return (raw ?? '').split(' ').map(Number);
-}
+/** A region's own map — the surface that REPLACES the world. */
+const regionMap = (name: string) => `section[aria-label="the ${name} region map"]`;
+const regionSvg = (name: string) => `${regionMap(name)} svg`;
 
-/** The territory's own rect, in the same coordinates. */
-async function territoryRect(page: Page, name: string): Promise<Readonly<{ x: number; y: number; w: number; h: number }>> {
-  const rect = page.locator(`${WORLD_SVG} .territory[data-region="${name}"] rect.shed`);
-  const [x, y, w, h] = await Promise.all([
-    rect.getAttribute('x'), rect.getAttribute('y'), rect.getAttribute('width'), rect.getAttribute('height'),
-  ]);
-  return { x: Number(x), y: Number(y), w: Number(w), h: Number(h) };
-}
-
-test('/it/yard/dock paints the dock interior inside the world — the same SVG, zoomed, never a second page', async ({ page }) => {
+test('/it/yard/dock REPLACES the world with the dock\'s own map — not the world drawn nearer', async ({ page }) => {
   await mocks(page);
   await page.goto('/it');
   const svg = page.locator(WORLD_SVG);
   await expect(svg.locator('.territory')).toHaveCount(8);
 
   // The world at rest, and the node it is drawn in. The handle is the
-  // load-bearing part: if the click swapped surfaces, this element is
-  // detached afterwards, whatever the new page happens to look like.
-  const worldBox = await viewBox(page);
-  const dock = await territoryRect(page, 'dock');
+  // load-bearing part, exactly as it was when this spec asserted the
+  // opposite: it proves which way the swap went.
   const node = await svg.elementHandle();
   expect(node).not.toBeNull();
-  await expect(svg.locator('[data-interior]')).toHaveCount(0);
 
   await svg.locator('.territory[data-region="dock"]').click();
   await expect(page).toHaveURL(/\/it\/yard\/dock$/);
 
-  // THE INTERIOR: the dock's own wagons, inside the dock's outline.
-  const interior = svg.locator('.interior[data-interior="dock"]');
+  // THE WORLD IS GONE. Replaced, not zoomed — and the old SVG node is
+  // detached, which is the assertion that earns the spec's title.
+  await expect(page.locator(WORLD_SVG)).toHaveCount(0);
+  expect(await node!.evaluate((el) => el.isConnected)).toBe(false);
+  await expect(page.locator('.territory')).toHaveCount(0);
+
+  // THE REGION'S OWN MAP, in its place: its head says what the region
+  // is, in words, at region scale rather than wrapped into a slot.
+  const map = page.locator(regionMap('dock'));
+  await expect(map).toHaveCount(1);
+  await expect(map).toHaveAttribute('data-state', 'clear');
+  await expect(map.locator('.region-name')).toHaveText('dock');
+  await expect(map.locator('.region-count')).toContainText('2');
+  await expect(map.locator('.region-why')).toContainText('2 cars parked');
+
+  // THE INTERIOR: the dock's own wagons, the same ids and tags the
+  // floor carries, now laid out in the region's whole canvas.
+  const interior = page.locator(`${regionSvg('dock')} .interior[data-interior="dock"]`);
   await expect(interior).toHaveCount(1);
   await expect(interior.locator('.plate')).toHaveCount(2);
   await expect(interior.locator('.plate[data-car="car-1111"]')).toHaveAttribute('data-station', 'dock');
-  await expect(interior).toContainText('dock');
   await expect(interior.locator('.plate[data-car="car-1111"] title')).toHaveText(/Teach the dock to breathe/);
 
-  // NEVER LEFT THE MAP: the world is still there, and it is the SAME
-  // element — not a re-render of an equivalent one. This is the
-  // assertion that earns the spec's title, and it caught the defect it
-  // was written for: two `{:else if}` arms in App.svelte for the two
-  // routes tore the SVG down on every click.
-  await expect(page.locator(WORLD_SVG)).toHaveCount(1);
-  expect(await node!.evaluate((el) => el.isConnected)).toBe(true);
-  expect(await svg.evaluate((el, prev) => el === prev, node)).toBe(true);
-
-  // THE CAMERA: settled on the dock — the box contains the dock's rect
-  // and is a fraction of the world it came from.
-  await expect
-    .poll(async () => {
-      const [, , w] = await viewBox(page);
-      return w! < worldBox[2]! / 2;
-    }, { message: 'the viewBox never zoomed in on the dock' })
-    .toBe(true);
-  const [x, y, w, h] = await viewBox(page);
-  expect(x!).toBeLessThanOrEqual(dock.x);
-  expect(y!).toBeLessThanOrEqual(dock.y);
-  expect(x! + w!).toBeGreaterThanOrEqual(dock.x + dock.w);
-  expect(y! + h!).toBeGreaterThanOrEqual(dock.y + dock.h);
-
-  // The territories the camera left are still there, faded, not gone:
-  // one world, not a page showing one region.
-  await expect(svg.locator('.territory')).toHaveCount(8);
-  await expect(svg.locator('.territory.away')).toHaveCount(7);
-  await expect(svg.locator('.territory.here[data-region="dock"]')).toHaveCount(1);
-
-  // The floor's panels are mounted under the zoomed world — the yard's
-  // own deck, on the same page.
+  // The floor's panels are still mounted beneath it — the yard's own
+  // deck, on the same page. The swap changed the map, not the floor.
   await expect(page.locator('.yard-panel-h', { hasText: 'Entity · loading dock' })).toBeVisible();
   await expect(page.locator('.yard-region-head')).toContainText('dock · clear — 2 cars parked');
 });
 
-test('Escape puts the camera back at the world, and so does the frame around the territory', async ({ page }) => {
+test('Escape goes back to the world, and so does the way-out control', async ({ page }) => {
   await mocks(page);
   await page.goto('/it');
   const svg = page.locator(WORLD_SVG);
   await expect(svg.locator('.territory')).toHaveCount(8);
-  const worldBox = await viewBox(page);
 
   await svg.locator('.territory[data-region="dock"]').click();
   await expect(page).toHaveURL(/\/it\/yard\/dock$/);
-  await expect(svg.locator('.interior[data-interior="dock"]')).toHaveCount(1);
+  await expect(page.locator(regionMap('dock'))).toHaveCount(1);
 
   await page.keyboard.press('Escape');
   await expect(page).toHaveURL(/\/it$/);
-  await expect
-    .poll(async () => (await viewBox(page)).join(' '), { message: 'Escape did not return the camera to the world' })
-    .toBe(worldBox.join(' '));
-  await expect(svg.locator('[data-interior]')).toHaveCount(0);
-  await expect(svg.locator('.territory.away')).toHaveCount(0);
+  // The world is back, whole: eight territories, no region map.
+  await expect(page.locator(WORLD_SVG).locator('.territory')).toHaveCount(8);
+  await expect(page.locator(regionMap('dock'))).toHaveCount(0);
 
-  // The way out is SAID, not only bound to a key: the affordance at the
-  // head of the zoomed territory does the same thing.
-  await svg.locator('.territory[data-region="dock"]').click();
+  // The way out is SAID, not only bound to a key.
+  await page.locator(`${WORLD_SVG} .territory[data-region="dock"]`).click();
   await expect(page).toHaveURL(/\/it\/yard\/dock$/);
-  await svg.locator('text.leave').click();
+  await page.locator(`${regionMap('dock')} button.leave`).click();
   await expect(page).toHaveURL(/\/it$/);
-  await expect(svg.locator('[data-interior]')).toHaveCount(0);
+  await expect(page.locator(WORLD_SVG).locator('.territory')).toHaveCount(8);
 });
 
 // ---------------------------------------------------------------------
@@ -210,7 +179,7 @@ const INBOUND_JOBS = {
   ],
 };
 
-test('a zoomed marshalling draws a platform per station — its packets, its bound, and a rate it could not count as unknown', async ({ page }) => {
+test("marshalling's own map draws a platform per station — its packets, its bound, and a rate it could not count as unknown", async ({ page }) => {
   await mocks(page);
   const json = (r: Route, b: unknown) =>
     r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(b) });
@@ -218,10 +187,10 @@ test('a zoomed marshalling draws a platform per station — its packets, its bou
   await page.route(/\/api\/stations\/flow/, (r) => json(r, STATION_FLOW));
 
   await page.goto('/it/yard/marshalling');
-  const marshalling = page.locator(`${WORLD_SVG} .territory[data-region="marshalling"]`);
-  await expect(marshalling).toHaveClass(/here/);
+  await expect(page.locator(WORLD_SVG)).toHaveCount(0);
+  await expect(page.locator(regionMap('marshalling'))).toHaveCount(1);
 
-  const interior = page.locator(`${WORLD_SVG} .interior[data-interior="marshalling"]`);
+  const interior = page.locator(`${regionSvg('marshalling')} .interior[data-interior="marshalling"]`);
   await expect(interior.locator('.platform')).toHaveCount(2);
   await expect(interior).not.toContainText("page of its own");
 
@@ -246,13 +215,13 @@ test('a zoomed marshalling draws a platform per station — its packets, its bou
   // not look alike.
   await expect(over.locator('text.rate')).not.toHaveClass(/unknown/);
 
-  // The board itself is mounted under the zoomed world: the page that
+  // The board itself is mounted under the region map: the page that
   // used to live at /it/operate/marshalling, minus its page header.
   await expect(page.locator('.my-root')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Marshalling Yard' })).toHaveCount(0);
 });
 
-test('a zoomed receiving stands its inbound packets by channel and flags what is past the age band', async ({ page }) => {
+test("receiving's own map stands its inbound packets by channel and flags what is past the age band", async ({ page }) => {
   await mocks(page);
   const json = (r: Route, b: unknown) =>
     r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(b) });
@@ -260,11 +229,12 @@ test('a zoomed receiving stands its inbound packets by channel and flags what is
   await page.route(/\/api\/jobs\?kind=user-feedback/, (r) => json(r, INBOUND_JOBS));
 
   await page.goto('/it/yard/receiving');
-  const receiving = page.locator(`${WORLD_SVG} .territory[data-region="receiving"]`);
-  await expect(receiving).toHaveClass(/here/);
-  await expect(receiving).not.toContainText("page of its own");
+  await expect(page.locator(WORLD_SVG)).toHaveCount(0);
+  const receiving = page.locator(regionMap('receiving'));
+  await expect(receiving).toHaveCount(1);
+  await expect(receiving).not.toContainText('page of its own');
 
-  const interior = page.locator(`${WORLD_SVG} .interior[data-interior="receiving"]`);
+  const interior = page.locator(`${regionSvg('receiving')} .interior[data-interior="receiving"]`);
   const feedback = interior.locator('.platform[data-platform="feedback"]');
   await expect(feedback).toContainText('1');
   // Opened 2026-08-01: past the 14-day band, so its mark is flagged —
@@ -275,7 +245,7 @@ test('a zoomed receiving stands its inbound packets by channel and flags what is
   // is the work NOT" is an answer a board still owes.
   await expect(interior.locator('.platform[data-platform="design"] .mark')).toHaveCount(0);
 
-  // And the inbound board is mounted under the world, header dropped.
+  // And the inbound board is mounted under the region map, header dropped.
   await expect(page.locator('.ry-root')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Receiving Yard' })).toHaveCount(0);
 });
@@ -286,24 +256,26 @@ test('a queue read that failed is said, never drawn as an empty region', async (
     r.fulfill({ status: 500, contentType: 'application/json', body: '"the station registry is down"' }));
 
   await page.goto('/it/yard/marshalling');
-  const marshalling = page.locator(`${WORLD_SVG} .territory[data-region="marshalling"]`);
-  await expect(marshalling).toContainText('cannot be read');
-  await expect(page.locator(`${WORLD_SVG} [data-interior]`)).toHaveCount(0);
+  const map = page.locator(regionMap('marshalling'));
+  await expect(map).toContainText('cannot be read');
+  await expect(page.locator(`${regionSvg('marshalling')} [data-interior]`)).toHaveCount(0);
 });
 
-test('a floor lands zoomed on first load — the camera is already there, not flying in from the world', async ({ page }) => {
+test('a direct load of /it/yard/<region> renders the region map and never the world', async ({ page }) => {
   await mocks(page);
   await page.goto('/it/yard/gates');
-  const svg = page.locator(WORLD_SVG);
-  await expect(svg.locator('.territory')).toHaveCount(8);
-  const gates = await territoryRect(page, 'gates');
-  // Read once, immediately: a load that started at the world and walked
-  // in would still be wider than the gates' own rect at this point.
-  const [x, y, w, h] = await viewBox(page);
-  expect(w!).toBeLessThan(gates.w * 2);
-  expect(x!).toBeLessThanOrEqual(gates.x);
-  expect(y!).toBeLessThanOrEqual(gates.y);
-  expect(x! + w!).toBeGreaterThanOrEqual(gates.x + gates.w);
-  expect(y! + h!).toBeGreaterThanOrEqual(gates.y + gates.h);
-  await expect(svg.locator('.territory.here[data-region="gates"]')).toHaveCount(1);
+  // The seeded-camera question this replaces ("does it fly in from the
+  // world?") cannot arise once the view is swapped: there is one
+  // surface for the route, and it is the region's.
+  await expect(page.locator(regionMap('gates'))).toHaveCount(1);
+  await expect(page.locator(WORLD_SVG)).toHaveCount(0);
+  await expect(page.locator('.territory')).toHaveCount(0);
+  await expect(page.locator(`${regionMap('gates')} .region-name`)).toHaveText('gates');
+});
+
+test('a region the layout does not know leaves the WORLD on screen, never a map of nothing', async ({ page }) => {
+  await mocks(page);
+  await page.goto('/it/yard/atlantis');
+  await expect(page.locator(WORLD_SVG).locator('.territory')).toHaveCount(8);
+  await expect(page.locator('section[aria-label$="region map"]')).toHaveCount(0);
 });

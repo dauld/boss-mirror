@@ -1,72 +1,32 @@
-// CLICKING A TERRITORY IS A ZOOM (design d2154293, car 3; David's
-// feedback c3105b2a, 2026-09-19: "zoom into the region by clicking to
-// see" what is moving inside it). The world map is ONE SVG in ONE
-// coordinate space, so going into a region is not a navigation to
-// another surface — it is the viewBox walking from the whole world to
-// that territory's rect. Nothing unmounts, nothing is replaced, the
-// borders and the neighbours stay where they are; the camera moves.
+// WHAT A REGION CONTAINS, AND WHERE IT SITS IN THE REGION'S RECT.
 //
-// Zoomed, a territory shows its INTERIOR: the wagons standing at the
-// stations that territory covers, taken straight off the floor's Scene
-// (yard-floor.ts) — the same wagons the Train Yard draws, with the same
-// ids, tags, lamps and statuses. One definition per number: this module
-// SELECTS and PLACES, it derives no count and invents no state.
+// This module SELECTS and PLACES: which stations a region covers,
+// which wagons are standing in it, and where each plate goes inside
+// the rect it is handed. One definition per number — it derives no
+// count and invents no state.
 //
-// Everything here is pure arithmetic over the layout in world.ts and
-// the Scene, so a broken zoom fails a unit test before it is a broken
-// picture (world-zoom.test.ts). WorldMap.svelte owns the animation
-// frames; this owns what the frames are walking between.
+// THERE IS NO CAMERA HERE ANY MORE (David, 2026-09-20; backlog
+// ca37478f). Until today a click walked the SVG's viewBox from the
+// whole world into a territory's rect — zoomBoxOf, lerpBox, easeInOut,
+// viewBoxText, WORLD_BOX, ZOOM_MS — and everything drawn got larger in
+// proportion. David: "I just wanted the world map view to get replaced
+// with the more detailed region map view on click but not literally
+// increase the size of content on the world map." So the world map
+// draws the world, RegionMap draws ONE region on its own canvas, and
+// the route decides which. The interpolation is DELETED rather than
+// left unused, and this file is named for what it does now.
+//
+// `interiorLayout` takes the rect to lay out INSIDE, which is the only
+// thing the swap changed here: a slot on the world line before, a
+// region's whole canvas (region-canvas.ts) now.
+//
+// Everything is pure arithmetic, so a broken layout fails a unit test
+// before it is a broken picture (region-contents.test.ts).
 
 import { REGION_NAMES, type RegionName } from './regions';
 import { MACHINERY_STRIP_H } from './world-machines';
-import { WORLD, territoryOf, type Territory } from './world';
+import { territoryOf, type Territory } from './world';
 import type { Scene, Station, Wagon } from './yard-floor';
-
-/** A viewBox: the rectangle of the world the SVG is showing. */
-export type Box = Readonly<{ x: number; y: number; w: number; h: number }>;
-
-/** The whole world — the box `/it` opens on and Escape returns to. */
-export const WORLD_BOX: Box = { x: 0, y: 0, w: WORLD.width, h: WORLD.height };
-
-/** How long the camera takes. Long enough that the eye follows the
- *  move (which is the point — a cut would read as a page change),
- *  short enough that it is never a wait. */
-export const ZOOM_MS = 420;
-
-/** Room left around a zoomed territory, so the outline it zoomed into
- *  is not cropped and the rails leaving it stay in view. */
-const PAD = 18;
-
-/** The box the camera walks to for a region — the whole world for
- *  `null`, and for a name the layout does not know, because a door
- *  that opens nowhere must still leave a picture on the screen. */
-export function zoomBoxOf(region: string | null): Box {
-  if (region === null) return WORLD_BOX;
-  const t = territoryOf(region);
-  if (t === undefined) return WORLD_BOX;
-  return { x: t.x - PAD, y: t.y - PAD, w: t.w + 2 * PAD, h: t.h + 2 * PAD };
-}
-
-/** Where the camera is, a fraction `k` of the way from `a` to `b`. */
-export function lerpBox(a: Box, b: Box, k: number): Box {
-  const at = (from: number, to: number) => from + (to - from) * k;
-  return { x: at(a.x, b.x), y: at(a.y, b.y), w: at(a.w, b.w), h: at(a.h, b.h) };
-}
-
-/** Ease in, ease out (the cubic) — a camera that starts and stops
- *  gently reads as one continuous world; a linear ramp reads as a
- *  slide transition between two surfaces. */
-export function easeInOut(k: number): number {
-  return k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
-}
-
-/** The four numbers, rounded to hundredths — SVG parses a plain
- *  decimal, and an exponent (1e-7, which a raw lerp produces near the
- *  ends) makes the whole attribute invalid and the map blank. */
-export function viewBoxText(b: Box): string {
-  const n = (v: number) => String(Math.round(v * 100) / 100);
-  return `${n(b.x)} ${n(b.y)} ${n(b.w)} ${n(b.h)}`;
-}
 
 // ---------------------------------------------------------------------
 // Which territory a wagon is standing in.
