@@ -523,6 +523,21 @@ pub(crate) fn failure_diagnosis(probe: &str, o: &Outcome) -> Option<String> {
     if o.exit == 0 {
         return None;
     }
+    if let Some(evidence) = quoting_was_mangled(probe, o) {
+        return Some(format!(
+            "THE PROBE'S QUOTING WAS MANGLED, so exit {exit} is not a verdict on the claim \
+             — the shell never ran the probe that was written. {evidence}\n  \
+             A stored probe carrying `\\\"` was escaped on the way in: the backslash-quotes \
+             reach the tool as literal characters, so the words of a pattern become \
+             filenames and the guard arm meant for \"nothing to judge yet\" catches the \
+             wreckage and exits {exit}. Re-store the probe with SINGLE quotes, or pass it \
+             through `--park-probe-file`, where no word expansion happens at all. Then \
+             re-run it: this says nothing about whether the change is in production \
+             (302bc2f2 — two cars sat unprovable for days this way, hourly rechecked, \
+             while both claims were already true on main).",
+            exit = o.exit,
+        ));
+    }
     if boss_jobs::probe::asserts_its_own_negation(probe) {
         let rewritten = match boss_jobs::probe::rewrites_its_exit_status(probe) {
             Some(n) => format!(
@@ -589,6 +604,61 @@ pub(crate) fn failure_diagnosis(probe: &str, o: &Outcome) -> Option<String> {
         ));
     }
     None
+}
+
+/// WHAT A TOOL SAYS WHEN THE PROBE'S OWN QUOTING REACHED IT LITERALLY
+/// (backlog 302bc2f2). A probe stored with backslash-quotes —
+/// `grep -c \"boss step complete\"` — hands grep the pattern `"boss`
+/// and then the FILENAMES `step` and `complete"`. grep warns about
+/// each, the substitution comes back non-numeric, and the probe's own
+/// guard arm catches it and exits 75. The record then says "not yet"
+/// in the probe's own words, which is the one answer nobody re-reads.
+///
+/// Measured 2026-09-20: two shed cars sat unprovable for days this
+/// way, hourly rechecked, while BOTH claims were already true on main.
+///
+/// THE SIGNAL IS DECIDABLE AND THE OBVIOUS ONE IS NOT. "No such file
+/// or directory" alone is a false positive — a probe that greps a file
+/// production has not written yet is an HONEST not-yet, and several in
+/// the shed are exactly that. Two signals distinguish them, and either
+/// is enough:
+///
+/// 1. The probe text carries a backslash-quote AND a tool reported a
+///    lookup failure. A correctly quoted probe cannot produce both.
+/// 2. The probe's own message arrives WRAPPED IN QUOTE CHARACTERS. A
+///    working `echo 'not yet: …'` never emits them; seeing them means
+///    the echo's quotes were literal, so every other quote in that
+///    probe was too.
+const LOOKUP_FAILURE_MARKERS: [&str; 2] = ["No such file or directory", "cannot open"];
+
+/// A literal backslash followed by a quote, as it appears in a stored
+/// probe whose quoting was escaped on the way in.
+const ESCAPED_QUOTE: &str = "\\\"";
+
+/// Did the shell read this probe as something other than what it says?
+/// `None` when the probe ran as written — including every honest
+/// not-yet. See [`LOOKUP_FAILURE_MARKERS`] for why the two signals are
+/// what they are.
+pub(crate) fn quoting_was_mangled(probe: &str, o: &Outcome) -> Option<String> {
+    let lookup_failed = o
+        .stderr
+        .lines()
+        .chain(o.stdout.lines())
+        .find(|l| LOOKUP_FAILURE_MARKERS.iter().any(|m| l.contains(m)))
+        .map(str::trim);
+    let said_in_quotes = what_it_said(o).filter(|l| l.starts_with('"'));
+
+    let evidence = match (lookup_failed, &said_in_quotes) {
+        (Some(line), _) if probe.contains(ESCAPED_QUOTE) => {
+            format!("a tool could not find what it was handed:\n  {line}")
+        }
+        (_, Some(line)) => format!(
+            "the probe's own message arrived wrapped in quote characters, which a working \
+             `echo` never emits:\n  {line}"
+        ),
+        _ => return None,
+    };
+    Some(evidence)
 }
 
 /// WHAT BASH SAYS WHEN `[` OR `((` IS HANDED A NON-NUMBER (backlog
@@ -4039,6 +4109,96 @@ ugrep: warning: complete\": No such file or directory\n";
     /// operator's machine recorded as a verdict about the claim. Now the
     /// probe runs behind the forge's own prelude here too, so a tool the
     /// PATH lacks is a finding on the record, not a red.
+    /// THE MANGLED-QUOTING CASE (backlog 302bc2f2, measured 2026-09-20).
+    /// Two shed cars carried a probe stored with LITERAL backslash-quotes,
+    /// so `grep -c \"boss step complete\"` made `step` and `complete\"`
+    /// FILENAMES. grep warned, the count came back non-numeric, the
+    /// `case` arm caught it, and the probe exited 75 with a sentence that
+    /// read exactly like an honest wait — hourly, for days, while both
+    /// claims were already TRUE on main.
+    #[test]
+    fn a_probe_whose_quoting_was_mangled_is_not_a_wait() {
+        let probe = concat!(
+            r#"n=$(echo hi | grep -c \"pub enum StepAction\" || true); "#,
+            r#"case ${n:-empty} in empty|*[!0-9]*) echo \"not yet: cannot read the file\"; "#,
+            "exit 75;; esac; echo ok"
+        );
+        let o = execute(probe).unwrap();
+        assert_eq!(o.exit, NOT_YET_EXIT, "the case arm catches it: {o:?}");
+
+        let d = failure_diagnosis(probe, &o)
+            .expect("a probe the shell could not read as written has no verdict to give");
+        assert!(d.starts_with("THE PROBE'S QUOTING WAS MANGLED"), "{d}");
+        assert!(
+            d.contains("--park-probe-file") || d.contains("single-quote"),
+            "the diagnosis names the repair: {d}"
+        );
+
+        // …and because a diagnosis exists, the not-yet arm cannot claim it.
+        assert!(
+            !matches!(verdict(probe, &o, Some("ok")), Verdict::NotYet { .. }),
+            "a mangled probe read as an honest wait is the whole defect: {o:?}"
+        );
+    }
+
+    /// THE SHED, AS IT ACTUALLY READ (backlog 302bc2f2, 2026-09-20).
+    /// These are the not-yet lines the thirteen cars awaiting proof
+    /// really recorded. Eleven are honest waits and ELEVEN OF THEM
+    /// carry a `\"` somewhere in their probe — inside a jq filter,
+    /// where it belongs — which is exactly why "the probe text contains
+    /// an escape" is the wrong detector and was my first, wrong count.
+    /// Not one of them may be diagnosed.
+    #[test]
+    fn the_honest_waits_the_shed_really_recorded_are_not_diagnosed() {
+        for said in [
+            "not yet: the newest run ed96b6e3 was dispatched before this car converged",
+            "not yet: no publish-github-pr request answered with an exit",
+            "not yet: no tenant.published in the audit tail; none lands until a publish",
+            "not yet: no build step nominated to the executor since convergence",
+            "not yet: no backlog-item filed by the rule carrying design 0e07ce64",
+            "not yet: no tag-release ops-request has been answered",
+            "not yet: no green after a red at the same head opened since convergence",
+            "not yet: no answered sweep-archive-branches request opened after convergence",
+            "not yet: no real prune since convergence",
+            "not yet: no sponsorship polled since convergence",
+            "not yet: no sponsorship packet opened since the change converged",
+        ] {
+            // A jq filter's own escaped quotes, which are correct and
+            // must not by themselves condemn the probe.
+            let probe = format!(
+                r#"row=$(printf '%s' "$body" | jq -r ".data[]|select(.k==\"x\")"); echo '{said}'; exit 75"#
+            );
+            let o = execute(&probe).unwrap();
+            assert_eq!(o.exit, NOT_YET_EXIT, "{said}");
+            assert!(
+                quoting_was_mangled(&probe, &o).is_none(),
+                "an honest wait was condemned: {said}\n{o:?}"
+            );
+            assert!(
+                matches!(verdict(&probe, &o, Some("token")), Verdict::NotYet { .. }),
+                "an honest wait must stay a wait: {said}"
+            );
+        }
+    }
+
+    /// The guard on the guard: a CORRECTLY quoted probe that says not-yet
+    /// keeps saying not-yet. Every honest wait in the shed looks like
+    /// this, and 9 of the 13 measured cars were exactly this.
+    #[test]
+    fn a_correctly_quoted_not_yet_is_still_a_wait() {
+        let probe = "echo 'not yet: no tag-release ops-request has been answered'; exit 75";
+        let o = execute(probe).unwrap();
+        assert_eq!(o.exit, NOT_YET_EXIT);
+        assert!(
+            failure_diagnosis(probe, &o).is_none(),
+            "a clean probe must not be diagnosed: {o:?}"
+        );
+        let Verdict::NotYet { said } = verdict(probe, &o, Some("token")) else {
+            panic!("an honest wait stays a wait: {o:?}")
+        };
+        assert!(said.contains("no tag-release"), "{said}");
+    }
+
     #[test]
     fn a_probe_naming_a_tool_the_path_lacks_did_not_run() {
         let stub = boss_testing::scratch::scratch_dir("prove-stub-path");
