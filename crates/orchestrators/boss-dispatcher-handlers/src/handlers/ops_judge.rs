@@ -42,10 +42,11 @@
 //!    not chain forever.
 //! 2. A request already carrying `metadata.judged` was judged by an
 //!    earlier delivery (JetStream is at-least-once): nothing more.
-//! 3. Find the verdict — the last line of the `execute` step's `output`
+//! 3. READ THE EXIT BEFORE THE OUTPUT. See below.
+//! 4. Find the verdict — the last line of the `execute` step's `output`
 //!    that matches `verdict_pattern`. None means the verb predates the
 //!    verdict or was killed before its last line: warn, write nothing.
-//! 4. Evaluate `when` over the groups. FALSE: write `judged` (the
+//! 5. Evaluate `when` over the groups. FALSE: write `judged` (the
 //!    predicate, the groups, the line) onto the judged request and file
 //!    nothing — a refusal is decided by a person, at the surface that
 //!    shows it. TRUE: file the follow-on unless an open `then_verb`
@@ -54,9 +55,42 @@
 //!    `judged` naming what was filed. The spawned packet carries
 //!    `for_check` = the judged request's id, so a reader follows the
 //!    evidence from the publish to the check that earned it.
+//!
+//! ## The exit is read BEFORE the output (53f54b3f)
+//!
+//! This handler's whole job is to spend a MUTATING verb on the strength
+//! of a read — `publish-drift --check` earns `publish-drift --for-real`,
+//! which publishes workflow rows. Until this landed it judged the
+//! output with no regard for whether the verb finished: every fixture
+//! here hardcoded `exit_code: "0"`, so the failed case had never run.
+//! A `--check` killed at its 1800s timeout, or one that died after
+//! printing its table, leaves a PARTIAL output in the same merged field
+//! — and a partial output that still carries a `refused 0` line reads
+//! exactly like a clean one. Acting on a measurement that did not
+//! complete is worse than failing to act, so a failed verb is not
+//! judged at all: nothing is filed but the alarm, and the check is
+//! annotated with the exit and the verb's last line so the reader who
+//! opens it is not left to re-derive why the chain stopped.
+//!
+//! It ALERTS rather than only noting, because nothing else here is
+//! holding the failure: the check closed, no step is open, no actor is
+//! assigned, and the next converge files a fresh check that can fail
+//! the same way forever — a check nobody reads is a check that is not
+//! running (CLAUDE.md §Diagnosis). One alarm per failed request, keyed
+//! `for_request`, the same dedup key `jobs.complete_linked_step` uses.
+//! `maintenance.sweep.judge` answers the same question differently, and
+//! says why in its own doc: its failure already has a reader.
+//!
+//! There is NO rule arg for this. The template it follows (f47861a5)
+//! made its failure mode a free default with a named opt-out, because
+//! there a rule could reasonably want the old note; here no rule could
+//! reasonably want a `--for-real` chained off a measurement that did
+//! not finish, so the behaviour is not a knob at all — a rule cannot
+//! forget to ask for it, and no future rule file can reintroduce the
+//! defect (CLAUDE.md §9a).
 
 use super::common::{api_client, get_json, open_jobs_of_kind, write_json};
-use super::jobs_complete_linked_step::step_by_slug;
+use super::jobs_complete_linked_step::{FOR_REQUEST, VerbFailure, step_by_slug, verb_failure};
 use async_trait::async_trait;
 use boss_dispatcher::rules::expr::{self, Value};
 use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext, arg_string};
@@ -209,6 +243,68 @@ pub(crate) fn follow_on_body(
     })
 }
 
+/// PURE: the urgent packet a failed measurement becomes (53f54b3f) —
+/// the verb that failed, its exit, its last line verbatim, and the
+/// follow-on that was NOT filed because of it. `for_request` is the
+/// dedup key, the same one `jobs.complete_linked_step` writes, so one
+/// failed request grows one alarm however many times it is delivered.
+/// Subject: the judged request's own, so "what went wrong on this host"
+/// answers from Subject history.
+pub(crate) fn chain_refused_alert_body(
+    j: &Judgement,
+    judged_id: &str,
+    judged: &serde_json::Value,
+    failure: &VerbFailure,
+    owner: &str,
+    ctx: &InvocationContext,
+) -> serde_json::Value {
+    let short = judged_id.get(..8).unwrap_or(judged_id);
+    let then = format!("{} {}", j.then_verb, j.then_args.join(" "));
+    let host = meta_str(judged, "host").unwrap_or(&j.then_host);
+    let subject = judged
+        .get("subject")
+        .filter(|s| {
+            s.get("id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|id| !id.is_empty())
+        })
+        .cloned()
+        .unwrap_or_else(|| json!({ "subject_kind": "custom", "id": host }));
+    json!({
+        "kind": "backlog-item",
+        "title": format!(
+            "{} FAILED (exit {}) on ops-request {short}: {} was not filed",
+            j.verb, failure.exit, then.trim()
+        ),
+        "subject": subject,
+        // The platform owner as the registry answers it, or nobody for
+        // the jobs API to resolve from the kind's owner_role (3c23662d).
+        "owner_id": owner,
+        "priority": "urgent",
+        "status": "open",
+        "tags": [],
+        "metadata": {
+            "area": "platform",
+            FOR_REQUEST: judged_id,
+            "verb": j.verb,
+            "exit": failure.exit,
+            "failed": failure.line,
+            "reporter": ctx.rule_name,
+            "triggered_by_event_id": ctx.triggering_event_id,
+            "detail": format!(
+                "Filed by {} (backlog 53f54b3f): ops-request {short} ran `{}` on {host} and the \
+                 verb FAILED (exit {}); the request closed `answered`, because the verb ran. This \
+                 rule spends `{}` on the strength of that read, so it was NOT filed — a \
+                 measurement that did not complete cannot earn a mutating follow-on, and a \
+                 truncated output can still carry a line that reads clean. Nothing was judged and \
+                 nothing was published; the chain stays stopped until someone re-runs the \
+                 measurement. The verb's last line: {}",
+                ctx.rule_name, j.verb, failure.exit, then.trim(), failure.line
+            ),
+        },
+    })
+}
+
 /// PURE: is `open` the follow-on this judgement already filed for
 /// `judged` — same verb, linked by `for_check` or by a shared
 /// `for_converge`?
@@ -251,21 +347,33 @@ fn meta_args(job: &serde_json::Value) -> Vec<String> {
 pub struct OpsJudge {
     client: reqwest::Client,
     jobs_base: String,
+    /// Who a failed-verb alarm is addressed to — the platform owner as
+    /// the people registry answers it, like every other filer here.
+    owner: Arc<dyn boss_core::platform_owner::PlatformOwner>,
 }
 
 impl OpsJudge {
-    pub fn new(jobs_base: impl Into<String>) -> Arc<Self> {
+    pub fn new(
+        jobs_base: impl Into<String>,
+        owner: Arc<dyn boss_core::platform_owner::PlatformOwner>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             client: api_client(),
             jobs_base: jobs_base.into(),
+            owner,
         })
     }
 
     /// Tests point the client at a local stand-in for jobs-api.
-    pub fn with_client(client: reqwest::Client, jobs_base: impl Into<String>) -> Arc<Self> {
+    pub fn with_client(
+        client: reqwest::Client,
+        jobs_base: impl Into<String>,
+        owner: Arc<dyn boss_core::platform_owner::PlatformOwner>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             client,
             jobs_base: jobs_base.into(),
+            owner,
         })
     }
 
@@ -293,6 +401,69 @@ impl OpsJudge {
             rule,
         )
         .await
+    }
+
+    /// THE FAILED MEASUREMENT (53f54b3f). The verb this rule judges RAN
+    /// and FAILED, so its output is a partial reading and the mutating
+    /// follow-on is not filed. The alarm goes FIRST and the note names
+    /// it: a redelivery after the alarm landed but before the note did
+    /// finds it open by `for_request` and reuses it, and one after both
+    /// landed stops at `judged`. Nothing about the judged request is
+    /// completed or routed — the chain stays stopped, which is the
+    /// point.
+    async fn refuse_to_chain(
+        &self,
+        j: &Judgement,
+        judged_id: &str,
+        judged: &serde_json::Value,
+        failure: &VerbFailure,
+        ctx: &InvocationContext,
+    ) -> Result<(), HandlerError> {
+        let rule = ctx.rule_name.as_str();
+        let open = open_jobs_of_kind(&self.client, self.base(), "backlog-item", rule).await?;
+        let alert_id = match open
+            .iter()
+            .find(|job| meta_str(job, FOR_REQUEST) == Some(judged_id))
+            .and_then(|job| job.get("id").and_then(|v| v.as_str()))
+        {
+            Some(existing) => existing.to_string(),
+            None => {
+                let owner = super::common::owner_for_filing(self.owner.as_ref(), rule).await;
+                let body = chain_refused_alert_body(j, judged_id, judged, failure, &owner, ctx);
+                self.file(&body, rule).await?
+            }
+        };
+        self.annotate(
+            judged_id,
+            json!({
+                JUDGED: format!(
+                    "{rule}: nothing filed — {} FAILED (exit {}), so its reading is partial and \
+                     `{} {}` cannot ride it; alarm {alert_id}. The verb's last line: {}",
+                    j.verb,
+                    failure.exit,
+                    j.then_verb,
+                    j.then_args.join(" "),
+                    failure.line
+                ),
+                "failed": failure.line,
+                "failed_exit": failure.exit,
+                "alert": alert_id,
+            }),
+            rule,
+        )
+        .await?;
+        tracing::warn!(
+            rule = %rule,
+            judged = %judged_id,
+            alert = %alert_id,
+            "{} FAILED (exit {}) — {} {} NOT filed; {}",
+            j.verb,
+            failure.exit,
+            j.then_verb,
+            j.then_args.join(" "),
+            failure.line
+        );
+        Ok(())
     }
 
     async fn annotate(
@@ -348,7 +519,21 @@ impl Handler for OpsJudge {
             return Ok(());
         }
 
-        // 3. The verdict, off the runner's recorded output.
+        // 3. THE EXIT, BEFORE THE OUTPUT (53f54b3f). A verb that RAN
+        //    and FAILED left a partial measurement, and this rule
+        //    spends a MUTATING follow-on on the strength of it. A
+        //    `--check` killed at its timeout with its table already
+        //    merged into the same field still carries a `refused 0`
+        //    line, so `when` would hold and the publish would ride a
+        //    reading that never finished. Nothing is judged; the alarm
+        //    is filed and the refusal written onto the check.
+        if let Some(failure) = verb_failure(&judged) {
+            return self
+                .refuse_to_chain(&j, judged_id, &judged, &failure, ctx)
+                .await;
+        }
+
+        // 4. The verdict, off the runner's recorded output.
         let output = step_by_slug(&judged, REPORT_STEP)
             .and_then(|s| s.get("metadata"))
             .and_then(|m| m.get("output"))
@@ -364,7 +549,7 @@ impl Handler for OpsJudge {
             return Ok(());
         };
 
-        // 4. The decision.
+        // 5. The decision.
         if !when_holds(&j.when, &j.when_src, &groups)? {
             self.annotate(
                 judged_id,
@@ -466,18 +651,35 @@ mod tests {
         .collect()
     }
 
-    /// The answered request, as the ops-runner completes it.
+    /// The answered request, as the ops-runner completes it — the verb
+    /// having exited 0.
     fn request(id: &str, verb: &str, req_args: &[&str], output: &str) -> serde_json::Value {
+        request_exit(id, verb, req_args, output, "0")
+    }
+
+    /// The same, with the exit the runner recorded on the execute step
+    /// (53f54b3f): every fixture here hardcoded `"0"`, which is why no
+    /// test had ever driven this handler with a verb that failed.
+    fn request_exit(
+        id: &str,
+        verb: &str,
+        req_args: &[&str],
+        output: &str,
+        exit: &str,
+    ) -> serde_json::Value {
         json!({
             "id": id,
             "kind": "ops-request",
             "status": "closed",
-            "metadata": { "host": "boss-gcp", "verb": verb, "args": req_args, "for_converge": CONVERGE },
+            // The runner writes the exit here too (`metadata.exit`);
+            // this handler reads the STEP's `exit_code` — see the
+            // module doc, and sibling packet 50fede8b.
+            "metadata": { "host": "boss-gcp", "verb": verb, "args": req_args, "for_converge": CONVERGE, "exit": exit },
             "steps": [
                 { "id": "r-filed", "spec_slug": "filed", "status": "completed", "metadata": {} },
                 { "id": "r-execute", "spec_slug": "execute", "status": "completed",
                   "completed_at": "2026-09-18T15:02:00Z",
-                  "metadata": { "disposition": "answered", "exit_code": "0", "runner_host": "boss-gcp",
+                  "metadata": { "disposition": "answered", "exit_code": exit, "runner_host": "boss-gcp",
                                 "output": output, "authority_role": "platform-admin" } },
                 { "id": "r-answered", "spec_slug": "answered", "status": "completed", "metadata": {} },
             ],
@@ -587,6 +789,16 @@ mod tests {
     const NOTHING_AHEAD_OUTPUT: &str = "publish-drift: would publish 0, skipped 23 equal, refused 0 (checkout cb053ed6, 23 kind(s), packet 11111111)\n";
     const FOR_REAL_OUTPUT: &str = "publish-drift: published 3, skipped 20 equal, refused 0 (checkout cb053ed6, 23 kind(s), packet f0000000)\n";
 
+    /// The handler under test, with a fixed platform owner — the id
+    /// an alarm it files is addressed to.
+    fn judge(base: String) -> Arc<OpsJudge> {
+        OpsJudge::with_client(
+            reqwest::Client::new(),
+            base,
+            Arc::new(boss_core::platform_owner::Fixed("emp-owner".into())),
+        )
+    }
+
     fn posts(w: &[(String, String, serde_json::Value)]) -> Vec<serde_json::Value> {
         w.iter()
             .filter(|(m, _, _)| m == "POST")
@@ -601,7 +813,7 @@ mod tests {
     async fn a_clean_check_files_the_follow_on_with_args_and_for_check() {
         let (base, writes) =
             mock_jobs(vec![request(CHECK, "publish-drift", &[], CLEAN_OUTPUT)]).await;
-        let h = OpsJudge::with_client(reqwest::Client::new(), base);
+        let h = judge(base);
         h.invoke(&args(), &ctx()).await.unwrap();
         let w = writes.lock().unwrap().clone();
         assert_eq!(w.len(), 2, "one spawn + one note, nothing else: {w:?}");
@@ -652,7 +864,7 @@ mod tests {
     async fn a_refused_check_files_nothing_and_annotates_the_check() {
         let (base, writes) =
             mock_jobs(vec![request(CHECK, "publish-drift", &[], REFUSED_OUTPUT)]).await;
-        let h = OpsJudge::with_client(reqwest::Client::new(), base);
+        let h = judge(base);
         h.invoke(&args(), &ctx()).await.unwrap();
         let w = writes.lock().unwrap().clone();
         assert_eq!(w.len(), 1, "one note, no spawn: {w:?}");
@@ -682,7 +894,7 @@ mod tests {
             NOTHING_AHEAD_OUTPUT,
         )])
         .await;
-        let h = OpsJudge::with_client(reqwest::Client::new(), base);
+        let h = judge(base);
         h.invoke(&args(), &ctx()).await.unwrap();
         let w = writes.lock().unwrap().clone();
         assert_eq!(w.len(), 1, "{w:?}");
@@ -701,7 +913,7 @@ mod tests {
             "not yet: checkout at cb053ed6, main at 9a1b2c3d\n",
         )])
         .await;
-        let h = OpsJudge::with_client(reqwest::Client::new(), base);
+        let h = judge(base);
         h.invoke(&args(), &ctx()).await.unwrap();
         assert!(writes.lock().unwrap().is_empty());
     }
@@ -714,7 +926,7 @@ mod tests {
     async fn a_redelivery_files_one_follow_on() {
         let (base, writes) =
             mock_jobs(vec![request(CHECK, "publish-drift", &[], CLEAN_OUTPUT)]).await;
-        let h = OpsJudge::with_client(reqwest::Client::new(), base.clone());
+        let h = judge(base.clone());
         h.invoke(&args(), &ctx()).await.unwrap();
         h.invoke(&args(), &ctx()).await.unwrap();
         let w = writes.lock().unwrap().clone();
@@ -739,7 +951,7 @@ mod tests {
         filed["metadata"][FOR_CHECK] = json!(CHECK);
         check["metadata"].as_object_mut().unwrap().remove(JUDGED);
         let (base, writes) = mock_jobs(vec![check, filed]).await;
-        let h = OpsJudge::with_client(reqwest::Client::new(), base);
+        let h = judge(base);
         h.invoke(&args(), &ctx()).await.unwrap();
         let w = writes.lock().unwrap().clone();
         assert!(posts(&w).is_empty(), "no twin: {w:?}");
@@ -755,7 +967,7 @@ mod tests {
     async fn another_verb_and_the_rules_own_follow_on_are_not_judged() {
         let (base, writes) =
             mock_jobs(vec![request(CHECK, "disk-report", &[], CLEAN_OUTPUT)]).await;
-        let h = OpsJudge::with_client(reqwest::Client::new(), base);
+        let h = judge(base);
         h.invoke(&args(), &ctx()).await.unwrap();
         assert!(writes.lock().unwrap().is_empty(), "wrong verb");
 
@@ -766,7 +978,7 @@ mod tests {
             FOR_REAL_OUTPUT,
         )])
         .await;
-        let h = OpsJudge::with_client(reqwest::Client::new(), base);
+        let h = judge(base);
         h.invoke(&args(), &ctx()).await.unwrap();
         assert!(
             writes.lock().unwrap().is_empty(),
@@ -815,7 +1027,7 @@ mod tests {
     /// arg; a missing arg is a missing arg.
     #[tokio::test]
     async fn bad_rule_args_are_permanent() {
-        let h = OpsJudge::with_client(reqwest::Client::new(), "http://unused");
+        let h = judge("http://unused".to_string());
         let err = h.invoke(&[], &ctx()).await.unwrap_err();
         assert!(
             matches!(err, HandlerError::MissingArg(ref a) if a == "verb"),
@@ -855,9 +1067,101 @@ mod tests {
         assert!(Judgement::from_args(&a).unwrap().then_args.is_empty());
     }
 
+    /// A verb that FAILED left a partial measurement, and the whole
+    /// point of the `--check` half is that its answer is trusted
+    /// enough to spend a `--for-real` on. Here the failed check's
+    /// output still CARRIES the clean verdict line — a run that died
+    /// after printing its table, or was killed at the timeout with the
+    /// table already merged into the same field — so `when` would hold
+    /// and the old handler would have published. Nothing is filed but
+    /// the alarm, and the check says why on its own face.
+    #[tokio::test]
+    async fn a_failed_check_publishes_nothing_and_files_the_alarm_instead() {
+        let (base, writes) = mock_jobs(vec![request_exit(
+            CHECK,
+            "publish-drift",
+            &[],
+            CLEAN_OUTPUT,
+            "1",
+        )])
+        .await;
+        let h = judge(base);
+        h.invoke(&args(), &ctx()).await.unwrap();
+        let w = writes.lock().unwrap().clone();
+        let filed = posts(&w);
+        assert_eq!(filed.len(), 1, "one alarm, nothing else filed: {w:?}");
+        assert_eq!(
+            filed[0]["kind"], "backlog-item",
+            "a --for-real must not ride a measurement that did not finish: {w:?}"
+        );
+        assert_eq!(filed[0]["priority"], "urgent");
+        let m = &filed[0]["metadata"];
+        assert_eq!(m[FOR_REQUEST], CHECK, "the dedup key names the check");
+        assert_eq!(m["exit"], "1");
+        assert!(
+            m["failed"].as_str().unwrap().contains("would publish 3"),
+            "the verb's last line, verbatim: {m}"
+        );
+        // And the judged check carries the refusal, so a reader who
+        // opens it is not left to re-derive why nothing happened.
+        let note = w
+            .iter()
+            .find(|(me, p, _)| me == "PATCH" && p == &format!("/api/jobs/{CHECK}/metadata"))
+            .map(|(_, _, b)| b.clone())
+            .expect("the check is annotated");
+        let judged = note[JUDGED].as_str().unwrap();
+        assert!(judged.contains("exit 1"), "{judged}");
+        assert!(
+            !judged.contains("filed publish-drift"),
+            "nothing was published: {judged}"
+        );
+    }
+
+    /// EX_TEMPFAIL is not a failure. `publish-drift` on a checkout
+    /// behind the newest converged train prints `not yet: …` and exits
+    /// 75 having compared nothing — which happens on most converges,
+    /// so treating it as a failure would file an urgent packet a day.
+    /// It takes the path it always took: no verdict line, nothing
+    /// judged, nothing filed, and no alarm.
+    #[tokio::test]
+    async fn a_not_yet_check_is_not_a_failure_and_files_nothing() {
+        let out = "publish-drift: not yet: checkout at cb053ed6, main at 4cb3d3a7 — nothing compared, nothing published\n";
+        let (base, writes) =
+            mock_jobs(vec![request_exit(CHECK, "publish-drift", &[], out, "75")]).await;
+        let h = judge(base);
+        h.invoke(&args(), &ctx()).await.unwrap();
+        assert!(
+            writes.lock().unwrap().is_empty(),
+            "a not-yet claims nothing: {:?}",
+            writes.lock().unwrap()
+        );
+    }
+
+    /// Idempotent under at-least-once delivery: the second delivery
+    /// reads `judged` and stops, and even a delivery that lost the note
+    /// finds the open alarm by `for_request` rather than filing a twin.
+    #[tokio::test]
+    async fn a_redelivered_failed_check_files_one_alarm() {
+        let (base, writes) = mock_jobs(vec![request_exit(
+            CHECK,
+            "publish-drift",
+            &[],
+            CLEAN_OUTPUT,
+            "124",
+        )])
+        .await;
+        let h = judge(base.clone());
+        h.invoke(&args(), &ctx()).await.unwrap();
+        h.invoke(&args(), &ctx()).await.unwrap();
+        let w = writes.lock().unwrap().clone();
+        let filed = posts(&w);
+        assert_eq!(filed.len(), 1, "one alarm across two deliveries: {w:?}");
+        assert_eq!(filed[0]["kind"], "backlog-item", "{w:?}");
+    }
+
     #[test]
     fn the_handler_is_registered_under_its_name() {
-        let h = OpsJudge::with_client(reqwest::Client::new(), "http://unused");
+        let h = judge("http://unused".to_string());
         assert_eq!(h.name(), "ops.judge");
         let emits = boss_dispatcher::cascade::handler_emits()
             .get("ops.judge")

@@ -1036,13 +1036,35 @@ pub(crate) const FOR_REQUEST: &str = "for_request";
 /// §Diagnosis, a verdict must name what failed).
 const FAILURE_MARKERS: [&str; 2] = ["FAILED", "REFUSED"];
 
+/// The one exit that is non-zero and NOT a failure (53f54b3f):
+/// EX_TEMPFAIL, the estate's `not yet`. A verb that cannot answer YET
+/// says so and exits 75 without measuring or writing anything —
+/// `publish-drift` on a checkout behind the newest converged train
+/// (infra/gcp/publish-drift.sh), `publish-github-pr`'s `not_yet`,
+/// `install.sh` with no image in the registry, `checkout-lock` that
+/// never came — and the recorded-probe contract spells the same code
+/// the same way. A not-yet claims nothing, so there is nothing to
+/// trouble a step over and nothing to alert about; it takes the path a
+/// verb with no answer line already takes. Treating it as a failure
+/// would have filed an urgent packet on every converge that moved
+/// ahead of boss-gcp's checkout, which is most of them.
+pub(crate) const NOT_YET_EXIT: &str = "75";
+
 /// PURE over the closing packet: `Some` when its `execute` step records
-/// a non-zero `exit_code` — the ops-runner's record of a verb that RAN
-/// and failed (a RUNNER refusal ran nothing, carries no exit, and
-/// closes `refused`, which no answered-rule fires on). The line is the
-/// last one carrying the first marker above that appears at all, else
-/// the last non-empty line: the runner records both streams merged and
-/// a verb says why it stopped last. c98a782f's line was the 4th of 4.
+/// a non-zero `exit_code` other than [`NOT_YET_EXIT`] — the ops-runner's
+/// record of a verb that RAN and failed (a RUNNER refusal ran nothing,
+/// carries no exit, and closes `refused`, which no answered-rule fires
+/// on). The line is the last one carrying the first marker above that
+/// appears at all, else the last non-empty line: the runner records
+/// both streams merged and a verb says why it stopped last. c98a782f's
+/// line was the 4th of 4.
+///
+/// ONE definition of "the verb failed" for the whole answered-ops-
+/// request family (CLAUDE.md §9a): `jobs.complete_linked_step` troubles
+/// the step it would have completed, `ops.judge` refuses to chain the
+/// next verb off it, and `maintenance.sweep.judge` refuses to read a
+/// verdict out of it. A second notion of failure in any of the three
+/// is the fact that lives twice.
 pub(crate) fn verb_failure(closing: &serde_json::Value) -> Option<VerbFailure> {
     let meta = step_by_slug(closing, super::ops_judge::REPORT_STEP)?.get("metadata")?;
     let exit = match meta.get("exit_code")? {
@@ -1050,7 +1072,7 @@ pub(crate) fn verb_failure(closing: &serde_json::Value) -> Option<VerbFailure> {
         serde_json::Value::Number(n) => n.to_string(),
         _ => return None,
     };
-    if exit.is_empty() || exit == "0" {
+    if exit.is_empty() || exit == "0" || exit == NOT_YET_EXIT {
         return None;
     }
     let output = meta.get("output").and_then(|v| v.as_str()).unwrap_or("");
@@ -1062,6 +1084,64 @@ pub(crate) fn verb_failure(closing: &serde_json::Value) -> Option<VerbFailure> {
         .unwrap_or("(no output recorded)")
         .to_string();
     Some(VerbFailure { exit, line })
+}
+
+#[cfg(test)]
+mod verb_failure_tests {
+    use super::*;
+
+    /// The answered request as the ops-runner completes it: the exit on
+    /// the EXECUTE step, under `exit_code`. That is the spelling every
+    /// reader here takes — `boss ops --wait` reads it, the step surface
+    /// is fed from it, and the sibling packet 50fede8b names the step
+    /// as the home that survives the collapse of the request-level
+    /// `metadata.exit` the runner writes beside it.
+    fn answered(exit: &str, output: &str) -> serde_json::Value {
+        json!({
+            "id": "r", "kind": "ops-request", "status": "closed",
+            "metadata": { "verb": "publish-drift", "exit": exit },
+            "steps": [{
+                "id": "r-execute", "spec_slug": "execute", "status": "completed",
+                "metadata": { "disposition": "answered", "exit_code": exit, "output": output },
+            }],
+        })
+    }
+
+    #[test]
+    fn a_clean_exit_is_no_failure() {
+        assert_eq!(verb_failure(&answered("0", "all good\n")), None);
+    }
+
+    /// EX_TEMPFAIL (53f54b3f). `publish-drift` on a checkout behind the
+    /// newest converged train prints `not yet: …` and exits 75 having
+    /// measured nothing and written nothing — the hand `until --check
+    /// ok` wait, as a verdict. It is not a failure: nothing to trouble
+    /// a step over, nothing to alert about, and it happens on most
+    /// converges.
+    #[test]
+    fn a_not_yet_is_no_failure() {
+        let out = "publish-drift: not yet: checkout at cb053ed6, main at 4cb3d3a7 — nothing compared, nothing published\n";
+        assert_eq!(verb_failure(&answered(NOT_YET_EXIT, out)), None);
+    }
+
+    #[test]
+    fn a_verb_that_ran_and_failed_carries_its_exit_and_its_last_failed_line() {
+        let out = "publish-github-pr: pushing\npublish-github-pr: FAILED — remote rejected\n";
+        let f = verb_failure(&answered("1", out)).expect("exit 1 is a failure");
+        assert_eq!(f.exit, "1");
+        assert_eq!(f.line, "publish-github-pr: FAILED — remote rejected");
+    }
+
+    /// The runner records 124 when it kills a verb at its timeout — the
+    /// truncated-report case the judges must never read a verdict out
+    /// of, and the one with no FAILED line of its own.
+    #[test]
+    fn a_killed_verb_is_a_failure_and_its_last_line_says_so() {
+        let out = "disk-report: reading df\n\n[ops-runner: command killed at 300s timeout]\n";
+        let f = verb_failure(&answered("124", out)).expect("exit 124 is a failure");
+        assert_eq!(f.exit, "124");
+        assert_eq!(f.line, "[ops-runner: command killed at 300s timeout]");
+    }
 }
 
 /// PURE: the urgent packet one failed verb becomes — named after the

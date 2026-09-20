@@ -480,6 +480,13 @@ enum Commands {
         /// input,output split (740000,21000); only a split is priced.
         #[arg(long, requires = "report")]
         tokens: Option<String>,
+        /// Dispatch anyway when a car carrying this packet's fix has
+        /// already MERGED (a7837d81). The refusal is not a guess about
+        /// the tree: it names the car, its branch and its merge. Force
+        /// it when the packet asks for more than that car carried —
+        /// and say what the rest is in the run's summary.
+        #[arg(long, conflicts_with_all = ["report", "next", "from_hook"])]
+        force: bool,
     },
     /// Where the IT department's work comes from — the input-channel
     /// mix (user-feedback vs monitoring/error-discovery), the algedonic
@@ -1424,6 +1431,7 @@ async fn main() -> Result<()> {
             summary,
             spend_usd,
             tokens,
+            force,
             ..
         } => {
             let packet = packet.expect("clap requires a packet without --next");
@@ -1437,7 +1445,7 @@ async fn main() -> Result<()> {
                 )
                 .await
             } else {
-                dispatch::run(packet, step, model, budget, effort).await
+                dispatch::run(packet, step, model, budget, effort, force).await
             }
         }
         Commands::Channels {

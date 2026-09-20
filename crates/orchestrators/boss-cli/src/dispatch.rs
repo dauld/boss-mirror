@@ -492,6 +492,85 @@ pub(crate) struct Dispatched {
     pub subagent_type: Option<String>,
 }
 
+/// The cars that name this packet as the item they build — narrowed at
+/// the server by the containment door (`metadata=`, url-encoded through
+/// `job::QUERY_VALUE`, the one encoder every other caller uses).
+///
+/// Exact id, because that is what a car carries: all 189 `backlog_item`
+/// values on the instance were full 36-char ids when this was measured
+/// (2026-09-19). A car holding an 8-char PREFIX would not be found, and
+/// that miss is today's behaviour — no refusal — never a wrong one.
+pub(crate) fn cars_for_item_query(item_id: &str) -> String {
+    let doc = json!({ "backlog_item": item_id }).to_string();
+    format!(
+        "/api/jobs?kind=ship-a-change&metadata={}&limit=50",
+        percent_encoding::utf8_percent_encode(&doc, crate::job::QUERY_VALUE)
+    )
+}
+
+/// THE LANDED-WORK REFUSAL (a7837d81). A packet whose fix is already on
+/// main is refused BEFORE the claim, and the refusal names the car that
+/// carried it.
+///
+/// WHAT WAS MEASURED, and why this is not a heuristic. On 2026-09-19
+/// two packets were dispatched to builders at high effort after their
+/// fixes had landed: d7fef617 (train #466, ~21 h earlier) and f47861a5
+/// (train #471, ~19 h earlier). The first run was spent entirely
+/// re-deriving a landed fix. The cause was NOT a missing link — of the
+/// 188 merged cars on the instance, 175 named a closing `backlog_item`,
+/// 6 named a `partial_item` and 7 named a `no_item_reason`, so every
+/// one of them answered the question `require_item_answer` asks, and
+/// not one of the 175 left its item open once the CAR closed. Both of
+/// these cars named their packet correctly.
+///
+/// What they had in common is that they were still `open` at `Proven in
+/// prod`: `ship-a-change` reaches `merged` off `steps.proven.done`, so
+/// an unproven car never closes, `jobs.complete_linked_step` never
+/// fires, and the item stays open for as long as the proof takes.
+/// Twelve such cars were standing that morning, the oldest landed 58 h
+/// earlier, holding ten open items between them — a population, not two
+/// accidents, and the queue an automated runner drains.
+///
+/// So the question here is answered from the RECORD, never from the
+/// tree: does a car naming this packet already satisfy
+/// `boss_jobs::car::is_landed`? That is the same predicate `boss gate`
+/// and the auto-park handler ask before filing a twin, and it is the
+/// only "is this already fixed" question that can be answered without
+/// reading code and guessing at it.
+///
+/// The claim is re-read off each row rather than trusted from the
+/// query: a server that ignored `metadata=` would answer the
+/// unfiltered page, and an unnarrowed page must narrow nothing
+/// (CLAUDE.md §Doors — a wrong target answers instead of erroring).
+pub(crate) fn landed_work_refusal(item_id: &str, cars: &[Value]) -> Option<String> {
+    let landed = cars.iter().find(|c| {
+        c.pointer("/metadata/backlog_item").and_then(Value::as_str) == Some(item_id)
+            && boss_jobs::car::is_landed(c)
+    })?;
+    let branch = landed
+        .pointer("/metadata/branch")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    let full = landed.get("id").and_then(Value::as_str).unwrap_or("?");
+    let car = &full[..full.len().min(8)];
+    let at = landed
+        .pointer("/metadata/merge_ref")
+        .and_then(Value::as_str)
+        .unwrap_or("main");
+    let item = &item_id[..item_id.len().min(8)];
+    Some(format!(
+        "this packet's fix is ALREADY ON MAIN: car {car} ({branch}) merged at {at}.\n  \
+         Dispatching it spends an agent run re-deriving landed work — measured twice on \
+         2026-09-19 (a7837d81), 21 h and 19 h after the merge.\n  \
+         That car is still open because its proof has not completed, which is the only \
+         reason its item did not close by itself. Two repairs, in order:\n    \
+         boss prove {branch}\n      \
+         runs the car's recorded probe; a pass closes the car AND this packet\n    \
+         boss dispatch {item} --force\n      \
+         if the packet asks for MORE than that car carried, say so and build the rest"
+    ))
+}
+
 /// The whole verb against an explicit base — the seam the wire tests
 /// go through. Returns the run and the prompt.
 #[allow(clippy::too_many_arguments)]
@@ -507,6 +586,11 @@ pub(crate) async fn dispatch_at(
     // from — a dispatch that names no station keeps today's claim.
     station: Option<&str>,
     over: &Overrides,
+    // Dispatch this packet even though a car carrying its fix has
+    // already landed — the operator saying "the packet asks for more
+    // than that car carried". `--next` never sets it: the queue is
+    // exactly where nobody is reading each choice.
+    force: bool,
     actor: &str,
     owner: &str,
     worktree: &str,
@@ -553,6 +637,21 @@ pub(crate) async fn dispatch_at(
     if !paths.is_empty()
         && let Some(level) = edit_level_at(http, base).await?
         && let Some(why) = level_refusal(&id[..8], &slug, &level, &paths)
+    {
+        bail!("{why}");
+    }
+
+    // THE LANDED-WORK DOOR (a7837d81): a packet a merged car already
+    // names is refused BEFORE the claim, for the same reason the
+    // hosting door above is — an agent that has claimed a step has
+    // already started spending. Best-effort on the READ only: a jobs
+    // API that cannot answer this one query must not stop a dispatch
+    // it would otherwise admit, so an unreachable read is silence and
+    // the dispatch proceeds. What is never best-effort is the verdict:
+    // a page that DID come back and names a landed car refuses.
+    if !force
+        && let Ok(body) = api_at(Method::GET, cars_for_item_query(&id), None).await
+        && let Some(why) = landed_work_refusal(&id, &crate::gate::rows(body))
     {
         bail!("{why}");
     }
@@ -782,6 +881,9 @@ pub(crate) async fn next_at(
             Some(&slug),
             Some(station),
             over,
+            // Never forced from the queue: the landed-work refusal is
+            // most valuable exactly where nobody reads each choice.
+            false,
             actor,
             owner,
             worktree,
@@ -1254,6 +1356,7 @@ pub async fn run(
     model: Option<String>,
     budget: Option<f64>,
     effort: Option<String>,
+    force: bool,
 ) -> Result<()> {
     let base = crate::gate::resolve_jobs_base(None)?;
     let repo = crate::brief::repo_root()?;
@@ -1283,6 +1386,7 @@ pub async fn run(
         step.as_deref(),
         None,
         &over,
+        force,
         &actor,
         &owner,
         &worktree,
@@ -1385,6 +1489,84 @@ mod tests {
                 .unwrap_err()
                 .contains("positive")
         );
+    }
+
+    /// A packet whose fix is already on main is refused BEFORE the
+    /// claim, and the refusal carries the car that carried it.
+    ///
+    /// Measured 2026-09-19 (a7837d81): d7fef617 and f47861a5 were each
+    /// dispatched to a builder at high effort ~21 h and ~19 h after a
+    /// car carrying their fix had merged. Both cars named their packet
+    /// correctly — the link is not the defect — and both were still
+    /// `open` at `Proven in prod`, so the arrival rule that closes the
+    /// item had nothing to fire on.
+    #[test]
+    fn a_packet_whose_car_already_landed_is_refused_with_the_car_named() {
+        let item = "f47861a5-2a86-4b8e-bb01-6491377b9499";
+        let landed = json!({
+            "id": "b8c4267f-0000-0000-0000-000000000000",
+            "status": "open",
+            "metadata": {
+                "backlog_item": item,
+                "branch": "fix/an-answered-ops-request-records-its-exit",
+                "merged": "true",
+                "merge_ref": "60d95aadf8bb",
+            },
+        });
+        let why = landed_work_refusal(item, std::slice::from_ref(&landed)).expect("refused");
+        assert!(
+            why.contains("fix/an-answered-ops-request-records-its-exit"),
+            "{why}"
+        );
+        assert!(why.contains("60d95aadf8bb"), "{why}");
+        assert!(why.contains("b8c4267f"), "{why}");
+        // Both repairs named: prove the car, or close the packet.
+        assert!(why.contains("boss prove"), "{why}");
+        assert!(why.contains("--force"), "{why}");
+
+        // A car still BUILDING the packet is not landed work: that is
+        // the ordinary in-flight case and must not refuse.
+        let building = json!({
+            "id": "c0000000-0000-0000-0000-000000000000",
+            "status": "open",
+            "metadata": { "backlog_item": item, "branch": "fix/in-flight" },
+        });
+        assert_eq!(landed_work_refusal(item, &[building]), None);
+        assert_eq!(landed_work_refusal(item, &[]), None);
+
+        // THE CONTROL LEG. A server that ignored `metadata=` would
+        // answer the unfiltered page, and every dispatch would be
+        // refused by the newest landed car of some OTHER packet. The
+        // claim is re-read off each row here, so a page that was never
+        // narrowed narrows nothing.
+        let other = json!({
+            "id": "d0000000-0000-0000-0000-000000000000",
+            "status": "closed",
+            "metadata": {
+                "backlog_item": "aaaaaaaa-0000-0000-0000-000000000000",
+                "branch": "fix/someone-elses", "outcome": "merged",
+            },
+        });
+        assert_eq!(
+            landed_work_refusal(item, std::slice::from_ref(&other)),
+            None
+        );
+        // …and a narrowed page that DOES hold the packet still refuses.
+        assert!(landed_work_refusal(item, &[other, landed]).is_some());
+    }
+
+    /// The one read behind the refusal: narrowed at the server by the
+    /// containment door, with the same encoder every other `metadata=`
+    /// caller uses.
+    #[test]
+    fn the_landed_car_read_is_narrowed_at_the_server() {
+        let q = cars_for_item_query("f47861a5-2a86-4b8e-bb01-6491377b9499");
+        assert!(
+            q.starts_with("/api/jobs?kind=ship-a-change&metadata="),
+            "{q}"
+        );
+        assert!(q.contains("%22backlog_item%22"), "{q}");
+        assert!(q.contains("f47861a5-2a86-4b8e-bb01-6491377b9499"), "{q}");
     }
 
     #[test]
@@ -1975,6 +2157,11 @@ mod wire_tests {
                             json!({ "edit_level": l, "manifest": "/opt/boss/tenant/seeds/tenant.toml" }).to_string(),
                         ),
                     },
+                    // The landed-work read (a7837d81): no car names
+                    // this packet, so nothing is refused here.
+                    ("GET", "/api/jobs") => {
+                        ("200 OK", json!({ "data": [], "total": 0 }).to_string())
+                    }
                     ("GET", "/api/workflows/backlog-item") => ("200 OK", row.to_string()),
                     ("POST", p) if p.ends_with("/claim") => {
                         if claim_conflict {
@@ -2071,6 +2258,7 @@ mod wire_tests {
             None,
             None,
             &over,
+            false,
             "claude@algedonic.dev",
             "emp-david",
             "/work/boss/.claude/worktrees/agent-x",
@@ -2090,6 +2278,10 @@ mod wire_tests {
             seq,
             vec![
                 ("GET".to_string(), format!("/api/jobs/{PACKET}")),
+                // The landed-work read (a7837d81), BEFORE the claim:
+                // a packet a merged car already names is refused while
+                // nothing has been claimed and nothing filed.
+                ("GET".to_string(), "/api/jobs".to_string()),
                 ("GET".to_string(), "/api/workflows/backlog-item".to_string()),
                 (
                     "POST".to_string(),
@@ -2111,7 +2303,15 @@ mod wire_tests {
             "the claim precedes the brief's read, which precedes the filing"
         );
 
-        let filed = &calls[4].2;
+        // The filing, found by WHAT it is rather than by where it sits
+        // in the sequence: the index moved when the landed-work read
+        // was added in front of the claim (a7837d81), and a positional
+        // read of a call log re-breaks on every such addition.
+        let filed = &calls
+            .iter()
+            .find(|(m, p, _)| m == "POST" && p == "/api/jobs")
+            .expect("the run is filed")
+            .2;
         assert_eq!(filed["kind"], "agent-run");
         assert_eq!(filed["metadata"]["packet"], PACKET);
         assert_eq!(filed["metadata"]["step"], "build");
@@ -2143,7 +2343,11 @@ mod wire_tests {
         assert!(brief.contains("# Builder rules"), "the profile's document");
         assert!(prompt.contains(&format!("export BOSS_AGENT_RUN={RUN}")));
 
-        let briefed = &calls[6].2;
+        let briefed = &calls
+            .iter()
+            .find(|(m, p, _)| m == "PUT" && p.ends_with("/steps/run-briefed"))
+            .expect("the briefed step is completed")
+            .2;
         assert_eq!(briefed["status"], "completed");
         assert_eq!(
             briefed["metadata"]["prompt_bytes"],
@@ -2170,6 +2374,7 @@ mod wire_tests {
             None,
             None,
             &Overrides::default(),
+            false,
             "claude@algedonic.dev",
             "emp-david",
             "/wt",
@@ -2237,6 +2442,7 @@ mod wire_tests {
             None,
             None,
             &Overrides::default(),
+            false,
             "claude@algedonic.dev",
             "emp-david",
             "/wt",
@@ -2272,6 +2478,7 @@ mod wire_tests {
             None,
             None,
             &Overrides::default(),
+            false,
             "claude@algedonic.dev",
             "emp-david",
             "/wt",
@@ -2313,6 +2520,7 @@ mod wire_tests {
             None,
             None,
             &Overrides::default(),
+            false,
             "claude@algedonic.dev",
             "emp-david",
             "/wt",
@@ -2339,6 +2547,7 @@ mod wire_tests {
                 None,
                 None,
                 &Overrides::default(),
+                false,
                 "claude@algedonic.dev",
                 "emp-david",
                 "/wt",
@@ -2364,6 +2573,7 @@ mod wire_tests {
             Some("build"),
             None,
             &Overrides::default(),
+            false,
             "claude@algedonic.dev",
             "emp-david",
             "/wt",
@@ -2382,6 +2592,154 @@ mod wire_tests {
             .iter()
             .any(|(m, p, _)| m == "POST" && p == "/api/jobs");
         assert!(!filed, "no run for a step this actor does not hold");
+    }
+
+    /// A packet whose fix a MERGED car already carries is refused
+    /// before anything is claimed or filed (a7837d81).
+    ///
+    /// Measured 2026-09-19: d7fef617 and f47861a5 were each dispatched
+    /// ~21 h and ~19 h after a car carrying their fix had merged, and
+    /// the first run was spent entirely re-deriving landed work. Both
+    /// cars named their packet correctly; both were still open at
+    /// `Proven in prod`, so `ship-a-change` never reached `merged` and
+    /// the rule that closes the item never fired. The refusal is read
+    /// off that car, never off the tree.
+    #[tokio::test]
+    async fn a_packet_a_merged_car_already_names_is_refused_before_the_claim() {
+        let landed = json!({
+            "data": [{
+                "id": "b8c4267f-0000-0000-0000-000000000000",
+                "status": "open",
+                "metadata": {
+                    "backlog_item": PACKET,
+                    "branch": "fix/an-answered-ops-request-records-its-exit",
+                    "merged": "true",
+                    "merge_ref": "60d95aadf8bb",
+                },
+            }],
+            "total": 1,
+        });
+        let packet = packet_without_projection();
+        let (base, log) = serve(move |method, path, target, _body| match (method, path) {
+            ("GET", p) if p == format!("/api/jobs/{PACKET}") => ("200 OK", packet.to_string()),
+            ("GET", "/api/tenant/edit-level") => (
+                "200 OK",
+                json!({ "edit_level": Value::Null, "manifest": "t.toml" }).to_string(),
+            ),
+            ("GET", "/api/jobs") => ("200 OK", landed.to_string()),
+            _ => ("404 Not Found", format!("unstubbed {method} {target}")),
+        })
+        .await;
+        let err = dispatch_at(
+            &reqwest::Client::new(),
+            &base,
+            &repo(),
+            PACKET,
+            Some("build"),
+            None,
+            &Overrides::default(),
+            false,
+            "claude@algedonic.dev",
+            "emp-david",
+            "/wt",
+            "h",
+            BriefSource::Rendered,
+        )
+        .await
+        .expect_err("refused");
+        let text = format!("{err:#}");
+        assert!(text.contains("ALREADY ON MAIN"), "{text}");
+        assert!(text.contains("60d95aadf8bb"), "{text}");
+        assert!(text.contains("boss prove"), "{text}");
+        let calls = log.calls.lock().unwrap().clone();
+        assert!(
+            !calls
+                .iter()
+                .any(|(m, p, _)| p.ends_with("/claim") || (m == "POST" && p == "/api/jobs")),
+            "nothing claimed and nothing filed: {calls:?}"
+        );
+    }
+
+    /// …and `--force` is the operator saying the packet asks for more
+    /// than that car carried: the same packet dispatches, and the run
+    /// is filed. Without this the refusal would be a wall rather than
+    /// a door, and the next builder would work around it.
+    #[tokio::test]
+    async fn force_dispatches_the_same_packet_and_files_the_run() {
+        let landed = json!({
+            "data": [{
+                "id": "b8c4267f-0000-0000-0000-000000000000",
+                "status": "open",
+                "metadata": { "backlog_item": PACKET, "branch": "fix/x", "merged": "true" },
+            }],
+            "total": 1,
+        });
+        let (base, log) = {
+            let row = row_with_block();
+            let packet = packet_without_projection();
+            let run: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+            serve(move |method, path, target, body| match (method, path) {
+                ("GET", p) if p == format!("/api/jobs/{PACKET}") => ("200 OK", packet.to_string()),
+                ("GET", "/api/tenant/edit-level") => (
+                    "200 OK",
+                    json!({ "edit_level": Value::Null, "manifest": "t.toml" }).to_string(),
+                ),
+                ("GET", "/api/jobs") => ("200 OK", landed.to_string()),
+                ("GET", "/api/workflows/backlog-item") => ("200 OK", row.to_string()),
+                ("POST", p) if p.ends_with("/claim") => {
+                    ("200 OK", json!({ "status": "active" }).to_string())
+                }
+                ("POST", "/api/jobs") => {
+                    let mut filed = body.clone();
+                    filed["id"] = json!(RUN);
+                    filed["steps"] = json!([
+                        { "id": "run-briefed", "spec_slug": "briefed", "status": "ready",
+                          "metadata": { "authority_role": "platform-admin" } },
+                    ]);
+                    *run.lock().unwrap() = Some(filed);
+                    ("201 Created", json!({ "id": RUN }).to_string())
+                }
+                ("GET", p) if p == format!("/api/jobs/{RUN}") => {
+                    match run.lock().unwrap().clone() {
+                        Some(r) => ("200 OK", r.to_string()),
+                        None => ("404 Not Found", "no such job".into()),
+                    }
+                }
+                ("PUT", p) if p.starts_with(&format!("/api/jobs/{RUN}/steps/")) => {
+                    ("204 No Content", String::new())
+                }
+                _ => ("404 Not Found", format!("unstubbed {method} {target}")),
+            })
+            .await
+        };
+        dispatch_at(
+            &reqwest::Client::new(),
+            &base,
+            &repo(),
+            PACKET,
+            Some("build"),
+            None,
+            &Overrides::default(),
+            true,
+            "claude@algedonic.dev",
+            "emp-david",
+            "/wt",
+            "h",
+            BriefSource::Rendered,
+        )
+        .await
+        .expect("forced past the landed car");
+        let calls = log.calls.lock().unwrap().clone();
+        assert!(
+            calls
+                .iter()
+                .any(|(m, p, _)| m == "POST" && p == "/api/jobs"),
+            "the run is filed: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|(m, p, _)| m == "GET" && p == "/api/jobs"),
+            "and --force does not spend the read it would ignore: {calls:?}"
+        );
     }
 
     /// The run packet as `--report` reads it, with `reported` in the
@@ -2698,6 +3056,11 @@ mod wire_tests {
                         "200 OK",
                         json!({ "edit_level": Value::Null, "manifest": "t.toml" }).to_string(),
                     ),
+                    // The landed-work read (a7837d81): no car names
+                    // this packet, so nothing is refused here.
+                    ("GET", "/api/jobs") => {
+                        ("200 OK", json!({ "data": [], "total": 0 }).to_string())
+                    }
                     ("GET", "/api/workflows/backlog-item") => ("200 OK", row.to_string()),
                     ("POST", p) if p.ends_with("/claim") => {
                         ("200 OK", json!({ "status": "active" }).to_string())

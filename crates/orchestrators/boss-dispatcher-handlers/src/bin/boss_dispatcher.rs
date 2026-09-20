@@ -389,7 +389,13 @@ async fn main() -> Result<()> {
             // note on the judged request why nothing was filed
             // (a1d3c762: publish-drift's --for-real by rule). Every noun
             // rides the rule row, so the next verb chain is a rule file.
-            handlers.register(OpsJudge::new(cfg.jobs_api_url.clone()));
+            // Reads the verb's EXIT before its output (53f54b3f): a
+            // measurement that did not finish chains nothing, and files
+            // an urgent packet to the platform owner instead.
+            handlers.register(OpsJudge::new(
+                cfg.jobs_api_url.clone(),
+                platform_owner.clone(),
+            ));
             // A release packet's `tag` step going ready files the
             // forge's tag-release request itself — v<version> off the
             // packet, the newest closed train's merge_ref off the

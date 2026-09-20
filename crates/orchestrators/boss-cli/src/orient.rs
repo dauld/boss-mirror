@@ -327,14 +327,32 @@ fn clipped(text: &str) -> String {
 }
 
 /// The SHED listing lines: every open car at `Proven in prod`, one
-/// line each, saying which of the three places it stands in. Pure so
-/// the shape is testable; the caller prints the heading from the count.
+/// line each, saying which of the three places it stands in AND which
+/// backlog-item it is holding open. Pure so the shape is testable; the
+/// caller prints the heading from the count.
+///
+/// WHY THE ITEM IS ON THE LINE (a7837d81). A car in the shed is not
+/// only waiting — it is BLOCKING. `ship-a-change` reaches `merged` off
+/// `steps.proven.done`, so an unproven car never closes,
+/// `jobs.complete_linked_step` never fires, and the item the car
+/// carries stays open for exactly as long as the proof does. Measured
+/// 2026-09-19: twelve cars stood here, the oldest landed 58 h earlier,
+/// holding ten open backlog-items between them, and two of those items
+/// had each already cost a dispatched agent run at high effort
+/// re-deriving a fix that was on main (d7fef617, f47861a5). The shed
+/// read as a queue of chores; what it was was the residue list, and
+/// the item id is what makes that legible without a second read.
 pub(crate) fn shed_lines(cars: &[Value]) -> Vec<String> {
     cars.iter()
         .filter(|c| c.get("status").and_then(Value::as_str) == Some("open"))
         .filter(|c| at_step(c) == "Proven in prod")
         .map(|c| {
             let branch = md_str(c, "branch");
+            let holds = match c.pointer("/metadata/backlog_item").and_then(Value::as_str) {
+                Some(i) => format!("{branch} (holds {})", &i[..i.len().min(8)]),
+                None => branch.to_string(),
+            };
+            let branch = holds.as_str();
             match shed_place(c) {
                 Shed::ProbePending { last: None } => {
                     format!("    {branch}: probe pending (the forge runs it on arrival)")
@@ -1172,7 +1190,9 @@ pub async fn run(all: bool) -> Result<()> {
         println!("\n  SHED — empty: every landed car is proven");
     } else {
         println!(
-            "\n  SHED — {} landed car(s) awaiting proof (probe pending / waiting on an event / UNPROVEN):",
+            "\n  SHED — {} landed car(s) awaiting proof (probe pending / waiting on an event / \
+             UNPROVEN). Each one it names an item for is HOLDING that item open until it \
+             proves — that is where the queue's inflated open count comes from (a7837d81):",
             shed.len()
         );
         for line in &shed {
@@ -1561,6 +1581,30 @@ mod tests {
         let open = vec![("fix/landed".to_string(), "Proven in prod".to_string())];
         // Its branch was swept by the train — the normal state, not residue.
         assert!(residue_cars(&open, &heads(&[])).is_empty());
+    }
+
+    /// A shed line names the backlog-item the car is holding open, so
+    /// the residue is readable from the one verb a session runs first.
+    ///
+    /// Measured 2026-09-19 (a7837d81): twelve cars stood in the shed,
+    /// the oldest landed 58 h earlier, holding ten open backlog-items —
+    /// and two of those items had each already cost a dispatched agent
+    /// run at high effort re-deriving a landed fix. A car with no item
+    /// holds nothing open and says nothing extra.
+    #[test]
+    fn a_shed_line_names_the_item_the_unproven_car_is_holding_open() {
+        let mut holding = landed("fix/holding", json!({ "proof_probe": "bash x.sh" }));
+        holding["metadata"]["backlog_item"] = json!("f47861a5-2a86-4b8e-bb01-6491377b9499");
+        let lines = shed_lines(&[holding, landed("fix/no-item", json!({}))]);
+        assert_eq!(
+            lines[0],
+            "    fix/holding (holds f47861a5): probe pending (the forge runs it on arrival)"
+        );
+        assert!(
+            lines[1].starts_with("    fix/no-item: UNPROVEN"),
+            "{}",
+            lines[1]
+        );
     }
 
     #[test]

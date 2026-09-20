@@ -24,11 +24,13 @@
 //!    debug read, and a verb that does not judge this sweep's question
 //!    must not complete it (the disk-report a copy-pasted rule files for
 //!    the image-freshness sweep says nothing about image freshness).
-//! 2. Read the verdict off the `execute` step's recorded `output`: the
-//!    LAST line starting `verdict: `, because the ops-runner merges
-//!    stdout and stderr into one field. No verdict line means the verb
-//!    predates the verdict — warn, write nothing, the step waits for a
-//!    person exactly as before.
+//! 2. Read the EXIT the runner recorded, and only then the verdict off
+//!    the `execute` step's recorded `output`: the LAST line starting
+//!    `verdict: `, because the ops-runner merges stdout and stderr into
+//!    one field. No verdict line means the verb predates the verdict —
+//!    warn, write nothing, the step waits for a person exactly as
+//!    before. A verb that FAILED is never read for a verdict at all
+//!    (see below).
 //! 3. Read the sweep. It must be a `maintenance-sweep` of the `target`
 //!    the rule names, still open, with `inspect` ready or active — a
 //!    completed one is a redelivery (JetStream is at-least-once), a
@@ -48,6 +50,37 @@
 //!    `reading` + `source`) so the agent reads the finding on the step
 //!    it is assigned, not in another packet. Routing stays theirs.
 //!
+//! ## The exit is read BEFORE the verdict (53f54b3f)
+//!
+//! Step 2 used to read the output with no regard for whether the verb
+//! finished — every fixture in this module hardcoded `exit_code: "0"`,
+//! so the failed case had never run. A `disk-report` killed at its
+//! timeout, or a `conformance-report` whose derivation died mid-walk,
+//! leaves a TRUNCATED output, and a truncated measurement is the
+//! false-empty class wearing a new hat: absence of a finding read as
+//! absence of a problem. Worse, a partial output can still carry an
+//! earlier `verdict: clean` line, which would COMPLETE the sweep's
+//! inspect and route it to Clear — a day's disk headroom signed off by
+//! a reading that never happened.
+//!
+//! So a failed verb is never read for a verdict. It takes the finding
+//! path: the inspect step is not completed, and the failure is written
+//! where the agent already assigned to that step reads it, in the
+//! spelling the step surface and the receiving yard already draw as
+//! troubled (`failed`, `failed_exit`, `failed_source` —
+//! `apps/web/src/steps/failedVerb.ts`, 074e1287). NO second packet is
+//! filed, and that is the one place this differs from `ops.judge`: a
+//! sweep is an OPEN, assigned packet that will now look troubled, so
+//! the failure already has a reader, and an urgent alarm beside it
+//! every time a daily report dies is the noise CLAUDE.md §Diagnosis
+//! warns about. `ops.judge` has no such reader — its check closes and
+//! nobody holds anything — which is why it alerts.
+//!
+//! `exit 75` is not a failure: the estate's verbs use EX_TEMPFAIL for
+//! `not yet`, having measured nothing, and that is the no-verdict path
+//! this handler already had. One definition of "the verb failed" for
+//! the whole family, in `jobs_complete_linked_step::verb_failure`.
+//!
 //! Same family as `maintenance.sweep.inspect` (empty-decisions,
 //! deploy-convergence), which inspects from the jobs API directly;
 //! this one inspects from a host verb's answer, which is why it fires
@@ -56,7 +89,7 @@
 //! whose measurement gains a verdict is one rule file dropped in.
 
 use super::common::{api_client, get_json, write_json};
-use super::jobs_complete_linked_step::{step_by_slug, unusable_link};
+use super::jobs_complete_linked_step::{VerbFailure, step_by_slug, unusable_link, verb_failure};
 use async_trait::async_trait;
 use boss_dispatcher::rules::expr::Value;
 use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext, arg_string};
@@ -92,6 +125,66 @@ pub(crate) fn is_clean(verdict: &str) -> bool {
         .strip_prefix(VERDICT_PREFIX)
         .map(str::trim)
         .is_some_and(|v| v == CLEAN)
+}
+
+/// What a report IS, as one value (53f54b3f) — so the three branches
+/// below cannot disagree about it, and the decision is testable without
+/// a jobs API.
+pub(crate) enum Reading<'a> {
+    /// The verb ran to a clean verdict: the sweep's inspect completes.
+    Clean(&'a str),
+    /// The verb ran and found something: the agent's, on the step.
+    Finding(&'a str),
+    /// The verb RAN AND FAILED, so there is no measurement to read —
+    /// whatever its output says, it is partial. Never a completion.
+    Unmeasured(VerbFailure),
+}
+
+/// PURE: read the EXIT first, the output only then. A failed verb's
+/// output is not consulted for a verdict at all, because a truncated
+/// report can carry an earlier `verdict: clean` line and completing an
+/// inspect on it signs off a reading that never happened. `None` when
+/// the verb exited cleanly (or `not yet`) and wrote no `verdict:` line:
+/// it predates the verdict, and the step waits for a person as before.
+pub(crate) fn reading_of(report: &serde_json::Value) -> Option<Reading<'_>> {
+    if let Some(failure) = verb_failure(report) {
+        return Some(Reading::Unmeasured(failure));
+    }
+    let output = step_by_slug(report, REPORT_STEP)
+        .and_then(|s| s.get("metadata"))
+        .and_then(|m| m.get("output"))
+        .and_then(|o| o.as_str())
+        .unwrap_or("");
+    let verdict = verdict_line(output)?;
+    Some(if is_clean(verdict) {
+        Reading::Clean(verdict)
+    } else {
+        Reading::Finding(verdict)
+    })
+}
+
+/// PURE: what a failed measurement writes onto the inspect step it
+/// refuses to complete. `reading` is the sentence the assigned agent
+/// sees where the verdict would have been; the other three are the
+/// spelling `apps/web/src/steps/failedVerb.ts` already draws as
+/// troubled, so the step surface and the receiving yard say a verb
+/// failed here without a line of frontend change.
+pub(crate) fn unmeasured_note(
+    verb: &str,
+    host: &str,
+    failure: &VerbFailure,
+    report_id: &str,
+) -> serde_json::Value {
+    json!({
+        "reading": format!(
+            "{verb} on {host} FAILED (exit {}) — nothing measured, so nothing is signed off: {}",
+            failure.exit, failure.line
+        ),
+        "source": report_id,
+        "failed": failure.line,
+        "failed_exit": failure.exit,
+        "failed_source": report_id,
+    })
 }
 
 /// PURE: the body that completes a sweep's `inspect` step from a clean
@@ -215,13 +308,8 @@ impl Handler for MaintenanceSweepJudge {
         }
         let host = meta_str(&report, "host").unwrap_or("host");
 
-        // 2. The verdict, off the runner's recorded output.
-        let output = step_by_slug(&report, REPORT_STEP)
-            .and_then(|s| s.get("metadata"))
-            .and_then(|m| m.get("output"))
-            .and_then(|o| o.as_str())
-            .unwrap_or("");
-        let Some(verdict) = verdict_line(output) else {
+        // 2. THE EXIT, then the verdict — in that order (53f54b3f).
+        let Some(reading) = reading_of(&report) else {
             tracing::warn!(
                 rule = %rule,
                 report = %report_id,
@@ -265,44 +353,72 @@ impl Handler for MaintenanceSweepJudge {
         }
 
         let step_url = format!("{}/api/jobs/{sweep_id}/steps/{step_id}", self.base());
-        if is_clean(verdict) {
-            // 4. Route FIRST, then complete — the Clear predicate reads
-            //    `job.metadata.action_needed` when the completion
-            //    re-evaluates the sweep's steps.
-            write_json(
-                &self.client,
-                reqwest::Method::PATCH,
-                &format!("{}/api/jobs/{sweep_id}/metadata", self.base()),
-                &json!({ "action_needed": "false" }),
-                rule,
-            )
-            .await?;
-            let at = step_by_slug(&report, REPORT_STEP)
-                .and_then(|s| s.get("completed_at"))
-                .and_then(|v| v.as_str())
-                .or_else(|| ctx.event_payload.get("closed_on").and_then(|v| v.as_str()))
-                .unwrap_or("")
-                .to_string();
-            // The same spelling the step API records as `completed_by`
-            // for a dispatcher write (`automation:rule:<name>`), so the
-            // item and the step agree on who checked it.
-            let actor = format!("automation:rule:{rule}");
-            let body =
-                clean_completion_body(&existing, verb, host, verdict, report_id, &actor, &at);
-            write_json(&self.client, reqwest::Method::PUT, &step_url, &body, rule).await?;
-            tracing::info!(rule = %rule, sweep = %sweep_id, report = %report_id, "{verdict} — inspect completed and routed to Clear");
-        } else {
-            // 5. A finding stays the agent's; the reading goes where
-            //    they will read it.
-            write_json(
-                &self.client,
-                reqwest::Method::PATCH,
-                &format!("{step_url}/metadata"),
-                &json!({ "reading": verdict, "source": report_id }),
-                rule,
-            )
-            .await?;
-            tracing::info!(rule = %rule, sweep = %sweep_id, report = %report_id, "{verdict} — written onto the inspect step, which stays open");
+        match reading {
+            Reading::Clean(verdict) => {
+                // 4. Route FIRST, then complete — the Clear predicate
+                //    reads `job.metadata.action_needed` when the
+                //    completion re-evaluates the sweep's steps.
+                write_json(
+                    &self.client,
+                    reqwest::Method::PATCH,
+                    &format!("{}/api/jobs/{sweep_id}/metadata", self.base()),
+                    &json!({ "action_needed": "false" }),
+                    rule,
+                )
+                .await?;
+                let at = step_by_slug(&report, REPORT_STEP)
+                    .and_then(|s| s.get("completed_at"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| ctx.event_payload.get("closed_on").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .to_string();
+                // The same spelling the step API records as
+                // `completed_by` for a dispatcher write
+                // (`automation:rule:<name>`), so the item and the step
+                // agree on who checked it.
+                let actor = format!("automation:rule:{rule}");
+                let body =
+                    clean_completion_body(&existing, verb, host, verdict, report_id, &actor, &at);
+                write_json(&self.client, reqwest::Method::PUT, &step_url, &body, rule).await?;
+                tracing::info!(rule = %rule, sweep = %sweep_id, report = %report_id, "{verdict} — inspect completed and routed to Clear");
+            }
+            Reading::Finding(verdict) => {
+                // 5. A finding stays the agent's; the reading goes
+                //    where they will read it.
+                write_json(
+                    &self.client,
+                    reqwest::Method::PATCH,
+                    &format!("{step_url}/metadata"),
+                    &json!({ "reading": verdict, "source": report_id }),
+                    rule,
+                )
+                .await?;
+                tracing::info!(rule = %rule, sweep = %sweep_id, report = %report_id, "{verdict} — written onto the inspect step, which stays open");
+            }
+            Reading::Unmeasured(failure) => {
+                // 6. THE VERB FAILED (53f54b3f). No completion, no
+                //    routing to Clear, and nothing read out of a
+                //    partial output — the step stays the agent's and
+                //    now LOOKS troubled, on the packet they are already
+                //    assigned to. No alarm is filed: this open sweep is
+                //    the alarm (see the module doc).
+                write_json(
+                    &self.client,
+                    reqwest::Method::PATCH,
+                    &format!("{step_url}/metadata"),
+                    &unmeasured_note(verb, host, &failure, report_id),
+                    rule,
+                )
+                .await?;
+                tracing::warn!(
+                    rule = %rule,
+                    sweep = %sweep_id,
+                    report = %report_id,
+                    "{verb} FAILED (exit {}) — nothing measured, inspect left open and annotated; {}",
+                    failure.exit,
+                    failure.line
+                );
+            }
         }
         Ok(())
     }
@@ -346,9 +462,22 @@ mod tests {
         ]
     }
 
-    /// The answered report, as the ops-runner completes it.
+    /// The answered report, as the ops-runner completes it — the verb
+    /// having exited 0.
     fn report(verb: &str, for_sweep: Option<&str>, output: &str) -> serde_json::Value {
-        let mut metadata = json!({ "host": "forge", "verb": verb, "args": [] });
+        report_exit(verb, for_sweep, output, "0")
+    }
+
+    /// The same, with the exit the runner recorded on the execute step
+    /// (53f54b3f): the fixture here hardcoded `"0"`, which is why no
+    /// test had ever driven this handler with a report that died.
+    fn report_exit(
+        verb: &str,
+        for_sweep: Option<&str>,
+        output: &str,
+        exit: &str,
+    ) -> serde_json::Value {
+        let mut metadata = json!({ "host": "forge", "verb": verb, "args": [], "exit": exit });
         if let Some(s) = for_sweep {
             metadata["for_sweep"] = json!(s);
         }
@@ -361,7 +490,7 @@ mod tests {
                 { "id": "r-filed", "spec_slug": "filed", "status": "completed", "metadata": {} },
                 { "id": "r-execute", "spec_slug": "execute", "status": "completed",
                   "completed_at": "2026-09-18T10:02:00Z",
-                  "metadata": { "disposition": "answered", "exit_code": "0", "runner_host": "forge",
+                  "metadata": { "disposition": "answered", "exit_code": exit, "runner_host": "forge",
                                 "output": output, "authority_role": "platform-admin" } },
                 { "id": "r-answered", "spec_slug": "answered", "status": "completed", "metadata": {} },
             ],
@@ -765,6 +894,114 @@ mod tests {
             &body["metadata"],
         )
         .unwrap_or_else(|e| panic!("the step API would refuse this body: {e:?}"));
+    }
+
+    /// THE FAILED MEASUREMENT (53f54b3f), in its sharpest shape: the
+    /// report died AFTER printing a clean verdict line, so the old
+    /// handler would have completed the sweep's inspect and routed it
+    /// to Clear — a day's disk headroom signed off by a reading that
+    /// never finished. Nothing is completed; the step stays the
+    /// agent's, annotated in the spelling the surfaces draw as
+    /// troubled.
+    #[tokio::test]
+    async fn a_failed_report_completes_nothing_and_troubles_the_step_instead() {
+        let output = format!("{CLEAN_OUTPUT}disk-report: FAILED — df died mid-read\n");
+        let (base, writes) = mock_jobs(vec![
+            report_exit("disk-report", Some(SWEEP), &output, "1"),
+            sweep("disk-headroom", "ready"),
+        ])
+        .await;
+        let h = MaintenanceSweepJudge::with_client(reqwest::Client::new(), base);
+        h.invoke(&args("disk-headroom", "disk-report"), &ctx())
+            .await
+            .unwrap();
+        let w = writes.lock().unwrap().clone();
+        assert!(
+            !w.iter().any(|(m, _, _)| m == "PUT"),
+            "a measurement that did not finish completes nothing: {w:?}"
+        );
+        assert!(
+            !w.iter()
+                .any(|(_, p, _)| p == &format!("/api/jobs/{SWEEP}/metadata")),
+            "and routes nothing to Clear: {w:?}"
+        );
+        assert_eq!(w.len(), 1, "one write, onto the step: {w:?}");
+        let (method, path, body) = &w[0];
+        assert_eq!(method, "PATCH");
+        assert_eq!(path, &format!("/api/jobs/{SWEEP}/steps/{INSPECT}/metadata"));
+        assert_eq!(body["failed"], "disk-report: FAILED — df died mid-read");
+        assert_eq!(body["failed_exit"], "1");
+        assert_eq!(body["failed_source"], REPORT);
+        assert_eq!(body["source"], REPORT);
+        let reading = body["reading"].as_str().unwrap();
+        assert!(reading.contains("FAILED (exit 1)"), "{reading}");
+        assert!(
+            !reading.contains("verdict: clean"),
+            "the partial reading is never presented as the verdict: {reading}"
+        );
+    }
+
+    /// A verb KILLED at its timeout has no FAILED line of its own — the
+    /// runner's marker is the last line — and no verdict line at all.
+    /// It is still a failure, and the step must say so rather than
+    /// falling through the predates-the-verdict path in silence.
+    #[tokio::test]
+    async fn a_killed_report_is_written_onto_the_step_not_passed_over() {
+        let output = "== filesystems ==\n\n[ops-runner: command killed at 300s timeout]\n";
+        let (base, writes) = mock_jobs(vec![
+            report_exit("disk-report", Some(SWEEP), output, "124"),
+            sweep("disk-headroom", "ready"),
+        ])
+        .await;
+        let h = MaintenanceSweepJudge::with_client(reqwest::Client::new(), base);
+        h.invoke(&args("disk-headroom", "disk-report"), &ctx())
+            .await
+            .unwrap();
+        let w = writes.lock().unwrap().clone();
+        assert_eq!(w.len(), 1, "the step is annotated, nothing else: {w:?}");
+        assert_eq!(w[0].2["failed_exit"], "124");
+        assert_eq!(
+            w[0].2["failed"], "[ops-runner: command killed at 300s timeout]",
+            "a verdict must name what failed"
+        );
+    }
+
+    /// EX_TEMPFAIL is not a failure — the estate's verbs use 75 for
+    /// `not yet`, having measured nothing — so it takes the path a verb
+    /// with no verdict line always took: nothing written, the step
+    /// waits for a person, and no note claiming a failure that did not
+    /// happen.
+    #[tokio::test]
+    async fn a_not_yet_report_is_not_a_failure_and_writes_nothing() {
+        let output = "disk-report: not yet: the host is mid-converge; nothing measured\n";
+        let (base, writes) = mock_jobs(vec![
+            report_exit("disk-report", Some(SWEEP), output, "75"),
+            sweep("disk-headroom", "ready"),
+        ])
+        .await;
+        let h = MaintenanceSweepJudge::with_client(reqwest::Client::new(), base);
+        h.invoke(&args("disk-headroom", "disk-report"), &ctx())
+            .await
+            .unwrap();
+        assert!(
+            writes.lock().unwrap().is_empty(),
+            "a not-yet claims nothing: {:?}",
+            writes.lock().unwrap()
+        );
+    }
+
+    /// The decision is one value, readable without a jobs API.
+    #[test]
+    fn the_exit_decides_before_the_output_does() {
+        let clean = report("disk-report", Some(SWEEP), CLEAN_OUTPUT);
+        assert!(matches!(reading_of(&clean), Some(Reading::Clean(_))));
+        let tight = report("disk-report", Some(SWEEP), TIGHT_OUTPUT);
+        assert!(matches!(reading_of(&tight), Some(Reading::Finding(_))));
+        // The same clean output, from a verb that did not finish.
+        let died = report_exit("disk-report", Some(SWEEP), CLEAN_OUTPUT, "1");
+        assert!(matches!(reading_of(&died), Some(Reading::Unmeasured(_))));
+        let not_yet = report_exit("disk-report", Some(SWEEP), "not yet\n", "75");
+        assert!(reading_of(&not_yet).is_none());
     }
 
     #[test]

@@ -273,6 +273,7 @@ pub(crate) async fn from_hook_at(
                 None,
                 None,
                 &Overrides::default(),
+                false,
                 actor,
                 owner,
                 worktree,
