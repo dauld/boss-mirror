@@ -109,10 +109,69 @@ pub(crate) fn text_or_file(
     Ok(prose)
 }
 
+/// [`text_or_file`] for a value that may legitimately be absent — a
+/// car with no probe at all proves by event instead. `None` only when
+/// NEITHER was given; once either is present every refusal above
+/// applies, because a probe supplied badly is worse than no probe.
+pub(crate) fn opt_text_or_file(
+    flag: &str,
+    file_flag: &str,
+    text: Option<String>,
+    file: Option<&Path>,
+) -> Result<Option<String>> {
+    if text.is_none() && file.is_none() {
+        return Ok(None);
+    }
+    text_or_file(flag, file_flag, text, file).map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use boss_testing::scratch::{scratch_dir, write_file};
+
+    /// A PROBE IS SHELL, SO IT IS THE VALUE ARGV DAMAGES MOST
+    /// (backlog 302bc2f2). The file door exists so a probe never has
+    /// to survive a shell: what the file holds is what gets recorded,
+    /// backslashes, quotes and all.
+    #[test]
+    fn a_probe_read_from_a_file_keeps_its_quoting_exactly() {
+        let dir = scratch_dir("prose-probe-file");
+        let probe = "n=$(git show HEAD:a.rs | grep -c 'pub enum StepAction' || true)\nexit 75\n";
+        let path = dir.join("probe.sh");
+        write_file(&path, probe);
+        let got = opt_text_or_file("--park-probe", "--park-probe-file", None, Some(&path))
+            .unwrap()
+            .expect("a file was given");
+        assert!(got.contains("'pub enum StepAction'"), "{got}");
+        assert!(
+            !got.contains(concat!(r"\", r#"""#)),
+            "no backslash-quote may appear: {got}"
+        );
+        // The editor's trailing newline is not part of the probe.
+        assert!(got.ends_with("exit 75"), "{got}");
+    }
+
+    /// Absent is absent: a car proving by EVENT passes neither flag,
+    /// and that must not be an error.
+    #[test]
+    fn neither_flag_is_no_probe_rather_than_a_refusal() {
+        assert!(
+            opt_text_or_file("--park-probe", "--park-probe-file", None, None)
+                .unwrap()
+                .is_none()
+        );
+        // …but a probe supplied EMPTY is still refused: worse than none.
+        assert!(
+            opt_text_or_file(
+                "--park-probe",
+                "--park-probe-file",
+                Some("   ".to_string()),
+                None
+            )
+            .is_err()
+        );
+    }
 
     /// The finding, pinned as behaviour: prose containing a literal
     /// backtick is ACCEPTED. It has to be. A backtick that survived to

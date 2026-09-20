@@ -267,6 +267,16 @@ enum Commands {
         /// refused here rather than at arrival.
         #[arg(long)]
         park_probe: Option<String>,
+        /// The probe, read from a FILE instead of argv — where no word
+        /// expansion happens at all. A probe is the one `--park-*`
+        /// value that is itself shell, so it is the one most damaged by
+        /// passing through a shell: backticks are substituted away, and
+        /// escaped quotes arrive literal, which makes a pattern's words
+        /// into filenames and exits the probe 75 saying "not yet" in
+        /// its own voice. Two cars sat unprovable for days that way
+        /// (302bc2f2) while both claims were already true on main.
+        #[arg(long, conflicts_with = "park_probe")]
+        park_probe_file: Option<std::path::PathBuf>,
         /// Auto-park: the string the probe must print for the claim to
         /// hold (`proof_expect` on the car). Required with --park-probe.
         /// Judged on the forge host, where the probe runs. Make it a
@@ -275,6 +285,10 @@ enum Commands {
         /// you mean and cannot pass on the wrong number.
         #[arg(long)]
         park_expect: Option<String>,
+        /// The expectation, read from a file — the twin of
+        /// `--park-probe-file`, for the same reason.
+        #[arg(long, conflicts_with = "park_expect")]
+        park_expect_file: Option<std::path::PathBuf>,
         /// Auto-park: for a change only an EVENT can prove (a stalled
         /// train, a red gate, an operator's cancel) — say which event
         /// and how to prove it when it fires. Recorded as `proof_event`;
@@ -1559,7 +1573,9 @@ async fn main() -> Result<()> {
             park_no_item,
             park_after,
             park_probe,
+            park_probe_file,
             park_expect,
+            park_expect_file,
             park_proof_event,
             force_regate,
             stale_base_anyway,
@@ -1575,8 +1591,18 @@ async fn main() -> Result<()> {
                 partial_item: park_partial_item,
                 no_item: park_no_item,
                 boards_after: park_after,
-                probe: park_probe,
-                expect: park_expect,
+                probe: crate::prose::opt_text_or_file(
+                    "--park-probe",
+                    "--park-probe-file",
+                    park_probe,
+                    park_probe_file.as_deref(),
+                )?,
+                expect: crate::prose::opt_text_or_file(
+                    "--park-expect",
+                    "--park-expect-file",
+                    park_expect,
+                    park_expect_file.as_deref(),
+                )?,
                 proof_event: park_proof_event,
             };
             gate::run(
