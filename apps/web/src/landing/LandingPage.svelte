@@ -6,6 +6,16 @@
   // perspective root); this page wraps it with the landing chrome
   // (hero + sign-in CTA).
 
+  // EVERY CLAIM THIS PAGE MAKES IS MARKED (design 59a776c5). A
+  // `data-claim` is a promise that src/marketing/claims.ts names the row
+  // that answers it, and that check-the-claims refuses when the two
+  // disagree. Adding an assertion to this page means adding a mark and a
+  // row; an UNMARKED assertion is invisible to the check, which is why
+  // the checker also fingerprints the prose and says so when the words
+  // move but the claim set does not.
+  //
+  // The live view below is exempt by construction: it is read from the
+  // live registry, so it cannot drift from it.
   import SystemModelLiveView from './SystemModelLiveView.svelte';
 </script>
 
@@ -20,7 +30,8 @@
       stack.
     </p>
     <p class="lede">
-      Below is a live window into <strong>Algedonic Ales</strong>,
+      Below is a live window into
+      <strong data-claim="tenant.name">Algedonic Ales</strong>,
       the brewery tenant that ships with BOSS — Jobs in flight
       right now, plus the step-graph workflow each Job is walking.
       The data is the live registry; pick a different workflow to
@@ -31,8 +42,10 @@
   <SystemModelLiveView />
 
   <footer class="cta">
-    <a class="cta-link" href="/login">Sign in to operate the brewery →</a>
+    <a class="cta-link" data-claim="cta.signin" href="/login">Sign in to operate the brewery →</a>
     <span class="docs">
+      <!-- Not a marked claim yet: nothing declares the mirror URL, so
+           there is no row to check it against (backlog f8af6040). -->
       <a href="https://github.com/algedonic-dev/boss" target="_blank" rel="noopener">Source on GitHub</a>
     </span>
   </footer>
