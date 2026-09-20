@@ -3,7 +3,7 @@
 | file | what it declares | who reads it |
 |---|---|---|
 | `algedonic.dev.toml` | every record the zone should hold (`tunnel:` targets by reference, `interlock = "access"` on a record the observer may apply) | `check-declared.sh`, the `dns.observe` handler |
-| `access.toml` | the Cloudflare Access applications in front of the proxied hostnames, and the OIDC redirects the gateway needs registered at the IdP | the `dns.observe` handler (applications), the lint `a-public-url-names-a-registered-oidc-redirect.sh` (redirects) |
+| `access.toml` | the Cloudflare Access applications in front of the proxied hostnames, and the OIDC redirects the gateway needs registered at the IdP | the `dns.observe` handler — ONE parse, `parse_access_declaration`, which the redirect check `boss-dispatcher-handlers/tests/a_public_url_names_a_registered_oidc_redirect.rs` reads rather than deriving its own (63a92827) |
 | `check-declared.sh` | the zone comparator — MATCH / DRIFT / ABSENT / UNDECLARED over a `dns_records` body, by hand or from the handler | operators, tests, the handler |
 
 The `dns.observe` dispatcher handler (rule `dns-observe-on-observe-ready`)

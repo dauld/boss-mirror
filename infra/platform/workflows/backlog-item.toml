@@ -167,11 +167,40 @@ authority_role = "platform-admin"
 # onto the packet as agent_profile / agent_model / agent_budget_usd /
 # agent_effort, which a station predicate and the claim door read.
 agent = { profile = "builder", model = "opus-5[1m]", budget_usd = 5, effort = "high" }
+# A BUILDER MAY REFUTE (backlog 6c114a23, 2026-09-20). Verify-the-claim
+# is required of every builder, and when it fires HERE rather than at
+# triage the packet used to have nowhere to land: the three withdrawal
+# terminals read triage alone, so routing to `build` skipped all three
+# and the only terminal left was `closed`, whose outcome asserts the
+# work was done. Measured on ef74fc12, whose builder correctly refused
+# to build: it was closed out of band with a PUT and a `refuted`
+# annotation, so the packet is closed with NO terminal outcome and
+# every count that reads terminals sees it as neither stale nor built.
+#
+# OPTIONAL, and checked at completion, not at create — a build that
+# built leaves it absent, which is Absent in boss-expr and false
+# against every literal, so `closed` still takes it. The set omits
+# `verify`, `design` and `build`: a builder refutes a packet, it does
+# not re-route one. Ordering, for a dispatched run: complete the RUN's
+# `building` with `result = refused` FIRST — completing this step fires
+# `agent-run-delivers-when-its-step-is-done`, which would land the run
+# as `delivered`, and a completed `building` is every later writer's
+# no-op.
+[[workflow.step.fields]]
+name = "disposition"
+field_type = "stale|duplicate|decline"
+required = false
 
 [[workflow.step]]
 title = "duplicate"
 kind = "outcome"
-ready_when = "steps.triage.done AND steps.triage.metadata.disposition = \"duplicate\""
+# THREE ARMS, ONE PER PLACE A REFUTATION CAN BE FOUND — see the
+# `disposition` field on `build` above (6c114a23). Naming `build` also
+# keeps this step Pending across the build instead of Skipped at triage
+# time: a Pending step is skipped only when EVERY step it references is
+# terminal, the same mechanism af28e250 used to keep `build` alive
+# across the review.
+ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"duplicate\") OR (steps.build.done AND steps.build.metadata.disposition = \"duplicate\")"
 title_template = "Closed as a duplicate"
 metadata_defaults = { outcome_kind = "withdrawn" }
 terminal = { outcome = "duplicate" }
@@ -179,7 +208,7 @@ terminal = { outcome = "duplicate" }
 [[workflow.step]]
 title = "stale"
 kind = "outcome"
-ready_when = "steps.triage.done AND steps.triage.metadata.disposition = \"stale\""
+ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"stale\") OR (steps.build.done AND steps.build.metadata.disposition = \"stale\")"
 title_template = "Closed \u2014 the claim no longer holds"
 metadata_defaults = { outcome_kind = "withdrawn" }
 terminal = { outcome = "stale" }
@@ -187,7 +216,7 @@ terminal = { outcome = "stale" }
 [[workflow.step]]
 title = "declined"
 kind = "outcome"
-ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"decline\") OR (steps.design-review.done AND steps.design-review.metadata.verdict = \"declined\")"
+ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"decline\") OR (steps.design-review.done AND steps.design-review.metadata.verdict = \"declined\") OR (steps.build.done AND steps.build.metadata.disposition = \"decline\")"
 title_template = "Closed without action"
 metadata_defaults = { outcome_kind = "aborted" }
 terminal = { outcome = "declined" }
@@ -212,7 +241,18 @@ kind = "outcome"
 # case — `verdict` is required at completion and enum-checked on the
 # step below — but closure is the property that must not depend on
 # that holding.
-ready_when = "steps.measure.done OR steps.build.done OR (steps.design-review.done AND NOT (steps.design-review.metadata.verdict = \"approved\" OR steps.design-review.metadata.verdict = \"declined\"))"
+#
+# AND NOT A BARE `steps.build.done` EITHER, since 6c114a23. A build
+# that refutes the packet routes to a withdrawal terminal, and two
+# terminals Ready off one write is the same race the review fork must
+# not have. So the build disjunct is stated the same way — the NEGATIVE
+# of the three dispositions that route elsewhere — and for the same
+# reason: an unreadable disposition still lands HERE and the item
+# closes, rather than skipping every successor and wedging the packet
+# open. A build that built carries no disposition at all, which is
+# Absent, false against every literal, so `NOT (false OR false OR
+# false)` is true and the ordinary path is unchanged.
+ready_when = "steps.measure.done OR (steps.build.done AND NOT (steps.build.metadata.disposition = \"stale\" OR steps.build.metadata.disposition = \"duplicate\" OR steps.build.metadata.disposition = \"decline\")) OR (steps.design-review.done AND NOT (steps.design-review.metadata.verdict = \"approved\" OR steps.design-review.metadata.verdict = \"declined\"))"
 title_template = "Backlog item closed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }

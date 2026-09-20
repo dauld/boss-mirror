@@ -140,10 +140,16 @@ include.everyone = true
 # registered — so BOSS_PUBLIC_URL may only name a hostname whose
 # redirect is registered there, or every login breaks the moment the
 # manifest converges. The pod cannot read Kanidm's admin API, so the
-# fact is DECLARED here with its provenance, and the lint
-# infra/lint/a-public-url-names-a-registered-oidc-redirect.sh refuses
-# a manifest whose BOSS_PUBLIC_URL names a hostname that is not
-# declared registered. Re-read it with `kanidm system oauth2 get boss`
+# fact is DECLARED here with its provenance, and the check
+# crates/orchestrators/boss-dispatcher-handlers/tests/
+# a_public_url_names_a_registered_oidc_redirect.rs refuses a manifest
+# whose BOSS_PUBLIC_URL names a hostname that is not declared
+# registered. It reads this file through the SAME parse the dns.observe
+# handler uses — one reader, because the awk lint it replaced could
+# read a redirect the observer refuses (backlog 63a92827), and that
+# test also asserts how many redirects this file declares, so a
+# misspelled `[[oidc_redirect]]` header cannot read as one fewer.
+# Re-read the registration with `kanidm system oauth2 get boss`
 # (the client's oauth2_rs_origin / redirect list) and correct
 # `registered` and `measured` here if the read disagrees.
 [[oidc_redirect]]

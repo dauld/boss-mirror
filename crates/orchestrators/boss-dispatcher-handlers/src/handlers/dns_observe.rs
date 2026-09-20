@@ -179,9 +179,11 @@ pub fn parse_comparison(stdout: &str) -> Result<Comparison, String> {
 
 /// `access.toml`: the applications in front of the zone's proxied
 /// hostnames and the OIDC redirects the gateway needs registered. The
-/// redirects are read by the lint
-/// `a-public-url-names-a-registered-oidc-redirect.sh`, not here; they
-/// are parsed so a malformed entry is refused at the same place.
+/// redirects are not acted on here; they are parsed so the whole file
+/// has ONE reader, and the check that judges a manifest's
+/// BOSS_PUBLIC_URL against them
+/// (`tests/a_public_url_names_a_registered_oidc_redirect.rs`) reads
+/// this parse rather than a second one of its own (backlog 63a92827).
 ///
 /// CLOSED KEY SET, every table (backlog 1c1591fa, 2026-09-19; the same
 /// sweep as the rule registry's a2358e7c F3). This file is authored
@@ -191,7 +193,8 @@ pub fn parse_comparison(stdout: &str) -> Result<Comparison, String> {
 /// compounding part was the redirect lint: it would report green over
 /// a `[[oidc_redirect]]` the observer never saw, a check passing on
 /// absence. A key this struct set does not read is now a refusal at
-/// the read, naming the key.
+/// the read, naming the key — and since 63a92827 that lint's awk is
+/// gone, so there is no second reader left to pass on the absence.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccessDeclaration {
@@ -2024,10 +2027,10 @@ why = "x"
     /// CLOSED KEY SET (backlog 1c1591fa, 2026-09-19). access.toml is
     /// authored tree data, the way the dispatcher's rule registry is,
     /// and an open key set drops a typo in silence — worse here than
-    /// in most places, because the lint
-    /// a-public-url-names-a-registered-oidc-redirect.sh then reports
-    /// green over a redirect the observer never saw: a check passing on
-    /// absence. Every table in the declaration is closed, so a
+    /// in most places, because the redirect check (since 63a92827 the
+    /// integration test beside this crate, before that an awk lint)
+    /// would then report green over a redirect the observer never saw:
+    /// a check passing on absence. Every table in the declaration is closed, so a
     /// misspelled key is refused where the file is read, by name.
     #[test]
     fn a_misspelled_key_in_the_access_declaration_is_refused_by_name() {
@@ -2076,6 +2079,36 @@ measured = "2026-09-19: read from the IdP"
                 "the refusal names the misspelled key and the file: {err}"
             );
         }
+    }
+
+    /// A TABLE-HEADER typo — `[[oidc_redirct]]` — is the case the key
+    /// set above says nothing about on its own: an unknown TABLE is not
+    /// an unknown key in a known table. It is refused only because the
+    /// DOCUMENT's own table is closed too, so the misspelled header is
+    /// an unknown key of the root. Asserted separately (backlog
+    /// 63a92827) because it is the case that reads as a smaller truth
+    /// rather than an error: one fewer redirect, not a refusal.
+    #[test]
+    fn a_misspelled_table_header_is_refused_rather_than_read_as_one_fewer() {
+        let text = r#"
+account_zone = "z.dev"
+[[oidc_redirect]]
+hostname = "a.z.dev"
+redirect = "https://a.z.dev/api/auth/oidc/callback"
+registered = true
+measured = "2026-09-20: read from the IdP"
+[[oidc_redirct]]
+hostname = "b.z.dev"
+redirect = "https://b.z.dev/api/auth/oidc/callback"
+registered = true
+measured = "2026-09-20: read from the IdP"
+"#;
+        let err = parse_access_declaration(text, "z.dev")
+            .expect_err("a misspelled table header is refused, never read as one fewer redirect");
+        assert!(
+            err.contains("oidc_redirct") && err.contains(ACCESS_DECLARATION),
+            "the refusal names the misspelled header and the file: {err}"
+        );
     }
 
     #[test]
