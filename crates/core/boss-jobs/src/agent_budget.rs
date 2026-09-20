@@ -59,7 +59,7 @@
 use std::sync::Arc;
 
 use boss_core::agent::{AgentCaps, AgentLoad, BudgetDecision};
-use boss_core::job::{Step, StepStatus};
+use boss_core::job::{Job, JobStatus};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
@@ -212,31 +212,55 @@ pub fn declares_an_agent_run(metadata: &serde_json::Value) -> bool {
     metadata.get(crate::agent_spec::MODEL_KEY).is_some()
 }
 
-/// How many agent runs `held_by` has IN FLIGHT: its steps that are
-/// Active and declare an agent block. Active is the whole test — a
-/// step goes Active at the claim and leaves it at completion — so this
-/// counts precisely the runs handed out and not yet finished, which is
-/// the population `agent_runs` cannot hold because it is written at
-/// finish.
+/// How many agent runs `held_by` has IN FLIGHT: its OPEN `agent-run`
+/// packets. A run opens at the dispatch and closes at the handback, so
+/// this is the population the cap is named after, counted directly.
+///
+/// IT USED TO COUNT CLAIMED STEPS, AND THAT PROXY DEADLOCKED THE QUEUE
+/// (backlog c314921e, measured 2026-09-20). The comment here read "a
+/// step goes Active at the claim and leaves it at completion", which is
+/// true of a step an agent both claims and completes — and false of the
+/// one step kind this gate actually counted. A backlog-item's `build`
+/// completes when its CAR closes, and a `ship-a-change` does not close
+/// until it is PROVEN in prod, so a claim drained on proof rather than
+/// on handback and the cap measured the proof backlog. The end state
+/// was cyclic, not merely slow: a car whose own probe wanted a fresh
+/// dispatch (`THE CLAIMED STEP NAMES ITS RUN`) held the slot that
+/// dispatch needed, so the one event that could prove it was the one
+/// event it forbade. Measured at the jam: the cap read 7 of 6 while the
+/// open-run population read ZERO — wrong by the whole of it, and in the
+/// direction that stops work.
+///
+/// Counting runs is also the collapse CLAUDE.md §9a asks for: the run
+/// is the thing being bounded, so the bound reads the run rather than a
+/// second opinion about it. A run whose session died does not hold a
+/// slot forever — `agent-run-dies-when-building-is-silent` closes it at
+/// twice the step's duration — which is the drain the claim proxy never
+/// had.
 ///
 /// `held_by` is a LIST because an actor is spelled more than one way:
 /// the registered id and every alias that resolves to it (design
-/// 6fda05ae). The claim CAS rewrites an alias holder to the registered
-/// id, but a step nominated before that landed still carries the
-/// alias, and a bound that missed those would under-refuse.
-pub fn in_flight_claims(steps: &[Step], held_by: &[String]) -> u32 {
-    let n = steps
+/// 6fda05ae).
+pub fn in_flight_runs(open_runs: &[Job], held_by: &[String]) -> u32 {
+    let n = open_runs
         .iter()
-        .filter(|s| s.status == StepStatus::Active)
-        .filter(|s| {
-            s.assignee_id
-                .as_deref()
+        .filter(|j| j.status == JobStatus::Open)
+        .filter(|j| {
+            j.metadata
+                .get(RUN_AGENT_KEY)
+                .and_then(serde_json::Value::as_str)
                 .is_some_and(|a| held_by.iter().any(|h| h == a))
         })
-        .filter(|s| declares_an_agent_run(&s.metadata))
         .count();
     u32::try_from(n).unwrap_or(u32::MAX)
 }
+
+/// The key an `agent-run` packet spells its actor under — written by
+/// `boss dispatch` when it opens the run.
+pub const RUN_AGENT_KEY: &str = "agent";
+
+/// The workflow kind a run packet is filed under.
+pub const RUN_KIND: &str = "agent-run";
 
 /// What the concurrency half measured and decided — the same shape
 /// [`Reservation`] has, for the same reason: a refusal carries every
@@ -346,64 +370,56 @@ mod tests {
         assert!(body["reason"].as_str().unwrap().contains("over the cap"));
     }
 
-    /// A step in whatever state the case needs. Only the four fields
-    /// `in_flight_claims` reads carry meaning here.
-    fn step(status: StepStatus, assignee: Option<&str>, agent: bool) -> Step {
-        use boss_core::job::{JobId, StepId};
-        Step {
-            id: StepId::from_uuid(uuid::Uuid::new_v4()),
-            job_id: JobId::from_uuid(uuid::Uuid::new_v4()),
-            kind: "task".into(),
-            title: "build".into(),
-            spec_slug: Some("build".into()),
-            assignee_id: assignee.map(str::to_string),
+    /// A run packet held by `agent`, open or closed.
+    fn run(agent: Option<&str>, status: JobStatus) -> Job {
+        use boss_core::job::JobId;
+        let mut m = serde_json::json!({});
+        if let (Some(a), Some(o)) = (agent, m.as_object_mut()) {
+            o.insert(RUN_AGENT_KEY.into(), a.into());
+        }
+        Job {
+            id: JobId::new(),
+            kind: "agent-run".into(),
+            workflow_version: 1,
+            subject: boss_core::job::Subject::new("custom", "bosspipeline"),
+            title: "run".into(),
+            owner_id: "emp-david".into(),
             status,
-            sort_order: 0,
-            blocked_by: vec![],
-            sign_offs_required: Vec::new(),
-            assurance_required: None,
-            sign_offs: Vec::new(),
-            fields: Vec::new(),
-            completed_on: None,
-            completed_by: None,
-            completed_at: None,
-            metadata: if agent {
-                serde_json::json!({crate::agent_spec::MODEL_KEY: "opus-5[1m]"})
-            } else {
-                serde_json::json!({})
-            },
-            notes: None,
-            step_plugin_version: 0,
-            embedded_job: None,
+            priority: boss_core::job::Priority::Standard,
+            opened_on: chrono::NaiveDate::from_ymd_opt(2026, 9, 20).unwrap(),
+            due_on: None,
+            closed_on: None,
+            metadata: m,
+            tags: vec![],
+            partition: boss_core::partition::Partition::Real,
         }
     }
 
+    /// THE POPULATION IS THE RUNS (backlog c314921e). Counting claimed
+    /// steps measured the proof backlog instead and deadlocked the
+    /// queue at 7 of 6 with zero runs actually going.
     #[test]
-    fn in_flight_counts_the_actors_active_agent_claims_and_nothing_else() {
+    fn in_flight_counts_the_actors_open_runs_and_nothing_else() {
         let held_by = vec![
             "agent-claude".to_string(),
             "claude@algedonic.dev".to_string(),
         ];
-        let steps = vec![
-            // Two runs genuinely in flight — one held under the
-            // registered id, one under an alias the CAS had not yet
-            // rewritten.
-            step(StepStatus::Active, Some("agent-claude"), true),
-            step(StepStatus::Active, Some("claude@algedonic.dev"), true),
-            // Ready and claimed is not running: the queue read hands
-            // these out, and counting them would refuse the claim the
-            // door is judging.
-            step(StepStatus::Ready, Some("agent-claude"), true),
+        let runs = vec![
+            // Two runs genuinely going — one under the registered id,
+            // one under an alias the registry ties to it.
+            run(Some("agent-claude"), JobStatus::Open),
+            run(Some("claude@algedonic.dev"), JobStatus::Open),
+            // Handed back. Its packet's `build` step may well still be
+            // Active — the car has not been proven — but the agent is
+            // not running it, which is the whole correction.
+            run(Some("agent-claude"), JobStatus::Closed),
             // Somebody else's run.
-            step(StepStatus::Active, Some("agent-other"), true),
-            // The actor's own hand work: active, theirs, no agent
-            // block — not a run, so not a run in flight.
-            step(StepStatus::Active, Some("agent-claude"), false),
-            // Unassigned.
-            step(StepStatus::Active, None, true),
+            run(Some("agent-other"), JobStatus::Open),
+            // A run naming no agent belongs to nobody here.
+            run(None, JobStatus::Open),
         ];
-        assert_eq!(in_flight_claims(&steps, &held_by), 2);
-        assert_eq!(in_flight_claims(&[], &held_by), 0);
+        assert_eq!(in_flight_runs(&runs, &held_by), 2);
+        assert_eq!(in_flight_runs(&[], &held_by), 0);
     }
 
     #[test]

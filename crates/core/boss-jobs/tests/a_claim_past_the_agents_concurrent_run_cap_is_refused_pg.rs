@@ -8,10 +8,24 @@
 //! `a.platform-admin.opus-5-1m` held 47 ready packets, and a puller
 //! firing `boss dispatch --next` on an interval would have claimed
 //! every one of them under a budget that could not yet see the
-//! previous claim. This is the bound: the actor's ACTIVE
-//! agent-blocked steps, judged against `agents.max_concurrent_runs`
-//! — the column that until now was read only by the recorder, after a
-//! run finished, where it can record a fact and stop nothing.
+//! previous claim. This is the bound: the actor's OPEN `agent-run`
+//! packets, judged against `agents.max_concurrent_runs` — the column
+//! that until now was read only by the recorder, after a run finished,
+//! where it can record a fact and stop nothing.
+//!
+//! IT BOUNDED ACTIVE CLAIMS UNTIL c314921e, AND THE PROXY DEADLOCKED
+//! THE QUEUE. A backlog-item's `build` does not drain at the handback;
+//! it drains when its car closes, and a `ship-a-change` does not close
+//! until it is PROVEN in prod. So the bound measured the proof backlog
+//! — 7 of 6 in flight against an open-run population of ZERO — and one
+//! of the seven was a car whose own probe wanted a fresh dispatch, so
+//! the event that would have proven it was the event it forbade.
+//!
+//! `boss dispatch` claims the step and THEN files the run, so a puller
+//! firing on an interval is still bounded: each dispatch's run exists
+//! before the next one's claim is judged. Two dispatches overlapping
+//! inside that one window can both be admitted — a narrower race than
+//! the proxy's, and the direction a serial operator never sees.
 //!
 //! Against the Pg adapters, through the same claim endpoint `boss
 //! dispatch` calls, on the rows the schema ships (`agent-claude`,
@@ -24,6 +38,8 @@
 //! 3. A person claiming the same step is admitted: the cap is the
 //!    agent's, and a person doing the work by hand is allowed.
 //! 4. A row with NO cap (the seeded default) bounds nothing.
+//! 5. A step still Active from a run that is OVER holds no slot —
+//!    the regression that deadlocked the queue.
 
 use std::sync::Arc;
 
@@ -60,6 +76,27 @@ fn packet() -> Job {
         due_on: None,
         closed_on: None,
         metadata: serde_json::json!({}),
+        tags: vec![],
+        partition: boss_core::partition::Partition::Real,
+    }
+}
+
+/// A run in flight: the `agent-run` packet `boss dispatch` files right
+/// after its claim is admitted. Open, and naming its agent.
+fn open_run(agent: &str) -> Job {
+    Job {
+        id: JobId::new(),
+        kind: "agent-run".into(),
+        workflow_version: 1,
+        subject: Subject::new("custom", "bosspipeline"),
+        title: "run".into(),
+        owner_id: "emp-david".into(),
+        status: JobStatus::Open,
+        priority: Priority::Standard,
+        opened_on: NaiveDate::from_ymd_opt(2026, 9, 20).unwrap(),
+        due_on: None,
+        closed_on: None,
+        metadata: serde_json::json!({ "agent": agent }),
         tags: vec![],
         partition: boss_core::partition::Partition::Real,
     }
@@ -192,6 +229,10 @@ async fn a_second_claim_at_the_cap_is_refused_with_the_count() {
     assert_eq!(body["assignee_id"], AGENT);
     assert_eq!(body["status"], "active");
 
+    // …and `boss dispatch` files its run, which is what the next claim
+    // is judged against.
+    jobs.create_job(&open_run(AGENT)).await.expect("run lands");
+
     // The second, which a puller firing again a minute later would
     // make: one run in flight, cap of one.
     let body = claim(&app, &steps[1], AGENT, StatusCode::CONFLICT).await;
@@ -222,13 +263,41 @@ async fn a_second_claim_at_the_cap_is_refused_with_the_count() {
     assert_eq!(body["assignee_id"], "emp-david");
 }
 
+/// THE DEADLOCK (backlog c314921e). A `build` step whose run was
+/// handed back stays Active until its car closes, and the car waits to
+/// be PROVEN — which can take days, and in the measured case could
+/// only happen via the dispatch this gate was refusing. The run is
+/// closed, so the slot is free, so the claim is admitted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claim_left_active_by_a_finished_run_holds_no_slot() {
+    let db = TestDb::new().await;
+    cap_the_agent(&db, Some(1)).await;
+    let (app, jobs, steps) = app_with_steps(&db, 2).await;
+
+    // A run that ran and was reported: its packet is CLOSED.
+    let mut done = open_run(AGENT);
+    done.status = JobStatus::Closed;
+    done.closed_on = NaiveDate::from_ymd_opt(2026, 9, 20);
+    jobs.create_job(&done).await.expect("run lands");
+
+    // Its step is still Active — the car has landed and is not proven.
+    let body = claim(&app, &steps[0], AGENT, StatusCode::OK).await;
+    assert_eq!(body["status"], "active");
+
+    // Under the old bound this was 1 of 1 and the queue stopped here.
+    let body = claim(&app, &steps[1], AGENT, StatusCode::OK).await;
+    assert_eq!(body["assignee_id"], AGENT);
+    assert_eq!(body["status"], "active");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_undeclared_cap_bounds_nothing() {
     // The seeded default — `max_concurrent_runs` NULL — admits every
     // claim, the boot-guard rule every cap reader here follows.
     let db = TestDb::new().await;
-    let (app, _, steps) = app_with_steps(&db, 3).await;
+    let (app, jobs, steps) = app_with_steps(&db, 3).await;
     for step_id in &steps {
+        jobs.create_job(&open_run(AGENT)).await.expect("run lands");
         let body = claim(&app, step_id, AGENT, StatusCode::OK).await;
         assert_eq!(body["assignee_id"], AGENT);
     }

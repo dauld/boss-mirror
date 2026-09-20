@@ -1596,9 +1596,19 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
     // A puller (`boss dispatch --next` on an interval) against the 47
     // ready packets measured at `a.platform-admin.opus-5-1m` would
     // have taken all 47 that way. This is the bound the money one
-    // cannot be: the actor's ACTIVE agent-blocked steps against its
+    // cannot be: the actor's OPEN `agent-run` packets against its
     // row's `max_concurrent_runs`. Under the cap nothing changes; a
     // row declaring no cap bounds nothing, like an undeclared budget.
+    //
+    // IT COUNTED CLAIMED STEPS UNTIL c314921e, AND THE PROXY DEADLOCKED
+    // THE QUEUE. A backlog-item's `build` does not drain at the
+    // handback — it drains when its car closes, and a `ship-a-change`
+    // does not close until it is PROVEN in prod — so the bound measured
+    // the proof backlog. Measured at the jam, 2026-09-20: 7 of 6 in
+    // flight against an open-run population of ZERO, and one of the
+    // seven was a car whose own probe wanted a fresh dispatch, so the
+    // event that would have proven it was the event it forbade. The
+    // run is what the cap is named after; it is now what the cap reads.
     // After the budget gate, because `BudgetDecision::decide` reports
     // money before concurrency and the two doors keep that order.
     if let Some(row) = agent_row.as_ref()
@@ -1612,24 +1622,29 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
         let held_by: Vec<String> = std::iter::once(row.id.clone())
             .chain(row.aliases.iter().cloned())
             .collect();
-        let mut held = Vec::new();
-        for id in &held_by {
-            match state
-                .jobs
-                .list_assignments(Some(id), &[], IN_FLIGHT_SCAN_LIMIT)
-                .await
-            {
-                Ok(rows) => held.extend(rows.into_iter().map(|r| r.step)),
-                Err(e) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("concurrency gate could not count {id}'s runs in flight: {e}"),
-                    )
-                        .into_response();
-                }
+        // One read of the population itself: the open `agent-run`
+        // packets. A failed read REFUSES rather than admitting — an
+        // uncounted bound is not a bound, and the money gate above
+        // fails in the same direction.
+        let filter = JobFilter {
+            kind: Some(crate::agent_budget::RUN_KIND.to_string()),
+            status: Some(JobStatus::Open),
+            ..Default::default()
+        };
+        let open_runs = match state.jobs.list_jobs(&filter, IN_FLIGHT_SCAN_LIMIT, 0).await {
+            Ok((rows, _)) => rows,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!(
+                        "concurrency gate could not count {}'s runs in flight: {e}",
+                        row.id
+                    ),
+                )
+                    .into_response();
             }
-        }
-        let in_flight = crate::agent_budget::in_flight_claims(&held, &held_by);
+        };
+        let in_flight = crate::agent_budget::in_flight_runs(&open_runs, &held_by);
         let check = crate::agent_budget::Concurrency::measure(&row.id, Some(cap), in_flight);
         if !check.decision.is_allowed() {
             return (StatusCode::CONFLICT, Json(check.refusal_body())).into_response();
