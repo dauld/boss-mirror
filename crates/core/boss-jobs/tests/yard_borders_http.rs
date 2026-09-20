@@ -31,7 +31,6 @@ use boss_jobs::dispatcher_firings::{
     DispatcherFiringsRepository, InMemoryDispatcherFirings, LastFiring,
 };
 use boss_jobs::http::{JobsApiState, router};
-use boss_jobs::step_registry::StepRegistry;
 use boss_jobs::{InMemoryJobs, JobsRepository};
 use boss_policy_client::types::{AccessTier, User};
 use boss_policy_client::{Action, FakePolicyClient, PolicyClient, Resource, Scope};
@@ -129,34 +128,27 @@ fn app() -> (axum::Router, Arc<InMemoryJobs>, Arc<dyn CadenceRepository>) {
         .seed(dock_station_row())
         .expect("seed the dock row");
     let state = JobsApiState {
-        jobs: jobs.clone(),
-        bus,
-        publisher: DomainPublisher::new(bus_dyn, "jobs"),
-        step_registry: Arc::new(StepRegistry::v1()),
-        policy: policy_client,
-        kind_registry: None,
-        plugin_registry: None,
-        job_edges: None,
         stations: Some(stations),
-        calendar: None,
-        subject_kinds: None,
-        subject_existence: None,
-        roster: None,
-        clock: Arc::new(boss_clock_client::FixedClockClient::new(
-            boss_clock_client::ClockNow {
-                now: t(NOW),
-                simulated: false,
-                epoch_start: None,
-                epoch_end: None,
-                paused: false,
-                restart_in_progress: false,
-                warp_factor: None,
-            },
-        )),
         cadence: Some(cadence.clone()),
         delivery: Some(delivery),
         dispatcher_firings: Some(dispatcher_firings),
-        agent_budget: None,
+        ..JobsApiState::minimal(
+            jobs.clone(),
+            bus,
+            DomainPublisher::new(bus_dyn, "jobs"),
+            policy_client,
+            Arc::new(boss_clock_client::FixedClockClient::new(
+                boss_clock_client::ClockNow {
+                    now: t(NOW),
+                    simulated: false,
+                    epoch_start: None,
+                    epoch_end: None,
+                    paused: false,
+                    restart_in_progress: false,
+                    warp_factor: None,
+                },
+            )),
+        )
     };
     (router(state), jobs, cadence)
 }

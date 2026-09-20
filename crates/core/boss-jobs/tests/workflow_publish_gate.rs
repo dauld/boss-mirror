@@ -30,7 +30,6 @@ use boss_jobs::registry::{
     InMemoryWorkflows, StepSpec, Terminal, WorkflowError, WorkflowRegistry, WorkflowSpec,
     WorkflowStatus,
 };
-use boss_jobs::step_registry::StepRegistry;
 use boss_policy_client::{AccessTier, Action, Resource, Scope, User};
 use boss_policy_client::{FakePolicyClient, PolicyClient};
 use boss_testing::RecordingEventBus;
@@ -57,7 +56,6 @@ fn build_app(registry: Arc<dyn WorkflowRegistry>) -> Router {
     let bus = RecordingEventBus::new();
     let bus_dyn: Arc<dyn EventBus> = bus.clone();
     let publisher = DomainPublisher::new(bus_dyn, "jobs");
-    let step_registry = Arc::new(StepRegistry::v1());
     let policy: Arc<dyn PolicyClient> = Arc::new(
         FakePolicyClient::builder()
             .allow("cto", Action::Read, Resource::workflow(), Scope::All)
@@ -68,26 +66,14 @@ fn build_app(registry: Arc<dyn WorkflowRegistry>) -> Router {
             .build(),
     );
     let state = JobsApiState {
-        // Station registry not exercised here; the gate under test is the
-        // Workflow publish path (the landed idiom for unused registries).
-        stations: None,
-        job_edges: None,
-        jobs,
-        bus,
-        publisher,
-        step_registry,
-        policy,
         kind_registry: Some(registry),
-        plugin_registry: None,
-        calendar: None,
-        subject_kinds: None,
-        subject_existence: None,
-        roster: None,
-        clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        cadence: None,
-        delivery: None,
-        dispatcher_firings: None,
-        agent_budget: None,
+        ..JobsApiState::minimal(
+            jobs,
+            bus,
+            publisher,
+            policy,
+            std::sync::Arc::new(boss_clock_client::WallClockClient),
+        )
     };
     router(state)
 }

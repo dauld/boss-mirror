@@ -93,24 +93,15 @@ fn app() -> axum::Router {
     let bus = RecordingEventBus::new();
     let bus_dyn: Arc<dyn EventBus> = bus.clone();
     let state = JobsApiState {
-        job_edges: None,
-        stations: None,
-        jobs,
-        bus,
-        publisher: DomainPublisher::new(bus_dyn, "jobs"),
-        step_registry: Arc::new(StepRegistry::v1()),
-        policy,
         kind_registry: Some(kinds as Arc<dyn WorkflowRegistry>),
-        plugin_registry: None,
-        calendar: None,
-        subject_kinds: None,
-        subject_existence: None,
         roster: Some(Arc::new(AdminRoster)),
-        clock: Arc::new(boss_clock_client::WallClockClient),
-        cadence: None,
-        delivery: None,
-        dispatcher_firings: None,
-        agent_budget: None,
+        ..JobsApiState::minimal(
+            jobs,
+            bus,
+            DomainPublisher::new(bus_dyn, "jobs"),
+            policy,
+            Arc::new(boss_clock_client::WallClockClient),
+        )
     };
     router(state)
 }

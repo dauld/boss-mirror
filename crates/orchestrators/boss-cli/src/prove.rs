@@ -978,7 +978,7 @@ pub(crate) fn admit(probe: &str, from_car: bool) -> Admission {
     Admission { refusal, warnings }
 }
 
-/// THE FOUR SHAPE WARNINGS, in the wording every door can use (the
+/// THE SIX SHAPE WARNINGS, in the wording every door can use (the
 /// prefix is the door's). All read the probe TEXT, like the two rules
 /// above them, and all are host-independent — so they are said at every
 /// door a human is standing at, `--from-car` or not. The third
@@ -987,6 +987,19 @@ pub(crate) fn admit(probe: &str, from_car: bool) -> Admission {
 /// place its stderr has a reader is the terminal it is typed at. The
 /// fourth (a92571a6) is the same argument again: a cutoff dated from a
 /// moving HEAD answers 75 forever, never a false green.
+///
+/// THE FIFTH AND SIXTH (e7cf78c6) ARE WARNINGS ON A DIFFERENT ARGUMENT,
+/// and the difference is worth keeping in sight: a counted page and a
+/// grep for a bare name can both record a FALSE GREEN, which is the
+/// direction that made `reads_git_time_with_an_offset` a refusal. What
+/// keeps them here is decidability, not harmlessness. `limit=` is
+/// correct in most of the probes that carry it (16 of 49 measured pair
+/// it with `.total` already, and a page that is never counted is fine),
+/// and a grep for a mention is a legitimate claim the text cannot be
+/// told apart from the defect — so a refusal would fire on correct
+/// probes and earn a routine override, which is read by nobody
+/// (CLAUDE.md §Diagnosis). Both texts therefore SAY that they can fail
+/// open, because a warning is only worth what its reader does with it.
 pub(crate) fn shape_warnings(probe: &str) -> impl Iterator<Item = String> {
     let inverted = boss_jobs::probe::asserts_its_own_negation(probe).then(|| {
         format!(
@@ -1047,11 +1060,41 @@ pub(crate) fn shape_warnings(probe: &str) -> impl Iterator<Item = String> {
             recipe = boss_jobs::probe::CAR_INSTANT_RECIPE,
         )
     });
+    let truncated = boss_jobs::probe::counts_a_page_it_may_not_have_read(probe).map(|token| {
+        format!(
+            "THIS PROBE COUNTS A PAGE IT MAY NOT HAVE READ — `{token}` asks the server for a \
+             PAGE, and a page answers in the same shape the whole list does: \
+             `{{\"data\":[…],\"total\":345}}` is a correct reply to a request for 300, and \
+             nothing in it says 45 rows were left behind. A count taken over that page is a \
+             count of a set the probe did not see.\n  {evidence}\n  \
+             UNLIKE THE THREE WARNINGS ABOVE, THIS SHAPE CAN FAIL OPEN: a probe that counts \
+             a page to assert an ABSENCE — no row since the cutoff matches the bad shape — \
+             records a false green when the row it wanted was in the tail. It is a warning \
+             and not a refusal only because `limit=` is right far more often than it is \
+             wrong and this is a coarse text scan, so read this one rather than skim it.",
+            evidence = boss_jobs::probe::TRUNCATED_PAGE_EVIDENCE,
+        )
+    });
+    let mention = boss_jobs::probe::greps_a_name_where_a_definition_is_meant(probe).map(|name| {
+        format!(
+            "THIS PROBE COUNTS A NAME WHERE A DEFINITION LOOKS LIKE WHAT IT MEANS — `{name}` \
+             matches every line that MENTIONS it, and the doc comment above a call site is \
+             such a line. The count is nonzero whether or not the thing was ever defined.\n  \
+             {evidence}\n  \
+             This is a warning, not a refusal, because the text cannot say which you meant: \
+             counting a mention is a legitimate claim (a call site exists, a literal is still \
+             in the config, a name was not removed). But when a definition WAS meant it fails \
+             OPEN — absent reads as present — so it is worth the ten seconds to check.",
+            evidence = boss_jobs::probe::MENTION_NOT_DEFINITION_EVIDENCE,
+        )
+    });
     inverted
         .into_iter()
         .chain(rewritten)
         .chain(unguarded)
         .chain(moving)
+        .chain(truncated)
+        .chain(mention)
 }
 
 /// The override, resolved once: `None` when the flag was not given,
@@ -4220,6 +4263,72 @@ mod tests {
                      case ${since:-empty} in empty|*[!0-9]*) echo 'not yet'; exit 75;; esac";
         assert!(
             !shape_warnings(fixed).any(|w| w.contains("DATES ITS CUTOFF")),
+            "{:?}",
+            shape_warnings(fixed).collect::<Vec<_>>()
+        );
+    }
+
+    /// A LIMIT IS NOT A FILTER, SAID AT THE DOOR (e7cf78c6). Car
+    /// ead4a6ed's recorded probe is the live instance: 300 rows asked
+    /// of a list of 345, with the row it waited on in the tail.
+    #[test]
+    fn a_probe_that_counts_a_page_is_warned_about() {
+        let probe = "n=$(boss-sor-read '/api/jobs?kind=gate-run&limit=300' \
+                     | jq '[.data[] | select(.metadata.flake == true)] | length'); \
+                     [ \"$n\" -ge 1 ] && echo flake:seen";
+        let w: Vec<String> = shape_warnings(probe).collect();
+        let said = w
+            .iter()
+            .find(|w| w.contains("COUNTS A PAGE"))
+            .unwrap_or_else(|| panic!("{w:?}"));
+        assert!(said.contains("limit=300"), "{said}");
+        assert!(
+            said.contains(boss_jobs::probe::TRUNCATED_PAGE_EVIDENCE),
+            "{said}"
+        );
+        // It says which way it fails, because that is what its reader
+        // decides on.
+        assert!(said.contains("CAN FAIL OPEN"), "{said}");
+        // And the rewrite it names — one body, rows judged against the
+        // total — is not warned about in turn.
+        let fixed = "body=$(boss-sor-read '/api/jobs?kind=gate-run&limit=300'); \
+                     rows=$(printf '%s' \"$body\" | jq '.data | length'); \
+                     seen=$(printf '%s' \"$body\" | jq '.total'); \
+                     [ \"$rows\" -eq \"$seen\" ] || { echo 'not yet: the page is not the list'; exit 75; }";
+        assert!(
+            !shape_warnings(fixed).any(|w| w.contains("COUNTS A PAGE")),
+            "{:?}",
+            shape_warnings(fixed).collect::<Vec<_>>()
+        );
+    }
+
+    /// A MENTION IS NOT A DEFINITION, SAID AT THE SAME DOOR (e7cf78c6):
+    /// the bare name matched the doc comment, the count came back
+    /// nonzero, and nothing was defined.
+    #[test]
+    fn a_probe_that_greps_a_bare_name_is_warned_about() {
+        let probe = "c=$(git show HEAD:crates/core/boss-jobs/src/claims.rs \
+                     | grep -c in_flight_claims); \
+                     [ \"$c\" -ge 1 ] && echo claim:ok";
+        let w: Vec<String> = shape_warnings(probe).collect();
+        let said = w
+            .iter()
+            .find(|w| w.contains("COUNTS A NAME"))
+            .unwrap_or_else(|| panic!("{w:?}"));
+        assert!(said.contains("in_flight_claims"), "{said}");
+        assert!(
+            said.contains(boss_jobs::probe::MENTION_NOT_DEFINITION_EVIDENCE),
+            "{said}"
+        );
+        assert!(said.contains("warning, not a refusal"), "{said}");
+        // The quoted definition it names is not warned about in turn —
+        // the negative case that keeps this from warning about every
+        // grep there is.
+        let fixed = "c=$(git show HEAD:crates/core/boss-jobs/src/claims.rs \
+                     | grep -c 'pub fn in_flight_claims'); \
+                     [ \"$c\" -ge 1 ] && echo claim:ok";
+        assert!(
+            !shape_warnings(fixed).any(|w| w.contains("COUNTS A NAME")),
             "{:?}",
             shape_warnings(fixed).collect::<Vec<_>>()
         );

@@ -63,24 +63,15 @@ fn build_app(registry: Arc<dyn StepPluginRegistry>, policy: Arc<dyn PolicyClient
     let publisher = DomainPublisher::new(bus_dyn, "jobs");
     let step_registry = Arc::new(StepRegistry::v1());
     let state = JobsApiState {
-        job_edges: None,
-        stations: None,
-        jobs,
-        bus,
-        publisher,
         step_registry,
-        policy,
-        kind_registry: None,
         plugin_registry: Some(registry),
-        calendar: None,
-        subject_kinds: None,
-        subject_existence: None,
-        roster: None,
-        clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        cadence: None,
-        delivery: None,
-        dispatcher_firings: None,
-        agent_budget: None,
+        ..JobsApiState::minimal(
+            jobs,
+            bus,
+            publisher,
+            policy,
+            std::sync::Arc::new(boss_clock_client::WallClockClient),
+        )
     };
     router(state)
 }

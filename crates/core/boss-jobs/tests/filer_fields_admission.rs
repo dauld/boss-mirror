@@ -25,7 +25,6 @@ use boss_jobs::registry::{
     StepSpec, Terminal, WorkflowRegistry, WorkflowSpec, platform_bundle_path,
 };
 use boss_jobs::seed_loader::load_workflows;
-use boss_jobs::step_registry::StepRegistry;
 use boss_jobs::{InMemoryJobs, InMemoryWorkflows, JobsRepository};
 use boss_policy_client::{Action, FakePolicyClient, PolicyClient, Resource, Scope};
 use boss_testing::RecordingEventBus;
@@ -72,24 +71,14 @@ fn app_with(specs: Vec<WorkflowSpec>) -> (axum::Router, Arc<InMemoryJobs>) {
     let bus = RecordingEventBus::new();
     let bus_dyn: Arc<dyn EventBus> = bus.clone();
     let state = JobsApiState {
-        job_edges: None,
-        stations: None,
-        jobs: jobs.clone(),
-        bus,
-        publisher: DomainPublisher::new(bus_dyn, "jobs"),
-        step_registry: Arc::new(StepRegistry::v1()),
-        policy,
         kind_registry: Some(kind_registry),
-        plugin_registry: None,
-        calendar: None,
-        subject_kinds: None,
-        subject_existence: None,
-        roster: None,
-        clock: Arc::new(boss_clock_client::WallClockClient),
-        cadence: None,
-        delivery: None,
-        dispatcher_firings: None,
-        agent_budget: None,
+        ..JobsApiState::minimal(
+            jobs.clone(),
+            bus,
+            DomainPublisher::new(bus_dyn, "jobs"),
+            policy,
+            Arc::new(boss_clock_client::WallClockClient),
+        )
     };
     (router(state), jobs)
 }

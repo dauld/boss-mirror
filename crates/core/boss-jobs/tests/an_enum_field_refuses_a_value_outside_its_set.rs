@@ -35,7 +35,6 @@ use boss_core::job::{
 use boss_core::port::EventBus;
 use boss_core::publisher::DomainPublisher;
 use boss_jobs::http::{JobsApiState, router};
-use boss_jobs::step_registry::StepRegistry;
 use boss_jobs::{InMemoryJobs, JobsRepository};
 use boss_policy_client::{
     AccessTier, Action, FakePolicyClient, PolicyClient, Resource, Scope, User,
@@ -84,26 +83,13 @@ fn build_app() -> (Router, Arc<InMemoryJobs>) {
     let bus = RecordingEventBus::new();
     let bus_dyn: Arc<dyn EventBus> = bus.clone();
     let publisher = DomainPublisher::new(bus_dyn, "jobs");
-    let state = JobsApiState {
-        job_edges: None,
-        stations: None,
-        jobs: jobs.clone(),
+    let state = JobsApiState::minimal(
+        jobs.clone(),
         bus,
         publisher,
-        step_registry: Arc::new(StepRegistry::v1()),
-        policy: allow_update(),
-        kind_registry: None,
-        plugin_registry: None,
-        calendar: None,
-        subject_kinds: None,
-        subject_existence: None,
-        roster: None,
-        clock: Arc::new(boss_clock_client::WallClockClient),
-        cadence: None,
-        delivery: None,
-        dispatcher_firings: None,
-        agent_budget: None,
-    };
+        allow_update(),
+        Arc::new(boss_clock_client::WallClockClient),
+    );
     (router(state), jobs)
 }
 

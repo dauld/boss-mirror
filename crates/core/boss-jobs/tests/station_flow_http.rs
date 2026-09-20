@@ -28,7 +28,6 @@ use boss_core::port::EventBus;
 use boss_core::publisher::DomainPublisher;
 use boss_jobs::http::{JobsApiState, router};
 use boss_jobs::station_queue::{StationPredicate, StepMatch};
-use boss_jobs::step_registry::StepRegistry;
 use boss_jobs::{InMemoryJobs, InMemoryStations, JobsRepository, StationKind, StationSpec};
 use boss_policy_client::types::{AccessTier, User};
 use boss_policy_client::{Action, FakePolicyClient, PolicyClient, Resource, Scope};
@@ -226,34 +225,24 @@ async fn app() -> axum::Router {
     .expect("events record");
 
     let state = JobsApiState {
-        jobs,
-        bus,
-        publisher: DomainPublisher::new(bus_dyn, "jobs"),
-        step_registry: Arc::new(StepRegistry::v1()),
-        policy,
-        kind_registry: None,
-        plugin_registry: None,
-        job_edges: None,
         stations: Some(stations),
-        calendar: None,
-        subject_kinds: None,
-        subject_existence: None,
-        roster: None,
-        clock: Arc::new(boss_clock_client::FixedClockClient::new(
-            boss_clock_client::ClockNow {
-                now: Utc::now(),
-                simulated: false,
-                epoch_start: None,
-                epoch_end: None,
-                paused: false,
-                restart_in_progress: false,
-                warp_factor: None,
-            },
-        )),
-        cadence: None,
-        delivery: None,
-        dispatcher_firings: None,
-        agent_budget: None,
+        ..JobsApiState::minimal(
+            jobs,
+            bus,
+            DomainPublisher::new(bus_dyn, "jobs"),
+            policy,
+            Arc::new(boss_clock_client::FixedClockClient::new(
+                boss_clock_client::ClockNow {
+                    now: Utc::now(),
+                    simulated: false,
+                    epoch_start: None,
+                    epoch_end: None,
+                    paused: false,
+                    restart_in_progress: false,
+                    warp_factor: None,
+                },
+            )),
+        )
     };
     router(state)
 }

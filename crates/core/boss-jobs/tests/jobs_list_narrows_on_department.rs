@@ -38,7 +38,6 @@ use boss_jobs::InMemoryJobs;
 use boss_jobs::JobsRepository;
 use boss_jobs::http::{JobsApiState, router};
 use boss_jobs::registry::{InMemoryWorkflows, WorkflowRegistry, WorkflowSpec};
-use boss_jobs::step_registry::StepRegistry;
 use boss_policy_client::{
     AccessTier, Action, FakePolicyClient, PolicyClient, Resource, Scope, User,
 };
@@ -110,24 +109,8 @@ fn app(kinds: Option<Arc<InMemoryWorkflows>>) -> (Router, Arc<InMemoryJobs>) {
         warp_factor: None,
     }));
     let state = JobsApiState {
-        job_edges: None,
-        stations: None,
-        jobs: jobs.clone(),
-        bus,
-        publisher,
-        step_registry: Arc::new(StepRegistry::v1()),
-        policy,
         kind_registry: kinds.map(|k| k as Arc<dyn WorkflowRegistry>),
-        plugin_registry: None,
-        calendar: None,
-        subject_kinds: None,
-        subject_existence: None,
-        roster: None,
-        clock,
-        cadence: None,
-        delivery: None,
-        dispatcher_firings: None,
-        agent_budget: None,
+        ..JobsApiState::minimal(jobs.clone(), bus, publisher, policy, clock)
     };
     (router(state), jobs)
 }

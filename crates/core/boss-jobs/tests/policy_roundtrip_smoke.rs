@@ -81,24 +81,15 @@ async fn smoke_tester_can_read_workflows_through_real_policy_api() {
     let kind_registry: Arc<dyn WorkflowRegistry> = Arc::new(InMemoryWorkflows::new());
 
     let state = JobsApiState {
-        job_edges: None,
-        stations: None,
-        jobs,
-        bus,
-        publisher,
         step_registry,
-        policy,
         kind_registry: Some(kind_registry),
-        plugin_registry: None,
-        calendar: None,
-        subject_kinds: None,
-        subject_existence: None,
-        roster: None,
-        clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        cadence: None,
-        delivery: None,
-        dispatcher_firings: None,
-        agent_budget: None,
+        ..JobsApiState::minimal(
+            jobs,
+            bus,
+            publisher,
+            policy,
+            std::sync::Arc::new(boss_clock_client::WallClockClient),
+        )
     };
 
     let app = router(state);

@@ -221,24 +221,16 @@ async fn an_api(url: &str) -> axum::Router {
     let agents: Arc<dyn AgentsRegistry> = Arc::new(PgAgents::new(pool.clone()));
     let runs: Arc<dyn AgentRunLog> = Arc::new(PgAgentRuns::new(pool.clone()));
     router(JobsApiState {
-        jobs,
-        bus,
-        publisher: DomainPublisher::new(bus_dyn, "jobs"),
-        step_registry: Arc::new(boss_jobs::step_registry::StepRegistry::v1()),
-        policy,
         kind_registry: Some(Arc::new(PgWorkflows::new(pool.clone())) as Arc<dyn WorkflowRegistry>),
-        plugin_registry: None,
-        job_edges: None,
         stations: Some(Arc::new(PgStations::new(pool.clone())) as Arc<dyn StationRegistry>),
-        calendar: None,
-        subject_kinds: None,
-        subject_existence: None,
-        roster: None,
-        clock: Arc::new(boss_clock_client::WallClockClient),
-        cadence: None,
-        delivery: None,
-        dispatcher_firings: None,
         agent_budget: Some(Arc::new(BudgetDoor { agents, runs })),
+        ..JobsApiState::minimal(
+            jobs,
+            bus,
+            DomainPublisher::new(bus_dyn, "jobs"),
+            policy,
+            Arc::new(boss_clock_client::WallClockClient),
+        )
     })
 }
 

@@ -59,24 +59,14 @@ fn build_app(policy: Arc<dyn PolicyClient>) -> (Router, Arc<InMemoryJobs>) {
     let publisher = DomainPublisher::new(bus_dyn, "jobs");
     let step_registry = Arc::new(StepRegistry::v1());
     let state = JobsApiState {
-        job_edges: None,
-        stations: None,
-        jobs: jobs.clone(),
-        bus,
-        publisher,
         step_registry,
-        policy,
-        kind_registry: None,
-        plugin_registry: None,
-        calendar: None,
-        subject_kinds: None,
-        subject_existence: None,
-        roster: None,
-        clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        cadence: None,
-        delivery: None,
-        dispatcher_firings: None,
-        agent_budget: None,
+        ..JobsApiState::minimal(
+            jobs.clone(),
+            bus,
+            publisher,
+            policy,
+            std::sync::Arc::new(boss_clock_client::WallClockClient),
+        )
     };
     (router(state), jobs)
 }

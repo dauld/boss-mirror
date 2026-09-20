@@ -34,7 +34,6 @@ use boss_jobs::agents::{InMemoryAgents, LoginDoor, UNRESOLVED_LOGIN, resolve_log
 use boss_jobs::http::{JobsApiState, router};
 use boss_jobs::owner_resolution::RosterLookup;
 use boss_jobs::registry::seedable_platform_workflows;
-use boss_jobs::step_registry::StepRegistry;
 use boss_jobs::{InMemoryJobs, InMemoryWorkflows, WorkflowRegistry};
 use boss_policy_client::{Action, FakePolicyClient, PolicyClient, Resource, Scope};
 use boss_testing::RecordingEventBus;
@@ -91,24 +90,15 @@ fn app() -> (axum::Router, Arc<InMemoryJobs>, Arc<RecordingEventBus>) {
     }
     let publisher = DomainPublisher::new(bus_dyn, "jobs");
     let state = JobsApiState {
-        job_edges: None,
-        stations: None,
-        jobs: jobs.clone(),
-        bus: bus.clone(),
-        publisher: publisher.clone(),
-        step_registry: Arc::new(StepRegistry::v1()),
-        policy,
         kind_registry: Some(kinds as Arc<dyn WorkflowRegistry>),
-        plugin_registry: None,
-        calendar: None,
-        subject_kinds: None,
-        subject_existence: None,
         roster: Some(Arc::new(AdminRoster)),
-        clock: Arc::new(boss_clock_client::WallClockClient),
-        cadence: None,
-        delivery: None,
-        dispatcher_firings: None,
-        agent_budget: None,
+        ..JobsApiState::minimal(
+            jobs.clone(),
+            bus.clone(),
+            publisher.clone(),
+            policy,
+            Arc::new(boss_clock_client::WallClockClient),
+        )
     };
     let registry = Arc::new(InMemoryAgents::new().with_agent(AGENT, [ALIAS]));
     let door = Arc::new(LoginDoor::new(registry, publisher));

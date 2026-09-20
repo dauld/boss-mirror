@@ -134,24 +134,14 @@ fn build_app(pool: PgPool) -> Router {
     );
 
     let state = JobsApiState {
-        job_edges: None,
-        stations: None,
-        jobs,
-        bus,
-        publisher,
         step_registry,
-        policy,
-        kind_registry: None,
-        plugin_registry: None,
-        calendar: None,
-        subject_kinds: None,
-        subject_existence: None,
-        roster: None,
-        clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        cadence: None,
-        delivery: None,
-        dispatcher_firings: None,
-        agent_budget: None,
+        ..JobsApiState::minimal(
+            jobs,
+            bus,
+            publisher,
+            policy,
+            std::sync::Arc::new(boss_clock_client::WallClockClient),
+        )
     };
     router(state)
 }

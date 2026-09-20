@@ -969,9 +969,14 @@ impl ParkIntent {
     /// text, unattended on the forge, nothing there reads a warning. So
     /// the same findings `boss prove`'s `admit` says are said here,
     /// from the one definition in `boss_jobs::probe`. They WARN rather
-    /// than refuse, for the reason argued at that door: every shape fails
-    /// closed, so the worst it does is strand a car, and every detector
-    /// is a coarse text scan a false refusal would be too expensive for.
+    /// than refuse, for the reason argued at that door: every detector is
+    /// a coarse text scan a false refusal would be too expensive for.
+    /// FOUR of the six also fail closed, so the worst they do is strand
+    /// a car; the two added by e7cf78c6 — a counted page, a grep for a
+    /// bare name — can record a FALSE GREEN, and warn anyway only
+    /// because the text cannot tell them from the correct probes that
+    /// share their shape. Their wording says so, since that is what a
+    /// reader decides on.
     pub fn probe_warnings(&self) -> Vec<String> {
         match &self.probe {
             None => Vec::new(),

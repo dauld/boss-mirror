@@ -142,6 +142,62 @@ pub struct JobsApiState<R: JobsRepository, B: EventBus> {
     pub agent_budget: Option<Arc<crate::agent_budget::BudgetDoor>>,
 }
 
+impl<R: JobsRepository, B: EventBus> JobsApiState<R, B> {
+    /// The required ports wired, every optional one absent — the base
+    /// a test builds on (backlog 26a856d4).
+    ///
+    /// Use it as the tail of a functional-update literal and name only
+    /// the ports the test actually exercises:
+    ///
+    /// ```ignore
+    /// let state = JobsApiState {
+    ///     kind_registry: Some(kinds),
+    ///     ..JobsApiState::minimal(jobs, bus, publisher, policy, clock)
+    /// };
+    /// ```
+    ///
+    /// Why it exists: every optional dependency added to this struct
+    /// cost ~65 struct-literal edits, because each test spelled every
+    /// field. Car b14afc48 added one port and shipped 73 files, 63 of
+    /// them the one line `dispatcher_firings: None,` — which buried
+    /// the ten files that mattered. The next optional port is one line
+    /// here instead.
+    ///
+    /// The five parameters are the ports with no sensible absence:
+    /// without them the router cannot answer anything. `clock` is
+    /// among them deliberately — a defaulted wall clock would make a
+    /// test's time source implicit, and determinism is one of the five
+    /// correctness properties, not a convenience.
+    pub fn minimal(
+        jobs: Arc<R>,
+        bus: Arc<B>,
+        publisher: DomainPublisher,
+        policy: Arc<dyn PolicyClient>,
+        clock: Arc<dyn boss_clock_client::ClockClient>,
+    ) -> Self {
+        Self {
+            jobs,
+            bus,
+            publisher,
+            step_registry: Arc::new(crate::step_registry::StepRegistry::v1()),
+            policy,
+            clock,
+            kind_registry: None,
+            plugin_registry: None,
+            job_edges: None,
+            stations: None,
+            calendar: None,
+            subject_kinds: None,
+            subject_existence: None,
+            roster: None,
+            cadence: None,
+            dispatcher_firings: None,
+            delivery: None,
+            agent_budget: None,
+        }
+    }
+}
+
 /// `GET /api/jobs/job-edges` — the declared job-to-job link fields.
 /// Read-only: authoring an edge is a migration (it changes what the
 /// write path refuses).

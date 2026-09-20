@@ -67,24 +67,15 @@ fn build_app(
             .build(),
     );
     let state = JobsApiState {
-        job_edges: None,
-        stations: None,
-        jobs: jobs.clone(),
-        bus: bus.clone(),
-        publisher,
         step_registry,
-        policy,
         kind_registry: Some(kinds),
-        plugin_registry: None,
-        calendar: None,
-        subject_kinds: None,
-        subject_existence: None,
-        roster: None,
-        clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        cadence: None,
-        delivery: None,
-        dispatcher_firings: None,
-        agent_budget: None,
+        ..JobsApiState::minimal(
+            jobs.clone(),
+            bus.clone(),
+            publisher,
+            policy,
+            std::sync::Arc::new(boss_clock_client::WallClockClient),
+        )
     };
     (router(state), jobs, bus)
 }
@@ -355,24 +346,14 @@ async fn publish_step_without_kind_registry_returns_503() {
             .build(),
     );
     let state = JobsApiState {
-        job_edges: None,
-        stations: None,
-        jobs: jobs.clone(),
-        bus: bus.clone(),
-        publisher,
         step_registry,
-        policy,
-        kind_registry: None,
-        plugin_registry: None,
-        calendar: None,
-        subject_kinds: None,
-        subject_existence: None,
-        roster: None,
-        clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        cadence: None,
-        delivery: None,
-        dispatcher_firings: None,
-        agent_budget: None,
+        ..JobsApiState::minimal(
+            jobs.clone(),
+            bus.clone(),
+            publisher,
+            policy,
+            std::sync::Arc::new(boss_clock_client::WallClockClient),
+        )
     };
     let app = router(state);
 

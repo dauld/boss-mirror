@@ -25,7 +25,6 @@ use boss_core::port::EventBus;
 use boss_core::publisher::DomainPublisher;
 use boss_jobs::http::{JobsApiState, router};
 use boss_jobs::owner_resolution::RosterLookup;
-use boss_jobs::step_registry::StepRegistry;
 use boss_jobs::{InMemoryJobs, InMemoryWorkflows, JobsRepository, WorkflowRegistry};
 use boss_policy_client::{AccessTier, Action, Resource, Scope, User};
 use boss_policy_client::{FakePolicyClient, PolicyClient};
@@ -70,26 +69,13 @@ fn build_app(policy: Arc<dyn PolicyClient>) -> (Router, Arc<InMemoryJobs>) {
     let bus = RecordingEventBus::new();
     let bus_dyn: Arc<dyn EventBus> = bus.clone();
     let publisher = DomainPublisher::new(bus_dyn, "jobs");
-    let state = JobsApiState {
-        job_edges: None,
-        stations: None,
-        jobs: jobs.clone(),
+    let state = JobsApiState::minimal(
+        jobs.clone(),
         bus,
         publisher,
-        step_registry: Arc::new(StepRegistry::v1()),
         policy,
-        kind_registry: None,
-        plugin_registry: None,
-        calendar: None,
-        subject_kinds: None,
-        subject_existence: None,
-        roster: None,
-        clock: Arc::new(boss_clock_client::WallClockClient),
-        cadence: None,
-        delivery: None,
-        dispatcher_firings: None,
-        agent_budget: None,
-    };
+        Arc::new(boss_clock_client::WallClockClient),
+    );
     (router(state), jobs)
 }
 
@@ -691,24 +677,15 @@ fn registry_app() -> Router {
     let bus = RecordingEventBus::new();
     let bus_dyn: Arc<dyn EventBus> = bus.clone();
     let state = JobsApiState {
-        job_edges: None,
-        stations: None,
-        jobs,
-        bus,
-        publisher: DomainPublisher::new(bus_dyn, "jobs"),
-        step_registry: Arc::new(StepRegistry::v1()),
-        policy,
         kind_registry: Some(kinds as Arc<dyn WorkflowRegistry>),
-        plugin_registry: None,
-        calendar: None,
-        subject_kinds: None,
-        subject_existence: None,
         roster: Some(Arc::new(AdminRoster)),
-        clock: Arc::new(boss_clock_client::WallClockClient),
-        cadence: None,
-        delivery: None,
-        dispatcher_firings: None,
-        agent_budget: None,
+        ..JobsApiState::minimal(
+            jobs,
+            bus,
+            DomainPublisher::new(bus_dyn, "jobs"),
+            policy,
+            Arc::new(boss_clock_client::WallClockClient),
+        )
     };
     router(state)
 }

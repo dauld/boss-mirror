@@ -31,7 +31,6 @@ use boss_core::publisher::DomainPublisher;
 use boss_jobs::InMemoryJobs;
 use boss_jobs::http::tenant::{EditLevelAnswer, edit_level_answer};
 use boss_jobs::http::{JobsApiState, router};
-use boss_jobs::step_registry::StepRegistry;
 use boss_policy_client::{FakePolicyClient, PolicyClient};
 use boss_testing::RecordingEventBus;
 use tower::ServiceExt;
@@ -41,26 +40,13 @@ fn app() -> axum::Router {
     let policy: Arc<dyn PolicyClient> = Arc::new(FakePolicyClient::builder().build());
     let bus = RecordingEventBus::new();
     let bus_dyn: Arc<dyn EventBus> = bus.clone();
-    let state = JobsApiState {
+    let state = JobsApiState::minimal(
         jobs,
         bus,
-        publisher: DomainPublisher::new(bus_dyn, "jobs"),
-        step_registry: Arc::new(StepRegistry::v1()),
+        DomainPublisher::new(bus_dyn, "jobs"),
         policy,
-        kind_registry: None,
-        plugin_registry: None,
-        job_edges: None,
-        stations: None,
-        calendar: None,
-        subject_kinds: None,
-        subject_existence: None,
-        roster: None,
-        clock: Arc::new(boss_clock_client::WallClockClient),
-        cadence: None,
-        delivery: None,
-        dispatcher_firings: None,
-        agent_budget: None,
-    };
+        Arc::new(boss_clock_client::WallClockClient),
+    );
     router(state)
 }
 

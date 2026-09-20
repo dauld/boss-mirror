@@ -299,26 +299,13 @@ async fn the_metadata_patch_reports_an_unresolvable_edge_as_the_callers_error() 
             .allow("ceo", Action::Update, Resource::job(), Scope::All)
             .build(),
     );
-    let app = router(JobsApiState {
-        job_edges: None,
-        stations: None,
-        jobs: Arc::new(PgJobs::new(pool.clone())),
+    let app = router(JobsApiState::minimal(
+        Arc::new(PgJobs::new(pool.clone())),
         bus,
         publisher,
-        step_registry: Arc::new(boss_jobs::step_registry::StepRegistry::v1()),
         policy,
-        kind_registry: None,
-        plugin_registry: None,
-        calendar: None,
-        subject_kinds: None,
-        subject_existence: None,
-        roster: None,
-        clock: Arc::new(boss_clock_client::WallClockClient),
-        cadence: None,
-        delivery: None,
-        dispatcher_firings: None,
-        agent_budget: None,
-    });
+        Arc::new(boss_clock_client::WallClockClient),
+    ));
 
     let resp = TestRequest::new(
         axum::http::Method::PATCH,

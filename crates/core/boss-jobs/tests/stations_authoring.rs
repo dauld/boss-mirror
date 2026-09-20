@@ -32,7 +32,6 @@ use boss_core::port::EventBus;
 use boss_core::publisher::DomainPublisher;
 use boss_jobs::http::{JobsApiState, router};
 use boss_jobs::station_queue::StationPredicate;
-use boss_jobs::step_registry::StepRegistry;
 use boss_jobs::{
     InMemoryJobs, InMemoryStations, StationKind, StationRegistry, StationSpec, WorkflowRegistry,
 };
@@ -114,24 +113,15 @@ fn app() -> (axum::Router, Arc<InMemoryStations>) {
     let bus = RecordingEventBus::new();
     let bus_dyn: Arc<dyn EventBus> = bus.clone();
     let state = JobsApiState {
-        job_edges: None,
         stations: Some(stations.clone() as Arc<dyn StationRegistry>),
-        jobs,
-        bus,
-        publisher: DomainPublisher::new(bus_dyn, "jobs"),
-        step_registry: Arc::new(StepRegistry::v1()),
-        policy,
         kind_registry: None::<Arc<dyn WorkflowRegistry>>,
-        plugin_registry: None,
-        calendar: None,
-        subject_kinds: None,
-        subject_existence: None,
-        roster: None,
-        clock: Arc::new(boss_clock_client::WallClockClient),
-        cadence: None,
-        delivery: None,
-        dispatcher_firings: None,
-        agent_budget: None,
+        ..JobsApiState::minimal(
+            jobs,
+            bus,
+            DomainPublisher::new(bus_dyn, "jobs"),
+            policy,
+            Arc::new(boss_clock_client::WallClockClient),
+        )
     };
     (router(state), stations)
 }

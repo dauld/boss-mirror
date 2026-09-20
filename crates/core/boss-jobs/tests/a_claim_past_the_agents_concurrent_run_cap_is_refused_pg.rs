@@ -183,24 +183,14 @@ async fn app_with_steps(db: &TestDb, n: usize) -> (axum::Router, Arc<PgJobs>, Ve
     let agents: Arc<dyn AgentsRegistry> = Arc::new(PgAgents::new(db.pool.clone()));
     let runs: Arc<dyn AgentRunLog> = Arc::new(PgAgentRuns::new(db.pool.clone()));
     let app = router(JobsApiState {
-        jobs: jobs.clone(),
-        bus,
-        publisher: DomainPublisher::new(bus_dyn, "jobs"),
-        step_registry: Arc::new(boss_jobs::step_registry::StepRegistry::v1()),
-        policy,
-        kind_registry: None,
-        plugin_registry: None,
-        job_edges: None,
-        stations: None,
-        calendar: None,
-        subject_kinds: None,
-        subject_existence: None,
-        roster: None,
-        clock: Arc::new(boss_clock_client::WallClockClient),
-        cadence: None,
-        delivery: None,
-        dispatcher_firings: None,
         agent_budget: Some(Arc::new(BudgetDoor { agents, runs })),
+        ..JobsApiState::minimal(
+            jobs.clone(),
+            bus,
+            DomainPublisher::new(bus_dyn, "jobs"),
+            policy,
+            Arc::new(boss_clock_client::WallClockClient),
+        )
     });
     (app, jobs, ids)
 }
