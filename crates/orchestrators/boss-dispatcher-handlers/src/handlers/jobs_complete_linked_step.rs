@@ -146,6 +146,37 @@
 //! recording a non-zero exit is a failure at all, so the rules that
 //! react to a car, a gate-run or a design are untouched.
 //!
+//! ## Where the edge LIVES (v7, dd6d44b7)
+//!
+//! Every version above reads the link off the closing packet's JOB
+//! metadata, which is where a car declares its `backlog_item` and
+//! where `boss gate` stamps a gate-run's `agent_run`. One shape of
+//! edge cannot live there: the one that names which agent-run is
+//! executing a particular STEP. A packet hosts a run per step — the
+//! page march dispatches `measure` and `file` on the same page-audit —
+//! so a single job-level key could not say which, and an analyst run
+//! (a measure, a draft, a judgement) ships no car and launches no
+//! gate, so neither landing rule can ever fire for it. Until this
+//! version every one of them needed a hand at the end, and roughly 94
+//! were queued behind the page march.
+//!
+//! - `link_from = "step"` — read `link` off the COMPLETING STEP's
+//!   metadata instead, which the `step.done.<kind>` payload already
+//!   carries whole (`boss-jobs`'s step-done builder puts the step's
+//!   `metadata` on the marker). `boss dispatch` writes the key there
+//!   at the claim, so the step says which run is executing it — a
+//!   fact, where the crew board's BUILDING lane used to infer one
+//!   from a branch with no gate-run behind it. Default `"job"`: every
+//!   rule authored before this names no `link_from` and is untouched.
+//!
+//! The edge is read BEFORE any request, because the rule that uses it
+//! rides `step.done.*` — every completed step in the system — and only
+//! a claimed one carries the key. Everything after that point is the
+//! same handler: the same guards in the same order, the same evidence,
+//! the same note on both ends. The evidence gains one field, the
+//! completing `step`, for the same reason the edge cannot be
+//! job-level.
+//!
 //! ## Idempotence
 //!
 //! JetStream is at-least-once and the close marker is emitted from
@@ -426,6 +457,68 @@ pub(crate) fn step_by_slug<'a>(
         .find(|s| s.get("spec_slug").and_then(|v| v.as_str()) == Some(slug))
 }
 
+/// Which side of the triggering event holds the declared edge (v7,
+/// dd6d44b7). `Job` is every rule authored before it: the link is a
+/// key on the closing packet's job metadata. `Step` is the link on the
+/// step that just completed, which is the only place an edge naming
+/// one run of several on one packet can live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LinkFrom {
+    Job,
+    Step,
+}
+
+/// The words a rule file spells the two sources as.
+const LINK_FROM_JOB: &str = "job";
+const LINK_FROM_STEP: &str = "step";
+
+impl LinkFrom {
+    /// Absent is `Job` — the shape every rule before v7 authored.
+    /// Anything else is rule authoring, identical on every redelivery,
+    /// so it is `Permanent` rather than a silent fall back to the job
+    /// metadata: a rule that meant `step` and mis-spelled it would
+    /// otherwise complete nothing forever and say nothing about why.
+    fn from_args(args: &[(String, Value)]) -> Result<Self, HandlerError> {
+        match arg(args, "link_from") {
+            Some(Value::String(s)) if s == LINK_FROM_STEP => Ok(Self::Step),
+            Some(Value::String(s)) if s == LINK_FROM_JOB || s.is_empty() => Ok(Self::Job),
+            Some(Value::String(s)) => Err(HandlerError::Permanent(format!(
+                "link_from {s:?} is not a source this handler knows; the two are \
+                 {LINK_FROM_JOB:?} (the closing packet's metadata, the default) and \
+                 {LINK_FROM_STEP:?} (the completing step's)"
+            ))),
+            _ => Ok(Self::Job),
+        }
+    }
+}
+
+/// PURE over a `step.done.<kind>` payload: the edge the completing
+/// step declares, trimmed, or `None` when it declares none. The
+/// marker carries the step's whole `metadata`, so this needs no read.
+fn link_on_completing_step<'a>(payload: &'a serde_json::Value, link: &str) -> Option<&'a str> {
+    payload
+        .get("metadata")?
+        .get(link)?
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// `unusable_link` as a filter: the id when it can name a Job, `None`
+/// with the warning already said when it cannot. One definition, used
+/// by both edge sources — a link that cannot name a Job is a skip, not
+/// a failure, because retrying a 400 costs eight deliveries and then
+/// drops the event for every OTHER handler on it.
+fn usable_link<'a>(id: &'a str, link: &str, rule: &str) -> Option<&'a str> {
+    match unusable_link(id) {
+        Some(why) => {
+            tracing::warn!(rule = %rule, link = %link, "{why}");
+            None
+        }
+        None => Some(id),
+    }
+}
+
 /// Can this string possibly name a Job, or is following it a wasted
 /// request that ends in a dead letter?
 ///
@@ -485,8 +578,10 @@ impl Handler for JobsCompleteLinkedStep {
             _ => DEFAULT_EVIDENCE_KEY,
         };
         // Parsed before any read: a bad regex is the same on every
-        // delivery, and dying on it after the reads wastes them.
+        // delivery, and dying on it after the reads wastes them. So is
+        // a `link_from` nobody spells.
         let answer = AnswerSpec::from_args(args)?;
+        let link_from = LinkFrom::from_args(args)?;
 
         // The `jobs.job.closed` payload carries the closing Job's id;
         // a `step.done.<kind>` marker carries the same Job under
@@ -502,6 +597,25 @@ impl Handler for JobsCompleteLinkedStep {
             .and_then(|v| v.as_str())
         else {
             return Ok(());
+        };
+
+        // A STEP-SOURCED EDGE IS READ BEFORE ANY REQUEST (v7). The
+        // rule that uses it rides `step.done.*` — every completed step
+        // in the system — and only a step `boss dispatch` claimed for
+        // a run carries the key, so a packet fetch here would be a
+        // cost paid on every step done for an obligation that exists
+        // on almost none of them. The marker carries the step's whole
+        // metadata, so there is nothing to fetch.
+        let step_link = match link_from {
+            LinkFrom::Step => {
+                match link_on_completing_step(&ctx.event_payload, link)
+                    .and_then(|id| usable_link(id, link, &ctx.rule_name))
+                {
+                    Some(id) => Some(id),
+                    None => return Ok(()),
+                }
+            }
+            LinkFrom::Job => None,
         };
 
         let closing = self.get_job(closing_id, &ctx.rule_name).await?;
@@ -520,22 +634,21 @@ impl Handler for JobsCompleteLinkedStep {
         // free-text case: a car whose motivating item is named only in
         // `backlog_text` prose, or one filed against nothing at all.
         // Both ship exactly as before.
-        let Some(target_id) = closing_meta
-            .get(link)
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        else {
-            return Ok(());
+        let target_id = match step_link {
+            Some(id) => id,
+            None => {
+                let Some(id) = closing_meta
+                    .get(link)
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .and_then(|id| usable_link(id, link, &ctx.rule_name))
+                else {
+                    return Ok(());
+                };
+                id
+            }
         };
-
-        // A link that cannot name a Job is a skip, not a failure —
-        // see `unusable_link`. Retrying a 400 costs eight deliveries
-        // and then drops the event for every handler on it.
-        if let Some(why) = unusable_link(target_id) {
-            tracing::warn!(rule = %ctx.rule_name, link = %link, "{why}");
-            return Ok(());
-        }
 
         let target = self.get_job(target_id, &ctx.rule_name).await?;
 
@@ -1351,11 +1464,7 @@ impl JobsCompleteLinkedStep {
                 .map(str::to_string),
             None => None,
         };
-        Shipped {
-            car: closing_id.to_string(),
-            branch: branch.unwrap_or("(no branch recorded)").to_string(),
-            title: title.to_string(),
-            evidence: json!({
+        let mut evidence = json!({
                 "car": closing_id,
                 "title": title,
                 // The car's BRANCH, from its metadata — not its
@@ -1376,7 +1485,21 @@ impl JobsCompleteLinkedStep {
                 "train": train_id,
                 "generation": generation,
                 "by_rule": ctx.rule_name,
-            }),
+        });
+        // WHICH STEP (v7, dd6d44b7). Present on a `step.done.<kind>`
+        // marker and absent on a Job close, and written only when the
+        // event carried it — a key that would be null on every Job
+        // close says nothing, while on a step-sourced edge it is the
+        // whole point: one packet hosts a run per step, so "the work
+        // you asked for was delivered" is only true of ONE of them.
+        if let Some(step_id) = ctx.event_payload.get("step_id").and_then(|v| v.as_str()) {
+            evidence["step"] = json!(step_id);
+        }
+        Shipped {
+            car: closing_id.to_string(),
+            branch: branch.unwrap_or("(no branch recorded)").to_string(),
+            title: title.to_string(),
+            evidence,
             answer: answer.clone(),
         }
     }
@@ -2735,6 +2858,239 @@ mod tests {
         );
         assert_eq!(deployed_generation("deployed by hand"), None);
         assert_eq!(deployed_generation("main@"), None);
+    }
+    // -----------------------------------------------------------------
+    // v7 (backlog dd6d44b7) — `link_from = "step"`: the edge on the
+    // COMPLETING STEP rather than on the closing packet's job metadata.
+    // -----------------------------------------------------------------
+
+    const RUN: &str = "55555555-5555-5555-5555-555555555555";
+    const MEASURE_STEP: &str = "66666666-6666-6666-6666-666666666666";
+
+    /// The `step.done.<kind>` marker jobs-api emits, in the shape
+    /// `crates/core/boss-jobs/src/http/steps.rs` builds it: the whole
+    /// step metadata under `metadata`, the packet under `job_id`.
+    fn step_done_marker(metadata: serde_json::Value) -> serde_json::Value {
+        json!({
+            "job_id": PACKET,
+            "step_id": MEASURE_STEP,
+            "kind": "task",
+            "subject_kind": "custom",
+            "subject_id": "bosspipeline",
+            "workflow_kind": "page-audit",
+            "completed_on": "2026-09-19",
+            "metadata": metadata,
+            "notify_on_done": false,
+            "spec_slug": "measure",
+        })
+    }
+
+    /// The packet an analyst run executed a step on: open, its
+    /// `measure` step completed and carrying the run `boss dispatch`
+    /// claimed it for.
+    fn executing_packet(step_metadata: serde_json::Value) -> serde_json::Value {
+        json!({
+            "id": PACKET,
+            "kind": "page-audit",
+            "title": "Page audit — /ux/support",
+            "status": "open",
+            "subject": { "subject_kind": "custom", "id": "bosspipeline" },
+            "metadata": {},
+            "steps": [
+                { "id": MEASURE_STEP, "spec_slug": "measure", "status": "completed",
+                  "metadata": step_metadata },
+                { "id": "s-file", "spec_slug": "file", "status": "ready", "metadata": {} },
+            ],
+        })
+    }
+
+    /// The run packet the edge names, at `building`.
+    fn run(building_status: &str) -> serde_json::Value {
+        json!({
+            "id": RUN,
+            "kind": "agent-run",
+            "title": "Agent run — measure on page-audit",
+            "status": "open",
+            "subject": { "subject_kind": "custom", "id": "bosspipeline" },
+            "metadata": { "packet": PACKET, "step": "measure" },
+            "steps": [
+                { "id": "r-claimed", "spec_slug": "claimed", "status": "completed",
+                  "metadata": {} },
+                { "id": "r-briefed", "spec_slug": "briefed", "status": "completed",
+                  "metadata": {} },
+                { "id": "r-building", "spec_slug": "building", "status": building_status,
+                  "metadata": { "authority_role": "platform-admin" } },
+                { "id": "r-reported", "spec_slug": "reported", "status": "pending",
+                  "metadata": {} },
+            ],
+        })
+    }
+
+    /// The rule row `agent-run-delivers-when-its-step-is-done` carries.
+    fn delivery_args() -> Vec<(String, Value)> {
+        vec![
+            ("link".to_string(), Value::String("agent_run".into())),
+            ("link_from".to_string(), Value::String("step".into())),
+            ("steps".to_string(), Value::String("building".into())),
+            (
+                "evidence_key".to_string(),
+                Value::String("delivered".into()),
+            ),
+            (
+                "done_metadata".to_string(),
+                Value::String(r#"{"result": "delivered"}"#.into()),
+            ),
+        ]
+    }
+
+    fn step_ctx(payload: serde_json::Value) -> InvocationContext {
+        InvocationContext {
+            rule_name: "agent-run-delivers-when-its-step-is-done".into(),
+            triggering_event_id: "evt-step-done-1".into(),
+            triggering_topic: "step.done.task".into(),
+            event_payload: payload,
+        }
+    }
+
+    /// THE REACHER. An analyst run's step completes on the packet it
+    /// was dispatched to; the edge `boss dispatch` wrote at the claim
+    /// is on that STEP (one packet hosts a run per step, so a single
+    /// job-level key could not name which), and the run's `building`
+    /// lands with `result = delivered`.
+    #[tokio::test]
+    async fn a_step_sourced_edge_delivers_the_run_that_executed_it() {
+        let (base, puts, patches) = mock_jobs(vec![
+            executing_packet(json!({ "agent_run": RUN })),
+            run("ready"),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
+        h.invoke(
+            &delivery_args(),
+            &step_ctx(step_done_marker(json!({ "agent_run": RUN }))),
+        )
+        .await
+        .expect("runs");
+
+        let puts = puts.lock().unwrap().clone();
+        assert_eq!(puts.len(), 1, "one step completed: {puts:?}");
+        let (step_id, body) = &puts[0];
+        assert_eq!(
+            step_id, "r-building",
+            "the RUN's building step, not the packet's"
+        );
+        assert_eq!(body["status"], "completed");
+        assert_eq!(
+            body["metadata"]["result"], "delivered",
+            "the analyst ending the vocabulary admits (a9c6ed5b)"
+        );
+        assert_eq!(
+            body["metadata"]["authority_role"], "platform-admin",
+            "the step's own metadata is merged, never replaced"
+        );
+        assert_eq!(
+            body["metadata"]["delivered"]["step"], MEASURE_STEP,
+            "the evidence names WHICH step delivered — one packet hosts a run per step"
+        );
+        assert_eq!(body["metadata"]["delivered"]["car"], PACKET);
+        assert!(
+            patches.lock().unwrap().is_empty(),
+            "nothing to note: the obligation acted"
+        );
+    }
+
+    /// A step nobody dispatched a run for carries no key, and the
+    /// obligation costs NOTHING — the rule is on `step.done.*`, which
+    /// fires for every completed step in the system, so a packet fetch
+    /// per step done would be a cost with no obligation behind it. The
+    /// mock serves no Jobs at all: any read would 404 and fail here.
+    #[tokio::test]
+    async fn a_step_with_no_run_reads_nothing() {
+        let (base, puts, patches) = mock_jobs(vec![]).await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
+        for metadata in [
+            json!({}),
+            json!({ "agent_run": "" }),
+            json!({ "agent_run": "  " }),
+        ] {
+            h.invoke(&delivery_args(), &step_ctx(step_done_marker(metadata)))
+                .await
+                .expect("a step with no declared edge is not this rule's business");
+        }
+        assert!(puts.lock().unwrap().is_empty());
+        assert!(patches.lock().unwrap().is_empty());
+    }
+
+    /// ORDERING. A run whose `building` some other writer already
+    /// completed — the gate-green rule, the car-merged rule, the
+    /// silence clock, a hand — is guard 2's first return, silently.
+    /// This is what makes a fourth writer safe to add.
+    #[tokio::test]
+    async fn a_run_already_landed_is_a_silent_noop() {
+        let (base, puts, patches) = mock_jobs(vec![
+            executing_packet(json!({ "agent_run": RUN })),
+            run("completed"),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
+        h.invoke(
+            &delivery_args(),
+            &step_ctx(step_done_marker(json!({ "agent_run": RUN }))),
+        )
+        .await
+        .expect("runs");
+        assert!(
+            puts.lock().unwrap().is_empty(),
+            "a completed building is never re-completed"
+        );
+        assert!(
+            patches.lock().unwrap().is_empty(),
+            "and a redelivery says nothing — a warning per redelivery is one nobody reads"
+        );
+    }
+
+    /// An 8-character prefix on the step is skipped the way one on a
+    /// car is: a 400 no redelivery fixes, and dropping the event would
+    /// take every other handler's effect on it too.
+    #[tokio::test]
+    async fn an_unusable_step_edge_is_skipped() {
+        let (base, puts, _patches) = mock_jobs(vec![]).await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
+        h.invoke(
+            &delivery_args(),
+            &step_ctx(step_done_marker(json!({ "agent_run": "55555555" }))),
+        )
+        .await
+        .expect("skipped, not retried");
+        assert!(puts.lock().unwrap().is_empty());
+    }
+
+    /// Rule authoring, identical on every redelivery: a `link_from`
+    /// this handler does not know is a `Permanent` refusal naming the
+    /// two it does, never a silent fall back to the job metadata.
+    #[test]
+    fn an_unknown_link_source_is_refused() {
+        let mut a = delivery_args();
+        for (k, v) in a.iter_mut() {
+            if k == "link_from" {
+                *v = Value::String("packet".into());
+            }
+        }
+        let err = LinkFrom::from_args(&a).expect_err("refused");
+        assert!(matches!(err, HandlerError::Permanent(_)), "{err:?}");
+        let why = format!("{err:?}");
+        assert!(why.contains("step") && why.contains("job"), "{why}");
+    }
+
+    /// The default is the JOB metadata — every rule authored before v7
+    /// names no `link_from` and must be untouched by it.
+    #[test]
+    fn no_link_from_is_the_job_metadata() {
+        assert!(matches!(LinkFrom::from_args(&args()), Ok(LinkFrom::Job)));
+        assert!(matches!(
+            LinkFrom::from_args(&delivery_args()),
+            Ok(LinkFrom::Step)
+        ));
     }
 }
 

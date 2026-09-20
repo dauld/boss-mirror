@@ -1,0 +1,61 @@
+# An ANALYST's run lands when the step it was dispatched to is done
+# (backlog dd6d44b7; the vocabulary is a9c6ed5b's, the edge is `boss
+# dispatch`'s). The third writer of `building`, and the one that
+# finally covers a run that ships no car.
+#
+# THE EDGE IS ON THE STEP, AND IT HAD TO BE. The two landing rules
+# follow `metadata.agent_run` on a closing gate-run or car — a JOB-level
+# key, which a builder's run has because it launches a gate and parks a
+# car. An analyst's run does neither: it measures a page, drafts a
+# retro, judges a report, and the only fact that means it succeeded is
+# ITS OWN step completing on the packet it was dispatched to. That edge
+# cannot be job-level, because one packet hosts a run PER STEP — the
+# page march dispatches `measure` and `file` on the same page-audit —
+# so a single key could not name which. `boss dispatch` writes
+# `agent_run` onto the step it CLAIMS (it holds both ids at that
+# moment), and `link_from = "step"` reads it back off the
+# `step.done.<kind>` marker, which carries the step's whole metadata.
+#
+# WHAT IT WRITES, AND WHAT IT LEAVES ALONE. `building` is completed with
+# `result = delivered` and the evidence — the packet, the step, the
+# rule — under `delivered`. That opens `reported`, which no rule ever
+# writes: a summary the machine invents is not the agent's.
+#
+# NO `when`, DELIBERATELY. The predicate that matters is "this step
+# carries an `agent_run`", and the expr binder resolves FLAT top-level
+# identifiers only — an absent one is a PredicateFailed retry storm,
+# not a quiet false — so selecting on it would mean hoisting a third
+# key to every `step.done` payload root beside `notify_on_done` and
+# `spec_slug`. It is not worth a core payload field: the handler reads
+# the edge off the marker BEFORE any request and returns on a step that
+# declares none, so a step nobody dispatched a run for costs one
+# predicate-free match and zero reads. The same shape
+# `complete-marker-on-step-ready` and `notify-assignee-on-step-assigned`
+# already have on their wildcards.
+#
+# ORDERING. A completed `building` is the first no-op in every other
+# writer's guard (guard 2 here, the open-step check in
+# `jobs.age_out_step`), so this fourth hand races nothing: whichever of
+# the green, the arrival, this delivery or the silence clock arrives
+# first wins and the rest write nothing. It does NOT disable the
+# four-hour silence clock, for analysts or for anyone — a genuinely
+# silent run still dies on schedule; this only lets a run that
+# DELIVERED land before that clock matters.
+[[rule]]
+name = "agent-run-delivers-when-its-step-is-done"
+why = """
+A CROSS-PROTOCOL REACTOR: a step completing on a packet of ANY kind —
+page-audit, department-retro, backlog-item — advances an `agent-run`
+packet. Two protocols, so no single Workflow definition can declare
+it, and the executing packet's protocol must not have to know an agent
+ran its step at all. Measured 2026-09-19 on the first live analyst run
+(d5e0f287, the /ux/support page audit): its `measure` step on packet
+9876ef0d was COMPLETED while the run sat at `building` with nowhere
+true to go, and ~94 more such runs are queued behind the page march,
+each needing a hand at the end — the act the protocol exists to remove.
+"""
+version = 1
+on_event = "step.done.*"
+[[rule.do]]
+handler = "jobs.complete_linked_step"
+args = { link = "\"agent_run\"", link_from = "\"step\"", steps = "\"building\"", evidence_key = "\"delivered\"", done_metadata = '"{\"result\": \"delivered\"}"' }

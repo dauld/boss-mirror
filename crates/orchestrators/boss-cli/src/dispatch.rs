@@ -478,6 +478,15 @@ pub(crate) enum BriefSource<'a> {
     },
 }
 
+/// The merging PATCH that makes the executing run a FACT on the step
+/// it was claimed for (backlog dd6d44b7), under the same key
+/// `boss gate` stamps on a gate-run — one spelling in this crate,
+/// because it is the `link` the delivery rule follows
+/// (`agent-run-delivers-when-its-step-is-done`, pinned below).
+pub(crate) fn executing_run_patch(run_id: &str) -> Value {
+    json!({ crate::gate::AGENT_RUN_KEY: run_id })
+}
+
 /// What a dispatch produced: the run's id and the exact prompt — the
 /// brief plus the run section — whether it was printed (`Rendered`) or
 /// handed back to the hook to put on the tool's input (`Handed`).
@@ -730,6 +739,35 @@ pub(crate) async fn dispatch_at(
         .and_then(Value::as_str)
         .context("the run's create returned no id — refusing to call that dispatched")?
         .to_string();
+
+    // THE EDGE (backlog dd6d44b7). The claimed step now SAYS which run
+    // is executing it. Nothing on a packet said so before: the run
+    // names its packet and step (`metadata.packet` / `metadata.step`)
+    // and the packet named nothing back, so the crew board's BUILDING
+    // lane had to INFER the run from a branch with no gate-run behind
+    // it, and no rule could reach from a step completing to the run
+    // that did the work. It rides the step rather than the job because
+    // one packet hosts a run PER STEP — the page march dispatches
+    // `measure` and `file` on the same page-audit — so one job-level
+    // key could not name which.
+    //
+    // Written before the prompt is printed, and fatal if it fails: a
+    // run whose step carries no edge is one that can never be
+    // delivered, and handing over the prompt anyway would leave the
+    // operator holding a run the silence clock will age out as died.
+    api_at(
+        Method::PATCH,
+        format!("/api/jobs/{id}/steps/{step_id}/metadata"),
+        Some(executing_run_patch(&run_id)),
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "writing the run edge onto `{slug}` on {} — run {} is filed and the step is claimed",
+            &id[..8],
+            &run_id[..8.min(run_id.len())]
+        )
+    })?;
 
     // A 201 is a claim; the read-back is the fact — and the step ids
     // only exist once the packet does.
@@ -1423,6 +1461,44 @@ mod tests {
         })
     }
 
+    /// THE EDGE AND THE RULE THAT FOLLOWS IT (backlog dd6d44b7). The
+    /// key `boss dispatch` writes onto the claimed step and the `link`
+    /// the delivery rule reads are one fact in two files — a Rust
+    /// const and a TOML rule row, which cannot be collapsed because a
+    /// registry row is data — so CLAUDE.md §9a asks for the equality
+    /// test. Without it the dispatch could be renamed, every test
+    /// here would pass, and every analyst run would sit at `building`
+    /// until the silence clock aged it out as died, saying nothing.
+    #[test]
+    fn the_step_edge_is_the_link_the_delivery_rule_follows() {
+        assert_eq!(
+            executing_run_patch("5b1d2c3e-0000-4000-8000-000000000001"),
+            json!({ "agent_run": "5b1d2c3e-0000-4000-8000-000000000001" }),
+            "the same key the gate stamps on a gate-run"
+        );
+
+        let rule = boss_testing::repo_root()
+            .join("infra/dispatcher/rules/agent-run-delivers-when-its-step-is-done.toml");
+        let text = std::fs::read_to_string(&rule)
+            .unwrap_or_else(|e| panic!("read {}: {e}", rule.display()));
+        let row: toml::Value = toml::from_str(&text).expect("the rule file parses");
+        let args = row["rule"][0]["do"][0]["args"]
+            .as_table()
+            .expect("the rule's do carries args");
+        // The args are expressions, so a string literal is quoted
+        // inside the TOML string — `"\"agent_run\""`.
+        assert_eq!(
+            args["link"].as_str(),
+            Some("\"agent_run\""),
+            "the rule follows the key dispatch writes"
+        );
+        assert_eq!(
+            args["link_from"].as_str(),
+            Some("\"step\""),
+            "off the COMPLETING STEP — one packet hosts a run per step"
+        );
+        assert_eq!(args["steps"].as_str(), Some("\"building\""));
+    }
     #[test]
     fn the_block_is_read_off_the_packets_projection_or_the_rows_step() {
         let projected = step(
@@ -2194,6 +2270,11 @@ mod wire_tests {
                     ("PUT", p) if p.starts_with(&format!("/api/jobs/{RUN}/steps/")) => {
                         ("204 No Content", String::new())
                     }
+                    // The edge onto the CLAIMED step (dd6d44b7) — on
+                    // the packet, not the run.
+                    ("PATCH", p) if p.starts_with(&format!("/api/jobs/{PACKET}/steps/")) => {
+                        ("204 No Content", String::new())
+                    }
                     _ => ("404 Not Found", format!("unstubbed {method} {target}")),
                 };
             (status, resp)
@@ -2294,13 +2375,35 @@ mod wire_tests {
                 // about a step it already held.
                 ("GET".to_string(), format!("/api/jobs/{PACKET}")),
                 ("POST".to_string(), "/api/jobs".to_string()),
+                (
+                    "PATCH".to_string(),
+                    format!("/api/jobs/{PACKET}/steps/s-build/metadata")
+                ),
                 ("GET".to_string(), format!("/api/jobs/{RUN}")),
                 (
                     "PUT".to_string(),
                     format!("/api/jobs/{RUN}/steps/run-briefed")
                 ),
             ],
-            "the claim precedes the brief's read, which precedes the filing"
+            "the claim precedes the filing, the edge follows the run that exists, \
+             and the brief precedes the completion"
+        );
+
+        // THE EDGE (dd6d44b7): the claimed step says which run is
+        // executing it, so nothing downstream has to infer it — the
+        // crew board's BUILDING lane, and the rule that delivers an
+        // analyst run when this step completes. Found by WHAT it is
+        // rather than by index, for the same reason the filing below
+        // is: the landed-work read (a7837d81) shifted every position.
+        let edge = &calls
+            .iter()
+            .find(|(m, p, _)| m == "PATCH" && p.ends_with("/steps/s-build/metadata"))
+            .expect("the claimed step names the run executing it")
+            .2;
+        assert_eq!(
+            *edge,
+            json!({ "agent_run": RUN }),
+            "a merging PATCH naming the run, and nothing else"
         );
 
         // The filing, found by WHAT it is rather than by where it sits
@@ -2708,6 +2811,12 @@ mod wire_tests {
                 ("PUT", p) if p.starts_with(&format!("/api/jobs/{RUN}/steps/")) => {
                     ("204 No Content", String::new())
                 }
+                // The run edge (dd6d44b7): dispatch writes `agent_run`
+                // onto the step it claimed, on every path including
+                // this one, so a forced dispatch stubs it too.
+                ("PATCH", p) if p.ends_with("/steps/s-build/metadata") => {
+                    ("204 No Content", String::new())
+                }
                 _ => ("404 Not Found", format!("unstubbed {method} {target}")),
             })
             .await
@@ -3082,6 +3191,12 @@ mod wire_tests {
                         }
                     }
                     ("PUT", p) if p.starts_with(&format!("/api/jobs/{INBOX_RUN}/steps/")) => {
+                        ("204 No Content", String::new())
+                    }
+                    // The edge onto the claimed step (dd6d44b7): a
+                    // queued dispatch writes it exactly as a hand one
+                    // does — one code path, one door.
+                    ("PATCH", p) if p.starts_with(&format!("/api/jobs/{WAITING}/steps/")) => {
                         ("204 No Content", String::new())
                     }
                     _ => ("404 Not Found", format!("unstubbed {method} {target}")),
