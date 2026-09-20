@@ -54,6 +54,28 @@ export type Trend = Readonly<{
   previous_samples: number;
 }>;
 
+/** WHAT A MACHINE IS DOING (design d2154293, car 5) — the server's
+ *  judgement, parsed, never re-derived here. A CLOSED set: an unknown
+ *  value throws rather than falling through to a glyph that reads as
+ *  calm, exactly as an unknown region state does.
+ *
+ *  `unknown` is not idle. Idle is a reading — the machine is here and
+ *  has no work — and the server states it only where presence is a
+ *  fact it holds. Everything else is "cannot tell", and the map draws
+ *  the two differently. */
+export type MachineState = 'running' | 'idle' | 'failed' | 'unknown';
+const MACHINE_STATES: ReadonlyArray<MachineState> = ['running', 'idle', 'failed', 'unknown'];
+
+export type Machine = Readonly<{
+  /** Stable within the region, so a glyph keeps its place between
+   *  reads: `gate-bay-1`, `conductor`, `station:design-review`. */
+  id: string;
+  name: string;
+  state: MachineState;
+  /** What the state was read from — the glyph's whole tooltip. */
+  why: string;
+}>;
+
 export type Region = Readonly<{
   name: string;
   /** What is here. `null` when the region could not be read — the
@@ -64,6 +86,10 @@ export type Region = Readonly<{
   state: RegionState;
   why: string;
   trend: Trend;
+  /** The machinery standing in this region. Empty for a region no
+   *  machine of ours works in, and empty on an older server — which
+   *  draws no glyphs rather than inventing idle ones. */
+  machines: ReadonlyArray<Machine>;
 }>;
 
 export type Regions = Readonly<{
@@ -93,6 +119,20 @@ function parseTrend(raw: unknown): Trend {
   };
 }
 
+function parseMachine(raw: unknown): Machine {
+  const o = asObject(raw, 'machine');
+  const state = String(o.state ?? '');
+  if (!(MACHINE_STATES as ReadonlyArray<string>).includes(state)) {
+    throw new Error(`machine ${String(o.id ?? '?')}: unknown state ${JSON.stringify(state)}`);
+  }
+  return {
+    id: String(o.id ?? ''),
+    name: String(o.name ?? ''),
+    state: state as MachineState,
+    why: String(o.why ?? ''),
+  };
+}
+
 function parseRegion(raw: unknown): Region {
   const o = asObject(raw, 'region');
   const state = String(o.state ?? '');
@@ -106,6 +146,7 @@ function parseRegion(raw: unknown): Region {
     state: state as RegionState,
     why: String(o.why ?? ''),
     trend: parseTrend(o.trend),
+    machines: Array.isArray(o.machines) ? o.machines.map(parseMachine) : [],
   };
 }
 

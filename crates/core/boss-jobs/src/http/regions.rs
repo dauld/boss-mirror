@@ -68,6 +68,11 @@ pub(super) struct MapRows {
     gate_runs: Vec<Job>,
     inbound: Option<Vec<Job>>,
     stations: Option<Vec<StationReading>>,
+    /// THE RUNNERS' EVIDENCE (design d2154293, car 5). A runner leaves
+    /// no heartbeat this process can read — only the ops-requests it
+    /// answered. `None` on any failed read, which the machine reports
+    /// as unknown rather than as an idle runner.
+    ops_requests: Option<Vec<(Job, Vec<Step>)>>,
 }
 
 impl MapRows {
@@ -86,6 +91,8 @@ impl MapRows {
             gate_runs: &self.gate_runs,
             inbound: self.inbound.as_deref(),
             stations: self.stations.as_deref(),
+            conductor: Some(&self.read.health),
+            ops_requests: self.ops_requests.as_deref(),
             now,
             window_hours,
         }
@@ -119,6 +126,7 @@ pub(super) async fn read_map<R: JobsRepository + 'static, B: EventBus + 'static>
             gate_runs: Vec::new(),
             inbound: Some(Vec::new()),
             stations: Some(Vec::new()),
+            ops_requests: Some(Vec::new()),
         });
     }
     let scope = job_scope_from_predicate(user, &predicate);
@@ -268,7 +276,15 @@ pub(super) async fn read_map<R: JobsRepository + 'static, B: EventBus + 'static>
     // its own), bound to the caller as `/api/stations/load` binds them,
     // over the caller's open packets; and each station's counted flow in
     // this window and the previous, from two cube reads. Unread → `None`.
-    let stations = marshalling_stations(state, user, scope, window_hours).await;
+    let stations = marshalling_stations(state, user, scope.clone(), window_hours).await;
+
+    // THE RUNNERS' EVIDENCE (design d2154293, car 5). A runner leaves
+    // no heartbeat this process can read — only the ops-requests it
+    // answered — so the newest request of each verb the map draws a
+    // runner for is fetched here, with its steps (the `disposition`
+    // rides the `execute` step). A failed read is `None`, which the
+    // machine reports as unknown rather than as an idle runner.
+    let ops_requests = newest_ops_requests(state, scope, reach).await;
 
     Ok(MapRows {
         read,
@@ -277,6 +293,7 @@ pub(super) async fn read_map<R: JobsRepository + 'static, B: EventBus + 'static>
         gate_runs,
         inbound,
         stations,
+        ops_requests,
     })
 }
 
@@ -289,6 +306,43 @@ fn empty_read() -> super::yard::YardRead {
         gate_runs_truncated: false,
         open_trains: Vec::new(),
     }
+}
+
+/// The newest ops-request of each verb [`regions::runner_verbs`] names,
+/// with its steps. One windowed read, then one `list_steps` per verb —
+/// bounded by the runner table, not by how busy the estate has been.
+/// `None` on ANY failure: an unread runner is not an idle one.
+async fn newest_ops_requests<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &JobsApiState<R, B>,
+    scope: crate::port::JobScope,
+    reach: chrono::NaiveDate,
+) -> Option<Vec<(Job, Vec<Step>)>> {
+    let filter = JobFilter {
+        kind: Some("ops-request".to_string()),
+        status: Some(JobStatus::Open),
+        closed_since: Some(reach),
+        scope,
+        ..Default::default()
+    };
+    let (rows, _) = state.jobs.list_jobs(&filter, TAIL_WINDOW, 0).await.ok()?;
+    let opened = |j: &Job| {
+        j.metadata
+            .get("opened_at")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    let mut out = Vec::new();
+    for verb in regions::runner_verbs() {
+        let newest = rows
+            .iter()
+            .filter(|j| j.metadata.get("verb").and_then(serde_json::Value::as_str) == Some(verb))
+            .max_by_key(|j| opened(j));
+        if let Some(job) = newest {
+            let steps = state.jobs.list_steps(&job.id).await.ok()?;
+            out.push((job.clone(), steps));
+        }
+    }
+    Some(out)
 }
 
 /// The station readings the marshalling region is judged on, or `None`

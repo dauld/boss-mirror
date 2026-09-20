@@ -37,6 +37,7 @@ const region = (over: Partial<Region> = {}): Region => ({
   state: 'clear',
   why: '3 cars parked',
   trend: trend(),
+  machines: [],
   ...over,
 });
 
@@ -69,6 +70,9 @@ describe('parseRegions — the payload, parsed once', () => {
       state: 'troubled',
       why: '1 bay holds a corpse — gate-run past its own deadline',
       trend: { metric: 'gate duration', unit: 'minutes', current: 11, previous: 9.5, samples: 20, previous_samples: 18 },
+      // A payload with no machinery list draws no glyphs — never
+      // invented idle ones (car 5, world-machines.test.ts).
+      machines: [],
     });
     // No bound on the wire (skip_serializing_if) reads as null, not 0.
     expect(m.regions[3]!.bound).toBeNull();

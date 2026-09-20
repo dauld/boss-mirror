@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::registry::WorkflowSpec;
-use crate::yard::{Reading, YardStatus};
+use crate::yard::{ConductorHealth, Reading, YardStatus};
 
 /// The eight regions, in map order. The count and the order are the
 /// decision (0524fc95 Q2); a reader that finds a ninth name has an
@@ -100,6 +100,49 @@ pub enum RegionState {
     Troubled,
 }
 
+/// WHAT A MACHINE IS DOING, in the record — a CLOSED set, so a glyph
+/// exists for every value and no reading falls through to a default
+/// that reads as calm (design d2154293, car 5).
+///
+/// `Unknown` is the load-bearing variant. A machine whose state cannot
+/// be determined is NOT idle: idle is a reading ("it is here and it has
+/// no work"), and it can only be taken where presence is observable
+/// independently of work. The precedent is car 2's — silence is judged
+/// ONLY where a machine declares a heartbeat, and everywhere else the
+/// answer is "cannot tell", never "false". A confident idle drawn for
+/// an unmeasurable machine is the false-empty class at its most
+/// visible: the map would say the machinery is fine when nothing asked
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MachineState {
+    /// Observed doing work right now.
+    Running,
+    /// Observed present, with no work in it. Only ever stated where
+    /// presence is a fact this process holds — a bay the policy
+    /// declares and this process counts, a station row in the registry,
+    /// a runner whose last request it answered.
+    Idle,
+    /// A named failure. A failed machine troubles its territory.
+    Failed,
+    /// Nothing in the record says which. Drawn distinctly from idle.
+    Unknown,
+}
+
+/// One machine standing in a region.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Machine {
+    /// Stable within the region, so a glyph keeps its place between
+    /// reads: `gate-bay-1`, `conductor`, `station:design-review`.
+    pub id: String,
+    /// What it is, short enough to ride a glyph.
+    pub name: String,
+    pub state: MachineState,
+    /// What the state was read from. A verdict must name what failed
+    /// (CLAUDE.md §Diagnosis), and an `Unknown` names what was missing.
+    pub why: String,
+}
+
 /// This window against the previous one, for the number the region's
 /// floor already measures. Both halves are `None` when nothing in that
 /// window could be measured — a rate nobody measured is not zero.
@@ -133,6 +176,13 @@ pub struct Region {
     /// name what failed (CLAUDE.md §Diagnosis).
     pub why: String,
     pub trend: Trend,
+    /// The machinery standing in this region — the gate bays, the
+    /// conductor, the stations, the runners — each judged HERE, on the
+    /// server, so one definition answers the map, the floor and the
+    /// CLI. Empty for a region no machine of ours works in; absent on
+    /// an older payload, which a client reads as empty.
+    #[serde(default)]
+    pub machines: Vec<Machine>,
 }
 
 /// The whole map.
@@ -185,6 +235,15 @@ pub struct RegionInputs<'a> {
     /// Every station but the dock. `None` when the station registry
     /// could not be read.
     pub stations: Option<&'a [StationReading]>,
+    /// The conductor's own firing record, as `http/yard.rs` already
+    /// built it for the yard status. `None` when this caller did not
+    /// read it — which the conductor machine states as unknown, never
+    /// as a healthy tick.
+    pub conductor: Option<&'a ConductorHealth>,
+    /// The newest ops-request of each verb [`runner_verbs`] names, with
+    /// its steps — the evidence a runner machine is read from. `None`
+    /// when the ops-request rows could not be read at all.
+    pub ops_requests: Option<&'a [(Job, Vec<Step>)]>,
     pub now: chrono::DateTime<chrono::Utc>,
     pub window_hours: i64,
 }
@@ -496,7 +555,286 @@ fn region(
         state,
         why,
         trend,
+        // Attached in one pass in `regions` below, so each region
+        // function stays about its own count and trend.
+        machines: Vec::new(),
     }
+}
+
+// ---------------------------------------------------------------------
+// The machinery (design d2154293, car 5).
+// ---------------------------------------------------------------------
+
+/// The runners the map draws, one per region: the verb whose
+/// ops-requests are the only evidence there is, the region it works
+/// in, and what to call it. `http/regions.rs` reads the verbs from
+/// [`RUNNER_VERBS`], derived from this — one list, so the read and the
+/// drawing cannot drift (CLAUDE.md §9a).
+const RUNNERS: [(&str, &str, &str); 2] = [
+    ("converge", "arrivals", "converge runner"),
+    ("run-car-probe", "shed", "probe runner"),
+];
+
+/// The ops-request verbs the handler fetches the newest request of.
+pub fn runner_verbs() -> Vec<&'static str> {
+    RUNNERS.iter().map(|(verb, _, _)| *verb).collect()
+}
+
+fn machine(id: String, name: &str, state: MachineState, why: String) -> Machine {
+    Machine {
+        id,
+        name: name.to_string(),
+        state,
+        why,
+    }
+}
+
+/// THE GATE BAYS. The policy declares how many there are and this
+/// process counts what occupies them, so a bay nothing is in is
+/// OBSERVED empty — the one machine here that can honestly be idle. A
+/// bay whose run is `stale` holds a corpse, which is the yard's own
+/// judgement (`yard::GATE_MAX_ACTIVE_HOURS`), read rather than redone.
+fn gate_bays(inputs: &RegionInputs<'_>) -> Vec<Machine> {
+    let g = &inputs.status.gates;
+    let capacity = usize::try_from(g.capacity).unwrap_or(0);
+    // Never fewer bays than there are runs standing in them: a run the
+    // policy has no slot for is still occupying something.
+    (0..capacity.max(g.active.len()))
+        .map(|i| {
+            let id = format!("gate-bay-{}", i + 1);
+            let name = format!("bay {}", i + 1);
+            match g.active.get(i) {
+                Some(a) if a.stale => machine(
+                    id,
+                    &name,
+                    MachineState::Failed,
+                    format!(
+                        "{} has been active past the gate deadline — a corpse holding the bay",
+                        a.branch
+                    ),
+                ),
+                Some(a) => machine(
+                    id,
+                    &name,
+                    MachineState::Running,
+                    format!("gating {} since {}", a.branch, a.since),
+                ),
+                None => machine(id, &name, MachineState::Idle, "free".to_string()),
+            }
+        })
+        .collect()
+}
+
+/// THE CONDUCTOR. It declares its heartbeat in the cadence registry,
+/// so silence IS judgeable here — and only here. Without that declared
+/// interval `silent` can never be true (`yard::conductor_health`), so
+/// the machine says unknown rather than inheriting the permissive
+/// answer.
+fn conductor_machine(h: Option<&ConductorHealth>) -> Machine {
+    let id = "conductor".to_string();
+    let name = "conductor";
+    let Some(h) = h else {
+        return machine(
+            id,
+            name,
+            MachineState::Unknown,
+            "the conductor's firing record was not read".to_string(),
+        );
+    };
+    if h.silent {
+        let since = match h.silent_for_minutes {
+            Some(m) => format!("{m}m since it last fired"),
+            None => "past its declared heartbeat".to_string(),
+        };
+        return machine(
+            id,
+            name,
+            MachineState::Failed,
+            format!("SILENT — {since}; every train's truth is last-known-good"),
+        );
+    }
+    if let Some(rc) = h.last_rc.filter(|rc| *rc != 0) {
+        let verb = h.last_verb.as_deref().unwrap_or("its last pass");
+        return machine(
+            id,
+            name,
+            MachineState::Failed,
+            format!("{verb} exited {rc} on its last pass"),
+        );
+    }
+    if h.expected_every_minutes.is_none() {
+        return machine(
+            id,
+            name,
+            MachineState::Unknown,
+            "no heartbeat is declared in the cadence registry, so silence cannot be judged"
+                .to_string(),
+        );
+    }
+    match h.silent_for_minutes {
+        Some(m) => machine(
+            id,
+            name,
+            MachineState::Running,
+            format!(
+                "{} {m}m ago, within its declared heartbeat",
+                h.last_verb.as_deref().unwrap_or("fired")
+            ),
+        ),
+        None => machine(
+            id,
+            name,
+            MachineState::Unknown,
+            "no firing on record to read a tick from".to_string(),
+        ),
+    }
+}
+
+/// THE STATIONS. Each is a registry row this process evaluated, so its
+/// presence is a fact and an empty one is genuinely idle. Flow the cube
+/// is blind to is unknown, not zero: a station holding work whose
+/// movement nobody can count is exactly the case an idle glyph would
+/// lie about.
+fn station_machines(inputs: &RegionInputs<'_>) -> Vec<Machine> {
+    let Some(rows) = inputs.stations else {
+        return vec![machine(
+            "stations".to_string(),
+            "the stations",
+            MachineState::Unknown,
+            "the station registry could not be read".to_string(),
+        )];
+    };
+    rows.iter()
+        .map(|s| {
+            let held = s.members.len();
+            let id = format!("station:{}", s.name);
+            let (state, why) = match (s.over_limit, s.served) {
+                (true, _) => (
+                    MachineState::Failed,
+                    format!("{held} standing — over its WIP limit"),
+                ),
+                (false, None) => (
+                    MachineState::Unknown,
+                    format!(
+                        "{held} standing — the flow cube is blind to this station's predicate, so whether it moves cannot be told"
+                    ),
+                ),
+                (false, Some(0)) if held > 0 => (
+                    MachineState::Failed,
+                    format!("{held} standing and nothing served in the window — not draining"),
+                ),
+                (false, Some(n)) if n > 0 => (
+                    MachineState::Running,
+                    format!("{n} served in the window, {held} standing"),
+                ),
+                (false, Some(_)) => (
+                    MachineState::Idle,
+                    "nothing standing, nothing served in the window".to_string(),
+                ),
+            };
+            machine(id, &s.name, state, why)
+        })
+        .collect()
+}
+
+/// A RUNNER, from its ops-requests — and ONLY from them. A runner
+/// polls; it declares no heartbeat anywhere this process can read, so
+/// silence says nothing and is never a failure here.
+///
+/// The machine reports the RUNNER, not the verb's verdict. A verb that
+/// answered with a non-zero exit ran fine — `run-car-probe` answers 75
+/// ("not yet") on most passes, and a probe judged false is the car's
+/// business, which the shed region already reads. What IS the runner's
+/// failure: a refusal, and a request closed with no answer recorded at
+/// all.
+fn runner_machine(inputs: &RegionInputs<'_>, verb: &str, name: &str) -> Machine {
+    let id = format!("runner:{verb}");
+    let Some(rows) = inputs.ops_requests else {
+        return machine(
+            id,
+            name,
+            MachineState::Unknown,
+            "the ops-request rows could not be read".to_string(),
+        );
+    };
+    let newest = rows
+        .iter()
+        .filter(|(j, _)| j.metadata.get("verb").and_then(Value::as_str) == Some(verb))
+        .max_by_key(|(j, _)| opened_at(j));
+    let Some((job, steps)) = newest else {
+        return machine(
+            id,
+            name,
+            MachineState::Unknown,
+            format!(
+                "no {verb} request in the window read — this runner declares no heartbeat, so its silence cannot be judged"
+            ),
+        );
+    };
+    if job.status != boss_core::job::JobStatus::Closed {
+        return machine(
+            id,
+            name,
+            MachineState::Running,
+            format!("a {verb} request is in flight"),
+        );
+    }
+    let execute = find_step(steps, "execute", "Execute the verb");
+    let disposition = execute
+        .map(|s| md_str(&s.metadata, "disposition"))
+        .unwrap_or("");
+    let exit = execute
+        .map(|s| md_str(&s.metadata, "exit_code"))
+        .unwrap_or("");
+    match disposition {
+        "answered" => machine(
+            id,
+            name,
+            MachineState::Idle,
+            format!(
+                "last {verb} answered{}{}",
+                if exit.is_empty() {
+                    String::new()
+                } else {
+                    format!(" exit {exit}")
+                },
+                match closed_at(job) {
+                    Some(at) => format!(" at {}", at.format("%H:%MZ")),
+                    None => String::new(),
+                }
+            ),
+        ),
+        "refused" => machine(
+            id,
+            name,
+            MachineState::Failed,
+            format!("the last {verb} request was refused — outside the allowlist"),
+        ),
+        _ => machine(
+            id,
+            name,
+            MachineState::Failed,
+            format!("the last {verb} request closed with no answer recorded"),
+        ),
+    }
+}
+
+/// The machinery of one region, by name. A region this answers nothing
+/// for has no machine of ours in it — which is a fact, not a gap.
+fn machines_of(name: &str, inputs: &RegionInputs<'_>) -> Vec<Machine> {
+    let mut out = match name {
+        "gates" => gate_bays(inputs),
+        "track" => vec![conductor_machine(inputs.conductor)],
+        "marshalling" => station_machines(inputs),
+        _ => Vec::new(),
+    };
+    out.extend(
+        RUNNERS
+            .iter()
+            .filter(|(_, region, _)| *region == name)
+            .map(|(verb, _, label)| runner_machine(inputs, verb, label)),
+    );
+    out
 }
 
 // ---------------------------------------------------------------------
@@ -506,18 +844,46 @@ fn region(
 /// The map. Pure: rows in, eight cards out, in [`REGIONS`] order.
 pub fn regions(inputs: &RegionInputs<'_>) -> Regions {
     let w = Windows::of(inputs.now, inputs.window_hours);
+    let regions = [
+        dock(inputs, &w),
+        gates(inputs, &w),
+        track(inputs, &w),
+        shed(inputs, &w),
+        arrivals(inputs, &w),
+        garage(inputs, &w),
+        receiving(inputs, &w),
+        marshalling(inputs, &w),
+    ]
+    .into_iter()
+    .map(|r| {
+        let machines = machines_of(&r.name, inputs);
+        with_machinery(r, machines)
+    })
+    .collect();
     Regions {
         window_hours: inputs.window_hours,
-        regions: vec![
-            dock(inputs, &w),
-            gates(inputs, &w),
-            track(inputs, &w),
-            shed(inputs, &w),
-            arrivals(inputs, &w),
-            garage(inputs, &w),
-            receiving(inputs, &w),
-            marshalling(inputs, &w),
-        ],
+        regions,
+    }
+}
+
+/// Hang a region's machinery on it — and let a FAILED machine trouble
+/// its territory, so the failure reads at world scale rather than only
+/// when someone zooms in. The machine's own sentence leads the `why`:
+/// a verdict must name what failed, and the region's existing reason
+/// is kept behind it rather than overwritten.
+fn with_machinery(region: Region, machines: Vec<Machine>) -> Region {
+    let failed = machines
+        .iter()
+        .find(|m| m.state == MachineState::Failed)
+        .map(|m| format!("{}: {}", m.name, m.why));
+    match failed {
+        Some(lead) if region.state != RegionState::Troubled => Region {
+            state: RegionState::Troubled,
+            why: format!("{lead} · {}", region.why),
+            machines,
+            ..region
+        },
+        _ => Region { machines, ..region },
     }
 }
 
@@ -1165,9 +1531,23 @@ mod tests {
             gate_runs,
             inbound,
             stations,
+            conductor: None,
+            ops_requests: Some(&[]),
             now: t(NOW),
             window_hours: 24,
         }
+    }
+
+    fn machines_in<'a>(r: &'a Regions, region: &str) -> &'a [Machine] {
+        &by_name(r, region).machines
+    }
+
+    fn machine_state(r: &Regions, region: &str, id: &str) -> MachineState {
+        machines_in(r, region)
+            .iter()
+            .find(|m| m.id == id)
+            .unwrap_or_else(|| panic!("{region} has no machine {id}"))
+            .state
     }
 
     fn by_name<'a>(r: &'a Regions, name: &str) -> &'a Region {
@@ -2024,5 +2404,282 @@ mod tests {
             spec("sale", "commerce"),
         ];
         assert_eq!(inbound_kinds(&specs), vec!["backlog-item", "user-feedback"]);
+    }
+
+    // -----------------------------------------------------------------
+    // The machinery (design d2154293, car 5).
+    // -----------------------------------------------------------------
+
+    /// An ops-request as the runner leaves it: the packet plus the
+    /// `execute` step the runner completes in one write.
+    fn ops_request(
+        verb: &str,
+        status: JobStatus,
+        disposition: Option<&str>,
+        exit: Option<&str>,
+    ) -> (Job, Vec<Step>) {
+        let job = job(
+            "ops-request",
+            verb,
+            status,
+            json!({ "verb": verb, "opened_at": "2026-09-19T11:00:00Z", "closed_at": "2026-09-19T11:01:00Z" }),
+        );
+        let mut execute = step(&job, "execute", StepStatus::Completed, None);
+        execute.metadata = json!({
+            "disposition": disposition.unwrap_or(""),
+            "exit_code": exit.unwrap_or(""),
+        });
+        (job, vec![execute])
+    }
+
+    /// A machine nobody can read is UNKNOWN, and unknown is its own
+    /// reading — never the idle one. This is the whole point of the
+    /// fourth state: a default of `idle` would have the world map draw
+    /// a calm, confident machinery hall for a system nothing is
+    /// measuring.
+    #[test]
+    fn an_unreadable_machine_is_unknown_and_never_idle() {
+        let status = empty_status();
+        let mut i = inputs(&status, &[], &[], &[], &[], Some(&[]), None);
+        i.conductor = None;
+        i.ops_requests = None;
+        let out = regions(&i);
+        assert_eq!(
+            machine_state(&out, "track", "conductor"),
+            MachineState::Unknown
+        );
+        assert_eq!(
+            machine_state(&out, "shed", "runner:run-car-probe"),
+            MachineState::Unknown
+        );
+        assert_eq!(
+            machine_state(&out, "arrivals", "runner:converge"),
+            MachineState::Unknown
+        );
+        assert_eq!(
+            machine_state(&out, "marshalling", "stations"),
+            MachineState::Unknown
+        );
+        // And nothing unknown is ever drawn as idle anywhere on the map.
+        for r in &out.regions {
+            for m in &r.machines {
+                assert_ne!(
+                    (m.state, m.why.contains("could not be read")),
+                    (MachineState::Idle, true),
+                    "{}/{}: {}",
+                    r.name,
+                    m.id,
+                    m.why
+                );
+            }
+        }
+    }
+
+    /// A conductor that declares no heartbeat cannot be judged silent —
+    /// `yard::conductor_health` leaves `silent` false — so the machine
+    /// says unknown rather than inheriting that permissive answer.
+    #[test]
+    fn the_conductor_is_running_idle_never_and_unknown_without_a_declared_heartbeat() {
+        let status = empty_status();
+        let heard = crate::yard::conductor_health(
+            Some(t("2026-09-19T11:55:00Z")),
+            Some("reconcile"),
+            Some(0),
+            Some(10),
+            Some(t(NOW)),
+        );
+        let mut i = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        i.conductor = Some(&heard);
+        assert_eq!(
+            machine_state(&regions(&i), "track", "conductor"),
+            MachineState::Running
+        );
+
+        let undeclared = crate::yard::conductor_health(
+            Some(t("2026-09-19T01:00:00Z")),
+            Some("reconcile"),
+            Some(0),
+            None,
+            Some(t(NOW)),
+        );
+        i.conductor = Some(&undeclared);
+        assert_eq!(
+            machine_state(&regions(&i), "track", "conductor"),
+            MachineState::Unknown
+        );
+    }
+
+    /// A failed machine troubles its territory at WORLD scale: the
+    /// region turns troubled and the machine's own sentence leads the
+    /// `why`, so the map names the failure without a zoom.
+    #[test]
+    fn a_silent_conductor_fails_its_machine_and_troubles_the_track() {
+        let status = empty_status();
+        let silent = crate::yard::conductor_health(
+            Some(t("2026-09-19T10:00:00Z")),
+            Some("reconcile"),
+            Some(0),
+            Some(10),
+            Some(t(NOW)),
+        );
+        let mut i = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        i.conductor = Some(&silent);
+        let out = regions(&i);
+        assert_eq!(
+            machine_state(&out, "track", "conductor"),
+            MachineState::Failed
+        );
+        let track = by_name(&out, "track");
+        assert_eq!(track.state, RegionState::Troubled);
+        assert!(track.why.starts_with("conductor: SILENT"), "{}", track.why);
+        // The region's own reading is kept behind the machine's, not
+        // overwritten — a verdict adds to the record, it does not
+        // replace it.
+        assert!(track.why.contains("in transit"), "{}", track.why);
+    }
+
+    /// The runner machine reports the RUNNER, not the verb's verdict:
+    /// `run-car-probe` answers 75 ("not yet") on most passes and the
+    /// runner is fine. A refusal is its failure.
+    #[test]
+    fn a_runner_that_answered_is_idle_whatever_the_verb_exited_and_a_refusal_fails_it() {
+        let status = empty_status();
+        let answered = [ops_request(
+            "run-car-probe",
+            JobStatus::Closed,
+            Some("answered"),
+            Some("75"),
+        )];
+        let mut i = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        i.ops_requests = Some(&answered);
+        let out = regions(&i);
+        assert_eq!(
+            machine_state(&out, "shed", "runner:run-car-probe"),
+            MachineState::Idle
+        );
+        assert_eq!(by_name(&out, "shed").state, RegionState::Clear);
+
+        let refused = [ops_request(
+            "converge",
+            JobStatus::Closed,
+            Some("refused"),
+            None,
+        )];
+        i.ops_requests = Some(&refused);
+        let out = regions(&i);
+        assert_eq!(
+            machine_state(&out, "arrivals", "runner:converge"),
+            MachineState::Failed
+        );
+        assert_eq!(by_name(&out, "arrivals").state, RegionState::Troubled);
+        // The probe runner has no request in these rows at all — which
+        // is unknown, not idle: it declares no heartbeat.
+        assert_eq!(
+            machine_state(&out, "shed", "runner:run-car-probe"),
+            MachineState::Unknown
+        );
+
+        let in_flight = [ops_request("converge", JobStatus::Open, None, None)];
+        i.ops_requests = Some(&in_flight);
+        assert_eq!(
+            machine_state(&regions(&i), "arrivals", "runner:converge"),
+            MachineState::Running
+        );
+    }
+
+    /// A gate bay is the one machine that can honestly be idle: the
+    /// policy declares how many bays there are and this process counts
+    /// what stands in them, so an empty bay is OBSERVED empty.
+    #[test]
+    fn every_gate_bay_the_policy_declares_is_a_machine_and_a_corpse_fails_one() {
+        let run = job(
+            "gate-run",
+            "gate feat/x",
+            JobStatus::Open,
+            json!({ "branch": "feat/x", "opened_at": "2026-09-17T00:00:00Z" }),
+        );
+        let runs = [run];
+        let status = build_status_for(
+            YardInputs {
+                gate_runs: &runs
+                    .iter()
+                    .map(|j| (j.clone(), Vec::new()))
+                    .collect::<Vec<_>>(),
+                now: Some(t(NOW)),
+                ..Default::default()
+            },
+            Reading::Read,
+            BoardingReadings::default(),
+        );
+        let out = regions(&inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[])));
+        let bays = machines_in(&out, "gates");
+        assert_eq!(
+            bays.len(),
+            usize::try_from(status.gates.capacity).unwrap(),
+            "one machine per declared bay"
+        );
+        // The run opened two days ago, so the yard calls it stale — a
+        // corpse holding the bay, which fails that bay and troubles the
+        // gates.
+        assert_eq!(
+            machine_state(&out, "gates", "gate-bay-1"),
+            MachineState::Failed
+        );
+        assert_eq!(
+            machine_state(&out, "gates", "gate-bay-2"),
+            MachineState::Idle
+        );
+        assert_eq!(by_name(&out, "gates").state, RegionState::Troubled);
+    }
+
+    /// A station whose flow the cube cannot count is UNKNOWN even while
+    /// it holds work — the reading an idle glyph would lie about.
+    #[test]
+    fn a_station_with_uncountable_flow_is_unknown_and_an_over_limit_one_fails() {
+        let status = empty_status();
+        let rows = [
+            StationReading {
+                name: "design-review".into(),
+                over_limit: false,
+                members: vec!["a".into(), "b".into()],
+                served: None,
+                previous_served: None,
+            },
+            StationReading {
+                name: "backlog".into(),
+                over_limit: true,
+                members: vec!["c".into()],
+                served: Some(3),
+                previous_served: Some(2),
+            },
+            StationReading {
+                name: "quiet".into(),
+                over_limit: false,
+                members: vec![],
+                served: Some(0),
+                previous_served: Some(0),
+            },
+        ];
+        let out = regions(&inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&rows)));
+        assert_eq!(
+            machine_state(&out, "marshalling", "station:design-review"),
+            MachineState::Unknown
+        );
+        assert_eq!(
+            machine_state(&out, "marshalling", "station:backlog"),
+            MachineState::Failed
+        );
+        assert_eq!(
+            machine_state(&out, "marshalling", "station:quiet"),
+            MachineState::Idle
+        );
+    }
+
+    /// The verbs the handler fetches are DERIVED from the runner table
+    /// the map draws from, so the read and the drawing cannot drift
+    /// (CLAUDE.md §9a).
+    #[test]
+    fn the_runner_verbs_the_handler_reads_are_the_runners_the_map_draws() {
+        assert_eq!(runner_verbs(), vec!["converge", "run-car-probe"]);
     }
 }

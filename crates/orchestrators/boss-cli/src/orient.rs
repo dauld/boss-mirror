@@ -2202,6 +2202,10 @@ mod tests {
                     state,
                     why: why.into(),
                     trend,
+                    // orient prints a region as a LINE — its count, its
+                    // bound and its why. The machinery (car 5) is a
+                    // drawing, so this reader takes none of it.
+                    machines: Vec::new(),
                 }
             };
         let map = Regions {

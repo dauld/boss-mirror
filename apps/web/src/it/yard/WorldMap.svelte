@@ -49,6 +49,7 @@
     type Box,
   } from './world-zoom';
   import { hasPlatforms, platformLayout, type Deck, type Platform } from './world-interior';
+  import { machineTitle, machineryLabel, machineryStrip } from './world-machines';
   import type { Scene } from './yard-floor';
 
   type Props = Readonly<{
@@ -263,6 +264,7 @@
       {@const state = stateOf(r)}
       {@const troubled = state === 'troubled'}
       {@const here = t.name === zoomed}
+      {@const machinery = machineryStrip(t, r?.machines ?? [])}
       <a
         class="territory machine"
         class:here
@@ -400,6 +402,38 @@
               {/each}
             </text>
           {/if}
+        {/if}
+        <!-- THE MACHINERY (car 5). The region's actors, read from the
+             registries and judged on the SERVER — gate bays, the
+             conductor, the stations, the runners — drawn along the
+             territory's bottom edge at both zoom levels, because
+             "running machinery" is what a region is for. The glyph
+             says the state without a legend: running MOVES, idle is
+             still and solid, failed blinks red, unknown is a broken
+             outline with a mark. Idle and unknown are told apart by
+             SHAPE, not shade: a machine nobody measured must never
+             draw as a calm one. -->
+        {#if machinery.placed.length > 0}
+          <g class="machinery" data-machinery={t.name} aria-label={machineryLabel(r?.machines ?? [])}>
+            {#each machinery.placed as p (p.machine.id)}
+              <g class="glyph {p.machine.state}" data-machine={p.machine.id} data-machine-state={p.machine.state}>
+                <title>{machineTitle(p.machine)}</title>
+                <rect x={p.x} y={p.y} width={p.w} height={p.h} class="shed" class:err={p.machine.state === 'failed'} />
+                {#if p.machine.state === 'running'}
+                  <rect class="lamp ok piston" x={p.x + 2} y={p.y + 3} width="4" height={p.h - 6} />
+                {:else if p.machine.state === 'failed'}
+                  <rect class="lamp err" x={p.x + 3} y={p.y + 3} width={p.w - 6} height={p.h - 6} />
+                {:else if p.machine.state === 'unknown'}
+                  <text class="tiny mark" x={p.x + p.w / 2} y={p.y + p.h - 3} text-anchor="middle">?</text>
+                {/if}
+              </g>
+            {/each}
+            {#if machinery.hidden > 0}
+              <!-- what did not fit is COUNTED; the strip is ordered so
+                   a failure or an unknown is never what gets cut -->
+              <text x={t.x + t.w - 4} y={t.y + t.h - 6} text-anchor="end" class="tiny">+{machinery.hidden}</text>
+            {/if}
+          </g>
         {/if}
       </a>
     {/each}
@@ -558,7 +592,25 @@
   .lamp.warn { fill: var(--warn, #d9a441); }
   .lamp.err { fill: var(--err, #e2685c); animation: blink 1s steps(2) infinite; }
   @keyframes blink { 50% { opacity: 0.25; } }
+  /* THE MACHINE GLYPHS (car 5). No colour is declared here: the
+     housing is the map's own `.shed` and the parts inside it are its
+     `.lamp` tones, so a state can only ever wear a token this surface
+     already names. What IS declared here is the one thing that tells
+     the four states apart without a legend — how the glyph BEHAVES. */
+  .glyph.running .piston { animation: piston 1.1s ease-in-out infinite alternate; }
+  /* Idle: solid, still, quiet. The housing is drawn, nothing is in it. */
+  .glyph.idle .shed { opacity: 0.55; }
+  .glyph.failed .shed { stroke-width: 1.5; }
+  /* Unknown: a BROKEN outline and a mark — a different shape from
+     idle, not a different shade of it, because shade alone does not
+     survive world scale. */
+  .glyph.unknown .shed { stroke-dasharray: 2 2; }
+  .yard .glyph text.mark { font-size: 9px; letter-spacing: 0; }
+  @keyframes piston { to { transform: translateX(4px); } }
   @media (prefers-reduced-motion: reduce) {
     .lamp, .glyph, .traffic { animation: none !important; }
+    /* A still piston is still a FILLED housing, which idle never is —
+       motion is the cue, the fill is the fallback. */
+    .glyph .piston { animation: none !important; }
   }
 </style>

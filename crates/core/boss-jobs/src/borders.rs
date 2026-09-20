@@ -845,6 +845,11 @@ mod tests {
             gate_runs,
             inbound,
             stations,
+            // Borders are drawn from the flows between regions; the
+            // machinery a region runs (car 5) says nothing about an
+            // edge, so these fixtures read it as unread.
+            conductor: None,
+            ops_requests: None,
             now: t(NOW),
             window_hours: DEFAULT_WINDOW_HOURS,
         }

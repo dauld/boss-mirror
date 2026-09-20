@@ -18,6 +18,7 @@
 // frames; this owns what the frames are walking between.
 
 import { REGION_NAMES, type RegionName } from './regions';
+import { MACHINERY_STRIP_H } from './world-machines';
 import { WORLD, territoryOf, type Territory } from './world';
 import type { Scene, Station, Wagon } from './yard-floor';
 
@@ -152,7 +153,10 @@ export function interiorLayout(t: Territory, wagons: ReadonlyArray<Wagon>): Read
   // The garage is wide and low: it gets its plates nearer its own head,
   // because INTERIOR_HEAD is measured for a full-height line territory.
   const head = Math.min(INTERIOR_HEAD, Math.max(24, t.h - PLATE_H - EDGE));
-  const availH = t.h - head - EDGE;
+  // The bottom of every territory belongs to its machinery (car 5), so
+  // a wagon plate and a machine glyph never draw over each other. The
+  // height is read from the strip's own definition, not copied.
+  const availH = t.h - head - EDGE - MACHINERY_STRIP_H;
   const cols = Math.max(1, Math.floor((availW + GAP) / (PLATE_W + GAP)));
   const rows = Math.max(1, Math.floor((availH + GAP) / (PLATE_H + GAP)));
   const capacity = cols * rows;
