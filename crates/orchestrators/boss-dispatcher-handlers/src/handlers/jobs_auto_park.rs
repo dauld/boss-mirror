@@ -601,7 +601,7 @@ fn supersede(car: &Value, inputs: &AutoParkInputs) -> serde_json::Map<String, Va
             .unwrap_or("?");
         format!("--park-partial-item {}", &partial[..8.min(partial.len())])
     };
-    out.insert("backlog_item".to_string(), Value::Null);
+    out.insert(car::BACKLOG_ITEM.to_string(), Value::Null);
     // Keep the id the open named, unless the gate already named one.
     if !inputs.item_provenance.contains_key(car::PARTIAL_ITEM) {
         out.insert(car::PARTIAL_ITEM.to_string(), json!(open_edge));
@@ -640,13 +640,14 @@ fn supersede(car: &Value, inputs: &AutoParkInputs) -> serde_json::Map<String, Va
 fn adopt_edge_patch(car: &Value, inputs: &AutoParkInputs) -> Option<Value> {
     let item = inputs.backlog_item.as_deref()?;
     if car
-        .pointer("/metadata/backlog_item")
+        .get("metadata")
+        .and_then(|m| m.get(car::BACKLOG_ITEM))
         .and_then(Value::as_str)
         == Some(item)
     {
         return None;
     }
-    Some(json!({ "backlog_item": item }))
+    Some(json!({ car::BACKLOG_ITEM: item }))
 }
 
 /// PURE: the ORDERING edge the gate's `--park-after` adds, for either way

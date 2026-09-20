@@ -100,10 +100,11 @@ pub(crate) const LANES: [&str; 2] = [LANE_CAR, LANE_STEP];
 /// says so, which is what this decides.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Grounding {
-    /// The strings this invariant took OUT of its authority. Each is
-    /// pinned to be present both in that file and in the lines
-    /// printed, so the label cannot outlive the reading it claims.
-    Derived(Vec<String>),
+    /// The values this invariant SUBSTITUTED into its lines, each
+    /// naming the file it was read out of. Every one is pinned to be
+    /// present both in that file and in the lines printed, so the
+    /// label cannot outlive the reading it claims.
+    Derived(Vec<Reading>),
     /// The authority ENFORCES the rule; the sentences are ours. Marked
     /// in the rendered output with `WRITTEN_MARK`, because a written
     /// claim wearing a derived label is worse than one wearing none —
@@ -115,6 +116,50 @@ pub(crate) enum Grounding {
 /// still named — it is the right file to go read — but the reader is
 /// told the sentences did not come out of it.
 pub(crate) const WRITTEN_MARK: &str = "— written here, not read from that file";
+
+/// ONE SUBSTITUTED VALUE and the file it was read out of (backlog
+/// d334116c, 2026-09-20).
+///
+/// An invariant names ONE authority, and until this every value it
+/// printed rode under that one name. `verify as the gate` printed
+/// `uid 65534 / gid 1500` beside `infra/dev/as-gate-uid.sh`: the
+/// script contains `65534` four times and `1500` zero times, because
+/// BOTH numbers are read at runtime out of the gate-runner manifest
+/// (the script's own `ids()` awk pass over `$MANIFEST`). So under a
+/// plain derived-looking label one number was checkable against the
+/// named file and the other was not, and nothing said which.
+///
+/// That is the cc9ddc5d trap one layer in — the reader stops trusting
+/// memory and trusts the label instead, and the label was right about
+/// half of it. A value now carries its own source, the pin checks each
+/// value against THAT file, and a source that is not the invariant's
+/// authority is printed, so a mixed invariant reads as two
+/// attributions rather than one misleading one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Reading {
+    /// The exact text substituted into the lines a reader sees.
+    pub(crate) value: String,
+    /// Repo-relative path of the file it came out of. Checked to
+    /// exist and to contain `value`.
+    pub(crate) from: String,
+}
+
+impl Reading {
+    /// A value read out of `from`. Both halves are stated at the call
+    /// site: the point of this type is that neither is inferred.
+    pub(crate) fn read(from: &str, value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+            from: from.to_string(),
+        }
+    }
+}
+
+/// How a reading whose source is NOT its invariant's authority is
+/// printed, under the invariant's lines: the values, then their file.
+pub(crate) fn foreign_source_line(values: &[String], from: &str) -> String {
+    format!("({} read from {from})", values.join(", "))
+}
 
 /// One invariant a brief can reference instead of restating, and the
 /// file in the tree that DECIDES it.
@@ -308,7 +353,10 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "default is one job per CPU — 32 on this pod, against a 16 GiB cgroup.".into(),
             ],
             lanes: vec![LANE_CAR],
-            grounding: Grounding::Derived(vec![format!("CARGO_BUILD_JOBS={jobs}")]),
+            grounding: Grounding::Derived(vec![Reading::read(
+                env_file,
+                format!("CARGO_BUILD_JOBS={jobs}"),
+            )]),
         },
         Invariant {
             name: "verify as the gate",
@@ -324,7 +372,16 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "Quote its last line in a receipt's `verified` field.".into(),
             ],
             lanes: vec![LANE_CAR],
-            grounding: Grounding::Derived(vec![uid.to_string()]),
+            // The METHOD is this script; the two NUMBERS are the
+            // manifest's, which is where the script's own awk pass
+            // reads them from. Attributing them to the script would
+            // pin them to its prose — `65534` appears there four
+            // times, all in comments, and `1500` not at all
+            // (d334116c).
+            grounding: Grounding::Derived(vec![
+                Reading::read(manifest, uid.to_string()),
+                Reading::read(manifest, gid.to_string()),
+            ]),
         },
         Invariant {
             name: "gate uid / gid",
@@ -333,7 +390,10 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "uid {uid}, gid {gid} — read from the `gate` container, not from prose"
             )],
             lanes: vec![LANE_CAR],
-            grounding: Grounding::Derived(vec![uid.to_string(), gid.to_string()]),
+            grounding: Grounding::Derived(vec![
+                Reading::read(manifest, uid.to_string()),
+                Reading::read(manifest, gid.to_string()),
+            ]),
         },
         Invariant {
             name: "fixture paths",
@@ -344,7 +404,10 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "the lint named above is in the pre-flight roster and refuses one.".into(),
             ],
             lanes: vec![LANE_CAR],
-            grounding: Grounding::Derived(vec!["boss_testing::scratch".into()]),
+            grounding: Grounding::Derived(vec![Reading::read(
+                fixture_lint,
+                "boss_testing::scratch",
+            )]),
         },
         Invariant {
             name: "the database",
@@ -356,7 +419,7 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "erroring.".into(),
             ],
             lanes: vec![LANE_CAR],
-            grounding: Grounding::Derived(vec![admin_url.clone()]),
+            grounding: Grounding::Derived(vec![Reading::read(test_db, admin_url.clone())]),
         },
         Invariant {
             name: "order",
@@ -407,7 +470,7 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "list cannot fall behind the gate that judges the car.".into(),
             ],
             lanes: vec![LANE_CAR],
-            grounding: Grounding::Derived(phases.clone()),
+            grounding: Grounding::Derived(phases.iter().map(|p| Reading::read(gate, p)).collect()),
         },
         // The tokens come from the constant the refusal reads, not from
         // prose: a brief that named a token the gate does not refuse is
@@ -440,6 +503,7 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                         boss_jobs::probe::CAR_CONVERGED_AT_VAR.to_string(),
                         "reads_git_time_with_an_offset".to_string(),
                     ])
+                    .map(|v| Reading::read(probe_rules, v))
                     .collect(),
             ),
         },
@@ -466,7 +530,7 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
             "say beside the finding what the control returned.".into(),
         ],
         lanes: vec![LANE_STEP],
-        grounding: Grounding::Derived(vec![sor.clone()]),
+        grounding: Grounding::Derived(vec![Reading::read(estate, sor.clone())]),
     });
 
     out.sort_by_key(|i| i.name);
@@ -482,8 +546,44 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 inv.authority
             );
         }
+        // And every SOURCE a substituted value names, for the same
+        // reason: a value attributed to a file that is gone is a
+        // sentence wearing a citation (d334116c).
+        if let Grounding::Derived(readings) = &inv.grounding {
+            for r in readings {
+                if !repo.join(&r.from).is_file() {
+                    bail!(
+                        "the {:?} invariant says it read {:?} out of {} and that file is not there",
+                        inv.name,
+                        r.value,
+                        r.from
+                    );
+                }
+            }
+        }
     }
     Ok(out)
+}
+
+/// The readings of `inv` that came out of some file OTHER than its
+/// authority, grouped by that file, first-appearance order kept so two
+/// renders of one tree read the same.
+pub(crate) fn foreign_sources(inv: &Invariant) -> Vec<(String, Vec<String>)> {
+    let Grounding::Derived(readings) = &inv.grounding else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for r in readings.iter().filter(|r| r.from != inv.authority) {
+        match out.iter_mut().find(|(f, _)| f == &r.from) {
+            Some((_, values)) => {
+                if !values.contains(&r.value) {
+                    values.push(r.value.clone());
+                }
+            }
+            None => out.push((r.from.clone(), vec![r.value.clone()])),
+        }
+    }
+    out
 }
 
 /// The invariant half, rendered FOR ONE LANE: the invariants that lane
@@ -496,7 +596,7 @@ pub(crate) fn invariant_section(invs: &[Invariant], lane: &str) -> String {
     let mine: Vec<&Invariant> = invs.iter().filter(|i| i.lanes.contains(&lane)).collect();
     let mut out = format!(
         "== THE INVARIANTS — for the `{lane}` lane, each read out of the file named \
-         after it, or marked as written ==\n"
+         after it (a value read elsewhere names its own file), or marked as written ==\n"
     );
     if mine.is_empty() {
         out.push_str(&format!(
@@ -515,6 +615,13 @@ pub(crate) fn invariant_section(invs: &[Invariant], lane: &str) -> String {
         out.push_str(&format!("\n{}   [{}{mark}]\n", inv.name, inv.authority));
         for l in &inv.lines {
             out.push_str(&format!("    {l}\n"));
+        }
+        // A value read out of some OTHER file says so here, grouped by
+        // that file and in the order the values were read. One
+        // authority standing for every value is what let the gate's gid
+        // ride under a file that does not contain it (d334116c).
+        for (from, values) in foreign_sources(inv) {
+            out.push_str(&format!("    {}\n", foreign_source_line(&values, &from)));
         }
     }
     out
@@ -1106,44 +1213,115 @@ mod tests {
     /// cc9ddc5d closed one level up (ten briefs retyped from memory,
     /// the uid wrong in all ten); an unchecked label re-opens it.
     #[test]
-    fn every_derived_invariant_can_show_its_reading_in_its_authority() {
+    fn every_derived_invariant_can_show_its_reading_in_the_file_it_names() {
         let invs = invariants(&repo()).expect("the invariants derive from this tree");
         let mut derived = 0;
         for inv in &invs {
-            let Grounding::Derived(values) = &inv.grounding else {
+            let Grounding::Derived(readings) = &inv.grounding else {
                 continue;
             };
             derived += 1;
             assert!(
-                !values.is_empty(),
+                !readings.is_empty(),
                 "{:?} claims a reading of nothing",
                 inv.name
             );
-            let authority = std::fs::read_to_string(repo().join(&inv.authority))
-                .unwrap_or_else(|_| panic!("{} reads", inv.authority));
             let lines = inv.lines.join("\n");
-            for v in values {
+            for r in readings {
                 assert!(
-                    !v.trim().is_empty(),
+                    !r.value.trim().is_empty(),
                     "{:?} claims an empty reading",
                     inv.name
                 );
+                // ITS OWN source, not the invariant's authority
+                // (d334116c): one authority standing for every value
+                // is how the gid came to ride under a file that does
+                // not contain it.
+                let source = std::fs::read_to_string(repo().join(&r.from))
+                    .unwrap_or_else(|_| panic!("{} reads", r.from));
                 assert!(
-                    authority.contains(v.as_str()),
-                    "{:?} says it read `{v}` out of {}, and that file does not contain it",
+                    source.contains(r.value.as_str()),
+                    "{:?} says it read `{}` out of {}, and that file does not contain it",
                     inv.name,
-                    inv.authority
+                    r.value,
+                    r.from
                 );
                 assert!(
-                    lines.contains(v.as_str()),
-                    "{:?} read `{v}` and then does not print it",
-                    inv.name
+                    lines.contains(r.value.as_str()),
+                    "{:?} read `{}` and then does not print it",
+                    inv.name,
+                    r.value
                 );
             }
         }
         assert!(
             derived >= 5,
             "most invariants are read, not written: {derived}"
+        );
+    }
+
+    /// EVERY SUBSTITUTED VALUE NAMES THE FILE IT CAME FROM, and a value
+    /// that came from somewhere other than the invariant's authority
+    /// says so where a builder reads it (backlog d334116c, 2026-09-20).
+    ///
+    /// Measured before the fix: `verify as the gate` printed `uid 65534
+    /// / gid 1500` under `infra/dev/as-gate-uid.sh`, a file containing
+    /// `65534` four times (all of them prose) and `1500` zero times.
+    /// Both numbers are in fact the gate-runner manifest's — the script
+    /// awks them out of it at runtime — so the invariant's one
+    /// authority was right about the METHOD and wrong about where
+    /// either number was read. The pin covered the uid alone, so the
+    /// gid rode unchecked under a derived label.
+    ///
+    /// This is cc9ddc5d one layer in: the whole point of `boss brief`
+    /// is that nobody retypes these numbers, and a reader who trusts
+    /// the label instead of their memory has to be able to trust all of
+    /// it.
+    #[test]
+    fn the_two_gate_ids_are_attributed_to_the_manifest_that_decides_them() {
+        let invs = invariants(&repo()).expect("the invariants derive");
+        let manifest = "infra/gate-runner/gate-runner.yaml";
+        let (uid, gid) =
+            gate_ids(&std::fs::read_to_string(repo().join(manifest)).expect("the manifest"))
+                .expect("the gate container's ids");
+        let inv = invs
+            .iter()
+            .find(|i| i.name == "verify as the gate")
+            .expect("a verify-as-the-gate invariant");
+        let Grounding::Derived(readings) = &inv.grounding else {
+            panic!("verify as the gate prints two read values");
+        };
+        for n in [uid.to_string(), gid.to_string()] {
+            let r = readings
+                .iter()
+                .find(|r| r.value == n)
+                .unwrap_or_else(|| panic!("the invariant prints {n} and pins {readings:?}"));
+            assert_eq!(
+                r.from, manifest,
+                "{n} is read from the manifest, not from {}",
+                r.from
+            );
+        }
+        // The METHOD is still the authority — it is the file to go read
+        // — and the rendered block now names the manifest beside the
+        // two numbers it actually holds.
+        assert_eq!(inv.authority, "infra/dev/as-gate-uid.sh");
+        let rendered = invariant_section(&invs, LANE_CAR);
+        let expected = foreign_source_line(&[uid.to_string(), gid.to_string()], manifest);
+        assert!(
+            rendered.contains(&expected),
+            "the rendered invariant does not say where the ids came from: {rendered}"
+        );
+        // And an invariant whose values all come from its authority
+        // stays plain: the extra line has to DISCRIMINATE, or it is
+        // decoration.
+        let db = invs
+            .iter()
+            .find(|i| i.name == "the database")
+            .expect("a database invariant");
+        assert!(
+            foreign_sources(db).is_empty(),
+            "the database invariant reads only its own authority"
         );
     }
 

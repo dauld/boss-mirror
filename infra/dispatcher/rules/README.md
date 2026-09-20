@@ -31,6 +31,29 @@ not have, and retiring every enforced rule no file here names. So:
   history: they are never edited (the checksum guard refuses it, which is
   the 2026-08-13 outage) and no new one is ever needed.
 
+**One of them is a trap, and it cannot be repaired** (backlog 8c0860ce,
+2026-09-20). `41-dispatcher.sql`, the migration that creates this table,
+opens by telling its reader that the seed rows are GENERATED from
+`infra/dispatcher/rules.toml` by `infra/dispatcher/gen-seed.py`, that
+they must NOT be hand-edited, and that `dispatcher_rules_seed_matches_toml`
+guards them against drift. All three are gone: the input collapsed into
+this directory on 2026-09-11, the generator went with it, and the pin was
+deleted deliberately for
+`crates/core/boss-dispatcher/tests/dispatcher_rules_seed.rs`, which
+mutates the derived copy instead of comparing two copies. It is worse
+than a stale sentence — it gives an instruction that cannot be followed
+AND forbids the thing that is now correct — and it stays exactly as it
+is, because the prose of an applied migration is part of its checksum
+(`migrate.sh` sha256s the whole file, comments included, and
+`infra/lint/migrations-append-only.sh` refuses the edit at gate time).
+Read that header as history, and the rows under it likewise:
+`20260918022108-seed-residue-is-not-a-retirement.sql` deletes the ones no
+file here authors. This paragraph is the repair, and it is pinned to the
+trap by
+`crates/core/boss-testing/tests/a_frozen_headers_correction_expires_with_its_trap.rs`
+— if the header ever stops saying it, that test fails and this paragraph
+goes.
+
 **It was two homes until 2026-09-11** (backlog 41ba00cd). A rule was
 declared twice, in two languages, with nothing deriving one from the
 other: a file here, and an `INSERT` in a migration. Only the second one

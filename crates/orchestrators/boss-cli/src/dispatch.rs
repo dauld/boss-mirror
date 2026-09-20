@@ -510,7 +510,7 @@ pub(crate) struct Dispatched {
 /// (2026-09-19). A car holding an 8-char PREFIX would not be found, and
 /// that miss is today's behaviour — no refusal — never a wrong one.
 pub(crate) fn cars_for_item_query(item_id: &str) -> String {
-    let doc = json!({ "backlog_item": item_id }).to_string();
+    let doc = json!({ boss_jobs::car::BACKLOG_ITEM: item_id }).to_string();
     format!(
         "/api/jobs?kind=ship-a-change&metadata={}&limit=50",
         percent_encoding::utf8_percent_encode(&doc, crate::job::QUERY_VALUE)

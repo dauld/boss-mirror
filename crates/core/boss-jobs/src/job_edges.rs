@@ -61,7 +61,7 @@ impl JobEdgesRegistry for InMemoryJobEdges {
             ),
             mk(
                 "ship-a-change",
-                "backlog_item",
+                crate::car::BACKLOG_ITEM,
                 "job_id",
                 "The backlog/feedback Job this change answers",
             ),
@@ -331,7 +331,7 @@ mod tests {
         assert_eq!(v[0]["field_path"], "waiting_on");
         assert_eq!(v[1]["source_kind"], "pr-train");
         assert_eq!(v[1]["field_kind"], "job_id_list");
-        assert_eq!(v[2]["field_path"], "backlog_item");
+        assert_eq!(v[2]["field_path"], crate::car::BACKLOG_ITEM);
         assert_eq!(v[2]["on_missing"], "abort");
     }
 }

@@ -2388,13 +2388,28 @@ pub async fn run(
         for d in &done.dropped {
             println!("boss gate: {}", d.line());
         }
+        // The move is stated in the past tense ONLY when the forge was
+        // re-read and holds it (18909a43): a push git accepted is an
+        // answer, not an effect, and this line once said "04ca1ae7 →
+        // 64ecfe32 (pushed with a lease)" of a branch that still read
+        // 04ca1ae7. A branch that did NOT end at the replayed head no
+        // longer reaches here at all — `rebase_onto_main` retries and
+        // then refuses — so the only remaining doubt is a forge that
+        // could not be re-read, and that doubt is printed.
         println!(
             "boss gate: --rebase replayed {} commit(s) of {branch} onto origin/main — {} → {} \
-             (pushed with a lease on the old head; your own worktree still has the old head: \
-             `git fetch origin && git reset --hard origin/{branch}` there when you are done)",
+             ({}; your own worktree still has the old head: `git fetch origin && git reset --hard \
+             origin/{branch}` there when you are done)",
             done.replayed,
             &done.old_head[..8.min(done.old_head.len())],
-            &done.new_head[..8.min(done.new_head.len())]
+            &done.new_head[..8.min(done.new_head.len())],
+            if done.confirmed {
+                "pushed with a lease on the old head and read back: the forge's branch holds it"
+            } else {
+                "pushed with a lease on the old head, but the forge could NOT be re-read to \
+                 confirm the branch holds it — check with `git ls-remote origin` before trusting \
+                 this line"
+            }
         );
         base_obs = crate::freshness::observe(std::path::Path::new("."), branch);
         // The packet records the head that is GATED — the replayed one.

@@ -263,6 +263,11 @@ pub(crate) struct Rebased {
     /// Commits main already held, in branch order — replayed EMPTY and
     /// skipped, each one named to the operator (1cfab20e).
     pub dropped: Vec<Dropped>,
+    /// Did the forge, re-read after the push, actually hold `new_head`?
+    /// `false` means the push was accepted and the branch could not be
+    /// re-read to confirm it — the caller says so rather than claiming a
+    /// move it did not observe (18909a43).
+    pub confirmed: bool,
 }
 
 /// One commit `--rebase` dropped because its patch is already on main:
@@ -301,6 +306,43 @@ impl Dropped {
 /// session were built on a main that had moved by gate time — trains
 /// land every ~45 min — and each rebase was the same three hand steps.
 pub(crate) fn rebase_onto_main(repo: &Path, branch: &str) -> anyhow::Result<Rebased> {
+    let mut raced: Vec<String> = Vec::new();
+    for _ in 0..REPLAY_ATTEMPTS {
+        match replay_once(repo, branch)? {
+            Replay::Settled(done) => return Ok(done),
+            Replay::Raced(why) => raced.push(why),
+        }
+    }
+    anyhow::bail!(
+        "boss gate --rebase: the rebase was NOT applied — {branch} on the forge does not end at \
+         the head that was replayed onto origin/main, after {REPLAY_ATTEMPTS} attempts. What each \
+         attempt saw:\n  {}\nThe branch is where it was; gate again once it is quiet.",
+        raced.join("\n  ")
+    );
+}
+
+/// How many times a racing branch is replayed before the verb refuses.
+///
+/// Three, because the race it survives is another push landing in the
+/// seconds between this verb reading the head and moving it: replaying
+/// against the branch as it now stands is the fix (18909a43, fix 2).
+/// A branch pushed to three times in a row while a gate launches is not
+/// a race — it is a builder still working — and refusing is then right.
+const REPLAY_ATTEMPTS: usize = 3;
+
+/// What one replay attempt left behind.
+enum Replay {
+    /// The forge, re-read, holds the replayed head — or could not be
+    /// re-read at all, in which case [`Rebased::confirmed`] is false and
+    /// the caller says so rather than vouching for the move.
+    Settled(Rebased),
+    /// Something moved the branch under this attempt: the lease refused
+    /// the push, or the push was accepted and the branch does not hold
+    /// what was pushed. The string is what this attempt observed.
+    Raced(String),
+}
+
+fn replay_once(repo: &Path, branch: &str) -> anyhow::Result<Replay> {
     use anyhow::{Context, bail};
     let git = |args: &[&str]| -> anyhow::Result<std::process::Output> {
         let mut cmd = crate::git_auth::command();
@@ -347,16 +389,26 @@ pub(crate) fn rebase_onto_main(repo: &Path, branch: &str) -> anyhow::Result<Reba
         "counting how far behind",
     )?;
     if behind.trim() == "0" {
-        return Ok(Rebased {
+        return Ok(Replay::Settled(Rebased {
             old_head: old_head.clone(),
             new_head: old_head,
             replayed: 0,
             dropped: vec![],
-        });
+            // Nothing was pushed, so the head read above IS the forge's.
+            confirmed: true,
+        }));
     }
+    // ONE ATTEMPT, ONE DIRECTORY. pid + head alone named the same path
+    // for every replay of the same head, and `cleanup` below removes it
+    // with --force: a retry (18909a43) or a second caller replaying that
+    // head pulled the directory out from under the first, which reads as
+    // "failed before any conflict could be read". The counter makes the
+    // path unique within this process; the pid, between processes.
+    static ATTEMPT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let tmp = std::env::temp_dir().join(format!(
-        "boss-gate-rebase-{}-{}",
+        "boss-gate-rebase-{}-{}-{}",
         std::process::id(),
+        ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         &old_head[..8.min(old_head.len())]
     ));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -503,22 +555,56 @@ pub(crate) fn rebase_onto_main(repo: &Path, branch: &str) -> anyhow::Result<Reba
         .output()
         .context("pushing the replayed branch")?;
     cleanup(&git);
+    let short = |s: &str| s[..8.min(s.len())].to_string();
     if !push.status.success() {
-        bail!(
-            "boss gate --rebase: the replay succeeded but the push was refused: {}. The branch \
-             on the forge is unchanged.",
+        // A lease refused IS the race — the branch moved between the head
+        // this attempt read and the push. Say what was seen and let the
+        // caller replay against the branch as it now stands.
+        return Ok(Replay::Raced(format!(
+            "the push of {} was refused under the lease on {}: {}",
+            short(&new_head),
+            short(&old_head),
             String::from_utf8_lossy(&push.stderr).trim()
-        );
+        )));
     }
-    // Keep the caller's remote-tracking ref honest; the local branch,
-    // if checked out somewhere, is theirs to move.
-    let _ = git(&["fetch", "-q", "origin", &format!("refs/heads/{branch}")]);
-    Ok(Rebased {
+    // THE PUSH IS READ BACK, NOT BELIEVED (18909a43, 2026-09-20). A push
+    // git reports as successful is a forge ANSWER and not a forge EFFECT:
+    // this verb printed "04ca1ae7 -> 64ecfe32 (pushed with a lease)" and
+    // the branch still read 04ca1ae7 — the replayed commit survived as an
+    // object no ref pointed at, and the car gated, and parked, one commit
+    // behind main. The exit code does not decide what this attempt did;
+    // the re-read does. It doubles as keeping the caller's
+    // remote-tracking ref honest (the local branch, if checked out
+    // somewhere, is theirs to move).
+    let _ = git(&[
+        "fetch",
+        "-q",
+        "origin",
+        &format!("+refs/heads/{branch}:refs/remotes/origin/{branch}"),
+    ]);
+    let observed = git(&["rev-parse", &format!("origin/{branch}")])
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    if let Some(head) = &observed
+        && head != &new_head
+    {
+        return Ok(Replay::Raced(format!(
+            "{} was pushed with a lease on {} and accepted, but {branch} on the forge reads {}",
+            short(&new_head),
+            short(&old_head),
+            short(head)
+        )));
+    }
+    Ok(Replay::Settled(Rebased {
         old_head,
         new_head,
         replayed: commits.len() - dropped.len(),
         dropped,
-    })
+        // An unreadable branch is not a finding either way: the caller
+        // prints the move without vouching for it.
+        confirmed: observed.is_some(),
+    }))
 }
 
 pub(crate) fn stale_base_guard(
@@ -803,6 +889,107 @@ mod tests {
             1,
             "the temporary worktree is gone: {wts}"
         );
+    }
+
+    impl Forge {
+        /// The forge repository this clone was made from.
+        fn origin(&self) -> std::path::PathBuf {
+            let url = String::from_utf8_lossy(
+                &Forge::git(&self.clone, &["config", "remote.origin.url"]).stdout,
+            )
+            .trim()
+            .to_string();
+            std::path::PathBuf::from(url)
+        }
+
+        /// Make the forge RETREAT: a `post-receive` hook that puts every
+        /// branch it just accepted back where it was. `once` retreats the
+        /// first push only, which is the race the verb must survive by
+        /// replaying; always-on is the one it must refuse plainly.
+        ///
+        /// This is the measured shape of 18909a43 (2026-09-20): the push
+        /// reported success, the replayed commit existed as an object,
+        /// and the branch still read the pre-rebase sha.
+        fn retreats(&self, once: bool) {
+            let hooks = self.origin().join(".git").join("hooks");
+            boss_testing::scratch::create_dir(&hooks);
+            let marker = hooks.join("retreated");
+            let guard = if once {
+                format!(
+                    "if [ -f {m} ]; then exit 0; fi\n: > {m}\n",
+                    m = marker.display()
+                )
+            } else {
+                String::new()
+            };
+            boss_testing::scratch::write_exec(
+                &hooks.join("post-receive"),
+                &format!(
+                    "#!/bin/sh\n{guard}while read -r old new ref; do\n  git update-ref \"$ref\" \
+                     \"$old\"\ndone\n"
+                ),
+            );
+        }
+    }
+
+    /// THE CLAIM IS READ BACK. A push the forge accepts and then undoes
+    /// leaves the branch where it started; the verb must say the rebase
+    /// was NOT applied and name the head the branch actually has —
+    /// never report the replayed sha in the past tense (18909a43).
+    #[test]
+    fn a_rebase_the_forge_did_not_keep_is_refused_naming_the_head_the_branch_has() {
+        let f = Forge::build("boss-cli-freshness-rebase-retreats");
+        f.retreats(false);
+        let old_head = String::from_utf8_lossy(
+            &Forge::git(&f.clone, &["rev-parse", "origin/car/disjoint"]).stdout,
+        )
+        .trim()
+        .to_string();
+        let err = rebase_onto_main(&f.clone, "car/disjoint")
+            .expect_err("a branch that did not move is not a rebase that happened")
+            .to_string();
+        assert!(
+            err.contains("NOT applied") && err.contains(&old_head[..8]),
+            "{err}"
+        );
+        Forge::git(&f.clone, &["fetch", "-q", "origin"]);
+        let forge_head = String::from_utf8_lossy(
+            &Forge::git(&f.clone, &["rev-parse", "origin/car/disjoint"]).stdout,
+        )
+        .trim()
+        .to_string();
+        assert_eq!(forge_head, old_head, "the forge's branch is where it was");
+        let wts = String::from_utf8_lossy(&Forge::git(&f.clone, &["worktree", "list"]).stdout)
+            .to_string();
+        assert_eq!(
+            wts.lines().count(),
+            1,
+            "no temporary worktree left behind: {wts}"
+        );
+    }
+
+    /// A ONE-OFF RACE IS REPLAYED, NOT ABANDONED. Resolve, clone and push
+    /// must agree on one sha; when they do not, the verb takes the branch
+    /// as it now stands and replays again (18909a43, fix 2).
+    #[test]
+    fn a_branch_that_moves_under_the_push_is_replayed_again() {
+        let f = Forge::build("boss-cli-freshness-rebase-race");
+        f.retreats(true);
+        let done = rebase_onto_main(&f.clone, "car/disjoint")
+            .expect("the second attempt settles the branch");
+        assert_eq!(done.replayed, 1, "{done:?}");
+        Forge::git(&f.clone, &["fetch", "-q", "origin"]);
+        let forge_head = String::from_utf8_lossy(
+            &Forge::git(&f.clone, &["rev-parse", "origin/car/disjoint"]).stdout,
+        )
+        .trim()
+        .to_string();
+        assert_eq!(
+            forge_head, done.new_head,
+            "the head the verb reports is the head the branch has"
+        );
+        assert!(done.confirmed, "read back from the forge: {done:?}");
+        assert_eq!(observe(&f.clone, "car/disjoint").standing, Base::Current);
     }
 
     /// A car whose replay conflicts is REFUSED with the files named, the

@@ -81,8 +81,8 @@ pub(crate) fn train_consist(boarded_cars: &[Value]) -> Vec<Value> {
                     .and_then(Value::as_str)
                     .filter(|s| !s.trim().is_empty())
             };
-            if let Some(item) = stated("backlog_item") {
-                entry["backlog_item"] = json!(id8(item));
+            if let Some(item) = stated(car::BACKLOG_ITEM) {
+                entry[car::BACKLOG_ITEM] = json!(id8(item));
             }
             if let Some(item) = stated(car::PARTIAL_ITEM) {
                 entry[car::PARTIAL_ITEM] = json!(id8(item));
@@ -120,7 +120,7 @@ pub(crate) fn squash_message(consist: &[Value]) -> String {
     // an omission.
     let item_answer = |c: &Value| -> String {
         let text = |k: &str| c.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
-        if let Some(i) = text("backlog_item") {
+        if let Some(i) = text(car::BACKLOG_ITEM) {
             format!(", backlog-item {i}")
         } else if let Some(i) = text(car::PARTIAL_ITEM) {
             format!(", part of {i}")
@@ -1143,10 +1143,14 @@ mod tests {
     #[test]
     fn the_squash_message_lists_one_line_per_car_of_the_consist() {
         let mut cars = boarded_cars();
-        cars[0]["metadata"]["backlog_item"] = json!("f252cb1c-1555-4cf6-9f93-19024bb166c3");
+        cars[0]["metadata"][car::BACKLOG_ITEM] = json!("f252cb1c-1555-4cf6-9f93-19024bb166c3");
         let consist = train_consist(&cars);
-        assert_eq!(consist[0]["backlog_item"], json!("f252cb1c"));
-        assert!(consist[1].get("backlog_item").is_none(), "{}", consist[1]);
+        assert_eq!(consist[0][car::BACKLOG_ITEM], json!("f252cb1c"));
+        assert!(
+            consist[1].get(car::BACKLOG_ITEM).is_none(),
+            "{}",
+            consist[1]
+        );
         assert_eq!(
             squash_message(&consist),
             "feat/x — Fix the thing [ship-a-change car-1-uu, backlog-item f252cb1c]\n\
@@ -1179,14 +1183,18 @@ mod tests {
                                 "no_item_reason": "found while building something else"}}),
         ];
         let consist = train_consist(&cars);
-        assert_eq!(consist[0]["backlog_item"], json!("f252cb1c"));
+        assert_eq!(consist[0][car::BACKLOG_ITEM], json!("f252cb1c"));
         assert_eq!(consist[1]["partial_item"], json!("9f00a805"));
         assert_eq!(
             consist[2]["no_item_reason"],
             json!("found while building something else")
         );
         // Each car states ONE answer, so no entry carries a second.
-        assert!(consist[1].get("backlog_item").is_none(), "{}", consist[1]);
+        assert!(
+            consist[1].get(car::BACKLOG_ITEM).is_none(),
+            "{}",
+            consist[1]
+        );
         assert!(consist[2].get("partial_item").is_none(), "{}", consist[2]);
         assert_eq!(
             squash_message(&consist),

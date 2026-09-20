@@ -644,7 +644,7 @@ fn persist_error_response(e: impl std::fmt::Display) -> Response {
 /// reference entirely, which is how sixteen packets ended up
 /// unlinked.
 fn edge_guidance(msg: String) -> String {
-    if msg.contains("backlog_item") {
+    if msg.contains(crate::car::BACKLOG_ITEM) {
         format!(
             "{msg} — `backlog_item` is a declared job edge and must name a Job on this \
              instance (it is what closes that packet when this change merges). For a \

@@ -54,7 +54,7 @@ pub fn car_body(
         // which is what makes it safe to write here rather than by hand.
         // A mistyped id is refused instead of silently pointing at
         // nothing.
-        metadata["backlog_item"] = json!(item);
+        metadata[BACKLOG_ITEM] = json!(item);
     }
     // How this change ships (data/config/software/infra), derived at the
     // gate and carried here so the yard and channel-gated delivery read
@@ -377,6 +377,25 @@ pub fn proof_intent(
     put(PROOF_EVENT, event);
     m
 }
+
+/// THE ITEM A CAR ANSWERS, AND AUTHORISES THE CLOSE OF.
+///
+/// The declared one-to-one job edge (`('ship-a-change', 'backlog_item',
+/// 'job_id')`) the arrival rule `complete-feedback-branch-on-car-merged`
+/// follows to complete the item's `build` step when the change merges —
+/// so writing it is what closes the item, and the id is ref-checked at
+/// the write.
+///
+/// ONE DEFINITION, LATE (backlog 973d353f). Its two siblings below were
+/// `pub const` from the day each was written, while the commonest of the
+/// three — 187 of 200 recent cars carried it, against 6 and 7 — stayed a
+/// bare string in fourteen files, several of them lines that name
+/// [`PARTIAL_ITEM`] by constant and this one by literal. It had not
+/// drifted; the asymmetry was the hazard on its own, because a reader
+/// who finds two of three as constants concludes the pattern is
+/// constants and never greps for the third (CLAUDE.md §9a: a pin is a
+/// holding action, the collapse is the destination).
+pub const BACKLOG_ITEM: &str = "backlog_item";
 
 /// THE ITEM A CAR NAMES WITHOUT AUTHORISING ITS CLOSE.
 ///
@@ -957,14 +976,14 @@ mod tests {
         assert_eq!(p[PARTIAL_ITEM], "cf0f5e2d");
         assert!(!p.contains_key(NO_ITEM_REASON));
         assert!(
-            !p.contains_key("backlog_item"),
+            !p.contains_key(BACKLOG_ITEM),
             "a partial edge must never write the key the arrival rule follows"
         );
         let n = item_provenance(None, Some("David asked for this in conversation"));
         assert_eq!(n.len(), 1);
         assert_eq!(n[NO_ITEM_REASON], "David asked for this in conversation");
-        assert_ne!(PARTIAL_ITEM, "backlog_item");
-        assert_ne!(NO_ITEM_REASON, "backlog_item");
+        assert_ne!(PARTIAL_ITEM, BACKLOG_ITEM);
+        assert_ne!(NO_ITEM_REASON, BACKLOG_ITEM);
     }
 
     #[test]
@@ -993,7 +1012,29 @@ mod tests {
         assert_eq!(b["title"], "A thing does the thing");
         assert_eq!(b["subject"]["id"], "feat/x");
         assert_eq!(b["owner_id"], "emp-owner", "the owner is the one handed in");
-        assert!(b["metadata"].get("backlog_item").is_none());
+        assert!(b["metadata"].get(BACKLOG_ITEM).is_none());
+    }
+
+    /// THE THIRD KEY IS A CONSTANT TOO (backlog 973d353f). Three keys
+    /// answer one question — which item this car answered — and
+    /// `require_item_answer` guarantees exactly one of them is present.
+    /// [`PARTIAL_ITEM`] and [`NO_ITEM_REASON`] were `pub const` from the
+    /// day they were written; the third, and the commonest (187 of 200
+    /// recent cars carried it, against 6 and 7), was a bare string in
+    /// fourteen files. It had not drifted, which is why it was cheap to
+    /// collapse — but the asymmetry was itself the hazard: a reader who
+    /// finds two of three as constants concludes the pattern is
+    /// constants, and will not grep for a literal spelling of the third.
+    #[test]
+    fn the_three_item_answer_keys_are_each_one_definition() {
+        assert_eq!(BACKLOG_ITEM, "backlog_item", "the wire spelling is fixed");
+        assert_ne!(BACKLOG_ITEM, PARTIAL_ITEM);
+        assert_ne!(BACKLOG_ITEM, NO_ITEM_REASON);
+        // The closing edge is the one the arrival rule follows, so the
+        // provenance-only builder must still never write it.
+        assert!(!item_provenance(Some("cf0f5e2d"), None).contains_key(BACKLOG_ITEM));
+        let b = car_body("feat/x", "Summary", Some("de6f0c06"), None, "emp-owner");
+        assert_eq!(b["metadata"][BACKLOG_ITEM], "de6f0c06");
     }
 
     #[test]
@@ -1006,7 +1047,7 @@ mod tests {
             "emp-owner",
         );
         assert_eq!(
-            b["metadata"]["backlog_item"],
+            b["metadata"][BACKLOG_ITEM],
             "de6f0c06-a341-4445-9f47-399dc27a60fb"
         );
     }

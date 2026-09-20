@@ -200,10 +200,10 @@ pub struct Department {
 /// The department rows out of the listing; a row without a code is
 /// skipped by name in the error list, never silently.
 pub fn departments(listing: &Value) -> Result<Vec<Department>, String> {
-    let rows = listing
-        .get("data")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "GET /api/departments answered no `data` array".to_string())?;
+    // The judgement about a missing `data` array lives once, in
+    // `common::rows_or_refuse` (backlog 833e2d0a). This reading was one
+    // of the three that made it, and it keeps its own per-row check.
+    let rows: Vec<Value> = super::common::rows_or_refuse(listing, "GET /api/departments")?;
     rows.iter()
         .map(|r| {
             let code = r
