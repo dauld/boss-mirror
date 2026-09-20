@@ -15,6 +15,7 @@ pub mod agent_spec;
 pub mod agents;
 pub mod audience;
 pub mod bootstrap;
+pub mod borders;
 pub mod bundle_seed;
 pub mod cadence;
 pub mod cadence_seed;

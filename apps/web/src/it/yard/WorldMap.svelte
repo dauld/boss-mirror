@@ -27,6 +27,14 @@
   import { untrack } from 'svelte';
   import { navigate } from '@boss/web-kit/nav';
   import { countText, floorHref, lampOf, trendText, type Region, type Regions } from './regions';
+  import {
+    densityOf,
+    machineText,
+    rateText as borderRateText,
+    waitingText,
+    type Border,
+    type Borders,
+  } from './borders';
   import { BORDERS, TERRITORIES, WORLD, borderPath, territoryOf, wrapWords, type Territory } from './world';
   import {
     WORLD_BOX,
@@ -58,8 +66,68 @@
     deck?: Deck | null;
     /** Back to the world: Escape, or the frame around the territory. */
     onleave?: () => void;
+    /** The rails' readings, or null while unread or unreadable: the
+     *  rails still DRAW — the layout is the map — but every number on
+     *  them then reads unknown rather than zero (car 2). */
+    borders?: Borders | null;
   }>;
-  let { regions, zoomed = null, floor = null, deck = null, onleave = () => {} }: Props = $props();
+  let {
+    regions,
+    zoomed = null,
+    floor = null,
+    deck = null,
+    onleave = () => {},
+    borders = null,
+  }: Props = $props();
+
+  const key = (from: string, to: string): string => `${from}→${to}`;
+  const byBorder = $derived(new Map((borders?.borders ?? []).map((b) => [key(b.from, b.to), b] as const)));
+  /** A border the server answered that the layout does not draw — said
+   *  at the foot of the map beside an unmapped region, never dropped. */
+  const unmappedBorders = $derived(
+    (borders?.borders ?? [])
+      .filter((b) => !BORDERS.some((d) => d.from === b.from && d.to === b.to))
+      .map((b) => key(b.from, b.to)),
+  );
+
+  /** The rail's midpoint — where the traffic token stands. A cubic whose
+   *  control points share the endpoints' axes passes through the mean of
+   *  its endpoints at t=0.5, so this IS the curve's middle. */
+  const mid = (p: { x1: number; y1: number; x2: number; y2: number }) => ({
+    x: (p.x1 + p.x2) / 2,
+    y: (p.y1 + p.y2) / 2,
+  });
+
+  /** Everything the rail knows, for the hover — a border must not need
+   *  a second surface to explain what it is showing. */
+  function borderTitle(b: Border | undefined, from: string, to: string): string {
+    if (b === undefined) return `${from} → ${to} — the borders read answered nothing for this rail`;
+    const holds = b.holds.map((h) => `  ${h.what} — ${h.why}`).join('\n');
+    return [
+      `${from} → ${to} · ${b.state} — ${b.why}`,
+      `one crossing = ${b.crossing}`,
+      `rate: ${borderRateText(b.rate)}`,
+      `${waitingText(b)}${holds === '' ? '' : `:\n${holds}`}`,
+      `machine: ${machineText(b.machine)} (${b.machine.why})`,
+    ].join('\n');
+  }
+
+  /** What the token prints: the queue depth, or `?` for a count the
+   *  server could not take. Never 0 for "I do not know". */
+  const tokenText = (b: Border | undefined): string =>
+    b === undefined || b.waiting === null ? '?' : String(b.waiting);
+
+  /** `3/d`, or `?` — the rate beside the rail, short enough for the gap
+   *  between two territories. The full sentence rides the title. */
+  const railRate = (b: Border | undefined): string =>
+    b === undefined || b.rate.current === null ? '?' : `${Math.round(b.rate.current * 10) / 10}/d`;
+
+  const densityFor = (b: Border | undefined) => densityOf(b === undefined ? null : b.rate.current);
+  const stateOfBorder = (b: Border | undefined) => b?.state ?? 'troubled';
+  /** The machine's lamp: its own silence when it declares a cadence,
+   *  otherwise unlit — an unlit lamp is "cannot tell", not "fine". */
+  const machineLamp = (b: Border | undefined): string =>
+    b === undefined || b.machine.silent === null ? 'unknown' : b.machine.silent ? 'err' : 'ok';
 
   const byName = $derived(new Map(regions.regions.map((r) => [r.name, r] as const)));
   /** A region the server answered that the layout has no territory
@@ -178,8 +246,14 @@
       {@const to = territoryOf(b.to)}
       {#if from && to}
         {@const p = borderPath(from, to)}
+        {@const row = byBorder.get(`${b.from}→${b.to}`)}
         <path d={p.d} class="tie" data-border="{b.from}→{b.to}" />
-        <path d={p.d} class="rail" />
+        <path d={p.d} class="rail" data-state={stateOfBorder(row)} />
+        <!-- the traffic itself: dashes running along the rail, their
+             weight from the crossing rate the server measured. An
+             UNMEASURED rate gets its own band (a dotted, unlit rail),
+             never the empty-rail one. -->
+        <path d={p.d} class="traffic" data-traffic="{b.from}→{b.to}" data-density={densityFor(row)} />
       {/if}
     {/each}
 
@@ -347,10 +421,41 @@
           onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && onleave()}>← the world (Esc)</text>
       {/if}
     {/if}
+    <!-- THE BORDER TOKENS, drawn ON TOP of the territories: what stands
+         at each border now, the machine that moves it, and the crossing
+         rate. Every state is the server's (design d2154293) — the map
+         only decides how thick to draw the rail. -->
+    {#each BORDERS as b (`t:${b.from}→${b.to}`)}
+      {@const from = territoryOf(b.from)}
+      {@const to = territoryOf(b.to)}
+      {#if from && to}
+        {@const p = borderPath(from, to)}
+        {@const m = mid(p)}
+        {@const row = byBorder.get(`${b.from}→${b.to}`)}
+        {@const state = stateOfBorder(row)}
+        <g class="crossing" data-crossing="{b.from}→{b.to}" data-state={state}
+           data-waiting={row === undefined || row.waiting === null ? 'unknown' : row.waiting}>
+          <title>{borderTitle(row, b.from, b.to)}</title>
+          <!-- the machine's lamp, above the rail: lit red once it has
+               been silent past its OWN declared cadence, unlit when
+               nothing records it -->
+          <rect x={m.x - 5} y={m.y - 22} width="10" height="10" class="glyph {machineLamp(row)}" />
+          <!-- what waits to cross, on the rail -->
+          <circle cx={m.x} cy={m.y} r="9" class="token {state}" />
+          <text x={m.x} y={m.y + 3.5} text-anchor="middle" class="token-count">{tokenText(row)}</text>
+          <!-- and the rate, under it -->
+          <text x={m.x} y={m.y + 22} text-anchor="middle" class="tiny rate">{railRate(row)}</text>
+        </g>
+      {/if}
+    {/each}
 
     {#if unmapped.length > 0}
       <text x={WORLD.width - 20} y={WORLD.height - 8} text-anchor="end" class="tiny err"
         >not on the map: {unmapped.join(', ')}</text>
+    {/if}
+    {#if unmappedBorders.length > 0}
+      <text x={WORLD.width - 20} y={WORLD.height - 20} text-anchor="end" class="tiny err"
+        >no rail drawn for: {unmappedBorders.join(', ')}</text>
     {/if}
   </svg>
 </section>
@@ -386,6 +491,32 @@
   .yard text.count { font-size: 18px; font-weight: 600; fill: var(--fog, #e8ecef); letter-spacing: 0; text-transform: none; }
   .yard text.err { fill: var(--err, #e2685c); }
   .rail { stroke: var(--rail); stroke-width: 2; fill: none; }
+  .rail[data-state='busy'] { stroke: var(--warn, #d9a441); }
+  .rail[data-state='troubled'] { stroke: var(--err, #e2685c); }
+  /* The traffic: dashes running the rail from A to B. Weight and speed
+     come from the measured rate; `unknown` is deliberately a sparse,
+     unlit dotting so an unmeasured rail cannot read as an empty one. */
+  .traffic { fill: none; stroke: var(--ok, #4fb98a); stroke-linecap: round; opacity: 0.85;
+    stroke-width: 2; stroke-dasharray: 2 10; animation: flow 3s linear infinite; }
+  .traffic[data-density='unknown'] { stroke: var(--static, #7a838c); stroke-dasharray: 1 7;
+    opacity: 0.4; animation: none; }
+  .traffic[data-density='none'] { stroke: none; animation: none; }
+  .traffic[data-density='light'] { stroke-width: 2; stroke-dasharray: 2 14; animation-duration: 4s; }
+  .traffic[data-density='steady'] { stroke-width: 3; stroke-dasharray: 4 10; animation-duration: 2.4s; }
+  .traffic[data-density='heavy'] { stroke-width: 4; stroke-dasharray: 6 6; animation-duration: 1.4s; }
+  @keyframes flow { to { stroke-dashoffset: -48; } }
+  /* The token standing on the rail: what waits to cross, right now. */
+  .token { fill: var(--ink, #12161c); stroke: var(--border-strong, #3a434d); stroke-width: 1.5; }
+  .token.busy { stroke: var(--warn, #d9a441); }
+  .token.troubled { stroke: var(--err, #e2685c); }
+  .yard text.token-count { font-size: 9px; letter-spacing: 0; text-transform: none;
+    fill: var(--fog, #e8ecef); }
+  .yard text.rate { fill: var(--static, #7a838c); }
+  /* The machine's lamp above the rail. Unlit = nothing records it. */
+  .glyph { fill: var(--ink, #12161c); stroke: var(--border-strong, #3a434d); }
+  .glyph.ok { fill: var(--ok, #4fb98a); stroke: var(--ok, #4fb98a); }
+  .glyph.err { fill: var(--err, #e2685c); stroke: var(--err, #e2685c); animation: blink 1s steps(2) infinite; }
+  .crossing { cursor: help; }
   .tie { stroke: var(--tie); stroke-width: 6; stroke-dasharray: 3 9; fill: none; }
   .shed { fill: var(--ink, #12161c); stroke: var(--border-strong, #3a434d); }
   .shed.err { stroke: var(--err, #e2685c); }
@@ -428,6 +559,6 @@
   .lamp.err { fill: var(--err, #e2685c); animation: blink 1s steps(2) infinite; }
   @keyframes blink { 50% { opacity: 0.25; } }
   @media (prefers-reduced-motion: reduce) {
-    .lamp { animation: none !important; }
+    .lamp, .glyph, .traffic { animation: none !important; }
   }
 </style>

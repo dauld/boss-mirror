@@ -29,6 +29,7 @@ use crate::step_registry::StepRegistry;
 
 pub mod machine_gate;
 
+mod borders;
 mod census;
 mod jobs;
 mod kinds;
@@ -43,6 +44,7 @@ pub mod tenant;
 mod terminal_report;
 mod yard;
 
+use borders::*;
 use census::*;
 use jobs::*;
 use kinds::*;
@@ -199,6 +201,13 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
         // pass as the status above so the map, the yard and `boss
         // orient` cannot disagree.
         .route("/api/yard/regions", get(yard_regions::<R, B>))
+        // The map's RAILS (design d2154293, car 2): one row per border
+        // between two regions — what crosses it and how fast, what is
+        // waiting to cross with each hold's reason, and the machine that
+        // moves it with its last-fired time. Same pass as the regions
+        // above; a border whose flow cannot be computed answers unknown,
+        // never zero.
+        .route("/api/yard/borders", get(yard_borders::<R, B>))
         .route("/api/jobs", get(list_jobs::<R, B>))
         .route("/api/jobs", post(create_job::<R, B>))
         .route("/api/jobs/{id}", get(get_job::<R, B>))

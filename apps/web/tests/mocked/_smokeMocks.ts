@@ -102,6 +102,7 @@ export const JOBS_LIVE = /\/api\/jobs\/live$/;
 export const JOBS_SUMMARY = /\/api\/jobs\/summary(\?|$)/;
 export const YARD_STATUS = /\/api\/yard\/status$/;
 export const YARD_REGIONS = /\/api\/yard\/regions(\?|$)/;
+export const YARD_BORDERS = /\/api\/yard\/borders(\?|$)/;
 export const WORKFLOW_DETAIL = /\/api\/workflows\/[^/]+$/;
 export const DISPATCHER_RULES = /\/api\/dispatcher\/rules$/;
 export const GATEWAY_PERF = /\/api\/gateway\/perf$/;
@@ -109,7 +110,7 @@ export const MARKETING_ASSET_DETAIL = /\/api\/catalog\/marketing-assets\/[^/]+$/
 export const VIEW_RESULTS = /\/api\/views\/[^/]+\/results/;
 export const SHIPMENT_DETAIL = /\/api\/shipping\/shipments\/[^/]+$/;
 export const OBJECT_ENDPOINTS: ReadonlyArray<RegExp> = [
-  JOBS_LIVE, JOBS_SUMMARY, YARD_STATUS, YARD_REGIONS, WORKFLOW_DETAIL, DISPATCHER_RULES, GATEWAY_PERF,
+  JOBS_LIVE, JOBS_SUMMARY, YARD_STATUS, YARD_REGIONS, YARD_BORDERS, WORKFLOW_DETAIL, DISPATCHER_RULES, GATEWAY_PERF,
   MARKETING_ASSET_DETAIL, VIEW_RESULTS, SHIPMENT_DETAIL,
 ];
 
@@ -182,6 +183,25 @@ export async function installApiFloor(page: Page): Promise<void> {
       regions: ['dock', 'gates', 'track', 'shed', 'arrivals', 'garage', 'receiving', 'marshalling'].map((name) => ({
         name, count: 0, state: 'clear', why: 'nothing here',
         trend: { metric: 'nothing measured', unit: 'per day', current: null, previous: null, samples: 0, previous_samples: 0 },
+      })),
+    }),
+  );
+  // The map's RAILS (design d2154293, car 2), for the same reason: the
+  // empty leg is eight quiet borders, not a failed read. The hops are
+  // world.ts's, which the server's table is pinned equal to.
+  await page.route(YARD_BORDERS, (r) =>
+    json(r, {
+      window_hours: 24,
+      now: '2026-09-03T12:00:00Z',
+      borders: [
+        ['receiving', 'marshalling'], ['marshalling', 'dock'], ['dock', 'gates'], ['gates', 'track'],
+        ['track', 'arrivals'], ['arrivals', 'shed'], ['gates', 'garage'], ['track', 'garage'],
+      ].map(([from, to]) => ({
+        from, to, crossing: 'nothing measured', state: 'clear', why: 'nothing waiting',
+        rate: { metric: 'crossings', unit: 'per day', current: 0, previous: 0, samples: 0, previous_samples: 0 },
+        last_crossed: null, waiting: 0, holds: [],
+        machine: { name: 'nothing', kind: 'actors', last_fired: null, silent_for_minutes: null,
+          expected_every_minutes: null, silent: null, why: 'no firing recorded' },
       })),
     }),
   );

@@ -45,6 +45,7 @@
   import { hasInterior } from './world-zoom';
   import { hasPlatforms, type Deck } from './world-interior';
   import type { Scene } from './yard-floor';
+  import { fetchBorders, summaryLine, type Borders } from './borders';
   import WorldMap from './WorldMap.svelte';
   import YardPage from './YardPage.svelte';
   import ReceivingYardPage from '../receiving/ReceivingYardPage.svelte';
@@ -79,14 +80,18 @@
   );
 
   let regions = $state<Remote<Regions>>({ kind: 'loading' });
+  let borders = $state<Remote<Borders>>({ kind: 'loading' });
   let readAt = $state<number | null>(null);
 
   onMount(() => {
     let cancelled = false;
     async function tick() {
-      const r = await fetchRegions();
+      // Two reads, concurrently — they are independent, and the map
+      // draws its territories even while the rails are still coming.
+      const [r, b] = await Promise.all([fetchRegions(), fetchBorders()]);
       if (cancelled) return;
       regions = r;
+      borders = b;
       readAt = Date.now();
     }
     void tick();
@@ -105,7 +110,7 @@
   <PageHeader
     eyebrow="IT · Forge line"
     title="The IT world"
-    subtitle="Eight territories along the packet flow, each a door to its floor — the count, whether it is clear, busy or troubled, and this window against the last"
+    subtitle="Eight territories along the packet flow, each a door to its floor, and the borders between them carrying what crosses, what waits and the machine that moves it"
   />
 
   {#if regions.kind === 'loading'}
@@ -115,7 +120,23 @@
          a map that could not be read must not look like a clear one. -->
     <div class="yard-empty load-failed">The regions cannot be read — {regions.error}</div>
   {:else}
-    <WorldMap regions={regions.data} {zoomed} {floor} {deck} onleave={() => navigate('/it')} />
+    <WorldMap
+      regions={regions.data}
+      {zoomed}
+      {floor}
+      {deck}
+      borders={borders.kind === 'ready' ? borders.data : null}
+      onleave={() => navigate('/it')} />
+    <!-- The activity summary, bubbled up to the high-level view: how
+         much crossed the world this window, what stands at the borders,
+         and which rails are troubled (design d2154293 car 2). A failed
+         rails read is SAID — the territories are still drawn, but a map
+         whose rails could not be read must not look like a quiet one. -->
+    {#if borders.kind === 'ready'}
+      <div class="yard-flow">{summaryLine(borders.data)}</div>
+    {:else if borders.kind === 'failed'}
+      <div class="yard-empty load-failed">The borders cannot be read — {borders.error}</div>
+    {/if}
     <div class="yard-flow">
       window {regions.data.window_hours}h against the {regions.data.window_hours}h before{readAt !== null ? ` · read ${clock(readAt)}` : ''}
     </div>

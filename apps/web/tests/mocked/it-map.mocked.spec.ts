@@ -10,7 +10,7 @@
 // the same read, so clicking in cannot contradict the map.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
-import { YARD_REGIONS, installSmokeMocks } from './_smokeMocks';
+import { YARD_BORDERS, YARD_REGIONS, installSmokeMocks } from './_smokeMocks';
 
 const trend = (metric: string, unit: string, current: number | null, previous: number | null) => ({
   metric, unit, current, previous, samples: current === null ? 0 : 5, previous_samples: previous === null ? 0 : 4,
@@ -33,11 +33,65 @@ const REGIONS = {
   ],
 };
 
+/** The rails (design d2154293, car 2): one busy with a machine silent
+ *  past its own cadence, one the server could not read at all, the rest
+ *  quiet. The shapes are the server's — `boss_jobs::borders`. */
+const rail = (
+  from: string,
+  to: string,
+  over: Record<string, unknown> = {},
+): Record<string, unknown> => ({
+  from, to,
+  crossing: 'a packet crossed',
+  rate: { metric: 'crossings', unit: 'per day', current: 2, previous: 3, samples: 2, previous_samples: 3 },
+  last_crossed: '2026-09-19T04:00:00Z',
+  waiting: 0,
+  holds: [],
+  machine: { name: 'the receiving desk', kind: 'actors', last_fired: null, silent_for_minutes: null,
+    expected_every_minutes: null, silent: null, why: 'no machine moves this hop' },
+  state: 'clear',
+  why: 'nothing waiting; 2 crossings in 24h',
+  ...over,
+});
+
+const BORDERS_PAYLOAD = {
+  window_hours: 24,
+  now: '2026-09-19T05:00:00Z',
+  borders: [
+    // The rate could not be computed and neither could the queue: the
+    // rail must read UNKNOWN, not empty.
+    rail('receiving', 'marshalling', {
+      rate: { metric: 'crossings', unit: 'per day', current: null, previous: null, samples: 0, previous_samples: 0 },
+      last_crossed: null, waiting: null, state: 'troubled',
+      why: 'the workflow registry that names the inbound kinds could not be read',
+    }),
+    rail('marshalling', 'dock'),
+    rail('dock', 'gates'),
+    // Traffic waiting and the machine silent past its declared cadence.
+    rail('gates', 'track', {
+      crossing: 'a car boarded a train',
+      rate: { metric: 'crossings', unit: 'per day', current: 24, previous: 18, samples: 24, previous_samples: 18 },
+      waiting: 3,
+      holds: [{ what: 'fix/a-car', why: 'parked, waiting for the boarding depth or the clock rule' }],
+      machine: { name: 'train-board-on-dock-depth', kind: 'cadence', last_fired: '2026-09-19T02:00:00Z',
+        silent_for_minutes: 180, expected_every_minutes: 30, silent: true,
+        why: 'its own firing in cadence_firings' },
+      state: 'troubled',
+      why: '3 packets waiting and train-board-on-dock-depth silent for 180m — it declares every 30m',
+    }),
+    rail('track', 'arrivals'),
+    rail('arrivals', 'shed'),
+    rail('gates', 'garage'),
+    rail('track', 'garage'),
+  ],
+};
+
 async function mocks(page: Page): Promise<void> {
   await installSmokeMocks(page);
   const json = (r: Route, b: unknown) =>
     r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(b) });
   await page.route(YARD_REGIONS, (r) => json(r, REGIONS));
+  await page.route(YARD_BORDERS, (r) => json(r, BORDERS_PAYLOAD));
 }
 
 test('the world paints eight territories in one SVG, along the flow, with the count and the trend inside each', async ({ page }) => {
@@ -142,4 +196,72 @@ test('a regions read that fails is said, never drawn as a clear world', async ({
   await page.goto('/it');
   await expect(page.locator('.load-failed')).toContainText('The regions cannot be read');
   await expect(page.locator('.territory')).toHaveCount(0);
+});
+
+test('a border carries its traffic, what waits on it and the machine that moves it', async ({ page }) => {
+  await mocks(page);
+  await page.goto('/it');
+  const svg = page.locator('section.yard svg');
+  // One crossing token per declared rail.
+  await expect(svg.locator('.crossing')).toHaveCount(8);
+
+  // The boarding rail: three waiting, a heavy traffic band from the
+  // measured rate, and the machine's lamp lit because IT declared the
+  // cadence it has been silent past.
+  const boarding = svg.locator('.crossing[data-crossing="gates→track"]');
+  await expect(boarding).toHaveAttribute('data-state', 'troubled');
+  await expect(boarding).toHaveAttribute('data-waiting', '3');
+  await expect(boarding).toContainText('3');
+  await expect(boarding).toContainText('24/d');
+  await expect(boarding.locator('.glyph.err')).toHaveCount(1);
+  await expect(svg.locator('[data-traffic="gates→track"]')).toHaveAttribute('data-density', 'heavy');
+  // Everything the rail knows is on the hover — a border does not need
+  // a second surface to explain its own number.
+  const title = await boarding.locator('title').textContent();
+  expect(title).toContain('one crossing = a car boarded a train');
+  expect(title).toContain('24 vs 18 /day');
+  expect(title).toContain('fix/a-car — parked, waiting for the boarding depth');
+  expect(title).toContain('train-board-on-dock-depth · SILENT 180m');
+
+  // The activity summary, bubbled up to the high-level view.
+  await expect(page.locator('.yard-flow').first()).toContainText('crossings in 24h');
+  await expect(page.locator('.yard-flow').first()).toContainText('troubled: receiving → marshalling, gates → track');
+});
+
+test('a border the server could not measure reads unknown, never zero', async ({ page }) => {
+  await mocks(page);
+  await page.goto('/it');
+  const svg = page.locator('section.yard svg');
+  const blind = svg.locator('.crossing[data-crossing="receiving→marshalling"]');
+  await expect(blind).toHaveAttribute('data-waiting', 'unknown');
+  // The token prints `?` and the rate prints `?` — no zero anywhere on
+  // the rail, and the traffic band is its own, not the empty one.
+  await expect(blind.locator('text.token-count')).toHaveText('?');
+  await expect(blind.locator('text.rate')).toHaveText('?');
+  await expect(svg.locator('[data-traffic="receiving→marshalling"]')).toHaveAttribute(
+    'data-density',
+    'unknown',
+  );
+  const title = await blind.locator('title').textContent();
+  expect(title).toContain('rate: no reading');
+  expect(title).toContain('waiting: no reading');
+  // And the summary counts it as unread rather than dropping it.
+  await expect(page.locator('.yard-flow').first()).toContainText('1 border unread');
+});
+
+test('a borders read that fails is said, and the territories still paint', async ({ page }) => {
+  await installSmokeMocks(page);
+  const json = (r: Route, b: unknown) =>
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(b) });
+  await page.route(YARD_REGIONS, (r) => json(r, REGIONS));
+  await page.route(YARD_BORDERS, (r) =>
+    r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify('the backend is down') }),
+  );
+  await page.goto('/it');
+  await expect(page.locator('.load-failed')).toContainText('The borders cannot be read');
+  // The world is still a world: eight territories, eight rails, every
+  // number on them unknown.
+  await expect(page.locator('section.yard svg .territory')).toHaveCount(8);
+  await expect(page.locator('section.yard svg .crossing')).toHaveCount(8);
+  await expect(page.locator('section.yard svg .crossing[data-waiting="unknown"]')).toHaveCount(8);
 });

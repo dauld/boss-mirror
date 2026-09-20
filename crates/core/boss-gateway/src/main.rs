@@ -435,6 +435,15 @@ fn build_router(
             "/api/yard/regions",
             axum::routing::get(|s, r| proxy::handle(s, r, &proxy::JOBS)),
         )
+        // The map's RAILS (design d2154293 car 2): what crosses each
+        // border, what waits at it and which machine moves it. Same
+        // upstream, same page, and routed here at the same time as the
+        // fetch that reads it — the shape above is what happens when
+        // those two are not one change.
+        .route(
+            "/api/yard/borders",
+            axum::routing::get(|s, r| proxy::handle(s, r, &proxy::JOBS)),
+        )
         // The agent-run record — which actor built what, and what it
         // cost. `GET /api/agent-runs[?actor_id=&branch=&since=]` lists
         // the rows and `/cost` rolls them up; both live on the jobs

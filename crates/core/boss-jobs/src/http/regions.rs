@@ -47,41 +47,83 @@ pub(super) async fn yard_regions<R: JobsRepository + 'static, B: EventBus + 'sta
         Ok(h) => h,
         Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
     };
-    // The same job read gate the yard status keeps: an unreadable caller
-    // gets an empty map, not a 403.
-    let predicate = match state.policy.scope_predicate(&user, Resource::job()).await {
+    let now = boss_clock_client::now_from(&state.clock).await;
+    let rows = match read_map(&state, &user, now, window_hours).await {
+        Ok(rows) => rows,
+        Err(resp) => return resp,
+    };
+    let map = regions::regions(&rows.inputs(now, window_hours));
+    Json(with_now(map, now)).into_response()
+}
+
+/// Everything ONE pass over the map's rows read, owned. Both
+/// read-models over that pass — the regions (design 0524fc95) and the
+/// borders (`super::borders`, design d2154293) — are functions of THESE
+/// rows, never a second set of queries free to disagree with them
+/// (which is the defect the regions read was built to end).
+pub(super) struct MapRows {
+    read: super::yard::YardRead,
+    closed_trains: Vec<(Job, Vec<Step>)>,
+    cars: Vec<(Job, Vec<Step>)>,
+    gate_runs: Vec<Job>,
+    inbound: Option<Vec<Job>>,
+    stations: Option<Vec<StationReading>>,
+}
+
+impl MapRows {
+    /// The rows as the pure aggregations take them.
+    pub(super) fn inputs(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        window_hours: i64,
+    ) -> RegionInputs<'_> {
+        RegionInputs {
+            status: &self.read.status,
+            dock_reading: self.read.dock_reading,
+            open_trains: &self.read.open_trains,
+            closed_trains: &self.closed_trains,
+            cars: &self.cars,
+            gate_runs: &self.gate_runs,
+            inbound: self.inbound.as_deref(),
+            stations: self.stations.as_deref(),
+            now,
+            window_hours,
+        }
+    }
+}
+
+/// The map's read sequence. A caller whose scope is empty gets an
+/// empty, well-formed map rather than a 403 — the same read gate every
+/// queue surface keeps — so this answers empty rows, not an error.
+pub(super) async fn read_map<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &Arc<JobsApiState<R, B>>,
+    user: &boss_policy_client::User,
+    now: chrono::DateTime<chrono::Utc>,
+    window_hours: i64,
+) -> Result<MapRows, Response> {
+    let predicate = match state.policy.scope_predicate(user, Resource::job()).await {
         Ok(p) => p,
         Err(e) => {
-            return (
+            return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("policy check failed: {e}"),
             )
-                .into_response();
+                .into_response());
         }
     };
-    let now = boss_clock_client::now_from(&state.clock).await;
     if matches!(predicate, boss_policy_client::Predicate::None) {
-        let status = yard::build_status(yard::YardInputs::default());
-        let empty = regions::regions(&RegionInputs {
-            status: &status,
-            dock_reading: yard::Reading::Read,
-            open_trains: &[],
-            closed_trains: &[],
-            cars: &[],
-            gate_runs: &[],
-            inbound: Some(&[]),
-            stations: Some(&[]),
-            now,
-            window_hours,
+        return Ok(MapRows {
+            read: empty_read(),
+            closed_trains: Vec::new(),
+            cars: Vec::new(),
+            gate_runs: Vec::new(),
+            inbound: Some(Vec::new()),
+            stations: Some(Vec::new()),
         });
-        return Json(with_now(empty, now)).into_response();
     }
-    let scope = job_scope_from_predicate(&user, &predicate);
+    let scope = job_scope_from_predicate(user, &predicate);
 
-    let read = match read_yard(&state, &user, scope.clone(), now).await {
-        Ok(read) => read,
-        Err(resp) => return resp,
-    };
+    let read = read_yard(state, user, scope.clone(), now).await?;
 
     // The tails reach back two windows: this one and the previous.
     let reach = (now - chrono::Duration::hours(2 * window_hours)).date_naive();
@@ -116,7 +158,7 @@ pub(super) async fn yard_regions<R: JobsRepository + 'static, B: EventBus + 'sta
         .await
     {
         Ok((rows, _)) => rows,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()),
     };
     for job in arrived
         .into_iter()
@@ -124,7 +166,9 @@ pub(super) async fn yard_regions<R: JobsRepository + 'static, B: EventBus + 'sta
     {
         let steps = match state.jobs.list_steps(&job.id).await {
             Ok(steps) => steps,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            Err(e) => {
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response());
+            }
         };
         closed_trains.push((job, steps));
     }
@@ -142,7 +186,7 @@ pub(super) async fn yard_regions<R: JobsRepository + 'static, B: EventBus + 'sta
         .await
     {
         Ok((rows, _)) => rows,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()),
     };
     closed_trains.extend(
         cancelled
@@ -164,13 +208,15 @@ pub(super) async fn yard_regions<R: JobsRepository + 'static, B: EventBus + 'sta
         .await
     {
         Ok((rows, _)) => rows,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()),
     };
     let mut cars: Vec<(Job, Vec<Step>)> = Vec::with_capacity(car_rows.len());
     for job in car_rows {
         let steps = match state.jobs.list_steps(&job.id).await {
             Ok(steps) => steps,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            Err(e) => {
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response());
+            }
         };
         cars.push((job, steps));
     }
@@ -187,7 +233,7 @@ pub(super) async fn yard_regions<R: JobsRepository + 'static, B: EventBus + 'sta
         .await
     {
         Ok((rows, _)) => rows,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()),
     };
 
     // The receiving yard's inbound packets: the kinds come from the
@@ -222,33 +268,39 @@ pub(super) async fn yard_regions<R: JobsRepository + 'static, B: EventBus + 'sta
     // its own), bound to the caller as `/api/stations/load` binds them,
     // over the caller's open packets; and each station's counted flow in
     // this window and the previous, from two cube reads. Unread → `None`.
-    let stations = marshalling_stations(&state, &user, scope, window_hours).await;
+    let stations = marshalling_stations(state, user, scope, window_hours).await;
 
-    let map = regions::regions(&RegionInputs {
-        status: &read.status,
-        dock_reading: read.dock_reading,
-        open_trains: &read.open_trains,
-        closed_trains: &closed_trains,
-        cars: &cars,
-        gate_runs: &gate_runs,
-        inbound: inbound.as_deref(),
-        stations: stations.as_deref(),
-        now,
-        window_hours,
-    });
-    Json(with_now(map, now)).into_response()
+    Ok(MapRows {
+        read,
+        closed_trains,
+        cars,
+        gate_runs,
+        inbound,
+        stations,
+    })
+}
+
+/// The empty pass: every read answered, nothing in it.
+fn empty_read() -> super::yard::YardRead {
+    super::yard::YardRead {
+        status: yard::build_status(yard::YardInputs::default()),
+        dock_reading: yard::Reading::Read,
+        health: yard::conductor_health(None, None, None, None, None),
+        gate_runs_truncated: false,
+        open_trains: Vec::new(),
+    }
 }
 
 /// The station readings the marshalling region is judged on, or `None`
 /// when the registry (or the packets under it) could not be read.
 async fn marshalling_stations<R: JobsRepository + 'static, B: EventBus + 'static>(
-    state: &JobsApiState<R, B>,
+    state: &Arc<JobsApiState<R, B>>,
     user: &boss_policy_client::User,
     scope: crate::port::JobScope,
     window_hours: i64,
 ) -> Option<Vec<StationReading>> {
     let reg = state.stations.as_ref()?;
-    let specs = effective_stations(state, reg).await.ok()?;
+    let specs = effective_stations(state.as_ref(), reg).await.ok()?;
     let filter = JobFilter {
         status: Some(JobStatus::Open),
         scope,

@@ -318,21 +318,21 @@ pub fn shed_place(md: &Value) -> ShedPlace {
 // Stamps and windows.
 // ---------------------------------------------------------------------
 
-type Instant = chrono::DateTime<chrono::Utc>;
+pub(crate) type Instant = chrono::DateTime<chrono::Utc>;
 
-fn parse_instant(s: &str) -> Option<Instant> {
+pub(crate) fn parse_instant(s: &str) -> Option<Instant> {
     chrono::DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|t| t.with_timezone(&chrono::Utc))
 }
 
-fn meta_instant(md: &Value, key: &str) -> Option<Instant> {
+pub(crate) fn meta_instant(md: &Value, key: &str) -> Option<Instant> {
     md.get(key).and_then(Value::as_str).and_then(parse_instant)
 }
 
 /// A step by slug, with the title fallback the conductor's own
 /// addressing uses.
-fn find_step<'a>(steps: &'a [Step], slug: &str, title: &str) -> Option<&'a Step> {
+pub(crate) fn find_step<'a>(steps: &'a [Step], slug: &str, title: &str) -> Option<&'a Step> {
     steps
         .iter()
         .find(|s| s.spec_slug.as_deref() == Some(slug) || s.title == title)
@@ -342,7 +342,7 @@ fn find_step<'a>(steps: &'a [Step], slug: &str, title: &str) -> Option<&'a Step>
 /// conductor's metadata stamp — the same two readers `yard.rs`'s
 /// `verdict_instant` has, for the same reason (older rows carry only
 /// the stamp).
-fn step_done_at(step: Option<&Step>) -> Option<Instant> {
+pub(crate) fn step_done_at(step: Option<&Step>) -> Option<Instant> {
     let s = step?;
     if s.status != StepStatus::Completed {
         return None;
@@ -354,7 +354,7 @@ fn step_done_at(step: Option<&Step>) -> Option<Instant> {
 /// The instant a packet opened: the `opened_at` stamp every pipeline
 /// packet carries, else its `opened_on` at midnight — coarser, and
 /// still inside the right day.
-fn opened_at(job: &Job) -> Option<Instant> {
+pub(crate) fn opened_at(job: &Job) -> Option<Instant> {
     meta_instant(&job.metadata, "opened_at").or_else(|| {
         job.opened_on
             .and_hms_opt(0, 0, 0)
@@ -364,22 +364,22 @@ fn opened_at(job: &Job) -> Option<Instant> {
 
 /// The instant a packet closed: `closed_at`, which the server writes
 /// when a declared terminal step completes.
-fn closed_at(job: &Job) -> Option<Instant> {
+pub(crate) fn closed_at(job: &Job) -> Option<Instant> {
     meta_instant(&job.metadata, "closed_at")
 }
 
 /// This window and the previous one, as half-open ranges ending at
 /// `now`: `[since, now)` and `[before, since)`.
 #[derive(Debug, Clone, Copy)]
-struct Windows {
+pub(crate) struct Windows {
     before: Instant,
     since: Instant,
     now: Instant,
-    hours: i64,
+    pub(crate) hours: i64,
 }
 
 impl Windows {
-    fn of(now: Instant, hours: i64) -> Self {
+    pub(crate) fn of(now: Instant, hours: i64) -> Self {
         let w = chrono::Duration::hours(hours);
         Windows {
             before: now - w - w,
@@ -388,15 +388,15 @@ impl Windows {
             hours,
         }
     }
-    fn current(&self, t: Instant) -> bool {
+    pub(crate) fn current(&self, t: Instant) -> bool {
         t >= self.since && t <= self.now
     }
-    fn previous(&self, t: Instant) -> bool {
+    pub(crate) fn previous(&self, t: Instant) -> bool {
         t >= self.before && t < self.since
     }
     /// A count as a per-day rate over one window.
     #[allow(clippy::cast_precision_loss)]
-    fn per_day(&self, n: usize) -> f64 {
+    pub(crate) fn per_day(&self, n: usize) -> f64 {
         n as f64 * 24.0 / self.hours as f64
     }
 }
@@ -437,7 +437,7 @@ fn duration_trend(metric: &str, unit: &str, current: Vec<i64>, previous: Vec<i64
 /// A per-day rate trend from two counts. A count is a measurement even
 /// when it is zero — an empty window is a rate of 0, not "unknown" —
 /// so both halves are always `Some`.
-fn rate_trend(metric: &str, w: &Windows, current: usize, previous: usize) -> Trend {
+pub(crate) fn rate_trend(metric: &str, w: &Windows, current: usize, previous: usize) -> Trend {
     Trend {
         metric: metric.to_string(),
         unit: "per day".to_string(),
@@ -465,7 +465,7 @@ where
     (cur, prev)
 }
 
-fn count_split<I>(w: &Windows, items: I) -> (usize, usize)
+pub(crate) fn count_split<I>(w: &Windows, items: I) -> (usize, usize)
 where
     I: IntoIterator<Item = Instant>,
 {
@@ -473,7 +473,7 @@ where
     (c.len(), p.len())
 }
 
-fn plural(n: usize, one: &str, many: &str) -> String {
+pub(crate) fn plural(n: usize, one: &str, many: &str) -> String {
     if n == 1 {
         format!("{n} {one}")
     } else {
@@ -694,21 +694,73 @@ fn track(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     region("track", Some(trains.len()), Some(1), state, why, trend)
 }
 
-/// THE SHED: landed cars awaiting proof — open cars whose live step is
-/// `proven`. Troubled when one is UNPROVEN (no probe, no event: nothing
-/// mechanical can settle it) or its probe is FAILING; busy while any
-/// waits. The trend is cars proven per day.
-fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
-    let awaiting: Vec<&(Job, Vec<Step>)> = inputs
-        .cars
-        .iter()
+/// The cars standing in the inspection shed: open cars whose live step
+/// is `proven`. ONE predicate (CLAUDE.md §9a) — the shed region reads
+/// it for its count, and the arrivals -> shed border
+/// (`crate::borders`) reads it for what is waiting to cross.
+pub(crate) fn awaiting_proof(cars: &[(Job, Vec<Step>)]) -> Vec<&(Job, Vec<Step>)> {
+    cars.iter()
         .filter(|(j, s)| {
             j.status == boss_core::job::JobStatus::Open
                 && s.iter()
                     .find(|st| matches!(st.status, StepStatus::Ready | StepStatus::Active))
                     .is_some_and(|st| st.spec_slug.as_deref() == Some("proven"))
         })
-        .collect();
+        .collect()
+}
+
+/// Trains cancelled in THIS window that released cars still
+/// [`awaiting_repair`], each with the cars it left behind (a car the
+/// read does not cover is named by its id — no evidence is not a
+/// pass). The arrivals region's trouble and the track -> garage
+/// border's queue are the same fact, so they read it here once.
+pub(crate) fn released_awaiting_repair<'a>(
+    closed_trains: &'a [(Job, Vec<Step>)],
+    cars: &'a [(Job, Vec<Step>)],
+    w: &Windows,
+) -> Vec<(&'a str, Vec<&'a str>)> {
+    let car_by_id: std::collections::HashMap<String, &Job> =
+        cars.iter().map(|(j, _)| (j.id.to_string(), j)).collect();
+    closed_trains
+        .iter()
+        .filter(|(j, _)| {
+            j.metadata
+                .get("outcome")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                != "arrived"
+        })
+        .filter(|(j, _)| closed_at(j).is_some_and(|t| w.current(t)))
+        .filter_map(|(j, _)| {
+            let waiting: Vec<&str> = j
+                .metadata
+                .get("boarded_jobs")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter_map(|id| match car_by_id.get(id) {
+                    Some(car) if awaiting_repair(car) => Some(
+                        car.metadata
+                            .get("branch")
+                            .and_then(Value::as_str)
+                            .unwrap_or(car.title.as_str()),
+                    ),
+                    Some(_) => None,
+                    None => Some(id),
+                })
+                .collect();
+            (!waiting.is_empty()).then_some((j.title.as_str(), waiting))
+        })
+        .collect()
+}
+
+/// THE SHED: landed cars awaiting proof — open cars whose live step is
+/// `proven`. Troubled when one is UNPROVEN (no probe, no event: nothing
+/// mechanical can settle it) or its probe is FAILING; busy while any
+/// waits. The trend is cars proven per day.
+fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
+    let awaiting = awaiting_proof(inputs.cars);
     let mut unproven = Vec::new();
     let mut failing = Vec::new();
     for (j, _) in &awaiting {
@@ -765,7 +817,7 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
 /// that a red HAPPENED in the window, never asking what became of the
 /// cars. A repaired red must stop looking troubled the way a troubled
 /// packet must look troubled.
-fn awaiting_repair(car: &Job) -> bool {
+pub(crate) fn awaiting_repair(car: &Job) -> bool {
     let landed = serde_json::to_value(car).is_ok_and(|v| crate::car::is_landed(&v));
     let regated = car.metadata.get("regate_receipt").is_some();
     let reboarded = car
@@ -789,15 +841,6 @@ fn arrivals(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
             .and_then(Value::as_str)
             .unwrap_or("")
     }
-    fn cars_aboard(j: &Job) -> Vec<&str> {
-        j.metadata
-            .get("boarded_jobs")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .collect()
-    }
     let arrived = inputs
         .closed_trains
         .iter()
@@ -808,33 +851,11 @@ fn arrivals(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     // The cars read covers open cars and those closed within two
     // windows, so every car aboard a train cancelled in THIS window is
     // in it; one that is not is unread, and no evidence is not a pass —
-    // it stays the red, named by its id.
-    let car_by_id: std::collections::HashMap<String, &Job> = inputs
-        .cars
-        .iter()
-        .map(|(j, _)| (j.id.to_string(), j))
-        .collect();
-    let red: Vec<String> = inputs
-        .closed_trains
-        .iter()
-        .filter(|(j, _)| outcome(j) != "arrived")
-        .filter(|(j, _)| closed_at(j).is_some_and(|t| w.current(t)))
-        .filter_map(|(j, _)| {
-            let waiting: Vec<&str> = cars_aboard(j)
-                .into_iter()
-                .filter_map(|id| match car_by_id.get(id) {
-                    Some(car) if awaiting_repair(car) => Some(
-                        car.metadata
-                            .get("branch")
-                            .and_then(Value::as_str)
-                            .unwrap_or(car.title.as_str()),
-                    ),
-                    Some(_) => None,
-                    None => Some(id),
-                })
-                .collect();
-            (!waiting.is_empty()).then(|| format!("{} ({})", j.title, waiting.join(", ")))
-        })
+    // it stays the red, named by its id. The predicate is shared with
+    // the track -> garage border ([`released_awaiting_repair`]).
+    let red: Vec<String> = released_awaiting_repair(inputs.closed_trains, inputs.cars, w)
+        .into_iter()
+        .map(|(train, cars)| format!("{train} ({})", cars.join(", ")))
         .collect();
     let converging = inputs
         .status

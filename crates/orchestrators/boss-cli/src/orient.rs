@@ -730,6 +730,77 @@ fn trend_text(t: &Value) -> String {
     format!("{metric} {} (was {})", one("current"), one("previous"))
 }
 
+/// The BORDERS header — one line per border of the IT world map, from
+/// `GET /api/yard/borders` (design d2154293, car 2). The regions above
+/// say how much is in each place; these say what MOVES between them:
+/// the crossing rate this window against the last, how many packets
+/// stand at the border now, and the machine that moves them with how
+/// long it has been silent.
+///
+/// Pure over the payload, so the shape is testable. Every unknown
+/// prints as `?` or `—` — a border whose flow could not be computed
+/// must not read as a quiet one, which on a CLI is exactly what a 0
+/// would say.
+pub(crate) fn border_lines(map: &Value) -> Vec<String> {
+    let hours = map.get("window_hours").and_then(Value::as_i64).unwrap_or(0);
+    let mut out = vec![format!(
+        "  BORDERS — what moves between the regions over the last {hours}h (rate · waiting · machine)"
+    )];
+    let borders = map
+        .get("borders")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for b in &borders {
+        let from = b.get("from").and_then(Value::as_str).unwrap_or("?");
+        let to = b.get("to").and_then(Value::as_str).unwrap_or("?");
+        let hop = format!("{from} -> {to}");
+        let state = b.get("state").and_then(Value::as_str).unwrap_or("?");
+        let state = if state == "clear" {
+            state.to_string()
+        } else {
+            state.to_uppercase()
+        };
+        // A waiting count the server could not take is `?`, never 0.
+        let waiting = match b.get("waiting") {
+            Some(Value::Number(n)) => format!("{n} waiting"),
+            _ => "? waiting".to_string(),
+        };
+        let why = b.get("why").and_then(Value::as_str).unwrap_or("");
+        out.push(format!(
+            "    {hop:<26} {:<24} {waiting:<12} {state:<9} {}  — {why}",
+            rate_text(b.get("rate").unwrap_or(&Value::Null)),
+            machine_text(b.get("machine").unwrap_or(&Value::Null)),
+        ));
+    }
+    out
+}
+
+/// `3.0/day (was 5.0/day)`, with a half nobody measured as `—`.
+fn rate_text(t: &Value) -> String {
+    let one = |key: &str| -> String {
+        match t.get(key).and_then(Value::as_f64) {
+            None => "—".to_string(),
+            Some(v) => format!("{v:.1}/day"),
+        }
+    };
+    format!("{} (was {})", one("current"), one("previous"))
+}
+
+/// `train-reconcile 4m ago` — and `SILENT 180m` when the machine has
+/// been quiet past its own declared cadence. A machine with no firing
+/// record says so rather than printing an age it does not have.
+fn machine_text(m: &Value) -> String {
+    let name = m.get("name").and_then(Value::as_str).unwrap_or("?");
+    let silent = m.get("silent").and_then(Value::as_bool);
+    let age = m.get("silent_for_minutes").and_then(Value::as_i64);
+    match (silent, age) {
+        (Some(true), Some(mins)) => format!("{name} SILENT {mins}m"),
+        (_, Some(mins)) => format!("{name} {mins}m ago"),
+        _ => format!("{name} (no firing recorded)"),
+    }
+}
+
 pub async fn run(all: bool) -> Result<()> {
     let http = reqwest::Client::new();
 
@@ -764,6 +835,21 @@ pub async fn run(all: bool) -> Result<()> {
         }
         Ok(None) => println!("  REGIONS — unavailable: the read answered nothing"),
         Err(e) => println!("  REGIONS — unavailable: {e}"),
+    }
+
+    // THE BORDERS — what moves BETWEEN those regions (design d2154293):
+    // the crossing rate, the queue standing at each border, and the
+    // machine that moves it. An older server without the read says so
+    // and the approach still prints.
+    println!();
+    match api(&http, reqwest::Method::GET, "/api/yard/borders", None).await {
+        Ok(Some(map)) => {
+            for line in border_lines(&map) {
+                println!("{line}");
+            }
+        }
+        Ok(None) => println!("  BORDERS — unavailable: the read answered nothing"),
+        Err(e) => println!("  BORDERS — unavailable: {e}"),
     }
 
     // Trains in transit.
@@ -2224,6 +2310,84 @@ mod tests {
             lines[7].contains("    receiving        ?") && lines[7].contains("TROUBLED"),
             "{}",
             lines[7]
+        );
+    }
+
+    /// The BORDERS section (design d2154293, car 2): a line per border
+    /// with what crosses it, what stands at it and which machine moves
+    /// it. Every unknown reads as unknown — the CLI's version of the
+    /// rule that a rail whose flow could not be computed must not draw
+    /// as a quiet one.
+    #[test]
+    fn border_lines_print_the_rate_the_queue_and_the_machine() {
+        let map = serde_json::json!({
+            "window_hours": 24,
+            "borders": [
+                {
+                    "from": "gates", "to": "track",
+                    "crossing": "a car boarded a train",
+                    "rate": { "metric": "crossings", "unit": "per day",
+                              "current": 3.0, "previous": 5.0,
+                              "samples": 3, "previous_samples": 5 },
+                    "last_crossed": "2026-09-19T11:00:00+00:00",
+                    "waiting": 2,
+                    "holds": [{ "what": "fix/a", "why": "parked, waiting for the boarding depth" }],
+                    "machine": { "name": "train-board-on-dock-depth", "kind": "cadence",
+                                 "last_fired": "2026-09-19T09:00:00+00:00",
+                                 "silent_for_minutes": 180, "expected_every_minutes": 30,
+                                 "silent": true, "why": "its own firing in cadence_firings" },
+                    "state": "troubled",
+                    "why": "2 packets waiting and train-board-on-dock-depth silent for 180m — it declares every 30m"
+                },
+                {
+                    "from": "receiving", "to": "marshalling",
+                    "crossing": "an inbound packet triaged",
+                    "rate": { "metric": "crossings", "unit": "per day",
+                              "current": null, "previous": null,
+                              "samples": 0, "previous_samples": 0 },
+                    "last_crossed": null,
+                    "waiting": null,
+                    "holds": [],
+                    "machine": { "name": "the receiving desk", "kind": "actors",
+                                 "last_fired": null, "silent_for_minutes": null,
+                                 "expected_every_minutes": null, "silent": null,
+                                 "why": "no machine moves this hop — an actor does" },
+                    "state": "troubled",
+                    "why": "the workflow registry that names the inbound kinds could not be read"
+                }
+            ]
+        });
+        let lines = border_lines(&map);
+        assert_eq!(
+            lines.len(),
+            3,
+            "a heading and two rails:\n{}",
+            lines.join("\n")
+        );
+        assert!(lines[0].contains("last 24h"), "{}", lines[0]);
+        assert!(
+            lines[1].contains("gates -> track")
+                && lines[1].contains("3.0/day (was 5.0/day)")
+                && lines[1].contains("2 waiting")
+                && lines[1].contains("TROUBLED")
+                && lines[1].contains("train-board-on-dock-depth SILENT 180m"),
+            "{}",
+            lines[1]
+        );
+        // The unknown rail: no rate, no count, no firing — and not one
+        // zero anywhere on the line.
+        assert!(
+            lines[2].contains("— (was —)")
+                && lines[2].contains("? waiting")
+                && lines[2].contains("(no firing recorded)")
+                && lines[2].contains("could not be read"),
+            "{}",
+            lines[2]
+        );
+        assert!(
+            !lines[2].contains(" 0 "),
+            "an unknown rail must not print a zero: {}",
+            lines[2]
         );
     }
 }
