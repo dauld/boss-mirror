@@ -101,6 +101,10 @@ name = "delivery_policy_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "dispatcher_firings_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "estate_readers_pg"
 required-features = ["postgres"]
 

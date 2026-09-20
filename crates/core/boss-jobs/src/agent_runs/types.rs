@@ -438,16 +438,20 @@ impl AgentRun {
     /// field and no way to say "one number, unsplit", and putting the
     /// total in either would be a lie a later reader cannot detect.
     ///
-    /// An unpriced run that DID report a split reports its tokens with
-    /// `usd_micros: 0` — the only place zero stands in for unknown, and
-    /// only because `Cost` has no room to say otherwise. Ask
-    /// [`AgentRun::usd_micros`] when the difference matters.
+    /// An unpriced run that DID report a split carries its price
+    /// through as `None` — unpriced is not free. Until backlog
+    /// c6e2341c this wrote `usd_micros: 0`, the last place in the
+    /// system where a zero stood in for unknown, and only because
+    /// `Cost.usd_micros` was a plain integer with no room to say
+    /// otherwise; it is an `Option` now, so this method no longer has
+    /// to lie and [`AgentRun::usd_micros`] is no longer the only
+    /// reader that can tell.
     pub fn cost(&self) -> Option<Cost> {
         match self.run.tokens {
             TokenUsage::Split { input, output } => Some(Cost {
                 input_tokens: input,
                 output_tokens: output,
-                usd_micros: self.usd_micros.unwrap_or(0),
+                usd_micros: self.usd_micros,
             }),
             TokenUsage::TotalOnly { .. } | TokenUsage::Unreported => None,
         }
@@ -843,6 +847,23 @@ mod tests {
     }
 
     #[test]
+    fn an_unpriced_split_run_reports_no_cost_rather_than_zero() {
+        // 65c9c05a closed this defect one layer down and named where it
+        // still lived: `cost()` wrote `usd_micros: 0` for a run nothing
+        // on the card could price, because `Cost.usd_micros` was a plain
+        // integer. It is an Option now, so unpriced is not free here
+        // either (backlog c6e2341c).
+        let run = recorded(
+            a_run("claude:some-model-we-never-seeded", 999, 999),
+            &card(),
+        );
+        let cost = run.cost().expect("a split run still maps onto Cost");
+        assert_eq!(cost.input_tokens, 999, "the tokens are a fact either way");
+        assert_eq!(cost.output_tokens, 999);
+        assert_eq!(cost.usd_micros, None, "unpriced is not free");
+    }
+
+    #[test]
     fn a_huge_run_saturates_rather_than_overflowing() {
         let (micros, _) =
             price_run(&card(), &a_run("claude:opus-5", u64::MAX, u64::MAX)).expect("priced");
@@ -927,7 +948,7 @@ mod tests {
         let run = recorded(a_run("claude:opus-5", 1_000_000, 1_000_000), &card());
         let cost: Cost = run.cost().expect("a split run maps onto Cost");
         assert_eq!(cost.input_tokens, 1_000_000);
-        assert_eq!(cost.usd_micros, 30_000_000);
+        assert_eq!(cost.usd_micros, Some(30_000_000));
     }
 
     #[test]

@@ -120,6 +120,14 @@ pub struct JobsApiState<R: JobsRepository, B: EventBus> {
     /// `/api/cadence/*` door is operator-only and a browser cannot reach
     /// it. `None` skips the predicate (tests / in-memory spike).
     pub cadence: Option<Arc<dyn crate::cadence::CadenceRepository>>,
+    /// The dispatcher's firing record (read-only here, backlog
+    /// b14afc48). The world map's borders name the machine that moves
+    /// each hop and say when it last fired; for the one hop a
+    /// dispatcher rule moves there was no record to read at all, so
+    /// the most automated border on the map could not prove it ran.
+    /// `None` → every dispatcher machine says the record could not be
+    /// read, which is the honest answer and never a quiet rail.
+    pub dispatcher_firings: Option<Arc<dyn crate::dispatcher_firings::DispatcherFiringsRepository>>,
     /// Delivery-policy registry (read-only here). Same reason as
     /// `cadence`: the yard status names the stall / red-train thresholds
     /// the conductor enforces, read from the live policy row rather than

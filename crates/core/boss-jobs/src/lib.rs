@@ -26,6 +26,7 @@ pub mod decision_record;
 pub mod delivery;
 pub mod delivery_policy_seed;
 pub mod department;
+pub mod dispatcher_firings;
 pub mod escalation;
 pub mod estate_seed;
 pub mod events;

@@ -27,6 +27,9 @@ use boss_core::publisher::DomainPublisher;
 use boss_jobs::borders::BORDERS;
 use boss_jobs::cadence::{CadenceRepository, CadenceRuleRow, InMemoryCadence, NewFiring};
 use boss_jobs::delivery::{DeliveryPolicyRepository, InMemoryDeliveryPolicy};
+use boss_jobs::dispatcher_firings::{
+    DispatcherFiringsRepository, InMemoryDispatcherFirings, LastFiring,
+};
 use boss_jobs::http::{JobsApiState, router};
 use boss_jobs::step_registry::StepRegistry;
 use boss_jobs::{InMemoryJobs, JobsRepository};
@@ -109,6 +112,18 @@ fn app() -> (axum::Router, Arc<InMemoryJobs>, Arc<dyn CadenceRepository>) {
     let bus_dyn: Arc<dyn EventBus> = bus.clone();
     let cadence: Arc<dyn CadenceRepository> = Arc::new(InMemoryCadence::new(vec![depth_rule()]));
     let delivery: Arc<dyn DeliveryPolicyRepository> = Arc::new(InMemoryDeliveryPolicy::new(vec![]));
+    // The dispatcher's firing record (b14afc48): auto-park-on-gate-green
+    // fired an hour before NOW, which is what the marshalling -> dock
+    // border must answer with instead of the old "nothing records it".
+    let dispatcher_firings: Arc<dyn DispatcherFiringsRepository> =
+        Arc::new(InMemoryDispatcherFirings::new(vec![(
+            "auto-park-on-gate-green".to_string(),
+            LastFiring {
+                firing_id: "dispatcher:auto-park-on-gate-green:evt-1".into(),
+                fired_on: "jobs.gate.green".into(),
+                fired_at: t("2026-09-19T11:00:00Z"),
+            },
+        )]));
     let stations = Arc::new(boss_jobs::InMemoryStations::new());
     stations
         .seed(dock_station_row())
@@ -140,6 +155,7 @@ fn app() -> (axum::Router, Arc<InMemoryJobs>, Arc<dyn CadenceRepository>) {
         )),
         cadence: Some(cadence.clone()),
         delivery: Some(delivery),
+        dispatcher_firings: Some(dispatcher_firings),
         agent_budget: None,
     };
     (router(state), jobs, cadence)
@@ -350,15 +366,24 @@ async fn the_machine_is_read_from_its_own_firing_record_and_silence_is_trouble()
         "{boarding}"
     );
 
-    // The dispatcher rule has no firing record anywhere, and says that
-    // rather than reading as a machine that has never run.
+    // The dispatcher rule reads its OWN firing record (b14afc48) — the
+    // hop that used to be the only one on the map unable to prove it
+    // ran. Its silence stays unjudged: an event rule declares no
+    // heartbeat, and a `silent: false` here would be a machine drawn
+    // healthy on no evidence.
     let parked = border(&v, "marshalling", "dock");
     assert_eq!(parked["machine"]["kind"], "dispatcher-rule");
+    assert_eq!(
+        parked["machine"]["last_fired"], "2026-09-19T11:00:00+00:00",
+        "{parked}"
+    );
+    assert_eq!(parked["machine"]["expected_every_minutes"], Value::Null);
+    assert_eq!(parked["machine"]["silent"], Value::Null, "{parked}");
     assert!(
         parked["machine"]["why"]
             .as_str()
             .unwrap()
-            .contains("nothing records"),
+            .contains("dispatcher_firings"),
         "{parked}"
     );
 }

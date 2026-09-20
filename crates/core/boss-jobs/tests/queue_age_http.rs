@@ -101,6 +101,7 @@ fn app() -> (axum::Router, Arc<InMemoryJobs>) {
         )),
         cadence: None,
         delivery: None,
+        dispatcher_firings: None,
         agent_budget: None,
     };
     (router(state), jobs)

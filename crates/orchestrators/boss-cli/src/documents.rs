@@ -145,15 +145,81 @@ pub(crate) fn read(repo: &Path, profile: &str) -> Result<Option<String>> {
     }
 }
 
+/// How a rules document QUOTES an invariant instead of restating it:
+/// `{{invariant:<name>}}` on a line of its own, expanded by `expand`
+/// into that invariant's own lines (backlog 395d24ad, 2026-09-19).
+///
+/// THE CASE. The base-check advice lived twice — the `base check`
+/// invariant in `brief.rs`, and rule 1 of the builder document, which
+/// taught the same check in different words. Both said the tip-to-tip
+/// `diff`, and both were corrected on the SAME DAY by two different
+/// builders in two separate cars (8d054cb2 for the document, 9843aeb9
+/// for the invariant), hours apart; the second only learned the first
+/// existed while reading for its pin. Each car left a pin correctly
+/// scoped to its own copy, which stops each copy drifting alone and
+/// does nothing about them drifting APART — two pins that cannot see
+/// each other. CLAUDE.md 9a is explicit that a pin is a holding
+/// action and the collapse is the destination, and advice carries no
+/// information in its second copy, so the document now quotes the
+/// door rather than restating it.
+pub(crate) const OPEN: &str = "{{invariant:";
+pub(crate) const CLOSE: &str = "}}";
+
+/// Every `{{invariant:<name>}}` in `body` replaced by that
+/// invariant's lines, indented four spaces as the brief indents them.
+///
+/// A name no invariant carries is REFUSED, naming the names there
+/// are: rendered through, it would hand a builder a literal
+/// placeholder under a confident header — the silence class, and the
+/// one way a collapse can be worse than the duplication it replaced.
+pub(crate) fn expand(body: &str, invariants: &[crate::brief::Invariant]) -> Result<String> {
+    let mut out = String::new();
+    let mut rest = body;
+    while let Some(at) = rest.find(OPEN) {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at + OPEN.len()..];
+        let Some(end) = tail.find(CLOSE) else {
+            anyhow::bail!("unterminated {OPEN} in a rules document: no {CLOSE} closes it");
+        };
+        let name = tail[..end].trim();
+        let Some(inv) = invariants.iter().find(|i| i.name == name) else {
+            anyhow::bail!(
+                "a rules document quotes the invariant `{name}`, which this tree does not \
+                 carry; the invariants are {:?}",
+                invariants.iter().map(|i| i.name).collect::<Vec<_>>()
+            );
+        };
+        for line in &inv.lines {
+            out.push_str(&format!("    {line}\n"));
+        }
+        // The lines each carry their own newline, so the one that
+        // ended the placeholder's line would open a blank one.
+        rest = tail[end + CLOSE.len()..]
+            .strip_prefix('\n')
+            .unwrap_or(&tail[end + CLOSE.len()..]);
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
 /// The rules section of a brief: the document's body under a header
 /// that names the profile and the file, or the one line that says
 /// which file would serve a profile that has none.
-pub(crate) fn section(repo: &Path, profile: &str) -> Result<String> {
+///
+/// Takes the invariants the brief already derived rather than deriving
+/// them again — one reading of `infra/gate.sh --roster` per brief, and
+/// the rules a builder reads cannot quote a different set from the one
+/// printed above them.
+pub(crate) fn section(
+    repo: &Path,
+    profile: &str,
+    invariants: &[crate::brief::Invariant],
+) -> Result<String> {
     Ok(match read(repo, profile)? {
         Some(doc) => format!(
             "== THE RULES — profile `{profile}`, from {} ==\n\n{}",
             path_for(profile),
-            body(&doc)
+            expand(&body(&doc), invariants)?
         ),
         None => format!(
             "== THE RULES — profile `{profile}` has no document ==\n\n\
@@ -263,27 +329,9 @@ mod tests {
         for phrase in [
             "wt-cargo test -p boss-testing --all-features",
             "reset --soft origin/main",
-            "git diff --stat origin/main...HEAD",
-            "merge-base",
             "scratchpad/builders/<packet id>/",
         ] {
             assert!(text.contains(phrase), "the builder rules say `{phrase}`");
-        }
-        // 8d054cb2 (2026-09-19): the rule prescribed the TWO-dot form,
-        // which diffs the tips, so every commit that landed on main while
-        // a builder worked was reported back as the branch's own deletions
-        // (car 6e738252: two-dot said 47 files / 5235 deletions, three-dot
-        // said 7 files / 16 deletions, and the branch was one commit
-        // behind). That false alarm invites the merge-or-reset this same
-        // rule forbids, so no occurrence may be left in tip-to-tip form.
-        let check = "git diff --stat origin/main";
-        for (at, _) in text.match_indices(check) {
-            let three_dot = text[at + check.len()..].starts_with("...HEAD");
-            let named_wrong = text[..at].ends_with("the two-dot `");
-            assert!(
-                three_dot || named_wrong,
-                "a tip-to-tip diff check survives in the builder rules at byte {at}"
-            );
         }
     }
 
@@ -443,8 +491,9 @@ mod tests {
             profiles.contains(DEFAULT_PROFILE) && profiles.contains("analyst"),
             "the two settings in use are declared in the bundle: {profiles:?}"
         );
+        let invs = crate::brief::invariants(&repo()).expect("the invariants derive");
         for profile in &profiles {
-            let rendered = section(&repo(), profile).expect("the section renders");
+            let rendered = section(&repo(), profile, &invs).expect("the section renders");
             assert!(
                 !rendered.contains("has no document"),
                 "{} declares profile `{profile}` and nothing serves it",
@@ -455,7 +504,9 @@ mod tests {
 
     #[test]
     fn a_profile_with_no_document_is_a_line_that_names_the_file() {
-        let s = section(&repo(), "no-such-profile").expect("a missing document is not an error");
+        let invs = crate::brief::invariants(&repo()).expect("the invariants derive");
+        let s =
+            section(&repo(), "no-such-profile", &invs).expect("a missing document is not an error");
         assert!(s.contains("has no document"), "{s}");
         assert!(
             s.contains("infra/platform/documents/no-such-profile-rules.md"),
@@ -465,7 +516,8 @@ mod tests {
 
     #[test]
     fn the_section_names_the_profile_and_the_file_it_came_from() {
-        let s = section(&repo(), "builder").expect("the builder rules render");
+        let invs = crate::brief::invariants(&repo()).expect("the invariants derive");
+        let s = section(&repo(), "builder", &invs).expect("the builder rules render");
         assert!(s.starts_with(
             "== THE RULES — profile `builder`, from infra/platform/documents/builder-rules.md =="
         ));
@@ -567,5 +619,112 @@ mod tests {
         std::fs::write(bundle.join("builder-rules.md"), "# no front matter\n").unwrap();
         let err = read(&dir, "builder").expect_err("refused");
         assert!(err.to_string().contains("no front-matter"), "{err}");
+    }
+
+    /// The placeholder as a document writes it. Built rather than
+    /// typed, because `{` doubles inside a format string and a test
+    /// that typed the literal would be asserting a different string
+    /// from the one `expand` looks for.
+    fn quote_of(name: &str) -> String {
+        format!("{OPEN}{name}{CLOSE}")
+    }
+
+    /// THE COLLAPSE (backlog 395d24ad, 2026-09-19). The base-check
+    /// advice lived twice: the `base check` invariant in `brief.rs`
+    /// and rule 1 of this document, teaching the same check in
+    /// different words. Both said the tip-to-tip form, and both were
+    /// corrected on the SAME DAY by two different builders in two
+    /// separate cars (8d054cb2 for the document, 9843aeb9 for the
+    /// invariant) — the second only learning the first existed while
+    /// reading for its pin. Each car left its own pin, correctly
+    /// scoped to its own copy, which stopped each copy drifting alone
+    /// and did nothing about them drifting APART. So the document now
+    /// QUOTES the invariant instead of restating it, and the
+    /// restatement is refused here: one definition, one pin (CLAUDE.md
+    /// 9a — a pin is a holding action, the collapse is the
+    /// destination).
+    #[test]
+    fn the_builder_rules_quote_the_base_check_invariant_rather_than_restating_it() {
+        let text = body(
+            &read(&repo(), "builder")
+                .expect("readable")
+                .expect("the builder rules are authored"),
+        );
+        assert!(
+            text.contains(&quote_of("base check")),
+            "rule 1 quotes the base-check invariant rather than restating it"
+        );
+        // No second copy of the commands, in either flag spelling.
+        for restated in [
+            "merge-base --is-ancestor",
+            "git diff --numstat origin/main",
+            "git diff --stat origin/main",
+        ] {
+            assert!(
+                !text.contains(restated),
+                "the builder rules restate the base check's `{restated}`; quote the \
+                 invariant instead (395d24ad)"
+            );
+        }
+        // And what a builder actually reads carries the invariant's
+        // own lines, verbatim.
+        let invs = crate::brief::invariants(&repo()).expect("the invariants derive");
+        let inv = invs
+            .iter()
+            .find(|i| i.name == "base check")
+            .expect("a base-check invariant");
+        let rendered = section(&repo(), "builder", &invs).expect("the section renders");
+        for line in &inv.lines {
+            assert!(
+                rendered.contains(line.as_str()),
+                "the rendered rules drop the invariant's line `{line}`"
+            );
+        }
+        assert!(
+            !rendered.contains(OPEN),
+            "an unexpanded placeholder reached a reader: {rendered}"
+        );
+    }
+
+    /// A placeholder naming an invariant this tree does not carry is
+    /// REFUSED, naming the names there are. Rendered through, it would
+    /// hand a builder a literal placeholder under a confident header —
+    /// the silence class, and the one way a collapse can be worse than
+    /// the duplication it replaced.
+    #[test]
+    fn a_document_quoting_an_invariant_that_does_not_exist_is_refused() {
+        let invs = crate::brief::invariants(&repo()).expect("the invariants derive");
+        let err = expand(
+            &format!("before\n\n{}\n\nafter\n", quote_of("base chck")),
+            &invs,
+        )
+        .expect_err("an unknown invariant name is refused");
+        assert!(err.to_string().contains("base chck"), "{err}");
+        assert!(err.to_string().contains("base check"), "{err}");
+        let err = expand(&format!("{OPEN}base check\n"), &invs).expect_err("unterminated");
+        assert!(err.to_string().contains("unterminated"), "{err}");
+    }
+
+    #[test]
+    fn a_quoted_invariant_is_indented_as_a_block_and_the_prose_around_it_is_kept() {
+        let invs = vec![crate::brief::Invariant {
+            name: "base check",
+            authority: "infra/gate.sh".into(),
+            lines: vec!["one".into(), "two".into()],
+            lanes: vec![crate::brief::LANE_CAR],
+            grounding: crate::brief::Grounding::Written,
+        }];
+        assert_eq!(
+            expand(
+                &format!("before\n\n{}\n\nafter\n", quote_of("base check")),
+                &invs
+            )
+            .expect("expands"),
+            "before\n\n    one\n    two\n\nafter\n"
+        );
+        assert_eq!(
+            expand("nothing to do\n", &invs).expect("expands"),
+            "nothing to do\n"
+        );
     }
 }

@@ -453,6 +453,32 @@ pub fn alarm_body(sensor: &SensorRow, alarm: &Alarm, owner: &str) -> Json {
     })
 }
 
+/// The sensor registry as `GET /api/sensors` answered it.
+///
+/// NO `data` ARRAY IS A REFUSAL, NOT AN EMPTY LIST (backlog 6c4c432a,
+/// the same reading `retro_open::departments` takes of departments,
+/// 80a77466). An error shape, a changed contract or a policy-narrowed
+/// answer carries no `data` key, and reading that as zero sensors
+/// polls nothing and reports the pass healthy — the whole class of
+/// outside-world input going dark with the only signal an absence of
+/// readings. An EMPTY array is honest: sensors are a registry, not a
+/// work queue, and a deployment may legitimately declare none, so it
+/// keeps working and no floor is put on the count.
+///
+/// The refusal is RETRYABLE (`HandlerError::Downstream` at the call
+/// site, as the malformed-row case already was): a listing with no
+/// `data` is a bad answer from the jobs API, not a deterministic fault
+/// in the request this handler sent, so a redelivery can succeed once
+/// the service or the policy scope is right, and the firing naks
+/// loudly instead of terminating.
+pub fn sensors(listing: &Json) -> Result<Vec<SensorRow>, String> {
+    let rows = listing
+        .get("data")
+        .filter(|d| d.is_array())
+        .ok_or_else(|| "GET /api/sensors answered no `data` array".to_string())?;
+    serde_json::from_value(rows.clone()).map_err(|e| format!("sensors not in shape: {e}"))
+}
+
 /// The open alarm carrying `key`, as `(id, reason)`, if any — and
 /// whether the page can be trusted (a truncated page holds).
 pub fn open_alarm(listing: &Json, key: &str) -> Result<Option<(String, String)>, String> {
@@ -906,13 +932,7 @@ impl Handler for SensorPoll {
             &ctx.rule_name,
         )
         .await?;
-        let sensors: Vec<SensorRow> = listing
-            .get("data")
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|e| HandlerError::Downstream(format!("sensors not in shape: {e}")))?
-            .unwrap_or_default();
+        let sensors = sensors(&listing).map_err(HandlerError::Downstream)?;
         let mut transient: Vec<String> = Vec::new();
         for sensor in sensors.iter().filter(|s| s.due_at(now)) {
             match self.poll_one(sensor, now).await {
@@ -1050,6 +1070,26 @@ mod tests {
                 .unwrap_err()
                 .contains("truncated")
         );
+    }
+
+    /// Backlog 6c4c432a. A listing with NO `data` array is no answer —
+    /// an error shape, a changed contract, a policy-narrowed read — and
+    /// it must refuse, not poll nothing and report healthy. An EMPTY
+    /// array is honest: a deployment may legitimately declare no
+    /// sensors, so it keeps working. Same distinction, same words, as
+    /// `retro_open::departments` (80a77466).
+    #[test]
+    fn a_listing_with_no_data_array_is_a_refusal_and_an_empty_one_is_honest() {
+        assert_eq!(
+            sensors(&json!({ "data": [], "total": 0 })).expect("empty is honest"),
+            vec![]
+        );
+        let why = sensors(&json!({ "total": 0 })).expect_err("no data array is a refusal");
+        assert!(why.contains("no `data` array"), "{why}");
+        let why = sensors(&json!({ "error": "forbidden" })).expect_err("an error shape refuses");
+        assert!(why.contains("no `data` array"), "{why}");
+        let why = sensors(&json!({ "data": [{ "id": 7 }] })).expect_err("a bad row refuses");
+        assert!(why.contains("not in shape"), "{why}");
     }
 
     #[test]

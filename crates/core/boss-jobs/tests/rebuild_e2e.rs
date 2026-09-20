@@ -150,6 +150,7 @@ fn build_app(pool: PgPool) -> Router {
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
         cadence: None,
         delivery: None,
+        dispatcher_firings: None,
         agent_budget: None,
     };
     router(state)

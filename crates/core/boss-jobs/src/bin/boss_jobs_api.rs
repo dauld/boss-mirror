@@ -182,6 +182,15 @@ async fn main() -> Result<()> {
             Arc<dyn boss_jobs::cadence::CadenceRepository>,
             Arc<dyn boss_jobs::cadence::CadenceRegistry>,
         ) = (cadence.clone(), cadence);
+        // The dispatcher's firing record (backlog b14afc48), read-only:
+        // the world map's borders ask every machine when it last fired,
+        // and the reactive layer — the most automated hop there is —
+        // had no record to answer from.
+        let dispatcher_firings: Arc<
+            dyn boss_jobs::dispatcher_firings::DispatcherFiringsRepository,
+        > = Arc::new(boss_jobs::dispatcher_firings::PgDispatcherFirings::new(
+            pool.clone(),
+        ));
         // The delivery pipeline's policy content, served to the train
         // conductor through the same door as everything else it reads
         // (docs/design/delivery-as-protocol.md).
@@ -242,6 +251,7 @@ async fn main() -> Result<()> {
             Some(plugin_registry),
             Some(scheduling),
             Some(cadence),
+            Some(dispatcher_firings),
             Some(delivery),
             Some(credentials),
             Some(agent_runs),
@@ -283,6 +293,7 @@ async fn run_server<R: JobsRepository + 'static>(
         Arc<dyn boss_jobs::cadence::CadenceRepository>,
         Arc<dyn boss_jobs::cadence::CadenceRegistry>,
     )>,
+    dispatcher_firings: Option<Arc<dyn boss_jobs::dispatcher_firings::DispatcherFiringsRepository>>,
     delivery: Option<Arc<dyn boss_jobs::delivery::DeliveryPolicyRepository>>,
     credentials: Option<Arc<dyn boss_jobs::credentials::CredentialsRegistry>>,
     agent_runs: Option<Arc<dyn boss_jobs::agent_runs::AgentRunLog>>,
@@ -371,6 +382,7 @@ async fn run_server<R: JobsRepository + 'static>(
         // two registries the /api/agents and /api/agent-runs doors
         // serve; without a run log there is no spend to measure and
         // every claim is admitted as before.
+        dispatcher_firings,
         agent_budget: agent_runs.as_ref().map(|log| {
             Arc::new(boss_jobs::agent_budget::BudgetDoor {
                 agents: agents.clone(),

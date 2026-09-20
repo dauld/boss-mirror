@@ -77,6 +77,7 @@ fn app() -> (axum::Router, Arc<InMemoryJobs>) {
         clock: Arc::new(boss_clock_client::WallClockClient),
         cadence: None,
         delivery: None,
+        dispatcher_firings: None,
         agent_budget: None,
     };
     (router(state), jobs)

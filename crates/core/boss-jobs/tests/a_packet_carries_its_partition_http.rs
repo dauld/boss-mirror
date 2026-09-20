@@ -94,6 +94,7 @@ fn app() -> (Router, Arc<InMemoryJobs>) {
         clock,
         cadence: None,
         delivery: None,
+        dispatcher_firings: None,
         agent_budget: None,
     };
     (router(state), jobs)

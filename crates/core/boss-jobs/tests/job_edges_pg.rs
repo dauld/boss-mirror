@@ -316,6 +316,7 @@ async fn the_metadata_patch_reports_an_unresolvable_edge_as_the_callers_error() 
         clock: Arc::new(boss_clock_client::WallClockClient),
         cadence: None,
         delivery: None,
+        dispatcher_firings: None,
         agent_budget: None,
     });
 

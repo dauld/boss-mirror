@@ -18,6 +18,7 @@ pub use boss_expr as expr;
 pub mod actor;
 pub mod authoring;
 pub mod dead_letter;
+pub mod firings;
 pub mod handler;
 pub mod helpers_inventory;
 pub mod jobs_spawn;

@@ -145,7 +145,10 @@ impl AgentDispatcher for ClaudeCodeDispatcher {
                             "claude subprocess failed"
                         );
                         Outcome::Failed {
-                            cost: Cost::ZERO,
+                            // It ran and then failed, so it spent what
+                            // it spent; the JSON that would say how much
+                            // never arrived (backlog c6e2341c).
+                            cost: Cost::UNPRICED,
                             error: format!(
                                 "claude exited with {}: {}",
                                 output.status,
@@ -241,7 +244,9 @@ fn parse_claude_output(stdout: &str) -> (serde_json::Value, Cost) {
         Ok(v) => v,
         Err(_) => {
             warn!("could not parse claude JSON output, treating as plain text");
-            return (serde_json::json!({ "text": stdout }), Cost::ZERO);
+            // The run happened and spent something; we just cannot read
+            // what. UNPRICED, not ZERO (backlog c6e2341c).
+            return (serde_json::json!({ "text": stdout }), Cost::UNPRICED);
         }
     };
 
@@ -262,12 +267,12 @@ fn parse_claude_output(stdout: &str) -> (serde_json::Value, Cost) {
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 
-    // Total cost is at the top level.
-    let cost_usd = parsed
+    // Total cost is at the top level — and when it is absent, the
+    // run is unpriced, not free (backlog c6e2341c).
+    let usd_micros = parsed
         .get("total_cost_usd")
         .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-    let usd_micros = (cost_usd * 1_000_000.0) as u64;
+        .map(|usd| (usd * 1_000_000.0) as u64);
 
     (
         response,
@@ -293,5 +298,32 @@ impl RunCompletions for BroadcastCompletions {
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_output_without_a_total_cost_is_unpriced_not_free() {
+        // backlog c6e2341c. `total_cost_usd` is absent whenever the CLI
+        // was not told to price the run; reading that as $0.00 put a
+        // measurement's authority on a number nobody reported.
+        let (_, cost) = parse_claude_output(
+            r#"{"result":"hi","usage":{"input_tokens":10,"output_tokens":253}}"#,
+        );
+        assert_eq!(cost.input_tokens, 10);
+        assert_eq!(cost.output_tokens, 253);
+        assert_eq!(cost.usd_micros, None, "unpriced is not free");
+
+        let (_, priced) = parse_claude_output(
+            r#"{"result":"hi","total_cost_usd":0.029,"usage":{"input_tokens":10,"output_tokens":253}}"#,
+        );
+        assert_eq!(priced.usd_micros, Some(29_000));
+
+        // Output we cannot parse came from a run that DID happen.
+        let (_, unreadable) = parse_claude_output("not json at all");
+        assert_eq!(unreadable.usd_micros, None);
     }
 }

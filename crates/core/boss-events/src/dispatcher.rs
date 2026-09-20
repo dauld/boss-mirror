@@ -40,7 +40,7 @@ impl Default for StubDispatcher {
         Self::new(Cost {
             input_tokens: 10,
             output_tokens: 20,
-            usd_micros: 100,
+            usd_micros: Some(100),
         })
     }
 }
@@ -195,7 +195,7 @@ mod tests {
         let d = StubDispatcher::new(Cost {
             input_tokens: 1,
             output_tokens: 2,
-            usd_micros: 3,
+            usd_micros: Some(3),
         });
         let s = spec("planner", 1);
         let mut completions = d.completions().await.unwrap();
@@ -212,7 +212,7 @@ mod tests {
         assert_eq!(completion.run.run_id, handle.run_id);
         match completion.outcome {
             Outcome::Success { cost, .. } => {
-                assert_eq!(cost.usd_micros, 3);
+                assert_eq!(cost.usd_micros, Some(3));
             }
             other => panic!("expected Success, got {other:?}"),
         }

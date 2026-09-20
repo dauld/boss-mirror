@@ -755,6 +755,15 @@ async fn main() -> Result<()> {
             let pool_rules = pool.clone();
             let dead_letters: Arc<dyn DeadLetterSink> =
                 JobsApiDeadLetters::new(cfg.jobs_api_url.clone());
+            // Every rule firing is recorded (backlog b14afc48), through
+            // the dispatcher's own pool — the same one the log tail and
+            // the schedule cursor use. Until this landed the reactive
+            // layer was the one machine on the IT world map that could
+            // not say when it last fired, so the hop it moves could not
+            // be told stopped from quiet.
+            let firings: Arc<dyn boss_dispatcher::rules::firings::FiringSink> = Arc::new(
+                boss_dispatcher::rules::firings::PgFirings::new(pool.clone()),
+            );
             tokio::spawn(async move {
                 let mut registry = registry;
                 let mut fp = fp;
@@ -776,6 +785,10 @@ async fn main() -> Result<()> {
                         // packet-less topics and a failed write both
                         // leave a number at /api/dispatcher/health.
                         live: Some(live_rules.clone()),
+                        // Best-effort and after the settle: a firing
+                        // row that cannot be written never redelivers a
+                        // side effect that landed.
+                        firings: Some(firings.clone()),
                     });
                     let ev = {
                         let live = live_rules.clone();

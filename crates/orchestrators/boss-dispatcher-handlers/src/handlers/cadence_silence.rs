@@ -137,7 +137,8 @@ use boss_dispatcher::rules::registry::RawRule;
 
 use super::cadence_roster::{ClockCadence, Guard, clock_cadences};
 use super::common::{
-    TRIAGE_SLUG, api_client, get_json, owner_for_filing, post_json, triage_step, write_json,
+    TRIAGE_SLUG, api_client, empty_roster_refusal, get_json, owner_for_filing, post_json,
+    triage_step, write_json,
 };
 
 /// Arg-key prefix for one declared cadence. `interval_minutes.<kind>`
@@ -1154,12 +1155,15 @@ impl Handler for CadenceSilenceSweep {
         if watched.is_empty() {
             // A sweep declaring nothing watches nothing, and would
             // report "all clear" forever. That is the silent-check
-            // class this handler exists to end, so it is an error.
-            return Err(HandlerError::Permanent(
-                "cadence.silence.sweep: the roster is empty — the rule row declares no \
-                 `interval_minutes.<kind>` args AND no enforced clock rule spawns a packet \
-                 on a schedule. A sweep with an empty roster is a check that is not running"
-                    .into(),
+            // class this handler exists to end, so it is an error —
+            // stated through the shared floor since 86ebf7fc, which is
+            // where the reasoning lives now that a second handler
+            // (retro.open) refuses its empty roster the same way.
+            return Err(empty_roster_refusal(
+                self.name(),
+                "cadence",
+                "the rule row declares no `interval_minutes.<kind>` args AND no enforced clock \
+                 rule spawns a packet on a schedule",
             ));
         }
         let now = boss_clock_client::now_from(&self.clock).await;

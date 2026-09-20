@@ -81,6 +81,41 @@ pub(crate) const LANE_CAR: &str = "car";
 pub(crate) const LANE_STEP: &str = "step";
 pub(crate) const LANES: [&str; 2] = [LANE_CAR, LANE_STEP];
 
+/// How an invariant's lines RELATE to the file named beside them
+/// (backlog c94ddc6f, 2026-09-19).
+///
+/// Until this, the only check on `authority` was that the named path
+/// EXISTS; nothing asked whether the file had anything to do with the
+/// text next to it. The base-check invariant carried a hand-typed
+/// `git diff` command under a label naming `freshness.rs` — a file
+/// that refuses a stale base but runs no such command — and that
+/// derived-looking label misled TWO readers in ONE day into reporting
+/// the defect's location as that file: the builder of 8d054cb2, and
+/// the operator afterwards in a triage evidence field marked
+/// `verified`.
+///
+/// Prose wearing derived clothes is the hole cc9ddc5d closed one level
+/// up. Most invariants here really are read out of their authority, so
+/// the reader cannot tell the one that is not — unless the rendering
+/// says so, which is what this decides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Grounding {
+    /// The strings this invariant took OUT of its authority. Each is
+    /// pinned to be present both in that file and in the lines
+    /// printed, so the label cannot outlive the reading it claims.
+    Derived(Vec<String>),
+    /// The authority ENFORCES the rule; the sentences are ours. Marked
+    /// in the rendered output with `WRITTEN_MARK`, because a written
+    /// claim wearing a derived label is worse than one wearing none —
+    /// a reader trusts it.
+    Written,
+}
+
+/// What a `Written` invariant prints beside its authority. The file is
+/// still named — it is the right file to go read — but the reader is
+/// told the sentences did not come out of it.
+pub(crate) const WRITTEN_MARK: &str = "— written here, not read from that file";
+
 /// One invariant a brief can reference instead of restating, and the
 /// file in the tree that DECIDES it.
 ///
@@ -98,6 +133,7 @@ pub(crate) struct Invariant {
     pub(crate) authority: String,
     pub(crate) lines: Vec<String>,
     pub(crate) lanes: Vec<&'static str>,
+    pub(crate) grounding: Grounding,
 }
 
 /// The gate container's uid and gid, read from the gate-runner manifest.
@@ -272,6 +308,7 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "default is one job per CPU — 32 on this pod, against a 16 GiB cgroup.".into(),
             ],
             lanes: vec![LANE_CAR],
+            grounding: Grounding::Derived(vec![format!("CARGO_BUILD_JOBS={jobs}")]),
         },
         Invariant {
             name: "verify as the gate",
@@ -287,6 +324,7 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "Quote its last line in a receipt's `verified` field.".into(),
             ],
             lanes: vec![LANE_CAR],
+            grounding: Grounding::Derived(vec![uid.to_string()]),
         },
         Invariant {
             name: "gate uid / gid",
@@ -295,6 +333,7 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "uid {uid}, gid {gid} — read from the `gate` container, not from prose"
             )],
             lanes: vec![LANE_CAR],
+            grounding: Grounding::Derived(vec![uid.to_string(), gid.to_string()]),
         },
         Invariant {
             name: "fixture paths",
@@ -305,6 +344,7 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "the lint named above is in the pre-flight roster and refuses one.".into(),
             ],
             lanes: vec![LANE_CAR],
+            grounding: Grounding::Derived(vec!["boss_testing::scratch".into()]),
         },
         Invariant {
             name: "the database",
@@ -316,6 +356,7 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "erroring.".into(),
             ],
             lanes: vec![LANE_CAR],
+            grounding: Grounding::Derived(vec![admin_url.clone()]),
         },
         Invariant {
             name: "order",
@@ -326,6 +367,9 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "a cold local build that is never pushed parks a car with nothing on it.".into(),
             ],
             lanes: vec![LANE_CAR],
+            // WRITTEN: the gate runs these checks, it does not spell
+            // this order for a builder's afternoon (c94ddc6f).
+            grounding: Grounding::Written,
         },
         // Three dots on the diff, and not as a matter of taste: two-dot
         // diffs the two TIPS, so it is right only while the line above
@@ -346,6 +390,13 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "A branch on an old base merges clean and reverts landed work.".into(),
             ],
             lanes: vec![LANE_CAR],
+            // WRITTEN, and this is the invariant that bought the
+            // distinction: `freshness.rs` REFUSES a branch whose base
+            // is behind main — which is why it is the right file to
+            // name — but it runs neither of these two commands, and
+            // the derived-looking label sent two readers to it for a
+            // defect that was here (c94ddc6f).
+            grounding: Grounding::Written,
         },
         Invariant {
             name: "gate phases",
@@ -356,6 +407,7 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "list cannot fall behind the gate that judges the car.".into(),
             ],
             lanes: vec![LANE_CAR],
+            grounding: Grounding::Derived(phases.clone()),
         },
         // The tokens come from the constant the refusal reads, not from
         // prose: a brief that named a token the gate does not refuse is
@@ -380,6 +432,16 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
                 "answers midnight rather than an error.".into(),
             ],
             lanes: vec![LANE_CAR],
+            grounding: Grounding::Derived(
+                boss_jobs::probe::GIT_TIME_WITH_AN_OFFSET
+                    .iter()
+                    .map(|t| t.to_string())
+                    .chain([
+                        boss_jobs::probe::CAR_CONVERGED_AT_VAR.to_string(),
+                        "reads_git_time_with_an_offset".to_string(),
+                    ])
+                    .collect(),
+            ),
         },
     ];
     // THE STEP LANE'S OWN INVARIANT (c8faa7f3). A profile that ships no
@@ -404,6 +466,7 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
             "say beside the finding what the control returned.".into(),
         ],
         lanes: vec![LANE_STEP],
+        grounding: Grounding::Derived(vec![sor.clone()]),
     });
 
     out.sort_by_key(|i| i.name);
@@ -432,8 +495,8 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
 pub(crate) fn invariant_section(invs: &[Invariant], lane: &str) -> String {
     let mine: Vec<&Invariant> = invs.iter().filter(|i| i.lanes.contains(&lane)).collect();
     let mut out = format!(
-        "== THE INVARIANTS — for the `{lane}` lane, derived from the file named after \
-         each, not restated ==\n"
+        "== THE INVARIANTS — for the `{lane}` lane, each read out of the file named \
+         after it, or marked as written ==\n"
     );
     if mine.is_empty() {
         out.push_str(&format!(
@@ -442,7 +505,14 @@ pub(crate) fn invariant_section(invs: &[Invariant], lane: &str) -> String {
         return out;
     }
     for inv in mine {
-        out.push_str(&format!("\n{}   [{}]\n", inv.name, inv.authority));
+        // A written invariant says so beside its authority: the file
+        // is still the one to go read, and the reader is told the
+        // sentences did not come out of it (c94ddc6f).
+        let mark = match inv.grounding {
+            Grounding::Written => format!(" {WRITTEN_MARK}"),
+            Grounding::Derived(_) => String::new(),
+        };
+        out.push_str(&format!("\n{}   [{}{mark}]\n", inv.name, inv.authority));
         for l in &inv.lines {
             out.push_str(&format!("    {l}\n"));
         }
@@ -839,7 +909,7 @@ pub(crate) fn render(
     }
     out.push_str(&invariant_section(&invs, &lane));
     out.push_str(&format!("\n{HOW_TO_USE}\n\n"));
-    out.push_str(&crate::documents::section(repo, profile)?);
+    out.push_str(&crate::documents::section(repo, profile, &invs)?);
     Ok(out)
 }
 
@@ -1016,6 +1086,97 @@ mod tests {
             );
             assert!(!inv.lines.is_empty(), "{:?} says nothing", inv.name);
         }
+    }
+
+    /// THE AUTHORITY FIELD IS CHECKED TO DECIDE THE LINES (backlog
+    /// c94ddc6f, 2026-09-19). Until this, the only check on `authority`
+    /// was that the named path EXISTS — nothing asked whether the file
+    /// had anything to do with the text beside it. The measured cost:
+    /// the base-check invariant carried a hand-typed `git diff` command
+    /// under a label naming `freshness.rs`, a file that runs no such
+    /// command, and the derived-looking label misled TWO readers in ONE
+    /// day into reporting the defect's location as that file — the
+    /// builder of 8d054cb2, and the operator afterwards in this
+    /// packet's own triage evidence, marked `verified`.
+    ///
+    /// So an invariant now declares which of the two it is, and this
+    /// test proves the claim: every string a `Derived` invariant says
+    /// it read is still present BOTH in the authority file and in the
+    /// lines a reader sees. Prose wearing derived clothes is the hole
+    /// cc9ddc5d closed one level up (ten briefs retyped from memory,
+    /// the uid wrong in all ten); an unchecked label re-opens it.
+    #[test]
+    fn every_derived_invariant_can_show_its_reading_in_its_authority() {
+        let invs = invariants(&repo()).expect("the invariants derive from this tree");
+        let mut derived = 0;
+        for inv in &invs {
+            let Grounding::Derived(values) = &inv.grounding else {
+                continue;
+            };
+            derived += 1;
+            assert!(
+                !values.is_empty(),
+                "{:?} claims a reading of nothing",
+                inv.name
+            );
+            let authority = std::fs::read_to_string(repo().join(&inv.authority))
+                .unwrap_or_else(|_| panic!("{} reads", inv.authority));
+            let lines = inv.lines.join("\n");
+            for v in values {
+                assert!(
+                    !v.trim().is_empty(),
+                    "{:?} claims an empty reading",
+                    inv.name
+                );
+                assert!(
+                    authority.contains(v.as_str()),
+                    "{:?} says it read `{v}` out of {}, and that file does not contain it",
+                    inv.name,
+                    inv.authority
+                );
+                assert!(
+                    lines.contains(v.as_str()),
+                    "{:?} read `{v}` and then does not print it",
+                    inv.name
+                );
+            }
+        }
+        assert!(
+            derived >= 5,
+            "most invariants are read, not written: {derived}"
+        );
+    }
+
+    /// The other half of the same rule: an invariant whose lines are
+    /// WRITTEN says so where the authority is printed, so a reader can
+    /// tell which claims carry a file behind them. `base check` is the
+    /// measured one — `freshness.rs` REFUSES a stale base, which is why
+    /// it is the right file to name, but it does not spell the two
+    /// commands a builder runs.
+    #[test]
+    fn an_invariant_whose_lines_are_written_is_not_dressed_as_a_reading() {
+        let invs = invariants(&repo()).expect("the invariants derive");
+        let rendered = invariant_section(&invs, LANE_CAR);
+        let base = invs
+            .iter()
+            .find(|i| i.name == "base check")
+            .expect("a base-check invariant");
+        assert_eq!(base.grounding, Grounding::Written);
+        assert!(
+            rendered.contains(&format!("[{} {WRITTEN_MARK}]", base.authority)),
+            "the written invariant is printed as if it were read: {rendered}"
+        );
+        // And a read one carries no such mark: the label has to
+        // DISCRIMINATE, or it is the unchecked label again.
+        let uid = invs
+            .iter()
+            .find(|i| i.name == "gate uid / gid")
+            .expect("a uid invariant");
+        assert!(matches!(uid.grounding, Grounding::Derived(_)));
+        assert!(
+            rendered.contains(&format!("[{}]", uid.authority)),
+            "a derived invariant must print its authority plainly: {rendered}"
+        );
     }
 
     #[test]

@@ -153,6 +153,44 @@ pub fn dispatcher_reader_header() -> String {
     .to_string()
 }
 
+/// THE FLOOR under every handler that fans out over a roster read at
+/// fire time (backlog 86ebf7fc): a roster that answers ZERO rows is
+/// refused, never reported as a quiet pass.
+///
+/// WHY IT IS A REFUSAL AND NOT A WARNING. A wrong, dark or
+/// policy-narrowed read answers `total: 0` instead of erroring — the
+/// most expensive recurring shape in this codebase (CLAUDE.md §Doors,
+/// "a wrong target answers instead of erroring"). The layer below can
+/// be made honest — `GET /api/departments` refuses rather than flatten
+/// a registry error to an empty list (80a77466) — and that is only
+/// half: the consumer still has to refuse the EMPTY it is honestly
+/// handed, because the rosters this applies to are ones whose zero
+/// means the system is broken, not that the week was quiet. A warning
+/// is not a refusal: it fires into a log nobody is reading at 00:00 on
+/// a Monday, and the cadence passes with no packet anyone acts on.
+///
+/// WHAT REFUSING BUYS. `Permanent` terminates the firing at once
+/// rather than burning the redelivery budget on a roster that will
+/// answer empty identically every time, and the dead-letter is counted
+/// on the dispatcher's liveness surface, where the estate chain reads
+/// unrecorded dead-letters and files a finding (8834804a) — a packet
+/// someone acts on, which is exactly what the quiet pass never made.
+///
+/// `why_zero_is_broken` is the caller's sentence, because the floor is
+/// generic and the reason never is.
+pub(crate) fn empty_roster_refusal(
+    handler: &str,
+    roster: &str,
+    why_zero_is_broken: &str,
+) -> HandlerError {
+    HandlerError::Permanent(format!(
+        "{handler}: the {roster} roster is empty — {why_zero_is_broken}. Firing successfully \
+         over zero rows is absence treated as an answer, and it hides the fault for a whole \
+         cadence at a time, so this refuses instead: a fan-out over an empty roster is a check \
+         that is not running"
+    ))
+}
+
 /// The client every handler's production constructor uses: a plain
 /// reqwest client that carries the machine token as a default header
 /// when the process has one configured (7fcd78fa phase 1). One
@@ -448,6 +486,34 @@ pub(crate) fn triage_step(job: &Value) -> Option<(String, serde_json::Map<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// THE FLOOR, stated once: a roster read that answers zero rows is
+    /// refused, and the refusal names the handler, the roster and why
+    /// zero means broken — the three things an operator reading a
+    /// dead-letter has to be told.
+    #[test]
+    fn an_empty_roster_is_a_permanent_refusal_that_names_the_roster() {
+        let e = empty_roster_refusal(
+            "retro.open",
+            "departments",
+            "a company with no departments is broken in a way a retro cannot fix",
+        );
+        assert!(
+            e.is_permanent(),
+            "a roster that is empty is empty identically on every redelivery"
+        );
+        let text = e.to_string();
+        assert!(text.contains("retro.open"), "{text}");
+        assert!(text.contains("departments roster is empty"), "{text}");
+        assert!(
+            text.contains("broken in a way a retro cannot fix"),
+            "the caller's reason rides the refusal: {text}"
+        );
+        assert!(
+            text.contains("a check that is not running"),
+            "the floor's own sentence, stated here and not per handler: {text}"
+        );
+    }
 
     #[test]
     fn overhead_source_id_matches_endpoint_contract() {

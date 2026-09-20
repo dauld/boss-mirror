@@ -17,6 +17,16 @@
 //! nine codes overlapping the real thirteen by five, which this rule
 //! would have turned into nine wrong retros on its first firing.
 //!
+//! THE ROSTER HAS A FLOOR (backlog 86ebf7fc). That read answering
+//! ZERO rows refuses the firing ([`departments_floor`]) rather than
+//! fanning out over nothing and returning `Ok`. 80a77466 made the
+//! endpoint answer an error as an error instead of as an empty list,
+//! which is the half a port can do; this is the other half, because a
+//! read can be honest and still hand back an empty registry, and a
+//! company with no departments is broken in a way a retro cannot fix.
+//! The handler warned here until this car, and a warning is not a
+//! refusal: it bought a silent week with no packet anyone acts on.
+//!
 //! THE DEDUP IS A WEEK WINDOW, NOT `open_job_exists`. A clock rule
 //! guarded by an open packet stops firing FOREVER once one packet is
 //! left open, and says nothing — measured 2026-09-10, nineteen days of
@@ -49,7 +59,7 @@ use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext, 
 use chrono::{Datelike, NaiveDate};
 use serde_json::{Value, json};
 
-use super::common::{api_client, get_json, owner_for_filing, post_json};
+use super::common::{api_client, empty_roster_refusal, get_json, owner_for_filing, post_json};
 
 pub struct RetroOpen {
     client: reqwest::Client,
@@ -212,6 +222,35 @@ pub fn departments(listing: &Value) -> Result<Vec<Department>, String> {
         .collect()
 }
 
+/// THE FLOOR on the department roster (backlog 86ebf7fc): zero
+/// departments refuses the firing.
+///
+/// `GET /api/departments` already answers an error as an error rather
+/// than as an empty list (80a77466), so an empty answer here is the
+/// honest one — and it is still not a week worth firing over. A
+/// company with no departments is broken in a way a retro cannot fix,
+/// and a handler that fanned out over it would open zero packets,
+/// return `Ok`, and buy a silent week. The floor's own reasoning, and
+/// why it is `Permanent`, live once in
+/// [`super::common::empty_roster_refusal`].
+///
+/// The refusal comes BEFORE the platform half deliberately: the whole
+/// firing is judged untrustworthy, and the platform retro's absence is
+/// not thereby hidden — `protocol-retro`/`infra/protocol-retro` is a
+/// declared weekly cadence that `cadence.silence.sweep` watches
+/// (see `cadence_roster`), so a suppressed week raises its own alarm.
+pub fn departments_floor(rows: &[Department]) -> Result<(), HandlerError> {
+    if rows.is_empty() {
+        return Err(empty_roster_refusal(
+            "retro.open",
+            "departments",
+            "GET /api/departments answered zero rows; a company with no departments is broken \
+             in a way a retro cannot fix",
+        ));
+    }
+    Ok(())
+}
+
 /// An optional string arg, refused when present and not a string.
 fn optional_string(
     args: &[(String, ExprValue)],
@@ -262,12 +301,7 @@ impl Handler for RetroOpen {
         )
         .await?;
         let departments = departments(&listing).map_err(HandlerError::Downstream)?;
-        if departments.is_empty() {
-            tracing::warn!(
-                rule = %ctx.rule_name,
-                "retro.open: the departments registry holds no department — nothing to review"
-            );
-        }
+        departments_floor(&departments)?;
 
         // Best-effort accumulator, the sweep's posture: one department's
         // failed read or POST must never cost the others their retro.
@@ -458,6 +492,41 @@ mod tests {
         assert_eq!(newest_opened_on(&l), Some(d("2026-09-21")));
         assert_eq!(newest_opened_on(&json!({ "data": [], "total": 0 })), None);
         assert_eq!(newest_opened_on(&json!({ "error": "x" })), None);
+    }
+
+    /// THE FLOOR (backlog 86ebf7fc). A roster read that SUCCEEDS and
+    /// answers zero departments is not a quiet week — it is the
+    /// registry dark, or narrowed to nothing by the reader's policy
+    /// scope, and firing happily over it buys a whole week of silence
+    /// with no packet anyone acts on. 80a77466 made `Err` distinct
+    /// from empty one layer down; this is the other half, and a
+    /// warning was never it: a warning is not a refusal.
+    #[test]
+    fn a_roster_of_zero_departments_is_refused_not_fired() {
+        let e = departments_floor(&[]).expect_err("zero departments refuses");
+        assert!(
+            e.is_permanent(),
+            "an empty registry answers empty on every redelivery; the runner must not burn \
+             the NAK budget re-asking"
+        );
+        let text = e.to_string();
+        assert!(text.contains("retro.open"), "{text}");
+        assert!(text.contains("departments roster is empty"), "{text}");
+        assert!(
+            text.contains("GET /api/departments"),
+            "the refusal names the read an operator goes and runs: {text}"
+        );
+    }
+
+    #[test]
+    fn one_department_clears_the_floor() {
+        assert!(
+            departments_floor(&[Department {
+                code: "sales".into(),
+                display_name: "Sales".into(),
+            }])
+            .is_ok()
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@ use super::dead_letter::{
     DeadLetterClass, DeadLetterNote, DeadLetterSink, HandlerFailure, annotation_target,
 };
 use super::expr::HelperResolver;
+use super::firings::{Firing, FiringSink, firing_id};
 use super::handler::{self, HandlerRegistry};
 use super::registry::{self, Registry};
 use anyhow::{Context, Result};
@@ -49,6 +50,12 @@ pub struct RulesRunner {
     /// annotation's own write is what failed. `None` in tests about
     /// matching and settling.
     pub live: Option<std::sync::Arc<crate::liveness::DispatcherLiveness>>,
+    /// Where a rule's firing is recorded so the hop it moves can prove
+    /// it ran (`super::firings`, backlog b14afc48). `None` runs the
+    /// loop with the log as the only trace — the pre-b14afc48
+    /// behaviour, kept for the tests that are about matching and
+    /// settling.
+    pub firings: Option<Arc<dyn FiringSink>>,
 }
 
 impl RulesRunner {
@@ -280,9 +287,17 @@ impl RulesRunner {
         // a partial failure double-applies the survivors on retry.
         let mut failures: Vec<HandlerFailure> = Vec::new();
         let mut all_permanent = true;
+        // Rule names whose handlers all succeeded, in fire order,
+        // deduplicated by the set below: a rule with three handlers
+        // fired ONCE on this event, not three times.
+        let mut fired: Vec<String> = Vec::new();
+        let mut failed: HashSet<String> = HashSet::new();
         for r in results {
             match &r.outcome {
                 Ok(()) => {
+                    if !fired.contains(&r.rule_name) {
+                        fired.push(r.rule_name.clone());
+                    }
                     // Per-fire log at DEBUG, not INFO: at warp the runner
                     // fires tens of rules/sec, and an INFO line each
                     // flooded syslog (26G incident, 2026-06-23). Failures
@@ -298,6 +313,7 @@ impl RulesRunner {
                     if !e.is_permanent() {
                         all_permanent = false;
                     }
+                    failed.insert(r.rule_name.clone());
                     failures.push(HandlerFailure {
                         rule: r.rule_name.clone(),
                         handler: r.handler.clone(),
@@ -306,6 +322,12 @@ impl RulesRunner {
                 }
             }
         }
+        fired.retain(|rule| !failed.contains(rule));
+        // What FIRED is recorded, after the settle is computed from it
+        // and never able to change it (b14afc48). Only the rules whose
+        // handlers all succeeded: a rule that failed did not move the
+        // packet, and its failure has the dead-letter for a record.
+        self.record_firings(topic, event_id, payload, &fired).await;
         if !failures.is_empty() {
             let msg = format!(
                 "{} handler(s) failed on {topic}: {}",
@@ -348,6 +370,53 @@ impl RulesRunner {
             return settle;
         }
         boss_nats::durable::Settle::Ack
+    }
+
+    /// Record that these rules fired on this event.
+    ///
+    /// BEST-EFFORT, for the dead-letter's reasons: it returns `()`, its
+    /// own failure is logged and dropped, and it runs after the settle
+    /// is decided. A firing record that could not be written must never
+    /// turn a side effect that DID land into a redelivery — the record
+    /// exists to make the hop's silence readable, and an arm that can
+    /// break the thing it observes is not an arm.
+    async fn record_firings(&self, topic: &str, event_id: &str, payload: &Value, fired: &[String]) {
+        let Some(sink) = &self.firings else { return };
+        if fired.is_empty() {
+            return;
+        }
+        // `wall_now` because this is a RECORD STAMP, not a business
+        // date (boss_clock_client::wall_now): sim time is retired from
+        // the record, and the map ages this instant against the same
+        // real clock audit_log timestamps are on.
+        let fired_at = boss_clock_client::wall_now();
+        let simulated = payload
+            .get("_simulated")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let rows: Vec<Firing> = fired
+            .iter()
+            .map(|rule| Firing {
+                firing_id: firing_id(rule, event_id),
+                rule: rule.clone(),
+                fired_on: topic.to_string(),
+                fired_at,
+                detail: serde_json::json!({
+                    "event_id": event_id,
+                    "simulated": simulated,
+                }),
+            })
+            .collect();
+        if let Err(e) = sink.record(&rows).await {
+            warn!(
+                error = %e,
+                topic = %topic,
+                triggering_event = %event_id,
+                rules = fired.len(),
+                "dispatcher firings: the firing record could not be written; \
+                 the side effects still landed and the log line is the only trace"
+            );
+        }
     }
 
     /// Land a dead-letter on the packet whose step the handler owed.
@@ -497,6 +566,45 @@ mod tests {
         }
     }
 
+    /// A sink that keeps what the runner asked to record.
+    struct RecordingFirings {
+        recorded: tokio::sync::Mutex<Vec<Firing>>,
+    }
+
+    impl RecordingFirings {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                recorded: tokio::sync::Mutex::new(Vec::new()),
+            })
+        }
+        async fn rules(&self) -> Vec<String> {
+            self.recorded
+                .lock()
+                .await
+                .iter()
+                .map(|f| f.rule.clone())
+                .collect()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FiringSink for RecordingFirings {
+        async fn record(&self, firings: &[Firing]) -> Result<(), String> {
+            self.recorded.lock().await.extend_from_slice(firings);
+            Ok(())
+        }
+    }
+
+    /// A sink that fails the way a down database would.
+    struct FailingFirings;
+
+    #[async_trait::async_trait]
+    impl FiringSink for FailingFirings {
+        async fn record(&self, _firings: &[Firing]) -> Result<(), String> {
+            Err("connection refused".into())
+        }
+    }
+
     #[test]
     fn subscriptions_dedupes_repeated_topics() {
         let toml = r#"
@@ -523,6 +631,7 @@ handler = "h3"
             helpers: Arc::new(NoHelpers),
             dead_letters: None,
             live: None,
+            firings: None,
         };
         let subs = runner.subscriptions();
         assert_eq!(subs.len(), 2);
@@ -538,6 +647,7 @@ handler = "h3"
             helpers: Arc::new(NoHelpers),
             dead_letters: None,
             live: None,
+            firings: None,
         };
         assert!(runner.subscriptions().is_empty());
     }
@@ -565,6 +675,7 @@ handler = "boom"
             helpers: Arc::new(NoHelpers),
             dead_letters: None,
             live: None,
+            firings: None,
         };
         let payload = serde_json::json!({
             "job_id": "j1", "step_id": "s1", "kind": "billing"
@@ -592,6 +703,7 @@ handler = "boom"
             helpers: Arc::new(NoHelpers),
             dead_letters: None,
             live: None,
+            firings: None,
         };
         let res = runner
             .handle("step.done.unmatched", "evt", &serde_json::json!({}), FIRST)
@@ -637,6 +749,7 @@ handler = "boom"
             helpers: Arc::new(NoHelpers),
             dead_letters: None,
             live: None,
+            firings: None,
         }
     }
 
@@ -1059,4 +1172,83 @@ handler = "h.invoice"
             boss_nats::durable::Settle::Permanent(_) => "Permanent",
         }
     }
+
+    #[tokio::test]
+    async fn a_rule_that_fired_is_recorded_with_its_events_own_id() {
+        // b14afc48: the hop a dispatcher rule moves could not prove it
+        // ran, because nothing wrote down that a rule fired.
+        let firings = RecordingFirings::new();
+        let mut runner = runner_with(vec![("h.ok", || Ok(()))], ONE_OK_RULE);
+        runner.firings = Some(firings.clone());
+        let res = runner
+            .handle("step.done.x", "evt-7", &serde_json::json!({}), FIRST)
+            .await;
+        assert!(matches!(res, boss_nats::durable::Settle::Ack));
+        let rows = firings.recorded.lock().await.clone();
+        assert_eq!(rows.len(), 1, "one firing per rule that fired: {rows:?}");
+        assert_eq!(rows[0].rule, "r-ok");
+        assert_eq!(rows[0].fired_on, "step.done.x");
+        assert_eq!(
+            rows[0].firing_id, "dispatcher:r-ok:evt-7",
+            "the id is the rule and the triggering event, so a redelivery dedupes"
+        );
+        assert_eq!(
+            rows[0].detail.get("event_id").and_then(|v| v.as_str()),
+            Some("evt-7")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rule_whose_handler_failed_is_not_recorded_as_having_fired() {
+        // The record says what RAN. A rule whose handler failed did not
+        // move the packet — its record is the dead-letter, and a firing
+        // row for it would be the false green this surface exists to
+        // refuse. The rule that DID succeed on the same event is still
+        // recorded: one event, two rules, two different truths.
+        let firings = RecordingFirings::new();
+        let mut runner = runner_with(
+            vec![
+                ("h.perm", || {
+                    Err(crate::rules::handler::HandlerError::Permanent(
+                        "bad arg".into(),
+                    ))
+                }),
+                ("h.trans", || Ok(())),
+            ],
+            TWO_HANDLER_RULES,
+        );
+        runner.firings = Some(firings.clone());
+        let _ = runner
+            .handle("step.done.x", "evt-9", &serde_json::json!({}), FIRST)
+            .await;
+        assert_eq!(
+            firings.rules().await,
+            vec!["r-trans".to_string()],
+            "only the rule whose handlers succeeded is recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_firing_record_that_cannot_be_written_never_changes_the_settle() {
+        // The arm must not break the thing it observes: a side effect
+        // that landed must not be redelivered because its firing row
+        // could not be written.
+        let mut runner = runner_with(vec![("h.ok", || Ok(()))], ONE_OK_RULE);
+        runner.firings = Some(Arc::new(FailingFirings));
+        let res = runner
+            .handle("step.done.x", "evt-11", &serde_json::json!({}), FIRST)
+            .await;
+        assert!(
+            matches!(res, boss_nats::durable::Settle::Ack),
+            "a failed firing record must still ACK the delivered event"
+        );
+    }
+
+    const ONE_OK_RULE: &str = r#"
+[[rule]]
+name = "r-ok"
+on_event = "step.done.x"
+[[rule.do]]
+handler = "h.ok"
+"#;
 }

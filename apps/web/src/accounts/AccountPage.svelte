@@ -321,7 +321,13 @@
               <ul class="pp-contract-list">
                 {#each contracts.slice(0, 5) as c (c.id)}
                   <li>
-                    <EntityLink kind="agreement" id={c.id} />
+                    <!-- Plain id, not a link: there is no agreement
+                         detail page, and the 'agreement' entity kind
+                         produced /ux/accounts/agreements/<id>, which the
+                         account wildcard swallowed as an account id and
+                         rendered as a missing account (retired
+                         2026-09-20, backlog 38d4e458). -->
+                    <span class="mono">{c.id}</span>
                     <span class="pp-contract-end">ends {c.end_date}</span>
                   </li>
                 {/each}

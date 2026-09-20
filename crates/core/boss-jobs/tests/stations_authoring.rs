@@ -130,6 +130,7 @@ fn app() -> (axum::Router, Arc<InMemoryStations>) {
         clock: Arc::new(boss_clock_client::WallClockClient),
         cadence: None,
         delivery: None,
+        dispatcher_firings: None,
         agent_budget: None,
     };
     (router(state), stations)

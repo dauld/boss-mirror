@@ -32,6 +32,20 @@ impl InMemoryCostLedger {
     fn cutoff(window: Window) -> DateTime<Utc> {
         window.cutoff(Utc::now())
     }
+
+    /// The window's spend that is actually known: unpriced entries add
+    /// nothing, because they have no number to add. See `check_budget`
+    /// for why the desk reads this rather than the honest total.
+    async fn priced_floor(&self, agent: &AgentId, window: Window) -> u64 {
+        let cutoff = Self::cutoff(window);
+        let inner = self.inner.lock().await;
+        inner
+            .entries
+            .iter()
+            .filter(|e| &e.agent == agent && e.at >= cutoff)
+            .filter_map(|e| e.cost.usd_micros)
+            .fold(0u64, u64::saturating_add)
+    }
 }
 
 #[async_trait]
@@ -77,14 +91,22 @@ impl CostLedger for InMemoryCostLedger {
         // this ledger measures the spend, `decide` judges it. The
         // concurrency half is the dispatcher's to count, so it is not
         // consulted here.
-        let spent = self.spent(agent, Window::LastHour).await?;
+        // NOT `spent().usd_micros`: one unpriced entry takes that
+        // whole window's total to unknown (backlog c6e2341c), and the
+        // desk still has to decide. It counts the PRICED FLOOR — the
+        // spend it can prove — because a missing number must not stop
+        // the stack (the `AgentCaps` note, 2026-09-07) and a floor only
+        // ever under-counts, so it never denies a run the full number
+        // would have allowed. The same rule
+        // `boss_jobs::agent_budget::spent_in` applies at the other desk.
+        let spent_usd_micros = self.priced_floor(agent, Window::LastHour).await;
         Ok(BudgetDecision::decide(
             boss_core::agent::AgentCaps {
                 max_concurrent_runs: None,
                 ..spec.caps()
             },
             AgentLoad {
-                spent_usd_micros: spent.usd_micros,
+                spent_usd_micros,
                 in_flight: 0,
             },
         ))
@@ -114,7 +136,7 @@ mod tests {
         Cost {
             input_tokens: 0,
             output_tokens: 0,
-            usd_micros: usd,
+            usd_micros: Some(usd),
         }
     }
 
@@ -127,6 +149,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unpriced_entry_makes_the_window_unknown_and_still_admits() {
+        // backlog c6e2341c: the window's TOTAL goes unknown, because an
+        // entry with no number cannot be added; the admission desk
+        // still decides, on the spend it can prove.
+        let l = InMemoryCostLedger::new();
+        let a = agent("planner");
+        l.record(&a, cost(100)).await.unwrap();
+        l.record(
+            &a,
+            Cost {
+                input_tokens: 5,
+                output_tokens: 5,
+                usd_micros: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            l.spent(&a, Window::LastHour).await.unwrap().usd_micros,
+            None,
+            "unpriced is not free"
+        );
+        // The tokens are known on both entries and still add up.
+        assert_eq!(l.spent(&a, Window::LastHour).await.unwrap().input_tokens, 5);
+        assert!(
+            l.check_budget(&a, &spec(&a, 150))
+                .await
+                .unwrap()
+                .is_allowed(),
+            "a proven floor of 100 is under a cap of 150"
+        );
+        assert!(
+            !l.check_budget(&a, &spec(&a, 100))
+                .await
+                .unwrap()
+                .is_allowed(),
+            "and the proven 100 still denies at the cap"
+        );
+    }
+
+    #[tokio::test]
     async fn spent_sums_only_matching_agent_within_window() {
         let l = InMemoryCostLedger::new();
         let a = agent("planner");
@@ -135,8 +198,14 @@ mod tests {
         l.record(&a, cost(50)).await.unwrap();
         l.record(&b, cost(200)).await.unwrap();
 
-        assert_eq!(l.spent(&a, Window::LastHour).await.unwrap().usd_micros, 150);
-        assert_eq!(l.vm_spent(Window::LastHour).await.unwrap().usd_micros, 350);
+        assert_eq!(
+            l.spent(&a, Window::LastHour).await.unwrap().usd_micros,
+            Some(150)
+        );
+        assert_eq!(
+            l.vm_spent(Window::LastHour).await.unwrap().usd_micros,
+            Some(350)
+        );
     }
 
     #[tokio::test]
@@ -175,6 +244,6 @@ mod tests {
         l.record(&a, cost(20)).await.unwrap();
 
         let recent = l.spent(&a, Window::Since { at: midpoint }).await.unwrap();
-        assert_eq!(recent.usd_micros, 20);
+        assert_eq!(recent.usd_micros, Some(20));
     }
 }

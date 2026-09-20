@@ -157,6 +157,7 @@ fn app() -> axum::Router {
         clock: Arc::new(boss_clock_client::WallClockClient),
         cadence: None,
         delivery: None,
+        dispatcher_firings: None,
         agent_budget: None,
     };
     router(state)

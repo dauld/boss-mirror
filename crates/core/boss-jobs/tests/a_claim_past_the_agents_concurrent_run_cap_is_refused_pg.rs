@@ -199,6 +199,7 @@ async fn app_with_steps(db: &TestDb, n: usize) -> (axum::Router, Arc<PgJobs>, Ve
         clock: Arc::new(boss_clock_client::WallClockClient),
         cadence: None,
         delivery: None,
+        dispatcher_firings: None,
         agent_budget: Some(Arc::new(BudgetDoor { agents, runs })),
     });
     (app, jobs, ids)

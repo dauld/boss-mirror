@@ -134,7 +134,7 @@ async fn happy_path_emits_full_telemetry_sequence() {
     let cost = Cost {
         input_tokens: 10,
         output_tokens: 20,
-        usd_micros: 500,
+        usd_micros: Some(500),
     };
     let h = boot(vec![planner_spec()], cost).await;
     let mut cursor = EventCursor::new(h.recorder.clone());
@@ -174,7 +174,7 @@ async fn happy_path_emits_full_telemetry_sequence() {
     // Final state: queue drained, ledger has one entry.
     assert_eq!(h.queue.depth(&agent).await.unwrap(), 0);
     let spent = h.ledger.spent(&agent, Window::LastHour).await.unwrap();
-    assert_eq!(spent.usd_micros, 500);
+    assert_eq!(spent.usd_micros, Some(500));
 
     h.shutdown().await;
 }
@@ -209,7 +209,7 @@ async fn budget_exhaustion_denies_dispatch() {
         Cost {
             input_tokens: 0,
             output_tokens: 0,
-            usd_micros: 100,
+            usd_micros: Some(100),
         },
     )
     .await;
@@ -223,7 +223,7 @@ async fn budget_exhaustion_denies_dispatch() {
             Cost {
                 input_tokens: 0,
                 output_tokens: 0,
-                usd_micros: 50,
+                usd_micros: Some(50),
             },
         )
         .await

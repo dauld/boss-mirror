@@ -129,7 +129,7 @@ async fn costs_default_window_is_hour() {
             Cost {
                 input_tokens: 1,
                 output_tokens: 2,
-                usd_micros: 300,
+                usd_micros: Some(300),
             },
         )
         .await

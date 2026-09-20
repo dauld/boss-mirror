@@ -237,6 +237,7 @@ async fn an_api(url: &str) -> axum::Router {
         clock: Arc::new(boss_clock_client::WallClockClient),
         cadence: None,
         delivery: None,
+        dispatcher_firings: None,
         agent_budget: Some(Arc::new(BudgetDoor { agents, runs })),
     })
 }

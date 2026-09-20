@@ -18,7 +18,6 @@ const PATTERNS: ReadonlyArray<Pattern> = [
   { re: /\b(part-[0-9a-z-]+)\b/gu, kind: 'part' },
   { re: /\b(PO-[A-Z0-9-]+)\b/gu, kind: 'po' },
   { re: /\b(SHIP-[A-Z0-9-]+)\b/gu, kind: 'shipment' },
-  { re: /\b(ticket-[0-9a-z-]+)\b/gu, kind: 'ticket' },
 ];
 
 export type RichToken =

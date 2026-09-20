@@ -35,10 +35,14 @@
 //! and exit code, which is what `yard::conductor_health` already reads.
 //! The gate runner is event-driven and keeps no heartbeat, so its last
 //! run (a gate-run opening or closing) is the stamp and silence is not
-//! a reading. A dispatcher rule records NOTHING — there is no
-//! `dispatcher_firings` table — so its last-fired time is `null` with
-//! the reason said out loud, and its crossings are the only evidence
-//! that it ran at all.
+//! a reading. A dispatcher rule is measured too, since backlog
+//! b14afc48: `dispatcher_firings` holds one row per firing, written by
+//! the rules runner that fired it. What it does NOT hold is an expected
+//! interval — an event-driven rule declares no heartbeat — so a
+//! dispatcher machine answers `last_fired` and leaves `silent` null.
+//! That distinction is the whole reason the table has no `every_minutes`
+//! column: a rate invented for an event rule manufactures false silence
+//! the first quiet hour.
 //!
 //! THE BORDER SET IS DATA, HELD EQUAL TO THE CLIENT'S. [`BORDERS`]
 //! below is the server's copy of the layout's borders; the client's is
@@ -72,7 +76,9 @@ pub enum MachineKind {
     /// rule declares its own interval. The ONLY kind whose silence is a
     /// reading.
     Cadence,
-    /// A dispatcher rule, fired by an event. Nothing records a firing.
+    /// A dispatcher rule, fired by an event. `dispatcher_firings`
+    /// records each firing; the rule declares no interval, so its
+    /// silence is never a reading (b14afc48).
     DispatcherRule,
     /// The gate runner, which runs when a gate-run is filed. Its last
     /// run is the stamp; it declares no interval, so it cannot be
@@ -252,6 +258,22 @@ pub struct CadenceFiring {
     pub every_minutes: Option<i64>,
 }
 
+/// One dispatcher rule's firing record (`dispatcher_firings`, backlog
+/// b14afc48). An entry PRESENT means the record was read for that rule:
+/// `fired_at: None` is "read, never fired". A declared machine with no
+/// entry at all is a rule the read did not cover, which the border says
+/// rather than drawing as a quiet rail.
+///
+/// THERE IS NO `every_minutes` HERE, and that is the point. A dispatcher
+/// rule fires on an event and declares no heartbeat, so it can be said
+/// to have fired at T and never to be silent — an interval invented for
+/// it would manufacture trouble the first quiet hour.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DispatcherFiring {
+    pub rule: String,
+    pub fired_at: Option<Instant>,
+}
+
 /// Everything [`borders`] reads: the same rows the regions map is built
 /// from, plus the cadence firings. `firings: None` is the cadence record
 /// unread — every cadence machine then says so rather than reading as
@@ -260,6 +282,11 @@ pub struct CadenceFiring {
 pub struct BorderInputs<'a> {
     pub regions: &'a RegionInputs<'a>,
     pub firings: Option<&'a [CadenceFiring]>,
+    /// The dispatcher rules' firings (`dispatcher_firings`).
+    /// `dispatcher_firings: None` is that record unread — every
+    /// dispatcher machine then says so rather than reading as
+    /// never-fired.
+    pub dispatcher_firings: Option<&'a [DispatcherFiring]>,
 }
 
 /// What one border's traffic came to: the rate, the newest crossing,
@@ -666,15 +693,38 @@ fn machine_of(spec: &BorderSpec, inputs: &BorderInputs<'_>, now: Instant) -> Mac
                 "its last gate-run; the runner is event-driven and declares no cadence".to_string(),
             )
         }
-        // There is no dispatcher_firings table: the rule's firings are
-        // recorded nowhere, so the crossings above are the only evidence
-        // it ran.
-        MachineKind::DispatcherRule => (
-            None,
-            None,
-            "nothing records a dispatcher rule's firings — the crossings are its only evidence"
-                .to_string(),
-        ),
+        // `dispatcher_firings` holds one row per firing (b14afc48).
+        // The interval half stays None on every branch: an event-driven
+        // rule declares no heartbeat, so `silent` below can only be
+        // null for it — never false, which is how a dead machine
+        // renders healthy.
+        MachineKind::DispatcherRule => match inputs.dispatcher_firings {
+            None => (
+                None,
+                None,
+                "the dispatcher firing record could not be read".to_string(),
+            ),
+            Some(firings) => match firings.iter().find(|f| f.rule == spec.machine) {
+                None => (
+                    None,
+                    None,
+                    format!("no firing record was read for {}", spec.machine),
+                ),
+                Some(f) => (
+                    f.fired_at,
+                    None,
+                    match f.fired_at {
+                        Some(_) => "its own firing in dispatcher_firings; an event rule \
+                             declares no interval, so its silence is not a reading"
+                            .to_string(),
+                        None => format!(
+                            "{} has never fired — dispatcher_firings holds no row for it",
+                            spec.machine
+                        ),
+                    },
+                ),
+            },
+        },
         MachineKind::Actors => (
             None,
             None,
@@ -871,6 +921,7 @@ mod tests {
         let out = borders(&BorderInputs {
             regions: &inputs,
             firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
         });
         let pairs: Vec<(String, String)> = out
             .borders
@@ -895,6 +946,7 @@ mod tests {
         let out = borders(&BorderInputs {
             regions: &inputs,
             firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
         });
         let b = only(&out, "receiving", "marshalling");
         assert_eq!(b.state, RegionState::Troubled);
@@ -912,6 +964,7 @@ mod tests {
         let out = borders(&BorderInputs {
             regions: &inputs,
             firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
         });
         let b = only(&out, "gates", "track");
         assert_eq!(b.state, RegionState::Troubled);
@@ -947,6 +1000,7 @@ mod tests {
         let out = borders(&BorderInputs {
             regions: &inputs,
             firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
         });
         let b = only(&out, "marshalling", "dock");
         assert_eq!(b.rate.samples, 1);
@@ -967,6 +1021,7 @@ mod tests {
         let out = borders(&BorderInputs {
             regions: &inputs,
             firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
         });
         let dispatcher = only(&out, "marshalling", "dock");
         assert_eq!(dispatcher.machine.kind, "dispatcher-rule");
@@ -975,7 +1030,11 @@ mod tests {
             dispatcher.machine.silent, None,
             "unknown must not render as not-silent"
         );
-        assert!(dispatcher.machine.why.contains("nothing records"));
+        assert!(
+            dispatcher.machine.why.contains("no firing record was read"),
+            "why: {}",
+            dispatcher.machine.why
+        );
         // A cadence machine the registry does not hold is named, not blank.
         let cadence = only(&out, "gates", "track");
         assert_eq!(cadence.machine.kind, "cadence");
@@ -988,6 +1047,7 @@ mod tests {
         let unread = borders(&BorderInputs {
             regions: &inputs,
             firings: None,
+            dispatcher_firings: Some(&[]),
         });
         assert!(
             only(&unread, "gates", "track")
@@ -1020,6 +1080,7 @@ mod tests {
         let out = borders(&BorderInputs {
             regions: &inputs,
             firings: Some(&firings),
+            dispatcher_firings: Some(&[]),
         });
         let border = only(&out, "gates", "track");
         assert_eq!(border.waiting, Some(2));
@@ -1040,6 +1101,7 @@ mod tests {
         let ok = borders(&BorderInputs {
             regions: &inputs,
             firings: Some(&fresh),
+            dispatcher_firings: Some(&[]),
         });
         let border = only(&ok, "gates", "track");
         assert_eq!(border.machine.silent, Some(false));
@@ -1078,6 +1140,7 @@ mod tests {
         let out = borders(&BorderInputs {
             regions: &inputs,
             firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
         });
         let b = only(&out, "marshalling", "dock");
         let held = status.held.len() + status.stranded.len();
@@ -1117,10 +1180,82 @@ mod tests {
         let out = borders(&BorderInputs {
             regions: &inputs,
             firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
         });
         let b = only(&out, "gates", "track");
         assert_eq!(b.waiting, Some(MAX_HOLDS + 5));
         assert_eq!(b.holds.len(), MAX_HOLDS);
+    }
+
+    #[test]
+    fn a_dispatcher_rules_firing_is_read_from_its_own_record() {
+        // b14afc48: the marshalling -> dock rail's machine is the
+        // dispatcher rule auto-park-on-gate-green, and until
+        // `dispatcher_firings` existed it could only answer 'nothing
+        // records a dispatcher rule's firings' — the most automated hop
+        // on the map was the one that could not prove it ran.
+        let status = empty_status();
+        let inputs = region_inputs(&status, &[], &[], &[], Some(&[]), Some(&[]));
+        let fired = vec![DispatcherFiring {
+            rule: "auto-park-on-gate-green".to_string(),
+            fired_at: Some(t("2026-09-19T11:00:00Z")),
+        }];
+        let out = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&fired),
+        });
+        let b = only(&out, "marshalling", "dock");
+        assert_eq!(b.machine.kind, "dispatcher-rule");
+        assert_eq!(
+            b.machine.last_fired.as_deref(),
+            Some(t("2026-09-19T11:00:00Z").to_rfc3339().as_str())
+        );
+        assert_eq!(b.machine.silent_for_minutes, Some(60));
+        assert!(
+            b.machine.why.contains("dispatcher_firings"),
+            "why: {}",
+            b.machine.why
+        );
+        // The half that must NOT follow from a firing record: an event
+        // rule declares no heartbeat, so there is no interval to be
+        // silent against and `silent` stays null.
+        assert_eq!(b.machine.expected_every_minutes, None);
+        assert_eq!(
+            b.machine.silent, None,
+            "an event-driven rule has no declared interval: silence is not a reading for it"
+        );
+    }
+
+    #[test]
+    fn an_unread_dispatcher_record_reads_differently_from_a_rule_that_never_fired() {
+        // The three answers a firing record owes, kept apart: unread,
+        // read-and-never-fired, and a name the read did not cover. None
+        // of them is a zero and none of them is a quiet rail.
+        let status = empty_status();
+        let inputs = region_inputs(&status, &[], &[], &[], Some(&[]), Some(&[]));
+        let unread = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: None,
+        });
+        let m = &only(&unread, "marshalling", "dock").machine;
+        assert_eq!(m.last_fired, None);
+        assert_eq!(m.silent, None);
+        assert!(m.why.contains("could not be read"), "why: {}", m.why);
+
+        let never = vec![DispatcherFiring {
+            rule: "auto-park-on-gate-green".to_string(),
+            fired_at: None,
+        }];
+        let out = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&never),
+        });
+        let m = &only(&out, "marshalling", "dock").machine;
+        assert_eq!(m.last_fired, None);
+        assert!(m.why.contains("has never fired"), "why: {}", m.why);
     }
 
     #[test]

@@ -156,26 +156,62 @@ pub struct ClaimedMessage {
 
 /// Cost incurred by an agent run. All monetary values in micro-USD
 /// (1_000_000 = $1.00) to avoid floating point.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cost {
     pub input_tokens: u64,
     pub output_tokens: u64,
-    pub usd_micros: u64,
+    /// What the run cost, or `None` — **unpriced is not free**, the
+    /// phrase the `agent_runs.usd_micros` column comment already uses
+    /// for the same fact one layer down. Nothing on the rate card
+    /// covered the model, or the reporter named no price: either way
+    /// the number is not known, and a zero in its place is a
+    /// measurement a later reader cannot tell from a real one. Was a
+    /// plain `u64` until backlog c6e2341c, which is why
+    /// `AgentRun::cost()` had to write a zero it knew was a lie.
+    #[serde(default)]
+    pub usd_micros: Option<u64>,
 }
 
 impl Cost {
+    /// Nothing spent, and that is a measurement: `Some(0)`, not `None`.
     pub const ZERO: Cost = Cost {
         input_tokens: 0,
         output_tokens: 0,
-        usd_micros: 0,
+        usd_micros: Some(0),
     };
 
+    /// A run that reported tokens but no price. Distinct from [`ZERO`]
+    /// in exactly the way this type exists to express.
+    ///
+    /// [`ZERO`]: Cost::ZERO
+    pub const UNPRICED: Cost = Cost {
+        input_tokens: 0,
+        output_tokens: 0,
+        usd_micros: None,
+    };
+
+    /// Tokens always add; money adds only when BOTH sides know their
+    /// own. One unpriced run takes the total to unknown, because a sum
+    /// that silently skipped it would read as a measurement of every
+    /// run in the window — the rule the agent-runs roll-up applies to
+    /// `usd_micros` and `total_tokens` one layer down.
     pub fn saturating_sum(self, other: Cost) -> Cost {
         Cost {
             input_tokens: self.input_tokens.saturating_add(other.input_tokens),
             output_tokens: self.output_tokens.saturating_add(other.output_tokens),
-            usd_micros: self.usd_micros.saturating_add(other.usd_micros),
+            usd_micros: match (self.usd_micros, other.usd_micros) {
+                (Some(a), Some(b)) => Some(a.saturating_add(b)),
+                _ => None,
+            },
         }
+    }
+}
+
+impl Default for Cost {
+    /// [`Cost::ZERO`], not a derived `None`: a default-constructed cost
+    /// is the identity a fold starts from, and that is a measured zero.
+    fn default() -> Cost {
+        Cost::ZERO
     }
 }
 
@@ -491,24 +527,82 @@ mod tests {
         let a = Cost {
             input_tokens: 10,
             output_tokens: 20,
-            usd_micros: 500,
+            usd_micros: Some(500),
         };
         let b = Cost {
             input_tokens: 5,
             output_tokens: 7,
-            usd_micros: 100,
+            usd_micros: Some(100),
         };
         let c = a + b;
         assert_eq!(c.input_tokens, 15);
         assert_eq!(c.output_tokens, 27);
-        assert_eq!(c.usd_micros, 600);
+        assert_eq!(c.usd_micros, Some(600));
 
         let max = Cost {
             input_tokens: u64::MAX,
             output_tokens: 0,
-            usd_micros: 0,
+            usd_micros: Some(0),
         };
         assert_eq!((max + a).input_tokens, u64::MAX);
+    }
+
+    #[test]
+    fn an_unpriced_cost_poisons_a_sum_rather_than_adding_zero() {
+        // The money is optional and the tokens are not: a run whose
+        // split was reported but whose price nothing on the card could
+        // supply still contributes its tokens, and takes the total's
+        // money to unknown. A sum that quietly dropped it would read as
+        // a measurement — the defect 65c9c05a closed one layer down,
+        // which could not reach this type until it grew the room to say
+        // so (backlog c6e2341c).
+        let priced = Cost {
+            input_tokens: 10,
+            output_tokens: 20,
+            usd_micros: Some(500),
+        };
+        let unpriced = Cost {
+            input_tokens: 5,
+            output_tokens: 7,
+            usd_micros: None,
+        };
+        let sum = priced + unpriced;
+        assert_eq!(sum.input_tokens, 15);
+        assert_eq!(sum.output_tokens, 27);
+        assert_eq!(sum.usd_micros, None, "unpriced is not free");
+        assert_eq!(
+            (unpriced + priced).usd_micros,
+            None,
+            "and the order the two arrive in cannot change that"
+        );
+        // A measured zero is still a measurement, and stays one.
+        assert_eq!(Cost::ZERO.usd_micros, Some(0));
+        assert_eq!((Cost::ZERO + priced).usd_micros, Some(500));
+        assert_eq!(Cost::default(), Cost::ZERO);
+    }
+
+    #[test]
+    fn an_unpriced_cost_writes_an_explicit_null() {
+        // A reader must be able to tell "no price" from "this payload
+        // is from before the field existed", so the field is written
+        // even when it is null (the same distinction 2e4c200f drew for
+        // the agent-runs serializer).
+        let v = serde_json::to_value(Cost::UNPRICED).unwrap();
+        assert_eq!(
+            v.get("usd_micros"),
+            Some(&serde_json::Value::Null),
+            "the key is present and null"
+        );
+        assert_eq!(
+            serde_json::to_value(Cost::ZERO).unwrap()["usd_micros"],
+            serde_json::json!(0)
+        );
+        // And an older payload that never carried the key reads back as
+        // unknown rather than as free.
+        let back: Cost =
+            serde_json::from_value(serde_json::json!({"input_tokens": 1, "output_tokens": 2}))
+                .unwrap();
+        assert_eq!(back.usd_micros, None);
     }
 
     #[test]
@@ -517,7 +611,7 @@ mod tests {
         let c = Cost {
             input_tokens: 1,
             output_tokens: 2,
-            usd_micros: 3,
+            usd_micros: Some(3),
         };
         assert_eq!(
             Outcome::Success {

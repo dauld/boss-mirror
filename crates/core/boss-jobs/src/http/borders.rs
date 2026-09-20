@@ -12,12 +12,13 @@
 //! [`super::regions::read_map`] — the one pass the regions map already
 //! makes — so the two read-models over the world cannot disagree about
 //! what is on the dock or which trains are in transit. The only read
-//! this one adds is the cadence firing record, which is where a
-//! machine's own heartbeat lives.
+//! this one adds is the machines' firing records — `cadence_firings`
+//! for a declared heartbeat and `dispatcher_firings` for a rule that
+//! fires on an event (backlog b14afc48).
 
 use super::*;
 
-use crate::borders::{self, BORDERS, CadenceFiring, MachineKind};
+use crate::borders::{self, BORDERS, CadenceFiring, DispatcherFiring, MachineKind};
 
 #[derive(Debug, Deserialize, Default)]
 pub(super) struct BordersQuery {
@@ -42,10 +43,12 @@ pub(super) async fn yard_borders<R: JobsRepository + 'static, B: EventBus + 'sta
         Err(resp) => return resp,
     };
     let firings = cadence_firings(&state).await;
+    let dispatcher = dispatcher_firings(&state).await;
     let regions = rows.inputs(now, window_hours);
     let map = borders::borders(&borders::BorderInputs {
         regions: &regions,
         firings: firings.as_deref(),
+        dispatcher_firings: dispatcher.as_deref(),
     });
     let mut v = serde_json::to_value(map).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = v.as_object_mut() {
@@ -89,6 +92,39 @@ async fn cadence_firings<R: JobsRepository + 'static, B: EventBus + 'static>(
             rule: name.to_string(),
             fired_at: firing.map(|f| f.fired_at),
             every_minutes: rule.every_minutes.map(i64::from),
+        });
+    }
+    Some(out)
+}
+
+/// The declared dispatcher machines' firing records
+/// (`dispatcher_firings`, backlog b14afc48). One entry per dispatcher
+/// rule the layout names, always — a rule that has never fired is an
+/// entry with no instant, which the border says out loud, because the
+/// alternative is a rail that looks quiet whether the machine is idle
+/// or stopped.
+///
+/// `None` is the whole record unread (no repository wired, or a failed
+/// read). A PARTIAL answer is refused the same way `cadence_firings`
+/// refuses one: one rule answering and another erroring would leave a
+/// border claiming "never fired" on no evidence.
+async fn dispatcher_firings<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &Arc<JobsApiState<R, B>>,
+) -> Option<Vec<DispatcherFiring>> {
+    let repo = state.dispatcher_firings.as_ref()?;
+    let mut wanted: Vec<&'static str> = BORDERS
+        .iter()
+        .filter(|spec| spec.machine_kind == MachineKind::DispatcherRule)
+        .map(|spec| spec.machine)
+        .collect();
+    wanted.sort_unstable();
+    wanted.dedup();
+    let mut out = Vec::with_capacity(wanted.len());
+    for name in wanted {
+        let firing = repo.last_firing(name).await.ok()?;
+        out.push(DispatcherFiring {
+            rule: name.to_string(),
+            fired_at: firing.map(|f| f.fired_at),
         });
     }
     Some(out)
