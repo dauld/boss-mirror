@@ -62,6 +62,19 @@ units = ["boss-ml-inference-batch"]
 # time.
 units = []
 
+[roles.ops-runner]
+# The host answers ops-request packets: infra/ops/ops-runner.sh, on a
+# ~1-minute timer, installed by infra/ops/install-ops-runner.sh from the
+# forge's and boss-gcp's own converges. NO units row, deliberately —
+# `boss-ops-runner` must not be a roster stem (it fires every minute and
+# its product IS packets, so the maintenance-wrap packet pair a row owes
+# would drown the board; infra/lint/boss-gcp-converges-itself.sh refuses
+# it). What the role carries is the DECLARATION: which hosts should be
+# answering, so the world map can draw a runner that has gone quiet
+# rather than nothing at all, and silence has something to be silence
+# from (backlog 49ed87b4).
+units = []
+
 [roles.legacy-stack]
 # The chores that maintained the second, older stack's data — retired
 # with it on 2026-09-15 (ops-request 7912c9ae) and uninstalled from

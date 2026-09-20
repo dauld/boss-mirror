@@ -20,7 +20,7 @@
 
 use super::*;
 
-use crate::regions::{self, RegionInputs, StationReading};
+use crate::regions::{self, RegionInputs, RunnerHost, StationReading};
 use crate::yard;
 
 /// How many rows each windowed tail may hold. A limit is not a filter:
@@ -73,6 +73,14 @@ pub(super) struct MapRows {
     /// answered. `None` on any failed read, which the machine reports
     /// as unknown rather than as an idle runner.
     ops_requests: Option<Vec<(Job, Vec<Step>)>>,
+    /// WHICH HOSTS SHOULD HAVE ONE (backlog 49ed87b4). The evidence
+    /// above can only name the runners that HAPPENED to answer
+    /// something, so a host that died is drawn nowhere — and an absent
+    /// glyph is indistinguishable from a runner that does not exist.
+    /// The estate registry is the independent statement of what should
+    /// be there. `None` on a failed read: one unknown machine, never an
+    /// estate with no runners in it.
+    runner_hosts: Option<Vec<RunnerHost>>,
 }
 
 impl MapRows {
@@ -93,6 +101,7 @@ impl MapRows {
             stations: self.stations.as_deref(),
             conductor: Some(&self.read.health),
             ops_requests: self.ops_requests.as_deref(),
+            runner_hosts: self.runner_hosts.as_deref(),
             now,
             window_hours,
         }
@@ -127,6 +136,7 @@ pub(super) async fn read_map<R: JobsRepository + 'static, B: EventBus + 'static>
             inbound: Some(Vec::new()),
             stations: Some(Vec::new()),
             ops_requests: Some(Vec::new()),
+            runner_hosts: Some(Vec::new()),
         });
     }
     let scope = job_scope_from_predicate(user, &predicate);
@@ -284,7 +294,22 @@ pub(super) async fn read_map<R: JobsRepository + 'static, B: EventBus + 'static>
     // runner for is fetched here, with its steps (the `disposition`
     // rides the `execute` step). A failed read is `None`, which the
     // machine reports as unknown rather than as an idle runner.
-    let ops_requests = newest_ops_requests(state, scope, reach).await;
+    //
+    // AND WHICH HOSTS SHOULD HAVE A RUNNER (backlog 49ed87b4): the
+    // estate registry's own rows, so a host that has answered nothing
+    // — including one that died — is still a machine on the map. The
+    // evidence read above is widened to the newest request of each such
+    // host, because ANY verb it answered proves the loop polled.
+    let runner_hosts = match state.jobs.list_estate_nodes().await {
+        Ok(nodes) => Some(regions::runner_hosts_of(&nodes)),
+        Err(_) => None,
+    };
+    let host_ids: Vec<String> = runner_hosts
+        .iter()
+        .flatten()
+        .map(|h| h.id.clone())
+        .collect();
+    let ops_requests = newest_ops_requests(state, scope, reach, &host_ids).await;
 
     Ok(MapRows {
         read,
@@ -294,6 +319,7 @@ pub(super) async fn read_map<R: JobsRepository + 'static, B: EventBus + 'static>
         inbound,
         stations,
         ops_requests,
+        runner_hosts,
     })
 }
 
@@ -308,14 +334,17 @@ fn empty_read() -> super::yard::YardRead {
     }
 }
 
-/// The newest ops-request of each verb [`regions::runner_verbs`] names,
-/// with its steps. One windowed read, then one `list_steps` per verb —
-/// bounded by the runner table, not by how busy the estate has been.
-/// `None` on ANY failure: an unread runner is not an idle one.
+/// The newest ops-request of each verb [`regions::runner_verbs`] names
+/// and of each host the estate registry declares a runner on, with its
+/// steps. One windowed read, then one `list_steps` per verb and per
+/// host — bounded by the runner table and the estate, not by how busy
+/// either has been. `None` on ANY failure: an unread runner is not an
+/// idle one.
 async fn newest_ops_requests<R: JobsRepository + 'static, B: EventBus + 'static>(
     state: &JobsApiState<R, B>,
     scope: crate::port::JobScope,
     reach: chrono::NaiveDate,
+    hosts: &[String],
 ) -> Option<Vec<(Job, Vec<Step>)>> {
     let filter = JobFilter {
         kind: Some("ops-request".to_string()),
@@ -338,6 +367,23 @@ async fn newest_ops_requests<R: JobsRepository + 'static, B: EventBus + 'static>
             .filter(|j| j.metadata.get("verb").and_then(serde_json::Value::as_str) == Some(verb))
             .max_by_key(|j| opened(j));
         if let Some(job) = newest {
+            let steps = state.jobs.list_steps(&job.id).await.ok()?;
+            out.push((job.clone(), steps));
+        }
+    }
+    // The same rows again, newest per HOST — whatever verb it was. A
+    // request already collected for its verb is not fetched twice.
+    for host in hosts {
+        let newest = rows
+            .iter()
+            .filter(|j| {
+                j.metadata.get("host").and_then(serde_json::Value::as_str) == Some(host.as_str())
+            })
+            .max_by_key(|j| opened(j));
+        if let Some(job) = newest {
+            if out.iter().any(|(j, _): &(Job, Vec<Step>)| j.id == job.id) {
+                continue;
+            }
             let steps = state.jobs.list_steps(&job.id).await.ok()?;
             out.push((job.clone(), steps));
         }

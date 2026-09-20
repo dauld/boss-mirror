@@ -206,6 +206,39 @@ pub struct StationReading {
     pub previous_served: Option<i64>,
 }
 
+/// The role a node declares when it answers ops-request packets — a
+/// Class of `node`, joined through `node_roles` (202609120300), the
+/// same vocabulary `cluster-operator` lives in. The tree declares it
+/// per machine in infra/estate/estate.toml and the launcher publishes
+/// it on every start; this constant is how the map asks the registry
+/// which hosts SHOULD have a runner.
+pub const OPS_RUNNER_ROLE: &str = "ops-runner";
+
+/// A host the registry expects an ops-runner on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerHost {
+    /// The estate node id — what an ops-request carries as
+    /// `metadata.host` and what the runner presents as `HOST_ID`.
+    pub id: String,
+    pub label: String,
+}
+
+/// The hosts a runner is EXPECTED on, from the estate registry's rows.
+/// A retired machine is not expected to answer; a node declaring no
+/// roles is not a runner host. One definition, read by the handler
+/// that fetches the evidence and by the drawing below (CLAUDE.md §9a).
+pub fn runner_hosts_of(nodes: &[crate::port::EstateNode]) -> Vec<RunnerHost> {
+    nodes
+        .iter()
+        .filter(|n| !n.retired)
+        .filter(|n| n.roles.iter().any(|r| r == OPS_RUNNER_ROLE))
+        .map(|n| RunnerHost {
+            id: n.id.clone(),
+            label: n.label.clone(),
+        })
+        .collect()
+}
+
 /// Everything [`regions`] reads, named — the same rows the yard status
 /// is built from, plus the windowed tails the trends need.
 #[derive(Debug, Clone)]
@@ -240,10 +273,16 @@ pub struct RegionInputs<'a> {
     /// read it — which the conductor machine states as unknown, never
     /// as a healthy tick.
     pub conductor: Option<&'a ConductorHealth>,
-    /// The newest ops-request of each verb [`runner_verbs`] names, with
-    /// its steps — the evidence a runner machine is read from. `None`
-    /// when the ops-request rows could not be read at all.
+    /// The newest ops-request of each verb [`runner_verbs`] names AND
+    /// of each host [`runner_hosts`] names, with its steps — the
+    /// evidence a runner machine is read from. `None` when the
+    /// ops-request rows could not be read at all.
     pub ops_requests: Option<&'a [(Job, Vec<Step>)]>,
+    /// The hosts the ESTATE REGISTRY says should be answering
+    /// ops-requests — [`runner_hosts_of`] over `/api/estate/nodes`.
+    /// `None` when the registry could not be read, which is one
+    /// unknown machine and never an estate with no runners in it.
+    pub runner_hosts: Option<&'a [RunnerHost]>,
     pub now: chrono::DateTime<chrono::Utc>,
     pub window_hours: i64,
 }
@@ -771,6 +810,13 @@ fn runner_machine(inputs: &RegionInputs<'_>, verb: &str, name: &str) -> Machine 
             ),
         );
     };
+    judge_request(id, name, verb, job, steps)
+}
+
+/// What ONE ops-request says about the runner that took it — shared by
+/// the verb runners above and the per-host runners below, so a
+/// disposition means the same thing whichever glyph reads it.
+fn judge_request(id: String, name: &str, verb: &str, job: &Job, steps: &[Step]) -> Machine {
     if job.status != boss_core::job::JobStatus::Closed {
         return machine(
             id,
@@ -819,6 +865,77 @@ fn runner_machine(inputs: &RegionInputs<'_>, verb: &str, name: &str) -> Machine 
     }
 }
 
+/// THE HOSTS THE REGISTRY EXPECTS A RUNNER ON (backlog 49ed87b4).
+///
+/// The verb runners above are named by the requests they HAPPEN to
+/// have answered, which is exactly the reading that cannot see a dead
+/// host: a machine that answers nothing is drawn nowhere, and an
+/// absent glyph is indistinguishable from a runner that does not
+/// exist. The estate registry is the independent statement of which
+/// hosts SHOULD be answering, so every declared host stands on the map
+/// whether or not it has said anything — the false-empty class closed
+/// at its most consequential point.
+///
+/// They stand in RECEIVING because that is where the packets they
+/// serve stand: an ops-request is an inbound platform kind
+/// ([`inbound_kinds`]), so the region counting them is the region
+/// whose machinery answers them.
+///
+/// A declared host with no request in the window is UNKNOWN, never
+/// idle: a runner still declares no poll interval anywhere the system
+/// of record can read, so its silence remains unjudgeable. That is the
+/// heartbeat half of 49ed87b4 and it is deliberately not claimed here
+/// — this half makes the silence VISIBLE, not readable.
+fn host_runner_machines(inputs: &RegionInputs<'_>) -> Vec<Machine> {
+    let Some(hosts) = inputs.runner_hosts else {
+        return vec![machine(
+            "runner:hosts".to_string(),
+            "the ops runners",
+            MachineState::Unknown,
+            "the estate registry could not be read, so which hosts should have a runner is unknown"
+                .to_string(),
+        )];
+    };
+    hosts
+        .iter()
+        .map(|host| {
+            let id = format!("runner:host:{}", host.id);
+            let name = format!("{} runner", host.label);
+            let Some(rows) = inputs.ops_requests else {
+                return machine(
+                    id,
+                    &name,
+                    MachineState::Unknown,
+                    "the ops-request rows could not be read".to_string(),
+                );
+            };
+            // ANY verb it answered is evidence the runner polled — a
+            // `df` answer proves the loop is alive exactly as a
+            // `converge` does.
+            let newest = rows
+                .iter()
+                .filter(|(j, _)| md_str(&j.metadata, "host") == host.id)
+                .max_by_key(|(j, _)| opened_at(j));
+            match newest {
+                Some((job, steps)) => {
+                    let verb = md_str(&job.metadata, "verb");
+                    let verb = if verb.is_empty() { "ops" } else { verb };
+                    judge_request(id, &name, verb, job, steps)
+                }
+                None => machine(
+                    id,
+                    &name,
+                    MachineState::Unknown,
+                    format!(
+                        "the estate registry declares an ops-runner on {}, and no request it answered is in the window; a runner declares no poll interval the record can read, so its silence cannot be judged",
+                        host.id
+                    ),
+                ),
+            }
+        })
+        .collect()
+}
+
 /// The machinery of one region, by name. A region this answers nothing
 /// for has no machine of ours in it — which is a fact, not a gap.
 fn machines_of(name: &str, inputs: &RegionInputs<'_>) -> Vec<Machine> {
@@ -826,6 +943,7 @@ fn machines_of(name: &str, inputs: &RegionInputs<'_>) -> Vec<Machine> {
         "gates" => gate_bays(inputs),
         "track" => vec![conductor_machine(inputs.conductor)],
         "marshalling" => station_machines(inputs),
+        "receiving" => host_runner_machines(inputs),
         _ => Vec::new(),
     };
     out.extend(
@@ -1533,6 +1651,7 @@ mod tests {
             stations,
             conductor: None,
             ops_requests: Some(&[]),
+            runner_hosts: Some(&[]),
             now: t(NOW),
             window_hours: 24,
         }
@@ -2681,5 +2800,162 @@ mod tests {
     #[test]
     fn the_runner_verbs_the_handler_reads_are_the_runners_the_map_draws() {
         assert_eq!(runner_verbs(), vec!["converge", "run-car-probe"]);
+    }
+
+    // -----------------------------------------------------------------
+    // The hosts that SHOULD have a runner (backlog 49ed87b4).
+    // -----------------------------------------------------------------
+
+    /// The same ops-request, filed against a host — what a runner reads
+    /// to decide a packet is its own (`ops-runner.sh`: metadata.host
+    /// equals HOST_ID).
+    fn on_host(mut r: (Job, Vec<Step>), host: &str) -> (Job, Vec<Step>) {
+        r.0.metadata
+            .as_object_mut()
+            .expect("job metadata is an object")
+            .insert("host".to_string(), json!(host));
+        r
+    }
+
+    fn host(id: &str) -> RunnerHost {
+        RunnerHost {
+            id: id.to_string(),
+            label: id.to_string(),
+        }
+    }
+
+    /// THE DEAD HOST IS DRAWN. A runner named only by what it answered
+    /// is invisible the moment it stops answering, and an absent glyph
+    /// is indistinguishable from a runner that does not exist. The
+    /// registry says which hosts SHOULD have one, so the host with
+    /// nothing in the window is a machine on the map — unknown, because
+    /// a runner still declares no poll interval, never idle.
+    #[test]
+    fn a_declared_runner_host_with_nothing_in_the_window_is_drawn_unknown_not_absent() {
+        let status = empty_status();
+        let hosts = [host("forge"), host("boss-gcp")];
+        let mut i = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        i.runner_hosts = Some(&hosts);
+        let out = regions(&i);
+        let drawn: Vec<&str> = machines_in(&out, "receiving")
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(drawn, vec!["runner:host:forge", "runner:host:boss-gcp"]);
+        let m = machines_in(&out, "receiving")
+            .iter()
+            .find(|m| m.id == "runner:host:boss-gcp")
+            .expect("the declared host is drawn");
+        assert_eq!(m.state, MachineState::Unknown);
+        assert!(
+            m.why.contains("declares an ops-runner"),
+            "the why names the registry that expects it: {}",
+            m.why
+        );
+    }
+
+    /// A host's runner is judged from ANY verb it answered — the
+    /// evidence is the runner polling, not what the verb decided. A
+    /// refusal and an answerless close are the runner's own failures.
+    #[test]
+    fn a_runner_host_is_judged_from_any_verb_it_answered() {
+        let status = empty_status();
+        let hosts = [host("boss-gcp")];
+        let rows = [on_host(
+            ops_request("uptime", JobStatus::Closed, Some("answered"), Some("0")),
+            "boss-gcp",
+        )];
+        let mut i = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        i.runner_hosts = Some(&hosts);
+        i.ops_requests = Some(&rows);
+        assert_eq!(
+            machine_state(&regions(&i), "receiving", "runner:host:boss-gcp"),
+            MachineState::Idle
+        );
+
+        let refused = [on_host(
+            ops_request("converge", JobStatus::Closed, Some("refused"), None),
+            "boss-gcp",
+        )];
+        i.ops_requests = Some(&refused);
+        let out = regions(&i);
+        assert_eq!(
+            machine_state(&out, "receiving", "runner:host:boss-gcp"),
+            MachineState::Failed
+        );
+        assert_eq!(by_name(&out, "receiving").state, RegionState::Troubled);
+
+        let in_flight = [on_host(
+            ops_request("df", JobStatus::Open, None, None),
+            "boss-gcp",
+        )];
+        i.ops_requests = Some(&in_flight);
+        assert_eq!(
+            machine_state(&regions(&i), "receiving", "runner:host:boss-gcp"),
+            MachineState::Running
+        );
+
+        // Another host's request is not this host's evidence.
+        let elsewhere = [on_host(
+            ops_request("uptime", JobStatus::Closed, Some("answered"), Some("0")),
+            "forge",
+        )];
+        i.ops_requests = Some(&elsewhere);
+        assert_eq!(
+            machine_state(&regions(&i), "receiving", "runner:host:boss-gcp"),
+            MachineState::Unknown
+        );
+    }
+
+    /// An unread estate registry is ONE unknown machine, never an
+    /// estate with no runners in it — the false-empty class the whole
+    /// machinery reading exists to refuse.
+    #[test]
+    fn an_unread_estate_registry_is_unknown_and_never_an_empty_estate() {
+        let status = empty_status();
+        let mut i = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        i.runner_hosts = None;
+        let out = regions(&i);
+        let m = machines_in(&out, "receiving")
+            .iter()
+            .find(|m| m.id == "runner:hosts")
+            .expect("an unread registry is still a machine");
+        assert_eq!(m.state, MachineState::Unknown);
+        assert!(
+            m.why.contains("could not be read"),
+            "the why names the read that failed: {}",
+            m.why
+        );
+    }
+
+    /// The hosts the handler reads are DERIVED from the same role the
+    /// map draws on, and a retired machine is not expected to answer
+    /// (CLAUDE.md §9a: one definition, not two lists).
+    #[test]
+    fn the_runner_hosts_are_the_nodes_declaring_the_role_and_never_a_retired_one() {
+        let node = |id: &str, roles: &[&str], retired: bool| crate::port::EstateNode {
+            id: id.to_string(),
+            label: format!("{id} label"),
+            address: "10.0.0.1".to_string(),
+            role: "forge".to_string(),
+            roles: roles.iter().map(|r| r.to_string()).collect(),
+            cpu: None,
+            memory_gb: None,
+            disk_gb: None,
+            notes: None,
+            retired,
+        };
+        let nodes = [
+            node("forge", &[OPS_RUNNER_ROLE, "cluster-operator"], false),
+            node("w-1", &[], false),
+            node("old", &[OPS_RUNNER_ROLE], true),
+        ];
+        assert_eq!(
+            runner_hosts_of(&nodes),
+            vec![RunnerHost {
+                id: "forge".to_string(),
+                label: "forge label".to_string()
+            }]
+        );
     }
 }

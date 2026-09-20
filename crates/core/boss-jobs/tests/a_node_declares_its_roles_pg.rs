@@ -86,13 +86,16 @@ async fn a_fresh_database_declares_nothing_until_the_tree_is_published() {
     assert_eq!(subjects as usize, rows.len());
 }
 
-/// Three roles since 2026-09-14 (d5941ef3 car 3): `legacy-stack` was
-/// deleted from node_roles — the second stack is being retired, and the
-/// bounded verb that stops it refuses while the declaration stands,
-/// because the converge would re-enable the chores on its next tick.
-/// The Class row for the role stays; no node declares it.
+/// Four roles: `legacy-stack` was deleted from node_roles on
+/// 2026-09-14 (d5941ef3 car 3) — the second stack is being retired, and
+/// the bounded verb that stops it refuses while the declaration stands,
+/// because the converge would re-enable the chores on its next tick;
+/// the Class row for the role stays and no node declares it — and
+/// `ops-runner` was added on 2026-09-20 (backlog 49ed87b4), the
+/// declaration that lets the world map draw this host's runner when it
+/// has answered nothing at all.
 #[tokio::test(flavor = "multi_thread")]
-async fn boss_gcp_declares_three_roles_and_keeps_its_primary() {
+async fn boss_gcp_declares_its_four_roles_and_keeps_its_primary() {
     let db = TestDb::new().await;
     let (_, nodes) = declared(&db).await;
 
@@ -106,6 +109,7 @@ async fn boss_gcp_declares_three_roles_and_keeps_its_primary() {
         vec![
             "ml-batch-host".to_string(),
             "off-cluster-observer".to_string(),
+            "ops-runner".to_string(),
             "wireguard-bastion".to_string(),
         ],
         "sorted, so two reads of the same registry compare equal — and no legacy-stack"
@@ -146,7 +150,12 @@ async fn the_forge_declares_cluster_operator() {
         forge.role, "forge",
         "the primary role the estate page keys on is unchanged"
     );
-    assert_eq!(forge.roles, vec!["cluster-operator".to_string()]);
+    assert_eq!(
+        forge.roles,
+        vec!["cluster-operator".to_string(), "ops-runner".to_string()],
+        "and ops-runner (49ed87b4): the forge answers ops-request packets, \
+         so the map can say whether its runner is there"
+    );
 }
 
 /// A role the vocabulary does not hold is refused by the schema — the

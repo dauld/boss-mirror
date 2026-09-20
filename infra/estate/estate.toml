@@ -76,8 +76,11 @@ forge_journal = "http://10.20.0.15:19531"
 # on (`talos-*` participates in the cluster compare); `roles` are the
 # Classes of `node` a managed host derives its unit roster from
 # (infra/estate/roles.toml) — a code the Class registry does not hold
-# is refused by the door. An adopter replaces every row below with
-# their own machines.
+# is refused by the door. `ops-runner` names no units of its own: it
+# says this host should be ANSWERING ops-request packets, and it is
+# what lets the world map draw a runner that has gone quiet instead of
+# drawing nothing at all (backlog 49ed87b4). An adopter replaces every
+# row below with their own machines.
 #
 # The `[[node]]` tables are read by boss_jobs::estate_seed (a TOML
 # parser); the flat keys above by the shell renderer. Neither reads the
@@ -138,7 +141,7 @@ id = "forge"
 label = "Forge host"
 address = "10.20.0.15"
 role = "forge"
-roles = ["cluster-operator"]
+roles = ["cluster-operator", "ops-runner"]
 cpu = 16
 memory_gb = 30
 disk_gb = 228
@@ -149,7 +152,7 @@ id = "boss-gcp"
 label = "boss-gcp"
 address = "34.45.110.40"
 role = "bastion"
-roles = ["ml-batch-host", "off-cluster-observer", "wireguard-bastion"]
+roles = ["ml-batch-host", "off-cluster-observer", "ops-runner", "wireguard-bastion"]
 cpu = 4
 memory_gb = 15
 disk_gb = 48

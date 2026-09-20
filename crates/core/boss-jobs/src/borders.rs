@@ -850,6 +850,7 @@ mod tests {
             // edge, so these fixtures read it as unread.
             conductor: None,
             ops_requests: None,
+            runner_hosts: None,
             now: t(NOW),
             window_hours: DEFAULT_WINDOW_HOURS,
         }
