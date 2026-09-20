@@ -62,14 +62,15 @@ export type Claim = Readonly<{
  *  not now, because a source kind nothing uses is code written for a
  *  page that does not exist.
  *
- *  THE GITHUB LINK IS NOT A CLAIM YET, AND THAT IS A FINDING, NOT AN
- *  OVERSIGHT (backlog f8af6040). To check the link, something has to
- *  declare what right IS, and nothing does: the mirror URL is spelled
- *  as a literal in four shell scripts and owned by none of them — one
- *  of them inside a refusal message. Pointing the claim at one of those
- *  scripts would have made a shell script the authority for a
- *  marketing claim and hidden the defect inside a passing check. The
- *  claim goes in when the URL has a home. */
+ *  THE GITHUB LINK IS A CLAIM AS OF 2026-09-20 (backlog f8af6040).
+ *  It could not be one before: checking a link needs something that
+ *  declares what right IS, and the mirror URL was a literal in four
+ *  shell scripts owned by none of them — one inside a refusal message.
+ *  Pointing the claim at one of those scripts would have made a shell
+ *  script the authority for a marketing claim and hidden the defect
+ *  inside a passing check. So the URL was collapsed into the estate's
+ *  one-place file first, and the row below points at THAT — the same
+ *  value the publish path reads. */
 export const CLAIMS: ReadonlyArray<Claim> = [
   {
     id: 'tenant.name',
@@ -81,6 +82,18 @@ export const CLAIMS: ReadonlyArray<Claim> = [
     // Pointing this claim there would have compared two unrelated
     // names and refused forever; the gate caught it.
     source: { kind: 'tree', where: 'examples/brewery/seeds/tenant.toml', pointer: 'meta.display_name' },
+  },
+  {
+    id: 'source.repo',
+    asserts: 'the public source of this system lives at this address',
+    // The link asserts where it GOES; its text is copy ("Source on
+    // GitHub") and rewording it must not refuse.
+    reads: 'href',
+    // The estate's one-place file, beside the system of record's
+    // address and the forge's — read by the publish path through
+    // infra/lib/sor.sh (BOSS_MIRROR_URL), so the website and the thing
+    // that feeds it cannot disagree about where the mirror is.
+    source: { kind: 'tree', where: 'infra/estate/estate.toml', pointer: 'mirror_url' },
   },
   {
     id: 'cta.signin',

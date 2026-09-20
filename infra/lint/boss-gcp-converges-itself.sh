@@ -152,6 +152,13 @@ bash "$repo/infra/estate/render-sor-env.sh" --to "$sor_env" >/dev/null \
 export BOSS_SOR_ENV="$sor_env"
 sor_url=$(sed -n 's/^BOSS_JOBS_URL=//p' "$sor_env")
 [ -n "$sor_url" ] || fail "the rendered address file names no BOSS_JOBS_URL"
+# The public mirror, from the same rendered file: check 4 below plants
+# it as a scratch checkout's remote to prove the converge refuses it.
+# Until 2026-09-20 that fixture spelled the URL itself — two of the four
+# copies the mirror had with no home (backlog f8af6040) — and a fixture
+# that spells its own subject stops testing the real one.
+mirror_url=$(sed -n 's/^BOSS_MIRROR_URL=//p' "$sor_env")
+[ -n "$mirror_url" ] || fail "the rendered address file names no BOSS_MIRROR_URL"
 
 units_run() { # <systemctl-log> <etc> <unit-lib> <outfile>
     STUB_LOG="$1" INSTALL_ETC="$2" INSTALL_SYSTEMCTL="$tmp/bin/systemctl" \
@@ -548,14 +555,14 @@ resolve() { # <dir> -> prints the chosen remote, or fails
 # 4a. forge + the public mirror: the forge wins.
 both="$tmp/both"
 git_q clone --quiet --origin forge "$forge_bare" "$both"
-git_q -C "$both" remote add origin https://github.com/algedonic-dev/boss.git
+git_q -C "$both" remote add origin "$mirror_url.git"
 got=$(resolve "$both") || fail "--resolve-remote refused a checkout that has a forge remote: $got"
 [ "$got" = "forge" ] || fail "with remotes forge + a github.com origin, the loop chose '$got'"
 
 # 4b. the mirror alone is a refusal, not a fallback.
 mirror="$tmp/mirror-only"
 git_q clone --quiet "$forge_bare" "$mirror"
-git_q -C "$mirror" remote set-url origin https://github.com/algedonic-dev/boss.git
+git_q -C "$mirror" remote set-url origin "$mirror_url.git"
 if out=$(resolve "$mirror"); then
     fail "--resolve-remote chose '$out' from a checkout whose only remote is the GitHub
     mirror. The mirror lags the forge by a publish and is never the source of truth; a

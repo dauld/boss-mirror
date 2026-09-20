@@ -57,6 +57,23 @@ forge_url = "http://10.20.0.15:3000"
 forge_registry = "10.20.0.15:3000"
 forge_journal = "http://10.20.0.15:19531"
 
+# THE PUBLIC MIRROR — the read-only backup-of-source on GitHub that the
+# publish-to-github protocol feeds by pull request, and the repository
+# the website links as "Source on GitHub". The URL a person opens; the
+# clone URL is this plus `.git`, and the owner/repo slug the GitHub API
+# wants is DERIVED from it by render-sor-env.sh (BOSS_MIRROR_URL,
+# BOSS_MIRROR_SLUG) — one line, so the two cannot disagree.
+#
+# Until 2026-09-20 it was a literal in four shell scripts and declared
+# nowhere (backlog f8af6040), one copy inside a REFUSAL telling an
+# operator which remote to add — so a move would have left a script
+# naming a remote that no longer exists. It surfaced only when the
+# marked-claims check (design 59a776c5) tried to READ it as a fact: the
+# landing page's GitHub link could not be checked because nothing
+# declared what right was. Now it can, and the claim `source.repo`
+# (apps/web/src/marketing/claims.ts) points here.
+mirror_url = "https://github.com/algedonic-dev/boss"
+
 
 # THE MACHINES — the estate's nodes and their roles, declared here and
 # published on every pod start by the launcher (`boss estate declare`,

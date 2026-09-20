@@ -20,9 +20,9 @@
 #      when `hosts` omits its HOST_ID, absent included, so a verb that
 #      forgets to say reaches nobody; this is what makes that a decision
 #      rather than an oversight
-#   2. every host named is a REAL estate node id, derived from the
-#      `INSERT INTO nodes` rows in infra/postgres/schema (the same ids a
-#      packet's metadata.host carries) — never a list typed here
+#   2. every host named is a REAL estate node id, read from the estate's
+#      DECLARATION, infra/estate/estate.toml (the same ids a packet's
+#      metadata.host carries) — never a list typed here
 #   3. a verb whose argv[0] is an absolute path lives in ONE host's
 #      filesystem, and may be scoped only to that host. This is the
 #      check that would have caught the whole class: the forge scripts
@@ -55,7 +55,7 @@ allowlist="$(sh "$repo/infra/ops/verbs-allowlist.sh" "$repo/infra/ops/verbs")" \
     || { echo "FAIL: infra/ops/verbs-allowlist.sh could not assemble infra/ops/verbs/ (see above)" >&2; exit 1; }
 
 python3 - "$repo" "$allowlist" <<'PY' || exit 1
-import json, os, re, sys, glob
+import json, os, re, sys
 
 repo = sys.argv[1]
 verbs = json.loads(sys.argv[2])["verbs"]
@@ -66,34 +66,47 @@ if not verbs:
     sys.exit("a-verb-declares-the-hosts-it-serves: scanned 0 verb(s) under infra/ops/verbs — refusing rather than passing vacuously (lib/scanned.sh; backlog cdf2d959)")
 print(f"a-verb-declares-the-hosts-it-serves: scanned {len(verbs)} verb(s) under infra/ops/verbs")
 
-# ---- the hosts that EXIST, derived from the estate registry's seeds.
-# `nodes` is the estate registry's table; its id is what an ops-request
-# packet carries as metadata.host and what a runner presents as
-# HOST_ID. Reading the seeds keeps this lint correct when a node joins.
-# Line-based on purpose: a row's `notes` text contains semicolons, so
-# reading to the statement's `;` truncates the block (measured — it
-# found three of seven ids). The needle is named `..._pattern` so
-# api-path-bypass-smell.sh reads this file as MATCHING that SQL rather
-# than running it — which is also what makes it one definition.
-nodes_insert_pattern=r"\s*INSERT INTO nodes \(id[ ,]"
+# ---- the hosts that EXIST, read from the estate's DECLARATION.
+# `id` is what an ops-request packet carries as metadata.host and what a
+# runner presents as HOST_ID, and infra/estate/estate.toml is where a
+# node has been declared since 2026-09-18 (ee368d0c): seed-estate.sh
+# publishes that file through the estate door, so a fresh database
+# declares nothing until it has run.
+#
+# UNTIL 2026-09-20 THIS READ THE `nodes` SEED ROWS IN
+# infra/postgres/schema (backlog 3d18b741). The rows moved out from
+# under it and only residue kept it alive: two leftover migrations
+# against seven declared nodes. A node declared that day was refused
+# here as "not an estate node id" — confident, specific and wrong — and
+# tidying the residue, which migration 20260918063829 had already begun,
+# would have stopped the lint outright. A migration records how the
+# database GOT here; this file states what the estate IS.
+#
+# Line-based, like every other reader of this file (its own header: the
+# renderer reads it with the shell, not a TOML parser), and the floor is
+# ZERO rather than a count — an adopter's estate is their machines, so
+# any number above none is the truth, while nothing parsed means the
+# read broke and every host check below would be vacuous.
+estate_toml = f"{repo}/infra/estate/estate.toml"
 node_ids = set()
-for path in sorted(glob.glob(f"{repo}/infra/postgres/schema/*.sql")):
-    in_rows = False
-    for line in open(path):
-        if re.match(nodes_insert_pattern, line):
-            in_rows = True
-            continue
-        if in_rows:
-            if re.match(r"\s*(ON CONFLICT|INSERT|UPDATE|SELECT|--|$)", line):
-                in_rows = False
-                continue
-            m = re.match(r"\s*\('([A-Za-z0-9._-]+)'\s*,", line)
-            if m:
-                node_ids.add(m.group(1))
-if len(node_ids) < 5:
-    sys.exit(f"FAIL: only {len(node_ids)} estate node id(s) derived from "
-             f"infra/postgres/schema — the derivation broke, so every host check below "
-             f"would be vacuous: {sorted(node_ids)}")
+try:
+    lines = open(estate_toml).read().splitlines()
+except OSError as e:
+    sys.exit(f"FAIL: cannot read the estate declaration {estate_toml}: {e}")
+in_node = False
+for line in lines:
+    line = line.strip()
+    if line.startswith("["):
+        in_node = line == "[[node]]"
+        continue
+    if in_node:
+        m = re.match(r'id\s*=\s*"([A-Za-z0-9._-]+)"\s*$', line)
+        if m:
+            node_ids.add(m.group(1))
+if not node_ids:
+    sys.exit(f"FAIL: no estate node id read from {estate_toml} — the estate is declared "
+             f"there in [[node]] tables, and without one every host check below would be "
+             f"vacuous")
 
 # MUTATING verbs boss-gcp may serve, each with the authorization that
 # admitted it. Empty until 2026-09-14. An entry here is the review
@@ -162,7 +175,7 @@ for name in sorted(verbs):
         if h not in node_ids:
             problems.append(
                 f"{name}.hosts names '{h}', which is not an estate node id. Known ids "
-                f"(from the `nodes` seed rows in infra/postgres/schema): {', '.join(sorted(node_ids))}. "
+                f"(declared in infra/estate/estate.toml): {', '.join(sorted(node_ids))}. "
                 f"A runner matches metadata.host EXACTLY, so a host that does not exist is a "
                 f"verb nobody can reach.")
     argv0 = spec["argv"][0]

@@ -58,8 +58,24 @@ STATE_DIR="${BOSS_PUBLISH_STATE_DIR:-/var/lib/boss-publish}"
 FORGE_COMPOSE="${BOSS_FORGE_COMPOSE:-/opt/forgejo/docker-compose.yml}"
 FORGE_REPO_SLUG="${BOSS_FORGE_REPO_SLUG:-david/boss}"
 FORGE_DATA_FALLBACK="${BOSS_FORGE_DATA_FALLBACK:-/opt/forgejo/data}"
-MIRROR_SLUG="${BOSS_MIRROR_SLUG:-algedonic-dev/boss}"
-MIRROR_URL="${BOSS_MIRROR_URL:-https://github.com/${MIRROR_SLUG}.git}"
+# THE MIRROR — where it is spelled: infra/estate/estate.toml, rendered
+# onto this host as /etc/boss/sor.env (infra/lib/sor.sh), never here.
+# Both overrides are taken FIRST and the file is read only when one is
+# missing: sourcing sor.sh with BOSS_SOR_ENV named REPLACES what the
+# environment carried, and the tests point this verb at fixture
+# repositories through exactly these two variables. The clone URL is the
+# declared URL plus `.git` — the same string the literal built until
+# 2026-09-20, when it was one of four copies owned by nothing (backlog
+# f8af6040), one of them inside another script's refusal message.
+_mirror_slug="${BOSS_MIRROR_SLUG:-}"
+_mirror_url="${BOSS_MIRROR_URL:-}"
+if [ -z "$_mirror_slug" ] || [ -z "$_mirror_url" ]; then
+    # shellcheck source=infra/lib/sor.sh
+    . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/sor.sh"
+    sor_require BOSS_MIRROR_SLUG BOSS_MIRROR_URL
+fi
+MIRROR_SLUG="${_mirror_slug:-$BOSS_MIRROR_SLUG}"
+MIRROR_URL="${_mirror_url:-${BOSS_MIRROR_URL}.git}"
 # THE FORK — dauld/boss-mirror, which is the one repository in
 # algedonic-dev/boss's fork network that dauld owns. Until 2026-09-11 this
 # default read `dauld/boss`, and NOTHING in the tree ever set

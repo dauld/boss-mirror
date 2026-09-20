@@ -44,9 +44,7 @@
   <footer class="cta">
     <a class="cta-link" data-claim="cta.signin" href="/login">Sign in to operate the brewery →</a>
     <span class="docs">
-      <!-- Not a marked claim yet: nothing declares the mirror URL, so
-           there is no row to check it against (backlog f8af6040). -->
-      <a href="https://github.com/algedonic-dev/boss" target="_blank" rel="noopener">Source on GitHub</a>
+      <a data-claim="source.repo" href="https://github.com/algedonic-dev/boss" target="_blank" rel="noopener">Source on GitHub</a>
     </span>
   </footer>
 </div>

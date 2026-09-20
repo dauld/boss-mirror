@@ -31,9 +31,11 @@
 //! against a station holding 47 ready packets would claim all 47, each
 //! admitted by a budget that could not yet see the previous one.
 //!
-//! [`in_flight_claims`] is the measurement the money one structurally
-//! cannot make: the actor's own steps that are ACTIVE and declare an
-//! agent block — claimed, running, not yet finished. [`Concurrency`]
+//! [`in_flight_runs`] is the measurement the money one structurally
+//! cannot make: the actor's own `agent-run` packets that are still
+//! OPEN — dispatched, running, not yet reported; the claim proxy this
+//! replaced read 7 of 6 against an open-run population of zero and
+//! jammed the desk (backlog c314921e). [`Concurrency`]
 //! judges it against `agents.max_concurrent_runs`, through the SAME
 //! one rule ([`BudgetDecision::decide`]) the recorder uses, so "at the
 //! cap" does not come to mean two things in two places (§9a). Until

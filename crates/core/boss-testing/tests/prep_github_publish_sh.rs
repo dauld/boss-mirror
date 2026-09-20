@@ -72,10 +72,48 @@ fn fixture(case: &str, with_mirror: bool) -> PathBuf {
     work
 }
 
+/// The address file the script reads (infra/lib/sor.sh): on a host the
+/// install renders /etc/boss/sor.env from infra/estate/estate.toml;
+/// here the same render into the scratch root, so the missing-remote
+/// refusal names the mirror the one source declares rather than a
+/// literal it used to carry (backlog f8af6040).
+fn sor_env(work: &Path) -> PathBuf {
+    let dest = work.join("sor.env");
+    let out = Command::new("bash")
+        .arg(repo_root().join("infra/estate/render-sor-env.sh"))
+        .arg("--to")
+        .arg(&dest)
+        .output()
+        .expect("render-sor-env.sh runs");
+    assert!(
+        out.status.success(),
+        "could not render the address file: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    dest
+}
+
+/// The mirror's URL as the ONE source declares it — read the way the
+/// renderer reads it, never spelled in this test.
+fn declared_mirror_url() -> String {
+    let out = Command::new("bash")
+        .arg(repo_root().join("infra/estate/render-sor-env.sh"))
+        .args(["--value", "BOSS_MIRROR_URL"])
+        .output()
+        .expect("render-sor-env.sh runs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
 fn run(work: &Path, source_ref: &str, json: bool) -> Output {
     let mut cmd = Command::new("bash");
     cmd.arg(script())
         .current_dir(work)
+        .env("BOSS_SOR_ENV", sor_env(work))
         .env("SOURCE_REF", source_ref)
         .env("GITHUB_REMOTE", "github")
         .env("GITHUB_BRANCH", "main");
@@ -124,6 +162,15 @@ fn a_missing_mirror_remote_is_refused_by_name() {
     assert!(
         stderr.contains("github/main") && stderr.contains("github"),
         "the refusal must name the mirror ref and its remote: {stderr}"
+    );
+    // And the remote it tells the operator to add is the one the estate
+    // DECLARES. Until 2026-09-20 this sentence carried a literal copy of
+    // the URL, so a move would have left it naming a remote that no
+    // longer exists (backlog f8af6040, CLAUDE.md 9a).
+    let url = declared_mirror_url();
+    assert!(
+        stderr.contains(&format!("{url}.git")),
+        "the refusal must name the declared mirror ({url}.git): {stderr}"
     );
     assert!(!stdout.contains("\"has_drift\":false"), "{stdout}");
 }

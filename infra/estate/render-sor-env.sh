@@ -27,6 +27,14 @@
 #   BOSS_FORGE_REGISTRY_HOST  the OCI registry host:port — forge-defaults
 #                             builds every image repo from it
 #   BOSS_FORGE_JOURNAL_URL    the systemd-journal-gatewayd door
+#   BOSS_MIRROR_URL           the public GitHub mirror, as a person
+#                             opens it (prep-github-publish names it in
+#                             its refusal; the website links it)
+#   BOSS_MIRROR_SLUG          owner/repo, DERIVED from that URL — what
+#                             the GitHub API and `gh pr create` want
+#                             (publish-github-pr, read-publish-checks).
+#                             Derived rather than declared for the same
+#                             reason JOBS_API is: two lines can disagree.
 #
 # Backlog 5222163e (audit H10): until this file, the address was a
 # literal in 47 files and the forge's in 62.
@@ -55,6 +63,22 @@ forge_host="$(read_key forge_host)"
 forge_url="$(read_key forge_url)"
 forge_registry="$(read_key forge_registry)"
 forge_journal="$(read_key forge_journal)"
+mirror_url="$(read_key mirror_url)"
+# owner/repo: the URL with its scheme and host removed. A URL that is
+# not https://<host>/<owner>/<repo> would render a slug the GitHub API
+# refuses much later, in a publish nobody is watching — so it is refused
+# here, on the host that installs (backlog f8af6040).
+mirror_slug="${mirror_url#*://}"
+mirror_slug="${mirror_slug#*/}"
+case "$mirror_slug" in
+    */*/*|/*|*/) mirror_slug="" ;;
+    */*) ;;
+    *) mirror_slug="" ;;
+esac
+if [ -z "$mirror_slug" ]; then
+    echo "render-sor-env: $SOURCE declares mirror_url = \"$mirror_url\", which is not https://<host>/<owner>/<repo> — nothing can derive the mirror's slug from it; refusing to render" >&2
+    exit 1
+fi
 
 render() {
     printf '# /etc/boss/sor.env — rendered from infra/estate/estate.toml by the host'"'"'s install.\n'
@@ -65,6 +89,8 @@ render() {
     printf 'BOSS_FORGE_URL=%s\n' "$forge_url"
     printf 'BOSS_FORGE_REGISTRY_HOST=%s\n' "$forge_registry"
     printf 'BOSS_FORGE_JOURNAL_URL=%s\n' "$forge_journal"
+    printf 'BOSS_MIRROR_URL=%s\n' "$mirror_url"
+    printf 'BOSS_MIRROR_SLUG=%s\n' "$mirror_slug"
 }
 
 case "${1:-}" in

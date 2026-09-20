@@ -23,7 +23,12 @@
 #
 # THE MIRROR IS READ THROUGH A REMOTE NAMED `github`, read-only and
 # anonymous — the repo is public, so measuring needs no credential
-# anywhere. Add it once: `git remote add github https://github.com/algedonic-dev/boss.git`.
+# anywhere. The refusal below prints the `git remote add` that configures
+# it, with the URL read from the one place the mirror is spelled
+# (infra/estate/estate.toml, through infra/lib/sor.sh) — until
+# 2026-09-20 that URL was a literal here, and a move would have left this
+# script telling an operator to add a remote that no longer exists
+# (backlog f8af6040).
 #
 # THE MIRROR IS GUARDED BY CONTENT, NOT BY COMMIT IDENTITY. A mirror
 # holding work nobody published must block: a snapshot pushed over it
@@ -101,8 +106,23 @@ fi
 # shellcheck source=infra/mirror-drift-lib.sh
 . "$LIB" || refuse "$LIB could not be sourced"
 
+# The mirror's clone URL, for the one message that names it. Read
+# LAZILY: this script measures against whatever remote it was pointed at
+# — a scratch fixture, in the self-test — and only the refusal below has
+# to know where the real mirror lives, so a tree with no rendered
+# address file still measures.
+mirror_clone_url() {
+  if [ -z "${BOSS_MIRROR_URL:-}" ]; then
+    # shellcheck source=infra/lib/sor.sh
+    . "$(cd "$(dirname "$0")" && pwd)/lib/sor.sh"
+    sor_require BOSS_MIRROR_URL
+  fi
+  printf '%s.git' "$BOSS_MIRROR_URL"
+}
+
 if ! git remote get-url "$REMOTE" >/dev/null 2>&1; then
-  refuse "remote '$REMOTE' is not configured (the mirror ref $REMOTE/$BRANCH cannot resolve); add it: git remote add $REMOTE https://github.com/algedonic-dev/boss.git"
+  add_url=$(mirror_clone_url) || exit 1
+  refuse "remote '$REMOTE' is not configured (the mirror ref $REMOTE/$BRANCH cannot resolve); add it: git remote add $REMOTE $add_url"
 fi
 git fetch -q "$REMOTE" "$BRANCH" 2>/dev/null
 TARGET="$REMOTE/$BRANCH"

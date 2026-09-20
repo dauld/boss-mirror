@@ -168,9 +168,18 @@ fn the_renderer_writes_the_file_atomically_and_answers_one_key() {
     let nested = dir.join("etc/boss/sor.env");
     let r = render(&["--to", nested.to_str().unwrap()], &[]);
     assert_eq!(r.code, 0, "{}{}", r.out, r.err);
+    // The count is DERIVED from the render, not retyped: it was `6
+    // keys` here and grew to 8 when the public mirror moved into the
+    // source (backlog f8af6040), which is one edit this file should
+    // never have asked for (§9a).
+    let keys = render(&[], &[])
+        .out
+        .lines()
+        .filter(|l| l.contains('=') && !l.starts_with('#'))
+        .count();
     assert!(
-        r.out.contains("wrote") && r.out.contains("6 keys"),
-        "{}",
+        r.out.contains("wrote") && r.out.contains(&format!("{keys} keys")),
+        "the renderer wrote a count that is not the number of keys it renders ({keys}): {}",
         r.out
     );
     let mode = std::fs::metadata(&nested).unwrap().permissions().mode() & 0o777;

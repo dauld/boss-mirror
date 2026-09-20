@@ -68,7 +68,20 @@
 # Runs as root under the ops-runner with NO HOME: nothing reads $HOME.
 set -euo pipefail
 
-MIRROR_SLUG="${BOSS_MIRROR_SLUG:-algedonic-dev/boss}"
+# THE MIRROR — owner/repo, from the one place it is spelled:
+# infra/estate/estate.toml, rendered onto this host as /etc/boss/sor.env
+# (infra/lib/sor.sh). An explicit BOSS_MIRROR_SLUG still wins and is
+# taken FIRST, because sourcing sor.sh with BOSS_SOR_ENV named REPLACES
+# what the environment carried — that is how the tests point this verb
+# at a fixture. Until 2026-09-20 the default here was the slug spelled
+# out, one of four copies of it owned by nothing (backlog f8af6040).
+MIRROR_SLUG="${BOSS_MIRROR_SLUG:-}"
+if [ -z "$MIRROR_SLUG" ]; then
+    # shellcheck source=infra/lib/sor.sh
+    . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/sor.sh"
+    sor_require BOSS_MIRROR_SLUG
+    MIRROR_SLUG="$BOSS_MIRROR_SLUG"
+fi
 GITHUB_API="${BOSS_GITHUB_API:-https://api.github.com}"
 # The check whose annotations are the alerts. GitHub's code-scanning
 # roll-up posts as one check-run named for the tool.
