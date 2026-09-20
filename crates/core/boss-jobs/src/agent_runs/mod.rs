@@ -54,6 +54,16 @@
 //!     [`types::NewAgentRun::branch`] is the bridge until then: a
 //!     branch is what a builder knows before any packet exists for it.
 
+/// The metadata key naming the agent run that is EXECUTING a step, or
+/// that a gate-run / car rides under — the `link` every landing rule
+/// follows (`jobs.complete_linked_step`). One spelling, here, because
+/// four readers depend on it agreeing: `boss gate` stamps it on a
+/// gate-run, `boss dispatch` writes it onto the step it claims
+/// (backlog dd6d44b7), the dispatcher rules read it back off the
+/// `step.done.<kind>` marker, and the step PUT carries it forward
+/// (backlog b91a2103) so a wholesale metadata write cannot erase it.
+pub const EDGE_KEY: &str = "agent_run";
+
 pub mod events;
 pub mod http;
 pub mod in_memory;

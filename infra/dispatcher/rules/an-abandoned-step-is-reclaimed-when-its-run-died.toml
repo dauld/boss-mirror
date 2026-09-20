@@ -1,0 +1,94 @@
+# THE ROUTING DECISION THE DEATH RULE DECLINED TO MAKE (backlog
+# a3397b01, 2026-09-19). `agent-run-dies-when-building-is-silent` says
+# in its own header that it leaves the step the run was executing on
+# "exactly as the builder left it — claimed, active — because releasing
+# it is a routing decision this rule must not make." This rule makes it,
+# and the two do not disagree: they are the SAME judgement split into
+# two facts, at two bounds, in the order a record can be read.
+#
+#   fact one, at four hours — THE RUN IS DEAD. Written by the death
+#   rule onto the run's own packet, with the silence it measured, the
+#   bound and the tick. Nothing on the executing packet moves.
+#
+#   fact two, two hours later — ITS WORK IS FREE. Written by this rule
+#   onto the claimed step, naming the run it took the step from and the
+#   instant that run was declared dead.
+#
+# Splitting them is the whole safety argument. A reclaim is the one
+# thing in this loop that can cause a DOUBLE BUILD — two executors on
+# one step — and the constraint the packet set is that it must be
+# observable in the record BEFORE it acts. Because the death is a
+# separate fact recorded two hours earlier, it is: an operator reading
+# /it/crew sees a run at `died` and can tell, from the record alone and
+# before anything moves, which step is about to be freed. A rule that
+# released on the same tick as the death would act on a fact nobody
+# could have read first.
+#
+# WHAT MOTIVATED IT. On 2026-09-19 a session died at ~15:39Z and
+# orphaned fifteen `agent-run` packets. The durable inbox (923b6571)
+# gave QUEUED work a door out; twelve of the fifteen were not queued —
+# they were CLAIMED, built, gate green, never handed back — and
+# `boss dispatch --next` cannot see an active step, because an active
+# step is somebody's. So two thirds of the incident survived the fix
+# that was filed for it.
+#
+# HOW A SLOW-BUT-ALIVE EXECUTOR IS PROTECTED. Four guards, and the
+# first is the one that is new:
+#
+#   1. THE STEP NAMES ITS RUN. Since `boss dispatch` writes
+#      `agent_run = <run id>` onto the step it claims (dd6d44b7), the
+#      handler asks whether THAT run is dead, rather than inferring
+#      abandonment from the step's own stillness. A step whose edge
+#      names a live run, or a re-dispatched step whose edge names the
+#      NEW run, is never touched. A step carrying no edge at all is
+#      reported and left alone: nothing names its executor, so nothing
+#      here can tell abandoned from busy, and guessing is the one move
+#      a reclaim may not make.
+#   2. THE RUN'S OWN SILENCE. Death is measured on the run packet by
+#      the death rule, off movement the executor produces; an executor
+#      that is slow but alive keeps its run moving and it never dies.
+#   3. THE SECOND BOUND. Two more hours after the death is recorded,
+#      six of silence in total.
+#   4. A RUN THAT MOVED AFTER IT DIED IS NOT FREE. If anything touched
+#      the run packet after the death stamp — a late report, a hand —
+#      the handler leaves the step and says so. The death is the last
+#      word only while it stays the last word.
+#
+# WHAT THIS IS NOT, SAID PLAINLY: it is a BOUND, not a mutex. Six hours
+# of measured silence and a dead run is strong evidence that nobody is
+# building, and it is not a lock — a process wedged for seven hours and
+# then resuming would still find its step re-dispatched. The lock shape
+# is a LEASE the executor renews, which the packet weighed and put
+# second because it needs the executor to cooperate and nothing in the
+# tree renews anything today. This rule is the cheaper half that reuses
+# a live mechanism; if a double build is ever OBSERVED, the renewal is
+# the answer, not a longer bound.
+#
+# HOURLY, NOT DAILY, for the same reason the death rule is: a bound of
+# hours judged once a day is the same silence one level up.
+#
+# NARROW ON PURPOSE: `died` only. A run that ends `refused` also leaves
+# its step claimed, but `refused` is written by a hand, and the hand
+# that writes it is present and can release the step in the same
+# breath. A clock has no such excuse.
+[[rule]]
+name = "an-abandoned-step-is-reclaimed-when-its-run-died"
+why = """
+A TIMER, the standing exemption: the condition is a step whose executor
+did NOT come back, and no event says "the run that claimed this has
+been dead for two hours". The death rule's completion is an event, but
+reacting to it directly would collapse the two facts this rule exists
+to keep apart — dead, and free — and a reclaim that fires on the same
+tick as the death is one nobody can read before it acts. Measured
+2026-09-19 (backlog a3397b01): of fifteen orphaned agent-runs, TWELVE
+held a step that was claimed, built and green, invisible to every
+queue read because an active step is somebody's. It adds no routing
+beyond the release: the step returns to `ready` and unassigned, which
+is the state it was claimed from, and the durable inbox hands it out
+again through the one budget gate like any other waiting work.
+"""
+version = 1
+schedule = { cadence = "hourly", anchor_date = "2026-09-19" }
+[[rule.do]]
+handler = "jobs.reclaim_abandoned_step"
+args = { run_kind = "\"agent-run\"", run_step = "\"building\"", dead_result = "\"died\"", link = "\"agent_run\"", after_hours = "\"2\"" }

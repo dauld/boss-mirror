@@ -1319,8 +1319,11 @@ impl ParkIntent {
 pub(crate) const AGENT_RUN_ENV: &str = "BOSS_AGENT_RUN";
 
 /// The key the run's id rides under on the gate-run — the `link` the
-/// landing rule's `jobs.complete_linked_step` follows.
-pub(crate) const AGENT_RUN_KEY: &str = "agent_run";
+/// landing rule's `jobs.complete_linked_step` follows. Defined ONCE,
+/// in core, because the step PUT now carries the same key forward
+/// (backlog b91a2103) and a second spelling here could drift from the
+/// one the server protects (CLAUDE.md §9a — collapse, do not pin).
+pub(crate) const AGENT_RUN_KEY: &str = boss_jobs::agent_runs::EDGE_KEY;
 
 /// The merging PATCH that records the run, or `None` when nothing
 /// names one. A blank value is nothing: an `export BOSS_AGENT_RUN=`

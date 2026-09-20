@@ -24,12 +24,24 @@
 # the push. `verdict_pattern` (the `ops.judge` vocabulary, same regex,
 # same "last matching line of the execute step's output") names the two
 # groups, and `done_metadata` writes them as `{tag}` and `{sha}` — the
-# step's own required fields. A refusal prints `tag-release: REFUSED —
-# …`, which the pattern does not match, so an answered-but-refused
-# request completes nothing and says so on both packets: the step stays
-# the founder's until a request succeeds. `verb` keeps this rule off
-# every other answered ops-request — including the GitHub-release verb
-# that will carry the same `release` edge one day.
+# step's own required fields. A verb that answers no line the pattern
+# matches completes nothing: the step stays the founder's until a
+# request succeeds. `verb` keeps this rule off every other answered
+# ops-request — including the GitHub-release verb that will carry the
+# same `release` edge one day.
+#
+# WHAT A FAILED RUN DOES, AND WHY THIS FILE DOES NOT SAY IT (f47861a5,
+# 2026-09-19). `refuse()` and `fail()` both exit 1, so a refused or
+# failed run is an ANSWERED request whose execute step records exit 1 —
+# and `jobs.complete_linked_step` troubles the `tag` step for it by
+# default: the verb's REFUSED/FAILED line lands on the still-open step
+# and an urgent packet is filed naming it. It is the handler's default
+# rather than an arg here because the version of that mode which was
+# opt-in covered the two rules whose author had just been burned and
+# left this one — written a day earlier — answering a failed tag-release
+# with a note nobody reads, exactly the silence the mode exists to
+# refuse. A rule that does not want it says `on_failure = "note"`; this
+# one wants it.
 #
 # The pattern is written without a backslash: the arg passes through
 # two string lexers (TOML, then boss-expr's), and boss-expr reads `\d`

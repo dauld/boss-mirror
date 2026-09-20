@@ -34,6 +34,22 @@
 # Idempotent by construction: a completed `building` is not open, and
 # the next tick finds nothing.
 #
+# WHO MAKES THAT DECISION, SINCE 2026-09-19 (backlog a3397b01).
+# `an-abandoned-step-is-reclaimed-when-its-run-died` does, and the two
+# rules do not disagree about the same thing — they are one judgement
+# split into two facts at two bounds. THIS rule writes "the run is
+# dead" and nothing else; that one waits a further bound and writes
+# "its work is free", releasing the step to `ready` and unassigned.
+# The split IS the safety: a reclaim is the one move here that can put
+# two executors on one step, so it must be readable in the record
+# before it acts, and a release firing on this same tick would act on a
+# fact nobody could have read first. What changed to make the release
+# safe at all is an EDGE, not a bound: `boss dispatch` now writes
+# `agent_run = <run id>` onto the step it claims (dd6d44b7), so the
+# reclaim asks whether THAT run died rather than inferring abandonment
+# from the step's stillness. This rule is unchanged and stays the way
+# it is — nothing about it is weakened by having a reader.
+#
 # HOURLY, NOT DAILY. The bound is four hours; a daily sweep would let a
 # dead run sit for up to a day past it, which is the same silence one
 # level up.

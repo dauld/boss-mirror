@@ -61,12 +61,18 @@ fn opened_output() -> String {
 type Writes = Arc<Mutex<Vec<(String, String, serde_json::Value)>>>;
 
 fn ctx() -> InvocationContext {
+    ctx_for(RULE, REQUEST)
+}
+
+/// The same close marker for any rule and any answered request — the
+/// release leg (v7) closes a different request under a different rule.
+fn ctx_for(rule: &str, request_id: &str) -> InvocationContext {
     InvocationContext {
-        rule_name: RULE.into(),
-        triggering_event_id: "evt-close-c98a782f".into(),
+        rule_name: rule.into(),
+        triggering_event_id: format!("evt-close-{}", &request_id[..8]),
         triggering_topic: "jobs.job.closed".into(),
         event_payload: json!({
-            "id": REQUEST, "kind": "ops-request", "outcome": "answered",
+            "id": request_id, "kind": "ops-request", "outcome": "answered",
             "closed_on": "2026-09-18", "parent_step_id": null,
         }),
     }
@@ -75,7 +81,15 @@ fn ctx() -> InvocationContext {
 /// The rule's args as the dispatcher hands them over — read from the
 /// file, matched against the close marker, never retyped.
 fn rule_args() -> Vec<(String, Value)> {
-    let path = boss_testing::dispatcher_rules_dir().join(format!("{RULE}.toml"));
+    rule_args_of(RULE)
+}
+
+/// The same, for any rule file that reacts to an answered ops-request
+/// with this handler — the release rule (v7) is driven from its own
+/// file, unedited, because that is the claim: a rule nobody touched
+/// inherits the failure mode.
+fn rule_args_of(rule: &str) -> Vec<(String, Value)> {
+    let path = boss_testing::dispatcher_rules_dir().join(format!("{rule}.toml"));
     let toml =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let reg = Registry::from_toml(&toml).expect("the rule file parses");
@@ -255,7 +269,15 @@ fn handler(base: String) -> Arc<JobsCompleteLinkedStep> {
 }
 
 fn step_patch(writes: &[(String, String, serde_json::Value)]) -> serde_json::Value {
-    let path = format!("/api/jobs/{PUBLISH}/steps/{OPEN_PR}/metadata");
+    step_patch_on(writes, PUBLISH, OPEN_PR)
+}
+
+fn step_patch_on(
+    writes: &[(String, String, serde_json::Value)],
+    job: &str,
+    step: &str,
+) -> serde_json::Value {
+    let path = format!("/api/jobs/{job}/steps/{step}/metadata");
     let found: Vec<_> = writes
         .iter()
         .filter(|(m, p, _)| m == "PATCH" && *p == path)
@@ -456,4 +478,191 @@ async fn an_unknown_on_failure_mode_is_a_permanent_error() {
         .await
         .expect_err("an unknown mode cannot be retried into a known one");
     assert!(matches!(err, HandlerError::Permanent(_)), "{err:?}");
+}
+
+/// THE DEFAULT (v7). The mode was opt-in when it landed, so it covered
+/// the two rules whose author had just been burned by the silence and
+/// no other — a rule that asks for nothing still left its step ready
+/// and said nothing. Here the publish rule's own args are handed over
+/// with `on_failure` REMOVED, and the failed leg must answer exactly as
+/// it does with the arg present: the annotation on the step, the urgent
+/// packet, and no completion.
+#[tokio::test]
+async fn a_rule_that_asks_for_no_mode_still_troubles_the_step_it_left_open() {
+    let (base, writes) = mock_jobs(
+        vec![request("1", FAILED_OUTPUT), publish("ready", json!({}))],
+        vec![],
+    )
+    .await;
+    let args: Vec<(String, Value)> = rule_args()
+        .into_iter()
+        .filter(|(k, _)| k != "on_failure")
+        .collect();
+    assert!(
+        !args.iter().any(|(k, _)| k == "on_failure"),
+        "the claim is about a rule that does not name the mode"
+    );
+    handler(base).invoke(&args, &ctx()).await.expect("runs");
+
+    let w = writes.lock().unwrap().clone();
+    assert!(
+        !w.iter().any(|(m, _, _)| m == "PUT"),
+        "a failed verb completes nothing: {w:?}"
+    );
+    assert_eq!(
+        w.iter().filter(|(m, _, _)| m == "POST").count(),
+        1,
+        "the alert is filed without the rule asking: {w:?}"
+    );
+    let note = step_patch(&w);
+    assert_eq!(note["failed"], FAILED_LINE);
+    assert_eq!(note["failed_source"], REQUEST);
+}
+
+/// The opt-out. A rule whose linked step is not troubled by its verb
+/// failing says so in one word, and gets v5's dead-link note instead:
+/// nothing on the step, no alert, the noop recorded on both ends.
+#[tokio::test]
+async fn a_rule_that_opts_out_keeps_the_dead_link_note() {
+    let (base, writes) = mock_jobs(
+        vec![request("1", FAILED_OUTPUT), publish("ready", json!({}))],
+        vec![],
+    )
+    .await;
+    let mut args = rule_args();
+    for (k, v) in args.iter_mut() {
+        if k == "on_failure" {
+            *v = Value::String("note".into());
+        }
+    }
+    handler(base).invoke(&args, &ctx()).await.expect("runs");
+
+    let w = writes.lock().unwrap().clone();
+    assert!(
+        !w.iter().any(|(m, _, _)| m == "POST" || m == "PUT"),
+        "no alert, no completion: {w:?}"
+    );
+    for id in [REQUEST, PUBLISH] {
+        assert!(
+            w.iter().any(|(m, p, b)| m == "PATCH"
+                && p == &format!("/api/jobs/{id}/metadata")
+                && b.get("obligation_noop").is_some()),
+            "the noop is noted on {id}: {w:?}"
+        );
+    }
+}
+
+/// The release leg's ids and fixtures — a second verb, a second
+/// protocol, one shape.
+const RELEASE_RULE: &str = "complete-release-tag-on-tag-release-answered";
+const TAG_REQUEST: &str = "3a7c1b95-2d4e-4f60-8a1b-7c6d5e4f3a2b";
+const RELEASE: &str = "5f4e3d2c-1b0a-4998-8877-665544332211";
+const TAG_STEP: &str = "8c7b6a59-4837-4261-95a4-b3c2d1e0f9a8";
+
+/// An answered tag-release request whose verb exited 1, linked to the
+/// release packet by the `release` edge its rule follows.
+fn tag_request(output: &str) -> serde_json::Value {
+    json!({
+        "id": TAG_REQUEST, "kind": "ops-request", "status": "closed",
+        "title": "tag-release v1.4.0 on forge",
+        "subject": { "subject_kind": "custom", "id": "forge" },
+        "metadata": { "host": "forge", "verb": "tag-release", "release": RELEASE,
+                      "exit": "1", "outcome": "answered" },
+        "steps": [
+            { "id": "t-execute", "spec_slug": "execute", "status": "completed",
+              "metadata": { "disposition": "answered", "exit_code": "1",
+                            "output": output, "runner_host": "forge" } },
+        ],
+    })
+}
+
+/// The release packet at its `tag` step, open and waiting.
+fn release_packet() -> serde_json::Value {
+    json!({
+        "id": RELEASE, "kind": "cut-a-release", "status": "open",
+        "title": "Cut release v1.4.0",
+        "subject": { "subject_kind": "custom", "id": "algedonic" },
+        "metadata": {},
+        "steps": [
+            { "id": TAG_STEP, "spec_slug": "tag", "status": "ready", "metadata": {} },
+        ],
+    })
+}
+
+/// THE SECOND VERB, AND THE POINT OF THE DEFAULT (v7). The release
+/// rule was written before the failure mode existed and names none, so
+/// a tag-release that ran and failed left the release packet's `tag`
+/// step `ready` with nothing on it — the measured shape of f47861a5 on
+/// another verb, another protocol and another step. Driven from the
+/// release rule's own file, unedited.
+#[tokio::test]
+async fn a_failed_tag_release_troubles_the_release_it_was_filed_for() {
+    let failed = "tag-release: forge: no tag v1.4.0 on remote origin\n\
+                  tag-release: converged checkout: 7f3a1c2 resolves to 7f3a1c2d4e5f60718293a4b5c6d7e8f901a2b3c4\n\
+                  tag-release: FAILED — pushing refs/tags/v1.4.0 to remote origin (as david): remote: the account may not write to this repository. The local tag was removed; the forge holds nothing\n";
+    let (base, writes) = mock_jobs(vec![tag_request(failed), release_packet()], vec![]).await;
+    handler(base)
+        .invoke(
+            &rule_args_of(RELEASE_RULE),
+            &ctx_for(RELEASE_RULE, TAG_REQUEST),
+        )
+        .await
+        .expect("runs");
+
+    let w = writes.lock().unwrap().clone();
+    assert!(
+        !w.iter().any(|(m, _, _)| m == "PUT"),
+        "the tag step is not completed — the forge holds nothing: {w:?}"
+    );
+    let posts: Vec<_> = w.iter().filter(|(m, _, _)| m == "POST").collect();
+    assert_eq!(posts.len(), 1, "one urgent packet: {w:?}");
+    let item = &posts[0].2;
+    assert_eq!(item["priority"], "urgent");
+    assert_eq!(item["metadata"]["verb"], "tag-release");
+    assert_eq!(item["metadata"]["for_request"], TAG_REQUEST);
+    assert_eq!(item["metadata"]["step"], "tag");
+    let failed_line = item["metadata"]["failed"].as_str().unwrap_or("");
+    assert!(
+        failed_line.contains("may not write to this repository"),
+        "the alert names what failed: {failed_line}"
+    );
+    let note = step_patch_on(&w, RELEASE, TAG_STEP);
+    assert_eq!(note["failed_exit"], "1");
+    assert_eq!(note["failed_source"], TAG_REQUEST);
+}
+
+/// A REFUSAL BY THE VERB IS A FAILURE OF THE REQUEST TOO — and its
+/// verdict must name the refusal, not the epilogue. The forge verbs'
+/// `refuse()` prints the reason and then `  Nothing was written.`, and
+/// exits 1 like `fail()` does, so the runner records an answered
+/// request whose step says exit 1. Picking the last non-empty line
+/// would hand the alert `Nothing was written.` — true, and no verdict
+/// at all (CLAUDE.md §Diagnosis: a verdict must name what failed).
+#[tokio::test]
+async fn a_refused_tag_release_is_alerted_by_its_reason_not_its_epilogue() {
+    let refused = "tag-release: forge: no tag v1.4.0 on remote origin\n\
+                   tag-release: REFUSED — sha e4d5d9816d34 is not the merge commit of any of the 57 closed pr-train packets read\n\
+                   tag-release:   Nothing was written.\n";
+    let (base, writes) = mock_jobs(vec![tag_request(refused), release_packet()], vec![]).await;
+    handler(base)
+        .invoke(
+            &rule_args_of(RELEASE_RULE),
+            &ctx_for(RELEASE_RULE, TAG_REQUEST),
+        )
+        .await
+        .expect("runs");
+
+    let w = writes.lock().unwrap().clone();
+    let posts: Vec<_> = w.iter().filter(|(m, _, _)| m == "POST").collect();
+    assert_eq!(posts.len(), 1, "one urgent packet: {w:?}");
+    let failed_line = posts[0].2["metadata"]["failed"].as_str().unwrap_or("");
+    assert!(
+        failed_line.contains("is not the merge commit"),
+        "the alert names the refusal: {failed_line}"
+    );
+    assert!(
+        !failed_line.contains("Nothing was written"),
+        "and not the epilogue after it: {failed_line}"
+    );
+    assert_eq!(step_patch_on(&w, RELEASE, TAG_STEP)["failed"], failed_line);
 }

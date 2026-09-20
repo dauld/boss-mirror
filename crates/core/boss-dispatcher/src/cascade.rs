@@ -203,6 +203,14 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         // packet to its own terminal; nothing listens for a run's
         // close, so the loop ends at the packet.
         ("jobs.age_out_step", vec!["jobs.step.completed"]),
+        // The routing half of the same judgement (a3397b01): a step
+        // held by a run that DIED is released — `ready`, unassigned,
+        // the dead run's edge cleared. A step UPDATE, never a
+        // completion: releasing work is not doing it. Nothing listens
+        // on `jobs.step.updated`, and the released step is handed out
+        // again by the durable inbox's queue READ, not by an event, so
+        // the loop ends at the board.
+        ("jobs.reclaim_abandoned_step", vec!["jobs.step.updated"]),
         ("gate.resolve", vec!["jobs.step.completed"]),
         ("packaging.allocate", vec!["jobs.step.completed"]),
         // The packet-loss census (migration 152): reads the whole

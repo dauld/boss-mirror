@@ -332,13 +332,31 @@ pub(crate) async fn open_jobs_of_kind(
     kind: &str,
     rule_name: &str,
 ) -> Result<Vec<Value>, HandlerError> {
+    open_jobs(client, jobs_base, Some(kind), rule_name).await
+}
+
+/// The same walk with the kind OPTIONAL: `None` is the whole open
+/// board. A handler asking a question about claimed STEPS rather than
+/// about packets of one kind needs it — `jobs.reclaim_abandoned_step`
+/// looks for steps held by a dead executor run, and those sit on
+/// packets of every kind an agent block appears on (a3397b01).
+pub(crate) async fn open_jobs(
+    client: &reqwest::Client,
+    jobs_base: &str,
+    kind: Option<&str>,
+    rule_name: &str,
+) -> Result<Vec<Value>, HandlerError> {
     const PAGE: usize = 500;
+    let kind_q = match kind {
+        Some(k) => format!("kind={k}&"),
+        None => String::new(),
+    };
     let mut rows: Vec<Value> = Vec::new();
     loop {
         let body = get_json(
             client,
             &format!(
-                "{}/api/jobs?kind={kind}&status=open&limit={PAGE}&offset={}",
+                "{}/api/jobs?{kind_q}status=open&limit={PAGE}&offset={}",
                 jobs_base.trim_end_matches('/'),
                 rows.len()
             ),

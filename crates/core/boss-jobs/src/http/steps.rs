@@ -402,6 +402,32 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
         obj.insert(crate::human_only::KEY.into(), flag);
     }
 
+    // AND SO IS THE RUN EDGE (b91a2103). `boss dispatch` writes
+    // `agent_run` onto the step it CLAIMS, and the delivery rule
+    // follows that edge from `step.done.<kind>` to land the run
+    // (dd6d44b7) — for an analyst run, which ships no car and files no
+    // gate-run, it is the ONLY thing that makes the run land. A
+    // completer that sends `metadata` without reading and merging
+    // erased it, and the failure was silent and delayed: the
+    // completion succeeded, the work was recorded correctly, and the
+    // run then died four hours later on the silence clock as though
+    // the agent had gone quiet. Losing it breaks something invisible,
+    // which is the same reason the two keys above are carried.
+    //
+    // Carried, not frozen: unlike `authority_role` this key is NOT
+    // stripped from the merge door, because a step re-claimed by a
+    // different run must name the run that now holds it — and
+    // `boss dispatch` writes the new id through that door right after
+    // the claim (the claim route itself never touches metadata), so a
+    // carried-forward value can never outlive the next dispatch. What
+    // survives here is OMISSION, nothing more.
+    if let Some(old_obj) = old.metadata.as_object()
+        && let Some(run) = old_obj.get(crate::agent_runs::EDGE_KEY).cloned()
+        && let Some(obj) = step.metadata.as_object_mut()
+    {
+        obj.insert(crate::agent_runs::EDGE_KEY.into(), run);
+    }
+
     // A HUMAN-ONLY STEP REFUSES A NON-HUMAN ASSIGNEE (c17871fe). Checked
     // when the assignee actually changes — an idempotent re-send of the
     // same assignee is not an assignment — against the employee

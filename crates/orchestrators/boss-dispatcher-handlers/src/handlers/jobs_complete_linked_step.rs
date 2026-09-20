@@ -126,7 +126,25 @@
 //!   backlog-item naming the verb, the request and the line is filed
 //!   to the platform owner through the door every alarm handler uses.
 //!   One alert per failed request (`for_request` dedups while open).
-//!   Without the arg, v5's answer stands.
+//!
+//! ## The mode is the DEFAULT (v7, f47861a5)
+//!
+//! v6 shipped it opt-in, and opt-in covered the two rules whose author
+//! had just watched the silence — and no other. The release rule
+//! (`complete-release-tag-on-tag-release-answered`, landed the day
+//! before) names no mode, so a `tag-release` that ran and FAILED
+//! matched no answer line, wrote v5's dead-link note on both ends, and
+//! left the release packet's `tag` step `ready` with nothing on it: the
+//! measured shape of this packet on another verb, another protocol and
+//! another step. A behaviour every rule author must remember to ask for
+//! is the defect (CLAUDE.md §9a), and the default that makes a failure
+//! loud is the one to make free. So `on_failure` is now an OPT-OUT: a
+//! rule whose linked step is genuinely not troubled by its verb failing
+//! writes `on_failure = "note"` and gets v5's answer; everything else,
+//! including every rule written from here on, troubles the step it
+//! would have completed. Only a closing packet with an `execute` step
+//! recording a non-zero exit is a failure at all, so the rules that
+//! react to a car, a gate-run or a design are untouched.
 //!
 //! ## Idempotence
 //!
@@ -529,13 +547,13 @@ impl Handler for JobsCompleteLinkedStep {
             return Ok(());
         }
 
-        // THE FAILURE (v6, f47861a5). A verb that RAN and exited
-        // non-zero is an answered request — the outcome says the verb
-        // ran, the execute step says how it went — and a rule that
-        // asked for the failure mode gets it here, before the answer
-        // pattern is consulted: a FAILED verb has no answer line, and
-        // v5's "no line matched" note on both ends is what left the
-        // publish step ready and silent for five hours.
+        // THE FAILURE (v6, f47861a5; the default since v7). A verb that
+        // RAN and exited non-zero is an answered request — the outcome
+        // says the verb ran, the execute step says how it went — and
+        // the failure mode is read here, before the answer pattern is
+        // consulted: a FAILED verb has no answer line, and v5's "no
+        // line matched" note on both ends is what left the publish step
+        // ready and silent for five hours.
         if let (Some(OnFailure::AnnotateAndAlert), Some(failure)) =
             (answer.on_failure, verb_failure(&closing))
         {
@@ -746,23 +764,29 @@ struct Shipped {
 struct AnswerSpec {
     verb: Option<String>,
     pattern: Option<regex::Regex>,
-    /// What to do when the closing packet's verb FAILED (v6) — `None`
-    /// keeps v5's answer: a failed verb has no answer line, and the
-    /// noop note lands on both ends.
+    /// What to do when the closing packet's verb FAILED (v6) — the
+    /// DEFAULT since v7, `None` only where a rule opted out.
     on_failure: Option<OnFailure>,
 }
 
-/// The one failure mode a rule may ask for (v6, f47861a5): the verb's
-/// last FAILED line is written onto the still-open step and an urgent
-/// backlog-item is filed for it. A second mode is a new variant here
-/// and a new word in `from_args`, never a string compared elsewhere.
+/// The failure mode (v6, f47861a5): the verb's last FAILED line is
+/// written onto the still-open step and an urgent backlog-item is
+/// filed for it. A second mode is a new variant here and a new word in
+/// `from_args`, never a string compared elsewhere.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OnFailure {
     AnnotateAndAlert,
 }
 
-/// The word a rule file spells the mode as.
+/// The word a rule file spells the mode as — the default, so a rule
+/// says it only to be explicit.
 const ANNOTATE_AND_ALERT: &str = "annotate-and-alert";
+
+/// The word a rule spells the OPT-OUT as: keep v5's dead-link note and
+/// leave the step alone. Nothing in the tree asks for it today; it
+/// exists so a rule whose linked step is genuinely not troubled by its
+/// verb failing can say so in one word instead of by silence.
+const NOTE: &str = "note";
 
 impl AnswerSpec {
     fn from_args(args: &[(String, Value)]) -> Result<Self, HandlerError> {
@@ -778,15 +802,28 @@ impl AnswerSpec {
             }
             _ => None,
         };
+        // THE MODE IS THE DEFAULT (v7, f47861a5). v6 made it opt-in,
+        // which covered the two rules whose author had just been burned
+        // and no other: the release rule (written a day earlier) still
+        // answered a FAILED tag-release with a noop note on both ends,
+        // leaving the release packet's `tag` step `ready` and silent —
+        // the same defect the mode exists to refuse, one verb over. A
+        // behaviour every rule must remember to ask for is the defect
+        // (CLAUDE.md §9a), so the rules stop asking and a rule that
+        // does not want it says `note`.
         let on_failure = match arg(args, "on_failure") {
-            Some(Value::String(s)) if s == ANNOTATE_AND_ALERT => Some(OnFailure::AnnotateAndAlert),
-            Some(Value::String(s)) if !s.is_empty() => {
-                // Rule authoring, identical on every redelivery.
+            None => Some(OnFailure::AnnotateAndAlert),
+            Some(Value::String(s)) if s.is_empty() || s == ANNOTATE_AND_ALERT => {
+                Some(OnFailure::AnnotateAndAlert)
+            }
+            Some(Value::String(s)) if s == NOTE => None,
+            // Rule authoring, identical on every redelivery.
+            Some(other) => {
                 return Err(HandlerError::Permanent(format!(
-                    "on_failure {s:?} is not a mode this handler knows; the one mode is {ANNOTATE_AND_ALERT:?}"
+                    "on_failure {other:?} is not a mode this handler knows; the modes are \
+                     {ANNOTATE_AND_ALERT:?} (the default) and {NOTE:?}"
                 )));
             }
-            _ => None,
         };
         Ok(Self {
             verb,
@@ -990,11 +1027,20 @@ pub(crate) struct VerbFailure {
 /// failed. One alert per failed request while it is open.
 pub(crate) const FOR_REQUEST: &str = "for_request";
 
+/// How a verb says it stopped, in the order the line is looked for:
+/// the forge verbs' `fail()` prints `FAILED — …` and their `refuse()`
+/// prints `REFUSED — …`. `REFUSED` earns a pass of its own rather than
+/// riding the last-line fallback because `refuse()` prints a SECOND
+/// line after the reason — `  Nothing was written.` — which the
+/// fallback would hand the alert: true, and not a verdict (CLAUDE.md
+/// §Diagnosis, a verdict must name what failed).
+const FAILURE_MARKERS: [&str; 2] = ["FAILED", "REFUSED"];
+
 /// PURE over the closing packet: `Some` when its `execute` step records
 /// a non-zero `exit_code` — the ops-runner's record of a verb that RAN
-/// and failed (a refusal ran nothing and carries no exit, and closes
-/// `refused`, which no answered-rule fires on). The line is the LAST
-/// one containing `FAILED` (the forge verbs' `fail()` spelling), else
+/// and failed (a RUNNER refusal ran nothing, carries no exit, and
+/// closes `refused`, which no answered-rule fires on). The line is the
+/// last one carrying the first marker above that appears at all, else
 /// the last non-empty line: the runner records both streams merged and
 /// a verb says why it stopped last. c98a782f's line was the 4th of 4.
 pub(crate) fn verb_failure(closing: &serde_json::Value) -> Option<VerbFailure> {
@@ -1009,9 +1055,9 @@ pub(crate) fn verb_failure(closing: &serde_json::Value) -> Option<VerbFailure> {
     }
     let output = meta.get("output").and_then(|v| v.as_str()).unwrap_or("");
     let mut lines = output.lines().map(str::trim).filter(|l| !l.is_empty());
-    let line = lines
-        .clone()
-        .rfind(|l| l.contains("FAILED"))
+    let line = FAILURE_MARKERS
+        .iter()
+        .find_map(|marker| lines.clone().rfind(|l| l.contains(marker)))
         .or_else(|| lines.next_back())
         .unwrap_or("(no output recorded)")
         .to_string();
@@ -2836,16 +2882,24 @@ mod answer_tests {
         assert!(patches.lock().unwrap().is_empty(), "nothing to note");
     }
 
-    /// A refused run is still an ANSWERED ops-request (the runner ran
-    /// the verb; the verb said no). Its output has no read-back line,
-    /// so the step stays the founder's and both packets say why.
+    /// A verb that SUCCEEDED and printed no line the pattern matches —
+    /// its output shape moved on, and nothing was read back. The step
+    /// stays the founder's and both packets say why (v5's answer,
+    /// which a clean exit keeps: the failure mode reads the exit, and
+    /// this one is 0).
+    ///
+    /// This case used to be spelled with a `REFUSED` output and exit 0,
+    /// which the verb cannot produce — `refuse()` exits 1 like `fail()`
+    /// does, so that request's step records exit 1 and v7 troubles the
+    /// release. The refusal is pinned there, in
+    /// tests/publish_pr_answer.rs, where a mock can take the alert.
     #[tokio::test]
-    async fn a_refused_tag_release_completes_nothing_and_says_so_on_both_ends() {
-        let refused = "tag-release: forge: no tag v1.2.3 on remote forgejo\n\
-                       tag-release: REFUSED — sha e4d5d9816d34 is not the merge commit of any of the 57 closed pr-train packets read\n\
-                       tag-release:   Nothing was written.\n";
+    async fn an_answer_with_no_read_back_line_completes_nothing_and_says_so_on_both_ends() {
+        let no_line = "tag-release: forge: no tag v1.2.3 on remote forgejo\n\
+                       tag-release: converged checkout: e4d5d98 resolves to e4d5d9816d34a1b2c3d4e5f60718293a4b5c6d7e\n\
+                       tag-release: done\n";
         let (base, puts, patches) = super::tests::mock_jobs(vec![
-            tag_release_request("tag-release", refused),
+            tag_release_request("tag-release", no_line),
             release_packet("ready"),
         ])
         .await;

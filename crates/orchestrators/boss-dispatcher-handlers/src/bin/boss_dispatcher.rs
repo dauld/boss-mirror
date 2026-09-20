@@ -45,6 +45,7 @@ use boss_dispatcher_handlers::handlers::{
     jobs_complete_linked_step::JobsCompleteLinkedStep,
     jobs_complete_step::JobsCompleteStep,
     jobs_complete_step_matching::JobsCompleteStepMatching,
+    jobs_reclaim_abandoned_step::JobsReclaimAbandonedStep,
     jobs_run_car_probes::JobsRunCarProbes,
     jobs_subjob_resolve::JobsSubjobResolve,
     ledger_bill_approve::LedgerBillApprove,
@@ -432,6 +433,14 @@ async fn main() -> Result<()> {
             // Generic: kind, step, the bound and what to write ride the
             // rule row; the tick's own `_at` is the clock.
             handlers.register(JobsAgeOutStep::new(cfg.jobs_api_url.clone()));
+            // The routing half of the same judgement (a3397b01): a
+            // step whose named executor run DIED is released back to
+            // `ready` and nobody's, a bound AFTER the death was
+            // recorded — two facts, so the release is readable in the
+            // record before it happens. Generic: the run kind, its
+            // step, the value that means dead, the edge key and the
+            // second bound all ride the rule row.
+            handlers.register(JobsReclaimAbandonedStep::new(cfg.jobs_api_url.clone()));
             // System-completes zero-duration, no-role markers
             // (trigger / outcome / milestone) the moment they go
             // Ready, so a Job flows past its structural checkpoints

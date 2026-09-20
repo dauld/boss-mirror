@@ -125,6 +125,16 @@ const SPAWNS_NOTHING_ON_PURPOSE: &[(&str, &str)] = &[
          one's.",
     ),
     (
+        "an-abandoned-step-is-reclaimed-when-its-run-died",
+        "runs `jobs.reclaim_abandoned_step`, which RELEASES the step a dead agent-run was \
+         claimed for — `ready`, unassigned — a bound after the death rule above recorded \
+         the death (backlog a3397b01). It files nothing and completes nothing: it puts \
+         work back where the claim took it from, so on an hour with no dead run holding a \
+         step it produces NOTHING, and that zero is the healthy reading. The packets it \
+         touches are of every kind an agent block appears on, so there is no one kind a \
+         sweep keyed by kind could watch.",
+    ),
+    (
         "work-session-ends-when-silent",
         "runs `jobs.age_out_step`, which completes the `active` step of every open \
          work-session whose heartbeat is older than the bound (design 511fa7d4 car 2b, \
