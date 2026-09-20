@@ -791,9 +791,12 @@ fn an_answered_verbs_exit_rides_the_request_metadata() {
     )
     .expect("the PATCH body is JSON");
     assert_eq!(
+        // `queue_depth` joined the exit on this door with 1ffb3305;
+        // this fixture's packet carries no `opened_at`, so it has no
+        // `queued_s`. Nothing ELSE reaches the request's metadata.
         patch,
-        serde_json::json!({"exit": "3"}),
-        "the request carries the verb's exit, and nothing else changes: {patch}"
+        serde_json::json!({"exit": "3", "queue_depth": 1}),
+        "the request carries the verb's exit and the queue it waited in, and nothing else: {patch}"
     );
     assert!(out.contains("answered fails"), "{out}");
 
@@ -806,4 +809,159 @@ fn an_answered_verbs_exit_rides_the_request_metadata() {
         !root.join("patch.json").exists(),
         "a refusal writes no exit on the request: {out}"
     );
+}
+
+/// A QUEUE WHOSE DEPTH NOBODY READS (backlog 1ffb3305). This runner
+/// walks up to 100 open requests SERIALLY in one oneshot with no
+/// per-verb fairness, so a latency-sensitive verb queues behind
+/// whatever is ahead of it in the same run — a converge, the verb that
+/// deploys a fix, waits behind however many run-car-probes are in
+/// front of it. Measured 2026-09-19: run-car-probe was 171 of the last
+/// 300 ops-requests against 42 converges, and its cadence went daily to
+/// hourly the same day. Today's volumes are comfortable; the serial
+/// walk is now the only real bound on raising any probe cadence
+/// further, and nothing measured it. A queue nobody reads is one that
+/// gets discovered at its worst moment, by a converge that did not
+/// deploy when it should have.
+///
+/// So the runner reads its own queue before it walks it, and the
+/// reading lands in two places on purpose: the journal line carries
+/// the gauge for EVERY run, depth zero included — a gauge that appears
+/// only when it is non-zero cannot be told apart from a runner that
+/// stopped — and each answered request carries what IT waited, so the
+/// series is a system-of-record query rather than an ssh. Per-verb
+/// fairness or a priority lane is the larger change and waits for this
+/// reading to say it is needed.
+#[test]
+fn the_runner_reads_its_own_queue_depth_and_oldest_wait() {
+    needs_jq!();
+    let root = scratch("queue-reading");
+    stub_sor(&root);
+    let ok = root.join("ok.sh");
+    write_exec(&ok, "#!/bin/sh\necho ok\n");
+    let verbs = verbs_dir(
+        &root,
+        &[(
+            "ok",
+            &format!(
+                r#"{{"about":"a verb that answers","hosts":["forge"],"argv":["{}"],"params":[]}}"#,
+                ok.display()
+            ),
+        )],
+    );
+
+    // An empty queue is a reading too, and the one the runner takes
+    // most often.
+    std::fs::write(root.join("jobs.json"), r#"{"data":[]}"#).unwrap();
+    let (out, _) = run(&root, &verbs, &[]);
+    assert_eq!(
+        queue_line(&out),
+        "ops-runner: queue host=forge depth=0 oldest_wait_s=-",
+        "an empty queue still reports its depth: {out}"
+    );
+
+    // Three open requests for this host, the oldest filed 600s ago.
+    queue(&root, "ok", &[Some(120), Some(600), Some(30)]);
+    let (out, _) = run(&root, &verbs, &[]);
+    let line = queue_line(&out);
+    assert!(line.contains("depth=3"), "{line}");
+    let oldest: i64 = field(&line, "oldest_wait_s")
+        .parse()
+        .unwrap_or_else(|_| panic!("oldest_wait_s is a number: {line}"));
+    assert!(
+        (600..660).contains(&oldest),
+        "the oldest wait is the oldest packet's age, not the newest's: {line}"
+    );
+
+    // A packet nobody stamped has NO age, and the reading says so
+    // rather than answering zero: `date -d ''` answers midnight, which
+    // would report a fresh packet as a decades-old wait (the probe-time
+    // trap, crates/core/boss-jobs/src/probe.rs).
+    queue(&root, "ok", &[None]);
+    let (out, _) = run(&root, &verbs, &[]);
+    assert_eq!(
+        queue_line(&out),
+        "ops-runner: queue host=forge depth=1 oldest_wait_s=-",
+        "an unstamped packet has no age: {out}"
+    );
+
+    // And the answered request carries what IT waited, beside the exit
+    // that already rides there — so the depth series is a jobs-API
+    // query, not a journal nobody opens.
+    queue(&root, "ok", &[Some(300), Some(45)]);
+    let (out, _) = run(&root, &verbs, &[]);
+    let patch: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("patch.json"))
+            .unwrap_or_else(|e| panic!("no PATCH on the request's metadata: {e}; {out}")),
+    )
+    .expect("the PATCH body is JSON");
+    assert_eq!(patch["queue_depth"], 2, "{patch} / {out}");
+    let waited = patch["queued_s"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("the request records its own wait: {patch} / {out}"));
+    assert!(
+        (45..105).contains(&waited),
+        "the LAST packet walked waited its own 45s, not the queue's oldest: {patch}"
+    );
+}
+
+/// The runner's one-line queue reading, or a panic naming what it
+/// printed instead.
+fn queue_line(out: &str) -> String {
+    out.lines()
+        .find(|l| l.starts_with("ops-runner: queue "))
+        .unwrap_or_else(|| panic!("no queue reading in the run's output:\n{out}"))
+        .to_string()
+}
+
+/// `key=value` off a space-separated reading line.
+fn field(line: &str, key: &str) -> String {
+    line.split_whitespace()
+        .find_map(|w| w.strip_prefix(&format!("{key}=")))
+        .unwrap_or_else(|| panic!("no {key} in {line}"))
+        .to_string()
+}
+
+/// A queue of open ops-requests for the forge, one per entry, each
+/// carrying the `opened_at` a live request carries (`Some(age)`
+/// seconds ago) or none at all.
+fn queue(root: &Path, verb: &str, ages_s: &[Option<u64>]) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let rows: Vec<String> = ages_s
+        .iter()
+        .enumerate()
+        .map(|(i, age)| {
+            let opened = match age {
+                Some(a) => format!(r#","opened_at":"{}""#, iso_at(now - a)),
+                None => String::new(),
+            };
+            format!(
+                r#"{{"id":"aaaaaaaa-0000-4000-8000-00000000000{i}","status":"open","metadata":{{"host":"forge","verb":"{verb}","args":[]{opened}}},"steps":[{{"id":"s-{i}","spec_slug":"execute","status":"ready","metadata":{{"authority_role":"platform-admin"}}}}]}}"#
+            )
+        })
+        .collect();
+    std::fs::write(
+        root.join("jobs.json"),
+        format!(r#"{{"data":[{}]}}"#, rows.join(",")),
+    )
+    .unwrap();
+}
+
+/// The timestamp shape a live ops-request carries in `metadata.opened_at`
+/// (read off request e8248c26, 2026-09-20): RFC 3339, nanoseconds, an
+/// explicit `+00:00` offset.
+fn iso_at(epoch: u64) -> String {
+    let out = Command::new("date")
+        .args([
+            "-u",
+            "-d",
+            &format!("@{epoch}"),
+            "+%Y-%m-%dT%H:%M:%S.000000000+00:00",
+        ])
+        .output()
+        .expect("date runs");
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
 }

@@ -83,6 +83,14 @@
 # git, curl, jq and tar in its image and /work writable. `--cli` runs
 # that leg alone (the ten-second fix the shim's refusal names).
 #
+# AND SINCE 2026-09-20, ONE PASS THAT MOVES THE CHECKOUT ITSELF
+# (backlog 033d1fd3): /work/boss is fast-forwarded to the origin/main it
+# has already fetched, so the pod doors symlinked into its infra/dev
+# stop answering from a copy the tree has moved past. It refuses to run
+# while any gate-run packet is open — a gate renders its runner from a
+# tree — and refuses whenever it cannot read that fact. The long form
+# is at the pass itself.
+#
 # WHAT RUNS IT. The `reclaim` sidecar in boss-dev.yaml fires it hourly
 # (the disk-floor-sweep.timer cadence: above the floor a pass is one
 # log line; below it a pass frees GBs, well ahead of the fill rate).
@@ -194,6 +202,163 @@ WT_TARGETS_REMOVED=0; WT_TARGETS_MIB=0
 FLOOR_WORKTREES_REMOVED=0
 STALE_TARGETS_RECLAIMED=0
 INCREMENTAL_DROPPED=0
+
+# ---------------------------------------------------------------------
+# THE CHECKOUT ITSELF: /work/boss catches up to origin/main.
+# ---------------------------------------------------------------------
+# WHY (backlog 033d1fd3, 2026-09-19). Every pod door — boss-api, the
+# boss shim, wt-cargo, wt-web — is a symlink into THIS checkout's
+# infra/dev, so each runs whatever the checkout last held. Car
+# fix/a-door-refuses-to-answer-from-a-stale-checkout gave each door
+# door-freshness.sh, which turns a stale copy's silently wrong answer
+# into a loud one: a read WARNS and a boss-api write is REFUSED. That
+# is the correctness half. The repair was still a human act — `git -C
+# /work/boss merge --ff-only origin/main` — and the operator session
+# typed it FOUR TIMES on 2026-09-19 alone (session start, 17:05 after
+# the 404, 17:40, 18:00) while trains land roughly every 50 minutes. A
+# warning everyone expects is a warning nobody reads, which is how the
+# class comes back. Mechanical operations belong to the machine
+# (CLAUDE.md §Diagnosis), and this sidecar is the machine already
+# standing in front of this checkout every hour.
+#
+# NO NETWORK, for the same reason the passes below take none: the
+# sidecar mounts only /work and /scratch, so it has no forge credential
+# and an anonymous fetch is `could not read Username` (b50a65ef). It
+# fast-forwards to the refs/remotes/origin/main the checkout ALREADY
+# has — the very ref door-freshness.sh compares against — so the door
+# can call a copy stale only in the window where this pass can repair
+# it, and a checkout nobody has fetched for is one neither of them can
+# judge. The dev container's own sessions keep the ref fresh (worktrees
+# share the object store).
+#
+# WHAT IT MUST NOT DO is move the tree under a running gate: `boss
+# gate` renders its runner manifest from the tree at launch, which is
+# the never-stash-while-a-gate-runs hazard. The quiet is READ FROM THE
+# SYSTEM OF RECORD — an open `gate-run` packet — rather than from a
+# lock file, because the gate-runs are already in the record and a lock
+# file would be a second copy of a fact (CLAUDE.md §9a). Any open
+# gate-run defers the whole pass: the pass runs hourly and a gate takes
+# minutes, so waiting costs an hour and guessing costs a gate. An
+# answer it CANNOT take — no system of record named, the API erroring,
+# a reply with no `.data` — defers too, because a safety check that did
+# not run is not a safety check.
+#
+# THREE MORE THINGS IT REFUSES, each the same line door-freshness.sh
+# draws: a checkout not on `main` (somebody put it on a branch), one
+# that has DIVERGED (a commit of its own is a developer's, never this
+# pass's to rewind), and one with no origin/main at all. And the last
+# lock is git's: `merge --ff-only` refuses rather than overwrite a
+# local edit, and that refusal is a PROBLEM — loud, on stderr and on
+# the packet — because the checkout then stays behind until someone
+# looks. Measured 2026-09-20: /work/boss carried a modified, TRACKED
+# .claude/settings.json, so a "clean tree" precondition would have made
+# this pass a permanent no-op; git's own narrower refusal (only files
+# the merge would overwrite) is the one that keeps it working.
+FF_RESULT=skipped
+FF_TO=""
+FF_REASON=""
+
+# Who this pass reads the system of record as. The same platform-admin
+# shape the maintenance helpers use, under this sidecar's own id: an
+# empty answer from a scope that cannot see gate-runs would read as
+# "quiet" and is exactly the wrong way to be wrong here.
+FF_USER='{"id":"automation:dev-scratch-reclaim","role":"platform-admin","access_tier":"operator","territory_account_ids":[],"direct_report_ids":[],"department":"platform"}'
+
+# Is any gate reading a tree right now? 0 = quiet, 1 = a gate is open,
+# 2 = could not tell — which is not quiet. Sets FF_REASON either way.
+gates_quiet() {
+    local here url api reply rc count
+    here="$(dirname "$(readlink -f "$0")")"
+    url="${BOSS_JOBS_URL:-$(head -n1 "$here/../dev/sor-url" 2>/dev/null || true)}"
+    if [ -z "$url" ]; then
+        FF_REASON="no system of record named (BOSS_JOBS_URL unset, $here/../dev/sor-url absent), so nothing can say whether a gate is running"
+        return 2
+    fi
+    api="$here/../boss-api-curl.sh"
+    [ -x "$api" ] || api=boss-api-curl.sh
+    rc=0
+    reply=$("$api" -fsS -H "x-boss-user: $FF_USER" \
+        "$url/api/jobs?kind=gate-run&status=open&limit=1" 2>/dev/null) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        FF_REASON="the jobs API at $url could not say whether a gate is running (curl exit $rc)"
+        return 2
+    fi
+    count=$(printf '%s' "$reply" | jq '.data | if . == null then error("no .data") else length end' 2>/dev/null) || count=
+    case ${count:-empty} in
+        empty | *[!0-9]*)
+            FF_REASON="the jobs API at $url answered a shape with no .data array — a changed contract, not an empty queue"
+            return 2
+            ;;
+    esac
+    if [ "$count" -gt 0 ]; then
+        FF_REASON="$count open gate-run packet(s) at $url, and a gate renders its runner from a tree"
+        return 1
+    fi
+    return 0
+}
+
+fast_forward_checkout() {
+    local branch head main behind out rc behind_word
+    if [ ! -d "$REPO_DIR/.git" ] && [ ! -f "$REPO_DIR/.git" ]; then
+        log "fast-forward skipped: $REPO_DIR is not a git checkout"
+        FF_RESULT="skipped: not a checkout"
+        return 0
+    fi
+    branch=$(git -C "$REPO_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null) || branch=""
+    if [ "$branch" != main ]; then
+        log "fast-forward skipped: $REPO_DIR is on ${branch:-a detached HEAD}, not main — a checkout somebody moved is theirs to move back"
+        FF_RESULT="skipped: not on main"
+        return 0
+    fi
+    head=$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null) || head=""
+    main=$(git -C "$REPO_DIR" rev-parse --verify -q refs/remotes/origin/main 2>/dev/null) || main=""
+    if [ -z "$head" ] || [ -z "$main" ]; then
+        log "fast-forward skipped: $REPO_DIR has no HEAD or no refs/remotes/origin/main (git fetch origin in the dev container)" >&2
+        FF_RESULT="skipped: no origin/main"
+        return 0
+    fi
+    if [ "$head" = "$main" ]; then
+        FF_RESULT=current
+        return 0
+    fi
+    if ! git -C "$REPO_DIR" merge-base --is-ancestor "$head" "$main" >/dev/null 2>&1; then
+        log "fast-forward skipped: $REPO_DIR at ${head:0:8} has diverged from origin/main ${main:0:8} — a commit of its own is a developer's, never this pass's to rewind"
+        FF_RESULT=diverged
+        return 0
+    fi
+    FF_TO="$main"
+    behind=$(git -C "$REPO_DIR" rev-list --count "$head..$main" 2>/dev/null) || behind=""
+    case ${behind:-empty} in
+        empty | *[!0-9]*) behind=1 ;;
+    esac
+    if [ "$behind" = 1 ]; then behind_word=commit; else behind_word=commits; fi
+
+    rc=0
+    gates_quiet || rc=$?
+    case "$rc" in
+        1)
+            log "fast-forward deferred: $FF_REASON — $REPO_DIR stays ${behind} ${behind_word} behind until the next pass"
+            FF_RESULT="deferred: a gate is running"
+            return 0
+            ;;
+        2)
+            log "fast-forward deferred: $FF_REASON — a safety check that did not run is not a safety check, so the tree stays where it is" >&2
+            FF_RESULT="deferred: the gate check could not be read"
+            return 0
+            ;;
+    esac
+
+    rc=0
+    out=$(git -C "$REPO_DIR" merge --ff-only "$main" 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        log "fast-forward FAILED (git exit $rc) taking $REPO_DIR from ${head:0:8} to ${main:0:8}; the doors keep warning until someone looks. git said: $out" >&2
+        FF_RESULT="failed: exit $rc"
+        problems=$((problems + 1))
+        return 0
+    fi
+    FF_RESULT=ok
+    log "fast-forward: $REPO_DIR moved ${head:0:8} -> ${main:0:8} ($behind $behind_word), so every door symlinked into its infra/dev runs the tree's own copy"
+}
 
 # ---------------------------------------------------------------------
 # WORK + SCRATCH, the 364 GB: worktrees whose branch the forge no
@@ -729,6 +894,7 @@ record_pass() {
         bash "$step" "$RECLAIM_KIND" run \
             "result=$result" "problems=$problems" \
             "worktree_pass=$WT_PASS" "worktree_pass_reason=$WT_PASS_REASON" \
+            "ff_result=$FF_RESULT" "ff_to=$FF_TO" \
             "origin_main_sha=$WT_MAIN_SHA" "origin_main_ref_ts=$WT_MAIN_TS" \
             "worktrees_removed=$WT_REMOVED" "worktrees_removed_mib=$WT_REMOVED_MIB" \
             "worktrees_kept_dirty=$WT_KEPT_DIRTY" "worktrees_kept_dirty_names=$WT_KEPT_DIRTY_NAMES" \
@@ -757,6 +923,7 @@ if [ "${1:-}" = "--cli" ]; then
     exit 0
 fi
 
+fast_forward_checkout
 install_tree_cli
 reclaim_gone_worktrees
 reclaim_work

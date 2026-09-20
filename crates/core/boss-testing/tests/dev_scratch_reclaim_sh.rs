@@ -85,6 +85,19 @@ fn stub_curl(root: &Path) -> PathBuf {
             "    shift\n",
             "done\n",
             "printf '%s %s %s\\n' \"$method\" \"$url\" \"$body\" >> \"$STUB_LOG\"\n",
+            // The fast-forward pass asks ONE question of the system of
+            // record — is a gate reading a tree right now — and a test
+            // decides the answer: none open by default, one open with
+            // STUB_OPEN_GATE, and an API that ANSWERS an error (curl's
+            // 22 under -f) with STUB_GATE_RC.
+            "case \"$url\" in\n",
+            "    *kind=gate-run*)\n",
+            "        if [ -n \"${STUB_GATE_RC:-}\" ]; then exit \"$STUB_GATE_RC\"; fi\n",
+            "        if [ -n \"${STUB_OPEN_GATE:-}\" ]; then\n",
+            "            echo '{\"data\":[{\"id\":\"gate-1\",\"status\":\"open\"}]}'\n",
+            "        else echo '{\"data\":[]}'; fi\n",
+            "        exit 0 ;;\n",
+            "esac\n",
             "case \"$method\" in\n",
             "    POST) touch \"$STUB_LOG.opened\"; echo '{\"id\":\"job-1\"}' ;;\n",
             "    PUT) echo '{}' ;;\n",
@@ -831,5 +844,218 @@ fn a_checkout_without_origin_main_installs_no_cli() {
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("CLI install skipped"),
         "the skip is said out loud, on stderr\n{text}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// THE FAST-FORWARD PASS (backlog 033d1fd3, 2026-09-19).
+//
+// Car fix/a-door-refuses-to-answer-from-a-stale-checkout made every pod
+// door judge its own copy: a read WARNS and a boss-api write is REFUSED
+// when /work/boss is behind origin/main. That is the correctness half.
+// The ergonomics half was still a human act — somebody typing `git -C
+// /work/boss merge --ff-only origin/main` — and the operator session
+// did exactly that FOUR TIMES on 2026-09-19 alone (session start, 17:05
+// after the 404, 17:40, 18:00) while trains land roughly every 50
+// minutes. A warning everybody expects is a warning nobody reads, which
+// is how the class comes back; mechanical operations belong to the
+// machine (CLAUDE.md §Diagnosis).
+//
+// The pass takes NO network: it fast-forwards to the
+// refs/remotes/origin/main the checkout already has, which is the same
+// ref door-freshness.sh compares against — so the door can only call a
+// copy stale in the window where this pass can repair it, and the
+// sidecar's missing forge credential (b50a65ef) never comes into it.
+//
+// THE HAZARD IT MUST NOT CAUSE: `boss gate` renders its runner from the
+// tree at launch, and mutating the tree under a running gate is the
+// never-stash-while-a-gate-runs fault. The quiet is read from the
+// SYSTEM OF RECORD — an open `gate-run` packet — rather than from a
+// lock file, because the gate-runs are already in the record. A reading
+// it cannot take is a DEFER, never a fast-forward taken blind.
+// ---------------------------------------------------------------------
+
+/// The checkout's own HEAD — what the doors run from.
+fn head_sha(repo: &Path) -> String {
+    git(repo, 0, &["rev-parse", "HEAD"])
+}
+
+/// A fixture whose checkout is one train behind origin/main, the shape
+/// the pod is in a few minutes after every merge. The worktree that
+/// carried the commit is one hour old, so the worktree pass keeps it and
+/// the fast-forward is the only thing the run can act on.
+fn behind_by_one(root: &Path) -> Yard {
+    let yard = Yard::new(root);
+    yard.worktree("agent-ahead", Some("feat/ahead"), 1);
+    yard.land("feat/ahead");
+    yard
+}
+
+#[test]
+fn a_checkout_behind_origin_main_is_fast_forwarded_when_no_gate_is_reading_the_tree() {
+    let root = boss_testing::scratch_dir("boss-dsr-ff");
+    let _guard = Scratch(root.clone());
+    let yard = behind_by_one(&root);
+    let main = yard.origin_main();
+    assert_ne!(head_sha(&yard.repo), main, "the fixture starts behind");
+
+    let out = run(&root, &[]);
+    let text = say(&out);
+    assert_eq!(
+        head_sha(&yard.repo),
+        main,
+        "the checkout the doors run from is taken to origin/main\n{text}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("fast-forward") && stdout.contains(&main[..8]),
+        "the pass says what it moved and to which sha\n{text}"
+    );
+    let log = curl_log(&root);
+    assert!(
+        log.contains("kind=gate-run") && log.contains("status=open"),
+        "the quiet is read from the system of record, not from a lock file\n{log}\n{text}"
+    );
+    // A routine fast-forward is maintenance that worked, like the CLI
+    // install beside it: it rides the log, not a packet (David
+    // 2026-09-16 — telemetry lives outside the audit log).
+    assert!(
+        !log.contains("POST"),
+        "a fast-forward that worked files no packet\n{log}\n{text}"
+    );
+    // And the checkout already standing on origin/main is a no-op that
+    // asks the system of record nothing at all.
+    std::fs::remove_file(root.join("curl-log.txt")).expect("reset the curl log");
+    let out = run(&root, &[]);
+    assert!(
+        !curl_log(&root).contains("kind=gate-run"),
+        "a checkout that is already current asks nothing\n{}\n{}",
+        curl_log(&root),
+        say(&out)
+    );
+}
+
+#[test]
+fn an_open_gate_run_defers_the_fast_forward() {
+    let root = boss_testing::scratch_dir("boss-dsr-ff-gate");
+    let _guard = Scratch(root.clone());
+    let yard = behind_by_one(&root);
+    let before = head_sha(&yard.repo);
+
+    let out = run(&root, &[("STUB_OPEN_GATE", "1")]);
+    let text = say(&out);
+    assert_eq!(
+        head_sha(&yard.repo),
+        before,
+        "a gate is reading a tree — the pass must not move one\n{text}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("gate-run"),
+        "and it says which reading held it back\n{text}"
+    );
+    assert!(
+        out.status.success(),
+        "waiting for the next hour is not a fault\n{text}"
+    );
+}
+
+#[test]
+fn a_system_of_record_that_cannot_be_read_defers_the_fast_forward() {
+    let root = boss_testing::scratch_dir("boss-dsr-ff-dark");
+    let _guard = Scratch(root.clone());
+    let yard = behind_by_one(&root);
+    let before = head_sha(&yard.repo);
+
+    // curl exit 22: the API ANSWERED an error. A safety check that did
+    // not run is not a safety check — the tree stays where it is.
+    let out = run(&root, &[("STUB_GATE_RC", "22")]);
+    let text = say(&out);
+    assert_eq!(
+        head_sha(&yard.repo),
+        before,
+        "a fast-forward is never taken on an unread gate check\n{text}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("fast-forward deferred"),
+        "the defer and its reason are loud\n{text}"
+    );
+}
+
+#[test]
+fn a_checkout_that_is_not_plainly_behind_on_main_is_left_alone() {
+    let root = boss_testing::scratch_dir("boss-dsr-ff-diverged");
+    let _guard = Scratch(root.clone());
+    let yard = behind_by_one(&root);
+    // A commit of its own on main: this checkout has diverged, which is
+    // a developer's doing and not a checkout that forgot to pull — the
+    // same line door-freshness.sh draws when it declines to judge.
+    boss_testing::write_file(&yard.repo.join("local.txt"), "mine\n");
+    git(&yard.repo, 0, &["add", "."]);
+    git(&yard.repo, 0, &["commit", "-q", "-m", "local"]);
+    let before = head_sha(&yard.repo);
+
+    let out = run(&root, &[]);
+    let text = say(&out);
+    assert_eq!(
+        head_sha(&yard.repo),
+        before,
+        "a diverged checkout is never rewound or merged\n{text}"
+    );
+    assert!(
+        curl_log(&root).is_empty(),
+        "and the system of record is not asked about a tree that cannot move\n{}\n{text}",
+        curl_log(&root)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("fast-forward skipped")
+            && String::from_utf8_lossy(&out.stdout).contains("diverged"),
+        "the pass names what it found instead\n{text}"
+    );
+}
+
+/// git's own refusal is the last lock, and it is a FINDING: the doors
+/// keep warning until somebody looks, so the pass says so on stderr,
+/// reds the run, and puts the verdict on its packet — never a silent
+/// checkout that quietly stopped catching up.
+#[test]
+fn a_fast_forward_git_refuses_is_loud_and_lands_on_the_packet() {
+    let root = boss_testing::scratch_dir("boss-dsr-ff-refused");
+    let _guard = Scratch(root.clone());
+    let yard = behind_by_one(&root);
+    let before = head_sha(&yard.repo);
+    // A local file the incoming commit also adds: git refuses rather
+    // than overwrite it. (Measured 2026-09-20: /work/boss carries a
+    // modified, tracked .claude/settings.json, so this is the live
+    // shape — and the reason the pass leans on git's narrow refusal
+    // instead of demanding a pristine tree, which would never run.)
+    boss_testing::write_file(&yard.repo.join("work.txt"), "mine, uncommitted\n");
+
+    let out = run(&root, &[]);
+    let text = say(&out);
+    assert_eq!(
+        head_sha(&yard.repo),
+        before,
+        "a refused fast-forward moves nothing\n{text}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "and reds the pass, like every other problem here\n{text}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("fast-forward FAILED")
+            && String::from_utf8_lossy(&out.stderr).contains("work.txt"),
+        "git's complete complaint rides the log — a digest would throw away the only copy\n{text}"
+    );
+    let log = curl_log(&root);
+    let put = log
+        .lines()
+        .find(|l| l.starts_with("PUT "))
+        .unwrap_or_else(|| panic!("the run step is completed\n{log}\n{text}"));
+    assert!(
+        put.contains("\"ff_result\":\"failed: exit")
+            && put.contains(&format!("\"ff_to\":\"{}\"", yard.origin_main()))
+            && put.contains("\"result\":\"incomplete\""),
+        "the packet names the verdict and the sha it could not reach\n{put}\n{text}"
     );
 }

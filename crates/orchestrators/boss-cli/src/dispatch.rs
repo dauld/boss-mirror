@@ -547,6 +547,49 @@ pub(crate) fn cars_for_item_query(item_id: &str) -> String {
 /// only "is this already fixed" question that can be answered without
 /// reading code and guessing at it.
 ///
+/// THE PROMPT IS THE DELIVERABLE, SO A DISCARDED ONE IS A REFUSAL
+/// (backlog d268b260). `boss dispatch <packet> > prompt.txt` is what
+/// you paste; the prompt prints ONCE, to stdout, after the step is
+/// claimed and the run is filed. Send stdout to /dev/null and the claim
+/// and the run survive while the only copy of the thing they exist to
+/// produce does not.
+///
+/// Measured three times, every one by the session that keeps filing
+/// about it: five runs orphaned on 2026-09-19 (`c8703bee`, gate-runs
+/// carrying `agent_run: None`, all five recovered by hand), and twice
+/// more on 2026-09-20 — the second while testing which packets were
+/// already landed, an hour after writing the packet describing the
+/// habit. Recovery is possible (the run id is on stderr) and costs a
+/// re-render plus a hand substitution into the `BOSS_AGENT_RUN=<run id>`
+/// placeholder, per run.
+///
+/// WHY THIS AND NOT "IS STDOUT A TTY". Piping the prompt into another
+/// program is legitimate and a shell with no terminal is legitimate;
+/// the only thing refused is output that is PROVABLY discarded. On
+/// Linux `/proc/self/fd/1` resolves to `/dev/null` exactly then — a
+/// file gets its path, a pipe `pipe:[…]`, a terminal `/dev/pts/N`.
+/// Where /proc is absent (macOS, the workstation) the read fails, this
+/// answers `None`, and nothing changes: a check that cannot see must
+/// not refuse.
+pub(crate) fn discarded_stdout_refusal() -> Option<String> {
+    let target = std::fs::read_link("/proc/self/fd/1").ok()?;
+    stdout_goes_nowhere(&target.to_string_lossy()).then(|| {
+        "stdout is /dev/null, so this dispatch would CLAIM the step, FILE the run, and throw the \
+         prompt away — the prompt is the deliverable, printed once and only here. Refused before \
+         the claim, so nothing is left half-done.\n  \
+         Send it somewhere: `boss dispatch <packet> > prompt.txt`, or drop the redirect to read \
+         it. Five runs were orphaned this way on 2026-09-19 and each needed the brief re-rendered \
+         and its run id substituted by hand (c8703bee)."
+            .to_string()
+    })
+}
+
+/// Is this stdout provably discarded? Split out from the read so the
+/// judgement is testable without a process whose fd 1 is /dev/null.
+pub(crate) fn stdout_goes_nowhere(target: &str) -> bool {
+    target == "/dev/null"
+}
+
 /// The claim is re-read off each row rather than trusted from the
 /// query: a server that ignored `metadata=` would answer the
 /// unfiltered page, and an unnarrowed page must narrow nothing
@@ -647,6 +690,16 @@ pub(crate) async fn dispatch_at(
         && let Some(level) = edit_level_at(http, base).await?
         && let Some(why) = level_refusal(&id[..8], &slug, &level, &paths)
     {
+        bail!("{why}");
+    }
+
+    // THE DISCARDED-PROMPT DOOR (d268b260): before anything is claimed
+    // or filed, refuse a dispatch whose prompt has nowhere to go. It is
+    // first among the pre-claim doors because it costs no read at all —
+    // and because the failure it prevents is the quietest of the three:
+    // the hosting and landed-work doors stop work that should not
+    // happen, this one stops work that WOULD happen and then vanish.
+    if let Some(why) = discarded_stdout_refusal() {
         bail!("{why}");
     }
 
@@ -1437,6 +1490,59 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
+
+    /// THE DISCARDED-PROMPT DOOR (backlog d268b260). `boss dispatch`
+    /// claims a step and files a run, then prints the prompt ONCE.
+    /// Sending stdout to /dev/null keeps the claim and the run and
+    /// loses the deliverable — three times measured, five runs
+    /// orphaned on the worst of them.
+    #[test]
+    fn only_a_provably_discarded_stdout_is_refused() {
+        assert!(stdout_goes_nowhere("/dev/null"));
+
+        // Everything else is a legitimate place for a prompt to go, and
+        // refusing any of them would be worse than the defect: a pipe
+        // into another program, a redirect to a file, a terminal, and
+        // the harness's own capture.
+        //
+        // shared-tmp-ok: these are readlink TARGETS being judged as
+        // strings, not paths this test creates or opens — nothing is
+        // written anywhere, so there is no fixture to collide over.
+        for ok in [
+            "pipe:[8675309]",
+            "/tmp/prompt.txt",
+            "/dev/pts/3",
+            "/dev/stdout",
+            "socket:[4242]",
+            "/home/david/prompts/prompt.txt",
+            // Near misses that are not the device.
+            "/dev/null.txt",
+            "/dev/nullX",
+            "/var/dev/null",
+        ] {
+            assert!(!stdout_goes_nowhere(ok), "{ok} must not be refused");
+        }
+    }
+
+    /// AND IT MUST NOT FIRE HERE. The test harness captures stdout, so
+    /// a check that misread its own fd would refuse every dispatch on
+    /// this machine — the failure mode worse than the one it fixes.
+    #[test]
+    fn the_door_is_silent_when_stdout_is_not_the_null_device() {
+        assert!(
+            discarded_stdout_refusal().is_none(),
+            "the harness's stdout is captured, never /dev/null"
+        );
+    }
+
+    /// A platform without /proc answers None rather than guessing.
+    /// Pinned as the reason the read is `.ok()?` and not an unwrap:
+    /// the workstation is macOS and must keep dispatching.
+    #[test]
+    fn a_missing_proc_entry_refuses_nothing() {
+        assert!(std::fs::read_link("/proc/self/fd/this-does-not-exist").is_err());
+        assert!(discarded_stdout_refusal().is_none());
+    }
     use super::*;
     // An EXPLICIT null says "nothing measured this"; an absent key is
     // a payload that forgot to say, and the API refuses that one.
@@ -1473,7 +1579,7 @@ mod tests {
     fn the_step_edge_is_the_link_the_delivery_rule_follows() {
         assert_eq!(
             executing_run_patch("5b1d2c3e-0000-4000-8000-000000000001"),
-            json!({ "agent_run": "5b1d2c3e-0000-4000-8000-000000000001" }),
+            json!({ crate::gate::AGENT_RUN_KEY: "5b1d2c3e-0000-4000-8000-000000000001" }),
             "the same key the gate stamps on a gate-run"
         );
 
@@ -1486,10 +1592,14 @@ mod tests {
             .as_table()
             .expect("the rule's do carries args");
         // The args are expressions, so a string literal is quoted
-        // inside the TOML string — `"\"agent_run\""`.
+        // inside the TOML string — `"\"agent_run\""`. Built from the
+        // CONST, not spelled out (backlog 1783c6dd): the rule file is
+        // DATA and does not move when the const is renamed, so a pin
+        // against a literal would keep agreeing with a rule that
+        // follows a key nothing writes any more.
         assert_eq!(
             args["link"].as_str(),
-            Some("\"agent_run\""),
+            Some(format!("\"{}\"", crate::gate::AGENT_RUN_KEY).as_str()),
             "the rule follows the key dispatch writes"
         );
         assert_eq!(

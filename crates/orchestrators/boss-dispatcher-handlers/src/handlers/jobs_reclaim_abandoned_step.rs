@@ -843,9 +843,24 @@ mod tests {
     /// reader is a journal. Parsed through the registry's own parser,
     /// the one the seed publishes with, rather than a second reading of
     /// the file. The `link` VALUE is the key `boss dispatch` stamps on
-    /// the step it claims (dd6d44b7); its anchor to that crate's const
-    /// is pinned where the const lives, and this holds the rule and the
-    /// handler together at this end.
+    /// the step it claims (dd6d44b7), and it is asserted against the
+    /// CORE CONST rather than a literal (backlog 1783c6dd).
+    ///
+    /// WHY THAT MATTERS, AND WHY A LITERAL LOOKED FINE. Production
+    /// already reads `boss_jobs::agent_runs::EDGE_KEY` everywhere; it
+    /// was only the pins that spelled the key out. Rename the const and
+    /// the Rust side moves with it, so every test comparing produced
+    /// JSON to produced JSON still agrees — but the RULE FILE is data
+    /// and does not move, and a pin that compares the file to a LITERAL
+    /// agrees with it. The rename would land green with the rule
+    /// following a key nothing writes any more, which is the silent
+    /// half of CLAUDE.md 9a: three copies, each held to a different
+    /// anchor, so no single test can see them disagree.
+    ///
+    /// The crate boundary the original builder hit is gone — this crate
+    /// depends on `boss-jobs` — so the triangle closes here rather than
+    /// needing an equality test between two rule files, which would
+    /// have been a fourth anchor rather than one.
     #[test]
     fn the_shipped_rule_carries_the_args_this_handler_reads() {
         const RULE: &str = "an-abandoned-step-is-reclaimed-when-its-run-died";
@@ -868,7 +883,7 @@ mod tests {
             ("run_kind", "agent-run"),
             ("run_step", "building"),
             ("dead_result", "died"),
-            ("link", "agent_run"),
+            ("link", boss_jobs::agent_runs::EDGE_KEY),
             ("after_hours", "2"),
         ] {
             assert_eq!(

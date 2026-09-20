@@ -766,7 +766,16 @@ a door that stops being true is a defect worth a car.
   (exit 78), because what a write lands in the log is immutable while
   a read's warning rides beside its answer. Only a checkout that has
   not pulled is judged stale — a branch, or a door being edited, is
-  silent — and `BOSS_DOOR_FRESHNESS=off` runs anything anyway. The pod's
+  silent — and `BOSS_DOOR_FRESHNESS=off` runs anything anyway. **That
+  fast-forward is the machine's now** (backlog 033d1fd3): the dev pod's
+  reclaim sidecar takes the checkout to the origin/main it has already
+  fetched on every hourly pass, and defers while any `gate-run` packet
+  is open, because a gate renders its runner from a tree. The operator
+  typed that command by hand four times on 2026-09-19, and a warning
+  fired four times a day is a warning nobody reads. A warning you still
+  see means the hour has not turned yet, a gate is running, or the
+  merge was refused — and a refusal is loud, on the sidecar's own
+  packet. The pod's
   system-of-record spelling is `infra/dev/sor-url`, which both
   `boss-api` and the shim read — WRITTEN from the one tree source,
   `infra/estate/estate.toml`, and held equal to it by a test (since
