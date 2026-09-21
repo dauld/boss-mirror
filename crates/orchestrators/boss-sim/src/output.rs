@@ -700,7 +700,7 @@ pub mod live {
         /// regen path (`--drain-pause-ms <N>`) to give the async
         /// dispatcher rule handlers time to drain their NATS queue
         /// between sim-days. Without it the sim emits 365 days of
-        /// step.done.<kind> events in ~3 wall-min while the
+        /// `step.done.<kind>` events in ~3 wall-min while the
         /// dispatcher processes them async, creating a race that
         /// surfaces as 30-sim-days-later 404s on PUT /paid against
         /// invoices the dispatcher hasn't created yet.

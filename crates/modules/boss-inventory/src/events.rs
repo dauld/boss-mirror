@@ -61,6 +61,7 @@ pub const ITEM_CONSUMED: &str = "inventory.item.consumed";
 /// arm for `finance.inventory.received`, so the rebuilt fact drives
 /// zero journal lines. The matching DR-1300 rides the idempotent
 /// bill-approval path; posting from here would double-post it. Payload:
+/// ```text
 ///   {
 ///     "source_id":        "{step_id}:{part_sku}",  // dedup-fact source_id
 ///     "part_sku":         "<sku>",
@@ -68,6 +69,7 @@ pub const ITEM_CONSUMED: &str = "inventory.item.consumed";
 ///     "unit_cost_cents":  <cost or null>,
 ///     "received_on":      "YYYY-MM-DD"              // dedup-fact happened_on
 ///   }
+/// ```
 pub const ITEM_RECEIVED: &str = "inventory.item.received";
 
 /// Inventory cost-transfer event, fires alongside ITEM_CONSUMED
@@ -77,6 +79,7 @@ pub const ITEM_RECEIVED: &str = "inventory.item.received";
 /// financial_facts from audit_log alone (matching the in-tx
 /// insert_fact path `consume_part_at` uses on the live path).
 /// Payload:
+/// ```text
 ///   {
 ///     "total_cost_cents":  qty * avg_cost,
 ///     "debit_account":     "1310",
@@ -86,6 +89,7 @@ pub const ITEM_RECEIVED: &str = "inventory.item.received";
 ///     "qty":               <qty>,
 ///     "unit_cost_cents":   <avg_cost>
 ///   }
+/// ```
 pub const INVENTORY_TRANSFERRED: &str = "inventory.transferred";
 
 /// Burden absorption marker — a production-overhead driver capitalized

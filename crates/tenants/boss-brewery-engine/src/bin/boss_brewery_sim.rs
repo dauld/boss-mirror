@@ -1710,7 +1710,7 @@ async fn advance_one_tick(
 /// End-of-sim-day rollup — drains the engine's per-day bus +
 /// flushes the per-day SimOutput buffer. Companion to
 /// [`advance_one_tick`]. The output is the long-lived
-/// process-scoped Arc<Mutex<LiveApiOutput>> so the per-day
+/// process-scoped `Arc<Mutex<LiveApiOutput>>` so the per-day
 /// `day_*` buffers populated across this sim-day's ticks
 /// actually flush here instead of getting silently dropped at
 /// the close of each per-tick spawn_blocking closure.

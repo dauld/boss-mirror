@@ -98,7 +98,7 @@ pub(crate) const COMPILED_CONSIST_FILES_NAMED: usize = 6;
 
 /// Character budget for the file list in a conflict skip reason. The
 /// reason lands on the car Job's `metadata.skip_reason`, which the
-/// yard's PacketCard renders as a chip ("LEFT BEHIND — <reason>") — past
+/// yard's PacketCard renders as a chip ("LEFT BEHIND — `<reason>`") — past
 /// this budget the list truncates to a count.
 pub(crate) const COMPILED_SKIP_REASON_FILE_BUDGET: usize = 96;
 

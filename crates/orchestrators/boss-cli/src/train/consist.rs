@@ -144,7 +144,7 @@ pub(crate) fn files_named_in(output: &str, budget: usize) -> Vec<String> {
 /// renders and the line the operator greps must never tell different
 /// stories (the rule `skip_reason_conflict` already follows, down to
 /// the file budget: this lands on `metadata.skip_reason`, which
-/// PacketCard renders as "LEFT BEHIND — <reason>", so the reason does
+/// PacketCard renders as "LEFT BEHIND — `<reason>`", so the reason does
 /// not repeat the words the chip already says).
 ///
 /// The last clause is the point of the whole car. A car that reads

@@ -31,8 +31,8 @@
 //! COVERS (the charges it sweeps to the bank) are a further paged
 //! read (`GET /v1/balance_transactions?payout=<id>`) and not this car.
 //!
-//! WHAT THE PACKET SAYS. `describe` titles it "Payout: <amount> <CUR>
-//! arriving <date>" and carries `amount_cents`, `currency`,
+//! WHAT THE PACKET SAYS. `describe` titles it "Payout: `<amount>` `<CUR>`
+//! arriving `<date>`" and carries `amount_cents`, `currency`,
 //! `arrival_date`, `stripe_payout_id`; the handler adds `sensor_id`
 //! and `sensor_source`. The workflow it opens (`receive-a-payout`) is
 //! the tenant's to declare; a sensor row naming a kind that is not

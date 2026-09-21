@@ -62,6 +62,16 @@ kind = "task"
 ready_when = "steps.triage.done AND steps.triage.metadata.disposition = \"verify\""
 title_template = "Re-measure the claim"
 authority_role = "platform-admin"
+# THE SAME DISPOSITION THE BUILD STEP CARRIES, and for the same reason
+# (backlog 2802ba8c). `build` has declared this since a build that
+# REFUTES its packet gained a way out. `measure` never did, so a
+# re-measurement that DISPROVED the claim had exactly one exit — the
+# `closed` terminal, which says the work was completed. A measurement
+# is the step most likely to disprove the thing that prompted it, and
+# it was the one step that could not say so.
+fields = [
+  { name = "disposition", field_type = "stale|duplicate|decline", required = false },
+]
 
 # THE DESIGN ROUTE OPENS THE DRAFT FIRST (backlog f90ca046, 2026-09-18)
 # — the same shape as user-feedback's, and for the same measured
@@ -200,7 +210,7 @@ kind = "outcome"
 # time: a Pending step is skipped only when EVERY step it references is
 # terminal, the same mechanism af28e250 used to keep `build` alive
 # across the review.
-ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"duplicate\") OR (steps.build.done AND steps.build.metadata.disposition = \"duplicate\")"
+ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"duplicate\") OR (steps.build.done AND steps.build.metadata.disposition = \"duplicate\") OR (steps.measure.done AND steps.measure.metadata.disposition = \"duplicate\")"
 title_template = "Closed as a duplicate"
 metadata_defaults = { outcome_kind = "withdrawn" }
 terminal = { outcome = "duplicate" }
@@ -208,7 +218,7 @@ terminal = { outcome = "duplicate" }
 [[workflow.step]]
 title = "stale"
 kind = "outcome"
-ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"stale\") OR (steps.build.done AND steps.build.metadata.disposition = \"stale\")"
+ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"stale\") OR (steps.build.done AND steps.build.metadata.disposition = \"stale\") OR (steps.measure.done AND steps.measure.metadata.disposition = \"stale\")"
 title_template = "Closed \u2014 the claim no longer holds"
 metadata_defaults = { outcome_kind = "withdrawn" }
 terminal = { outcome = "stale" }
@@ -216,7 +226,7 @@ terminal = { outcome = "stale" }
 [[workflow.step]]
 title = "declined"
 kind = "outcome"
-ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"decline\") OR (steps.design-review.done AND steps.design-review.metadata.verdict = \"declined\") OR (steps.build.done AND steps.build.metadata.disposition = \"decline\")"
+ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"decline\") OR (steps.measure.done AND steps.measure.metadata.disposition = \"decline\") OR (steps.design-review.done AND steps.design-review.metadata.verdict = \"declined\") OR (steps.build.done AND steps.build.metadata.disposition = \"decline\")"
 title_template = "Closed without action"
 metadata_defaults = { outcome_kind = "aborted" }
 terminal = { outcome = "declined" }
@@ -252,7 +262,7 @@ kind = "outcome"
 # open. A build that built carries no disposition at all, which is
 # Absent, false against every literal, so `NOT (false OR false OR
 # false)` is true and the ordinary path is unchanged.
-ready_when = "steps.measure.done OR (steps.build.done AND NOT (steps.build.metadata.disposition = \"stale\" OR steps.build.metadata.disposition = \"duplicate\" OR steps.build.metadata.disposition = \"decline\")) OR (steps.design-review.done AND NOT (steps.design-review.metadata.verdict = \"approved\" OR steps.design-review.metadata.verdict = \"declined\"))"
+ready_when = "(steps.measure.done AND NOT (steps.measure.metadata.disposition = \"stale\" OR steps.measure.metadata.disposition = \"duplicate\" OR steps.measure.metadata.disposition = \"decline\")) OR (steps.build.done AND NOT (steps.build.metadata.disposition = \"stale\" OR steps.build.metadata.disposition = \"duplicate\" OR steps.build.metadata.disposition = \"decline\")) OR (steps.design-review.done AND NOT (steps.design-review.metadata.verdict = \"approved\" OR steps.design-review.metadata.verdict = \"declined\"))"
 title_template = "Backlog item closed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }

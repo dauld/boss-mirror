@@ -14,7 +14,7 @@
 //!
 //! Exposed endpoints:
 //!
-//! - `GET  /api/assets/assets/{id}/parts` — merged Vec<Part>
+//! - `GET  /api/assets/assets/{id}/parts` — merged `Vec<Part>`
 //! - `GET  /api/assets/assets/{id}/software-config` — single row or 404
 //! - `POST /api/assets/assets/{id}/software-config` — upsert (sim)
 //! - `GET  /api/assets/assets/{id}/accessories` — installed accessories

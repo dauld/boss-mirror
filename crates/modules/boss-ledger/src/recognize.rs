@@ -2,7 +2,7 @@
 //!
 //! Reads `revenue_schedules` rows whose `next_recognition_date` is due,
 //! emits a `finance.revenue.recognized` fact per period (RuleSet v2 then
-//! posts the corresponding journal entry: DR 2200 / CR <revenue-account>),
+//! posts the corresponding journal entry: DR 2200 / CR `<revenue-account>`),
 //! advances the cursor, and flips the status to `closed` once the
 //! schedule is fully recognized.
 //!

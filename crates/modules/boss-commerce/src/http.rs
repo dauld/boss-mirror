@@ -59,7 +59,7 @@ pub struct CommerceApiState<R: CommerceRepository> {
     pub commerce: Arc<R>,
     pub publisher: Option<DomainPublisher>,
     /// Cross-service guard for validating account_id at write time.
-    /// Wrapped in Arc<dyn> so the production binary plugs in
+    /// Wrapped in `Arc<dyn>` so the production binary plugs in
     /// `ReqwestPeopleClient` and tests can substitute a fake.
     pub people_client: Arc<dyn PeopleClient>,
     /// Row-level authorization. Null in tests that don't exercise

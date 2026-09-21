@@ -27,8 +27,8 @@
 //!
 //! THE ROW PROJECTS A FACT IN THE LOG (backlog dbdc4d31, 2026-09-19).
 //! Until this car the row was the only record: no audit_log event said
-//! "this database was published from <boss_commit> by <actor>, taking
-//! <registries>", and a publish that wrote N registry rows plus a
+//! "this database was published from `<boss_commit>` by `<actor>`, taking
+//! `<registries>`", and a publish that wrote N registry rows plus a
 //! stamp left nothing in the system of record for a rebuilder to see.
 //! Now every stamp stages ONE `tenant.published` event — payload = the
 //! stamp's columns, `_actor` = the actor it names — on the

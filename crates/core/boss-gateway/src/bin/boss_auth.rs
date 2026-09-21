@@ -13,6 +13,7 @@
 //! `/var/lib/boss/auth/credentials.toml` by default.
 //!
 //! Subcommands:
+//! ```text
 //!   add    <email>          — prompt for password, hash, write.
 //!                              Fails if the email already exists.
 //!   set    <email>          — same as add but upserts.
@@ -21,6 +22,7 @@
 //!   verify <email>          — prompt for password, exit 0 on
 //!                              match, 1 on failure. Useful for
 //!                              shell-script smoke tests.
+//! ```
 //!
 //! Password input reads from stdin; if stdin is a TTY a hidden
 //! prompt is used, otherwise the first line of stdin is read raw

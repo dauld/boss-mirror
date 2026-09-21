@@ -425,6 +425,7 @@ pub struct DnsRecord {
 /// The Cloudflare v4 API surface the tunnel rotation needs, measured
 /// from cloudflared's own client (`cfapi/tunnel.go`, master 2026-09-16)
 /// and the zone/DNS calls `boss-tls.yaml` already makes:
+/// ```text
 ///   GET    /zones?name=<zone>                                  — zone id + account id
 ///   GET    /accounts/{a}/cfd_tunnel?name=<n>&is_deleted=false  — ledger by name
 ///   GET    /accounts/{a}/cfd_tunnel?is_deleted=false            — the whole ledger
@@ -433,6 +434,7 @@ pub struct DnsRecord {
 ///   DELETE /accounts/{a}/cfd_tunnel/{id}                       — refuses under live conns
 ///   GET    /zones/{z}/dns_records?type=CNAME&name=<fqdn>
 ///   POST   /zones/{z}/dns_records / PATCH /zones/{z}/dns_records/{id}
+/// ```
 /// The tunnel secret is generated CLIENT-SIDE (32 random bytes,
 /// base64) exactly as `cloudflared tunnel create` does, so the
 /// credentials file can be built from what the handler already holds

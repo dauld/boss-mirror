@@ -226,7 +226,7 @@ fn held_greens(gate_runs: &[Value], car_branches: &BTreeSet<String>) -> Vec<(Str
 ///
 /// A TROUBLED PACKET MUST LOOK TROUBLED (CLAUDE.md §Diagnosis; 76d41004).
 /// This verb used to list every queued run in one lane as "since
-/// <stamp>", so a run whose waiter had been dead for ten minutes —
+/// `<stamp>`", so a run whose waiter had been dead for ten minutes —
 /// with no Job, and nothing left that would ever launch it — rendered
 /// exactly like a run two minutes from its slot. Measured 2026-09-10
 /// 22:41–22:51Z; the yard's queued lane still reads the same way.

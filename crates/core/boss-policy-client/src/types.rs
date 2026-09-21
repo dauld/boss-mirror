@@ -213,7 +213,7 @@ pub enum Scope {
 
 impl Scope {
     /// Serialize to the DB `scope` column format.
-    /// 'none' | 'self' | 'territory' | 'team' | 'department:<name>' | 'all'
+    /// 'none' | 'self' | 'territory' | 'team' | '`department:<name>`' | 'all'
     pub fn to_db_string(&self) -> String {
         match self {
             Self::None => "none".to_string(),

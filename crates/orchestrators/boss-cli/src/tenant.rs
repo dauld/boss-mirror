@@ -1728,7 +1728,7 @@ pub enum TenantAction {
     Init {
         /// The tenant_id: lowercase letters, digits and hyphens.
         name: String,
-        /// Directory to write into (default: ./<name>).
+        /// Directory to write into (default: `./<name>`).
         #[arg(long)]
         into: Option<PathBuf>,
     },

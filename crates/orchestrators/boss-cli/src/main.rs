@@ -138,7 +138,7 @@ enum Commands {
     Ops {
         /// Estate node id the request is for (forge, boss-gcp).
         host: String,
-        /// A verb name — a file infra/ops/verbs/<verb>.json.
+        /// A verb name — a file `infra/ops/verbs/<verb>.json`.
         verb: String,
         /// Positional args, one per param the verb declares.
         args: Vec<String>,
@@ -163,7 +163,7 @@ enum Commands {
     Gate {
         /// Branch to gate.
         branch: String,
-        /// Gate mode: "auto" (or "--auto"), or "-p <crate>". Empty = full.
+        /// Gate mode: "auto" (or "--auto"), or "-p `<crate>`". Empty = full.
         ///
         /// Checked before the cluster is touched — an unknown mode is a
         /// refusal here, not a red gate forty minutes from now.
@@ -441,7 +441,7 @@ enum Commands {
         /// run — dispatch the packet the prompt names with the prompt as
         /// its brief (the run section comes back on stdout as the
         /// tool's updatedInput), link a run the prompt already carries,
-        /// or count an untracked run. <PACKET> is then the work-session
+        /// or count an untracked run. `<PACKET>` is then the work-session
         /// packet the run belongs to, or `-` for none.
         #[arg(long)]
         from_hook: bool,
@@ -478,7 +478,7 @@ enum Commands {
         #[arg(long, conflicts_with = "report")]
         effort: Option<String>,
         /// The other end of the run: record the builder's handback on
-        /// the run named by <PACKET>, complete its `reported` step when
+        /// the run named by `<PACKET>`, complete its `reported` step when
         /// the green has opened it, and write the finish to agent_runs.
         #[arg(long, requires = "summary")]
         report: bool,
@@ -1078,7 +1078,7 @@ enum WorkflowAction {
         kind: String,
         /// The spec to publish: a JSON file, a workflow bundle file
         /// (`*.toml`), a single kind file
-        /// (infra/platform/workflows/<kind>.toml), or the bundle
+        /// (`infra/platform/workflows/<kind>.toml`), or the bundle
         /// directory itself (infra/platform/workflows) — the `kind`
         /// row is taken from it, one definition for seed and publish.
         spec: std::path::PathBuf,

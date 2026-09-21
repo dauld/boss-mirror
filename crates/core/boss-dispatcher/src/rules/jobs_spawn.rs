@@ -16,7 +16,7 @@
 //!
 //! Required args: `kind`, `subject_kind`, `subject`.
 //! Optional args: `title` (defaults to "Auto-spawn from rule
-//! <rule-name>"), `priority` (defaults to "normal"),
+//! `<rule-name>`"), `priority` (defaults to "normal"),
 //! `parent_step_id` (the delegate-subjob parent — D7).
 //!
 //! ## Delegate-subjob linkage (D7)

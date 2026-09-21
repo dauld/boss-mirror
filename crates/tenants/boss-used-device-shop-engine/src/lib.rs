@@ -6,7 +6,7 @@
 //! pool, and drives the day-loop via
 //! `boss_sim::engines::run_ticks_with_handlers`. Side-effect
 //! dispatch lives in the boss-dispatcher daemon's rule registry; the
-//! engine just emits step.done.<kind> via PUT to jobs-api which the
+//! engine just emits `step.done.<kind>` via PUT to jobs-api which the
 //! dispatcher routes.
 //!
 //! Two entry points mirror brewery-engine's public surface:

@@ -6,7 +6,7 @@
 //! stored flag, which drifts the instant main moves or a co-boarder
 //! parks (the fact-that-lives-twice trap, §9a). THE HONEST SHAPE is
 //! the gate receipt's own discipline: a SHA-ANCHORED projection —
-//! "clean as of main@<sha>, parked-set <hash>, checked at T" — that
+//! "clean as of `main@<sha>`, parked-set `<hash>`, checked at T" — that
 //! reads STALE rather than wrong when its inputs move, recomputed on
 //! the conductor's reconcile tick where the clone and the git op
 //! already live.
