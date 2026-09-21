@@ -244,19 +244,60 @@ impl Handler for GateResolve {
         }
         let outcome = self.outcome_for(&ev).await?;
 
-        // PATCH-on-PUT replaces top-level `metadata` wholesale, so carry the
-        // gate's existing metadata forward and add the computed outcome —
-        // the Workflow's fork predicate reads `metadata.outcome`.
-        let mut md = ev.metadata.clone();
-        md.insert("outcome".to_string(), json!(outcome));
-
-        let url = format!(
+        // TWO CALLS, AND THE ORDER IS THE POINT (backlog c30a510e,
+        // design 93d2bddb's `shape` resolution).
+        //
+        // This used to build the step body as `ev.metadata.clone()` plus
+        // `outcome` and PUT it, and the step PUT replaces top-level
+        // `metadata` WHOLESALE. So it wrote the EVENT's snapshot over
+        // whatever the step held at PUT time: any key written between the
+        // event firing and this handler's write was silently erased —
+        // including keys this handler has never heard of. A caller cannot
+        // defend against that by remembering to include a key, because it
+        // does not know which keys exist. Three carve-outs had already
+        // accreted in the PUT for exactly this reason (authority_role
+        // frozen, human_only and agent_run carried), each after an
+        // incident, and the design chose to REMOVE the class rather than
+        // keep enumerating it — an enumerated class costs a core change
+        // per incident forever, a removed one costs a change and then
+        // none.
+        //
+        // So: PATCH the one fact this handler owns, then set the status.
+        // The metadata door MERGES and cannot touch status or assignee;
+        // the PUT carries no metadata at all, and the step PUT's own
+        // overlay semantics keep every other field intact.
+        //
+        // METADATA FIRST, because the step API refuses a metadata write to
+        // a COMPLETED step — completing first would make the outcome
+        // unwritable, and the Workflow's fork predicate reads
+        // `metadata.outcome`.
+        let step_url = format!(
             "{}/api/jobs/{}/steps/{}",
             self.jobs_base.trim_end_matches('/'),
             ev.job_id,
             ev.step_id,
         );
-        let body = json!({ "status": "completed", "metadata": md });
+        let patch_url = format!("{step_url}/metadata");
+        let patch = self
+            .client
+            .patch(&patch_url)
+            .header("content-type", "application/json")
+            .header("x-boss-user", dispatcher_actor_header(&ctx.rule_name))
+            .header("x-sim-origin", sim_origin_value())
+            .json(&json!({ "outcome": outcome }))
+            .send()
+            .await
+            .map_err(|e| HandlerError::Downstream(format!("PATCH {patch_url}: {e}")))?;
+        if !patch.status().is_success() {
+            let status = patch.status();
+            let text = patch.text().await.unwrap_or_default();
+            return Err(HandlerError::Downstream(format!(
+                "PATCH {patch_url} returned {status}: {text}"
+            )));
+        }
+
+        let url = step_url;
+        let body = json!({ "status": "completed" });
         let resp = self
             .client
             .put(&url)
@@ -454,10 +495,15 @@ mod tests {
         std::sync::Arc<std::sync::Mutex<Option<JsonValue>>>,
     ) {
         use axum::extract::Path;
-        use axum::{Json, Router, routing::get, routing::put};
+        use axum::{Json, Router, routing::get, routing::patch, routing::put};
 
+        // BOTH calls are captured, under one lock, as `{put, patch}` —
+        // the handler now writes the outcome through the merging door
+        // and the status through the step PUT, and a test that watched
+        // only one of them could not tell a merge from a repaint.
         let captured: std::sync::Arc<std::sync::Mutex<Option<JsonValue>>> = Default::default();
         let cap = captured.clone();
+        let cap_patch = captured.clone();
 
         let jobs = Router::new()
             .route(
@@ -477,7 +523,26 @@ mod tests {
                           Json(body): Json<JsonValue>| {
                         let cap = cap.clone();
                         async move {
-                            *cap.lock().unwrap() = Some(body);
+                            let mut slot = cap.lock().unwrap();
+                            let mut seen = slot.take().unwrap_or_else(|| json!({}));
+                            seen["put"] = body;
+                            *slot = Some(seen);
+                            Json(json!({ "ok": true }))
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/api/jobs/{id}/steps/{step_id}/metadata",
+                patch(
+                    move |Path((_id, _sid)): Path<(String, String)>,
+                          Json(body): Json<JsonValue>| {
+                        let cap = cap_patch.clone();
+                        async move {
+                            let mut slot = cap.lock().unwrap();
+                            let mut seen = slot.take().unwrap_or_else(|| json!({}));
+                            seen["patch"] = body;
+                            *slot = Some(seen);
                             Json(json!({ "ok": true }))
                         }
                     },
@@ -539,14 +604,70 @@ mod tests {
     /// demand, instead of double-brewing through the lag.
     #[tokio::test]
     async fn in_flight_yield_pushes_gate_to_oversupply() {
-        let (jobs, products, captured) = stub_servers("morning-brew-stout", 7, 1000).await;
+        let body = run_gate(7, 1000).await;
+        assert_eq!(body["put"]["status"], "completed");
+        assert_eq!(body["patch"]["outcome"], "oversupply");
+    }
+
+    /// The tenant fixture, spelled ONCE.
+    ///
+    /// Each of the three cases below used to name the demo workflow and
+    /// its payload itself, so the tenant's vocabulary appeared six times
+    /// in a tier that ratchets it (`no-tenant-vocabulary-above-its-tier`,
+    /// baseline never raised). Adding a case therefore cost two more
+    /// words. Through here it costs none, and the cases read as what
+    /// they vary — the open count and the stock — instead of repeating
+    /// what they do not.
+    async fn run_gate(open_count: i64, on_hand: i64) -> JsonValue {
+        let (jobs, products, captured) =
+            stub_servers("morning-brew-stout", open_count, on_hand).await;
         let h = GateResolve::new(jobs, products, reg());
         h.invoke(&[], &ctx_for(stout_gate_payload()))
             .await
             .expect("invoke succeeds");
-        let body = captured.lock().unwrap().clone().expect("PUT fired");
-        assert_eq!(body["status"], "completed");
-        assert_eq!(body["metadata"]["outcome"], "oversupply");
+        let body = captured.lock().unwrap().clone();
+        body.expect("the handler wrote")
+    }
+
+    /// THE DEFECT ITSELF: the handler must not write the event's
+    /// snapshot of the step's metadata.
+    ///
+    /// It used to build the body as `ev.metadata.clone()` plus
+    /// `outcome` and PUT it, and the step PUT replaces top-level
+    /// `metadata` wholesale — so any key written to the step between
+    /// the event firing and this write was erased, including keys the
+    /// handler has never heard of (backlog c30a510e). A caller cannot
+    /// defend against that by remembering to include a key, because it
+    /// does not know which keys exist.
+    ///
+    /// The assertion is on what the handler SENDS, which is the only
+    /// thing it controls: the outcome goes through the merging door
+    /// carrying nothing else, and the PUT carries no `metadata` key at
+    /// all. A PUT with no metadata cannot overwrite metadata, whatever
+    /// the step happens to hold by then.
+    #[tokio::test]
+    async fn the_write_carries_the_outcome_alone_and_never_the_events_snapshot() {
+        let body = run_gate(7, 1000).await;
+
+        // The status write carries NO metadata — this is the property
+        // that makes the erasure impossible rather than unlikely.
+        assert!(
+            body["put"].get("metadata").is_none(),
+            "the status PUT must send no metadata at all: {}",
+            body["put"]
+        );
+        assert_eq!(body["put"]["status"], "completed");
+
+        // And the merge carries exactly one key: the fact this handler
+        // owns. Anything else here would be the snapshot returning by
+        // another route.
+        let patched = body["patch"].as_object().expect("a patch body");
+        assert_eq!(
+            patched.keys().collect::<Vec<_>>(),
+            vec!["outcome"],
+            "the merge writes only the outcome: {:?}",
+            patched
+        );
     }
 
     /// Mirror case — same real on-hand (1000), but only this Job is
@@ -557,12 +678,7 @@ mod tests {
     /// starved Stout to zero. The pipeline credit fixes it.
     #[tokio::test]
     async fn zero_in_flight_same_on_hand_brews() {
-        let (jobs, products, captured) = stub_servers("morning-brew-stout", 1, 1000).await;
-        let h = GateResolve::new(jobs, products, reg());
-        h.invoke(&[], &ctx_for(stout_gate_payload()))
-            .await
-            .expect("invoke succeeds");
-        let body = captured.lock().unwrap().clone().expect("PUT fired");
-        assert_eq!(body["metadata"]["outcome"], "brew");
+        let body = run_gate(1, 1000).await;
+        assert_eq!(body["patch"]["outcome"], "brew");
     }
 }

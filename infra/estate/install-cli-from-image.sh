@@ -290,7 +290,36 @@ refuse_http() { # <what> <url> <code> <curl-rc> <body-file> <hint>
 }
 
 # sha256 of a file, as "sha256:<hex>" — the digest form the manifest uses.
-digest_of() { printf 'sha256:%s\n' "$(sha256sum "$1" | cut -d' ' -f1)"; }
+#
+# NO BYTES IS NOT A MISMATCH (backlog 112b1d87). This used to hash its
+# argument unconditionally, and `sha256sum` on a file that is not there
+# writes its complaint to stderr and nothing to stdout — so the caller
+# got `sha256:`, an EMPTY digest, and compared it against the manifest.
+# Measured 2026-09-20: a layer fetch answered HTTP 200 with rc 0 and
+# produced no file (`layer.blob: No such file or directory`), and the
+# run refused with "blob digest mismatch … the bytes fetched hash to
+# sha256:". A mismatch reads as corruption or a tampered registry and
+# sends its reader to the wrong investigation; the condition was in
+# fact transient, and the identical call installed cleanly two minutes
+# later.
+#
+# The check lives HERE rather than at the two call sites because both
+# have the same shape one fetch apart, and a guard written twice is one
+# a third caller will not know about (§9a). The existing HTTP check
+# stays: it asks whether the fetch was reported to succeed, and this
+# asks whether an artefact exists — the distinction between an answer
+# and an effect.
+digest_of() {
+    if [ ! -e "$1" ]; then
+        echo "$NAME: no file at $1 — the fetch reported success and created nothing" >&2
+        return 3
+    fi
+    if [ ! -s "$1" ]; then
+        echo "$NAME: $1 holds 0 bytes — the fetch reported success and wrote an empty body" >&2
+        return 3
+    fi
+    printf 'sha256:%s\n' "$(sha256sum "$1" | cut -d' ' -f1)"
+}
 
 # --- the generation ---------------------------------------------------------
 # What `current` names before this run touches anything: the revert
@@ -380,7 +409,8 @@ else
             code="$(http_get "$durl" "$pull/manifest.json" "$pull/manifest.hdr" 'application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json')"; rc=$?
             [ "$rc" -eq 0 ] && [ "$code" = 200 ] \
                 || refuse_http "the $PLATFORM manifest of $IMAGE could not be fetched" "$durl" "$code" "$rc" "$pull/manifest.json" "the index at $murl named it"
-            got="$(digest_of "$pull/manifest.json")"
+            got="$(digest_of "$pull/manifest.json")" \
+                || refuse "not yet: the $PLATFORM manifest of $IMAGE arrived with no bytes" "$durl answered HTTP $code and left nothing to hash, so this is not a digest mismatch — no bytes arrived. The condition is usually transient; retry before investigating the registry."
             [ "$got" = "$mdigest" ] \
                 || refuse "refused: manifest digest mismatch for $IMAGE" "the index at $murl names $mdigest for the $PLATFORM manifest and the bytes fetched from $durl hash to $got; nothing from this image is trusted."
             ;;
@@ -411,7 +441,8 @@ else
         code="$(http_get "$burl" "$blob" "$pull/layer.hdr")"; rc=$?
         [ "$rc" -eq 0 ] && [ "$code" = 200 ] \
             || refuse_http "layer $i of $IMAGE ($lsize bytes) could not be fetched" "$burl" "$code" "$rc" "$blob" "the manifest names it; nothing was installed."
-        got="$(digest_of "$blob")"
+        got="$(digest_of "$blob")" \
+            || refuse "not yet: layer $i of $IMAGE arrived with no bytes" "$burl answered HTTP $code for a layer the manifest says is $lsize bytes, and left nothing to hash, so this is not a digest mismatch — no bytes arrived. The condition is usually transient; retry before investigating the registry."
         [ "$got" = "$ldigest" ] \
             || refuse "refused: blob digest mismatch on layer $i of $IMAGE" "the manifest names $ldigest ($lsize bytes) and the $(stat -c %s "$blob" 2>/dev/null || wc -c <"$blob") bytes fetched from $burl hash to $got; nothing from this image is trusted and nothing was installed."
         # The member list, whole, then read in the shell: an early-exiting

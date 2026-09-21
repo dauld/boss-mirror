@@ -261,6 +261,7 @@ case "$path" in
     if [ -f "$STUB_REGISTRY/blobs/$d" ]; then
       cp "$STUB_REGISTRY/blobs/$d" "$out"
       [ -n "${STUB_CORRUPT_BLOB:-}" ] && echo corrupt >> "$out"
+      if [ -n "${STUB_VANISHING_BLOB:-}" ]; then rm -f "$out"; printf 200; exit 0; fi
       printf 200; exit 0
     fi ;;
 esac
@@ -718,6 +719,61 @@ fn a_blob_that_does_not_match_its_digest_is_refused_before_tar_reads_it() {
     assert!(
         result.starts_with("refused") && result.contains("digest mismatch"),
         "{result}"
+    );
+}
+
+/// A fetch that reports success and leaves no bytes is NOT a digest
+/// mismatch, and must not say it is.
+///
+/// MEASURED IN PRODUCTION 2026-09-20 (backlog 112b1d87). A layer fetch
+/// answered HTTP 200 with rc 0 and produced no file
+/// (`layer.blob: No such file or directory`); the script hashed the
+/// absent file, `sha256sum` wrote its complaint to stderr and nothing
+/// to stdout, and the run refused with "blob digest mismatch … the
+/// bytes fetched hash to sha256:" — an EMPTY actual hash.
+///
+/// The wrong verdict is the defect, not the failure. A digest mismatch
+/// reads as corruption or a tampered registry and sends its reader to
+/// the wrong investigation; the real condition was transient and the
+/// identical call installed cleanly two minutes later. So the refusal
+/// must name no-bytes, and must NOT be a mismatch.
+#[test]
+fn a_fetch_that_leaves_no_bytes_is_refused_as_no_bytes_not_as_a_mismatch() {
+    if !tools() {
+        return;
+    }
+    let c = Case::new("vanishing-blob");
+    let (rc, out) = c.run(SHA_A, &[("STUB_VANISHING_BLOB", "1".into())]);
+
+    // 75, not 1: this condition is RETRYABLE and the exit code is what
+    // a caller reads. The production instance installed cleanly two
+    // minutes later, so a fatal verdict would have been wrong twice.
+    assert_eq!(rc, 75, "a transient no-bytes fetch is `not yet`: {out}");
+
+    // THE VERDICT, not the prose. The refusal's explanation says the
+    // words "not a digest mismatch", so asserting on the whole output
+    // would match its own disclaimer; `cli_result` is the one line a
+    // reader and the run summary both take as the answer.
+    let result = c.summary("cli_result");
+    assert!(
+        result.starts_with("not yet") && result.contains("no bytes"),
+        "the verdict names what actually happened: {result}"
+    );
+    assert!(
+        !out.contains("blob digest mismatch"),
+        "and the mismatch refusal — the one that reads as corruption or a tampered \
+         registry — must not fire when no bytes arrived: {out}"
+    );
+    // The DECLARED size is named, not asserted as a literal: the
+    // fixture's layer differs by a byte or two between runs, so a
+    // hardcoded count here would be a flake rather than a check.
+    assert!(
+        out.contains("the manifest says is") && out.contains("/blobs/sha256:"),
+        "it still names the size the manifest declared and the URL asked: {out}"
+    );
+    assert!(
+        c.current().is_none() && !c.link.exists(),
+        "nothing is installed: {out}"
     );
 }
 

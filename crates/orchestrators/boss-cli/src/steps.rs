@@ -246,6 +246,53 @@ pub(crate) fn declared_fields(step: &Value) -> Vec<Field> {
         .collect()
 }
 
+/// The fields a step's KIND declares, on top of its row's.
+///
+/// TWO VALIDATORS HAD TO AGREE AND DID NOT (backlog b1e87213). The API
+/// judges a completion against the StepType's schema AND the row's;
+/// this verb judged it against the row alone. So `checklist` — whose
+/// kind requires an `items` array and whose three uses in the platform
+/// bundle declare it in no row at all — could not be completed through
+/// this door in either direction: the API refused the body without
+/// `items`, and the verb refused to send `items` because the row did
+/// not name it.
+///
+/// Measured cost, 2026-09-21: publish-to-github packet 7d5c9051 sat at
+/// `measure` from 2026-09-20, the daily publish rule guards on `NOT
+/// open_publish_exists`, and so one uncompletable step suppressed the
+/// public mirror's publish entirely — 455 commits behind by the time
+/// anyone reached for the door. It read as nobody having worked the
+/// packet. It was a door that could not be opened.
+///
+/// The row WINS on a name collision: a row may narrow a kind's field
+/// (a tighter enum, a required that the kind leaves optional), and the
+/// row is the more specific contract.
+pub(crate) fn with_kind_fields(row: Vec<Field>, kind_fields: Vec<Field>) -> Vec<Field> {
+    let mut out = row;
+    for f in kind_fields {
+        if !out.iter().any(|d| d.name == f.name) {
+            out.push(f);
+        }
+    }
+    out
+}
+
+/// The StepType registry's fields for one kind, off `GET
+/// /api/jobs/step-types`. An unknown kind contributes nothing — the
+/// API is still the judge, and a verb that invented a contract the
+/// registry does not hold would be the defect one layer over.
+pub(crate) fn kind_fields(step_types: &Value, kind: &str) -> Vec<Field> {
+    let rows = step_types
+        .get("data")
+        .and_then(Value::as_array)
+        .or_else(|| step_types.as_array());
+    rows.into_iter()
+        .flatten()
+        .find(|t| t.get("kind").and_then(Value::as_str) == Some(kind))
+        .map(declared_fields)
+        .unwrap_or_default()
+}
+
 /// The values an enum field admits — `a|b|c` is the registry's enum
 /// spelling (`step_registry::validate_field_type`); anything without a
 /// pipe is a scalar type, not an enum.
@@ -644,6 +691,16 @@ impl Wire {
     ) -> Result<Option<Value>> {
         let signature = identity::signature_for(&method, path, self.caller.clone());
         crate::gate::api_at_signed(&self.http, &self.base, method, path, payload, signature).await
+    }
+
+    /// The StepType registry, as the API's own validator reads it.
+    /// Read fresh rather than compiled in: a kind's fields are
+    /// registry data and a second copy here would be the drift 9a is
+    /// written against.
+    async fn step_types(&self) -> Result<Value> {
+        self.call(reqwest::Method::GET, "/api/jobs/step-types", None)
+            .await?
+            .context("the step-type registry read back empty")
     }
 
     async fn packet(&self, id: &str) -> Result<Value> {
@@ -1052,7 +1109,17 @@ pub(crate) fn coerce(field: &Field, raw: &str) -> Result<Value, String> {
 /// answers 204 and records an annotation nobody reads. Refused here, by
 /// name, naming what the row does declare.
 pub(crate) fn field_writes(step: &Value, given: &[Given]) -> Result<Map<String, Value>, String> {
-    let declared = declared_fields(step);
+    field_writes_against(step, given, Vec::new())
+}
+
+/// [`field_writes`] with the step KIND's fields folded in — what the
+/// API actually judges against.
+pub(crate) fn field_writes_against(
+    step: &Value,
+    given: &[Given],
+    kind_fields: Vec<Field>,
+) -> Result<Map<String, Value>, String> {
+    let declared = with_kind_fields(declared_fields(step), kind_fields);
     let mut writes = Map::new();
     for g in given {
         let field = declared.iter().find(|f| f.name == g.name).ok_or_else(|| {
@@ -1111,8 +1178,18 @@ pub(crate) async fn complete(
 ) -> Result<()> {
     let packet = wire.resolve(packet_ref, None).await?;
     let step = open_step(&packet, slug).map_err(|e| anyhow!("{e}"))?;
-    let writes =
-        field_writes(step, given).map_err(|e| anyhow!("{} `{slug}`: {e}", short(&packet)))?;
+    // The kind's own fields, from the registry the API validates
+    // against. Best-effort: if the read fails the verb falls back to
+    // the row alone, which is how it behaved before — a door that
+    // cannot reach the registry should be no worse than it was, not
+    // refuse outright.
+    let kind = step.get("kind").and_then(Value::as_str).unwrap_or_default();
+    let from_kind = match wire.step_types().await {
+        Ok(types) => kind_fields(&types, kind),
+        Err(_) => Vec::new(),
+    };
+    let writes = field_writes_against(step, given, from_kind)
+        .map_err(|e| anyhow!("{} `{slug}`: {e}", short(&packet)))?;
     // Merged, not replaced — the step keeps its `procedure`, its
     // `agent` block and its audience — and the MERGED document is what
     // the registry judges, exactly as the API judges it after its own
@@ -2419,5 +2496,110 @@ mod tests {
         .await
         .expect_err("the packet does not hold it");
         assert!(err.to_string().contains("reads back as ready"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod kind_field_tests {
+    use super::*;
+
+    fn step_types_fixture() -> Value {
+        json!({"data": [
+            {"kind": "checklist", "fields": [
+                {"name": "items", "field_type": "array", "required": true}
+            ]},
+            {"kind": "task", "fields": []}
+        ]})
+    }
+
+    /// The defect, in one assertion: a checklist step whose row names
+    /// only its own fields still accepts `items`, because the API
+    /// requires it.
+    #[test]
+    fn a_checklist_accepts_the_items_its_kind_requires() {
+        let step = json!({
+            "id": "11111111-1111-1111-1111-111111111111",
+            "spec_slug": "measure",
+            "kind": "checklist",
+            "status": "ready",
+            "fields": [
+                {"name": "commits_ahead", "field_type": "string", "required": true}
+            ]
+        });
+        let from_kind = kind_fields(&step_types_fixture(), "checklist");
+        assert_eq!(
+            from_kind.len(),
+            1,
+            "the registry declares items: {from_kind:?}"
+        );
+
+        let given = vec![
+            Given {
+                name: "commits_ahead".into(),
+                value: "455".into(),
+            },
+            Given {
+                name: "items".into(),
+                value: "[{\"label\":\"drift measured\",\"checked\":true}]".into(),
+            },
+        ];
+        let writes = field_writes_against(&step, &given, from_kind)
+            .expect("the kind's required field is accepted");
+        assert_eq!(writes["commits_ahead"], json!("455"));
+        assert!(
+            writes["items"].is_array(),
+            "an `array` field is parsed as JSON, not stored as text: {:?}",
+            writes["items"]
+        );
+    }
+
+    /// The refusal that must SURVIVE: a name neither the row nor the
+    /// kind declares is still refused. Widening the contract to the
+    /// union must not widen it to everything — that guard is why a
+    /// typo does not answer 204 and record an annotation nobody reads.
+    #[test]
+    fn a_name_neither_declares_is_still_refused() {
+        let step = json!({
+            "id": "11111111-1111-1111-1111-111111111111",
+            "spec_slug": "measure",
+            "kind": "checklist",
+            "status": "ready",
+            "fields": [{"name": "commits_ahead", "field_type": "string", "required": true}]
+        });
+        let from_kind = kind_fields(&step_types_fixture(), "checklist");
+        let given = vec![Given {
+            name: "committs_ahead".into(),
+            value: "455".into(),
+        }];
+        let err =
+            field_writes_against(&step, &given, from_kind).expect_err("a typo is still refused");
+        assert!(err.contains("committs_ahead"), "{err}");
+    }
+
+    /// The row WINS on a collision: it may narrow what the kind leaves
+    /// loose, and the row is the more specific contract.
+    #[test]
+    fn the_row_wins_when_both_declare_a_name() {
+        let row = vec![Field {
+            name: "items".into(),
+            field_type: "string".into(),
+            required: false,
+        }];
+        let kind = vec![Field {
+            name: "items".into(),
+            field_type: "array".into(),
+            required: true,
+        }];
+        let merged = with_kind_fields(row, kind);
+        assert_eq!(merged.len(), 1, "no duplicate entry: {merged:?}");
+        assert_eq!(merged[0].field_type, "string", "the row's type stands");
+    }
+
+    /// A kind the registry does not know contributes nothing, rather
+    /// than the verb inventing a contract one layer above the judge.
+    #[test]
+    fn an_unknown_kind_contributes_nothing() {
+        assert!(kind_fields(&step_types_fixture(), "no-such-kind").is_empty());
+        assert!(kind_fields(&json!({}), "checklist").is_empty());
     }
 }

@@ -13,7 +13,7 @@
 # together, 23 terms, with a tenant's name as a path or an id exempt.
 crates/core 375
 crates/modules 445
-crates/orchestrators 836
+crates/orchestrators 834
 apps/web/src 310
 apps/simulator 55
 infra/postgres/schema 202
