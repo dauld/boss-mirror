@@ -78,6 +78,7 @@
 //! A no-op, not an error, when findings are absent, not yet
 //! persistent, or already raised.
 
+use boss_jobs::channels::InputChannel;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -464,7 +465,7 @@ fn alarm_body(
         "priority": "urgent",
         "status": "open",
         "tags": [],
-        "metadata": metadata,
+        "metadata": super::common::with_lane(metadata, InputChannel::Telemetry),
     })
 }
 
@@ -529,7 +530,7 @@ fn staleness_body(stale: &Value, evidence: &str, owner: &str) -> Value {
         "priority": "urgent",
         "status": "open",
         "tags": [],
-        "metadata": metadata,
+        "metadata": super::common::with_lane(metadata, InputChannel::Telemetry),
     })
 }
 

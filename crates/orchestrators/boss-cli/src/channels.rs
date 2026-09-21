@@ -21,78 +21,14 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use serde_json::{Value, json};
 
-/// The lane a work-originating job entered through.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum InputChannel {
-    UserFeedback,
-    Roadmap,
-    DesignResolution,
-    Review,
-    Telemetry,
-    PipelineFailure,
-    Discovery,
-    PostMortem,
-    Dependency,
-    Scheduled,
-    Unclassified,
-}
-
-impl InputChannel {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            InputChannel::UserFeedback => "user-feedback",
-            InputChannel::Roadmap => "roadmap",
-            InputChannel::DesignResolution => "design-resolution",
-            InputChannel::Review => "review-finding",
-            InputChannel::Telemetry => "telemetry/monitoring",
-            InputChannel::PipelineFailure => "pipeline-failure",
-            InputChannel::Discovery => "discovery-while-working",
-            InputChannel::PostMortem => "post-mortem",
-            InputChannel::Dependency => "dependency/external",
-            InputChannel::Scheduled => "scheduled",
-            InputChannel::Unclassified => "unclassified",
-        }
-    }
-
-    /// Proactive lanes build what is wanted; the rest are the system
-    /// responding to something that already happened. This split is the
-    /// health reading, not a value judgement on the work itself.
-    pub(crate) fn is_proactive(self) -> bool {
-        matches!(
-            self,
-            InputChannel::UserFeedback | InputChannel::Roadmap | InputChannel::DesignResolution
-        )
-    }
-
-    /// The inverse of [`InputChannel::label`] over the fileable lanes —
-    /// derived from that one list, so a lane can never be nameable and
-    /// unreadable at once. An unknown or misspelled label is `None`: a
-    /// typo must not masquerade as a recorded fact.
-    pub(crate) fn parse(label: &str) -> Option<InputChannel> {
-        FILEABLE_LANES.into_iter().find(|c| c.label() == label)
-    }
-}
-
-/// Every lane a FILER may name, in one list — the vocabulary `boss job
-/// file --channel` parses and its refusal prints, so the door's help and
-/// the report's labels cannot drift apart (CLAUDE.md §9a).
-/// `Unclassified` is deliberately absent: it is what the ABSENCE of an
-/// answer reads as, never an answer.
-pub(crate) const FILEABLE_LANES: [InputChannel; 10] = [
-    InputChannel::UserFeedback,
-    InputChannel::Roadmap,
-    InputChannel::DesignResolution,
-    InputChannel::Review,
-    InputChannel::Telemetry,
-    InputChannel::PipelineFailure,
-    InputChannel::Discovery,
-    InputChannel::PostMortem,
-    InputChannel::Dependency,
-    InputChannel::Scheduled,
-];
-
-/// The metadata key the lane is RECORDED under, written at filing.
-pub(crate) const RECORDED_KEY: &str = "input_channel";
+/// The lane vocabulary itself now lives in `boss_jobs::channels`, so
+/// the CLI door and the machine filers in `boss-dispatcher-handlers`
+/// read ONE definition of the key and the labels (backlog b2d9b432,
+/// CLAUDE.md §9a). Re-exported under the local names so this module's
+/// callers and tests read unchanged. What stays here is what is
+/// genuinely the CLI's: the pre-field inference, the provenance split,
+/// and the mix report.
+pub(crate) use boss_jobs::channels::{FILEABLE_LANES, InputChannel, RECORDED_KEY};
 
 /// When `metadata.input_channel` started being written (c5dc81a1, the
 /// car that added the field). Packets opened before it predate the

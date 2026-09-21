@@ -62,6 +62,7 @@ use super::ops_judge::JUDGED;
 use async_trait::async_trait;
 use boss_dispatcher::rules::expr::Value;
 use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext, arg_string};
+use boss_jobs::channels::InputChannel;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -158,6 +159,7 @@ pub(crate) fn item_body(
         "status": "open",
         "tags": [],
         "metadata": {
+            "input_channel": super::common::lane_label(InputChannel::PipelineFailure),
             "area": area,
             "design": design,
             RED_ROUTE: red.route,

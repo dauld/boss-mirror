@@ -196,6 +196,7 @@ use super::common::{dispatcher_actor_header, dispatcher_reader_header, sim_origi
 use async_trait::async_trait;
 use boss_dispatcher::rules::expr::Value;
 use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext, arg, arg_string};
+use boss_jobs::channels::InputChannel;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -1303,6 +1304,7 @@ pub(crate) fn failure_alert_body(
         "status": "open",
         "tags": [],
         "metadata": {
+            "input_channel": super::common::lane_label(InputChannel::PipelineFailure),
             "area": "platform",
             FOR_REQUEST: closing_id,
             "for_packet": target_id,

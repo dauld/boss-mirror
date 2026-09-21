@@ -94,6 +94,7 @@ use super::jobs_complete_linked_step::{FOR_REQUEST, VerbFailure, step_by_slug, v
 use async_trait::async_trait;
 use boss_dispatcher::rules::expr::{self, Value};
 use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext, arg_string};
+use boss_jobs::channels::InputChannel;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -284,6 +285,7 @@ pub(crate) fn chain_refused_alert_body(
         "status": "open",
         "tags": [],
         "metadata": {
+            "input_channel": super::common::lane_label(InputChannel::PipelineFailure),
             "area": "platform",
             FOR_REQUEST: judged_id,
             "verb": j.verb,

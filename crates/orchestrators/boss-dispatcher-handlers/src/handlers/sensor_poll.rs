@@ -69,6 +69,7 @@
 //! to the adapter as a bearer. It is never logged, never on a packet,
 //! never in an error string.
 
+use boss_jobs::channels::InputChannel;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -449,7 +450,7 @@ pub fn alarm_body(sensor: &SensorRow, alarm: &Alarm, owner: &str) -> Json {
         "priority": "urgent",
         "status": "open",
         "tags": [],
-        "metadata": metadata,
+        "metadata": super::common::with_lane(metadata, InputChannel::Telemetry),
     })
 }
 

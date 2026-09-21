@@ -125,6 +125,7 @@
 //! does buy is that a chore dying while the SoR is healthy — which is
 //! both measured instances — is spoken about within a day.
 
+use boss_jobs::channels::InputChannel;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -1071,7 +1072,7 @@ pub fn alarm_body(
         "priority": "urgent",
         "status": "open",
         "tags": [],
-        "metadata": Value::Object(metadata),
+        "metadata": super::common::with_lane(Value::Object(metadata), InputChannel::Telemetry),
     })
 }
 

@@ -6,6 +6,7 @@
 //! helpers cut the boilerplate to ~5 lines per handler.
 
 use boss_dispatcher::rules::handler::HandlerError;
+use boss_jobs::channels::{InputChannel, RECORDED_KEY};
 use serde_json::Value;
 
 /// Step-event payload fields the handlers commonly read.
@@ -357,6 +358,43 @@ pub(crate) async fn get_json(
         .map_err(|e| HandlerError::Downstream(format!("GET {url} not JSON: {e}")))
 }
 
+/// Stamp the INPUT LANE onto a machine filer's packet metadata
+/// (backlog b2d9b432).
+///
+/// Every backlog-item this crate files has a perfectly known origin —
+/// an estate alarm is telemetry, a red chore line is a pipeline
+/// failure, a failed ops verb is a pipeline failure — better known than
+/// any human filer knows theirs. None of them recorded it, so from
+/// `FIELD_LIVE_AT` (2026-09-21T00:00:00Z) every one would have read as
+/// "the filer did not say", and the filed-without-a-lane count would
+/// have measured the machines instead of the operators. A count that
+/// mixes "somebody forgot" with "the machines do not participate" is
+/// worse than no count.
+///
+/// The lane is a REQUIRED ARGUMENT, not an option with a default: a
+/// filer that cannot say which lane it is has no business filing, and a
+/// default would quietly re-create the silence this fixes. The key and
+/// the labels come from `boss_jobs::channels`, the one definition the
+/// CLI door reads too, so this cannot drift from what `boss job file
+/// --channel` accepts.
+pub(crate) fn with_lane(metadata: Value, lane: InputChannel) -> Value {
+    let mut metadata = match metadata {
+        Value::Object(m) => m,
+        // A filer that handed us something that is not an object had no
+        // metadata to keep; the lane is still worth recording.
+        _ => serde_json::Map::new(),
+    };
+    metadata.insert(RECORDED_KEY.into(), Value::String(lane.label().into()));
+    Value::Object(metadata)
+}
+
+/// The lane's recorded label, for a filer whose metadata is an inline
+/// `json!` object rather than a value to wrap. Same one definition as
+/// [`with_lane`]; see it for why the lane is never defaulted.
+pub(crate) fn lane_label(lane: InputChannel) -> &'static str {
+    lane.label()
+}
+
 /// The rows of a listing, or a refusal naming the reading — the ONE
 /// place this handler crate decides what a missing `data` array means.
 ///
@@ -645,5 +683,96 @@ mod tests {
             overhead_source_id("step-1", "6100"),
             "overhead-absorbed@step-1:6100"
         );
+    }
+}
+
+#[cfg(test)]
+mod lane_pin {
+    use super::*;
+
+    /// EVERY MACHINE-FILED BACKLOG-ITEM IN THIS CRATE STAMPS ITS LANE
+    /// (backlog b2d9b432).
+    ///
+    /// Stamping the eight sites that existed was the easy half; the half
+    /// that lasts is that the NINTH cannot be written without one. From
+    /// `FIELD_LIVE_AT` a packet with no lane reads as "the filer did not
+    /// say", and a machine filer is the one filer whose origin is never
+    /// in doubt — so a silent one does not merely lose a field, it
+    /// poisons the count that is supposed to measure operators.
+    ///
+    /// This reads the crate's own source rather than exercising each
+    /// handler, because the defect is a MISSING line: no amount of
+    /// running the eight that are right can show that a ninth is wrong.
+    /// The `mod tests` truncation is what keeps fixtures out — a test
+    /// packet standing in for what the jobs API lists back is not a
+    /// filing, and there are five of those.
+    #[test]
+    fn every_backlog_item_this_crate_files_stamps_an_input_lane() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/handlers");
+        let mut filings = 0;
+        let mut silent: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(dir).expect("handlers dir") {
+            let path = entry.expect("entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let src = std::fs::read_to_string(&path).expect("read handler");
+            // Fixtures live under `mod tests`; a filing never does.
+            let production = match src.find("\nmod tests {") {
+                Some(i) => &src[..i],
+                None => &src[..],
+            };
+            let lines: Vec<&str> = production.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                if !line.contains(r#""kind": "backlog-item""#) {
+                    continue;
+                }
+                filings += 1;
+                let window = lines[i..lines.len().min(i + 30)].join("\n");
+                if !window.contains("input_channel")
+                    && !window.contains("with_lane")
+                    && !window.contains("lane_label")
+                {
+                    silent.push(format!("{name}:{}", i + 1));
+                }
+            }
+        }
+        assert!(
+            silent.is_empty(),
+            "these machine filers file a backlog-item with NO input lane, so from \
+             FIELD_LIVE_AT each reads as `the filer did not say` though its origin is \
+             known exactly: {silent:?}. Stamp it — `super::common::with_lane(metadata, \
+             InputChannel::<lane>)` when the metadata is a value, or \
+             `\"input_channel\": super::common::lane_label(InputChannel::<lane>)` inside \
+             an inline object."
+        );
+        assert_eq!(
+            filings, 8,
+            "the number of machine filing sites changed. That is fine — but check the new \
+             one stamps a lane, then update this count, which exists so a filing that \
+             DISAPPEARS from the scan (a renamed key, a reshaped body) cannot read as \
+             `all clear`."
+        );
+    }
+
+    #[test]
+    fn with_lane_records_the_label_and_keeps_what_was_there() {
+        let out = with_lane(
+            serde_json::json!({"area": "estate", "host": "w-1"}),
+            InputChannel::Telemetry,
+        );
+        assert_eq!(out["input_channel"], "telemetry/monitoring");
+        assert_eq!(out["area"], "estate", "existing keys survive");
+        assert_eq!(out["host"], "w-1");
+        // The key is the one the CLI reads, not a second spelling.
+        assert_eq!(RECORDED_KEY, "input_channel");
+        // A filer with nothing to keep still records the lane.
+        let bare = with_lane(serde_json::Value::Null, InputChannel::PipelineFailure);
+        assert_eq!(bare["input_channel"], "pipeline-failure");
     }
 }

@@ -68,6 +68,7 @@
 //! that then LOOKS open, and the daily spawner files no twin while it
 //! is.
 
+use boss_jobs::channels::InputChannel;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -960,6 +961,7 @@ pub fn alarm_body(zone: &str, observation_id: &str, r: &Reading, owner: &str) ->
         "status": "open",
         "tags": [],
         "metadata": {
+            "input_channel": super::common::lane_label(InputChannel::Telemetry),
             "area": "estate",
             "estate_finding": alarm_key(zone),
             "scope": "dns-zone",

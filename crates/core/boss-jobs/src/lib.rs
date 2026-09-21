@@ -21,6 +21,7 @@ pub mod cadence;
 pub mod cadence_seed;
 pub mod calendar_hook;
 pub mod car;
+pub mod channels;
 pub mod credentials;
 pub mod decision_record;
 pub mod delivery;
