@@ -875,10 +875,21 @@ a door that stops being true is a defect worth a car.
   branch must not move** — the receipt vouches for the sha the gate
   resolved at launch, so a commit pushed after it leaves a car the dock
   refuses as "gated, then changed" — a rebase of a parked car is the
-  same event. The repair is to gate the new tip again: a re-gate
-  REFRESHES the parked car (the fresh receipt rides it as
-  `regate_receipt`) rather than filing a twin, and `boss rerail
-  --finish` does the same once a green vouches for the head; and
+  same event. **The repair is TWO calls, and the second is the one
+  that repairs.** Gate the new tip, then `boss rerail <car> --finish`,
+  which copies the fresh green onto the car as `regate_receipt` and
+  clears the stale skip. A BARE re-gate does not refresh anything: it
+  produces a green gate-run that sits BESIDE a car still vouching for
+  the old sha, which is the worst of both — the branch looks repaired
+  and the dock refuses it again. Measured twice, on two cars, a day
+  apart (`bb49056b`, and car 817b1b84 on 2026-09-21, which had been
+  left behind by seventeen consecutive trains and boarded the next one
+  after `--finish`). This document said the re-gate alone was enough,
+  which is read at exactly the moment someone is already recovering
+  from a mistake. Whether a re-gate carrying its `--park-*` flags
+  refreshes the car is UNTESTED — the park intent is the difference
+  between the two forms, and neither run measured it, so do not rely
+  on it; `--finish` is the door that has been observed to work. And
   **prose with backticks does not survive argv**, and that is not a
   `--park-*` rule — it belongs to EVERY flag that carries a sentence
   (`boss triage --evidence`, `boss fold --change`, `boss design

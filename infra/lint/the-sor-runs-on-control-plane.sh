@@ -15,8 +15,17 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 f="infra/cluster/manifests/boss.yaml"
 [ -f "$f" ] || { echo "sor-control-plane: $f is missing"; exit 1; }
 
-workloads=$(grep -cE '^kind: (Deployment|StatefulSet)' "$f")
-pinned=$(grep -c 'node-role.kubernetes.io/control-plane' "$f")
+# `|| true` ON BOTH COUNTS, and the reason is the whole point of this
+# lint. `grep -c` prints 0 and exits 1 when nothing matches, and under
+# the `set -e` above that kills the script even though the count is
+# captured — the assignment takes grep's status as its own. Zero pins
+# is EXACTLY the condition this lint exists to catch (90932d98), so
+# without these the script died on line 19 in its own worst case and
+# the diagnostic below never printed: failing closed, but silently,
+# which CLAUDE.md §Diagnosis calls a verdict nobody can act on
+# (backlog 4c9733f7).
+workloads=$(grep -cE '^kind: (Deployment|StatefulSet)' "$f" || true)
+pinned=$(grep -c 'node-role.kubernetes.io/control-plane' "$f" || true)
 if [ "$pinned" -lt "$workloads" ]; then
     echo "sor-control-plane: $f has $workloads workload(s) but only $pinned"
     echo "  control-plane nodeSelector(s). A boss workload without it can land on a"
