@@ -477,7 +477,9 @@ enum Commands {
         #[arg(long, requires = "report")]
         spend_usd: Option<f64>,
         /// With --report: the token count — a total (761000) or the
-        /// input,output split (740000,21000); only a split is priced.
+        /// input,output split (740000,21000). A split is priced at the
+        /// card's two rates; a total at the model's declared blend, and
+        /// the record says which.
         #[arg(long, requires = "report")]
         tokens: Option<String>,
         /// Dispatch anyway when a car carrying this packet's fix has

@@ -16,11 +16,12 @@
 # WHAT IT DOES NOT DO. It does not compute a cost. The server prices a
 # run from `agent_rate_card` inside the transaction that writes it,
 # because a caller that can assert its own `usd_micros` makes the rate
-# card decorative. Runs reporting only a total are unpriced by design —
-# the card charges input and output at different rates, so there is no
-# arithmetic from one number to a price, and `unpriced_runs` /
-# `total_only_runs` say so in the roll-up rather than a blended guess
-# standing in for a measurement.
+# card decorative. A run reporting only a total is priced at the model's
+# DECLARED blend when its card row carries one, and unpriced when it
+# does not (design 91a9bfe7, 2026-09-20) — the ratio is registry data so
+# a reader can see the assumption, the roll-up names the basis beside
+# the figure, and `unpriced_runs` / `total_only_runs` still say what is
+# missing and why.
 #
 # IDEMPOTENT. `run_id` is minted in the data file, and the API collapses
 # a repeat: a second run of this script reports `duplicate` per row and
@@ -147,8 +148,9 @@ while IFS=$'\t' read -r run_id actor_id branch total_tokens tool_calls duration_
     [ -n "$branch" ] && job_id=$(job_id_for "$branch")
 
     # total_tokens ALONE: no input/output keys at all, because no split
-    # was measured. The server reads that as a total-only run and leaves
-    # usd_micros NULL.
+    # was measured. The server reads that as a total-only run and prices
+    # it at the model's declared blend, or leaves usd_micros NULL when
+    # the model declares none.
     body=$(jq -n \
         --arg run_id "$run_id" \
         --arg actor_id "$actor_id" \

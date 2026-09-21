@@ -253,6 +253,10 @@ mod tests {
             input_usd_micros_per_mtok: 5_000_000,
             output_usd_micros_per_mtok: 25_000_000,
             note: "Claude Opus 5, 1M context".into(),
+            // The live row's declared ratio (design 91a9bfe7), so
+            // these tests see the shape the surface actually serves: a
+            // total-only run, priced at the blend, saying so.
+            blended_input_share_ppm: Some(875_000),
         }]
     }
 
@@ -458,9 +462,37 @@ mod tests {
         // The model is its own key on every row the list serves — this
         // one resolved out of the legacy colon form at record time.
         assert_eq!(row["model"], "opus-5[1m]", "body: {body}");
-        // A bare total cannot be priced, and the row says so rather
-        // than reporting a dollar figure it does not have.
-        assert!(row["usd_micros"].is_null(), "body: {body}");
+        // A bare total IS priced now, at the model's declared blend
+        // (design 91a9bfe7): 134,392 tokens at $7.50/MTok. Until
+        // 2026-09-20 this row read null, which is how 83 of 85 recorded
+        // runs came to carry no cost at all. The figure is an estimate
+        // and the record says so — the basis is derived from the two
+        // fields on this very row, `input_tokens` null beside a
+        // `usd_micros` that is not, and the roll-up at
+        // `/api/agent-runs/cost` carries it as a word.
+        assert_eq!(row["usd_micros"], 1_007_940, "body: {body}");
+        assert_eq!(row["priced_by"], "opus-5[1m]", "body: {body}");
+        assert!(row["input_tokens"].is_null(), "body: {body}");
+    }
+
+    /// The roll-up a surface reads, saying what its figure rests on.
+    #[tokio::test]
+    async fn the_cost_roll_up_names_the_basis_beside_the_figure() {
+        let (status, body) = get(
+            "/api/agent-runs/cost",
+            Some(header("platform-admin", AccessTier::Operator)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let out: serde_json::Value = serde_json::from_str(&body).expect("JSON");
+        let summary = &out["summary"];
+        assert_eq!(summary["usd_micros"], 1_007_940, "body: {body}");
+        assert_eq!(
+            summary["pricing_basis"], "blended",
+            "a figure from a total must not read as a measurement: {body}"
+        );
+        assert_eq!(summary["blended_runs"], 1, "body: {body}");
+        assert_eq!(summary["by_model"][0]["pricing_basis"], "blended");
     }
 
     /// The shape the design decided (6fda05ae): a registered agent's

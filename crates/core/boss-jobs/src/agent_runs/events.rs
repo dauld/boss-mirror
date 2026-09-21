@@ -241,7 +241,11 @@ mod tests {
         assert_eq!(ev.payload["total_tokens"], 142_982);
         assert_explicit_null!(ev.payload, "input_tokens", "the split was not measured");
         assert_explicit_null!(ev.payload, "output_tokens", "the split was not measured");
-        assert_explicit_null!(ev.payload, "usd_micros", "a total cannot be priced");
+        assert_explicit_null!(
+            ev.payload,
+            "usd_micros",
+            "this fixture's model declares no blend, so its total is unpriced"
+        );
     }
 
     #[test]

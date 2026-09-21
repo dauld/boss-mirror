@@ -93,12 +93,14 @@
 //! run's `reported` step when the green has opened it (the run lands
 //! on that), and records the finish in `agent_runs` — the row the claim
 //! door reads an actor's hour-window spend from, priced by the rate
-//! card when the tokens are a split, unpriced when they are a total
-//! (`TokenUsage`'s own rule). Idempotent end to end: the packet PATCH
+//! card at its two rates when the tokens are a split and at the model's
+//! declared blend when they are a total, with the basis named either
+//! way (`PricingBasis`; design 91a9bfe7). Idempotent end to end: the packet PATCH
 //! merges, a completed `reported` is left as it is, and the run row is
 //! keyed on the run's id.
 
 use anyhow::{Context, Result, bail};
+use boss_jobs::agent_runs::PricingBasis;
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -1077,8 +1079,8 @@ pub(crate) fn parse_tokens(s: &str) -> std::result::Result<Tokens, String> {
     let bad = || {
         format!(
             "--tokens {s:?} is not a count: give a total (--tokens 761000) or the split the \
-             usage line shows (--tokens 740000,21000 as input,output) — only a split is \
-             priced by the rate card"
+             usage line shows (--tokens 740000,21000 as input,output) — a split is priced at \
+             the card's two rates, a total at the model's declared blend"
         )
     };
     let n = |t: &str| t.trim().replace('_', "").parse::<u64>().map_err(|_| bad());
@@ -1223,8 +1225,9 @@ pub(crate) fn run_branch(run: &Value) -> Option<String> {
 /// off the run's metadata, started when `briefed` completed (the
 /// instant the build began — the same stamp the silence rule reads)
 /// or when the packet opened, finished at the report. A total-only
-/// `--tokens` is recorded in full and priced by nothing; a split is
-/// priced by the rate card. The reporter's own dollar figure rides
+/// `--tokens` is recorded in full and priced at the model's declared
+/// blend; a split is priced at the card's two rates, and the record
+/// says which basis produced the figure. The reporter's own dollar figure rides
 /// `detail` beside it, for the comparison, never as the price. The
 /// `outcome` is what [`run_outcome`] read off the run's terminal, and
 /// the effort it was dispatched at rides `detail` beside the spend,
@@ -1402,18 +1405,46 @@ pub(crate) async fn report_at(
     let out = api_at(Method::POST, "/api/agent-runs".to_string(), Some(record))
         .await
         .with_context(|| format!("recording run {short} in agent_runs"))?;
+    // The basis through the record's own rule, not a second copy of it
+    // here: the recorded run says what its figure rests on
+    // (`AgentRun::pricing_basis`), and a blended figure must never be
+    // printed as a measured one (design 91a9bfe7).
+    let recorded: Option<boss_jobs::agent_runs::AgentRun> = out
+        .as_ref()
+        .and_then(|o| o.get("run"))
+        .cloned()
+        .and_then(|r| serde_json::from_value(r).ok());
+    // The figure off the answer itself, so a response this CLI cannot
+    // fully parse still reports the price it was given.
     let priced = out
         .as_ref()
         .and_then(|o| o.pointer("/run/usd_micros"))
         .and_then(Value::as_u64);
-    match priced {
-        Some(micros) => eprintln!(
-            "boss dispatch: agent_runs holds run {short} for {actor_id} at ${:.4} (rate card)",
+    match (priced, recorded.as_ref().and_then(|r| r.pricing_basis())) {
+        (Some(micros), Some(PricingBasis::Blended)) => eprintln!(
+            "boss dispatch: agent_runs holds run {short} for {actor_id} at ${:.4} — BLENDED, not \
+             measured: a bare total priced at the model's declared input/output ratio (rate \
+             card). Give --tokens IN,OUT when a split exists and it is priced at the two rates \
+             instead",
             micros as f64 / 1_000_000.0
         ),
-        None => eprintln!(
-            "boss dispatch: agent_runs holds run {short} for {actor_id}, unpriced — a total-only \
-             token count is recorded in full and priced by nothing; give --tokens IN,OUT to price it"
+        (Some(micros), Some(PricingBasis::Split)) => eprintln!(
+            "boss dispatch: agent_runs holds run {short} for {actor_id} at ${:.4} (rate card, \
+             measured split)",
+            micros as f64 / 1_000_000.0
+        ),
+        // Priced, but this build could not read the run back to say on
+        // what basis. The figure is stated and the claim about it is
+        // not: naming a basis here would be guessing one.
+        (Some(micros), None) => eprintln!(
+            "boss dispatch: agent_runs holds run {short} for {actor_id} at ${:.4} (rate card; \
+             basis unread — GET /api/agent-runs says which)",
+            micros as f64 / 1_000_000.0
+        ),
+        (None, _) => eprintln!(
+            "boss dispatch: agent_runs holds run {short} for {actor_id}, unpriced — nothing on \
+             the rate card could price it: no row for the model, no declared blend for a \
+             total-only count, or no count at all. The run is recorded in full either way"
         ),
     }
     Ok(())

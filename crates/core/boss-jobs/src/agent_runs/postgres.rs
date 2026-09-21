@@ -156,14 +156,26 @@ fn agent_row(row: &sqlx::postgres::PgRow) -> Result<RegisteredAgent, AgentRunErr
     })
 }
 
+/// The rate card's columns, spelled once: the recorder reads the card
+/// inside its transaction and the read endpoint reads it outside one,
+/// and a list that lived twice would drift the next time a column is
+/// added (CLAUDE.md §9a — `blended_input_share_ppm` was the next time).
+const CARD_COLUMNS: &str =
+    "model, input_usd_micros_per_mtok, output_usd_micros_per_mtok, note, blended_input_share_ppm";
+
 fn card_row(row: &sqlx::postgres::PgRow) -> Result<RateCardRow, AgentRunError> {
     let input: i64 = row.try_get("input_usd_micros_per_mtok").map_err(storage)?;
     let output: i64 = row.try_get("output_usd_micros_per_mtok").map_err(storage)?;
+    // NULL is "this model declares no ratio", which leaves a total-only
+    // run unpriced — not a zero share, which would price every token at
+    // the output rate.
+    let share: Option<i64> = row.try_get("blended_input_share_ppm").map_err(storage)?;
     Ok(RateCardRow {
         model: row.try_get("model").map_err(storage)?,
         input_usd_micros_per_mtok: u64::try_from(input).unwrap_or(0),
         output_usd_micros_per_mtok: u64::try_from(output).unwrap_or(0),
         note: row.try_get("note").map_err(storage)?,
+        blended_input_share_ppm: share.map(|v| u64::try_from(v).unwrap_or(0)),
     })
 }
 
@@ -180,13 +192,10 @@ impl AgentRunLog for PgAgentRuns {
 
         // Price inside the transaction so the row names the card it was
         // actually priced against.
-        let card_rows = sqlx::query(
-            "SELECT model, input_usd_micros_per_mtok, output_usd_micros_per_mtok, note \
-             FROM agent_rate_card",
-        )
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(storage)?;
+        let card_rows = sqlx::query(&format!("SELECT {CARD_COLUMNS} FROM agent_rate_card"))
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(storage)?;
         let card = card_rows
             .iter()
             .map(card_row)
@@ -354,10 +363,9 @@ impl AgentRunLog for PgAgentRuns {
     }
 
     async fn rate_card(&self) -> Result<Vec<RateCardRow>, AgentRunError> {
-        let rows = sqlx::query(
-            "SELECT model, input_usd_micros_per_mtok, output_usd_micros_per_mtok, note \
-             FROM agent_rate_card ORDER BY model",
-        )
+        let rows = sqlx::query(&format!(
+            "SELECT {CARD_COLUMNS} FROM agent_rate_card ORDER BY model"
+        ))
         .fetch_all(&self.pool)
         .await
         .map_err(storage)?;

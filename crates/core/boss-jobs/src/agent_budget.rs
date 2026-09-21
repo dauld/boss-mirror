@@ -106,8 +106,11 @@ pub fn reserve(
 
 /// The hour-window spend: the priced cost of every run in `runs` — the
 /// adapter has already narrowed them to the actor and the window. An
-/// unpriced run (a total-only token count) adds nothing: it cannot add
-/// a number it does not have, the same rule `measure_load` applies.
+/// unpriced run adds nothing: it cannot add a number it does not have,
+/// the same rule `measure_load` applies. Since design 91a9bfe7 a
+/// total-only run on a model that declares a blend IS priced and DOES
+/// count here — which is the point of that change: the desks were
+/// enforcing against 2% of the spend.
 pub fn spent_in(runs: &[AgentRun]) -> u64 {
     runs.iter()
         .filter_map(|r| r.usd_micros)
