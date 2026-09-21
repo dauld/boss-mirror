@@ -1,0 +1,211 @@
+# ---------------------------------------------------------------------------
+# replace-a-disk — changing the storage under a running estate host,
+# as a protocol rather than an evening.
+#
+# WHY IT IS A PROTOCOL. Hardware wears out and fills up on every estate
+# that runs long enough, so this is not a one-off for our forge: any
+# BOSS deployment reaches the day a box needs a bigger disk, and the
+# knowledge of how to do it safely should be a registry row every
+# operator inherits, not a runbook one person read once.
+#
+# THE SHAPE FOLLOWS join-a-node: measure before you act, and verify
+# more than once afterwards, because every verification here has been
+# the thing that was quietly false somewhere. A host whose services all
+# report active can still be unable to do the work it exists for
+# (component health is not system health, 2026-09-02), and a disk swap
+# that "went fine" can have silently left a credential behind that
+# nothing notices until the next time it is needed.
+#
+# THE STEP THIS PROTOCOL EXISTS FOR IS `back-up`. Measured on our own
+# forge, 2026-09-21, while preparing exactly this swap: the cluster
+# database is dumped nightly to two offsite homes, and the forge — which
+# holds the only copy of the repository, the OCI registry and the CI
+# runner's registration — had no backup at all. The whole disaster plan
+# was "keep the old disk for a week", which covers a bad clone and not
+# fire, theft, or the box dying on its own. Nobody decided that; it was
+# never asked. A protocol asks. `back-up` blocks the swap until a
+# restorable copy exists and someone has said HOW it was verified,
+# because a backup nobody has restored from is a belief, not an artifact.
+#
+# `reclaim` comes before `swap` because a swap that copies garbage is a
+# longer swap with a bigger window: the same forge gave back 31 GB in
+# ninety seconds to a bounded reclaim verb, which is a third of what the
+# clone would have carried.
+#
+# `quiesce` exists because the pipeline does not hold itself. Our
+# conductor FAILS OPEN when it cannot read the host's disk observation
+# (`conductor.rs`: "boarding anyway"), so a dark host does not pause the
+# work aimed at it — it collects failures instead, and at max_red_trains
+# a car is held out until a human looks. Whatever a deployment's
+# equivalent is, name it here before the host goes dark, and state what
+# will QUEUE versus what will FAIL, because those are different plans.
+#
+# `retain-rollback` records the date the old disk may be reused, because
+# "keep it for a week" with no date written down is a week nobody counts.
+# ---------------------------------------------------------------------------
+
+[[workflow]]
+kind = "replace-a-disk"
+label = "Replace a disk"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Changing the storage under an estate host without losing what only that host holds. Every step demands the evidence that a swap which looks clean can still have lost something: a credential no tree holds, a registration nothing re-issues, a service that starts but cannot do its work. The protocol refuses to reach the physical act until a restorable backup exists and the work aimed at the host has been held."
+
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+title_template = "Replace a disk: {metadata.host}"
+authority_role = "platform-admin"
+
+[[workflow.step]]
+title = "measure"
+kind = "task"
+ready_when = "steps.opened.done"
+title_template = "Measure {metadata.host} before touching it"
+authority_role = "platform-admin"
+fields = [
+  { name = "capacity", field_type = "string", required = true },
+  { name = "largest_consumers", field_type = "string", required = true },
+  { name = "carries", field_type = "string", required = true },
+  { name = "measured_via", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "back-up"
+kind = "task"
+ready_when = "steps.measure.done"
+title_template = "A restorable copy exists of what only {metadata.host} holds"
+authority_role = "platform-admin"
+fields = [
+  { name = "untreed_items", field_type = "string", required = true },
+  { name = "backup_location", field_type = "string", required = true },
+  { name = "restore_verified", field_type = "string", required = true },
+  { name = "not_covered", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "reclaim"
+kind = "task"
+ready_when = "steps.measure.done"
+title_template = "Reclaim what does not need to be carried across"
+authority_role = "platform-admin"
+fields = [
+  { name = "reclaimed", field_type = "string", required = true },
+  { name = "method", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "quiesce"
+kind = "task"
+ready_when = "steps.back-up.done"
+title_template = "Hold the work aimed at {metadata.host}"
+authority_role = "platform-admin"
+fields = [
+  { name = "held", field_type = "string", required = true },
+  { name = "queues_vs_fails", field_type = "string", required = true },
+  { name = "release_command", field_type = "string", required = true },
+  { name = "expected_dark", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "swap"
+kind = "task"
+ready_when = "steps.quiesce.done AND steps.reclaim.done"
+title_template = "Swap the disk on {metadata.host}"
+authority_role = "platform-admin"
+fields = [
+  { name = "method", field_type = "string", required = true },
+  { name = "started_at", field_type = "string", required = true },
+  { name = "finished_at", field_type = "string", required = true },
+  { name = "old_disk_disposition", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "verify-capacity"
+kind = "task"
+ready_when = "steps.swap.done"
+title_template = "The new capacity is real on {metadata.host}"
+authority_role = "platform-admin"
+fields = [
+  { name = "observed_capacity", field_type = "string", required = true },
+  { name = "observed_via", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "verify-identity"
+kind = "task"
+ready_when = "steps.verify-capacity.done"
+title_template = "Everything {metadata.host} held is still there"
+authority_role = "platform-admin"
+fields = [
+  { name = "services_healthy", field_type = "string", required = true },
+  { name = "credentials_verified", field_type = "string", required = true },
+  { name = "registrations_verified", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "verify-work"
+kind = "task"
+ready_when = "steps.verify-identity.done"
+title_template = "Real work ran end to end on {metadata.host}"
+authority_role = "platform-admin"
+fields = [
+  { name = "workload", field_type = "string", required = true },
+  { name = "evidence", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "release"
+kind = "task"
+ready_when = "steps.verify-work.done"
+title_template = "Release the hold on work aimed at {metadata.host}"
+authority_role = "platform-admin"
+fields = [
+  { name = "released", field_type = "string", required = true },
+  { name = "first_work_after", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "retain-rollback"
+kind = "task"
+ready_when = "steps.release.done"
+title_template = "The old disk is retained until a stated date"
+authority_role = "platform-admin"
+fields = [
+  { name = "location", field_type = "string", required = true },
+  { name = "retain_until", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "replaced"
+kind = "outcome"
+ready_when = "steps.retain-rollback.done"
+title_template = "Replaced: {metadata.host}"
+authority_role = "platform-admin"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "replaced" }
+
+[[workflow.step]]
+title = "rolled-back"
+kind = "outcome"
+ready_when = "steps.swap.done"
+title_template = "Rolled back: {metadata.host}"
+authority_role = "platform-admin"
+metadata_defaults = { outcome_kind = "withdrawn" }
+terminal = { outcome = "rolled-back" }
+fields = [
+  { name = "reason", field_type = "string", required = true },
+  { name = "restored_from", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "abandoned"
+kind = "outcome"
+ready_when = "steps.measure.done"
+title_template = "Not replaced: {metadata.host}"
+authority_role = "platform-admin"
+metadata_defaults = { outcome_kind = "withdrawn" }
+terminal = { outcome = "abandoned" }
+fields = [{ name = "reason", field_type = "string", required = true }]
