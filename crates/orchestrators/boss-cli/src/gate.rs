@@ -905,16 +905,13 @@ pub use boss_jobs::probe::{
 /// The gate-run key each proof flag stamps. The auto-park handler
 /// reads these and writes the car's `proof_*` keys
 /// (`boss_jobs::car::PROOF_*`).
-pub const PARK_PROBE: &str = "park_probe";
-pub const PARK_EXPECT: &str = "park_expect";
-pub const PARK_PROOF_EVENT: &str = "park_proof_event";
+pub use boss_jobs::car::{PARK_EXPECT, PARK_PROBE, PARK_PROOF_EVENT};
 
 /// The gate-run keys the two non-closing item answers stamp. The
 /// auto-park handler copies them onto the car as
 /// `boss_jobs::car::PARTIAL_ITEM` / `NO_ITEM_REASON` — NEVER as
 /// `backlog_item`, which is the one key the arrival rule follows.
-pub const PARK_NO_ITEM: &str = "park_no_item";
-pub const PARK_PARTIAL_ITEM: &str = "park_partial_item";
+pub use boss_jobs::car::{PARK_NO_ITEM, PARK_PARTIAL_ITEM};
 
 /// The gate-run key `--park-after` stamps. The auto-park handler copies
 /// it onto the car as the declared `boss_jobs::car::BOARDS_AFTER` edge,
@@ -931,7 +928,9 @@ pub const PARK_PARTIAL_ITEM: &str = "park_partial_item";
 /// Borrowed from core rather than spelled here: the reader is a
 /// dispatcher handler in a crate this one cannot import, and a key that
 /// agreed by coincidence would be a hold nothing enforces (§9a).
-pub use boss_jobs::car::PARK_BOARDS_AFTER;
+pub use boss_jobs::car::{
+    PARK_BACKLOG_ITEM, PARK_BOARDS_AFTER, PARK_EXCLUDES, PARK_SUMMARY, PARK_TEST, PARK_VERIFIED,
+};
 
 impl ParkIntent {
     /// True when no `--park-*` flag was given: a plain gate.
@@ -1284,11 +1283,11 @@ impl ParkIntent {
                 m.insert(k.to_string(), json!(v));
             }
         };
-        put("park_summary", &self.summary);
-        put("park_excludes", &self.excludes);
-        put("park_test", &self.test);
-        put("park_verified", &self.verified);
-        put("park_backlog_item", &self.backlog_item);
+        put(PARK_SUMMARY, &self.summary);
+        put(PARK_EXCLUDES, &self.excludes);
+        put(PARK_TEST, &self.test);
+        put(PARK_VERIFIED, &self.verified);
+        put(PARK_BACKLOG_ITEM, &self.backlog_item);
         put(PARK_PARTIAL_ITEM, &self.partial_item);
         put(PARK_NO_ITEM, &self.no_item);
         put(PARK_BOARDS_AFTER, &self.boards_after);

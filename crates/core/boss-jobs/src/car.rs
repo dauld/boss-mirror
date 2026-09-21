@@ -454,6 +454,36 @@ pub const BOARDS_AFTER: &str = "boards_after";
 /// nothing enforces.
 pub const PARK_BOARDS_AFTER: &str = "park_boards_after";
 
+/// THE REST OF THE `park_*` FAMILY, here for the reason the one above
+/// already gave: the writer is the CLI and the reader is a dispatcher
+/// handler, in two crates that cannot import each other, so a key
+/// spelled in both places agrees only by coincidence.
+///
+/// Until 2026-09-21 that was the state of all ten (backlog ef9a602d).
+/// Five had no constant at all; five more had one in `boss-cli` — a
+/// const on the WRITE side and a bare literal on the READ side, which
+/// is the same coincidence wearing a better name. `PARK_BOARDS_AFTER`
+/// was the only key both sides took from one definition.
+///
+/// THE FAILURE IS SILENT, which is why it is worth ten constants. A
+/// mistyped key on the write side stamps a field nobody reads; on the
+/// read side it reads a field nobody stamped. Either way the car
+/// parks, the gate is green, and the receipt is quietly short a piece
+/// — and for `PARK_BACKLOG_ITEM` that piece is what attaches a landed
+/// fix to the packet it answers, so losing it leaves an item open
+/// after its fix is in production, which is the residue the startup
+/// protocol sends the next session to re-derive by hand.
+pub const PARK_SUMMARY: &str = "park_summary";
+pub const PARK_EXCLUDES: &str = "park_excludes";
+pub const PARK_TEST: &str = "park_test";
+pub const PARK_VERIFIED: &str = "park_verified";
+pub const PARK_BACKLOG_ITEM: &str = "park_backlog_item";
+pub const PARK_PROBE: &str = "park_probe";
+pub const PARK_EXPECT: &str = "park_expect";
+pub const PARK_PROOF_EVENT: &str = "park_proof_event";
+pub const PARK_NO_ITEM: &str = "park_no_item";
+pub const PARK_PARTIAL_ITEM: &str = "park_partial_item";
+
 /// The item provenance a car carries beyond the closing edge: the item
 /// it is one piece of, or the reason it names none. Absent and blank
 /// values are omitted (never nulled), so merging this into a car body

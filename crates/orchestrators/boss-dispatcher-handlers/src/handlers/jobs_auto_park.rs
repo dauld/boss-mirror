@@ -238,7 +238,10 @@ fn auto_park_inputs(
     let md = gate_run.get("metadata").and_then(Value::as_object)?;
     // No `park_summary` = a manual gate (no `--park-*` intent). Do not
     // auto-park; the branch is gated but its author did not ask for it.
-    let summary = md.get("park_summary").and_then(Value::as_str)?.to_string();
+    let summary = md
+        .get(car::PARK_SUMMARY)
+        .and_then(Value::as_str)?
+        .to_string();
     let branch = md.get("branch").and_then(Value::as_str)?.to_string();
     let field = |k: &str| {
         md.get(k)
@@ -270,15 +273,15 @@ fn auto_park_inputs(
     Some(AutoParkInputs {
         branch,
         summary,
-        excludes: field("park_excludes"),
-        test: field("park_test"),
-        verified: field("park_verified"),
+        excludes: field(car::PARK_EXCLUDES),
+        test: field(car::PARK_TEST),
+        verified: field(car::PARK_VERIFIED),
         delivery_channel: md
             .get("delivery_channel")
             .and_then(Value::as_str)
             .map(str::to_string),
         backlog_item: md
-            .get("park_backlog_item")
+            .get(car::PARK_BACKLOG_ITEM)
             .and_then(Value::as_str)
             .map(str::to_string),
         // The two answers that are NOT the closing edge, copied under
@@ -286,8 +289,8 @@ fn auto_park_inputs(
         // gate's `park_partial_item` / `park_no_item` cannot silently go
         // missing between the gate-run and the car.
         item_provenance: car::item_provenance(
-            md.get("park_partial_item").and_then(Value::as_str),
-            md.get("park_no_item").and_then(Value::as_str),
+            md.get(car::PARK_PARTIAL_ITEM).and_then(Value::as_str),
+            md.get(car::PARK_NO_ITEM).and_then(Value::as_str),
         ),
         // The ordering edge the gate's `--park-after` stamped. Blank is
         // no edge: the ref check reads `''` as "no claim to check", so a
@@ -302,9 +305,9 @@ fn auto_park_inputs(
             .map(str::to_string),
         receipt,
         proof: car::proof_intent(
-            md.get("park_probe").and_then(Value::as_str),
-            md.get("park_expect").and_then(Value::as_str),
-            md.get("park_proof_event").and_then(Value::as_str),
+            md.get(car::PARK_PROBE).and_then(Value::as_str),
+            md.get(car::PARK_EXPECT).and_then(Value::as_str),
+            md.get(car::PARK_PROOF_EVENT).and_then(Value::as_str),
         ),
         // The verdict is green by the guard at the top of this function.
         flake: flake_stamp(gate_run, verdict_meta)
