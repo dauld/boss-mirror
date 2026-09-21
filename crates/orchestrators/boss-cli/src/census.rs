@@ -252,6 +252,69 @@ pub(crate) fn edge_refs(job: &Job, edges: &[JobEdgeSpec]) -> Vec<EdgeRef> {
     out
 }
 
+/// Does this metadata value look like it NAMES a Job? Permissive on
+/// shape, because the census decides by RESOLUTION: a candidate that
+/// no Job answers to is not reported, so the only cost of accepting a
+/// git sha here is one lookup that comes back empty.
+///
+/// Permissive matters. The four ad-hoc spellings measured on
+/// 2026-09-21 were a mix of full uuids and 8-char prefixes, and a
+/// check that only understood full uuids would have missed half of
+/// exactly the habit it exists to count.
+pub(crate) fn looks_like_a_job_ref(v: &str) -> bool {
+    let bare: String = v.chars().filter(|c| *c != '-').collect();
+    (8..=32).contains(&bare.len()) && bare.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Every metadata value that names a Job through NO declared edge
+/// (design c0d2787a q4).
+///
+/// The registry declares which field on which kind points at another
+/// Job. Nothing stopped an author writing the same fact into a field
+/// nobody declared — and on 2026-09-21 six packets filed in one
+/// session carried four such spellings (`prerequisite_for`,
+/// `prerequisite`, `prerequisite_of`, `related`), none resolvable,
+/// none ref-checked, none queryable, while the one declared edge was
+/// being refused by its verb. Without this count the freeform habit
+/// simply continues beside the declared edges, and in a year there
+/// are eight declared and forty undeclared.
+///
+/// Top-level keys only, strings and arrays of strings. Nested objects
+/// are not scanned: a reference buried three levels down is prose, and
+/// widening the net costs precision the base rate cannot afford yet.
+pub(crate) fn undeclared_refs(job: &Job, edges: &[JobEdgeSpec]) -> Vec<EdgeRef> {
+    let declared: std::collections::BTreeSet<&str> = edges
+        .iter()
+        .filter(|e| e.source_kind == "*" || e.source_kind == job.kind)
+        .map(|e| e.field_path.as_str())
+        .collect();
+
+    let Some(map) = job.metadata.as_object() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (field, raw) in map {
+        if declared.contains(field.as_str()) {
+            continue;
+        }
+        let mut consider = |v: &Value| {
+            if let Some(text) = v.as_str()
+                && looks_like_a_job_ref(text)
+            {
+                out.push(EdgeRef {
+                    field: field.clone(),
+                    value: text.to_string(),
+                });
+            }
+        };
+        match raw {
+            Value::Array(items) => items.iter().for_each(&mut consider),
+            other => consider(other),
+        }
+    }
+    out
+}
+
 /// What the census can say about one edge reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -433,6 +496,11 @@ pub(crate) struct EdgeSection {
     pub refs_checked: usize,
     pub dangling: Vec<EdgeRow>,
     pub unknown: Vec<EdgeRow>,
+    /// Metadata values that name a real Job through no declared edge
+    /// (design c0d2787a q4). Reported, never raised — the base rate is
+    /// the point, and a count nobody has seen yet should not gate
+    /// anything.
+    pub undeclared: Vec<EdgeRow>,
 }
 
 #[derive(Debug, Serialize)]
@@ -760,6 +828,25 @@ async fn collect(opts: Options, now: DateTime<Utc>) -> Result<Census> {
     let (ids_scanned, id_probes) =
         resolve_universe(&mut api, &mut universe, &refs, opts.max_scan, &mut notes).await?;
 
+    // The inverse question: a value that names a Job through a field
+    // nobody declared. Resolved against the SAME universe, and only
+    // reported when a Job actually answers — an unresolvable hex blob
+    // is a sha or a step id, not evidence of the habit being counted.
+    let mut undeclared: Vec<EdgeRow> = Vec::new();
+    for p in &packets {
+        for r in undeclared_refs(&p.job, &edges) {
+            if resolve(&r.value, &universe) == Resolution::Present {
+                undeclared.push(EdgeRow {
+                    job_id: p.job.id.to_string(),
+                    job_kind: p.job.kind.clone(),
+                    field: r.field,
+                    value: r.value,
+                    resolution: Resolution::Present,
+                });
+            }
+        }
+    }
+
     let mut dangling: Vec<EdgeRow> = Vec::new();
     let mut unknown: Vec<EdgeRow> = Vec::new();
     for (job_id, job_kind, r) in &refs {
@@ -853,6 +940,7 @@ async fn collect(opts: Options, now: DateTime<Utc>) -> Result<Census> {
         },
         edge_integrity: EdgeSection {
             declarations_from,
+            undeclared,
             declared: edges.len(),
             scope: "open packets",
             refs_checked: refs.len(),
@@ -1174,6 +1262,35 @@ fn render(c: &Census) -> String {
             "  unknown (not decidable from what was fetched) — {}",
             e.unknown.len()
         ));
+    }
+    if e.undeclared.is_empty() {
+        o.push("  undeclared: none — every Job reference sits in a declared field".into());
+    } else {
+        let mut fields: BTreeMap<&str, usize> = BTreeMap::new();
+        for row in &e.undeclared {
+            *fields.entry(row.field.as_str()).or_default() += 1;
+        }
+        o.push(format!(
+            "  undeclared — {} reference(s) in {} field(s) nobody declared; each names a \
+             real Job that no reader can follow",
+            e.undeclared.len(),
+            fields.len()
+        ));
+        for (field, n) in &fields {
+            o.push(format!("    {field:<24}{n}"));
+        }
+        for row in e.undeclared.iter().take(12) {
+            o.push(format!(
+                "    {}  {:<20}{} → {}",
+                short(&row.job_id),
+                trunc(&row.job_kind, 19),
+                row.field,
+                short(&row.value)
+            ));
+        }
+        if e.undeclared.len() > 12 {
+            o.push(format!("    … and {} more", e.undeclared.len() - 12));
+        }
     }
 
     o.push(String::new());
@@ -2066,6 +2183,13 @@ mod tests {
                     resolution: Resolution::Dangling,
                 }],
                 unknown: vec![],
+                undeclared: vec![EdgeRow {
+                    job_id: "3b2c9d1a-1111-2222-3333-444444444444".into(),
+                    job_kind: "ship-a-change".into(),
+                    field: "related".into(),
+                    value: "7c1d0e55-5555-6666-7777-888888888888".into(),
+                    resolution: Resolution::Present,
+                }],
             },
             cost: Cost {
                 api_calls: 9,
@@ -2440,5 +2564,127 @@ mod tests {
             "opened-on"
         );
         assert_eq!(v["cost"]["api_calls"], 9);
+    }
+}
+
+#[cfg(test)]
+mod undeclared_tests {
+    use super::*;
+
+    fn job_with(kind: &str, metadata: Value) -> Job {
+        let mut j: Job = serde_json::from_value(serde_json::json!({
+            "id": "11111111-1111-1111-1111-111111111111",
+            "kind": kind,
+            "subject": { "subject_kind": "custom", "id": "x" },
+            "title": "t",
+            "owner_id": "emp-o",
+            "status": "open",
+            "priority": "standard",
+            "opened_on": "2026-09-21",
+            "workflow_version": 1,
+            "metadata": {},
+            "tags": []
+        }))
+        .expect("a Job");
+        j.metadata = metadata;
+        j
+    }
+
+    fn edges() -> Vec<JobEdgeSpec> {
+        vec![
+            JobEdgeSpec {
+                source_kind: "*".into(),
+                field_path: "waiting_on".into(),
+                field_kind: "job_id".into(),
+                on_missing: "abort".into(),
+                description: String::new(),
+            },
+            JobEdgeSpec {
+                source_kind: "ship-a-change".into(),
+                field_path: "backlog_item".into(),
+                field_kind: "job_id".into(),
+                on_missing: "abort".into(),
+                description: String::new(),
+            },
+        ]
+    }
+
+    /// The four spellings measured on 2026-09-21, verbatim — including
+    /// the array-valued one, which a scanner that only read strings
+    /// would have walked straight past.
+    #[test]
+    fn it_finds_the_spellings_that_were_actually_written() {
+        let job = job_with(
+            "backlog-item",
+            serde_json::json!({
+                "prerequisite_for": "dd8120ba-e593-46cf-add2-5e362c5df688",
+                "prerequisite": "121831e6",
+                "related": ["2c14ba6b", "96f85c9b-9592-43fc-9ba5-9e9c40915454"],
+                "waiting_on": "121831e6-8bf6-4583-b83c-e2ffd92db261",
+            }),
+        );
+        let found = undeclared_refs(&job, &edges());
+        let fields: Vec<&str> = found.iter().map(|r| r.field.as_str()).collect();
+        assert!(fields.contains(&"prerequisite_for"), "{found:?}");
+        assert!(fields.contains(&"prerequisite"), "{found:?}");
+        assert_eq!(
+            fields.iter().filter(|f| **f == "related").count(),
+            2,
+            "both ids in the array, not just the first: {found:?}"
+        );
+        assert!(
+            !fields.contains(&"waiting_on"),
+            "a DECLARED field is not undeclared: {found:?}"
+        );
+    }
+
+    /// Declaration is per-kind: the same key is a declared edge on one
+    /// kind and freeform on another, and the scan must respect that or
+    /// it reports every car's `backlog_item` as a finding.
+    #[test]
+    fn a_declaration_applies_only_to_the_kind_that_declares_it() {
+        let meta = serde_json::json!({ "backlog_item": "ef74fc12" });
+        assert!(
+            undeclared_refs(&job_with("ship-a-change", meta.clone()), &edges()).is_empty(),
+            "declared on ship-a-change"
+        );
+        assert_eq!(
+            undeclared_refs(&job_with("backlog-item", meta), &edges()).len(),
+            1,
+            "the same key on a kind that does not declare it IS a finding"
+        );
+    }
+
+    /// The shape test is permissive on purpose; resolution is what
+    /// decides. But it must still reject the obvious non-references,
+    /// or every packet reports its whole metadata.
+    #[test]
+    fn the_shape_test_admits_ids_and_rejects_prose() {
+        assert!(looks_like_a_job_ref("ef74fc12"));
+        assert!(looks_like_a_job_ref("dd8120ba-e593-46cf-add2-5e362c5df688"));
+        assert!(
+            !looks_like_a_job_ref("ef74fc1"),
+            "7 chars is too short to mean one Job"
+        );
+        assert!(!looks_like_a_job_ref("platform-admin"));
+        assert!(!looks_like_a_job_ref("2026-09-21T17:00:00Z"));
+        assert!(!looks_like_a_job_ref(""));
+        assert!(
+            !looks_like_a_job_ref("7dcf3ab97fb0186ee0000e396b9dc3e6cc6e510e"),
+            "a 40-char git sha is longer than any Job id"
+        );
+    }
+
+    /// Metadata that is not an object at all, which the API permits.
+    #[test]
+    fn a_packet_with_no_metadata_object_yields_nothing() {
+        assert!(undeclared_refs(&job_with("backlog-item", Value::Null), &edges()).is_empty());
+        assert!(
+            undeclared_refs(
+                &job_with("backlog-item", serde_json::json!("prose")),
+                &edges()
+            )
+            .is_empty()
+        );
     }
 }

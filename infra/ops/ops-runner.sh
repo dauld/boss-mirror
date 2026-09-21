@@ -273,6 +273,12 @@ while [ "$i" -lt "$n" ]; do
                       else ($spec.hosts | join(", ")) end)
                    + "; verbs this host serves: "
                    + ([.verbs | to_entries[] | select((.value.hosts // []) | index($host)) | .key] | join(", ")))
+          elif ($spec.requires_approval // false) == true then
+            refuse("verb \($verb) declares requires_approval, and this runner cannot verify "
+                   + "an approval: nothing issues one yet (design 17835005 — a rendered plan "
+                   + "hash, signed, single-use, verified before the argv is built). A runner "
+                   + "that cannot check an approval refuses rather than assumes, so this verb "
+                   + "is inert until that channel exists")
           elif ($args | type) != "array" or any($args[]; type != "string") then
             refuse("metadata.args must be a JSON array of strings")
           elif ($args | length) > ($spec.params | length) then

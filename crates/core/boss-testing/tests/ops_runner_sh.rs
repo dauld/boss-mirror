@@ -979,3 +979,146 @@ fn iso_at(epoch: u64) -> String {
         .expect("date runs");
     String::from_utf8(out.stdout).unwrap().trim().to_string()
 }
+
+/// A verb that declares `requires_approval` is REFUSED until something
+/// can verify an approval — and the refusal says which verb, and why.
+///
+/// This is the safety half of design 17835005 (passkey-approved,
+/// machine-executed destructive operations), and it lands BEFORE the
+/// thing that issues approvals, deliberately. The design's own claim is
+/// that the guard matters more than the approval: a verb whose
+/// dangerous outcome is excluded by machine-checkable preconditions can
+/// be handed to the machine, and one that cannot must not be. Declaring
+/// the requirement first means the first such verb is inert on arrival
+/// — the system never gains the power before it gains the gate.
+///
+/// FAIL CLOSED IS THE WHOLE POINT. A runner that cannot check an
+/// approval must refuse, never assume; `commission-a-disk` partitions a
+/// block device, and the failure mode of assuming is a wiped host.
+#[test]
+fn a_verb_requiring_approval_is_refused_while_no_approval_can_be_verified() {
+    needs_jq!();
+    let root = scratch("requires-approval");
+    stub_sor(&root);
+    let verbs = verbs_dir(
+        &root,
+        &[(
+            "needs-a-human",
+            r#"{"about":"MUTATING — test fixture.","hosts":["forge"],
+                "requires_approval":true,
+                "argv":["true"],"params":[]}"#,
+        )],
+    );
+    packet(&root, "needs-a-human", "[]");
+    let (out, payload) = run(&root, &verbs, &[]);
+    let md = payload.unwrap_or_else(|| panic!("no step completed: {out}"));
+    assert_eq!(md["disposition"], "refused", "{md}");
+    let reason = md["reason"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no reason on the step: {md}"));
+    assert!(
+        reason.contains("needs-a-human") && reason.contains("approval"),
+        "the refusal names the verb and what it wants: {reason}"
+    );
+    assert!(
+        md.get("exit_code").is_none(),
+        "a refusal ran nothing — and this one in particular must not: {md}"
+    );
+}
+
+/// The refusal is about the DECLARATION, not about the verb being
+/// unusual: an ordinary verb in the same allowlist still runs. Without
+/// this control the test above passes against a runner that refuses
+/// everything.
+#[test]
+fn a_verb_that_requires_no_approval_still_runs_beside_one_that_does() {
+    needs_jq!();
+    let root = scratch("requires-approval-control");
+    stub_sor(&root);
+    let verbs = verbs_dir(
+        &root,
+        &[
+            (
+                "needs-a-human",
+                r#"{"about":"MUTATING — test fixture.","hosts":["forge"],
+                    "requires_approval":true,"argv":["true"],"params":[]}"#,
+            ),
+            (
+                "ordinary",
+                r#"{"about":"a read.","hosts":["forge"],"argv":["true"],"params":[]}"#,
+            ),
+        ],
+    );
+    packet(&root, "ordinary", "[]");
+    let (out, payload) = run(&root, &verbs, &[]);
+    let md = payload.unwrap_or_else(|| panic!("no step completed: {out}"));
+    assert_eq!(md["disposition"], "answered", "{md}");
+    assert_eq!(md["exit_code"], "0", "{md}");
+}
+
+/// The shipped verb declares it, and the shipped script refuses the
+/// shapes that would aim it at the wrong disk.
+///
+/// The declaration is a one-word difference between a verb that is
+/// inert and a verb that partitions a block device on request, so it
+/// is pinned rather than trusted to review.
+#[test]
+fn the_disk_verb_is_inert_and_refuses_an_unstable_target() {
+    let root = repo_root();
+    let spec: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("infra/ops/verbs/commission-a-disk.json"))
+            .expect("the verb file"),
+    )
+    .expect("the verb file is JSON");
+    assert_eq!(
+        spec["requires_approval"], true,
+        "commission-a-disk writes a partition table; it stays inert until an approval can \
+         be verified"
+    );
+    assert!(
+        spec["about"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("MUTATING"),
+        "the bounded-verbs lint derives its roster from that word"
+    );
+
+    // The script's refusals, exercised. A success path cannot be tested
+    // here — it would partition the gate runner — so the failure paths
+    // are the whole test, which is the right way round for a verb whose
+    // only interesting property is what it declines to do.
+    let script = root.join("infra/forge/commission-a-disk.sh");
+    let cases: [(&[&str], &str); 4] = [
+        (&["/dev/nvme0n1", "/srv/data"], "stable identity"),
+        (&["nvme0n1", "/srv/data"], "stable identity"),
+        (
+            &["/dev/disk/by-id/nvme-NO-SUCH-DEVICE-0000", "/srv/data"],
+            "no such device",
+        ),
+        (
+            &["/dev/disk/by-id/nvme-NO-SUCH-DEVICE-0000", "relative/path"],
+            "must be absolute",
+        ),
+    ];
+    for (args, expected) in cases {
+        let out = Command::new("sh")
+            .arg(&script)
+            .args(args)
+            .output()
+            .expect("the script runs");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(78),
+            "a wrong request is EX_CONFIG, not a failed run: {args:?} -> {text}"
+        );
+        assert!(
+            text.contains(expected),
+            "the refusal says which precondition failed: {args:?} -> {text}"
+        );
+    }
+}

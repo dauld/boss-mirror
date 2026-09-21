@@ -42,6 +42,30 @@
 #
 # `retain-rollback` records the date the old disk may be reused, because
 # "keep it for a week" with no date written down is a week nobody counts.
+#
+# WHAT THE FIRST REAL RUN CHANGED, the same afternoon it was written.
+# This protocol was authored as a SWAP — take the old disk out, put the
+# new one in — and the swap it was written for turned out to be an ADD:
+# the forge had a second M.2 slot, so the 1 TB went in beside the old
+# disk and the host booted from the original, unchanged. That path is
+# both the safest (nothing is removed, so there is nothing to restore)
+# and the likeliest, because a machine with a spare slot is a machine
+# that does not need a clone. A protocol named only for the destructive
+# case nudges its operator toward the destructive case, so `install`
+# carries the METHOD and two things hang off it: `commission`, which is
+# the work of turning a device into capacity and which a pure swap does
+# not need, and `retain-rollback`, which is meaningless when nothing was
+# taken out.
+#
+# AND THE LESSON THAT COST THE MOST TO LEARN, in `verify-capacity`:
+# adding a disk RENUMBERS the kernel's devices. On the forge the new
+# blank drive enumerated as nvme0n1 and the live root filesystem moved
+# to nvme1n1p2, so the disk that looked like "the new one" by number was
+# the one carrying the system. The host booted only because fstab
+# resolves by UUID. `verify-capacity` therefore demands the device's
+# STABLE identity — its by-id path or serial — and not its kernel name,
+# because every destructive command in `commission` will be aimed using
+# whatever that step recorded.
 # ---------------------------------------------------------------------------
 
 [[workflow]]
@@ -110,12 +134,15 @@ fields = [
 ]
 
 [[workflow.step]]
-title = "swap"
+title = "install"
 kind = "task"
 ready_when = "steps.quiesce.done AND steps.reclaim.done"
-title_template = "Swap the disk on {metadata.host}"
+title_template = "Install the disk on {metadata.host}"
 authority_role = "platform-admin"
 fields = [
+  # `add` | `clone-and-swap` | `reinstall`. Recorded rather than
+  # branched on in code: the two steps that depend on it read this
+  # value in their own `ready_when`.
   { name = "method", field_type = "string", required = true },
   { name = "started_at", field_type = "string", required = true },
   { name = "finished_at", field_type = "string", required = true },
@@ -125,12 +152,30 @@ fields = [
 [[workflow.step]]
 title = "verify-capacity"
 kind = "task"
-ready_when = "steps.swap.done"
+ready_when = "steps.install.done"
 title_template = "The new capacity is real on {metadata.host}"
 authority_role = "platform-admin"
 fields = [
   { name = "observed_capacity", field_type = "string", required = true },
   { name = "observed_via", field_type = "string", required = true },
+  # THE STABLE NAME, not the kernel's. Adding a disk renumbers
+  # devices; every destructive command in `commission` is aimed with
+  # what this field records, so a by-id path or a serial is the answer
+  # and `nvme0n1` is not.
+  { name = "device_identity", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "commission"
+kind = "task"
+ready_when = "steps.verify-capacity.done AND steps.install.metadata.method = \"add\""
+title_template = "Turn the new device into capacity on {metadata.host}"
+authority_role = "platform-admin"
+fields = [
+  { name = "partitioned_as", field_type = "string", required = true },
+  { name = "mounted_by", field_type = "string", required = true },
+  { name = "consumers_moved", field_type = "string", required = true },
+  { name = "reclaim_reverified", field_type = "string", required = true },
 ]
 
 [[workflow.step]]
@@ -148,7 +193,10 @@ fields = [
 [[workflow.step]]
 title = "verify-work"
 kind = "task"
-ready_when = "steps.verify-identity.done"
+# Waits for `commission` when there was one: on an additive install
+# the real work runs against services whose data has just moved, so
+# proving it BEFORE the move proves the wrong tree.
+ready_when = "steps.verify-identity.done AND (steps.commission.done OR steps.install.metadata.method != \"add\")"
 title_template = "Real work ran end to end on {metadata.host}"
 authority_role = "platform-admin"
 fields = [
@@ -170,7 +218,7 @@ fields = [
 [[workflow.step]]
 title = "retain-rollback"
 kind = "task"
-ready_when = "steps.release.done"
+ready_when = "steps.release.done AND steps.install.metadata.method != \"add\""
 title_template = "The old disk is retained until a stated date"
 authority_role = "platform-admin"
 fields = [
@@ -181,7 +229,7 @@ fields = [
 [[workflow.step]]
 title = "replaced"
 kind = "outcome"
-ready_when = "steps.retain-rollback.done"
+ready_when = "steps.release.done AND (steps.retain-rollback.done OR steps.install.metadata.method = \"add\")"
 title_template = "Replaced: {metadata.host}"
 authority_role = "platform-admin"
 metadata_defaults = { outcome_kind = "completed" }
@@ -190,7 +238,7 @@ terminal = { outcome = "replaced" }
 [[workflow.step]]
 title = "rolled-back"
 kind = "outcome"
-ready_when = "steps.swap.done"
+ready_when = "steps.install.done"
 title_template = "Rolled back: {metadata.host}"
 authority_role = "platform-admin"
 metadata_defaults = { outcome_kind = "withdrawn" }

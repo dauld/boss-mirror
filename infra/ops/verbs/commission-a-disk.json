@@ -1,0 +1,11 @@
+{
+  "about": "MUTATING — writes a partition table and a filesystem, which is the most destructive thing any verb here does. INERT ON ARRIVAL: it declares requires_approval, and the runner refuses any such verb because nothing can verify an approval yet (design 17835005, decided by David 2026-09-21 — a rendered plan hash, signed with his passkey, single-use, verified before the argv is built). It lands ahead of that channel on purpose, so the gate exists before the power does. Its bound is by construction of the ONE script it calls (infra/forge/commission-a-disk.sh): the target must be a /dev/disk/by-id/ path, must carry no partition table, must have nothing mounted on it and must not back the root filesystem, all re-checked immediately before the write rather than once at plan time. A kernel name is refused outright — on 2026-09-21 adding a disk to the forge renumbered the devices and the drive that looked like the new one by number was the one carrying the system.",
+  "hosts": ["forge"],
+  "requires_approval": true,
+  "argv": ["infra/forge/commission-a-disk.sh", "{1}", "{2}"],
+  "params": [
+    { "name": "device_by_id", "pattern": "^/dev/disk/by-id/[A-Za-z0-9._-]{4,120}$" },
+    { "name": "mount_path", "pattern": "^/[A-Za-z0-9._/-]{1,60}$" }
+  ],
+  "timeout": 600
+}
