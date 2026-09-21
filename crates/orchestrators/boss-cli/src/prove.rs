@@ -555,6 +555,19 @@ pub(crate) fn failure_diagnosis(probe: &str, o: &Outcome) -> Option<String> {
             exit = o.exit,
         ));
     }
+    if let Some(line) = quoting_mangled_its_arguments(&o.stderr) {
+        return Some(format!(
+            "THE PROBE'S QUOTING WAS MANGLED, so exit {exit} is not a verdict on the claim \
+             — a tool was handed a filename with a quote in it, which means the argument \
+             list was split somewhere the author did not intend. The tool said:\n  {line}\n  \
+             This is the backtick trap's cousin: prose damaged between authoring and \
+             storage. SINGLE-quote the probe when you pass it, or use the flag's `-file` \
+             twin, where no word expansion happens at all. Fix the probe and re-park — a \
+             recheck re-runs damaged text forever, and every run reports the probe's own \
+             not-yet sentence, which reads exactly like an honest wait (302bc2f2).",
+            exit = o.exit,
+        ));
+    }
     if o.stdout.trim().is_empty() && o.stderr.trim().is_empty() {
         let rewritten = match boss_jobs::probe::rewrites_its_exit_status(probe) {
             Some(n) => format!(
@@ -601,6 +614,51 @@ pub(crate) fn crashed_comparing_a_non_number(stderr: &str) -> Option<&str> {
         .lines()
         .map(str::trim)
         .find(|line| NUMERIC_CRASH_MARKERS.iter().any(|m| line.contains(m)))
+}
+
+/// WHAT A TOOL SAYS WHEN THE PROBE'S QUOTING WAS MANGLED (backlog
+/// 302bc2f2). Car c4c1ac17's stored probe carried backslash-escaped
+/// quotes, so `grep -c \"boss step complete\"` ran with `\"boss` as the
+/// pattern and `step` and `complete"` as FILENAMES. grep warned about
+/// each, exited 2, and the probe's own `case` arm turned that into exit
+/// 75 — the one answer nobody re-reads. The claim was already true on
+/// main; the car sat unproven for days over its own text, and the
+/// hourly recheck re-ran it forever, each run printing the same
+/// reassuring sentence.
+///
+/// THE RULE IS NARROW ON PURPOSE, and the narrowness is the whole
+/// design. "No such file or directory" ALONE is not evidence of damage:
+/// a probe that greps a file which has not landed on main yet says
+/// exactly that, and it is an honest not-yet. What is never honest is a
+/// missing operand whose NAME CARRIES A DOUBLE QUOTE — no probe reads a
+/// file called `complete"`, so the quote is the residue of an extra
+/// escaping layer between authoring and storage.
+///
+/// WHY NOT REFUSE THE TEXT AT THE DOOR INSTEAD. That was the first
+/// proposal and it is wrong, measured: of 254 stored probes, 71 carry a
+/// backslash-quote and nearly all are CORRECT — `grep -q "name =
+/// \"folded_into\""` is how sh writes a literal quote inside a quoted
+/// string. Restricting to a backslash-quote in unquoted context still
+/// flags two correct probes, both `case` patterns where `*\"x\"*` is the
+/// idiomatic way to match a literal quote. The text cannot tell the
+/// damage from the idiom; the RUN can, because only the damaged one
+/// makes a tool report a filename with a quote in it.
+///
+/// It fails toward NotProven with the cause attached, never toward a
+/// green, so the worst a false positive does is make a car look
+/// troubled — which is the direction CLAUDE.md asks this to fail.
+pub(crate) const MISSING_OPERAND_MARKERS: [&str; 3] =
+    ["No such file or directory", "cannot open", "can't open"];
+
+/// The first stderr line that names a missing operand whose name
+/// carries a double quote — the line the verdict quotes. `None` when
+/// nothing on stderr shows that shape, so an honestly-missing file
+/// keeps its not-yet.
+pub(crate) fn quoting_mangled_its_arguments(stderr: &str) -> Option<&str> {
+    stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| line.contains('"') && MISSING_OPERAND_MARKERS.iter().any(|m| line.contains(m)))
 }
 
 /// [`judge`], with the diagnosis attached when the record supports one.
@@ -3629,6 +3687,87 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("THE PROBE CRASHED"), "{e}");
+    }
+
+    /// THE MEASURED c4c1ac17 STDERR (backlog 302bc2f2). Its stored probe
+    /// carried backslash-escaped quotes, so under sh `\"boss` was the
+    /// PATTERN and `step` and `complete"` were FILENAMES. grep warned
+    /// about both and exited 2, the probe's own `case` arm caught the
+    /// non-number and exited 75, and the runner read 75 as an honest
+    /// wait. `recheck-failing-probes-hourly` then re-ran a probe that
+    /// could never pass, hourly, each run producing the same reassuring
+    /// sentence. Nothing was ever judged about the claim — which was, as
+    /// it happens, already true on main.
+    const MANGLED_ARGS_STDERR: &str = "\
+ugrep: warning: step: No such file or directory\n\
+ugrep: warning: complete\": No such file or directory\n";
+
+    #[test]
+    fn a_probe_whose_quoting_was_mangled_is_not_read_as_an_honest_wait() {
+        // Exit 75 is the probe's own not-yet code, and that is the whole
+        // trap: this must NOT come back as NotYet.
+        let o = crashed(75, MANGLED_ARGS_STDERR);
+        let d = failure_diagnosis(NULL_COUNT_PROBE, &o)
+            .expect("a mangled argument list is diagnosable");
+        assert!(d.contains("QUOTING"), "the cause is named: {d}");
+        assert!(
+            d.contains("complete\": No such file or directory"),
+            "the stderr line is quoted, not pointed at: {d}"
+        );
+        assert!(!d.contains("not yet"), "a broken probe is not a wait: {d}");
+        // The verdict is the thing that mattered: 75 with a diagnosis is
+        // NotProven, so the shed renders it troubled instead of waiting.
+        assert!(
+            matches!(
+                verdict(NULL_COUNT_PROBE, &o, Some("x:ok")),
+                Verdict::NotProven(_)
+            ),
+            "exit 75 with mangled arguments must not read as NotYet"
+        );
+    }
+
+    /// Every phrasing a tool uses for a missing operand is the same
+    /// finding, not only the one measured — a fourth is a line in
+    /// `MISSING_OPERAND_MARKERS`, and this walks the list so the list is
+    /// what gets tested, at every exit code a `||` branch could turn it
+    /// into. The quote in the name is what makes each one damage rather
+    /// than a wait, so each marker is checked both ways.
+    #[test]
+    fn every_missing_operand_marker_is_damage_only_when_the_name_carries_a_quote() {
+        for marker in MISSING_OPERAND_MARKERS {
+            for exit in [1, 2, 75] {
+                let mangled = format!("grep: complete\": {marker}\n");
+                let d = failure_diagnosis(NULL_COUNT_PROBE, &crashed(exit, &mangled))
+                    .unwrap_or_else(|| panic!("{marker:?} at exit {exit} is mangled quoting"));
+                assert!(d.contains("QUOTING"), "{marker:?}: {d}");
+                let honest = format!("grep: newfile.txt: {marker}\n");
+                assert!(
+                    failure_diagnosis(NULL_COUNT_PROBE, &crashed(exit, &honest)).is_none(),
+                    "{marker:?} without a quote in the name is an honest wait"
+                );
+            }
+        }
+    }
+
+    /// The rule is narrow ON PURPOSE. A probe that greps a file which is
+    /// not on main yet is an HONEST not-yet, and its stderr says "No such
+    /// file or directory" too. What is never honest is a missing file
+    /// whose NAME carries a double quote: no probe greps such a file, so
+    /// the quote is the residue of an extra escaping layer.
+    #[test]
+    fn a_plainly_missing_file_is_still_an_honest_wait() {
+        let o = crashed(75, "grep: newfile.txt: No such file or directory\n");
+        assert!(
+            failure_diagnosis(NULL_COUNT_PROBE, &o).is_none(),
+            "a file that has simply not landed yet is not a mangled probe"
+        );
+        assert!(
+            matches!(
+                verdict(NULL_COUNT_PROBE, &o, Some("x:ok")),
+                Verdict::NotYet { .. }
+            ),
+            "and it still reads as the honest wait it is"
+        );
     }
 
     /// Every message bash's `[` and `((` print for a non-number is a
