@@ -54,6 +54,7 @@ impl Sensors for InMemorySensors {
                 every_minutes: s.every_minutes,
                 opens_kind: s.opens.clone(),
                 subject_kind: s.subject_kind.clone(),
+                selector: s.selector.clone(),
                 enabled: s.enabled,
                 tenant_id: tenant_id.to_string(),
                 published_at: boss_clock_client::wall_now(),
@@ -184,6 +185,7 @@ mod tests {
             opens: "receive-a-sponsorship".into(),
             subject_kind: "custom".into(),
             enabled: true,
+            selector: None,
         }
     }
 

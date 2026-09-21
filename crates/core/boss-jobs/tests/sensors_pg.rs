@@ -22,6 +22,7 @@ fn input(id: &str) -> SensorInput {
         opens: "receive-a-sponsorship".into(),
         subject_kind: "custom".into(),
         enabled: true,
+        selector: None,
     }
 }
 
@@ -187,6 +188,52 @@ async fn the_cursor_never_moves_backwards_and_the_sweep_keeps_what_is_owed() {
 /// since 20260917-a-push-only-sensor-has-no-period), it is never due,
 /// and its readings — which no stamp will ever reach — are swept by
 /// age alone while a polled sensor's owed reading of the same age is
+/// ONE MAILBOX, MANY DEPARTMENTS (design bffc0aba). The selector is the
+/// field that lets two sensors read the same source and each take only
+/// its own stream, so it has to survive the table — a column that
+/// silently dropped it would give both sensors everything.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_selector_survives_the_round_trip_and_null_stays_null() {
+    let db = TestDb::new().await;
+    let repo = PgSensors::new(db.pool.clone());
+    let mut support = input("support-inbox");
+    support.source = "mail".into();
+    support.opens = "receive-a-message".into();
+    support.selector = Some("support@algedonic.dev".into());
+    let mut finance = input("finance-inbox");
+    finance.source = "mail".into();
+    finance.opens = "receive-an-invoice".into();
+    finance.selector = Some("finance@algedonic.dev".into());
+    repo.publish(
+        "algedonic",
+        &[support, finance, input("stripe-sponsorships")],
+    )
+    .await
+    .expect("publish");
+
+    let rows = repo.list().await.expect("list");
+    let by = |id: &str| {
+        rows.iter()
+            .find(|r| r.id == id)
+            .unwrap_or_else(|| panic!("{id} published"))
+            .clone()
+    };
+    assert_eq!(
+        by("support-inbox").selector.as_deref(),
+        Some("support@algedonic.dev")
+    );
+    assert_eq!(
+        by("finance-inbox").selector.as_deref(),
+        Some("finance@algedonic.dev"),
+        "two sensors on one source keep DIFFERENT selectors"
+    );
+    assert_eq!(
+        by("stripe-sponsorships").selector,
+        None,
+        "a source with one stream selects nothing, and null is not the empty string"
+    );
+}
+
 /// kept.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_push_only_sensor_lands_without_a_period_and_its_readings_are_swept_by_age() {
@@ -200,6 +247,7 @@ async fn a_push_only_sensor_lands_without_a_period_and_its_readings_are_swept_by
         opens: "marketing-weekly".into(),
         subject_kind: "custom".into(),
         enabled: true,
+        selector: None,
     };
     let out = repo.publish("acme", &[input("s"), site]).await.unwrap();
     assert_eq!((out.received, out.inserted), (2, 2));

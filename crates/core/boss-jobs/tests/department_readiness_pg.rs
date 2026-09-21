@@ -104,6 +104,7 @@ fn sensor(id: &str, opens: &str) -> SensorInput {
         opens: opens.into(),
         subject_kind: "custom".into(),
         enabled: true,
+        selector: None,
     }
 }
 

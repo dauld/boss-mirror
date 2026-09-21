@@ -63,6 +63,22 @@ pub struct SensorInput {
     pub subject_kind: String,
     #[serde(default = "enabled_default")]
     pub enabled: bool,
+    /// WHICH STREAM within the source, when the source has more than
+    /// one and they are not separate sources.
+    ///
+    /// The first case is mail (design bffc0aba, David 2026-09-21: "use
+    /// inbox names to trigger different protocols"). `support@` and
+    /// `finance@` route into ONE mailbox, and each must open a
+    /// different department's protocol — so several sensors read the
+    /// same place and each takes only its own mail. Without this the
+    /// routing cannot be expressed as data, and the fallback is a
+    /// branch per department inside one protocol: a `match` statement
+    /// in a registry row, which is what §9 exists to prevent.
+    ///
+    /// `None` for a source with one stream, which is every source that
+    /// exists today — Stripe's key IS the selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
 }
 
 fn enabled_default() -> bool {
@@ -118,9 +134,29 @@ pub fn validate_sensor(s: &SensorInput) -> Result<(), String> {
                 s.id, s.source
             ));
         }
+        if s.selector.is_some() {
+            return Err(format!(
+                "sensor {}: source `{}` is push-only (nothing polls it), so it takes no selector",
+                s.id, s.source
+            ));
+        }
         return Ok(());
     }
     slug("credential", &s.credential)?;
+    // NOT kebab-case: a selector names something the OUTSIDE world
+    // already named — an address, a folder, a label — and
+    // `support@algedonic.dev` is not kebab-case and never will be.
+    // Empty is refused rather than read as absent, because the two mean
+    // different things and a selector that silently meant everything
+    // would hand one sensor every other sensor's mail.
+    if let Some(sel) = &s.selector
+        && sel.trim().is_empty()
+    {
+        return Err(format!(
+            "sensor {}: selector is declared but blank — name the stream it reads, or omit it",
+            s.id
+        ));
+    }
     if s.every_minutes < 1 {
         return Err(format!(
             "sensor {}: every_minutes is {}; a sensor polls at least once a minute",
@@ -148,6 +184,9 @@ pub struct SensorRow {
     pub opens_kind: String,
     pub subject_kind: String,
     pub enabled: bool,
+    /// Which stream within the source — see [`SensorInput::selector`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
     pub tenant_id: String,
     pub published_at: DateTime<Utc>,
     /// When the poller last attempted this sensor (good or unreadable).
@@ -234,7 +273,68 @@ mod tests {
             opens: "receive-a-sponsorship".into(),
             subject_kind: "custom".into(),
             enabled: true,
+            selector: None,
         }
+    }
+
+    /// ONE SOURCE, MANY STREAMS (design bffc0aba, David 2026-09-21:
+    /// "use inbox names to trigger different protocols"). A mailbox is
+    /// the first source where several sensors read the SAME place and
+    /// each must take only its own mail: support@ and finance@ both
+    /// route into one Proton mailbox, and each opens a different
+    /// department's protocol. Without a selector that routing cannot be
+    /// expressed as data at all, and the fallback is a branch per
+    /// department inside one protocol — a `match` statement in a
+    /// registry row, which is what §9 exists to prevent.
+    #[test]
+    fn a_sensor_may_select_within_its_source() {
+        let mut s = input();
+        s.selector = Some("support@algedonic.dev".into());
+        assert!(validate_sensor(&s).is_ok(), "a selector is admitted");
+    }
+
+    /// NOT kebab-case, deliberately. Every other string on a sensor row
+    /// is an identifier this system coins; a selector names something
+    /// the OUTSIDE world already named — an address, a folder, a label —
+    /// and `support@algedonic.dev` is not kebab-case and never will be.
+    /// Holding it to that rule would refuse every real value.
+    #[test]
+    fn a_selector_is_not_held_to_the_kebab_case_rule() {
+        let mut s = input();
+        s.selector = Some("Support Inbox/2026".into());
+        assert!(validate_sensor(&s).is_ok(), "{:?}", validate_sensor(&s));
+    }
+
+    /// An EMPTY selector is refused rather than treated as absent. The
+    /// two mean different things — absent is "this source has one
+    /// stream", empty is "I meant to name one and did not" — and a
+    /// selector that silently means everything would give one sensor
+    /// every other sensor's mail.
+    #[test]
+    fn an_empty_selector_is_refused_rather_than_read_as_absent() {
+        let mut s = input();
+        s.selector = Some("   ".into());
+        let err = validate_sensor(&s).expect_err("blank");
+        assert!(err.contains("selector"), "{err}");
+    }
+
+    /// A push-only source is not polled, so it selects nothing — the
+    /// same reasoning that already refuses it a credential and a
+    /// period, rather than admitting a field that would never be read.
+    #[test]
+    fn a_push_only_source_takes_no_selector() {
+        let site = SensorInput {
+            id: "www-visits".into(),
+            source: "site".into(),
+            credential: String::new(),
+            every_minutes: 0,
+            opens: "marketing-weekly".into(),
+            subject_kind: "custom".into(),
+            enabled: true,
+            selector: Some("anything".into()),
+        };
+        let err = validate_sensor(&site).expect_err("push-only");
+        assert!(err.contains("selector"), "{err}");
     }
 
     #[test]
@@ -267,6 +367,7 @@ mod tests {
             opens: "marketing-weekly".into(),
             subject_kind: "custom".into(),
             enabled: true,
+            selector: None,
         };
         assert!(site.is_push_only());
         assert!(validate_sensor(&site).is_ok());
@@ -330,6 +431,7 @@ mod tests {
             every_minutes: 15,
             opens_kind: "k".into(),
             subject_kind: "custom".into(),
+            selector: None,
             enabled,
             tenant_id: "t".into(),
             published_at: at("2026-09-17T00:00:00Z"),

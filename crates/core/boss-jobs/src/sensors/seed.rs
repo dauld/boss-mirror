@@ -43,6 +43,43 @@ pub fn load_sensors_toml(path: &Path) -> Result<Vec<SensorInput>, String> {
 mod tests {
     use super::*;
 
+    /// The shape a tenant actually writes for mail (design bffc0aba,
+    /// David 2026-09-21: "use inbox names to trigger different
+    /// protocols"). Two rows, one source, one mailbox, two departments
+    /// — the selector is the only thing that tells them apart, so the
+    /// loader has to carry it from the file the founder edits.
+    #[test]
+    fn two_inboxes_on_one_source_parse_to_two_declarations() {
+        let rows = parse_sensors_toml(
+            "[[sensor]]\nid = \"support-inbox\"\nsource = \"mail\"\n\
+             credential = \"agent-b-imap\"\nevery_minutes = 5\n\
+             opens = \"receive-a-message\"\nsubject_kind = \"custom\"\n\
+             selector = \"support@algedonic.dev\"\n\n\
+             [[sensor]]\nid = \"finance-inbox\"\nsource = \"mail\"\n\
+             credential = \"agent-b-imap\"\nevery_minutes = 5\n\
+             opens = \"receive-an-invoice\"\nsubject_kind = \"custom\"\n\
+             selector = \"finance@algedonic.dev\"\n",
+        )
+        .expect("two inboxes on one source");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].selector.as_deref(), Some("support@algedonic.dev"));
+        assert_eq!(rows[1].opens, "receive-an-invoice");
+    }
+
+    /// A row that omits it is unchanged — every sensor that exists
+    /// today selects nothing, and the loader must not start requiring
+    /// a field they have no answer for.
+    #[test]
+    fn a_row_without_a_selector_still_parses() {
+        let rows = parse_sensors_toml(
+            "[[sensor]]\nid = \"stripe-sponsorships\"\nsource = \"stripe\"\n\
+             credential = \"stripe-restricted-read\"\nevery_minutes = 15\n\
+             opens = \"receive-a-sponsorship\"\nsubject_kind = \"custom\"\n",
+        )
+        .expect("unchanged");
+        assert_eq!(rows[0].selector, None);
+    }
+
     const FILE: &str = r#"
 [[sensor]]
 id = "stripe-sponsorships"

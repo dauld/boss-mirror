@@ -13,7 +13,7 @@ use super::types::{
     BatchOutcome, NewReading, PUSH_ONLY_SOURCES, PollStamp, Reading, SensorInput, SensorRow,
 };
 
-const SENSOR_COLUMNS: &str = "id, source, credential, every_minutes, opens_kind, subject_kind, \
+const SENSOR_COLUMNS: &str = "id, source, credential, every_minutes, opens_kind, subject_kind, selector, \
                               enabled, tenant_id, published_at, last_polled_at, cursor_at";
 
 pub struct PgSensors {
@@ -37,6 +37,7 @@ fn sensor_of(row: &sqlx::postgres::PgRow) -> Result<SensorRow, SensorsError> {
         credential: row.try_get("credential").map_err(storage)?,
         every_minutes: row.try_get("every_minutes").map_err(storage)?,
         opens_kind: row.try_get("opens_kind").map_err(storage)?,
+        selector: row.try_get("selector").map_err(storage)?,
         subject_kind: row.try_get("subject_kind").map_err(storage)?,
         enabled: row.try_get("enabled").map_err(storage)?,
         tenant_id: row.try_get("tenant_id").map_err(storage)?,
@@ -75,8 +76,8 @@ impl Sensors for PgSensors {
         for s in sensors {
             let n = sqlx::query(
                 "INSERT INTO sensors \
-                 (id, source, credential, every_minutes, opens_kind, subject_kind, enabled, tenant_id) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+                 (id, source, credential, every_minutes, opens_kind, subject_kind, selector, enabled, tenant_id) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
                  ON CONFLICT (id) DO NOTHING",
             )
             .bind(&s.id)
@@ -85,6 +86,7 @@ impl Sensors for PgSensors {
             .bind(s.every_minutes)
             .bind(&s.opens)
             .bind(&s.subject_kind)
+            .bind(&s.selector)
             .bind(s.enabled)
             .bind(tenant_id)
             .execute(&self.pool)

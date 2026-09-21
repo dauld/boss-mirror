@@ -983,6 +983,7 @@ mod tests {
             opens_kind: "receive-a-sponsorship".into(),
             subject_kind: "custom".into(),
             enabled: true,
+            selector: None,
             tenant_id: "acme".into(),
             published_at: at("2026-09-17T00:00:00Z"),
             last_polled_at: None,
@@ -1317,6 +1318,7 @@ mod tests {
                     opens: "receive-a-sponsorship".into(),
                     subject_kind: "custom".into(),
                     enabled: true,
+                    selector: None,
                 }],
             )
             .await
@@ -1743,6 +1745,7 @@ mod tests {
                     opens: "receive-a-payout".into(),
                     subject_kind: "custom".into(),
                     enabled: true,
+                    selector: None,
                 }],
             )
             .await
@@ -1910,6 +1913,7 @@ mod tests {
                     opens: "k".into(),
                     subject_kind: "custom".into(),
                     enabled: true,
+                    selector: None,
                 }],
             )
             .await
@@ -1960,6 +1964,7 @@ mod tests {
                     opens: "receive-a-sponsorship".into(),
                     subject_kind: "custom".into(),
                     enabled: false,
+                    selector: None,
                 }],
             )
             .await
