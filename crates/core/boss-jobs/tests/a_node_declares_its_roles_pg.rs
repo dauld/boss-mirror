@@ -11,8 +11,8 @@
 //! Two facts are pinned here because `nodes.role` and `node_roles`
 //! are one fact in two places until the second stack is gone (CLAUDE.md
 //! §9a): boss-gcp's primary role stays `bastion` (the estate page keys
-//! its jump route on it) while its declared roles are the three the
-//! design left it; and a node declaring nothing reads `roles: []`, never
+//! its jump route on it) while its declared roles are the five it now
+//! holds; and a node declaring nothing reads `roles: []`, never
 //! its primary role copied in — the converge treats an empty set as "no
 //! roster declared, install every row", and a copied-in `bastion` would
 //! silently narrow that to nothing.
@@ -86,16 +86,22 @@ async fn a_fresh_database_declares_nothing_until_the_tree_is_published() {
     assert_eq!(subjects as usize, rows.len());
 }
 
-/// Four roles: `legacy-stack` was deleted from node_roles on
+/// Five roles: `legacy-stack` was deleted from node_roles on
 /// 2026-09-14 (d5941ef3 car 3) — the second stack is being retired, and
 /// the bounded verb that stops it refuses while the declaration stands,
 /// because the converge would re-enable the chores on its next tick;
-/// the Class row for the role stays and no node declares it — and
+/// the Class row for the role stays and no node declares it —
 /// `ops-runner` was added on 2026-09-20 (backlog 49ed87b4), the
 /// declaration that lets the world map draw this host's runner when it
-/// has answered nothing at all.
+/// has answered nothing at all — and `cluster-operator` on 2026-09-20,
+/// making this the estate's SECOND holder. The forge was the only one,
+/// so a forge window left nobody holding talosctl or kubectl, and
+/// cluster-watchdog.timer runs on that same host; boss-gcp is the one
+/// node that is neither the forge nor inside the cluster it operates.
+/// Its grant is scoped (boss-break-glass-operator.yaml), which is why
+/// it declares a narrower credential set than the forge does.
 #[tokio::test(flavor = "multi_thread")]
-async fn boss_gcp_declares_its_four_roles_and_keeps_its_primary() {
+async fn boss_gcp_declares_its_five_roles_and_keeps_its_primary() {
     let db = TestDb::new().await;
     let (_, nodes) = declared(&db).await;
 
@@ -107,6 +113,7 @@ async fn boss_gcp_declares_its_four_roles_and_keeps_its_primary() {
     assert_eq!(
         gcp.roles,
         vec![
+            "cluster-operator".to_string(),
             "ml-batch-host".to_string(),
             "off-cluster-observer".to_string(),
             "ops-runner".to_string(),

@@ -90,6 +90,16 @@ boss-dev-access.yaml pipeline
 boss-credential-broker.yaml pipeline
 gate-seed-local.yaml pipeline
 
+# The break-glass CLUSTER credential (2026-09-20) — not to be confused
+# with the break-glass ceremony below, which is the business system of
+# record's. This one is the scoped ServiceAccount boss-gcp holds as the
+# estate's second cluster-operator: cluster-wide read plus patch on two
+# workload kinds in prod's namespace, no secrets. PIPELINE because it
+# operates the cluster itself, which exists once — an instance is a
+# namespace on that cluster, and a per-instance copy would grant a
+# second credential over the same nodes for no added reach.
+boss-break-glass-operator.yaml pipeline
+
 # The break-glass ceremony is the business system of record's; the
 # boss pod mounts this ConfigMap `optional: true`, so an instance
 # without one boots and answers 409 "no credential enrolled".

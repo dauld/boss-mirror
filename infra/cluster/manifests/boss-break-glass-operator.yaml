@@ -1,0 +1,123 @@
+# The break-glass cluster credential for a second cluster-operator.
+#
+# WHY IT EXISTS. Until 2026-09-20 the forge was the estate's only
+# cluster-operator: it alone carried talosctl, kubectl and the
+# credentials under /etc/boss-ops. That is fine until the forge is the
+# thing that is down — planned (a disk inspection) or not — because
+# then nobody holds a tool for the cluster, and the one loop that can
+# roll it back (cluster-watchdog.timer) runs on that same host. The
+# estate's answer is boss-gcp, the only node that is neither the forge
+# nor inside the cluster it would be operating.
+#
+# WHY IT IS NOT THE FORGE'S KUBECONFIG. boss-gcp is the PUBLIC EDGE. It
+# already holds the WireGuard keys, so it is already a path into the
+# LAN — but going from a network path to cluster-admin is a real step
+# up in blast radius, not a rounding error. The break-glass job is
+# narrow and known: read whether the cluster is working, and roll a
+# workload back to the last image that did. That is what is granted
+# here, and nothing else. Copying the admin config would have been one
+# line of work and an unbounded grant.
+#
+# WHAT IT DELIBERATELY WITHHOLDS, in the shape boss-dev-access.yaml
+# uses for the same reason: no `delete` on anything, no secrets, no
+# create/update on workloads, no exec. A holder can SEE the cluster and
+# can UNDO a bad rollout. It cannot deploy, cannot read a credential,
+# and cannot remove anything.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: break-glass-operator
+  namespace: boss
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: break-glass-operator
+rules:
+  # "Is the cluster working?" — the question the watchdog answers, and
+  # the first one a human asks. Cluster-scoped because node health is.
+  - apiGroups: [""]
+    resources: [nodes, nodes/status, namespaces, events]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [pods, pods/log, pods/status]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, daemonsets, replicasets]
+    verbs: [get, list, watch]
+  - apiGroups: [batch]
+    resources: [jobs, cronjobs]
+    verbs: [get, list, watch]
+  # SECRETS ARE ABSENT ON PURPOSE and this is the line that matters
+  # most: the whole point of scoping this credential is that the
+  # internet-facing host cannot read the cluster's secrets.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: break-glass-operator-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: break-glass-operator
+subjects:
+  - kind: ServiceAccount
+    name: break-glass-operator
+    namespace: boss
+---
+# THE ONE WRITE, scoped to the namespace that holds the workloads.
+#
+# `patch` on deployments/statefulsets is what a rollback spends:
+# `kubectl rollout undo` and `kubectl set image` are both patches. It is
+# also, deliberately, the only write — with no `create` and no `delete`,
+# a holder can move a workload back to an image that booted and cannot
+# introduce one or remove a workload.
+#
+# CLAUDE.md is explicit that "roll back" is a target and not a verb:
+# `rollout undo` moved between two revisions carrying the SAME broken
+# image on 2026-09-05, so the first rollback read as a rollback and was
+# a no-op. The intended use of this grant is `set image` to a NAMED
+# last-converged build, which is why the read half above includes
+# replicasets — that is where the previous image digests are legible.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: break-glass-operator-rollback
+  namespace: boss
+rules:
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets]
+    verbs: [patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: break-glass-operator-rollback
+  namespace: boss
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: break-glass-operator-rollback
+subjects:
+  - kind: ServiceAccount
+    name: break-glass-operator
+    namespace: boss
+---
+# A NON-EXPIRING token, for the same reason boss-dev-access.yaml takes
+# one: the value of this credential is that it works when nobody is
+# available to mint one. `kubectl create token` produces a bounded token
+# and is the right default everywhere a person is present to re-run it;
+# a break-glass credential that has quietly expired is not a credential.
+#
+# The blast radius of the non-expiry is exactly the grant above: read
+# the cluster, patch two workload kinds in one namespace, no secrets.
+# That is what makes a long-lived token acceptable here and would not
+# make an admin one acceptable.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: break-glass-operator-token
+  namespace: boss
+  annotations:
+    kubernetes.io/service-account.name: break-glass-operator
+type: kubernetes.io/service-account-token

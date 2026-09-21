@@ -305,6 +305,20 @@ run_summary_field sor_env "$SOR_ENV"
 BOSS_CONVERGE_NAME="boss-gcp-converge" read_node_roles "$NODE_ID"
 run_summary_field node_id "$NODE_ID"
 
+# WHAT THE cluster-operator ROLE BRINGS, when this host holds it. Added
+# 2026-09-20: the forge was the estate's ONLY cluster-operator, so a
+# forge window — planned or not — left nobody holding talosctl, kubectl
+# or the cluster credentials, and boss-gcp is the one estate node that
+# is neither the forge nor inside the cluster it would be operating.
+# The installer is the same file the forge runs (infra/estate/
+# install-cluster-operator.sh): one talosctl pin, one credential check,
+# reported here through run_summary_field the way the forge reports it.
+# Sourced AFTER read_node_roles above, because has_role is what decides.
+. "${BOSS_GCP_CONVERGE_INFRA:-$(dirname "$0")/..}/estate/install-cluster-operator.sh"
+if has_role cluster-operator; then
+    install_cluster_operator
+fi
+
 log="$(mktemp -t boss-gcp-converge-install.XXXXXX)"
 rc=0
 "$INSTALLER" units >"$log" 2>&1 || rc=$?

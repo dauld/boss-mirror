@@ -236,7 +236,7 @@ real failure:
 | `boss-ports` ↔ `deploy-services.sh` fallback arrays | two services silently absent from a deploy | **collapsed** — the bare-metal deploy and its arrays were deleted (2026-09-18); the pin now holds the LIVE container launcher's roster to the registry, which was the unpinned copy the whole time |
 | `manifest.txt` ↔ `boss-testing::SCHEMA_FILES` | every DB-backed test ran without two tables | **collapsed twice** — `build.rs` generated the list from the manifest, then the manifest itself was deleted and the schema directory became the definition |
 | `MODEL_ROUTES` ↔ `MODEL_KINDS` | pages rendered under the wrong tab, silently | **collapsed** — one `nav-catalog.ts` answers both questions |
-| gate.sh `PREFLIGHT_LINTS` ↔ `infra/lint/` | four cars collided on the roster's tail line in one day, one left behind by #218 | **collapsed** — the roster is the directory minus a four-entry exclusion set, read the way the consist check already read it |
+| gate.sh `PREFLIGHT_LINTS` ↔ `infra/lint/` | four cars collided on the roster's tail line in one day, one left behind by #218 | **collapsed** — the roster is the directory minus the lints that declare `# consist: skip` in their own header, read the way the consist check already read it |
 | `infra/dispatcher/rules.toml` ↔ the ratchet's `BASELINE=<n>` | two rule cars could not ride one train (07e72962): both appended to the file AND bumped the same integer | **collapsed** — one file per rule under `infra/dispatcher/rules/`, and the count is derived from the directory; the justification the baseline bump used to force is now a required `why` in each rule's own file |
 
 All three are now either collapsed to one definition or pinned by a
@@ -400,7 +400,9 @@ the tier it touches.**
 
 The `infra/lint/tier-import-audit.sh` script enforces the
 Tier-1-can't-depend-on-Tier-2 rule (orchestrators excluded);
-runs cleanly today (0 violations across 28 core crates).
+runs cleanly today (0 violations across 28 core crates; the script's
+own line says 29 because it counts crate manifests, and `boss-expr`
+carries a nested `fuzz` crate).
 
 Each domain crate has a matching `*-client` for cross-service
 HTTP calls + a `Pg*` adapter behind the `postgres` feature.

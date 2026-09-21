@@ -195,35 +195,12 @@ fi
 . "${HERE}/../estate/node-roles.sh"
 cli_rc=0
 if has_role cluster-operator; then
-    TALOSCTL_VERSION="v1.13.8"
-    TALOSCTL_SHA256="406b56f9e4ff03b1557cc941b1f163aec8a6ebb36e28f0bbbe6d083589529261"
-    if [ "${INSTALL_TALOSCTL:-1}" = "1" ] && [ ! -x /usr/local/bin/talosctl ]; then
-        tmp="$(mktemp)"
-        if curl -sfL -o "$tmp" "https://github.com/siderolabs/talos/releases/download/${TALOSCTL_VERSION}/talosctl-linux-amd64" \
-            && echo "${TALOSCTL_SHA256}  ${tmp}" | sha256sum -c - >/dev/null; then
-            install -m 0755 "$tmp" /usr/local/bin/talosctl
-            echo "install.sh: talosctl ${TALOSCTL_VERSION} installed (cluster-operator)"
-        else
-            echo "install.sh: talosctl download or checksum failed — the cluster-operator role has no Talos client until it is present" >&2
-        fi
-        rm -f "$tmp"
-    fi
-    ops_missing=""
-    for cred in talosconfig kubeconfig; do
-        f="/etc/boss-ops/$cred"
-        if [ ! -f "$f" ]; then
-            ops_missing="$ops_missing $cred:absent"
-        elif [ "$(stat -c '%U:%G %a' "$f" 2>/dev/null)" != "root:root 600" ]; then
-            ops_missing="$ops_missing $cred:$(stat -c '%U:%G %a' "$f")"
-        fi
-    done
-    if [ -n "$ops_missing" ]; then
-        echo "install.sh: cluster-operator credentials not ready —${ops_missing} (want root:root 600 under /etc/boss-ops; placed by hand, never by this script)"
-        if declare -F run_summary_field >/dev/null; then run_summary_field ops_credentials "not ready:${ops_missing}"; fi
-    else
-        echo "install.sh: cluster-operator credentials present (root:root 600)"
-        if declare -F run_summary_field >/dev/null; then run_summary_field ops_credentials "present"; fi
-    fi
+    # talosctl and the /etc/boss-ops credential check are the ROLE's,
+    # not this host's: since 2026-09-20 boss-gcp holds the role too, and
+    # a second copy of the version pin is the drift CLAUDE.md §9a names.
+    # One definition, sourced so it can report through run_summary_field.
+    . "${HERE}/../estate/install-cluster-operator.sh"
+    install_cluster_operator
 
     # THE CLI, FROM THE IMAGE AT THE SHA THIS CONVERGE CHECKED OUT.
     # forge-converge.sh hands the sha over as BOSS_CONVERGE_SHA (root

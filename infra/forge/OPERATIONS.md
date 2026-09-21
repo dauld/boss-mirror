@@ -201,6 +201,114 @@ Anything else — a restart, a prune beyond the sweep, a compose action
 — is a human on the host, and the command should be handed over ready
 to paste with its expected output stated.
 
+## Planned downtime
+
+Every section below this one is about a failure. This one is about
+choosing to power the host off — first written 2026-09-20, the night
+before an inspection for a possible second disk, when the question
+"what actually breaks if we switch it off" had no written answer and
+had to be re-derived from the manifests.
+
+**What keeps running.** Everything already running in the cluster:
+`postgres-0`, `nats-0`, the app pod, the dispatcher. The system of
+record stays up, and an operator can keep reading and writing packets
+through the whole window. That is the reassurance worth stating first,
+because the host's centrality invites the opposite assumption.
+
+**What stops.** Trains, gates, CI, every converge and deploy, and every
+image pull in the estate — 13 manifests name `10.20.0.15:3000`, and
+`postgres` is one of them. Its manifest says why in its own comment: *a
+database that cannot re-pull its image during a flake cannot restart.*
+So the rule for the window is not "avoid the cluster" but something
+sharper:
+
+> While this host is down, any cluster pod that stops will not come
+> back until it returns. Running pods are safe; restarts are not.
+
+That makes a planned forge window incompatible with a planned cluster
+window, in either order. Do not take a node down to fill the wait.
+
+**Two arms go down with the host, and both are easy to forget.**
+
+- `cluster-watchdog.timer` runs *here*, every 5 minutes. It is the loop
+  that reads the cluster from outside and rolls it to the last
+  converged build when it is dark — deliberately built to owe nothing
+  to the API it watches (2026-09-05). It does still owe everything to
+  this host being powered on. For the length of the window the cluster
+  has no outside-in recovery arm.
+- **This host is the only `cluster-operator` in the estate.** The role
+  holds `talosctl`, `kubectl` and the cluster credentials under
+  `/etc/boss-ops`. `boss-gcp` is an `ops-runner` but not a
+  `cluster-operator`, so with this host off there is no supported path
+  to the cluster's control plane at all. `boss ops forge …` is gone
+  too — the ops-runner is here.
+
+Neither is an argument against the window. Both are arguments for
+keeping it short, starting it from a healthy cluster, and knowing
+before the power comes off whether any other machine can reach the
+cluster API if it is needed.
+
+**Before the power comes off**
+
+1. Read the cluster's health and only start from a green one — a window
+   with no watchdog is the wrong time to discover a sick node.
+2. Confirm no train is in flight and no `gate-run` is open, then hold
+   the conductor so none starts into the window.
+3. Confirm the nightly backup's three legs (the Longhorn PVC,
+   `boss-gcp:/var/backups/boss-cluster-pg`, GCS). Nothing in this
+   window should touch the database, which is exactly why an untested
+   backup should not be discovered afterwards.
+4. Name the last converged build by digest, so any rollback after the
+   window has a target by name rather than "the previous one".
+5. Settle whether another machine holds a working kubeconfig. If none
+   does, that is a known and accepted gap for the window, not a
+   surprise during it.
+
+**On the way back up**
+
+Verify in this order, because each one depends on the last: the host
+boots and `df /` is what you expect → Forgejo answers on `:3000` → the
+registry serves a real pull → `forgejo-runner.service` is polling →
+`cluster-watchdog.timer` and `cluster-deploy-runner.timer` are active
+again → release the conductor. A window is over when a pull and a gate
+have both succeeded, not when the box is pingable.
+
+**If the reason for the window was disk**, read `disk-report` before
+and after and record both numbers — and read the RIGHT number, which
+is not the percentage. This section was first written against
+"99G used of 228G, 46%, `verdict: clean`" and called the trip
+headroom rather than repair. That reading was wrong, and the sweep's
+own journal is what corrects it.
+
+**The operating constraint is the 100 GB floor, not the percentage.**
+Measured 2026-09-20, hourly, over consecutive runs:
+
+```
+disk-floor-sweep: CI-image prune freed 1210MiB on / (now 118GB free)
+disk-floor-sweep: 118GB free >= 100GB floor — nothing to do
+disk-floor-sweep: CI-image prune freed 1210MiB on / (now 116GB free)
+disk-floor-sweep: 116GB free >= 100GB floor — nothing to do
+```
+
+Free space oscillates between 116 and 118 GB, so the margin above the
+floor is **16–18 GB**, and the sweep holds that line by pruning one
+per-train CI image (~1.2 GB, of 3.48 GB each) on every pass. A cold CI
+job needs 70 GB free to start and consumes about 74 GB: **one fits,
+two concurrent do not.** A host at 46% that can run one build at a
+time is not a host with room to spare, and "46%" is exactly the
+number that makes it look like one.
+
+**What the record does and does not say.** Every `pr-train` packet in
+the system of record — 98 of 98 — carries no locomotive disk refusal.
+That window is four days (2026-09-17 onward), because that is all the
+trains the record holds; it is NOT evidence that the 2026-09-10
+retention fix retired the problem, and the backlog's own note
+(2026-09-19) says the floor was being hit three times a month. Four
+quiet days is four quiet days.
+
+So: measure before concluding the host needs hardware, and measure
+against the floor.
+
 ## Failure modes, in the order they have actually happened
 
 ### 1. The disk fills
