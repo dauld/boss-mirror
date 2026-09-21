@@ -15,9 +15,21 @@
 //!     is exactly the wrong thing on a lookup that precedes a write;
 //!   - true garbage stays 400, unchanged.
 //!
-//! WRITES ARE DELIBERATELY NOT WIDENED. A prefix that resolves to the
-//! wrong job on a PUT/PATCH is a silently-corrupted packet; a write
-//! holds the full id it just read back. This is the smallest true fix.
+//! THE WRITES WERE EXCLUDED HERE, AND THE EXCLUSION WAS REVERSED on
+//! 2026-09-21 (packet cd7b0054). This file used to read: "WRITES ARE
+//! DELIBERATELY NOT WIDENED. A prefix that resolves to the wrong job
+//! on a PUT/PATCH is a silently-corrupted packet; a write holds the
+//! full id it just read back." Neither half survived measurement — the
+//! wrong job cannot be resolved, because ambiguity is refused two
+//! tests below rather than guessed, and the readers hold the eight
+//! characters a surface printed rather than the full id. Refused,
+//! three writes in one day padded a read prefix into a fabricated
+//! uuid. The job-level write doors now resolve through the same
+//! function these tests exercise; the reasoning and its own tests are
+//! in `a_write_door_resolves_the_id_you_can_read.rs`.
+//!
+//! The step doors under `/steps/{step_id}` are still not widened, for
+//! a reason that does survive: nothing prints a step id short.
 
 use std::sync::Arc;
 

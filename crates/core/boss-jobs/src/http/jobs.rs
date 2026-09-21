@@ -1203,16 +1203,29 @@ pub(super) async fn get_job<R: JobsRepository + 'static, B: EventBus + 'static>(
     }
 }
 
-/// The job a `{id}` path segment names.
+/// The job a `{id}` path segment names, on EVERY door that takes one —
+/// reads and job-level writes alike.
 ///
-/// The fast path: a full uuid, the id the whole system stores and
-/// every write holds. Otherwise, resolve the id everyone actually
-/// holds — the 8-char prefix printed in journals, arrival reports and
-/// messages. Nothing matches → 404 (genuinely absent); more than one →
-/// 409 (the caller asked a two-answer question, and guessing is the
-/// wrong move on a lookup that precedes a write). True garbage stays
-/// 400.
-async fn resolve_path_job_id<R: JobsRepository + 'static, B: EventBus + 'static>(
+/// The fast path: a full uuid, the id the whole system stores.
+/// Otherwise, resolve the id everyone actually holds — the 8-char
+/// prefix printed in journals, arrival reports, `boss orient`, the
+/// yard and every verb's own output. Nothing matches → 404 (genuinely
+/// absent); more than one → 409 (the caller asked a two-answer
+/// question, and guessing is the wrong move on a lookup that precedes
+/// a write). True garbage stays 400, and says what would work.
+///
+/// THE WRITES WERE DELIBERATELY EXCLUDED UNTIL 2026-09-21 (packet
+/// cd7b0054), on the reasoning that "a prefix that resolves to the
+/// wrong job on a PUT/PATCH is a silently-corrupted packet; a write
+/// holds the full id it just read back". Neither half held. The wrong
+/// job cannot be resolved — an ambiguous prefix is refused below
+/// rather than picked — and the readers do not hold the full id, they
+/// hold the eight characters a surface printed. Refused, three writes
+/// in one day CONSTRUCTED a thirty-six character id by padding one
+/// that had been read, which is the habit "never write a sha you did
+/// not read" exists to prevent. The exclusion traded a failure with no
+/// route to occur for one that occurred three times.
+pub(super) async fn resolve_path_job_id<R: JobsRepository + 'static, B: EventBus + 'static>(
     state: &JobsApiState<R, B>,
     id: &str,
 ) -> Result<boss_core::job::JobId, Response> {
@@ -1221,7 +1234,15 @@ async fn resolve_path_job_id<R: JobsRepository + 'static, B: EventBus + 'static>
     }
     let prefix = id.to_ascii_lowercase();
     if !is_id_prefix(&prefix) {
-        return Err((StatusCode::BAD_REQUEST, "invalid job id").into_response());
+        // NAMES THE SHAPE AND THE ROUTE. "invalid job id" alone is a
+        // parse-failure sentence, and it is what sent three writes off
+        // to construct an id nobody had read (cd7b0054). A refusal at
+        // the moment someone is already stuck owes them the next step.
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "invalid job id: give the full uuid, or 8 or more leading characters of it              (hex and hyphens only) — `boss orient` and every arrival report print those 8",
+        )
+            .into_response());
     }
     match state.jobs.resolve_job_id_prefix(&prefix).await {
         Ok(matches) => match matches.as_slice() {
@@ -1412,9 +1433,9 @@ pub(super) async fn update_job<R: JobsRepository + 'static, B: EventBus + 'stati
     CurrentUser(user): CurrentUser,
     Json(mut job): Json<Job>,
 ) -> Response {
-    let job_id = match parse_job_id(&id) {
-        Some(id) => id,
-        None => return (StatusCode::BAD_REQUEST, "invalid job id").into_response(),
+    let job_id = match resolve_path_job_id(&state, &id).await {
+        Ok(job_id) => job_id,
+        Err(refusal) => return refusal,
     };
 
     // Ensure path ID matches body ID.
@@ -1590,9 +1611,9 @@ pub(super) async fn patch_job_metadata<R: JobsRepository + 'static, B: EventBus 
     CurrentUser(user): CurrentUser,
     Json(patch): Json<serde_json::Value>,
 ) -> Response {
-    let job_id = match parse_job_id(&id) {
-        Some(id) => id,
-        None => return (StatusCode::BAD_REQUEST, "invalid job id").into_response(),
+    let job_id = match resolve_path_job_id(&state, &id).await {
+        Ok(job_id) => job_id,
+        Err(refusal) => return refusal,
     };
     let serde_json::Value::Object(patch) = patch else {
         return (
@@ -1687,8 +1708,9 @@ pub(super) async fn convert_job<R: JobsRepository + 'static, B: EventBus + 'stat
     CurrentUser(user): CurrentUser,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
-    let Some(job_id) = parse_job_id(&id) else {
-        return (StatusCode::BAD_REQUEST, "invalid job id").into_response();
+    let job_id = match resolve_path_job_id(&state, &id).await {
+        Ok(job_id) => job_id,
+        Err(refusal) => return refusal,
     };
     let existing = match state.jobs.get_job(&job_id).await {
         Ok(Some(j)) => j,

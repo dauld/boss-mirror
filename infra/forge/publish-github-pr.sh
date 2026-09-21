@@ -554,14 +554,31 @@ if [ "${1:-}" = "--measure" ]; then
     if ! curl -fsS -X PATCH -H "content-type: application/json" -H "x-boss-user: $BOSS_USER" \
             ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
             --data-binary @"$workdir/refresh" \
-            "$BASE/api/jobs/$job_id/metadata" > "$workdir/patched" 2>"$workdir/err"; then
+            "$BASE/api/jobs/$job_id/metadata" > /dev/null 2>"$workdir/err"; then
         fail "annotating ${job_id:0:8} with the refreshed drift failed — $(head -c 300 "$workdir/err" | tr '\n' ' ')"
     fi
-    # An API's answer is not an API's effect: the merge comes back in the
-    # response body, so the instant is read from what the packet now holds.
+    # An API's answer is not an API's effect — so READ THE PACKET, not
+    # the write call's reply. This used to jq the PATCH's own response
+    # body, and that door answers 204 with NO body: there was never
+    # anything there to read (backlog b88a13d5). The result depended on
+    # the host's jq. On jq-1.6 `jq -e` over an empty document exits 0,
+    # so the check passed and verified nothing; elsewhere it exits
+    # non-zero, so a daily rule reported FAILED on runs that had done
+    # their work (ops-request 9340fd6e). A permanently-red check is one
+    # nobody reads; a silently-vacuous one is worse.
+    if ! curl -fsS -H "x-boss-user: $BOSS_USER" \
+            ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
+            "$BASE/api/jobs/$job_id" > "$workdir/readback" 2>"$workdir/err"; then
+        fail "the refresh for ${job_id:0:8} was accepted but the packet could not be read back — $(head -c 300 "$workdir/err" | tr '\n' ' ')"
+    fi
+    # NO EVIDENCE IS NOT A PASS, and that has to be checked BEFORE the
+    # comparison: an empty or unparseable read-back is what made this
+    # check vacuous, and `jq -e` alone cannot tell it from a match.
+    [ -s "$workdir/readback" ] && jq -e 'type == "object"' "$workdir/readback" > /dev/null 2>&1 \
+        || fail "the refresh for ${job_id:0:8} was accepted but the read-back of the packet answered nothing parseable — the measurement is not on the packet"
     jq -e --arg ts "$ts" '((.data // .) | .metadata // {}) | .drift_refreshed_at == $ts' \
-        "$workdir/patched" > /dev/null \
-        || fail "the jobs API accepted the refresh for ${job_id:0:8} but does not carry $ts back — the measurement is not on the packet"
+        "$workdir/readback" > /dev/null \
+        || fail "the jobs API accepted the refresh for ${job_id:0:8} but the packet does not carry $ts — the measurement is not on the packet"
 
     say "--measure: refreshed ${job_id:0:8} — $ahead commit(s) ahead, $files file(s), $new_count newly public ($sens_count under runbooks/infra), secrets $secrets; forge ${forge_head:0:8} over mirror ${mirror_head:0:8} at $ts"
     exit 0

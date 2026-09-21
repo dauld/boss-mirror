@@ -1378,12 +1378,33 @@ fn the_default_fork_is_the_mirrors_real_fork() {
 // ---------------------------------------------------------------------
 
 impl Run {
-    /// Replace the fixture's curl with one that answers the GET from
-    /// `jobs.json`, SAVES a PATCH body and echoes it back under
-    /// `data.metadata` the way the jobs API answers a metadata merge —
-    /// the verb verifies its own write from that response, because an
-    /// API's answer is not an API's effect.
+    /// Replace the fixture's curl with one that SAVES a PATCH body,
+    /// answers the PATCH the way the real door does — **204, no body at
+    /// all** — and serves the merged packet on the GET that follows.
+    ///
+    /// IT USED TO ECHO THE PATCH BACK under `data.metadata`, described
+    /// in its own words as "the way the jobs API answers a metadata
+    /// merge". The jobs API does no such thing:
+    /// `patch_job_metadata` ends `StatusCode::NO_CONTENT.into_response()`
+    /// on every path, and a live PATCH against the system of record
+    /// answers 204 with an empty body. The fixture invented a response
+    /// the door has never sent, and the verb's read-back — which was
+    /// reading that response — passed here for its whole life while
+    /// reporting FAILED on every real run (backlog b88a13d5).
+    ///
+    /// That is the inversion worth naming: the comment cited "an API's
+    /// answer is not an API's effect" while doing the one thing that
+    /// rule forbids, reading the write call's own reply as the effect.
+    /// A fixture more generous than the door is not a test.
     fn echoing_curl(&self) {
+        self.curl_answering_readback(true)
+    }
+
+    /// `echoing_curl`, with a dial on whether the GET that follows the
+    /// PATCH carries the merge. `false` stands in for a write that
+    /// landed nowhere — the case the read-back exists to catch, and
+    /// which nothing could exercise while the stub echoed.
+    fn curl_answering_readback(&self, merged: bool) {
         boss_testing::write_exec(
             &self.stubs.join("curl"),
             &format!(
@@ -1398,16 +1419,33 @@ done
 for a in "$@"; do
     if [ "$a" = "PATCH" ]; then
         cp "$payload" '{patch}'
-        printf '{{"data":{{"metadata":%s}}}}\n' "$(cat "$payload")"
+        # 204 No Content: the real door returns NO body. Anything the
+        # verb wants to know about its write, it must go and read.
+        if [ '{merged}' = true ]; then
+            jq -s '(.[0].data[0]) as $j | .[1] as $p
+                   | $j | .metadata = (($j.metadata // {{}}) * $p)'                '{jobs}' "$payload" > '{after}'
+        fi
         exit 0
     fi
     if [ "$a" = "PUT" ]; then exit 0; fi
+done
+# `/api/jobs/<id>` is one packet; `/api/jobs?...` is a listing. The
+# read-back asks the first question and must not be handed the second.
+for a in "$@"; do
+    case "$a" in
+        *api/jobs/*\?*) ;;
+        *api/jobs/*)
+            if [ -f '{after}' ]; then cat '{after}'; else jq '.data[0]' '{jobs}'; fi
+            exit 0 ;;
+    esac
 done
 cat '{jobs}'
 "#,
                 log = self.root.join("curl.log").display(),
                 patch = self.root.join("patch.json").display(),
                 jobs = self.root.join("jobs.json").display(),
+                after = self.root.join("jobs-after.json").display(),
+                merged = merged,
             ),
         );
     }
@@ -1528,5 +1566,96 @@ fn a_secrets_finding_rides_the_annotation_and_an_unrunnable_scan_writes_nothing(
         !blind.curl_log().contains("PATCH"),
         "it wrote a drift with no scan behind it: {}",
         blind.curl_log()
+    );
+}
+
+/// THE READ-BACK MUST SAY NO WHEN THE WRITE DID NOT LAND.
+///
+/// THE DEFECT (backlog b88a13d5). `--measure` PATCHes the drift onto
+/// the held packet and then verifies it, and the verification read the
+/// PATCH's own response body. `PATCH /api/jobs/{id}/metadata` answers
+/// **204 with no body**, so there was never anything there to read.
+/// What that produced depended entirely on the host's `jq`:
+///
+///   - on `jq-1.6` — this pod's — `jq -e` over an EMPTY document exits
+///     **0**, so the check PASSED and verified nothing for its whole
+///     life;
+///   - on the forge's, it exits non-zero, so a daily rule reported
+///     `FAILED` on runs that had done their work correctly
+///     (ops-request 9340fd6e, 2026-09-21 17:48Z: the verb said the
+///     measurement was not on the packet, and the packet carried it).
+///
+/// Both halves are the same defect and the second is the dangerous one.
+/// A permanently-red daily check is CLAUDE.md's "a check nobody reads";
+/// a silently-vacuous one is worse, because nothing ever tells you.
+///
+/// So this test does not assert the happy path — `a_measure_run_records_
+/// todays_drift_on_the_open_packet` already does, and did while the
+/// check was vacuous. It asserts the NEGATIVE: a packet that comes back
+/// WITHOUT the stamp must fail the run. Nothing could exercise that
+/// while the fixture echoed the PATCH back at the verb.
+#[test]
+fn a_measurement_that_did_not_land_on_the_packet_fails_the_run() {
+    if !have_real_jq() {
+        eprintln!("publish_github_pr_sh: SKIPPED — the measure path needs a real jq");
+        return;
+    }
+    let run = Run::new("measure-readback-denies");
+    let scan = run.planted_scan(0);
+    // The PATCH is accepted and changes nothing — the read-back that
+    // follows serves the packet as it was.
+    run.curl_answering_readback(false);
+    let (ok, out) = run.go_argv("--measure", &[("BOSS_SECRETS_SCAN", scan)]);
+
+    assert!(
+        !ok,
+        "the run must FAIL when the packet does not carry the measurement back. \
+         It passed, which means the read-back is not reading the packet: {out}"
+    );
+    assert!(
+        out.contains("not on the packet") || out.contains("does not carry"),
+        "the refusal must say the measurement is not on the packet: {out}"
+    );
+    // AND IT MUST HAVE TRIED. A run that failed before ever writing
+    // would satisfy the assertions above while proving nothing.
+    let log = run.curl_log();
+    assert!(
+        log.contains("PATCH"),
+        "the run never attempted the write, so this proves nothing about the read-back: {log}"
+    );
+}
+
+/// THE CONTROL FOR THE TEST ABOVE, and the one that pins the jq
+/// dependence out of existence: the SAME fixture with the merge landing
+/// must still pass. Without it, a verb that had simply started refusing
+/// every measurement would satisfy the negative case.
+#[test]
+fn the_same_run_passes_once_the_packet_carries_it() {
+    if !have_real_jq() {
+        eprintln!("publish_github_pr_sh: SKIPPED — the measure path needs a real jq");
+        return;
+    }
+    let run = Run::new("measure-readback-confirms");
+    let scan = run.planted_scan(0);
+    run.curl_answering_readback(true);
+    let (ok, out) = run.go_argv("--measure", &[("BOSS_SECRETS_SCAN", scan)]);
+    assert!(ok, "a measurement that DID land must pass: {out}");
+    // THE READ-BACK IS A GET OF THE PACKET, not the PATCH's own reply.
+    // Read by LINE, and only lines AFTER the write: the PATCH's own
+    // line carries the same `/api/jobs/<id>` text, so a substring
+    // search over the whole log would be satisfied by the very call
+    // whose answer this fix stopped trusting.
+    let log = run.curl_log();
+    let lines: Vec<&str> = log.lines().collect();
+    let patch_at = lines
+        .iter()
+        .position(|l| l.contains("PATCH"))
+        .expect("the run wrote");
+    assert!(
+        lines[patch_at + 1..]
+            .iter()
+            .any(|l| l.contains("/api/jobs/") && !l.contains("PATCH")),
+        "no read of the packet follows the PATCH — the verb is still trusting the \
+         write call's own answer, which is 204 with no body: {log}"
     );
 }
