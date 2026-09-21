@@ -23,7 +23,7 @@ const bytesToB64url = (buf: ArrayBuffer): string =>
     .replace(/\//g, '_')
     .replace(/=+$/, '');
 
-import { CEREMONY_DECLINED } from '../me/passkeyHints';
+import { enrolmentFailure } from '../me/passkeyHints';
 
 export type PresenceRefusal = Readonly<{
   required?: string;
@@ -162,8 +162,11 @@ export async function enrollPasskey(label: string): Promise<void> {
         attestation: pk.attestation,
       },
     })) as PublicKeyCredential | null;
-  } catch {
-    throw new Error(CEREMONY_DECLINED);
+  } catch (err) {
+    // The browser's DOMException name is the only copy of WHICH failure
+    // this was; a bare `catch` here threw one blanket message for all
+    // six and is why feedback f1fd9168 repeated a55d9a01 six days later.
+    throw new Error(enrolmentFailure(err));
   }
   if (!credential) throw new Error('Passkey creation returned no credential.');
   const attestation = credential.response as AuthenticatorAttestationResponse;

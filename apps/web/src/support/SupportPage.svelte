@@ -16,6 +16,13 @@
   import SortHeader from '@boss/web-kit/ui/SortHeader.svelte';
   import { createSortState } from '@boss/web-kit/ui/sort-state.svelte';
   import { fetchPaged, isCapped, type Paged } from '../data/paginated';
+  import {
+    accountHealthView,
+    deviceCellMeaning,
+    failedRead,
+    okRead,
+    type ReadState,
+  } from './reads';
 
   type Account = {
     id: string;
@@ -42,6 +49,12 @@
   /// the empty states, so an outage never reads as "no open cases"
   /// (packet 3fba9c35, the false-empty sweep).
   let loadFailed = $state<string | null>(null);
+  /// The two SECONDARY reads, kept rather than discarded. Each was
+  /// previously collapsed to an empty list or a null page, which is how
+  /// an outage reached the screen wearing the page's empty state
+  /// (packets 325f34cd, 8c9e1190).
+  let accountsRead = $state<ReadState>(okRead);
+  let devicesRead = $state<ReadState>(okRead);
   let loading = $state(true);
   let tab = $state<Tab>('overview');
 
@@ -59,6 +72,9 @@
           fetchPaged<Asset>('/api/assets?limit=1000'),
         ]);
         const pBody = pResp.ok ? await pResp.json() : [];
+        const accountsFailure = pResp.ok
+          ? null
+          : `/api/people/accounts: HTTP ${pResp.status}`;
         if (!cancelled) {
           // The jobs list is the page's primary dataset — its failure
           // is the page's failure. Devices/accounts enrich the rows
@@ -71,7 +87,12 @@
             loadFailed = jPaged.error;
           }
           accounts = Array.isArray(pBody) ? pBody : (pBody.data ?? []);
+          accountsRead = accountsFailure
+            ? failedRead(accountsFailure)
+            : okRead;
           devicesPage = dPaged.kind === 'ready' ? dPaged.page : null;
+          devicesRead =
+            dPaged.kind === 'ready' ? okRead : failedRead(dPaged.error);
           loading = false;
         }
       } catch (e) {
@@ -91,6 +112,7 @@
   }
 
   let openJobs = $derived(jobs.filter(isOpen));
+
 
   let accountIdsWithOpen = $derived.by(() => {
     const s = new Set<string>();
@@ -176,6 +198,17 @@
     return [...map.values()].filter((e) => e.openCount > 0);
   });
 
+  /// The tab's view, decided in reads.ts so "a failed read looks
+  /// different from an empty one" is a tested function rather than the
+  /// order of two branches in a template.
+  let healthView = $derived(
+    accountHealthView(
+      loadFailed ? failedRead(loadFailed) : okRead,
+      accountsRead,
+      accountHealthRows.length,
+    ),
+  );
+
   type HealthSortKey = 'account' | 'tier' | 'open' | 'equipment' | 'last';
   const HEALTH_DESC_FIRST: ReadonlyArray<HealthSortKey> = ['open', 'equipment', 'last'];
   const healthSort = createSortState<HealthSortKey>({ key: 'open', dir: 'desc' }, (k) =>
@@ -208,6 +241,14 @@
       noun="service jobs loaded"
       hint="Open-case + account-health counts on this page only consider this window; raise the cap or narrow by date."
     />
+  {/if}
+  {#if deviceCellMeaning(devicesRead) === 'unknown'}
+    <p class="empty load-failed" role="alert">
+      Couldn't load devices — {devicesRead.kind === 'failed'
+        ? devicesRead.error
+        : ''}. A '—' in a device column below means this page could not
+      read the device, not that the case has none.
+    </p>
   {/if}
   {#if isCapped(devicesPage)}
     <OverflowBanner
@@ -320,11 +361,17 @@
     </section>
   {:else if tab === 'account-health'}
     <section class="list-section" style="padding:16px 0">
-      {#if loadFailed}
+      {#if healthView.kind === 'cases-failed'}
         <p class="empty load-failed" role="alert">
-          Couldn't load cases — {loadFailed}
+          Couldn't load cases — {healthView.error}
         </p>
-      {:else if accountHealthRows.length === 0}
+      {:else if healthView.kind === 'accounts-failed'}
+        <p class="empty load-failed" role="alert">
+          Couldn't load accounts — {healthView.error}. This tab is built
+          from the account list, so it is showing nothing rather than
+          nothing being there.
+        </p>
+      {:else if healthView.kind === 'empty'}
         <p class="empty">No account data.</p>
       {:else}
         <table class="data-table data-table-striped">

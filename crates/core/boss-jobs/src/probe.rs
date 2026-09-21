@@ -1012,6 +1012,19 @@ mod tests {
             tools.contains(&"kubectl"),
             "host-absent-tools.txt lost the tool f9304366 measured: {tools:?}"
         );
+        // And the retirement holds. `boss` came off this list on
+        // 2026-09-18 when the forge's own converge started installing
+        // the CLI from the converged image (9f00a805 car 1), and a
+        // line that outlives the absence it recorded refuses correct
+        // probes for a fact that is no longer true. The builder rules
+        // now point AT this file rather than restating it (785dc91a),
+        // so this list is the only place the answer lives.
+        assert!(
+            !tools.contains(&"boss"),
+            "host-absent-tools.txt lists boss again — if that is a real \
+             measurement it needs its own dated entry, and the builder \
+             rules that point here need revisiting with it: {tools:?}"
+        );
         for t in &tools {
             assert!(
                 !t.contains('#') && !t.contains(' ') && !t.contains('/'),

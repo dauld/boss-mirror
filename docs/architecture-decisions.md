@@ -66,6 +66,50 @@ demo tenants are **Algedonic Ales** (the brewery) and the
 **used-device-shop**, both instantiations of company-management on
 the same state-machine abstraction.
 
+### The Viable System Model, mapped — which BOSS concept plays which
+
+Beer is the namesake and cybernetics is first among the three
+lineages, but **VSM vocabulary does not appear in BOSS code**. It used
+to, in exactly two crates — `boss-cybernetics` (whose own header read
+"Per-VM Cybernetics coordinator (VSM S2/S3)") and
+`boss-observability` — and both retire under design 8382bbb2. The
+mapping is recorded here so the correspondence outlives the code that
+carried the words, because a reader arriving from Beer must be able to
+find it and a reader arriving from the code must not have to learn a
+second vocabulary to work (backlog 6872efd4). Retiring the only S2
+implementation without writing this down is how a founding idea
+quietly becomes decoration.
+
+| VSM | BOSS | where it lives |
+|---|---|---|
+| **S1** — the operational units that do the work | **Actors executing Steps.** Humans and registered agents are the CPUs; nothing moves without one claiming a step and doing it | the claim door; `agents` registry |
+| **S2** — coordination, damping oscillation between units | **Stations, and the bounds enforced at the claim.** A station is a data-defined priority queue that holds a packet until there is bandwidth or capability — which is S2's job stated in the network's own words | station rows; `agent_budget.rs` |
+| **S3** — internal control, resource allocation, here-and-now | **The dispatcher, plus the registry rows that bound it.** Rules fire on `step.done.<kind>` and threshold events; the numbers they enforce are registry data, not code | `infra/dispatcher/rules/`; `agents.max_concurrent_runs` |
+| **S3\*** — the audit channel that bypasses the line | **The audit log and sensor readings.** The log holds what *did* happen; readings are measurements *about* the system rather than work it performed | `audit_log`; `agent_runs`; sensors |
+
+**S4 and S5 are deliberately unmapped.** Designs and the backlog do
+S4-ish work and `boss-policy` does S5-ish work, but neither
+correspondence is tight enough to assert, and a mapping asserted
+loosely is the decoration this section exists to prevent.
+
+**Four of `boss-cybernetics`' five stated responsibilities already
+live elsewhere**, which is why it retires rather than being rebuilt:
+budget caps before dispatch, one-at-a-time dispatch and chaining on
+completion are all enforced at the claim door and by dispatcher rules;
+lifecycle telemetry is the audit log plus `agent_runs`. **The fifth is
+a real gap, not a translation**: its per-agent durable inbox has no
+successor yet, and the decision (8382bbb2) is that it lands as a
+**station** plus the existing `agent-run` kind rather than as a second
+coordinator — a station is already the systems word for a queue that
+holds work until there is capability, and that keeps one budget gate
+rather than two implementations of one rule. **Neither crate is
+deleted before that inbox exists**: retiring the old mechanism before
+the new one is live is how a capability is lost by accident.
+
+*Algedonic* signals keep their Beer meaning throughout: rules firing
+on threshold events, routed past the normal reporting line because
+they are urgent.
+
 ## Primitives & information architecture
 
 Four primitives model everything: **Subjects** (identity-bearing
