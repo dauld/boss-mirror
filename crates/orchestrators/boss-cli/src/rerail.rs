@@ -429,7 +429,33 @@ pub async fn run(
         &["merge-base", "origin/main", &format!("origin/{old_branch}")],
     )?;
     let range = format!("{base}..origin/{old_branch}");
-    let wt = format!(".git/rerail-wt/{new_branch}");
+    // THE SHARED GIT DIRECTORY, ASKED FOR RATHER THAN SPELLED.
+    //
+    // This was the literal `.git/rerail-wt/{new_branch}` until
+    // 2026-09-21 (backlog 112106e4), which works only from the main
+    // checkout. In a LINKED WORKTREE `.git` is a FILE — it holds a
+    // single `gitdir:` line pointing at the real directory — so the
+    // path asks git to create a directory under a file, and git says:
+    //
+    //   fatal: could not create leading directories of
+    //   '.git/rerail-wt/<branch>/.git': Not a directory
+    //
+    // which names a path the operator never typed and says nothing
+    // about worktrees. The knowledge needed to read it — that a
+    // worktree's `.git` is a file — is exactly what someone reaching
+    // for `rerail` may not have (§Diagnosis: a verdict someone must
+    // re-derive is not a verdict).
+    //
+    // `--git-common-dir` answers from either place: `.git` from the
+    // main checkout, an absolute path from a worktree, and both are
+    // usable as written. The rerail worktrees then land beside each
+    // other whichever checkout the verb was run from, which is also
+    // what `--finish` expects when it looks for them later.
+    let common = git(".", &["rev-parse", "--git-common-dir"]).context(
+        "asking git for the shared git directory — rerail needs it to place its temporary \
+         worktree, and without it the path would only be right from the main checkout",
+    )?;
+    let wt = format!("{}/rerail-wt/{new_branch}", common.trim());
 
     if dry {
         let commits = git(".", &["rev-list", "--count", &range])?;

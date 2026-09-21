@@ -22,14 +22,47 @@
 # often; the table stays live-editable, and a version published live
 # supersedes this file (the seed reports "behind", never rewrites).
 #
+# VERSION 7 DROPS THE COOLDOWN FROM 45 TO 30 (David, 2026-09-21:
+# "Let's go with 30m and measure"), and the number is chosen against
+# measured train occupancy rather than picked. Over the 40 most recent
+# trains:
+#
+#   inter-departure gap   median 45m   — exactly the cooldown
+#   train occupancy       median 24m,  p90 33m
+#   idle track per cycle  median 22m   — empty about half the time
+#   consist size          median 2,    19 of 40 trains carried ONE car
+#
+# So departures were paced by this integer, not by dock depth, and the
+# batching it exists to create was largely not happening. The rule's own
+# history above says the same from the other side: depth went 4, 8, 12,
+# 4, 3, 1 — "a lone car still ships" (v6). The depth half of the
+# batching strategy was abandoned a fortnight ago and this was what
+# remained of it.
+#
+# WHY 30 AND NOT 0, which was the question asked. Boarding whenever the
+# track clears collapses the cycle to occupancy (~24m) and roughly
+# DOUBLES the trains — and each train takes a gate bay for its own
+# assembled-tree gate, triggers a cluster converge, and builds a 3.48 GB
+# CI image on a forge disk that hits its floor three times a month.
+# Measured the same day: three concurrent gates ran 19-21m against an
+# 11m median, and a car must gate BEFORE it can board, so more trains
+# means slower car gates means fewer cars ready means smaller trains.
+# 30 sits just above p90 occupancy: the track is rarely idle and trains
+# do not stack into the bays.
+#
+# WHAT WOULD SEND IT BACK TO 45: arrivals per day flat while converges
+# double. That would say the gate bays were the constraint all along and
+# the idle track was not costing anything. Baseline to compare against
+# is on backlog 3ec04168.
+#
 # To change this rule, bump `version`.
 # ---------------------------------------------------------------------------
 
 [[cadence_rule]]
 name = "train-board-on-dock-depth"
-version = 6
+version = 7
 status = "active"
 verb = "board"
 basis = "queue-depth"
 min_dock_depth = 1
-cooldown_minutes = 45
+cooldown_minutes = 30

@@ -853,10 +853,17 @@ a door that stops being true is a defect worth a car.
   of the new `completed_by` column showed an operator's `boss prove`
   credited to the train automation (backlog 5083d6f5).
 
-- **Before pushing — `infra/gate.sh --quick`.** fmt plus every
-  build-free lint, ~11s. It is not a gate and says so. Skipping it once
-  cost 17 minutes of cluster time to learn that `cargo fmt` had been run
-  on one crate and not another.
+- **Before pushing — `infra/gate.sh --lint`.** `--quick` (fmt plus every
+  build-free lint, ~11s) PLUS clippy scoped to the crates the tree
+  changed — seconds on a warm tree, against the ~11 minutes a gate
+  costs. Neither is a gate, and both say so: the build and the suites
+  stay unproven either way. Skipping the pre-flight once cost 17 minutes
+  of cluster time to learn that `cargo fmt` had been run on one crate and
+  not another, and `--quick` alone cost two more gates to clippy errors
+  `--lint` would have caught — the second of them on 2026-09-21, by a
+  session that had read this line (`410e21e2`). Reach for `--quick` only
+  where nothing compiles: a docs, infra or `apps/` change maps to no
+  crate, and `--lint` says so and skips clippy anyway.
 
 - **Briefing a builder — `boss brief <packet>`.** The packet verbatim
   from the system of record, plus the invariants *derived* from the files

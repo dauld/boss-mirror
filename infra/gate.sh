@@ -12,6 +12,14 @@
 #                                 # gate — nothing compiles. Run it
 #                                 # before spending 17 minutes of
 #                                 # cluster time on a formatting slip.
+#   infra/gate.sh --lint          # --quick PLUS clippy, scoped to the
+#                                 # crates the tree changed. Seconds on
+#                                 # a warm tree against ~11 minutes of
+#                                 # gate, and clippy is the red class
+#                                 # that buys the least: prefer this to
+#                                 # --quick before pushing. Still not a
+#                                 # gate — the build and the suites
+#                                 # remain unproven.
 #   infra/gate.sh --auto          # car mode, scope DERIVED from the
 #                                 # tree. Skips cargo entirely when
 #                                 # nothing changed implies a crate —
@@ -1868,11 +1876,11 @@ if [ "$QUICK" -eq 1 ]; then
         # edge, and the WARNING lines above name each lint and why.
         echo "pre-flight: clean except ${#CANNOT_READ[@]} lint(s) that could not read the registry: ${CANNOT_READ[*]}"
         echo "pre-flight: no build ran, so this is NOT a gate; the gate runs those lints itself."
-        echo "pre-flight: clippy, build and the test suites are still unproven."
+        echo "pre-flight: clippy, build and the test suites are still unproven — infra/gate.sh --lint proves clippy in seconds."
         exit 0
     fi
     echo "pre-flight: clean — no build ran, so this is NOT a gate."
-    echo "pre-flight: clippy, build and the test suites are still unproven."
+    echo "pre-flight: clippy, build and the test suites are still unproven — infra/gate.sh --lint proves clippy in seconds."
     exit 0
 fi
 

@@ -116,7 +116,30 @@ async fn seeded_rules_serve_the_thresholds_the_schema_declares() {
         "boarding threshold drifted from the schema — this is the \
          2026-08-13 split-brain, and it made the operator's answer wrong"
     );
-    assert_eq!(depth.cooldown_minutes, Some(45));
+    // AND THE COOLDOWN THE MIGRATIONS SEED, which is 45 and always will
+    // be. A literal is RIGHT here, and that is worth saying because a
+    // literal was wrong in the three other places this number lived.
+    //
+    // The difference is WHAT the literal pins. Those three pinned a
+    // LIVE value — the bundle's current declaration — so every version
+    // bump had to find all of them, and the comment above records the
+    // gate catching exactly that after a sibling moved. This one pins
+    // HISTORY: migrate.sh checksums an applied migration whole, so what
+    // 202609042110 seeded cannot change. A literal cannot drift from a
+    // frozen fact.
+    //
+    // Deliberately NOT the bundle's value. Since the H4 cutover the
+    // bundle is the home and may LEAD the migrations — it declares v7
+    // with a 30-minute cooldown as of 2026-09-21 — so comparing the
+    // seeded row to the bundle would assert that history keeps up with
+    // the present, which is backwards (backlog cab50f4c).
+    assert_eq!(
+        depth.cooldown_minutes,
+        Some(45),
+        "the migrations' seeded cooldown is frozen history; the CURRENT declaration lives \
+         in infra/platform/cadence/ and is pinned by \
+         the_cadence_rules_bundle_is_the_migrations_pg"
+    );
 }
 
 /// A calendar rule must be served WHOLE — cadence, anchor_date and

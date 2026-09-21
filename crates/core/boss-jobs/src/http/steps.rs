@@ -329,6 +329,20 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
         Ok(None) => return (StatusCode::NOT_FOUND, "step not found").into_response(),
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
+    // Same containment rule as the metadata PATCH and the claim route,
+    // which have carried it all along — this handler did not, and it is
+    // the most-used write of the three (packet 730ea77e). The step is
+    // found by its OWN id, so without this the path's job id is
+    // decorative: a fabricated one was accepted live on 2026-09-21, the
+    // step flipped on the real packet, and the caller got 204. What it
+    // costs is below this line, not here — `parent_job` reads
+    // `.ok().flatten()`, so a job id naming nothing becomes `None`, the
+    // event's subject and workflow fall back to empty strings, and the
+    // `if let Some(job)` at the foot skips BOTH the re-evaluator and the
+    // terminal close. The packet is left wedged with no error anywhere.
+    if old.job_id != job_id {
+        return (StatusCode::NOT_FOUND, "step not on this job").into_response();
+    }
 
     // The parent packet, fetched ONCE: the event stamp inherits its
     // partition, the step.done / step.assigned markers read

@@ -128,6 +128,27 @@ async fn every_name(db: &TestDb) -> Vec<String> {
         .expect("names")
 }
 
+/// How many bundle rows sit AHEAD of the live active row — the rules a
+/// seed will publish rather than find present.
+///
+/// Derived, never assumed. Two pins below used to take it as zero,
+/// which was true only while no cadence rule had changed since the
+/// cutover; the first bundle-only version bump — the edit path
+/// `migrations-declare-schema-only` requires — made it one, and both
+/// pins failed for a reason that had nothing to do with what they
+/// test (backlog cab50f4c).
+async fn ahead_of_live(registry: &PgCadence, names: &[String]) -> usize {
+    let live = declarations(&active_rows(registry, names).await);
+    bundle()
+        .iter()
+        .filter(|spec| {
+            live.get(spec.name())
+                .and_then(|row| row["version"].as_u64())
+                .is_some_and(|v| u64::try_from(spec.version).is_ok_and(|d| d > v))
+        })
+        .count()
+}
+
 /// PIN 1 — every active row the migrations produce is declared in the
 /// bundle, column for column, and the bundle declares nothing else.
 #[tokio::test(flavor = "multi_thread")]
@@ -156,13 +177,44 @@ async fn the_bundle_declares_every_active_row_the_migrations_produce() {
          declare has no home once migrations declare schema only — unless its \
          retirement is written down in that list)"
     );
+    // THE BUNDLE MAY BE AHEAD; IT MAY NEVER BE BEHIND; AND WHERE THE
+    // VERSIONS MATCH, EVERY COLUMN MUST AGREE.
+    //
+    // This asserted plain equality until 2026-09-21, which contradicted
+    // the lint written the same day for the same consolidation:
+    // `migrations-declare-schema-only` forbids a post-cutover migration
+    // from inserting a registry row and says "a change to a live row is
+    // a version bump there [in the bundle]". A bundle-only bump then
+    // made the bundle differ from the migrations — which this pin
+    // forbade. Both were green only because NO cadence rule had changed
+    // since the cutover, so the first change broke one or the other
+    // whichever way it was made (backlog cab50f4c; David chose the
+    // lint).
+    //
+    // What the pin was FOR still holds and is kept: the bundle is
+    // complete (the names check above), it can be the only home, and a
+    // column cannot change without a version bump saying so. What is
+    // dropped is the migration-era assumption that history is the
+    // authority — once the bundle is the home, "equals the migrations"
+    // means "nobody may ever edit a rule".
     for (name, migrated) in &from_migrations {
         let declared = &from_bundle[name];
-        assert_eq!(
-            declared, migrated,
-            "infra/platform/cadence/{name}.toml must equal the active row the \
-             migrations produce, every column (left = bundle, right = migrations)"
+        let dv = declared["version"].as_u64().expect("a bundle version");
+        let mv = migrated["version"].as_u64().expect("a migration version");
+        assert!(
+            dv >= mv,
+            "infra/platform/cadence/{name}.toml declares v{dv}, BEHIND the v{mv} the \
+             migrations produce — a fresh database would seed the older row and history \
+             would silently win"
         );
+        if dv == mv {
+            assert_eq!(
+                declared, migrated,
+                "infra/platform/cadence/{name}.toml is at the migrations' version but \
+                 differs from it — a column changed without the version bump that says so \
+                 (left = bundle, right = migrations)"
+            );
+        }
     }
 }
 
@@ -174,7 +226,11 @@ async fn an_emptied_registry_is_rebuilt_from_the_bundle_alone() {
     let db = TestDb::new().await;
     let registry = PgCadence::new(db.pool.clone());
     let names = every_name(&db).await;
-    let expected = declarations(&expected_from(active_rows(&registry, &names).await));
+    // WHAT THE SEED MUST REBUILD IS THE BUNDLE, because the bundle is
+    // the home (backlog cab50f4c). Reading the expectation off the
+    // migrations instead would assert that an emptied registry comes
+    // back as HISTORY rather than as the current declaration.
+    let expected = declarations(&bundle());
 
     sqlx::query("DELETE FROM cadence_rules")
         .execute(&db.pool)
@@ -198,7 +254,7 @@ async fn an_emptied_registry_is_rebuilt_from_the_bundle_alone() {
     assert_eq!(
         declarations(&after),
         expected,
-        "the seed must recreate the migration rows exactly — the bundle can be the only home"
+        "the seed must recreate the BUNDLE exactly — the bundle can be the only home"
     );
     for row in &after {
         let versions = registry
@@ -213,13 +269,33 @@ async fn an_emptied_registry_is_rebuilt_from_the_bundle_alone() {
             versions.iter().map(|v| v.version).collect::<Vec<_>>()
         );
     }
+    // THE DECLARED VERSION, not a literal. This asserted `6` until
+    // 2026-09-21, which made it the THIRD copy of a number the
+    // boarding rule has moved seven times — the bundle file, the
+    // platform_cadence_bundle spot-check, and here. Each version bump
+    // had to find all three, with nothing but review holding them
+    // equal (§9a).
+    //
+    // STILL NOT VACUOUS: the property under test is that a rebuild
+    // from the bundle alone lands the rule at its DECLARED version
+    // rather than at v1 with the history thrown away. Comparing the
+    // rebuilt row to the declaration is exactly that property; a
+    // rebuild that reset to 1 still fails, and now so does one that
+    // resets to any other number, for every rule rather than the one
+    // that happened to be spelled out.
+    let declared = bundle()
+        .into_iter()
+        .find(|s| s.name() == "train-board-on-dock-depth")
+        .expect("the bundle declares the boarding rule")
+        .version;
     let board = after
         .iter()
         .find(|r| r.name() == "train-board-on-dock-depth")
         .expect("the boarding rule is active");
     assert_eq!(
-        board.version, 6,
-        "the boarding rule lands at the version six migrations produced, not at v1"
+        board.version, declared,
+        "the boarding rule lands at the version the migrations produced and the bundle \
+         declares, not at v1"
     );
 }
 
@@ -237,22 +313,60 @@ async fn a_present_registry_is_left_untouched() {
         .await
         .expect("count rows");
 
+    // BEFORE the seed, because the seed is what changes it: read after,
+    // and every row it just published looks like it was never ahead.
+    let ahead = ahead_of_live(&registry, &names).await;
+
     let report = seed_cadence_rules(&registry, &bundle(), &actor(), chrono::Utc::now(), false)
         .await
         .expect("a present registry is not a failure");
+    // Every row is Present EXCEPT the ones the bundle has moved ahead,
+    // which publish — that is the edit path, not a surprise.
     assert_eq!(
         report.count(|o| matches!(o, SeedOutcome::Present)),
-        bundle().len(),
-        "every bundle row is already present: {report}"
+        bundle().len() - ahead,
+        "every bundle row at the live version is already present: {report}"
     );
+    assert_eq!(
+        report.count(|o| matches!(o, SeedOutcome::Published { .. })),
+        ahead,
+        "and exactly the rows the bundle moved ahead are published: {report}"
+    );
+    // NOTHING IS INSERTED, which is the property this pin is really
+    // for: a seed over a present registry must never create a rule
+    // that was not already there, whatever the versions say.
     assert_eq!(report.count(|o| matches!(o, SeedOutcome::Inserted)), 0);
 
     let rows_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cadence_rules")
         .fetch_one(&db.pool)
         .await
         .expect("count rows");
-    assert_eq!(rows_after, rows_before, "a no-op seed writes no row");
-    assert_eq!(declarations(&active_rows(&registry, &names).await), before);
+    // EXACTLY ONE NEW ROW PER PUBLISH, and none otherwise. The version
+    // bump is an append — the prior row is retired in place, not
+    // deleted — so a bundle leading by one rule grows the table by one.
+    // Asserting a flat count assumed no rule ever leads.
+    assert_eq!(
+        rows_after,
+        rows_before + i64::try_from(ahead).expect("a small count"),
+        "a seed writes one row per version bump and nothing else"
+    );
+
+    // The rules that did NOT move are untouched, declaration for
+    // declaration — which is what this pin is named for.
+    let after = declarations(&active_rows(&registry, &names).await);
+    for (name, was) in &before {
+        if bundle().iter().any(|s| {
+            s.name() == name
+                && u64::try_from(s.version).is_ok_and(|v| v > was["version"].as_u64().unwrap_or(0))
+        }) {
+            continue; // deliberately moved ahead
+        }
+        assert_eq!(
+            after.get(name),
+            Some(was),
+            "{name} did not move in the bundle and must be untouched by the seed"
+        );
+    }
 }
 
 /// The refusal: a bundle row edited WITHOUT a version bump differs
@@ -327,13 +441,18 @@ async fn a_version_bump_publishes_and_retires_the_live_row() {
     bumped.version = live.version + 1;
     bumped.row.every_minutes = Some(15);
 
+    // The rule THIS test bumped, plus any the bundle already carries
+    // ahead of live. Counting a bare 1 assumed the bundle never leads
+    // the migrations, which stopped being true the first time a rule
+    // was edited the way the lint requires.
+    let ahead = ahead_of_live(&registry, &every_name(&db).await).await;
     let report = seed_cadence_rules(&registry, &specs, &actor(), chrono::Utc::now(), false)
         .await
         .expect("a version bump publishes");
     assert_eq!(
         report.count(|o| matches!(o, SeedOutcome::Published { .. })),
-        1,
-        "{report}"
+        ahead + 1,
+        "the bumped rule publishes, and so does anything the bundle already led: {report}"
     );
 
     let lineage = registry

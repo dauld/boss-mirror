@@ -91,14 +91,45 @@ async fn every_bundled_rule_is_publishable_at_its_declared_version() {
         bundle().len(),
         "every published rule is served active"
     );
-    let board = served
-        .iter()
-        .find(|r| r.name == "train-board-on-dock-depth")
-        .expect("the boarding rule is served");
-    assert_eq!(
-        (board.min_dock_depth, board.cooldown_minutes),
-        (Some(1), Some(45))
-    );
+    // EVERY SERVED ROW CARRIES WHAT ITS FILE DECLARED, checked against
+    // the bundle rather than against literals.
+    //
+    // This spot-checked the boarding rule against `(Some(1), Some(45))`
+    // until 2026-09-21. That is a second copy of two integers an
+    // operator changes — the boarding rule alone has been through seven
+    // versions, six of them moving one number — and every one of those
+    // changes had to remember to edit this literal too. §9a: a fact that
+    // lives twice gets one definition, and here the definition is the
+    // bundle file.
+    //
+    // NOT VACUOUS. The comparison is not file-against-itself: the
+    // values go file -> publish_declared -> active_rules, so this
+    // asserts the PUBLISH PATH preserves them. A publish that dropped
+    // `cooldown_minutes` would still fail, and would now fail for every
+    // rule rather than for the one that was spelled out.
+    for spec in bundle() {
+        let declared = spec.clone();
+        let row = served
+            .iter()
+            .find(|r| r.name == declared.name())
+            .unwrap_or_else(|| panic!("{} is served", declared.name()));
+        assert_eq!(
+            (
+                row.min_dock_depth,
+                row.cooldown_minutes,
+                row.every_minutes,
+                row.verb.as_str()
+            ),
+            (
+                declared.row.min_dock_depth,
+                declared.row.cooldown_minutes,
+                declared.row.every_minutes,
+                declared.row.verb.as_str()
+            ),
+            "{}: the served row must carry what its bundle file declares",
+            declared.name()
+        );
+    }
 }
 
 /// A file that declares anything but an active row, or a version below
