@@ -3057,17 +3057,27 @@ fn red_verdict_detail(body: &Value) -> Option<String> {
         })
         .unwrap_or_default();
     let mut lines = if fails.is_empty() {
-        receipt
-            .get("checks")
-            .and_then(Value::as_array)
-            .map(|cs| {
-                cs.iter()
-                    .filter(|c| c.get("result").and_then(Value::as_str) != Some("pass"))
-                    .filter_map(|c| c.get("name").and_then(Value::as_str))
-                    .map(|n| format!("{n}: failed (this receipt names no test)"))
-                    .collect()
-            })
+        // THE ONE PREDICATE (backlog 873c5746). This branch used to
+        // carry its own `result != "pass"` filter, which counted a
+        // REFUSED entry as a failure — and a refused check answered
+        // nothing, so the name it carries is the lint's rather than
+        // the branch's. It was safe only by adjacency: the whole-
+        // verdict refusal returns above, so the duplicate never saw
+        // one. A receipt whose verdict is `failed` while a single
+        // check is `refused` reaches here and is exactly the case the
+        // adjacency does not cover.
+        //
+        // `fails` is still PREFERRED over this (the branch above):
+        // the two fields carry different things — `fails` holds the
+        // detail lines naming the test and the assertion, `checks`
+        // holds only a check name — and a console line wants the one
+        // that says WHAT failed. So the collapse is of the predicate,
+        // not of the precedence.
+        boss_jobs::flake::failing_checks(&receipt)
             .unwrap_or_default()
+            .into_iter()
+            .map(|n| format!("{n}: failed (this receipt names no test)"))
+            .collect()
     } else {
         fails
     };
@@ -6162,6 +6172,38 @@ kind: Job\n\
             }))
             .is_none(),
             "nothing to read must stay silent rather than invent a cause"
+        );
+
+        // A REFUSED CHECK IS NOT A FAILING CHECK (backlog 873c5746,
+        // and the rule boss_jobs::flake::REFUSED exists for). A lint
+        // that exited LINT_CANNOT_ANSWER is rewritten to
+        // `result: refused` precisely so a reader counting failures
+        // does not count it — and the name it carries is the lint's,
+        // not the branch's, so printing it accuses the wrong thing.
+        //
+        // This reaches the CHECKS fallback, which is the branch a
+        // whole-verdict refusal returns above: the verdict here is
+        // `failed`, not `refused`, so the early return does not fire.
+        // That adjacency is what made the duplicated predicate safe,
+        // and it is exactly one edit away from not being.
+        let mixed = json!({
+            "steps": [{
+                "spec_slug": "record-verdict",
+                "metadata": {"receipt":
+                    "{\"verdict\":\"failed\",\"checks\":[\
+                      {\"name\":\"clippy\",\"result\":\"fail\"},\
+                      {\"name\":\"audit-ordering\",\"result\":\"refused\"}]}"}
+            }]
+        });
+        let detail = red_verdict_detail(&mixed).expect("the real failure is still named");
+        assert!(
+            detail.contains("clippy"),
+            "the check that actually failed is named: {detail}"
+        );
+        assert!(
+            !detail.contains("audit-ordering"),
+            "a refused check must not be reported as a failure — it answered \
+             nothing, and its name is the lint's rather than the branch's: {detail}"
         );
     }
 
