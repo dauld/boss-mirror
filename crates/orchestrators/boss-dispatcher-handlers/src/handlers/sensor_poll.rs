@@ -472,11 +472,18 @@ pub fn alarm_body(sensor: &SensorRow, alarm: &Alarm, owner: &str) -> Json {
 /// the service or the policy scope is right, and the firing naks
 /// loudly instead of terminating.
 pub fn sensors(listing: &Json) -> Result<Vec<SensorRow>, String> {
-    let rows = listing
-        .get("data")
-        .filter(|d| d.is_array())
-        .ok_or_else(|| "GET /api/sensors answered no `data` array".to_string())?;
-    serde_json::from_value(rows.clone()).map_err(|e| format!("sensors not in shape: {e}"))
+    super::common::rows_or_refuse(listing, "GET /api/sensors")
+}
+
+/// The readings a sensor still owes a packet, from its unstamped
+/// listing — the same rule as `sensors` above, one call later and with
+/// more at stake. A missing `data` read as zero here means "no reading
+/// owes a packet", so the poll completes happily, the sensor looks
+/// alive and the packets those readings owe never open. An EMPTY array
+/// is honest (a sensor may genuinely owe nothing); a missing or
+/// non-array one is no answer and refuses.
+pub fn owed_readings(listing: &Json) -> Result<Vec<Reading>, String> {
+    super::common::rows_or_refuse(listing, "GET /api/sensors/{id}/readings")
 }
 
 /// The open alarm carrying `key`, as `(id, reason)`, if any — and
@@ -835,18 +842,13 @@ impl SensorPoll {
         // Open a packet per reading still owed one — the ones just
         // recorded and any an earlier firing recorded but could not
         // open — and stamp each before the next.
-        let owed: Vec<Reading> = self
+        let listing = self
             .get(&format!(
                 "/api/sensors/{}/readings?unstamped=true",
                 sensor.id
             ))
-            .await?
-            .get("data")
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|e| HandlerError::Downstream(format!("readings not in shape: {e}")))?
-            .unwrap_or_default();
+            .await?;
+        let owed: Vec<Reading> = owed_readings(&listing).map_err(HandlerError::Downstream)?;
         // The cursor is the newest observation whether or not every
         // packet opens: the readings are recorded, and an owed one is
         // found by its missing stamp, not by re-reading the source.
@@ -1089,6 +1091,36 @@ mod tests {
         let why = sensors(&json!({ "error": "forbidden" })).expect_err("an error shape refuses");
         assert!(why.contains("no `data` array"), "{why}");
         let why = sensors(&json!({ "data": [{ "id": 7 }] })).expect_err("a bad row refuses");
+        assert!(why.contains("not in shape"), "{why}");
+    }
+
+    /// The readings half of the same rule (0767c830). This one is
+    /// sharper than the listing's: when the LISTING goes dark the pass
+    /// polls nothing, which at least leaves an absence. Here the
+    /// readings are recorded and in the record, the sensor looks alive
+    /// and the cadence reports healthy — and a missing `data` read as
+    /// zero means the packets they owe silently never open. The
+    /// evidence of health is what makes the failure invisible, so an
+    /// EMPTY array stays honest (a sensor may genuinely owe nothing)
+    /// and a MISSING one refuses.
+    #[test]
+    fn owed_readings_refuse_a_missing_data_array_and_an_empty_one_is_honest() {
+        assert_eq!(
+            owed_readings(&json!({ "data": [], "total": 0 })).expect("empty is honest"),
+            vec![]
+        );
+        let why = owed_readings(&json!({ "total": 0 })).expect_err("no data array is a refusal");
+        assert!(why.contains("no `data` array"), "{why}");
+        let why =
+            owed_readings(&json!({ "error": "forbidden" })).expect_err("an error shape refuses");
+        assert!(why.contains("no `data` array"), "{why}");
+        let why = owed_readings(&json!({ "data": null })).expect_err("a null data refuses");
+        assert!(why.contains("no `data` array"), "{why}");
+        let why = owed_readings(&json!({ "data": { "external_id": "x" } }))
+            .expect_err("an object data refuses");
+        assert!(why.contains("no `data` array"), "{why}");
+        let why = owed_readings(&json!({ "data": [{ "external_id": 7 }] }))
+            .expect_err("a bad row refuses");
         assert!(why.contains("not in shape"), "{why}");
     }
 

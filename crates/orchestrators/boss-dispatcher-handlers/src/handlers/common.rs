@@ -367,7 +367,12 @@ pub(crate) async fn get_json(
 /// three handlers ONE AT A TIME, each found by accident by someone
 /// working on something else: `retro.open`'s departments (80a77466),
 /// `sensor.poll`'s sensors (6c4c432a), and its owed readings
-/// (0767c830). A grep sweep is not the cure and that is measured: in
+/// (0767c830) — and all three now TAKE this helper rather than each
+/// holding its own copy of the rule. The owed-readings one was still
+/// inline when this doc first named it, which is the drift the helper
+/// exists to stop: reading a missing `data` as zero there meant
+/// recorded readings silently never opened the packets they owed.
+/// A grep sweep is not the cure and that is measured: in
 /// `sensor_poll.rs` alone the chain appears four times, of which one
 /// was the bug, one is safe by accident of its own truncation check
 /// and one is a different shape. So the JUDGEMENT moves here instead,
