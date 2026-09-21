@@ -138,6 +138,38 @@ describe('the words a rail prints', () => {
     ).toBe('train-board-on-dock-depth · no firing recorded');
   });
 
+  // A border of kind `actors` has NO rule to fire — a person or an
+  // agent does the crossing — so "no firing recorded" there is not a
+  // finding, it is the only sentence that could ever be true. It read
+  // as a dead automation on `receiving -> marshalling`, the most
+  // backed-up border in the yard, which is the pairing most likely to
+  // send a reader hunting for a rule that does not exist (beec1130).
+  //
+  // CLAUDE.md §Diagnosis says a troubled packet must look troubled;
+  // the inverse has to hold too, or the surface spends attention on a
+  // non-problem and teaches the reader to discount the phrase on the
+  // borders where it IS a finding.
+  it('says an actor-worked border is worked by actors, not that nothing fired', () => {
+    const actors = machine({
+      name: 'the receiving desk',
+      kind: 'actors',
+      last_fired: null,
+      silent_for_minutes: null,
+      expected_every_minutes: null,
+      silent: null,
+      why: 'no machine moves this hop — an actor does; the last crossing is the stamp',
+    });
+    expect(machineText(actors)).toBe('the receiving desk · worked by actors');
+    expect(machineText(actors)).not.toContain('no firing recorded');
+
+    // THE CONTROL. A machine that really does fire and has no record
+    // must still say so — the phrase is a finding there, and a change
+    // that silenced it everywhere would satisfy the line above.
+    expect(
+      machineText(machine({ silent: null, silent_for_minutes: null, last_fired: null })),
+    ).toContain('no firing recorded');
+  });
+
   it('gives traffic a density band, and an unmeasured rate its own band — not the empty one', () => {
     expect(densityOf(null)).toBe('unknown');
     expect(densityOf(0)).toBe('none');

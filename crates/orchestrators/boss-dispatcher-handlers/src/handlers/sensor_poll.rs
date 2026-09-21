@@ -480,6 +480,23 @@ pub fn sensors(listing: &Json) -> Result<Vec<SensorRow>, String> {
     serde_json::from_value(rows.clone()).map_err(|e| format!("sensors not in shape: {e}"))
 }
 
+/// The readings still owed a packet, as the sensors API answered them.
+///
+/// A missing, null or non-array `data` is NO ANSWER and refuses — it
+/// used to read as an empty list, i.e. "nothing owes a packet", so a
+/// poll against a wrong-shaped answer completed happily while recorded
+/// readings never became packets: the readings exist, the sensor looks
+/// alive, and the audit-log fact never opens (0767c830). An EMPTY
+/// array stays honest — a sensor may genuinely owe nothing.
+pub fn owed_readings(listing: &Json) -> Result<Vec<Reading>, String> {
+    let rows = listing
+        .get("data")
+        .and_then(Json::as_array)
+        .ok_or_else(|| "the owed-readings read answered no `data` array".to_string())?;
+    serde_json::from_value(Json::Array(rows.clone()))
+        .map_err(|e| format!("readings not in shape: {e}"))
+}
+
 /// The open alarm carrying `key`, as `(id, reason)`, if any — and
 /// whether the page can be trusted (a truncated page holds).
 pub fn open_alarm(listing: &Json, key: &str) -> Result<Option<(String, String)>, String> {
@@ -836,18 +853,19 @@ impl SensorPoll {
         // Open a packet per reading still owed one — the ones just
         // recorded and any an earlier firing recorded but could not
         // open — and stamp each before the next.
-        let owed: Vec<Reading> = self
+        let listing = self
             .get(&format!(
                 "/api/sensors/{}/readings?unstamped=true",
                 sensor.id
             ))
-            .await?
-            .get("data")
-            .cloned()
-            .map(serde_json::from_value)
-            .transpose()
-            .map_err(|e| HandlerError::Downstream(format!("readings not in shape: {e}")))?
-            .unwrap_or_default();
+            .await?;
+        // Downstream, not Permanent: a bad answer from the jobs API is
+        // not a fault in the request this handler sent, so a
+        // redelivery can succeed once the far side is right
+        // (boss-dispatcher/src/rules/handler.rs documents Permanent as
+        // a deterministic request-data error that terminates).
+        let owed: Vec<Reading> = owed_readings(&listing)
+            .map_err(|why| HandlerError::Downstream(format!("sensor {}: {why}", &sensor.id)))?;
         // The cursor is the newest observation whether or not every
         // packet opens: the readings are recorded, and an owed one is
         // found by its missing stamp, not by re-reading the source.
@@ -1092,6 +1110,40 @@ mod tests {
         assert!(why.contains("no `data` array"), "{why}");
         let why = sensors(&json!({ "data": [{ "id": 7 }] })).expect_err("a bad row refuses");
         assert!(why.contains("not in shape"), "{why}");
+    }
+
+    /// A missing `data` is NO ANSWER, not "nothing owes a packet"
+    /// (0767c830). The distinction is the whole point: an EMPTY array
+    /// is honest — a sensor may genuinely owe nothing — while a
+    /// missing, null or non-array one means the far side did not
+    /// answer the question, and reading it as zero leaves recorded
+    /// readings that silently never become packets.
+    #[test]
+    fn owed_readings_refuses_a_listing_with_no_data_array_and_allows_an_empty_one() {
+        assert_eq!(
+            owed_readings(&json!({"data": [], "total": 0})).unwrap(),
+            vec![]
+        );
+        let one = json!({"data": [{
+            "sensor_id": "stripe-sponsorships",
+            "external_id": "ch_1",
+            "observed_at": "2026-09-17T10:00:00Z",
+            "payload": {"id": "ch_1"},
+            "packet_id": null
+        }], "total": 1});
+        assert_eq!(owed_readings(&one).unwrap().len(), 1);
+        for no_answer in [
+            json!({"total": 0}),
+            json!({"data": null}),
+            json!({"data": {}}),
+        ] {
+            assert!(
+                owed_readings(&no_answer)
+                    .unwrap_err()
+                    .contains("no `data` array"),
+                "a listing {no_answer} must refuse rather than read as nothing owed"
+            );
+        }
     }
 
     #[test]

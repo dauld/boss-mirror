@@ -55,12 +55,32 @@
 # the idle track was not costing anything. Baseline to compare against
 # is on backlog 3ec04168.
 #
-# To change this rule, bump `version`.
+# WHY v8 AND NOT v7, which is where the cooldown change first landed.
+# v7 ALREADY EXISTED LIVE, with cooldown 45 — the bundle file said v6
+# while the registry's lineage was at v7, and "bump the version" read
+# the file. Measured 2026-09-21 after the change landed green: the
+# lineage answers v1..v7 with v7 ACTIVE at cooldown 45, the bundle
+# declared v7 at 30, and the two disagree at the same version number.
+# So the change was inert — `boss cadence publish` refuses (v7 is not
+# above the newest of the lineage) and the seed would refuse it at the
+# next boot as exactly the drift a bundle exists to remove. A green
+# gate proved the file; nothing proved the row.
+#
+# The bundle being BEHIND the live lineage is tolerated by design, as
+# information rather than a refusal (cadence_seed.rs) — and that
+# tolerance is what manufactured the collision, because the next author
+# bumps from the file. train-window is in the same state right now
+# (bundle v2, live v3), so the next change to it collides the same way.
+# That is filed separately; this car only moves the boarding rule to a
+# version above the live lineage so the decision actually takes effect.
+#
+# To change this rule, bump `version` — and check the LIVE lineage
+# first (`GET /api/cadence/rules/<name>/versions`), not just this file.
 # ---------------------------------------------------------------------------
 
 [[cadence_rule]]
 name = "train-board-on-dock-depth"
-version = 7
+version = 8
 status = "active"
 verb = "board"
 basis = "queue-depth"

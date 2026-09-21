@@ -790,8 +790,27 @@ fn rate_text(t: &Value) -> String {
 /// `train-reconcile 4m ago` — and `SILENT 180m` when the machine has
 /// been quiet past its own declared cadence. A machine with no firing
 /// record says so rather than printing an age it does not have.
+///
+/// EXCEPT WHERE THERE IS NO MACHINE. A border of kind `actors` is
+/// crossed by a person or an agent, so there is no rule to fire and
+/// "(no firing recorded)" is not a finding — it is the only sentence
+/// that could ever be true there, and it reads exactly like a dead
+/// automation. It sat on `receiving -> marshalling`, the most
+/// backed-up border in the yard, which is the pairing most likely to
+/// send a reader hunting for a rule that does not exist (beec1130).
+/// §Diagnosis says a troubled packet must look troubled; the inverse
+/// holds too, or the phrase stops carrying weight on the borders where
+/// it IS a finding.
+///
+/// The `kind` is the one definition this and the rail both read —
+/// `MachineKind` in boss-jobs/src/borders.rs — so the two surfaces
+/// branch on the same fact rather than on a phrase copied between
+/// them.
 fn machine_text(m: &Value) -> String {
     let name = m.get("name").and_then(Value::as_str).unwrap_or("?");
+    if m.get("kind").and_then(Value::as_str) == Some("actors") {
+        return format!("{name} (worked by actors)");
+    }
     let silent = m.get("silent").and_then(Value::as_bool);
     let age = m.get("silent_for_minutes").and_then(Value::as_i64);
     match (silent, age) {
@@ -2317,6 +2336,73 @@ mod tests {
         );
     }
 
+    /// AN ACTOR-WORKED BORDER MUST NOT READ AS A DEAD RULE.
+    ///
+    /// `receiving -> marshalling` has `machine_kind: Actors` — a person
+    /// or an agent does the crossing, there is no rule to fire — and it
+    /// printed "(no firing recorded)", the phrase this surface uses for
+    /// a machine that should have fired and did not. On the most
+    /// backed-up border in the yard (217 standing, the oldest four days
+    /// past the triage band) that is the pairing most likely to send a
+    /// reader hunting for a broken automation that does not exist
+    /// (beec1130).
+    ///
+    /// §Diagnosis says a troubled packet must look troubled. The
+    /// inverse is load-bearing too: a healthy mechanism that looks
+    /// broken spends someone's attention on a non-problem, and teaches
+    /// them to discount the phrase on the borders where it is a real
+    /// finding.
+    #[test]
+    fn an_actor_worked_border_says_who_works_it_rather_than_that_nothing_fired() {
+        let map = serde_json::json!({
+            "window_hours": 24,
+            "borders": [
+                {
+                    "from": "receiving", "to": "marshalling",
+                    "rate": { "current": 58.0, "previous": 87.0 },
+                    "waiting": 217, "state": "BUSY", "holds": [],
+                    "machine": {
+                        "name": "the receiving desk", "kind": "actors",
+                        "last_fired": null, "silent_for_minutes": null,
+                        "expected_every_minutes": null, "silent": null,
+                        "why": "no machine moves this hop — an actor does; \
+                                the last crossing is the stamp"
+                    }
+                },
+                {
+                    "from": "gates", "to": "track",
+                    "rate": { "current": 3.0, "previous": 5.0 },
+                    "waiting": 0, "state": "clear", "holds": [],
+                    "machine": {
+                        "name": "train-board-on-dock-depth", "kind": "cadence",
+                        "last_fired": null, "silent_for_minutes": null,
+                        "expected_every_minutes": 30, "silent": null,
+                        "why": "the cadence firing record could not be read"
+                    }
+                }
+            ]
+        });
+        let lines = border_lines(&map);
+        let actors = &lines[1];
+        assert!(
+            actors.contains("worked by actors"),
+            "the actor-worked rail must name who works it:\n{actors}"
+        );
+        assert!(
+            !actors.contains("no firing recorded"),
+            "an actor-worked rail must not report a firing it could never have:\n{actors}"
+        );
+        // THE CONTROL, on the same map: a machine that really does fire
+        // and has no record must STILL say so. Without it, a change
+        // that dropped the phrase everywhere would pass the two
+        // assertions above.
+        let cadence = &lines[2];
+        assert!(
+            cadence.contains("(no firing recorded)"),
+            "a cadence rule with no firing record is a finding and must keep saying so:\n{cadence}"
+        );
+    }
+
     /// The BORDERS section (design d2154293, car 2): a line per border
     /// with what crosses it, what stands at it and which machine moves
     /// it. Every unknown reads as unknown — the CLI's version of the
@@ -2352,10 +2438,18 @@ mod tests {
                     "last_crossed": null,
                     "waiting": null,
                     "holds": [],
-                    "machine": { "name": "the receiving desk", "kind": "actors",
+                    // A CADENCE RULE whose firing record could not be
+                    // read — which is what this rail is for. It used to
+                    // be `kind: actors`, and that made the
+                    // "(no firing recorded)" assertion below test the
+                    // wrong thing: an actor-worked hop has no rule to
+                    // fire, so the phrase was never a finding there
+                    // (beec1130). The unknown-record case needs a
+                    // machine that really does fire.
+                    "machine": { "name": "train-reconcile", "kind": "cadence",
                                  "last_fired": null, "silent_for_minutes": null,
-                                 "expected_every_minutes": null, "silent": null,
-                                 "why": "no machine moves this hop — an actor does" },
+                                 "expected_every_minutes": 10, "silent": null,
+                                 "why": "the cadence firing record could not be read" },
                     "state": "troubled",
                     "why": "the workflow registry that names the inbound kinds could not be read"
                 }

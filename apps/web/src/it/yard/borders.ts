@@ -167,8 +167,24 @@ export function waitingText(b: Border): string {
 
 /** The machine with how long it has been quiet: `SILENT 180m` past its
  *  own declared cadence, `fired 4m ago` inside it, and "no firing
- *  recorded" where nothing records this machine at all. */
+ *  recorded" where nothing records this machine at all.
+ *
+ *  EXCEPT WHERE THERE IS NO MACHINE. A border of kind `actors` is
+ *  crossed by a person or an agent; there is no rule to fire, so "no
+ *  firing recorded" is not a finding there — it is the only sentence
+ *  that could ever be true, and it reads exactly like a dead
+ *  automation. On `receiving -> marshalling`, the most backed-up
+ *  border in the yard, that is the pairing most likely to send a
+ *  reader hunting for a rule that does not exist (beec1130). A healthy
+ *  mechanism must not look broken, or the phrase stops meaning
+ *  anything on the borders where it IS a finding.
+ *
+ *  The `kind` is the one definition both surfaces read — `MachineKind`
+ *  here and `MachineKind` in boss-jobs/src/borders.rs — so the rail
+ *  and `boss orient` branch on the same fact rather than on a phrase
+ *  copied between them. */
 export function machineText(m: Machine): string {
+  if (m.kind === 'actors') return `${m.name} · worked by actors`;
   if (m.silent === true) return `${m.name} · SILENT ${m.silent_for_minutes ?? '?'}m`;
   if (m.silent_for_minutes !== null) return `${m.name} · fired ${m.silent_for_minutes}m ago`;
   return `${m.name} · no firing recorded`;
