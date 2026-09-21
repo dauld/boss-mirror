@@ -226,10 +226,17 @@ pub(crate) fn design_review_step_metadata(
 /// Where a packet stands on its design route, as `--answers` needs it:
 /// the `design-review` step the question goes onto, and the
 /// `draft-design` step this verb completes when the route has one.
+///
+/// `review` is `None` when the packet HAS a design route but none of
+/// it is open — decided already, or triaged somewhere else. The edge
+/// is still written; nothing is completed; `records_only` carries the
+/// sentence the verb prints saying so (design c0d2787a q2).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DesignRoute {
-    pub review: Value,
+    pub review: Option<Value>,
     pub draft: Option<Value>,
+    /// Why this route completes nothing, when it completes nothing.
+    pub records_only: Option<String>,
 }
 
 fn step_by_slug<'a>(packet: &'a Value, slug: &str) -> Option<&'a Value> {
@@ -249,7 +256,24 @@ fn is_open(step: &Value) -> bool {
 }
 
 /// Can a design be filed against this packet, and what does the verb
-/// then write? Pure, so the two shapes it must accept are pinned.
+/// then write? Pure, so the shapes it must accept are pinned.
+///
+/// RECORDING IS NOT COMPLETING (design c0d2787a, answered
+/// 2026-09-21). This used to refuse whenever the target had no OPEN
+/// design route — "a design filed against it would complete nothing
+/// when it closes" — which declined to record a TRUE FACT because a
+/// side effect would not fire. The loss is larger than the no-op it
+/// prevented: the author then writes the relationship into freeform
+/// metadata, where nothing resolves it, nothing ref-checks it and
+/// nothing can query it. Measured the day this changed: four
+/// different ad-hoc spellings in one session, beside one declared
+/// edge that was refused.
+///
+/// So the edge is written whenever the packet is the KIND of thing a
+/// design decides, and the verb says plainly what it will and will
+/// not cause. The refusal that remains is a different claim — that
+/// `answers` does not apply at all — and it now names the relation
+/// that does.
 ///
 /// Two protocol versions are live at once (in-flight packets keep
 /// theirs). Before f90ca046, routing to `design` opened
@@ -268,33 +292,44 @@ pub(crate) fn answerable(packet: &Value) -> std::result::Result<DesignRoute, Str
     let kind = packet.get("kind").and_then(Value::as_str).unwrap_or("?");
     let review = step_by_slug(packet, "design-review").ok_or_else(|| {
         format!(
-            "packet {short} ({kind}) has no design-review step — only a user-feedback or \
-             backlog-item routed to design can be answered by a design"
+            "packet {short} ({kind}) has no design-review step, so `answers` does not apply \
+             to it — only a user-feedback or backlog-item can be DECIDED by a design. If \
+             that packet merely brought this design about, that is the `occasioned_by` \
+             relation: set it in the design's metadata, where it is declared, resolved and \
+             queryable"
         )
     })?;
     if is_open(review) {
         return Ok(DesignRoute {
-            review: review.clone(),
+            review: Some(review.clone()),
             draft: None,
+            records_only: None,
         });
     }
     let draft = step_by_slug(packet, "draft-design");
     if let Some(draft) = draft.filter(|d| is_open(d)) {
         return Ok(DesignRoute {
-            review: review.clone(),
+            review: Some(review.clone()),
             draft: Some(draft.clone()),
+            records_only: None,
         });
     }
     let status = review.get("status").and_then(Value::as_str).unwrap_or("?");
-    Err(format!(
-        "packet {short}'s design-review is {status} and its draft-design is {} — triage it \
-         to `design` first (or it was already decided); a design filed against it would \
-         complete nothing when it closes",
-        draft
-            .and_then(|d| d.get("status"))
-            .and_then(Value::as_str)
-            .unwrap_or("absent")
-    ))
+    let draft_status = draft
+        .and_then(|d| d.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("absent");
+    Ok(DesignRoute {
+        review: None,
+        draft: None,
+        records_only: Some(format!(
+            "packet {short}'s design-review is {status} and its draft-design is \
+             {draft_status}, so nothing on it is waiting for this design: the edge is \
+             recorded and NO step will be completed when the design is decided. If you \
+             meant to put the decision in front of someone, triage {short} to `design` \
+             first"
+        )),
+    })
 }
 
 /// The draft-design completion: `design_id` laid over the step's own
@@ -416,58 +451,68 @@ pub async fn run(
     // assigned that step reads. Merged over the step's own metadata —
     // PATCH-on-PUT replaces it wholesale.
     if let Some((feedback, route)) = &answered {
-        let review = &route.review;
-        let sid = review
-            .get("id")
-            .and_then(Value::as_str)
-            .context("the answered packet's design-review step has no id")?;
-        let existing = review.get("metadata").cloned().unwrap_or_else(|| json!({}));
-        api(
-            &http,
-            reqwest::Method::PUT,
-            &format!("/api/jobs/{feedback}/steps/{sid}"),
-            Some(json!({ "metadata": design_review_step_metadata(&existing, &title, &id) })),
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "writing the question onto {}'s design-review (the design {short} is filed \
-                 and carries the edge; only the question is missing)",
+        // RECORDED, BUT COMPLETING NOTHING. The edge went onto the
+        // design at filing, which is the fact; there is no open step
+        // to put a question on, so say what that means and stop —
+        // loud and recorded beats silent and absent (c0d2787a q2).
+        if let Some(why) = &route.records_only {
+            println!(
+                "boss design: {short} records `answers` {} — {why}",
                 &feedback[..8]
-            )
-        })?;
-        // The draft step is done BY THIS VERB, carrying the id it just
-        // got back (f90ca046): the record is copied from the filing,
-        // never retyped, and completing it is what opens the review —
-        // which by now already asks its question, so it is never ready
-        // and empty.
-        if let Some(draft) = &route.draft {
-            let did = draft
+            );
+        } else if let Some(review) = &route.review {
+            let sid = review
                 .get("id")
                 .and_then(Value::as_str)
-                .context("the answered packet's draft-design step has no id")?;
-            let existing = draft.get("metadata").cloned().unwrap_or_else(|| json!({}));
+                .context("the answered packet's design-review step has no id")?;
+            let existing = review.get("metadata").cloned().unwrap_or_else(|| json!({}));
             api(
                 &http,
                 reqwest::Method::PUT,
-                &format!("/api/jobs/{feedback}/steps/{did}"),
-                Some(draft_done_body(&existing, &id)),
+                &format!("/api/jobs/{feedback}/steps/{sid}"),
+                Some(json!({ "metadata": design_review_step_metadata(&existing, &title, &id) })),
             )
             .await
             .with_context(|| {
                 format!(
-                    "completing {}'s draft-design with design_id {short} (the design is \
-                     filed, the edge and the question are written; only the draft's record \
-                     is missing)",
+                    "writing the question onto {}'s design-review (the design {short} is filed \
+                 and carries the edge; only the question is missing)",
                     &feedback[..8]
                 )
             })?;
-        }
-        println!(
-            "boss design: {short} answers {} — its design-review now asks for this design, \
+            // The draft step is done BY THIS VERB, carrying the id it just
+            // got back (f90ca046): the record is copied from the filing,
+            // never retyped, and completing it is what opens the review —
+            // which by now already asks its question, so it is never ready
+            // and empty.
+            if let Some(draft) = &route.draft {
+                let did = draft
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .context("the answered packet's draft-design step has no id")?;
+                let existing = draft.get("metadata").cloned().unwrap_or_else(|| json!({}));
+                api(
+                    &http,
+                    reqwest::Method::PUT,
+                    &format!("/api/jobs/{feedback}/steps/{did}"),
+                    Some(draft_done_body(&existing, &id)),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "completing {}'s draft-design with design_id {short} (the design is \
+                     filed, the edge and the question are written; only the draft's record \
+                     is missing)",
+                        &feedback[..8]
+                    )
+                })?;
+            }
+            println!(
+                "boss design: {short} answers {} — its design-review now asks for this design, \
              and deciding the design completes it",
-            &feedback[..8]
-        );
+                &feedback[..8]
+            );
+        }
     }
 
     if no_questions {
@@ -737,7 +782,11 @@ mod tests {
             step("design-review", "ready"),
         ]);
         let route = answerable(&v1).expect("an open review is answerable");
-        assert_eq!(route.review["spec_slug"], json!("design-review"));
+        assert_eq!(
+            route.review.as_ref().expect("a review to write onto")["spec_slug"],
+            json!("design-review")
+        );
+        assert!(route.records_only.is_none(), "this route completes a step");
         assert!(route.draft.is_none(), "no draft to complete");
 
         // The shape since: the draft is open and the review pending.
@@ -747,7 +796,10 @@ mod tests {
             step("design-review", "pending"),
         ]);
         let route = answerable(&v2).expect("an open draft is answerable");
-        assert_eq!(route.review["status"], json!("pending"));
+        assert_eq!(
+            route.review.as_ref().expect("a review to write onto")["status"],
+            json!("pending")
+        );
         assert_eq!(
             route.draft.as_ref().map(|d| d["spec_slug"].clone()),
             Some(json!("draft-design")),
@@ -762,22 +814,42 @@ mod tests {
         ]);
         assert!(answerable(&drafted).expect("open review").draft.is_none());
 
-        // Not routed to design (both pending), or already decided.
+        // Not routed to design (both pending), or already decided:
+        // the fact is RECORDED and the verb says what it will not
+        // cause. Refusing here used to push the author into freeform
+        // metadata, which is worse in every way (c0d2787a q2).
         for (draft, review) in [("pending", "pending"), ("completed", "completed")] {
-            let err = answerable(&packet(vec![
+            let route = answerable(&packet(vec![
                 step("draft-design", draft),
                 step("design-review", review),
             ]))
-            .expect_err("nothing open on the design route");
+            .expect("a packet with a design route is recordable even when nothing is open");
             assert!(
-                err.contains("54f0ab33") && err.contains(review) && err.contains(draft),
-                "the refusal names the packet and both statuses: {err}"
+                route.review.is_none() && route.draft.is_none(),
+                "nothing open means nothing to complete"
+            );
+            let why = route
+                .records_only
+                .expect("a sentence saying what will not happen");
+            assert!(
+                why.contains("54f0ab33") && why.contains(review) && why.contains(draft),
+                "it names the packet and both statuses: {why}"
+            );
+            assert!(
+                why.contains("NO step will be completed"),
+                "it says plainly that nothing completes: {why}"
             );
         }
-        // A kind with no design route at all.
+
+        // A kind a design cannot DECIDE is still a refusal — `answers`
+        // does not apply — and it names the relation that does.
         let err = answerable(&json!({ "id": "abc", "kind": "ship-a-change", "steps": [] }))
             .expect_err("no design-review step");
         assert!(err.contains("ship-a-change"), "{err}");
+        assert!(
+            err.contains("occasioned_by"),
+            "a refusal points at the door that fits: {err}"
+        );
     }
 
     /// `--markdown` takes the doc's TEXT, and the natural misreading of

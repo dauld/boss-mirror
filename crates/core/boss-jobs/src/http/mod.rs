@@ -569,7 +569,29 @@ pub(super) fn self_id(user: &boss_policy_client::User) -> Option<&str> {
 /// and the PUT had none, so a packet the operator closed by hand read
 /// as "no cycle time" beside its stamped neighbours (backlog
 /// a7a07ffb). A fact that lives three times gets one definition.
+///
+/// BOTH TIMING FACTS, since 2026-09-21, because collapsing `closed_at`
+/// left the column beside it un-collapsed at the very same three
+/// sites: the step-driven hooks set `closed_on` from the clock, and
+/// the status PUT took it FROM THE WIRE. A caller round-tripping a Job
+/// body — GET it, flip `status`, PUT it back — sends back the
+/// `closed_on: null` the GET handed them, and the server stored it.
+/// Measured: backlog-item ef74fc12 sat `closed` with no closing date
+/// from 2026-09-20T17:50:50Z, and the nightly conservation sweep
+/// failed on property C ("Closed jobs have closed_on") every run
+/// until it was corrected. One row in 157 closes that window, because
+/// it takes a full-body PUT — and permanent, because nothing
+/// re-derives the date afterwards.
+///
+/// The date is a BACKSTOP here, not an override: the step-driven sites
+/// anchor `closed_on` to the closing step's `completed_on` on purpose,
+/// so that a Job closed on the sim calendar dates by that calendar
+/// rather than by wall-clock. This fills the gap only when nobody
+/// upstream had a better answer, which is exactly the PUT's case.
 pub(super) fn stamp_close_instant(job: &mut Job, now: &chrono::DateTime<chrono::Utc>) {
+    if job.closed_on.is_none() {
+        job.closed_on = Some(now.date_naive());
+    }
     if let serde_json::Value::Object(map) = &mut job.metadata {
         map.entry("closed_at")
             .or_insert_with(|| serde_json::json!(now.to_rfc3339()));

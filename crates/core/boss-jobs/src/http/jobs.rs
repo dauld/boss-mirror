@@ -1477,9 +1477,10 @@ pub(super) async fn update_job<R: JobsRepository + 'static, B: EventBus + 'stati
     }
 
     // The third close site (the two step-driven hooks are in steps.rs):
-    // the same `closed_at` stamp beside the caller's `closed_on`, so a
-    // Job the operator closes by hand measures a cycle time like every
-    // other. The caller's own `closed_at`, if it sent one, wins.
+    // the same timing stamps, so a Job the operator closes by hand
+    // measures a cycle time like every other AND carries the date it
+    // closed. The caller's own `closed_at` / `closed_on`, if it sent
+    // them, win; what this guarantees is that neither is absent.
     if action == Action::Close {
         let now = boss_clock_client::now_from(&state.clock).await;
         stamp_close_instant(&mut job, &now);

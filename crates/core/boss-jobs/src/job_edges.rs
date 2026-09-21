@@ -53,6 +53,30 @@ impl JobEdgesRegistry for InMemoryJobEdges {
                 "job_id",
                 "The Job whose closure this Job waits on",
             ),
+            // The three RELATION edges (design c0d2787a): plain facts
+            // about how two packets stand to each other, carrying no
+            // behaviour. Declared '*' because a relationship is not a
+            // property of a kind. There is deliberately no
+            // "prerequisite" relation — `waiting_on` above already is
+            // one, and it is the one the dispatcher clears on close.
+            mk(
+                "*",
+                "duplicate_of",
+                "job_id",
+                "The packet this one restates; the duplicate is the one that closes",
+            ),
+            mk(
+                "*",
+                "occasioned_by",
+                "job_id",
+                "The packet whose work brought this one into being — provenance only; it gates nothing",
+            ),
+            mk(
+                "*",
+                "supersedes",
+                "job_id",
+                "The packet this one replaces, whose conclusion no longer holds",
+            ),
             mk(
                 "pr-train",
                 "boarded_jobs",
@@ -323,15 +347,39 @@ mod tests {
     }
 
     /// The wire shape the Links panel reads — a rename is breaking.
+    ///
+    /// Looked up BY CONTENT, not by index. This test asserted
+    /// `v[0]`, `v[1]`, `v[2]` until 2026-09-21, when declaring three
+    /// new '*' relations shifted every position and broke it without
+    /// any of the field names it exists to guard having changed. List
+    /// order was never the contract here — the serialised key names
+    /// are.
     #[tokio::test]
     async fn in_memory_serialises_with_the_field_names_the_panel_reads() {
         let edges = InMemoryJobEdges.list().await.expect("list");
         let v = serde_json::to_value(&edges).expect("serialises");
-        assert_eq!(v[0]["source_kind"], "*");
-        assert_eq!(v[0]["field_path"], "waiting_on");
-        assert_eq!(v[1]["source_kind"], "pr-train");
-        assert_eq!(v[1]["field_kind"], "job_id_list");
-        assert_eq!(v[2]["field_path"], crate::car::BACKLOG_ITEM);
-        assert_eq!(v[2]["on_missing"], "abort");
+        let rows = v.as_array().expect("an array of edges");
+        let find = |source_kind: &str, field_path: &str| {
+            rows.iter()
+                .find(|r| r["source_kind"] == source_kind && r["field_path"] == field_path)
+                .unwrap_or_else(|| {
+                    panic!("no declared edge {source_kind}.{field_path} in {rows:?}")
+                })
+        };
+
+        // Every key the panel reads, on rows chosen to cover all four:
+        // the '*' wildcard, the list-valued edge, and the dial.
+        let waiting = find("*", "waiting_on");
+        assert_eq!(waiting["field_kind"], "job_id");
+        assert_eq!(
+            find("pr-train", "boarded_jobs")["field_kind"],
+            "job_id_list"
+        );
+        let backlog = find("ship-a-change", crate::car::BACKLOG_ITEM);
+        assert_eq!(backlog["on_missing"], "abort");
+        assert!(
+            backlog["description"].is_string(),
+            "the panel renders the description: {backlog:?}"
+        );
     }
 }

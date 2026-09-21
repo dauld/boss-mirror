@@ -99,6 +99,18 @@ async fn registry_seeds_exactly_the_declared_edges() {
         rows,
         vec![
             // '*' applies to every kind (migration 110, waiting_on).
+            //
+            // The three RELATION edges (design c0d2787a) carry no
+            // behaviour: they record that two packets are related, so
+            // the fact is resolvable and queryable instead of living
+            // in whatever metadata key the author reached for. They
+            // are '*' because a relationship is not a property of a
+            // kind. `waiting_on` stays the BLOCKING one — a wait the
+            // dispatcher clears on close — and is deliberately not
+            // duplicated by a "prerequisite" relation.
+            ("*".into(), "duplicate_of".into(), "job_id".into()),
+            ("*".into(), "occasioned_by".into(), "job_id".into()),
+            ("*".into(), "supersedes".into(), "job_id".into()),
             ("*".into(), "waiting_on".into(), "job_id".into()),
             // The feedback (or backlog item) a design decides
             // (5f0b2661) — followed on publish by

@@ -399,3 +399,70 @@ async fn the_direct_status_put_close_carries_the_same_keys() {
     assert_close_marker_shape(marker, "direct-status-put");
     assert_eq!(marker["kind"], "closes-by-catch-all");
 }
+
+/// A Job that closes must carry the DATE it closed, whoever closed it.
+///
+/// `closed_on` is the same fact as the `closed_at` instant one
+/// resolution coarser, and until this test the two were stamped
+/// differently: the step-driven sites set the column from the clock,
+/// the status PUT took it FROM THE WIRE. A caller round-tripping a Job
+/// body — GET it, flip `status` to `closed`, PUT it back — sends the
+/// `closed_on: null` the GET handed them, and the server stored it.
+///
+/// Measured in production 2026-09-21: backlog-item ef74fc12 sat
+/// `closed` with a null `closed_on` from 2026-09-20T17:50:50Z, and the
+/// nightly conservation sweep had been failing on it ever since
+/// ("[VIOLATION] C. Closed jobs have closed_on"). One row in 157 close
+/// events in that window — rare, because it needs a full-body PUT, and
+/// permanent, because nothing re-derives the date afterwards.
+///
+/// This is the a7a07ffb defect one field over: that one collapsed the
+/// `closed_at` metadata stamp into `stamp_close_instant` because it
+/// lived three times and the PUT had none. The column beside it was
+/// left un-collapsed at the same three sites.
+#[tokio::test]
+async fn the_direct_status_put_stamps_a_closing_date_the_caller_did_not_send() {
+    let (app, jobs) = app();
+    let job_id = open_job(&app, "closes-by-catch-all", serde_json::json!({})).await;
+
+    // Exactly what a round-tripping client sends: the body the GET
+    // gave back, with `status` flipped. `closed_on` is still the null
+    // the open Job carried.
+    let mut job = get_job(&app, &job_id).await;
+    assert!(
+        job["closed_on"].is_null(),
+        "precondition: an open Job has no closing date"
+    );
+    job["status"] = serde_json::Value::String("closed".into());
+
+    let (status, body) = send(
+        &app,
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/api/jobs/{job_id}"))
+            .header("content-type", "application/json")
+            .header("x-boss-user", admin_header())
+            .body(Body::from(job.to_string()))
+            .unwrap(),
+    )
+    .await;
+    assert!(status.is_success(), "close PUT failed: {status} {body}");
+
+    let stored = get_job(&app, &job_id).await;
+    assert_eq!(stored["status"], "closed");
+    assert!(
+        !stored["closed_on"].is_null(),
+        "a closed Job must carry its closing date; the conservation \
+         sweep's property C reads this column: {stored}"
+    );
+
+    // The event has to agree with the row, or a rebuild reproduces the
+    // violation from the log.
+    let markers = close_markers(&jobs);
+    let marker = markers.last().expect("a close marker was recorded");
+    assert!(
+        !marker["closed_on"].is_null(),
+        "the close marker must carry the date the row carries: {marker}"
+    );
+    assert_eq!(marker["closed_on"], stored["closed_on"]);
+}
