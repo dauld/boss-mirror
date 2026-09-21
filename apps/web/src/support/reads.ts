@@ -64,3 +64,34 @@ export function accountHealthView(
 export function deviceCellMeaning(devices: ReadState): 'no-device' | 'unknown' {
   return devices.kind === 'failed' ? 'unknown' : 'no-device';
 }
+
+/// The Account Health tab's rows, ordered — every account, not only the
+/// ones in trouble.
+///
+/// WHY THE FILTER WENT (packet 4c708662). The tab filtered to
+/// `openCount > 0`, and openCount counts open field-service jobs, which
+/// are structurally zero because no such workflow is published. So the
+/// tab rendered "No account data." while account data existed — the
+/// surface's words drifted from the fact they describe, which is the
+/// Orwell clause in the guidelines read literally.
+///
+/// The packet offers two readings — the words are wrong, or the filter
+/// is — and the table settles it: its columns are account, tier,
+/// openCount, deviceCount and lastDate. Three of the five say something
+/// about an account with no open case, and a tab called Account Health
+/// that hides every healthy account hides the roster. Removing the
+/// filter also makes the empty state true again, rather than needing
+/// its own reworded sentence.
+///
+/// ORDERED, not merely unfiltered: accounts with open cases sort first,
+/// so the worklist reading the filter used to give is kept rather than
+/// traded away. Ties break by name so two reads of the same data look
+/// the same.
+export function orderedHealthRows<
+  T extends { openCount: number; account: { name: string } },
+>(rows: ReadonlyArray<T>): T[] {
+  return [...rows].sort(
+    (a, b) =>
+      b.openCount - a.openCount || a.account.name.localeCompare(b.account.name),
+  );
+}

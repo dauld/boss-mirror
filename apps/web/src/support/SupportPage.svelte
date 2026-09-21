@@ -21,6 +21,7 @@
     deviceCellMeaning,
     failedRead,
     okRead,
+    orderedHealthRows,
     type ReadState,
   } from './reads';
 
@@ -195,7 +196,7 @@
       if (isOpen(j)) e.openCount++;
       if (!e.lastDate || j.opened_on > e.lastDate) e.lastDate = j.opened_on;
     }
-    return [...map.values()].filter((e) => e.openCount > 0);
+    return orderedHealthRows([...map.values()]);
   });
 
   /// The tab's view, decided in reads.ts so "a failed read looks

@@ -4,6 +4,7 @@ import {
   deviceCellMeaning,
   failedRead,
   okRead,
+  orderedHealthRows,
 } from './reads';
 
 // Packets 325f34cd and 8c9e1190, both from the /ux/support page audit
@@ -75,5 +76,57 @@ describe('the read states carry their reason', () => {
     const r = failedRead('/api/assets: HTTP 500');
     expect(r.kind).toBe('failed');
     expect(r.kind === 'failed' && r.error).toBe('/api/assets: HTTP 500');
+  });
+});
+
+// Packet 4c708662, gap 7 of the same page audit. accountHealthRows
+// filtered to `openCount > 0`, and openCount counts open field-service
+// jobs — which are structurally zero, because no such workflow is
+// published. So the Account Health tab rendered "No account data."
+// forever WHILE ACCOUNT DATA EXISTED.
+//
+// The packet offers two readings: the words are wrong, or the filter
+// is. The filter is. The table's own columns are account, tier,
+// openCount, deviceCount and lastDate — three of the five are
+// meaningful for an account with no open case, and a tab called
+// Account Health that hides every healthy account hides the roster.
+// Removing it also makes the empty state's words true again: "no
+// account data" is then exactly what it says.
+describe('Account Health shows accounts, not only accounts in trouble', () => {
+  const row = (name: string, openCount: number) => ({
+    account: { name },
+    openCount,
+  });
+
+  test('an account with no open case is still shown', () => {
+    const rows = orderedHealthRows([row('Anonymous Sponsor', 0)]);
+    expect(rows).toHaveLength(1);
+    expect(rows.map((r) => r.account.name)).toEqual(['Anonymous Sponsor']);
+  });
+
+  test('accounts needing attention sort to the top', () => {
+    // Removing the filter must not cost the worklist reading it had:
+    // whatever WAS visible before stays visible and stays first.
+    const rows = orderedHealthRows([
+      row('Quiet', 0),
+      row('Busy', 3),
+      row('Some', 1),
+    ]);
+    expect(rows.map((r) => r.account.name)).toEqual(['Busy', 'Some', 'Quiet']);
+  });
+
+  test('ties break by name, so the order is stable to read', () => {
+    const rows = orderedHealthRows([row('Beta', 0), row('Alpha', 0)]);
+    expect(rows.map((r) => r.account.name)).toEqual(['Alpha', 'Beta']);
+  });
+
+  test('no accounts is still genuinely empty', () => {
+    expect(orderedHealthRows([])).toHaveLength(0);
+  });
+
+  test('the input is not mutated', () => {
+    const input = [row('Quiet', 0), row('Busy', 3)];
+    orderedHealthRows(input);
+    expect(input.map((r) => r.account.name)).toEqual(['Quiet', 'Busy']);
   });
 });

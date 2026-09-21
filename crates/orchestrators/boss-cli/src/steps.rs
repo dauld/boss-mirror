@@ -94,6 +94,14 @@ pub enum Cmd {
         /// and the record. Exclusive with --change.
         #[arg(long, conflicts_with = "change")]
         change_file: Option<std::path::PathBuf>,
+        /// WHERE the settled material landed — the file and section, or
+        /// the car that carried it. Write `none` when the fold changed
+        /// nothing. Required only when the row declares `folded_into`
+        /// (design-doc from the version that added it; an in-flight
+        /// packet pinned to an earlier one does not take it).
+        /// SINGLE-quote it, like --change.
+        #[arg(long)]
+        folded_into: Option<String>,
     },
     /// Hold a parked car at the dock: it stays gated green and does not board.
     ///
@@ -179,6 +187,7 @@ pub async fn dispatch(cmd: Cmd) -> Result<()> {
             design,
             change,
             change_file,
+            folded_into,
         } => {
             let change = crate::prose::text_or_file(
                 "--change",
@@ -186,7 +195,7 @@ pub async fn dispatch(cmd: Cmd) -> Result<()> {
                 change,
                 change_file.as_deref(),
             )?;
-            fold(&wire, &design, &change).await
+            fold(&wire, &design, &change, folded_into.as_deref()).await
         }
         Cmd::Hold { car, reason } => hold(&wire, &car, Some(&reason)).await,
         Cmd::Release { car } => hold(&wire, &car, None).await,
@@ -488,8 +497,20 @@ pub(crate) fn foldable(packet: &Value) -> Result<&Value, String> {
     }
 }
 
-/// What `boss fold` writes: `fold_change`, if the row declares it.
-pub(crate) fn fold_writes(step: &Value, change: &str) -> Result<Map<String, Value>, String> {
+/// What `boss fold` writes: `fold_change`, and `folded_into` when the
+/// row declares it.
+///
+/// THE ROW DECIDES, NOT THE FLAG (backlog aaf85ca2). `folded_into`
+/// arrives in a later design-doc version, and an in-flight packet stays
+/// pinned to the version it was admitted under — so this one verb must
+/// complete a fold on a row that declares the field and on one that
+/// does not. Writing a field the row never declared would be refused at
+/// completion; refusing to fold an older packet would strand it.
+pub(crate) fn fold_writes(
+    step: &Value,
+    change: &str,
+    folded_into: Option<&str>,
+) -> Result<Map<String, Value>, String> {
     let fields = declared_fields(step);
     if !fields.iter().any(|f| f.name == "fold_change") {
         return Err(format!(
@@ -511,6 +532,20 @@ pub(crate) fn fold_writes(step: &Value, change: &str) -> Result<Map<String, Valu
     }
     let mut writes = Map::new();
     writes.insert("fold_change".into(), json!(change.trim()));
+    if fields.iter().any(|f| f.name == "folded_into") {
+        let landed = folded_into.unwrap_or("").trim();
+        if landed.is_empty() {
+            return Err(
+                "--folded-into is blank, and this fold step declares the field — write \
+                 where the settled material landed (the file and section, or the car \
+                 that carried it), or `none` when the fold changed nothing. It is the \
+                 only place that tie is recorded: the terminal has no field for it, and \
+                 filing time cannot know it"
+                    .to_string(),
+            );
+        }
+        writes.insert("folded_into".into(), json!(landed));
+    }
     Ok(writes)
 }
 
@@ -755,10 +790,16 @@ pub(crate) async fn triage(
     Ok(())
 }
 
-pub(crate) async fn fold(wire: &Wire, design: &str, change: &str) -> Result<()> {
+pub(crate) async fn fold(
+    wire: &Wire,
+    design: &str,
+    change: &str,
+    folded_into: Option<&str>,
+) -> Result<()> {
     let packet = wire.resolve(design, Some("design-doc")).await?;
     let step = foldable(&packet).map_err(|e| anyhow!("{e}"))?;
-    let writes = fold_writes(step, change).map_err(|e| anyhow!("{}: {e}", short(&packet)))?;
+    let writes =
+        fold_writes(step, change, folded_into).map_err(|e| anyhow!("{}: {e}", short(&packet)))?;
     let jid = crate::envelope::job_id(&packet).context("the packet has no id")?;
     let sid = step_id(step)?;
     wire.put_step(jid, sid, completion(step, &writes)).await?;
@@ -1434,7 +1475,12 @@ mod tests {
     fn a_fold_at_its_ready_step_writes_fold_change_over_the_procedure() {
         let d = design("completed", "ready", &["order", "delete-bare-metal"]);
         let step = foldable(&d).expect("fold is ready");
-        let writes = fold_writes(step, " docs/architecture-decisions.md gains a section ").unwrap();
+        let writes = fold_writes(
+            step,
+            " docs/architecture-decisions.md gains a section ",
+            None,
+        )
+        .unwrap();
         assert_eq!(
             writes["fold_change"],
             json!("docs/architecture-decisions.md gains a section")
@@ -1453,11 +1499,67 @@ mod tests {
     fn a_blank_fold_change_and_a_row_without_the_field_are_refused() {
         let d = design("completed", "ready", &[]);
         let step = foldable(&d).unwrap();
-        let err = fold_writes(step, " ").expect_err("blank");
+        let err = fold_writes(step, " ", None).expect_err("blank");
         assert!(err.contains("--change is blank"), "{err}");
         let bare = json!({ "spec_slug": "fold", "status": "ready", "fields": [], "metadata": {} });
-        let err = fold_writes(&bare, "x").expect_err("no fold_change");
+        let err = fold_writes(&bare, "x", None).expect_err("no fold_change");
         assert!(err.contains("no `fold_change` field"), "{err}");
+    }
+
+    /// `folded_into` arrives in a LATER design-doc version (backlog
+    /// aaf85ca2), and in-flight packets stay pinned to the version they
+    /// were admitted under — so this one verb has to complete a fold on
+    /// a row that declares the field and on one that does not. The row
+    /// decides, not the flag.
+    #[test]
+    fn the_fold_writes_where_it_landed_only_when_the_row_declares_it() {
+        let with = json!({
+            "spec_slug": "fold", "status": "ready", "metadata": {},
+            "fields": [field("fold_change", "string", true),
+                       field("folded_into", "string", true)],
+        });
+        let writes = fold_writes(
+            &with,
+            "a section on the VSM mapping",
+            Some("  docs/architecture-decisions.md  "),
+        )
+        .expect("a row that declares it takes it");
+        assert_eq!(
+            writes["folded_into"],
+            json!("docs/architecture-decisions.md")
+        );
+
+        // A row from the older version: the flag is simply not written,
+        // rather than the verb refusing a packet it can still complete.
+        let without = json!({
+            "spec_slug": "fold", "status": "ready", "metadata": {},
+            "fields": [field("fold_change", "string", true)],
+        });
+        let writes = fold_writes(
+            &without,
+            "same change",
+            Some("docs/architecture-decisions.md"),
+        )
+        .expect("an older row still folds");
+        assert!(
+            !writes.contains_key("folded_into"),
+            "a field the row does not declare must not be written: {writes:?}"
+        );
+    }
+
+    /// "Nothing" is a legitimate fold, so the field takes `none` — but
+    /// it does not take SILENCE, for the same reason --change does not.
+    #[test]
+    fn a_declared_folded_into_refuses_to_be_left_blank() {
+        let with = json!({
+            "spec_slug": "fold", "status": "ready", "metadata": {},
+            "fields": [field("fold_change", "string", true),
+                       field("folded_into", "string", true)],
+        });
+        let err = fold_writes(&with, "a real change", None).expect_err("absent");
+        assert!(err.contains("--folded-into"), "{err}");
+        let err = fold_writes(&with, "a real change", Some("   ")).expect_err("blank");
+        assert!(err.contains("--folded-into"), "{err}");
     }
 
     // ------------------------------------------------------------------
@@ -1835,6 +1937,7 @@ mod tests {
             &wire,
             "0d2e1655",
             "architecture-decisions.md gains a section",
+            None,
         )
         .await
         .expect("folds");
@@ -1854,7 +1957,9 @@ mod tests {
     async fn fold_refuses_an_undecided_review_before_any_write() {
         let s = stub(vec![design("ready", "pending", &[])]).await;
         let wire = Wire::at(s.base.clone(), named());
-        let err = fold(&wire, "0d2e1655", "x").await.expect_err("review open");
+        let err = fold(&wire, "0d2e1655", "x", None)
+            .await
+            .expect_err("review open");
         assert!(
             err.to_string().contains("order, delete-bare-metal"),
             "{err}"
@@ -1863,7 +1968,7 @@ mod tests {
         // Not a design-doc at all: the kind filter finds nothing.
         let s = stub(vec![packet("backlog-item", vec![step("triage", "ready")])]).await;
         let wire = Wire::at(s.base.clone(), named());
-        let err = fold(&wire, "0d2e1655", "x")
+        let err = fold(&wire, "0d2e1655", "x", None)
             .await
             .expect_err("not a design");
         assert!(err.to_string().contains("no job matches"), "{err}");

@@ -9,11 +9,29 @@
 # (`GET /api/departments`, the jobs API's read over the `departments`
 # table) and opens one `department-retro` per department, so this is
 # one file and not one per department: the registry is the one
-# definition of which departments exist, and a department declared on
-# Tuesday has its first retro on Monday with no edit here. Which
-# registry answers that read changed on 2026-09-19 (backlog 80a77466)
-# BEFORE this rule first fired: it was the employee Class drawer, nine
-# codes overlapping the real thirteen by five. `jobs.spawn` could not do this — it opens exactly one
+# definition of which departments exist, and a department that appears
+# in it has its first retro on the next Monday with no edit here.
+#
+# WHAT "APPEARS IN IT" COSTS TODAY, stated because this paragraph used
+# to promise more than it could deliver (backlog 61903fb1). The
+# sentence above once read "a department declared on Tuesday", which
+# was true against the employee Class drawer — a registry that takes
+# live authoring. On 2026-09-19 the read moved onto a typed
+# `departments` table (backlog 80a77466), BEFORE this rule first
+# fired, and that table has no write door: adding a department is a
+# migration, a car, a train and a converge. So the rule's stated
+# reason for its own shape briefly asserted a capability nothing
+# supported — the a2358e7c class arriving by movement rather than by
+# neglect, since nobody decided to take live authoring away.
+#
+# The shape is still right, and the promise comes back: design
+# 32f18167 (David, 2026-09-20) decided a department is a SUBJECT kind
+# — identity, a head, a charter, protocols, a retro cadence, things
+# that happen TO it — with its function taxonomy as Class data on that
+# kind. A Subject is created live, so once that lands the original
+# sentence is true again and this note is the record of the window in
+# between. Note the decision is neither route backlog 61903fb1 named
+# (a POST door, or arrival with the tenant bundle); it is a third. `jobs.spawn` could not do this — it opens exactly one
 # packet from literal args, and a rule's `when` cannot iterate.
 #
 # NO `when` GUARD, DELIBERATELY. `NOT open_job_exists(...)` retires a

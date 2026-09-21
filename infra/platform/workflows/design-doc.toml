@@ -28,10 +28,23 @@
 # in git; git's value is review and history over things that have
 # stopped moving.
 #
-# `publish` is deliberately a plain terminal that records the path
-# rather than a step that writes the file. Writing it is a car's job —
-# David's answer to design-docs-as-data Q4, twice: "the docs car that
-# carries the flush through a train".
+# `publish` is deliberately a plain terminal rather than a step that
+# writes the file. Writing it is a car's job — David's answer to
+# design-docs-as-data Q4, twice: "the docs car that carries the flush
+# through a train".
+#
+# WHERE IT LANDED IS RECORDED ON `fold`, NOT ON THE TERMINAL (backlog
+# aaf85ca2). This header used to say the terminal "records the path",
+# and the row has never had a field for one — so design a5368918 was
+# folded into docs/architecture-decisions.md with nothing tying it to
+# that file but a car's commit message. The terminal cannot grow the
+# field either: it has no authority_role and its ready_when is
+# `steps.fold.done`, so it completes on its own, and a required field
+# there would stall every design while an optional one would be filled
+# by nobody. `fold` is a task, done by the actor who does the folding,
+# and that is the one moment the destination is both known and being
+# decided — filing time cannot know it, because a design doc is
+# residue written at the END of a discussion.
 [[workflow]]
 kind = "design-doc"
 label = "Design doc"
@@ -123,10 +136,22 @@ metadata_defaults = { procedure = """State what CURRENT TRUTH gains from this do
 
 The fold is the current-truth reading, assembled per topic, with the decision history beside it rather than inlined (Q2). Today that is docs/architecture-decisions.md, maintained by hand because merging prose has nuance a generator cannot judge. This step does not automate that judgement; it makes skipping it visible.
 
-Do NOT flush decisions into a per-doc markdown file. Q4 settled that the decisions live on the packet and the fold reads them from there; writing them back into files is work in the direction we are abandoning.""" }
+Do NOT flush decisions into a per-doc markdown file. Q4 settled that the decisions live on the packet and the fold reads them from there; writing them back into files is work in the direction we are abandoning.
+
+`folded_into` is WHERE it landed — the file and section, or the car that carried it. Write `none` when the fold changed nothing; that is a legitimate answer and the reason belongs in fold_change beside it. This is the only place the tie is recorded: the terminal has no field for it, and filing time cannot know it.""" }
 
 [[workflow.step.fields]]
 name = "fold_change"
+field_type = "string"
+required = true
+
+# WHERE it landed, beside WHAT changed. Required for the same reason
+# fold_change is: "nothing" is a legitimate answer to a fold and still
+# has to be written down, so the field takes `none` rather than being
+# optional and quietly empty — an optional field is a comment asking
+# the next person, which §9a says is not a mechanism.
+[[workflow.step.fields]]
+name = "folded_into"
 field_type = "string"
 required = true
 
