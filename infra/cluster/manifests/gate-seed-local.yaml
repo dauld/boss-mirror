@@ -11,8 +11,22 @@
 # (`cp --reflink=auto`, FICLONE) shares extents and writes only metadata
 # — but only within ONE filesystem, and a Longhorn volume carries its
 # own ext4. Talos puts every emptyDir on the EPHEMERAL partition's xfs
-# (nvme0n1p4 on w-1, reflink-capable); a `local` PersistentVolume on a
-# directory of that same partition puts the seed there too.
+# (on w-1 the fourth partition of the install disk, reflink-capable); a
+# `local` PersistentVolume on a directory of that same partition puts
+# the seed there too.
+#
+# THE PARTITION IS NAMED BY ROLE, NOT BY KERNEL NUMBER, and that is
+# deliberate: kernel device numbers are not stable across adding a
+# disk. Measured on the forge 2026-09-21, which took a second NVMe
+# beside its first — the NEW drive enumerated as nvme0n1 and the
+# RUNNING ROOT FILESYSTEM moved from nvme0n1p2 to nvme1n1p2. The host
+# booted only because fstab resolves by UUID; a reader who had written
+# down "root is nvme0n1p2" would have been holding a loaded gun. This
+# line used to say `nvme0n1p4 on w-1`, and w-1 is the next node due a
+# second disk, so it was one screwdriver away from being false in the
+# same way. Nothing here resolves a device by number at runtime — the
+# PV below is a PATH (/var/local/gate-seed) bound by nodeAffinity — so
+# this is a correction to the record, not to behaviour.
 #
 # WHAT THIS DECLARES, cluster-scoped, so it is converged from here and
 # not applied by `boss gate` (whose credential is namespaced) — and the
