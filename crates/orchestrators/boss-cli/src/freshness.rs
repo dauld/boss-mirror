@@ -224,6 +224,107 @@ pub(crate) fn observe(repo: &Path, branch: &str) -> BaseObservation {
     }
 }
 
+/// The one escape every door in `infra/dev/` answers to, spelled once
+/// on this side of the language boundary (`infra/dev/door-freshness.sh`
+/// holds the shell's copy, pinned by its own test).
+pub(crate) const FRESHNESS_ENV: &str = "BOSS_DOOR_FRESHNESS";
+
+/// Has the operator silenced the freshness question for this process?
+pub(crate) fn freshness_silenced() -> bool {
+    std::env::var(FRESHNESS_ENV).is_ok_and(|v| v.trim() == "off")
+}
+
+/// The remote-tracking ref every reading here is taken against, read
+/// in FULL so a local branch named `origin/main` cannot answer for it.
+const MAIN_REF: &str = "refs/remotes/origin/main";
+
+/// Where a CHECKOUT stands against `origin/main` — the question a
+/// recorded probe asks without knowing it.
+///
+/// A probe reads the tree with `git show HEAD:<path>`. On the forge,
+/// where the unattended door runs it, HEAD is the converged checkout —
+/// production. At the hand door it is whatever this checkout last
+/// fast-forwarded to, and on the dev pod the freshness sidecar DEFERS
+/// while any gate-run is open, which under load is most of the time. So
+/// the staleness is the steady state exactly when proofs are recorded:
+/// measured 2026-09-22 (backlog a09bd894) the pod's checkout was NINE
+/// trains behind while five shed cars were run through `--from-car`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct TreeObservation {
+    /// Current (the checkout carries every landed change) / Behind /
+    /// Unanswered.
+    pub(crate) standing: Base,
+    /// The checkout's HEAD — the tree the probe will read.
+    pub(crate) head: String,
+    /// `refs/remotes/origin/main`, as the last fetch left it.
+    pub(crate) main_head: String,
+    /// Commits on `origin/main` this checkout does not have.
+    pub(crate) behind_by: usize,
+    /// Why git could not answer, when `standing` is `Unanswered`.
+    pub(crate) unreadable: Option<String>,
+}
+
+/// Read a checkout's standing, LOCALLY — no fetch, ever.
+///
+/// The same reading `infra/dev/door-freshness.sh` does, for the same
+/// reasons stated there: a door called constantly must not take the
+/// network, and a dark forge must not stop a probe. Worktrees share
+/// remote-tracking refs, so a builder's own `git fetch origin` keeps
+/// this answer current at no cost here.
+///
+/// Polarity is [`observe`]'s: `origin/main` an ancestor of HEAD is
+/// CURRENT. That is deliberately stricter than the door helper's
+/// ancestor-of-main test, which stays quiet on a branch — a branch cut
+/// from an old main reads an old tree too, and that is the thing being
+/// judged. Every failure is [`Base::Unanswered`], never a staleness
+/// finding.
+pub(crate) fn observe_tree(repo: &Path) -> TreeObservation {
+    let unreadable = |why: String| TreeObservation {
+        standing: Base::Unanswered,
+        unreadable: Some(why),
+        ..Default::default()
+    };
+    let head = match git_line(repo, &["rev-parse", "HEAD"]) {
+        Ok(s) => s,
+        Err(e) => return unreadable(e),
+    };
+    let main_head = match git_line(repo, &["rev-parse", MAIN_REF]) {
+        Ok(s) => s,
+        Err(e) => return unreadable(e),
+    };
+    let standing = base_from_is_ancestor_code(
+        git(repo, &["merge-base", "--is-ancestor", &main_head, &head])
+            .ok()
+            .and_then(|o| o.status.code()),
+    );
+    if standing != Base::Behind {
+        return TreeObservation {
+            standing,
+            head,
+            main_head,
+            behind_by: 0,
+            unreadable: match standing {
+                Base::Unanswered => Some("git merge-base --is-ancestor gave no answer".to_string()),
+                _ => None,
+            },
+        };
+    }
+    let behind_by = git_line(
+        repo,
+        &["rev-list", "--count", &format!("{head}..{main_head}")],
+    )
+    .ok()
+    .and_then(|s| s.parse().ok())
+    .unwrap_or(0);
+    TreeObservation {
+        standing,
+        head,
+        main_head,
+        behind_by,
+        unreadable: None,
+    }
+}
+
 /// What `boss gate` does about the branch's base.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BaseGuard {
@@ -670,6 +771,93 @@ pub(crate) fn stale_base_guard(
                     obs.untested.len(),
                 )),
             }
+        }
+    }
+}
+
+/// PURE: what `boss prove --from-car` does about the tree its probe is
+/// about to read. `records` is whether this run would WRITE a proof;
+/// `silenced` is `BOSS_DOOR_FRESHNESS=off`, the one escape the doors
+/// already answer to.
+///
+/// THE SPLIT IS THE DOOR-FRESHNESS SPLIT (CLAUDE.md §Doors): a read
+/// warns, a WRITE is refused, because a read's warning rides beside its
+/// answer while a write lands an immutable fact. A recorded proof is a
+/// write, and a worse one than most — it asserts a claim about
+/// PRODUCTION, from a tree nobody can re-read later, and the dangerous
+/// direction is the passing one: a probe asserting a change has
+/// converged passes against a checkout that predates a later revert.
+/// Measured 2026-09-22 (a09bd894): five cars proved off a six-hour-old
+/// tree, every answer right by luck rather than method, and nothing in
+/// the output said which tree was read.
+///
+/// So the refusal is narrow by construction: it fires only where a
+/// proof would be recorded, which leaves `--dry` as the rehearsal the
+/// flag exists for — the same text, the same environment, the same
+/// verdict, and nothing written. That is why this refuses rather than
+/// warns despite the packet's own worry about blocking rehearsals on
+/// the busy nights: the busy night still has a door.
+///
+/// It states the tree in EVERY case, including the clean one. The
+/// measured defect was two halves and this is the other: a proof taken
+/// against production and a proof taken against an old tree looked
+/// identical in the output.
+pub(crate) fn stale_tree_guard(obs: &TreeObservation, records: bool, silenced: bool) -> BaseGuard {
+    let short = |s: &str| s.chars().take(7).collect::<String>();
+    match obs.standing {
+        Base::Current => BaseGuard::Note(format!(
+            "boss prove: the probe reads THIS checkout at {}, which carries every change \
+             on origin/main {}",
+            short(&obs.head),
+            short(&obs.main_head),
+        )),
+        Base::Unanswered => BaseGuard::Note(format!(
+            "boss prove: which tree this probe reads is UNKNOWN ({}) — running anyway. \
+             A tree that cannot be READ is not a tree that is stale (CLAUDE.md \
+             §Diagnosis); the probe's own output is the evidence either way.",
+            obs.unreadable.as_deref().unwrap_or("no reason recorded"),
+        )),
+        Base::Behind => {
+            let facts = format!(
+                "this checkout is BEHIND origin/main by {} commit(s) — HEAD {}, origin/main {}",
+                obs.behind_by,
+                short(&obs.head),
+                short(&obs.main_head),
+            );
+            if !records || silenced {
+                return BaseGuard::Note(format!(
+                    "boss prove: {facts}. A recorded probe reads the tree with `git show \
+                     HEAD:`, so this one is judging a tree the forge has already left \
+                     behind. Nothing is recorded by this run{}.",
+                    if silenced {
+                        format!(
+                            " ({FRESHNESS_ENV}=off silenced the refusal, so a proof taken \
+                             here vouches for a tree that is not production)"
+                        )
+                    } else {
+                        String::new()
+                    },
+                ));
+            }
+            BaseGuard::Refuse(format!(
+                "boss prove: REFUSED — {facts}.\n  \
+                 A recorded probe reads the tree with `git show HEAD:<path>`. On the \
+                 forge, where this car's probe will be re-run unattended, HEAD is the \
+                 CONVERGED checkout; here it is whatever this one last fast-forwarded \
+                 to, and the dev pod's sidecar defers while any gate-run is open — so \
+                 under load, which is when proofs get recorded, stale is the steady \
+                 state.\n  \
+                 A proof recorded off it is immutable and says nothing about which tree \
+                 answered. The failure mode is the passing one: a probe asserting a \
+                 change HAS converged passes against a checkout that predates a later \
+                 revert.\n  \
+                 Fix it — this is one local call, no fetch:\n    \
+                 git fetch origin && git merge --ff-only origin/main\n  \
+                 To REHEARSE against this tree without recording anything, pass --dry: \
+                 same probe, same environment, same verdict, no write. To record anyway \
+                 — a claim about the old tree, deliberately — run with \
+                 {FRESHNESS_ENV}=off, the escape every other door answers to."
+            ))
         }
     }
 }
@@ -1465,5 +1653,128 @@ mod tests {
         let md = base_metadata(&obs, None);
         assert_eq!(md["base_standing"], json!("unreadable"));
         assert_eq!(md["base_unreadable"], json!("connection refused"));
+    }
+
+    // -----------------------------------------------------------------
+    // The TREE a recorded probe reads (backlog a09bd894)
+    // -----------------------------------------------------------------
+
+    /// `boss prove --from-car` runs the car's probe HERE, and a recorded
+    /// probe reads the tree with `git show HEAD:<path>`. So the standing
+    /// that matters is the CHECKOUT's, not a branch's, and it is read
+    /// with no fetch — the same local-only reading `door-freshness.sh`
+    /// does.
+    #[test]
+    fn the_tree_a_probe_would_read_is_judged_locally_with_no_fetch() {
+        let f = Forge::build("boss-cli-freshness-tree");
+        // The fresh clone stands exactly on origin/main.
+        let current = observe_tree(&f.clone);
+        assert_eq!(current.standing, Base::Current, "{current:?}");
+        assert_eq!(current.head, current.main_head, "{current:?}");
+        assert_eq!(current.behind_by, 0, "{current:?}");
+
+        // Move the checkout back two trains, the way the pod's is when
+        // the freshness sidecar has deferred: `git show HEAD:` now reads
+        // a tree that is NOT the one the forge would read.
+        let base = String::from_utf8_lossy(
+            &Forge::git(&f.clone, &["rev-list", "--max-parents=0", "HEAD"]).stdout,
+        )
+        .trim()
+        .to_string();
+        Forge::git(&f.clone, &["checkout", "-q", &base]);
+        let behind = observe_tree(&f.clone);
+        assert_eq!(behind.standing, Base::Behind, "{behind:?}");
+        assert_eq!(behind.head, base, "{behind:?}");
+        assert_eq!(behind.main_head, current.main_head, "{behind:?}");
+        assert_eq!(behind.behind_by, 2, "two trains behind: {behind:?}");
+        assert_eq!(behind.unreadable, None, "{behind:?}");
+
+        // No fetch: the forge moving is invisible here until someone
+        // fetches, which is the point — a door called constantly must
+        // not take the network, and a dark forge must not stop a probe.
+        let origin = f.origin();
+        boss_testing::scratch::write_file(&origin.join("untouched.rs"), "moved\n");
+        Forge::git(&origin, &["commit", "-qam", "train: main moves again"]);
+        let after = observe_tree(&f.clone);
+        assert_eq!(after.main_head, current.main_head, "no fetch: {after:?}");
+    }
+
+    /// A checkout git cannot answer about is NOT a stale one — the
+    /// `Unanswered` law this module already keeps for a branch's base.
+    #[test]
+    fn a_tree_git_cannot_answer_about_is_unanswered_not_behind() {
+        let dir = boss_testing::scratch::scratch_dir("boss-cli-freshness-tree-nogit");
+        boss_testing::scratch::create_dir(&dir);
+        let obs = observe_tree(&dir);
+        assert_eq!(obs.standing, Base::Unanswered, "{obs:?}");
+        assert!(obs.unreadable.is_some(), "{obs:?}");
+    }
+
+    /// THE DOOR-FRESHNESS SPLIT, applied to the proof (backlog a09bd894):
+    /// a recorded proof is a WRITE — an immutable fact in the audit log
+    /// about a tree nobody can re-read later — so a stale checkout
+    /// REFUSES it; a rehearsal that records nothing gets the same facts
+    /// as a warning beside its answer.
+    #[test]
+    fn a_stale_tree_refuses_a_recorded_proof_and_warns_a_rehearsal() {
+        let behind = TreeObservation {
+            standing: Base::Behind,
+            head: "1c63ca24ffff".into(),
+            main_head: "de960a2affff".into(),
+            behind_by: 9,
+            unreadable: None,
+        };
+        let BaseGuard::Refuse(why) = stale_tree_guard(&behind, true, false) else {
+            panic!("a recorded proof off a stale tree must be refused");
+        };
+        assert!(why.contains("1c63ca2") && why.contains("de960a2"), "{why}");
+        assert!(why.contains('9'), "it names how far behind: {why}");
+        // The remedy and both escapes, because a door with no escape
+        // gets routed around (CLAUDE.md §Doors).
+        assert!(why.contains("merge --ff-only origin/main"), "{why}");
+        assert!(why.contains("--dry"), "{why}");
+        assert!(why.contains("BOSS_DOOR_FRESHNESS=off"), "{why}");
+
+        for (records, silenced) in [(false, false), (true, true)] {
+            let BaseGuard::Note(note) = stale_tree_guard(&behind, records, silenced) else {
+                panic!("records={records} silenced={silenced} must not refuse");
+            };
+            assert!(
+                note.contains("BEHIND"),
+                "the facts still ride along: {note}"
+            );
+            assert!(note.contains("1c63ca2"), "{note}");
+        }
+    }
+
+    /// AND IT SAYS WHICH TREE IT READ EVEN WHEN NOTHING IS WRONG. The
+    /// measured defect was not only the staleness: "nothing in the
+    /// output says which tree was read", so a proof against production
+    /// and a proof against a six-hour-old tree looked identical.
+    #[test]
+    fn a_current_or_unreadable_tree_is_still_stated() {
+        let current = TreeObservation {
+            standing: Base::Current,
+            head: "abcdef01".into(),
+            main_head: "abcdef01".into(),
+            ..Default::default()
+        };
+        let BaseGuard::Note(note) = stale_tree_guard(&current, true, false) else {
+            panic!("a current tree is never refused");
+        };
+        assert!(
+            note.contains("abcdef0"),
+            "it names the tree it read: {note}"
+        );
+
+        let unknown = TreeObservation {
+            standing: Base::Unanswered,
+            unreadable: Some("not a git repository".into()),
+            ..Default::default()
+        };
+        let BaseGuard::Note(note) = stale_tree_guard(&unknown, true, false) else {
+            panic!("a tree that cannot be READ is not a tree that is stale");
+        };
+        assert!(note.contains("not a git repository"), "{note}");
     }
 }

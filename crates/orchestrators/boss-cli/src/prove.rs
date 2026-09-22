@@ -2530,6 +2530,34 @@ pub(crate) async fn run(
         (None, None) => None,
     };
 
+    // WHICH TREE THIS PROBE IS ABOUT TO READ (backlog a09bd894), and a
+    // refusal when it is not the one the forge reads. The first half of
+    // this fix (18fee481) gave `--from-car` the forge's probe
+    // ENVIRONMENT; this is the other half, because the two doors then
+    // agreed about the environment and disagreed about the TREE — a
+    // recorded probe reads it with `git show HEAD:<path>`, and on the
+    // pod HEAD is whatever the checkout last fast-forwarded to, which
+    // under load is trains behind (nine, measured 2026-09-22).
+    //
+    // Only `--from-car`: that flag exists so an operator can rehearse
+    // what the forge will run, so it is the one door that PROMISES the
+    // forge's reading. A hand-written `--probe` is the operator's own
+    // text about their own tree, and refusing it would be this verb
+    // deciding what their probe meant.
+    if from_car {
+        let obs = crate::freshness::observe_tree(tree.as_deref().unwrap_or_else(|| Path::new(".")));
+        match crate::freshness::stale_tree_guard(
+            &obs,
+            // A `--dry` run records nothing, so it is the rehearsal the
+            // refusal leaves open rather than a write to refuse.
+            !dry,
+            crate::freshness::freshness_silenced(),
+        ) {
+            crate::freshness::BaseGuard::Note(n) => println!("{n}"),
+            crate::freshness::BaseGuard::Refuse(why) => bail!("{why}"),
+        }
+    }
+
     println!("boss prove: {short}  $ {probe}");
     let o = execute_with(
         &probe,

@@ -1224,6 +1224,42 @@ pub(crate) fn run_outcome(run: &Value) -> Option<&'static str> {
     }
 }
 
+/// What `--report` tells a run that has reached no terminal — and the
+/// command that ends it (backlog 2e4d7624, 2026-09-22).
+///
+/// The refusal was already correct about the CONDITION and said
+/// nothing about what to do: "once the run has landed, refused or
+/// died" is a state with no verb attached, and the verb was not
+/// discoverable — the builder who hit it on run 93bcd09c found it by
+/// reading `infra/platform/workflows/agent-run.toml`. The cost of not
+/// naming it is silent and shared: an un-terminated run keeps its slot
+/// against the agent's concurrent-run cap, and the only symptom is the
+/// NEXT dispatch refusing with 409, paid by whoever comes next rather
+/// than by the run that refused (open runs reached 7 against a cap of
+/// 6 on the day this was filed).
+///
+/// Refusing to build is a GOOD outcome — builder rule 15 — and it is
+/// the harder ending to record: a green gate writes `gated` by itself
+/// through the landing rule, while a refusal has no gate and no rule
+/// and must be written by a hand. So this hands over the door, the way
+/// the step API's 409 names `PATCH /api/jobs/{id}/metadata` as the way
+/// to annotate instead. It stays a two-step form on purpose: the
+/// terminal is written by `boss step complete`, the same verb that
+/// completes every other step in its row's declared shape, and a
+/// `--report --refused` spelling would be a second way to write it
+/// and a second thing to keep true.
+pub(crate) fn no_terminal_line(short: &str) -> String {
+    format!(
+        "boss dispatch: run {short} has no terminal yet — `{BUILDING_SLUG}` carries no \
+         `result`, so agent_runs would have to assert an outcome the packet does not hold. \
+         The report is on the packet. End the run with the outcome it reached — `boss step \
+         complete {short} --step {BUILDING_SLUG} --field result=refused` for an agent that \
+         stopped without building, or `result=delivered` for work that ships no car; a green \
+         gate writes `gated` by itself and the hourly clock writes `died`. Then run --report \
+         again and the cost is recorded with the outcome it reached"
+    )
+}
+
 /// The car the run produced, off the evidence the landing rule stamped
 /// onto `building` (backlog 65c9c05a). `jobs.complete_linked_step`
 /// writes the closing packet's own `metadata.branch` under the rule's
@@ -1549,12 +1585,7 @@ pub(crate) async fn report_at(
     // because the row is insert-once and the guess would stick
     // (backlog 8f1de7bf).
     let Some(outcome) = run_outcome(&run) else {
-        eprintln!(
-            "boss dispatch: run {short} has no terminal yet — `{BUILDING_SLUG}` carries no \
-             `result`, so agent_runs would have to assert an outcome the packet does not hold. \
-             The report is on the packet; run --report again once the run has landed, refused \
-             or died, and the cost is recorded with the outcome it reached"
-        );
+        eprintln!("{}", no_terminal_line(short));
         return Ok(());
     };
     let login = run
@@ -2359,6 +2390,49 @@ mod tests {
             assert!(
                 run_outcome(&packet).is_some(),
                 "the protocol admits `{value}` and this match does not"
+            );
+        }
+    }
+
+    /// The refusal hands over the door (backlog 2e4d7624). A refusal
+    /// that names the condition and no command leaves the run holding
+    /// its slot against the concurrent-run cap, and the next dispatch
+    /// pays for it with a 409. Every value it names is held to the
+    /// protocol's own enum, so the door cannot name a result the
+    /// Workflow row stopped admitting (CLAUDE.md 9a).
+    #[test]
+    fn the_no_terminal_refusal_names_the_command_that_ends_the_run() {
+        let line = no_terminal_line("5b1d2c3e");
+        assert!(
+            line.contains("boss step complete 5b1d2c3e --step building --field result=refused"),
+            "the refusal must name the command that ends a refused run: {line}"
+        );
+
+        let run =
+            boss_jobs::seed_loader::load_workflows(boss_jobs::registry::platform_bundle_path())
+                .expect("the platform bundle parses")
+                .into_iter()
+                .find(|w| w.kind == RUN_KIND)
+                .expect("agent-run ships in the platform bundle");
+        let field_type = run
+            .steps
+            .iter()
+            .find(|s| s.title == BUILDING_SLUG)
+            .expect("agent-run has a `building` step")
+            .fields
+            .iter()
+            .find(|f| f.name == "result")
+            .expect("building declares `result`")
+            .field_type
+            .clone();
+        for value in ["refused", "delivered", "gated", "died"] {
+            assert!(
+                field_type.split('|').any(|v| v == value),
+                "the refusal names `{value}` and the row declares {field_type}"
+            );
+            assert!(
+                line.contains(value),
+                "the fork has a `{value}` branch the refusal does not name: {line}"
             );
         }
     }

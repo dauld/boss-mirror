@@ -58,6 +58,26 @@ fn question(anchor: &str, title: &str, proposal: &str) -> Value {
     json!({ "anchor": anchor, "title": title, "proposal": proposal })
 }
 
+/// THE PACKET A DESIGN ANSWERS, read off the design — one accessor for
+/// the declared `design-doc.answers` job edge this module writes.
+///
+/// Three callers ask three different questions of the same key and each
+/// must read it the same way: `steps::design_link_check` ("does this
+/// design answer THAT packet"), `gate::item_a_design_answers` ("which
+/// item does a `--park-design` car close"), and the writer above. A
+/// blank value is NOT an answer — the edge guard reads `''` as "no
+/// claim to check" (migration 104), so a design carrying one answers
+/// nothing and must read as absent rather than as an id (CLAUDE.md §9a:
+/// collapse, do not pin).
+pub(crate) fn answers_edge(design: &Value) -> Option<&str> {
+    design
+        .get("metadata")
+        .and_then(|m| m.get("answers"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+}
+
 /// Parse `Qn|title|proposal` — the flag form, so a shell caller can
 /// pass several without a heredoc. The pipe is deliberate: question
 /// titles routinely contain commas and colons.

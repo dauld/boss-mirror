@@ -245,6 +245,23 @@ enum Commands {
         /// a forgotten one.
         #[arg(long, value_name = "REASON")]
         park_no_item: Option<String>,
+        /// Auto-park: the DESIGN whose plan this car builds. The item is
+        /// read off the design's `answers` edge and stamped as the
+        /// closing `backlog_item`, so the item closes when the car
+        /// lands — exactly as --park-backlog-item does, without the
+        /// builder having to go and find the item.
+        ///
+        /// A design's builder has the design in hand, not the item whose
+        /// triage routed to it. Measured 2026-09-19 (de6f28d6): cars
+        /// 2ef08389 and 6ca4cb63 were parked --park-no-item naming their
+        /// designs, and the items those designs answered sat at `build
+        /// (ready)` after the change landed in #472 and #474 until an
+        /// operator completed them by hand.
+        ///
+        /// For a plan of SEVERAL cars, only the last one closes the
+        /// item: name the item with --park-partial-item on the others.
+        #[arg(long, value_name = "DESIGN")]
+        park_design: Option<String>,
         /// Auto-park: the CAR this one must land BEHIND. The dock will not
         /// board this car until that one has landed, and says so by name
         /// on every board attempt until it does.
@@ -1591,6 +1608,7 @@ async fn main() -> Result<()> {
             park_backlog_item,
             park_partial_item,
             park_no_item,
+            park_design,
             park_after,
             park_probe,
             park_probe_file,
@@ -1610,6 +1628,7 @@ async fn main() -> Result<()> {
                 backlog_item: park_backlog_item,
                 partial_item: park_partial_item,
                 no_item: park_no_item,
+                design: park_design,
                 boards_after: park_after,
                 probe: crate::prose::opt_text_or_file(
                     "--park-probe",

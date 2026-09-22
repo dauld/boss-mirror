@@ -263,12 +263,11 @@ mod tests {
             );
             assert!(text.contains(phase), "the builder rules name `{phase}`");
         }
-        for door in [
-            "wt-cargo",
-            "infra/gate.sh --quick",
-            "boss gate",
-            "BOSS_AGENT_RUN",
-        ] {
+        // The pre-flight door is NOT in this list: it is quoted from
+        // CLAUDE.md §Doors rather than named here, and
+        // `the_builder_document_quotes_the_preflight_door` reads it
+        // out of the file that decides it (backlog 5d919334).
+        for door in ["wt-cargo", "boss gate", "BOSS_AGENT_RUN"] {
             assert!(text.contains(door), "the builder rules name `{door}`");
         }
         assert!(
@@ -725,6 +724,49 @@ mod tests {
         assert_eq!(
             expand("nothing to do\n", &invs).expect("expands"),
             "nothing to do\n"
+        );
+    }
+
+    /// THE PRE-FLIGHT DOOR IS QUOTED, NOT RESTATED (backlog 5d919334,
+    /// 2026-09-22).
+    ///
+    /// Rules 4, 9 and 16 each named `infra/gate.sh --quick` in their
+    /// own words — three copies of a door CLAUDE.md §Doors had already
+    /// moved to `--lint`, after `--quick` alone cost two gates to
+    /// clippy errors (410e21e2). Two builders hit the contradiction
+    /// within one hour on 2026-09-22 and both judged the tree correct;
+    /// a builder who did not notice would run the weaker door and pay
+    /// for it at the gate. The whole contract of this document is that
+    /// its invariants are DERIVED from the files that decide them, so
+    /// the fix is 395d24ad's placeholder, not a corrected literal.
+    ///
+    /// The negative half is the load-bearing one: no gate.sh mode may
+    /// be spelled in the body at all, because a second spelling is
+    /// exactly what drifted.
+    #[test]
+    fn the_builder_document_quotes_the_preflight_door() {
+        let doc = read(&repo(), "builder")
+            .expect("readable")
+            .expect("infra/platform/documents/builder-rules.md is authored");
+        let text = body(&doc);
+        assert!(
+            text.contains("{{invariant:pre-flight}}"),
+            "the builder rules no longer quote the pre-flight invariant"
+        );
+        assert!(
+            !text.contains("infra/gate.sh --"),
+            "the builder rules spell a gate.sh mode of their own; CLAUDE.md §Doors              decides it and {}pre-flight{} quotes it",
+            OPEN,
+            CLOSE
+        );
+
+        let invs = crate::brief::invariants(&repo()).expect("the invariants derive from this tree");
+        let expanded = expand(&text, &invs).expect("the placeholder expands");
+        let claude = std::fs::read_to_string(repo().join("CLAUDE.md")).expect("CLAUDE.md");
+        let door = crate::brief::preflight_door(&claude).expect("§Doors names a door");
+        assert!(
+            expanded.contains(&door),
+            "a builder reading the expanded rules never sees the door §Doors names: `{door}`"
         );
     }
 }

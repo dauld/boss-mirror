@@ -1300,10 +1300,7 @@ pub(crate) fn contract_check(step: &Value, metadata: &Value) -> Result<(), Strin
 /// step's completion when the route has one. This refusal is what
 /// stops the other path from producing half of it in silence.
 pub(crate) fn design_link_check(packet_id: &str, design: &Value) -> Result<(), String> {
-    let answers = design
-        .get("metadata")
-        .and_then(|m| m.get("answers"))
-        .and_then(Value::as_str);
+    let answers = crate::design::answers_edge(design);
     let short = &packet_id[..8.min(packet_id.len())];
     let design_short = design
         .get("id")

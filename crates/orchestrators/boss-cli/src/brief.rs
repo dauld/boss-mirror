@@ -313,6 +313,35 @@ pub(crate) fn sor_url(estate_toml: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// The pre-flight door, read out of CLAUDE.md §Doors (backlog
+/// 5d919334, 2026-09-22).
+///
+/// §Doors is where a session looks for the command to run before a
+/// push, and its `Before pushing` entry is the one place in this tree
+/// that DECIDES which mode that is. The builder document restated it
+/// instead, as `--quick`, and CLAUDE.md had already moved to `--lint`
+/// — the same pre-flight plus a scoped clippy — after `--quick` alone
+/// cost two gates to clippy errors (410e21e2). So every brief rendered
+/// on 2026-09-22 handed a builder the weaker door; two builders noticed
+/// the disagreement within one hour, judged the tree correct, and ran
+/// the stronger one anyway. A builder who did not notice would pay for
+/// it at the gate.
+///
+/// Patching the literal would leave the same copy one word later, so
+/// the door is parsed here and QUOTED by the document — CLAUDE.md 9a's
+/// collapse rather than its holding action.
+pub(crate) fn preflight_door(claude_md: &str) -> Option<String> {
+    claude_md
+        .split("- **Before pushing")
+        .nth(1)?
+        .split("\n\n- **")
+        .next()?
+        .split('`')
+        .nth(1)
+        .map(str::to_string)
+        .filter(|v| !v.is_empty())
+}
+
 fn read(repo: &Path, rel: &str) -> Result<String> {
     std::fs::read_to_string(repo.join(rel)).with_context(|| format!("reading {rel}"))
 }
@@ -531,6 +560,31 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
         ],
         lanes: vec![LANE_STEP],
         grounding: Grounding::Derived(vec![Reading::read(estate, sor.clone())]),
+    });
+
+    // THE PRE-FLIGHT DOOR (backlog 5d919334, 2026-09-22). CLAUDE.md
+    // §Doors is where a session looks for the command to run before a
+    // push, and it is the one file that decides which mode that is.
+    // The builder rules restated it as `--quick` and §Doors had moved
+    // to `--lint`; the copy is read here instead, so the rules can
+    // quote it.
+    let doors = "CLAUDE.md";
+    let door = preflight_door(&read(repo, doors)?)
+        .with_context(|| format!("{doors} §Doors does not carry a `Before pushing` door"))?;
+    out.push(Invariant {
+        name: "pre-flight",
+        authority: doors.to_string(),
+        lines: vec![
+            format!("bash {door} > <your scratch dir>/preflight.log 2>&1; echo $?"),
+            "The `Before pushing` door of CLAUDE.md §Doors, read out of that entry:".into(),
+            "the whole build-free pre-flight PLUS clippy scoped to the crates this tree".into(),
+            "changed, seconds against the ~11 minutes a gate costs. It is not a gate —".into(),
+            "the build and the suites stay unproven — and it is judged by its EXIT CODE,".into(),
+            "never by its last line: a pipe through tail succeeds while the run fails,".into(),
+            "and an && chain behind one pushed a red car (2026-09-20).".into(),
+        ],
+        lanes: vec![LANE_CAR],
+        grounding: Grounding::Derived(vec![Reading::read(doors, door.clone())]),
     });
 
     out.sort_by_key(|i| i.name);
@@ -1919,5 +1973,43 @@ mod tests {
         let protocol = out.find("== THE PROTOCOL").expect("the protocol half");
         let step = out.find("== THE STEP").expect("the step half");
         assert!(packet < protocol && protocol < step, "{out}");
+    }
+
+    /// THE PRE-FLIGHT DOOR IS READ, NOT RESTATED (backlog 5d919334,
+    /// 2026-09-22). CLAUDE.md §Doors decides which mode a builder runs
+    /// before a push; the builder rules carried their own copy of it,
+    /// still reading `--quick` a day after §Doors moved to `--lint`.
+    /// That is the same shape as c94ddc6f one level out: a document
+    /// vouching for a tree it did not read.
+    #[test]
+    fn the_preflight_door_is_read_out_of_the_doors_list() {
+        let claude = std::fs::read_to_string(repo().join("CLAUDE.md")).expect("CLAUDE.md");
+        let door = preflight_door(&claude)
+            .expect("CLAUDE.md §Doors no longer carries a `Before pushing` door");
+        assert!(
+            door.starts_with("infra/gate.sh --"),
+            "the `Before pushing` door is a gate.sh mode; §Doors names `{door}`"
+        );
+
+        let invs = invariants(&repo()).expect("the invariants derive from this tree");
+        let inv = invs
+            .iter()
+            .find(|i| i.name == "pre-flight")
+            .expect("a `pre-flight` invariant, so a rules document can quote the door");
+        assert_eq!(inv.authority, "CLAUDE.md", "§Doors decides this one");
+        assert!(inv.lanes.contains(&LANE_CAR), "a car is what gets pushed");
+        let lines = inv.lines.join("\n");
+        assert!(
+            lines.contains(&door),
+            "the invariant prints a door §Doors does not name. §Doors: `{door}`\n{lines}"
+        );
+        // THE COLLAPSE, not a correction: ONE spelling of the mode in
+        // the whole block. A second one is the copy this packet is
+        // about, one word later.
+        assert_eq!(
+            lines.matches("infra/gate.sh ").count(),
+            1,
+            "the pre-flight invariant names a gate.sh mode more than once:\n{lines}"
+        );
     }
 }

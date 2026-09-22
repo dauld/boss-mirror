@@ -875,6 +875,12 @@ pub struct ParkIntent {
     pub partial_item: Option<String>,
     /// Why this car answers no item at all.
     pub no_item: Option<String>,
+    /// The DESIGN whose plan this car builds — how a design's car names
+    /// its item, since the builder has the design in hand and the item
+    /// is one edge away (`design-doc.answers`). Resolved to
+    /// `backlog_item` at launch and never stamped itself, so nothing
+    /// downstream learns a new word (backlog de6f28d6).
+    pub design: Option<String>,
     /// The car this one must land BEHIND — `--park-after`. Written on the
     /// car as the declared `boards_after` job edge, which the conductor's
     /// boarding filter reads (`boss_jobs::car::BOARDS_AFTER`).
@@ -942,6 +948,7 @@ impl ParkIntent {
             && self.backlog_item.is_none()
             && self.partial_item.is_none()
             && self.no_item.is_none()
+            && self.design.is_none()
             && self.boards_after.is_none()
             && self.probe.is_none()
             && self.expect.is_none()
@@ -1113,8 +1120,8 @@ impl ParkIntent {
     }
 
     /// WHICH ITEM DOES THIS CAR FIX — refuse park intent that does not
-    /// say. Exactly one of three answers, and the refusal is syntactic:
-    /// it reads the flags given, never the branch name or the diff.
+    /// say. Exactly one answer, and the refusal is syntactic: it reads
+    /// the flags given, never the branch name or the diff.
     ///
     /// THE GAP (e1325456, measured 2026-09-10). The edge that closes a
     /// backlog item when its fix lands was optional, so it was omitted:
@@ -1131,7 +1138,7 @@ impl ParkIntent {
     /// close by themselves, with no operator action, while eight others
     /// were closed by hand.
     ///
-    /// WHY THREE ANSWERS AND NOT ONE. A refusal that admitted only
+    /// WHY MORE THAN ONE ANSWER. A refusal that admitted only
     /// `--park-backlog-item` would pressure a builder into linking an
     /// item that should not be linked, and the failure mode would flip
     /// from residue a human notices to a silent premature close:
@@ -1144,6 +1151,11 @@ impl ParkIntent {
     ///   rule follows, so the item stays open for its other pieces.
     /// - `--park-no-item <reason>` — no item, and which kind of item-less
     ///   car this is.
+    /// - `--park-design <id>` — this car builds that DESIGN's plan; the
+    ///   item is the one the design's `answers` edge names, read at
+    ///   launch and stamped as `backlog_item`. Not a fourth SEMANTICS:
+    ///   the same closing edge, named through the packet the builder
+    ///   actually has in hand (de6f28d6).
     ///
     /// THE COST OF THE REFUSAL is seconds at the builder's terminal, and
     /// the thing it prevents costs a future session a read — the same
@@ -1163,6 +1175,7 @@ impl ParkIntent {
             ("--park-backlog-item", self.backlog_item.is_some()),
             ("--park-partial-item", self.partial_item.is_some()),
             ("--park-no-item", self.no_item.is_some()),
+            ("--park-design", self.design.is_some()),
         ]
         .into_iter()
         .filter(|(_, g)| *g)
@@ -1176,7 +1189,9 @@ impl ParkIntent {
                  --park-partial-item <id>    this car is ONE PIECE of that item — the edge is \
                  recorded, the item stays open\n  \
                  --park-no-item \"<reason>\"   this car answers no item — say which kind (asked \
-                 for in conversation, found while building something else)\n\n\
+                 for in conversation, found while building something else)\n  \
+                 --park-design <id>          this car builds that DESIGN's plan — the item is \
+                 the one the design answers, read off the design and closed like the first\n\n\
                  Measured 2026-09-10 (e1325456): 13 of 19 open cars named no item, so the \
                  arrival rule had nothing to route and each item stayed open after its fix was \
                  live in production — the residue CLAUDE.md §Engineering Session Startup step 4 \
@@ -1186,7 +1201,8 @@ impl ParkIntent {
             many => anyhow::bail!(
                 "{} together — pass exactly one. Which one decides whether the item CLOSES \
                  when this car lands, so there is nothing to rank: a car is an item's build, \
-                 or one piece of it, or answers no item.",
+                 or one piece of it, or answers no item. --park-design is the FIRST of those, \
+                 named through the design, so it never rides beside another.",
                 many.join(" and ")
             ),
         }
@@ -1214,6 +1230,20 @@ impl ParkIntent {
                 );
             }
         }
+        // A blank design has its OWN refusal, because it fails a step
+        // earlier than a blank item: there is no packet to read the
+        // `answers` edge off, so the car would launch having answered
+        // the item question with nothing.
+        if let Some(design) = &self.design
+            && design.trim().is_empty()
+        {
+            anyhow::bail!(
+                "--park-design names no design: there is no packet to read the answered item \
+                 off, so this car would launch having answered the item question with \
+                 nothing. Give the design-doc's id, or name the item directly with \
+                 --park-backlog-item <id>."
+            );
+        }
         // The ordering edge gets its own refusal, because a blank one
         // fails DIFFERENTLY from a blank item: the ref check reads `''`
         // as "no claim to check" (104), so the car would be filed with a
@@ -1233,8 +1263,8 @@ impl ParkIntent {
     }
 
     /// Every packet id a park intent names, with the flag that named it:
-    /// the item this car closes or is a piece of, and the car it boards
-    /// behind. Each is a reference the auto-park handler will write as a
+    /// the item this car closes or is a piece of, the design whose plan
+    /// it builds, and the car it boards behind. Each is a reference the auto-park handler will write as a
     /// job edge ON GREEN — an hour after this terminal, where a bad id is
     /// a refused edge on a dispatcher run and not a word to the builder.
     /// So the launcher resolves them now: `unresolvable` returns the ones
@@ -1249,6 +1279,7 @@ impl ParkIntent {
         match flag {
             "--park-backlog-item" => self.backlog_item = Some(full),
             "--park-partial-item" => self.partial_item = Some(full),
+            "--park-design" => self.design = Some(full),
             "--park-after" => self.boards_after = Some(full),
             _ => {}
         }
@@ -1258,6 +1289,7 @@ impl ParkIntent {
         [
             ("--park-backlog-item", self.backlog_item.as_deref()),
             ("--park-partial-item", self.partial_item.as_deref()),
+            ("--park-design", self.design.as_deref()),
             ("--park-after", self.boards_after.as_deref()),
         ]
         .into_iter()
@@ -1315,6 +1347,58 @@ impl ParkIntent {
             PARK_EXPECT: Value::Null,
             PARK_PROOF_EVENT: Value::Null,
         })
+    }
+}
+
+/// THE ITEM A DESIGN'S CAR CLOSES — read off the design, not typed
+/// (backlog de6f28d6).
+///
+/// A design's plan is built by cars, and the builder of one has the
+/// DESIGN in hand, not the item that routed to it. So the two cars
+/// measured on 2026-09-19 (2ef08389 for design 0524fc95, 6ca4cb63 for
+/// 01c3cc3f) were parked `--park-no-item` naming the design, and the
+/// items those designs answered — e38693d2 and ba429e7f — stayed at
+/// `build (ready)` after the change landed in #472 and #474, with no
+/// open car naming them. An operator completed both build steps by
+/// hand. Nothing was missing from the record: `design-doc.answers` is a
+/// declared, ref-checked job edge (migration
+/// 20260915023329-a-design-doc-names-the-feedback-it-answers) pointing
+/// at exactly that packet. It was never read at park time.
+///
+/// ONE RESOLUTION, NO NEW RULE. This returns the item, the launcher
+/// stamps it as `park_backlog_item`, and the merged rule
+/// (`complete-feedback-branch-on-car-merged`) closes it the way it
+/// closes every other linked item. The alternative — the design's
+/// `Settled` step completing the answered item once every car in its
+/// plan merged — needs a second rule, a notion of "every car in the
+/// plan" that nothing records, and fires at a moment no car owns.
+///
+/// SINGULAR, because the edge is. `design-doc.answers` is declared
+/// `job_id`, not `job_id_list`, and measured 2026-09-22 across all 46
+/// design-doc packets: 18 carry one id, 28 carry none, none carries a
+/// list. A design answers at most one packet, so this returns at most
+/// one item and the flag needs no iteration.
+pub fn item_a_design_answers(given: &str, packet: &Value) -> Result<String> {
+    let job = packet.get("data").unwrap_or(packet);
+    match job.get("kind").and_then(Value::as_str) {
+        Some("design-doc") => {}
+        Some(other) => bail!(
+            "--park-design {given} is a {other} packet, not a design-doc. The flag names the \
+             DESIGN whose plan this car builds; to name the item itself, pass \
+             --park-backlog-item {given}."
+        ),
+        None => bail!("--park-design {given}: the system of record answered a packet with no kind"),
+    }
+    match crate::design::answers_edge(job) {
+        Some(item) => Ok(item.to_string()),
+        // 28 of 46 designs are in this shape, so it is the ordinary
+        // answer and not a malformed packet: say which flag takes over.
+        None => bail!(
+            "--park-design {given} answers no packet: it was filed without --answers, so \
+             nothing ties its plan to a backlog item and there is no item for this car to \
+             close. Name the item with --park-backlog-item <id>, or say \
+             --park-no-item \"<reason>\"."
+        ),
     }
 }
 
@@ -2359,6 +2443,26 @@ pub async fn run(
                  rather than typing it; an id is a sha.",
                 lines.join("\n")
             );
+        }
+        // A DESIGN'S CAR RESOLVES TO ITS ITEM HERE — after the design is
+        // known to exist, before anything is filed. The design is an
+        // INPUT to the item question, not an answer of its own, so it
+        // leaves as `backlog_item` and no rule, handler or gate-run key
+        // learns a new word (de6f28d6).
+        if let Some(design) = park.design.clone() {
+            let packet = api(
+                &http,
+                reqwest::Method::GET,
+                &format!("/api/jobs/{design}"),
+                None,
+            )
+            .await
+            .with_context(|| format!("reading design {design} for --park-design"))?
+            .ok_or_else(|| anyhow::anyhow!("--park-design {design}: the SoR answered nothing"))?;
+            let item = item_a_design_answers(&design, &packet)?;
+            println!("boss gate: --park-design {design} answers item {item}");
+            park.design = None;
+            park.backlog_item = Some(item);
         }
     }
     // The concurrency bound: env override > delivery policy > compiled.
@@ -4067,6 +4171,12 @@ mod tests {
             backlog_item: Some("7c9e376d".into()),
             partial_item: Some("cf0f5e2d".into()),
             no_item: Some("asked in chat".into()),
+            // Stamps NOTHING — `--park-design` is resolved to
+            // `backlog_item` at launch and never reaches the gate-run
+            // under a key of its own, so there is no key for
+            // `clear_patch` to clear either (de6f28d6). It is set here
+            // only to keep this literal exhaustive.
+            design: Some("0524fc95".into()),
             boards_after: Some("a1b2c3d4".into()),
             probe: Some("true".into()),
             expect: Some("x".into()),
@@ -4679,6 +4789,119 @@ mod tests {
         p.backlog_item = Some("7c9e376d".into());
         assert!(p.require_complete().is_ok());
         assert_eq!(p.metadata_patch()["park_backlog_item"], "7c9e376d");
+    }
+
+    /// A DESIGN'S CAR NAMES ITS ITEM THROUGH THE DESIGN (de6f28d6).
+    ///
+    /// Measured 2026-09-19: cars 2ef08389 and 6ca4cb63 built the plans of
+    /// designs 0524fc95 and 01c3cc3f and were parked `--park-no-item`
+    /// naming the design, because the design is what the builder had in
+    /// hand. The items those designs answered (e38693d2, ba429e7f) sat at
+    /// `build (ready)` after the change landed (#472, #474) with no open
+    /// car naming them, and an operator completed both by hand. Nothing
+    /// was missing from the record: `design-doc.answers` is a declared,
+    /// ref-checked job edge naming exactly that item. It was simply never
+    /// read at park time.
+    #[test]
+    fn a_design_resolves_to_the_item_its_answers_edge_names() {
+        let design = json!({
+            "id": "0524fc95-0000-0000-0000-000000000000",
+            "kind": "design-doc",
+            "metadata": {"answers": "e38693d2-b0fc-4bea-ac06-101059ccf586"},
+        });
+        assert_eq!(
+            item_a_design_answers("0524fc95", &design).unwrap(),
+            "e38693d2-b0fc-4bea-ac06-101059ccf586"
+        );
+        // The jobs API wraps a single Job in `data`; the same read
+        // answers either shape, as the resolution loop above does.
+        assert_eq!(
+            item_a_design_answers("0524fc95", &json!({"data": design})).unwrap(),
+            "e38693d2-b0fc-4bea-ac06-101059ccf586"
+        );
+    }
+
+    /// A design filed WITHOUT `--answers` ties its plan to no item, and
+    /// the refusal says which flag to reach for instead. Measured
+    /// 2026-09-22: 28 of the 46 design-doc packets carry no `answers`, so
+    /// this is the common shape, not the odd one.
+    #[test]
+    fn a_design_that_answers_nothing_is_refused_naming_the_two_escapes() {
+        let e = item_a_design_answers(
+            "acedf981",
+            &json!({"kind": "design-doc", "metadata": {"title": "x"}}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("acedf981"), "name the design: {e}");
+        assert!(e.contains("--park-backlog-item"), "{e}");
+        assert!(e.contains("--park-no-item"), "{e}");
+    }
+
+    /// `--park-design` names a DESIGN. Pointed at the item itself it
+    /// would read `answers` off a backlog-item, find none, and refuse for
+    /// the wrong reason — so the kind is checked first and the refusal
+    /// names the flag that takes the id given.
+    #[test]
+    fn a_park_design_pointed_at_a_non_design_is_refused_by_kind() {
+        let e = item_a_design_answers("e38693d2", &json!({"kind": "backlog-item", "metadata": {}}))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("backlog-item"), "name the kind it found: {e}");
+        assert!(e.contains("--park-backlog-item"), "{e}");
+    }
+
+    /// `--park-design` ANSWERS THE ITEM QUESTION. It is not a fourth kind
+    /// of answer: it is how a design's car names the item, resolved to
+    /// `backlog_item` at launch. So the syntactic check admits it alone,
+    /// and refuses it beside an answer that would name a different item.
+    #[test]
+    fn a_design_is_an_item_answer_and_never_rides_beside_another() {
+        let mut p = park_full();
+        p.design = Some("0524fc95".into());
+        p.require_item_answer()
+            .expect("a design answers the question");
+        assert_eq!(
+            p.named_refs(),
+            vec![("--park-design", "0524fc95")],
+            "the design is resolved against the SoR like every other id a park names"
+        );
+        p.backlog_item = Some("e38693d2".into());
+        let e = p.require_item_answer().unwrap_err().to_string();
+        assert!(e.contains("--park-design"), "{e}");
+        assert!(e.contains("--park-backlog-item"), "{e}");
+        let mut blank = park_full();
+        blank.design = Some("  ".into());
+        let e = blank.require_item_answer().unwrap_err().to_string();
+        assert!(e.contains("--park-design names no design"), "{e}");
+    }
+
+    /// The design is an INPUT, not a key on the gate-run: it resolves to
+    /// `park_backlog_item`, which is the one key the arrival rule
+    /// follows, so no rule and no handler learns a new word. A design
+    /// left unresolved must therefore stamp nothing at all rather than a
+    /// key nothing reads.
+    #[test]
+    fn a_design_stamps_no_key_of_its_own() {
+        let mut p = park_full();
+        p.design = Some("0524fc95".into());
+        assert!(!p.is_empty(), "a lone --park-design is park intent");
+        let m = p.metadata_patch();
+        assert!(m.get("park_design").is_none(), "{m}");
+        assert!(
+            m.get(PARK_BACKLOG_ITEM).is_none(),
+            "nothing resolved yet: {m}"
+        );
+        p.set_named_ref(
+            "--park-design",
+            "0524fc95-0000-0000-0000-000000000000".into(),
+        );
+        p.backlog_item = Some("e38693d2-b0fc-4bea-ac06-101059ccf586".into());
+        p.design = None;
+        assert_eq!(
+            p.metadata_patch()[PARK_BACKLOG_ITEM],
+            "e38693d2-b0fc-4bea-ac06-101059ccf586"
+        );
     }
 
     /// WHICH ITEM DOES THIS CAR FIX — the question auto-park used to let
