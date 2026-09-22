@@ -224,6 +224,44 @@ pub(crate) fn cargo_jobs(env_file: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// The manifest that DECLARES the dev pod's cgroup — the pod every
+/// builder works in, and the ceiling a bare `cargo` drives to.
+pub(crate) const DEV_MANIFEST: &str = "infra/cluster/manifests/boss-dev.yaml";
+
+/// The resource limits the dev container declares, verbatim — the
+/// cgroup a builder is actually inside (backlog 28fc3a39, 2026-09-22).
+///
+/// Returned as the manifest's own line rather than parsed into numbers
+/// and reassembled: the figure printed to a builder is then the same
+/// string the declaration holds, so `Reading` can pin it against the
+/// file and neither unit nor spelling can drift between them. The two
+/// typed copies it replaces said 16 GiB where the manifest declares
+/// 32Gi, and one of them said 8 CPU where it declares 16 — the pod was
+/// resized for two builders and an operator (5ee0ff2a) and both copies
+/// stayed at the old size.
+///
+/// Scoped to the container named `dev`, for the same reason `gate_ids`
+/// is scoped: the postgres and reclaim sidecars declare limits of their
+/// own, and a scan that took the first (or the last) would confidently
+/// answer with a database's 4Gi.
+pub(crate) fn pod_cgroup_limits(manifest: &str) -> Option<String> {
+    let mut inside = false;
+    for line in manifest.lines() {
+        let t = line.trim();
+        if t.starts_with("- name:") {
+            if inside {
+                break;
+            }
+            inside = t == "- name: dev";
+            continue;
+        }
+        if inside && t.starts_with("limits:") {
+            return Some(t.to_string());
+        }
+    }
+    None
+}
+
 /// The admin URL `TestDb` connects to by default — i.e. the one a test
 /// reaches when nothing overrides it, which is the address a
 /// `kubectl port-forward` turns into the production cluster database.
@@ -364,6 +402,12 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
         .with_context(|| format!("{manifest} does not name the gate container's uid and gid"))?;
     let jobs = cargo_jobs(&read(repo, env_file)?)
         .with_context(|| format!("{env_file} does not set CARGO_BUILD_JOBS"))?;
+    // THE BOUND'S OWN REASON, read from the declaration (28fc3a39).
+    // What a bare `cargo` would drive to its ceiling was typed here,
+    // and in the builder rules, and both had stayed at the pod's old
+    // size — half the memory in both, half the CPU in one.
+    let cgroup = pod_cgroup_limits(&read(repo, DEV_MANIFEST)?)
+        .with_context(|| format!("{DEV_MANIFEST} does not declare the dev container's limits"))?;
     let admin_url = test_db_admin_url(&read(repo, test_db)?)
         .with_context(|| format!("{test_db} does not declare DEFAULT_ADMIN_URL"))?;
     let phases = gate_phases(&read(repo, gate)?);
@@ -379,13 +423,14 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
             lines: vec![
                 format!("set -a; . {env_file}; set +a     # CARGO_BUILD_JOBS={jobs}"),
                 "Nothing else bounds cargo here (there is no .cargo/config.toml), so the".into(),
-                "default is one job per CPU — 32 on this pod, against a 16 GiB cgroup.".into(),
+                "default is one job per CPU — 32 on this pod, because nproc reads the NODE".into(),
+                format!("and not the cgroup, which the dev pod declares as {cgroup}."),
             ],
             lanes: vec![LANE_CAR],
-            grounding: Grounding::Derived(vec![Reading::read(
-                env_file,
-                format!("CARGO_BUILD_JOBS={jobs}"),
-            )]),
+            grounding: Grounding::Derived(vec![
+                Reading::read(env_file, format!("CARGO_BUILD_JOBS={jobs}")),
+                Reading::read(DEV_MANIFEST, cgroup.clone()),
+            ]),
         },
         Invariant {
             name: "verify as the gate",
@@ -1169,6 +1214,99 @@ mod tests {
         assert_eq!(cargo_jobs(&live).as_deref(), Some("6"));
         assert_eq!(cargo_jobs("CARGO_BUILD_JOBS=11\n").as_deref(), Some("11"));
         assert_eq!(cargo_jobs("# nothing set here\n"), None);
+    }
+
+    /// THE CGROUP A BUILDER ACTS ON IS READ OUT OF THE MANIFEST THAT
+    /// DECLARES IT (backlog 28fc3a39, 2026-09-22).
+    ///
+    /// The cargo bound's own reason — what a bare `cargo` would drive
+    /// to its ceiling — was a typed figure in both places it appeared:
+    /// this invariant said "a 16 GiB cgroup" and the builder rules said
+    /// "16 GiB / 8-CPU", while `infra/cluster/manifests/boss-dev.yaml`
+    /// had declared `{cpu: "16", memory: 32Gi}` since the pod was
+    /// resized for two builders and an operator (5ee0ff2a). Half the
+    /// memory in both copies, half the CPU in one. A rule whose stated
+    /// reason is false teaches the reader to discount the rule, so the
+    /// figure is read from the declaration rather than corrected into
+    /// a third drift.
+    #[test]
+    fn the_cargo_bound_cites_the_cgroup_the_dev_pod_declares() {
+        let live = std::fs::read_to_string(repo().join(DEV_MANIFEST)).expect("the dev manifest");
+        let limits = pod_cgroup_limits(&live).expect("the dev container declares its limits");
+        assert_eq!(
+            limits, "limits: {cpu: \"16\", memory: 32Gi}",
+            "the dev pod was resized; that is fine — this assertion exists so the \
+             MOVE is visible, and the brief will already be printing the new figure \
+             because it reads it here"
+        );
+        // The anti-hardcode half: a different manifest must produce a
+        // different figure, or the derivation is a literal wearing a
+        // function's clothes.
+        let moved = live.replace(&limits, "limits: {cpu: \"64\", memory: 128Gi}");
+        assert_eq!(
+            pod_cgroup_limits(&moved).as_deref(),
+            Some("limits: {cpu: \"64\", memory: 128Gi}")
+        );
+
+        let invs = invariants(&repo()).expect("the invariants derive from this tree");
+        let inv = invs
+            .iter()
+            .find(|i| i.name == "cargo jobs")
+            .expect("the cargo bound is an invariant of this tree");
+        assert!(
+            inv.lines.join("\n").contains(&limits),
+            "the cargo bound states a cgroup the manifest does not declare: {:?}",
+            inv.lines
+        );
+        let Grounding::Derived(readings) = &inv.grounding else {
+            panic!("the cargo bound is derived, not written");
+        };
+        assert!(
+            readings
+                .iter()
+                .any(|r| r.from == DEV_MANIFEST && r.value == limits),
+            "the cgroup figure rides under the bound's own authority instead of \
+             naming the manifest it was read from"
+        );
+    }
+
+    #[test]
+    fn a_sidecars_limits_are_not_mistaken_for_the_dev_containers() {
+        // Declared AFTER the sidecar here, because in the real manifest
+        // it comes first — a scan that took the first `limits:` would
+        // pass against the tree and answer with postgres's 4Gi the day
+        // someone reorders it.
+        let manifest = "\
+      containers:
+        - name: postgres
+          resources:
+            limits: {cpu: \"2\", memory: 4Gi}
+        - name: dev
+          resources:
+            requests: {cpu: \"4\", memory: 8Gi}
+            limits: {cpu: \"16\", memory: 32Gi}
+        - name: reclaim
+          resources:
+            limits: {cpu: 500m, memory: 256Mi}
+";
+        assert_eq!(
+            pod_cgroup_limits(manifest).as_deref(),
+            Some("limits: {cpu: \"16\", memory: 32Gi}")
+        );
+        // No dev container is nothing, never the next container's
+        // numbers: a confident wrong figure is the failure class here.
+        assert_eq!(
+            pod_cgroup_limits("        - name: postgres\n            limits: {cpu: \"2\"}\n"),
+            None
+        );
+        // A dev container that declares no limits is unbounded, and
+        // saying so is not this function's business either.
+        assert_eq!(
+            pod_cgroup_limits(
+                "        - name: dev\n          image: x\n        - name: pg\n            limits: {cpu: \"2\"}\n"
+            ),
+            None
+        );
     }
 
     #[test]

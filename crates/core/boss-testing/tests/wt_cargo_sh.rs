@@ -1,7 +1,10 @@
 //! `infra/dev/wt-cargo` — the door every cargo build on the dev pod goes
 //! through: a per-worktree `CARGO_TARGET_DIR` reflink-seeded from the
 //! warm shared one, and a jobs bound that keeps a builder inside its
-//! share of the pod's 16 GiB cgroup (backlog 34b29b52).
+//! share of the pod's cgroup — the limits the dev container declares in
+//! `infra/cluster/manifests/boss-dev.yaml`, not a figure typed here
+//! (backlog 34b29b52; the typed one said 16 GiB against a declared 32Gi,
+//! 28fc3a39).
 //!
 //! Until 2026-09-14 this script was pod-local text under
 //! /work/tools/bin, with its OWN copy of the cargo bound — and it

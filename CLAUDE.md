@@ -771,13 +771,21 @@ a door that stops being true is a defect worth a car.
   silent — and `BOSS_DOOR_FRESHNESS=off` runs anything anyway. **That
   fast-forward is the machine's now** (backlog 033d1fd3): the dev pod's
   reclaim sidecar takes the checkout to the origin/main it has already
-  fetched on every hourly pass, and defers while any `gate-run` packet
-  is open, because a gate renders its runner from a tree. The operator
+  fetched on every hourly pass, and defers while a `gate-run` packet is
+  LAUNCHING — opened in the last two minutes — because a gate renders
+  its runner from a tree as it starts. It deferred on ANY open gate-run
+  until 2026-09-22, and at 12 builders that was true 84% of the day, so
+  the pass landed one time in six and the checkout sat five commits
+  behind (backlog 475fbd10); `boss gate` reads the runner manifest once,
+  before it files its packet, and the runner Job clones from the forge,
+  so an older gate has already taken everything it will take from a
+  tree. The operator
   typed that command by hand four times on 2026-09-19, and a warning
   fired four times a day is a warning nobody reads. A warning you still
-  see means the hour has not turned yet, a gate is running, or the
+  see means the hour has not turned yet, a gate was launching, or the
   merge was refused — and a refusal is loud, on the sidecar's own
-  packet. The pod's
+  packet, as is a deferral that leaves the checkout behind for more
+  than two hours. The pod's
   system-of-record spelling is `infra/dev/sor-url`, which both
   `boss-api` and the shim read — WRITTEN from the one tree source,
   `infra/estate/estate.toml`, and held equal to it by a test (since

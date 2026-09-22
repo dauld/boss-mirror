@@ -86,16 +86,22 @@ fn stub_curl(root: &Path) -> PathBuf {
             "done\n",
             "printf '%s %s %s\\n' \"$method\" \"$url\" \"$body\" >> \"$STUB_LOG\"\n",
             // The fast-forward pass asks ONE question of the system of
-            // record — is a gate reading a tree right now — and a test
-            // decides the answer: none open by default, one open with
-            // STUB_OPEN_GATE, and an API that ANSWERS an error (curl's
-            // 22 under -f) with STUB_GATE_RC.
+            // record — is a gate LAUNCHING right now — and a test
+            // decides the answer: none open by default; one open with
+            // STUB_OPEN_GATE, aged by STUB_GATE_AGE_SECS (default 0, a
+            // gate opened this second); a page that reports more open
+            // runs than it returns with STUB_GATE_TOTAL; and an API
+            // that ANSWERS an error (curl's 22 under -f) with
+            // STUB_GATE_RC.
             "case \"$url\" in\n",
             "    *kind=gate-run*)\n",
             "        if [ -n \"${STUB_GATE_RC:-}\" ]; then exit \"$STUB_GATE_RC\"; fi\n",
             "        if [ -n \"${STUB_OPEN_GATE:-}\" ]; then\n",
-            "            echo '{\"data\":[{\"id\":\"gate-1\",\"status\":\"open\"}]}'\n",
-            "        else echo '{\"data\":[]}'; fi\n",
+            "            now=$(date -u +%s)\n",
+            "            at=$(date -u -d \"@$((now - ${STUB_GATE_AGE_SECS:-0}))\" +%Y-%m-%dT%H:%M:%S.000000000+00:00)\n",
+            "            jq -nc --arg at \"$at\" --argjson total \"${STUB_GATE_TOTAL:-1}\" \\\n",
+            "               '{total: $total, data: [{id: \"gate-1\", status: \"open\", metadata: {opened_at: $at}}]}'\n",
+            "        else echo '{\"total\":0,\"data\":[]}'; fi\n",
             "        exit 0 ;;\n",
             "esac\n",
             "case \"$method\" in\n",
@@ -868,11 +874,28 @@ fn a_checkout_without_origin_main_installs_no_cli() {
 // sidecar's missing forge credential (b50a65ef) never comes into it.
 //
 // THE HAZARD IT MUST NOT CAUSE: `boss gate` renders its runner from the
-// tree at launch, and mutating the tree under a running gate is the
+// tree AT LAUNCH, and mutating the tree under a LAUNCHING gate is the
 // never-stash-while-a-gate-runs fault. The quiet is read from the
-// SYSTEM OF RECORD — an open `gate-run` packet — rather than from a
-// lock file, because the gate-runs are already in the record. A reading
-// it cannot take is a DEFER, never a fast-forward taken blind.
+// SYSTEM OF RECORD — a recently-opened `gate-run` packet — rather than
+// from a lock file, because the gate-runs are already in the record. A
+// reading it cannot take is a DEFER, never a fast-forward taken blind.
+//
+// AND LAUNCHING IS NOT RUNNING (backlog 475fbd10, 2026-09-22). `boss
+// gate` takes everything it will ever take from a tree in ONE
+// `read_to_string` of the runner manifest — the first statement of
+// `gate::run`, before the gate-run packet is filed — so a packet older
+// than the launch window belongs to a gate that has already rendered.
+// Deferring on "any open gate-run" was true for 251 of the last 300
+// minutes (84%, measured on the packet; 73% re-measured here from the
+// gate-run history), against 15% for a 120-second launch window, and an
+// hourly pass against an 84%-busy condition lands about one time in
+// six. The checkout sat five commits behind and every door warned.
+//
+// AND THE DEFERRAL HAS AN UPPER BOUND, because one that can repeat
+// forever never errors — it just stops being true, which is the silent
+// -failure class CLAUDE.md names. Past the deadline a deferral stops
+// being a wait and becomes a finding: a problem, a red pass, and the
+// reason on the packet where the refused fast-forward already lands.
 // ---------------------------------------------------------------------
 
 /// The checkout's own HEAD — what the doors run from.
@@ -936,7 +959,7 @@ fn a_checkout_behind_origin_main_is_fast_forwarded_when_no_gate_is_reading_the_t
 }
 
 #[test]
-fn an_open_gate_run_defers_the_fast_forward() {
+fn a_gate_run_opened_this_second_defers_the_fast_forward() {
     let root = boss_testing::scratch_dir("boss-dsr-ff-gate");
     let _guard = Scratch(root.clone());
     let yard = behind_by_one(&root);
@@ -956,6 +979,113 @@ fn an_open_gate_run_defers_the_fast_forward() {
     assert!(
         out.status.success(),
         "waiting for the next hour is not a fault\n{text}"
+    );
+}
+
+/// A gate that opened its packet an hour ago read the runner manifest
+/// an hour ago too — `gate::run`'s one `read_to_string` runs BEFORE the
+/// packet is filed. Holding the checkout for it buys nothing and costs
+/// the 84% of the day at least one gate is open (backlog 475fbd10).
+#[test]
+fn a_gate_that_has_already_rendered_its_runner_does_not_defer_the_fast_forward() {
+    let root = boss_testing::scratch_dir("boss-dsr-ff-running");
+    let _guard = Scratch(root.clone());
+    let yard = behind_by_one(&root);
+    let main = yard.origin_main();
+
+    let out = run(
+        &root,
+        &[("STUB_OPEN_GATE", "1"), ("STUB_GATE_AGE_SECS", "3600")],
+    );
+    let text = say(&out);
+    assert_eq!(
+        head_sha(&yard.repo),
+        main,
+        "an hour-old gate has taken everything it will ever take from a tree\n{text}"
+    );
+    assert!(
+        out.status.success(),
+        "and moving the checkout for it is the pass working\n{text}"
+    );
+}
+
+/// A page that reports more open gate-runs than it returns answers a
+/// smaller question (CLAUDE.md — a limit is not a filter): the launch
+/// window cannot be judged from rows that were never sent, so the pass
+/// defers the way it does on any unread check.
+#[test]
+fn a_truncated_gate_run_page_is_a_reading_the_pass_cannot_take() {
+    let root = boss_testing::scratch_dir("boss-dsr-ff-truncated");
+    let _guard = Scratch(root.clone());
+    let yard = behind_by_one(&root);
+    let before = head_sha(&yard.repo);
+
+    // One row returned, three said to be open, and the two unseen ones
+    // could each have launched a second ago.
+    let out = run(
+        &root,
+        &[
+            ("STUB_OPEN_GATE", "1"),
+            ("STUB_GATE_AGE_SECS", "3600"),
+            ("STUB_GATE_TOTAL", "3"),
+        ],
+    );
+    let text = say(&out);
+    assert_eq!(
+        head_sha(&yard.repo),
+        before,
+        "a fast-forward is never taken on a page that answered a smaller question\n{text}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("fast-forward deferred"),
+        "the defer and its reason are loud\n{text}"
+    );
+}
+
+/// THE UPPER BOUND. A deferral that can repeat forever never errors; it
+/// just stops being true, and the checkout starves while every door
+/// warns and every write is refused at exit 78. How long it has been
+/// behind is read from GIT ALONE — the committer time of the oldest
+/// commit the checkout is missing — so there is no counter file and no
+/// second copy of a fact (CLAUDE.md §9a).
+#[test]
+fn a_deferral_that_outlives_its_deadline_is_a_problem_on_the_packet() {
+    let root = boss_testing::scratch_dir("boss-dsr-ff-deadline");
+    let _guard = Scratch(root.clone());
+    let yard = behind_by_one(&root);
+    let before = head_sha(&yard.repo);
+
+    let out = run(
+        &root,
+        &[("STUB_OPEN_GATE", "1"), ("BOSS_FF_DEADLINE_SECS", "0")],
+    );
+    let text = say(&out);
+    assert_eq!(
+        head_sha(&yard.repo),
+        before,
+        "the deadline makes a stuck deferral LOUD; it never overrides the hazard\n{text}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "and reds the pass, like every other problem here\n{text}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("DEFERRED PAST ITS DEADLINE"),
+        "a deferral nobody can see is the failure this bound exists to end\n{text}"
+    );
+    let log = curl_log(&root);
+    let put = log
+        .lines()
+        .find(|l| l.starts_with("PUT "))
+        .unwrap_or_else(|| panic!("the run step is completed\n{log}\n{text}"));
+    assert!(
+        put.contains("\"result\":\"incomplete\"") && put.contains("past its"),
+        "the packet says the checkout stopped catching up\n{put}\n{text}"
+    );
+    assert!(
+        put.contains("\"ff_detail\":\"") && put.contains("behind origin/main for"),
+        "and names how long and what held it — not an exit code to go re-derive\n{put}\n{text}"
     );
 }
 

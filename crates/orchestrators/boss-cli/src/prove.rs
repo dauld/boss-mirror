@@ -1238,6 +1238,16 @@ pub(crate) fn override_reason(given: Option<&str>) -> Result<Option<&str>> {
     }
 }
 
+/// WHERE A PROBE'S TREE IS OBSERVED: the directory the probe will
+/// actually run in, which is the shell's own `cwd` — the converged
+/// checkout at the unattended door, the recorded one under `--recheck`,
+/// and this process's directory at the hand door. Reading it anywhere
+/// else would answer about a tree the probe never opens, which is the
+/// class of mistake this whole area exists to refuse.
+fn probe_tree(shell: &Shell) -> crate::freshness::TreeObservation {
+    crate::freshness::observe_tree(shell.cwd.as_deref().unwrap_or_else(|| Path::new(".")))
+}
+
 /// The proof record. Serialised once, stored verbatim, re-read by
 /// `--recheck` — so its field names are a contract, not a detail.
 /// `overridden` is the one optional key: present only when the
@@ -1245,12 +1255,18 @@ pub(crate) fn override_reason(given: Option<&str>) -> Result<Option<&str>> {
 /// presence means something to whoever reads the proof back. The
 /// unattended door never writes it: it has no override, and a probe it
 /// refuses is refused on the ops-request, exit 2.
+///
+/// `tree` is taken by value rather than left to each door to remember,
+/// because a door that forgets it records a proof that cannot say what
+/// it read — the defect this closed (backlog 6f581de6). See
+/// [`crate::freshness::tree_metadata`] for what the two keys mean.
 pub(crate) fn proof_json(
     probe: &str,
     expect: Option<&str>,
     o: &Outcome,
     host: &str,
     at: &str,
+    tree: &crate::freshness::TreeObservation,
     overridden: Option<&Value>,
 ) -> Value {
     let mut p = json!({
@@ -1273,6 +1289,15 @@ pub(crate) fn proof_json(
             .unwrap_or_default(),
         "at": at,
     });
+    // WHAT IT READ, beside where it ran. `cwd` names a directory whose
+    // contents change under it; these name the revision that answered.
+    for (k, v) in crate::freshness::tree_metadata(tree)
+        .as_object()
+        .into_iter()
+        .flatten()
+    {
+        p[k] = v.clone();
+    }
     if let Some(o) = overridden {
         p["overridden"] = o.clone();
     }
@@ -2193,12 +2218,18 @@ pub(crate) async fn run_unattended(car_id: &str, now: chrono::DateTime<chrono::U
 
     let shell = Shell::unattended(&base)?.with_car_instant(car_merge_ref(&car));
     println!("boss prove: {short}  $ {probe}");
+    // THE TREE THIS PROBE READS, observed where it will run — the
+    // converged checkout. Here the standing is nearly always
+    // `unreadable`, because the forge's clone need not carry a
+    // remote-tracking ref, and `tree_head` is the fact that matters:
+    // production's own revision at the moment the claim was judged.
+    let tree = probe_tree(&shell);
     let o = execute_with(&probe, &shell)?;
     let at = now.to_rfc3339();
     let here = host();
     let verdict = verdict(&probe, &o, Some(&expect));
     if let Verdict::Proven = verdict {
-        let proof = proof_json(&probe, Some(&expect), &o, &here, &at, None);
+        let proof = proof_json(&probe, Some(&expect), &o, &here, &at, &tree, None);
         let mut md = proven_metadata(&verified, &serde_json::to_string(&proof)?, None, now);
         md["proven_by"] = json!(PROVEN_BY);
         crate::gate::api(
@@ -2405,12 +2436,22 @@ pub(crate) async fn run(
         // unattended door hands over, or the claim means a different
         // thing at each door (a92571a6).
         let cwd = rec.cwd.as_deref().filter(|d| !d.is_empty());
-        let o = execute_with(
-            &probe,
-            &Shell::here(cwd.map(Path::new))
-                .with_probe_reader(tree.as_deref(), &base)
-                .with_car_instant(car_merge_ref(car)),
-        )?;
+        let shell = Shell::here(cwd.map(Path::new))
+            .with_probe_reader(tree.as_deref(), &base)
+            .with_car_instant(car_merge_ref(car));
+        // WHICH TREE THIS RE-RUN READS (backlog 6f581de6). A recheck
+        // records nothing, so there is no immutable fact to refuse —
+        // but its HOLDS / NO LONGER HOLDS is acted on by a human, and
+        // acting on a verdict taken off an unnamed tree is the same
+        // defect one step removed. So it is stated, never refused.
+        println!(
+            "{}",
+            crate::freshness::unrecorded_tree_note(
+                &probe_tree(&shell),
+                crate::freshness::freshness_silenced(),
+            )
+        );
+        let o = execute_with(&probe, &shell)?;
         // THREE READINGS, and which record they are read against
         // decides the sentence: a PROOF that fails now has decayed; an
         // ATTEMPT was never a proof. --recheck writes nothing on any of
@@ -2544,8 +2585,15 @@ pub(crate) async fn run(
     // forge's reading. A hand-written `--probe` is the operator's own
     // text about their own tree, and refusing it would be this verb
     // deciding what their probe meant.
+    let shell = Shell::here(None)
+        .with_probe_reader(tree.as_deref(), &base)
+        .with_car_instant(car_merge_ref(car));
+    // OBSERVED ONCE, USED TWICE: the guard below judges it, and the
+    // proof records it (backlog 6f581de6). Two readings could disagree
+    // — a train lands between them — and a proof stamped with a tree
+    // the guard did not judge is the same gap in a new place.
+    let obs = probe_tree(&shell);
     if from_car {
-        let obs = crate::freshness::observe_tree(tree.as_deref().unwrap_or_else(|| Path::new(".")));
         match crate::freshness::stale_tree_guard(
             &obs,
             // A `--dry` run records nothing, so it is the rehearsal the
@@ -2559,12 +2607,7 @@ pub(crate) async fn run(
     }
 
     println!("boss prove: {short}  $ {probe}");
-    let o = execute_with(
-        &probe,
-        &Shell::here(None)
-            .with_probe_reader(tree.as_deref(), &base)
-            .with_car_instant(car_merge_ref(car)),
-    )?;
+    let o = execute_with(&probe, &shell)?;
     let at = now.to_rfc3339();
     match verdict(&probe, &o, expect.as_deref()) {
         Verdict::Proven => {}
@@ -2640,6 +2683,7 @@ pub(crate) async fn run(
         &o,
         &host(),
         &at,
+        &obs,
         overridden.as_ref(),
     );
     let shown = o.stdout.trim();
@@ -2733,6 +2777,13 @@ mod tests {
             stderr: String::new(),
             missing_tools: Vec::new(),
         }
+    }
+
+    /// The tree observation for a test that is not about the tree. It
+    /// is deliberately the UNREADABLE one rather than a current tree:
+    /// a fixture must not hand a proof a standing nothing measured.
+    fn no_tree() -> crate::freshness::TreeObservation {
+        crate::freshness::TreeObservation::default()
     }
 
     /// THE RULE THE VERB EXISTS TO ENFORCE: a failing probe is not proof.
@@ -2943,12 +2994,53 @@ mod tests {
             &o,
             "h",
             "2026-08-28T00:00:00Z",
+            &no_tree(),
             None,
         );
         let step = json!({"metadata": {"proof": serde_json::to_string(&p).unwrap()}});
         let rec = recorded_probe(&step).unwrap();
         assert_eq!(rec.probe, "grep -q MARKER f");
         assert_eq!(rec.expect.as_deref(), Some("MARKER"));
+    }
+
+    /// A RECORDED PROOF SAYS WHICH TREE ANSWERED IT (backlog 6f581de6).
+    /// `host` and `cwd` say WHERE it ran; a directory's contents change
+    /// under it, and a recorded probe reads the tree with `git show
+    /// HEAD:<path>` — so without the sha the artifact is incomplete in
+    /// the one dimension this verb exists to close. Provenance is the
+    /// first of the five properties, and the standing rides beside the
+    /// sha because a later reader cannot re-derive it: `origin/main`
+    /// has moved a hundred times by the time anyone reads the proof.
+    #[test]
+    fn a_recorded_proof_names_the_tree_it_read() {
+        use crate::freshness::{Base, TreeObservation};
+        let o = ok("MARKER present");
+        let tree = TreeObservation {
+            standing: Base::Behind,
+            head: "1c63ca24ffff".into(),
+            main_head: "de960a2affff".into(),
+            behind_by: 9,
+            unreadable: None,
+        };
+        let p = proof_json(
+            "grep -q MARKER f",
+            Some("MARKER"),
+            &o,
+            "h",
+            "2026-09-22T00:00:00Z",
+            &tree,
+            None,
+        );
+        assert_eq!(p["tree_head"], json!("1c63ca24ffff"));
+        assert_eq!(p["tree_standing"], json!("behind"));
+        // BESIDE the existing keys, not instead of them: these eight
+        // are what a live proof carried when this was measured, and
+        // `--recheck` reads three of them back.
+        for k in [
+            "at", "cwd", "exit", "expect", "host", "probe", "stderr", "stdout",
+        ] {
+            assert!(p.get(k).is_some(), "{k} is a contract, not a detail: {p}");
+        }
     }
 
     /// THE 932aa956 / 3f846cc5 CASE. A probe authored on the workstation
@@ -3022,6 +3114,7 @@ mod tests {
             &o,
             "somehost",
             "2026-08-29T00:00:00Z",
+            &no_tree(),
             None,
         );
         let step = json!({"metadata": {"proof": proof.to_string()}});
@@ -3351,8 +3444,24 @@ mod tests {
             stderr: String::new(),
             missing_tools: Vec::new(),
         };
-        let first = proof_json("old-probe", None, &o, "h", "2026-08-29T00:00:00Z", None);
-        let better = proof_json("better-probe", None, &o, "h", "2026-08-30T00:00:00Z", None);
+        let first = proof_json(
+            "old-probe",
+            None,
+            &o,
+            "h",
+            "2026-08-29T00:00:00Z",
+            &no_tree(),
+            None,
+        );
+        let better = proof_json(
+            "better-probe",
+            None,
+            &o,
+            "h",
+            "2026-08-30T00:00:00Z",
+            &no_tree(),
+            None,
+        );
         let step = json!({"metadata": {"proof": first.to_string()}});
         let with_reproof = json!({"metadata": {"reproof": [
             {"proof": better.to_string(), "recorded_at": "2026-08-30T00:00:00Z"}
@@ -3688,7 +3797,15 @@ mod tests {
             o.exit, 4,
             "jq -e exits 4 when its filter produces no output; `empty` produces none"
         );
-        let p = proof_json(INVERTED_FILTER, Some("claim:ok"), &o, "h", "now", None);
+        let p = proof_json(
+            INVERTED_FILTER,
+            Some("claim:ok"),
+            &o,
+            "h",
+            "now",
+            &no_tree(),
+            None,
+        );
         assert_eq!(p["exit"], 4, "the proof record carries the REAL status");
         assert!(
             p.get("stderr").is_some(),
@@ -3728,7 +3845,7 @@ mod tests {
             "jq's own diagnosis, captured: {:?}",
             o.stderr
         );
-        let p = proof_json(failing, Some("claim:ok"), &o, "h", "now", None);
+        let p = proof_json(failing, Some("claim:ok"), &o, "h", "now", &no_tree(), None);
         assert!(
             p["stderr"].as_str().unwrap().contains("maintenance-backup"),
             "and recorded: {p}"
@@ -4061,6 +4178,7 @@ ugrep: warning: complete\": No such file or directory\n";
             &ok("x"),
             "h",
             "now",
+            &no_tree(),
             Some(&ov),
         );
         assert_eq!(p["overridden"]["rule"], UNIDENTIFIED_RULE);
@@ -4068,7 +4186,7 @@ ugrep: warning: complete\": No such file or directory\n";
             p["overridden"]["reason"],
             "the identity header comes from my shell profile"
         );
-        let plain = proof_json("true", Some("x"), &ok("x"), "h", "now", None);
+        let plain = proof_json("true", Some("x"), &ok("x"), "h", "now", &no_tree(), None);
         assert!(
             plain.get("overridden").is_none(),
             "no override, no key — a reader must not read one to learn nothing"
@@ -4405,7 +4523,7 @@ ugrep: warning: complete\": No such file or directory\n";
         // A step that DOES carry a proof still wins — an attempt is the
         // record of a run that settled nothing, not a replacement.
         let proven = json!({"metadata": {"proof": proof_json(
-            "real-probe", Some("x"), &ok("x"), "h", "now", None).to_string()}});
+            "real-probe", Some("x"), &ok("x"), "h", "now", &no_tree(), None).to_string()}});
         let rec = recorded_probe_for(&car, &proven).unwrap();
         assert_eq!(rec.probe, "real-probe");
         assert_eq!(rec.source, Source::Proof);

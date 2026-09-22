@@ -98,12 +98,17 @@ impl ItemAnswer {
     /// excludes (both required), so an open's intent is never empty and
     /// the check always runs.
     ///
-    /// ONLY THE FLAG PREFIX IS ADAPTED. The gate spells these
-    /// `--park-backlog-item`; this verb spells them `--backlog-item`. The
-    /// rewrite is one mechanical substitution, pinned by
-    /// `an_open_with_no_item_answer_is_refused_naming_all_three`, so a
-    /// reworded gate refusal that stopped naming its flags reds a test
-    /// rather than printing flags that do not exist.
+    /// THE SPELLING IS ADAPTED, AND FLAGS THIS VERB LACKS ARE DROPPED.
+    /// The gate spells these `--park-backlog-item`; this verb spells them
+    /// `--backlog-item`. The gate ALSO has answers this verb does not —
+    /// `--park-design` — and a prefix rewrite alone rendered that as
+    /// `--design` at this door, a flag `boss car open --help` has never
+    /// listed (backlog 19a2aca3). Both halves are pinned:
+    /// `an_open_with_no_item_answer_is_refused_naming_all_three` that the
+    /// three real ones are named, and
+    /// `a_refusal_names_only_flags_this_verb_accepts` that nothing else
+    /// is — the second read off clap, so the next flag added at one door
+    /// is covered by construction.
     fn check(&self, summary: &str, excludes: &str) -> Result<()> {
         crate::gate::ParkIntent {
             summary: Some(summary.to_string()),
@@ -172,18 +177,74 @@ impl ItemAnswer {
 }
 
 /// The gate's refusal, in this verb's flag spelling: `--park-backlog-item`
-/// is `--backlog-item` here. One mechanical substitution over a shared
-/// message, rather than a second message to keep in step with it.
+/// is `--backlog-item` here. Two mechanical steps over a shared message,
+/// rather than a second message to keep in step with it: the prefix is
+/// substituted, then any line OFFERING a flag this verb does not accept
+/// is dropped.
+///
+/// WHY THE DROP (backlog 19a2aca3). The two doors do not offer the same
+/// set. `boss gate` gained `--park-design`, the shared refusal gained a
+/// fourth offer line, and the substitution alone printed `--design` here
+/// — a flag `boss car open` has never had, told to a builder who is
+/// already stuck. A refusal is a door's last chance to be helpful, and
+/// naming an unusable door wastes it exactly as naming none does
+/// (2e4d7624). Dropping is the CLASS fix: it holds for the next flag
+/// added at one door and not the other, with no list to remember.
+///
+/// It drops OFFERS, not mentions: see [`offered_flag`].
 ///
 /// The one line of our own says WHEN the answer is being asked for, which
 /// the shared text cannot: it was written for a verb that runs after the
 /// build, and here the build has not started.
 fn in_this_verbs_spelling(refusal: &str) -> String {
+    let rewritten = refusal.replace("--park-", "--");
+    let accepted = accepted_long_flags();
+    let kept: Vec<&str> = rewritten
+        .lines()
+        .filter(|line| offered_flag(line).is_none_or(|f| accepted.contains(f)))
+        .collect();
     format!(
         "a car states which item it is for when its build STARTS — the gate then only \
          has to confirm it.\n{}",
-        refusal.replace("--park-", "--")
+        kept.join("\n")
     )
+}
+
+/// The flag an indented line OFFERS — the "type this" lines of a list of
+/// answers, which is the only shape a caller-specific drop is safe on.
+///
+/// A line at column 0 is prose and survives whatever it mentions: the
+/// shared refusal for two answers at once STARTS with a flag and carries
+/// the whole explanation, so dropping it would delete the refusal.
+fn offered_flag(line: &str) -> Option<&str> {
+    if !line.starts_with([' ', '\t']) {
+        return None;
+    }
+    let tok = line.split_whitespace().next()?;
+    tok.starts_with("--").then_some(tok)
+}
+
+/// EVERY LONG FLAG `boss car open` ACCEPTS, read from the verb's own
+/// clap definition — the one place that decides it (CLAUDE.md §9a).
+///
+/// A list typed here would be the same fact living twice, and the copy
+/// that drifted would be the one deciding what a refusal tells a builder
+/// to type. Reading clap costs one `Command` build on a path that has
+/// already failed.
+fn accepted_long_flags() -> std::collections::BTreeSet<String> {
+    <crate::CarAction as clap::Subcommand>::augment_subcommands(clap::Command::new("car"))
+        .find_subcommand("open")
+        .map(|open| {
+            open.get_arguments()
+                .flat_map(|a| {
+                    a.get_long()
+                        .into_iter()
+                        .chain(a.get_all_aliases().unwrap_or_default())
+                })
+                .map(|l| format!("--{l}"))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// What `boss car open` does about a branch, decided from the system of
@@ -681,6 +742,70 @@ mod tests {
             "this verb's flags have no `park` in them — the gate's spelling must not leak \
              into a refusal printed by `boss car open`: {e}"
         );
+    }
+
+    /// EVERY FLAG A REFUSAL NAMES IS ONE THIS VERB ACCEPTS — read from
+    /// `boss car open`'s OWN clap definition, never a list typed here
+    /// (CLAUDE.md §9a: prefer collapsing to one definition).
+    ///
+    /// WHY THE TEST ABOVE COULD NOT SEE THIS (backlog 19a2aca3). It
+    /// asserts the presence of the three flags that DO exist plus the
+    /// absence of one known-wrong prefix. Both stayed true when the gate
+    /// gained `--park-design`: the shared refusal grew a FOURTH offer
+    /// line, which the prefix rewrite rendered as `--design` — a flag
+    /// this verb has never had. A test that checks presence-of-expected
+    /// and absence-of-one-known-wrong cannot see a line naming something
+    /// that does not exist. This one asks the opposite question, so the
+    /// NEXT flag added at one door and not the other is covered without
+    /// anyone remembering to come back here.
+    #[test]
+    fn a_refusal_names_only_flags_this_verb_accepts() {
+        let accepted = accepted_long_flags();
+        // The clap read must not answer emptily — an empty set would
+        // make every assertion below vacuously true, which is how a
+        // renamed subcommand would slip past silently.
+        assert!(
+            accepted.contains("--backlog-item"),
+            "the clap read finds this verb's own flags: {accepted:?}"
+        );
+        let e = check(&ItemAnswer::default()).unwrap_err().to_string();
+        for flag in flags_named(&e) {
+            assert!(
+                accepted.contains(&flag),
+                "the refusal names {flag}, which `boss car open` does not accept \
+                 (it accepts {accepted:?}): {e}"
+            );
+        }
+    }
+
+    /// AND THE DROP IS MECHANICAL — a shared refusal offering a flag
+    /// this verb lacks loses that LINE and keeps everything else,
+    /// including the prose around it. Written against a synthetic
+    /// refusal because the live one is the instance under repair: when
+    /// the gate next gains a flag, this still says what the rewriter
+    /// does with it.
+    #[test]
+    fn the_rewriter_drops_an_offer_line_for_a_flag_this_verb_lacks() {
+        let out = in_this_verbs_spelling(
+            "pass exactly one of:\n  --park-backlog-item <id>    the closing edge\n  \
+             --park-design <id>          a flag only the gate has\n\nMeasured 2026-09-10.",
+        );
+        assert!(out.contains("--backlog-item <id>"), "{out}");
+        assert!(!out.contains("--design"), "{out}");
+        assert!(!out.contains("a flag only the gate has"), "{out}");
+        assert!(out.contains("Measured 2026-09-10."), "{out}");
+        assert!(out.contains("pass exactly one of:"), "{out}");
+    }
+
+    /// The flags a piece of refusal text names, as a reader reads them.
+    /// The trim keeps `-` so a leading `--` survives, and drops the
+    /// quotes, brackets and sentence punctuation around a flag.
+    fn flags_named(text: &str) -> Vec<String> {
+        text.split_whitespace()
+            .map(|t| t.trim_matches(|c: char| !(c.is_alphanumeric() || c == '-')))
+            .filter(|t| t.starts_with("--") && t.len() > 2)
+            .map(str::to_string)
+            .collect()
     }
 
     /// EACH ANSWER, ALONE, IS ACCEPTED — and lands on the packet under

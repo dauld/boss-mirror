@@ -288,9 +288,21 @@ pub(crate) fn observe_tree(repo: &Path) -> TreeObservation {
         Ok(s) => s,
         Err(e) => return unreadable(e),
     };
+    // The head git DID answer for survives a failure to read the
+    // remote-tracking ref, which is absent on plenty of real checkouts
+    // — and is the fact the proof stamp wants most, since it names the
+    // tree the probe read. Reducing a record before storing it throws
+    // away the only copy (CLAUDE.md §Diagnosis).
     let main_head = match git_line(repo, &["rev-parse", MAIN_REF]) {
         Ok(s) => s,
-        Err(e) => return unreadable(e),
+        Err(e) => {
+            return TreeObservation {
+                standing: Base::Unanswered,
+                head,
+                unreadable: Some(e),
+                ..Default::default()
+            };
+        }
     };
     let standing = base_from_is_ancestor_code(
         git(repo, &["merge-base", "--is-ancestor", &main_head, &head])
@@ -862,6 +874,67 @@ pub(crate) fn stale_tree_guard(obs: &TreeObservation, records: bool, silenced: b
     }
 }
 
+/// How a standing is spelled in a record. ONE definition: a gate-run's
+/// `base_standing` and a proof's `tree_standing` answer the same
+/// question about different refs, and a reader that learned one word
+/// must not meet a second spelling of it.
+pub(crate) fn standing_word(b: Base) -> &'static str {
+    match b {
+        Base::Current => "current",
+        Base::Behind => "behind",
+        Base::Unanswered => "unreadable",
+    }
+}
+
+/// THE TREE A PROBE READ, as proof keys (backlog 6f581de6).
+///
+/// A recorded proof carried `host` and `cwd` — the machine and the
+/// directory — and said nothing about WHAT it read, while a directory's
+/// contents change under it: a probe reads the tree with `git show
+/// HEAD:<path>`, and on the pod HEAD is whatever the checkout last
+/// fast-forwarded to. Provenance is the first of the five properties
+/// (CLAUDE.md §Founding ideas) and this verb exists to turn a feeling
+/// about the past into an artifact, so a proof that cannot say which
+/// revision answered it is incomplete in the one dimension it is for.
+///
+/// `a09bd894` landed the PREVENTION — a stale tree cannot record a
+/// proof through `--from-car`. Prevention plus silence is still weaker
+/// than a record: it says nothing about proofs already on the board,
+/// nothing about the doors the guard does not cover, and a reader with
+/// the proof in front of them still cannot tell. The observation is
+/// already computed at the moment the probe runs, so this is carrying a
+/// value into a record that is already written.
+///
+/// BOTH KEYS ARE ALWAYS PRESENT, `tree_head` null when git could not
+/// answer. Unlike [`base_metadata`], which feeds the metadata PATCH
+/// where a null DELETES the key, this is serialised into one opaque
+/// `proof` string — so null is safe here and it is the honest shape: a
+/// proof whose tree could not be read must not look like one recorded
+/// before this key existed.
+pub(crate) fn tree_metadata(obs: &TreeObservation) -> Value {
+    json!({
+        "tree_head": (!obs.head.is_empty()).then(|| obs.head.clone()),
+        "tree_standing": standing_word(obs.standing),
+    })
+}
+
+/// The tree line for a run that RECORDS NOTHING — `boss prove
+/// --recheck`, which re-runs a recorded probe and writes nothing.
+///
+/// Its HOLDS / NO LONGER HOLDS is acted on by a human, off whatever
+/// tree happens to be present, and until this it was the one door in
+/// the family that said nothing at all about which tree that was. A
+/// NOTE rather than a refusal is what its shape earns: the refusal in
+/// [`stale_tree_guard`] is paid for by the immutability of what a write
+/// lands, and there is no write here. That is why this passes
+/// `records = false`, which by construction cannot refuse — pinned by
+/// `a_run_that_records_nothing_is_told_the_tree_and_never_refused`.
+pub(crate) fn unrecorded_tree_note(obs: &TreeObservation, silenced: bool) -> String {
+    match stale_tree_guard(obs, false, silenced) {
+        BaseGuard::Note(n) | BaseGuard::Refuse(n) => n,
+    }
+}
+
 /// The base facts, as gate-run metadata.
 ///
 /// Stamped whether the base was current or not, and whether the packet
@@ -873,13 +946,7 @@ pub(crate) fn stale_tree_guard(obs: &TreeObservation, records: bool, silenced: b
 /// jobs API's metadata PATCH DELETES a key set to null, and deleting a
 /// key nothing ever wrote is a write that reads as a change.
 pub(crate) fn base_metadata(obs: &BaseObservation, anyway: Option<&str>) -> Value {
-    let mut md = json!({
-        "base_standing": match obs.standing {
-            Base::Current => "current",
-            Base::Behind => "behind",
-            Base::Unanswered => "unreadable",
-        },
-    });
+    let mut md = json!({ "base_standing": standing_word(obs.standing) });
     if !obs.main_head.is_empty() {
         md["base_main_head"] = json!(obs.main_head);
     }
@@ -1776,5 +1843,119 @@ mod tests {
             panic!("a tree that cannot be READ is not a tree that is stale");
         };
         assert!(note.contains("not a git repository"), "{note}");
+    }
+
+    /// AND IT KEEPS THE HEAD IT DID READ. `refs/remotes/origin/main`
+    /// can be absent exactly where a probe is most worth stamping — the
+    /// forge's converged checkout is the tree every recorded probe
+    /// reads, and a clone's remote-tracking ref is not a thing this
+    /// code may assume. Discarding a head git ANSWERED because a second
+    /// ref did not is reducing a record before storing it, which throws
+    /// away the only copy (CLAUDE.md §Diagnosis). The standing is still
+    /// `Unanswered`: what could not be read is not a staleness finding.
+    #[test]
+    fn a_tree_with_no_origin_main_still_names_the_head_it_read() {
+        let f = Forge::build("boss-cli-freshness-tree-no-main");
+        let head = observe_tree(&f.clone).head;
+        assert!(!head.is_empty(), "the fixture clone has a HEAD");
+        Forge::git(&f.clone, &["update-ref", "-d", MAIN_REF]);
+        let obs = observe_tree(&f.clone);
+        assert_eq!(obs.standing, Base::Unanswered, "{obs:?}");
+        assert_eq!(obs.head, head, "the head git answered survives: {obs:?}");
+        assert!(obs.unreadable.is_some(), "{obs:?}");
+    }
+
+    /// THE PROOF STAMP (backlog 6f581de6). A recorded proof carried
+    /// `host` and `cwd` — where it ran — and nothing about WHAT it
+    /// read, while a directory's contents change under it. These are
+    /// the two keys that close that, read off the observation the guard
+    /// above already makes at the moment the probe runs.
+    #[test]
+    fn the_proof_keys_name_the_tree_and_its_standing() {
+        let behind = TreeObservation {
+            standing: Base::Behind,
+            head: "1c63ca24ffff".into(),
+            main_head: "de960a2affff".into(),
+            behind_by: 9,
+            unreadable: None,
+        };
+        let md = tree_metadata(&behind);
+        assert_eq!(md["tree_head"], json!("1c63ca24ffff"));
+        assert_eq!(md["tree_standing"], json!("behind"));
+
+        let current = TreeObservation {
+            standing: Base::Current,
+            head: "abcdef01".into(),
+            main_head: "abcdef01".into(),
+            ..Default::default()
+        };
+        assert_eq!(tree_metadata(&current)["tree_standing"], json!("current"));
+
+        // A head that could not be read is NULL, not the empty string:
+        // absent is a different fact from empty, and `tree_standing`
+        // says which of the two this is.
+        let unknown = TreeObservation {
+            standing: Base::Unanswered,
+            unreadable: Some("not a git repository".into()),
+            ..Default::default()
+        };
+        let md = tree_metadata(&unknown);
+        assert_eq!(md["tree_standing"], json!("unreadable"));
+        assert_eq!(
+            md.get("tree_head"),
+            Some(&Value::Null),
+            "the key is present and null, so a proof whose tree could not be \
+             read reads differently from one recorded before this existed"
+        );
+    }
+
+    /// A RUN THAT RECORDS NOTHING IS TOLD, NEVER REFUSED (backlog
+    /// 6f581de6). `boss prove --recheck` re-runs a recorded probe and
+    /// writes nothing, and a human acts on its HOLDS / NO LONGER HOLDS
+    /// off whatever tree happens to be present. Silence there is the
+    /// same defect one step removed — but a refusal is disproportionate
+    /// to a run that leaves no artifact, so the note is the answer, at
+    /// every standing and with the escape set or not.
+    #[test]
+    fn a_run_that_records_nothing_is_told_the_tree_and_never_refused() {
+        let behind = TreeObservation {
+            standing: Base::Behind,
+            head: "1c63ca24ffff".into(),
+            main_head: "de960a2affff".into(),
+            behind_by: 9,
+            unreadable: None,
+        };
+        let current = TreeObservation {
+            standing: Base::Current,
+            head: "abcdef01".into(),
+            main_head: "abcdef01".into(),
+            ..Default::default()
+        };
+        let unknown = TreeObservation {
+            standing: Base::Unanswered,
+            unreadable: Some("not a git repository".into()),
+            ..Default::default()
+        };
+        for obs in [&behind, &current, &unknown] {
+            for silenced in [false, true] {
+                assert!(
+                    matches!(stale_tree_guard(obs, false, silenced), BaseGuard::Note(_)),
+                    "records=false must never refuse: {obs:?}"
+                );
+                assert_eq!(
+                    unrecorded_tree_note(obs, silenced),
+                    match stale_tree_guard(obs, false, silenced) {
+                        BaseGuard::Note(n) | BaseGuard::Refuse(n) => n,
+                    },
+                    "the unrecorded note is the guard's own text: {obs:?}"
+                );
+            }
+        }
+        assert!(unrecorded_tree_note(&behind, false).contains("BEHIND"));
+        assert!(unrecorded_tree_note(&behind, false).contains("1c63ca2"));
+        assert!(
+            unrecorded_tree_note(&current, false).contains("abcdef0"),
+            "it names the tree even when nothing is wrong"
+        );
     }
 }

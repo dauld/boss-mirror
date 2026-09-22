@@ -521,3 +521,60 @@ fn the_building_doors_warn_and_never_refuse() {
         );
     }
 }
+
+/// ONE ESCAPE, TWO LANGUAGES (CLAUDE.md §9a, backlog 6f581de6).
+///
+/// The shell helper above and `crates/orchestrators/boss-cli/src/freshness.rs`
+/// ask deliberately DIFFERENT questions and that difference is the
+/// design, not a drift: the helper asks whether this checkout is an
+/// ancestor of `origin/main` and stays quiet on a branch, because a
+/// branch is a developer working; the Rust guard asks whether
+/// `origin/main` is an ancestor of HEAD, so a branch cut from an old
+/// main IS judged, because a recorded probe reads that old tree with
+/// `git show HEAD:` either way.
+///
+/// What DOES live twice is the escape. An operator who silences one
+/// door means to silence the freshness question, and finding that the
+/// other door answers to a different spelling is the wrong-target
+/// failure this whole area exists to prevent. A string in a `.sh` and a
+/// `const` in a `.rs` cannot be collapsed into one definition, so §9a's
+/// other half applies: pin it, and name the offending file when it
+/// drifts.
+#[test]
+fn both_freshness_doors_answer_to_one_env_name() {
+    const ESCAPE: &str = "BOSS_DOOR_FRESHNESS";
+    let sh_path = repo_root().join("infra/dev/door-freshness.sh");
+    let rs_path = repo_root().join("crates/orchestrators/boss-cli/src/freshness.rs");
+    let sh = std::fs::read_to_string(&sh_path).expect("read the shell helper");
+    let rs = std::fs::read_to_string(&rs_path).expect("read the Rust guard");
+
+    assert!(
+        sh.contains(&format!("[ \"${{{ESCAPE}:-}}\" = off ]")),
+        "{} no longer silences on {ESCAPE}=off; the Rust guard in {} still does, so \
+         silencing one door leaves the other talking",
+        sh_path.display(),
+        rs_path.display(),
+    );
+    assert!(
+        rs.contains(&format!("FRESHNESS_ENV: &str = \"{ESCAPE}\"")),
+        "{} no longer answers to {ESCAPE}, which {} still silences on",
+        rs_path.display(),
+        sh_path.display(),
+    );
+    assert!(
+        rs.contains("v.trim() == \"off\""),
+        "{} must silence on the same VALUE the shell helper does — `off`, not `1` or \
+         `true`: an escape spelled two ways is an escape that half works",
+        rs_path.display(),
+    );
+    // And the Rust side spells the name exactly once, so every reader
+    // there goes through the const: one side of a pinned pair that has
+    // its own internal copies is a pair with three members.
+    assert_eq!(
+        rs.matches(&format!("\"{ESCAPE}\"")).count(),
+        1,
+        "{} spells the escape as a literal more than once; every reader takes \
+         FRESHNESS_ENV, which cannot drift from itself",
+        rs_path.display(),
+    );
+}

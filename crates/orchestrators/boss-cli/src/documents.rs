@@ -769,4 +769,47 @@ mod tests {
             "a builder reading the expanded rules never sees the door §Doors names: `{door}`"
         );
     }
+
+    /// RULE 2'S REASON IS THE CARGO BOUND, QUOTED (backlog 28fc3a39,
+    /// 2026-09-22). The rule told a builder not to run bare cargo and
+    /// gave the cgroup as its reason — "the pod's 16 GiB / 8-CPU
+    /// cgroup" — where `infra/cluster/manifests/boss-dev.yaml` declares
+    /// twice the memory and twice the CPU. The same figure was half
+    /// wrong in the `cargo jobs` invariant too, which is the shape
+    /// 395d24ad settled: one derivation, quoted here, rather than two
+    /// typed copies drifting apart.
+    ///
+    /// The negative half is the load-bearing one: no cgroup figure may
+    /// be spelled in the body at all, because a second spelling is
+    /// exactly what drifted.
+    #[test]
+    fn the_builder_document_quotes_the_cargo_bound() {
+        let doc = read(&repo(), "builder")
+            .expect("readable")
+            .expect("infra/platform/documents/builder-rules.md is authored");
+        let text = body(&doc);
+        assert!(
+            text.contains("{{invariant:cargo jobs}}"),
+            "the builder rules no longer quote the cargo bound"
+        );
+        assert!(
+            !text.contains("GiB"),
+            "the builder rules spell a cgroup figure of their own; the dev pod's \
+             manifest declares it and {}cargo jobs{} quotes it",
+            OPEN,
+            CLOSE
+        );
+
+        let invs = crate::brief::invariants(&repo()).expect("the invariants derive from this tree");
+        let expanded = expand(&text, &invs).expect("the placeholder expands");
+        let manifest = std::fs::read_to_string(repo().join(crate::brief::DEV_MANIFEST))
+            .expect("the dev manifest");
+        let limits =
+            crate::brief::pod_cgroup_limits(&manifest).expect("the dev container declares limits");
+        assert!(
+            expanded.contains(&limits),
+            "a builder reading the expanded rules never sees the cgroup the manifest \
+             declares: `{limits}`"
+        );
+    }
 }

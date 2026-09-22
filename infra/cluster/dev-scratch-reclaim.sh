@@ -86,10 +86,11 @@
 # AND SINCE 2026-09-20, ONE PASS THAT MOVES THE CHECKOUT ITSELF
 # (backlog 033d1fd3): /work/boss is fast-forwarded to the origin/main it
 # has already fetched, so the pod doors symlinked into its infra/dev
-# stop answering from a copy the tree has moved past. It refuses to run
-# while any gate-run packet is open — a gate renders its runner from a
-# tree — and refuses whenever it cannot read that fact. The long form
-# is at the pass itself.
+# stop answering from a copy the tree has moved past. It defers while a
+# gate is LAUNCHING — a gate renders its runner from a tree as it starts
+# — and whenever it cannot read that fact; a deferral that outlives its
+# deadline is a problem on the packet, never a silent stall. The long
+# form is at the pass itself.
 #
 # WHAT RUNS IT. The `reclaim` sidecar in boss-dev.yaml fires it hourly
 # (the disk-floor-sweep.timer cadence: above the floor a pass is one
@@ -110,6 +111,12 @@
 #                            worktree is removable          (default 12)
 #   BOSS_WORKTREE_IDLE_H     hours of git quiet before a main/detached
 #                            worktree is removable          (default 168)
+#   BOSS_FF_LAUNCH_WINDOW_SECS  how recently a gate-run must have opened
+#                            to count as still LAUNCHING, and so as
+#                            reading the tree                (default 120)
+#   BOSS_FF_DEADLINE_SECS    how long the checkout may stay behind before
+#                            a deferral stops being a wait and becomes a
+#                            finding                        (default 7200)
 #   BOSS_JOBS_URL            the system of record the pass records on;
 #                            else the line in REPO_DIR/infra/dev/sor-url
 # Paths (env, defaulted to the boss-dev layout):
@@ -144,6 +151,17 @@ WORKTREE_GRACE_H="${BOSS_WORKTREE_GRACE_H:-12}"
 # A worktree on `main` or a detached HEAD has no branch for the forge
 # to have forgotten, so idleness is the whole judgement: 7 days.
 WORKTREE_IDLE_H="${BOSS_WORKTREE_IDLE_H:-168}"
+# How recently an open gate-run must have been filed for its gate to
+# still be LAUNCHING — see `gates_quiet` for why that is the whole
+# hazard. 120s against a launch that is one file read plus one POST.
+FF_LAUNCH_WINDOW_SECS="${BOSS_FF_LAUNCH_WINDOW_SECS:-120}"
+# How long the checkout may stay behind origin/main before a deferral
+# stops being "wait for the next hour" and becomes a finding. Trains
+# land roughly every 50 minutes, so two hours is at least two passes
+# and two trains — long enough that a busy afternoon is not an alarm,
+# short enough that a checkout which has stopped catching up is named
+# on the same working day.
+FF_DEADLINE_SECS="${BOSS_FF_DEADLINE_SECS:-7200}"
 
 REPO_DIR="${REPO_DIR:-/work/boss}"
 WORKTREES_DIR="${WORKTREES_DIR:-$REPO_DIR/.claude/worktrees}"
@@ -151,7 +169,7 @@ TARGET_DIR="${CARGO_TARGET_DIR:-/scratch/target}"
 SCRATCH_MOUNT="${SCRATCH_MOUNT:-/scratch}"
 WORK_MOUNT="${WORK_MOUNT:-/work}"
 
-for name in SCRATCH_FLOOR_GB WORK_FLOOR_GB WORKTREE_MAX_AGE_H STALE_TARGET_H WORKTREE_GRACE_H WORKTREE_IDLE_H; do
+for name in SCRATCH_FLOOR_GB WORK_FLOOR_GB WORKTREE_MAX_AGE_H STALE_TARGET_H WORKTREE_GRACE_H WORKTREE_IDLE_H FF_LAUNCH_WINDOW_SECS FF_DEADLINE_SECS; do
     case "${!name}" in
         ''|*[!0-9]*)
             echo "dev-scratch-reclaim: $name must be a whole number, got '${!name}'" >&2
@@ -231,17 +249,45 @@ INCREMENTAL_DROPPED=0
 # judge. The dev container's own sessions keep the ref fresh (worktrees
 # share the object store).
 #
-# WHAT IT MUST NOT DO is move the tree under a running gate: `boss
+# WHAT IT MUST NOT DO is move the tree under a LAUNCHING gate: `boss
 # gate` renders its runner manifest from the tree at launch, which is
 # the never-stash-while-a-gate-runs hazard. The quiet is READ FROM THE
-# SYSTEM OF RECORD — an open `gate-run` packet — rather than from a
-# lock file, because the gate-runs are already in the record and a lock
-# file would be a second copy of a fact (CLAUDE.md §9a). Any open
-# gate-run defers the whole pass: the pass runs hourly and a gate takes
-# minutes, so waiting costs an hour and guessing costs a gate. An
+# SYSTEM OF RECORD — a recently-opened `gate-run` packet — rather than
+# from a lock file, because the gate-runs are already in the record and
+# a lock file would be a second copy of a fact (CLAUDE.md §9a). An
 # answer it CANNOT take — no system of record named, the API erroring,
-# a reply with no `.data` — defers too, because a safety check that did
-# not run is not a safety check.
+# a reply with no `.data`, a page that returns fewer rows than it says
+# are open — defers too, because a safety check that did not run is not
+# a safety check.
+#
+# LAUNCHING, NOT RUNNING (backlog 475fbd10, 2026-09-22). This used to
+# defer on ANY open gate-run, and at 12 builders that condition was true
+# for 251 of 300 minutes — 84% — so an hourly pass landed about one time
+# in six and the checkout sat five commits behind while every door
+# warned and every door WRITE was refused at exit 78. Raising throughput
+# had made the catch-up unreachable. The narrower condition is also the
+# truer one: `boss gate` takes everything it will ever take from a tree
+# in ONE `read_to_string` of the runner manifest — the first statement
+# of `gate::run` in crates/orchestrators/boss-cli/src/gate.rs, BEFORE
+# the gate-run packet is filed — and the runner Job itself clones from
+# the forge into a per-run emptyDir and never touches /work at all
+# (infra/gate-runner/gate-runner.yaml). So a gate-run older than
+# FF_LAUNCH_WINDOW_SECS belongs to a gate that has already rendered, and
+# holding the checkout for it buys nothing. Re-measured over the same
+# history: a 120-second launch window is occupied 15% of five hours and
+# 14% of a day, against 73% and more for "any open gate-run".
+#
+# AND THE DEFERRAL HAS AN UPPER BOUND, because a deferral that can
+# repeat forever never errors — it just stops being true, which is the
+# silent-failure class CLAUDE.md names. Past FF_DEADLINE_SECS behind,
+# a deferral is a PROBLEM: it reds the pass and rides the packet with
+# how long and what held it, the same channel git's own refusal uses.
+# HOW LONG comes from git alone — the committer time of the oldest
+# commit the checkout is missing — so nothing keeps a counter file that
+# could disagree with the two refs that decide the fast-forward. The
+# bound makes a stuck deferral LOUD; it never overrides the hazard,
+# because a gate lost to a moved tree costs more than an hour of stale
+# doors and the doors refuse a write rather than land a wrong one.
 #
 # THREE MORE THINGS IT REFUSES, each the same line door-freshness.sh
 # draws: a checkout not on `main` (somebody put it on a branch), one
@@ -266,23 +312,29 @@ FF_REASON=""
 # "quiet" and is exactly the wrong way to be wrong here.
 FF_USER='{"id":"automation:dev-scratch-reclaim","role":"platform-admin","access_tier":"operator","territory_account_ids":[],"direct_report_ids":[],"department":"platform"}'
 
-# Is any gate reading a tree right now? 0 = quiet, 1 = a gate is open,
+# Is any gate LAUNCHING right now? 0 = quiet, 1 = a gate is launching,
 # 2 = could not tell — which is not quiet. Sets FF_REASON either way.
+#
+# The page is asked for more than it can plausibly need (open gate-runs
+# are bounded by the gate concurrency plus its queue) and the rows are
+# then compared against `.total`: a truncated page answers a smaller
+# question, and the runs it did not send are exactly the ones that could
+# have launched a second ago.
 gates_quiet() {
-    local here url api reply rc count
+    local here url api reply rc count total now_s cutoff at at_s launching
     here="$(dirname "$(readlink -f "$0")")"
     url="${BOSS_JOBS_URL:-$(head -n1 "$here/../dev/sor-url" 2>/dev/null || true)}"
     if [ -z "$url" ]; then
-        FF_REASON="no system of record named (BOSS_JOBS_URL unset, $here/../dev/sor-url absent), so nothing can say whether a gate is running"
+        FF_REASON="no system of record named (BOSS_JOBS_URL unset, $here/../dev/sor-url absent), so nothing can say whether a gate is launching"
         return 2
     fi
     api="$here/../boss-api-curl.sh"
     [ -x "$api" ] || api=boss-api-curl.sh
     rc=0
     reply=$("$api" -fsS -H "x-boss-user: $FF_USER" \
-        "$url/api/jobs?kind=gate-run&status=open&limit=1" 2>/dev/null) || rc=$?
+        "$url/api/jobs?kind=gate-run&status=open&limit=50" 2>/dev/null) || rc=$?
     if [ "$rc" -ne 0 ]; then
-        FF_REASON="the jobs API at $url could not say whether a gate is running (curl exit $rc)"
+        FF_REASON="the jobs API at $url could not say whether a gate is launching (curl exit $rc)"
         return 2
     fi
     count=$(printf '%s' "$reply" | jq '.data | if . == null then error("no .data") else length end' 2>/dev/null) || count=
@@ -292,15 +344,52 @@ gates_quiet() {
             return 2
             ;;
     esac
-    if [ "$count" -gt 0 ]; then
-        FF_REASON="$count open gate-run packet(s) at $url, and a gate renders its runner from a tree"
+    total=$(printf '%s' "$reply" | jq '.total // empty' 2>/dev/null) || total=
+    case ${total:-empty} in
+        empty | *[!0-9]*) total="$count" ;;
+    esac
+    if [ "$total" -gt "$count" ]; then
+        FF_REASON="the jobs API at $url reports $total open gate-run packets but returned $count — a truncated page cannot say whether one of the rest is launching"
+        return 2
+    fi
+    [ "$count" -gt 0 ] || return 0
+
+    now_s=$(date -u +%s)
+    cutoff=$((now_s - FF_LAUNCH_WINDOW_SECS))
+    launching=0
+    # `jq -r` first, into a here-doc, so a `return` below leaves this
+    # function rather than a pipeline's subshell — and so no producer is
+    # still writing when the loop stops (the SIGPIPE coin, rule 12).
+    while IFS= read -r at; do
+        # An open run with no opened_at is a shape this pass cannot
+        # judge, and an unjudgeable safety check is not a safety check.
+        [ -n "$at" ] || {
+            FF_REASON="an open gate-run at $url carries no opened_at, so nothing can say whether it is still reading a tree"
+            return 2
+        }
+        # Guarded FIRST: `date -d ''` answers midnight rather than
+        # erroring (CLAUDE.md), so an empty parse must never become a 0.
+        at_s=$(date -u -d "$at" +%s 2>/dev/null) || at_s=
+        case ${at_s:-empty} in
+            empty | *[!0-9]*)
+                FF_REASON="an open gate-run at $url carries an opened_at this pass cannot read ($at)"
+                return 2
+                ;;
+        esac
+        [ "$at_s" -lt "$cutoff" ] || launching=$((launching + 1))
+    done <<EOF
+$(printf '%s' "$reply" | jq -r '.data[].metadata.opened_at // ""')
+EOF
+
+    if [ "$launching" -gt 0 ]; then
+        FF_REASON="$launching of $count open gate-run packet(s) at $url opened within the last ${FF_LAUNCH_WINDOW_SECS}s, and a gate renders its runner from a tree as it launches"
         return 1
     fi
     return 0
 }
 
 fast_forward_checkout() {
-    local branch head main behind out rc behind_word
+    local branch head main behind out rc behind_word behind_since behind_secs
     if [ ! -d "$REPO_DIR/.git" ] && [ ! -f "$REPO_DIR/.git" ]; then
         log "fast-forward skipped: $REPO_DIR is not a git checkout"
         FF_RESULT="skipped: not a checkout"
@@ -335,20 +424,52 @@ fast_forward_checkout() {
     esac
     if [ "$behind" = 1 ]; then behind_word=commit; else behind_word=commits; fi
 
+    # HOW LONG IT HAS BEEN BEHIND, from the same two refs that decide
+    # the fast-forward: the committer time of the OLDEST commit this
+    # checkout is missing. No counter file, so nothing can disagree with
+    # git about it (CLAUDE.md §9a). `tail` drains the list rather than
+    # cutting it short, so pipefail sees no SIGPIPE.
+    behind_since=$(git -C "$REPO_DIR" log --format=%ct "$head..$main" 2>/dev/null | tail -n1) || behind_since=
+    behind_secs=
+    case ${behind_since:-empty} in
+        empty | *[!0-9]*) ;;
+        *) behind_secs=$(($(date -u +%s) - behind_since)) ;;
+    esac
+
     rc=0
     gates_quiet || rc=$?
-    case "$rc" in
-        1)
-            log "fast-forward deferred: $FF_REASON — $REPO_DIR stays ${behind} ${behind_word} behind until the next pass"
-            FF_RESULT="deferred: a gate is running"
-            return 0
-            ;;
-        2)
-            log "fast-forward deferred: $FF_REASON — a safety check that did not run is not a safety check, so the tree stays where it is" >&2
+    if [ "$rc" -ne 0 ]; then
+        if [ "$rc" = 1 ]; then
+            FF_RESULT="deferred: a gate is launching"
+        else
             FF_RESULT="deferred: the gate check could not be read"
+        fi
+        # THE UPPER BOUND. Deferring is a wait until the checkout has
+        # been behind longer than a deadline; past that it is a FINDING,
+        # because a deferral that can repeat forever never errors — it
+        # just stops being true while every door warns and every door
+        # write is refused at exit 78. The tree still does not move: the
+        # bound makes the stall loud, it does not overrule the hazard.
+        if [ -n "$behind_secs" ] && [ "$behind_secs" -gt "$FF_DEADLINE_SECS" ]; then
+            FF_RESULT="$FF_RESULT, past its ${FF_DEADLINE_SECS}s deadline"
+            # Flattened for the JSON the step writer interpolates it
+            # into, the same way git's own complaint is below — at the
+            # LAST step before storage, with the full text already in
+            # the log line beside it.
+            FF_DETAIL=$(printf '%s has been behind origin/main for %s minutes (%s %s), past the %s-minute deadline: %s' \
+                "$REPO_DIR" "$((behind_secs / 60))" "$behind" "$behind_word" "$((FF_DEADLINE_SECS / 60))" "$FF_REASON" \
+                | tr -d '"\\' | tr '[:cntrl:]' ' ' | tr -s ' ' | cut -c1-400)
+            log "fast-forward DEFERRED PAST ITS DEADLINE: $FF_DETAIL — every door here answers from that tree and a write is refused at exit 78" >&2
+            problems=$((problems + 1))
             return 0
-            ;;
-    esac
+        fi
+        if [ "$rc" = 1 ]; then
+            log "fast-forward deferred: $FF_REASON — $REPO_DIR stays ${behind} ${behind_word} behind until the next pass"
+        else
+            log "fast-forward deferred: $FF_REASON — a safety check that did not run is not a safety check, so the tree stays where it is" >&2
+        fi
+        return 0
+    fi
 
     rc=0
     out=$(git -C "$REPO_DIR" merge --ff-only "$main" 2>&1) || rc=$?

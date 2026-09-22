@@ -83,13 +83,20 @@ const JOB = {
   ],
 };
 
+/// `plugin` and `jobDelayMs` serve the throw pin at the bottom of this
+/// file, and nothing else: a plugin that throws only once its data
+/// arrives, with the data held back past any wall-clock guess.
 async function installIncidentReviewMocks(
   page: import('@playwright/test').Page,
   step: typeof REVIEW_STEP,
+  opts: { plugin?: string; jobDelayMs?: number } = {},
 ) {
   await installSmokeMocks(page);
   const job = { ...JOB, steps: [JOB.steps[0]!, JOB.steps[1]!, step] };
-  await page.route('**/api/jobs/job-ipm-1', (r) => r.fulfill({ json: job }));
+  await page.route('**/api/jobs/job-ipm-1', async (r) => {
+    if (opts.jobDelayMs) await new Promise((done) => setTimeout(done, opts.jobDelayMs));
+    await r.fulfill({ json: job });
+  });
   await page.route('**/api/jobs/step-plugins', (r) =>
     r.fulfill({
       json: [
@@ -105,8 +112,44 @@ async function installIncidentReviewMocks(
     }),
   );
   await page.route('**/plugins/incident-review.js', (r) =>
-    r.fulfill({ contentType: 'application/javascript', body: PLUGIN }),
+    r.fulfill({ contentType: 'application/javascript', body: opts.plugin ?? PLUGIN }),
   );
+}
+
+/// THE PLUGIN'S OWN END OF WORK, OBSERVED — not a clock (backlog
+/// b1b7021c). This guard used to be `waitForTimeout(1500)` followed by
+/// a PLAIN `expect` over `errs`. A plain expect does not retry, because
+/// there is nothing to re-poll in an array already collected, so the
+/// one check in this file whose whole job is to be loud about a plugin
+/// throwing only ever saw a plugin that threw inside the first 1 500 ms
+/// — and recorded a throw at 1 600 ms as no throw at all. Measured on
+/// this branch with the pin at the bottom of the file: a plugin that
+/// throws when its data arrives, with the read held to 1 800 ms, passed
+/// the sleep-then-assert guard.
+///
+/// So wait for what the plugin DOES instead. It paints a placeholder
+/// synchronously, fetches the Job once, and repaints the document from
+/// the answer; `.sir-head` is in that second paint and nothing else,
+/// which makes it the observable end of every path the mount can throw
+/// from. Polling it also reads `errs` on every tick, so a plugin that
+/// died in mount reports as the throw it was rather than spending the
+/// whole visibility budget on a heading that was never going to appear.
+///
+/// No budget of its own: `expect.poll` inherits the one
+/// playwright.mocked.config.ts states for the suite.
+async function findingsRendered(
+  page: import('@playwright/test').Page,
+  errs: readonly string[],
+): Promise<void> {
+  await expect
+    .poll(async () => {
+      // Thrown, not returned: a returned mismatch keeps polling and
+      // spends the whole budget before it says anything, and a plugin
+      // that has already thrown is never going to paint.
+      if (errs.length > 0) throw new Error(`plugin threw: ${errs.join(' | ')}`);
+      return (await page.locator('.sir-head').count()) > 0;
+    })
+    .toBe(true);
 }
 
 test('the findings render as one document: job metadata + what each step found', async ({
@@ -117,9 +160,7 @@ test('the findings render as one document: job metadata + what each step found',
   await installIncidentReviewMocks(page, REVIEW_STEP);
 
   await mountPage(page, '/jobs/job-ipm-1/steps/step-review', { root: '.step-focus' });
-  await page.waitForTimeout(1500);
-
-  expect(errs, `plugin threw: ${errs.join(' | ')}`).toEqual([]);
+  await findingsRendered(page, errs);
 
   // The Job's semi-structured metadata, known keys as sections…
   await expect(page.getByText('Six queued gates killed while etcd degraded on cp-2.')).toBeVisible();
@@ -137,6 +178,11 @@ test('the findings render as one document: job metadata + what each step found',
 
   // Plumbing keys are not findings.
   await expect(page.getByText('Authority role', { exact: true })).toHaveCount(0);
+
+  // Read again at the LAST moment this test can look: a throw that
+  // arrived while the assertions above ran used to be discarded, the
+  // array having been read once and never again.
+  expect(errs, `plugin threw: ${errs.join(' | ')}`).toEqual([]);
 });
 
 test('completing the review PUTs status=completed and refreshes', async ({ page }) => {
@@ -168,11 +214,47 @@ test('a completed review is read-only — the record, not another form', async (
   });
 
   await mountPage(page, '/jobs/job-ipm-1/steps/step-review', { root: '.step-focus' });
-  await page.waitForTimeout(1000);
 
+  // No settle sleep: the first assertion below RETRIES until the
+  // document paints, which is the condition 1 000 ms was guessing at,
+  // and it gates the two after it — the absence checks would otherwise
+  // pass vacuously against a surface that has not loaded yet.
   // The findings still render (the archive value of the surface)…
   await expect(page.getByText('Six queued gates killed while etcd degraded on cp-2.')).toBeVisible();
   // …but there is nothing left to press.
   await expect(page.getByRole('button', { name: /complete review/i })).toHaveCount(0);
   await expect(page.getByText(/review recorded/i)).toBeVisible();
+});
+
+// A PLUGIN THAT THROWS ONLY WHEN ITS DATA ARRIVES — the shape of the
+// false green (backlog b1b7021c). Registers, paints the placeholder,
+// and throws from the callback that renders the document, so the throw
+// cannot land before the read this plugin waits on.
+const THROWS_WHEN_ITS_DATA_ARRIVES = `
+window.__boss_register_step_plugin('incident-review', function (container, props) {
+  var root = document.createElement('div');
+  root.className = 'step-surface step-incident-review';
+  root.innerHTML = '<p class="sir-empty">Loading the findings\u2026</p>';
+  container.appendChild(root);
+  fetch('/api/jobs/' + props.jobId).then(function () {
+    root.innerHTML = '<div class="sir-head"><h3>Post-mortem findings</h3></div>';
+    setTimeout(function () { throw new Error('late plugin throw'); }, 0);
+  });
+});
+`;
+
+test('the throw guard catches a plugin that throws when its data arrives', async ({ page }) => {
+  const errs: string[] = [];
+  page.on('pageerror', (e) => errs.push(String(e)));
+  await installIncidentReviewMocks(page, REVIEW_STEP, {
+    plugin: THROWS_WHEN_ITS_DATA_ARRIVES,
+    jobDelayMs: 1_800,
+  });
+
+  await mountPage(page, '/jobs/job-ipm-1/steps/step-review', { root: '.step-focus' });
+
+  // The guard must FAIL here, and name the throw. `waitForTimeout(1500)`
+  // in its place read the array 300 ms before the throw existed and
+  // passed — the false green, reproduced on this branch before the fix.
+  await expect(findingsRendered(page, errs)).rejects.toThrow(/late plugin throw/);
 });
