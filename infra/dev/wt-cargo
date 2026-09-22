@@ -101,6 +101,51 @@ set -a; . "$env_file"; set +a
 # when they collide; the operator's own worktrees keep the pod bound
 # (infra/dev/pod-build.env, sourced above). WT_JOBS overrides either.
 case "$name" in
-    agent-*) export CARGO_BUILD_JOBS="${WT_JOBS:-4}"; exec nice -n 10 cargo "$@" ;;
-    *)       export CARGO_BUILD_JOBS="${WT_JOBS:-$CARGO_BUILD_JOBS}"; exec cargo "$@" ;;
+    agent-*) export CARGO_BUILD_JOBS="${WT_JOBS:-4}"; runner=(nice -n 10 cargo) ;;
+    *)       export CARGO_BUILD_JOBS="${WT_JOBS:-$CARGO_BUILD_JOBS}"; runner=(cargo) ;;
 esac
+
+# SAY HOW MANY TEST BINARIES THE RUN MUST REACH, BEFORE IT REACHES ANY
+# (backlog 3566f5b4, 2026-09-22). Measured that day: `cargo test -p
+# boss-jobs --all-features` reaches 148 test binaries in 11m20s on this
+# pod — longer than the ten-minute window a builder's tool call gets.
+# Cut off at that mark the output holds 125 `Running` lines, no failure
+# and no final `test result:` summary, which is indistinguishable from a
+# green suite; the eleven binaries sorting at or after waiting_on_pg.rs
+# never ran, and the car went to the gate twice on one-line stale
+# expectations in two of them. cargo stops at the first FAILING binary
+# too (`--no-fail-fast` runs the rest), and that at least exits 101.
+#
+# Counting the `Running` lines was always possible; the total to count
+# them against was what nobody had, and it has to be printed BEFORE the
+# run or the same truncation eats it. `cargo test --no-run` prints one
+# `Executable` line per test binary and the run then prints one
+# `Running` line per binary — measured equal at 148 — and it is the
+# build the run needs anyway, so this costs a warm no-op.
+#
+# Only a whole-crate suite run: a `--` splits harness arguments, where
+# `--no-run` would land on libtest instead of cargo.
+sub=""
+for a in "$@"; do case "$a" in -*) ;; *) sub=$a; break ;; esac; done
+count_pass=yes
+[ "$sub" = test ] || count_pass=no
+for a in "$@"; do case "$a" in --|--no-run|--list|--doc|-h|--help) count_pass=no ;; esac; done
+
+if [ "$count_pass" = yes ]; then
+    # Streamed, not captured: a cold build is minutes long and silence
+    # there is the defect this line exists to close, one layer up.
+    norun=$(mktemp "${TMPDIR:-/tmp}/wt-cargo-norun.XXXXXX")
+    set +e
+    "${runner[@]}" "$@" --no-run 2>&1 | tee "$norun" >&2
+    rc=${PIPESTATUS[0]}
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        rm -f "$norun"
+        exit "$rc"
+    fi
+    binaries=$(grep -c '^ *Executable' "$norun" || true)
+    rm -f "$norun"
+    echo "wt-cargo: $binaries test binaries — cargo prints one Running line per binary and stops at the first that fails, so a run showing fewer, or no final test result line, did not finish and is not green" >&2
+fi
+
+exec "${runner[@]}" "$@"
