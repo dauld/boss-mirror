@@ -102,6 +102,7 @@ fn feedback(n: u8, status: JobStatus, closed_on: Option<NaiveDate>) -> Job {
         status,
         priority: Priority::Standard,
         opened_on: day(2026, 1, 1),
+        opened_at: None,
         due_on: None,
         closed_on,
         metadata: serde_json::Value::Null,

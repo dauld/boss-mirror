@@ -78,6 +78,7 @@ struct JobRow {
     status: String,
     priority: String,
     opened_on: chrono::NaiveDate,
+    opened_at: Option<chrono::DateTime<chrono::Utc>>,
     due_on: Option<chrono::NaiveDate>,
     closed_on: Option<chrono::NaiveDate>,
     metadata: serde_json::Value,
@@ -149,6 +150,7 @@ fn row_to_job(r: JobRow) -> Job {
         status: parse_job_status(&r.status),
         priority: parse_priority(&r.priority),
         opened_on: r.opened_on,
+        opened_at: r.opened_at,
         due_on: r.due_on,
         closed_on: r.closed_on,
         metadata: r.metadata,
@@ -460,9 +462,9 @@ impl JobsRepository for PgJobs {
         let result = sqlx::query(
             r#"
             INSERT INTO jobs (id, kind, subject_kind, subject_id, title, owner_id,
-                              status, priority, opened_on, due_on, closed_on, metadata, tags,
+                              status, priority, opened_on, opened_at, due_on, closed_on, metadata, tags,
                               workflow_version, created_at, updated_at, partition, simulated)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $15, $16, $17)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $16, $17, $18)
             ON CONFLICT (id) DO NOTHING
             "#,
         )
@@ -475,6 +477,11 @@ impl JobsRepository for PgJobs {
         .bind(job_status_str(job.status))
         .bind(priority_str(job.priority))
         .bind(job.opened_on)
+        // The admission instant (backlog 6c2eba00). Written HERE and
+        // nowhere else: the UPDATE below leaves the column out, the
+        // same way it leaves `partition` out, so a later PUT carrying
+        // a different value cannot move when the packet arrived.
+        .bind(job.opened_at)
         .bind(job.due_on)
         .bind(job.closed_on)
         .bind(&job.metadata)
@@ -528,7 +535,7 @@ impl JobsRepository for PgJobs {
 
     async fn get_job(&self, id: &JobId) -> Result<Option<Job>, JobsError> {
         let row = sqlx::query_as::<_, JobRow>(
-            "SELECT id, kind, workflow_version, subject_kind, subject_id, title, owner_id, status, priority, opened_on, due_on, closed_on, metadata, tags, partition FROM jobs WHERE id = $1",
+            "SELECT id, kind, workflow_version, subject_kind, subject_id, title, owner_id, status, priority, opened_on, opened_at, due_on, closed_on, metadata, tags, partition FROM jobs WHERE id = $1",
         )
         .bind(*id.inner().as_uuid())
         .fetch_optional(&self.pool)
@@ -543,7 +550,7 @@ impl JobsRepository for PgJobs {
     /// does, and the answer is deterministic on a busy day.
     async fn newest_closed_job(&self, kind: &str) -> Result<Option<Job>, JobsError> {
         let row = sqlx::query_as::<_, JobRow>(
-            "SELECT id, kind, workflow_version, subject_kind, subject_id, title, owner_id, status, priority, opened_on, due_on, closed_on, metadata, tags, partition \
+            "SELECT id, kind, workflow_version, subject_kind, subject_id, title, owner_id, status, priority, opened_on, opened_at, due_on, closed_on, metadata, tags, partition \
              FROM jobs WHERE kind = $1 AND status = 'closed' \
              ORDER BY closed_on DESC NULLS LAST, opened_on DESC, created_at DESC, id LIMIT 1",
         )
@@ -582,9 +589,10 @@ impl JobsRepository for PgJobs {
             .begin()
             .await
             .map_err(|e| JobsError::Storage(e.to_string()))?;
-        // `partition` (and its derived `simulated`) is deliberately
-        // absent from the SET list: a Job's origin is decided at
-        // admission and never revisited.
+        // `partition` (and its derived `simulated`) and `opened_at`
+        // are deliberately absent from the SET list: a Job's origin
+        // and the instant it was admitted are decided at admission and
+        // never revisited.
         // The storage enforces the immutability rather than trusting
         // every caller to (same rule as rebuild.rs's upsert).
         let result = sqlx::query(
@@ -669,7 +677,7 @@ impl JobsRepository for PgJobs {
                 updated_at = $4
             WHERE id = $1
             RETURNING id, kind, workflow_version, subject_kind, subject_id, title, owner_id,
-                      status, priority, opened_on, due_on, closed_on, metadata, tags, partition
+                      status, priority, opened_on, opened_at, due_on, closed_on, metadata, tags, partition
             "#,
         )
         .bind(*id.inner().as_uuid())
@@ -894,7 +902,7 @@ impl JobsRepository for PgJobs {
             UPDATE jobs SET workflow_version = $2, updated_at = $3
             WHERE id = $1
             RETURNING id, kind, workflow_version, subject_kind, subject_id, title, owner_id,
-                      status, priority, opened_on, due_on, closed_on, metadata, tags, partition
+                      status, priority, opened_on, opened_at, due_on, closed_on, metadata, tags, partition
             "#,
         )
         .bind(*id.inner().as_uuid())
@@ -962,7 +970,7 @@ impl JobsRepository for PgJobs {
         // /api/jobs?account_id=foo looked empty on every detail page.
         let list_sql = r#"
             SELECT id, kind, workflow_version, subject_kind, subject_id, title, owner_id, status,
-                   priority, opened_on, due_on, closed_on, metadata, tags, partition
+                   priority, opened_on, opened_at, due_on, closed_on, metadata, tags, partition
             FROM jobs
             WHERE ($1::text IS NULL OR kind = $1)
               -- $13 is the terminal retention window. With it, $2 is

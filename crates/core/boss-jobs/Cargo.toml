@@ -287,3 +287,7 @@ required-features = ["postgres"]
 [[test]]
 name = "the_inbox_outlives_the_session_that_filled_it_pg"
 required-features = ["postgres"]
+
+[[test]]
+name = "a_rebuild_recovers_the_admission_instant_from_the_log_pg"
+required-features = ["postgres"]

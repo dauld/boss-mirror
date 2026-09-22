@@ -293,12 +293,13 @@ impl JobsRepository for InMemoryJobs {
             let Some(existing) = state.jobs.get(&key) else {
                 return Err(JobsError::NotFound(job.id));
             };
-            // Mirror the Pg adapter: the partition is decided at
-            // admission and immutable — an update carries no
-            // authority over it. The storage enforces this rather
-            // than trusting every caller to.
+            // Mirror the Pg adapter: the partition and the admission
+            // instant are decided at admission and immutable — an
+            // update carries no authority over either. The storage
+            // enforces this rather than trusting every caller to.
             let mut next = job.clone();
             next.partition = existing.partition;
+            next.opened_at = existing.opened_at;
             state.jobs.insert(key, next);
         }
         self.record_all(events);

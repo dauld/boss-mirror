@@ -153,6 +153,8 @@ pub async fn rebuild_jobs_and_steps(pool: &PgPool) -> Result<RebuildReport, Rebu
 /// decided when it is created and never revisited, so a later
 /// `jobs.job.updated` must not be able to move it. The storage
 /// enforces the immutability rather than trusting every caller to.
+/// `opened_at` (backlog 6c2eba00) rides with it, for the same reason
+/// and on the same terms.
 async fn upsert_job(
     conn: &mut sqlx::PgConnection,
     job: &Job,
@@ -160,12 +162,21 @@ async fn upsert_job(
     partition: Partition,
 ) -> Result<bool, RebuildError> {
     let (subj_kind, subj_ref) = subject_parts(&job.subject);
+    // The admission instant, derived from the log rather than invented
+    // (backlog 6c2eba00, design f2cdff23 question `backfill`): the
+    // payload's own stamp for a packet admitted after the field
+    // existed, and the create event's recorded instant for one filed
+    // before it — which is the same derivation the migration's
+    // back-fill applies, so a full replay reproduces the columns it
+    // wrote rather than drifting from them. A packet whose create
+    // event is not in the log has no row here to fill.
+    let opened_at = job.opened_at.unwrap_or(ts);
     let result = sqlx::query(
         r#"
         INSERT INTO jobs (id, kind, subject_kind, subject_id, title, owner_id,
-                          status, priority, opened_on, due_on, closed_on, metadata, tags,
+                          status, priority, opened_on, opened_at, due_on, closed_on, metadata, tags,
                           workflow_version, created_at, updated_at, partition, simulated)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $15, $16, $17)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $16, $17, $18)
         ON CONFLICT (id) DO UPDATE SET
             kind = EXCLUDED.kind,
             workflow_version = EXCLUDED.workflow_version,
@@ -193,6 +204,7 @@ async fn upsert_job(
     .bind(job_status_str(job.status))
     .bind(priority_str(job.priority))
     .bind(job.opened_on)
+    .bind(opened_at)
     .bind(job.due_on)
     .bind(job.closed_on)
     .bind(&job.metadata)

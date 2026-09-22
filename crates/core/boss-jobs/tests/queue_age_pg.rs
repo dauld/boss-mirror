@@ -38,6 +38,7 @@ fn packet(id: &str, owner: &str, title: &str) -> Job {
         status: JobStatus::Open,
         priority: Priority::Standard,
         opened_on: NaiveDate::from_ymd_opt(2026, 8, 29).unwrap(),
+        opened_at: None,
         due_on: None,
         closed_on: None,
         metadata: serde_json::json!({}),

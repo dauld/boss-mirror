@@ -24,6 +24,7 @@ async fn seeded_step(status: StepStatus, assignee: Option<&str>) -> (InMemoryJob
         status: JobStatus::Open,
         priority: Priority::Standard,
         opened_on: NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+        opened_at: None,
         due_on: None,
         closed_on: None,
         metadata: serde_json::Value::Null,

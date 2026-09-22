@@ -41,6 +41,7 @@ fn packet(
         status,
         priority: Priority::Standard,
         opened_on: opened,
+        opened_at: None,
         due_on: None,
         closed_on: closed,
         metadata: match outcome {

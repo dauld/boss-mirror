@@ -164,6 +164,7 @@ fn job(kind: &str, id: &str, title: &str, status: JobStatus, metadata: Value) ->
         status,
         priority: Priority::Standard,
         opened_on: NaiveDate::from_ymd_opt(2026, 9, 19).unwrap(),
+        opened_at: None,
         due_on: None,
         closed_on: (status == JobStatus::Closed)
             .then(|| NaiveDate::from_ymd_opt(2026, 9, 19).unwrap()),

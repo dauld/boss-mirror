@@ -161,6 +161,27 @@ pub struct Job {
     pub status: JobStatus,
     pub priority: Priority,
     pub opened_on: NaiveDate,
+    /// The instant the packet was admitted — server-stamped at
+    /// `POST /api/jobs`, immutable afterwards (the adapters keep it
+    /// out of every UPDATE, the same way they keep `partition` out).
+    ///
+    /// `opened_on` is a DATE, so the finest honest answer it supports
+    /// is a whole day; every surface that asks "how long has this been
+    /// waiting" — the ops-runner's `oldest_wait_s`, dock wait and gate
+    /// duration on the region map, the overdue alarms, the silence
+    /// sweep — needs the instant. Until backlog 6c2eba00 that instant
+    /// was `metadata.opened_at`, written by whoever filed the packet:
+    /// a convention the doors happen to follow, absent on anything
+    /// filed by a caller that does not know it. The metadata stamp is
+    /// still written for the readers already on it; this is the field
+    /// that cannot be absent by accident.
+    ///
+    /// `None` on packets that predate the column and whose
+    /// `jobs.job.created` event the back-fill could not find. An
+    /// absent stamp is the honest answer there — a projection of the
+    /// log, never an invention (design f2cdff23, question `backfill`).
+    #[serde(default)]
+    pub opened_at: Option<chrono::DateTime<chrono::Utc>>,
     pub due_on: Option<NaiveDate>,
     pub closed_on: Option<NaiveDate>,
     pub metadata: serde_json::Value,
@@ -203,6 +224,11 @@ impl Job {
             status: JobStatus::Draft,
             priority,
             opened_on,
+            // Server-stamped at admission, not by a constructor: a
+            // `Job::new` in a sim or replay path has no admission
+            // instant to report, and inventing one here would be the
+            // habit this field replaces.
+            opened_at: None,
             due_on: None,
             closed_on: None,
             metadata: serde_json::Value::Object(serde_json::Map::new()),
@@ -637,6 +663,39 @@ mod tests {
         let json = serde_json::to_string(&job).unwrap();
         let back: Job = serde_json::from_str(&json).unwrap();
         assert_eq!(job, back);
+    }
+
+    /// `opened_at` is a FIELD, not a filer habit (backlog 6c2eba00,
+    /// design f2cdff23). It is server-stamped at admission, so
+    /// `Job::new` leaves it absent; and it is `#[serde(default)]`, so
+    /// every `jobs.job.created` payload written before the promotion
+    /// still deserializes — a rebuild over an old slice must not fail,
+    /// and must not invent an instant nobody observed.
+    #[test]
+    fn job_opened_at_is_absent_until_something_stamps_it() {
+        let mut job = Job::new(
+            "test-kind",
+            Subject::new("asset", "sys-001"),
+            "Test job",
+            "emp-42",
+            Priority::Standard,
+            NaiveDate::from_ymd_opt(2026, 4, 16).unwrap(),
+        );
+        assert_eq!(job.opened_at, None, "Job::new must not invent an instant");
+
+        let at = "2026-09-20T17:40:16.732718729Z"
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap();
+        job.opened_at = Some(at);
+        let v = serde_json::to_value(&job).unwrap();
+        assert!(v.get("opened_at").is_some(), "the stamp rides the wire");
+        let back: Job = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(back.opened_at, Some(at), "sub-second resolution survives");
+
+        let mut pre = v;
+        pre.as_object_mut().unwrap().remove("opened_at");
+        let back: Job = serde_json::from_value(pre).unwrap();
+        assert_eq!(back.opened_at, None);
     }
 
     #[test]
