@@ -16,9 +16,12 @@
 //! wired is a 503, the posture every registry-backed door here takes;
 //! a registry that is wired and cannot answer leaves that ONE part
 //! `has: null` with the error as its reason, because the other five
-//! are still worth reading. Reads admit `crate::trust::can_read` — the
-//! operator tier, a trusted sibling, and the auditor tier the recorded
-//! probe reader carries.
+//! are still worth reading. The READINESS read admits
+//! `crate::trust::can_read` — the operator tier, a trusted sibling,
+//! and the auditor tier the recorded probe reader carries. The bare
+//! LIST asks no tier: it is the org chart the chrome bar renders for
+//! every signed-in user (backlog dc5788ba), the posture `/api/classes`
+//! it took those tabs over from already had.
 
 use std::sync::Arc;
 
@@ -95,13 +98,15 @@ async fn departments_or_response(state: &DepartmentsApiState) -> Result<Vec<Depa
     })
 }
 
-async fn list(
-    State(state): State<Arc<DepartmentsApiState>>,
-    CurrentUser(user): CurrentUser,
-) -> Response {
-    if !can_read(&user) {
-        return StatusCode::FORBIDDEN.into_response();
-    }
+/// The org chart, and it is not operator machinery — so unlike the
+/// readiness read beside it, this one asks no tier (backlog dc5788ba).
+/// The chrome bar builds its tabs from this on every page for every
+/// signed-in user; until that car it derived them from
+/// `GET /api/classes`, which gates nothing, so asking `can_read` here
+/// would take every department tab away from everyone below operator.
+/// The gateway's session cookie is still the door — this is a service
+/// behind it, the posture `/api/classes` and `/api/subject-kinds` take.
+async fn list(State(state): State<Arc<DepartmentsApiState>>) -> Response {
     match departments_or_response(&state).await {
         Ok(rows) => Json(json!({ "data": rows, "total": rows.len() })).into_response(),
         Err(r) => r,

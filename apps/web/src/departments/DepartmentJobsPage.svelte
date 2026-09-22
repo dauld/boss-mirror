@@ -16,7 +16,7 @@
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import { entityHref } from '@boss/web-kit/ui/entity-href';
   import { departmentLabel } from '@boss/web-kit/nav';
-  import { departments } from '@boss/web-kit/session/classes.svelte';
+  import { departments } from '@boss/web-kit/session/departments.svelte';
   import { href, navigate } from '../router';
   import { shortId } from '../data/ids';
   import type { Remote } from '../data/remote';

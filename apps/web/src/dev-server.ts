@@ -61,6 +61,9 @@ const EXTRA_ROUTES: ReadonlyArray<readonly [string, string]> = [
   // /api/surface-opens (the SPA's route-open record, 628f182b) rides
   // on jobs-api beside agent-runs.
   ['/api/surface-opens', 'jobs'],
+  // /api/departments (the departments registry the chrome bar reads
+  // its tabs from, dc5788ba) rides on jobs-api beside stations.
+  ['/api/departments', 'jobs'],
   // /api/events tail mounts on people-api.
   ['/api/events', 'people'],
   // /api/snapshot is mounted on observability.

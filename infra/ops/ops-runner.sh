@@ -124,7 +124,7 @@ BASE="$BOSS_JOBS_URL"
 
 VERBS_DIR="${OPS_VERBS_DIR:-$(dirname "$0")/verbs}"
 # THE CHECKOUT THIS RUNNER IS PART OF. A verb's script is named in its
-# verb file RELATIVE to the repo (infra/forge/reach.sh) and resolved
+# verb file RELATIVE to the repo (infra/forge/disk-report.sh) and resolved
 # here, against the checkout the runner itself runs from — never an
 # absolute path baked into the allowlist. Until 2026-09-12 eleven of
 # sixteen verbs carried /home/david/boss/…, the FORGE's checkout path,

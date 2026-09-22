@@ -1,10 +1,11 @@
 {
-  "about": "READ-ONLY: can this host open a TCP connection to <ip>:<port>? A LAN/tunnel-side vantage the cluster pod lacks (no CAP_NET_RAW, no route into the WireGuard overlay). First use 2026-09-07: is the WireGuard hub 10.99.0.1 reachable over wg0 (the bastion route into the LAN); also the gateway-vs-ISP question for the 1.1.1.0/24 blackhole. Read-only in the phase-1 sense: a TCP connect, nothing sent, nothing mutated. Runs infra/forge/reach.sh: one line, open (<N>ms) / closed (<reason>) / timeout (4s), exit 0 only when open. IPv4 literal only — no hostname, so the host never resolves a name on a packet's behalf.",
+  "about": "READ-ONLY: can this host open a TCP connection to <ip>:<port>? A LAN/tunnel-side vantage the cluster pod lacks (no CAP_NET_RAW, no route into the WireGuard overlay). First use 2026-09-07: is the WireGuard hub 10.99.0.1 reachable over wg0 (the bastion route into the LAN); also the gateway-vs-ISP question for the 1.1.1.0/24 blackhole. Read-only in the phase-1 sense: a TCP connect, nothing sent, nothing mutated. Runs `boss reach`, the tree's CLI installed on this host from the converged image (infra/estate/install-cli-from-image.sh; backlog 9f00a805 car 1). Until car 3 of the same item (2026-09-22) this verb ran infra/forge/reach.sh, 65 lines of bash connecting through /dev/tcp under `timeout 4` because the forge had no boss binary; the twin is deleted and the one definition is crates/orchestrators/boss-cli/src/reach.rs. The output shape is unchanged: one line, open (<N>ms) / closed (<reason>) / timeout (4s), exit 0 only when open, 1 otherwise, 2 on bad usage, so this packet's exit_code carries the verdict. IPv4 literal only — no hostname, so the host never resolves a name on a packet's behalf; the CLI PARSES the quad, which the shell's regex could not, so an out-of-range octet like 999.1.1.1 is refused as usage instead of being handed to the resolver.",
   "hosts": [
     "forge"
   ],
   "argv": [
-    "infra/forge/reach.sh",
+    "boss",
+    "reach",
     "{1}",
     "{2}"
   ],

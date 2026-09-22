@@ -412,6 +412,23 @@ fn build_router(
             "/api/stations/{*rest}",
             axum::routing::any(|s, r| proxy::handle(s, r, &proxy::JOBS)),
         )
+        // The departments registry — the `departments` table and each
+        // department's readiness, served on the jobs upstream beside
+        // stations, so they proxy there. The chrome bar reads the bare
+        // list on every page to build its tabs (backlog dc5788ba): it
+        // used to derive them from `/api/classes`, so the endpoint
+        // existed on the service and had never needed a door. Both
+        // matchers for the stations reason — `{*rest}` needs a
+        // segment, so without the bare route the list falls through to
+        // the SPA fallback and the client parses index.html as JSON.
+        .route(
+            "/api/departments",
+            axum::routing::any(|s, r| proxy::handle(s, r, &proxy::JOBS)),
+        )
+        .route(
+            "/api/departments/{*rest}",
+            axum::routing::any(|s, r| proxy::handle(s, r, &proxy::JOBS)),
+        )
         // The yard's read-model — gate slots + capacity, the garage,
         // the boarding summary — computed on the jobs upstream, so it
         // proxies there beside stations. The Approach renders its
@@ -1165,6 +1182,12 @@ mod routing_tests {
             // the door until train #12 — the reason this list exists.
             "/api/stations",
             "/api/stations/loading-dock/queue",
+            // The departments registry: the bare list is what the
+            // chrome bar reads on every page (dc5788ba), and it is
+            // exactly the shape — a list endpoint with no trailing
+            // segment — the per-service bare matchers exist for.
+            "/api/departments",
+            "/api/departments/sales/readiness",
             // The yard's server-computed read-model: gate slots,
             // capacity and the garage. Same failure as the stations
             // pair one endpoint later — it shipped in train #192 and

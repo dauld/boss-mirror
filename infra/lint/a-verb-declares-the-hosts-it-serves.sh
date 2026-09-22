@@ -187,7 +187,7 @@ for name in sorted(verbs):
         # checkout, so every managed host can carry every script.
         problems.append(
             f"{name}'s argv[0] is the absolute path {argv0}. Name the script relative to "
-            f"the repo (infra/forge/reach.sh); the runner resolves it against its own "
+            f"the repo (infra/forge/disk-report.sh); the runner resolves it against its own "
             f"checkout, on whichever host runs it. A bare command stays a bare command.")
     elif "/" in argv0:
         script = os.path.join(repo, argv0)

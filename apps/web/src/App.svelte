@@ -12,7 +12,8 @@
   import { loadSession } from '@boss/web-kit/session/session.svelte';
   import { loadManifest, manifest, reflectTenantOnDocument } from '@boss/web-kit/session/manifest.svelte';
   import { loadStepTypeRegistry } from './steps/surfaceRegistry.svelte';
-  import { loadClasses, departments } from '@boss/web-kit/session/classes.svelte';
+  import { loadClasses } from '@boss/web-kit/session/classes.svelte';
+  import { loadDepartments, departments } from '@boss/web-kit/session/departments.svelte';
   import AppShell from './shell/AppShell.svelte';
   import UpdateBar from './shell/UpdateBar.svelte';
   import { appsFor, APP_SUBJECT_KINDS, type AppId } from './shell/nav-catalog';
@@ -186,6 +187,7 @@
     loadManifest();
     loadStepTypeRegistry();
     loadClasses('employee');
+    loadDepartments();
     const onPop = () => {
       route = parseRoute(window.location.pathname);
     };

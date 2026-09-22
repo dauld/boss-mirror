@@ -12,7 +12,7 @@
   import { canSeeRoute, type RouteName, type Role } from '@boss/web-kit/session/permissions';
   import { workForRole } from '@boss/web-kit/session/work-by-role';
   import { departmentLabel } from '@boss/web-kit/nav';
-  import { departments } from '@boss/web-kit/session/classes.svelte';
+  import { departments } from '@boss/web-kit/session/departments.svelte';
   import { href, navigate } from '../router';
   import {
     ROUTE_CATALOG,

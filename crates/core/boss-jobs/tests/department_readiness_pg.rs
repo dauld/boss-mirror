@@ -419,25 +419,42 @@ async fn a_part_whose_registry_is_not_wired_is_undetermined_not_absent() {
     assert_eq!(v["have"], 4, "the other parts still count");
 }
 
+/// A signed-in employee gets the org chart and not the machinery.
+///
+/// The readiness read is operator machinery — six registries joined,
+/// one department's protocols, packets and newest retro — and stays
+/// behind `can_read`. The bare LIST is the org chart, which the chrome
+/// bar renders on every page for every signed-in user (backlog
+/// dc5788ba): until that car the bar derived its tabs from
+/// `GET /api/classes`, which no tier gates at all, so refusing a
+/// user-tier caller here would have taken every department tab away
+/// from everyone who is not an operator.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_user_tier_caller_is_refused() {
+async fn a_user_tier_caller_reads_the_roster_and_not_the_readiness() {
     let f = fixture(true, Some(rules())).await;
     let user = User {
         access_tier: AccessTier::User,
         ..operator()
     };
-    let resp = f
-        .app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/api/departments/sales/readiness")
-                .header("x-boss-user", serde_json::to_string(&user).expect("user"))
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let as_user = |uri: &'static str| {
+        let app = f.app.clone();
+        let header = serde_json::to_string(&user).expect("user");
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .header("x-boss-user", header)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response")
+        }
+    };
+    assert_eq!(
+        as_user("/api/departments/sales/readiness").await.status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(as_user("/api/departments").await.status(), StatusCode::OK);
 }

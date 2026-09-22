@@ -76,7 +76,7 @@ file and never from the packet, a literal may lead with `-`
 drops its `{N}` word from the argv instead of failing. `timeout`
 (seconds) overrides the runner's default for that verb.
 
-`argv[0]` names a script RELATIVE to the repo (`infra/forge/reach.sh`);
+`argv[0]` names a script RELATIVE to the repo (`infra/forge/disk-report.sh`);
 the runner resolves it against its own checkout, so every managed host
 can carry every script, and a bare command (`systemctl`, `df`) stays a
 bare command resolved on PATH. An absolute path is refused by the lint

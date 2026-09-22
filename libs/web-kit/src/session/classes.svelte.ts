@@ -10,11 +10,19 @@
 // patching a Svelte file.
 //
 // Each subject_kind is fetched once, on demand, and cached. The boot
-// path loads `employee` (departments/roles); other surfaces call
+// path loads `employee` (roles, and the drawer of department values an
+// employee may be assigned); other surfaces call
 // `loadClasses('<subject_kind>')` from their mount and read via
 // `classesFor('<subject_kind>', '<member_attribute>')`.
-
-import { departmentsFromRegistry, type Department } from '../nav';
+//
+// WHAT LEFT, and why (backlog dc5788ba). `departments()` used to live
+// here and derive the chrome bar's tabs from `(employee, *,
+// department)`. That drawer is the values an employee's `department`
+// column may take, not the departments the company has — a different
+// question with, measured, a different answer. The roster moved to
+// `session/departments.svelte.ts`, which reads the departments
+// registry. This file still serves the drawer to the surfaces whose
+// question it actually is.
 
 type ClassRow = Readonly<{
   subject_kind: string;
@@ -77,16 +85,6 @@ export async function loadClasses(subject_kind: string): Promise<void> {
     requested.delete(subject_kind);
     classes.value = { ...classes.value, [subject_kind]: { kind: 'error' } };
   }
-}
-
-/// The tenant's departments, for the chrome bar and the sidebar's
-/// group labels — `(employee, *, department)` in registry order, read
-/// through the same cache as every other taxonomy (ce68f137). Empty
-/// until `loadClasses('employee')` has answered; the bar then carries
-/// Home (and Simulator) alone, which is the honest state of a shell
-/// that does not yet know the org chart.
-export function departments(): ReadonlyArray<Department> {
-  return departmentsFromRegistry(classesFor('employee', 'department'));
 }
 
 /// Active (non-retired) Class rows for a (subject_kind, member_attribute),

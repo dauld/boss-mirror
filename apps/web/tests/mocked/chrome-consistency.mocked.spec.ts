@@ -33,9 +33,11 @@ const MANIFEST = {
 test.describe('chrome bar', () => {
   test.beforeEach(async ({ page }) => {
     // `mountPage` does not install the smoke-mock backend: the floor
-    // answers the shell's own reads, the manifest is mocked here — the
-    // brand comes from it now — and so are the department Classes the
-    // bar derives its tabs from.
+    // answers the shell's own reads — including the departments
+    // registry the bar derives its tabs from (dc5788ba) — and the
+    // manifest is mocked here, because the brand comes from it now.
+    // The employee Class drawer is still mocked for the surfaces whose
+    // question it is (roles, the policy flyout's scope picker).
     await installApiFloor(page);
     await page.route(/\/api\/tenant\/manifest$/, (r) => r.fulfill({ json: MANIFEST }));
     await page.route(/\/api\/classes(\?|$)/, (r) => r.fulfill({ json: DEPARTMENT_CLASSES }));

@@ -16,6 +16,11 @@
 //! two frontend files, never typed, and the actual set is read from a
 //! database with every migration applied.
 //!
+//! WHICH ROSTER THE RUNNING SPA ASKS is the third test below (backlog
+//! dc5788ba). Equal rosters prove nothing if the chrome bar reads a
+//! different registry than the one pinned here, and until that car it
+//! did.
+//!
 //! HOME IS NOT A ROW, deliberately. `home` is the fourteenth `app` code
 //! in the catalog and it is not a department: Home surfaces are
 //! cross-cutting personal work, and IT is the department that builds
@@ -35,6 +40,8 @@ use std::collections::BTreeSet;
 
 const CATALOG: &str = "apps/web/src/shell/nav-catalog.ts";
 const OPENER: &str = "apps/web/scripts/open-page-audits.ts";
+const LOADER: &str = "libs/web-kit/src/session/departments.svelte.ts";
+const DRAWER: &str = "libs/web-kit/src/session/classes.svelte.ts";
 
 fn read(path: &str) -> String {
     std::fs::read_to_string(repo_root().join(path)).unwrap_or_else(|e| {
@@ -112,6 +119,40 @@ async fn the_rows_are_exactly_the_codes_the_page_march_carries() {
         "the department registry and the codes page-audit packets carry have drifted — \
          a packet whose department matches no row reads as a normal packet, which is why \
          this is a test and not a comment ({CATALOG} + {OPENER})"
+    );
+}
+
+/// WHICH ROSTER THE SPA READS — the other half of the pin above
+/// (backlog dc5788ba, design 32f18167).
+///
+/// The test above holds the department ROWS equal to the codes the
+/// catalog assigns and the opener carries. That is worth nothing if
+/// the running SPA asks a different registry, and until this car it
+/// did: the chrome bar derived its tabs from the employee Class drawer
+/// — `(employee, *, department)`, the values an employee's `department`
+/// column may take — which measured nine codes against these thirteen,
+/// overlapping in five (backlog 80a77466, 2026-09-19). Both halves
+/// were individually correct and the product answered "what
+/// departments are there" two ways.
+///
+/// So this reads the SPA's loader, not prose: it must fetch the
+/// departments endpoint, and the classes client must no longer export
+/// a departments roster at all. A file read that finds nothing panics
+/// rather than passing — `read` says so.
+#[test]
+fn the_spa_reads_the_departments_registry_and_not_the_employee_drawer() {
+    let loader = read(LOADER);
+    assert!(
+        loader.contains("fetch('/api/departments')"),
+        "{LOADER} no longer fetches the departments registry — the chrome bar's tabs are the \
+         `departments` table these rows are in, and a bar reading any other roster renders \
+         departments no packet, page or retro names"
+    );
+    assert!(
+        !read(DRAWER).contains("export function departments("),
+        "{DRAWER} exports a departments roster again — the employee Class drawer is the values \
+         an employee's `department` column may take, which is a different question with a \
+         different answer ({LOADER} is the one that answers this one)"
     );
 }
 

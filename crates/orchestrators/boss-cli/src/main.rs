@@ -36,6 +36,7 @@ mod prove;
 mod publish;
 mod publish_requests;
 mod queue;
+mod reach;
 mod receipt;
 mod rerail;
 mod running;
@@ -148,6 +149,20 @@ enum Commands {
         /// Validate and show what would be filed, without filing.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Can THIS host open a TCP connection to `<ipv4>:<port>`? The
+    /// `reach` ops verb's one definition (backlog 9f00a805 car 3).
+    ///
+    /// One connect under a 4 s deadline, nothing sent, nothing read,
+    /// nothing mutated; one line out, exit 0 only when open. It was
+    /// `infra/forge/reach.sh` — bash and `/dev/tcp` — until the forge
+    /// had a `boss` binary to run instead (car 1 of the same item).
+    Reach {
+        /// A dotted IPv4 quad. Never a hostname: this host does not
+        /// resolve a name on a packet's behalf.
+        ip: String,
+        /// 1..=65535.
+        port: String,
     },
     /// Launch a gate for a branch — files or reuses the gate-run
     /// packet, renders the runner Job, and creates it.
@@ -1403,6 +1418,7 @@ async fn main() -> Result<()> {
             wait,
             dry_run,
         } => ops_request::run(host, verb, args, wait, dry_run).await,
+        Commands::Reach { ip, port } => reach::run(&ip, &port),
         Commands::Cadence { action } => match action {
             CadenceAction::Retire { name } => cadence::retire(&name).await,
             CadenceAction::Publish { file } => cadence::publish(&file).await,

@@ -67,39 +67,52 @@ export function href(relative: string): string {
 // the model rather than doing work inside it.
 // ---------------------------------------------------------------------------
 
-/// One department, as the chrome bar needs it: the Class code and the
-/// registry's display name.
+/// One department, as the chrome bar needs it: the registry's code and
+/// its display name.
 export type Department = Readonly<{ code: string; label: string }>;
 
-/// The shape of a Class row this reader needs; the full row is the
-/// classes client's (`session/classes.svelte.ts`).
-export type DepartmentRow = Readonly<{
-  code: string;
-  display_name: string;
-  member_attribute: string;
-  sort_order: number;
-  retired_at: string | null;
-}>;
+/// The shape of a `GET /api/departments` row this reader needs. The
+/// full row carries a `function` too (the Class taxonomy on the
+/// department kind); the bar has no use for it.
+export type DepartmentRow = Readonly<{ code: string; display_name: string }>;
 
-/// The department vocabulary — departments-from-registry, in registry
-/// sort order (ce68f137).
+/// The department vocabulary — the DEPARTMENTS REGISTRY, read.
 ///
-/// It is the Class registry's `(employee, *, department)` rows: core's
-/// in infra/postgres/schema/01-registries.sql plus whatever the tenant
-/// seeds. Until 2026-09-17 this file carried a copy of that list,
-/// pinned by an equality test against the playground's seeds — which
-/// is exactly why a second tenant's department (Algedonic's
-/// `operations`) had no tab: the copy knew one tenant's org chart. The
-/// SPA already fetches `employee` classes once at boot, so the bar
-/// reads the same rows every other taxonomy reader does. An empty or
-/// unloaded registry is no department tabs, not a crash.
-export function departmentsFromRegistry(
-  rows: ReadonlyArray<DepartmentRow>,
-): ReadonlyArray<Department> {
-  return rows
-    .filter((r) => r.member_attribute === 'department' && r.retired_at === null)
-    .slice()
-    .sort((a, b) => a.sort_order - b.sort_order)
+/// The rows are the un-retired `departments` table, which
+/// `GET /api/departments` serves already filtered and already sorted
+/// by `sort_order, id`; so this keeps the order it was given rather
+/// than inventing one out of fields the wire does not carry.
+///
+/// WHICH REGISTRY, and why it changed (backlog dc5788ba, design
+/// 32f18167). Until now the bar read the employee Class drawer —
+/// `(employee, *, department)`, the values an employee's `department`
+/// column may take — which is a different question and, measured
+/// 2026-09-19 (backlog 80a77466), a different answer: nine codes
+/// against the thirteen departments the company has, overlapping in
+/// five. Once `GET /api/departments` moved to the table, the SPA was
+/// the last reader of the drawer, so the chrome bar rendered
+/// engineering, hosting, operations and product — which are not
+/// departments and own no page — while every page-audit and
+/// department-retro packet named the other thirteen. Two surfaces in
+/// one product answering "what departments are there" differently.
+///
+/// `null` is the read FAILING, and that is not the same fact as an
+/// empty roster: a wrong or unrouted endpoint answers a bare list or
+/// the SPA fallback's index.html, and flattening either to "no
+/// departments" hides the whole org chart without saying so.
+export function departmentsFrom(body: unknown): ReadonlyArray<Department> | null {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return null;
+  const data = (body as { data?: unknown }).data;
+  if (!Array.isArray(data)) return null;
+  return data
+    .filter(
+      (r): r is DepartmentRow =>
+        typeof r === 'object' &&
+        r !== null &&
+        typeof (r as DepartmentRow).code === 'string' &&
+        (r as DepartmentRow).code !== '' &&
+        typeof (r as DepartmentRow).display_name === 'string',
+    )
     .map((r) => ({ code: r.code, label: r.display_name }));
 }
 
