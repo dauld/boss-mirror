@@ -15,6 +15,12 @@
 //! completing, with every noun in the rule's args so the NEXT verb chain
 //! is a rule file and not a handler.
 //!
+//! One half of that measurement has since been repaired: `jobs.spawn`
+//! CAN pass an args list as of 4d53fae2 (2026-09-22), because the DSL
+//! gained a list literal. What is still missing here is the reading —
+//! `jobs.job.closed` carries no step output — so this handler's reason
+//! to exist is the verdict line, not the args.
+//!
 //! ## The rule's args
 //!
 //! - `verb` — which answered ops-request this rule judges.

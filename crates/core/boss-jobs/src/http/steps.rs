@@ -2294,6 +2294,29 @@ pub(super) async fn build_step_ready_event<R: JobsRepository + 'static, B: Event
             "kind": step.kind,
             "subject_kind": subject_kind,
             "subject_id": subject_id,
+            // `workflow_kind` and `spec_slug` are hoisted to the
+            // payload root, and BOTH always present, exactly as
+            // `step.done.<kind>` hoists them and for the same reason:
+            // the dispatcher expr binder resolves flat top-level
+            // identifiers only, and an absent identifier is a
+            // PredicateFailed → Retry → dead-letter storm, not a quiet
+            // false.
+            //
+            // They are WHICH packet and WHICH step of it. The shared
+            // `step.ready.task` topic carries every task step on the
+            // board, so without these a "when this kind's step X
+            // becomes ready" rule had no `when` it could write and had
+            // to fetch the Job in a handler — which is what
+            // `ops.file_tag_release` and `maintenance.chore.file_reds`
+            // were written to do (backlog 4d53fae2, left by the
+            // builder of 89c95245).
+            //
+            // `workflow_kind` is "" only when the parent Job could not
+            // be read, like the subject fields above; `spec_slug` is
+            // "" for a step that has none (ad-hoc, or materialized
+            // before the column existed).
+            "workflow_kind": job.kind,
+            "spec_slug": step.spec_slug.clone().unwrap_or_default(),
             // A step assigned BEFORE it became ready notifies its
             // assignee, not the role's on-call member — the handler
             // prefers a named assignee when the payload carries one.

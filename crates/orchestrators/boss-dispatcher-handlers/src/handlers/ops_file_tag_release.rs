@@ -21,7 +21,20 @@
 //! the step. The sha is the newest closed pr-train's `merge_ref`, a
 //! read of a different packet altogether. `jobs.spawn` reads only its
 //! args and the payload, and cannot carry an args LIST (its
-//! `metadata.*` args are scalars). So this handler: it fetches the
+//! `metadata.*` args are scalars).
+//!
+//! BOTH OF THOSE TWO ARE NOW CLOSED (4d53fae2, 2026-09-22):
+//! `step.ready.*` hoists `workflow_kind` and `spec_slug` the way
+//! `step.done.*` does, so a `when` CAN name this packet kind and this
+//! slug, and the DSL has a list literal, so `metadata.args` can carry
+//! `["tag-release", …]`. What still needs code is the two READS this
+//! handler makes that no rule can make: the version off the release
+//! PACKET, and the sha off the newest merged pr-train — a different
+//! packet altogether. So this handler shrinks rather than disappears,
+//! and its remaining reason is stated here so the next reader does not
+//! re-measure the grammar.
+//!
+//! So this handler: it fetches the
 //! packet the step belongs to, checks it IS the packet kind the rule
 //! names and the step IS the slug (self-filtering, the way
 //! dns.observe requires its packet kind), reads the newest merged

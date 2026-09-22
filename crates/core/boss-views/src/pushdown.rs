@@ -317,10 +317,16 @@ pub fn extract(expr: &Expr, pushable: PushableColumns) -> Option<Pushdown> {
         // catch-all for them here — adding a new operator to the DSL
         // should fail this match rather than silently land in the
         // residual, where it would cost a full scan nobody noticed.
+        // A list literal (4d53fae2) is residual for the same reason:
+        // it exists so a rule file can pass a handler an argument
+        // list, and no comparison over one is expressible in SQL here
+        // — `= ANY(...)` is what `collapse_any` builds out of an OR
+        // chain, not a filter term an author writes.
         Expr::UnaryOp(UnaryOp::Not, _)
         | Expr::FunctionCall(_, _)
         | Expr::Identifier(_)
-        | Expr::Literal(_) => None,
+        | Expr::Literal(_)
+        | Expr::List(_) => None,
     }
 }
 
@@ -831,5 +837,20 @@ mod tests {
                 Bound::Text("si".into())
             ]
         );
+    }
+
+    #[test]
+    fn a_list_literal_is_residual_and_does_not_narrow_its_conjunct() {
+        // The DSL gained list literals for rule ARGS (4d53fae2), and a
+        // View filter shares the evaluator. SQL cannot answer one, so
+        // it must fall to the residual — and, critically, a conjunct
+        // beside it must still push: dropping the pushable half would
+        // cost a scan, and pushing the unpushable half would narrow.
+        assert!(
+            ex("kind = [\"a\", \"b\"]").is_none(),
+            "a comparison against a list is not expressible here"
+        );
+        let (sql, _) = sql_of("kind = \"k\" AND source = [\"a\"]");
+        assert_eq!(sql, "kind = $1", "the pushable conjunct still pushes");
     }
 }

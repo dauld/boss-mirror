@@ -911,7 +911,14 @@ pub fn match_event(
                     // `id` would otherwise spawn a job with an absent
                     // subject. Reject it, skip-and-name the rule, and
                     // leave the innocent neighbours on the topic firing.
-                    Ok(Value::Absent) => {
+                    //
+                    // The check asks the VALUE, not the variant
+                    // (4d53fae2): since the DSL gained list literals an
+                    // arg can be `[a, b, c]`, and an element that
+                    // resolved to nothing is the same hole one level
+                    // down — it would reach the handler as a list with
+                    // `absent` in it.
+                    Ok(v) if v.has_absent() => {
                         let what = match expr {
                             Expr::Identifier(path) => path.join("."),
                             other => format!("{other:?}"),
@@ -1381,6 +1388,67 @@ args = { subject = "id" }
         // silent orphaning this layer exists to prevent.
         assert_eq!(outcome.skipped.len(), 1);
         assert_eq!(outcome.skipped[0].rule, "spawn-keg-return");
+        assert!(matches!(
+            outcome.skipped[0].err,
+            MatchError::ArgFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn an_args_list_reaches_the_handler_whole() {
+        // 4d53fae2: an ops-request is a verb plus an args LIST, and
+        // until the DSL had a list literal a rule could not file one
+        // — which is why `ops.file_tag_release` was written as code.
+        // Elements mix constants and payload identifiers.
+        let toml = r#"
+[[rule]]
+name = "file-tag-release"
+on_event = "step.ready.task"
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"ops-request\"", subject_kind = "\"custom\"", subject = "\"forge\"", "metadata.args" = "[\"tag-release\", workflow_kind, job_id]" }
+"#;
+        let reg = Registry::from_toml(toml).unwrap();
+        let payload = json!({"job_id": "pkt-1", "workflow_kind": "cut-a-release"});
+        let outcome = match_event(&reg, "step.ready.task", &payload, &NoHelpers);
+        assert_eq!(outcome.skipped.len(), 0, "{:?}", outcome.skipped);
+        assert_eq!(outcome.matched.len(), 1);
+        let args = &outcome.matched[0].invocations[0].args;
+        let list = args
+            .iter()
+            .find(|(k, _)| k == "metadata.args")
+            .map(|(_, v)| v)
+            .expect("the args list reaches the handler");
+        assert_eq!(
+            *list,
+            Value::List(vec![
+                Value::String("tag-release".into()),
+                Value::String("cut-a-release".into()),
+                Value::String("pkt-1".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn an_args_list_with_an_unresolvable_element_skips_and_names_the_rule() {
+        // The same defect as the 2026-08-24 incident, one level down:
+        // an arg that resolved to nothing must not reach a handler and
+        // spawn a Job with a hole in it. A list is checked through, so
+        // the hole cannot hide inside one.
+        let toml = r#"
+[[rule]]
+name = "file-tag-release"
+on_event = "step.ready.task"
+[[rule.do]]
+handler = "jobs.spawn"
+args = { "metadata.args" = "[\"tag-release\", version]" }
+"#;
+        let reg = Registry::from_toml(toml).unwrap();
+        let payload = json!({"job_id": "pkt-1"});
+        let outcome = match_event(&reg, "step.ready.task", &payload, &NoHelpers);
+        assert_eq!(outcome.matched.len(), 0);
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].rule, "file-tag-release");
         assert!(matches!(
             outcome.skipped[0].err,
             MatchError::ArgFailed { .. }

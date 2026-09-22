@@ -14,6 +14,19 @@
 //! }}]
 //! ```
 //!
+//! A `metadata.<field>` arg parameterizes the spawned Job's metadata,
+//! and may be a LIST (4d53fae2):
+//! ```toml
+//! do = [{ handler = "jobs.spawn", args = {
+//!   kind = "\"ops-request\"",
+//!   "metadata.verb" = "\"tag-release\"",
+//!   "metadata.args" = "[\"v\" , version, job_id]",
+//! }}]
+//! ```
+//! An ops-request is a verb plus its args, so until the DSL had a list
+//! literal a request with args could not be filed by rule at all and
+//! was filed by a handler written for the purpose.
+//!
 //! Required args: `kind`, `subject_kind`, `subject`.
 //! Optional args: `title` (defaults to "Auto-spawn from rule
 //! `<rule-name>`"), `priority` (defaults to "normal"),
@@ -59,6 +72,33 @@ impl JobsSpawn {
             client,
             jobs_base: jobs_base.into(),
         })
+    }
+}
+
+/// The JSON a `metadata.<field>` arg lands as, or `None` for a value
+/// with no JSON form.
+///
+/// A LIST is the reason this is a function (backlog 4d53fae2). An
+/// ops-request is a verb plus its args — `["tag-release", "v1.2.3",
+/// "<packet>"]` — and while `metadata.*` took scalars only, a rule
+/// could not file one, so the request was filed by a handler written
+/// for the purpose. The DSL now has a list literal, and this is where
+/// it reaches the spawned Job's metadata.
+///
+/// `Absent` and `Null` answer `None` and the field is left off
+/// entirely, which is what the absent-arg guard in `match_event`
+/// already refuses one level up: a key present with a hole in it
+/// would read as a real value downstream.
+fn metadata_arg_json(v: &Value) -> Option<serde_json::Value> {
+    match v {
+        Value::String(s) => Some(json!(s)),
+        Value::Int(i) => Some(json!(i)),
+        Value::Float(x) => Some(json!(x)),
+        Value::Bool(b) => Some(json!(b)),
+        Value::List(items) => Some(serde_json::Value::Array(
+            items.iter().filter_map(metadata_arg_json).collect(),
+        )),
+        Value::Null | Value::Absent => None,
     }
 }
 
@@ -130,13 +170,9 @@ impl Handler for JobsSpawn {
         // per-SKU dedup can match an in-flight restock for that SKU.
         if let Some(map) = metadata.as_object_mut() {
             for (k, v) in args {
-                if let Some(field) = k.strip_prefix("metadata.") {
-                    let jv = match v {
-                        Value::String(s) => json!(s),
-                        Value::Int(i) => json!(i),
-                        Value::Bool(b) => json!(b),
-                        _ => continue,
-                    };
+                if let Some(field) = k.strip_prefix("metadata.")
+                    && let Some(jv) = metadata_arg_json(v)
+                {
                     map.insert(field.to_string(), jv);
                 }
             }
@@ -292,6 +328,60 @@ mod tests {
             .invoke(
                 &[
                     ("kind".to_string(), Value::Int(42)),
+                    ("subject_kind".to_string(), Value::String("vendor".into())),
+                    ("subject".to_string(), Value::String("vnd-1".into())),
+                ],
+                &ctx,
+            )
+            .await;
+        assert!(matches!(res, Err(HandlerError::BadArgType { .. })));
+    }
+
+    #[test]
+    fn a_metadata_arg_carries_a_list_whole() {
+        // 4d53fae2. An ops-request is a verb plus an args LIST, and a
+        // `metadata.*` arg took scalars only — `_ => continue` dropped
+        // anything else SILENTLY, so a rule that tried would have
+        // filed a request with no args at all. Both halves are pinned:
+        // the list arrives as a JSON array, and a shape the DSL cannot
+        // produce here is still skipped rather than guessed at.
+        assert_eq!(
+            metadata_arg_json(&Value::List(vec![
+                Value::String("tag-release".into()),
+                Value::String("v1.2.3".into()),
+                Value::Int(3),
+            ])),
+            Some(json!(["tag-release", "v1.2.3", 3])),
+        );
+        assert_eq!(
+            metadata_arg_json(&Value::List(Vec::new())),
+            Some(json!([])),
+            "an empty args list is a verb with no args, not a skip"
+        );
+        assert_eq!(
+            metadata_arg_json(&Value::String("x".into())),
+            Some(json!("x"))
+        );
+        assert_eq!(metadata_arg_json(&Value::Absent), None);
+    }
+
+    #[tokio::test]
+    async fn a_list_is_not_accepted_where_a_string_is_required() {
+        // `kind` names a workflow. A list there is an authoring
+        // mistake, and the handler must say so rather than stringify
+        // it — `arg_string` already refuses every non-string, and this
+        // pins that the new variant did not open a hole in it.
+        let h = JobsSpawn::new("http://127.0.0.1:1");
+        let ctx = InvocationContext {
+            rule_name: "test".into(),
+            triggering_event_id: "evt-1".into(),
+            triggering_topic: "x".into(),
+            event_payload: serde_json::json!({}),
+        };
+        let res = h
+            .invoke(
+                &[
+                    ("kind".to_string(), Value::List(vec![Value::Int(1)])),
                     ("subject_kind".to_string(), Value::String("vendor".into())),
                     ("subject".to_string(), Value::String("vnd-1".into())),
                 ],

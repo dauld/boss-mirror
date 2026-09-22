@@ -15,6 +15,13 @@
 //!
 //! Operands:
 //!   - Literals: string "...", integer 123, boolean true/false, null
+//!   - List literals: [a, b, c] — elements are themselves expressions,
+//!     so a constant and a payload identifier can sit side by side.
+//!     A list is not a boolean and does not order; it exists so a rule
+//!     file can hand a handler an argument LIST (an ops-request is a
+//!     verb plus its args), which before 4d53fae2 forced a handler.
+//!     A JSON ARRAY on the payload still resolves to `Absent` — see
+//!     `Value::List`.
 //!   - Identifiers: bareword — resolved against caller-supplied state
 //!     (typically a JSON-shaped event payload, or a synthesized
 //!     step-state bag for Workflow v2 predicates)
@@ -71,6 +78,23 @@ pub enum Value {
     /// over an absent `x` is a clean false, not an UnknownIdentifier
     /// that pins the step pending forever.
     Absent,
+    /// An ordered sequence, produced by a list literal `[a, b, c]`.
+    ///
+    /// It exists so a rule file can pass a handler an ARGUMENT LIST —
+    /// an ops-request is a verb plus `["a", "b", "c"]`, and until
+    /// 4d53fae2 a `jobs.spawn` could only carry scalars, so filing one
+    /// by rule was impossible and two handlers were written instead
+    /// (`ops.file_tag_release`, `maintenance.chore.file_reds`).
+    ///
+    /// It is NOT a resolution of payload arrays: `resolve_identifier`
+    /// still answers `Absent` for a JSON array, because predicates
+    /// already depend on that reading (7b756357) and changing it would
+    /// silently flip live `when` clauses. A list is something an
+    /// author WRITES.
+    ///
+    /// It is false in no position at all — `as_bool` refuses it the
+    /// way it refuses a string — and it orders against nothing.
+    List(Vec<Value>),
 }
 
 impl Value {
@@ -83,6 +107,22 @@ impl Value {
             Value::Float(_) => "float",
             Value::String(_) => "string",
             Value::Absent => "absent",
+            Value::List(_) => "list",
+        }
+    }
+
+    /// True iff this value, or any element of it, is `Absent`.
+    ///
+    /// The dispatcher's arg check reads this: an arg that resolved to
+    /// nothing must skip-and-name its rule rather than spawn a Job
+    /// with a hole in it (the 2026-08-24 incident). An element that
+    /// resolved to nothing is the same defect one level down, so the
+    /// check asks the value, not the variant.
+    pub fn has_absent(&self) -> bool {
+        match self {
+            Value::Absent => true,
+            Value::List(items) => items.iter().any(Value::has_absent),
+            _ => false,
         }
     }
 
@@ -110,6 +150,16 @@ impl fmt::Display for Value {
             Value::Float(x) => write!(f, "{x}"),
             Value::String(s) => write!(f, "{s}"),
             Value::Absent => write!(f, "absent"),
+            Value::List(items) => {
+                write!(f, "[")?;
+                for (i, v) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{v}")?;
+                }
+                write!(f, "]")
+            }
         }
     }
 }
@@ -129,6 +179,11 @@ pub enum Expr {
     FunctionCall(String, Vec<Expr>),
     BinaryOp(BinaryOp, Box<Expr>, Box<Expr>),
     UnaryOp(UnaryOp, Box<Expr>),
+    /// `[a, b, c]` — elements are full expressions, evaluated in
+    /// order into a `Value::List`. Not `Expr::Literal(Value::List(..))`
+    /// because an element is usually an identifier off the payload,
+    /// and `references` has to see it (backlog 4d53fae2).
+    List(Vec<Expr>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -249,7 +304,9 @@ pub fn references(expr: &Expr) -> Vec<Vec<String>> {
     fn walk(expr: &Expr, out: &mut Vec<Vec<String>>) {
         match expr {
             Expr::Identifier(path) => out.push(path.clone()),
-            Expr::FunctionCall(_, args) => args.iter().for_each(|a| walk(a, out)),
+            Expr::FunctionCall(_, args) | Expr::List(args) => {
+                args.iter().for_each(|a| walk(a, out))
+            }
             Expr::BinaryOp(_, l, r) => {
                 walk(l, out);
                 walk(r, out);
@@ -401,6 +458,10 @@ impl<'a> Parser<'a> {
             return Ok(inner);
         }
 
+        if c == '[' {
+            return self.parse_list();
+        }
+
         if c == '"' {
             return self.parse_string();
         }
@@ -424,6 +485,35 @@ impl<'a> Parser<'a> {
         }
 
         Err(ParseError::UnexpectedToken(c.to_string(), self.pos))
+    }
+
+    /// `[` expr (`,` expr)* `]`, and `[]`. No trailing comma — the
+    /// function-call form above refuses one too, and one grammar with
+    /// two answers is a trap for the author.
+    fn parse_list(&mut self) -> Result<Expr, ParseError> {
+        debug_assert_eq!(self.peek_char(), Some('['));
+        self.pos += 1;
+        let mut items = Vec::new();
+        self.skip_whitespace();
+        if self.peek_char() != Some(']') {
+            loop {
+                items.push(self.parse_or()?);
+                self.skip_whitespace();
+                if self.match_punct(",") {
+                    continue;
+                }
+                break;
+            }
+        }
+        self.skip_whitespace();
+        if !self.match_punct("]") {
+            return Err(ParseError::Expected {
+                expected: "']'",
+                found: self.src[self.pos..].chars().take(8).collect(),
+                pos: self.pos,
+            });
+        }
+        Ok(Expr::List(items))
     }
 
     fn parse_string(&mut self) -> Result<Expr, ParseError> {
@@ -574,6 +664,10 @@ pub fn eval(expr: &Expr, ctx: &Context<'_>) -> Result<Value, EvalError> {
             let vals: Result<Vec<Value>, _> = args.iter().map(|a| eval(a, ctx)).collect();
             ctx.helpers.call(name, &vals?)
         }
+        Expr::List(items) => {
+            let vals: Result<Vec<Value>, _> = items.iter().map(|i| eval(i, ctx)).collect();
+            Ok(Value::List(vals?))
+        }
         Expr::UnaryOp(UnaryOp::Not, inner) => {
             let v = eval(inner, ctx)?;
             let b = v.as_bool().ok_or(EvalError::TypeError {
@@ -700,6 +794,13 @@ fn values_equal(l: &Value, r: &Value) -> bool {
         (Float(a), Float(b)) => a == b,
         (Int(a), Float(b)) | (Float(b), Int(a)) => (*a as f64) == *b,
         (String(a), String(b)) => a == b,
+        // Element-wise, so a rule can compare an args list it built
+        // against one it was given. An `Absent` element makes the
+        // lists unequal, the same way a bare `Absent` compares unequal
+        // to everything.
+        (List(a), List(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y))
+        }
         _ => false,
     }
 }
@@ -1385,5 +1486,112 @@ mod tests {
         assert!(refs.contains(&vec!["subject".into(), "warranty".into()]));
         // Literals contribute nothing.
         assert_eq!(references(&parse("true").unwrap()).len(), 0);
+    }
+
+    // ----- list literals (backlog 4d53fae2) -----
+
+    #[test]
+    fn parse_list_of_string_literals() {
+        assert_eq!(
+            parse("[\"tag-release\", \"v1.2.3\"]").unwrap(),
+            Expr::List(vec![
+                Expr::Literal(Value::String("tag-release".into())),
+                Expr::Literal(Value::String("v1.2.3".into())),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_empty_list() {
+        assert_eq!(parse("[]").unwrap(), Expr::List(Vec::new()));
+    }
+
+    #[test]
+    fn an_unterminated_list_is_a_parse_error() {
+        assert!(parse("[\"a\", \"b\"").is_err());
+    }
+
+    #[test]
+    fn a_list_element_may_be_any_expression() {
+        // The elements are full expressions, not literals: the whole
+        // point of the form is an ops-request's args, where one word
+        // is a constant and the next comes off the payload.
+        let e = parse("[\"tag-release\", metadata.version, 1 = 1]").unwrap();
+        let payload = json!({"metadata": {"version": "1.2.3"}});
+        assert_eq!(
+            eval(&e, &ctx(&payload)).unwrap(),
+            Value::List(vec![
+                Value::String("tag-release".into()),
+                Value::String("1.2.3".into()),
+                Value::Bool(true),
+            ])
+        );
+    }
+
+    #[test]
+    fn references_walks_into_list_elements() {
+        // The payload-contract gate reads a rule's identifiers out of
+        // `references`, so an identifier hiding in a list must be
+        // visible to it or the gate would pass a rule that
+        // dead-letters.
+        let refs = references(&parse("[host, verb.name, \"x\"]").unwrap());
+        assert_eq!(
+            refs,
+            vec![
+                vec!["host".to_string()],
+                vec!["verb".to_string(), "name".to_string()]
+            ]
+        );
+    }
+
+    #[test]
+    fn a_list_is_not_a_boolean_and_does_not_order() {
+        let payload = json!({});
+        let v = eval(&parse("[1, 2]").unwrap(), &ctx(&payload)).unwrap();
+        assert_eq!(v.kind(), "list");
+        assert_eq!(v.as_bool(), None);
+        // Equality is element-wise; ordering refuses, the way it does
+        // for every other mismatched pair.
+        assert_eq!(
+            eval(&parse("[1, 2] = [1, 2]").unwrap(), &ctx(&payload)).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            eval(&parse("[1, 2] = [1, 3]").unwrap(), &ctx(&payload)).unwrap(),
+            Value::Bool(false)
+        );
+        assert!(eval(&parse("[1] < [2]").unwrap(), &ctx(&payload)).is_err());
+    }
+
+    #[test]
+    fn a_list_reports_an_absent_element() {
+        // `has_absent` is what the dispatcher's arg check reads: an
+        // arg that resolved to nothing must skip-and-name its rule,
+        // and an element that resolved to nothing is the same defect
+        // one level down.
+        let payload = json!({});
+        let v = eval(&parse("[\"a\", nope]").unwrap(), &ctx(&payload)).unwrap();
+        assert!(v.has_absent(), "an absent element must be reported");
+        assert!(Value::Absent.has_absent());
+        assert!(!Value::String("a".into()).has_absent());
+        assert!(
+            !eval(&parse("[\"a\"]").unwrap(), &ctx(&payload))
+                .unwrap()
+                .has_absent()
+        );
+    }
+
+    #[test]
+    fn an_array_on_the_payload_is_still_absent() {
+        // Deliberately unchanged by the list literal: `resolve_identifier`
+        // has answered `Absent` for a JSON array since 7b756357, and
+        // predicates already lean on that (`NOT tags` reads true over
+        // an array today). The literal is a way for a rule AUTHOR to
+        // write a list, not a new resolution of payload arrays.
+        let payload = json!({"tags": ["a", "b"]});
+        assert_eq!(
+            eval(&parse("tags").unwrap(), &ctx(&payload)).unwrap(),
+            Value::Absent
+        );
     }
 }
