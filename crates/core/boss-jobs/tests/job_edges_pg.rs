@@ -122,6 +122,17 @@ async fn registry_seeds_exactly_the_declared_edges() {
                 "translated_from".into(),
                 "job_id".into()
             ),
+            // The gate's own park intent (89faab68). The gate writes
+            // it onto every gate-run it stamps, and it was undeclared
+            // until the census COUNTED it — nobody reading the code
+            // found it. Declared on `gate-run` rather than `'*'`
+            // because one verb writes it onto one kind; the relation
+            // edges above are wildcards for the opposite reason.
+            (
+                "gate-run".into(),
+                "park_backlog_item".into(),
+                "job_id".into()
+            ),
             (
                 "pr-train".into(),
                 "boarded_jobs".into(),

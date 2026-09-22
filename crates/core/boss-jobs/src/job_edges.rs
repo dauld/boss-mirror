@@ -108,6 +108,12 @@ impl JobEdgesRegistry for InMemoryJobEdges {
                 "The car this one must land behind — the dock will not board it until that car has landed",
             ),
             mk(
+                "gate-run",
+                "park_backlog_item",
+                "job_id",
+                "The backlog/feedback Job the car this gate parks will answer",
+            ),
+            mk(
                 "design-doc",
                 "translated_from",
                 "job_id",
@@ -249,6 +255,63 @@ mod tests {
             "the migration's description must match the in-memory one, or the two \
              registries disagree about what the edge means: {}",
             edge.description
+        );
+    }
+
+    /// THE PIN FOR THE GATE'S OWN PARK INTENT (backlog 89faab68).
+    ///
+    /// `boss gate --park-backlog-item` writes `park_backlog_item` onto
+    /// every gate-run it stamps a park intent on, and the field was
+    /// undeclared — found by the census's undeclared-reference count,
+    /// not by anyone reading the code. Undeclared means not
+    /// ref-checked, not rendered in the Links panel, and not
+    /// queryable; and this particular field is what the auto-park rule
+    /// reads to attach a car to its item, so one resolving to nothing
+    /// attaches a car to nothing.
+    ///
+    /// DECLARED ON `gate-run`, NOT `'*'`, and the assertion below holds
+    /// that deliberately. The three relation edges are wildcards
+    /// because a relationship is not a property of a kind; this is the
+    /// opposite — one verb writes it onto one kind — so it is declared
+    /// the way `ship-a-change.backlog_item` is. A wildcard would invite
+    /// the field onto packets that have no business carrying it.
+    #[tokio::test]
+    async fn the_park_intent_edge_matches_the_migration_that_seeds_it() {
+        const MIGRATION: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../infra/postgres/schema/",
+            "20260921222101-the-gate-declares-its-park-intent.sql"
+        ));
+        let edges = InMemoryJobEdges.list().await.expect("list");
+        let edge = edges
+            .iter()
+            .find(|e| e.source_kind == "gate-run" && e.field_path == "park_backlog_item")
+            .expect("gate-run.park_backlog_item must be in the in-memory defaults");
+
+        assert_eq!(
+            edge.field_kind, "job_id",
+            "a gate parks one car against one item"
+        );
+        assert_eq!(
+            edge.on_missing, "abort",
+            "a park intent naming a packet that does not resolve attaches the car to              nothing — refuse it at the write rather than admit it in silence"
+        );
+        assert!(
+            MIGRATION.contains("'gate-run', 'park_backlog_item', 'job_id'"),
+            "the migration must seed the same triple the in-memory list serves"
+        );
+        assert!(
+            MIGRATION.contains(&edge.description),
+            "the migration's description must match the in-memory one, or the two \
+             registries disagree about what the edge means: {}",
+            edge.description
+        );
+        assert!(
+            !edges
+                .iter()
+                .any(|e| e.source_kind == "*" && e.field_path == "park_backlog_item"),
+            "park_backlog_item must not ALSO be declared as a wildcard: one verb writes \
+             it onto one kind, and a second declaration would admit it anywhere"
         );
     }
 
