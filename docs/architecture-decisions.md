@@ -1512,6 +1512,36 @@ the lease, the `service-instance` kind and the `build` step's record
 of its workspace are decided and **not built**: the dev session is one
 Deployment on the build node, allocated by hand.
 
+**The dev door is an Access SSH application** (design `5fc71f03`, David
+2026-09-18, all three as proposed; backlog `e4cedb46`). That one
+Deployment answered only on a MetalLB VIP on the LAN, so from anywhere
+else the way in was a jump through the boss-gcp WireGuard bastion —
+which `/it/estate` had to spell out in three forms, because `ssh://`
+cannot carry a `ProxyJump` — authorised by one long-lived ed25519 key
+an operator had loaded into a Secret by hand. It is now
+`dev.algedonic.dev`: a CNAME to the tunnel, a route on the in-cluster
+connector to the pod's own ssh Service, and a Cloudflare Access
+application in front of it, all four declared in the same files every
+other public name uses. What that buys is not convenience but the
+credential: **Access issues a certificate for the session**, which the
+pod's sshd accepts through `TrustedUserCAKeys`, so nothing long-lived
+sits on either side of the door.
+
+Two things fell out of the measurement. The pod ran **Dropbear rather
+than OpenSSH for one capability** — sshd's preauth privsep child
+chroots, Dropbear does not, and in 2026-08-30 the cheaper door won.
+Dropbear cannot verify a certificate against a CA at all, so the swap
+back costs exactly `SYS_CHROOT` and the history stays in the manifest
+beside the capability list, which is the only place a reader would ask.
+And **the Access declaration needed no new vocabulary**: `type` is a
+value the handler carries from the declaration to the comparison to the
+create body, never matched against a list of known kinds, so `type =
+"ssh"` is declared, compared and applied by the same four fields
+`self_hosted` uses — pinned now, so the next reach for an enum goes
+red. The short-lived-certificate CA is not a field: Cloudflare generates
+one per application, and reading its public key into the Secret the
+manifest names is a root ceremony, done once.
+
 **The train is tested where the seed is** (design `128b5496`, David
 2026-09-12, all three questions accepted as proposed; cars landed
 2026-09-13). Measured off the forge's task list on 2026-09-12: CI's jobs

@@ -1865,6 +1865,45 @@ mod tests {
         }
     }
 
+    /// An SSH application is the SAME vocabulary as a self_hosted one
+    /// (design 5fc71f03; backlog e4cedb46 asked whether the handler
+    /// knows only HTTP applications). `type` is a value carried
+    /// verbatim from the declaration to the comparison and to the
+    /// create body — never matched against a list of known kinds — so
+    /// the dev door needed no handler change, and this test is what
+    /// keeps that true when someone reaches for an enum.
+    #[test]
+    fn an_ssh_application_is_declared_compared_and_created_as_one() {
+        let text = std::fs::read_to_string(
+            boss_testing::repo_root().join("infra/cluster/dns/access.toml"),
+        )
+        .expect("access.toml ships beside the zone file");
+        let dec = parse_access_declaration(&text, "algedonic.dev").expect("parses for the zone");
+        let dev = dec
+            .application
+            .iter()
+            .find(|a| a.domain == "dev.algedonic.dev")
+            .expect("the dev workspace door is declared");
+        assert_eq!(dev.app_type, "ssh");
+
+        // ABSENT is what the first observation after this lands reads,
+        // and what makes the handler create it — with the declared
+        // type, not a default.
+        let absent = compare_access(std::slice::from_ref(dev), &[]);
+        assert_eq!(absent[0]["verdict"], json!("ABSENT"));
+        assert_eq!(absent[0]["declared"]["type"], json!("ssh"));
+
+        // And once the account holds it, the comparison MATCHes: an
+        // ssh application does not read as permanent DRIFT against a
+        // vocabulary that only knew self_hosted.
+        let live = AccessApp {
+            app_type: "ssh".into(),
+            ..live_app("dev.algedonic.dev", vec![allow("operators", &[DAVID])])
+        };
+        let matched = compare_access(std::slice::from_ref(dev), &[live]);
+        assert_eq!(matched[0]["verdict"], json!("MATCH"), "{matched:?}");
+    }
+
     #[test]
     fn the_shipped_access_declaration_parses_and_fronts_both_doors() {
         let text = std::fs::read_to_string(
@@ -2769,8 +2808,10 @@ measured = "2026-09-20: read from the IdP"
     /// deleted that morning, 530 from then on (fd75c641).
     const OLD_TUNNEL_CNAME: &str = "8bb06ec8-a6d1-4796-8f51-df363798b48c.cfargotunnel.com";
     /// The converge packet's ingress line once tunnel-origins.toml routes
-    /// the IdP (the sibling car), as the runner records it.
-    const CONVERGE_ROUTES_IDP: &str = "boss.algedonic.dev → boss; playground.algedonic.dev → boss (boss-playground skipped: secrets absent); id.algedonic.dev → https://10.20.0.31:443 (origin)";
+    /// the IdP (the sibling car) and the dev door (5fc71f03), as the
+    /// runner records it: both are declared origins, so both appear
+    /// here, and the tunnel interlock on either record reads it.
+    const CONVERGE_ROUTES_IDP: &str = "boss.algedonic.dev → boss; playground.algedonic.dev → boss (boss-playground skipped: secrets absent); id.algedonic.dev → https://10.20.0.31:443 (origin); dev.algedonic.dev → ssh://boss-dev-ssh.boss-dev.svc.cluster.local:22 (origin)";
 
     fn converge_listing(ingress: &str) -> Json {
         json!({"data": [{
@@ -2799,6 +2840,13 @@ measured = "2026-09-20: read from the IdP"
                 1,
             ),
             record("www.algedonic.dev", "CNAME", &tunnel_cname(), true, 1),
+            // The dev workspace's ssh door (5fc71f03), present here
+            // although it did not exist on 2026-09-16: each test below
+            // isolates ONE record's flip, and an absent interlocked
+            // record the test is not about would add a create to every
+            // write list. Its own creation is the subject of
+            // `the_dev_door_record_is_created_once_the_converge_routes_it`.
+            record("dev.algedonic.dev", "CNAME", &tunnel_cname(), true, 1),
         ]
     }
 
@@ -2815,6 +2863,13 @@ measured = "2026-09-20: read from the IdP"
                 1,
             ),
             record("www.algedonic.dev", "CNAME", &tunnel_cname(), true, 1),
+            // The dev workspace's ssh door (5fc71f03). It is absent
+            // from `as_measured` deliberately: it did not exist on
+            // 2026-09-16, so every fixture of the zone BEFORE the flip
+            // is now one record short of the declaration, and each
+            // test below that observes such a zone sees the observer
+            // create this one behind its tunnel interlock.
+            record("dev.algedonic.dev", "CNAME", &tunnel_cname(), true, 1),
         ]
     }
 
@@ -2854,6 +2909,15 @@ measured = "2026-09-20: read from the IdP"
                     precedence: 1,
                 }],
             ),
+            // The dev workspace's ssh door (5fc71f03): the only
+            // application of another `type`, which is why it is here
+            // rather than only in its own test — every MATCH fixture
+            // must carry it, or the type a live read returns is one
+            // nothing compares.
+            AccessApp {
+                app_type: "ssh".into(),
+                ..live_app("dev.algedonic.dev", vec![allow("operators", &[DAVID])])
+            },
         ]
     }
 
@@ -3089,7 +3153,7 @@ measured = "2026-09-20: read from the IdP"
             "existing step metadata rides along"
         );
         let verdicts = body["metadata"]["verdicts"].as_array().unwrap();
-        assert_eq!(verdicts.len(), 4, "boss., id., playground. and www.");
+        assert_eq!(verdicts.len(), 5, "boss., id., playground., www. and dev.");
         assert!(
             verdicts.iter().all(|v| v["verdict"] == "MATCH"),
             "{verdicts:?}"
@@ -3111,8 +3175,8 @@ measured = "2026-09-20: read from the IdP"
         let access_v = body["metadata"]["access"].as_array().unwrap();
         assert_eq!(
             access_v.len(),
-            4,
-            "boss., www., the playground and its callback bypass"
+            5,
+            "boss., www., dev., the playground and its callback bypass"
         );
         assert!(
             access_v.iter().all(|v| v["verdict"] == "MATCH"),
@@ -3122,8 +3186,8 @@ measured = "2026-09-20: read from the IdP"
         let summary = body["metadata"]["summary"].as_str().unwrap();
         assert!(
             summary.contains(
-                "4 match, 0 drift, 0 absent, 0 undeclared — every declared record matches"
-            ) && summary.contains("· access: 4 match, 0 drift, 0 absent, 0 undeclared"),
+                "5 match, 0 drift, 0 absent, 0 undeclared — every declared record matches"
+            ) && summary.contains("· access: 5 match, 0 drift, 0 absent, 0 undeclared"),
             "{summary}"
         );
     }
@@ -3175,7 +3239,7 @@ measured = "2026-09-20: read from the IdP"
             ]
         );
         assert_eq!(*zone.reads.lock().unwrap(), 2, "read back after the apply");
-        assert_eq!(zone.live().len(), 4, "no A left beside the CNAME");
+        assert_eq!(zone.live().len(), 5, "no A left beside the CNAME");
 
         let w = writes(&captured);
         assert_eq!(
@@ -3359,6 +3423,57 @@ measured = "2026-09-20: read from the IdP"
         assert_eq!(kept[0]["refused"], "x", "and the refusal is still recorded");
     }
 
+    /// The dev workspace's ssh door (design 5fc71f03; backlog
+    /// e4cedb46). Its record rides the SAME interlock the IdP's does —
+    /// applied only once the converge reports the tunnel routing it —
+    /// because a CNAME to a tunnel with no rule for the name is the
+    /// 530 of 2026-09-16, and an ssh door that answers 530 looks
+    /// exactly like an ssh door that is down.
+    #[tokio::test]
+    async fn the_dev_door_record_is_created_once_the_converge_routes_it() {
+        let without_dev: Vec<Json> = as_declared()
+            .into_iter()
+            .filter(|r| r["name"] != "dev.algedonic.dev")
+            .collect();
+        let (jobs, captured) = stub_jobs_api("ready", vec![], LOCATION).await;
+        let zone = FakeZone::with(without_dev.clone());
+        let access = FakeAccess::with(account_as_declared());
+        let h = handler(jobs, zone.clone(), access, secrets(), declarations());
+        h.invoke(&zone_args(), &ctx()).await.unwrap();
+        assert_eq!(
+            zone.writes(),
+            vec![format!(
+                "create dev.algedonic.dev CNAME {} proxied=true ttl=1",
+                tunnel_cname()
+            )],
+            "the door's record created behind the tunnel interlock, nothing else touched"
+        );
+        let body = step_put(&writes(&captured));
+        let dev = body["metadata"]["verdicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == "dev.algedonic.dev")
+            .cloned()
+            .unwrap_or_else(|| panic!("no dev. verdict: {body}"));
+        assert_eq!(dev["tunnel"], "routed");
+
+        // With a converge that does not name it, nothing is written:
+        // the record waits for the route rather than answering 530.
+        let (jobs, _captured) = stub_jobs_api_with_converge(
+            "ready",
+            vec![],
+            LOCATION,
+            "boss.algedonic.dev → boss; id.algedonic.dev → https://10.20.0.31:443 (origin)",
+        )
+        .await;
+        let zone = FakeZone::with(without_dev);
+        let access = FakeAccess::with(account_as_declared());
+        let h = handler(jobs, zone.clone(), access, secrets(), declarations());
+        h.invoke(&zone_args(), &ctx()).await.unwrap();
+        assert!(zone.writes().is_empty(), "held: {:?}", zone.writes());
+    }
+
     /// The 2026-09-16 outage (fd75c641): the IdP's record pointed at
     /// the deleted tunnel. With the converge routing id. (the sibling
     /// car landed) the observer corrects the CNAME in place behind the
@@ -3377,6 +3492,9 @@ measured = "2026-09-20: read from the IdP"
                 1,
             ),
             record("www.algedonic.dev", "CNAME", &tunnel_cname(), true, 1),
+            // Already applied, so the id. correction is the only write
+            // this test has to account for (see `as_measured`).
+            record("dev.algedonic.dev", "CNAME", &tunnel_cname(), true, 1),
         ];
         let (jobs, captured) = stub_jobs_api("ready", vec![], LOCATION).await;
         let zone = FakeZone::with(stale.clone());

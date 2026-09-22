@@ -32,5 +32,8 @@ data:
         originRequest:
           originServerName: id.algedonic.dev
           noTLSVerify: true
+      # [origin] dev.algedonic.dev — infra/cluster/tunnel-origins.toml
+      - hostname: dev.algedonic.dev
+        service: ssh://boss-dev-ssh.boss-dev.svc.cluster.local:22
       # the mandatory catch-all, last
       - service: http_status:404

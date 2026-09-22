@@ -129,3 +129,24 @@ proxied = true
 ttl = 1
 interlock = "access"
 why = "the company website, served by prod's gateway from the tenant's site/ through the same tunnel; behind Access until the public launch"
+
+# The dev workspace's ssh door (design 5fc71f03, David 2026-09-18;
+# backlog e4cedb46). Until it, the workspace answered only on a LAN VIP
+# (10.20.0.35) and from outside only through the boss-gcp WireGuard
+# bastion — a jump an operator had to hold in their head and a key that
+# lived forever. This name reaches the same pod through the tunnel,
+# behind the Access SSH application access.toml declares for it, which
+# issues a certificate good for one session instead.
+#
+# `interlock = "tunnel"`, like id.: the record is applied only once the
+# converge has recorded the route (tunnel-origins.toml) that serves it.
+# A CNAME ahead of its route is the 530 the IdP answered for a day on
+# 2026-09-16, and the interlock is what that cost bought.
+[[record]]
+name = "dev.algedonic.dev"
+type = "CNAME"
+target = "tunnel:cloudflare-tunnel-credentials"
+proxied = true
+ttl = 1
+interlock = "tunnel"
+why = "the dev workspace's ssh door, routed by the tunnel as a declared origin and fronted by an Access SSH application"

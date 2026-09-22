@@ -258,16 +258,27 @@ spec:
           command: ["sleep", "infinity"]
           securityContext:
             allowPrivilegeEscalation: false
-            # SETGID/SETUID and nothing else: the ssh door (02f4a2ee,
-            # David 2026-08-30: "I just want to do the ssh link") needs
-            # to spawn a session as the connecting user. Dropbear over
-            # OpenSSH precisely because sshd's mandatory preauth chroot
-            # would ALSO need SYS_CHROOT — measured on the live pod:
-            # sshd failed chroot(), dropbear failed only setgid, and
-            # this pair is the whole difference.
+            # SETGID/SETUID because the ssh door (02f4a2ee, David
+            # 2026-08-30: "I just want to do the ssh link") spawns a
+            # session as the connecting user, and SYS_CHROOT because
+            # the door is now OpenSSH (design 5fc71f03, backlog
+            # e4cedb46) and sshd's preauth privsep child chroots to
+            # /run/sshd.
+            #
+            # THAT CHROOT IS WHY DROPBEAR WAS HERE. Measured on the
+            # live pod 2026-08-30: sshd failed chroot(), dropbear
+            # failed only setgid, and this one capability was the
+            # whole difference — so the cheaper door was taken. It was
+            # re-measured 2026-09-20 in the dev pod, unchanged:
+            # CapEff 0x00000000000000c0, SETGID + SETUID and nothing
+            # else. What changed is the requirement, not the cost:
+            # Dropbear cannot verify a user certificate against a CA,
+            # and a certificate the edge issues per session is the
+            # whole point of an Access SSH door. One capability, in
+            # exchange for retiring a key that lived forever.
             capabilities:
               drop: ["ALL"]
-              add: ["SETGID", "SETUID"]
+              add: ["SETGID", "SETUID", "SYS_CHROOT"]
           ports:
             - {name: ssh, containerPort: 22}
           # The ssh door + session env, declared. Everything in here
@@ -281,8 +292,8 @@ spec:
           # closed and the pod healthy — kubectl exec still works and
           # /work/ssh/postStart.log holds the evidence. Accepted debt:
           # apt runs on every pod start (network dependency); the
-          # upgrade is baking dropbear into boss-ci, worth doing only
-          # if boot flakiness is ever actually observed.
+          # upgrade is baking openssh-server into boss-ci, worth doing
+          # only if boot flakiness is ever actually observed.
           lifecycle:
             postStart:
               exec:
@@ -297,8 +308,19 @@ spec:
                     printf 'APT::Sandbox::User "root";\n' > /etc/apt/apt.conf.d/99-pod-no-sandbox
                     mkdir -p /tmp/apt /work/ssh /root/.ssh /work/home
                     apt-get -o Dir::Cache::archives=/tmp/apt update -qq || true
-                    apt-get -o Dir::Cache::archives=/tmp/apt install -y --no-install-recommends dropbear-bin openssh-sftp-server || true
-                    [ -f /work/ssh/dropbear_ed25519_host_key ] || dropbearkey -t ed25519 -f /work/ssh/dropbear_ed25519_host_key
+                    apt-get -o Dir::Cache::archives=/tmp/apt install -y --no-install-recommends openssh-server openssh-sftp-server || true
+                    # The privsep child needs its user and its chroot
+                    # target. The package's postinst makes both; the
+                    # fallback is here because this whole block is
+                    # best-effort and a half-installed apt must not
+                    # leave a door that refuses every login with
+                    # "Privilege separation user sshd does not exist"
+                    # (measured 2026-09-20: that is sshd's refusal, and
+                    # it comes AFTER the config parse, so a valid
+                    # config is not what is missing).
+                    getent passwd sshd >/dev/null || useradd --system --no-create-home --home-dir /run/sshd --shell /usr/sbin/nologin sshd || true
+                    mkdir -p /run/sshd && chmod 0755 /run/sshd
+                    [ -f /work/ssh/ssh_host_ed25519_key ] || ssh-keygen -q -t ed25519 -N '' -f /work/ssh/ssh_host_ed25519_key
                     cp /etc/ssh-authorized/authorized_keys /root/.ssh/authorized_keys || true
                     chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys || true
                     # BOTH homes: sessions arrive with HOME=/work/home
@@ -375,8 +397,55 @@ spec:
                     # reads as success), and the whole install is retried
                     # until the binary exists - ten attempts six seconds
                     # apart, each failure named in this log. It runs after
-                    # dropbear so ssh never waits on the WAN.
-                    dropbear -r /work/ssh/dropbear_ed25519_host_key -p 22 -s
+                    # sshd so ssh never waits on the WAN.
+                    #
+                    # THE DOOR'S OWN CONFIG, on the PVC beside its host
+                    # key: the image ships none, and a hand-edited
+                    # /etc/ssh/sshd_config is exactly the imperative
+                    # state a converge silently reverts. Written on
+                    # every boot, so the manifest is the definition.
+                    # Every keyword below was syntax-checked against
+                    # OpenSSH_9.2 - the bookworm package this pod
+                    # installs - on 2026-09-20.
+                    cat > /work/ssh/sshd_config <<'SD'
+                    Port 22
+                    HostKey /work/ssh/ssh_host_ed25519_key
+                    PidFile /work/ssh/sshd.pid
+                    LogLevel INFO
+                    UsePAM no
+                    PermitRootLogin yes
+                    PasswordAuthentication no
+                    KbdInteractiveAuthentication no
+                    PubkeyAuthentication yes
+                    AuthorizedKeysFile /root/.ssh/authorized_keys
+                    AcceptEnv LANG LC_*
+                    Subsystem sftp /usr/lib/openssh/sftp-server
+                    SD
+                    # THE ACCESS SSH CA, and why the line is conditional.
+                    # TrustedUserCAKeys is what makes the short-lived
+                    # certificate Cloudflare Access issues for one
+                    # session an acceptable credential - the reason this
+                    # door left Dropbear, which cannot verify a
+                    # certificate against a CA at all. The public key is
+                    # David's root ceremony (read it from the Cloudflare
+                    # dashboard into the Secret the volumes below name);
+                    # until it is there the file is absent, and naming
+                    # an absent file would leave the door authorising by
+                    # the mounted key alone with nothing saying why. So
+                    # the line is written only when the key is, and the
+                    # log says which door is open - no evidence is not a
+                    # pass. The certificate must carry `root` as a
+                    # principal: with no AuthorizedPrincipalsFile sshd
+                    # requires the cert's principal to equal the login
+                    # name, and `ssh root@dev.algedonic.dev` is what
+                    # /it/estate prints.
+                    if [ -s /etc/access-ssh-ca/ca.pub ]; then
+                      echo 'TrustedUserCAKeys /etc/access-ssh-ca/ca.pub' >> /work/ssh/sshd_config
+                      echo "ssh door: Access SSH CA present - dev.algedonic.dev certificates accepted"
+                    else
+                      echo "ssh door: no /etc/access-ssh-ca/ca.pub - Secret boss-dev-access-ssh-ca is empty; the LAN key door still works, dev.algedonic.dev refuses every certificate"
+                    fi
+                    /usr/sbin/sshd -f /work/ssh/sshd_config -E /work/ssh/sshd.log
                     # The pod's fsGroup (1500) re-modes files on the PVC at
                     # every mount, so the bastion key David authorised comes
                     # back 0660 after each roll and ssh refuses it
@@ -498,6 +567,7 @@ spec:
             - {name: forge-token, mountPath: /etc/forge, readOnly: true}
             - {name: forge-write-token, mountPath: /etc/boss-train, readOnly: true}
             - {name: ssh-authorized, mountPath: /etc/ssh-authorized, readOnly: true}
+            - {name: access-ssh-ca, mountPath: /etc/access-ssh-ca, readOnly: true}
         - name: postgres
           # Matches production's major (the `boss` StatefulSet runs
           # postgres:16). A dev database on a different major is a test
@@ -678,12 +748,42 @@ spec:
         # absent Secret means a closed door, not a stuck pod.
         - name: ssh-authorized
           secret: {secretName: boss-dev-ssh-authorized-keys, optional: true, defaultMode: 0400}
+        # THE ACCESS SSH CA's PUBLIC KEY (design 5fc71f03, backlog
+        # e4cedb46). Cloudflare Access generates one short-lived-
+        # certificate CA per application; sshd trusts it through
+        # TrustedUserCAKeys, and from then on the edge issues a
+        # certificate good for minutes instead of an operator loading
+        # a key that lives forever.
+        #
+        # THE ROOT CEREMONY, David's, once per application: read the
+        # CA's public key off the Cloudflare dashboard (Access → the
+        # dev.algedonic.dev application → SSH → the public key) and
+        # load it here. Public key material, like the authorized_keys
+        # Secret above, so any operator can carry it - but the tree
+        # never holds the value:
+        #   kubectl create secret generic boss-dev-access-ssh-ca \
+        #     -n boss-dev --from-file=ca.pub=<the dashboard's key>
+        # `optional: true`, the posture every Secret on this pod takes:
+        # an absent Secret is a closed door with a reason in
+        # postStart.log, never a pod stuck in ContainerCreating.
+        - name: access-ssh-ca
+          secret: {secretName: boss-dev-access-ssh-ca, optional: true, defaultMode: 0444}
 ---
-# The ssh door's address: ssh://root@10.20.0.35 — macOS opens Terminal
-# on that URL natively, which is the "launch my terminal from the
-# website" answer (02f4a2ee) without any browser-terminal machinery.
-# Reachable on the LAN directly; off-LAN via the boss-gcp WireGuard
-# jump. Auth is David's ed25519 key only: no passwords, root key login.
+# The ssh door, reachable two ways and declared once. From the
+# internet: the in-cluster Cloudflare Tunnel routes dev.algedonic.dev
+# to this Service BY ITS CLUSTER DNS NAME (infra/cluster/
+# tunnel-origins.toml, `ssh://boss-dev-ssh.boss-dev.svc.cluster.local:22`),
+# behind the Access SSH application declared in
+# infra/cluster/dns/access.toml — which is why a LoadBalancer Service
+# keeps its ClusterIP and why nothing here had to change for the door
+# to move. From the LAN: the MetalLB VIP 10.20.0.35 still answers, on
+# the mounted authorized_keys, as the fallback for a day when the edge
+# is the thing that is broken.
+#
+# The VIP was the ONLY way in until design 5fc71f03 (2026-09-18): a LAN
+# address, so off-LAN meant a jump through the boss-gcp WireGuard
+# bastion, authorised by one long-lived key. /it/estate stopped printing
+# it with backlog e4cedb46; it is kept, not advertised.
 apiVersion: v1
 kind: Service
 metadata:

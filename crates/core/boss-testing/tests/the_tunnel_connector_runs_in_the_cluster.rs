@@ -717,13 +717,13 @@ fn a_skipped_instances_hostname_is_served_by_the_source_gateway_until_provisione
     assert_eq!(rc, 0, "{err}");
     assert_eq!(
         out.trim(),
-        "boss.algedonic.dev → boss; www.algedonic.dev → boss (site); playground.algedonic.dev → boss (boss-playground skipped: secrets absent); id.algedonic.dev → https://10.20.0.31:443 (origin)"
+        "boss.algedonic.dev → boss; www.algedonic.dev → boss (site); playground.algedonic.dev → boss (boss-playground skipped: secrets absent); id.algedonic.dev → https://10.20.0.31:443 (origin); dev.algedonic.dev → ssh://boss-dev-ssh.boss-dev.svc.cluster.local:22 (origin)"
     );
     let (rc, out, err) = run_render_env(&repo_root(), &["--summary"], &[]);
     assert_eq!(rc, 0, "{err}");
     assert_eq!(
         out.trim(),
-        "boss.algedonic.dev → boss; www.algedonic.dev → boss (site); playground.algedonic.dev → boss-playground; id.algedonic.dev → https://10.20.0.31:443 (origin)",
+        "boss.algedonic.dev → boss; www.algedonic.dev → boss (site); playground.algedonic.dev → boss-playground; id.algedonic.dev → https://10.20.0.31:443 (origin); dev.algedonic.dev → ssh://boss-dev-ssh.boss-dev.svc.cluster.local:22 (origin)",
         "applied: the field says the hostname is its own instance's again"
     );
 

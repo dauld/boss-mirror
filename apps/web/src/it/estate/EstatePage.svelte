@@ -8,11 +8,9 @@
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import { formatRelative } from '@boss/web-kit/ui/date';
   import {
-    bastionOf,
-    bastionRoutes,
     comparisonVerdict,
-    DEV_SSH_LABEL,
-    DEV_SSH_URL,
+    DEV_DOOR_HOST,
+    devDoorSteps,
     fetchEstate,
     latestByScope,
     latestComparison,
@@ -47,10 +45,9 @@
   const clusterCmp = $derived(
     estate?.comparisons.kind === 'ready' ? latestComparison(estate.comparisons.data, 'kubernetes-nodes') : null,
   );
-  // The off-VPN route reads the bastion from the same nodes table the
-  // page renders above — no second address typed into this file.
-  const bastion = $derived(estate?.nodes.kind === 'ready' ? bastionOf(estate.nodes.data) : null);
-  const routes = $derived(bastion ? bastionRoutes(bastion.address) : null);
+  // The one-time terminal setup, spelled by the module that holds the
+  // hostname — no second address typed into this file.
+  const doorSteps = devDoorSteps();
 </script>
 
 <div class="estate-root">
@@ -143,31 +140,21 @@
 
     <div class="estate-section">02 — THE DEV WORKSPACE</div>
     <div class="estate-door">
-      <a class="estate-launch" href={DEV_SSH_URL}>Open the dev session — {DEV_SSH_LABEL}</a>
       <p class="estate-hint">
-        On the VPN or LAN. Opens your terminal straight into the workspace (key auth). Inside: the
-        durable tmux session is <code>dev</code> — attach with <code>/work/dev-session.sh</code>,
-        detach with <code>ctrl-b d</code>. For the browser instead, run
-        <code>claude remote-control</code> inside the session and drive it from claude.ai.
+        The workspace answers on <code>{DEV_DOOR_HOST}</code>, from anywhere, behind Cloudflare
+        Access. There is no VPN to join and no key to install: the edge asks who you are and issues
+        a certificate that lasts the session. Three lines, the first two once per machine.
       </p>
-      {#if bastion && routes}
-        <div class="estate-section estate-subsection">OFF THE VPN — THROUGH THE BASTION</div>
-        <p class="estate-hint">
-          {DEV_SSH_LABEL} is a LAN address; from outside, the way in is through
-          <span class="estate-id">{bastion.id}</span> ({bastion.address}).
-        </p>
-        <a class="estate-launch" href={routes.shellUrl}>Open a shell on the bastion — {bastion.address}</a>
-        <p class="estate-hint">
-          Your ssh config supplies the username. Once there, run <code>{routes.hopCommand}</code>.
-          Or both hops in one line:
-        </p>
-        <pre class="estate-snippet">{routes.jumpCommand}</pre>
-        <p class="estate-hint">
-          Or once, in <code>~/.ssh/config</code> — after which the link above works from anywhere,
-          since <code>ssh://</code> cannot carry a jump:
-        </p>
-        <pre class="estate-snippet">{routes.sshConfig}</pre>
-      {/if}
+      {#each doorSteps as step, i (step.command)}
+        <p class="estate-hint"><strong>{i + 1}. {step.what}</strong> — {step.why}</p>
+        <pre class="estate-snippet">{step.command}</pre>
+      {/each}
+      <p class="estate-hint">
+        Inside: the durable tmux session is <code>dev</code> — attach with
+        <code>/work/dev-session.sh</code>, detach with <code>ctrl-b d</code>. For the browser
+        instead, run <code>claude remote-control</code> inside the session and drive it from
+        claude.ai.
+      </p>
     </div>
   {/if}
 </div>
@@ -209,16 +196,9 @@
   .estate-ok { color: var(--signal, #5FD4A8); }
   .estate-drift { color: var(--warn, #d9a441); }
   .estate-door { display: flex; flex-direction: column; gap: 8px; }
-  .estate-launch {
-    font-family: var(--font-mono, ui-monospace, monospace);
-    color: var(--signal, #5FD4A8); text-decoration: none;
-    border: 1px solid var(--signal, #5FD4A8); border-radius: 0;
-    padding: 8px 14px; width: fit-content; letter-spacing: 0.06em;
-  }
-  .estate-launch:hover, .estate-launch:focus { background: var(--signal, #5FD4A8); color: var(--ink-inverse, #0d1117); }
   .estate-hint { color: var(--static, #7A838C); font-size: 12px; max-width: 60ch; }
   .estate-hint code { font-family: var(--font-mono, ui-monospace, monospace); }
-  .estate-subsection { margin-top: 20px; }
+  .estate-hint strong { color: var(--ink, #E6EDF3); font-weight: 500; }
   /* One click selects the whole snippet — copyable without a button. */
   .estate-snippet {
     font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px;

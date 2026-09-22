@@ -43,3 +43,18 @@ service = "https://10.20.0.31:443"
 origin_server_name = "id.algedonic.dev"
 no_tls_verify = true
 why = "the identity provider (Kanidm) every OIDC login on boss. and playground. discovers and redirects to; Cloudflare's Access does not front it, the login page is its own"
+
+[[origin]]
+hostname = "dev.algedonic.dev"
+# The dev workspace's ssh door (design 5fc71f03, David 2026-09-18;
+# backlog e4cedb46). cloudflared proxies arbitrary TCP for an `ssh://`
+# origin, and the client half is `cloudflared access ssh` — the stanza
+# /it/estate prints. The origin is the pod's own Service by cluster DNS
+# name (infra/cluster/manifests/boss-dev.yaml, Service boss-dev-ssh),
+# NOT its MetalLB VIP: the connector runs in the cluster, so the VIP
+# would be a trip out to the LAN and back for a hop it already has.
+# No TLS on this leg and nothing to name with SNI — ssh carries its own
+# host-key authentication end to end, which the tunnel does not
+# terminate.
+service = "ssh://boss-dev-ssh.boss-dev.svc.cluster.local:22"
+why = "the dev workspace's ssh door, in front of which access.toml declares a Cloudflare Access SSH application issuing short-lived certificates"
