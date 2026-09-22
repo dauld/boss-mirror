@@ -1298,6 +1298,11 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     // ones, so an old car is named even when its place would otherwise
     // read as healthy progress.
     let mut stale: Vec<(i64, &str)> = Vec::new();
+    // Of the stale ones, how many have NEVER had their probe run. A
+    // probe that ran and said `not yet` is the world answering; a probe
+    // with no attempt on record is us not asking. Same age, opposite
+    // meaning, and until 2026-09-22 the same sentence.
+    let mut never_probed = 0usize;
     for (j, _) in &awaiting {
         let branch = j
             .metadata
@@ -1315,6 +1320,12 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
         let hours = (inputs.now - opened.with_timezone(&chrono::Utc)).num_hours();
         if hours >= PROOF_STALE_HOURS {
             stale.push((hours, branch));
+            if matches!(
+                shed_place(&j.metadata),
+                ShedPlace::ProbePending { last: None }
+            ) {
+                never_probed += 1;
+            }
         }
     }
     stale.sort_by_key(|(hours, _)| std::cmp::Reverse(*hours));
@@ -1334,10 +1345,22 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
         // The age is the finding, so it leads — and the oldest car is
         // named, because "9 awaiting proof" sends a reader to a list
         // while "105h, fix/x" sends them to a car.
+        // WHOSE MOVE IS IT. The age says something is stuck; this says
+        // whether anyone here can unstick it. Never a fourth state —
+        // a stale proof is worth a look either way — but a reader who
+        // sees "told not yet" knows to go look at the WORLD, and one
+        // who sees "never probed" knows to go run something.
+        let whose = if never_probed == 0 {
+            "every one asked and was told not yet — waiting on the world, not on us".to_string()
+        } else if never_probed == stale.len() {
+            format!("{never_probed} never probed — nothing has run their proof, which is on us")
+        } else {
+            format!("{never_probed} never probed — on us; the rest asked and were told not yet")
+        };
         (
             RegionState::Troubled,
             format!(
-                "{} of {n} open past {PROOF_STALE_HOURS}h — oldest {oldest}h, {branch}",
+                "{} of {n} open past {PROOF_STALE_HOURS}h — oldest {oldest}h, {branch} — {whose}",
                 stale.len()
             ),
         )
@@ -2166,6 +2189,119 @@ mod tests {
         assert!(
             shed.why.contains("UNPROVEN") && shed.why.contains("fix/e"),
             "{}",
+            shed.why
+        );
+    }
+
+    /// A STALE PROOF IS EITHER ON US OR ON THE WORLD, and the shed said
+    /// neither.
+    ///
+    /// Measured 2026-09-22, an hour after the staleness signal above
+    /// shipped: the shed read "8 of 12 open past 24h — oldest 108h" and
+    /// three rechecks of the oldest cars each came back "not yet: no
+    /// real prune since convergence", "not yet: no sponsorship packet
+    /// opened since the change converged", "not yet: no answered
+    /// sweep-archive-branches request". Those cars are HEALTHY and
+    /// blocked on a qualifying event the world has not produced — the
+    /// probe asked and was answered. A car whose probe has never been
+    /// run is the opposite, and the same sentence covered both.
+    ///
+    /// Reporting them identically is the decay CLAUDE.md names under
+    /// "a check nobody reads": a colour that fires on a state nobody
+    /// can act on teaches the reader to discount it. The distinction
+    /// already exists in the type — `ShedPlace::ProbeNotYet` versus a
+    /// `ProbePending` with no attempt recorded — and only the stale
+    /// branch threw it away.
+    #[test]
+    fn a_stale_proof_says_whether_it_waits_on_us_or_on_the_world() {
+        // NOW is 2026-09-19T12:00:00Z; both cars are two days old, so
+        // age cannot be what separates them.
+        let aged = |branch: &str, attempt: Value| {
+            let mut md = json!({
+                "branch": branch,
+                "merged": true,
+                "opened_at": "2026-09-17T10:00:00Z",
+                "proof_probe": "true",
+            });
+            if !attempt.is_null() {
+                md["proof_attempt"] = attempt;
+            }
+            let j = job("ship-a-change", branch, JobStatus::Open, md);
+            let s = vec![
+                step(
+                    &j,
+                    "gate",
+                    StepStatus::Completed,
+                    Some("2026-09-17T06:00:00Z"),
+                ),
+                step(&j, "proven", StepStatus::Ready, None),
+            ];
+            (j, s)
+        };
+        let status = empty_status();
+
+        // ON THE WORLD: the probe ran and was told not yet.
+        let asked = vec![aged("feat/asked", json!({ "not_yet": true, "exit": 75 }))];
+        let out = regions(&inputs(
+            &status,
+            &[],
+            &[],
+            &asked,
+            &[],
+            Some(&[]),
+            Some(&[]),
+        ));
+        let shed = by_name(&out, "shed");
+        assert_eq!(
+            shed.state,
+            RegionState::Troubled,
+            "still troubled — a car stuck two days is worth a look either way: {}",
+            shed.why
+        );
+        assert!(
+            shed.why.contains("told not yet"),
+            "but it says the probe asked and the world answered: {}",
+            shed.why
+        );
+        assert!(
+            !shed.why.contains("never"),
+            "and does not accuse anyone of neglecting it: {}",
+            shed.why
+        );
+
+        // ON US, same age, same everything else: no attempt recorded,
+        // so nothing has ever run this car's probe. THE CONTROL — it is
+        // what stops the clause reading as always-waiting-on-the-world.
+        let never = vec![aged("feat/never", Value::Null)];
+        let out = regions(&inputs(
+            &status,
+            &[],
+            &[],
+            &never,
+            &[],
+            Some(&[]),
+            Some(&[]),
+        ));
+        let shed = by_name(&out, "shed");
+        assert_eq!(shed.state, RegionState::Troubled, "{}", shed.why);
+        assert!(
+            shed.why.contains("never probed"),
+            "the same age with no attempt on record reads as on us: {}",
+            shed.why
+        );
+
+        // MIXED: the count has to survive both being present, or the
+        // commonest real shed (a few of each) gets one of the two
+        // sentences and the other half goes unmentioned.
+        let both = vec![
+            aged("feat/asked", json!({ "not_yet": true, "exit": 75 })),
+            aged("feat/never", Value::Null),
+        ];
+        let out = regions(&inputs(&status, &[], &[], &both, &[], Some(&[]), Some(&[])));
+        let shed = by_name(&out, "shed");
+        assert!(
+            shed.why.contains("1 never probed"),
+            "names how many are on us, alongside the rest: {}",
             shed.why
         );
     }
