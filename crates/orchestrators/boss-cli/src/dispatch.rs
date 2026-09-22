@@ -161,6 +161,36 @@ pub(crate) fn block_in_row(row: &Value, slug: &str) -> Option<Settings> {
     })
 }
 
+/// THE reader of a step's agent settings, and the only one (backlog
+/// dacee8cc): the projection the packet carries, else the block the
+/// active Workflow row declares for that step. `row` is what the
+/// caller has in hand — `None` asks whether the step can answer alone,
+/// which is how a caller that reads the row lazily stays lazy.
+///
+/// It exists because the fallback arrived twice by repair rather than
+/// once by design, and the two copies did not agree. `boss dispatch`
+/// required all four projected keys (half a projection is none, since
+/// they are written together); `boss brief` read `agent_profile` alone,
+/// so a half-projected step briefed a human in one lane and dispatched
+/// an agent in the other. CLAUDE.md 9a: a fact that lives twice gets
+/// collapsed if it can be, and this one could.
+///
+/// The fallback is needed because the projection is copied at OPEN
+/// time, like the procedure, so every packet admitted before its kind
+/// declared an agent block has none. Measured 2026-09-22 against the
+/// live system of record: 195 open steps whose active row declares a
+/// block carry no `agent_` key — 186 page-audit, 8 backlog-item, 1
+/// user-feedback. Back-filling them is NOT the answer: an in-flight
+/// packet is pinned to the version it was admitted under, and writing
+/// v3's block onto a v1 packet would make the record state a
+/// declaration that version never made.
+pub(crate) fn settings_for(step: &Value, row: Option<&Value>) -> Option<Settings> {
+    block_on_step(step).or_else(|| {
+        let slug = step.get("spec_slug").and_then(Value::as_str)?;
+        block_in_row(row?, slug)
+    })
+}
+
 /// The refusal a step with no block gets: it names the fix, in the
 /// row's own syntax.
 pub(crate) fn no_block_refusal(kind: &str, slug: &str) -> String {
@@ -720,19 +750,19 @@ pub(crate) async fn dispatch_at(
         bail!("{why}");
     }
 
-    // The block: the packet's projection, else the active row's step.
-    // The row is KEPT when it is read, because the brief dates the
-    // step's procedure against the same row (794e8d61) and one
-    // dispatch should read it at most once.
-    let (block, row_already_read) = match block_on_step(step) {
+    // The block: the packet's projection, else the active row's step,
+    // both through the ONE reader `boss brief` also asks (dacee8cc).
+    // Asked first with no row in hand, so the row is read only when
+    // the step cannot answer alone. The row is KEPT when it is read,
+    // because the brief dates the step's procedure against the same
+    // row (794e8d61) and one dispatch should read it at most once.
+    let (block, row_already_read) = match settings_for(step, None) {
         Some(b) => (b, None),
         None => {
             let row = api_at(Method::GET, format!("/api/workflows/{kind}"), None)
                 .await
                 .with_context(|| format!("reading the {kind} Workflow row for its agent block"))?;
-            let block = row
-                .as_ref()
-                .and_then(|r| block_in_row(r, &slug))
+            let block = settings_for(step, row.as_ref())
                 .ok_or_else(|| anyhow::anyhow!("{}", no_block_refusal(&kind, &slug)))?;
             (block, row)
         }
@@ -1684,6 +1714,21 @@ mod tests {
         });
         assert_eq!(block_in_row(&row, "build"), Some(block()));
         assert_eq!(block_in_row(&row, "triage"), None);
+
+        // ONE READER FOR BOTH HALVES (dacee8cc). `boss brief` asks the
+        // same function, so the lane a human reads before dispatching
+        // cannot differ from the lane the dispatch renders. With no row
+        // in hand it answers off the step alone — which is how the
+        // dispatch keeps its row read lazy — and a step with no
+        // projection and no row answers nothing, which is the refusal.
+        assert_eq!(settings_for(&projected, None), Some(block()));
+        assert_eq!(settings_for(&projected, Some(&row)), Some(block()));
+        assert_eq!(settings_for(&half, None), None);
+        assert_eq!(settings_for(&half, Some(&row)), Some(block()));
+        assert_eq!(
+            settings_for(&step("triage", "ready", json!({})), Some(&row)),
+            None
+        );
     }
 
     /// Overrides override only what they name, and the result is held

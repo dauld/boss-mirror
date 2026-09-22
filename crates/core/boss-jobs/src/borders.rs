@@ -44,6 +44,14 @@
 //! column: a rate invented for an event rule manufactures false silence
 //! the first quiet hour.
 //!
+//! AN EVENT RULE IS STILL JUDGED — without an interval (c53f8f38).
+//! `silent` stays null for it, and the trouble reading it DOES support
+//! needs no heartbeat: work is waiting, and the machine has not fired
+//! since the oldest of it arrived. [`judge`] asks that of the
+//! marshalling → dock rail, whose stranded greens carry their own
+//! arrival instant, and a rail with nothing waiting is never troubled
+//! however long it has been quiet.
+//!
 //! THE BORDER SET IS DATA, HELD EQUAL TO THE CLIENT'S. [`BORDERS`]
 //! below is the server's copy of the layout's borders; the client's is
 //! `apps/web/src/it/yard/world.ts::BORDERS`, and `borders.test.ts`
@@ -57,8 +65,8 @@ use serde_json::Value;
 
 use crate::regions::{
     Instant, RegionInputs, RegionState, Trend, Windows, awaiting_proof, closed_at, count_split,
-    find_step, meta_instant, opened_at, plural, rate_trend, released_awaiting_repair, shed_place,
-    step_done_at,
+    find_step, meta_instant, opened_at, parse_instant, plural, rate_trend,
+    released_awaiting_repair, shed_place, step_done_at,
 };
 use crate::yard::{SILENT_AFTER_INTERVALS, TrainBlock};
 
@@ -299,6 +307,22 @@ struct Flow {
     /// Set when a row this border needs could not be read. The border
     /// is then troubled and this is its `why`.
     unread: Option<String>,
+    /// The oldest packet standing at this border that the MACHINE is
+    /// supposed to move, and when it arrived — what [`judge`] compares
+    /// a last firing against (c53f8f38). `None` on every border that
+    /// cannot answer it: nothing waiting for the machine, an arrival
+    /// nobody stamped, or a hop whose waiting is not the machine's to
+    /// clear. Never a guess: an invented arrival alarms on the first
+    /// unstamped row, which is the failure this whole module refuses.
+    oldest_waiting: Option<Oldest>,
+}
+
+/// The oldest thing waiting on a border's machine, with how many stand
+/// with it — the two facts the trouble sentence needs.
+#[derive(Debug, Clone, Copy)]
+struct Oldest {
+    n: usize,
+    arrived: Instant,
 }
 
 fn unknown_rate() -> Trend {
@@ -322,7 +346,15 @@ impl Flow {
             waiting: None,
             holds: Vec::new(),
             unread: Some(why.to_string()),
+            oldest_waiting: None,
         }
+    }
+
+    /// The arrival this border's machine is judged against. Only a
+    /// border that can source every candidate's instant calls it.
+    fn waiting_since(mut self, oldest: Option<Oldest>) -> Self {
+        self.oldest_waiting = oldest;
+        self
     }
 
     fn of(w: &Windows, stamps: Vec<Instant>, waiting: usize, holds: Vec<Hold>) -> Self {
@@ -334,6 +366,7 @@ impl Flow {
             waiting: Some(waiting),
             holds: holds.into_iter().take(MAX_HOLDS).collect(),
             unread: None,
+            oldest_waiting: None,
         }
     }
 }
@@ -432,7 +465,30 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
                 )
             }));
             let waiting = status.held.len() + status.stranded.len();
-            Flow::of(w, stamps, waiting, holds)
+            // WHAT THIS HOP'S MACHINE IS JUDGED AGAINST (c53f8f38). Only
+            // the STRANDED greens: a held green is a brake an operator
+            // put on, and `auto-park-on-gate-green` was never going to
+            // file a car for it, so its silence about one says nothing
+            // (`crate::stranded`). The arrival is the gate-run's own
+            // `since` — `boss gate`'s `opened_at` stamp, as
+            // `yard::opened_since` read it — and it is EARLIER than the
+            // green it gated, which makes this test strictly
+            // conservative. A `since` that is a bare date (the row
+            // carried no stamp: 6c2eba00) does not parse, and one
+            // unparseable candidate refuses the whole reading, because
+            // the oldest might be the one that could not be read.
+            let arrivals: Option<Vec<Instant>> = status
+                .stranded
+                .iter()
+                .map(|s| parse_instant(&s.since))
+                .collect();
+            let oldest = arrivals.and_then(|a| {
+                a.iter().copied().min().map(|arrived| Oldest {
+                    n: a.len(),
+                    arrived,
+                })
+            });
+            Flow::of(w, stamps, waiting, holds).waiting_since(oldest)
         }
         // A branch taking a bay. What waits is the line for a slot, in
         // its own order.
@@ -485,6 +541,7 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
                     waiting: None,
                     holds: Vec::new(),
                     unread: Some("the loading-dock station row could not be read".to_string()),
+                    oldest_waiting: None,
                 };
             }
             let mut holds: Vec<Hold> = status
@@ -780,8 +837,10 @@ pub fn borders(inputs: &BorderInputs<'_>) -> Borders {
 /// How a border reads at a glance. Troubled: a read that could not be
 /// taken (refused like a failure, never drawn as a quiet rail), or
 /// traffic waiting while the machine that moves it has been silent past
-/// its own declared cadence — the shape the whole design is for. Busy:
-/// anything waiting. Clear: a rail with room.
+/// its own declared cadence — the shape the whole design is for — or,
+/// for an event rule that declares no cadence, traffic that arrived
+/// before the machine's last firing (c53f8f38). Busy: anything waiting.
+/// Clear: a rail with room.
 fn judge(spec: &BorderSpec, flow: &Flow, machine: &Machine, w: &Windows) -> (RegionState, String) {
     if let Some(unread) = flow.unread.as_deref() {
         return (RegionState::Troubled, unread.to_string());
@@ -796,6 +855,38 @@ fn judge(spec: &BorderSpec, flow: &Flow, machine: &Machine, w: &Windows) -> (Reg
                 "{} waiting and {} silent for {silent}m — it declares every {every}m",
                 plural(waiting, "packet", "packets"),
                 machine.name
+            ),
+        );
+    }
+    // THE EVENT-DRIVEN FORM OF THE SAME QUESTION (c53f8f38, named by
+    // the builder of b14afc48). A cadence machine is judged above
+    // against the heartbeat it DECLARES; an event rule declares none,
+    // and an interval invented for it manufactures false silence the
+    // first quiet hour. The question that needs no interval: has the
+    // machine fired since the oldest thing waiting on it ARRIVED? A hop
+    // with nothing waiting is never troubled however long it has been
+    // quiet, which is why this reads the queue first.
+    //
+    // ASKED ONLY OF A DISPATCHER RULE, deliberately. The gate runner's
+    // stamp is its last RUN rather than its last decision, so the same
+    // comparison would read a full set of bays — a queue that is
+    // capacity, not a stall — as a stopped machine. A machine that has
+    // NEVER fired is out of scope too: `last_fired` is null both for
+    // that and for a firing record nobody could read, and this surface
+    // does not guess between them.
+    if spec.machine_kind == MachineKind::DispatcherRule
+        && let Some(oldest) = flow.oldest_waiting
+        && let Some(fired) = machine.last_fired.as_deref().and_then(parse_instant)
+        && fired < oldest.arrived
+    {
+        return (
+            RegionState::Troubled,
+            format!(
+                "{} waiting since {} and {} has not fired since — its last firing was {}",
+                plural(oldest.n, "packet", "packets"),
+                oldest.arrived.to_rfc3339(),
+                machine.name,
+                fired.to_rfc3339(),
             ),
         );
     }
@@ -1256,6 +1347,138 @@ mod tests {
         let m = &only(&out, "marshalling", "dock").machine;
         assert_eq!(m.last_fired, None);
         assert!(m.why.contains("has never fired"), "why: {}", m.why);
+    }
+
+    /// A gate-run that went green and no car ever claimed — the shape
+    /// `stranded::unparked_green` recognises: a green verdict on a step,
+    /// a branch, no hold and no spent marker. `opened_at` is the stamp
+    /// `boss gate` writes and `yard::opened_since` reads; `None` is the
+    /// row that carries only a date.
+    fn green_run(branch: &str, opened_at: Option<&str>) -> (Job, Vec<Step>) {
+        let mut md = json!({ "branch": branch, "outcome": "passed" });
+        if let Some(o) = opened_at {
+            md["opened_at"] = json!(o);
+        }
+        let g = job("gate-run", branch, JobStatus::Closed, md);
+        let mut s = step(&g, "record-verdict", StepStatus::Completed, None);
+        s.metadata = json!({ "verdict": "green" });
+        (g, vec![s])
+    }
+
+    fn fired(at: Option<&str>) -> Vec<DispatcherFiring> {
+        vec![DispatcherFiring {
+            rule: "auto-park-on-gate-green".to_string(),
+            fired_at: at.map(t),
+        }]
+    }
+
+    #[test]
+    fn a_green_waiting_since_before_the_rules_last_firing_is_troubled() {
+        // c53f8f38: the event-driven form of silence. The rule declares
+        // no interval and must not be given one — the question that
+        // needs none is whether it has fired since the oldest thing
+        // waiting on it ARRIVED.
+        let runs = vec![green_run(
+            "fix/a-forgotten-green",
+            Some("2026-09-19T08:00:00Z"),
+        )];
+        let yard = YardInputs {
+            now: Some(t(NOW)),
+            gate_runs: &runs,
+            ..Default::default()
+        };
+        let status = build_status_for(yard, Reading::Read, BoardingReadings::default());
+        assert_eq!(
+            status.stranded.len(),
+            1,
+            "the fixture is one stranded green"
+        );
+        let inputs = region_inputs(&status, &[], &[], &[], Some(&[]), Some(&[]));
+
+        let out = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&fired(Some("2026-09-19T07:00:00Z"))),
+        });
+        let b = only(&out, "marshalling", "dock");
+        assert_eq!(b.state, RegionState::Troubled);
+        assert!(b.why.contains("has not fired since"), "why: {}", b.why);
+        // The half this must NOT do: no interval was invented for an
+        // event rule, so the cadence reading stays absent (b14afc48).
+        assert_eq!(b.machine.expected_every_minutes, None);
+        assert_eq!(b.machine.silent, None);
+
+        // The control: the same queue with a firing AFTER the oldest
+        // arrived is busy, not troubled — the machine is running.
+        let ok = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&fired(Some("2026-09-19T11:00:00Z"))),
+        });
+        assert_eq!(only(&ok, "marshalling", "dock").state, RegionState::Busy);
+    }
+
+    #[test]
+    fn a_green_with_no_arrival_stamp_is_never_judged_stalled() {
+        // The 6c2eba00 case: `opened_at` is a filer convention, so a row
+        // without one knows only its DAY. Judging a stall off midnight
+        // would alarm on every such row; unknown is unknown.
+        let runs = vec![green_run("fix/an-unstamped-green", None)];
+        let yard = YardInputs {
+            now: Some(t(NOW)),
+            gate_runs: &runs,
+            ..Default::default()
+        };
+        let status = build_status_for(yard, Reading::Read, BoardingReadings::default());
+        assert_eq!(status.stranded.len(), 1);
+        let inputs = region_inputs(&status, &[], &[], &[], Some(&[]), Some(&[]));
+        let out = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&fired(Some("2026-09-19T07:00:00Z"))),
+        });
+        let b = only(&out, "marshalling", "dock");
+        assert_eq!(b.waiting, Some(1), "it still stands at the border");
+        assert_eq!(
+            b.state,
+            RegionState::Busy,
+            "an arrival nobody stamped is not an alarm: {}",
+            b.why
+        );
+    }
+
+    #[test]
+    fn a_green_held_on_purpose_never_makes_the_border_troubled() {
+        // A brake deliberately on is not an alarm (`crate::stranded`).
+        // The rule was never going to park a held green, so its silence
+        // about one says nothing about the hop.
+        let md = json!({
+            "branch": "fix/a-held-green",
+            "outcome": "passed",
+            "hold": "waiting on David's call",
+            "opened_at": "2026-09-19T08:00:00Z",
+        });
+        let g = job("gate-run", "a held green", JobStatus::Closed, md);
+        let mut s = step(&g, "record-verdict", StepStatus::Completed, None);
+        s.metadata = json!({ "verdict": "green" });
+        let runs = vec![(g, vec![s])];
+        let yard = YardInputs {
+            now: Some(t(NOW)),
+            gate_runs: &runs,
+            ..Default::default()
+        };
+        let status = build_status_for(yard, Reading::Read, BoardingReadings::default());
+        assert_eq!(status.held.len(), 1, "the fixture is one HELD green");
+        assert_eq!(status.stranded.len(), 0);
+        let inputs = region_inputs(&status, &[], &[], &[], Some(&[]), Some(&[]));
+        let out = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&fired(Some("2026-09-19T07:00:00Z"))),
+        });
+        let b = only(&out, "marshalling", "dock");
+        assert_eq!(b.waiting, Some(1));
+        assert_eq!(b.state, RegionState::Busy, "why: {}", b.why);
     }
 
     #[test]

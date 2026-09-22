@@ -927,42 +927,29 @@ pub(crate) fn repo_root() -> Result<PathBuf> {
     Ok(PathBuf::from(root))
 }
 
-/// The profile a packet's current step is briefed under: the
-/// `agent_profile` car 1 projects onto the step from its Workflow
-/// row's `agent` block, else [`crate::documents::DEFAULT_PROFILE`].
-/// A packet with no open step — or no packet at all — is briefed as
-/// the default, because the rules document is what the reader came
-/// for and a blank brief helps nobody.
-pub(crate) fn profile_for(job: Option<&Value>) -> String {
-    profile_on_step(job).unwrap_or_else(|| crate::documents::DEFAULT_PROFILE.to_string())
-}
-
-/// The `agent_profile` PROJECTED ONTO THE STEP, if there is one.
-pub(crate) fn profile_on_step(job: Option<&Value>) -> Option<String> {
-    job.and_then(now_step)
-        .and_then(|s| s.get("metadata"))
-        .and_then(|m| m.get(boss_jobs::agent_spec::PROFILE_KEY))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-}
-
-/// The profile the packet's CURRENT WORKFLOW ROW declares for the step
-/// it is at — the same fallback `boss dispatch` makes (`block_in_row`),
-/// so a hand-run brief renders the lane the dispatch will use.
+/// The profile a packet's current step is briefed under, read through
+/// the ONE reader `boss dispatch` uses ([`crate::dispatch::settings_for`]):
+/// the step's own projection, else the block the active Workflow row
+/// declares for it, else [`crate::documents::DEFAULT_PROFILE`]. A
+/// packet with no open step — or no packet at all, or no row read —
+/// is briefed as the default, because the rules document is what the
+/// reader came for and a blank brief helps nobody.
 ///
 /// Measured 2026-09-19 on page-audit c0d2caf0: the live `measure` step
 /// carries `procedure`, `audience` and `authority_role` but NO agent
 /// block — the projection is not on these packets — so reading only the
 /// step answered `builder` for a step the Workflow row declares
 /// `analyst`, and the brief a human read before dispatching was the
-/// other lane's.
-///
-/// Best effort: the row read is an extra call, and a brief that cannot
-/// make it is still worth printing, so a failure falls through to the
-/// default rather than refusing.
-fn profile_in_row(row: &Value, job: &Value) -> Option<String> {
-    let slug = now_step(job)?.get("spec_slug").and_then(Value::as_str)?;
-    crate::dispatch::block_in_row(row, slug).map(|s| s.profile)
+/// other lane's. The row is best effort at the call site: an extra
+/// call that cannot be made still leaves a brief worth printing.
+pub(crate) fn profile_for(job: Option<&Value>, row: Option<&Value>) -> String {
+    profile_on_step(job, row).unwrap_or_else(|| crate::documents::DEFAULT_PROFILE.to_string())
+}
+
+/// The profile declared for the packet's current step, by either half
+/// of the one reader, if anything declares one.
+pub(crate) fn profile_on_step(job: Option<&Value>, row: Option<&Value>) -> Option<String> {
+    crate::dispatch::settings_for(job.and_then(now_step)?, row).map(|s| s.profile)
 }
 
 /// The registry's ACTIVE Workflow row for this packet's kind, read
@@ -1042,25 +1029,18 @@ pub async fn run(packet_ref: Option<String>, profile_override: Option<String>) -
     // WHAT A HAND-RUN BRIEF RENDERS AS (c8faa7f3). `boss brief
     // <packet>` is also read by a human before dispatching, with no
     // profile implied. It renders as THE DISPATCH WOULD: the step's own
-    // `agent_profile` when the projection carries one, else the
-    // Workflow row's block for that step — the same two places
-    // `dispatch` looks, in the same order — so the human reads what the
-    // agent will read. With no packet, or nothing declaring a profile
-    // anywhere, it is `builder`, exactly as before profiles existed.
+    // projection when it carries one, else the Workflow row's block for
+    // that step — through `dispatch::settings_for`, which is the SAME
+    // FUNCTION the dispatch resolves with rather than a second copy of
+    // its order (dacee8cc) — so the human reads what the agent will
+    // read. With no packet, or nothing declaring a profile anywhere,
+    // it is `builder`, exactly as before profiles existed.
     // `--profile` names a lane without dispatching anything.
     let active = match job.as_ref() {
         Some(j) => active_row(&http, j).await,
         None => None,
     };
-    let profile = match (profile_override, profile_on_step(job.as_ref())) {
-        (Some(p), _) => p,
-        (None, Some(p)) => p,
-        (None, None) => match (job.as_ref(), active.as_ref()) {
-            (Some(j), Some(row)) => profile_in_row(row, j)
-                .unwrap_or_else(|| crate::documents::DEFAULT_PROFILE.to_string()),
-            _ => crate::documents::DEFAULT_PROFILE.to_string(),
-        },
-    };
+    let profile = profile_override.unwrap_or_else(|| profile_for(job.as_ref(), active.as_ref()));
     print!(
         "{}",
         render(&repo, job.as_ref(), &profile, active.as_ref())?
@@ -1546,16 +1526,21 @@ mod tests {
             "metadata": {},
             "steps": [
                 { "spec_slug": "triage", "status": "completed", "metadata": {} },
+                // The WHOLE projection, as car 1 writes it — four keys
+                // together. It carried two until dacee8cc, which is
+                // the shape dispatch has always read as no projection
+                // at all.
                 { "spec_slug": "build", "status": "ready",
-                  "metadata": { "agent_profile": "analyst", "agent_model": "opus-5[1m]" } },
+                  "metadata": { "agent_profile": "analyst", "agent_model": "opus-5[1m]",
+                                "agent_budget_usd": 4.0, "agent_effort": "high" } },
             ],
         });
-        assert_eq!(profile_for(Some(&declared)), "analyst");
+        assert_eq!(profile_for(Some(&declared), None), "analyst");
         let undeclared = json!({
             "steps": [{ "spec_slug": "build", "status": "ready", "metadata": {} }],
         });
-        assert_eq!(profile_for(Some(&undeclared)), "builder");
-        assert_eq!(profile_for(None), "builder");
+        assert_eq!(profile_for(Some(&undeclared), None), "builder");
+        assert_eq!(profile_for(None, None), "builder");
 
         let out = render(&repo(), Some(&undeclared), "builder", None).expect("renders");
         let packet = out.find("== THE PACKET").expect("the packet half");
@@ -1571,6 +1556,65 @@ mod tests {
         let alone = render(&repo(), None, "builder", None).expect("renders");
         assert!(!alone.contains("== THE PACKET"));
         assert!(alone.contains("== THE RULES"));
+    }
+
+    /// ONE READER, ONE ANSWER (backlog dacee8cc). The step-then-row
+    /// fallback was spelled twice — `boss dispatch` read all four
+    /// projected keys or fell through to the row, `boss brief` read
+    /// `agent_profile` alone — so half a projection made the two verbs
+    /// disagree about which lane a step belongs to, and the brief a
+    /// human read before dispatching was not the one the dispatch
+    /// would render. Measured 2026-09-22: 195 live steps across
+    /// page-audit, backlog-item and user-feedback carry no `agent_`
+    /// key at all (the whole page march plus nine others), so this
+    /// fallback decides the lane for most agent work on the instance.
+    #[test]
+    fn the_brief_and_the_dispatch_read_the_block_the_same_way() {
+        let row = json!({
+            "kind": "page-audit",
+            "steps": [
+                { "title": "measure", "kind": "task",
+                  "agent": { "profile": "analyst", "model": "opus-5[1m]",
+                             "budget_usd": 4, "effort": "high" } },
+            ],
+        });
+        // HALF A PROJECTION IS NONE — dispatch's own rule since car 1,
+        // because the four keys are written together. A step carrying
+        // only `agent_profile` is therefore the row's lane, not that
+        // key's.
+        let half = json!({
+            "kind": "page-audit",
+            "steps": [{ "spec_slug": "measure", "status": "ready",
+                        "metadata": { "agent_profile": "builder" } }],
+        });
+        let step = now_step(&half).expect("the open step");
+        assert_eq!(
+            crate::dispatch::settings_for(step, Some(&row)).map(|s| s.profile),
+            Some("analyst".to_string()),
+        );
+        assert_eq!(profile_for(Some(&half), Some(&row)), "analyst");
+
+        // A FULL projection wins over the row: the packet is pinned to
+        // the version it was admitted under, and the projection is
+        // that version's declaration.
+        let projected = json!({
+            "kind": "page-audit",
+            "steps": [{ "spec_slug": "measure", "status": "ready",
+                        "metadata": { "agent_profile": "builder",
+                                      "agent_model": "opus-5[1m]",
+                                      "agent_budget_usd": 5.0,
+                                      "agent_effort": "high" } }],
+        });
+        assert_eq!(profile_for(Some(&projected), Some(&row)), "builder");
+
+        // Neither half declares anything: the default lane, as before
+        // profiles existed.
+        let bare = json!({
+            "kind": "page-audit",
+            "steps": [{ "spec_slug": "measure", "status": "ready", "metadata": {} }],
+        });
+        assert_eq!(profile_for(Some(&bare), Some(&row)), "analyst");
+        assert_eq!(profile_for(Some(&bare), None), "builder");
     }
 
     /// A page-audit `measure` step, in the shape the live one has

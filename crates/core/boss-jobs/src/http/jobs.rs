@@ -242,6 +242,15 @@ pub(super) async fn list_jobs<R: JobsRepository + 'static, B: EventBus + 'static
     };
 
     // Enrich each job with its steps so the list view can show progress.
+    // THIS IS A WIRE CONTRACT, NOT A CONVENIENCE (backlog d0ee20f8):
+    // `infra/ops/ops-runner.sh` reads the `execute` step off each LISTED
+    // row and skips a packet it cannot find one on, so removing this
+    // loop stops the ops queue without erroring anywhere. It is also the
+    // standing refutation of "write the fact at the request level so a
+    // reader need not fetch steps" — the shortcut that put a second
+    // spelling of the verb's exit on the request (50fede8b): a
+    // request-level reader never had to fetch them. Held by
+    // tests/a_listed_packet_carries_its_steps.rs.
     let mut enriched: Vec<serde_json::Value> = Vec::with_capacity(jobs.len());
     for job in &jobs {
         let steps = state.jobs.list_steps(&job.id).await.unwrap_or_default();
