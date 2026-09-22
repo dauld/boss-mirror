@@ -809,7 +809,36 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
             from = status_word(old.status),
             "abort-from-any-state: aborted terminal completing past its blockers",
         );
-    } else if is_flipping_to_done && !step.blocked_by.is_empty() {
+    } else if is_flipping_to_done
+        && !step.blocked_by.is_empty()
+        // A STEP THE ENGINE HAS ALREADY OPENED IS NOT BLOCKED.
+        //
+        // `blocked_by` is a predicate-derived denormalised edge list
+        // FOR DAG RENDERING (CLAUDE.md §Steps), and it cannot express a
+        // disjunction: it lists every step the predicate REFERENCES,
+        // not the ones its truth actually required. So a `ready_when`
+        // of the shape `A OR B` lists both, and completing the step
+        // while only A holds was refused as "unresolved blockers".
+        //
+        // Measured 2026-09-22: the ops-request protocol gated `execute`
+        // on `steps.filed.done AND (NOT job.metadata.requires_approval
+        // OR steps.approve.done)`. With the flag absent the engine made
+        // execute READY on the `NOT` arm, and this guard refused the
+        // runner's completion over the pending approve step — 16
+        // requests jammed on the forge, the oldest 68 minutes,
+        // including a converge; `PUT failed … 409` once a minute for
+        // over an hour, answered=0.
+        //
+        // TWO READINGS OF ONE EDGE, AND THE PREDICATE IS THE AUTHORITY.
+        // The engine evaluates it; this list only draws it. Where they
+        // disagreed the drawing was winning.
+        //
+        // THE GUARD KEEPS ITS REAL JOB, which is a step completed OUT
+        // OF ORDER — one the engine has never opened. That is still
+        // refused below, and `a_pending_step_with_an_unresolved_blocker
+        // _is_still_refused` holds it.
+        && !matches!(old.status, StepStatus::Ready | StepStatus::Active)
+    {
         match state.jobs.resolve_blockers(&step.blocked_by).await {
             Ok(statuses) => {
                 // Missing blockers (returned-length < asked-length) are
