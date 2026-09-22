@@ -106,6 +106,51 @@ pub fn copy_lint_libs(fixture: &Path) {
     assert!(copied > 0, "{} holds no .sh to copy", src.display());
 }
 
+/// The tunnel's ingress map as one line — `infra/cluster/
+/// render-tunnel-config.sh --summary`, run against THIS tree, with
+/// `skipped` handed to it as the converge hands its own
+/// `instances_skipped` field.
+///
+/// One definition of what the converge records as `tunnel_ingress`.
+/// Until 2026-09-22 the rendered line was spelled as a literal in four
+/// assertions across two test files — `the_tunnel_connector_runs_in_
+/// the_cluster.rs` and `every_converge_tick_observes_the_connector.rs`
+/// — so adding one row to `infra/cluster/instances.toml` churned all of
+/// them (backlog e9423392; CLAUDE.md §9a). The renderer already
+/// answered the question, and these four are CONSUMERS: they assert the
+/// runner carried the renderer's line through into the packet, which is
+/// exactly what deriving it here states. The two assertions that pin
+/// what the renderer itself PRINTS stay literal in that file — a
+/// definition derived from its own subject would prove nothing — and
+/// `the_tunnel_ingress_summary_is_spelled_only_where_it_is_defined`
+/// below holds the split.
+pub fn tunnel_ingress_summary(skipped: &str) -> String {
+    let root = repo_root();
+    let script = root.join("infra/cluster/render-tunnel-config.sh");
+    let out = std::process::Command::new("bash")
+        .arg(&script)
+        .arg("--summary")
+        .current_dir(&root)
+        .env("BOSS_CLUSTER_TREE", &root)
+        .env("BOSS_INSTANCES_SKIPPED", skipped)
+        .output()
+        .unwrap_or_else(|e| panic!("run {} --summary: {e}", script.display()));
+    assert!(
+        out.status.success(),
+        "{} --summary refused ({:?}):\n{}",
+        script.display(),
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let summary = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert!(
+        !summary.is_empty(),
+        "{} --summary printed nothing — an empty expectation matches every file",
+        script.display()
+    );
+    summary
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +227,78 @@ mod tests {
             })
             .count();
         assert!(rule_files > 0, "no rule files under {}", dir.display());
+    }
+
+    /// The tunnel ingress summary is spelled once — in the file that
+    /// asserts what the renderer PRINTS — and derived everywhere else.
+    /// The collapse holds only while nothing grows a copy back, and a
+    /// copy is what made one added instance row churn four assertions
+    /// (backlog e9423392).
+    #[test]
+    fn the_tunnel_ingress_summary_is_spelled_only_where_it_is_defined() {
+        // Where `render-tunnel-config.sh --summary` itself is under
+        // test: that file states the renderer's output, so it spells it.
+        let defining = "the_tunnel_connector_runs_in_the_cluster.rs";
+        let summaries = [
+            tunnel_ingress_summary(""),
+            tunnel_ingress_summary("boss-playground (secrets absent: boss-secrets)"),
+        ];
+        assert_ne!(
+            summaries[0], summaries[1],
+            "a skipped instance must change the line, or this pin reads one fact as two"
+        );
+        let tests = repo_root().join("crates/core/boss-testing/tests");
+        let mut offenders = Vec::new();
+        for entry in std::fs::read_dir(&tests).expect("tests dir") {
+            let path = entry.expect("entry").path();
+            if path.file_name().is_some_and(|n| n == defining) {
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).expect("read");
+            if summaries.iter().any(|s| src.contains(s.as_str())) {
+                offenders.push(path.display().to_string());
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these files spell the rendered ingress summary instead of calling \
+             boss_testing::tunnel_ingress_summary, so one added instance row churns \
+             every one of them: {offenders:?}"
+        );
+
+        // And in the defining file, ONCE per variant: that one is the
+        // assertion about what the renderer prints. A second spelling
+        // there is a consumer, and a consumer derives.
+        let src = std::fs::read_to_string(tests.join(defining)).expect("read the defining file");
+        for summary in &summaries {
+            assert_eq!(
+                src.matches(summary.as_str()).count(),
+                1,
+                "{defining} states the renderer's own output once per variant; \
+                 every other assertion about it derives: {summary}"
+            );
+        }
+    }
+
+    /// The two shapes the converge records, from the renderer itself:
+    /// an applied instance routes to its own namespace, a skipped one to
+    /// its source's gateway with the reason in parentheses.
+    #[test]
+    fn the_summary_names_the_instance_that_serves_each_hostname() {
+        let applied = tunnel_ingress_summary("");
+        let skipped = tunnel_ingress_summary("boss-playground (secrets absent: boss-secrets)");
+        assert!(applied.contains(" \u{2192} "), "{applied}");
+        assert!(
+            skipped.contains("(boss-playground skipped: secrets absent)"),
+            "a skipped instance must carry its reason: {skipped}"
+        );
+        assert!(
+            !applied.contains("skipped"),
+            "with nothing skipped the line says so: {applied}"
+        );
     }
 
     #[test]

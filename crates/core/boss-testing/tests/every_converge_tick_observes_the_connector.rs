@@ -30,13 +30,21 @@
 //! fails the deploying tick's apply loop; and the runner's inline
 //! recording is gone — the deploying path calls the lib with `deploy`.
 
-use boss_testing::{repo_root, scratch_dir, write_exec, write_file};
+use boss_testing::{repo_root, scratch_dir, tunnel_ingress_summary, write_exec, write_file};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const LIB: &str = "infra/forge/cluster-deploy-lib.sh";
 const RUNNER: &str = "infra/forge/cluster-deploy-runner.sh";
 const RUN_SUMMARY: &str = "infra/run-summary.sh";
+
+/// What the runner's secret gate writes into `instances_skipped` when
+/// the playground's Secrets are absent (cluster-deploy-lib.sh
+/// `skipped_entry`, `<ns> (secrets absent: a, b)`). It is the ONE input
+/// the ingress line below depends on, so the line itself is rendered
+/// rather than spelled (boss_testing::tunnel_ingress_summary; backlog
+/// e9423392).
+const SKIPPED: &str = "boss-playground (secrets absent: boss-secrets)";
 
 /// The runner's unchanged block, lifted between its two markers: the
 /// stamp comparison that opens it, and the stage clock reset that
@@ -187,7 +195,7 @@ fn an_unchanged_tick_records_the_connector_and_the_ingress_from_the_gates_skippe
     assert_eq!(r.recorded["cloudflared"], "connected", "{}", r.recorded);
     assert_eq!(
         r.recorded["tunnel_ingress"],
-        "boss.algedonic.dev → boss; www.algedonic.dev → boss (site); playground.algedonic.dev → boss (boss-playground skipped: secrets absent); id.algedonic.dev → https://10.20.0.31:443 (origin)",
+        tunnel_ingress_summary(SKIPPED),
         "the renderer is handed the gate's skipped set, exactly as the deploying tick hands it: {}",
         r.recorded
     );
@@ -211,7 +219,7 @@ fn an_unchanged_tick_records_the_connector_and_the_ingress_from_the_gates_skippe
     assert_eq!(r.rc, 0, "{}\n{}", r.out, r.err);
     assert_eq!(
         r.recorded["tunnel_ingress"],
-        "boss.algedonic.dev → boss; www.algedonic.dev → boss (site); playground.algedonic.dev → boss-playground; id.algedonic.dev → https://10.20.0.31:443 (origin)",
+        tunnel_ingress_summary(""),
         "{}",
         r.recorded
     );

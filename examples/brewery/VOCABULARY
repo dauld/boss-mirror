@@ -13,6 +13,14 @@
 # is. A word here is one that names nothing but this tenant: a hit in
 # crates/core is a leak by definition, never a coincidence.
 #
+# A line beginning with `!` declares the opposite: a PHRASE that is NOT
+# this tenant's, though a term matches inside it. `brew*` is right in
+# general and wrong for `brew install`, which names Homebrew — a builder
+# writing macOS install steps was refused by it on 2026-09-20 and had to
+# reword the step (backlog e9423392). The block below already made this
+# call in prose for whole words; a `!` line makes it for a phrase, where
+# the sensor can read it.
+#
 # Format: one term per line, matched case-insensitively. A trailing `*`
 # matches any word beginning so (brew* = brew, brewery, brewhouse,
 # brewing); without it the term is a whole word (wort, not worth).
@@ -42,3 +50,4 @@ cellar*
 yeast*
 bbl
 ttb
+!brew install

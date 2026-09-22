@@ -223,32 +223,53 @@ fn after_hours(args: &[(String, Value)]) -> Result<f64, HandlerError> {
     }
 }
 
-/// The body that puts a claimed step back where the claim took it
-/// from: `ready`, nobody's, its recorded metadata kept, the dead run's
-/// edge REMOVED, and one evidence object saying what was taken from
-/// whom and when.
+/// The metadata merge that takes the dead run's edge OFF a claimed
+/// step and records why, in one server-side write.
 ///
 /// The edge is removed rather than left standing because a stale one is
 /// actively wrong downstream: `agent-run-delivers-when-its-step-is-done`
 /// follows it, and a step completed later would try to deliver onto a
 /// run that is closed and dead. `boss dispatch` writes the new run's id
 /// at the next claim, so nothing needs it in the meantime.
-pub(crate) fn release_body(
-    step: &serde_json::Value,
+///
+/// IT IS AN EXPLICIT `null` THROUGH THE MERGE DOOR, and that is the
+/// whole of backlog ce3a4b16. Until 2026-09-22 this was one PUT whose
+/// `metadata` simply left the key out — which reads as a clear and is
+/// not one: since b91a2103 the step PUT CARRIES `agent_run` forward
+/// whenever a body omits it (`crates/core/boss-jobs/src/http/steps.rs`,
+/// pinned by `the_run_edge_survives_a_metadata_put.rs`), because
+/// omission is how every other completer says "leave the edge alone".
+/// So the release believed it cleared the edge and did not, and the
+/// reclaimed step went back to `ready` still naming the run that
+/// abandoned it. `PATCH .../steps/{id}/metadata` is the only door that
+/// DELETES a key, and only for a key given as `null`.
+///
+/// The evidence rides the same merge, so the clear is never recorded
+/// without its reason — and, because the merge happens inside one
+/// adapter transaction, a concurrent writer's other keys survive it,
+/// which the old read-spread-PUT could not promise.
+pub(crate) fn release_patch(
     link: &str,
     evidence_key: &str,
     evidence: serde_json::Value,
 ) -> serde_json::Value {
-    let mut merged = match step.get("metadata").cloned() {
-        Some(serde_json::Value::Object(m)) => m,
-        _ => serde_json::Map::new(),
-    };
-    merged.remove(link);
-    merged.insert(evidence_key.to_string(), evidence);
+    json!({
+        link: serde_json::Value::Null,
+        evidence_key: evidence,
+    })
+}
+
+/// The body that puts the claim back where it came from: `ready`,
+/// nobody's.
+///
+/// It carries NO `metadata` at all. The PUT is an overlay — a field
+/// absent from the body is left as stored — so the merge above is the
+/// step's metadata by the time this lands, and a `metadata` key here
+/// would replace it wholesale with a client-side copy.
+pub(crate) fn release_put() -> serde_json::Value {
     json!({
         "status": WAITING,
         "assignee_id": serde_json::Value::Null,
-        "metadata": serde_json::Value::Object(merged),
     })
 }
 
@@ -379,25 +400,39 @@ impl Handler for JobsReclaimAbandonedStep {
                 if since_death < bound {
                     continue;
                 }
-                let body = release_body(
-                    step,
-                    link,
-                    evidence_key,
-                    json!({
-                        "from_run": run_id,
-                        "from_actor": run.pointer("/metadata/agent"),
-                        "died_at": died_at.to_rfc3339(),
-                        "since_death_hours": (since_death * 100.0).round() / 100.0,
-                        "after_hours": bound,
-                        "at": now.to_rfc3339(),
-                        "rule": ctx.rule_name,
-                    }),
-                );
+                let step_url = format!("{}/api/jobs/{job_id}/steps/{step_id}", self.base());
+                // THE EDGE COMES OFF FIRST, while the step is still
+                // `active` (ce3a4b16). For the window between these two
+                // writes nothing can claim the step, so nothing can
+                // observe it free and still named. The other order
+                // would publish a `ready` step naming a dead run, and a
+                // claim landing in that window would have ITS fresh
+                // edge nulled by the write that followed.
+                write_json(
+                    &self.client,
+                    reqwest::Method::PATCH,
+                    &format!("{step_url}/metadata"),
+                    &release_patch(
+                        link,
+                        evidence_key,
+                        json!({
+                            "from_run": run_id,
+                            "from_actor": run.pointer("/metadata/agent"),
+                            "died_at": died_at.to_rfc3339(),
+                            "since_death_hours": (since_death * 100.0).round() / 100.0,
+                            "after_hours": bound,
+                            "at": now.to_rfc3339(),
+                            "rule": ctx.rule_name,
+                        }),
+                    ),
+                    &ctx.rule_name,
+                )
+                .await?;
                 write_json(
                     &self.client,
                     reqwest::Method::PUT,
-                    &format!("{}/api/jobs/{job_id}/steps/{step_id}", self.base()),
-                    &body,
+                    &step_url,
+                    &release_put(),
                     &ctx.rule_name,
                 )
                 .await?;
@@ -505,10 +540,29 @@ mod tests {
         })
     }
 
-    type Puts = Arc<Mutex<Vec<(String, String, serde_json::Value)>>>;
+    /// Every write the handler makes, as (method, job id, step id, body).
+    /// The METHOD is recorded because which door a release uses is the
+    /// whole subject of ce3a4b16: the same body through a PUT and
+    /// through the merge door do not have the same effect.
+    type Writes = Arc<Mutex<Vec<(String, String, String, serde_json::Value)>>>;
 
-    async fn mock_jobs(jobs: Vec<serde_json::Value>) -> (String, Puts) {
-        let puts: Puts = Arc::new(Mutex::new(Vec::new()));
+    /// A jobs API that answers the way the real one does on the two
+    /// doors this handler writes through — because the bug this test
+    /// module missed for a release was in the SERVER'S reading of the
+    /// body, not in the body (backlog ce3a4b16). Modelled here:
+    ///
+    /// - **PUT `/steps/{id}` is an OVERLAY**, not a replacement of the
+    ///   row: a key absent from the body leaves the stored field alone
+    ///   (`crates/core/boss-jobs/src/http/steps.rs`).
+    /// - **AND IT CARRIES `agent_run` FORWARD** whenever the body's
+    ///   `metadata` omits it (b91a2103, pinned by
+    ///   `crates/core/boss-jobs/tests/the_run_edge_survives_a_metadata_put.rs`).
+    ///   Omission is how a completer says "leave the edge alone", so a
+    ///   PUT can never DELETE it.
+    /// - **PATCH `/steps/{id}/metadata` merges top-level keys, and a
+    ///   `null` REMOVES one** — the only door that clears the edge.
+    async fn mock_jobs(jobs: Vec<serde_json::Value>) -> (String, Writes) {
+        let writes: Writes = Arc::new(Mutex::new(Vec::new()));
         let by_id: Arc<Mutex<HashMap<String, serde_json::Value>>> = Arc::new(Mutex::new(
             jobs.into_iter()
                 .map(|j| (j["id"].as_str().unwrap_or_default().to_string(), j))
@@ -517,7 +571,9 @@ mod tests {
         let list_jobs = by_id.clone();
         let one_job = by_id.clone();
         let put_jobs = by_id.clone();
-        let put_log = puts.clone();
+        let patch_jobs = by_id.clone();
+        let put_log = writes.clone();
+        let patch_log = writes.clone();
         let app = Router::new()
             .route(
                 "/api/jobs",
@@ -558,21 +614,82 @@ mod tests {
                 axum::routing::put(
                     move |Path((id, step_id)): Path<(String, String)>,
                           Json(body): Json<serde_json::Value>| {
-                        let puts = put_log.clone();
+                        let writes = put_log.clone();
                         let by_id = put_jobs.clone();
                         async move {
-                            puts.lock()
-                                .unwrap()
-                                .push((id.clone(), step_id.clone(), body.clone()));
+                            writes.lock().unwrap().push((
+                                "PUT".to_string(),
+                                id.clone(),
+                                step_id.clone(),
+                                body.clone(),
+                            ));
                             if let Some(job) = by_id.lock().unwrap().get_mut(&id)
                                 && let Some(steps) =
                                     job.get_mut("steps").and_then(|s| s.as_array_mut())
                             {
                                 for step in steps.iter_mut() {
-                                    if step["id"] == json!(step_id) {
-                                        step["status"] = body["status"].clone();
-                                        step["assignee_id"] = body["assignee_id"].clone();
-                                        step["metadata"] = body["metadata"].clone();
+                                    if step["id"] != json!(step_id) {
+                                        continue;
+                                    }
+                                    for field in ["status", "assignee_id"] {
+                                        if let Some(v) = body.get(field) {
+                                            step[field] = v.clone();
+                                        }
+                                    }
+                                    let Some(sent) = body.get("metadata") else {
+                                        continue;
+                                    };
+                                    let carried = step
+                                        .pointer("/metadata/agent_run")
+                                        .filter(|_| sent.get("agent_run").is_none())
+                                        .cloned();
+                                    step["metadata"] = sent.clone();
+                                    if let Some(run) = carried
+                                        && let Some(obj) = step["metadata"].as_object_mut()
+                                    {
+                                        obj.insert("agent_run".into(), run);
+                                    }
+                                }
+                            }
+                            Json(json!({ "ok": true }))
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/api/jobs/{id}/steps/{step_id}/metadata",
+                axum::routing::patch(
+                    move |Path((id, step_id)): Path<(String, String)>,
+                          Json(body): Json<serde_json::Value>| {
+                        let writes = patch_log.clone();
+                        let by_id = patch_jobs.clone();
+                        async move {
+                            writes.lock().unwrap().push((
+                                "PATCH".to_string(),
+                                id.clone(),
+                                step_id.clone(),
+                                body.clone(),
+                            ));
+                            if let Some(job) = by_id.lock().unwrap().get_mut(&id)
+                                && let Some(steps) =
+                                    job.get_mut("steps").and_then(|s| s.as_array_mut())
+                            {
+                                for step in steps.iter_mut() {
+                                    if step["id"] != json!(step_id) {
+                                        continue;
+                                    }
+                                    if !step["metadata"].is_object() {
+                                        step["metadata"] = json!({});
+                                    }
+                                    let Some(obj) = step["metadata"].as_object_mut() else {
+                                        continue;
+                                    };
+                                    for (k, v) in body.as_object().into_iter().flatten() {
+                                        if v.is_null() {
+                                            obj.remove(k);
+                                        } else {
+                                            obj.insert(k.clone(), v.clone());
+                                        }
                                     }
                                 }
                             }
@@ -584,7 +701,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        (format!("http://{addr}"), puts)
+        (format!("http://{addr}"), writes)
     }
 
     use axum::response::IntoResponse;
@@ -609,34 +726,46 @@ mod tests {
             .expect("the tick runs");
 
         let written = puts.lock().unwrap().clone();
-        assert_eq!(written.len(), 1, "exactly one step released: {written:?}");
-        let (job, step, body) = &written[0];
-        assert_eq!(job, PACKET);
-        assert_eq!(step, &format!("{PACKET}-build"));
-        assert_eq!(body["status"], "ready");
-        assert_eq!(body["assignee_id"], serde_json::Value::Null);
+        assert_eq!(
+            written.len(),
+            2,
+            "one step released, through the two doors a release needs: {written:?}"
+        );
+        for (_, job, step, _) in &written {
+            assert_eq!(job, PACKET);
+            assert_eq!(step, &format!("{PACKET}-build"));
+        }
+
+        // THE STEP AS THE SERVER NOW HOLDS IT, not the bodies that were
+        // sent (ce3a4b16). Every body this handler sent read correctly
+        // while the edge stayed standing, because a PUT that OMITS
+        // `agent_run` carries it forward — so the request is not the
+        // fact, and this test asks the row.
+        let step = stored_step(&base, PACKET, &format!("{PACKET}-build")).await;
+        assert_eq!(step["status"], "ready");
+        assert_eq!(step["assignee_id"], serde_json::Value::Null);
         assert!(
-            body["metadata"].get("agent_run").is_none(),
-            "the dead run's edge is removed, or the delivery rule would \
-             later deliver onto a closed run: {body}"
+            step["metadata"].get("agent_run").is_none(),
+            "the dead run's edge is gone from the STORED step, or the \
+             delivery rule would later deliver onto a closed run: {step}"
         );
         assert_eq!(
-            body["metadata"]["agent_model"], "opus",
+            step["metadata"]["agent_model"], "opus",
             "what made the step claimable is its record and is kept"
         );
-        assert_eq!(body["metadata"]["reclaimed"]["from_run"], DEAD_RUN);
+        assert_eq!(step["metadata"]["reclaimed"]["from_run"], DEAD_RUN);
         assert_eq!(
-            body["metadata"]["reclaimed"]["from_actor"],
+            step["metadata"]["reclaimed"]["from_actor"],
             "claude@algedonic.dev"
         );
         assert_eq!(
-            body["metadata"]["reclaimed"]["died_at"],
+            step["metadata"]["reclaimed"]["died_at"],
             "2026-09-19T12:00:00+00:00"
         );
-        assert_eq!(body["metadata"]["reclaimed"]["since_death_hours"], 3.0);
-        assert_eq!(body["metadata"]["reclaimed"]["after_hours"], 2.0);
+        assert_eq!(step["metadata"]["reclaimed"]["since_death_hours"], 3.0);
+        assert_eq!(step["metadata"]["reclaimed"]["after_hours"], 2.0);
         assert_eq!(
-            body["metadata"]["reclaimed"]["rule"],
+            step["metadata"]["reclaimed"]["rule"],
             "an-abandoned-step-is-reclaimed-when-its-run-died"
         );
 
@@ -645,9 +774,80 @@ mod tests {
             .expect("the next tick runs");
         assert_eq!(
             puts.lock().unwrap().len(),
-            1,
+            2,
             "a released step is `ready`, not `active` — nothing is written twice"
         );
+    }
+
+    /// THE DOOR IS THE FIX (backlog ce3a4b16). The release used to
+    /// build one PUT whose `metadata` simply left `agent_run` out, and
+    /// every assertion about that body passed — but omission is how a
+    /// caller says LEAVE IT ALONE, and since b91a2103 the server reads
+    /// it that way and carries the edge forward. So the reclaimed step
+    /// went back to `ready` still naming the run that abandoned it, and
+    /// `agent-run-delivers-when-its-step-is-done` would follow that
+    /// edge onto a closed, dead run.
+    ///
+    /// The clear is therefore an explicit `null` through the merge
+    /// door, which is the only write that DELETES a key — and it goes
+    /// FIRST, while the step is still `active`: for the window between
+    /// the two writes nothing can claim the step, whereas releasing it
+    /// to `ready` first would publish a step naming a dead run and let
+    /// a fresh claim's edge be nulled by the write that followed.
+    #[tokio::test]
+    async fn the_edge_is_cleared_through_the_merge_door_and_never_by_omission() {
+        let (base, puts) = mock_jobs(vec![
+            packet(PACKET, Some(DEAD_RUN)),
+            run(DEAD_RUN, "died", Some("2026-09-19T12:00:00Z")),
+        ])
+        .await;
+        let h = JobsReclaimAbandonedStep::with_client(reqwest::Client::new(), &base);
+        h.invoke(&args(), &ctx(tick("2026-09-19T15:00:00Z")))
+            .await
+            .expect("the tick runs");
+
+        let written = puts.lock().unwrap().clone();
+        let methods: Vec<&str> = written.iter().map(|(m, ..)| m.as_str()).collect();
+        assert_eq!(
+            methods,
+            vec!["PATCH", "PUT"],
+            "the edge is cleared through the merge door BEFORE the step \
+             is freed, so no claim can land between them: {written:?}"
+        );
+        assert_eq!(
+            written[0].3["agent_run"],
+            serde_json::Value::Null,
+            "an explicit null is what deletes a key; omitting it does not"
+        );
+        assert_eq!(
+            written[0].3["reclaimed"]["from_run"], DEAD_RUN,
+            "the evidence rides the same merge, so the clear is never \
+             recorded without its reason"
+        );
+        assert!(
+            written[1].3.get("metadata").is_none(),
+            "the PUT moves status and assignee only — a `metadata` key \
+             on it would replace the merge it just made: {:?}",
+            written[1].3
+        );
+    }
+
+    /// One step as the mock server now holds it — the release is judged
+    /// on the row, never on the request (ce3a4b16).
+    async fn stored_step(base: &str, job: &str, step_id: &str) -> serde_json::Value {
+        let job: serde_json::Value = reqwest::get(format!("{base}/api/jobs/{job}"))
+            .await
+            .expect("the packet reads back")
+            .json()
+            .await
+            .expect("the packet is JSON");
+        job["steps"]
+            .as_array()
+            .expect("the packet has steps")
+            .iter()
+            .find(|s| s["id"] == json!(step_id))
+            .cloned()
+            .expect("the released step is on the packet")
     }
 
     /// THE SECOND BOUND IS THE READABLE WINDOW. A run dead for one hour

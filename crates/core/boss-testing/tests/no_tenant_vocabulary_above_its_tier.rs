@@ -92,6 +92,17 @@ impl Tree {
         )
     }
 
+    /// The same word list plus one DISCLAIMED PHRASE (`!<phrase>`): a
+    /// literal that carries a term but names something outside this
+    /// tenant, the way `brew install` carries `brew*` and names
+    /// Homebrew (backlog e9423392).
+    fn vocabulary_disclaiming(&self, phrase: &str) -> &Tree {
+        self.file(
+            "examples/wibble/VOCABULARY",
+            &format!("# why: the fixture tenant's words\nwibble*\nflurble\n!{phrase}\n"),
+        )
+    }
+
     /// A baseline with every tier at `n` except `crates/core` at `core`.
     fn baseline(&self, core: usize, n: usize) -> &Tree {
         let mut body = String::from("# fixture baseline\n");
@@ -371,5 +382,98 @@ fn the_repository_itself_is_at_its_baseline() {
         "every tier must sit exactly at its baseline; got {:?}:\n{}",
         out.status.code(),
         text(&out)
+    );
+}
+
+/// A PHRASE the tenant DISCLAIMS is not its vocabulary (backlog
+/// e9423392). `brew*` is a word-start prefix that is right in general —
+/// brewery, brewhouse, brewing — and wrong for one common literal:
+/// `brew install` names Homebrew. A builder writing macOS install steps
+/// hit this on 2026-09-20 and worked around it by writing a different
+/// command; the next one will not always have as clean a dodge.
+///
+/// The VOCABULARY file already carried this judgement as PROSE — its
+/// "deliberately NOT listed" block, naming tap, batch, hop, grain,
+/// barrel, ale. A comment asking the next person to make the same call
+/// is not a mechanism (CLAUDE.md §9a), so a `!<phrase>` line makes one
+/// class of it executable, subtracted with the same exact weighting the
+/// name-as-path and DELETE exemptions already use.
+#[test]
+fn a_phrase_the_tenant_disclaims_is_not_its_vocabulary() {
+    let tree = Tree::new("disclaimed-phrase");
+    tree.vocabulary_disclaiming("wibble sprocket")
+        .baseline(1, 0)
+        .file(
+            "crates/core/boss-thing/src/lib.rs",
+            "\
+// a wibble sprocket is the disclaimed phrase, and a Wibble Sprocket is it too
+// but a plain wibble here is the one hit that counts
+",
+        );
+    let out = tree.run();
+    assert!(
+        out.status.success(),
+        "two disclaimed phrases and one word must count exactly one; got {:?}:\n{}",
+        out.status.code(),
+        text(&out)
+    );
+
+    // The exemption reaches the phrase and nothing else: the same term
+    // in any other company still counts.
+    let tree = Tree::new("disclaimed-phrase-is-not-the-term");
+    tree.vocabulary_disclaiming("wibble sprocket")
+        .baseline(0, 0)
+        .file(
+            "crates/core/boss-thing/src/lib.rs",
+            "// a wibble widget is not the disclaimed phrase\n",
+        );
+    let out = tree.run();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the term outside the disclaimed phrase must still count:\n{}",
+        text(&out)
+    );
+    assert!(
+        text(&out).contains("crates/core/boss-thing/src/lib.rs"),
+        "and be named:\n{}",
+        text(&out)
+    );
+}
+
+/// A disclaimed phrase that carries no term would exempt nothing — a
+/// declaration that reads as covering something and covers nothing, the
+/// wrong-path-answers-0 shape (CLAUDE.md §Doors). Refused, naming it.
+#[test]
+fn a_disclaimed_phrase_carrying_no_term_is_refused() {
+    let tree = Tree::new("disclaimed-phrase-without-a-term");
+    tree.vocabulary_disclaiming("sprocket widget")
+        .baseline(0, 0);
+    let out = tree.run();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a phrase matching no term must be a refusal, never a silent no-op:\n{}",
+        text(&out)
+    );
+    let t = text(&out);
+    assert!(
+        t.contains("sprocket widget") && t.contains("disclaim"),
+        "the refusal must name the phrase and the mechanism it belongs to:\n{t}"
+    );
+}
+
+/// The brewery's own disclaimer, in the real tree: `brew install` is
+/// Homebrew, not this tenant. The declaration lives with the tenant and
+/// the lint reads it there, so this pins the one line the repository
+/// depends on — without it, the phrase counts again and the next
+/// builder writing install steps is refused as this one was.
+#[test]
+fn the_brewery_disclaims_brew_install() {
+    let vocab = repo_root().join("examples/brewery/VOCABULARY");
+    let body = std::fs::read_to_string(&vocab).expect("read the brewery vocabulary");
+    assert!(
+        body.lines().any(|l| l.trim() == "!brew install"),
+        "the tenant must disclaim the phrase in its own file:\n{body}"
     );
 }

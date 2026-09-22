@@ -52,7 +52,7 @@
 //!     `Write`, which a ConfigMap's symlink swap never is). The
 //!     committed file stays the no-skip render, byte for byte.
 
-use boss_testing::{repo_root, scratch_dir, write_exec, write_file};
+use boss_testing::{repo_root, scratch_dir, tunnel_ingress_summary, write_exec, write_file};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -937,7 +937,7 @@ fn the_runner_re_renders_the_ingress_after_the_secret_gate_and_rolls_the_connect
     assert!(applied.contains(SKIP_COMMENT), "{applied}");
     assert_eq!(
         recorded["tunnel_ingress"],
-        "boss.algedonic.dev → boss; www.algedonic.dev → boss (site); playground.algedonic.dev → boss (boss-playground skipped: secrets absent); id.algedonic.dev → https://10.20.0.31:443 (origin)",
+        tunnel_ingress_summary(SKIPPED),
         "{recorded}"
     );
     // The deploying tick still records the connector beside the map,
@@ -982,10 +982,7 @@ fn the_runner_re_renders_the_ingress_after_the_secret_gate_and_rolls_the_connect
         read(CONFIG),
         "with nothing skipped the converge applies the committed render"
     );
-    assert_eq!(
-        recorded["tunnel_ingress"],
-        "boss.algedonic.dev → boss; www.algedonic.dev → boss (site); playground.algedonic.dev → boss-playground; id.algedonic.dev → https://10.20.0.31:443 (origin)"
-    );
+    assert_eq!(recorded["tunnel_ingress"], tunnel_ingress_summary(""));
     let sha = sha256_hex(&applied);
     assert_eq!(
         recorded["tunnel_ingress_render"],

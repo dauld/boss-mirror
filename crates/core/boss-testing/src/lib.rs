@@ -31,4 +31,6 @@ pub use request::{TestRequest, TestResponse};
 pub use scratch::{create_dir, scratch_dir, scratch_path, write_exec, write_file};
 #[cfg(feature = "postgres")]
 pub use test_db::TestDb;
-pub use tree::{copy_lint_libs, dispatcher_rules_dir, repo_root, tree_match};
+pub use tree::{
+    copy_lint_libs, dispatcher_rules_dir, repo_root, tree_match, tunnel_ingress_summary,
+};

@@ -77,6 +77,19 @@
 #     edited, so without this form that tier could never fall to zero
 #     once the deleting migration landed. The same word in an INSERT
 #     beside it, or in the comment above it, still counts.
+#   - a DISCLAIMED PHRASE: a `!<phrase>` line in a VOCABULARY, matched
+#     as a whole phrase, case-insensitively. A term can be right in
+#     general and wrong for one common literal — `brew*` deliberately
+#     reaches brewery, brewhouse and brewing, and also reaches
+#     `brew install`, which is Homebrew. The tenant already made this
+#     class of judgement in prose (its "deliberately NOT listed" block
+#     names tap, batch, hop, grain, barrel, ale); a comment asking the
+#     next author to make it again is not a mechanism (CLAUDE.md §9a),
+#     so the phrase is declared beside the words it qualifies and is
+#     subtracted with the same exact weighting as the forms above. A
+#     phrase carrying no term of that VOCABULARY is refused: it would
+#     exempt nothing while reading as though it covered something
+#     (backlog e9423392).
 #
 # A wrong path answers 0 instead of erroring (CLAUDE.md §Doors), so a
 # missing tier root, a missing VOCABULARY, a malformed term, and a
@@ -124,9 +137,17 @@ shopt -u nullglob
 # brewery, brewhouse, brewing). The term alphabet is restricted so no
 # escaping is ever needed and a stray metacharacter cannot widen the
 # match silently.
+#
+# A line beginning with `!` is a DISCLAIMED PHRASE, not a term: a
+# literal that carries a term but names something outside this tenant
+# (`brew install` is Homebrew, though `brew*` is right in general —
+# backlog e9423392). It is collected here and subtracted below with the
+# exempt forms, by the same exact weighting.
 pattern=""
 terms=0
 tenants=""
+phrases=""
+phrase_list=""
 for vf in "${vocab_files[@]}"; do
     tenant=${vf#examples/}; tenant=${tenant%/VOCABULARY}
     tenants="${tenants:+$tenants, }$tenant"
@@ -135,6 +156,19 @@ for vf in "${vocab_files[@]}"; do
         line=${line#"${line%%[![:space:]]*}"}
         line=${line%"${line##*[![:space:]]}"}
         [ -n "$line" ] || continue
+        case "$line" in
+            '!'*)
+                phrase=${line#!}
+                phrase=${phrase#"${phrase%%[![:space:]]*}"}
+                case "$phrase" in
+                    ''|*[!a-z0-9\ -]*)
+                        refuse "$vf: disclaimed phrase '$line' — a phrase is lowercase letters, digits, spaces and hyphens, with no trailing *" ;;
+                esac
+                phrases="${phrases:+$phrases|}\\b${phrase}\\b"
+                phrase_list="${phrase_list:+$phrase_list
+}$vf $phrase"
+                continue ;;
+        esac
         case "$line" in
             *'*') term=${line%\*}; tail='' ;;
             *)    term=$line;      tail='\b' ;;
@@ -148,6 +182,20 @@ for vf in "${vocab_files[@]}"; do
     done < "$vf"
 done
 [ "$terms" -gt 0 ] || refuse "every VOCABULARY is empty — nothing to count"
+
+# A disclaimed phrase that carries no term exempts nothing: a
+# declaration that reads as covering something and covers nothing, which
+# is the wrong-path-answers-0 shape (CLAUDE.md §Doors). Refused here,
+# where the term pattern is finally complete.
+while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    vf=${entry%% *}; phrase=${entry#* }
+    n=$(printf '%s' "$phrase" | grep -oiE -e "$pattern" | wc -l | tr -d ' ')
+    [ "$n" -gt 0 ] \
+        || refuse "$vf: disclaimed phrase '$phrase' carries no term of this VOCABULARY, so it would exempt nothing — remove it, or spell the phrase the way the term matches"
+done <<PHRASES
+$phrase_list
+PHRASES
 
 # ---- the count: one grep per tier, occurrences per file ------------
 # `-o` so a line carrying two terms counts two; `-H` so every hit
@@ -180,7 +228,7 @@ for vf in "${vocab_files[@]}"; do
     n=${vf#examples/}; n=${n%/VOCABULARY}
     names="${names:+$names|}$n"
 done
-exempt_pattern="examples/($names)\\b|\\btenant_id *= *\"($names)\""
+exempt_pattern="examples/($names)\\b|\\btenant_id *= *\"($names)\"${phrases:+|$phrases}"
 exempt=""
 for tier in "${TIERS[@]}"; do
     tier_exempt=$(grep -rIioHE \
