@@ -12,7 +12,7 @@
 # plus this car — the brewery's and the used-device shop's VOCABULARY
 # together, 23 terms, with a tenant's name as a path or an id exempt.
 crates/core 375
-crates/modules 445
+crates/modules 443
 crates/orchestrators 834
 apps/web/src 310
 apps/simulator 55

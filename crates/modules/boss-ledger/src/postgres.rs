@@ -24,7 +24,7 @@ use uuid::Uuid;
 use crate::error::LedgerError;
 use crate::posting_rules::{DataRuleSet, load_newest_rule_in_tx};
 use crate::rules::{evaluate, is_gl_inert};
-use crate::tax_registry::{check_liability_account_in_tx, names_a_tax_liability};
+use crate::tax_registry::{check_tax_accounts_in_tx, names_a_tax_liability};
 use crate::types::{FactRef, JournalEntryDraft};
 
 /// Fixed UUID of the active BOSS RuleSet — matches the seed in
@@ -117,12 +117,14 @@ pub async fn post_fact_in_tx(
         return Ok(());
     }
 
-    // A tax fact posts to the liability account the instance's
-    // `tax_kinds` row names for its kind — the tenant's declaration is
-    // the one definition — and a kind with no row cannot post. The rule
-    // above is pure and cannot read the table, so the hold is here, in
-    // the same transaction, after the rule's own payload checks and only
-    // for an entry about to be written (backlog e021be29).
+    // A tax fact posts to the accounts the instance's `tax_kinds` row
+    // names for its kind — the tenant's declaration is the one
+    // definition — and a kind with no row cannot post. The rule above is
+    // pure and cannot read the table, so the hold is here, in the same
+    // transaction, after the rule's own payload checks and only for an
+    // entry about to be written (backlog e021be29 for the liability,
+    // c0b83e13 for the expense side, which was an allowlist of three
+    // demo codes inside the rule until then).
     if names_a_tax_liability(fact.kind) {
         let account = fact
             .payload
@@ -133,7 +135,8 @@ pub async fn post_fact_in_tx(
                 reason: "liability_account missing".to_string(),
             })?;
         let tax_kind = fact.payload.get("kind").and_then(|v| v.as_str());
-        check_liability_account_in_tx(tx, fact.kind, tax_kind, account).await?;
+        let expense = fact.payload.get("expense_account").and_then(|v| v.as_str());
+        check_tax_accounts_in_tx(tx, fact.kind, tax_kind, account, expense).await?;
     }
 
     let period_id = ensure_period_for(tx, fact.kind, draft.posted_on).await?;

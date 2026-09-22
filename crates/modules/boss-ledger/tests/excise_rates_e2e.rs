@@ -124,8 +124,7 @@ async fn accrue(
 ) -> (StatusCode, Value) {
     let mut body = json!({
         "id": id,
-        "expense_account": "6550",
-        "liability_account": "2320",
+        "kind": "excise",
         "posted_on": posted_on,
         "jurisdiction": "US-FEDERAL",
         "excise_bbl": excise_bbl,
@@ -345,8 +344,7 @@ async fn legacy_amount_cents_body_still_posts() {
         "/api/ledger/tax-accruals",
         json!({
             "id": "excise-legacy",
-            "expense_account": "6550",
-            "liability_account": "2320",
+            "kind": "excise",
             "amount_cents": 36750,
             "posted_on": "2026-03-01",
             "jurisdiction": "US-FEDERAL",
@@ -365,8 +363,7 @@ async fn neither_quantity_nor_amount_is_a_400() {
         "/api/ledger/tax-accruals",
         json!({
             "id": "excise-empty",
-            "expense_account": "6550",
-            "liability_account": "2320",
+            "kind": "excise",
             "posted_on": "2026-03-01",
             "jurisdiction": "US-FEDERAL",
         }),
@@ -429,4 +426,147 @@ async fn schedule_writes_are_auditor_gated_and_listable() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["jurisdiction"], "US-FEDERAL");
     assert_eq!(rows[0]["tiers"], ttb_tiers());
+}
+
+// --- the accounts are the kind's (backlog c0b83e13) ------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_accrual_posts_to_the_accounts_the_kinds_row_names() {
+    // The body names only the kind; the door reads 2320 / 6550 off the
+    // `excise` tax_kinds row and stamps both onto the fact, so the
+    // payload a rebuild replays carries them.
+    let db = TestDb::new().await;
+    let (status, _) = accrue(&db, "excise-row-1", "2026-03-01", 100, Some(350)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(gl_credit_balance(&db, "2320").await, 100 * 350);
+    assert_eq!(gl_credit_balance(&db, "6550").await, -(100 * 350));
+    let (payload,): (Value,) = sqlx::query_as(
+        "SELECT payload FROM financial_facts WHERE source_table = 'tax_accruals' \
+         AND source_id = 'excise-row-1'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(payload["kind"], json!("excise"));
+    assert_eq!(payload["liability_account"], json!("2320"));
+    assert_eq!(payload["expense_account"], json!("6550"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kind_with_no_row_is_refused_naming_it() {
+    let db = TestDb::new().await;
+    let (status, body) = post_json(
+        make_router(&db),
+        "/api/ledger/tax-accruals",
+        json!({
+            "id": "excise-unregistered",
+            "kind": "wheat-levy",
+            "excise_bbl": 10,
+            "posted_on": "2026-03-01",
+            "jurisdiction": "US-FEDERAL",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let text = body.to_string();
+    assert!(
+        text.contains("wheat-levy") && text.contains("tax_kinds"),
+        "{text}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kind_that_drains_rather_than_accrues_is_refused_naming_it() {
+    // `sales` builds its liability up per invoice line: its row names no
+    // expense account, so it cannot be the target of a standalone accrual.
+    let db = TestDb::new().await;
+    let (status, body) = post_json(
+        make_router(&db),
+        "/api/ledger/tax-accruals",
+        json!({
+            "id": "excise-sales",
+            "kind": "sales",
+            "excise_bbl": 10,
+            "posted_on": "2026-03-01",
+            "jurisdiction": "US-CA",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let text = body.to_string();
+    assert!(
+        text.contains("sales") && text.contains("expense_account"),
+        "{text}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_body_still_naming_the_accounts_is_refused_rather_than_ignored() {
+    // A caller on the pre-c0b83e13 contract must hear about it: unknown
+    // fields were dropped in silence before, which would have accrued
+    // against whatever the kind's row said while the caller believed
+    // its own codes were in force.
+    let db = TestDb::new().await;
+    let (status, _) = post_json(
+        make_router(&db),
+        "/api/ledger/tax-accruals",
+        json!({
+            "id": "excise-old-contract",
+            "kind": "excise",
+            "expense_account": "6550",
+            "liability_account": "2320",
+            "excise_bbl": 10,
+            "posted_on": "2026-03-01",
+            "jurisdiction": "US-FEDERAL",
+        }),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "the old body shape must not post");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_excise_filing_drains_the_liability_and_never_accrues_it_again() {
+    // c0b83e13 gave the `excise` tax_kinds row an expense account, and
+    // the filing door used to read "this kind accrues at filing time"
+    // off exactly that field. Excise is accrued per brew batch, so a
+    // filing that accrued again would double the liability: the period
+    // derivation reads the 2320 balance the batches already credited.
+    let db = TestDb::new().await;
+    put_ttb_schedule(&db, "US-FEDERAL", "2026-01-01").await;
+    let (status, _) = accrue(&db, "excise-batch-1", "2026-01-15", 100, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let accrued = gl_credit_balance(&db, "2320").await;
+    let expensed = gl_credit_balance(&db, "6550").await;
+    assert_eq!(accrued, 100 * 350);
+
+    let (status, body) = post_json(
+        make_router(&db),
+        "/api/ledger/tax-filings",
+        json!({
+            "id": "tf-excise-US-FEDERAL-2026-Q1",
+            "kind": "excise",
+            "jurisdiction": "US-FEDERAL",
+            "period_start": "2026-01-01",
+            "period_end": "2026-03-31",
+            "due_on": "2026-04-15",
+            "amount_cents": 1,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["amount_cents"],
+        json!(accrued),
+        "the filing derives from 2320"
+    );
+    assert_eq!(
+        gl_credit_balance(&db, "2320").await,
+        accrued,
+        "creating the filing must not credit 2320 a second time"
+    );
+    assert_eq!(
+        gl_credit_balance(&db, "6550").await,
+        expensed,
+        "creating the filing must not debit 6550 a second time"
+    );
 }

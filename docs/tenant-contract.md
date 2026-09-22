@@ -422,10 +422,16 @@ inside the enum, every parent declared before its child.
 which taxes the tenant files and where it collects them: one
 `[[tax_kind]]` per filing kind — `kind`, the `liability_account` it
 drains on remit, the `expense_account` it accrues against (only a kind
-that accrues, income tax; omit it for a kind that drains a liability
-built up per invoice or per payroll run) and `derive_basis`, the
-accrual door's amount derivation (`POST /api/ledger/tax-accruals`;
-none means the caller's amount) — and one `[[sales_tax_rate]]` per
+that accrues: income tax at filing time, excise per brew batch; omit
+it for a kind that drains a liability built up per invoice or per
+payroll run) and `derive_basis`, the accrual door's amount derivation
+(`POST /api/ledger/tax-accruals`; none means the caller's amount).
+Both accounts are the row's: the accrual door takes a `kind` and
+resolves them from it, and a kind with no row — or one naming no
+expense account — is refused by name (backlog `c0b83e13`). A
+`period-*` derivation reads the liability's existing balance, so such
+a filing only drains it and never accrues again. And one
+`[[sales_tax_rate]]` per
 state: `state` (two letters), `jurisdiction` (`US-CA`), `rate_bps`
 (0..=2000). Until this file had a door, both tables came from the
 product: 40-ledger.sql seeds the brewery's five kinds and the 27

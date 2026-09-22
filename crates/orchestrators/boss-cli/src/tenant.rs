@@ -2677,7 +2677,10 @@ terminal = { outcome = "sponsored" }
         assert_eq!(seed.tax_kind.len(), 5);
         assert_eq!(seed.sales_tax_rate.len(), 27);
         let codes: Vec<String> = seed.account_codes().into_iter().collect();
-        assert_eq!(codes, ["2150", "2300", "2310", "2320", "6500"]);
+        // 6550 joined the five when the per-production kind took the
+        // expense account its accruals debit (backlog c0b83e13): the
+        // row is the one definition of both of a kind's accounts.
+        assert_eq!(codes, ["2150", "2300", "2310", "2320", "6500", "6550"]);
         let r = check(&boss_testing::repo_root().join("examples/brewery"));
         let row = status_of(&r, "seeds/tax.toml").unwrap();
         assert_eq!(row.status, Status::Ok, "{row:?}");

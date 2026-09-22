@@ -420,11 +420,19 @@ kept because the migration has not been written, not because it could
 not be a protocol consequence — and it must not be joined by new
 routing. The census counts these 22 `step.done.*` rules as the number to
 watch.
+
+v2 (backlog c0b83e13): the args carried `liability_account = "2320"`
+and `expense_account = "6550"` — the demo tenant's two codes, a copy
+of a fact the tenant's own `tax_kinds` row already holds (and a
+second copy in 41-dispatcher.sql's seed). They carry the KIND now and
+the ledger resolves both accounts from that row, so a kind with no
+row refuses by name instead of posting to whatever the args said.
 """
+version = 2
 on_event = "step.done.production-produce"
 [[rule.do]]
 handler = "ledger.tax.accrue"
-args = { rate_cents_per_bbl = "350", liability_account = "\"2320\"", expense_account = "\"6550\"", jurisdiction = "\"US-FEDERAL\"" }
+args = { rate_cents_per_bbl = "350", kind = "\"excise\"", jurisdiction = "\"US-FEDERAL\"" }
 
 # ---------------------------------------------------------------------------
 # Reorder-threshold spawn — the canonical example.

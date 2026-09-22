@@ -398,8 +398,8 @@ fn tax_accrued(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> {
     //     "filing_id":         "tf-income-US-FEDERAL-2026-Q1",
     //     "kind":              a `tax_kinds` row on this instance,
     //     "jurisdiction":      "US-FEDERAL",
-    //     "expense_account":   "6500",          -- must be debit-normal
-    //     "liability_account": "2310",          -- the account that row names
+    //     "expense_account":   "6500",          -- the expense that row names
+    //     "liability_account": "2310",          -- the liability that row names
     //     "amount_cents":      ...,
     //   }
     //
@@ -414,12 +414,14 @@ fn tax_accrued(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> {
     // the remit step would over-debit the liability and leave a
     // negative balance.
     //
-    // The liability account is NOT judged here: this function is pure
-    // and the tenant's regime is a table. The posting path
-    // (`post_fact_in_tx`) holds the account to the `tax_kinds` row the
-    // instance holds for `kind` and refuses a kind with no row, by name
-    // (backlog e021be29 — until 2026-09-19 a `matches!` here carried
-    // the demo tenant's four accounts and refused every other tenant's).
+    // NEITHER account is judged here: this function is pure and the
+    // tenant's regime is a table. The posting path (`post_fact_in_tx`)
+    // holds both to the `tax_kinds` row the instance holds for `kind`
+    // and refuses a kind with no row, by name (backlog e021be29 for the
+    // liability — until 2026-09-19 a `matches!` here carried the demo
+    // tenant's four liability accounts and refused every other
+    // tenant's; c0b83e13 for the expense side, which was the same leak
+    // shape, `6400 | 6500 | 6550`, until 2026-09-22).
     let amount = cents_from_payload(fact.payload.get("amount_cents"))
         .ok_or_else(|| payload_err(fact.kind, "amount_cents missing"))?;
     if amount <= 0 {
@@ -430,12 +432,6 @@ fn tax_accrued(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> {
         .get("expense_account")
         .and_then(|v| v.as_str())
         .ok_or_else(|| payload_err(fact.kind, "expense_account missing"))?;
-    if !matches!(expense, "6400" | "6500" | "6550") {
-        return Err(payload_err(
-            fact.kind,
-            &format!("expense_account `{expense}` not allowed"),
-        ));
-    }
     let liability = fact
         .payload
         .get("liability_account")

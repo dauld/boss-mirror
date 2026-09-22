@@ -578,20 +578,24 @@ fn tax_accrued_books_expense_to_liability() {
 }
 
 #[test]
-fn tax_accrued_rejects_unknown_expense_account() {
-    // Only 6400 + 6500 are whitelisted as tax-expense accounts today.
+fn tax_accrued_does_not_judge_the_expense_account() {
+    // The rule is PURE and the tenant's regime is a table, so neither
+    // account is judged here: the posting path holds both to the kind's
+    // `tax_kinds` row (backlog c0b83e13, the expense half of e021be29).
+    // Until 2026-09-22 a `matches!("6400" | "6500" | "6550")` here
+    // refused every other tenant's expense account as "not allowed".
     let payload = json!({
-        "filing_id": "tf-bad",
-        "kind": "income",
-        "jurisdiction": "US-FEDERAL",
-        "expense_account": "6100",
-        "liability_account": "2310",
+        "filing_id": "tf-gross-receipts",
+        "kind": "gross-receipts",
+        "jurisdiction": "US-DE",
+        "expense_account": "6910",
+        "liability_account": "2900",
         "amount_cents": 100,
     });
-    assert!(matches!(
-        evaluate(&BossRuleSet, &fact("finance.tax.accrued", &payload)),
-        Err(LedgerError::InvalidPayload { .. })
-    ));
+    let draft = evaluate(&BossRuleSet, &fact("finance.tax.accrued", &payload)).unwrap();
+    assert!(draft.is_balanced());
+    assert_eq!(line_for(&draft.lines, "6910").debit_cents, 100i64);
+    assert_eq!(line_for(&draft.lines, "2900").credit_cents, 100i64);
 }
 
 #[test]

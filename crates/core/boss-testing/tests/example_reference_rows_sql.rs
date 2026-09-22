@@ -279,14 +279,17 @@ async fn on_a_fresh_schema_what_remains_is_exactly_what_the_platform_names() {
     let phases_before = classes(&db, "asset", "phase").await;
 
     // The plan on the bare schema: every present candidate is deletable.
-    // The migration's tax kinds name five accounts, and until 7f163e58
+    // The migration's tax kinds name six accounts, and until 7f163e58
     // that kept them; a kind that is itself leaving keeps nothing.
+    // 6550 joined the five when 20260922052339 gave the per-production
+    // kind the expense account its accruals debit (backlog c0b83e13):
+    // the row is the one definition of both of a kind's accounts.
     let p = plan(&url);
     let tax_accounts = set(&db, "SELECT liability_account FROM tax_kinds UNION SELECT expense_account FROM tax_kinds WHERE expense_account IS NOT NULL").await;
     assert_eq!(
         tax_accounts,
-        s(&["2150", "2300", "2310", "2320", "6500"]),
-        "40-ledger.sql seeds tax kinds naming these accounts"
+        s(&["2150", "2300", "2310", "2320", "6500", "6550"]),
+        "the schema's tax kinds name these accounts"
     );
     assert_eq!(
         p["tax_kinds"]["present"].as_u64().unwrap(),

@@ -89,9 +89,7 @@ pub(super) async fn create_tax_filing(
 
     // Resolve the GL accounts + amount-derivation for this tax kind from
     // the `tax_kinds` reference table (data, not a hardcoded match in the
-    // dispatcher or an allow-list CHECK). `accrue` is implied by the
-    // presence of an expense account: income tax accrues against 6500,
-    // while sales + payroll drain an existing liability balance.
+    // dispatcher or an allow-list CHECK).
     let resolved: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT liability_account, expense_account, derive_basis \
          FROM tax_kinds WHERE kind = $1",
@@ -114,7 +112,28 @@ pub(super) async fn create_tax_filing(
                 .into_response();
         }
     };
-    let accrue = expense_account.is_some();
+    // Does this filing still have to BOOK the liability, or only drain
+    // one already on the books? A `period-*` derivation reads the
+    // liability account's own balance for the period (see the three
+    // arms below), which means every invoice, payroll run or production step
+    // in it already credited that account — accruing again at filing
+    // time would double the liability. Anything else computes a fresh
+    // amount from the books (income tax from prior-quarter net income),
+    // and that amount is what this filing accrues. The prefix is the
+    // rule, not a list beside the arms: an unknown basis is already
+    // refused by name below, so a new derivation's author chooses it
+    // deliberately.
+    //
+    // Until c0b83e13 (2026-09-22) the test was `expense_account
+    // .is_some()` alone, which held only because the per-production row named
+    // no expense account — the account that accrual actually
+    // debits lived in the dispatcher rule's args instead. Now that the
+    // row names it, the presence of an expense account no longer tells
+    // these two cases apart.
+    let derives_from_the_accrued_balance = derive_basis
+        .as_deref()
+        .is_some_and(|b| b.starts_with("period-"));
+    let accrue = expense_account.is_some() && !derives_from_the_accrued_balance;
 
     // Derive amount_cents from the actual books rather than a
     // placeholder. For income tax:
@@ -494,11 +513,23 @@ async fn post_accrual_entry(
 
 /// Body for `POST /api/ledger/tax-accruals` — a standalone accrual with
 /// no filing row. Used by the dispatcher's `ledger.tax.accrue` handler
-/// to book a per-production excise liability (DR 6550 / CR 2320) the
-/// moment a brew batch packages, exactly the way sales tax accrues per
-/// invoice. `id` is the idempotency key (e.g. `excise-<step_id>`): it
-/// feeds the financial_facts `(kind, source_table, source_id)` unique
-/// index, so a duplicate POST is a no-op.
+/// to book a per-production tax liability the moment a production step
+/// packages, exactly the way sales tax accrues per invoice. `id` is the
+/// idempotency key (e.g. `excise-<step_id>`): it feeds the
+/// financial_facts `(kind, source_table, source_id)` unique index, so a
+/// duplicate POST is a no-op.
+///
+/// THE ACCOUNTS ARE THE KIND'S, not the caller's (backlog c0b83e13).
+/// The body carries `kind` — a `tax_kinds` row on this instance — and
+/// the door reads `liability_account` + `expense_account` off that row,
+/// so the tenant's declaration is the one definition of which accounts
+/// an accrual hits. A kind with no row, or a kind whose row
+/// names no expense account, is refused by name. Until 2026-09-22 the
+/// body named both accounts itself and the fields below carried the
+/// demo tenant's `6550` / `2320`, which meant the posting hold could
+/// only check that SOME row named the liability. `deny_unknown_fields`
+/// so a caller still sending the old pair is refused loudly rather than
+/// having it dropped in silence.
 ///
 /// Two amount bases, quantity preferred:
 /// - `excise_bbl` — the taxed barrels. The ledger resolves the rate
@@ -509,10 +540,10 @@ async fn post_accrual_entry(
 /// - `amount_cents` — a caller-computed amount, taken verbatim
 ///   (pre-registry contract; still valid).
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct CreateTaxAccrualBody {
     id: String,
-    expense_account: String,
-    liability_account: String,
+    kind: String,
     #[serde(default)]
     amount_cents: Option<i64>,
     posted_on: NaiveDate,
@@ -564,6 +595,46 @@ pub(super) async fn create_tax_accrual(
     let mut tx = match state.pool.begin().await {
         Ok(t) => t,
         Err(e) => return storage_err(e),
+    };
+
+    // The kind's row is the one definition of both accounts (c0b83e13).
+    // Read before any amount work so an unregistered kind is refused by
+    // name rather than after a graduated-tier computation.
+    let named: Option<(String, Option<String>)> = match sqlx::query_as(
+        "SELECT liability_account, expense_account FROM tax_kinds WHERE kind = $1",
+    )
+    .bind(&body.kind)
+    .fetch_optional(&mut *tx)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => return storage_err(e),
+    };
+    let (liability_account, expense_account) = match named {
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "tax kind `{}` has no tax_kinds row on this instance — declare it in \
+                     seeds/tax.toml and publish it before it can accrue",
+                    body.kind
+                ),
+            )
+                .into_response();
+        }
+        Some((_, None)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "tax kind `{}` names no expense_account, so it drains a liability \
+                     rather than accruing against an expense — declare one in \
+                     seeds/tax.toml",
+                    body.kind
+                ),
+            )
+                .into_response();
+        }
+        Some((liability, Some(expense))) => (liability, expense),
     };
 
     let resolved = match (body.excise_bbl, body.amount_cents) {
@@ -700,8 +771,9 @@ pub(super) async fn create_tax_accrual(
     // provenance of the amount.
     let mut payload = serde_json::json!({
         "accrual_id": body.id,
-        "expense_account": body.expense_account,
-        "liability_account": body.liability_account,
+        "kind": body.kind,
+        "expense_account": expense_account,
+        "liability_account": liability_account,
         "amount_cents": resolved.amount_cents,
         "posted_on": body.posted_on,
         "jurisdiction": body.jurisdiction,

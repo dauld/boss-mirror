@@ -227,7 +227,7 @@ pub fn load_tax_toml(path: &std::path::Path) -> Result<TaxSeed, String> {
 }
 
 #[cfg(feature = "postgres")]
-pub(crate) use pg::{check_liability_account_in_tx, names_a_tax_liability};
+pub(crate) use pg::{check_tax_accounts_in_tx, names_a_tax_liability};
 #[cfg(feature = "postgres")]
 pub use pg::{declare_tax, list_sales_tax_rates, list_tax_kinds};
 
@@ -435,14 +435,15 @@ mod pg {
         matches!(fact_kind, "finance.tax.accrued" | "finance.tax.remitted")
     }
 
-    /// Hold a tax fact's `liability_account` to the row this instance
-    /// holds — the tenant's declaration is the ONE definition of which
-    /// account a kind hits (backlog e021be29). With a `kind` in the
-    /// payload, the account must be the one that kind's row names, and a
-    /// kind with no row cannot post; without one (the standalone accrual
-    /// door, `POST /api/ledger/tax-accruals`, stamps none), the account
-    /// must be one SOME row names as its liability. Either refusal is
-    /// `TaxKindNotRegistered`, naming the kind and the accounts, so the
+    /// Hold a tax fact's accounts to the row this instance holds — the
+    /// tenant's declaration is the ONE definition of which accounts a
+    /// kind hits (backlog e021be29 for the liability, c0b83e13 for the
+    /// expense). With a `kind` in the payload, each account must be the
+    /// one that kind's row names, and a kind with no row cannot post;
+    /// without one (a fact stamped before the accrual door carried a
+    /// kind), the liability must be one SOME row names and the expense
+    /// is unjudged, because no row identifies it. Every refusal is
+    /// `TaxKindNotRegistered`, naming the kind and both accounts, so the
     /// remedy reads off the error: declare the kind in `seeds/tax.toml`
     /// and publish it, or fix the emitter's stamp.
     ///
@@ -450,11 +451,12 @@ mod pg {
     /// checks and only for an entry about to be written — an already-
     /// posted fact stays the idempotent no-op it is, whatever the row
     /// says today.
-    pub(crate) async fn check_liability_account_in_tx(
+    pub(crate) async fn check_tax_accounts_in_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         fact_kind: &str,
         tax_kind: Option<&str>,
         account: &str,
+        expense: Option<&str>,
     ) -> Result<(), LedgerError> {
         let refused = |reason: String| LedgerError::TaxKindNotRegistered {
             fact_kind: fact_kind.to_string(),
@@ -462,22 +464,37 @@ mod pg {
         };
         match tax_kind {
             Some(kind) => {
-                let named: Option<(String,)> =
-                    sqlx::query_as("SELECT liability_account FROM tax_kinds WHERE kind = $1")
-                        .bind(kind)
-                        .fetch_optional(&mut **tx)
-                        .await
-                        .map_err(storage)?;
-                match named {
-                    None => Err(refused(format!(
+                let named: Option<(String, Option<String>)> = sqlx::query_as(
+                    "SELECT liability_account, expense_account FROM tax_kinds WHERE kind = $1",
+                )
+                .bind(kind)
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(storage)?;
+                let Some((row_liability, row_expense)) = named else {
+                    return Err(refused(format!(
                         "tax kind `{kind}` has no tax_kinds row on this instance — \
                          declare it in seeds/tax.toml and publish it before it can post"
-                    ))),
-                    Some((row,)) if row != account => Err(refused(format!(
+                    )));
+                };
+                if row_liability != account {
+                    return Err(refused(format!(
                         "liability_account `{account}` is not the account tax_kinds names \
-                         for `{kind}` (`{row}`)"
+                         for `{kind}` (`{row_liability}`)"
+                    )));
+                }
+                match (expense, row_expense.as_deref()) {
+                    (None, _) => Ok(()),
+                    (Some(e), Some(row)) if e == row => Ok(()),
+                    (Some(e), Some(row)) => Err(refused(format!(
+                        "expense_account `{e}` is not the account tax_kinds names for \
+                         `{kind}` (`{row}`)"
                     ))),
-                    Some(_) => Ok(()),
+                    (Some(e), None) => Err(refused(format!(
+                        "tax kind `{kind}` names no expense_account on this instance, so it \
+                         drains a liability rather than accruing against `{e}` — declare an \
+                         expense_account for it in seeds/tax.toml, or fix the emitter"
+                    ))),
                 }
             }
             None => {

@@ -4,12 +4,20 @@
 //!
 //! Used for federal beer excise tax: each brew batch's taxed barrels
 //! (`excise_bbl`, from the package step's metadata) post as
-//! DR 6550 Excise Tax Expense / CR 2320 Excise Tax Payable, exactly
-//! the way sales tax accrues per invoice line. The quarterly
-//! excise-tax-filing Workflow later drains 2320 → 1000 Cash. The
-//! liability is credited by this production source fact, not at filing
-//! time, so the filing's `period-excise` derive_basis sums the 2320
-//! credit balance for the period.
+//! DR Excise Tax Expense / CR Excise Tax Payable, exactly the way sales
+//! tax accrues per invoice line. The quarterly excise-tax-filing
+//! Workflow later drains the liability to Cash. The liability is
+//! credited by this production source fact, not at filing time, so the
+//! filing's `period-excise` derive_basis sums that account's credit
+//! balance for the period.
+//!
+//! THE ACCOUNTS ARE THE KIND'S (backlog c0b83e13). The rule's args
+//! carry `kind` — a `tax_kinds` row on the instance — and the ledger
+//! resolves both accounts from that row. Until 2026-09-22 they were
+//! `liability_account = "2320"` / `expense_account = "6550"` args: the
+//! demo tenant's two codes, spelled in its own rule file and in the
+//! dispatcher schema seed — a third and fourth copy of a fact the
+//! tenant's row already held.
 //!
 //! THE RATE IS REGISTRY DATA (brewery-fidelity Q4, decided
 //! 2026-08-22). The handler sends the QUANTITY, never an amount: the
@@ -76,22 +84,12 @@ impl Handler for LedgerTaxAccrue {
             Value::Int(i) => Some(*i),
             _ => None,
         });
-        let liability_account = arg(args, "liability_account")
+        let kind = arg(args, "kind")
             .and_then(|v| match v {
                 Value::String(s) => Some(s.clone()),
                 _ => None,
             })
-            .ok_or_else(|| {
-                HandlerError::Downstream("liability_account arg missing or not a string".into())
-            })?;
-        let expense_account = arg(args, "expense_account")
-            .and_then(|v| match v {
-                Value::String(s) => Some(s.clone()),
-                _ => None,
-            })
-            .ok_or_else(|| {
-                HandlerError::Downstream("expense_account arg missing or not a string".into())
-            })?;
+            .ok_or_else(|| HandlerError::Downstream("kind arg missing or not a string".into()))?;
         let jurisdiction = arg(args, "jurisdiction")
             .and_then(|v| match v {
                 Value::String(s) => Some(s.clone()),
@@ -109,8 +107,7 @@ impl Handler for LedgerTaxAccrue {
             step.step_id,
             excise_bbl,
             fallback_rate_cents_per_bbl,
-            &liability_account,
-            &expense_account,
+            &kind,
             &jurisdiction,
             posted_on,
         ) else {
@@ -139,8 +136,7 @@ fn accrual_body(
     step_id: &str,
     excise_bbl: i64,
     fallback_rate_cents_per_bbl: Option<i64>,
-    liability_account: &str,
-    expense_account: &str,
+    kind: &str,
     jurisdiction: &str,
     posted_on: chrono::NaiveDate,
 ) -> Option<serde_json::Value> {
@@ -149,8 +145,7 @@ fn accrual_body(
     }
     let mut body = json!({
         "id": format!("excise-{step_id}"),
-        "expense_account": expense_account,
-        "liability_account": liability_account,
+        "kind": kind,
         "excise_bbl": excise_bbl,
         "posted_on": posted_on,
         "jurisdiction": jurisdiction,
@@ -172,11 +167,11 @@ mod tests {
     #[test]
     fn zero_or_negative_barrels_build_no_body() {
         assert_eq!(
-            accrual_body("s1", 0, Some(350), "2320", "6550", "US-FEDERAL", day()),
+            accrual_body("s1", 0, Some(350), "production-tax", "US-FEDERAL", day()),
             None
         );
         assert_eq!(
-            accrual_body("s1", -3, Some(350), "2320", "6550", "US-FEDERAL", day()),
+            accrual_body("s1", -3, Some(350), "production-tax", "US-FEDERAL", day()),
             None
         );
     }
@@ -187,8 +182,7 @@ mod tests {
             "step-9",
             105,
             Some(350),
-            "2320",
-            "6550",
+            "production-tax",
             "US-FEDERAL",
             day(),
         )
@@ -196,8 +190,6 @@ mod tests {
         assert_eq!(body["id"], "excise-step-9");
         assert_eq!(body["excise_bbl"], 105);
         assert_eq!(body["fallback_rate_cents_per_bbl"], 350);
-        assert_eq!(body["liability_account"], "2320");
-        assert_eq!(body["expense_account"], "6550");
         assert_eq!(body["jurisdiction"], "US-FEDERAL");
         assert_eq!(body["posted_on"], "2026-03-01");
         // The ledger owns the rate: the handler must NOT send a
@@ -206,11 +198,31 @@ mod tests {
     }
 
     #[test]
+    fn the_body_names_the_kind_and_neither_account() {
+        // The tax_kinds row is the one definition of both accounts
+        // (c0b83e13): a handler that still spelled them would be a
+        // fourth copy, and the door refuses the fields outright.
+        let body = accrual_body(
+            "step-9",
+            105,
+            Some(350),
+            "production-tax",
+            "US-FEDERAL",
+            day(),
+        )
+        .unwrap();
+        assert_eq!(body["kind"], "production-tax");
+        assert!(body.get("liability_account").is_none());
+        assert!(body.get("expense_account").is_none());
+    }
+
+    #[test]
     fn no_rate_arg_omits_the_fallback_entirely() {
         // A rule that trusts the registry can drop rate_cents_per_bbl;
         // the ledger then 400s (loudly) if the registry row is missing,
         // instead of accruing silently at a stale flat rate.
-        let body = accrual_body("step-9", 105, None, "2320", "6550", "US-FEDERAL", day()).unwrap();
+        let body =
+            accrual_body("step-9", 105, None, "production-tax", "US-FEDERAL", day()).unwrap();
         assert!(body.get("fallback_rate_cents_per_bbl").is_none());
     }
 }

@@ -19,10 +19,13 @@
 # `derive_basis` names the amount derivation the accrual door runs
 # (POST /api/ledger/tax-accruals); a kind without one takes the
 # caller's amount. `expense_account` is set only for a kind that
-# accrues against an expense — income tax — and omitted for a kind
-# that drains a liability already built up per invoice or per payroll
-# run. A kind that names an account this tenant's chart does not
-# declare is refused by `boss tenant check`.
+# accrues against an expense — income tax, and excise, whose accruals
+# the dispatcher books per brew batch — and omitted for a kind that
+# drains a liability already built up per invoice or per payroll run.
+# An accrual against a kind whose row names no expense account is
+# refused at the post (backlog c0b83e13). A kind that names an account
+# this tenant's chart does not declare is refused by `boss tenant
+# check`.
 
 [[tax_kind]]
 kind = "sales"
@@ -47,6 +50,7 @@ liability_account = "2150"
 [[tax_kind]]
 kind = "excise"
 liability_account = "2320"
+expense_account = "6550"
 derive_basis = "period-excise"
 
 [[sales_tax_rate]]
