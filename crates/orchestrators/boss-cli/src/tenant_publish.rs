@@ -299,6 +299,57 @@ impl Bases {
         }
     }
 
+    /// Every service on ONE HOST, each on its own `boss_ports` PROD
+    /// port — the shape of the LAN machine door
+    /// (`infra/cluster/manifests/boss-jobs-internal.yaml`), which is
+    /// how a reader OFF the cluster asks the same services
+    /// the in-pod default asks on localhost. It is not the gateway:
+    /// the gateway signs its own `x-boss-user` from a session and
+    /// answers a sessionless caller 401, so `--gateway` cannot carry
+    /// the seed identity these reads are made with.
+    ///
+    /// `base` is the door's address — `BOSS_JOBS_URL` as the estate
+    /// spells it (`infra/estate/estate.toml`), host AND jobs port. The
+    /// port it carries is REPLACED per service rather than appended
+    /// (the same rule as `sor_base_on_port` in
+    /// `infra/forge/probe-bin/sor-routes.sh`: only the port moves, the
+    /// host is never the caller's to change), and a base with no host
+    /// is refused rather than resolved into a well-formed URL that
+    /// would read some other stack (CLAUDE.md §Doors: a wrong target
+    /// answers instead of erroring).
+    pub fn on_door(base: &str) -> Result<Self> {
+        let trimmed = base.trim();
+        let (scheme, rest) = match trimmed.split_once("://") {
+            Some((s, r)) => (s, r),
+            None => ("http", trimmed),
+        };
+        let hostport = rest.split('/').next().unwrap_or(rest);
+        // An explicit port is dropped; an IPv6 literal keeps its
+        // brackets, so only a trailing all-digit `:port` is a port.
+        let host = match hostport.rsplit_once(':') {
+            Some((h, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => h,
+            _ => hostport,
+        };
+        if scheme.is_empty() || host.is_empty() {
+            bail!(
+                "--door {base:?} names no host: give the machine door's address, the same \
+                 BOSS_JOBS_URL the estate spells (http://<host>:<jobs port>)"
+            );
+        }
+        let at = |service: &str| format!("{scheme}://{host}:{}", boss_ports::prod(service));
+        Ok(Self {
+            classes: at("classes"),
+            ledger: at("ledger"),
+            locations: at("locations"),
+            calendar: at("calendar"),
+            subjects: at("subject-kinds"),
+            policy: at("policy"),
+            people: at("people"),
+            jobs: at("jobs"),
+            dispatcher: at("dispatcher"),
+        })
+    }
+
     /// One line for the report header: what a write was routed to.
     pub fn describe(&self, gateway: Option<&str>) -> String {
         match gateway {
@@ -3002,6 +3053,44 @@ mod tests {
         assert_ne!(d.jobs, d.classes, "solo ports, not one base");
         assert!(d.describe(None).contains("boss_ports"));
         assert!(g.describe(Some("http://gw:8080")).contains("gateway"));
+    }
+
+    #[test]
+    fn a_door_puts_every_service_on_its_own_port_of_the_one_host() {
+        // The LAN machine door carries each service on its boss-ports
+        // PROD port, so a reader off the cluster asks the same services
+        // the in-pod default asks, on one host. The host here is a
+        // stand-in: the estate's own address is spelled once, in
+        // infra/estate/estate.toml, and a lint refuses it anywhere else.
+        let d = Bases::on_door("http://door:7900").unwrap();
+        assert_eq!(d.jobs, format!("http://door:{}", boss_ports::prod("jobs")));
+        assert_eq!(
+            d.policy,
+            format!("http://door:{}", boss_ports::prod("policy"))
+        );
+        assert_eq!(
+            d.calendar,
+            format!("http://door:{}", boss_ports::prod("calendar"))
+        );
+        assert_eq!(
+            d.subjects,
+            format!("http://door:{}", boss_ports::prod("subject-kinds"))
+        );
+        assert_ne!(d.jobs, d.classes, "one host, its own port per service");
+
+        // The base the estate spells is BOSS_JOBS_URL — host AND jobs
+        // port — so the port it carries is replaced, never appended,
+        // and a trailing slash or a path is not part of the host.
+        assert_eq!(Bases::on_door("http://door/").unwrap().jobs, d.jobs);
+        assert_eq!(
+            Bases::on_door("https://door:1/x").unwrap().jobs,
+            format!("https://door:{}", boss_ports::prod("jobs"))
+        );
+
+        // A base with no host is refused rather than resolved to a
+        // well-formed URL that reads a different stack.
+        assert!(Bases::on_door("http://").is_err());
+        assert!(Bases::on_door("   ").is_err());
     }
 
     fn line_of<'a>(lines: &'a [String], path: &str) -> &'a str {

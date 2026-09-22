@@ -31,8 +31,20 @@ const ORIGIN = `http://127.0.0.1:${PORT}`;
 // moved out of Playwright's own url-probe (the 30s-capped race).
 const skipDevServer = process.env['PWTEST_SKIP_DEVSERVER'] === '1';
 
+// WHICH DIRECTORY THE RUN COLLECTS — tests/mocked for every real run,
+// and one seam for the leak pin (backlog 2847f813).
+//
+// tests/run-mocked.ts refuses a run whose dev-server answered /api/**
+// reads the mock did not, and that refusal could only ever be rehearsed
+// by hand: the fixture it needs is a spec with NO installApiFloor, and
+// such a spec under tests/mocked would red the suite by design. So the
+// fixture lives at tests/leak-pin/ — collected by nothing, invisible to
+// `bun run test:mocked` — and scripts/mocked-runner-refuses-a-leak.test.ts
+// points this at it for one run. Nothing else sets the variable.
+const TEST_DIR = process.env['BOSS_MOCKED_TEST_DIR'] ?? './tests/mocked';
+
 export default defineConfig({
-  testDir: './tests/mocked',
+  testDir: TEST_DIR,
   timeout: 30_000,
   retries: process.env['CI'] ? 1 : 0,
   reporter: [['list']],

@@ -1,6 +1,22 @@
-//! `boss tenant export <dir> [--gateway <url>] [--tenant <id>]` — the
-//! live registries written back into the contract's file shape
-//! (design e187198f car 3, backlog e618f3ac).
+//! `boss tenant export <dir> [--gateway <url> | --door <url>]
+//! [--tenant <id>]` — the live registries written back into the
+//! contract's file shape (design e187198f car 3, backlog e618f3ac).
+//!
+//! WHERE IT CAN BE RUN FROM (backlog ea3c8234, car 4's first half).
+//! The reads are made as the seed identity, in the `x-boss-user`
+//! header, which only a service's own port accepts: the gateway signs
+//! that header from a SESSION and answers a sessionless reader 401, so
+//! `--gateway` is an in-cluster convenience and not a route for the
+//! machine that is supposed to commit the export. `--door` is that
+//! route — the LAN machine door (`boss-jobs-internal`, the address
+//! `infra/estate/estate.toml` spells as the system of record), one
+//! host with each service on its `boss_ports` port, which the
+//! forge and the dev pod can both reach. Measured 2026-09-22 before
+//! this car: the door carried classes and locations but NOT policy,
+//! the calendar or subject-kinds, so an off-cluster export could
+//! read some of the instance and not the rest — and a partial snapshot
+//! rendered into the tenant repo would DELETE rows from the files it
+//! rewrites. The three ports land with this car.
 //!
 //! WHY. The instance is the truth (cars 1 and 2: every door is
 //! insert-if-absent, the launcher publishes once per database). That

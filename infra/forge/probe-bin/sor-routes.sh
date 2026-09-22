@@ -40,8 +40,17 @@
 # and the dispatcher's rule registry (boss-dispatcher http.rs, all
 # under /api/dispatcher/) joined on 2026-09-17 (backlog 77fd7b5a +
 # 4145d2c1): the first real sponsorship sat at recognize with no door
-# to post a journal entry through. Everything unlisted — jobs, steps,
-# the yard, agents, sensors, workflows — is the jobs API.
+# to post a journal entry through. Policy, the calendar and the two
+# subject surfaces joined on 2026-09-22 (backlog ea3c8234): they are
+# the three registries `boss tenant export` reads that no door carried,
+# so an off-cluster export could read some of the instance and not the
+# rest — and a partial snapshot rendered into the tenant repo deletes
+# rows from the files it rewrites. `/api/subjects` and
+# `/api/subject-kinds` are one service (boss-subject-kinds mounts both:
+# subjects.rs and http.rs), and neither answered anywhere before this —
+# they fell through to the jobs API, which serves neither. Everything
+# unlisted — jobs, steps, the yard, agents, sensors, workflows — is the
+# jobs API.
 sor_service_for_path() {
     local route="${1%%\?*}" service
     # SOR-ROUTES-BEGIN
@@ -56,6 +65,10 @@ sor_service_for_path() {
         /api/locations|/api/locations/*)                       service=locations ;;
         /api/ledger/*)                                         service=ledger ;;
         /api/dispatcher/*)                                     service=dispatcher ;;
+        /api/policy|/api/policy/*)                             service=policy ;;
+        /api/calendar|/api/calendar/*)                         service=calendar ;;
+        /api/subject-kinds|/api/subject-kinds/*)               service=subject-kinds ;;
+        /api/subjects|/api/subjects/*)                         service=subject-kinds ;;
         *)                                                     service=jobs ;;
     esac
     # SOR-ROUTES-END

@@ -639,14 +639,26 @@ fn executor_for(
 /// its candidates; the agent must be active, hold that role and run
 /// that model. Lowest id wins, so the pick is deterministic. `None` is
 /// "this pick says nothing", and the caller falls through to
-/// `executor_for` — the env's single executor, which is the FALLBACK
-/// now and retires when every deployment's agents row holds the roles
-/// its blocks are declared under. Measured 2026-09-18 on the live
-/// registry: agent-claude holds `engineering-agent`, every block sits
-/// under `platform-admin`, so this pick names nobody and prod keeps
-/// nominating claude@algedonic.dev through BOSS_DISPATCH_EXECUTOR_ID.
-/// The retirement is one registry edit (the row's `role`) and one
-/// manifest edit (drop the two env lines), in that order.
+/// `executor_for` — the env's single executor. Measured 2026-09-18 on
+/// the live registry: agent-claude holds `engineering-agent`, every
+/// block sits under `platform-admin`, so this pick names nobody and
+/// prod keeps nominating claude@algedonic.dev through
+/// BOSS_DISPATCH_EXECUTOR_ID.
+///
+/// CALLING THE ENV LANE A FALLBACK WAS WRONG, and this comment used to
+/// (backlog 910df43a). A fallback covers the same work by a weaker
+/// route; the env lane covers work this pick CANNOT SEE. This pick
+/// fires on `agent_model`, so a step with no `agent = {...}` block is
+/// invisible to it whatever the roster holds — and re-measured
+/// 2026-09-22, 80 of the 188 steps live-assigned to agent-claude carry
+/// no block (`page-audit.measure` 46, `department-retro.collect` 13,
+/// `agent-run.building` 6, and six more pairs). So the retirement is
+/// NOT the two edits this comment promised: the row's `role` and the
+/// manifest leave those 80 with no deterministic nomination at all,
+/// only the role hash across the role's holders. It needs a third
+/// precondition — every step the agent executes carrying a block, or
+/// the station-discipline migration the boundary doc schedules. Pinned
+/// by `the_env_executor_is_the_only_lane_for_a_step_with_no_agent_block`.
 fn capability_executor(
     partition: Partition,
     decision_shaped: bool,
@@ -1324,12 +1336,14 @@ mod tests {
     /// to nobody else. In every direction it must NOT fire: a decision,
     /// a non-real packet, a step with no block, a role the agent does not
     /// hold, a model the agent does not run, a person of the right role
-    /// (people run no model). The env executor stays the FALLBACK, read
-    /// only when this pick names nobody — which on the live registry it
-    /// does today: agent-claude's row holds `engineering-agent` while
-    /// every agent block sits under `platform-admin`, so prod keeps
-    /// nominating claude@algedonic.dev through BOSS_DISPATCH_EXECUTOR_*
-    /// until the row holds the role (measured 2026-09-18).
+    /// (people run no model). The env executor is read only when this
+    /// pick names nobody — which on the live registry it does today:
+    /// agent-claude's row holds `engineering-agent` while every agent
+    /// block sits under `platform-admin`, so prod keeps nominating
+    /// claude@algedonic.dev through BOSS_DISPATCH_EXECUTOR_* until the
+    /// row holds the role (measured 2026-09-18). That does not make the
+    /// env lane this pick's fallback: see
+    /// `the_env_executor_is_the_only_lane_for_a_step_with_no_agent_block`.
     #[test]
     fn a_step_with_an_agent_block_is_nominated_by_capability_match() {
         let agent = |id: &str, role: &str, model: &str| super::Employee {
@@ -1406,6 +1420,67 @@ mod tests {
                 Some("opus-5[1m]"),
                 &retired
             ),
+            None
+        );
+    }
+
+    /// THE ENV EXECUTOR IS NOT A FALLBACK FOR THE CAPABILITY PICK — it
+    /// is the ONLY lane for a step that carries no agent block, and
+    /// that is why its retirement is not the two steps this module used
+    /// to describe (backlog 910df43a, measured 2026-09-22).
+    ///
+    /// The capability pick fires on `agent_model`, which car 1's
+    /// materialisation projects from a step's `agent = {...}` block.
+    /// Two workflows in the whole registry declare one
+    /// (`backlog-item`, `user-feedback`) while 56 name a
+    /// `platform-admin` role. Read live that day, 188 steps stood
+    /// assigned to agent-claude and 80 of them — `page-audit.measure`
+    /// (46), `department-retro.collect` (13), `agent-run.building`
+    /// (6), `backlog-item.measure` (4), `ship-a-change.proven` (4) and
+    /// `.review` (3), `page-audit.test`, `maintenance-sweep.remediate`,
+    /// `user-feedback.investigate`, `receive-a-payout.post` — carry no
+    /// block at all. Dropping `BOSS_DISPATCH_EXECUTOR_*` today would
+    /// hand every one of them back to
+    /// `pick_employee_with_role_fallback`, which hashes across the
+    /// role's holders: the deterministic nomination those 80 steps
+    /// reach the agent by exists nowhere else. So the retirement needs
+    /// a THIRD precondition beside the row's role and the manifest —
+    /// every step the agent executes carrying a block, or the
+    /// station-discipline migration the boundary doc schedules — and
+    /// this test pins the gap so it cannot be taken on the belief that
+    /// the pick already covers it.
+    #[test]
+    fn the_env_executor_is_the_only_lane_for_a_step_with_no_agent_block() {
+        let roster = vec![super::Employee {
+            id: "agent-claude".into(),
+            role: "platform-admin".into(),
+            status: "active".into(),
+            is_agent: true,
+            models: vec!["opus-5[1m]".into()],
+        }];
+        let platform = ["platform-admin"];
+        // A step with no block: the capability pick names nobody even
+        // with the row holding the role the step is under — step 1 of
+        // the retirement changes nothing here.
+        assert_eq!(
+            capability_executor(Partition::Real, false, &platform, None, &roster),
+            None
+        );
+        // ...and the env lane is what names the executor for it.
+        assert_eq!(
+            executor_for(
+                Partition::Real,
+                false,
+                Some("claude@algedonic.dev"),
+                Some("platform-admin"),
+                &platform
+            ),
+            Some("claude@algedonic.dev".to_string())
+        );
+        // Drop the env lines and nothing nominates it: both lanes say
+        // nothing, and the step falls to the role hash.
+        assert_eq!(
+            executor_for(Partition::Real, false, None, None, &platform),
             None
         );
     }

@@ -51,6 +51,20 @@
 # infra/forge/probe-bin/boss-gateway-read, which sends no identity by
 # design, and the row is the one entry here that no path routes to.
 #
+# Policy, the calendar and the subject registry joined on 2026-09-22
+# (backlog ea3c8234, car 4 of design e187198f). `boss tenant export`
+# writes the live registries back into the tenant repo, and it reads
+# nine services; this door carried six of them. Measured from the dev
+# pod that morning: 10.20.0.34:7800 (classes) answered, 10.20.0.34:7250
+# (policy) did not answer at all. An export that can read six of nine
+# is worse than one that cannot run — it renders the files it CAN read
+# and the three it cannot come out empty, which is a deletion in the
+# commit it opens. Same trust class as every row above: these are read
+# surfaces on an IP that already carries the jobs API's writes. The
+# reads are made as the seed identity in `x-boss-user`, which is why
+# the gateway row is not the route for them — the gateway signs that
+# header from a session and answers a sessionless reader 401.
+#
 # The ports are boss-ports' prod ports under boss-ports' names, and
 # the all-in-one pod listens on each (generate-configs.sh binds
 # 0.0.0.0), so port == targetPort. Which services, on which port, is
@@ -81,3 +95,6 @@ spec:
     - {port: 7080, targetPort: 7080, name: ledger}
     - {port: 7950, targetPort: 7950, name: dispatcher}
     - {port: 4443, targetPort: 4443, name: gateway}
+    - {port: 7250, targetPort: 7250, name: policy}
+    - {port: 7860, targetPort: 7860, name: calendar}
+    - {port: 7830, targetPort: 7830, name: subject-kinds}
