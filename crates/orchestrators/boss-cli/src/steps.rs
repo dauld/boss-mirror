@@ -1275,6 +1275,64 @@ pub(crate) fn contract_check(step: &Value, metadata: &Value) -> Result<(), Strin
     )
 }
 
+/// A `draft-design` completion names a design; the DESIGN must name the
+/// packet back, or the link closes nothing.
+///
+/// THE DEFECT (backlog 2c7dd4ab, hit live 2026-09-20). "This design
+/// answers that packet" has TWO representations and only one is
+/// load-bearing:
+///
+/// 1. the declared `design-doc.answers` job edge, which
+///    `complete-feedback-design-review-on-design-review-decided`
+///    follows to complete the packet's `design-review`;
+/// 2. the `design_id` field on `draft-design`, which is what completing
+///    that step asks for.
+///
+/// Setting (2) LOOKS like linking the design. The rule cannot follow
+/// it. So a hand-linked design is decided, out of the reviewer's queue,
+/// and its packet waits forever — which is exactly what happened: David
+/// decided design `f2cdff23`, saw it leave his queue, and `6c2eba00`
+/// still read `design-review: ready` an hour later. He reasonably
+/// concluded his review had been lost. It had not; the two records
+/// simply disagreed and nothing reconciled them.
+///
+/// `boss design --answers` writes BOTH — the edge at filing, and this
+/// step's completion when the route has one. This refusal is what
+/// stops the other path from producing half of it in silence.
+pub(crate) fn design_link_check(packet_id: &str, design: &Value) -> Result<(), String> {
+    let answers = design
+        .get("metadata")
+        .and_then(|m| m.get("answers"))
+        .and_then(Value::as_str);
+    let short = &packet_id[..8.min(packet_id.len())];
+    let design_short = design
+        .get("id")
+        .and_then(Value::as_str)
+        .map(|i| i[..8.min(i.len())].to_string())
+        .unwrap_or_else(|| "?".into());
+    match answers {
+        Some(a) if a == packet_id => Ok(()),
+        Some(other) => Err(format!(
+            "design {design_short} answers {} , not {short}. Linking it here would \
+             record a second, different claim about what this design decides — and the \
+             rule that closes a packet follows the design's OWN edge, so {short} would \
+             wait forever while the other packet closed.",
+            &other[..8.min(other.len())]
+        )),
+        None => Err(format!(
+            "design {design_short} carries no `answers` edge, so completing this step \
+             would link it in a way NOTHING follows: the rule that closes a packet's \
+             design-review reads the design's declared edge, not this field. The design \
+             would be decided and out of the reviewer's queue while {short} waited \
+             forever (backlog 2c7dd4ab).\n  \
+             File it through the door that writes both: `boss design <title> --answers \
+             {short} ...`. For a design that already exists, record the edge on it \
+             first — `PATCH /api/jobs/{design_short}/metadata` with \
+             {{\"answers\": \"{packet_id}\"}} — then complete this step."
+        )),
+    }
+}
+
 pub(crate) async fn complete(
     wire: &Wire,
     packet_ref: &str,
@@ -1295,6 +1353,21 @@ pub(crate) async fn complete(
     };
     let writes = field_writes_against(step, given, from_kind)
         .map_err(|e| anyhow!("{} `{slug}`: {e}", short(&packet)))?;
+    // A `draft-design` completion names a design; the design must name
+    // the packet back, or the link closes nothing (backlog 2c7dd4ab).
+    // Checked here rather than left to the rule, because the rule's
+    // silence is the whole defect: a hand-linked design is decided, out
+    // of the reviewer's queue, and its packet waits forever.
+    if slug == "draft-design"
+        && let Some(design_ref) = writes.get("design_id").and_then(Value::as_str)
+    {
+        let design = wire.resolve(design_ref, None).await?;
+        let packet_id = crate::envelope::job_id(&packet)
+            .context("the packet has no id")?
+            .to_string();
+        design_link_check(&packet_id, &design)
+            .map_err(|e| anyhow!("{} `{slug}`: {e}", short(&packet)))?;
+    }
     // Merged, not replaced — the step keeps its `procedure`, its
     // `agent` block and its audience — and the MERGED document is what
     // the registry judges, exactly as the API judges it after its own
@@ -3255,5 +3328,72 @@ mod self_closing_tests {
             self_closing_warning(&alarm(Some("disk_tight:w-1")), "duplicate").is_some(),
             "but any OTHER disposition skips the withdrawal terminals the recovery needs"
         );
+    }
+}
+
+#[cfg(test)]
+mod design_link_tests {
+    use super::*;
+
+    fn design(id: &str, answers: Option<&str>) -> Value {
+        let mut md = serde_json::Map::new();
+        if let Some(a) = answers {
+            md.insert("answers".into(), json!(a));
+        }
+        json!({ "id": id, "metadata": Value::Object(md) })
+    }
+
+    const PACKET: &str = "6c2eba00-1111-4111-8111-111111111111";
+    const OTHER: &str = "dd6d44b7-2222-4222-8222-222222222222";
+    const DESIGN: &str = "f2cdff23-3333-4333-8333-333333333333";
+
+    /// THE INCIDENT (2026-09-20): a design linked only by the step
+    /// field. The rule follows the design's OWN edge, so it never
+    /// fires, and the packet waits forever while the design leaves the
+    /// reviewer's queue. David saw exactly that and reasonably
+    /// concluded his review had been lost.
+    #[test]
+    fn a_design_carrying_no_answers_edge_is_refused_with_the_door_named() {
+        let err = design_link_check(PACKET, &design(DESIGN, None))
+            .expect_err("a design that names nobody cannot close this packet");
+        assert!(
+            err.contains("NOTHING follows"),
+            "the refusal must say the link would be one NOTHING follows: {err}"
+        );
+        assert!(
+            err.contains("boss design"),
+            "and name the door that writes both representations: {err}"
+        );
+        assert!(
+            err.contains("2c7dd4ab"),
+            "and cite the measurement, so the next reader can check it: {err}"
+        );
+    }
+
+    /// The other half of wrong: a design that answers a DIFFERENT
+    /// packet. Linking it here would record a second, contradicting
+    /// claim about what the design decides — and the other packet is
+    /// the one that would close.
+    #[test]
+    fn a_design_answering_another_packet_is_refused_and_names_it() {
+        let err = design_link_check(PACKET, &design(DESIGN, Some(OTHER)))
+            .expect_err("a design pointed elsewhere cannot close this packet");
+        assert!(
+            err.contains(&OTHER[..8]),
+            "the refusal names the packet the design actually answers: {err}"
+        );
+        assert!(
+            err.contains(&PACKET[..8]),
+            "and the one that would have waited forever: {err}"
+        );
+    }
+
+    /// THE CONTROL. The correct pairing passes — without it the two
+    /// refusals above would be satisfied by a check that refuses
+    /// everything, which would make `boss design --answers` unusable.
+    #[test]
+    fn the_matching_pair_is_accepted() {
+        design_link_check(PACKET, &design(DESIGN, Some(PACKET)))
+            .expect("a design that answers this packet links fine");
     }
 }
