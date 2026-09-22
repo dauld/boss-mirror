@@ -30,11 +30,35 @@
 #
 # A refusal here is exit 78 (EX_CONFIG): the request was wrong, not the
 # run. Exit 1 is reserved for a step that genuinely failed.
+#
+# --plan RENDERS AND DOES NOT ACT (design 17835005, answered by David
+# 2026-09-21). It evaluates exactly the preconditions the write path
+# evaluates, observes the same facts, and prints a PLAN DOCUMENT: the
+# resolved target, what was observed, the argv that would run and the
+# effect it would have. Nothing is written. It is the "plan" of
+# plan-then-approve, and it is what a passkey signs over — q1 settled
+# that the signature binds a rendered plan rather than a verb call,
+# because a verb call authorises an intent whose target can still
+# resolve differently at execution time, which is exactly how the
+# device renumbering would have gone wrong.
+#
+# THE PLAN IS HASHED OVER ITS OWN BYTES, so there is one definition of
+# what was approved and no canonicalisation to drift (§9a). Whoever
+# verifies re-hashes the bytes it was handed; nobody re-renders and
+# compares. That is why this document carries NO timestamp and nothing
+# else that varies between two renders of the same true state — the
+# render time belongs on the packet, outside what is signed. Two plans
+# of the same disk in the same state are byte-identical; if any
+# OBSERVED fact moves, the bytes move with it, which is the drift q4
+# says must void an approval.
 set -eu
 
 die() { echo "commission-a-disk: $*" >&2; exit 78; }
 
-[ $# -eq 2 ] || die "usage: commission-a-disk.sh <device-by-id> <mount-path>"
+PLAN=0
+if [ "${1-}" = "--plan" ]; then PLAN=1; shift; fi
+
+[ $# -eq 2 ] || die "usage: commission-a-disk.sh [--plan] <device-by-id> <mount-path>"
 BY_ID="$1"
 MOUNT="$2"
 
@@ -68,6 +92,22 @@ if [ -n "$root_src" ]; then
 fi
 mounted=$(lsblk -nro MOUNTPOINTS "$DEV" | tr -d ' ' | grep -c . || true)
 [ "${mounted:-0}" -eq 0 ] || die "$DEV has $mounted mounted filesystem(s) — refusing"
+
+# ---- the plan, when that is all that was asked for ------------------
+# Reached only with every precondition holding: a plan for a target that
+# cannot be commissioned is not a plan, it is a refusal, and the `die`
+# calls above have already made it one. So a plan on stdout means "this
+# would run", and exit 78 means "it would not, and here is why" — the
+# same two answers the write path gives, without the write.
+if [ "$PLAN" -eq 1 ]; then
+    size=$(blockdev --getsize64 "$DEV" 2>/dev/null || echo 0)
+    # The template is a FILE, not an inline program, so the test runs
+    # the same bytes the script runs rather than a copy of them (§9a).
+    jq -n --arg by_id "$BY_ID" --arg dev "$DEV" --arg mount "$MOUNT" \
+          --arg size "$size" --arg parts "$((kids - 1))" --arg mounted "${mounted:-0}" \
+          -f "$(dirname "$0")/commission-a-disk.plan.jq"
+    exit 0
+fi
 
 echo "commission-a-disk: preconditions hold for $BY_ID -> $DEV (raw, unmounted, not root)"
 echo "commission-a-disk: partitioning"

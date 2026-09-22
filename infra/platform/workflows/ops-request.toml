@@ -51,10 +51,57 @@ ready_when = "true"
 title_template = "Host read requested: {metadata.verb} on {metadata.host}"
 metadata_defaults = { trigger_kind = "operator", trigger_name = "operator-requests-a-host-read" }
 
+# THE APPROVAL, AND THE FIRST PRESENCE-ASSURED STEP IN THE SYSTEM.
+#
+# Design 17835005, answered by David 2026-09-21: he approves a
+# destructive change with his passkey and the machine executes it. Q1
+# settled what the signature binds — A RENDERED PLAN, not a verb call.
+# A verb call authorises an intent whose target can still resolve
+# differently at execution time, which is exactly how 2026-09-21 would
+# have gone wrong: a second NVMe renumbered the devices, and the disk
+# that looked like "the new one" by number was carrying the system.
+#
+# HOW THE PLAN GETS SIGNED, and why this needs no new hash. A sign-off
+# with `assurance_required = "presence"` is only producible one way
+# (steps.rs: "an assurance level with a bypass is a comment, not a
+# control"): the gateway verified a WebAuthn assertion over
+# sha256(shape_hash || ":" || nonce), where shape_hash is
+# `step_shape_hash(title, metadata)` of THIS step. So putting the plan
+# document in this step's metadata means the signature covers the plan
+# BYTES — signing the step's shape IS signing the plan. No second hash
+# to keep in agreement (§9a), and strictly stronger than a bespoke
+# plan hash because it binds the title and everything else here too.
+#
+# AND DRIFT VOIDS IT FOR FREE, which is what q4 asked for. The stamp
+# records the shape_hash it was made against, and the endpoint
+# re-computes the hash from the step's CURRENT content before
+# accepting a ticket. If the plan changes after the ceremony the hash
+# moves and the stamp no longer matches it — so an approval cannot
+# survive an edit it never saw.
+#
+# INERT UNTIL SOMETHING SETS THE FLAG. `job.metadata.requires_approval`
+# is absent on every ops-request filed today, and an absent value reads
+# FALSE in boolean position (boss-expr), so this step never becomes
+# ready and `execute` is gated exactly as it was. That is deliberate,
+# and the same ordering the `commission-a-disk` verb used: the gate
+# exists before the power does.
+[[workflow.step]]
+title = "approve"
+kind = "sign-off"
+ready_when = "steps.filed.done AND job.metadata.requires_approval"
+assurance_required = "presence"
+title_template = "Approve the plan: {metadata.verb} on {metadata.host}"
+authority_role = "platform-admin"
+metadata_defaults = { procedure = "READ THE PLAN ON THIS STEP AND NOTHING ELSE. `plan` holds the document rendered on the host itself: the target named by-id, the kernel name it resolved to AT PLAN TIME, what was observed about it, and the argv that would run. The kernel name is shown because it is the thing that moves — it is evidence about when the plan was made, never the target.\n\nYOUR PASSKEY SIGNS THESE EXACT BYTES. If anything about the plan changes after you sign, the signature stops matching and the runner refuses. If the plan looks wrong, do not approve it and say why — a plan that needs an operator to eyeball which thing is meant is a verb that should not be on this path at all (q3)." }
+fields = [{ name = "plan", field_type = "string", required = true }]
+
 [[workflow.step]]
 title = "execute"
 kind = "task"
-ready_when = "steps.filed.done"
+# WAITS FOR THE APPROVAL ONLY WHERE ONE IS REQUIRED. The absent flag
+# reads false, so every read verb filed today is ready exactly when it
+# was; a verb that declares `requires_approval` waits for the sign-off.
+ready_when = "steps.filed.done AND (NOT job.metadata.requires_approval OR steps.approve.done)"
 title_template = "Run {metadata.verb} on {metadata.host}"
 # Gated the way the maintenance kinds gate `run`: the simulated
 # workforce must not role-match onto a real host read. The runner's

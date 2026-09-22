@@ -375,6 +375,33 @@ if BOSS_GATE_RECEIPT="$RECEIPT" ./infra/gate.sh ${GATE_MODE:-} > /gate-target/ga
 else
     VERDICT=failed
 fi
+# THE VERDICT COMES FROM THE RECEIPT, not from a second reading of the
+# exit status (backlog c67bdbae). gate.sh already decided and wrote it
+# down; deriving it again here made the fact live twice, and the two
+# copies disagreed IN THE SAME WRITE — gate-run d14b0768 uploaded a
+# receipt saying `refused` while reporting `failed` beside it, so a
+# branch took a strike because the system of record was mid-roll and a
+# live-reading lint declined to guess.
+#
+# AN INFRASTRUCTURE REFUSAL IS NOT A CONSIST FAILURE (CLAUDE.md
+# §Diagnosis). gate.sh exits 2 for one and says in its own output that
+# the run "judged nothing about the branch". The if above stays as the
+# FALLBACK — a receipt that does not exist or will not parse leaves the
+# exit-status reading in place, which is the conservative answer, and
+# `failed` is the right conservative answer for a run whose record is
+# unreadable.
+#
+# Only the words the protocol's `verdict` enum declares are accepted
+# here. A receipt naming anything else is ignored rather than reported:
+# an unknown value would be refused by the field validator, and a
+# refused report is a `lost` gate-run nobody can read.
+if [ -s "$RECEIPT" ]; then
+    from_receipt=$(jq -r '.verdict // empty' "$RECEIPT" 2>/dev/null || true)
+    case "$from_receipt" in
+        green|failed|lost|refused) VERDICT="$from_receipt" ;;
+        *) : ;;
+    esac
+fi
 trap - ERR
 
 # --- failure detail (begin) ---

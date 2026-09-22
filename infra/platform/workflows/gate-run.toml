@@ -42,7 +42,7 @@ ready_when = "steps.launched.done"
 title_template = "Record the receipt"
 metadata_defaults = { heartbeat_at = "" }
 fields = [
-  { name = "verdict", field_type = "green|failed|lost", required = true },
+  { name = "verdict", field_type = "green|failed|lost|refused", required = true },
   { name = "receipt", field_type = "string" },
 ]
 
@@ -69,3 +69,34 @@ ready_when = "steps.record-verdict.done AND steps.record-verdict.metadata.verdic
 title_template = "Gate lost (environment died)"
 metadata_defaults = { outcome_kind = "aborted" }
 terminal = { outcome = "lost" }
+
+# AN INFRASTRUCTURE REFUSAL IS NOT A CONSIST FAILURE (backlog c67bdbae).
+#
+# `gate.sh` exits 2, distinct from 1, when it declines to judge at all —
+# a disk floor below its bound, a foreign-owned checkout, a live-reading
+# lint that cannot reach its registry — and writes `verdict: refused`
+# with `refused_because` into the receipt. Its own words for the
+# operator: "this run judged nothing about the branch... there is
+# nothing here for the author to edit."
+#
+# Until this terminal existed the runner had nowhere to put that word:
+# `verdict` enumerated green|failed|lost, so a refusal was reported as a
+# FAILURE and the branch took a strike for an outage. Measured on
+# gate-run d14b0768, 2026-09-21 — its receipt says refused and its
+# verdict field said failed, contradicting each other in one write,
+# because the system of record was rolling when a workflow-reading lint
+# ran.
+#
+# `aborted` LIKE `lost`, AND FOR THE SAME REASON RATHER THAN BY
+# COPYING: both mean the run produced no evidence about the tree. The
+# difference is that `lost` is silence — the environment died before
+# saying anything — and this is a component declining out loud, with a
+# reason. Neither is evidence against the branch, and neither may be
+# read as one.
+[[workflow.step]]
+title = "refused"
+kind = "outcome"
+ready_when = "steps.record-verdict.done AND steps.record-verdict.metadata.verdict = \"refused\""
+title_template = "Gate refused — it judged nothing about this branch"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "refused" }
