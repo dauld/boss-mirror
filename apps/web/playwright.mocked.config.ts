@@ -45,10 +45,60 @@ const TEST_DIR = process.env['BOSS_MOCKED_TEST_DIR'] ?? './tests/mocked';
 
 export default defineConfig({
   testDir: TEST_DIR,
-  timeout: 30_000,
+  // THIS SUITE'S LOAD BUDGET, STATED IN ONE PLACE (backlog e6bc776b).
+  //
+  // Every wait below used to be a framework default: Playwright gives an
+  // unstated `expect` 5 000 ms, and gives an unstated click or goto no cap
+  // of its own at all — they simply consume the per-test timeout, so the
+  // failure that arrives names the test rather than the thing it was
+  // waiting for. Nobody chose 5 000 ms for this pod, and three of the four
+  // specs in the load-flake report were failing against it (false-empty
+  // declares no budget anywhere; guest-signin and incident-review declare
+  // one for the mount through `mountPage` and then assert on the default).
+  //
+  // WHAT LOAD DOES TO THIS SUITE, measured 2026-09-22 on the dev pod
+  // (16-CPU cgroup quota, 32 host CPUs) by running the four named specs
+  // unchanged against a bounded CPU load:
+  //
+  //   quiet                      16/16, light tests 0.45-0.73 s
+  //   1.5x oversubscription      16/16, light tests 1.7 -2.7  s
+  //   4x                         16/16, light tests 3.7 -5.6  s
+  //   10x                        16/16, light tests 4.8 -7.8  s
+  //   full suite (129) at 2x     129/129, false-empty 5.9 s
+  //
+  // Nothing about the page differs under load — only how long it takes to
+  // paint, and by a factor of ten. A budget of 5 000 ms is inside that
+  // band; 15 000 ms is not. The asymmetry is the same one tests/run-mocked.ts
+  // argues for its readiness gate, and it is the reason these numbers are
+  // set high rather than tuned: a generous budget costs wall-clock only in a
+  // run that is already failing, while a tight one costs a whole suite of
+  // false red that reads as an app regression — ~10 minutes of one of three
+  // gate bays, plus the builder time to prove the diff innocent.
+  //
+  // It is NOT a retry and it hides nothing: a surface that never renders
+  // still fails, with the same message, 10 s later. Only the starved one
+  // stops lying.
+  //
+  // scripts/the-mocked-suite-states-its-budget.test.ts pins that these stay
+  // stated, because the alternative is what happened for the last month —
+  // one constant discovered and bumped per red, in whichever file paid for
+  // it (interaction-crawl's CLICK_TIMEOUT_MS 3 000 -> 15 000 after train
+  // #461 on 2026-09-18; _helpers.ts's mountPage 10 000; outage-crawl's
+  // 20 000), five numbers in five files and none of them readable as this
+  // suite's budget.
+  timeout: 60_000,
+  expect: { timeout: 15_000 },
   retries: process.env['CI'] ? 1 : 0,
   reporter: [['list']],
   use: {
+    // Bounded here rather than left to eat the test timeout, so a click on
+    // a starved renderer reports as a click that waited 15 s and not as a
+    // test that died somewhere.
+    actionTimeout: 15_000,
+    // A goto also triggers the dev-server's on-the-fly bundle of the route
+    // it lands on, which is the slowest thing in the suite under load —
+    // hence twice the action budget.
+    navigationTimeout: 30_000,
     baseURL: ORIGIN,
     headless: true,
     viewport: { width: 1280, height: 800 },

@@ -520,8 +520,13 @@ def sections(names):
 RE_FAILED = re.compile(r"^test (\S+) \.\.\. FAILED")
 RE_STDOUT = re.compile(r"^---- (\S+) stdout ----")
 RE_LISTED = re.compile(r"^ {4}(\S+)$")
-RE_PANIC_OLD = re.compile(r"^thread '([^']*)' panicked at '(.*)', (\S+)$")
-RE_PANIC_NEW = re.compile(r"^thread '([^']*)' panicked at (\S+):$")
+# `(<tid>)` between the thread's name and `panicked` is optional: rustc
+# began printing the thread id there, and the pattern that did not allow
+# it made gate-run a1664c7e report "no panic line for it in this check's
+# output" over a panic sitting in the same receipt's `fails_excerpt`
+# (backlog 2dc742c1, 2026-09-22). Both formats carry it.
+RE_PANIC_OLD = re.compile(r"^thread '([^']*)'(?: \(\d+\))? panicked at '(.*)', (\S+)$")
+RE_PANIC_NEW = re.compile(r"^thread '([^']*)'(?: \(\d+\))? panicked at (\S+):$")
 RE_ERROR = re.compile(r"^\s*(error(\[E\d{4}\])?|Error|ERROR)\b[: ]")
 RE_ARROW = re.compile(r"^\s*--> (\S+)")
 

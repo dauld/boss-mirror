@@ -419,19 +419,52 @@ spec:
                   # refused or failed read here costs one spoken line,
                   # never the run — the same contract as a lost kubelet
                   # read above.
+                  #
+                  # A CORPSE DOES NOT SETTLE A PACKET SOMEONE ELSE IS
+                  # STILL GATING. `boss gate` REUSES an open gate-run
+                  # packet, so one packet can carry a dead Job and a live
+                  # one at the same time, and the dead half says nothing
+                  # about the run still going. Measured 2026-09-22
+                  # (backlog 53b9a103): packet e6845e06 was settled
+                  # `lost` here at 15:45:02 from Job
+                  # gate-feat-the-chrome-bar-b7n6j, failed at 15:33:29,
+                  # while gate-feat-the-chrome-bar-xkxgl was eleven
+                  # minutes into a run on the same packet; a minute later
+                  # that run's 93-check GREEN receipt was refused HTTP 409
+                  # by a step this settle had completed, and a third gate
+                  # was spent re-proving the same sha. Both Jobs are in
+                  # the ONE read above, so the live sibling is knowable
+                  # at the moment of the decision: a packet any
+                  # unfinished gate Job still carries is skipped, out
+                  # loud, and left to that run's own verdict. The column
+                  # reads `-` rather than empty because tab is an IFS
+                  # WHITESPACE character, so `read` collapses two adjacent
+                  # tabs into one and every field after an empty one
+                  # shifts left (measured here: the dead runner's message
+                  # arrived as the live sibling's name).
                   GATE_NS="${BOSS_GATE_NAMESPACE:-boss-dev}"
                   if kubectl get jobs -n "$GATE_NS" -l app=gate-runner -o json >"$WORK/gate-jobs.json" 2>"$WORK/gate-jobs.err"; then
-                    jq -r '(.items // [])[]
+                    jq -r '(.items // []) as $all
+                      | $all[]
                       | select((.status.failed // 0) > 0)
                       | ((.status.conditions // []) | map(select(.type == "Failed")) | .[0] // {}) as $c
+                      | (.metadata.labels["boss.dev/packet"] // "") as $packet
                       | [ .metadata.name,
-                          (.metadata.labels["boss.dev/packet"] // ""),
+                          $packet,
                           ($c.reason // "unknown reason"),
                           ($c.lastTransitionTime // "unknown time"),
+                          ([ $all[]
+                             | select((.status.failed // 0) == 0 and (.status.succeeded // 0) == 0)
+                             | select((.metadata.labels["boss.dev/packet"] // "") == $packet)
+                             | .metadata.name ] | .[0] // "-"),
                           ($c.message // "") ]
                       | @tsv' "$WORK/gate-jobs.json" >"$WORK/dead-gates.tsv"
-                    while IFS="$(printf '\t')" read -r job packet reason at message; do
+                    while IFS="$(printf '\t')" read -r job packet reason at live message; do
                       [ -n "$packet" ] || continue
+                      if [ "$live" != "-" ]; then
+                        echo "dead runner $job: packet $packet is still being gated by $live — not settling, that run reports its own verdict (53b9a103)"
+                        continue
+                      fi
                       if ! api_curl -sf -H "x-boss-user: {\"id\":\"automation:estate-observer\",\"role\":\"platform-admin\",\"access_tier\":\"operator\"}" \
                           "$JOBS_API/api/jobs/$packet" >"$WORK/packet.json" 2>/dev/null; then
                         echo "dead runner $job: packet $packet could not be read — left for the clock reaper"

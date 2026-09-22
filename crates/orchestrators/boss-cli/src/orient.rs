@@ -157,6 +157,55 @@ fn held_dock_cars(cars: &[Value]) -> Vec<(String, String)> {
     out
 }
 
+/// How many consecutive boardings must have refused a car before this
+/// verb calls it troubled.
+///
+/// A SKIP IS ROUTINE AND MUST NOT PRINT (backlog 94896e74). Measured
+/// 2026-09-22: 52 of 132 trains (39%) carried a skipped branch and
+/// departed anyway, and one branch was skipped 23 consecutive times and
+/// landed fine. A line on every skip is a line on a normal occurrence,
+/// which is how a surface becomes noise and then becomes unread. Five
+/// consecutive refusals is hours of a car not landing while trains keep
+/// leaving without it — the repetition the packet is about, not the
+/// event.
+const TROUBLED_SKIPS: u64 = 5;
+
+/// Cars standing on the dock that boarding has refused over and over —
+/// branch, how many consecutive windows refused it, and the reason the
+/// last one gave.
+///
+/// The conductor has always recorded both facts ON the car
+/// (`skip_reason`, and `skips` since 94896e74) and cleared them the
+/// moment it boards, so this is a read of the packets orient has
+/// already fetched — no second call, no copy of the conductor's
+/// judgement. Deepest first: the car nobody can land is the one the
+/// operator is deciding about.
+fn troubled_dock_cars(cars: &[Value]) -> Vec<(String, u64, String)> {
+    let mut out: Vec<(String, u64, String)> = cars
+        .iter()
+        .filter(|c| c.get("status").and_then(Value::as_str) == Some("open"))
+        .filter(|c| boss_jobs::car::is_parked(c))
+        .filter_map(|c| {
+            let skips = c
+                .get("metadata")
+                .and_then(|m| m.get("skips"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            (skips >= TROUBLED_SKIPS).then(|| {
+                let reason = md_str(c, "skip_reason");
+                let reason = if reason.is_empty() {
+                    "no reason recorded".to_string()
+                } else {
+                    reason.to_string()
+                };
+                (md_str(c, "branch").to_string(), skips, reason)
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out
+}
+
 /// The two gate-run reads behind the STRANDED and HELD GREENS lanes,
 /// composed here so the test that pins their shape reads the strings
 /// the server will.
@@ -1187,6 +1236,24 @@ pub async fn run(all: bool) -> Result<()> {
         }
     }
 
+    // SKIPPED REPEATEDLY — a car the assembled tree keeps refusing.
+    // Nothing prints for a healthy dock: one skip is routine and a line
+    // on every one of them is noise on a normal occurrence. What has no
+    // surface at all is REPETITION, and that is what cost seven hours on
+    // 2026-09-22 (backlog 94896e74) — the conductor named the conflict
+    // every window and no read an operator runs carried the count.
+    let troubled = troubled_dock_cars(&cars);
+    if !troubled.is_empty() {
+        println!(
+            "  SKIPPED REPEATEDLY — {} car(s) refused {TROUBLED_SKIPS}+ consecutive \
+             boardings (repair: boss rerail <car>, which stops for you on a real conflict):",
+            troubled.len()
+        );
+        for (branch, skips, reason) in &troubled {
+            println!("    {branch}  —  skipped {skips}x  —  {reason}");
+        }
+    }
+
     // MY WORK — the actor's own queue, after the dock (65a89769). One
     // read of the agents registry for the aliases, one assignments read
     // per identity; a caller nobody named is refused here and the rest
@@ -2012,6 +2079,87 @@ mod tests {
         let boarded = car("fix/boarded", "open", "completed", held.clone());
         let closed = car("fix/closed", "closed", "ready", held.clone());
         assert!(held_dock_cars(&[boarded, closed]).is_empty());
+    }
+
+    // ---- SKIPPED REPEATEDLY (94896e74) ---------------------------------
+
+    fn skipped_car(branch: &str, status: &str, review: &str, skips: Value, reason: &str) -> Value {
+        let mut c = car(branch, status, review, json!({}));
+        c["metadata"] = json!({ "branch": branch, "skips": skips, "skip_reason": reason });
+        c
+    }
+
+    /// ONE SKIP IS ROUTINE. 39% of trains carry a skipped branch and
+    /// depart anyway, so a car refused once — or four times — prints
+    /// nothing. A line on a normal occurrence is how a surface becomes
+    /// noise and then becomes unread, which is the defect this lane
+    /// exists to fix, not to repeat.
+    #[test]
+    fn a_dock_whose_cars_are_skipped_now_and_then_says_nothing() {
+        let cars = vec![
+            skipped_car("fix/a", "open", "ready", json!(1), "conflict: a.rs"),
+            skipped_car("fix/b", "open", "ready", json!(4), "conflict: b.rs"),
+            car("fix/clean", "open", "ready", json!({})),
+        ];
+        assert!(troubled_dock_cars(&cars).is_empty());
+    }
+
+    /// REPETITION IS THE SIGNAL. At the threshold the car is named with
+    /// its count and the reason the last window gave — the two facts the
+    /// conductor already recorded and no read carried.
+    #[test]
+    fn a_car_refused_over_and_over_is_named_with_its_count_and_reason() {
+        let cars = vec![
+            skipped_car("fix/a", "open", "ready", json!(5), "conflict: steps.rs"),
+            skipped_car("fix/deep", "open", "ready", json!(23), "conflict: a.rs"),
+        ];
+        assert_eq!(
+            troubled_dock_cars(&cars),
+            vec![
+                ("fix/deep".to_string(), 23, "conflict: a.rs".to_string()),
+                ("fix/a".to_string(), 5, "conflict: steps.rs".to_string()),
+            ],
+            "deepest first: the car nobody can land is the one being decided about"
+        );
+    }
+
+    /// Only a car still AT the dock can be refused there. A boarded car
+    /// has its `skips` cleared in the same write that stamps the train,
+    /// but a stale stamp on a car that left must not paint trouble
+    /// either — the dock predicate answers that, not the stamp.
+    #[test]
+    fn a_car_that_left_the_dock_is_not_troubled_on_it() {
+        let cars = vec![
+            skipped_car(
+                "fix/boarded",
+                "open",
+                "completed",
+                json!(9),
+                "conflict: a.rs",
+            ),
+            skipped_car("fix/closed", "closed", "ready", json!(9), "conflict: a.rs"),
+        ];
+        assert!(troubled_dock_cars(&cars).is_empty());
+    }
+
+    /// A MALFORMED COUNT IS NOT A STALL, and a missing reason is not a
+    /// blank line. Neither may invent trouble, and neither may hide a
+    /// car that has one.
+    #[test]
+    fn a_count_that_is_not_a_count_paints_nothing_and_a_missing_reason_says_so() {
+        for stamp in [json!("many"), json!(-9), json!(null), json!(9.5)] {
+            let cars = vec![skipped_car("fix/a", "open", "ready", stamp.clone(), "x")];
+            assert!(
+                troubled_dock_cars(&cars).is_empty(),
+                "{stamp} is not a count of anything"
+            );
+        }
+        let cars = vec![skipped_car("fix/a", "open", "ready", json!(7), "")];
+        assert_eq!(
+            troubled_dock_cars(&cars),
+            vec![("fix/a".to_string(), 7, "no reason recorded".to_string())],
+            "seven refusals are still seven refusals with no reason on the car"
+        );
     }
 
     // ---- MY WORK (65a89769) --------------------------------------------

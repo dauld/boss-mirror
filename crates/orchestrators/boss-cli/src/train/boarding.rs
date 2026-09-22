@@ -110,6 +110,120 @@ pub(crate) fn refusal_persists(refusal: &NoDeparture) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// A SKIP THAT REPEATS IS A STALL (backlog 94896e74)
+//
+// A single skip is ROUTINE and must never fire anything: measured
+// 2026-09-22, 52 of 132 trains (39%) carried a skipped branch and still
+// departed, and one branch was skipped 23 consecutive times and landed
+// fine. What has no escalation is REPETITION. On 2026-09-22 the
+// conductor refused to board from 07:01Z to 14:21Z — roughly 420
+// identical firings on one conflicted car — diagnosed it perfectly,
+// filed ONE alarm at 07:01Z, deduplicated correctly by staying open,
+// and nothing read it for seven hours.
+//
+// So the repair verb is not what is missing (`boss rerail` exists, and
+// would not have saved that day: the conflict was real and stopped for
+// a human by design). What is missing is the SIGNAL, in two places:
+//
+//   - the car counts its consecutive skips (`next_skip_count`), so a
+//     repeatedly-skipped car LOOKS troubled where an operator already
+//     reads the dock, rather than hiding behind one reason string that
+//     says nothing about how many windows have refused it;
+//   - the alarm ESCALATES on a ladder (`stall_escalation`) instead of
+//     merely persisting, so an unread packet's number grows with the
+//     wait.
+//
+// AND THE DEDUP IS NOT BROKEN BY ANY OF IT. The alarm deduplicates by
+// staying open, and closing it is what re-arms it; an escalation that
+// filed twins would be worse than the silence it replaces. Every write
+// here lands on THAT SAME packet, and the ladder is finite, so the
+// escalation costs at most three writes however long the stall runs.
+// ---------------------------------------------------------------------------
+
+/// How many consecutive windows have skipped this car, counting the one
+/// being stamped now.
+///
+/// Read off the car's own `skips` stamp, which boarding CLEARS in the
+/// same write that clears `skip_reason` — so the count is consecutive by
+/// construction and a car that rides a train starts again at one. A
+/// stamp that is not a non-negative integer reads as no stamp: a
+/// malformed value must not paint repetition that did not happen, the
+/// same reading `red_trains_of` gives the strike count (2bb0d014).
+pub(crate) fn next_skip_count(car: &Value) -> u64 {
+    car.get("metadata")
+        .and_then(|m| m.get("skips"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .saturating_add(1)
+}
+
+/// The escalation ladder for an open boarding-stall alarm, in minutes
+/// since it was filed. Three rungs, not a rung a minute: the packet is
+/// already `priority: urgent` when it is filed, so an escalation is
+/// worth a write only when the NUMBER on it has meaningfully grown.
+/// The measured stall (07:01Z → 14:21Z) reaches the top rung.
+pub(crate) const STALL_ESCALATION_MINS: [i64; 3] = [30, 120, 360];
+
+/// A rung of that ladder, reached and not yet recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StallEscalation {
+    /// Which rung: 1, 2 or 3.
+    pub level: u64,
+    /// How long the alarm has been open, in minutes — the number that
+    /// grows, and the one an operator is actually owed.
+    pub minutes: i64,
+}
+
+/// Which rung an open boarding-stall alarm has reached, when that is
+/// HIGHER than the rung it already records — `None` otherwise, which is
+/// most windows.
+///
+/// Dated from the alarm's own `stalled_since` metadata rather than the
+/// Job's `opened_on`, which is a DATE and cannot answer a 30-minute
+/// question. An alarm filed before this stamp existed has no
+/// `stalled_since` and is not judged here at all: the caller stamps it
+/// and the next window judges it, which is the honest answer rather
+/// than a duration invented from a date.
+pub(crate) fn stall_escalation(alarm: &Value, now: DateTime<Utc>) -> Option<StallEscalation> {
+    let md = alarm.get("metadata")?;
+    let since = md
+        .get("stalled_since")
+        .and_then(Value::as_str)
+        .and_then(|s| s.parse::<DateTime<Utc>>().ok())?;
+    let minutes = (now - since).num_minutes();
+    let recorded = md
+        .get("escalation_level")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let level = STALL_ESCALATION_MINS
+        .iter()
+        .filter(|rung| minutes >= **rung)
+        .count() as u64;
+    (level > recorded).then_some(StallEscalation { level, minutes })
+}
+
+/// The message an escalation writes onto the alarm packet — the wait,
+/// the repair, and the current window's own refusal line, so a reader
+/// who opens the packet at the escalation needs no second read.
+pub(crate) fn stall_escalation_message(escalation: &StallEscalation, line: &str) -> String {
+    let StallEscalation { level, minutes } = escalation;
+    let rungs = STALL_ESCALATION_MINS.len();
+    format!(
+        "STILL STALLED — {minutes} minutes after this packet was filed the identical \
+         refusal is still firing, and nobody has acted (escalation {level} of {rungs}). \
+         The window's line right now:\n\n{line}\n\n\
+         REPAIR: each skipped car carries its own skip_reason naming the conflict, and \
+         its skips count naming how many windows have refused it. `boss rerail <car>` \
+         puts a conflict-skipped car back aboard — new branch from current main, rebase, \
+         gate, receipt copied onto the car — and stops for a person on a REAL conflict, \
+         which is what that stop is for. Closing this packet re-arms the alarm.\n\n\
+         This is an escalation of the packet that was already open, not a new one: no \
+         twin was filed, and the ladder is finite, so a stall costs at most {rungs} of \
+         these however long it runs (backlog 94896e74)."
+    )
+}
+
 /// The journal line a refused board leaves. It is the only record of
 /// the window now, so it carries the reason AND the fact that no packet
 /// was opened; a reader who greps `no train departed` gets every
@@ -950,6 +1064,115 @@ mod persistence_tests {
             refusal_persists(&waiting),
             refusal_persists(&stuck),
             "a classifier keyed on the variant alone would get one of these wrong"
+        );
+    }
+}
+
+#[cfg(test)]
+mod repetition_tests {
+    use super::*;
+
+    #[test]
+    fn a_first_skip_counts_one_and_a_repeat_counts_up() {
+        let fresh = json!({"metadata": {"branch": "fix/a"}});
+        assert_eq!(next_skip_count(&fresh), 1, "the first skip is one skip");
+        let again = json!({"metadata": {"skips": 1}});
+        assert_eq!(next_skip_count(&again), 2);
+        let twenty_three = json!({"metadata": {"skips": 22}});
+        assert_eq!(next_skip_count(&twenty_three), 23);
+    }
+
+    #[test]
+    fn a_malformed_count_reads_as_a_first_skip_rather_than_painting_a_stall() {
+        for stamp in [json!("lots"), json!(-3), json!(1.5), json!(null)] {
+            let car = json!({"metadata": {"skips": stamp}});
+            assert_eq!(
+                next_skip_count(&car),
+                1,
+                "a count that is not a count must not invent repetition"
+            );
+        }
+    }
+
+    fn alarm(stalled_since: &str, level: u64) -> Value {
+        json!({"metadata": {"stalled_since": stalled_since, "escalation_level": level}})
+    }
+
+    fn at(mins: i64) -> DateTime<Utc> {
+        "2026-09-22T07:01:00Z".parse::<DateTime<Utc>>().unwrap() + chrono::Duration::minutes(mins)
+    }
+
+    #[test]
+    fn a_stall_inside_the_first_rung_does_not_escalate() {
+        let a = alarm("2026-09-22T07:01:00Z", 0);
+        assert!(
+            stall_escalation(&a, at(29)).is_none(),
+            "the packet was filed 29 minutes ago and says so already — a second write \
+             adds nothing"
+        );
+    }
+
+    #[test]
+    fn a_stall_that_outlives_a_rung_escalates_once_and_then_stays_put() {
+        let a = alarm("2026-09-22T07:01:00Z", 0);
+        let e = stall_escalation(&a, at(35)).expect("30 minutes unread is rung one");
+        assert_eq!(e.level, 1);
+        assert_eq!(e.minutes, 35);
+        let escalated = alarm("2026-09-22T07:01:00Z", 1);
+        assert!(
+            stall_escalation(&escalated, at(45)).is_none(),
+            "the rung is already recorded: escalating again every window would file the \
+             noise this packet exists to avoid"
+        );
+        assert_eq!(
+            stall_escalation(&escalated, at(130))
+                .expect("two hours is rung two")
+                .level,
+            2
+        );
+        assert_eq!(
+            stall_escalation(&alarm("2026-09-22T07:01:00Z", 2), at(440))
+                .expect("the measured seven hours is the top rung")
+                .level,
+            3
+        );
+        assert!(
+            stall_escalation(&alarm("2026-09-22T07:01:00Z", 3), at(600)).is_none(),
+            "the ladder ends — an unbounded escalation is a write every window forever"
+        );
+    }
+
+    #[test]
+    fn an_alarm_with_no_stamp_cannot_be_judged_and_says_so() {
+        let a = json!({"metadata": {}});
+        assert!(
+            stall_escalation(&a, at(600)).is_none(),
+            "an alarm filed by an older conductor has no stalled_since; the caller \
+             stamps it rather than guessing a duration"
+        );
+        let bad = json!({"metadata": {"stalled_since": "not a time"}});
+        assert!(stall_escalation(&bad, at(600)).is_none());
+    }
+
+    #[test]
+    fn the_escalation_sentence_names_the_wait_and_the_repair() {
+        let msg = stall_escalation_message(
+            &StallEscalation {
+                level: 3,
+                minutes: 440,
+            },
+            "no train departed — every candidate was skipped on merge conflicts: fix/a.",
+        );
+        assert!(msg.contains("440 minutes"), "{msg}");
+        assert!(msg.contains("boss rerail"), "the repair verb: {msg}");
+        assert!(
+            msg.contains("fix/a"),
+            "the current window's own line rides along: {msg}"
+        );
+        assert!(
+            msg.contains("no twin"),
+            "dedup is by this packet staying open, and the escalation must say it \
+             has not broken that: {msg}"
         );
     }
 }

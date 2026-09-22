@@ -35,7 +35,7 @@
 // the list is the work. It is pinned in BOTH directions (see the two
 // tests at the bottom) so it can only shrink.
 
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Page, type Request } from '@playwright/test';
 import { SHELL_ENDPOINTS, installSmokeMocks } from './_smokeMocks';
 import { FAILURE_MARKER, LANDING_FALLBACK, ROUTES } from './_routes';
 
@@ -113,16 +113,76 @@ async function installOutage(page: Page): Promise<void> {
 
 type Seen = { route: string; markers: number; shell: boolean };
 
+/// THE READS A ROUTE FIRES, OBSERVED (backlog e6bc776b). The crawl used
+/// to give a painted shell a flat 700 ms for "onMount effects and the
+/// (instant) mocked rejections" to settle, then count markers. 700 ms is
+/// a guess about a quiet pod, and under load this suite runs ten times
+/// slower with nothing about the page changed (measured 2026-09-22: the
+/// same four specs go from 0.45-0.73 s each quiet to 4.8-7.8 s at 10x
+/// CPU oversubscription). A route whose rejection had not rendered yet
+/// counted zero markers and was reported BY NAME as a surface telling
+/// the operator something it does not know — a false finding shaped
+/// exactly like a real one, which is the worst failure mode this file
+/// has. So the wait is on the reads themselves: they are answered, not
+/// assumed to have been.
+type Reads = { inFlight: Set<Request>; issued: number };
+
+/// Reads are counted per ROUTE, so `issued` is zeroed at each goto.
+function watchReads(page: Page): Reads {
+  const reads: Reads = { inFlight: new Set(), issued: 0 };
+  page.on('request', (r) => {
+    if (!r.url().includes('/api/')) return;
+    reads.inFlight.add(r);
+    reads.issued += 1;
+  });
+  page.on('requestfinished', (r) => reads.inFlight.delete(r));
+  page.on('requestfailed', (r) => reads.inFlight.delete(r));
+  return reads;
+}
+
+/// Total budget for one route to answer its reads and paint what they
+/// mean. Reached only by a route still fetching after this long; the
+/// normal path leaves in a few hundred ms, FASTER than the sleep it
+/// replaces, because it leaves when the work is done rather than when
+/// the clock says it should be.
+const SETTLE_BUDGET_MS = 15_000;
+/// A mount can fire a second read once the first answers, so an empty
+/// in-flight set is only quiescence if it STAYS empty this long.
+const QUIET_MS = 250;
+/// A shell painted but no read issued yet is EARLY, not quiet — onMount
+/// has not run. Bounded so a genuinely read-free route costs this much
+/// and not the whole budget.
+const FIRST_READ_MS = 2_000;
+/// The last answer lands in JS; the render it causes is the next frame.
+const PAINT_MS = 100;
+
+async function settle(page: Page, reads: Reads): Promise<void> {
+  const start = Date.now();
+  const deadline = start + SETTLE_BUDGET_MS;
+  let quietSince = 0;
+  while (Date.now() < deadline) {
+    const started = reads.issued > 0 || Date.now() - start >= FIRST_READ_MS;
+    if (reads.inFlight.size > 0 || !started) quietSince = 0;
+    else if (quietSince === 0) quietSince = Date.now();
+    else if (Date.now() - quietSince >= QUIET_MS) break;
+    await page.waitForTimeout(25);
+  }
+  await page.waitForTimeout(PAINT_MS);
+}
+
 /// One shared page, one navigation per route — same rationale as
 /// route-smoke: the browser keeps the on-the-fly bundle warm, and a full
 /// goto wipes the previous route's JS state, so there is no effect bleed.
 async function crawl(page: Page, routes: ReadonlyArray<string>): Promise<Seen[]> {
   await installOutage(page);
+  const reads = watchReads(page);
   const seen: Seen[] = [];
   for (const route of routes) {
     let shell = false;
     for (let attempt = 1; attempt <= 2 && !shell; attempt++) {
       try {
+        reads.inFlight.clear();
+        reads.issued = 0;
         await page.goto(route, { waitUntil: 'commit', timeout: 20_000 });
         await expect(page.locator('.app-shell')).toBeVisible({ timeout: 20_000 });
         shell = true;
@@ -130,9 +190,8 @@ async function crawl(page: Page, routes: ReadonlyArray<string>): Promise<Seen[]>
         // Recorded as shell:false below if the retry also misses.
       }
     }
-    // Let onMount effects and the (instant) mocked rejections settle so
-    // the failure branch has actually rendered.
-    if (shell) await page.waitForTimeout(700);
+    // Let onMount's reads be ANSWERED and the failure branch render.
+    if (shell) await settle(page, reads);
     const markers = shell ? await page.locator(FAILURE_MARKER).count() : 0;
     seen.push({ route, markers, shell });
   }

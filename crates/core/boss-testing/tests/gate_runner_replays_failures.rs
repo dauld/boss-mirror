@@ -204,6 +204,31 @@ test result: FAILED. 6 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
 ::endgroup::
 ";
 
+/// The same shape, as rustc prints it since it began putting the
+/// thread id in the panic header — copied verbatim from gate-run
+/// a1664c7e (2026-09-22), the run whose verdict said there was no
+/// panic line.
+const CARGO_LOG_WITH_THREAD_ID: &str = "\
+::group::gate: test
+running 7 tests
+test a_lints_own_verdict_is_not_reported_as_a_scanning_failure ... ok
+test every_preflight_lint_scans_something_or_says_why_it_is_not_a_scanner ... FAILED
+
+failures:
+
+---- every_preflight_lint_scans_something_or_says_why_it_is_not_a_scanner stdout ----
+
+thread 'every_preflight_lint_scans_something_or_says_why_it_is_not_a_scanner' (32614) panicked at crates/core/boss-testing/tests/a_lint_that_scanned_nothing_is_red.rs:327:5:
+2 of 58 pre-flight lints REPORTED A FINDING on this tree (each exited nonzero).
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+failures:
+    every_preflight_lint_scans_something_or_says_why_it_is_not_a_scanner
+
+test result: FAILED. 6 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+::endgroup::
+";
+
 fn red_receipt(checks: &str) -> String {
     format!("{{\"verdict\":\"failed\",\"head\":\"abc\",\"mode\":\"full\",\"checks\":[{checks}]}}")
 }
@@ -657,6 +682,42 @@ fn the_excerpt_carries_the_panic_block_the_replay_prints() {
             got.replay
         );
     }
+}
+
+/// THE PANIC LINE CARRIES A THREAD ID, AND THE PARSER MUST STILL READ
+/// IT (backlog 2dc742c1, 2026-09-22). Gate-run a1664c7e recorded
+/// `test: every_preflight_lint_scans_something… - FAILED, with no panic
+/// line for it in this check's output` while the panic — its file:line
+/// and its whole assertion message — sat in the SAME receipt's
+/// `fails_excerpt`. The verdict-naming path missed a panic it was
+/// already holding: rustc prints `thread '<name>' (<tid>) panicked at
+/// <file:line:col>:` and the parser's pattern allowed nothing between
+/// the closing quote and `panicked`. CLAUDE.md §Diagnosis: a verdict
+/// someone must go re-derive is not a verdict — and this one had the
+/// answer in its hand.
+#[test]
+fn a_panic_line_with_a_thread_id_is_still_attributed_to_its_test() {
+    if python3_missing() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    let got = run_extractor(
+        &red_receipt("{\"name\":\"test\",\"result\":\"fail\"}"),
+        CARGO_LOG_WITH_THREAD_ID,
+    );
+    assert!(got.ok, "extractor failed: {}", got.stdout);
+    let fails = got.fails_joined();
+    assert!(
+        !fails.contains("no panic line"),
+        "the panic is right there in the check's output; saying there is none sends a \
+         reader to re-derive what the record already holds:\n{fails}"
+    );
+    assert!(
+        fails.contains("every_preflight_lint_scans_something_or_says_why_it_is_not_a_scanner")
+            && fails.contains("a_lint_that_scanned_nothing_is_red.rs:327:5:")
+            && fails.contains("2 of 58 pre-flight lints REPORTED A FINDING"),
+        "`fails` names the test, where it panicked and what it said:\n{fails}"
+    );
 }
 
 /// A green receipt carries `fails_excerpt: {}` — present and empty, for

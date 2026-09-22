@@ -626,13 +626,13 @@ impl Conductor {
             )
             .await?,
         )?;
-        let already = open.iter().any(|j| {
+        let already = open.iter().find(|j| {
             j.get("title")
                 .and_then(Value::as_str)
                 .is_some_and(|t| t.starts_with("Boarding stalled:"))
         });
-        if already {
-            return Ok(());
+        if let Some(alarm) = already {
+            return self.escalate_boarding_stall(alarm, &line).await;
         }
         log("boarding stalled on a refusal that will not clear itself — filing a packet");
         let owner = self.owner_for_filing().await;
@@ -640,8 +640,62 @@ impl Conductor {
             Method::POST,
             "/api/jobs",
             Some(crate::train::stranded::no_departure_alarm_body(
-                &line, &owner,
+                &line,
+                &owner,
+                Utc::now(),
             )),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Grow the number on an alarm nobody has read yet.
+    ///
+    /// WHY (backlog 94896e74). The dedup above is right and stays: while
+    /// the packet is open no twin is filed, and closing it re-arms the
+    /// alarm. But "already filed" was also "nothing further happens",
+    /// and on 2026-09-22 that meant a packet filed at 07:01Z sat
+    /// unchanged while the identical refusal fired ~420 more times until
+    /// 14:21Z. The packet was already `priority: urgent` at filing, so
+    /// there is no priority left to raise; what an operator is owed is
+    /// the WAIT, on the packet, growing. `stall_escalation` is the
+    /// decision — a finite three-rung ladder, so a stall of any length
+    /// costs at most three writes and the escalation can never become
+    /// the flood it warns about.
+    ///
+    /// An alarm from before this stamp existed carries no
+    /// `stalled_since`; it is stamped here and judged from the next
+    /// window, rather than having a duration invented for it from a
+    /// date-level `opened_on`.
+    async fn escalate_boarding_stall(&self, alarm: &Value, line: &str) -> Result<()> {
+        let jid = job_id(alarm)?.to_string();
+        let now = Utc::now();
+        if metadata_map(alarm).get("stalled_since").is_none() {
+            self.merge_job_metadata(&jid, vec![("stalled_since", json!(now.to_rfc3339()))])
+                .await?;
+            return Ok(());
+        }
+        let Some(escalation) = stall_escalation(alarm, now) else {
+            return Ok(());
+        };
+        log(format!(
+            "boarding stalled {} minutes and still refusing — escalating packet {} to {} of {}",
+            escalation.minutes,
+            id8(&jid),
+            escalation.level,
+            STALL_ESCALATION_MINS.len()
+        ));
+        self.merge_job_metadata(
+            &jid,
+            vec![
+                ("escalation_level", json!(escalation.level)),
+                ("stalled_minutes", json!(escalation.minutes)),
+                ("escalated_at", json!(now.to_rfc3339())),
+                (
+                    "message",
+                    json!(stall_escalation_message(&escalation, line)),
+                ),
+            ],
         )
         .await?;
         Ok(())
@@ -2861,13 +2915,25 @@ impl Conductor {
                 // the yard renders and the line the operator greps
                 // must never tell different stories.
                 let reason = skip_reason_conflict(&conflicted, self.policy.skip_reason_file_budget);
-                log(format!("{branch}: {reason} — left for the next train"));
+                let skips = next_skip_count(&j);
+                log(format!(
+                    "{branch}: {reason} — left for the next train (refused {skips}x in a row)"
+                ));
                 left_behind.push(json!({
                     "car_id_short": id8(job_id(&j)?),
                     "reason": reason.as_str(),
                 }));
-                self.merge_job_metadata(job_id(&j)?, vec![("skip_reason", json!(reason))])
-                    .await?;
+                // The COUNT rides with the reason (backlog 94896e74). One
+                // skip is routine — 39% of trains carry one and depart —
+                // so the reason alone says nothing about whether this car
+                // is having a bad window or has been refused all morning.
+                // Cleared with `skip_reason` on boarding, so it counts
+                // CONSECUTIVE skips.
+                self.merge_job_metadata(
+                    job_id(&j)?,
+                    vec![("skip_reason", json!(reason)), ("skips", json!(skips))],
+                )
+                .await?;
                 skipped.push((j, branch));
             }
         }
@@ -3176,7 +3242,10 @@ impl Conductor {
             // outlive the skip — the key is REMOVED (Null), not left
             // behind as "". `consist_refusal` — the lint output a
             // refused consist leaves on the car it blocked — comes off
-            // in the same write, for the same reason.
+            // in the same write, for the same reason. So does `skips`,
+            // and that is what makes the count CONSECUTIVE: a car that
+            // rides a train carries no history of refusals into its
+            // next window (94896e74).
             //
             // `boarded_head` rides here too, and lives on the CAR
             // rather than in a second list on the train: the sweep
@@ -3190,6 +3259,7 @@ impl Conductor {
                     ("train", json!(train_id.as_str())),
                     ("boarded_head", json!(head.as_str())),
                     ("skip_reason", Value::Null),
+                    ("skips", Value::Null),
                     ("consist_refusal", Value::Null),
                 ],
             )

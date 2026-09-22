@@ -37,6 +37,17 @@
 #      observer's ServiceAccount — because a manifest that reads what its
 #      Role does not grant is denied at run time and reads as "no dead
 #      runners", which is the silent-absence class this exists to end.
+#   6. a packet a LIVE gate Job is still running against is NOT settled
+#      from a DEAD sibling Job on the same packet — a relaunch reuses the
+#      open packet, so one packet can carry a corpse and a live runner at
+#      once, and settling it closes the record under the run still going.
+#      Measured 2026-09-22 (backlog 53b9a103): packet e6845e06 was settled
+#      `lost` at 15:45:02 from Job gate-feat-the-chrome-bar-b7n6j, which
+#      had failed at 15:33:29, while gate-feat-the-chrome-bar-xkxgl was
+#      eleven minutes into a run on the same packet; its 93-check green
+#      receipt hit HTTP 409 a minute later and a third gate was spent
+#      re-proving the same sha. Both Jobs are in the ONE read this
+#      observer already does, so the live sibling is knowable here.
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -82,13 +93,17 @@ JSON
 printf '{"node":{"nodeName":"w-1","fs":{"availableBytes":418759086080,"capacityBytes":997807714304}}}\n' \
     >"$tmp/stats-w-1.json"
 
-# Three gate Jobs as `kubectl get jobs -l app=gate-runner -o json` shows
+# Five gate Jobs as `kubectl get jobs -l app=gate-runner -o json` shows
 # them: DEAD (failed, packet open, no verdict), REPORTED (failed, but its
-# packet already carries a verdict), LIVE (no status yet). The DEAD one
-# is the real Job from the incident, condition and all.
+# packet already carries a verdict), LIVE (no status yet), and a CONTESTED
+# pair — one failed Job and one still running, both labelled with the SAME
+# packet, which is what a relaunch onto a reused packet leaves behind. The
+# DEAD one is the real Job from the incident, condition and all; the
+# contested pair is the real pair from 53b9a103.
 DEAD=610d715e-48f3-4f2f-9269-cffddcb84ca0
 REPORTED=22222222-2222-4222-8222-222222222222
 LIVE=33333333-3333-4333-8333-333333333333
+CONTESTED=44444444-4444-4444-8444-444444444444
 cat >"$tmp/gate-jobs.json" <<JSON
 {"items":[
  {"metadata":{"name":"gate-docs-a-probe-shape-f-x8c5q",
@@ -102,6 +117,13 @@ cat >"$tmp/gate-jobs.json" <<JSON
     {"type":"Failed","reason":"BackoffLimitExceeded","lastTransitionTime":"2026-09-11T18:00:00Z"}]}},
  {"metadata":{"name":"gate-feat-still-running-fghij",
               "labels":{"app":"gate-runner","boss.dev/packet":"$LIVE"}},
+  "status":{"active":1}},
+ {"metadata":{"name":"gate-feat-the-chrome-bar-b7n6j",
+              "labels":{"app":"gate-runner","boss.dev/packet":"$CONTESTED"}},
+  "status":{"failed":1,"conditions":[
+    {"type":"Failed","reason":"BackoffLimitExceeded","message":"Job has reached the specified backoff limit","lastTransitionTime":"2026-09-22T15:33:29Z"}]}},
+ {"metadata":{"name":"gate-feat-the-chrome-bar-xkxgl",
+              "labels":{"app":"gate-runner","boss.dev/packet":"$CONTESTED"}},
   "status":{"active":1}}
 ]}
 JSON
@@ -111,6 +133,13 @@ cat >"$tmp/packet-$DEAD.json" <<JSON
  "steps":[{"id":"64594238-0000-4000-8000-000000000001","kind":"trigger","status":"completed"},
           {"id":"bfdc7ff5-0000-4000-8000-000000000002","kind":"gate-verdict","status":"ready","metadata":{}},
           {"id":"dc8f0b53-0000-4000-8000-000000000005","kind":"outcome","status":"pending"}]}
+JSON
+# The contested packet: open, no verdict yet, and a live runner still
+# gating it — indistinguishable from the DEAD one by the packet alone.
+cat >"$tmp/packet-$CONTESTED.json" <<JSON
+{"id":"$CONTESTED","kind":"gate-run","status":"open","metadata":{"branch":"feat/the-chrome-bar-reads-the-department-registry"},
+ "steps":[{"id":"cccccccc-0000-4000-8000-000000000001","kind":"trigger","status":"completed"},
+          {"id":"dddddddd-0000-4000-8000-000000000002","kind":"gate-verdict","status":"ready","metadata":{}}]}
 JSON
 cat >"$tmp/packet-$REPORTED.json" <<JSON
 {"id":"$REPORTED","kind":"gate-run","status":"closed","metadata":{"branch":"fix/red-for-real"},
@@ -200,6 +229,14 @@ grep -q "$REPORTED" "$tmp/log-settle" && grep -q "^PUT	http://stub/api/jobs/$REP
     && fail "a failed Job whose packet already carries a verdict was written again — the runner's report is the truth, its exit code is not a second verdict"
 grep -q "$LIVE" "$tmp/log-settle" \
     && fail "a live Job's packet was touched — nothing has finished, so nothing may be settled"
+
+# ----- 6: a packet a live sibling is still gating is left alone ------
+grep -q "^PUT	http://stub/api/jobs/$CONTESTED" "$tmp/log-settle" \
+    && { cat "$tmp/log-settle" >&2; fail "a packet with a LIVE runner on it was settled from its DEAD sibling — the green that run is about to report cannot be recorded on a closed packet (53b9a103)"; }
+grep -q 'gate-feat-the-chrome-bar-xkxgl' "$tmp/out-settle" \
+    || { cat "$tmp/out-settle" >&2; fail "the skipped settle did not name the live sibling holding the packet — quiet is a loan against the next diagnosis"; }
+grep -q 'gate-feat-the-chrome-bar-b7n6j' "$tmp/out-settle" \
+    || { cat "$tmp/out-settle" >&2; fail "the skipped settle did not name the dead Job it declined to settle from"; }
 grep -q 'gate-docs-a-probe-shape-f-x8c5q' "$tmp/out-settle" \
     || { cat "$tmp/out-settle" >&2; fail "the settle was not spoken on stdout — quiet is a loan against the next diagnosis"; }
 
@@ -212,4 +249,4 @@ grep -q '^PUT	' "$tmp/log-refused" && fail "a refused read still produced a step
 grep -qi 'forbidden' "$tmp/out-refused" \
     || { cat "$tmp/out-refused" >&2; fail "the refused jobs read was not spoken on stdout with the server's reason"; }
 
-echo "a-dead-runner-is-settled-by-its-observer: ok — one Failed runner settled lost with its Job and condition named; a reported and a live Job untouched; a refused read costs one line"
+echo "a-dead-runner-is-settled-by-its-observer: ok — one Failed runner settled lost with its Job and condition named; a reported, a live and a live-sibling-contested Job untouched; a refused read costs one line"

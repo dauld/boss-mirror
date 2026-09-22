@@ -406,7 +406,7 @@ pub(crate) fn stranded_alarm_body(
 /// refusal has already passed that check. This is a stopped pipeline,
 /// not a busy one, and that is why no timer is needed to tell them
 /// apart.
-pub(crate) fn no_departure_alarm_body(line: &str, owner: &str) -> Value {
+pub(crate) fn no_departure_alarm_body(line: &str, owner: &str, now: DateTime<Utc>) -> Value {
     json!({
         "kind": "user-feedback",
         "status": "open",
@@ -426,6 +426,15 @@ pub(crate) fn no_departure_alarm_body(line: &str, owner: &str) -> Value {
                  diagnosed in the journal and read by nobody (backlog 6baabd43)."
             ),
             "input_channel": "telemetry/monitoring",
+            // WHEN the stall started, to the minute. The Job's own
+            // `opened_on` is a DATE and cannot answer "has this been
+            // unread for half an hour?", which is the question the
+            // escalation ladder asks every window
+            // (`boarding::stall_escalation`, backlog 94896e74). Staying
+            // open is still the whole dedup; this is what lets the
+            // number on the packet grow while it does.
+            "stalled_since": now.to_rfc3339(),
+            "escalation_level": 0,
         },
     })
 }
