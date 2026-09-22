@@ -804,6 +804,57 @@ fn confirm_completed(step: &Value, writes: &Map<String, Value>) -> Result<()> {
     Ok(())
 }
 
+/// The warning a self-closing alarm earns when a human triages it.
+///
+/// WHY (backlog 2228dea3, measured 2026-09-22). An estate alarm closes
+/// ITSELF: `estate.recover` watches the comparison series and, when the
+/// finding stops appearing, completes the alarm's TRIAGE step with
+/// disposition `stale`. Two `disk_tight:w-1` alarms closed that way on
+/// 2026-09-18.
+///
+/// A third did not, and the reason was a race nobody could see:
+///
+/// ```text
+///   14114f92  triage completed by automation:rule:estate-recover-on-comparison -> stale
+///   e1fea3b2  triage completed by agent-claude                                 -> build
+/// ```
+///
+/// Same finding, same scope, same host. Triaging it to `build` took the
+/// step the recovery acts on, so when the condition cleared — 0 of 20
+/// consecutive comparisons still carrying it — the recovery had nothing
+/// to complete, the withdrawal terminals were already skipped, and an
+/// urgent alarm sat open on the queue with its condition long gone.
+///
+/// NOTHING SAID SO, BEFORE OR AFTER, and that is the whole defect. An
+/// estate alarm is a `backlog-item`: it sits in the backlog station,
+/// `boss orient` lists it among the rest, and it has a `triage` step
+/// like everything else. Triaging it looks exactly like ordinary queue
+/// work, and doing it silently disables a mechanism that would have
+/// closed the packet for free.
+///
+/// THE PREDICATE IS THE HANDLER'S OWN. `estate_recover::finding_of`
+/// reads `metadata.estate_finding` and matches on it; so does this. Not
+/// a guess about titles or kinds — the same key, so the warning cannot
+/// disagree with the thing it is warning about (§9a).
+///
+/// A WARNING, NOT A REFUSAL. An operator may genuinely want to route an
+/// alarm — one that will not clear on its own needs a human disposition
+/// — and refusing that would leave no way to act on it at all.
+pub(crate) fn self_closing_warning(packet: &Value, disposition: &str) -> Option<String> {
+    let finding = packet
+        .get("metadata")
+        .and_then(|m| m.get("estate_finding"))
+        .and_then(Value::as_str)?;
+    if disposition == "stale" {
+        // The disposition the recovery itself uses. Taking the step to
+        // reach the same terminal is not taking anything over.
+        return None;
+    }
+    Some(format!(
+        "boss triage: WARNING — this packet is a self-closing estate alarm          (`{finding}`). `estate.recover` closes one by completing THIS step with          disposition `stale` once the finding stops appearing in the comparison series.          Triaging it `{disposition}` takes that over: the withdrawal terminals skip, and          if the condition clears later the recovery will have nothing to complete and the          alarm stays open with its cause long gone (measured on e1fea3b2, backlog          2228dea3). If the finding is live and needs a person, this is right; if you are          routing it because it appeared in the queue, let it close itself."
+    ))
+}
+
 pub(crate) async fn triage(
     wire: &Wire,
     item: &str,
@@ -826,6 +877,9 @@ pub(crate) async fn triage(
         .as_ref()
         .map(|o| crate::envelope::job_id(o).context("the original has no id"))
         .transpose()?;
+    if let Some(w) = self_closing_warning(&packet, disposition) {
+        eprintln!("{w}");
+    }
     let writes = triage_writes(step, disposition, evidence, original_id)
         .map_err(|e| anyhow!("{}: {e}", short(&packet)))?;
     let jid = crate::envelope::job_id(&packet).context("the packet has no id")?;
@@ -2601,5 +2655,79 @@ mod kind_field_tests {
     fn an_unknown_kind_contributes_nothing() {
         assert!(kind_fields(&step_types_fixture(), "no-such-kind").is_empty());
         assert!(kind_fields(&json!({}), "checklist").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod self_closing_tests {
+    use super::*;
+
+    fn alarm(finding: Option<&str>) -> Value {
+        let mut md = serde_json::Map::new();
+        if let Some(f) = finding {
+            md.insert("estate_finding".into(), json!(f));
+        }
+        json!({ "id": "e1fea3b2-2ef7-4600-b96e-2214764373ba", "metadata": Value::Object(md) })
+    }
+
+    /// THE INCIDENT: routing a self-closing alarm to `build` took the
+    /// step `estate.recover` completes, and the alarm outlived its
+    /// condition by hours with nothing saying why.
+    #[test]
+    fn routing_a_self_closing_alarm_elsewhere_warns_and_names_what_it_takes_over() {
+        let w = self_closing_warning(&alarm(Some("disk_tight:w-1")), "build")
+            .expect("a self-closing alarm routed elsewhere is warned about");
+        assert!(
+            w.contains("disk_tight:w-1"),
+            "the warning names the finding, so the reader knows which alarm: {w}"
+        );
+        assert!(
+            w.contains("estate.recover"),
+            "and the mechanism being taken over: {w}"
+        );
+        assert!(
+            w.contains("stale"),
+            "and the disposition that mechanism uses, which is what makes it checkable: {w}"
+        );
+        assert!(
+            w.contains("If the finding is live"),
+            "and says when routing it IS right, so the warning is not read as a refusal: {w}"
+        );
+    }
+
+    /// THE CONTROLS, and there are two because the warning must not
+    /// fire on ordinary triage — which is nearly every triage there is.
+    /// A warning on every packet is noise, and noise becomes unread,
+    /// which is the class this whole packet belongs to.
+    #[test]
+    fn an_ordinary_packet_is_not_warned_about() {
+        assert_eq!(
+            self_closing_warning(&alarm(None), "build"),
+            None,
+            "a packet carrying no estate_finding is not an alarm and is not the \
+             recovery's to close"
+        );
+        assert_eq!(
+            self_closing_warning(&json!({ "id": "x" }), "build"),
+            None,
+            "nor is one with no metadata at all"
+        );
+    }
+
+    /// AND THE DISPOSITION THE RECOVERY ITSELF USES IS NOT A TAKEOVER.
+    /// Reaching the same terminal by hand is the same outcome; warning
+    /// there would be telling an operator off for agreeing.
+    #[test]
+    fn closing_it_stale_by_hand_is_not_taking_anything_over() {
+        assert_eq!(
+            self_closing_warning(&alarm(Some("disk_tight:w-1")), "stale"),
+            None,
+            "`stale` is the disposition estate.recover writes — a human writing it \
+             reaches the same terminal, and nothing is lost"
+        );
+        assert!(
+            self_closing_warning(&alarm(Some("disk_tight:w-1")), "duplicate").is_some(),
+            "but any OTHER disposition skips the withdrawal terminals the recovery needs"
+        );
     }
 }

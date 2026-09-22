@@ -206,6 +206,32 @@ answer "yes" stops the search:
 - **Wait to write the test until after the fix.** Per CLAUDE.md
   TDD discipline: write the failing test that reproduces the
   bug *first*, then the minimal code that makes it pass.
+- **Assert a refusal without the control that it still allows the
+  legitimate case.** A test that only checks "this is refused"
+  passes against code that refuses *everything*, which is a worse
+  defect than the one being fixed and looks identical in CI. Every
+  refusal test needs a sibling asserting the accepted case, on the
+  same fixture. Measured three times on 2026-09-21/22, each a
+  different shape of the same hole: the step PUT containment fix
+  (a refusal that would have passed against a handler rejecting
+  every write), the assurance guard (which must still let an
+  ordinary step complete, the path the dispatcher, the conductor
+  and `boss step complete` all take), and the design-link refusal
+  (whose control is what keeps `boss design --answers` usable —
+  the door the refusal exists to protect). The general form: a
+  refusal is a *boundary*, and a boundary is only pinned when both
+  sides of it are.
+- **Write a test that cannot fail.** The sibling of the above, and
+  harder to see because it is green for the right-looking reason.
+  Three live instances, same week: a `jq -e` guard that exits 0 on
+  an empty document, so it passed while verifying nothing; a test
+  fixture that echoed a body the real endpoint never sends (a 204),
+  so the code under test was never exercised; and a pin whose value
+  list came back empty, so it iterated nothing. Guard against it
+  explicitly — assert the fixture is non-empty, assert the scan
+  found at least *n* items, and where the check is cheap, mutate the
+  code and watch the test name the offence. A test that has never
+  been observed to fail has not been observed to work.
 
 ## What CI actually runs today
 

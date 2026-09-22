@@ -1342,6 +1342,41 @@ pub(crate) const AGENT_RUN_KEY: &str = boss_jobs::agent_runs::EDGE_KEY;
 /// `boss dispatch:` line prints. The shape here is the handler's own
 /// (`jobs_complete_linked_step::unusable_link`), and the refusal is
 /// raised before any packet is filed.
+/// The warning a park-intent gate leaves when NO run claims it.
+///
+/// WHY (backlog c8703bee). A gate carrying `--park-*` flags is an
+/// agent's car by construction — a hand gate does not park one. When
+/// `BOSS_AGENT_RUN` is unset, the gate-run records `agent_run` none,
+/// `agent-run-lands-on-gate-green` has no edge to follow, and the run
+/// sits at `building` until the silence rule ages it out as **died** —
+/// recording successful work as a failure and losing its cost from the
+/// table the claim door reads. Measured on three runs (25b148a2,
+/// f9d658dc, c6d8060a): all three built cars whose gates went green,
+/// all three gate-runs carry `agent_run` none. One builder said so in
+/// its own handback; the other two would have died silently.
+///
+/// A MALFORMED export is already refused above. ABSENCE was silent,
+/// which is the harder half: nothing distinguishes "hand gate, no run
+/// exists" from "dispatched run whose id never reached the shell".
+///
+/// A WARNING, NOT A REFUSAL. Hand-gating a car with park flags is
+/// legitimate — an operator repairing someone else's work does exactly
+/// that — and the refusal one function down already says "or unset it
+/// for a hand gate". So this says what will happen and lets it happen.
+pub(crate) fn no_run_warning(has_park_intent: bool, run: Option<&Value>) -> Option<String> {
+    if !has_park_intent || run.is_some() {
+        return None;
+    }
+    Some(format!(
+        "boss gate: WARNING — this gate parks a car and no run claims it \
+         ({AGENT_RUN_ENV} is unset). The gate-run will record `{AGENT_RUN_KEY}` none, so \
+         a dispatched run cannot land on the green and ages into `died` at the silence \
+         bound — successful work recorded as a failure (backlog c8703bee). If you were \
+         dispatched, the id is in the `== THE RUN ==` section of your prompt; export it \
+         and gate again. If you are hand-gating, this is expected and nothing is wrong."
+    ))
+}
+
 pub(crate) fn agent_run_patch(env: Option<String>) -> Result<Option<Value>> {
     let Some(id) = env.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) else {
         return Ok(None);
@@ -2208,6 +2243,9 @@ pub async fn run(
     // malformed export is refused here rather than stamped and skipped
     // an hour later in a journal nobody reads.
     let agent_run = agent_run_patch(std::env::var(AGENT_RUN_ENV).ok())?;
+    if let Some(w) = no_run_warning(!park.is_empty(), agent_run.as_ref()) {
+        eprintln!("{w}");
+    }
     let http = reqwest::Client::new();
     // EVERY PACKET THE PARK INTENT NAMES MUST EXIST, checked here at the
     // terminal. The auto-park handler writes these as job edges on
@@ -6337,6 +6375,53 @@ mod agent_run_tests {
         assert_eq!(agent_run_patch(Some("  ".into())).unwrap(), None);
         assert_eq!(agent_run_patch(None).unwrap(), None);
         assert_eq!(AGENT_RUN_ENV, "BOSS_AGENT_RUN");
+    }
+
+    /// A gate that parks a car and has no run says so (backlog
+    /// c8703bee): three runs built green cars whose gate-runs carry
+    /// `agent_run` none, so the landing rule had no edge to follow and
+    /// each would have aged into `died` — successful work recorded as a
+    /// failure.
+    #[test]
+    fn a_park_intent_with_no_run_warns_and_says_what_will_happen() {
+        let w = no_run_warning(true, None).expect("a parked car with no run is warned about");
+        assert!(
+            w.contains("BOSS_AGENT_RUN"),
+            "the warning names the export that is missing: {w}"
+        );
+        assert!(
+            w.contains("died"),
+            "and the consequence, which is the part nobody would guess: {w}"
+        );
+        assert!(
+            w.contains("hand-gating"),
+            "and that a hand gate is legitimate, so the warning is not read as a fault: {w}"
+        );
+    }
+
+    /// THE TWO CONTROLS, and both are needed. A gate with a run is
+    /// fine; a gate with no park intent is a hand gate and was never
+    /// going to land a run. Without these the warning would fire on
+    /// every `boss gate` an operator runs, which is how a warning
+    /// becomes noise and then becomes unread.
+    #[test]
+    fn a_run_or_no_park_intent_is_not_warned_about() {
+        let run = json!({ AGENT_RUN_KEY: "5b1d2c3e-0000-4000-8000-000000000001" });
+        assert_eq!(
+            no_run_warning(true, Some(&run)),
+            None,
+            "a parked car whose run claims it is exactly right"
+        );
+        assert_eq!(
+            no_run_warning(false, None),
+            None,
+            "a bare gate parks nothing, so no run was ever going to land on it"
+        );
+        assert_eq!(
+            no_run_warning(false, Some(&run)),
+            None,
+            "and a run without a park intent is not this defect either"
+        );
     }
 
     /// A prefix, a branch, or anything the landing handler would skip
