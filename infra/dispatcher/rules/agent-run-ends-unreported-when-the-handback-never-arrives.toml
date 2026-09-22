@@ -1,0 +1,88 @@
+# THE OTHER END OF THE RUN, AND THE SLOT IT WAS HOLDING (backlog
+# 6a5f4214, 2026-09-22). `agent-run-dies-when-building-is-silent`
+# reads the age of an OPEN `building`. A builder that finishes
+# building and then never comes back has a COMPLETED `building`, so
+# that rule correctly finds nothing, every hour, forever, and
+# `an-abandoned-step-is-reclaimed-when-its-run-died` waits on its
+# verdict and never fires either. Nothing read the age of the step
+# after it.
+#
+# MEASURED, NOT INFERRED. Run d5ced940 completed `building` at
+# 06:21:32Z on 2026-09-22 and sat at `reported` for nearly nine hours
+# while its work was already on main — car fa21486d in train #542, and
+# the packet it built for closed itself at 07:01:44Z off
+# `complete-feedback-branch-on-car-merged`. The closing edge worked
+# perfectly; only the run was orphaned. Over the 116 runs that had
+# landed by that afternoon, NINE had a `building`-to-`reported` gap
+# over six hours and every one of them was recovered by a hand; the
+# slowest genuine handback was 1.15h and the p90 was 49 minutes, so
+# the two populations do not overlap.
+#
+# WHAT IT COSTS, AND WHY IT IS NOT COSMETIC. An open run holds one of
+# the six concurrent slots the claim door enforces (the concurrency
+# gate in `crates/core/boss-jobs/src/http/steps.rs`, backlog 57c108c2),
+# so a leaked slot is a permanent reduction in work-in-flight. On the
+# afternoon this was filed the population reached 7 of 6 and the next
+# claim would have been refused 409. Today a human notices; under an
+# unattended dispatch cadence (design 9e1de851) a handful of leaks
+# overnight would present as "the pipeline went dark" with a
+# completely different cause.
+#
+# THE TERMINAL IS `unreported`, DELIBERATELY NOT `died`. The work
+# SHIPPED — `building` closed `gated` or `delivered`, which is a gate
+# green or an analyst's completed step — and recording successful work
+# as a failure is the shape backlog c8703bee names. `landed` would be
+# the opposite lie: its own title says the report is recorded, and
+# here it never was. The protocol's `unreported` outcome says exactly
+# what happened and nothing more.
+#
+# WHAT IT WRITES, AND THE INVARIANT IT KEEPS. `reported` is completed
+# with `handback = absent` — the fork the `unreported` terminal reads —
+# and a `summary`, which the step requires at done. That summary is
+# the clock's own sentence about the ABSENCE, not an account of the
+# work: "No rule ever writes the report, because a summary the machine
+# invents is not the agent's" still holds, because nothing here
+# invents one. The handler's `aged_out` evidence object carries the
+# silence measured, the bound and the tick beside it. The template
+# fills ABSENT keys only, so a handback that arrives first — `boss
+# dispatch --report` writes `summary` and no `handback` at all — is
+# never overwritten, and a completed step is not open, so the next
+# tick finds nothing.
+#
+# NO RECLAIM FOLLOWS THIS ONE, BY CONSTRUCTION. The step the run was
+# executing is already completed: `reported` cannot even open unless
+# `building` closed `gated` (the gate went green and the car merged,
+# which is what completed the packet's step) or `delivered` (the
+# handler that completes `building` fires OFF that step completing).
+# So there is no claimed step to release, which is why this rule has
+# no two-bound sibling the way the death rule does.
+#
+# THE BOUND IS 2x THE STEP'S DURATION, AND IT LIVES TWICE — the same
+# idiom, and the same §9a pin, as the death rule: the protocol authors
+# `reported` at `duration_hours = 1.0` and
+# `platform_bundle_agent_run.rs` holds this arg equal to twice it.
+#
+# HOURLY, NOT DAILY: `jobs.age_out_step` judges hours off the tick's
+# own `_at`, which only a sub-day cadence carries, and a bound of
+# hours judged once a day is the same silence one level up.
+[[rule]]
+name = "agent-run-ends-unreported-when-the-handback-never-arrives"
+why = """
+A TIMER, the standing exemption: the condition is a report that did
+NOT arrive, and no event says "two hours passed with nothing handed
+back". The Workflow row can require a summary at done; it cannot
+complete its own step for want of anyone completing it, and the one
+writer of that step is a hand running `boss dispatch --report`.
+Measured 2026-09-22 (backlog 6a5f4214): nine of the 116 runs that had
+landed sat past six hours between building and reporting, each holding
+one of six concurrent slots until an operator noticed, while the
+slowest genuine handback took 1.15h. It adds no routing: one firing
+completes `reported` with `handback = absent` on every run whose
+report never came, and the protocol's own `unreported` terminal closes
+it.
+"""
+version = 1
+schedule = { cadence = "hourly", anchor_date = "2026-09-22" }
+[[rule.do]]
+handler = "jobs.age_out_step"
+args = { kind = "\"agent-run\"", step = "\"reported\"", hours = "\"2\"", done_metadata = '"{\"handback\": \"absent\", \"summary\": \"No handback was recorded. This line is the clock rule agent-run-ends-unreported-when-the-handback-never-arrives, not the agent: the run built, its work is evidenced on `building`, and nothing reported within the bound, so the slot it held was released and the run ends `unreported`. See `aged_out` beside this for the silence measured.\"}"' }

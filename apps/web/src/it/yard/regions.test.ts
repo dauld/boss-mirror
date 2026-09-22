@@ -13,7 +13,7 @@ import {
   type Trend,
 } from './regions';
 
-// The IT system map (design 0524fc95, car 2): eight region cards read
+// The IT system map (design 0524fc95, car 2): the region cards read
 // from ONE endpoint, /api/yard/regions (car 1), each a door to its
 // floor. These pin the client half — the parse of the server's payload,
 // the floor each card opens, and the words a card prints for a count
@@ -54,11 +54,12 @@ const PAYLOAD = {
     { name: 'garage', count: 0, state: 'clear', why: 'nothing gated red', trend: { metric: 'reds', unit: 'per day', current: 0, previous: 2, samples: 0, previous_samples: 2 } },
     { name: 'receiving', count: 4, state: 'busy', why: '4 inbound, oldest 5 days', trend: { metric: 'inbound', unit: 'per day', current: 4, previous: 6, samples: 4, previous_samples: 6 } },
     { name: 'marshalling', count: null, state: 'troubled', why: 'the station registry could not be read', trend: { metric: 'served', unit: 'per day', current: null, previous: null, samples: 0, previous_samples: 0 } },
+    { name: 'shop-floor', count: 2, bound: 6, state: 'clear', why: '2 runs in flight, 1 crew on the floor', trend: { metric: 'build duration', unit: 'minutes', current: 64, previous: 58, samples: 5, previous_samples: 4 }, machines: [{ id: 'session:s1', name: 'claude@algedonic.dev', state: 'running', why: 'last prompt 3 min ago; 2 runs in flight' }] },
   ],
 };
 
 describe('parseRegions — the payload, parsed once', () => {
-  it('reads the eight regions in the order the server sent them, with count, bound, state, why and trend', () => {
+  it('reads the regions in the order the server sent them, with count, bound, state, why and trend', () => {
     const m = parseRegions(PAYLOAD);
     expect(m.window_hours).toBe(24);
     expect(m.regions.map((r) => r.name)).toEqual([...REGION_NAMES]);
@@ -93,7 +94,7 @@ describe('parseRegions — the payload, parsed once', () => {
   });
 });
 
-describe('the eight names are the server\'s, in map order', () => {
+describe('the names are the server\'s, in map order', () => {
   it('equal boss_jobs::regions::REGIONS (crates/core/boss-jobs/src/regions.rs)', () => {
     // A fact that lives twice gets an equality test (CLAUDE.md §9a): the
     // server's constant is the decision (0524fc95 Q2); this list is the
@@ -104,7 +105,7 @@ describe('the eight names are the server\'s, in map order', () => {
       'utf8',
     );
     const block = src.match(/pub const REGIONS: \[&str; (\d+)\] = \[([^\]]*)\];/);
-    expect(block, 'boss_jobs::regions::REGIONS is where the eight names live').not.toBeNull();
+    expect(block, 'boss_jobs::regions::REGIONS is where the names live').not.toBeNull();
     const names = [...block![2]!.matchAll(/"([a-z-]+)"/g)].map((m) => m[1]!);
     expect(Number(block![1])).toBe(names.length);
     expect([...REGION_NAMES] as string[]).toEqual(names);
@@ -124,6 +125,9 @@ describe('floorHref — every card is a door to a floor that already exists', ()
     // the zoomed territory, like every other floor.
     expect(floorHref('receiving')).toBe('/it/yard/receiving');
     expect(floorHref('marshalling')).toBe('/it/yard/marshalling');
+    // The shop floor's board is the crew board, which was the floor
+    // before the region existed (backlog 94c6ffd0).
+    expect(floorHref('shop-floor')).toBe('/it/yard/shop-floor');
   });
 
   it('a name this client does not know still opens the yard, never a dead link', () => {

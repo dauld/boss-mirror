@@ -1,10 +1,10 @@
 // THE IT WORLD — the layout of the system map as data (design
 // d2154293, decided by David 2026-09-19; this is car 1). One SVG, one
-// coordinate space: the eight regions are TERRITORIES laid out along
-// the real packet flow, left to right the way packets travel —
+// coordinate space: the regions are TERRITORIES laid out along the
+// real packet flow, left to right the way packets travel —
 //
-//     receiving -> marshalling -> dock -> gates -> track -> arrivals -> shed
-//                                           \-> garage (a siding off gates / track)
+//     receiving -> marshalling -> shop-floor -> dock -> gates -> track -> arrivals -> shed
+//                                                         \-> garage (a siding off gates / track)
 //
 // — and the BORDERS between them are declared here, each a track
 // segment WorldMap.svelte draws between two territories. Car 2 hangs
@@ -34,15 +34,32 @@ export type Border = Readonly<{ from: RegionName; to: RegionName }>;
 
 /** The world's extent — the SVG viewBox. As wide as the yard map
  *  (YardMap's VIEW_W), so the two scale the same way on a page; the
- *  line's slots leave a 24-unit gap so the border rails read as track
- *  (a 10-unit gap hid them, 2026-09-19). */
+ *  line's slots divide the width between the margins, leaving `GAP`
+ *  between each pair for the border rails to run in. */
 export const WORLD = { width: 1240, height: 400 } as const;
 
-// The line: seven territories, one slot each, at the yard's margin.
-const LINE: ReadonlyArray<RegionName> = ['receiving', 'marshalling', 'dock', 'gates', 'track', 'arrivals', 'shed'];
+// The line: one slot each, at the yard's margin. The slot WIDTH is
+// derived from how many there are — the line always spans the world
+// between its margins — so adding a territory (the shop floor did,
+// backlog 94c6ffd0) narrows every slot by the same rule instead of
+// running the last one off the right edge. Nothing here is a pixel
+// someone placed by hand.
+const LINE: ReadonlyArray<RegionName> = [
+  'receiving',
+  'marshalling',
+  'shop-floor',
+  'dock',
+  'gates',
+  'track',
+  'arrivals',
+  'shed',
+];
 const MARGIN = 20;
-const SLOT = 174;
-const LINE_W = 150;
+/** The gap between two slots, which is the room the border rails run
+ *  in: a 10-unit gap hid them (2026-09-19). */
+const GAP = 24;
+const SLOT = Math.floor((WORLD.width - 2 * MARGIN) / LINE.length);
+const LINE_W = SLOT - GAP;
 const LINE_Y = 24;
 const LINE_H = 200;
 const slotX = (i: number): number => MARGIN + i * SLOT;

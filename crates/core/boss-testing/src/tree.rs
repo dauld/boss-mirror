@@ -106,6 +106,60 @@ pub fn copy_lint_libs(fixture: &Path) {
     assert!(copied > 0, "{} holds no .sh to copy", src.display());
 }
 
+/// Copy `infra/gate.sh` into a fixture tree at `<fixture>/infra/`,
+/// together with every file it sources — derived from the gate's own
+/// source lines, transitively, rather than enumerated here.
+///
+/// One definition of "what a copied gate needs beside it", and the
+/// same lesson as [`copy_lint_libs`] one layer up (CLAUDE.md §9a).
+/// Until 2026-09-22 four fixtures each carried the one or two helpers
+/// gate.sh happened to source, and adding a second one
+/// (`infra/dev/wt-target-dir.sh`, backlog 955c99b6) broke three of
+/// them at once — the copied gate ran, failed to source, refused, and
+/// the refusal read as a verdict about the fixture. gate.sh is the
+/// definition, so a helper it sources tomorrow is carried without
+/// this function changing.
+pub fn copy_gate_sh(fixture: &Path) {
+    // gate.sh `cd`s to its own repo root before sourcing anything, so
+    // every source line names a repo-relative path and the fixture
+    // reproduces it at the same relative path.
+    let mut pending = vec!["infra/gate.sh".to_string()];
+    let mut carried: Vec<String> = Vec::new();
+    while let Some(rel) = pending.pop() {
+        if carried.contains(&rel) {
+            continue;
+        }
+        let src = repo_root().join(&rel);
+        let text = std::fs::read_to_string(&src)
+            .unwrap_or_else(|e| panic!("read {} for a fixture tree: {e}", src.display()));
+        let dst = fixture.join(&rel);
+        let parent = dst.parent().expect("a relative path has a parent");
+        std::fs::create_dir_all(parent)
+            .unwrap_or_else(|e| panic!("create {}: {e}", parent.display()));
+        std::fs::copy(&src, &dst)
+            .unwrap_or_else(|e| panic!("carry {rel} into {}: {e}", fixture.display()));
+        for line in text.lines() {
+            // `. infra/lint/lib/git-answer.sh || { … }`. A `#
+            // shellcheck source=` comment does not start with `. `,
+            // and a source of a VARIABLE path cannot be resolved from
+            // the text — the gate has none, and one added later would
+            // announce itself by failing here rather than silently.
+            if let Some(rest) = line.trim_start().strip_prefix(". ") {
+                let sourced = rest.split_whitespace().next().unwrap_or_default();
+                if sourced.starts_with("infra/") {
+                    pending.push(sourced.to_string());
+                }
+            }
+        }
+        carried.push(rel);
+    }
+    assert!(
+        carried.len() > 1,
+        "infra/gate.sh sourced nothing — either the gate stopped refusing without its helpers, \
+         or this function stopped reading its source lines; both are worth knowing. Carried: {carried:?}"
+    );
+}
+
 /// The tunnel's ingress map as one line — `infra/cluster/
 /// render-tunnel-config.sh --summary`, run against THIS tree, with
 /// `skipped` handed to it as the converge hands its own

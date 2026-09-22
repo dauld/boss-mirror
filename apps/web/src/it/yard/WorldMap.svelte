@@ -1,6 +1,6 @@
 <script lang="ts">
   // THE IT WORLD MAP (design d2154293, car 1). One SVG in one
-  // coordinate space: world.ts declares the eight regions as
+  // coordinate space: world.ts declares the regions as
   // territories laid out along the packet flow and the borders between
   // them; this draws each territory as an outline in the yard's own
   // strokes with the region's count, state and trend from
@@ -119,7 +119,7 @@
   <svg
     viewBox="0 0 {WORLD.width} {WORLD.height}"
     role="img"
-    aria-label="the IT world: eight territories along the packet flow">
+    aria-label="the IT world: the territories along the packet flow">
     <!-- the borders: a track segment per hop of the flow, under the
          territories so an outline sits on the rail -->
     {#each BORDERS as b (`${b.from}→${b.to}`)}

@@ -20,6 +20,7 @@
   import { appToday } from '@boss/web-kit/sim-clock';
   import { formatActor } from '../../data/actor';
   import { href } from '../../router';
+  import { crewPlatforms, type Deck } from '../yard/world-interior';
   import {
     actorCards,
     CAR_WINDOW,
@@ -32,6 +33,19 @@
     type CrewState,
     type TrackCar,
   } from './crew';
+
+  // THE SHOP FLOOR IS A REGION NOW (backlog 94c6ffd0): this board is
+  // also mounted UNDER the world zoomed into the shop-floor territory,
+  // at /it/yard/shop-floor — the same arrangement receiving and
+  // marshalling have had since car 4 of design d2154293. `embedded`
+  // drops the page header, because the world above already carries
+  // one, and that is ALL it drops. `ondeck` hands the crews up so the
+  // territory's platforms are drawn from the reads this page already
+  // makes — one read of a region, never two.
+  let {
+    embedded = false,
+    ondeck = (_deck: Deck) => {},
+  }: Readonly<{ embedded?: boolean; ondeck?: (deck: Deck) => void }> = $props();
 
   let crew = $state<CrewState | null>(null);
   // One clock for every relative stamp, taken when the data arrived —
@@ -90,6 +104,24 @@
       : null,
   );
 
+  // The territory's platforms, from the same fold the board renders.
+  // A failed read is a failed DECK — a region drawn with no crews on it
+  // would read as an empty shop rather than an unread one.
+  const deck = $derived<Deck>(
+    crew === null
+      ? { kind: 'reading' }
+      : crew.sessions.kind === 'failed'
+        ? { kind: 'unavailable', why: crew.sessions.error }
+        : crew.agentRuns.kind === 'failed'
+          ? { kind: 'unavailable', why: crew.agentRuns.error }
+          : floor === null
+            ? { kind: 'reading' }
+            : { kind: 'ready', region: 'shop-floor', platforms: crewPlatforms(floor.crews, floor.unlinked) },
+  );
+  $effect(() => {
+    ondeck(deck);
+  });
+
   const realCrew = $derived(cards?.filter((c) => c.lane !== 'sim') ?? []);
   const simCrew = $derived(cards?.filter((c) => c.lane === 'sim') ?? []);
 
@@ -118,11 +150,13 @@
 </script>
 
 <div class="crew-root">
-  <PageHeader
-    eyebrow="IT · Delivery"
-    title="The Crew Board"
-    subtitle="Who is building what, right now — the interval between work waiting and work landed"
-  />
+  {#if !embedded}
+    <PageHeader
+      eyebrow="IT · Delivery"
+      title="The Crew Board"
+      subtitle="Who is building what, right now — the interval between work waiting and work landed"
+    />
+  {/if}
 
   {#if !crew}
     <p class="crew-quiet">Reading the pipeline…</p>

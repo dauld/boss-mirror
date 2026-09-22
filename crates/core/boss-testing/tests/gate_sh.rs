@@ -285,12 +285,10 @@ fn skeleton(label: &str, lints: &[(&str, &str)]) -> std::path::PathBuf {
     let dir = boss_testing::scratch_dir(label);
     let tree = dir.join("tree");
     boss_testing::create_dir(&tree.join("infra/lint/lib"));
-    // gate.sh sources the lint vocabulary (LINT_CANNOT_ANSWER) from the
-    // lib and refuses to run without it, so the skeleton carries both.
-    for rel in ["infra/gate.sh", "infra/lint/lib/git-answer.sh"] {
-        std::fs::copy(repo_root().join(rel), tree.join(rel))
-            .unwrap_or_else(|e| panic!("carry this tree's {rel} into the skeleton: {e}"));
-    }
+    // gate.sh refuses to run without any helper it sources — the lint
+    // vocabulary (LINT_CANNOT_ANSWER) and the target-dir rule (backlog
+    // 955c99b6) — so the skeleton carries the gate and all of them.
+    boss_testing::copy_gate_sh(&tree);
     boss_testing::write_file(
         &tree.join("infra/lint/workspace-declares-what-it-runs.sh"),
         "#!/usr/bin/env bash\nexit 0\n",
@@ -1370,8 +1368,8 @@ impl LevelTree {
         let _ = std::fs::remove_dir_all(&dir);
         let tree = dir.join("tree");
         boss_testing::copy_lint_libs(&tree);
+        boss_testing::copy_gate_sh(&tree);
         for rel in [
-            "infra/gate.sh",
             "infra/platform/tiers.toml",
             &format!("infra/lint/{EDIT_LEVEL_LINT}.sh"),
         ] {

@@ -661,7 +661,7 @@ pub(crate) fn my_work_section(
     out
 }
 
-/// The REGIONS header — the IT system map's eight KPI cards, one line
+/// The REGIONS header — the IT system map's KPI cards, one line
 /// each, from `GET /api/yard/regions` (design 0524fc95, car 1). The
 /// server owns these numbers now: the count, the clear/busy/troubled
 /// state and the trend are ONE definition in `boss_jobs::regions`, the
@@ -2202,7 +2202,7 @@ mod tests {
     /// the SERVER's own types, so a renamed field on `boss_jobs::regions`
     /// breaks this before it can print `?` at an operator.
     #[test]
-    fn the_regions_header_prints_the_servers_eight_cards() {
+    fn the_regions_header_prints_the_servers_cards() {
         use boss_jobs::regions::{Region, RegionState, Regions, Trend};
         let trend = |metric: &str, unit: &str, cur: Option<f64>, prev: Option<f64>| Trend {
             metric: metric.into(),
@@ -2300,7 +2300,7 @@ mod tests {
         assert_eq!(
             lines.len(),
             9,
-            "a heading and eight cards:\n{}",
+            "a heading and a card per region:\n{}",
             lines.join("\n")
         );
         assert!(lines[0].contains("last 24h"), "{}", lines[0]);

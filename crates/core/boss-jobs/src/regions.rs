@@ -29,17 +29,20 @@
 //! — never an empty region that reads as "nothing here". A trend with
 //! no samples is `null`, never zero.
 
-use boss_core::job::{Job, Step, StepStatus};
+use boss_core::job::{Job, JobStatus, Step, StepStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::registry::WorkflowSpec;
 use crate::yard::{ConductorHealth, Reading, YardStatus};
 
-/// The eight regions, in map order. The count and the order are the
-/// decision (0524fc95 Q2); a reader that finds a ninth name has an
-/// older or newer server than it expects.
-pub const REGIONS: [&str; 8] = [
+/// The nine regions, in map order. The count and the order are the
+/// decision (0524fc95 Q2); a reader that finds a tenth name has an
+/// older or newer server than it expects. `shop-floor` is the ninth
+/// (backlog 94c6ffd0): the region UPSTREAM of the dock, where a car is
+/// still being built — appended rather than inserted, so the names a
+/// client already knows keep their place.
+pub const REGIONS: [&str; 9] = [
     "dock",
     "gates",
     "track",
@@ -48,6 +51,7 @@ pub const REGIONS: [&str; 8] = [
     "garage",
     "receiving",
     "marshalling",
+    "shop-floor",
 ];
 
 /// The trend window when the caller names none: a day, the shortest
@@ -214,6 +218,34 @@ pub struct StationReading {
 /// which hosts SHOULD have a runner.
 pub const OPS_RUNNER_ROLE: &str = "ops-runner";
 
+/// THE CREWS' PACKET KIND (design 511fa7d4 car 2b). One open
+/// `work-session` is one crew standing on the shop floor: the
+/// SessionStart hook files it and the prompt hook heartbeats it.
+pub const SESSION_KIND: &str = "work-session";
+
+/// Silent this long and a crew is drawn IDLE rather than at work — the
+/// crew board's own `IDLE_AFTER_MS` (`apps/web/src/it/crew/crew.ts`),
+/// ported here so the map and the board stop calling a session
+/// "working" at the same moment, and pinned equal by `crew.test.ts`
+/// (CLAUDE.md §9a). The session's own silence rule ends it at six
+/// hours; this is only where the floor stops crediting it with work.
+pub const CREW_IDLE_HOURS: i64 = 1;
+
+/// THE FLOOR'S BOUND: how many runs may be in flight at once, summed
+/// over the agents registry's `max_concurrent_runs`. `None` when ANY
+/// row declares no cap — an agent without one is unbounded
+/// (`agent_budget`'s own rule), so a total that ignored it would draw
+/// a bound the claim door does not enforce — and `None` for an empty
+/// registry, which bounds nothing either.
+pub fn run_capacity(rows: &[crate::agents::AgentRow]) -> Option<usize> {
+    if rows.is_empty() {
+        return None;
+    }
+    rows.iter()
+        .map(|r| r.max_concurrent_runs.and_then(|n| usize::try_from(n).ok()))
+        .sum()
+}
+
 /// A host the registry expects an ops-runner on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerHost {
@@ -278,6 +310,20 @@ pub struct RegionInputs<'a> {
     /// evidence a runner machine is read from. `None` when the
     /// ops-request rows could not be read at all.
     pub ops_requests: Option<&'a [(Job, Vec<Step>)]>,
+    /// THE SHOP FLOOR'S RUNS (backlog 94c6ffd0): `agent-run` packets
+    /// open, plus those closed within two windows. Steps ride the OPEN
+    /// ones only — a finished-but-unreported run is a `building` done
+    /// over a `reported` still open — while the trend reads its two
+    /// instants off the metadata. `None` when the read failed, which
+    /// is a troubled floor and never a quiet one.
+    pub agent_runs: Option<&'a [(Job, Vec<Step>)]>,
+    /// The crews: open [`SESSION_KIND`] packets, rows only. `None` on a
+    /// failed read — one unknown machine, never a floor with nobody
+    /// standing on it.
+    pub sessions: Option<&'a [Job]>,
+    /// [`run_capacity`] over the agents registry, or `None` where no
+    /// bound is declared or the registry could not be read.
+    pub run_capacity: Option<usize>,
     /// The hosts the ESTATE REGISTRY says should be answering
     /// ops-requests — [`runner_hosts_of`] over `/api/estate/nodes`.
     /// `None` when the registry could not be read, which is one
@@ -938,8 +984,79 @@ fn host_runner_machines(inputs: &RegionInputs<'_>) -> Vec<Machine> {
 
 /// The machinery of one region, by name. A region this answers nothing
 /// for has no machine of ours in it — which is a fact, not a gap.
+/// THE CREWS ON THE FLOOR — one machine per open session (design
+/// 511fa7d4 car 2b, backlog 94c6ffd0). A crew is the only machinery on
+/// the map that is mostly a HUMAN or an agent's own session rather than
+/// a loop of ours, and it is read the same way: `running` while the
+/// heartbeat is fresh, `idle` past [`CREW_IDLE_HOURS`] of silence, and
+/// `unknown` where nothing measured it.
+///
+/// A session that has never prompted is UNKNOWN, not idle. Idle is a
+/// reading — "it is here and it has no work" — and the only thing that
+/// can take it is the heartbeat the prompt hook writes. Before the
+/// first prompt there is no such reading, and a confident idle would
+/// say the operator walked away when nothing asked.
+fn crew_machines(inputs: &RegionInputs<'_>) -> Vec<Machine> {
+    let Some(sessions) = inputs.sessions else {
+        return vec![machine(
+            "crews".to_string(),
+            "crews",
+            MachineState::Unknown,
+            "the work-session packets could not be read".to_string(),
+        )];
+    };
+    let runs_of = |id: &str| {
+        inputs
+            .agent_runs
+            .unwrap_or(&[])
+            .iter()
+            .filter(|(j, _)| j.status == JobStatus::Open)
+            .filter(|(j, _)| md_str(&j.metadata, "session") == id)
+            .count()
+    };
+    sessions
+        .iter()
+        .map(|s| {
+            let id = s.id.to_string();
+            let name = {
+                let actor = md_str(&s.metadata, "actor");
+                if actor.is_empty() {
+                    s.title.clone()
+                } else {
+                    actor.to_string()
+                }
+            };
+            let working = plural(runs_of(&id), "run in flight", "runs in flight");
+            let (state, why) = match meta_instant(&s.metadata, "last_active_at") {
+                None => (
+                    MachineState::Unknown,
+                    format!(
+                        "no heartbeat on the packet — nothing says whether anyone is here; {working}"
+                    ),
+                ),
+                Some(beat) => {
+                    let silent = (inputs.now - beat).num_minutes().max(0);
+                    if silent > CREW_IDLE_HOURS * 60 {
+                        (
+                            MachineState::Idle,
+                            format!("silent for {silent} min; {working}"),
+                        )
+                    } else {
+                        (
+                            MachineState::Running,
+                            format!("last prompt {silent} min ago; {working}"),
+                        )
+                    }
+                }
+            };
+            machine(format!("session:{id}"), &name, state, why)
+        })
+        .collect()
+}
+
 fn machines_of(name: &str, inputs: &RegionInputs<'_>) -> Vec<Machine> {
     let mut out = match name {
+        "shop-floor" => crew_machines(inputs),
         "gates" => gate_bays(inputs),
         "track" => vec![conductor_machine(inputs.conductor)],
         "marshalling" => station_machines(inputs),
@@ -959,7 +1076,8 @@ fn machines_of(name: &str, inputs: &RegionInputs<'_>) -> Vec<Machine> {
 // The regions.
 // ---------------------------------------------------------------------
 
-/// The map. Pure: rows in, eight cards out, in [`REGIONS`] order.
+/// The map. Pure: rows in, one card per [`REGIONS`] name out, in that
+/// order.
 pub fn regions(inputs: &RegionInputs<'_>) -> Regions {
     let w = Windows::of(inputs.now, inputs.window_hours);
     let regions = [
@@ -971,6 +1089,7 @@ pub fn regions(inputs: &RegionInputs<'_>) -> Regions {
         garage(inputs, &w),
         receiving(inputs, &w),
         marshalling(inputs, &w),
+        shop_floor(inputs, &w),
     ]
     .into_iter()
     .map(|r| {
@@ -1722,6 +1841,103 @@ fn marshalling(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     region("marshalling", Some(n), None, state, why, trend)
 }
 
+/// THE SHOP FLOOR: what is being BUILT — the runs in flight, with the
+/// sessions that dispatched them standing in the region as crews
+/// (design 511fa7d4 car 2b, backlog 94c6ffd0). It is the region
+/// UPSTREAM OF THE DOCK, and the map had no such place until now: the
+/// world began where a car was already finished, and the interval an
+/// actor spends building one was rows on a board somewhere else.
+///
+/// The count is the runs IN FLIGHT against [`run_capacity`], because
+/// that pair is the fact an operator needs before queueing more work —
+/// a floor at its cap refuses the next dispatch. Troubled is the
+/// failure the cap makes expensive: a run whose `building` step is
+/// done while its `reported` step is still open has FINISHED and is
+/// still holding a slot, which is invisible from every count of "runs
+/// in flight" that does not read the steps. The trend is the build
+/// duration — a run's own open-to-close, for the runs that closed in
+/// each window.
+fn shop_floor(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
+    let Some(runs) = inputs.agent_runs else {
+        return region(
+            "shop-floor",
+            None,
+            inputs.run_capacity,
+            RegionState::Troubled,
+            "the agent-run packets could not be read".to_string(),
+            duration_trend("build duration", "minutes", Vec::new(), Vec::new()),
+        );
+    };
+    let durations = runs.iter().filter_map(|(j, _)| {
+        let opened = opened_at(j)?;
+        let closed = closed_at(j)?;
+        let d = (closed - opened).num_seconds();
+        (d > 0).then_some((closed, d))
+    });
+    let (cur, prev) = split(w, durations);
+    let trend = duration_trend("build duration", "minutes", cur, prev);
+
+    let in_flight: Vec<&(Job, Vec<Step>)> = runs
+        .iter()
+        .filter(|(j, _)| j.status == JobStatus::Open)
+        .collect();
+    // Finished, and still holding its slot: `building` completed, the
+    // handback never recorded. The run's own step is the only place
+    // this shows — the packet is open and looks like work in progress.
+    let unreported = in_flight
+        .iter()
+        .filter(|(_, steps)| {
+            step_done_at(find_step(steps, "building", "Building")).is_some()
+                && step_done_at(find_step(steps, "reported", "Report recorded")).is_none()
+        })
+        .count();
+    // A crew count is only stated where the sessions were READ: an
+    // unread session list is not a floor with nobody on it, and the
+    // clause is left off rather than printed as a zero.
+    let crews = inputs
+        .sessions
+        .map(|s| plural(s.len(), "crew on the floor", "crews on the floor"));
+    let count = in_flight.len();
+    let at_cap = inputs.run_capacity.is_some_and(|cap| count >= cap);
+    let (state, why) = if unreported > 0 {
+        (
+            RegionState::Troubled,
+            format!(
+                "{} finished and not reported — each holds a slot until the handback lands",
+                plural(unreported, "run", "runs")
+            ),
+        )
+    } else if at_cap {
+        (
+            RegionState::Busy,
+            format!(
+                "{} — at the cap, the next dispatch is refused",
+                plural(count, "run in flight", "runs in flight")
+            ),
+        )
+    } else {
+        (
+            RegionState::Clear,
+            [
+                Some(plural(count, "run in flight", "runs in flight")),
+                crews,
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<String>>()
+            .join(", "),
+        )
+    };
+    region(
+        "shop-floor",
+        Some(count),
+        inputs.run_capacity,
+        state,
+        why,
+        trend,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1796,6 +2012,9 @@ mod tests {
             conductor: None,
             ops_requests: Some(&[]),
             runner_hosts: Some(&[]),
+            agent_runs: Some(&[]),
+            sessions: Some(&[]),
+            run_capacity: None,
             now: t(NOW),
             window_hours: 24,
         }
@@ -1818,7 +2037,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_yard_answers_eight_clear_regions_in_map_order() {
+    fn an_empty_yard_answers_a_clear_card_for_every_region_in_map_order() {
         let status = empty_status();
         let out = regions(&inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[])));
         let names: Vec<&str> = out.regions.iter().map(|r| r.name.as_str()).collect();
@@ -3447,5 +3666,202 @@ mod tests {
                 label: "forge label".to_string()
             }]
         );
+    }
+
+    // -----------------------------------------------------------------
+    // THE SHOP FLOOR (backlog 94c6ffd0) — the region upstream of the
+    // dock, where a car is still being built.
+    // -----------------------------------------------------------------
+
+    fn run(open: bool, opened: &str, closed: Option<&str>) -> Job {
+        let mut md = json!({ "opened_at": opened, "agent": "agent-claude" });
+        if let Some(c) = closed {
+            md["closed_at"] = json!(c);
+        }
+        job(
+            crate::agent_budget::RUN_KIND,
+            "a run",
+            if open {
+                JobStatus::Open
+            } else {
+                JobStatus::Closed
+            },
+            md,
+        )
+    }
+
+    fn session(actor: &str, last_active: Option<&str>) -> Job {
+        let mut md = json!({ "actor": actor, "started_at": "2026-09-19T06:00:00Z" });
+        if let Some(t) = last_active {
+            md["last_active_at"] = json!(t);
+        }
+        job(SESSION_KIND, "a session", JobStatus::Open, md)
+    }
+
+    fn floor<'a>(
+        base: RegionInputs<'a>,
+        runs: &'a [(Job, Vec<Step>)],
+        sessions: &'a [Job],
+        capacity: Option<usize>,
+    ) -> RegionInputs<'a> {
+        RegionInputs {
+            agent_runs: Some(runs),
+            sessions: Some(sessions),
+            run_capacity: capacity,
+            ..base
+        }
+    }
+
+    #[test]
+    fn the_shop_floor_counts_the_runs_in_flight_against_the_registrys_capacity() {
+        let status = empty_status();
+        let runs = vec![
+            (run(true, "2026-09-19T11:00:00Z", None), Vec::new()),
+            (run(true, "2026-09-19T11:30:00Z", None), Vec::new()),
+            // Closed inside the window: not in flight — the trend's
+            // sample instead.
+            (
+                run(false, "2026-09-19T08:00:00Z", Some("2026-09-19T09:00:00Z")),
+                Vec::new(),
+            ),
+        ];
+        let sessions = Vec::new();
+        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        let r = regions(&floor(base, &runs, &sessions, Some(6)));
+        let f = by_name(&r, "shop-floor");
+        assert_eq!(f.count, Some(2), "two runs are in flight");
+        assert!(
+            f.why.contains("0 crews on the floor"),
+            "a READ session list of none is a real zero: {}",
+            f.why
+        );
+        assert_eq!(f.bound, Some(6));
+        assert_eq!(f.state, RegionState::Clear, "{}", f.why);
+        assert_eq!(f.trend.metric, "build duration");
+        assert_eq!(f.trend.unit, "minutes");
+        assert_eq!(f.trend.current, Some(60.0), "the one run that closed");
+    }
+
+    #[test]
+    fn a_floor_at_the_registrys_capacity_is_busy_because_the_next_dispatch_is_refused() {
+        let status = empty_status();
+        let runs: Vec<(Job, Vec<Step>)> = (0..2)
+            .map(|_| (run(true, "2026-09-19T11:00:00Z", None), Vec::new()))
+            .collect();
+        let sessions = Vec::new();
+        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        let r = regions(&floor(base, &runs, &sessions, Some(2)));
+        let f = by_name(&r, "shop-floor");
+        assert_eq!(f.state, RegionState::Busy, "{}", f.why);
+        assert!(f.why.contains("at the cap"), "{}", f.why);
+    }
+
+    /// A run that finished and never reported still holds its slot —
+    /// the failure the cap makes expensive, and the one an operator
+    /// needs to see from world scale.
+    #[test]
+    fn a_finished_but_unreported_run_troubles_the_shop_floor() {
+        let status = empty_status();
+        let j = run(true, "2026-09-19T09:00:00Z", None);
+        let steps = vec![
+            step(
+                &j,
+                "building",
+                StepStatus::Completed,
+                Some("2026-09-19T10:00:00Z"),
+            ),
+            step(&j, "reported", StepStatus::Ready, None),
+        ];
+        let runs = vec![(j, steps)];
+        let sessions = Vec::new();
+        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        let r = regions(&floor(base, &runs, &sessions, Some(6)));
+        let f = by_name(&r, "shop-floor");
+        assert_eq!(f.state, RegionState::Troubled, "{}", f.why);
+        assert!(
+            f.why.contains("holds a slot") && f.why.contains("not reported"),
+            "the why names the failure and its cost: {}",
+            f.why
+        );
+    }
+
+    /// An unread floor is troubled, never an empty one: a map that drew
+    /// nobody building would read as a quiet shop rather than an unread
+    /// one (the rule every region here keeps).
+    #[test]
+    fn an_unread_run_list_is_a_troubled_floor_and_never_a_quiet_one() {
+        let status = empty_status();
+        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        let r = regions(&RegionInputs {
+            agent_runs: None,
+            sessions: None,
+            run_capacity: None,
+            ..base
+        });
+        let f = by_name(&r, "shop-floor");
+        assert_eq!(f.count, None);
+        assert!(
+            !f.why.contains("crew"),
+            "an unread session list states no crew count at all: {}",
+            f.why
+        );
+        assert_eq!(f.state, RegionState::Troubled);
+        assert!(f.why.contains("could not be read"), "{}", f.why);
+        // And the crews: one unknown machine naming the failed read,
+        // never a floor with nobody standing on it.
+        let m = machines_in(&r, "shop-floor");
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].state, MachineState::Unknown);
+    }
+
+    /// The crews ARE the sessions (design 511fa7d4 car 2b). Idle is a
+    /// reading, taken only where the packet declares a heartbeat; a
+    /// session that has never prompted is unknown, not idle.
+    #[test]
+    fn the_crews_are_the_sessions_and_silence_is_read_only_from_a_heartbeat() {
+        let status = empty_status();
+        let sessions = vec![
+            session("emp-david", Some("2026-09-19T11:55:00Z")),
+            session("claude@algedonic.dev", Some("2026-09-19T06:30:00Z")),
+            session("emp-quiet", None),
+        ];
+        let at_work = sessions[0].id.to_string();
+        let silent = sessions[1].id.to_string();
+        let never = sessions[2].id.to_string();
+        let runs = Vec::new();
+        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        let r = regions(&floor(base, &runs, &sessions, None));
+        assert_eq!(
+            machine_state(&r, "shop-floor", &format!("session:{at_work}")),
+            MachineState::Running
+        );
+        assert_eq!(
+            machine_state(&r, "shop-floor", &format!("session:{silent}")),
+            MachineState::Idle
+        );
+        assert_eq!(
+            machine_state(&r, "shop-floor", &format!("session:{never}")),
+            MachineState::Unknown,
+            "a session that never prompted is not idle — nothing measured it"
+        );
+    }
+
+    /// The bound is the registry's, and an agent with no declared cap is
+    /// unbounded — so the total is, too (the claim door's own rule).
+    #[test]
+    fn the_run_capacity_is_the_registrys_sum_and_an_undeclared_cap_is_unbounded() {
+        let row = |cap: Option<i32>| crate::agents::AgentRow {
+            id: "agent-claude".to_string(),
+            display_name: "Claude".to_string(),
+            default_model: "opus-5".to_string(),
+            role: None,
+            department: None,
+            hourly_budget_usd_micros: None,
+            max_concurrent_runs: cap,
+            aliases: vec![],
+        };
+        assert_eq!(run_capacity(&[row(Some(6)), row(Some(2))]), Some(8));
+        assert_eq!(run_capacity(&[row(Some(6)), row(None)]), None);
+        assert_eq!(run_capacity(&[]), None);
     }
 }

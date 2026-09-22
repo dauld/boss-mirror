@@ -125,6 +125,17 @@ const SPAWNS_NOTHING_ON_PURPOSE: &[(&str, &str)] = &[
          one's.",
     ),
     (
+        "agent-run-ends-unreported-when-the-handback-never-arrives",
+        "runs `jobs.age_out_step`, which completes the `reported` step of every open \
+         agent-run whose handback never arrived, so the run reaches its `unreported` \
+         terminal and releases the concurrency slot it was holding (backlog 6a5f4214). \
+         The same shape as the death rule above: it files nothing and CLOSES packets a \
+         dispatch opened, so on an hour with no orphaned handback it produces NOTHING, \
+         and that zero is the healthy reading. The packets it advances are agent-runs \
+         opened by `boss dispatch`, an operator's act — a sweep keyed by kind would be \
+         watching the operator's cadence, not this one's.",
+    ),
+    (
         "an-abandoned-step-is-reclaimed-when-its-run-died",
         "runs `jobs.reclaim_abandoned_step`, which RELEASES the step a dead agent-run was \
          claimed for — `ready`, unassigned — a bound after the death rule above recorded \

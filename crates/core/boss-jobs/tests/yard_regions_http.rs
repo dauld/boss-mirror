@@ -277,7 +277,7 @@ fn region<'a>(v: &'a Value, name: &str) -> &'a Value {
 }
 
 #[tokio::test]
-async fn the_read_answers_eight_regions_each_with_count_state_and_trend() {
+async fn the_read_answers_every_region_each_with_count_state_and_trend() {
     let (app, jobs) = app();
     seed(&jobs).await;
     let (status, v) = get(&app, "operator", "/api/yard/regions").await;
@@ -347,7 +347,7 @@ async fn a_denied_caller_gets_an_empty_well_formed_map() {
     seed(&jobs).await;
     let (status, v) = get(&app, "guest", "/api/yard/regions").await;
     assert_eq!(status, StatusCode::OK, "{v}");
-    assert_eq!(v["regions"].as_array().unwrap().len(), 8);
+    assert_eq!(v["regions"].as_array().unwrap().len(), REGIONS.len());
     assert_eq!(region(&v, "track")["count"], 0);
 }
 

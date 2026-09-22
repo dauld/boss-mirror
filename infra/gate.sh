@@ -72,6 +72,26 @@ cd "$(dirname "$0")/.."
 # this script is untouched and keeps incremental.
 export CARGO_INCREMENTAL=0
 
+# AND IT MUST NOT CHECK INTO A TARGET DIR ANOTHER CHECKOUT OWNS
+# (backlog 955c99b6, 2026-09-22). Setting CARGO_INCREMENTAL and not
+# CARGO_TARGET_DIR left this script's cargo on the pod-wide
+# /scratch/target while every builder's real build went through
+# wt-cargo into its own — so six concurrent worktrees checked into one
+# directory, and `--lint`, the door CLAUDE.md names before pushing,
+# false-redded a clean tree three times for one builder. The helper
+# holds both the reasoning and the rule; it moves a LINKED worktree
+# into the dir wt-cargo already seeded for it and leaves every main
+# checkout — the gate runner's per-run clone, forge CI, /work/boss —
+# exactly as it is. Refused rather than skipped for the same reason as
+# the source above: a gate that cannot tell whose artifacts it is
+# reading has no verdict to give.
+# shellcheck source=infra/dev/wt-target-dir.sh
+. infra/dev/wt-target-dir.sh || {
+    echo "gate.sh: infra/dev/wt-target-dir.sh could not be read — without it this gate cannot tell whether its target dir belongs to another checkout, and a verdict compiled against a neighbour's artifacts is not a verdict. Refusing." >&2
+    exit 2
+}
+wt_isolate_target_dir
+
 # THE GATE'S GIT READS MUST WORK FOR WHATEVER UID THE GATE RUNS AS.
 #
 # Since #310 (2026-09-11) the gate runs as uid 65534 / gid 1500, and

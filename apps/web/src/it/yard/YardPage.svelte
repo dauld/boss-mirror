@@ -112,7 +112,7 @@
   import { navigate } from '@boss/web-kit/nav';
 
   // THE FLOOR THIS PAGE OPENS ON (design 0524fc95, car 2). /it is the
-  // MAP now — eight region cards read from /api/yard/regions
+  // MAP now — the region cards read from /api/yard/regions
   // (MapPage.svelte) — and each yard card opens this page at
   // /it/yard/<region>, focused on that region's panel: the floor IS
   // this page, nothing split out, every panel one click deeper.

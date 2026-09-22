@@ -1,6 +1,6 @@
 // THE WORLD MAP'S RAILS — the client of `GET /api/yard/borders`
 // (design d2154293, decided 2026-09-19; this is car 2). Car 1 drew the
-// eight regions as territories with a rail between each pair, and the
+// regions as territories with a rail between each pair, and the
 // rails carried nothing: "I want to see the interactivity between
 // regions at the border" (feedback c3105b2a). A border in this system
 // is a real thing — packets cross it at a rate, packets stand at it

@@ -35,7 +35,6 @@
 //! `clean`, which would claim what was not checked. `--lint` and the
 //! gate proper keep refusing: their receipts are read as verdicts.
 
-use boss_testing::repo_root;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -63,10 +62,10 @@ impl Tree {
         let dir = boss_testing::scratch_dir(&format!("lint-cannot-answer-{tag}"));
         let tree = dir.join("tree");
         boss_testing::create_dir(&tree.join("infra/lint/lib"));
-        for rel in ["infra/gate.sh", "infra/lint/lib/git-answer.sh"] {
-            std::fs::copy(repo_root().join(rel), tree.join(rel))
-                .unwrap_or_else(|e| panic!("carry {rel} into the synthetic tree: {e}"));
-        }
+        // The gate and every helper it sources — it REFUSES without
+        // any of them, and which ones there are is gate.sh's to say
+        // (backlog 955c99b6).
+        boss_testing::copy_gate_sh(&tree);
         boss_testing::write_file(
             &tree.join("infra/lint/workspace-declares-what-it-runs.sh"),
             "#!/usr/bin/env bash\nexit 0\n",

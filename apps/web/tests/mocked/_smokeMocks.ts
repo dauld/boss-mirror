@@ -12,6 +12,12 @@
 // mounts.
 
 import type { Page, Route } from '@playwright/test';
+// The world's own layout, so the empty leg below cannot list a region
+// or a hop the map does not draw (backlog 94c6ffd0: both lists were
+// typed out here and went stale the day a ninth region landed).
+// world.ts is pinned to the server's REGIONS and BORDERS by
+// world.test.ts and borders.test.ts, so this is one definition deep.
+import { BORDERS, TERRITORIES } from '../../src/it/yard/world';
 
 const json = (r: Route, body: unknown, status = 200): Promise<void> =>
   r.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
@@ -202,32 +208,30 @@ export async function installApiFloor(page: Page): Promise<void> {
 
   // The IT system map's regions (design 0524fc95, car 2): the /it
   // landing reads this ONE endpoint. An empty-but-well-formed map —
-  // eight regions, each clear with a count of 0 and a trend with no
-  // samples — so the page draws eight cards and the crawl walks eight
-  // doors. Under the `[]` catch-all the page would render a failure
-  // line (a list where the map is due is a malformed read), which is
-  // right for an outage and wrong for the empty leg.
+  // one region per declared territory, each clear with a count of 0 and
+  // a trend with no samples — so the page draws every card and the
+  // crawl walks every door. Under the `[]` catch-all the page would
+  // render a failure line (a list where the map is due is a malformed
+  // read), which is right for an outage and wrong for the empty leg.
   await page.route(YARD_REGIONS, (r) =>
     json(r, {
       window_hours: 24,
       now: '2026-09-03T12:00:00Z',
-      regions: ['dock', 'gates', 'track', 'shed', 'arrivals', 'garage', 'receiving', 'marshalling'].map((name) => ({
+      regions: TERRITORIES.map(({ name }) => ({
         name, count: 0, state: 'clear', why: 'nothing here',
         trend: { metric: 'nothing measured', unit: 'per day', current: null, previous: null, samples: 0, previous_samples: 0 },
       })),
     }),
   );
   // The map's RAILS (design d2154293, car 2), for the same reason: the
-  // empty leg is eight quiet borders, not a failed read. The hops are
-  // world.ts's, which the server's table is pinned equal to.
+  // empty leg is a quiet border per declared hop, not a failed read.
+  // The hops are world.ts's, which the server's table is pinned equal
+  // to.
   await page.route(YARD_BORDERS, (r) =>
     json(r, {
       window_hours: 24,
       now: '2026-09-03T12:00:00Z',
-      borders: [
-        ['receiving', 'marshalling'], ['marshalling', 'dock'], ['dock', 'gates'], ['gates', 'track'],
-        ['track', 'arrivals'], ['arrivals', 'shed'], ['gates', 'garage'], ['track', 'garage'],
-      ].map(([from, to]) => ({
+      borders: BORDERS.map(({ from, to }) => ({
         from, to, crossing: 'nothing measured', state: 'clear', why: 'nothing waiting',
         rate: { metric: 'crossings', unit: 'per day', current: 0, previous: 0, samples: 0, previous_samples: 0 },
         last_crossed: null, waiting: 0, holds: [],

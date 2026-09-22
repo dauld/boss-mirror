@@ -1,8 +1,9 @@
 //! `GET /api/yard/regions?window=24h` — the IT system map's KPI read
 //! (design 0524fc95, decided 2026-09-19; car 1).
 //!
-//! Eight regions — dock, gates, track, shed, arrivals, garage,
-//! receiving, marshalling — each with a count, a clear/busy/troubled
+//! Nine regions — dock, gates, track, shed, arrivals, garage,
+//! receiving, marshalling, shop-floor — each with a count, a
+//! clear/busy/troubled
 //! state and a trend over the window, computed ONCE here from the rows
 //! this process already reads for the yard status, so the map (car 2),
 //! the yard and `boss orient` answer with one voice. The aggregation is
@@ -14,7 +15,8 @@
 //! of the status's own pass ([`super::yard::read_yard`]) plus the
 //! windowed tails the trends need — the closed trains, cars and
 //! gate-runs of the last two windows, the receiving yard's inbound
-//! packets, and the marshalling stations' load and flow. Every read
+//! packets, the marshalling stations' load and flow, and the shop
+//! floor's runs, crews and declared capacity. Every read
 //! that cannot answer states so (`None` → a troubled region with
 //! `count: null`), never an empty region that reads as clear.
 
@@ -81,6 +83,15 @@ pub(super) struct MapRows {
     /// be there. `None` on a failed read: one unknown machine, never an
     /// estate with no runners in it.
     runner_hosts: Option<Vec<RunnerHost>>,
+    /// THE SHOP FLOOR'S RUNS (backlog 94c6ffd0): the `agent-run`
+    /// packets open or closed within reach. Steps ride the OPEN ones
+    /// only — they are what says a run has finished without reporting —
+    /// and there are at most a registry's worth of those.
+    agent_runs: Option<Vec<(Job, Vec<Step>)>>,
+    /// The crews standing on it: the open `work-session` packets.
+    sessions: Option<Vec<Job>>,
+    /// The bound those runs are read against, from the agents registry.
+    run_capacity: Option<usize>,
 }
 
 impl MapRows {
@@ -102,6 +113,9 @@ impl MapRows {
             conductor: Some(&self.read.health),
             ops_requests: self.ops_requests.as_deref(),
             runner_hosts: self.runner_hosts.as_deref(),
+            agent_runs: self.agent_runs.as_deref(),
+            sessions: self.sessions.as_deref(),
+            run_capacity: self.run_capacity,
             now,
             window_hours,
         }
@@ -137,6 +151,9 @@ pub(super) async fn read_map<R: JobsRepository + 'static, B: EventBus + 'static>
             stations: Some(Vec::new()),
             ops_requests: Some(Vec::new()),
             runner_hosts: Some(Vec::new()),
+            agent_runs: Some(Vec::new()),
+            sessions: Some(Vec::new()),
+            run_capacity: None,
         });
     }
     let scope = job_scope_from_predicate(user, &predicate);
@@ -309,7 +326,41 @@ pub(super) async fn read_map<R: JobsRepository + 'static, B: EventBus + 'static>
         .flatten()
         .map(|h| h.id.clone())
         .collect();
-    let ops_requests = newest_ops_requests(state, scope, reach, &host_ids).await;
+    let ops_requests = newest_ops_requests(state, scope.clone(), reach, &host_ids).await;
+
+    // THE SHOP FLOOR (backlog 94c6ffd0): the runs in flight and the
+    // ones that closed within reach, the sessions that dispatched them,
+    // and the bound the agents registry declares. Each read answers
+    // `None` on failure — the region then says it could not be read,
+    // rather than drawing a shop with nobody in it.
+    let agent_runs = read_agent_runs(state, scope.clone(), reach).await;
+    let sessions = state
+        .jobs
+        .list_jobs(
+            &JobFilter {
+                kind: Some(regions::SESSION_KIND.to_string()),
+                status: Some(JobStatus::Open),
+                scope: scope.clone(),
+                ..Default::default()
+            },
+            TAIL_WINDOW,
+            0,
+        )
+        .await
+        .ok()
+        .map(|(rows, _)| rows);
+    // A registry that could not be read and one that declares no cap
+    // are the same drawing — no bound on the card — and neither is a
+    // number the map would have to invent.
+    let run_capacity = match state.agent_budget.as_ref() {
+        Some(door) => door
+            .agents
+            .list()
+            .await
+            .ok()
+            .and_then(|rows| regions::run_capacity(&rows)),
+        None => None,
+    };
 
     Ok(MapRows {
         read,
@@ -320,7 +371,40 @@ pub(super) async fn read_map<R: JobsRepository + 'static, B: EventBus + 'static>
         stations,
         ops_requests,
         runner_hosts,
+        agent_runs,
+        sessions,
+        run_capacity,
     })
+}
+
+/// The shop floor's runs: open ones WITH their steps (a run that
+/// finished without reporting is a `building` done over a `reported`
+/// still open), plus the ones that closed within reach as rows — the
+/// trend reads its two instants off the metadata. `None` on any failed
+/// read: an unread floor is troubled, never empty.
+async fn read_agent_runs<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &Arc<JobsApiState<R, B>>,
+    scope: crate::port::JobScope,
+    reach: chrono::NaiveDate,
+) -> Option<Vec<(Job, Vec<Step>)>> {
+    let filter = JobFilter {
+        kind: Some(crate::agent_budget::RUN_KIND.to_string()),
+        status: Some(JobStatus::Open),
+        closed_since: Some(reach),
+        scope,
+        ..Default::default()
+    };
+    let (rows, _) = state.jobs.list_jobs(&filter, TAIL_WINDOW, 0).await.ok()?;
+    let mut out = Vec::with_capacity(rows.len());
+    for job in rows {
+        let steps = if job.status == JobStatus::Open {
+            state.jobs.list_steps(&job.id).await.ok()?
+        } else {
+            Vec::new()
+        };
+        out.push((job, steps));
+    }
+    Some(out)
 }
 
 /// The empty pass: every read answered, nothing in it.

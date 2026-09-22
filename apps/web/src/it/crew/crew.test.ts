@@ -18,6 +18,7 @@ import { describe, it, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { isHumanActor } from '../../data/actor';
 import {
+  IDLE_AFTER_MS,
   actorLane,
   actorCards,
   parseCars,
@@ -882,5 +883,26 @@ describe('CrewBoardPage wiring', () => {
     // page must not carry a bare digit where a count belongs.
     expect(pageCode).not.toMatch(/completedToday\s*[:=]\s*\d/);
     expect(pageCode).not.toMatch(/holds\s*[:=]\s*\d/);
+  });
+});
+
+// ---------------------------------------------------------------------
+// The floor's idle threshold lives twice (CLAUDE.md §9a).
+// ---------------------------------------------------------------------
+
+describe('the idle threshold the map and this board share', () => {
+  it('equals boss_jobs::regions::CREW_IDLE_HOURS (crates/core/boss-jobs/src/regions.rs)', () => {
+    // The shop floor is a region of the system map since backlog
+    // 94c6ffd0, and the server judges the same crews this board does.
+    // Two copies of "silent this long and a crew is not working" would
+    // let the map call a session idle while the board still drew it at
+    // work, so the pair is pinned here.
+    const src = readFileSync(
+      new URL('../../../../../crates/core/boss-jobs/src/regions.rs', import.meta.url),
+      'utf8',
+    );
+    const m = src.match(/pub const CREW_IDLE_HOURS: i64 = (\d+);/);
+    expect(m, 'boss_jobs::regions::CREW_IDLE_HOURS is the server\'s copy').not.toBeNull();
+    expect(IDLE_AFTER_MS).toBe(Number(m![1]) * 60 * 60 * 1000);
   });
 });

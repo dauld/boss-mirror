@@ -44,7 +44,13 @@ fi
 root=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "wt-cargo: not in a git worktree" >&2; exit 2; }
 name=$(basename "$root")
 seed=${WT_SEED:-/scratch/target}
-dir=${WT_TARGET_ROOT:-/scratch}/target-$name
+# THE NAME IS READ, NOT TYPED (backlog 955c99b6, 2026-09-22). gate.sh
+# now checks into this same dir rather than the shared one, so the
+# spelling lives once — in the helper beside this script — and the two
+# cannot drift into a --lint that reads a dir no build ever wrote.
+# shellcheck source=wt-target-dir.sh
+. "$here/wt-target-dir.sh" || { echo "wt-cargo: $here/wt-target-dir.sh could not be read — the per-worktree target dir has no name to read; refusing to build into a shared one" >&2; exit 2; }
+dir=$(wt_target_dir "${WT_TARGET_ROOT:-/scratch}" "$root")
 if [ ! -d "$dir" ]; then
     if [ -d "$seed" ]; then
         # The copy lands in a sibling temp name and is renamed into

@@ -1,7 +1,7 @@
 //! The IT world map's BORDERS — `GET /api/yard/borders` (design
 //! d2154293, decided 2026-09-19; this is car 2).
 //!
-//! WHY THIS EXISTS. Car 1 drew the eight regions as territories in one
+//! WHY THIS EXISTS. Car 1 drew the map's regions as territories in one
 //! coordinate space with a rail between each pair, and the rails were
 //! decoration: a line with nothing on it. The feedback that opened this
 //! design asked to "see the interactivity between regions at the
@@ -48,7 +48,7 @@
 //! `silent` stays null for it, and the trouble reading it DOES support
 //! needs no heartbeat: work is waiting, and the machine has not fired
 //! since the oldest of it arrived. [`judge`] asks that of the
-//! marshalling → dock rail, whose stranded greens carry their own
+//! shop-floor → dock rail, whose stranded greens carry their own
 //! arrival instant, and a rail with nothing waiting is never troubled
 //! however long it has been quiet.
 //!
@@ -123,16 +123,24 @@ pub struct BorderSpec {
     pub machine_kind: MachineKind,
 }
 
-/// The eight borders of the world layout, in flow order then the two
+/// The nine borders of the world layout, in flow order then the two
 /// garage feeders — the same set and order as
 /// `apps/web/src/it/yard/world.ts::BORDERS`, pinned equal by
 /// `borders.test.ts`.
 ///
-/// The line reads receiving -> marshalling -> dock -> gates -> track ->
-/// arrivals -> shed, which is the layout car 1 declared, so `dock ->
-/// gates` is a branch TAKING a bay (a first gate or a re-gate) and
-/// `gates -> track` is a green car boarding a train.
-pub const BORDERS: [BorderSpec; 8] = [
+/// The line reads receiving -> marshalling -> shop-floor -> dock ->
+/// gates -> track -> arrivals -> shed, so `dock -> gates` is a branch
+/// TAKING a bay (a first gate or a re-gate) and `gates -> track` is a
+/// green car boarding a train.
+///
+/// THE SHOP FLOOR SPLIT ONE HOP IN TWO (backlog 94c6ffd0). What used
+/// to be `marshalling -> dock` counted the car parking and said
+/// nothing about the interval before it: a packet was taken off a
+/// station and a car appeared on the dock some hours later, with the
+/// build — the part an actor actually spends the time on — drawn
+/// nowhere. The two hops are the two events that were always
+/// distinct: a run OPENED on the packet, and its car PARKED.
+pub const BORDERS: [BorderSpec; 9] = [
     BorderSpec {
         from: "receiving",
         to: "marshalling",
@@ -142,6 +150,13 @@ pub const BORDERS: [BorderSpec; 8] = [
     },
     BorderSpec {
         from: "marshalling",
+        to: "shop-floor",
+        crossing: "a packet taken off a station — a run opened on it",
+        machine: "boss dispatch",
+        machine_kind: MachineKind::Actors,
+    },
+    BorderSpec {
+        from: "shop-floor",
         to: "dock",
         crossing: "a car filed and parked on a green gate",
         machine: "auto-park-on-gate-green",
@@ -440,12 +455,57 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
                 .collect();
             Flow::of(w, stamps, open.len(), holds)
         }
-        // triaged -> routed: the packet became a car standing on the
-        // dock, which is the car's `gate` (park) step completing. What
-        // waits is a green that never became a car — held on purpose,
-        // with its reason, or stranded, which is a fix about to be
-        // rebuilt blind.
-        ("marshalling", "dock") => {
+        // routed -> being built: an actor took a packet off a station
+        // and a run opened on it (design c87fb59b car 2). One crossing
+        // per `agent-run` filed. What waits is the marshalling yard
+        // itself — the open packets standing at its stations, which is
+        // what a dispatch takes one of — counted once across stations,
+        // because a packet can match two predicates.
+        ("marshalling", "shop-floor") => {
+            let Some(runs) = r.agent_runs else {
+                return Flow::unread("the agent-run packets could not be read");
+            };
+            let stamps: Vec<Instant> = runs.iter().filter_map(|(j, _)| opened_at(j)).collect();
+            let Some(stations) = r.stations else {
+                // The rate is still a measurement; the QUEUE is not, and
+                // an unread station registry is not an empty yard.
+                let last = stamps.iter().copied().max();
+                return Flow {
+                    rate: Flow::of(w, stamps, 0, Vec::new()).rate,
+                    last,
+                    waiting: None,
+                    holds: Vec::new(),
+                    unread: Some("the station registry could not be read".to_string()),
+                    oldest_waiting: None,
+                };
+            };
+            let standing: std::collections::BTreeSet<&str> = stations
+                .iter()
+                .flat_map(|s| s.members.iter().map(String::as_str))
+                .collect();
+            let mut deep: Vec<&crate::regions::StationReading> =
+                stations.iter().filter(|s| !s.members.is_empty()).collect();
+            deep.sort_by_key(|s| std::cmp::Reverse(s.members.len()));
+            let holds = deep
+                .iter()
+                .map(|s| {
+                    hold(
+                        &s.name,
+                        format!(
+                            "{} standing — nobody has taken one",
+                            plural(s.members.len(), "packet", "packets")
+                        ),
+                    )
+                })
+                .collect();
+            Flow::of(w, stamps, standing.len(), holds)
+        }
+        // being built -> parked: the packet became a car standing on
+        // the dock, which is the car's `gate` (park) step completing.
+        // What waits is a green that never became a car — held on
+        // purpose, with its reason, or stranded, which is a fix about
+        // to be rebuilt blind.
+        ("shop-floor", "dock") => {
             let stamps: Vec<Instant> = r
                 .cars
                 .iter()
@@ -804,7 +864,7 @@ fn machine_of(spec: &BorderSpec, inputs: &BorderInputs<'_>, now: Instant) -> Mac
     }
 }
 
-/// The map's rails. Pure: rows in, eight borders out, in [`BORDERS`]
+/// The map's rails. Pure: rows in, nine borders out, in [`BORDERS`]
 /// order.
 pub fn borders(inputs: &BorderInputs<'_>) -> Borders {
     let r = inputs.regions;
@@ -992,6 +1052,9 @@ mod tests {
             conductor: None,
             ops_requests: None,
             runner_hosts: None,
+            agent_runs: None,
+            sessions: None,
+            run_capacity: None,
             now: t(NOW),
             window_hours: DEFAULT_WINDOW_HOURS,
         }
@@ -1064,7 +1127,7 @@ mod tests {
     }
 
     #[test]
-    fn a_car_parking_is_one_crossing_of_the_marshalling_dock_border() {
+    fn a_car_parking_is_one_crossing_of_the_shop_floor_dock_border() {
         let status = empty_status();
         let car = job("ship-a-change", "a car", JobStatus::Open, json!({}));
         let steps = vec![step(
@@ -1093,7 +1156,7 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: Some(&[]),
         });
-        let b = only(&out, "marshalling", "dock");
+        let b = only(&out, "shop-floor", "dock");
         assert_eq!(b.rate.samples, 1);
         assert_eq!(b.rate.previous_samples, 1);
         assert_eq!(b.rate.current, Some(1.0));
@@ -1105,6 +1168,102 @@ mod tests {
         assert_eq!(b.waiting, Some(0));
     }
 
+    /// THE HOP INTO THE SHOP FLOOR (backlog 94c6ffd0): one crossing per
+    /// run opened, and what waits is the marshalling yard's own
+    /// standing packets — counted ONCE across stations, because a
+    /// packet can stand at two of them.
+    #[test]
+    fn a_run_opening_is_one_crossing_into_the_shop_floor_and_the_stations_are_what_waits() {
+        let status = empty_status();
+        let runs = vec![
+            (
+                job(
+                    "agent-run",
+                    "a run",
+                    JobStatus::Open,
+                    json!({ "opened_at": "2026-09-19T09:00:00Z" }),
+                ),
+                Vec::new(),
+            ),
+            (
+                job(
+                    "agent-run",
+                    "an older run",
+                    JobStatus::Closed,
+                    json!({ "opened_at": "2026-09-18T09:00:00Z" }),
+                ),
+                Vec::new(),
+            ),
+        ];
+        let stations = vec![
+            crate::regions::StationReading {
+                name: "backlog".to_string(),
+                members: vec!["p1".to_string(), "p2".to_string()],
+                ..Default::default()
+            },
+            crate::regions::StationReading {
+                name: "design-review".to_string(),
+                members: vec!["p2".to_string()],
+                ..Default::default()
+            },
+        ];
+        let base = region_inputs(&status, &[], &[], &[], Some(&[]), Some(&stations));
+        let inputs = RegionInputs {
+            agent_runs: Some(&runs),
+            ..base
+        };
+        let out = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
+        });
+        let b = only(&out, "marshalling", "shop-floor");
+        assert_eq!(b.rate.samples, 1, "one run opened in this window");
+        assert_eq!(b.rate.previous_samples, 1);
+        assert_eq!(
+            b.waiting,
+            Some(2),
+            "p2 stands at two stations, counted once"
+        );
+        assert_eq!(b.state, RegionState::Busy, "{}", b.why);
+        assert_eq!(
+            b.holds.first().map(|h| h.what.as_str()),
+            Some("backlog"),
+            "the deepest station leads"
+        );
+    }
+
+    /// An unread station registry leaves the RATE — a measurement that
+    /// was taken — and refuses the queue, which was not.
+    #[test]
+    fn an_unread_station_registry_leaves_the_rate_and_refuses_the_queue() {
+        let status = empty_status();
+        let runs = vec![(
+            job(
+                "agent-run",
+                "a run",
+                JobStatus::Open,
+                json!({ "opened_at": "2026-09-19T09:00:00Z" }),
+            ),
+            Vec::new(),
+        )];
+        let base = region_inputs(&status, &[], &[], &[], Some(&[]), None);
+        let inputs = RegionInputs {
+            agent_runs: Some(&runs),
+            ..base
+        };
+        let out = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
+        });
+        let b = only(&out, "marshalling", "shop-floor");
+        assert_eq!(b.rate.samples, 1);
+        assert_eq!(b.waiting, None);
+        assert_eq!(b.state, RegionState::Troubled);
+        assert!(b.why.contains("station registry"), "why: {}", b.why);
+    }
+
     #[test]
     fn a_machine_with_no_firing_record_says_so_rather_than_reading_healthy() {
         let status = empty_status();
@@ -1114,7 +1273,7 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: Some(&[]),
         });
-        let dispatcher = only(&out, "marshalling", "dock");
+        let dispatcher = only(&out, "shop-floor", "dock");
         assert_eq!(dispatcher.machine.kind, "dispatcher-rule");
         assert_eq!(dispatcher.machine.last_fired, None);
         assert_eq!(
@@ -1233,7 +1392,7 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: Some(&[]),
         });
-        let b = only(&out, "marshalling", "dock");
+        let b = only(&out, "shop-floor", "dock");
         let held = status.held.len() + status.stranded.len();
         assert_eq!(b.waiting, Some(held));
         if held > 0 {
@@ -1280,7 +1439,7 @@ mod tests {
 
     #[test]
     fn a_dispatcher_rules_firing_is_read_from_its_own_record() {
-        // b14afc48: the marshalling -> dock rail's machine is the
+        // b14afc48: the shop-floor -> dock rail's machine is the
         // dispatcher rule auto-park-on-gate-green, and until
         // `dispatcher_firings` existed it could only answer 'nothing
         // records a dispatcher rule's firings' — the most automated hop
@@ -1296,7 +1455,7 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: Some(&fired),
         });
-        let b = only(&out, "marshalling", "dock");
+        let b = only(&out, "shop-floor", "dock");
         assert_eq!(b.machine.kind, "dispatcher-rule");
         assert_eq!(
             b.machine.last_fired.as_deref(),
@@ -1330,7 +1489,7 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: None,
         });
-        let m = &only(&unread, "marshalling", "dock").machine;
+        let m = &only(&unread, "shop-floor", "dock").machine;
         assert_eq!(m.last_fired, None);
         assert_eq!(m.silent, None);
         assert!(m.why.contains("could not be read"), "why: {}", m.why);
@@ -1344,7 +1503,7 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: Some(&never),
         });
-        let m = &only(&out, "marshalling", "dock").machine;
+        let m = &only(&out, "shop-floor", "dock").machine;
         assert_eq!(m.last_fired, None);
         assert!(m.why.contains("has never fired"), "why: {}", m.why);
     }
@@ -1400,7 +1559,7 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: Some(&fired(Some("2026-09-19T07:00:00Z"))),
         });
-        let b = only(&out, "marshalling", "dock");
+        let b = only(&out, "shop-floor", "dock");
         assert_eq!(b.state, RegionState::Troubled);
         assert!(b.why.contains("has not fired since"), "why: {}", b.why);
         // The half this must NOT do: no interval was invented for an
@@ -1415,7 +1574,7 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: Some(&fired(Some("2026-09-19T11:00:00Z"))),
         });
-        assert_eq!(only(&ok, "marshalling", "dock").state, RegionState::Busy);
+        assert_eq!(only(&ok, "shop-floor", "dock").state, RegionState::Busy);
     }
 
     #[test]
@@ -1437,7 +1596,7 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: Some(&fired(Some("2026-09-19T07:00:00Z"))),
         });
-        let b = only(&out, "marshalling", "dock");
+        let b = only(&out, "shop-floor", "dock");
         assert_eq!(b.waiting, Some(1), "it still stands at the border");
         assert_eq!(
             b.state,
@@ -1476,7 +1635,7 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: Some(&fired(Some("2026-09-19T07:00:00Z"))),
         });
-        let b = only(&out, "marshalling", "dock");
+        let b = only(&out, "shop-floor", "dock");
         assert_eq!(b.waiting, Some(1));
         assert_eq!(b.state, RegionState::Busy, "why: {}", b.why);
     }

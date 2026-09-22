@@ -1,7 +1,7 @@
 <script lang="ts">
   // THE IT WORLD — the /it landing. Since design d2154293 (decided by
   // David 2026-09-19; this is car 1) it is ONE SVG world: world.ts lays
-  // the eight regions out as territories along the packet flow and
+  // the regions out as territories along the packet flow and
   // WorldMap.svelte draws them, each with its count, state and trend
   // inside its outline and the why on a troubled one. The 4x2 card
   // grid that stood here (0524fc95 car 2) had no shared coordinate
@@ -54,6 +54,7 @@
   import { fetchBorders, summaryLine, type Borders } from './borders';
   import WorldMap from './WorldMap.svelte';
   import YardPage from './YardPage.svelte';
+  import CrewBoardPage from '../crew/CrewBoardPage.svelte';
   import ReceivingYardPage from '../receiving/ReceivingYardPage.svelte';
   import MarshallingYardPage from '../marshalling/MarshallingYardPage.svelte';
 
@@ -116,7 +117,7 @@
   <PageHeader
     eyebrow="IT · Forge line"
     title="The IT world"
-    subtitle="Eight territories along the packet flow, each a door to its floor, and the borders between them carrying what crosses, what waits and the machine that moves it"
+    subtitle="The territories along the packet flow, each a door to its floor, and the borders between them carrying what crosses, what waits and the machine that moves it"
   />
 
   {#if regions.kind === 'loading'}
@@ -175,6 +176,8 @@
     {#key platformRegion}
       {#if platformRegion === 'receiving'}
         <ReceivingYardPage embedded ondeck={(d) => (held = { region: 'receiving', deck: d })} />
+      {:else if platformRegion === 'shop-floor'}
+        <CrewBoardPage embedded ondeck={(d) => (held = { region: 'shop-floor', deck: d })} />
       {:else}
         <MarshallingYardPage embedded ondeck={(d) => (held = { region: 'marshalling', deck: d })} />
       {/if}

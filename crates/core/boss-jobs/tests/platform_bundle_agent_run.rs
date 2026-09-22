@@ -55,6 +55,19 @@ fn reaches(
     building_md: serde_json::Value,
     reported_done: bool,
 ) -> bool {
+    reaches_with_report(spec, title, building_md, reported_done, json!({}))
+}
+
+/// The same, with the `reported` step's own metadata — the SECOND fork
+/// in this protocol (backlog 6a5f4214): a handback the agent gave and
+/// an absence the clock recorded route to different terminals.
+fn reaches_with_report(
+    spec: &WorkflowSpec,
+    title: &str,
+    building_md: serde_json::Value,
+    reported_done: bool,
+    reported_md: serde_json::Value,
+) -> bool {
     let payload = json!({
         "subject": { "id": "bosspipeline", "subject_kind": "custom" },
         "job": { "metadata": { "packet": "p", "step": "build" } },
@@ -62,7 +75,7 @@ fn reaches(
             "claimed": { "done": true, "metadata": {} },
             "briefed": { "done": true, "metadata": { "prompt_bytes": "1" } },
             "building": { "done": true, "metadata": building_md },
-            "reported": { "done": reported_done, "metadata": {} },
+            "reported": { "done": reported_done, "metadata": reported_md },
         },
     });
     let expr = boss_expr::parse(&step(spec, title).ready_when).expect("ready_when parses");
@@ -85,7 +98,14 @@ fn the_run_has_the_decided_steps_in_order() {
     assert_eq!(
         titles,
         vec![
-            "claimed", "briefed", "building", "reported", "landed", "refused", "died"
+            "claimed",
+            "briefed",
+            "building",
+            "reported",
+            "landed",
+            "unreported",
+            "refused",
+            "died"
         ]
     );
     assert_eq!(step(&run, "claimed").kind, "trigger");
@@ -97,7 +117,10 @@ fn the_run_has_the_decided_steps_in_order() {
         step(&run, "reported").ready_when,
         "steps.building.done AND (steps.building.metadata.result = \"gated\" OR steps.building.metadata.result = \"delivered\")"
     );
-    assert_eq!(step(&run, "landed").ready_when, "steps.reported.done");
+    assert_eq!(
+        step(&run, "landed").ready_when,
+        "steps.reported.done AND steps.reported.metadata.handback != \"absent\""
+    );
 }
 
 /// The fork is one required enum: a run cannot close without saying
@@ -126,6 +149,7 @@ fn building_says_how_it_ended_and_every_value_routes_once() {
         outcomes,
         vec![
             ("landed", "landed"),
+            ("unreported", "unreported"),
             ("refused", "refused"),
             ("died", "died")
         ]
@@ -144,6 +168,125 @@ fn building_says_how_it_ended_and_every_value_routes_once() {
         };
         assert_eq!(reached, vec![want], "result = {value}");
     }
+}
+
+/// THE SECOND FORK, AND THE SLOT IT RELEASES (backlog 6a5f4214).
+/// A run whose work is evidenced but whose agent never came back had
+/// NO reachable terminal: `building` is completed, so the silence
+/// clock that watches `building` correctly finds nothing, every hour,
+/// forever, and the run holds one of the six concurrent slots the
+/// claim door enforces. `reported` now forks: a handback the agent
+/// gave lands the run, and an absence the clock recorded ends it
+/// `unreported` — which is what is true. Not `died`: the work SHIPPED
+/// (backlog c8703bee — successful work must not be recorded as a
+/// failure), and `landed` would claim a report nobody gave.
+#[test]
+fn an_absent_handback_ends_the_run_unreported_and_never_landed() {
+    let run = bundled("agent-run");
+    let gated = json!({ "result": "gated" });
+    let absent = json!({ "handback": "absent" });
+    // The clock's ending: `unreported`, and NOT `landed`.
+    assert!(reaches_with_report(
+        &run,
+        "unreported",
+        gated.clone(),
+        true,
+        absent.clone()
+    ));
+    assert!(!reaches_with_report(
+        &run,
+        "landed",
+        gated.clone(),
+        true,
+        absent.clone()
+    ));
+    // An analyst's delivered work reaches it the same way.
+    assert!(reaches_with_report(
+        &run,
+        "unreported",
+        json!({ "result": "delivered" }),
+        true,
+        absent
+    ));
+    // A handback that arrived lands, whether or not it says so, and
+    // never reaches `unreported`. The agent's own report writes no
+    // `handback` key at all (`boss dispatch --report`), so the absent
+    // key must read as a report that came.
+    for md in [json!({}), json!({ "handback": "recorded" })] {
+        assert!(
+            reaches_with_report(&run, "landed", gated.clone(), true, md.clone()),
+            "a report on the record lands the run: {md}"
+        );
+        assert!(
+            !reaches_with_report(&run, "unreported", gated.clone(), true, md.clone()),
+            "a report on the record is not an absence: {md}"
+        );
+    }
+    // Neither terminal is reachable while the report step is open.
+    for t in ["landed", "unreported"] {
+        assert!(!reaches_with_report(
+            &run,
+            t,
+            gated.clone(),
+            false,
+            json!({})
+        ));
+    }
+    assert_eq!(
+        step(&run, "unreported").ready_when,
+        "steps.reported.done AND steps.reported.metadata.handback = \"absent\""
+    );
+}
+
+/// THE SECOND FACT THAT LIVES TWICE. The clock rule that ends a run
+/// whose handback never arrived declares its bound as a rule arg, and
+/// the protocol authors `reported`'s duration here; they are held
+/// equal at 2x, exactly as `building` and its silence rule are.
+///
+/// The duration is measured, not chosen: over the 116 agent-runs that
+/// had landed on 2026-09-22, the gap from `building` completing to
+/// `reported` completing was a median of 2 minutes and a p90 of 49
+/// minutes, with the slowest genuine handback at 1.15h — and then a
+/// hole, with the next nine at 6.08h and up, every one of them a run
+/// an operator noticed by hand.
+#[test]
+fn the_unreported_bound_is_twice_the_reports_duration() {
+    let run = bundled("agent-run");
+    let duration = step(&run, "reported")
+        .duration_hours
+        .expect("reported authors duration_hours");
+    let rule_file = boss_testing::repo_root().join(
+        "infra/dispatcher/rules/agent-run-ends-unreported-when-the-handback-never-arrives.toml",
+    );
+    let rule: toml::Value = toml::from_str(
+        &std::fs::read_to_string(&rule_file).expect("the unreported clock rule is authored"),
+    )
+    .expect("the rule file parses");
+    let action = &rule["rule"][0]["do"][0];
+    assert_eq!(action["handler"].as_str(), Some("jobs.age_out_step"));
+    assert_eq!(action["args"]["kind"].as_str(), Some("\"agent-run\""));
+    assert_eq!(action["args"]["step"].as_str(), Some("\"reported\""));
+    let hours: f64 = action["args"]["hours"]
+        .as_str()
+        .expect("hours is an expression string")
+        .trim_matches('"')
+        .parse()
+        .expect("hours is a number");
+    assert_eq!(hours, 2.0 * duration, "the bound is 2x the step's duration");
+    assert_eq!(
+        rule["rule"][0]["schedule"]["cadence"].as_str(),
+        Some("hourly"),
+        "jobs.age_out_step reads the tick's `_at`, which only a sub-day cadence carries"
+    );
+    // What it writes has to satisfy the step it completes: `summary` is
+    // required at done, and `handback = absent` is the fork the
+    // `unreported` terminal reads. The clock invents no account of the
+    // work — it records that none arrived, and says so in the summary.
+    let done = action["args"]["done_metadata"]
+        .as_str()
+        .expect("done_metadata is an expression string");
+    assert!(done.contains(r#"\"handback\": \"absent\""#), "{done}");
+    assert!(done.contains("No handback"), "{done}");
 }
 
 /// A green gate alone does not land a run: the report must be on the

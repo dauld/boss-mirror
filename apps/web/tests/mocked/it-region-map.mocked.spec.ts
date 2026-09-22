@@ -24,6 +24,7 @@
 // easing and interpolation it needed are deleted rather than unused.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
+import { TERRITORIES } from '../../src/it/yard/world';
 import { YARD_REGIONS, installSmokeMocks } from './_smokeMocks';
 
 const trend = (metric: string, unit: string) => ({
@@ -42,6 +43,7 @@ const REGIONS = {
     { name: 'garage', count: 0, state: 'clear', why: 'nothing gated red', trend: trend('reds', 'per day') },
     { name: 'receiving', count: 0, state: 'clear', why: 'nothing inbound', trend: trend('inbound', 'per day') },
     { name: 'marshalling', count: 0, state: 'clear', why: 'nothing waiting', trend: trend('served', 'per day') },
+    { name: 'shop-floor', count: 0, bound: 6, state: 'clear', why: 'no run in flight, no crew on the floor', trend: trend('build duration', 'minutes') },
   ],
 };
 
@@ -76,7 +78,7 @@ test('/it/yard/dock REPLACES the world with the dock\'s own map — not the worl
   await mocks(page);
   await page.goto('/it');
   const svg = page.locator(WORLD_SVG);
-  await expect(svg.locator('.territory')).toHaveCount(8);
+  await expect(svg.locator('.territory')).toHaveCount(TERRITORIES.length);
 
   // The world at rest, and the node it is drawn in. The handle is the
   // load-bearing part, exactly as it was when this spec asserted the
@@ -120,7 +122,7 @@ test('Escape goes back to the world, and so does the way-out control', async ({ 
   await mocks(page);
   await page.goto('/it');
   const svg = page.locator(WORLD_SVG);
-  await expect(svg.locator('.territory')).toHaveCount(8);
+  await expect(svg.locator('.territory')).toHaveCount(TERRITORIES.length);
 
   await svg.locator('.territory[data-region="dock"]').click();
   await expect(page).toHaveURL(/\/it\/yard\/dock$/);
@@ -129,7 +131,7 @@ test('Escape goes back to the world, and so does the way-out control', async ({ 
   await page.keyboard.press('Escape');
   await expect(page).toHaveURL(/\/it$/);
   // The world is back, whole: eight territories, no region map.
-  await expect(page.locator(WORLD_SVG).locator('.territory')).toHaveCount(8);
+  await expect(page.locator(WORLD_SVG).locator('.territory')).toHaveCount(TERRITORIES.length);
   await expect(page.locator(regionMap('dock'))).toHaveCount(0);
 
   // The way out is SAID, not only bound to a key.
@@ -137,7 +139,7 @@ test('Escape goes back to the world, and so does the way-out control', async ({ 
   await expect(page).toHaveURL(/\/it\/yard\/dock$/);
   await page.locator(`${regionMap('dock')} button.leave`).click();
   await expect(page).toHaveURL(/\/it$/);
-  await expect(page.locator(WORLD_SVG).locator('.territory')).toHaveCount(8);
+  await expect(page.locator(WORLD_SVG).locator('.territory')).toHaveCount(TERRITORIES.length);
 });
 
 // ---------------------------------------------------------------------
@@ -276,6 +278,6 @@ test('a direct load of /it/yard/<region> renders the region map and never the wo
 test('a region the layout does not know leaves the WORLD on screen, never a map of nothing', async ({ page }) => {
   await mocks(page);
   await page.goto('/it/yard/atlantis');
-  await expect(page.locator(WORLD_SVG).locator('.territory')).toHaveCount(8);
+  await expect(page.locator(WORLD_SVG).locator('.territory')).toHaveCount(TERRITORIES.length);
   await expect(page.locator('section[aria-label$="region map"]')).toHaveCount(0);
 });

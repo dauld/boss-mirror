@@ -18,7 +18,7 @@
 # prompt, and completes `briefed`. From there the run is a packet like
 # any other — it sits on /it/crew, it ages, and a rule closes it.
 #
-# THREE TERMINALS, REACHED BY FOUR DIFFERENT HANDS:
+# FOUR TERMINALS, REACHED BY FIVE DIFFERENT HANDS:
 #   landed  — either of two endings, both of which then require the
 #             report:
 #             `gated`, a BUILDER's ending — `building` is completed by
@@ -35,6 +35,16 @@
 #             who read it today, by the runner later — and the run lands
 #             on it. No rule ever writes the report, because a summary
 #             the machine invents is not the agent's.
+#   unreported — the work is evidenced and the handback never came
+#             (backlog 6a5f4214, 2026-09-22): `building` closed `gated`
+#             or `delivered`, and `reported` then sat open past twice its
+#             duration, holding one of the six concurrent slots the claim
+#             door enforces while nothing read that age. The hourly rule
+#             `agent-run-ends-unreported-when-the-handback-never-arrives`
+#             completes `reported` with `handback = absent` and a summary
+#             that says only that none arrived — the clock still invents
+#             no account of the work, and the terminal it routes to
+#             claims neither a report (`landed`) nor a failure (`died`).
 #   refused — the agent stopped without doing the work (the claim no
 #             longer held on main, the packet was a duplicate):
 #             `building` completed by hand with `result = refused`.
@@ -154,14 +164,37 @@ fields = [
 # fork total by evaluating each successor with ONLY the fork done, and
 # a terminal that also needed this step would read as an orphan
 # outcome.
+#
+# AND IT IS THE ONE STEP A RUN COULD WEDGE ON (backlog 6a5f4214,
+# 2026-09-22). `building` is completed by then, so the silence clock
+# that watches `building` correctly finds nothing on such a run, every
+# hour, forever — and the run holds one of the six slots the claim
+# door enforces (`crates/core/boss-jobs/src/http/steps.rs`, the
+# concurrency gate) until an operator notices. Measured that day over
+# the 116 runs that had landed: the gap from `building` completing to
+# `reported` completing was a median of 2 minutes, a p90 of 49
+# minutes, and a slowest genuine handback of 1.15h; then a hole, and
+# nine more at 6.08h to 27.95h, every one of them recovered by a hand.
+# So `reported` declares a duration like `building` does, and
+# `agent-run-ends-unreported-when-the-handback-never-arrives` reads
+# its bound as 2x — the same idiom, pinned equal by
+# platform_bundle_agent_run.rs (CLAUDE.md 9a).
+#
+# `handback` is the fork that keeps the record honest about which hand
+# closed it. It is NOT required and no agent writes it: `boss dispatch
+# --report` writes the summary and the cost, and an absent key reads
+# as the report that arrived. Only the clock writes `absent`, and the
+# `unreported` terminal is what it routes to.
 [[workflow.step]]
 title = "reported"
 kind = "task"
 ready_when = "steps.building.done AND (steps.building.metadata.result = \"gated\" OR steps.building.metadata.result = \"delivered\")"
 title_template = "Report recorded"
 authority_role = "platform-admin"
+duration_hours = 1.0
 fields = [
   { name = "summary", field_type = "string", required = true },
+  { name = "handback", field_type = "recorded|absent" },
   { name = "spend_usd", field_type = "string" },
   { name = "tokens", field_type = "string" },
 ]
@@ -169,10 +202,25 @@ fields = [
 [[workflow.step]]
 title = "landed"
 kind = "outcome"
-ready_when = "steps.reported.done"
+ready_when = "steps.reported.done AND steps.reported.metadata.handback != \"absent\""
 title_template = "Landed — the work is evidenced, report recorded"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "landed" }
+
+# THE WORK SHIPPED AND NOBODY SAID SO (backlog 6a5f4214). Deliberately
+# not `died`: `building` closed `gated` or `delivered`, so the car is
+# on main or the analyst's step is complete, and recording successful
+# work as a failure is the shape backlog c8703bee names. Deliberately
+# not `landed` either — that terminal's own title says the report is
+# recorded, and here it never was. `unreported` is what is true, and
+# it is the one terminal in this protocol reached only by a clock.
+[[workflow.step]]
+title = "unreported"
+kind = "outcome"
+ready_when = "steps.reported.done AND steps.reported.metadata.handback = \"absent\""
+title_template = "Unreported — the work is evidenced, no handback arrived"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "unreported" }
 
 [[workflow.step]]
 title = "refused"

@@ -112,8 +112,11 @@ fn app() -> (axum::Router, Arc<InMemoryJobs>, Arc<dyn CadenceRepository>) {
     let cadence: Arc<dyn CadenceRepository> = Arc::new(InMemoryCadence::new(vec![depth_rule()]));
     let delivery: Arc<dyn DeliveryPolicyRepository> = Arc::new(InMemoryDeliveryPolicy::new(vec![]));
     // The dispatcher's firing record (b14afc48): auto-park-on-gate-green
-    // fired an hour before NOW, which is what the marshalling -> dock
+    // fired an hour before NOW, which is what the shop-floor -> dock
     // border must answer with instead of the old "nothing records it".
+    // (That hop was marshalling -> dock until backlog 94c6ffd0 put the
+    // shop floor between the two — the same crossing, the same machine,
+    // one territory further along.)
     let dispatcher_firings: Arc<dyn DispatcherFiringsRepository> =
         Arc::new(InMemoryDispatcherFirings::new(vec![(
             "auto-park-on-gate-green".to_string(),
@@ -363,7 +366,7 @@ async fn the_machine_is_read_from_its_own_firing_record_and_silence_is_trouble()
     // ran. Its silence stays unjudged: an event rule declares no
     // heartbeat, and a `silent: false` here would be a machine drawn
     // healthy on no evidence.
-    let parked = border(&v, "marshalling", "dock");
+    let parked = border(&v, "shop-floor", "dock");
     assert_eq!(parked["machine"]["kind"], "dispatcher-rule");
     assert_eq!(
         parked["machine"]["last_fired"], "2026-09-19T11:00:00+00:00",

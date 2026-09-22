@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { REGION_NAMES } from './regions';
 import { BORDERS, TERRITORIES, WORLD, borderPath, territoryOf, wrapWords } from './world';
 
-// THE WORLD'S LAYOUT IS DATA (design d2154293, car 1): the eight
+// THE WORLD'S LAYOUT IS DATA (design d2154293, car 1): the
 // regions are territories in one coordinate space, laid out along the
 // packet flow, and the borders between them are declared, not drawn by
 // hand. These pin the layout to the server's map — every region the
@@ -32,8 +32,8 @@ describe('the territories are the server\'s regions', () => {
     }
   });
 
-  it('lays the line out along the packet flow — receiving, marshalling, dock, gates, track, arrivals, shed — left to right, the garage a siding under gates and track', () => {
-    const line = ['receiving', 'marshalling', 'dock', 'gates', 'track', 'arrivals', 'shed'] as const;
+  it('lays the line out along the packet flow — receiving, marshalling, shop-floor, dock, gates, track, arrivals, shed — left to right, the garage a siding under gates and track', () => {
+    const line = ['receiving', 'marshalling', 'shop-floor', 'dock', 'gates', 'track', 'arrivals', 'shed'] as const;
     const xs = line.map((n) => territoryOf(n)!.x);
     expect([...xs].sort((a, b) => a - b)).toEqual(xs);
     const garage = territoryOf('garage')!;
@@ -63,7 +63,10 @@ describe('the borders join declared territories', () => {
     const keys = BORDERS.map((b) => `${b.from}→${b.to}`);
     for (const hop of [
       'receiving→marshalling',
-      'marshalling→dock',
+      // The shop floor split one hop in two (backlog 94c6ffd0): a run
+      // OPENS on a packet, and its car PARKS some hours later.
+      'marshalling→shop-floor',
+      'shop-floor→dock',
       'dock→gates',
       'gates→track',
       'track→arrivals',

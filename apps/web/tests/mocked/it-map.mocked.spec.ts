@@ -1,15 +1,25 @@
 // THE IT WORLD MAP — design d2154293, car 1 (over 0524fc95's regions
-// read, GET /api/yard/regions). /it is ONE SVG world: eight
-// territories laid out along the packet flow (world.ts), each drawn
+// read, GET /api/yard/regions). /it is ONE SVG world: the territories
+// laid out along the packet flow (world.ts), each drawn
 // in the yard's strokes with the region's count, state and trend
 // inside its outline, the why on a troubled one, and a door to its
-// floor. This pins what the packet names: the world paints eight
-// territories from a fixture payload, a troubled one carries its why
-// where it is, a click opens the floor — and the floor's panel opens
-// with the region's own state and why at its head (a106309c), from
-// the same read, so clicking in cannot contradict the map.
+// floor. This pins what the packet names: the world paints one
+// territory per declared region from a fixture payload, a troubled one
+// carries its why where it is, a click opens the floor — and the
+// floor's panel opens with the region's own state and why at its head
+// (a106309c), from the same read, so clicking in cannot contradict the
+// map.
+//
+// THE ARITY IS READ FROM THE LAYOUT, NEVER TYPED HERE (backlog
+// 94c6ffd0). These counts were the literals 8 and 8 until the shop
+// floor became the ninth region, and then five specs failed for
+// arithmetic rather than for anything they were built to protect. The
+// layout declares how many territories and rails there are, world.ts
+// is pinned to the server's own list by world.test.ts, and this reads
+// it — so a tenth region is a fixture row here and nothing else.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
+import { BORDERS, TERRITORIES } from '../../src/it/yard/world';
 import { YARD_BORDERS, YARD_REGIONS, installSmokeMocks } from './_smokeMocks';
 
 const trend = (metric: string, unit: string, current: number | null, previous: number | null) => ({
@@ -30,6 +40,7 @@ const REGIONS = {
     { name: 'garage', count: 0, state: 'clear', why: 'nothing gated red', trend: trend('reds', 'per day', 0, 2) },
     { name: 'receiving', count: 4, state: 'busy', why: '4 inbound, oldest 5 days', trend: trend('inbound', 'per day', 4, 6) },
     { name: 'marshalling', count: null, state: 'troubled', why: 'the station registry could not be read', trend: trend('served', 'per day', null, null) },
+    { name: 'shop-floor', count: 2, bound: 6, state: 'clear', why: '2 runs in flight, 1 crew on the floor', trend: trend('build duration', 'minutes', 64, 58) },
   ],
 };
 
@@ -65,7 +76,10 @@ const BORDERS_PAYLOAD = {
       last_crossed: null, waiting: null, state: 'troubled',
       why: 'the workflow registry that names the inbound kinds could not be read',
     }),
-    rail('marshalling', 'dock'),
+    // The shop floor split this hop in two (backlog 94c6ffd0): a run
+    // OPENS on a packet, and its car PARKS some hours later.
+    rail('marshalling', 'shop-floor'),
+    rail('shop-floor', 'dock'),
     rail('dock', 'gates'),
     // Traffic waiting and the machine silent past its declared cadence.
     rail('gates', 'track', {
@@ -94,21 +108,21 @@ async function mocks(page: Page): Promise<void> {
   await page.route(YARD_BORDERS, (r) => json(r, BORDERS_PAYLOAD));
 }
 
-test('the world paints eight territories in one SVG, along the flow, with the count and the trend inside each', async ({ page }) => {
+test('the world paints a territory per region in one SVG, along the flow, with the count and the trend inside each', async ({ page }) => {
   await mocks(page);
   await page.goto('/it');
 
   const svg = page.locator('section.yard svg');
   await expect(svg).toHaveCount(1);
   const territories = svg.locator('.territory');
-  await expect(territories).toHaveCount(8);
+  await expect(territories).toHaveCount(TERRITORIES.length);
   const names = await territories.evaluateAll((els) => els.map((el) => el.getAttribute('data-region')));
-  expect(new Set(names)).toEqual(new Set(['dock', 'gates', 'track', 'shed', 'arrivals', 'garage', 'receiving', 'marshalling']));
+  expect(new Set(names)).toEqual(new Set(TERRITORIES.map((t) => t.name)));
   // The flow reads left to right: each territory on the line starts
   // right of the one packets leave to reach it.
   const xOf = async (name: string) =>
     Number(await svg.locator(`.territory[data-region="${name}"] rect`).getAttribute('x'));
-  const line = ['receiving', 'marshalling', 'dock', 'gates', 'track', 'arrivals', 'shed'];
+  const line = ['receiving', 'marshalling', 'shop-floor', 'dock', 'gates', 'track', 'arrivals', 'shed'];
   const xs = await Promise.all(line.map(xOf));
   expect([...xs].sort((a, b) => a - b)).toEqual(xs);
   // The borders are drawn: one rail per declared hop, the garage fed by both gates and track.
@@ -156,7 +170,7 @@ test('a territory click opens its floor, and the floor opens with the region\'s 
   await mocks(page);
   await page.goto('/it');
   const svg = page.locator('section.yard svg');
-  await expect(svg.locator('.territory')).toHaveCount(8);
+  await expect(svg.locator('.territory')).toHaveCount(TERRITORIES.length);
 
   // A troubled yard region: the Train Yard on the gates' panel, headed
   // by the map's own verdict — the floor cannot contradict the map.
@@ -172,7 +186,7 @@ test('a territory click opens its floor, and the floor opens with the region\'s 
   // Back returns to the world.
   await page.goBack();
   await expect(page).toHaveURL(/\/it$/);
-  await expect(page.locator('section.yard svg .territory')).toHaveCount(8);
+  await expect(page.locator('section.yard svg .territory')).toHaveCount(TERRITORIES.length);
 
   // A clear region's floor says so at its head, too.
   await page.locator('section.yard svg .territory[data-region="dock"]').click();
@@ -203,7 +217,7 @@ test('a border carries its traffic, what waits on it and the machine that moves 
   await page.goto('/it');
   const svg = page.locator('section.yard svg');
   // One crossing token per declared rail.
-  await expect(svg.locator('.crossing')).toHaveCount(8);
+  await expect(svg.locator('.crossing')).toHaveCount(BORDERS.length);
 
   // The boarding rail: three waiting, a heavy traffic band from the
   // measured rate, and the machine's lamp lit because IT declared the
@@ -259,9 +273,9 @@ test('a borders read that fails is said, and the territories still paint', async
   );
   await page.goto('/it');
   await expect(page.locator('.load-failed')).toContainText('The borders cannot be read');
-  // The world is still a world: eight territories, eight rails, every
+  // The world is still a world: every territory, every rail, and every
   // number on them unknown.
-  await expect(page.locator('section.yard svg .territory')).toHaveCount(8);
-  await expect(page.locator('section.yard svg .crossing')).toHaveCount(8);
-  await expect(page.locator('section.yard svg .crossing[data-waiting="unknown"]')).toHaveCount(8);
+  await expect(page.locator('section.yard svg .territory')).toHaveCount(TERRITORIES.length);
+  await expect(page.locator('section.yard svg .crossing')).toHaveCount(BORDERS.length);
+  await expect(page.locator('section.yard svg .crossing[data-waiting="unknown"]')).toHaveCount(BORDERS.length);
 });

@@ -441,7 +441,7 @@ fn build_router(
             "/api/yard/status",
             axum::routing::any(|s, r| proxy::handle(s, r, &proxy::JOBS)),
         )
-        // The yard's REGIONS — the eight-card system map at /it (design
+        // The yard's REGIONS — the region-card system map at /it (design
         // 0524fc95 car 2, train #475). Shipped on the jobs upstream and
         // fetched by the landing page, unrouted here: the fourth
         // instance of the stations shape, and the one David found on

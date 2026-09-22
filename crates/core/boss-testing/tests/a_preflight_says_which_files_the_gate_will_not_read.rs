@@ -27,7 +27,6 @@
 //! silently is pre-flight -> push with edits in between, so the closing
 //! lines name the files and the verdict still stands.
 
-use boss_testing::repo_root;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -52,10 +51,7 @@ impl Tree {
         let _ = std::fs::remove_dir_all(&dir);
         let tree = dir.join("tree");
         boss_testing::copy_lint_libs(&tree);
-        let gate = tree.join("infra/gate.sh");
-        boss_testing::create_dir(gate.parent().expect("a relative path has a parent"));
-        std::fs::copy(repo_root().join("infra/gate.sh"), &gate)
-            .unwrap_or_else(|e| panic!("carry infra/gate.sh into the synthetic tree: {e}"));
+        boss_testing::copy_gate_sh(&tree);
         boss_testing::write_file(&tree.join(LINT), "#!/usr/bin/env bash\nexit 0\n");
         boss_testing::write_file(&tree.join(".gitignore"), "scratch/\n");
         let t = Tree { dir, tree };

@@ -32,6 +32,7 @@
 // picture. WorldMap.svelte owns the strokes.
 
 import { AGE_THRESHOLDS, CHANNELS, ageDays, type Channel, type InboundRow } from '../receiving/receiving';
+import type { Crew } from '../crew/crew';
 import type { Siding } from '../marshalling/marshalling';
 import { INTERIOR_HEAD } from './region-contents';
 import type { Territory } from './world';
@@ -64,9 +65,13 @@ export type Deck =
   | Readonly<{ kind: 'unavailable'; why: string }>
   | Readonly<{ kind: 'ready'; region: string; platforms: ReadonlyArray<Platform> }>;
 
-/** The two regions whose interior is platforms rather than wagons in
- *  transit. The other six are region-contents.ts's INTERIOR_REGIONS. */
-export const PLATFORM_REGIONS: ReadonlyArray<string> = ['receiving', 'marshalling'];
+/** The regions whose interior is platforms rather than wagons in
+ *  transit. The other six are region-contents.ts's INTERIOR_REGIONS.
+ *  The shop floor joined them on backlog 94c6ffd0: a crew is a
+ *  platform and its runs are what stands on it — the same picture as a
+ *  queue, because a crew IS one, bounded by how much it can build at
+ *  once rather than by a WIP limit. */
+export const PLATFORM_REGIONS: ReadonlyArray<string> = ['receiving', 'marshalling', 'shop-floor'];
 
 export function hasPlatforms(region: string): boolean {
   return PLATFORM_REGIONS.includes(region);
@@ -99,6 +104,57 @@ export function marshallingPlatforms(
       note: [oldest, left].filter((p) => p !== null).join(' · '),
     };
   });
+}
+
+/** THE SHOP FLOOR: a platform per CREW — one open session — with the
+ *  runs it dispatched standing on it (design 511fa7d4 car 2b, backlog
+ *  94c6ffd0). The busiest crew leads, then the idle ones, so a floor
+ *  with someone working reads as working.
+ *
+ *  A crew whose silence could not be judged is `null`-idle upstream
+ *  and says so here rather than claiming either; and `rate` is null on
+ *  every platform, because what a crew FINISHED in the window is not
+ *  in the reads this board makes — the runs it lists are the open
+ *  ones. A `?` is the honest mark for it; a 0 would say the crew
+ *  shipped nothing.
+ *
+ *  `unlinked` is the runs no listed session claims — a hand dispatch,
+ *  or a session outside the read window. They get a platform of their
+ *  own rather than being dropped, because a run drawn nowhere is the
+ *  false-empty class. */
+export function crewPlatforms(
+  crews: ReadonlyArray<Crew>,
+  unlinked: ReadonlyArray<unknown>,
+): ReadonlyArray<Platform> {
+  const platforms = crews.map((c): Platform => {
+    const who = c.session.actor ?? c.session.title;
+    const state = c.idle === null ? 'silence not measured' : c.idle ? 'idle' : 'at work';
+    const prompts = c.session.promptCount === null ? null : `${c.session.promptCount} prompts`;
+    return {
+      name: who,
+      standing: c.runs.length,
+      bound: null,
+      rate: null,
+      flag: { from: 'tail', n: 0 },
+      note: [state, prompts, c.session.host].filter((p) => p !== null && p !== '').join(' · '),
+    };
+  });
+  const sorted = [...platforms].sort(
+    (a, b) => (b.standing ?? 0) - (a.standing ?? 0) || a.name.localeCompare(b.name),
+  );
+  return unlinked.length === 0
+    ? sorted
+    : [
+        ...sorted,
+        {
+          name: 'no session',
+          standing: unlinked.length,
+          bound: null,
+          rate: null,
+          flag: { from: 'tail', n: unlinked.length },
+          note: 'dispatched by hand, or by a session this read did not reach',
+        },
+      ];
 }
 
 /** Receiving: a platform per channel, the channels holding flagged

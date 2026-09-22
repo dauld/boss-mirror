@@ -21,7 +21,7 @@ import { fetchRemote, type Remote } from '../../data/remote';
 // Wire types — the shape of GET /api/yard/regions. Parsed once, below.
 // ---------------------------------------------------------------------
 
-/** The eight regions, in map order. The server's
+/** The nine regions, in map order. The server's
  *  `boss_jobs::regions::REGIONS` is the decision (0524fc95 Q2); this
  *  is the client's copy, pinned equal by regions.test.ts. */
 export const REGION_NAMES = [
@@ -33,6 +33,7 @@ export const REGION_NAMES = [
   'garage',
   'receiving',
   'marshalling',
+  'shop-floor',
 ] as const;
 export type RegionName = (typeof REGION_NAMES)[number];
 
@@ -183,12 +184,14 @@ const YARD_SELECTION: Readonly<Record<string, string>> = {
   garage: 'garage',
 };
 
-/** The two regions whose floor is a queue board. Since car 4 of design
- *  d2154293 they are zooms like every other territory: the board
- *  mounts UNDER the zoomed world, and /it/operate/receiving and
- *  /it/operate/marshalling — the pages they used to be — resolve to
- *  the same route. */
-const BOARD_FLOORS: ReadonlyArray<string> = ['receiving', 'marshalling'];
+/** The regions whose floor is a BOARD rather than the yard's own
+ *  rolling stock. Since car 4 of design d2154293 they are zooms like
+ *  every other territory: the board mounts UNDER the zoomed world, and
+ *  /it/operate/receiving and /it/operate/marshalling — the pages they
+ *  used to be — resolve to the same route. The shop floor joined them
+ *  on backlog 94c6ffd0: its board is the crew board, which was the
+ *  floor before the region existed. */
+const BOARD_FLOORS: ReadonlyArray<string> = ['receiving', 'marshalling', 'shop-floor'];
 
 /** Where a card leads. A name this client does not know opens the
  *  yard itself — a door that opens somewhere, never a dead link. */
