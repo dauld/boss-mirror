@@ -1239,6 +1239,34 @@ pub(crate) fn released_awaiting_repair<'a>(
         .collect()
 }
 
+/// How long a landed car may stand unproven before the shed says so.
+///
+/// WHY A BOUND AT ALL (backlog 488d42e6). The shed troubled itself only
+/// for a car with NO way to settle (`Unproven`) or a FAILING probe. A
+/// car whose probe answers `not yet` — early, not wrong — was never
+/// troubled however long it said so, and `not yet` is by far the
+/// commonest place a car stops. Measured 2026-09-22: nine cars standing
+/// at `proven`, every one `merged = true`, aged 9.0h to **105.7h**, and
+/// the shed read `9 landed cars awaiting proof` — the same words it
+/// prints ten minutes after a landing. The packet measured 58.3h as the
+/// worst case two days earlier, so the age roughly doubled while the
+/// COUNT fell from twelve to nine: proofs drain, just slower than they
+/// accumulate. That is a rate to be seen, not a queue to be chased.
+///
+/// WHY 24 HOURS. Most probes are rechecked hourly and most of the
+/// events they wait on happen daily, so a car that has not settled
+/// inside a day is waiting on something that is not coming on its own.
+/// It is a threshold for LOOKING, not a deadline: the car is still
+/// correct, still landed, still retrying.
+///
+/// THE CLOCK IS THE CAR'S OWN `opened_at`, not a landing time, because
+/// no landing time is recorded on the car — `merged` is a boolean and
+/// the `merged` STEP cannot complete until `proven` does, which is the
+/// very thing being waited for. So this over-reports by however long
+/// the car took to build and land, and the wording says "open" rather
+/// than "landed" for that reason.
+pub const PROOF_STALE_HOURS: i64 = 24;
+
 /// THE SHED: landed cars awaiting proof — open cars whose live step is
 /// `proven`. Troubled when one is UNPROVEN (no probe, no event: nothing
 /// mechanical can settle it) or its probe is FAILING; busy while any
@@ -1265,6 +1293,32 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
         .filter_map(|(_, s)| step_done_at(find_step(s, "proven", "Proven in production")));
     let (cur, prev) = count_split(w, proven);
     let trend = rate_trend("proven", w, cur, prev);
+    // STALE: awaiting proof for longer than a day, whatever its place.
+    // Collected over every awaiting car rather than only the `not yet`
+    // ones, so an old car is named even when its place would otherwise
+    // read as healthy progress.
+    let mut stale: Vec<(i64, &str)> = Vec::new();
+    for (j, _) in &awaiting {
+        let branch = j
+            .metadata
+            .get("branch")
+            .and_then(Value::as_str)
+            .unwrap_or(j.title.as_str());
+        let Some(opened) = j
+            .metadata
+            .get("opened_at")
+            .and_then(Value::as_str)
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        else {
+            continue;
+        };
+        let hours = (inputs.now - opened.with_timezone(&chrono::Utc)).num_hours();
+        if hours >= PROOF_STALE_HOURS {
+            stale.push((hours, branch));
+        }
+    }
+    stale.sort_by_key(|(hours, _)| std::cmp::Reverse(*hours));
+
     let n = awaiting.len();
     let (state, why) = if !unproven.is_empty() {
         (
@@ -1275,6 +1329,17 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
         (
             RegionState::Troubled,
             format!("probe FAILING: {}", failing.join(", ")),
+        )
+    } else if let Some((oldest, branch)) = stale.first().copied() {
+        // The age is the finding, so it leads — and the oldest car is
+        // named, because "9 awaiting proof" sends a reader to a list
+        // while "105h, fix/x" sends them to a car.
+        (
+            RegionState::Troubled,
+            format!(
+                "{} of {n} open past {PROOF_STALE_HOURS}h — oldest {oldest}h, {branch}",
+                stale.len()
+            ),
         )
     } else if n > 0 {
         (
@@ -2101,6 +2166,149 @@ mod tests {
         assert!(
             shed.why.contains("UNPROVEN") && shed.why.contains("fix/e"),
             "{}",
+            shed.why
+        );
+    }
+
+    /// A car awaiting proof PAST A DAY troubles the shed, even when its
+    /// probe is answering `not yet` — early, not wrong, and the
+    /// commonest place a car stops (backlog 488d42e6).
+    ///
+    /// Measured 2026-09-22: nine cars at `proven`, every one merged,
+    /// aged 9.0h to 105.7h, and the shed said `9 landed cars awaiting
+    /// proof` — the words it prints ten minutes after a landing. The
+    /// age had roughly doubled since the packet was filed while the
+    /// COUNT fell, so the rate was the finding and nothing showed it.
+    #[test]
+    fn a_car_awaiting_proof_past_a_day_troubles_the_shed() {
+        // NOW is 2026-09-19T12:00:00Z.
+        let aged = |branch: &str, opened: &str| {
+            let j = job(
+                "ship-a-change",
+                branch,
+                JobStatus::Open,
+                json!({
+                    "branch": branch,
+                    "merged": true,
+                    "opened_at": opened,
+                    "proof_probe": "true",
+                    // `not yet` — the place that was never troubled.
+                    "proof_attempt": { "not_yet": true, "exit": 75 },
+                }),
+            );
+            let s = vec![
+                step(
+                    &j,
+                    "gate",
+                    StepStatus::Completed,
+                    Some("2026-09-17T06:00:00Z"),
+                ),
+                step(&j, "proven", StepStatus::Ready, None),
+            ];
+            (j, s)
+        };
+        let status = empty_status();
+
+        // FRESH: landed this morning, still working. Must stay busy, or
+        // the signal fires on every landing and stops meaning anything.
+        let fresh = vec![aged("fix/fresh", "2026-09-19T06:00:00Z")];
+        let out = regions(&inputs(
+            &status,
+            &[],
+            &[],
+            &fresh,
+            &[],
+            Some(&[]),
+            Some(&[]),
+        ));
+        let shed = by_name(&out, "shed");
+        assert_eq!(
+            shed.state,
+            RegionState::Busy,
+            "a car six hours old is working, not troubled: {}",
+            shed.why
+        );
+
+        // STALE: two days at `not yet`.
+        let stale = vec![
+            aged("fix/fresh", "2026-09-19T06:00:00Z"),
+            aged("feat/two-days", "2026-09-17T10:00:00Z"),
+        ];
+        let out = regions(&inputs(
+            &status,
+            &[],
+            &[],
+            &stale,
+            &[],
+            Some(&[]),
+            Some(&[]),
+        ));
+        let shed = by_name(&out, "shed");
+        assert_eq!(
+            shed.state,
+            RegionState::Troubled,
+            "a car past {PROOF_STALE_HOURS}h must trouble the shed: {}",
+            shed.why
+        );
+        assert!(
+            shed.why.contains("feat/two-days"),
+            "and NAME the oldest — a count sends a reader to a list, a branch sends them \
+             to a car: {}",
+            shed.why
+        );
+        assert!(
+            shed.why.contains("50h"),
+            "carrying its age, which is the finding: {}",
+            shed.why
+        );
+        assert!(
+            !shed.why.contains("fix/fresh"),
+            "and not the fresh one, which is not the problem: {}",
+            shed.why
+        );
+
+        // A CAR WITH NO `opened_at` IS SKIPPED, not treated as
+        // infinitely old. An absent timestamp is not evidence of age,
+        // and reading it as one would trouble the shed for a missing
+        // field — the zero-means-unknown defect, in a region card.
+        let no_clock = {
+            let j = job(
+                "ship-a-change",
+                "fix/no-clock",
+                JobStatus::Open,
+                json!({
+                    "branch": "fix/no-clock",
+                    "merged": true,
+                    "proof_probe": "true",
+                    "proof_attempt": { "not_yet": true, "exit": 75 },
+                }),
+            );
+            let st = vec![
+                step(
+                    &j,
+                    "gate",
+                    StepStatus::Completed,
+                    Some("2026-09-17T06:00:00Z"),
+                ),
+                step(&j, "proven", StepStatus::Ready, None),
+            ];
+            vec![(j, st)]
+        };
+        let out = regions(&inputs(
+            &status,
+            &[],
+            &[],
+            &no_clock,
+            &[],
+            Some(&[]),
+            Some(&[]),
+        ));
+        let shed = by_name(&out, "shed");
+        assert_eq!(
+            shed.state,
+            RegionState::Busy,
+            "a car with no opened_at has no age, so it is busy — never troubled for a \
+             field it does not carry: {}",
             shed.why
         );
     }
