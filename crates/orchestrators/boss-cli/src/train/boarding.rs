@@ -65,6 +65,51 @@ pub(crate) enum NoDeparture {
     HeldOnEdges { cars: String, needs_human: String },
 }
 
+/// Will this refusal still be here on the next window, unchanged?
+///
+/// WHY THE DISTINCTION IS THE WHOLE ALARM (backlog 6baabd43). From
+/// 04:27Z to 13:49Z on one day no train departed. The conductor never
+/// stopped and never failed: it fired every minute, took its lock, ran
+/// preflight, evaluated all three parked cars and logged in full —
+/// naming all three branches and the conflicting files for each. Nine
+/// and a half hours of perfect diagnosis with zero reach: no packet, no
+/// alarm, no surface. Meanwhile the yard rendered `3 cars parked — the
+/// boarding depth is met, a train is due`, which is exactly what it says
+/// two minutes after a healthy departure.
+///
+/// AND AN ALARM ON "NO TRAIN DEPARTED" ALONE WOULD BE NOISE. Most
+/// windows refuse for reasons that clear themselves within a minute —
+/// an idle dock, a car waiting on a predecessor still in flight. The
+/// packet is explicit that a dock-depth alarm "would fire on every
+/// healthy busy dock, which is how a check becomes noise and then
+/// becomes unread". So the signal is not "nothing departed"; it is
+/// "nothing departed FOR A REASON THAT WILL NOT CLEAR ITSELF".
+///
+/// The enum already carries that fact, which is why this is a total
+/// match and not a heuristic:
+///
+/// - `NothingParked` — an idle window. The next parked car departs.
+/// - `HeldOnEdges` with nobody needing a human — each car boards by
+///   itself once the car it named has landed.
+/// - `HostShort` — an infrastructure refusal that clears when the host
+///   does, and which says nothing about any branch.
+///
+/// against the three that repeat identically until a person acts:
+///
+/// - `AllConflicted` — every candidate conflicts on the assembled tree,
+///   and will again on the next window, and the next.
+/// - `ConsistRefused` — the assembled tree is refused; nobody's car is
+///   at fault and nothing on the dock can change it.
+/// - `HeldOnEdges` with `needs_human` — an edge that can never be
+///   satisfied; the window refuses identically forever.
+pub(crate) fn refusal_persists(refusal: &NoDeparture) -> bool {
+    match refusal {
+        NoDeparture::NothingParked | NoDeparture::HostShort { .. } => false,
+        NoDeparture::HeldOnEdges { needs_human, .. } => !needs_human.is_empty(),
+        NoDeparture::AllConflicted { .. } | NoDeparture::ConsistRefused { .. } => true,
+    }
+}
+
 /// The journal line a refused board leaves. It is the only record of
 /// the window now, so it carries the reason AND the fact that no packet
 /// was opened; a reader who greps `no train departed` gets every
@@ -824,6 +869,87 @@ mod boards_after_tests {
         assert!(
             line.contains("aaaaaaaa"),
             "the waiting car is still listed as held: {line}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+
+    /// THE TOTAL SPLIT, asserted case by case so a new variant cannot
+    /// be added without deciding which side it falls on — the compiler
+    /// forces the match, and this forces the judgement.
+    #[test]
+    fn a_refusal_that_clears_itself_is_not_a_stall() {
+        assert!(
+            !refusal_persists(&NoDeparture::NothingParked),
+            "an idle window is not a stall — the next parked car departs, and alarming \
+             here is how a check becomes noise"
+        );
+        assert!(
+            !refusal_persists(&NoDeparture::HostShort {
+                reason: "9GB free, need 12GB".into()
+            }),
+            "an infrastructure refusal clears when the host does and says nothing about \
+             any branch"
+        );
+        assert!(
+            !refusal_persists(&NoDeparture::HeldOnEdges {
+                cars: "fix/a".into(),
+                needs_human: String::new()
+            }),
+            "a car waiting on a predecessor still in flight departs on its own, 60 \
+             seconds later"
+        );
+    }
+
+    /// The three that repeat identically until a person acts. These are
+    /// the nine-and-a-half hours.
+    #[test]
+    fn a_refusal_that_repeats_until_someone_acts_is_a_stall() {
+        assert!(
+            refusal_persists(&NoDeparture::AllConflicted {
+                branches: "fix/a, fix/b, fix/c".into()
+            }),
+            "every candidate conflicting on the assembled tree will conflict again on \
+             the next window, and the next — this is the measured case (6baabd43)"
+        );
+        assert!(
+            refusal_persists(&NoDeparture::ConsistRefused {
+                reason: "two rule cars on one train".into(),
+                cars: 3
+            }),
+            "the assembled tree is refused and nothing on the dock can change it"
+        );
+        assert!(
+            refusal_persists(&NoDeparture::HeldOnEdges {
+                cars: "fix/a, fix/b".into(),
+                needs_human: "fix/b".into()
+            }),
+            "an edge that can never be satisfied refuses identically forever"
+        );
+    }
+
+    /// The same variant falls on BOTH sides depending on its content,
+    /// which is the reason this is a function over the value rather
+    /// than a list of variant names.
+    #[test]
+    fn held_on_edges_splits_on_whether_anyone_is_needed() {
+        let waiting = NoDeparture::HeldOnEdges {
+            cars: "fix/a".into(),
+            needs_human: String::new(),
+        };
+        let stuck = NoDeparture::HeldOnEdges {
+            cars: "fix/a".into(),
+            needs_human: "fix/a".into(),
+        };
+        assert!(!refusal_persists(&waiting));
+        assert!(refusal_persists(&stuck));
+        assert_ne!(
+            refusal_persists(&waiting),
+            refusal_persists(&stuck),
+            "a classifier keyed on the variant alone would get one of these wrong"
         );
     }
 }

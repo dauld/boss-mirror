@@ -386,6 +386,50 @@ pub(crate) fn stranded_alarm_body(
 
 /// The alarm a merged train whose commit never reaches the cluster
 /// becomes (fdff316c / 7e5ee013). Pure so the shape is pinned by tests.
+/// The packet a persistent non-departure files (backlog 6baabd43).
+///
+/// WHAT IT CARRIES IS THE POINT. The conductor already knows exactly
+/// why — which branches conflicted, which edge cannot be satisfied,
+/// what the consist check refused — and on 2026-09-19 it wrote all of
+/// that to its own stdout every sixty seconds for nine and a half
+/// hours while no train departed and nothing read a word of it. The
+/// packet's own conclusion: prefer the conductor's signal over a
+/// dock-depth alarm, "because it is the only one of the three that
+/// knows WHY, and a stall alarm that carries the conflicting branches
+/// and files is actionable on arrival, whereas a dock-depth alarm
+/// sends someone to go and find out". So the refusal's own journal
+/// line — the one a reader would otherwise have to go and grep — is
+/// the message.
+///
+/// THE TRACK IS PROVABLY CLEAR when this fires: the conductor returns
+/// early on `BOARDING HELD — track occupied`, so anything reaching a
+/// refusal has already passed that check. This is a stopped pipeline,
+/// not a busy one, and that is why no timer is needed to tell them
+/// apart.
+pub(crate) fn no_departure_alarm_body(line: &str, owner: &str) -> Value {
+    json!({
+        "kind": "user-feedback",
+        "status": "open",
+        "title": "Boarding stalled: the dock cannot depart and the track is clear",
+        "subject": {"subject_kind": "custom", "id": "bosspipeline"},
+        "tags": ["pipeline", "train"],
+        "owner_id": owner,
+        "priority": "urgent",
+        "metadata": {
+            "message": format!(
+                "The conductor refused to board on a reason that will not clear itself, \
+                 with no train on the track. Its own line for this window:\n\n{line}\n\n\
+                 Filed once and deduplicated by this packet staying open — while it is \
+                 open no twin is filed, so closing it is what re-arms the alarm. It was \
+                 filed because the identical refusal repeats every sixty seconds until \
+                 someone acts: on 2026-09-19 that ran from 04:27Z to 13:49Z, perfectly \
+                 diagnosed in the journal and read by nobody (backlog 6baabd43)."
+            ),
+            "input_channel": "telemetry/monitoring",
+        },
+    })
+}
+
 pub(crate) fn convergence_overdue_alarm_body(
     tid: &str,
     merge_ref: &str,

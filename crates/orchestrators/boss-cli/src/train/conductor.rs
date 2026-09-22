@@ -585,6 +585,68 @@ impl Conductor {
     // own `skip_reason`. An operator's `boss train cancel` still fills
     // the same terminal with its `--reason`, on its own path.
 
+    /// Log a refused board, and file ONE packet when the refusal is the
+    /// kind that will not clear itself.
+    ///
+    /// WHY THIS EXISTS (backlog 6baabd43). From 04:27Z to 13:49Z on
+    /// 2026-09-19 no train departed. The conductor never stopped and
+    /// never failed: every minute it took its lock, ran preflight,
+    /// evaluated all three parked cars and logged in full — naming the
+    /// branches and the conflicting files. Nine and a half hours of
+    /// perfect diagnosis with zero reach, while the yard rendered
+    /// `3 cars parked — a train is due`, which is what it says two
+    /// minutes after a healthy departure.
+    ///
+    /// NOT EVERY NON-DEPARTURE. `refusal_persists` is the split, and it
+    /// is the whole design: an idle dock, a car waiting on a
+    /// predecessor in flight, a host short of disk — all clear
+    /// themselves, and alarming on them is how a check becomes noise
+    /// and then becomes unread. Only the three that repeat identically
+    /// until a person acts get a packet.
+    ///
+    /// NO TIMER, because none is needed: the conductor returns early on
+    /// `BOARDING HELD — track occupied`, so a refusal reaching here has
+    /// already proven the track is clear. A persistent refusal with an
+    /// empty track is a stopped pipeline by construction.
+    ///
+    /// DEDUPLICATED BY THE PACKET ITSELF. While one is open no twin is
+    /// filed, so the alarm does not become the thing it is warning
+    /// about — and closing it is what re-arms it.
+    async fn record_no_departure(&self, refusal: &NoDeparture) -> Result<()> {
+        let line = no_departure_line(refusal);
+        log(&line);
+        if !crate::train::boarding::refusal_persists(refusal) || self.cfg.dry {
+            return Ok(());
+        }
+        let open = rows(
+            self.api(
+                Method::GET,
+                "/api/jobs?kind=user-feedback&status=open&limit=100",
+                None,
+            )
+            .await?,
+        )?;
+        let already = open.iter().any(|j| {
+            j.get("title")
+                .and_then(Value::as_str)
+                .is_some_and(|t| t.starts_with("Boarding stalled:"))
+        });
+        if already {
+            return Ok(());
+        }
+        log("boarding stalled on a refusal that will not clear itself — filing a packet");
+        let owner = self.owner_for_filing().await;
+        self.api(
+            Method::POST,
+            "/api/jobs",
+            Some(crate::train::stranded::no_departure_alarm_body(
+                &line, &owner,
+            )),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Settle gate-runs whose runner died without reporting: complete
     /// `record-verdict` as `lost`, the terminal the workflow already
     /// provides for exactly this. NOT green and NOT failed — the checks
@@ -2674,7 +2736,8 @@ impl Conductor {
                 // condition itself — a host short of disk — is already
                 // a packet: the estate observer files and refreshes one
                 // for the host, and it does not arrive once a minute.
-                log(no_departure_line(&NoDeparture::HostShort { reason }));
+                self.record_no_departure(&NoDeparture::HostShort { reason })
+                    .await?;
                 return Ok(());
             }
             host_readiness::Readiness::Unverifiable { reason } => {
@@ -2703,7 +2766,8 @@ impl Conductor {
             // full of cars the ordering filter held — and whether this
             // window is self-clearing or waiting on a person is precisely
             // what an operator reads the line to learn.
-            log(no_departure_line(&empty_dock_refusal(&left_behind)));
+            self.record_no_departure(&empty_dock_refusal(&left_behind))
+                .await?;
             return Ok(());
         }
 
@@ -2815,9 +2879,10 @@ impl Conductor {
             .join(", ");
 
         if boarded.is_empty() {
-            log(no_departure_line(&NoDeparture::AllConflicted {
+            self.record_no_departure(&NoDeparture::AllConflicted {
                 branches: skipped_names.clone(),
-            }));
+            })
+            .await?;
             return Ok(());
         }
 
@@ -2904,10 +2969,11 @@ impl Conductor {
                 )
                 .await?;
             }
-            log(no_departure_line(&NoDeparture::ConsistRefused {
+            self.record_no_departure(&NoDeparture::ConsistRefused {
                 reason: format!("consist check refused — {reason}"),
                 cars: boarded.len(),
-            }));
+            })
+            .await?;
             return Ok(());
         }
         // "0 cheap lint(s) clean" was the line a could-not-list
