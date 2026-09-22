@@ -135,6 +135,9 @@
 # own — "dubious ownership", measured on ops-request c9877f75).
 set -uo pipefail
 
+# shellcheck source=infra/lib/jq.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/jq.sh"
+
 NAME="publish-workflow"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -379,6 +382,14 @@ read_live() { # <out file>; exit 0 with the active row written, 75 otherwise
     # The endpoint answers the active row as an object (or an envelope,
     # or every version as an array — the CLI tolerates all three, so do
     # we): keep the active one.
+    # A 200 carrying NO BODY is the case `jq -e` calls a pass, and it
+    # would write an empty $1 for the version read below to find
+    # (d96e38ab). Asked separately so each refusal keeps its own words —
+    # and because the shared one quotes a jq.err that never gets written.
+    if ! jq_doc_file "$body"; then
+        printf '%s: %s/api/workflows/%s answered %s with no readable body, so nothing was compared\n' "$NAME" "$BOSS_JOBS_URL" "$KIND" "$code" >&2
+        return 8
+    fi
     if ! jq -e '
         (if type == "object" and has("data") then .data else . end)
         | (if type == "array" then (map(select(.status == "active")) | last) else . end)

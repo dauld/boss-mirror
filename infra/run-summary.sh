@@ -47,6 +47,9 @@
 # arm that needs the patient is not an arm). A failure warns on stderr,
 # which lands in the journal beside the work.
 
+# shellcheck source=infra/lib/jq.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/lib" && pwd)/jq.sh"
+
 # One key, one value, merged in immediately. Strings: these land in
 # step metadata, where a field is authored as a string — except the
 # one shape below.
@@ -67,7 +70,9 @@ run_summary_field() { # <key> <value>
 # and nothing is recorded: a wrong record is worse than a missing one.
 run_summary_json() { # <key> <json>
     [ -n "${BOSS_RUN_SUMMARY_FILE:-}" ] || return 0
-    if ! printf '%s' "${2-}" | jq -e . >/dev/null 2>&1; then
+    # An EMPTY value is the commonest "not JSON" there is — a command
+    # that printed nothing — and `jq -e` reads it as a pass (d96e38ab).
+    if ! jq_doc_text "${2-}" || ! printf '%s' "${2-}" | jq -e . >/dev/null 2>&1; then
         echo "run-summary: $1 is not JSON — not recorded: ${2-}" >&2
         return 0
     fi

@@ -17,17 +17,13 @@
 // a failed read look different from an empty one" is a function with a
 // name and a test.
 
-/// One read's outcome. A failure carries its reason, because the
-/// operator reading the page is the person who has to act on it.
-export type ReadState =
-  | { kind: 'ok' }
-  | { kind: 'failed'; error: string };
-
-export const okRead: ReadState = { kind: 'ok' };
-
-export function failedRead(error: string): ReadState {
-  return { kind: 'failed', error };
-}
+// ReadState, okRead and failedRead were defined here and now live in
+// ../data/readState, lifted by packet 7a7bfc88: the same defect is live
+// in six more pages, and six copies of one idea is the drift CLAUDE.md
+// 9a is about. Re-exported because this page and its test already
+// import them from here; the definition is one file, not seven.
+import type { ReadState } from '../data/readState';
+export { failedRead, okRead, type ReadState } from '../data/readState';
 
 /// What the Account Health tab renders. The tab's rows are built from
 /// the accounts list, so an accounts outage produces zero rows — which
@@ -94,4 +90,31 @@ export function orderedHealthRows<
     (a, b) =>
       b.openCount - a.openCount || a.account.name.localeCompare(b.account.name),
   );
+}
+
+/// How long a support case may stay open before the page calls it
+/// escalated.
+///
+/// WHY IT IS HERE AND NOT A LITERAL (packet e0a40c81, gap 11 of the
+/// /ux/support audit). `daysOpen > 14` decided the escalatedCount tile
+/// AND the amber row styling, with the tile's label spelling a third
+/// 14 in prose. No workflow row, Class row or metadata field declares
+/// that rule, so the page was inventing an operating rule a tenant
+/// cannot change without editing the frontend — Registries Over
+/// Hardcoded Paths in the smallest possible way.
+///
+/// THIS IS NOT THE FIX, IT IS THE HOLDING ACTION. The threshold belongs
+/// on the workflow that defines a support case, and no such workflow is
+/// published (gap 1 of the same audit), so there is nothing yet to
+/// carry it. Named here, the number lives once and its value is pinned
+/// by a test, so it cannot drift silently between its call sites in the
+/// meantime. When the workflow lands, this constant becomes that field's
+/// default and the call sites keep their shape.
+export const ESCALATION_DAYS = 14;
+
+/// Whether a case open this many days counts as escalated. Strictly
+/// greater: the 14th day is not yet escalated, which is what the two
+/// `> 14` expressions encoded and neither of them said.
+export function isEscalated(daysOpen: number): boolean {
+  return daysOpen > ESCALATION_DAYS;
 }

@@ -81,6 +81,8 @@ export TZ=UTC
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=infra/lint/lib/git-answer.sh
 . "$SELF_DIR/lint/lib/git-answer.sh"
+# shellcheck source=infra/lib/jq.sh
+. "$SELF_DIR/lib/jq.sh"
 
 NAME="protocol-drift"
 KIND="maintenance-protocol-drift"
@@ -173,7 +175,10 @@ report_json() { # prints the report's path; the caller removes its dir
             } >&2
             rm -rf "$t"; return "$LINT_CANNOT_ANSWER" ;;
     esac
-    if ! jq -e 'type == "object"' "$t/report.json" >/dev/null 2>&1; then
+    # An ABSENT report is exactly "wrote no readable report", and it is
+    # the case `jq -e` alone calls a pass (d96e38ab).
+    if ! jq_doc_file "$t/report.json" \
+        || ! jq -e 'type == "object"' "$t/report.json" >/dev/null 2>&1; then
         {
             printf '%s: %s — %s exited %s but wrote no readable report to %s.\n' \
                 "$NAME" "$LINT_CANNOT_ANSWER_MARKER" "$(basename "$LINT")" "$rc" "$t/report.json"

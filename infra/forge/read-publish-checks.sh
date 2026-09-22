@@ -68,6 +68,9 @@
 # Runs as root under the ops-runner with NO HOME: nothing reads $HOME.
 set -euo pipefail
 
+# shellcheck source=infra/lib/jq.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/jq.sh"
+
 # THE MIRROR — owner/repo, from the one place it is spelled:
 # infra/estate/estate.toml, rendered onto this host as /etc/boss/sor.env
 # (infra/lib/sor.sh). An explicit BOSS_MIRROR_SLUG still wins and is
@@ -159,7 +162,10 @@ target=$(jq -c '
 if [ -z "$target" ]; then
     # The jq above is written once; a shape it cannot read is a
     # failure to say so, not "nothing to do".
-    if ! jq -e '(if type == "object" and has("data") then .data else . end) | type == "array"' "$workdir/jobs" >/dev/null 2>&1; then
+    # NOTHING READ is not "nothing to do", and that is the input
+    # `jq -e` alone calls a pass (d96e38ab).
+    if ! jq_doc_file "$workdir/jobs" \
+        || ! jq -e '(if type == "object" and has("data") then .data else . end) | type == "array"' "$workdir/jobs" >/dev/null 2>&1; then
         fail "the jobs API answered something that is not a packet list: $(head -c 200 "$workdir/jobs" | tr '\n' ' ')"
     fi
     say "no open publish-to-github packet has its read-checks step ready — nothing to do"

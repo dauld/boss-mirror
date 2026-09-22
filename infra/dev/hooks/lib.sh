@@ -37,6 +37,9 @@
 # with a stub `boss` on PATH (the shim/launcher tests' idiom).
 set -u
 
+# shellcheck source=infra/lib/jq.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../lib" && pwd)/jq.sh"
+
 hook_name="${hook_name:-$(basename "$0" .sh)}"
 state_root="${BOSS_HOOK_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/boss/sessions}"
 
@@ -57,6 +60,11 @@ bail() {
 read_payload() {
   payload=$(cat 2>/dev/null || true)
   command -v jq >/dev/null 2>&1 || bail "jq is not on PATH — nothing recorded"
+  # An EMPTY payload is what a closed stdin leaves, and `jq -e` reads
+  # it as JSON (d96e38ab) — the hook would then record nothing and say
+  # nothing, which is the failure bail() exists to make audible.
+  jq_doc_text "$payload" \
+    || bail "the hook payload is empty — nothing recorded"
   printf '%s' "$payload" | jq -e . >/dev/null 2>&1 || bail "the hook payload is not JSON — nothing recorded"
 }
 

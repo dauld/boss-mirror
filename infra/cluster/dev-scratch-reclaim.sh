@@ -255,6 +255,8 @@ INCREMENTAL_DROPPED=0
 # this pass a permanent no-op; git's own narrower refusal (only files
 # the merge would overwrite) is the one that keeps it working.
 FF_RESULT=skipped
+# Git's own complaint when a fast-forward is refused, for the packet.
+FF_DETAIL=
 FF_TO=""
 FF_REASON=""
 
@@ -352,6 +354,19 @@ fast_forward_checkout() {
     out=$(git -C "$REPO_DIR" merge --ff-only "$main" 2>&1) || rc=$?
     if [ "$rc" -ne 0 ]; then
         log "fast-forward FAILED (git exit $rc) taking $REPO_DIR from ${head:0:8} to ${main:0:8}; the doors keep warning until someone looks. git said: $out" >&2
+        # GIT'S OWN WORDS RIDE THE PACKET, not only the journal
+        # (backlog 6db0b658; David, 2026-09-22 — accept the jam and make
+        # the refusal loud). `ff_result` carried `failed: exit 1`, which
+        # is a verdict a reader must go and re-derive: CLAUDE.md
+        # §Diagnosis, "a verdict must name what failed". The journal had
+        # the answer all along and the packet is what anyone reads.
+        #
+        # BOUNDED AND FLATTENED, because this is interpolated into JSON
+        # by the step writer: newlines and tabs to spaces, quotes and
+        # backslashes dropped, 400 characters. The reduction is at the
+        # LAST step before storage and the full text is already in the
+        # log above — never the only copy.
+        FF_DETAIL=$(printf '%s' "$out" | tr -d '"\\' | tr '[:cntrl:]' ' ' | tr -s ' ' | cut -c1-400)
         FF_RESULT="failed: exit $rc"
         problems=$((problems + 1))
         return 0
@@ -894,7 +909,7 @@ record_pass() {
         bash "$step" "$RECLAIM_KIND" run \
             "result=$result" "problems=$problems" \
             "worktree_pass=$WT_PASS" "worktree_pass_reason=$WT_PASS_REASON" \
-            "ff_result=$FF_RESULT" "ff_to=$FF_TO" \
+            "ff_result=$FF_RESULT" "ff_to=$FF_TO" "ff_detail=$FF_DETAIL" \
             "origin_main_sha=$WT_MAIN_SHA" "origin_main_ref_ts=$WT_MAIN_TS" \
             "worktrees_removed=$WT_REMOVED" "worktrees_removed_mib=$WT_REMOVED_MIB" \
             "worktrees_kept_dirty=$WT_KEPT_DIRTY" "worktrees_kept_dirty_names=$WT_KEPT_DIRTY_NAMES" \

@@ -42,6 +42,9 @@
 
 set -euo pipefail
 
+# shellcheck source=infra/lib/jq.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/jq.sh"
+
 DAYS="${BOSS_REGEN_DAYS:-365}"
 START="${BOSS_REGEN_START:-2025-04-01}"
 # Sim warp (sim-seconds per wall-second). Default 2000, NOT the sim `run`
@@ -251,6 +254,7 @@ for i in $(seq 1 60); do
     # parse as two visibly separate motions for static scanners.
     KINDS=$(curl -s -m 2 http://127.0.0.1:7900/api/workflows 2>/dev/null || true)
     if curl -s -f -m 2 http://127.0.0.1:7900/api/jobs/health >/dev/null 2>&1 \
+        && jq_doc_text "$KINDS" \
         && printf '%s' "$KINDS" \
         | jq -e '(type == "array") and (length > 0)' >/dev/null 2>&1; then
         RECONCILED=1
@@ -397,8 +401,14 @@ fi
 echo "==> [5.5/10] waiting for people projection to warm (roster readiness)"
 ppl_prev=-1; ppl_stable=0
 for _i in $(seq 1 90); do
-    ppl_n=$(curl -s "http://127.0.0.1:7500/api/people" 2>/dev/null \
-        | jq -e 'length' 2>/dev/null || echo 0)
+    # Fetch, then ask whether anything came back: on an empty body
+    # `jq -e` exits 0 printing NOTHING, so ppl_n was the empty string and
+    # the -gt below was a bash error rather than a retry (d96e38ab).
+    ppl_body=$(curl -s "http://127.0.0.1:7500/api/people" 2>/dev/null || true)
+    ppl_n=0
+    if jq_doc_text "$ppl_body"; then
+        ppl_n=$(printf '%s' "$ppl_body" | jq 'length' 2>/dev/null || echo 0)
+    fi
     if [ "$ppl_n" -gt 100 ] && [ "$ppl_n" = "$ppl_prev" ]; then
         ppl_stable=$((ppl_stable + 1))
         if [ "$ppl_stable" -ge 3 ]; then

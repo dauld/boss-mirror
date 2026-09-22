@@ -51,6 +51,9 @@
 # (state dir, GH_CONFIG_DIR) and nothing reads $HOME.
 set -euo pipefail
 
+# shellcheck source=infra/lib/jq.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/jq.sh"
+
 TOKEN_FILE="${BOSS_GITHUB_TOKEN_FILE:-/etc/boss-publish/github.token}"
 STATE_DIR="${BOSS_PUBLISH_STATE_DIR:-/var/lib/boss-publish}"
 # WHERE THE FORGE REPOSITORY IS — derived, not asserted. See the block
@@ -574,8 +577,10 @@ if [ "${1:-}" = "--measure" ]; then
     # NO EVIDENCE IS NOT A PASS, and that has to be checked BEFORE the
     # comparison: an empty or unparseable read-back is what made this
     # check vacuous, and `jq -e` alone cannot tell it from a match.
-    [ -s "$workdir/readback" ] && jq -e 'type == "object"' "$workdir/readback" > /dev/null 2>&1 \
+    jq_doc_file "$workdir/readback" && jq -e 'type == "object"' "$workdir/readback" > /dev/null 2>&1 \
         || fail "the refresh for ${job_id:0:8} was accepted but the read-back of the packet answered nothing parseable — the measurement is not on the packet"
+    # The line above has already refused a read-back holding no document,
+    # so this compare cannot be handed silence.
     jq -e --arg ts "$ts" '((.data // .) | .metadata // {}) | .drift_refreshed_at == $ts' \
         "$workdir/readback" > /dev/null \
         || fail "the jobs API accepted the refresh for ${job_id:0:8} but the packet does not carry $ts — the measurement is not on the packet"
@@ -688,6 +693,16 @@ fork_of_mirror() {
     local slug="$1" meta="$workdir/fork.json"
     if ! gh_t api "repos/$slug" > "$meta" 2>"$workdir/err"; then
         return 2
+    fi
+    # gh exited 0, which is not the same as gh having ANSWERED: an empty
+    # body reaches `jq -r` as no document, so fork-says would be blank
+    # and `jq -e` below would exit 0 — "yes, this is the fork, push to
+    # it" on no evidence at all (d96e38ab). 1, not 2: 2 goes on to FORK
+    # the repository, and a write is the wrong answer to a read that did
+    # not happen. 1 refuses with these words and pushes nothing.
+    if ! jq_doc_file "$meta"; then
+        printf 'nothing readable — gh answered with no repository object' > "$workdir/fork-says"
+        return 1
     fi
     jq -r '"fork=\(.fork // false) parent=\(.parent.full_name // "none") source=\(.source.full_name // "none") private=\(.private // "?")"' \
         "$meta" > "$workdir/fork-says" 2>/dev/null \

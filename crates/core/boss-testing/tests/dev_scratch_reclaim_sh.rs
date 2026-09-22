@@ -1058,4 +1058,19 @@ fn a_fast_forward_git_refuses_is_loud_and_lands_on_the_packet() {
             && put.contains("\"result\":\"incomplete\""),
         "the packet names the verdict and the sha it could not reach\n{put}\n{text}"
     );
+    // AND WHAT GIT ACTUALLY SAID (backlog 6db0b658; David, 2026-09-22 —
+    // accept the jam, make the refusal loud). `failed: exit 1` is a
+    // verdict a reader must go and re-derive from a journal they are not
+    // reading: CLAUDE.md §Diagnosis, "a verdict must name what failed".
+    // The offending path is the one fact that turns the packet into an
+    // action, and it was in the log all along.
+    assert!(
+        put.contains("\"ff_detail\":\""),
+        "the packet carries git's own complaint, not only an exit code\n{put}\n{text}"
+    );
+    assert!(
+        put.contains("work.txt"),
+        "and it NAMES THE FILE — without that the reader has an exit code and a sha, and \
+         must go to the host's journal to learn which path refused\n{put}\n{text}"
+    );
 }

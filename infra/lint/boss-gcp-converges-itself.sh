@@ -63,6 +63,9 @@
 #      2026-09-11: `result=ok` was the whole record, and answering "did it
 #      install?" took an ops-request plus 200 journal lines off the host
 set -uo pipefail
+
+# shellcheck source=infra/lib/jq.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/jq.sh" || exit 3
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 converge="$repo/infra/gcp/boss-gcp-converge.sh"
@@ -464,7 +467,10 @@ sum_fail() { echo "FAIL: $*" >&2; echo "--- summary ($sum):" >&2; cat "$sum" 2>/
 [ -f "$sum" ] || sum_fail "the units mode wrote no run summary to BOSS_RUN_SUMMARY_FILE.
     Without it the converge's packet carries result=ok and nothing else, and 'did it
     install?' is a question only a human on the host can answer (2026-09-11)."
-jq -e . "$sum" >/dev/null 2>&1 || sum_fail "the run summary is not valid JSON"
+# The `[ -f ]` above proves the file EXISTS; a zero-byte one is the
+# input `jq -e` reads as valid JSON (d96e38ab).
+jq_doc_file "$sum" && jq -e . "$sum" >/dev/null 2>&1 \
+    || sum_fail "the run summary is absent, empty or not valid JSON"
 got=$(jq -r '.units_installed // ""' "$sum")
 [ "$got" = "$installed" ] \
     || sum_fail "the summary says units_installed='$got'; this lint installed $installed pairs.

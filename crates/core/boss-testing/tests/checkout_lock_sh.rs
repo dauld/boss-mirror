@@ -463,12 +463,17 @@ fn the_runner_answers_its_request_through_the_exit_trap() {
     // …and the address library forge-defaults.sh sources (the registry
     // host comes from /etc/boss/sor.env through it; the runner names its
     // image repo explicitly below, so no file is needed here).
+    // …and jq.sh beside it, which run-summary.sh sources for the
+    // emptiness question `jq -e` cannot answer (d96e38ab). Copied as a
+    // directory rather than named one file at a time: a hand-kept list
+    // of a directory's contents is the pair that drifts (CLAUDE.md 9a),
+    // and this one already had.
     std::fs::create_dir_all(work.join("infra/lib")).unwrap();
-    std::fs::copy(
-        repo_root().join("infra/lib/sor.sh"),
-        work.join("infra/lib/sor.sh"),
-    )
-    .unwrap();
+    for lib in std::fs::read_dir(repo_root().join("infra/lib")).expect("infra/lib/") {
+        let from = lib.expect("infra/lib entry").path();
+        let name = from.file_name().expect("infra/lib file name").to_owned();
+        std::fs::copy(&from, work.join("infra/lib").join(name)).unwrap();
+    }
     // …and the run-summary lib it stamps its stage timings through.
     std::fs::copy(
         repo_root().join("infra/run-summary.sh"),

@@ -123,6 +123,9 @@
 
 set -uo pipefail
 
+# shellcheck source=infra/lib/jq.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/jq.sh"
+
 ME="switch-instance-database"
 say() { echo "$ME: $*" >&2; }
 refuse() { say "REFUSED — $*"; say "  Nothing was changed."; exit 2; }
@@ -381,6 +384,7 @@ fi
 # with the reason; never a refusal.
 NATS_JSON='{"measured": false, "reason": "not read"}'
 if k exec "$NATS_WORKLOAD" -c "$NATS_CONTAINER" -- wget -qO- 'http://127.0.0.1:8222/jsz?consumers=true' > "$TMP/jsz" 2> "$TMP/jsz.err" \
+    && jq_doc_file "$TMP/jsz" \
     && jq -e . < "$TMP/jsz" > /dev/null 2>&1; then
     NATS_JSON=$(jq -c '{
         measured: true,

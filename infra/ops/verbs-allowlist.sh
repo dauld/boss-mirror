@@ -38,6 +38,9 @@
 # which is why only *.json is read.
 set -u
 
+# shellcheck source=infra/lib/jq.sh
+. "$(dirname "$0")/../lib/jq.sh"
+
 dir="${1:-$(dirname "$0")/verbs}"
 me=$(basename "$0")
 
@@ -59,7 +62,10 @@ for f in "$@"; do
             echo "$me: $f — a verb name is lowercase letters, digits and dashes, not leading with a dash (a packet's metadata.verb must match it exactly)" >&2
             exit 78 ;;
     esac
-    if ! jq -e 'type == "object" and (has("verbs") | not)' "$f" >/dev/null 2>&1; then
+    # An EMPTY verb file passes `jq -e` (d96e38ab) and then contributes
+    # nothing to the table below — a verb absent without a word.
+    if ! jq_doc_file "$f" \
+        || ! jq -e 'type == "object" and (has("verbs") | not)' "$f" >/dev/null 2>&1; then
         echo "$me: $f is not a JSON object describing ONE verb (about, hosts, argv, params[, timeout]); the whole-allowlist {\"verbs\": {...}} shape is gone — one file per verb" >&2
         exit 78
     fi

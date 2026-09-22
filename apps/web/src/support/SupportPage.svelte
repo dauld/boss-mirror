@@ -19,7 +19,9 @@
   import {
     accountHealthView,
     deviceCellMeaning,
+    ESCALATION_DAYS,
     failedRead,
+    isEscalated,
     okRead,
     orderedHealthRows,
     type ReadState,
@@ -131,7 +133,7 @@
       const daysOpen = Math.floor(
         (now - new Date(j.opened_on).getTime()) / 86_400_000,
       );
-      return daysOpen > 14;
+      return isEscalated(daysOpen);
     }).length;
   });
 
@@ -292,7 +294,7 @@
           <dl class="kv">
             <dt>Accounts with open jobs</dt>
             <dd><strong>{accountIdsWithOpen.size}</strong></dd>
-            <dt>Escalated (&gt;14d open)</dt>
+            <dt>Escalated (&gt;{ESCALATION_DAYS}d open)</dt>
             <dd><strong style="color:#d97706">{escalatedCount}</strong></dd>
           </dl>
       </Section>
@@ -346,7 +348,7 @@
                   {/if}
                 </td>
                 <td class="num">
-                  {#if r.daysOpen > 14}
+                  {#if isEscalated(r.daysOpen)}
                     <strong style="color:#d97706">{r.daysOpen}d</strong>
                   {:else}
                     {r.daysOpen}d

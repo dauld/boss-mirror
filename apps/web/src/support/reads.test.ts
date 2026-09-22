@@ -2,7 +2,9 @@ import { describe, expect, test } from 'bun:test';
 import {
   accountHealthView,
   deviceCellMeaning,
+  ESCALATION_DAYS,
   failedRead,
+  isEscalated,
   okRead,
   orderedHealthRows,
 } from './reads';
@@ -128,5 +130,49 @@ describe('Account Health shows accounts, not only accounts in trouble', () => {
     const input = [row('Quiet', 0), row('Busy', 3)];
     orderedHealthRows(input);
     expect(input.map((r) => r.account.name)).toEqual(['Quiet', 'Busy']);
+  });
+});
+
+// Packet e0a40c81, gap 11 of the same audit. `daysOpen > 14` decided
+// both the escalatedCount tile and the amber row styling, as a literal
+// in two expressions, with the tile's LABEL carrying a third copy of
+// the same 14. No protocol row declares that rule, so the page was
+// inventing an operating rule a tenant cannot change without editing
+// the frontend. The real fix is data — the threshold belongs on the
+// workflow that defines a support case — and that is blocked behind
+// gap 1: no such workflow is published. Until it is, the number lives
+// once and is pinned here, so it cannot drift silently between the two
+// call sites and the words on the tile.
+describe('the escalation threshold is named, not magic', () => {
+  test('the threshold is 14 days — pinned, so a change is deliberate', () => {
+    expect(ESCALATION_DAYS).toBe(14);
+  });
+
+  test('escalated means STRICTLY older than the threshold', () => {
+    // The boundary the two literals encoded: 14 days open is not yet
+    // escalated, 15 is. Asserted because a reader of `> 14` cannot tell
+    // whether the 14th day was meant to count.
+    expect(isEscalated(ESCALATION_DAYS - 1)).toBe(false);
+    expect(isEscalated(ESCALATION_DAYS)).toBe(false);
+    expect(isEscalated(ESCALATION_DAYS + 1)).toBe(true);
+  });
+
+  test('the page reads the constant — no copy of the number survives', async () => {
+    // The drift pin. A named constant that two call sites bypass is no
+    // better than the literal, and the tile's label is the copy most
+    // likely to be left behind: it is prose, so nothing else would ever
+    // flag it.
+    const src = await Bun.file(
+      new URL('./SupportPage.svelte', import.meta.url),
+    ).text();
+    const escalation = src
+      .split('\n')
+      .filter((l) => /\bdaysOpen\b|Escalated|escalatedCount/.test(l));
+    expect(escalation.length).toBeGreaterThan(0);
+    for (const line of escalation) {
+      expect(line).not.toMatch(/\b14\b/);
+    }
+    expect(src).toMatch(/ESCALATION_DAYS/);
+    expect(src).toMatch(/isEscalated\(/);
   });
 });

@@ -89,6 +89,8 @@ export TZ=UTC
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=infra/lint/lib/git-answer.sh
 . "$SELF_DIR/lint/lib/git-answer.sh"
+# shellcheck source=infra/lib/jq.sh
+. "$SELF_DIR/lib/jq.sh"
 
 NAME="surface-usage"
 KIND="maintenance-surface-usage"
@@ -234,7 +236,10 @@ row_json() {
     err=$(mktemp -t surface-usage-err.XXXXXX) || return 1
     rollup=$(api GET "/api/surface-opens/rollup?since=$since&until=$until" 2>"$err")
     local rc=$?
-    if [ "$rc" != "0" ] || ! printf '%s' "$rollup" | jq -e '.rows | type == "array"' >/dev/null 2>&1; then
+    # An answer of NO BYTES is what this refusal is for, and `jq -e`
+    # reads it as a pass (d96e38ab) — so ask jq_doc_text first.
+    if [ "$rc" != "0" ] || ! jq_doc_text "$rollup" \
+        || ! printf '%s' "$rollup" | jq -e '.rows | type == "array"' >/dev/null 2>&1; then
         {
             printf '%s: %s — GET %s/api/surface-opens/rollup did not answer with rows (curl exit %s),\n' \
                 "$NAME" "$LINT_CANNOT_ANSWER_MARKER" "$BOSS_JOBS_URL" "$rc"
@@ -296,7 +301,8 @@ sweep_json() {
     local err out rc
     err=$(mktemp -t surface-usage-sweep.XXXXXX) || { jq -n '{swept: null, error: "no writable temp dir"}'; return 1; }
     out=$(api POST "/api/surface-opens/sweep" 2>"$err"); rc=$?
-    if [ "$rc" = "0" ] && printf '%s' "$out" | jq -e '.deleted | type == "number"' >/dev/null 2>&1; then
+    if [ "$rc" = "0" ] && jq_doc_text "$out" \
+        && printf '%s' "$out" | jq -e '.deleted | type == "number"' >/dev/null 2>&1; then
         printf '%s' "$out" | jq '{swept: {deleted, before, retention_days}, error: null}'
         rm -f "$err"
         return 0

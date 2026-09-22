@@ -1858,6 +1858,58 @@ refuse_untracked_files() {
     exit 2
 }
 
+# THE PRE-FLIGHT VOUCHES FOR THIS TREE; THE GATE READS THE PUSHED COMMIT.
+#
+# The other half of the refusal above. `refuse_untracked_files` covers
+# the file git cannot see at all, and every word of its reasoning — "an
+# untracked file is clean here and red at the gate, which checks out the
+# pushed commit" — applies to a file git CAN see and reads differently
+# from HEAD. The lints read the WORKING COPY of a tracked path, so they
+# are right about this tree and say nothing about the commit that gets
+# gated.
+#
+# MEASURED 2026-09-21 (backlog 87454e54, gate-run 9e02228b), and it cost
+# a gate. Resolving a rerail, a builder ran `cherry-pick --continue`
+# (which commits), then `cargo fmt --all`, then `--lint` (clean), then
+# `git push`: the fmt had moved one mis-indented closing brace and was
+# never committed, so the push carried the PRE-fmt commit. The gate went
+# red on `fmt`, and on `no-employee-id-literal` — the brace was where
+# that lint reads the `cfg(test)` region to end, so a literal inside a
+# test module read as production code. One whitespace character, two
+# failed checks, neither of them about the change.
+#
+# A WARNING, NOT A REFUSAL, unlike the untracked case: running the
+# pre-flight mid-edit to see whether the lints are happy is the normal
+# builder loop, and refusing that would break it. What must not happen
+# silently is pre-flight -> push with edits in between. So the note
+# rides beside the verdict — named files, and what the gate will read
+# instead — and the builder decides. Pinned by boss-testing's
+# a_preflight_says_which_files_the_gate_will_not_read.rs, which runs
+# THIS script against synthetic trees.
+note_uncommitted_modifications() {
+    local modified status count
+    # `git diff HEAD` rather than a bare `git diff`: a staged edit is
+    # still not in the commit the push carries, and `git add` without a
+    # commit is the other half of the same slip.
+    modified=$(git diff --name-status HEAD 2>&1)
+    status=$?
+    if [ "$status" -ne 0 ]; then
+        # Not fatal — this is a warning, and a pre-flight that cannot
+        # compare to HEAD still ran its lints. Said out loud rather than
+        # swallowed, because silence here is the defect above.
+        echo "pre-flight: cannot tell how this tree differs from HEAD (git diff exited ${status}: ${modified})" >&2
+        echo "pre-flight: the gate reads the PUSHED commit, so commit before you push." >&2
+        return 0
+    fi
+    [ -n "$modified" ] || return 0
+    count=$(printf '%s\n' "$modified" | grep -c '[^[:space:]]')
+    echo "pre-flight: ${count} tracked file(s) here differ from HEAD, and the gate reads the PUSHED commit:"
+    printf '%s\n' "$modified" | sed 's/^/  /'
+    echo "  The lints above read the working copy, so this verdict is about THIS tree."
+    echo "  remediation: commit before you push — an edit made after the pre-flight is"
+    echo "            judged by the gate and vouched for by nobody (backlog 87454e54)."
+}
+
 # `--quick` stops here. It is a PRE-FLIGHT, not a gate, and says so:
 # nothing compiles, so it cannot see a clippy error, a failing test or a
 # broken build. Its whole claim is "you will not lose a gate to a lint
@@ -1866,6 +1918,7 @@ if [ "$QUICK" -eq 1 ]; then
     refuse_untracked_files
     run_preflight
     echo ""
+    note_uncommitted_modifications
     if [ "${#FAILED[@]}" -gt 0 ]; then
         echo "pre-flight: ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
         echo "pre-flight: fix these before spending a gate on them." >&2
@@ -1924,6 +1977,7 @@ if [ "$LINT" -eq 1 ]; then
         echo "pre-flight: no crate implied by the tree — skipping clippy (nothing to compile)"
     fi
     echo ""
+    note_uncommitted_modifications
     if [ "${#FAILED[@]}" -gt 0 ]; then
         echo "pre-flight: ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
         echo "pre-flight: fix these before spending a gate on them." >&2

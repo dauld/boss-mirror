@@ -142,6 +142,9 @@
 
 set -uo pipefail
 
+# shellcheck source=infra/lib/jq.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/jq.sh"
+
 ME="prune-registry-versions"
 say() { echo "$ME: $*" >&2; }
 refuse() { say "REFUSED — $*"; say "  Nothing was deleted."; exit 2; }
@@ -245,8 +248,10 @@ scrub() { # stdin -> stdout, every credential form replaced
     done
 }
 [ -f "$DOCKER_CONFIG_FILE" ] || refuse "no docker config at $DOCKER_CONFIG_FILE — the converge's registry login (docker login $REG_HOST, as the checkout owner) is the credential this verb uses, and it is not there"
-if ! jq -e . < "$DOCKER_CONFIG_FILE" > /dev/null 2>&1; then
-    refuse "$DOCKER_CONFIG_FILE is not JSON, so the login for $REG_HOST cannot be read"
+# The `[ -f ]` above proves the file exists; a zero-byte login file is
+# the input `jq -e` reads as valid JSON (d96e38ab).
+if ! jq_doc_file "$DOCKER_CONFIG_FILE" || ! jq -e . < "$DOCKER_CONFIG_FILE" > /dev/null 2>&1; then
+    refuse "$DOCKER_CONFIG_FILE is empty or not JSON, so the login for $REG_HOST cannot be read"
 fi
 AUTH_B64=$(jq -r --arg host "$REG_HOST" '
     (.auths // {}) | to_entries[]
@@ -434,7 +439,10 @@ if [ "$INDEX_OK" = 1 ]; then
     while IFS=$'\t' read -r name ver created epoch; do
         case "$ver" in sha256:*) continue ;; esac
         code=$(http "$BEARER_CFG" GET "$FORGE_URL/v2/$OWNER/$name/manifests/$ver" "$TMP/manifest.json" -H "$ACCEPT")
-        if [ "$code" != 200 ] || ! jq -e . < "$TMP/manifest.json" > /dev/null 2>&1; then
+        # A 200 with no body is unreadable, not a manifest with no
+        # children — and `jq -e` alone calls it a pass (d96e38ab).
+        if [ "$code" != 200 ] || ! jq_doc_file "$TMP/manifest.json" \
+            || ! jq -e . < "$TMP/manifest.json" > /dev/null 2>&1; then
             printf '%s\t%s\t%s\n' "$name" "$ver" "$code" >> "$TMP/unreadable.tsv"
             continue
         fi
