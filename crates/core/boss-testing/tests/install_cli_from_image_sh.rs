@@ -1196,7 +1196,30 @@ const FORGE_CONVERGE: &str = "infra/forge/forge-converge.sh";
 /// about, and since 2026-09-22 (backlog cb9eb0f2) `ops-runner` is what
 /// installs the ops runner — until then the runner landed on every
 /// host regardless, which is what made the declaration decorative.
-const FORGE_ROLES: &str = "cluster-operator,ops-runner";
+///
+/// READ from the declaration, never typed here (CLAUDE.md §9a, backlog
+/// 1c7f8f23): a literal copy would let this file go on proving the
+/// forge installs a runner after the estate stopped asking for one,
+/// which is the exact drift the role was added to end. One definition
+/// cannot disagree with itself, so there is nothing to pin.
+fn forge_roles() -> String {
+    let toml = std::fs::read_to_string(repo_root().join("infra/estate/estate.toml"))
+        .expect("estate.toml is readable");
+    let forge = toml
+        .split("[[node]]")
+        .find(|block| block.contains("id = \"forge\""))
+        .expect("estate.toml declares the forge node");
+    let list = forge
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("roles = ["))
+        .and_then(|l| l.strip_suffix(']'))
+        .expect("the forge node declares roles");
+    list.split(',')
+        .map(|r| r.trim().trim_matches('"'))
+        .filter(|r| !r.is_empty())
+        .collect::<Vec<_>>()
+        .join(",")
+}
 
 /// The forge installer, driven into a scratch root the way
 /// infra/lint/forge-install-covers-the-ops-runner.sh drives it: a stub
@@ -1280,7 +1303,7 @@ fn the_forge_installs_the_cli_for_cluster_operator_at_the_converged_sha_from_the
         return;
     }
     let f = ForgeInstall::new("ok");
-    let (rc, out) = f.run(FORGE_ROLES, Some(SHA_A), &[]);
+    let (rc, out) = f.run(&forge_roles(), Some(SHA_A), &[]);
     assert_eq!(rc, 0, "{out}");
     assert!(f.units_installed(), "the units converge as before: {out}");
     assert!(
@@ -1354,6 +1377,85 @@ fn a_host_without_the_role_installs_no_cli_and_says_so() {
     );
 }
 
+/// THE OTHER DIRECTION OF THE SAME DECLARATION (backlog 1c7f8f23, the
+/// second half of cb9eb0f2). Skipping an install is not an uninstall:
+/// drop `ops-runner` from a host's roles and the runner already on it
+/// keeps running, keeps claiming ops-request packets, and the estate's
+/// map — which draws the DECLARATION — shows no runner there. A second
+/// executor on one queue that nothing reports is this repo's recurring
+/// shape, a wrong target answering instead of erroring.
+///
+/// The converge does NOT remove it, and that is the decision, not an
+/// omission: the runner is the DOOR every bounded verb arrives
+/// through, which is why `uninstall-not-in-role.sh` hard-keeps it and
+/// why infra/lint/boss-gcp-converges-itself.sh refuses to let it become
+/// a roles.toml row. A converge that stops an executor on a file edit
+/// is destructive-by-policy, and CLAUDE.md puts that on the other side
+/// of the line from the mechanical work a converge may do. So the
+/// converge REPORTS, loudly and on the packet, and leaves the stopping
+/// to a deliberate bounded step.
+#[test]
+fn a_host_that_drops_the_role_keeps_its_runner_and_the_converge_says_so_on_the_packet() {
+    if !tools() {
+        return;
+    }
+    let f = ForgeInstall::new("stranded");
+    let (rc, out) = f.run(&forge_roles(), Some(SHA_A), &[]);
+    assert_eq!(rc, 0, "{out}");
+    assert!(f.runner_installed(), "the declared run installs one: {out}");
+    let _ = std::fs::remove_file(&f.case.summary);
+
+    // The estate drops the role; everything else about the host is the
+    // same, and it converges again half an hour later.
+    let (rc, out) = f.run("cluster-operator", Some(SHA_A), &[]);
+    assert_eq!(
+        rc, 0,
+        "reporting a stranded runner must not red the converge of a host whose every other unit is fine: {out}"
+    );
+    assert!(
+        f.runner_installed(),
+        "the converge removed the runner — stopping an executor on a declaration edit is not a converge's to do: {out}"
+    );
+    assert!(
+        out.contains("STILL INSTALLED"),
+        "the run must say the runner is still there, not merely that none was installed: {out}"
+    );
+    let summary = f.case.summary("ops_runner");
+    assert!(
+        summary.contains("still installed"),
+        "ops_runner on the packet reads as an ordinary skip: {summary}"
+    );
+    let anomalies = f.case.summary("anomalies");
+    assert!(
+        anomalies.contains("boss-ops-runner"),
+        "the finding reaches only the journal, which a reader without host access never sees: {anomalies:?} / {out}"
+    );
+}
+
+/// And the quiet half, which is most hosts: one that never had a runner
+/// records the skip as a FIELD and files no anomaly. An anomaly on
+/// every non-runner host's converge, every half hour, is the
+/// permanently-warning channel nobody reads by the time it matters.
+#[test]
+fn a_host_that_never_had_a_runner_files_no_anomaly_about_not_having_one() {
+    if !tools() {
+        return;
+    }
+    let f = ForgeInstall::new("quiet");
+    let (rc, out) = f.run("off-cluster-observer", Some(SHA_A), &[]);
+    assert_eq!(rc, 0, "{out}");
+    assert!(!f.runner_installed(), "{out}");
+    assert!(
+        f.case.summary("ops_runner").contains("not in role"),
+        "the skip is still recorded as a field: {out}"
+    );
+    assert!(
+        !f.case.summary("anomalies").contains("boss-ops-runner"),
+        "a host that never had a runner reports one as an anomaly: {}",
+        f.case.summary("anomalies")
+    );
+}
+
 /// The ordinary state of the first tick after a train: the checkout is
 /// at the merge, the deploy runner on this same host has not pushed the
 /// image for it yet. Not a red — the converge says so, records it, and
@@ -1364,11 +1466,11 @@ fn an_image_the_deploy_runner_has_not_built_yet_is_not_a_red_converge_on_the_for
         return;
     }
     let f = ForgeInstall::new("not-yet");
-    let (rc, out) = f.run(FORGE_ROLES, Some(SHA_A), &[]);
+    let (rc, out) = f.run(&forge_roles(), Some(SHA_A), &[]);
     assert_eq!(rc, 0, "{out}");
     let _ = std::fs::remove_file(&f.case.summary);
 
-    let (rc, out) = f.run(FORGE_ROLES, Some(SHA_D), &[]);
+    let (rc, out) = f.run(&forge_roles(), Some(SHA_D), &[]);
     assert_eq!(
         rc, 0,
         "a tag the deploy runner has not built yet must not red the forge converge: {out}"
@@ -1416,7 +1518,11 @@ fn a_real_cli_refusal_still_reds_the_forge_converge_with_the_units_installed() {
         return;
     }
     let f = ForgeInstall::new("refused");
-    let (rc, out) = f.run(FORGE_ROLES, Some(SHA_A), &[("STUB_TOKEN_DOWN", "1".into())]);
+    let (rc, out) = f.run(
+        &forge_roles(),
+        Some(SHA_A),
+        &[("STUB_TOKEN_DOWN", "1".into())],
+    );
     assert_ne!(rc, 0, "{out}");
     assert!(f.units_installed(), "the units installed regardless: {out}");
     assert!(
@@ -1448,7 +1554,7 @@ fn a_hand_run_without_a_converged_sha_installs_no_cli_and_says_so() {
         return;
     }
     let f = ForgeInstall::new("no-sha");
-    let (rc, out) = f.run(FORGE_ROLES, None, &[]);
+    let (rc, out) = f.run(&forge_roles(), None, &[]);
     assert_eq!(rc, 0, "{out}");
     assert!(f.case.requests().is_empty(), "{:?}", f.case.requests());
     assert!(

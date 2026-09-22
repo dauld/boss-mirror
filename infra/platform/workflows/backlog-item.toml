@@ -30,6 +30,21 @@ title_template = "Measure the claim, choose a route"
 # page — so they are the first two steps in the bundle to say who they
 # are for in the one shape every reader derives from.
 audience = { role = "platform-admin" }
+# HOW AN ABSENCE VERDICT IS MADE, on the step that makes it (backlog
+# fac521bc). A does-not-reproduce triage on c68104cf ran the real
+# lint, used tracked fixtures, and added a CONTROL — every part of the
+# method this repo asks for — and was still wrong, because the
+# fixtures were built from the packet's prose rather than from the
+# file the packet named. Prose in a doc is read by whoever goes
+# looking; a procedure is read by whoever is doing the triage, at the
+# moment they do it, and is versioned with the protocol.
+metadata_defaults = { procedure = """Measure the claim yourself before you route it, and put the measurement in `evidence` — a route chosen off the packet's own text is the failure this step exists to refuse.
+
+AN ABSENCE VERDICT — does-not-reproduce, already-fixed, `stale` — is the most expensive one to get wrong, because a well-evidenced wrong answer is a worse record than no answer at all: the next reader trusts it. Two rules, both bought on 2026-09-21 (backlog fac521bc).
+
+REPRODUCE FROM THE FILE, NOT FROM THE PROSE. When the packet names the car, train, commit or file its finding came from, `git show <ref>:<path>` that file and reproduce in the shape it actually has. The prose is a report of the site; only the site is the site. Packet c68104cf's reported line was never the plain shell comment its triage planted: it sat inside a `python3 - <<'PY'` heredoc, and a heredoc body is classified off its OPENER, so the lexer rule the fixture was testing never applied to it. Planted in THAT shape it reproduced on the first run — and the file was named in the packet's own related-car reference, one read away.
+
+SAY WHICH SHAPE YOU TESTED. A control proves the fixture is STRONG enough to catch something; it says nothing about whether the fixture is the right SHAPE. Those are two different failure modes, and a control covers only the first — which is why adding one, the part everyone remembers to add, did not save the verdict above. So an absence verdict names the shape it planted and where that shape came from. One that states its fixture can be re-opened by anyone who notices the shape was wrong; one that only says it does not reproduce cannot.""" }
 [[workflow.step.fields]]
 name = "disposition"
 field_type = "verify|design|build|duplicate|stale|decline"

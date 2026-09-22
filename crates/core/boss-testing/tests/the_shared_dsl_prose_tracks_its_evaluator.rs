@@ -103,6 +103,10 @@ fn the_header_does_not_carry_a_count_of_its_own_list() {
         "Three consumers",
         "Four consumers",
         "Five consumers",
+        // Not an ordinal but the same second copy: the header said
+        // `both consumers` in its terminating-language paragraph while
+        // the list below it named four (f1bfc954, 2026-09-22).
+        "both consumers",
     ] {
         assert!(
             !header.contains(word),

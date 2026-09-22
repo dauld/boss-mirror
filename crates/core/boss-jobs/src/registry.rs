@@ -4960,6 +4960,163 @@ mod tests {
         assert_eq!(steps[1].status, StepStatus::Ready);
     }
 
+    // ---- an absent metadata key in a `ready_when`, re-derived
+    // (backlog f1bfc954, 2026-09-22) -------------------------------
+    //
+    // The invariant
+    // `a-predicate-reading-another-steps-field-needs-that-key-to-exist`
+    // was written on 2026-08-15 against an evaluator that RAISED on a
+    // missing identifier and had no short-circuit, so one unreadable
+    // clause took the whole predicate down. Both of those are gone —
+    // `resolve_identifier` answers `Absent` (7b756357) and AND/OR
+    // return on the left operand (151d1e04) — so the finding had to be
+    // measured again rather than have its sentences patched. These
+    // four tests ARE that measurement, and the invariant's note is
+    // written from them.
+
+    /// `decide` declares no `metadata_defaults`, so `outcome` is
+    /// absent on it until (and unless) an executor writes one.
+    fn absent_key_spec() -> WorkflowSpec {
+        WorkflowSpec::platform_seed(
+            "absent-key",
+            "Absent key",
+            "test",
+            vec!["account".into()],
+            vec![
+                StepSpec {
+                    title: "decide".into(),
+                    kind: "task".into(),
+                    ready_when: "true".into(),
+                    ..Default::default()
+                },
+                StepSpec {
+                    title: "ship".into(),
+                    kind: "task".into(),
+                    ready_when: "steps.decide.metadata.outcome = \"approved\"".into(),
+                    ..Default::default()
+                },
+                StepSpec {
+                    title: "rescue".into(),
+                    kind: "task".into(),
+                    ready_when: "steps.decide.metadata.outcome = \"approved\" OR steps.decide.done"
+                        .into(),
+                    ..Default::default()
+                },
+                StepSpec {
+                    title: "guard".into(),
+                    kind: "task".into(),
+                    ready_when: "steps.decide.metadata.outcome != \"reject\"".into(),
+                    ..Default::default()
+                },
+                StepSpec {
+                    title: "marked".into(),
+                    kind: "task".into(),
+                    ready_when:
+                        "steps.decide.metadata.outcome = \"approved\" AND job.metadata.merged = \"true\""
+                            .into(),
+                    ..Default::default()
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn an_absent_key_no_longer_takes_down_the_disjunction_around_it() {
+        // THE HALF THAT DIED. This is the shape the 2026-08-15 note
+        // called out as the one that "bites exactly the protocols
+        // worth writing": a re-routing branch reachable from one
+        // clause OR another. It no longer bites. The unreadable
+        // clause is a clean false and the other disjunct decides.
+        let spec = absent_key_spec();
+        let subject = Subject::new("account", "a-1");
+        let job_metadata = serde_json::Value::Object(Default::default());
+        let mut steps =
+            materialize_steps(&spec, &subject, JobId::new(), &job_metadata, StepId::new);
+
+        // `decide` completes WITHOUT ever writing `outcome`.
+        steps[0].status = StepStatus::Completed;
+        steps[0].metadata = serde_json::json!({});
+        reevaluate(&spec, &mut steps, &subject, &job_metadata);
+
+        assert_eq!(
+            steps[2].status,
+            StepStatus::Ready,
+            "the readable disjunct decides; the absent one is false, not an error"
+        );
+    }
+
+    #[test]
+    fn an_absent_key_reads_false_and_the_step_is_skipped_not_left_pending() {
+        // THE HALF THAT SURVIVES, RESHAPED. The symptom is no longer
+        // "pending forever": once every referenced step is terminal,
+        // `reevaluate` skips the step. What survives is that the skip
+        // is INDISTINGUISHABLE from the branch being honestly not
+        // taken — an author who misspells a key, or reads one the
+        // upstream step never declares, gets a silent Skipped that
+        // looks exactly like a correct routing decision.
+        let spec = absent_key_spec();
+        let subject = Subject::new("account", "a-1");
+        let job_metadata = serde_json::Value::Object(Default::default());
+        let mut steps =
+            materialize_steps(&spec, &subject, JobId::new(), &job_metadata, StepId::new);
+
+        steps[0].status = StepStatus::Completed;
+        steps[0].metadata = serde_json::json!({});
+        reevaluate(&spec, &mut steps, &subject, &job_metadata);
+
+        assert_eq!(
+            steps[1].status,
+            StepStatus::Skipped,
+            "absent reads false and `decide` is terminal, so the step is skipped"
+        );
+    }
+
+    #[test]
+    fn a_negated_comparison_over_an_absent_key_opens_the_step_early() {
+        // THE DIRECTION THE OLD NOTE HAD BACKWARDS, and the reason
+        // this invariant still earns its place. `Absent` is UNEQUAL to
+        // every literal, so `!=` over a key nobody has written yet is
+        // TRUE. The step opens before the step it claims to depend on
+        // has run at all — failing OPEN, not pending. The old
+        // mechanism could only ever hold a step back.
+        let spec = absent_key_spec();
+        let subject = Subject::new("account", "a-1");
+        let job_metadata = serde_json::Value::Object(Default::default());
+        let steps = materialize_steps(&spec, &subject, JobId::new(), &job_metadata, StepId::new);
+
+        assert_eq!(steps[0].status, StepStatus::Ready, "`decide` has not run");
+        assert_eq!(
+            steps[3].status,
+            StepStatus::Ready,
+            "`guard` is open already: absent != \"reject\" is true"
+        );
+    }
+
+    #[test]
+    fn a_job_metadata_clause_suppresses_the_skip_and_pending_forever_returns() {
+        // WHERE "PENDING FOREVER" STILL LIVES. `reevaluate` refuses to
+        // infer Skipped from a predicate that reads `job.metadata.*`,
+        // because that metadata can be written at any time (aa9980c8).
+        // So a predicate that mixes an unreadable step key with a job
+        // marker gets neither: not ready, not skipped, no log line —
+        // the original symptom, surviving in exactly this one shape.
+        let spec = absent_key_spec();
+        let subject = Subject::new("account", "a-1");
+        let job_metadata = serde_json::json!({ "merged": "true" });
+        let mut steps =
+            materialize_steps(&spec, &subject, JobId::new(), &job_metadata, StepId::new);
+
+        steps[0].status = StepStatus::Completed;
+        steps[0].metadata = serde_json::json!({});
+        reevaluate(&spec, &mut steps, &subject, &job_metadata);
+
+        assert_eq!(
+            steps[4].status,
+            StepStatus::Pending,
+            "the job-metadata clause suppresses the skip, so it holds Pending"
+        );
+    }
+
     /// A two-step chain used by the pairing tests below.
     fn pairing_spec() -> WorkflowSpec {
         WorkflowSpec::platform_seed(

@@ -48,7 +48,7 @@
 //!
 //! Hand-rolled recursive-descent parser + tree-walking evaluator. No
 //! Turing-completeness, no recursion in the language itself, no loops —
-//! the correctness of both consumers depends on expressions terminating,
+//! the correctness of every consumer depends on expressions terminating,
 //! and they do because the language can't express anything that wouldn't.
 
 use std::fmt;

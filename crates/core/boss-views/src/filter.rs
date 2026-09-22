@@ -1,8 +1,12 @@
 //! View filters, on top of the shared `boss-expr` DSL.
 //!
-//! This is the third consumer of that DSL, after dispatcher rule
-//! predicates and step `ready_when`. Reusing it rather than inventing
-//! a filter language is the whole reason this phase needs no sandbox:
+//! One consumer of that DSL among several; the roster lives in the
+//! DSL's own header, where a test holds it to the manifests that
+//! decide it (`the_header_names_every_crate_that_depends_on_the_dsl`).
+//! An ordinal here would be a second, unpinned copy of that count —
+//! this one said `third` while there were four (backlog f1bfc954).
+//! Reusing the DSL rather than inventing a filter language is the
+//! whole reason this phase needs no sandbox:
 //! the grammar has no loops, no recursion and no Turing-completeness,
 //! so an operator-authored predicate provably terminates. Q3 of the
 //! review deferred agent-written code precisely because *that* needs
