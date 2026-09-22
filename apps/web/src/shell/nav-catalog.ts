@@ -52,6 +52,24 @@ export type NavItem = Readonly<{
   /// inline in a nav group carry no `app`; they inherit the group
   /// they sit in.
   app?: AppId;
+  /// The department whose packets this surface lists, by Class code.
+  ///
+  /// This is here for the reason `app` is (backlog 423a531d,
+  /// 2026-09-22): what a surface FILTERS on is part of what the
+  /// surface is, and it had no home. Two routes carried a workflow
+  /// kind as a literal prop instead — `initialKind="field-service"`
+  /// and `initialKind="sale"`, both tenant kinds this instance does
+  /// not publish — so both pages rendered a title and a permanent
+  /// "No jobs match" with nothing to catch it.
+  ///
+  /// A DEPARTMENT, not a kind, because a department's work is several
+  /// protocols: Sales runs `receive-a-sponsorship` AND
+  /// `receive-an-inquiry`, so no single kind= could express it even
+  /// once the literal was corrected. The server resolves a department
+  /// to the kinds whose workflow row declares it
+  /// (`/api/jobs?department=<code>`), which keeps the mapping in
+  /// registry data where it belongs.
+  department?: string;
 }>;
 
 export type NavGroup = Readonly<{ label: string; items: ReadonlyArray<NavItem> }>;
@@ -103,8 +121,8 @@ export type UngatedSurfaceId =
 
 export const ROUTE_CATALOG: Readonly<Record<RouteName | UngatedSurfaceId, NavItem>> = {
   jobs:      { id: 'jobs',      label: 'All jobs',         path: '/ux/jobs',      permKey: 'jobs',      app: 'home' },
-  sales:     { id: 'sales',     label: 'Sales pipeline',   path: '/ux/sales',     permKey: 'sales',     app: 'sales' },
-  service:   { id: 'service',   label: 'Service queue',    path: '/ux/service',   permKey: 'service',   module: 'support', app: 'service' },
+  sales:     { id: 'sales',     label: 'Sales pipeline',   path: '/ux/sales',     permKey: 'sales',     app: 'sales', department: 'sales' },
+  service:   { id: 'service',   label: 'Service queue',    path: '/ux/service',   permKey: 'service',   module: 'support', app: 'service', department: 'support' },
   qa:        { id: 'qa',        label: 'QA',               path: '/ux/qa',        permKey: 'qa',        module: 'qa',      app: 'qa' },
   finance:   { id: 'finance',   label: 'Finance',          path: '/ux/finance',   permKey: 'finance',   module: 'finance', app: 'finance' },
   warehouse: { id: 'warehouse', label: 'Inventory',        path: '/ux/warehouse', permKey: 'warehouse', module: 'warehouse', app: 'warehouse' },

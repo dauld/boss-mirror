@@ -159,8 +159,16 @@ export function subjectPath(s: Subject): string {
       return `/accounts/${s.id ?? ''}`;
     case 'purchase_order':
       return `/purchase-orders/${s.id ?? ''}`;
+    // A campaign has no page of its own, so it lands on its own
+    // packets. It used to land on `kind=marketing-motion`, a
+    // tenant workflow hardcoded into shared frontend
+    // (backlog 423a531d, 2026-09-22): an instance running another
+    // tenant does not publish that kind, so the click reached an
+    // empty list. `subject_id` is the filter the /jobs route already
+    // parses, and it asks the honest question — this campaign's work,
+    // whatever protocol it runs under.
     case 'campaign':
-      return `/jobs?kind=marketing-motion`;
+      return `/jobs?subject_id=${encodeURIComponent(s.id ?? '')}`;
     case 'employee':
       return `/people/${s.id ?? ''}`;
     case 'vendor':

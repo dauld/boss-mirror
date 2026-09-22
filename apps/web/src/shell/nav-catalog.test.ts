@@ -598,3 +598,30 @@ describe('every concrete Subject kind is claimed by an app', () => {
     }
   });
 });
+
+describe('a surface that lists a department names the department', () => {
+  // Backlog 423a531d (2026-09-22). The Service queue and the Sales
+  // pipeline were mounted with a hardcoded workflow kind —
+  // `field-service` and `sale`, both authored only in a tenant's seed
+  // bundle and published by no instance running another tenant — so
+  // both rendered a title and a permanent "No jobs match", with
+  // nothing holding the literal to anything. What a surface FILTERS on
+  // now lives in the catalog beside its path and its app, as a
+  // DEPARTMENT: a department's work is several protocols (Sales runs
+  // receive-a-sponsorship AND receive-an-inquiry), so no single kind
+  // could have expressed it even once corrected.
+  const SEEDED_CODES = new Set(registryDepartments());
+
+  it('every declared department code is one the Class registry seeds', () => {
+    const declared = entries.filter(([, e]) => e.department !== undefined);
+    expect(declared.length).toBeGreaterThan(0);
+    for (const [key, e] of declared) {
+      expect([key, SEEDED_CODES.has(e.department!)]).toEqual([key, true]);
+    }
+  });
+
+  it('the two jobs-queue surfaces carry one, so neither needs a kind literal', () => {
+    expect(ROUTE_CATALOG.sales.department).toBe('sales');
+    expect(ROUTE_CATALOG.service.department).toBe('support');
+  });
+});

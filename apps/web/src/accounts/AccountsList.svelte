@@ -38,9 +38,17 @@
 
   // Per-account device counts and open-ticket counts are computed
   // client-side from these fetches. When the support module is
-  // disabled the field-service queue does not exist, so the jobs
-  // fetch is skipped entirely (no point spending the round-trip on
-  // a guaranteed-empty result).
+  // disabled the department has no surface here, so the jobs fetch is
+  // skipped entirely (no point spending the round-trip on a
+  // guaranteed-empty result).
+  //
+  // The ticket read asks for the SUPPORT DEPARTMENT's packets. It
+  // asked for `kind=field-service` until 2026-09-22 (backlog
+  // 423a531d) — a workflow one tenant's seed bundle authors, which
+  // this instance does not publish — so the Tickets column was 0 for every account. Being a
+  // contributing read inside a Promise.all rather than the page's own
+  // list, its emptiness folded into a wider view and nothing looked
+  // wrong, which is why it outlived the page that shared the defect.
   const supportOn = $derived(moduleEnabled('support'));
 
   let invoicesPage = $state<Paged<Invoice> | null>(null);
@@ -63,7 +71,7 @@
           // empty since the rename.
           fetchPaged<Asset>('/api/assets?limit=1000'),
           includeJobs
-            ? fetchPaged<Job>('/api/jobs?kind=field-service&limit=5000')
+            ? fetchPaged<Job>('/api/jobs?department=support&limit=5000')
             : Promise.resolve(null),
           // Open AR — pull invoices, filter client-side to unpaid.
           // Bounded at 10k; the OverflowBanner below surfaces

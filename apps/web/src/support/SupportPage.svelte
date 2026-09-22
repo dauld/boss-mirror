@@ -1,8 +1,19 @@
 <script lang="ts">
   // Support dashboard — port of apps/web/src/support/SupportPage.tsx.
   //
-  // Field-service-only view over /api/jobs filtered to kind=field-service,
-  // joined with accounts + systems for the tabs.
+  // A view over the SUPPORT DEPARTMENT's packets, joined with accounts
+  // + systems for the tabs.
+  //
+  // It read `kind=field-service` until 2026-09-22 (backlog 423a531d) —
+  // a TENANT workflow, authored only in that tenant's seed bundle and
+  // hardcoded into shared frontend, which this instance does not publish. Every number the page printed was
+  // structurally 0 against 5700 packets, and would have stayed 0 until
+  // someone authored that protocol here. `department=support` asks the
+  // question the page is actually about: the server resolves it to the
+  // kinds whose workflow row declares the department, so a Support
+  // protocol authored later is counted with no code change. Today that
+  // set is EMPTY — Support has no protocols yet — and an empty answer
+  // is now the true one rather than an artefact of the filter.
 
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import { appNow } from '@boss/web-kit/sim-clock';
@@ -70,7 +81,7 @@
     (async () => {
       try {
         const [jPaged, pResp, dPaged] = await Promise.all([
-          fetchPaged<Job>('/api/jobs?kind=field-service&limit=5000'),
+          fetchPaged<Job>('/api/jobs?department=support&limit=5000'),
           fetch('/api/people/accounts'),
           fetchPaged<Asset>('/api/assets?limit=1000'),
         ]);

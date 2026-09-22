@@ -23,6 +23,7 @@
   let {
     initialKind = '',
     initialKindPrefix = '',
+    initialDepartment = '',
     initialStatus = 'open',
     initialOwnerId = '',
     initialSubjectKind = '',
@@ -35,6 +36,16 @@
   } = $props<{
     initialKind?: string;
     initialKindPrefix?: string;
+    /// A department Class code. The listing narrows to the packets
+    /// whose workflow row declares it — the server's join, not this
+    /// page's guess. The Service queue and the Sales pipeline are
+    /// mounted with it; both used to be mounted with a hardcoded
+    /// `initialKind` naming a TENANT workflow this instance does not
+    /// publish, so both rendered a title and a permanent "No jobs
+    /// match" (backlog 423a531d, 2026-09-22). The code comes from the
+    /// route's own catalog entry (shell/nav-catalog.ts), beside its
+    /// path and its app.
+    initialDepartment?: string;
     initialStatus?: string;
     // #93: list-filter props. owner_id filters by Job.owner_id;
     // subjectKind+subjectId filter by Job.subject_kind+subject_id.
@@ -71,6 +82,7 @@
   $effect(() => {
     const k = kind;
     const kp = initialKindPrefix;
+    const dept = initialDepartment;
     const s = status;
     const o = initialOwnerId;
     const sk = initialSubjectKind;
@@ -81,6 +93,7 @@
     const params = new URLSearchParams();
     if (k) params.set('kind', k);
     if (kp) params.set('kind_prefix', kp);
+    if (dept) params.set('department', dept);
     if (s) params.set('status', s);
     if (o) params.set('owner_id', o);
     if (si) params.set('subject_id', si);

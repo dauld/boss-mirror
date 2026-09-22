@@ -16,7 +16,7 @@
   import { loadDepartments, departments } from '@boss/web-kit/session/departments.svelte';
   import AppShell from './shell/AppShell.svelte';
   import UpdateBar from './shell/UpdateBar.svelte';
-  import { appsFor, APP_SUBJECT_KINDS, type AppId } from './shell/nav-catalog';
+  import { appsFor, APP_SUBJECT_KINDS, ROUTE_CATALOG, type AppId } from './shell/nav-catalog';
   import { appForRoute, moduleForRoute, sectionForRoute } from './shell/sections';
   import { makeSurfaceOpenRecorder, postSurfaceOpen, routePattern } from './shell/surface-opens';
   import StepFocusPage from './steps/StepFocusPage.svelte';
@@ -287,14 +287,24 @@
     {:else if route.kind === 'jobDetail'}
       <JobDetailPage jobId={route.jobId} />
     {:else if route.kind === 'service'}
+      <!-- Both queues filter by DEPARTMENT, and the code comes from
+           the route's own catalog entry. They filtered on a hardcoded
+           workflow kind until 2026-09-22 — `field-service` and `sale`,
+           both authored only in a tenant's seed bundle — so each
+           rendered its title and then, correctly and permanently, "No
+           jobs match" (backlog 423a531d). A department runs several
+           protocols (Sales: receive-a-sponsorship AND
+           receive-an-inquiry), so no single kind could have been right
+           either; the server resolves the department to the kinds
+           whose workflow row declares it. -->
       <JobsListPage
-        initialKind="field-service"
+        initialDepartment={ROUTE_CATALOG.service.department ?? ''}
         initialStatus="open"
         pageTitle="Service queue"
       />
     {:else if route.kind === 'sales'}
       <JobsListPage
-        initialKind="sale"
+        initialDepartment={ROUTE_CATALOG.sales.department ?? ''}
         initialStatus="open"
         pageTitle="Sales pipeline"
       />
