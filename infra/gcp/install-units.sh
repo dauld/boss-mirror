@@ -297,6 +297,15 @@ run_summary_field summary \
 # one the forge installer uses: infra/ops/install-ops-runner.sh. Its
 # failure is loud but late — a red unit and a failed packet, carried to
 # the end rather than abandoning the rest of this mode.
+#
+# NOT A ROSTER ROW, BUT STILL BY ROLE. Since 2026-09-22 (backlog
+# cb9eb0f2) that script reads BOSS_NODE_ROLES itself and installs a
+# runner only where `ops-runner` is declared — the same declaration the
+# rows above are selected by, so this host's third loop answers to the
+# registry like its first two. The predicate is not repeated here: it
+# lives in the one definition, which is why both callers still call it
+# unconditionally. A host outside the role gets exit 0 and a `not in
+# role` verdict on the packet, never the refusal this block exits with.
 ops_runner_rc=0
 INSTALL_ETC="$TIMER_ETC" INSTALL_SYSTEMCTL="$TIMER_SYSTEMCTL" \
     bash "$REPO_ROOT/infra/ops/install-ops-runner.sh" boss-gcp || ops_runner_rc=$?

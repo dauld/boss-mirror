@@ -625,9 +625,13 @@ enum Commands {
         /// (`--park-probe` / `--park-expect` on `boss gate`, copied to
         /// the car's `proof_probe` / `proof_expect`) instead of one
         /// given here. `--verified` defaults to the car's summary.
-        /// Runs HERE, on this box — the arrival rule runs the same text
-        /// on the forge host, so a probe can pass one place and be
-        /// unrunnable in the other (f9304366).
+        /// Runs HERE, on this box — as you, with no timeout — but in
+        /// the environment the forge's own door builds: the sanctioned
+        /// reader first on PATH and the read-scoped identity and port
+        /// table exported, so the two doors run one text one way
+        /// (18fee481). A probe that names a tool this machine has and
+        /// the forge does not can still pass here and be unrunnable
+        /// there (f9304366); that mismatch is named, not refused.
         #[arg(long, conflicts_with_all = ["probe", "expect", "exit_only"])]
         from_car: bool,
         /// The machine's door: what the forge's ops-runner runs for a

@@ -24,12 +24,24 @@
 # the nineteen-day silence of 2026-09-10: it had no `when` at all.)
 #
 # WHY NOT A TRAIN'S ARRIVAL, which is when the drift actually changes.
-# A `when` helper is evaluated for EVERY event on its topic — the
-# expression language has no short-circuit (boss-expr `eval`, measured
-# 2026-09-19 on this car) — so `open_publish_exists` on
-# `jobs.job.closed` would put a jobs-API read on every packet close in
-# the system and a dead-letter on every blip. Daily asks it once, in
-# the verb, where the answer is already needed.
+# THE COST ARGUMENT IS RETIRED, and this paragraph is its record. It
+# used to argue from an evaluator that evaluated both operands of an
+# AND on every event, so `open_publish_exists` on `jobs.job.closed`
+# would have put a jobs-API read on every packet close in the system
+# and a dead-letter on every blip. 151d1e04 gave AND and OR a
+# short-circuit (boss-expr `eval`), so a cheap conjunct now buys the
+# helper on its right and such a guard would read the API only on the
+# closes that already matched `kind` and `outcome`.
+#
+# What survives the fix is the reason that was never about cost: a HELD
+# packet has to be re-measured on days when no train arrives at all —
+# the 2026-09-17 -> 09-18 hold above is the measurement — so an arrival
+# is the WRONG event, not merely an expensive one. Daily asks in the
+# verb, where the answer is already needed, and no day is skipped for
+# want of traffic. Backlog dd61e914 read the retired sentence and asked
+# for a guard back on this rule; `the_measurement_carries_no_dedup_guard`
+# (crates/core/boss-dispatcher/tests/refresh_publish_drift_rule.rs)
+# refuses one, for the reason the block above this gives.
 #
 # THE VERB IS ITS OWN FILE, NOT A MODE THIS RULE SELECTS. `jobs.spawn`
 # carries no args list, so a packet a rule files can only take a verb's

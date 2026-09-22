@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use boss_core::agent::{AgentId, AgentSpec, Cost, Message};
+use boss_core::agent::{AgentId, AgentSpec, Cost, Message, TokenUsage};
 use boss_core::port::{CostLedger, MessageQueue};
 use boss_cybernetics::http::{HttpState, router};
 use boss_events::bus::InMemoryEventBus;
@@ -127,8 +127,10 @@ async fn costs_default_window_is_hour() {
         .record(
             &planner,
             Cost {
-                input_tokens: 1,
-                output_tokens: 2,
+                tokens: TokenUsage::Split {
+                    input: 1,
+                    output: 2,
+                },
                 usd_micros: Some(300),
             },
         )

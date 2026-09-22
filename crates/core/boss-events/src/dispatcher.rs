@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 use boss_core::agent::{
     AgentId, AgentSpec, ClaimedMessage, Cost, Outcome, RunCompletion, RunHandle, RunId, RunStatus,
+    TokenUsage,
 };
 use boss_core::port::{AgentDispatcher, DispatchError, RunCompletions};
 use chrono::Utc;
@@ -38,8 +39,10 @@ impl StubDispatcher {
 impl Default for StubDispatcher {
     fn default() -> Self {
         Self::new(Cost {
-            input_tokens: 10,
-            output_tokens: 20,
+            tokens: TokenUsage::Split {
+                input: 10,
+                output: 20,
+            },
             usd_micros: Some(100),
         })
     }
@@ -193,8 +196,10 @@ mod tests {
     #[tokio::test]
     async fn dispatch_broadcasts_completion_with_synthetic_cost() {
         let d = StubDispatcher::new(Cost {
-            input_tokens: 1,
-            output_tokens: 2,
+            tokens: TokenUsage::Split {
+                input: 1,
+                output: 2,
+            },
             usd_micros: Some(3),
         });
         let s = spec("planner", 1);

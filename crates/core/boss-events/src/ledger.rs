@@ -116,6 +116,7 @@ impl CostLedger for InMemoryCostLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use boss_core::agent::TokenUsage;
 
     fn agent(slug: &str) -> AgentId {
         AgentId::try_new(slug).unwrap()
@@ -134,8 +135,10 @@ mod tests {
 
     fn cost(usd: u64) -> Cost {
         Cost {
-            input_tokens: 0,
-            output_tokens: 0,
+            tokens: TokenUsage::Split {
+                input: 0,
+                output: 0,
+            },
             usd_micros: Some(usd),
         }
     }
@@ -159,8 +162,10 @@ mod tests {
         l.record(
             &a,
             Cost {
-                input_tokens: 5,
-                output_tokens: 5,
+                tokens: TokenUsage::Split {
+                    input: 5,
+                    output: 5,
+                },
                 usd_micros: None,
             },
         )
@@ -172,7 +177,10 @@ mod tests {
             "unpriced is not free"
         );
         // The tokens are known on both entries and still add up.
-        assert_eq!(l.spent(&a, Window::LastHour).await.unwrap().input_tokens, 5);
+        assert_eq!(
+            l.spent(&a, Window::LastHour).await.unwrap().tokens.input(),
+            Some(5)
+        );
         assert!(
             l.check_budget(&a, &spec(&a, 150))
                 .await

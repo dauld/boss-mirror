@@ -200,6 +200,43 @@ fn run_lint(root: &Path, rel: &str) -> (i32, String, String) {
     )
 }
 
+/// How a lint's OWN verdict on the tree is reported by the sweep below.
+///
+/// WHY THIS IS NOT INLINE (backlog c68104cf, 2026-09-22). The sweep runs
+/// every roster lint, so it is where ANY lint's finding surfaces when a
+/// builder runs this crate's suite — and the two failures it can report
+/// are different in kind. "Printed no scanned count" is about this
+/// file's rule. "Exited 1" is the lint's own verdict about a line
+/// somewhere in the tree, usually a line the builder just wrote, and
+/// nothing to do with scanning at all. The builder of 3d18b741 edited a
+/// comment in one lint and watched a test named
+/// `every_preflight_lint_scans_something…` go red; the whole cost of
+/// that packet was the distance between those two sentences. The
+/// message is the thing that closes it, so it is a function with a test.
+fn lint_reported_a_finding(name: &str, code: i32, stdout_tail: &str, stderr_tail: &str) -> String {
+    format!(
+        "{name}: exited {code} — this is {name}'s OWN verdict on the tree, not a \
+         scanning-count failure and nothing to do with this test's rule. Read its \
+         output below and fix what it names; the file it reports is very likely one \
+         you just edited, even though you did not edit {name} itself. To see only \
+         this: bash infra/lint/{name}.sh\n  stdout:\n{stdout_tail}\n  stderr:\n{stderr_tail}"
+    )
+}
+
+#[test]
+fn a_lints_own_verdict_is_not_reported_as_a_scanning_failure() {
+    let msg = lint_reported_a_finding("api-path-bypass-smell", 1, "  [shell-dml] x.sh:3:#", "");
+    assert!(
+        msg.contains("OWN verdict") && msg.contains("not a scanning-count failure"),
+        "a lint that exited nonzero found something; saying it did not prove it \
+         looked at anything is a wrong verdict:\n{msg}"
+    );
+    assert!(
+        msg.contains("bash infra/lint/api-path-bypass-smell.sh"),
+        "the message hands back the one command that reproduces it alone:\n{msg}"
+    );
+}
+
 /// Every roster lint is a scanner that printed a positive count, or is
 /// listed above with a reason; and every listed name is still a lint.
 #[test]
@@ -233,6 +270,10 @@ fn every_preflight_lint_scans_something_or_says_why_it_is_not_a_scanner() {
         .iter()
         .filter(|(name, _)| !NOT_SCANNERS.iter().any(|(n, _)| *n == name.as_str()))
         .collect();
+    // Two different failures, kept apart so neither is described as the
+    // other (backlog c68104cf): `verdicts` are lints that found something
+    // in the tree, `failures` are lints that broke this file's rule.
+    let mut verdicts = Vec::new();
     let mut failures = Vec::new();
     for chunk in scanners.chunks(6) {
         let handles: Vec<_> = chunk
@@ -257,10 +298,11 @@ fn every_preflight_lint_scans_something_or_says_why_it_is_not_a_scanner() {
                     .join("\n")
             };
             if code != 0 {
-                failures.push(format!(
-                    "{name}: exited {code} on the tree\n  stdout:\n{}\n  stderr:\n{}",
-                    tail(&stdout),
-                    tail(&stderr)
+                verdicts.push(lint_reported_a_finding(
+                    &name,
+                    code,
+                    &tail(&stdout),
+                    &tail(&stderr),
                 ));
                 continue;
             }
@@ -280,6 +322,17 @@ fn every_preflight_lint_scans_something_or_says_why_it_is_not_a_scanner() {
             }
         }
     }
+    // Reported first and separately: a lint's own finding is the one a
+    // reader can act on, and it is the one they did not come here for.
+    assert!(
+        verdicts.is_empty(),
+        "{} of {} pre-flight lints REPORTED A FINDING on this tree (each exited \
+         nonzero). This test runs every roster lint, which is why their verdicts \
+         surface here; none of the below is about scanned counts:\n\n{}",
+        verdicts.len(),
+        scanners.len(),
+        verdicts.join("\n\n")
+    );
     assert!(
         failures.is_empty(),
         "{} of {} scanning lints did not prove they looked at anything:\n\n{}",

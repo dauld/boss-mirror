@@ -273,6 +273,14 @@ done
 # (CLAUDE.md §9a). It enables the timer itself, which is why the loop
 # below no longer appends it.
 #
+# CALLED UNCONDITIONALLY, AND IT DECIDES. Since 2026-09-22 (backlog
+# cb9eb0f2) the script reads BOSS_NODE_ROLES — which forge-converge
+# exported above from the estate registry — and installs a runner only
+# where the `ops-runner` role is declared. The predicate lives there,
+# once, so this caller and boss-gcp's cannot hold two answers to "which
+# hosts run a runner"; a host outside the role gets a skip line and
+# exit 0, not a refusal.
+#
 # ITS FAILURE IS LOUD BUT LATE, and that is why the rc is carried instead
 # of letting `set -e` act here: a runner that did not install deserves a
 # red unit and a packet on the `failed` terminal, but not at the price of

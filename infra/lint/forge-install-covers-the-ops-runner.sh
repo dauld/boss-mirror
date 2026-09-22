@@ -136,5 +136,55 @@ failed*) ;;
    cat "$sum_bad" 2>/dev/null >&2; cat "$tmp/out-refused" >&2; exit 1 ;;
 esac
 
-echo "forge-install-covers-the-ops-runner: self-test ok — 6 unit pairs installed into a scratch root, the ops runner from infra/ops with a forge drop-in (HOST_ID=forge, ExecStart from this checkout), 6 timers enabled, and the run's own summary carries the counts plus the ops runner's verdict — 'failed: …' and a non-zero exit when its timer will not enable, never an unconditional success line"
+# ---------------------------------------------------------------------
+# AND THE ROLE IS THE CAUSE, NOT A DESCRIPTION (backlog cb9eb0f2).
+#
+# Until 2026-09-22 both installers called install-ops-runner.sh
+# unconditionally and `ops-runner` in infra/estate/estate.toml was read
+# only by the world map. Three statements of "which hosts run a runner",
+# the third of them added AS the authority and the other two not knowing
+# it existed: remove the role from a host and the map stopped drawing
+# its runner while the runner kept running, and nothing disagreed out
+# loud (CLAUDE.md §9a). The declaration now decides, read ONCE inside
+# the one definition of how a host gets a runner — so the two callers
+# carry no copy of the predicate and cannot drift from it.
+#
+# Driven directly, because what varies here is the ROLE list and not the
+# caller: the roles each converge reads off the estate registry and
+# exports (infra/estate/node-roles.sh) are this script's whole input.
+# ---------------------------------------------------------------------
+role_run() { # <roles> <etc> <summary> <out>
+    mkdir -p "$2"
+    STUB_LOG="$tmp/systemctl-role.log" INSTALL_ETC="$2" \
+        INSTALL_SYSTEMCTL="$tmp/bin/systemctl" BOSS_RUN_SUMMARY_FILE="$3" \
+        BOSS_NODE_ROLES="$1" bash "$repo/infra/ops/install-ops-runner.sh" forge >"$4" 2>&1
+}
+: >"$tmp/systemctl-role.log"
+role_run "cluster-operator,ops-runner" "$tmp/etc-in-role" "$tmp/summary-in-role.json" "$tmp/out-in-role" \
+    || { cat "$tmp/out-in-role" >&2; fail "install-ops-runner exited non-zero for a host that DECLARES ops-runner"; }
+[ -f "$tmp/etc-in-role/boss-ops-runner.service" ] \
+    || fail "a host declaring ops-runner got no runner: $(cat "$tmp/out-in-role")"
+[ "$(jq -r '.ops_runner // ""' "$tmp/summary-in-role.json")" = "installed" ] \
+    || fail "the declaring host's summary does not record the runner as installed: $(cat "$tmp/summary-in-role.json")"
+
+# The negative is the one that matters: a host whose live roles do NOT
+# name ops-runner must not be given one by an installer that never read
+# the declaration. Exit 0, not a refusal — not being an ops-runner is a
+# correct outcome, and boss-gcp's units mode exits with THIS script's
+# code, so a non-zero here would red every converge on such a host.
+if ! role_run "cluster-operator" "$tmp/etc-not-in-role" "$tmp/summary-not-in-role.json" "$tmp/out-not-in-role"; then
+    echo "FAIL: install-ops-runner exited non-zero for a host outside the role:" >&2
+    cat "$tmp/out-not-in-role" >&2
+    echo "    Not being an ops-runner is a verdict, not a failure — and install-units.sh" >&2
+    echo "    exits with this code, so it would red every converge on such a host." >&2
+    exit 1
+fi
+[ ! -e "$tmp/etc-not-in-role/boss-ops-runner.service" ] \
+    || fail "a host whose roles (cluster-operator) do not name ops-runner was given a runner anyway — the declaration is still decorative (cb9eb0f2): $(cat "$tmp/out-not-in-role")"
+case "$(jq -r '.ops_runner // ""' "$tmp/summary-not-in-role.json" 2>/dev/null)" in
+"not in role"*) ;;
+*) fail "the skipped install is not recorded on the run summary by name: $(cat "$tmp/summary-not-in-role.json" 2>/dev/null)" ;;
+esac
+
+echo "forge-install-covers-the-ops-runner: self-test ok — 6 unit pairs installed into a scratch root, the ops runner from infra/ops with a forge drop-in (HOST_ID=forge, ExecStart from this checkout), 6 timers enabled, and the run's own summary carries the counts plus the ops runner's verdict — 'failed: …' and a non-zero exit when its timer will not enable, never an unconditional success line — and the ops-runner ROLE is what installs a runner: a host declaring it gets one, a host declaring cluster-operator alone gets none and says so on its packet, exit 0"
 exit 0

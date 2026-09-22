@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use boss_core::agent::{AgentId, AgentSpec, Cost, Message, Window};
+use boss_core::agent::{AgentId, AgentSpec, Cost, Message, TokenUsage, Window};
 use boss_core::event::Event;
 use boss_core::port::{CostLedger, MessageQueue};
 use boss_cybernetics::Cybernetics;
@@ -132,8 +132,10 @@ impl EventCursor {
 #[tokio::test]
 async fn happy_path_emits_full_telemetry_sequence() {
     let cost = Cost {
-        input_tokens: 10,
-        output_tokens: 20,
+        tokens: TokenUsage::Split {
+            input: 10,
+            output: 20,
+        },
         usd_micros: Some(500),
     };
     let h = boot(vec![planner_spec()], cost).await;
@@ -207,8 +209,10 @@ async fn budget_exhaustion_denies_dispatch() {
     let h = boot(
         vec![spec],
         Cost {
-            input_tokens: 0,
-            output_tokens: 0,
+            tokens: TokenUsage::Split {
+                input: 0,
+                output: 0,
+            },
             usd_micros: Some(100),
         },
     )
@@ -221,8 +225,10 @@ async fn budget_exhaustion_denies_dispatch() {
         .record(
             &agent,
             Cost {
-                input_tokens: 0,
-                output_tokens: 0,
+                tokens: TokenUsage::Split {
+                    input: 0,
+                    output: 0,
+                },
                 usd_micros: Some(50),
             },
         )

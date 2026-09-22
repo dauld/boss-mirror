@@ -1957,20 +1957,12 @@ impl Shell {
             })?,
             None => 60,
         };
-        let reader = var("BOSS_PROBE_READER_ACTOR").unwrap_or_else(|| READER_ACTOR.into());
-        let ports = std::fs::read_to_string(dir.join(SOR_PORTS_ENV))
-            .map(|t| sor_ports_table(&t))
-            .unwrap_or_default();
         Ok(Self {
-            path_prefix: Some(dir.join(PROBE_BIN)),
-            cwd: Some(dir),
+            path_prefix: None,
+            cwd: Some(dir.clone()),
             user: Some(user),
             timeout_secs: Some(timeout),
-            env: vec![
-                ("BOSS_JOBS_URL".into(), base.to_string()),
-                ("BOSS_SOR_USER".into(), reader_header(&reader)),
-                ("BOSS_SOR_PORTS".into(), ports),
-            ],
+            env: Vec::new(),
             // This verb's own write credential never reaches the
             // probe's text; `boss_jobs::probe::names_an_actor` refuses
             // a probe that sets one, and this is the other half.
@@ -1978,7 +1970,61 @@ impl Shell {
                 crate::identity::ACTOR_ENV.into(),
                 crate::identity::ACTOR_FILE_ENV.into(),
             ],
-        })
+        }
+        .with_probe_reader(Some(&dir), base))
+    }
+
+    /// THE ENVIRONMENT A RECORDED PROBE IS PROMISED, BUILT ONCE FOR
+    /// BOTH DOORS (backlog 18fee481, measured 2026-09-22). `tree` is the
+    /// checkout the reader and its port table are read out of — the
+    /// converged checkout at the unattended door, the operator's own
+    /// worktree at the hand door — and `base` is the system of record
+    /// the verb resolved.
+    ///
+    /// WHY THE HAND DOOR GETS IT TOO. `--from-car` exists so an operator
+    /// can rehearse locally what the forge will run, and its own help
+    /// says so; it ran that text with the caller's PATH and nothing
+    /// else, so `boss prove <car> --from-car` on the dev pod answered
+    /// `boss-sor-read not found` for every car whose probe reads the
+    /// system of record — which is most of them. The refusal was
+    /// correct (did-not-run, not failed) and the defect was upstream of
+    /// it: two doors onto one text, in two environments, and the flag
+    /// meant to make them agree was the one that did not. Nothing has to
+    /// be installed for this — the reader is IN THE TREE beside its
+    /// route table. Measured that hour: the shed sat at 8 of 12 cars
+    /// open past 24 h, oldest 108 h, with the forge's hourly recheck as
+    /// its only worker.
+    ///
+    /// The privilege is unchanged and server-enforced: the identity is
+    /// the READ-SCOPED reader, at both doors, and never
+    /// `operator:unidentified` — an unidentified read is answered with a
+    /// NARROWER WORLD silently, which is a green absence assertion
+    /// against a page the probe was never allowed to see (61085a9e). It
+    /// does not come from the tree, so a caller standing outside a
+    /// worktree is still handed it; what such a caller loses is the
+    /// reader on PATH, and a probe that needs it then says `not found`,
+    /// which is the honest did-not-run.
+    ///
+    /// What this does NOT make the same is the rest of the hand door:
+    /// the probe still runs HERE, as the operator, with no timeout and
+    /// with their own `BOSS_ACTOR` — `admit` already says so, and a
+    /// pod-local proof is the established shape for a claim only the
+    /// cluster can show.
+    pub(crate) fn with_probe_reader(mut self, tree: Option<&Path>, base: &str) -> Self {
+        let reader = std::env::var("BOSS_PROBE_READER_ACTOR")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| READER_ACTOR.into());
+        let ports = tree
+            .and_then(|t| std::fs::read_to_string(t.join(SOR_PORTS_ENV)).ok())
+            .map(|t| sor_ports_table(&t))
+            .unwrap_or_default();
+        self.path_prefix = tree.map(|t| t.join(PROBE_BIN));
+        self.env.push(("BOSS_JOBS_URL".into(), base.to_string()));
+        self.env
+            .push(("BOSS_SOR_USER".into(), reader_header(&reader)));
+        self.env.push(("BOSS_SOR_PORTS".into(), ports));
+        self
     }
 }
 
@@ -2245,7 +2291,24 @@ pub(crate) async fn run(
 ) -> Result<()> {
     let overriding = override_reason(probe_anyway.as_deref())?;
     let http = reqwest::Client::new();
-    let cars = all_ship_a_change_cars(&http, &crate::gate::resolve_jobs_base(None)?).await?;
+    let base = crate::gate::resolve_jobs_base(None)?;
+    let cars = all_ship_a_change_cars(&http, &base).await?;
+    // THE TREE THE PROBE'S READER COMES OUT OF (backlog 18fee481): the
+    // worktree the operator is standing in, which carries
+    // `infra/forge/probe-bin` by construction. Outside one there is no
+    // reader to put on PATH — say so here rather than let the probe
+    // report `boss-sor-read not found` as if the tool were missing from
+    // the machine, which is the reading that sent a session looking for
+    // an install that was never needed.
+    let tree = crate::brief::repo_root().ok();
+    if tree.is_none() {
+        eprintln!(
+            "boss prove: NOTE — this is not a checkout, so {PROBE_BIN} is not on the \
+             probe's PATH and a probe that reads the system of record will report \
+             `{reader}: command not found`. Run this from one.",
+            reader = boss_jobs::probe::SOR_READER,
+        );
+    }
     // `--recheck` RE-RUNS a recorded probe and writes nothing, so a
     // finished car is a legitimate target for it and for nothing else.
     // Every other path records a proof, which a closed or cancelled car
@@ -2289,7 +2352,11 @@ pub(crate) async fn run(
                  services that exist on the host they were written for, so re-running one \
                  elsewhere tests something else and usually fails.\n  \
                  Re-run it on {recorded}, or re-prove the car here to record a probe that \
-                 belongs to this host."
+                 belongs to this host — and if its probe is host-INdependent, which a probe \
+                 reading the system of record through the sanctioned reader is, \
+                 `boss prove {short} --from-car` runs that same text here and records the \
+                 proof: both doors now put the reader on PATH and export the same \
+                 read-scoped identity (18fee481)."
             ),
             Rerunnable::MissingDir { cwd } => bail!(
                 "CANNOT RE-RUN HERE — this proof was recorded in {cwd}, which does not exist \
@@ -2340,7 +2407,9 @@ pub(crate) async fn run(
         let cwd = rec.cwd.as_deref().filter(|d| !d.is_empty());
         let o = execute_with(
             &probe,
-            &Shell::here(cwd.map(Path::new)).with_car_instant(car_merge_ref(car)),
+            &Shell::here(cwd.map(Path::new))
+                .with_probe_reader(tree.as_deref(), &base)
+                .with_car_instant(car_merge_ref(car)),
         )?;
         // THREE READINGS, and which record they are read against
         // decides the sentence: a PROOF that fails now has decayed; an
@@ -2464,7 +2533,9 @@ pub(crate) async fn run(
     println!("boss prove: {short}  $ {probe}");
     let o = execute_with(
         &probe,
-        &Shell::here(None).with_car_instant(car_merge_ref(car)),
+        &Shell::here(None)
+            .with_probe_reader(tree.as_deref(), &base)
+            .with_car_instant(car_merge_ref(car)),
     )?;
     let at = now.to_rfc3339();
     match verdict(&probe, &o, expect.as_deref()) {
@@ -4445,6 +4516,88 @@ ugrep: warning: complete\": No such file or directory\n";
         assert_eq!(user["id"], READER_ACTOR);
         assert_eq!(user["role"], READER_ROLE);
         assert_eq!(user["access_tier"], "auditor");
+    }
+
+    /// THE HAND DOOR RUNS THE SAME TEXT IN THE SAME ENVIRONMENT
+    /// (backlog 18fee481, measured 2026-09-22). `--from-car` exists so
+    /// an operator can rehearse locally what the forge will run, and
+    /// its own help says so — but it ran that text with the operator's
+    /// PATH and nothing else, while the unattended door put
+    /// `infra/forge/probe-bin` first and exported the reader's identity
+    /// and port table. So the one flag whose purpose is to make the two
+    /// doors agree was the one that did not: every car whose probe
+    /// reads the system of record answered
+    /// `boss-sor-read not found` on the pod, and the shed sat at 8 of
+    /// 12 cars open past 24 h with the forge's hourly recheck as its
+    /// only worker. One construction, both doors (CLAUDE.md §9a): the
+    /// env this test compares is BUILT once, so it cannot drift.
+    #[test]
+    fn both_doors_hand_a_probe_the_same_reader_environment() {
+        let base = "http://sor.invalid:7900";
+        let unattended = Shell::unattended(base).expect("the unattended door builds");
+        // Its own checkout, so this holds wherever BOSS_PROBE_DIR points.
+        let hand = Shell::here(None).with_probe_reader(unattended.cwd.as_deref(), base);
+        assert_eq!(hand.env, unattended.env, "the promised env is one thing");
+        assert_eq!(hand.path_prefix, unattended.path_prefix);
+        // ...and the hand door is still the operator's own shell: here,
+        // as them, with no timeout (`admit` says so too — a probe that
+        // names an actor runs by hand and is only refused at the gate).
+        assert_eq!(hand.cwd, None);
+        assert_eq!(hand.user, None);
+        assert_eq!(hand.timeout_secs, None);
+    }
+
+    /// THE SANCTIONED READER IS ON THE PROBE'S PATH AND THE READER IS
+    /// NAMED. The measured refusal was `boss-sor-read not found`; the
+    /// tool is in the tree beside its route table, so nothing has to be
+    /// installed. And the identity it is handed is the read-scoped
+    /// actor — never unset (the reader refuses that) and never
+    /// `operator:unidentified`, which is answered with a narrower world
+    /// silently and makes an absence assertion pass against a page the
+    /// probe was never allowed to see (61085a9e).
+    #[test]
+    fn the_hand_door_puts_the_sanctioned_reader_on_the_probes_path() {
+        let root = boss_testing::repo_root();
+        let shell = Shell::here(None).with_probe_reader(Some(&root), "http://sor.invalid:7900");
+        let o = execute_with(
+            "command -v boss-sor-read > /dev/null || { echo no-reader; exit 1; }; \
+             printf '[%s][%s]\\n' \"$BOSS_JOBS_URL\" \"$BOSS_SOR_PORTS\"; \
+             printf '%s\\n' \"$BOSS_SOR_USER\"",
+            &shell,
+        )
+        .expect("bash runs");
+        assert_eq!(o.exit, 0, "{o:?}");
+        assert!(o.missing_tools.is_empty(), "{o:?}");
+        assert!(
+            o.stdout.contains("[http://sor.invalid:7900][jobs=7900"),
+            "{o:?}"
+        );
+        let user: Value = serde_json::from_str(o.stdout.lines().last().unwrap()).unwrap();
+        assert_eq!(user["id"], READER_ACTOR);
+        assert_eq!(user["role"], READER_ROLE);
+        assert_eq!(user["access_tier"], "auditor");
+        assert_ne!(user["id"], crate::identity::UNIDENTIFIED);
+    }
+
+    /// A DOOR WITH NO TREE STILL NAMES THE READER. Outside a worktree
+    /// there is no `probe-bin` to put on PATH and no port table to
+    /// read — a probe needing the reader then says `not found`, which
+    /// is the honest DID-NOT-RUN. What must not happen is the read
+    /// going out unidentified: the identity does not come from the
+    /// tree, so it is handed over either way.
+    #[test]
+    fn without_a_tree_the_reader_is_still_named_rather_than_unidentified() {
+        let shell = Shell::here(None).with_probe_reader(None, "http://sor.invalid:7900");
+        assert_eq!(shell.path_prefix, None);
+        let user = shell
+            .env
+            .iter()
+            .find(|(k, _)| k == "BOSS_SOR_USER")
+            .map(|(_, v)| v.clone())
+            .expect("the reader identity is not the tree's to give");
+        let user: Value = serde_json::from_str(&user).unwrap();
+        assert_eq!(user["id"], READER_ACTOR);
+        assert_ne!(user["id"], crate::identity::UNIDENTIFIED);
     }
 
     /// THE CAR'S OWN CONVERGED INSTANT IS PART OF THAT PROMISE

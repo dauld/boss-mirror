@@ -19,9 +19,11 @@ import {
   REGION_SECTIONS,
   SECTION_FOR_ROUTE,
   appForRoute,
+  moduleForRoute,
   sectionForRoute,
 } from './sections';
 import { ROUTE_CATALOG, appForSection } from './nav-catalog';
+import type { Route } from '../router';
 
 const catalogKeys = new Set(Object.keys(ROUTE_CATALOG));
 // Every section a route can light: the kind's own, plus the two a
@@ -99,5 +101,43 @@ describe('sections resolve in the nav catalog', () => {
     for (const s of HOME_CHROME_SECTIONS.keys()) {
       expect(appForSection(s), `${s} has a catalog entry now — drop its exception`).toBe('home');
     }
+  });
+});
+
+describe('the module gate a route answers to', () => {
+  // Backlog f9b43965: App.svelte carried a hand-written
+  // `routeRequiredModule` switch beside the catalog's own `module`
+  // field — one surface, two module ids. It named /ux/support's module
+  // 'shipping', so a direct visit to the support page answered
+  // "Shipments is not enabled" for a page with nothing to do with
+  // shipments, while the nav row was hidden on 'support'. Same
+  // CLAUDE.md §9a class as MODEL_ROUTES / MODEL_KINDS, and the same
+  // fix: one answer derived from the catalog, not a second list.
+
+  test('the support page is gated on support, not on shipping', () => {
+    expect(moduleForRoute({ kind: 'support' })).toEqual({ id: 'support', label: 'Support' });
+    expect(moduleForRoute({ kind: 'service' })).toEqual({ id: 'support', label: 'Service queue' });
+  });
+
+  test('a route requires exactly the module that hides its own nav row', () => {
+    // The drift this refuses: the module that HIDES a sidebar row and
+    // the module that gates the ROUTE behind it are one fact.
+    for (const kind of Object.keys(SECTION_FOR_ROUTE) as ReadonlyArray<Route['kind']>) {
+      const entry = (ROUTE_CATALOG as Record<string, { module?: string } | undefined>)[
+        SECTION_FOR_ROUTE[kind]
+      ];
+      expect(moduleForRoute({ kind } as Route)?.id ?? null, kind).toEqual(entry?.module ?? null);
+    }
+  });
+
+  test('a surface with no module in the catalog is never gated', () => {
+    // Entries without a `module` field are always-on — the catalog
+    // says so, and this is the only place that decides it.
+    expect(moduleForRoute({ kind: 'jobs' })).toBeNull();
+    expect(moduleForRoute({ kind: 'people' })).toBeNull();
+    expect(moduleForRoute({ kind: 'me' })).toBeNull();
+    // A department jobs view is one surface for every declared
+    // department: no catalog row, so nothing to gate it on.
+    expect(moduleForRoute({ kind: 'department', code: 'sales' })).toBeNull();
   });
 });

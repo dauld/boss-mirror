@@ -10,6 +10,7 @@
 use async_trait::async_trait;
 use boss_core::agent::{
     AgentId, AgentSpec, ClaimedMessage, Cost, Outcome, RunCompletion, RunHandle, RunId, RunStatus,
+    TokenUsage,
 };
 use boss_core::port::{AgentDispatcher, DispatchError, RunCompletions};
 use chrono::Utc;
@@ -160,8 +161,9 @@ impl AgentDispatcher for ClaudeCodeDispatcher {
                         let (response, cost) = parse_claude_output(&stdout);
                         info!(
                             agent = %agent,
-                            input_tokens = cost.input_tokens,
-                            output_tokens = cost.output_tokens,
+                            input_tokens = ?cost.tokens.input(),
+                            output_tokens = ?cost.tokens.output(),
+                            total_tokens = ?cost.tokens.total(),
                             "claude run completed"
                         );
                         Outcome::Success { cost, response }
@@ -256,16 +258,23 @@ fn parse_claude_output(stdout: &str) -> (serde_json::Value, Cost) {
         parsed.clone()
     };
 
-    // Token counts are nested under "usage".
+    // Token counts are nested under "usage" — both halves or neither.
+    // `unwrap_or(0)` until backlog e059a754: output the CLI printed
+    // without a usage block read as a measured zero, the same
+    // zero-means-unknown defect this type's money side lost in
+    // c6e2341c. `TokenUsage` can say unknown now, so it does.
     let usage = parsed.get("usage");
-    let input_tokens = usage
-        .and_then(|u| u.get("input_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let output_tokens = usage
-        .and_then(|u| u.get("output_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    let tokens = match (
+        usage
+            .and_then(|u| u.get("input_tokens"))
+            .and_then(|v| v.as_u64()),
+        usage
+            .and_then(|u| u.get("output_tokens"))
+            .and_then(|v| v.as_u64()),
+    ) {
+        (Some(input), Some(output)) => TokenUsage::Split { input, output },
+        _ => TokenUsage::Unreported,
+    };
 
     // Total cost is at the top level — and when it is absent, the
     // run is unpriced, not free (backlog c6e2341c).
@@ -274,14 +283,7 @@ fn parse_claude_output(stdout: &str) -> (serde_json::Value, Cost) {
         .and_then(|v| v.as_f64())
         .map(|usd| (usd * 1_000_000.0) as u64);
 
-    (
-        response,
-        Cost {
-            input_tokens,
-            output_tokens,
-            usd_micros,
-        },
-    )
+    (response, Cost { tokens, usd_micros })
 }
 
 struct BroadcastCompletions {
@@ -313,8 +315,13 @@ mod tests {
         let (_, cost) = parse_claude_output(
             r#"{"result":"hi","usage":{"input_tokens":10,"output_tokens":253}}"#,
         );
-        assert_eq!(cost.input_tokens, 10);
-        assert_eq!(cost.output_tokens, 253);
+        assert_eq!(
+            cost.tokens,
+            TokenUsage::Split {
+                input: 10,
+                output: 253
+            }
+        );
         assert_eq!(cost.usd_micros, None, "unpriced is not free");
 
         let (_, priced) = parse_claude_output(
@@ -325,5 +332,10 @@ mod tests {
         // Output we cannot parse came from a run that DID happen.
         let (_, unreadable) = parse_claude_output("not json at all");
         assert_eq!(unreadable.usd_micros, None);
+        // And output with no usage block at all counted nothing, which
+        // is not the same fact as counting zero (backlog e059a754).
+        let (_, uncounted) = parse_claude_output(r#"{"result":"hi","total_cost_usd":0.029}"#);
+        assert_eq!(uncounted.tokens, TokenUsage::Unreported);
+        assert_eq!(uncounted.usd_micros, Some(29_000), "priced all the same");
     }
 }

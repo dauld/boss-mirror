@@ -1190,6 +1190,14 @@ fn the_gcp_converge_still_reds_on_a_tag_the_registry_lacks() {
 const FORGE_INSTALL: &str = "infra/forge/install.sh";
 const FORGE_CONVERGE: &str = "infra/forge/forge-converge.sh";
 
+/// What the forge declares in infra/estate/estate.toml, and therefore
+/// what its converge hands its installer. Both roles matter to this
+/// file: `cluster-operator` is what brings the CLI these tests are
+/// about, and since 2026-09-22 (backlog cb9eb0f2) `ops-runner` is what
+/// installs the ops runner — until then the runner landed on every
+/// host regardless, which is what made the declaration decorative.
+const FORGE_ROLES: &str = "cluster-operator,ops-runner";
+
 /// The forge installer, driven into a scratch root the way
 /// infra/lint/forge-install-covers-the-ops-runner.sh drives it: a stub
 /// systemctl, no kubectl/talosctl download, the address file rendered
@@ -1254,7 +1262,14 @@ impl ForgeInstall {
 
     fn units_installed(&self) -> bool {
         self.etc.join("forge-converge.service").is_file()
-            && self.etc.join("boss-ops-runner.service").is_file()
+    }
+
+    /// Asked separately from the unit pairs, because it is answered by a
+    /// different declaration: the ops runner lands only where the host's
+    /// roles name `ops-runner` (backlog cb9eb0f2). A host that is not
+    /// one still converges every unit above it.
+    fn runner_installed(&self) -> bool {
+        self.etc.join("boss-ops-runner.service").is_file()
     }
 }
 
@@ -1265,9 +1280,13 @@ fn the_forge_installs_the_cli_for_cluster_operator_at_the_converged_sha_from_the
         return;
     }
     let f = ForgeInstall::new("ok");
-    let (rc, out) = f.run("cluster-operator", Some(SHA_A), &[]);
+    let (rc, out) = f.run(FORGE_ROLES, Some(SHA_A), &[]);
     assert_eq!(rc, 0, "{out}");
     assert!(f.units_installed(), "the units converge as before: {out}");
+    assert!(
+        f.runner_installed(),
+        "the forge declares ops-runner, so its converge installs one: {out}"
+    );
     let c = &f.case;
     assert_eq!(
         c.summary("cli_sha"),
@@ -1323,6 +1342,16 @@ fn a_host_without_the_role_installs_no_cli_and_says_so() {
         out.contains("cluster-operator not among this host's roles"),
         "{out}"
     );
+    // And neither role is declared here, so no ops runner either — the
+    // same reading of the same list, one installer down (cb9eb0f2).
+    assert!(
+        !f.runner_installed(),
+        "a host declaring only off-cluster-observer was given an ops runner: {out}"
+    );
+    assert!(
+        out.contains("does not declare the ops-runner role"),
+        "and the run says why it installed none: {out}"
+    );
 }
 
 /// The ordinary state of the first tick after a train: the checkout is
@@ -1335,11 +1364,11 @@ fn an_image_the_deploy_runner_has_not_built_yet_is_not_a_red_converge_on_the_for
         return;
     }
     let f = ForgeInstall::new("not-yet");
-    let (rc, out) = f.run("cluster-operator", Some(SHA_A), &[]);
+    let (rc, out) = f.run(FORGE_ROLES, Some(SHA_A), &[]);
     assert_eq!(rc, 0, "{out}");
     let _ = std::fs::remove_file(&f.case.summary);
 
-    let (rc, out) = f.run("cluster-operator", Some(SHA_D), &[]);
+    let (rc, out) = f.run(FORGE_ROLES, Some(SHA_D), &[]);
     assert_eq!(
         rc, 0,
         "a tag the deploy runner has not built yet must not red the forge converge: {out}"
@@ -1387,11 +1416,7 @@ fn a_real_cli_refusal_still_reds_the_forge_converge_with_the_units_installed() {
         return;
     }
     let f = ForgeInstall::new("refused");
-    let (rc, out) = f.run(
-        "cluster-operator",
-        Some(SHA_A),
-        &[("STUB_TOKEN_DOWN", "1".into())],
-    );
+    let (rc, out) = f.run(FORGE_ROLES, Some(SHA_A), &[("STUB_TOKEN_DOWN", "1".into())]);
     assert_ne!(rc, 0, "{out}");
     assert!(f.units_installed(), "the units installed regardless: {out}");
     assert!(
@@ -1423,7 +1448,7 @@ fn a_hand_run_without_a_converged_sha_installs_no_cli_and_says_so() {
         return;
     }
     let f = ForgeInstall::new("no-sha");
-    let (rc, out) = f.run("cluster-operator", None, &[]);
+    let (rc, out) = f.run(FORGE_ROLES, None, &[]);
     assert_eq!(rc, 0, "{out}");
     assert!(f.case.requests().is_empty(), "{:?}", f.case.requests());
     assert!(

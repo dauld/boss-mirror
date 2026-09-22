@@ -72,7 +72,11 @@ units = []
 # it). What the role carries is the DECLARATION: which hosts should be
 # answering, so the world map can draw a runner that has gone quiet
 # rather than nothing at all, and silence has something to be silence
-# from (backlog 49ed87b4).
+# from (backlog 49ed87b4). Since 2026-09-22 that declaration is also the
+# CAUSE (backlog cb9eb0f2): install-ops-runner.sh reads the host's live
+# roles and installs a runner only where this role names it, so a host
+# dropped from the role stops being converged as one instead of the map
+# alone forgetting it.
 units = []
 
 [roles.legacy-stack]

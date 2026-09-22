@@ -96,8 +96,12 @@ mirror_url = "https://github.com/algedonic-dev/boss"
 # is refused by the door. `ops-runner` names no units of its own: it
 # says this host should be ANSWERING ops-request packets, and it is
 # what lets the world map draw a runner that has gone quiet instead of
-# drawing nothing at all (backlog 49ed87b4). An adopter replaces every
-# row below with their own machines.
+# drawing nothing at all (backlog 49ed87b4) — and, since 2026-09-22
+# (backlog cb9eb0f2), what INSTALLS one: infra/ops/install-ops-runner.sh
+# reads the host's live roles, so dropping the role here stops the next
+# converge installing a runner rather than only stopping the map from
+# drawing it. An adopter replaces every row below with their own
+# machines.
 #
 # The `[[node]]` tables are read by boss_jobs::estate_seed (a TOML
 # parser); the flat keys above by the shell renderer. Neither reads the

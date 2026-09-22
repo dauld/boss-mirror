@@ -16,9 +16,10 @@ import type { Page, Route } from '@playwright/test';
 const json = (r: Route, body: unknown, status = 200): Promise<void> =>
   r.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
 
-/// Every module id the SPA gates on (nav-catalog `module`, App.svelte's
-/// routeRequiredModule, the Simulator tab and DebugGear), all on — the
-/// playground tenant's manifest, in the shape the tenant contract
+/// Every module id the SPA gates on (nav-catalog `module`, which since
+/// backlog f9b43965 also answers for the route gate through
+/// `moduleForRoute`, plus the Simulator tab and DebugGear), all on —
+/// the playground tenant's manifest, in the shape the tenant contract
 /// documents.
 export const MODULES_ON: Readonly<Record<string, boolean>> = {
   calendar: true, equipment: true, exec: true, finance: true, 'marketing-assets': true,

@@ -171,7 +171,34 @@ hits=0
 report() {  # $1 = category, $2 = "file:line:content"
     if allowlisted "$2"; then return; fi
     echo "  [$1] ${2}"
+    prose_note "$2"
     hits=$((hits + 1))
+}
+
+# prose_note "<file>:<line>:<content>" — when the refused line is a SENTENCE
+# about DML rather than DML, say so and name the repair.
+#
+# WHY (backlog c68104cf, 2026-09-22; hit by the builder of 3d18b741). The awk
+# lexer below strips ordinary shell comments before anything is classified, so
+# a prose line only reaches the classifier from INSIDE a heredoc or a quoted
+# block — where the opener decides read-versus-write, and `python3 - <<'PY'`
+# is not a text tool. The rule was right; its ADVICE was unfollowable. A
+# builder writing the WHY comment every change here carries was told to "put
+# it in a read position … a grep/awk/sed/echo/printf invocation, or a
+# *_PATTERN variable", and you cannot pipe a comment through grep. The repair
+# is to reword the sentence, and nothing said so. Nothing is excused: the
+# finding is still printed and $hits still counts it.
+prose_note() {
+    local rest content
+    rest="${1#*:}"       # drop file:
+    content="${rest#*:}" # drop line:
+    [[ "$content" =~ ^[[:space:]]*# ]] || return 0
+    echo "      ^ that line is PROSE, and it is still in write position. Ordinary"
+    echo "        shell comments are stripped before classification, so a comment"
+    echo "        only lands here from inside a heredoc or a quoted block, which"
+    echo "        is read off its OPENER. Nothing you can do to a sentence puts it"
+    echo "        in a read position — reword it to name the table rather than the"
+    echo "        statement (the \`nodes\` seed rows). (backlog c68104cf)"
 }
 
 # --- the shell classifier -----------------------------------------------------

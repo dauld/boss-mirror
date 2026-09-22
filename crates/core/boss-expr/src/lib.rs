@@ -21,11 +21,20 @@
 //!   - Function calls: name(arg, ...) — resolved against a helper-function
 //!     table the caller registers
 //!
-//! Two consumers share this DSL today:
+//! The crates that share this DSL today — the list is its own count,
+//! and it is pinned against their manifests by
+//! `the_header_names_every_crate_that_depends_on_the_dsl`
+//! (crates/core/boss-testing/tests/the_shared_dsl_prose_tracks_its_evaluator.rs),
+//! because the count word here said two while four crates depended on
+//! it (dd61e914):
 //!
 //!   1. `boss-dispatcher` rule predicates (`rule.when`) and rule handler
 //!      arg expressions (`do[].args`).
 //!   2. `boss-jobs` `step.ready_when` predicates.
+//!   3. `boss-views` View filters (`filter.rs`), and the index pushdown
+//!      that reads an expression's structure (`pushdown.rs`).
+//!   4. `boss-dispatcher-handlers` `ops.judge`, whose `when` arg is an
+//!      expression over the groups a verdict pattern captured.
 //!
 //! The shared-DSL decision is recorded in
 //! `docs/architecture-decisions.md` §Dispatcher — the event router.

@@ -20,7 +20,7 @@
 //     `sections.test.ts` pins every value now (CLAUDE.md §9a).
 
 import type { Route } from '../router';
-import { appForSection, type AppId } from './nav-catalog';
+import { ROUTE_CATALOG, appForSection, type AppId, type NavItem } from './nav-catalog';
 
 /// Sections that deliberately resolve to the Home app instead of a
 /// catalog entry, each with the reason. The bar for adding one is
@@ -77,6 +77,27 @@ export const REGION_SECTIONS: Readonly<Record<string, string>> = {
   receiving: 'system-receiving',
   marshalling: 'system-marshalling',
 };
+
+/// Which tenant module a route needs, and the label to say it with —
+/// or null when the surface is always-on.
+///
+/// DERIVED from the catalog entry the route lights, because the module
+/// that HIDES a sidebar row and the module that gates the ROUTE behind
+/// it are one fact. App.svelte carried the second copy as a
+/// hand-written `routeRequiredModule` switch, and it drifted exactly
+/// the way §9a says a fact that lives twice does: /ux/support was
+/// gated on 'shipping' while its nav row was gated on 'support', so a
+/// direct visit answered "Shipments is not enabled" for a page with
+/// nothing to do with shipments (backlog f9b43965, found by the
+/// /ux/support page audit 9876ef0d, 2026-09-19). The switch also
+/// listed no module for finance, warehouse, parts or products, whose
+/// nav rows the catalog hides — the same disagreement pointing the
+/// other way.
+export function moduleForRoute(route: Route): { id: string; label: string } | null {
+  const entry = (ROUTE_CATALOG as Record<string, NavItem | undefined>)[sectionForRoute(route)];
+  if (!entry?.module) return null;
+  return { id: entry.module, label: entry.label };
+}
 
 /// Which sidebar row a route lights.
 export function sectionForRoute(route: Route): string {
