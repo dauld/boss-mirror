@@ -71,11 +71,29 @@ describe('the borders join declared territories', () => {
       'gates→track',
       'track→arrivals',
       'arrivals→shed',
+      // The crossing OUT of the world (design cb38d806): what arrived
+      // on main is what a publish proposes to the public mirror.
+      'arrivals→publish',
       'gates→garage',
       'track→garage',
     ]) {
       expect(keys, hop).toContain(hop);
     }
+  });
+
+  it('hangs the publish dock off arrivals, on the sidings row below the line', () => {
+    const publish = territoryOf('publish')!;
+    const arrivals = territoryOf('arrivals')!;
+    const shed = territoryOf('shed')!;
+    const garage = territoryOf('garage')!;
+    expect(publish.y).toBeGreaterThanOrEqual(arrivals.y + arrivals.h);
+    expect(publish.y).toBe(garage.y);
+    expect(publish.x).toBe(arrivals.x);
+    expect(publish.x + publish.w).toBe(shed.x + shed.w);
+    // It leaves arrivals downwards, the way the garage does.
+    const p = borderPath(arrivals, publish);
+    expect(p.y1).toBe(arrivals.y + arrivals.h);
+    expect(p.y2).toBe(publish.y);
   });
 
   it('a border path runs from the facing edge of one territory to the facing edge of the other', () => {

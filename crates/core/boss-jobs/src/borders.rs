@@ -140,7 +140,7 @@ pub struct BorderSpec {
 /// build — the part an actor actually spends the time on — drawn
 /// nowhere. The two hops are the two events that were always
 /// distinct: a run OPENED on the packet, and its car PARKED.
-pub const BORDERS: [BorderSpec; 9] = [
+pub const BORDERS: [BorderSpec; 10] = [
     BorderSpec {
         from: "receiving",
         to: "marshalling",
@@ -189,6 +189,20 @@ pub const BORDERS: [BorderSpec; 9] = [
         crossing: "a landed car proven",
         machine: "boss prove",
         machine_kind: MachineKind::Actors,
+    },
+    // THE CROSSING OUT OF THE WORLD (design cb38d806, backlog
+    // eee42416). What arrived on main is what a publish proposes to the
+    // public mirror, so the publish region hangs off arrivals. One
+    // crossing is one pull request opened — the machine that opens it
+    // is the dispatcher rule, not the daily cadence that files the
+    // packet: the cadence measures the drift every day and most days
+    // close on `nothing-to-publish`, which is not a crossing.
+    BorderSpec {
+        from: "arrivals",
+        to: "publish",
+        crossing: "a snapshot of main proposed to the public mirror",
+        machine: "publish-github-pr-on-open-pr-ready",
+        machine_kind: MachineKind::DispatcherRule,
     },
     BorderSpec {
         from: "gates",
@@ -730,6 +744,40 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
             }
             Flow::of(w, stamps, waiting, holds)
         }
+        // A snapshot of main proposed to the public mirror (design
+        // cb38d806). One crossing per pull request OPENED, which is the
+        // `open-pr` step completing. What stands at the border is every
+        // PR the record still shows open, each with its own reason for
+        // standing there: a reading nobody judged, or simply a merge
+        // nobody has made — the second is a human gate by decision
+        // (David, 2026-09-19: the merge stays his hand act), so the
+        // hold says whose it is rather than implying a fault.
+        ("arrivals", "publish") => {
+            let Some(packets) = r.publish_packets else {
+                return Flow::unread("the publish-to-github packets could not be read");
+            };
+            let prs = crate::regions::publish_prs(packets);
+            let stamps: Vec<Instant> = prs.iter().map(|p| p.opened).collect();
+            let open: Vec<&crate::regions::PublishPr> = prs.iter().filter(|p| !p.merged).collect();
+            let holds = open
+                .iter()
+                .map(|p| {
+                    hold(
+                        &p.url,
+                        if p.unjudged_red() {
+                            p.reading()
+                        } else {
+                            "open on the mirror — the merge is a person's".to_string()
+                        },
+                    )
+                })
+                .collect();
+            // No `waiting_since`: what stands here waits on a PERSON to
+            // merge, not on this rule, and judging the rule against it
+            // would blame the machine for a gate the design made
+            // David's on purpose.
+            Flow::of(w, stamps, open.len(), holds)
+        }
         _ => Flow::unread("no crossing is declared for this border"),
     }
 }
@@ -1029,6 +1077,34 @@ mod tests {
         )
     }
 
+    /// One publish packet, shaped as the live ones are: the pull
+    /// request, its snapshot and the mirror head it was built on ride
+    /// `open-pr`; the scan reading rides `read-checks`.
+    fn publish_packet(
+        pr: &str,
+        snapshot: &str,
+        mirror_head: &str,
+        opened_at: &str,
+        reading: (&str, &str, &str),
+    ) -> (Job, Vec<Step>) {
+        let j = job(
+            crate::regions::PUBLISH_KIND,
+            "Publish to the public mirror",
+            JobStatus::Closed,
+            json!({}),
+        );
+        let mut open_pr = step(&j, "open-pr", StepStatus::Completed, Some(opened_at));
+        open_pr.metadata = json!({
+            "pr_url": pr,
+            "snapshot_commit": snapshot,
+            "mirror_head": mirror_head,
+        });
+        let mut checks = step(&j, "read-checks", StepStatus::Completed, Some(opened_at));
+        checks.metadata =
+            json!({ "conclusion": reading.0, "alerts": reading.1, "rules": reading.2 });
+        (j, vec![open_pr, checks])
+    }
+
     /// The map's inputs with nothing in them — every read answered.
     fn region_inputs<'a>(
         status: &'a YardStatus,
@@ -1055,6 +1131,7 @@ mod tests {
             runner_hosts: None,
             agent_runs: None,
             sessions: None,
+            publish_packets: None,
             run_capacity: None,
             now: t(NOW),
             window_hours: DEFAULT_WINDOW_HOURS,
@@ -1109,6 +1186,99 @@ mod tests {
         assert_eq!(b.rate.current, None, "a rate nobody measured is not zero");
         assert_eq!(b.rate.previous, None);
         assert!(b.why.contains("workflow registry"), "why: {}", b.why);
+    }
+
+    /// THE CROSSING OUT OF THE WORLD (design cb38d806). One pull
+    /// request opened is one crossing; what stands at the border is
+    /// every PR the record still shows open, and each hold says WHY it
+    /// stands — the reading when nobody judged it, the human gate when
+    /// that is all there is. An unread packet list is troubled, never a
+    /// quiet rail.
+    #[test]
+    fn a_pull_request_on_the_mirror_is_one_crossing_of_the_publish_border() {
+        let status = empty_status();
+        let publish = vec![
+            publish_packet(
+                "https://mirror/pull/240",
+                "snap-240",
+                "mirror-a",
+                "2026-09-19T09:00:00Z",
+                ("failure", "109", "14"),
+            ),
+            // This one's snapshot was built ON snap-240, so the
+            // mirror's main had reached it: #240 was merged. Nothing
+            // reaches snap-241, so #241 is the one still standing.
+            publish_packet(
+                "https://mirror/pull/241",
+                "snap-241",
+                "snap-240",
+                "2026-09-19T10:00:00Z",
+                ("success", "0", "0"),
+            ),
+        ];
+        let mut inputs = region_inputs(&status, &[], &[], &[], Some(&[]), Some(&[]));
+        inputs.publish_packets = Some(&publish);
+        let out = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
+        });
+        let b = only(&out, "arrivals", "publish");
+        // Two PRs opened in the window; #240 merged (a later snapshot
+        // sits on it), so only #241 stands.
+        assert_eq!(b.rate.samples, 2);
+        assert_eq!(b.waiting, Some(1));
+        assert_eq!(b.holds.len(), 1);
+        assert_eq!(b.holds[0].what, "https://mirror/pull/241");
+        assert!(
+            b.holds[0].why.contains("the merge is a person's"),
+            "why: {}",
+            b.holds[0].why
+        );
+
+        // Unread: no rate, no queue, and the sentence names the read.
+        let mut blind = region_inputs(&status, &[], &[], &[], Some(&[]), Some(&[]));
+        blind.publish_packets = None;
+        let out = borders(&BorderInputs {
+            regions: &blind,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
+        });
+        let b = only(&out, "arrivals", "publish");
+        assert_eq!(b.state, RegionState::Troubled);
+        assert_eq!(b.waiting, None);
+        assert!(b.why.contains("publish-to-github"), "why: {}", b.why);
+    }
+
+    /// A PR whose reading nobody judged carries THE READING at the
+    /// border too — the hold is what the scan said, not that something
+    /// is wrong (a verdict must name what failed).
+    #[test]
+    fn an_unjudged_red_reading_is_the_publish_borders_hold_reason() {
+        let status = empty_status();
+        let publish = vec![publish_packet(
+            "https://mirror/pull/239",
+            "snap-239",
+            "mirror-a",
+            "2026-09-19T09:00:00Z",
+            ("failure", "109", "14"),
+        )];
+        let mut inputs = region_inputs(&status, &[], &[], &[], Some(&[]), Some(&[]));
+        inputs.publish_packets = Some(&publish);
+        let out = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
+        });
+        let b = only(&out, "arrivals", "publish");
+        assert_eq!(b.holds.len(), 1);
+        assert!(
+            b.holds[0].why.contains("failure")
+                && b.holds[0].why.contains("109")
+                && b.holds[0].why.contains("14"),
+            "why: {}",
+            b.holds[0].why
+        );
     }
 
     #[test]

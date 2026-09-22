@@ -90,6 +90,13 @@ pub(super) struct MapRows {
     agent_runs: Option<Vec<(Job, Vec<Step>)>>,
     /// The crews standing on it: the open `work-session` packets.
     sessions: Option<Vec<Job>>,
+    /// THE PUBLISH REGION'S PACKETS (design cb38d806): the newest
+    /// `publish-to-github` packets with their steps — the pull request,
+    /// its scan reading and the mirror heads that say whether anyone
+    /// merged it. NOT windowed: a PR nobody merged is what the region
+    /// exists to show, and it outlives every window. `None` on a failed
+    /// read — a troubled region, never a mirror that reads as current.
+    publish_packets: Option<Vec<(Job, Vec<Step>)>>,
     /// The bound those runs are read against, from the agents registry.
     run_capacity: Option<usize>,
 }
@@ -115,6 +122,7 @@ impl MapRows {
             runner_hosts: self.runner_hosts.as_deref(),
             agent_runs: self.agent_runs.as_deref(),
             sessions: self.sessions.as_deref(),
+            publish_packets: self.publish_packets.as_deref(),
             run_capacity: self.run_capacity,
             now,
             window_hours,
@@ -153,6 +161,7 @@ pub(super) async fn read_map<R: JobsRepository + 'static, B: EventBus + 'static>
             runner_hosts: Some(Vec::new()),
             agent_runs: Some(Vec::new()),
             sessions: Some(Vec::new()),
+            publish_packets: Some(Vec::new()),
             run_capacity: None,
         });
     }
@@ -362,6 +371,13 @@ pub(super) async fn read_map<R: JobsRepository + 'static, B: EventBus + 'static>
         None => None,
     };
 
+    // THE PUBLISH REGION (design cb38d806): the newest publish packets,
+    // with steps. No `closed_since` — a pull request nobody merged is
+    // exactly what this region shows, and it outlives any window; the
+    // page cap below is the only bound, and it is generous against a
+    // DAILY cadence.
+    let publish_packets = read_publish_packets(state, scope.clone()).await;
+
     Ok(MapRows {
         read,
         closed_trains,
@@ -373,8 +389,38 @@ pub(super) async fn read_map<R: JobsRepository + 'static, B: EventBus + 'static>
         runner_hosts,
         agent_runs,
         sessions,
+        publish_packets,
         run_capacity,
     })
+}
+
+/// How many publish packets the map reads. The cadence is daily, so
+/// this is a season of them — and a limit is not a filter: the merge
+/// test below reads every mirror head in the page, and a page that
+/// ended mid-history could call a merged PR open. Well clear of that.
+const PUBLISH_TAIL: i64 = 60;
+
+/// The publish packets, newest first, with their steps — the pull
+/// request and its snapshot ride `open-pr`, the scan reading rides
+/// `read-checks`, and the judgement is `judge-checks`'s status. `None`
+/// on any failed read: the region then says the read failed rather
+/// than drawing a mirror with nothing outstanding.
+async fn read_publish_packets<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &Arc<JobsApiState<R, B>>,
+    scope: crate::port::JobScope,
+) -> Option<Vec<(Job, Vec<Step>)>> {
+    let filter = JobFilter {
+        kind: Some(regions::PUBLISH_KIND.to_string()),
+        scope,
+        ..Default::default()
+    };
+    let (rows, _) = state.jobs.list_jobs(&filter, PUBLISH_TAIL, 0).await.ok()?;
+    let mut out = Vec::with_capacity(rows.len());
+    for job in rows {
+        let steps = state.jobs.list_steps(&job.id).await.ok()?;
+        out.push((job, steps));
+    }
+    Some(out)
 }
 
 /// The shop floor's runs: open ones WITH their steps (a run that

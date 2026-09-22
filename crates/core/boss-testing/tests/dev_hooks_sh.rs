@@ -77,6 +77,7 @@ impl Fixture {
                  n=$(ls \"{log}\" 2>/dev/null | wc -l)\n\
                  d=\"{log}/$n\"; mkdir -p \"$d\"\n\
                  for a in \"$@\"; do printf '%s\\0' \"$a\"; done > \"$d/argv\"\n\
+                 printf '%s' \"${{BOSS_SESSION_AGENT_DEFINITIONS:-}}\" > \"$d/definitions_env\"\n\
                  cat > \"$d/stdin\"\n\
                  [ \"$2\" = patch ] && cp \"$4\" \"$d/body\"\n\
                  {exit_early}\n\
@@ -139,6 +140,18 @@ impl Fixture {
         out
     }
 
+    /// What `BOSS_SESSION_AGENT_DEFINITIONS` held for the n-th `boss`
+    /// call — the snapshot the dispatch door reads (backlog e1c4dc93).
+    fn definitions_env(&self, n: usize) -> String {
+        std::fs::read_to_string(
+            self.root
+                .join("boss-calls")
+                .join(n.to_string())
+                .join("definitions_env"),
+        )
+        .unwrap_or_default()
+    }
+
     /// Run one hook with `payload` on stdin and the stub bin dir on
     /// PATH (`with_bin`), or a PATH with no `boss` at all.
     fn run(&self, hook: &str, payload: &str, with_bin: bool) -> (i32, String, String) {
@@ -175,6 +188,13 @@ impl Fixture {
 fn start_payload(source: &str) -> String {
     format!(
         r#"{{"session_id":"s-1","transcript_path":"/x/t.jsonl","cwd":"/work/boss","hook_event_name":"SessionStart","source":"{source}"}}"#
+    )
+}
+
+fn start_payload_in(source: &str, cwd: &Path) -> String {
+    format!(
+        r#"{{"session_id":"s-1","transcript_path":"/x/t.jsonl","cwd":"{cwd}","hook_event_name":"SessionStart","source":"{source}"}}"#,
+        cwd = cwd.display()
     )
 }
 
@@ -443,6 +463,105 @@ fn agent_start_dispatches_through_the_door_and_hands_back_its_answer() {
     assert_eq!(
         f2.calls("boss-calls")[0].0,
         ["dispatch", "-", "--from-hook"]
+    );
+}
+
+/// WHAT THIS SESSION LOADED, snapshotted at the one moment Claude Code
+/// reads the definitions directory (backlog e1c4dc93). A car that adds
+/// `.claude/agents/effort-high.md` lands under sessions already
+/// running; those sessions cannot load it, and the dispatch door would
+/// name it on the Agent call. Measured live 2026-09-22: the harness
+/// answers `Agent type 'effort-ultra-nonexistent' not found. Available
+/// agents: …` — loud and immediate, never a silent fallback — but only
+/// after the door has claimed the step and filed the run. The snapshot
+/// is what lets the door refuse first instead. A RESUME loads the
+/// directory again, so it is written there too.
+#[test]
+fn session_start_snapshots_the_definitions_this_session_loaded() {
+    let f = Fixture::new("start-definitions");
+    f.stub_boss(false);
+    let project = f.root.join("project");
+    let agents = project.join(".claude").join("agents");
+    boss_testing::create_dir(&agents);
+    for name in ["effort-low", "effort-medium"] {
+        std::fs::write(agents.join(format!("{name}.md")), "---\n").expect("a definition");
+    }
+    std::fs::write(agents.join("notes.txt"), "not a definition").expect("a stray file");
+
+    let (code, _, err) = f.run(
+        "session-start.sh",
+        &start_payload_in("startup", &project),
+        true,
+    );
+    assert_eq!(code, 0, "{err}");
+    let snapshot = f.state.join("s-1").join("definitions");
+    let loaded = std::fs::read_to_string(&snapshot).expect("the snapshot is written");
+    let mut names: Vec<&str> = loaded.split_whitespace().collect();
+    names.sort_unstable();
+    assert_eq!(names, ["effort-low", "effort-medium"], "{loaded:?}");
+
+    // A resume reads the directory again — and the definition that
+    // landed since is in the snapshot the resumed session gets.
+    std::fs::write(agents.join("effort-high.md"), "---\n").expect("a third definition");
+    let (code, _, err) = f.run(
+        "session-start.sh",
+        &start_payload_in("resume", &project),
+        true,
+    );
+    assert_eq!(code, 0, "{err}");
+    let loaded = std::fs::read_to_string(&snapshot).expect("the snapshot is rewritten");
+    assert!(
+        loaded.split_whitespace().any(|n| n == "effort-high"),
+        "{loaded:?}"
+    );
+
+    // No definitions directory at all: an EMPTY snapshot, which says
+    // this session loaded none — not an ABSENT one, which says nothing
+    // is known and refuses nothing.
+    let f2 = Fixture::new("start-definitions-absent");
+    f2.stub_boss(false);
+    let bare = f2.root.join("bare");
+    boss_testing::create_dir(&bare);
+    let (code, _, err) = f2.run(
+        "session-start.sh",
+        &start_payload_in("startup", &bare),
+        true,
+    );
+    assert_eq!(code, 0, "{err}");
+    let snapshot = f2.state.join("s-1").join("definitions");
+    assert!(
+        snapshot.is_file(),
+        "the snapshot exists even when the directory does not"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&snapshot).expect("readable").trim(),
+        ""
+    );
+}
+
+/// The dispatch door reads the snapshot through the environment, so
+/// the hook that has the session's state directory is the one that
+/// names the file (backlog e1c4dc93).
+#[test]
+fn agent_start_hands_the_door_this_sessions_definitions() {
+    let f = Fixture::new("agent-start-definitions");
+    f.stub_boss(false);
+    std::fs::create_dir_all(f.state.join("s-1")).unwrap();
+    std::fs::write(f.state.join("s-1").join("packet"), format!("{SESSION}\n")).unwrap();
+    std::fs::write(f.state.join("s-1").join("definitions"), "effort-high\n").unwrap();
+    let (code, _, err) = f.run(
+        "agent-start.sh",
+        &agent_payload("PreToolUse", "Build it.\\nPacket: da925366", ""),
+        true,
+    );
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        f.definitions_env(0),
+        f.state
+            .join("s-1")
+            .join("definitions")
+            .display()
+            .to_string()
     );
 }
 

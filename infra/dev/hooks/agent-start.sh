@@ -20,6 +20,11 @@ session_dir
 session_packet
 need_boss
 mkdir -p "$dir/runs" 2>/dev/null || bail "cannot create $dir/runs"
+# The definitions THIS session loaded (backlog e1c4dc93), written by
+# session-start.sh: the door refuses a dispatch whose effort selects one
+# this session cannot load, rather than letting the Agent call fail
+# after the claim and the run are filed.
+export BOSS_SESSION_AGENT_DEFINITIONS="$dir/definitions"
 err="$dir/dispatch.$$.err"
 answer=$(printf '%s' "$payload" | boss dispatch "${packet:--}" --from-hook 2>"$err")
 status=$?

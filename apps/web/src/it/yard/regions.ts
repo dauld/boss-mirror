@@ -21,7 +21,7 @@ import { fetchRemote, type Remote } from '../../data/remote';
 // Wire types — the shape of GET /api/yard/regions. Parsed once, below.
 // ---------------------------------------------------------------------
 
-/** The nine regions, in map order. The server's
+/** The ten regions, in map order. The server's
  *  `boss_jobs::regions::REGIONS` is the decision (0524fc95 Q2); this
  *  is the client's copy, pinned equal by regions.test.ts. */
 export const REGION_NAMES = [
@@ -34,6 +34,7 @@ export const REGION_NAMES = [
   'receiving',
   'marshalling',
   'shop-floor',
+  'publish',
 ] as const;
 export type RegionName = (typeof REGION_NAMES)[number];
 

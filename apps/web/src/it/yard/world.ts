@@ -5,6 +5,7 @@
 //
 //     receiving -> marshalling -> shop-floor -> dock -> gates -> track -> arrivals -> shed
 //                                                         \-> garage (a siding off gates / track)
+//                                                                          \-> publish (a siding off arrivals)
 //
 // — and the BORDERS between them are declared here, each a track
 // segment WorldMap.svelte draws between two territories. Car 2 hangs
@@ -16,7 +17,7 @@
 //
 // NOTHING HERE IS A PIXEL SOMEONE PLACED BY HAND: the line is one rule
 // (a slot per hop), the garage spans the two territories it hangs off,
-// and a ninth region is a row in this file plus a border, pinned by
+// and a further region is a row in this file plus a border, pinned by
 // world.test.ts against the server's REGIONS.
 
 import type { RegionName } from './regions';
@@ -78,11 +79,29 @@ const garage: Territory = {
   h: 120,
 };
 
-export const TERRITORIES: ReadonlyArray<Territory> = [...line, garage];
+// The publish dock: the crossing OUT of this world (design cb38d806,
+// backlog eee42416). What arrived on main is what a publish proposes to
+// the public mirror, so it is a siding under arrivals and the shed —
+// the same row as the garage, at the far end of the line, because a
+// packet that reaches it has left the yard's own loop.
+const arrivalsSlot = LINE.indexOf('arrivals');
+const shedSlot = LINE.indexOf('shed');
+const publish: Territory = {
+  name: 'publish',
+  x: slotX(arrivalsSlot),
+  y: garage.y,
+  w: slotX(shedSlot) + LINE_W - slotX(arrivalsSlot),
+  h: garage.h,
+};
 
-/** The line's hops, in flow order, then the garage's two feeders. */
+export const TERRITORIES: ReadonlyArray<Territory> = [...line, garage, publish];
+
+/** The line's hops, in flow order, then the crossing out to the mirror
+ *  and the garage's two feeders — the same set and order as the
+ *  server's `boss_jobs::borders::BORDERS`, pinned by borders.test.ts. */
 export const BORDERS: ReadonlyArray<Border> = [
   ...LINE.slice(1).map((to, i): Border => ({ from: LINE[i]!, to })),
+  { from: 'arrivals', to: 'publish' },
   { from: 'gates', to: 'garage' },
   { from: 'track', to: 'garage' },
 ];

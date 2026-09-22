@@ -55,6 +55,7 @@ const PAYLOAD = {
     { name: 'receiving', count: 4, state: 'busy', why: '4 inbound, oldest 5 days', trend: { metric: 'inbound', unit: 'per day', current: 4, previous: 6, samples: 4, previous_samples: 6 } },
     { name: 'marshalling', count: null, state: 'troubled', why: 'the station registry could not be read', trend: { metric: 'served', unit: 'per day', current: null, previous: null, samples: 0, previous_samples: 0 } },
     { name: 'shop-floor', count: 2, bound: 6, state: 'clear', why: '2 runs in flight, 1 crew on the floor', trend: { metric: 'build duration', unit: 'minutes', current: 64, previous: 58, samples: 5, previous_samples: 4 }, machines: [{ id: 'session:s1', name: 'claude@algedonic.dev', state: 'running', why: 'last prompt 3 min ago; 2 runs in flight' }] },
+    { name: 'publish', count: 1, state: 'troubled', why: 'https://mirror/pull/240 — the scan read failure — 109 alert(s) over 14 rule(s), no disposition recorded', trend: { metric: 'publishes', unit: 'per day', current: 1, previous: 1, samples: 1, previous_samples: 1 } },
   ],
 };
 

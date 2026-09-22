@@ -36,13 +36,15 @@ use serde_json::Value;
 use crate::registry::WorkflowSpec;
 use crate::yard::{ConductorHealth, Reading, YardStatus};
 
-/// The nine regions, in map order. The count and the order are the
-/// decision (0524fc95 Q2); a reader that finds a tenth name has an
+/// The ten regions, in map order. The count and the order are the
+/// decision (0524fc95 Q2); a reader that finds an eleventh name has an
 /// older or newer server than it expects. `shop-floor` is the ninth
 /// (backlog 94c6ffd0): the region UPSTREAM of the dock, where a car is
-/// still being built — appended rather than inserted, so the names a
-/// client already knows keep their place.
-pub const REGIONS: [&str; 9] = [
+/// still being built. `publish` is the tenth (design cb38d806, backlog
+/// eee42416): the crossing OUT of the world, where what landed on main
+/// is proposed to the public GitHub mirror. Both were appended rather
+/// than inserted, so the names a client already knows keep their place.
+pub const REGIONS: [&str; 10] = [
     "dock",
     "gates",
     "track",
@@ -52,6 +54,7 @@ pub const REGIONS: [&str; 9] = [
     "receiving",
     "marshalling",
     "shop-floor",
+    "publish",
 ];
 
 /// The trend window when the caller names none: a day, the shortest
@@ -231,6 +234,146 @@ pub const SESSION_KIND: &str = "work-session";
 /// hours; this is only where the floor stops crediting it with work.
 pub const CREW_IDLE_HOURS: i64 = 1;
 
+/// THE PUBLISH PACKET'S KIND (design cb38d806). One `publish-to-github`
+/// packet is one day's measurement of the drift between the forge and
+/// the public mirror; the ones that found drift opened a pull request.
+pub const PUBLISH_KIND: &str = "publish-to-github";
+
+/// How long a mirror pull request may stand before the publish is
+/// STALLED. Design cb38d806 §4, decided by David 2026-09-19: "a stalled
+/// publish (open PR older than 24 h, or a red reading unjudged) looks
+/// troubled on the surface". The target it serves is §1 — a publish PR
+/// every day there is drift, sized like a day of trains — which a PR
+/// left standing defeats: #239 carried 1319 files in one commit because
+/// the publishes before it had never been merged, and the scan's own
+/// footnote says a change that large reads as all-new code.
+pub const STALLED_PUBLISH_HOURS: i64 = 24;
+
+/// ONE MIRROR PULL REQUEST, as the publish packet recorded it — the
+/// `open-pr` step's own fields, the `read-checks` reading, and whether
+/// `judge-checks` judged it. NOTHING HERE IS FETCHED FROM THE MIRROR:
+/// the readback car (backlog 321f1409) put the scan on the packet
+/// precisely so a surface could read it with no credential and no
+/// second opinion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishPr {
+    /// The pull request, as the verb recorded it.
+    pub url: String,
+    /// The snapshot commit the PR proposes — the object the mirror's
+    /// main BECOMES when a person merges it, which is what makes the
+    /// merge readable from the record (see [`publish_prs`]).
+    pub snapshot: String,
+    /// When `open-pr` completed: the instant the PR was opened.
+    pub opened: Instant,
+    /// The scan's conclusion as the mirror spells it (`success`,
+    /// `failure`, `absent`…). EMPTY when `read-checks` has not
+    /// completed — which is not a pass, and is why [`Self::unjudged_red`]
+    /// asks for a conclusion that was actually read.
+    pub conclusion: String,
+    /// The reading's own numbers, as the step recorded them — the
+    /// region says the reading, never a symptom (design cb38d806 §4).
+    pub alerts: String,
+    pub rules: String,
+    /// `judge-checks` completed: a disposition per rule is on the
+    /// packet. A SKIPPED judge is not a judgement — the workflow skips
+    /// it only when the scan concluded `success`, which the conclusion
+    /// already says.
+    pub judged: bool,
+    /// True when the record shows the mirror's main reached
+    /// [`Self::snapshot`] — that is, a person merged it.
+    pub merged: bool,
+}
+
+impl PublishPr {
+    /// A RED READING NOBODY JUDGED: the scan was read, it did not
+    /// conclude `success`, and no disposition was recorded. This is
+    /// design cb38d806 §2's defect exactly — "a red badge on the mirror
+    /// with no reading in the system of record is the defect" — and PR
+    /// #238 was merged over 64 unread alerts because nothing said so.
+    pub fn unjudged_red(&self) -> bool {
+        !self.conclusion.is_empty() && self.conclusion != "success" && !self.judged
+    }
+
+    /// The READING, in the words the region carries. An alarm that
+    /// reports a symptom sends a human to re-derive what the system
+    /// already recorded (CLAUDE.md §Diagnosis), so the sentence names
+    /// the conclusion and both counts the step wrote down.
+    pub fn reading(&self) -> String {
+        format!(
+            "the scan read {} — {} alert(s) over {} rule(s), no disposition recorded",
+            self.conclusion, self.alerts, self.rules
+        )
+    }
+}
+
+/// Every mirror head the publish packets recorded: each `open-pr`
+/// step's `mirror_head` (the parent its snapshot was built on) and each
+/// packet's `drift_refresh.mirror_head` (the daily measurement). A
+/// snapshot commit is a NEW object, so it can appear in this set only
+/// after the mirror's main reached it — which happens only when a
+/// person merges the pull request. That is the whole merge test, and it
+/// needs no credential and no second read.
+fn mirror_heads(packets: &[(Job, Vec<Step>)]) -> std::collections::HashSet<String> {
+    packets
+        .iter()
+        .flat_map(|(job, steps)| {
+            let drift = job
+                .metadata
+                .get("drift_refresh")
+                .map(|d| md_str(d, "mirror_head").to_string());
+            let open_pr = find_step(steps, "open-pr", "open-pr")
+                .map(|s| md_str(&s.metadata, "mirror_head").to_string());
+            [drift, open_pr]
+        })
+        .flatten()
+        .filter(|h| !h.is_empty())
+        .collect()
+}
+
+/// The pull requests the publish packets opened, newest first — one per
+/// packet that reached `open-pr`, with its reading and its merge state.
+///
+/// A PR the mirror has not absorbed reads OPEN. The record cannot see a
+/// merge until the next measurement of the mirror's head (the daily
+/// drift refresh, or the next publish's snapshot), so a PR merged in
+/// that gap reads open until then. That is a LATE reading, not an
+/// invented one, and it errs in the same direction every region here
+/// does: never quiet where the record has not spoken.
+pub fn publish_prs(packets: &[(Job, Vec<Step>)]) -> Vec<PublishPr> {
+    let heads = mirror_heads(packets);
+    let mut prs: Vec<PublishPr> = packets
+        .iter()
+        .filter_map(|(_, steps)| {
+            let open_pr = find_step(steps, "open-pr", "open-pr")?;
+            let opened = step_done_at(Some(open_pr))?;
+            let url = md_str(&open_pr.metadata, "pr_url").to_string();
+            if url.is_empty() {
+                return None;
+            }
+            let snapshot = md_str(&open_pr.metadata, "snapshot_commit").to_string();
+            let checks = find_step(steps, "read-checks", "read-checks");
+            let judge = find_step(steps, "judge-checks", "judge-checks");
+            let read = |key: &str| {
+                checks
+                    .map(|s| md_str(&s.metadata, key).to_string())
+                    .unwrap_or_default()
+            };
+            Some(PublishPr {
+                merged: !snapshot.is_empty() && heads.contains(&snapshot),
+                url,
+                snapshot,
+                opened,
+                conclusion: read("conclusion"),
+                alerts: read("alerts"),
+                rules: read("rules"),
+                judged: judge.is_some_and(|s| s.status == StepStatus::Completed),
+            })
+        })
+        .collect();
+    prs.sort_by_key(|p| std::cmp::Reverse(p.opened));
+    prs
+}
+
 /// THE FLOOR'S BOUND: how many runs may be in flight at once, summed
 /// over the agents registry's `max_concurrent_runs`. `None` when ANY
 /// row declares no cap — an agent without one is unbounded
@@ -321,6 +464,13 @@ pub struct RegionInputs<'a> {
     /// failed read — one unknown machine, never a floor with nobody
     /// standing on it.
     pub sessions: Option<&'a [Job]>,
+    /// THE PUBLISH REGION'S PACKETS (design cb38d806): the newest
+    /// [`PUBLISH_KIND`] packets, open and closed, with their steps. NOT
+    /// windowed — a pull request nobody merged is exactly the thing
+    /// this region exists to show, and it outlives every window; the
+    /// handler caps the page instead. `None` on a failed read, which is
+    /// a troubled region and never a mirror that reads as current.
+    pub publish_packets: Option<&'a [(Job, Vec<Step>)]>,
     /// [`run_capacity`] over the agents registry, or `None` where no
     /// bound is declared or the registry could not be read.
     pub run_capacity: Option<usize>,
@@ -1090,6 +1240,7 @@ pub fn regions(inputs: &RegionInputs<'_>) -> Regions {
         receiving(inputs, &w),
         marshalling(inputs, &w),
         shop_floor(inputs, &w),
+        publish(inputs, &w),
     ]
     .into_iter()
     .map(|r| {
@@ -1938,6 +2089,87 @@ fn shop_floor(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     )
 }
 
+/// THE PUBLISH REGION (design cb38d806, backlog eee42416) — the
+/// crossing OUT of the world, where what landed on main is proposed to
+/// the public mirror as a pull request and a person merges it.
+///
+/// The count is the pull requests the record shows STILL OPEN, because
+/// that is the number the design's targets are written against: one
+/// publish a day, sized like a day of trains (§1), and at most one
+/// human act per publish (§3). A PR left standing is what turns the
+/// next one into a week-scale snapshot no reader and no scan can judge.
+///
+/// The two troubled conditions are §4's, verbatim, and each carries
+/// what it read rather than that something is wrong:
+///
+///   * A RED READING NOBODY JUDGED ([`PublishPr::unjudged_red`]) — the
+///     defect §2 names. This leads, because it is the one a merge would
+///     make permanent: #238 was merged over 64 unread alerts.
+///   * A PULL REQUEST OPEN PAST [`STALLED_PUBLISH_HOURS`] — the publish
+///     has stalled on the human gate, and every day it stands makes the
+///     next diff larger.
+///
+/// The trend is publishes per day: the PRs opened in each window, which
+/// is §1's own number.
+fn publish(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
+    let Some(packets) = inputs.publish_packets else {
+        return region(
+            "publish",
+            None,
+            None,
+            RegionState::Troubled,
+            "the publish-to-github packets could not be read".to_string(),
+            rate_trend("publishes", w, 0, 0),
+        );
+    };
+    let prs = publish_prs(packets);
+    let (cur, prev) = count_split(w, prs.iter().map(|p| p.opened));
+    let trend = rate_trend("publishes", w, cur, prev);
+
+    let open: Vec<&PublishPr> = prs.iter().filter(|p| !p.merged).collect();
+    let unjudged = open.iter().find(|p| p.unjudged_red());
+    // Oldest first: the PR that has stood longest is the one the
+    // sentence should name.
+    let stalled = open
+        .iter()
+        .filter(|p| (inputs.now - p.opened).num_hours() >= STALLED_PUBLISH_HOURS)
+        .min_by_key(|p| p.opened);
+    let (state, why) = if let Some(p) = unjudged {
+        (
+            RegionState::Troubled,
+            format!("{} — {}", p.url, p.reading()),
+        )
+    } else if let Some(p) = stalled {
+        (
+            RegionState::Troubled,
+            format!(
+                "{} has been open {} — past the {STALLED_PUBLISH_HOURS}h a publish may stand, and every day it does the next diff is larger",
+                p.url,
+                plural(
+                    usize::try_from((inputs.now - p.opened).num_hours()).unwrap_or(0),
+                    "hour",
+                    "hours"
+                )
+            ),
+        )
+    } else if let Some(p) = open.first() {
+        (
+            RegionState::Busy,
+            format!(
+                "{} — {} awaiting a merge",
+                p.url,
+                plural(open.len(), "pull request", "pull requests")
+            ),
+        )
+    } else {
+        (
+            RegionState::Clear,
+            "no pull request awaiting a merge".to_string(),
+        )
+    };
+    region("publish", Some(open.len()), None, state, why, trend)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2015,6 +2247,7 @@ mod tests {
             runner_hosts: Some(&[]),
             agent_runs: Some(&[]),
             sessions: Some(&[]),
+            publish_packets: Some(&[]),
             run_capacity: None,
             now: t(NOW),
             window_hours: 24,
@@ -3845,6 +4078,191 @@ mod tests {
             MachineState::Unknown,
             "a session that never prompted is not idle — nothing measured it"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // The publish region (design cb38d806, backlog eee42416).
+    // -----------------------------------------------------------------
+
+    /// One publish packet as the live ones are shaped (measured against
+    /// b423d16b, 7d5c9051 and 254177e2 on 2026-09-22): the `open-pr`
+    /// step carries the PR, its snapshot and the mirror head it was
+    /// built on; `read-checks` carries the reading; `judge-checks` is
+    /// skipped when the scan concluded `success`.
+    fn publish_packet(
+        pr: &str,
+        snapshot: &str,
+        mirror_head: &str,
+        opened_at: &str,
+        reading: Option<(&str, &str, &str)>,
+        judged: bool,
+    ) -> (Job, Vec<Step>) {
+        let j = job(
+            PUBLISH_KIND,
+            "Publish to the public mirror",
+            JobStatus::Closed,
+            json!({}),
+        );
+        let mut open_pr = step(&j, "open-pr", StepStatus::Completed, Some(opened_at));
+        open_pr.metadata = json!({
+            "pr_url": pr,
+            "snapshot_commit": snapshot,
+            "mirror_head": mirror_head,
+        });
+        let mut steps = vec![open_pr];
+        if let Some((conclusion, alerts, rules)) = reading {
+            let mut checks = step(&j, "read-checks", StepStatus::Completed, Some(opened_at));
+            checks.metadata = json!({ "conclusion": conclusion, "alerts": alerts, "rules": rules });
+            steps.push(checks);
+            steps.push(step(
+                &j,
+                "judge-checks",
+                if judged {
+                    StepStatus::Completed
+                } else if conclusion == "success" {
+                    StepStatus::Skipped
+                } else {
+                    StepStatus::Ready
+                },
+                judged.then_some(opened_at),
+            ));
+        }
+        (j, steps)
+    }
+
+    fn with_publish<'a>(
+        base: RegionInputs<'a>,
+        packets: Option<&'a [(Job, Vec<Step>)]>,
+    ) -> RegionInputs<'a> {
+        RegionInputs {
+            publish_packets: packets,
+            ..base
+        }
+    }
+
+    /// §4's first troubled condition: a pull request standing past a
+    /// day. The record has the instant (`open-pr` completed) and the
+    /// merge (a later mirror head reaching the snapshot), so the region
+    /// can say STALLED without asking the mirror anything.
+    #[test]
+    fn a_mirror_pull_request_open_past_a_day_troubles_the_publish_region() {
+        let status = empty_status();
+        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        // Opened 30 hours before NOW, and no later mirror head reaches
+        // its snapshot — nobody merged it.
+        let packets = vec![publish_packet(
+            "https://mirror/pull/240",
+            "snap-240",
+            "mirror-a",
+            "2026-09-18T06:00:00Z",
+            Some(("success", "0", "0")),
+            false,
+        )];
+        let out = regions(&with_publish(base, Some(&packets)));
+        let p = by_name(&out, "publish");
+        assert_eq!(p.count, Some(1));
+        assert_eq!(p.state, RegionState::Troubled, "{}", p.why);
+        assert!(
+            p.why.contains("pull/240"),
+            "the why names the PR: {}",
+            p.why
+        );
+        assert!(
+            p.why.contains("30 hours"),
+            "the why says how long it has stood: {}",
+            p.why
+        );
+    }
+
+    /// §4's second: a red reading with no disposition. The sentence
+    /// carries THE READING — the conclusion and both counts the step
+    /// recorded — not "something is wrong with the publish" (a verdict
+    /// must name what failed).
+    #[test]
+    fn a_red_reading_nobody_judged_troubles_the_region_and_carries_the_reading() {
+        let status = empty_status();
+        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        // Opened an hour ago: not stalled, so the trouble can only be
+        // the unjudged reading.
+        let packets = vec![publish_packet(
+            "https://mirror/pull/239",
+            "snap-239",
+            "mirror-a",
+            "2026-09-19T11:00:00Z",
+            Some(("failure", "109", "14")),
+            false,
+        )];
+        let out = regions(&with_publish(base, Some(&packets)));
+        let p = by_name(&out, "publish");
+        assert_eq!(p.state, RegionState::Troubled, "{}", p.why);
+        assert!(p.why.contains("pull/239"), "{}", p.why);
+        assert!(
+            p.why.contains("failure") && p.why.contains("109") && p.why.contains("14"),
+            "the why is the reading, not a symptom: {}",
+            p.why
+        );
+
+        // Judged, the same reading is no longer trouble: the merge now
+        // follows a disposition per rule, which is all §2 asks.
+        let judged = vec![publish_packet(
+            "https://mirror/pull/239",
+            "snap-239",
+            "mirror-a",
+            "2026-09-19T11:00:00Z",
+            Some(("failure", "109", "14")),
+            true,
+        )];
+        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        let out = regions(&with_publish(base, Some(&judged)));
+        assert_eq!(by_name(&out, "publish").state, RegionState::Busy);
+    }
+
+    /// The merge is READ, never assumed: a later packet whose snapshot
+    /// was built on top of this one's proves the mirror's main reached
+    /// it. Merged, the PR leaves the count and the region is clear —
+    /// and the old PR's age stops troubling anything.
+    #[test]
+    fn a_merged_pull_request_leaves_the_count_and_clears_the_region() {
+        let status = empty_status();
+        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        let packets = vec![
+            publish_packet(
+                "https://mirror/pull/240",
+                "snap-240",
+                "mirror-a",
+                "2026-09-17T06:00:00Z",
+                Some(("success", "0", "0")),
+                false,
+            ),
+            // The next publish built its snapshot on snap-240, so the
+            // mirror's main HAD reached it: #240 was merged.
+            publish_packet(
+                "https://mirror/pull/241",
+                "snap-241",
+                "snap-240",
+                "2026-09-19T11:30:00Z",
+                Some(("success", "0", "0")),
+                false,
+            ),
+        ];
+        let out = regions(&with_publish(base, Some(&packets)));
+        let p = by_name(&out, "publish");
+        assert_eq!(p.count, Some(1), "only #241 is still open: {}", p.why);
+        assert_eq!(p.state, RegionState::Busy, "{}", p.why);
+        assert!(p.why.contains("pull/241"), "{}", p.why);
+    }
+
+    /// An unread publish list is troubled, never a mirror that reads as
+    /// current — the rule every region here keeps.
+    #[test]
+    fn an_unread_publish_list_is_troubled_and_never_a_current_mirror() {
+        let status = empty_status();
+        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        let out = regions(&with_publish(base, None));
+        let p = by_name(&out, "publish");
+        assert_eq!(p.count, None);
+        assert_eq!(p.state, RegionState::Troubled);
+        assert!(p.why.contains("could not be read"), "{}", p.why);
     }
 
     /// The bound is the registry's, and an agent with no declared cap is

@@ -445,6 +445,46 @@ pub(crate) fn definition_in(repo: &Path, settings: &Settings) -> Option<String> 
     path.is_file().then_some(name)
 }
 
+/// Where `session-start.sh` left the list of definitions THIS session
+/// loaded — the one moment Claude Code reads the directory.
+pub(crate) const SESSION_DEFINITIONS_ENV: &str = "BOSS_SESSION_AGENT_DEFINITIONS";
+
+/// The declarable definitions this checkout holds that the session did
+/// not load (backlog e1c4dc93). Claude Code reads
+/// [`boss_jobs::agent_spec::DEFINITIONS_DIR`] ONCE, at session start;
+/// one that arrives after — the car that added them, an hourly
+/// fast-forward of the pod's checkout — is on disk and unknown to the
+/// running session, so naming it is an immediate `Agent type
+/// 'effort-high' not found`. Pure: both lists are the caller's.
+pub(crate) fn unloaded(on_disk: &[String], loaded: &[String]) -> Vec<String> {
+    boss_jobs::agent_spec::Effort::ALL
+        .iter()
+        .map(|e| boss_jobs::agent_spec::definition_name(e.as_str()))
+        .filter(|name| on_disk.iter().any(|d| d == name) && !loaded.iter().any(|l| l == name))
+        .collect()
+}
+
+/// [`unloaded`] against this checkout and the session's snapshot. No
+/// snapshot — a session that started before the hook wrote one, or a
+/// `boss dispatch` run by hand — means nothing is KNOWN about what the
+/// session loaded, and an unknown is never a refusal.
+pub(crate) fn unloaded_for_session(repo: &Path, snapshot: Option<&Path>) -> Vec<String> {
+    let Some(snapshot) = snapshot else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(snapshot) else {
+        return Vec::new();
+    };
+    let loaded: Vec<String> = text.split_whitespace().map(str::to_string).collect();
+    let dir = repo.join(boss_jobs::agent_spec::DEFINITIONS_DIR);
+    let on_disk: Vec<String> = boss_jobs::agent_spec::Effort::ALL
+        .iter()
+        .map(|e| boss_jobs::agent_spec::definition_name(e.as_str()))
+        .filter(|name| dir.join(format!("{name}.md")).is_file())
+        .collect();
+    unloaded(&on_disk, &loaded)
+}
+
 /// The last part of the prompt: the run's id, and the one export that
 /// ties the gate the builder launches back to it.
 pub(crate) fn run_section(run_id: &str, settings: &Settings) -> String {
@@ -2107,6 +2147,36 @@ mod tests {
             );
             assert_eq!(subagent_type(&settings), name);
         }
+    }
+
+    /// A session loads `.claude/agents/*.md` ONCE, at its start
+    /// (backlog e1c4dc93). A definition that arrives after — the car
+    /// that added them, an hourly fast-forward of the pod's checkout —
+    /// is on disk and unknown to that session, so the hook would name
+    /// a `subagent_type` the harness answers `Agent type 'effort-high'
+    /// not found` to. Measured live 2026-09-22: that refusal is loud
+    /// and immediate, so the cost is not a silent fallback but the
+    /// claim and the run this door files BEFORE the Agent call dies.
+    #[test]
+    fn a_definition_the_session_never_loaded_is_named_before_anything_is_filed() {
+        let all: Vec<String> = boss_jobs::agent_spec::Effort::ALL
+            .iter()
+            .map(|e| boss_jobs::agent_spec::definition_name(e.as_str()))
+            .collect();
+        // The whole set loaded: nothing to refuse.
+        assert!(unloaded(&all, &all).is_empty());
+        // A session started before the car that added them.
+        assert_eq!(unloaded(&all, &[]), all);
+        // One arrived since: only that one is named.
+        let older: Vec<String> = all.iter().skip(1).cloned().collect();
+        assert_eq!(unloaded(&all, &older), vec![all[0].clone()]);
+        // A checkout WITHOUT the definitions refuses nothing — that is
+        // `definition_in`'s case, and the caller's own type stands.
+        assert!(unloaded(&[], &[]).is_empty());
+        assert!(unloaded(&[], &all).is_empty());
+        // A name the session loaded that no effort declares is not
+        // this door's business.
+        assert!(unloaded(&["claude".into()], &[]).is_empty());
     }
 
     /// `--tokens` is a total or an input,output split, and the split is

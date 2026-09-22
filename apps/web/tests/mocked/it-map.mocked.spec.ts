@@ -41,6 +41,7 @@ const REGIONS = {
     { name: 'receiving', count: 4, state: 'busy', why: '4 inbound, oldest 5 days', trend: trend('inbound', 'per day', 4, 6) },
     { name: 'marshalling', count: null, state: 'troubled', why: 'the station registry could not be read', trend: trend('served', 'per day', null, null) },
     { name: 'shop-floor', count: 2, bound: 6, state: 'clear', why: '2 runs in flight, 1 crew on the floor', trend: trend('build duration', 'minutes', 64, 58) },
+    { name: 'publish', count: 0, state: 'clear', why: 'no pull request awaiting a merge', trend: trend('publishes', 'per day', 1, 1) },
   ],
 };
 
@@ -95,6 +96,7 @@ const BORDERS_PAYLOAD = {
     }),
     rail('track', 'arrivals'),
     rail('arrivals', 'shed'),
+    rail('arrivals', 'publish'),
     rail('gates', 'garage'),
     rail('track', 'garage'),
   ],

@@ -35,6 +35,22 @@
 //! - not an Agent call at all, or an Agent call inside a subagent
 //!   (`agent_id` on the payload: a builder spawning an explorer) →
 //!   nothing.
+//! - the prompt names a packet whose effort selects a definition THIS
+//!   session never loaded (backlog e1c4dc93) → a DENY, before the
+//!   claim. This is the one refusal here, and it refuses a call the
+//!   harness is about to refuse anyway: Claude Code reads
+//!   `.claude/agents/*.md` once, at session start, so a car that adds
+//!   one lands under sessions already running. Measured live
+//!   2026-09-22 — `Agent type 'effort-ultra-nonexistent' not found.
+//!   Available agents: …` — the harness's answer is loud and
+//!   immediate, never a silent fallback, so what the raw failure costs
+//!   is not the diagnosis but the RESIDUE it leaves: a step claimed
+//!   and a run filed for a builder that never started, which the
+//!   restart that fixes the session does not clean up. Refusing first
+//!   leaves nothing behind and says what to do. What the session
+//!   loaded is `session-start.sh`'s snapshot, named by
+//!   [`crate::dispatch::SESSION_DEFINITIONS_ENV`]; no snapshot means
+//!   nothing is known, and an unknown is never a refusal.
 //!
 //! stdout is the hook's answer and nothing else: the updatedInput JSON
 //! when there is one, empty otherwise. Every status line goes to
@@ -164,6 +180,30 @@ pub(crate) fn updated_input(input: &Value, prompt: &str, subagent_type: Option<&
     })
 }
 
+/// The hook's answer for a definition this session cannot load
+/// (backlog e1c4dc93): a PreToolUse DENY, which is the only shape that
+/// stops the Agent call while the door still owns the words. It names
+/// the definitions and the restart, because the harness's own refusal
+/// — `Agent type 'effort-high' not found. Available agents: …`,
+/// measured live 2026-09-22 — arrives only AFTER the claim and the run
+/// are filed, leaving a run packet for an agent that never started.
+pub(crate) fn refusal(missing: &[String]) -> Value {
+    let names = missing.join(", ");
+    let dir = boss_jobs::agent_spec::DEFINITIONS_DIR;
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": format!(
+                "boss dispatch: this session started before {dir} held {names}, so it cannot \
+                 load that definition and the Agent call would fail with `Agent type not \
+                 found` (backlog e1c4dc93). Nothing was claimed and no run was filed. Restart \
+                 the session — a new session reads {dir} again — then dispatch this packet."
+            ),
+        }
+    })
+}
+
 /// The session's next untracked count, off its current metadata.
 pub(crate) fn next_untracked(session: &Value) -> u64 {
     session
@@ -184,6 +224,11 @@ pub(crate) enum Outcome {
     Linked {
         run: String,
     },
+    /// A definition this session never loaded: refused before the
+    /// claim, so no run is filed for an agent that cannot start.
+    Refused {
+        missing: Vec<String>,
+    },
     Dispatched(Dispatched),
 }
 
@@ -200,6 +245,7 @@ pub(crate) async fn from_hook_at(
     owner: &str,
     worktree: &str,
     host: &str,
+    definitions: Option<&Path>,
 ) -> Result<Outcome> {
     use reqwest::Method;
     let api_at = |method: Method, path: String, body: Option<Value>| {
@@ -261,6 +307,21 @@ pub(crate) async fn from_hook_at(
             Ok(Outcome::Linked { run })
         }
         Parsed::Packet { packet_ref } => {
+            // BEFORE the claim (backlog e1c4dc93): a definition this
+            // session never loaded fails the Agent call whatever we
+            // do, and dispatching first would leave the step claimed
+            // and a run filed behind a builder that never started.
+            let missing = crate::dispatch::unloaded_for_session(repo, definitions);
+            if !missing.is_empty() {
+                let answer = refusal(&missing);
+                eprintln!(
+                    "boss dispatch --from-hook: this session never loaded {} — refused, nothing \
+                     claimed and no run filed; restart the session",
+                    missing.join(", ")
+                );
+                print!("{answer}");
+                return Ok(Outcome::Refused { missing });
+            }
             let prompt = input
                 .pointer("/tool_input/prompt")
                 .and_then(Value::as_str)
@@ -322,6 +383,13 @@ pub async fn run(session: String) -> Result<()> {
                 .map(|p| p.display().to_string())
         })
         .unwrap_or_default();
+    // `session-start.sh` wrote this at the one moment Claude Code
+    // reads the definitions directory (backlog e1c4dc93); unset, the
+    // door knows nothing about the session and refuses nothing.
+    let definitions = std::env::var(crate::dispatch::SESSION_DEFINITIONS_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(std::path::PathBuf::from);
     from_hook_at(
         &reqwest::Client::new(),
         &base,
@@ -332,6 +400,7 @@ pub async fn run(session: String) -> Result<()> {
         &owner,
         &worktree,
         &host,
+        definitions.as_deref(),
     )
     .await?;
     Ok(())
@@ -413,6 +482,26 @@ mod tests {
 
     /// The hook's answer keeps every other input key and replaces the
     /// prompt; the count reads absent as zero.
+    /// The refusal is the hook's own stdout answer: a PreToolUse deny
+    /// whose reason names every definition the session is missing and
+    /// the one act that repairs it (backlog e1c4dc93).
+    #[test]
+    fn the_refusal_names_the_definition_and_the_restart() {
+        let out = refusal(&["effort-high".to_string(), "effort-low".to_string()]);
+        let hs = &out["hookSpecificOutput"];
+        assert_eq!(hs["hookEventName"], "PreToolUse");
+        assert_eq!(hs["permissionDecision"], "deny");
+        let why = hs["permissionDecisionReason"].as_str().expect("a reason");
+        assert!(why.contains("effort-high"), "{why}");
+        assert!(why.contains("effort-low"), "{why}");
+        assert!(why.contains("Restart"), "{why}");
+        assert!(why.contains("e1c4dc93"), "{why}");
+        assert!(
+            why.contains("nothing was claimed") || why.contains("Nothing was claimed"),
+            "{why}"
+        );
+    }
+
     #[test]
     fn the_updated_input_keeps_the_calls_other_keys() {
         let out = updated_input(
@@ -580,6 +669,15 @@ mod wire_tests {
     }
 
     async fn go(base: &str, input: &Value, session: Option<&str>) -> Outcome {
+        go_with(base, input, session, None).await
+    }
+
+    async fn go_with(
+        base: &str,
+        input: &Value,
+        session: Option<&str>,
+        definitions: Option<&std::path::Path>,
+    ) -> Outcome {
         from_hook_at(
             &reqwest::Client::new(),
             base,
@@ -590,6 +688,7 @@ mod wire_tests {
             "emp-david",
             "/work/boss/.claude/worktrees/agent-x",
             "boss-dev-0",
+            definitions,
         )
         .await
         .expect("the door answers")
@@ -648,6 +747,74 @@ mod wire_tests {
                 && b["status"] == "completed"),
             "briefed is completed"
         );
+    }
+
+    /// A session that never loaded the definition is refused HERE,
+    /// before anything is written (backlog e1c4dc93). Claude Code
+    /// reads `.claude/agents/*.md` once, at session start; a car that
+    /// adds one lands under a session already running, and the hook
+    /// would then name a `subagent_type` that session cannot load.
+    /// Measured live 2026-09-22: the harness answers `Agent type
+    /// 'effort-ultra-nonexistent' not found. Available agents: …` —
+    /// loud, immediate, never a silent fallback — so what the raw
+    /// failure costs is not the diagnosis but the RESIDUE, a step
+    /// claimed and a run filed for an agent that never started. The
+    /// door refuses first and says what repairs it.
+    #[tokio::test]
+    async fn a_session_that_never_loaded_the_definition_is_refused_before_the_claim() {
+        let dir = boss_testing::scratch_dir("dispatch-hook-definitions");
+        let snapshot = dir.join("definitions");
+        // This session loaded the general agents and none of the
+        // effort definitions — it started before the car that added
+        // them, exactly the packet's case.
+        std::fs::write(&snapshot, "claude\ngeneral-purpose\n").expect("write the snapshot");
+
+        let (base, calls) = stub().await;
+        let out = go_with(
+            &base,
+            &call(&format!("Packet: {PACKET}")),
+            Some(SESSION),
+            Some(snapshot.as_path()),
+        )
+        .await;
+        let Outcome::Refused { missing, .. } = &out else {
+            panic!("{out:?}");
+        };
+        assert!(missing.iter().any(|m| m == "effort-high"), "{missing:?}");
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "nothing is claimed and no run is filed: {:?}",
+            calls.lock().unwrap()
+        );
+
+        // The same session once it has been restarted: the snapshot
+        // holds the definitions, and the dispatch proceeds.
+        std::fs::write(
+            &snapshot,
+            "claude\neffort-low\neffort-medium\neffort-high\n",
+        )
+        .expect("rewrite the snapshot");
+        let (base, _calls) = stub().await;
+        let out = go_with(
+            &base,
+            &call(&format!("Packet: {PACKET}")),
+            Some(SESSION),
+            Some(snapshot.as_path()),
+        )
+        .await;
+        assert!(matches!(out, Outcome::Dispatched(_)), "{out:?}");
+
+        // No snapshot at all — a hand-run verb, or a session older
+        // than the hook that writes one — is never refused.
+        let (base, _calls) = stub().await;
+        let out = go_with(
+            &base,
+            &call(&format!("Packet: {PACKET}")),
+            Some(SESSION),
+            None,
+        )
+        .await;
+        assert!(matches!(out, Outcome::Dispatched(_)), "{out:?}");
     }
 
     /// A pasted `boss dispatch` prompt links the run it names to the

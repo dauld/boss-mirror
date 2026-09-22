@@ -44,6 +44,7 @@ const REGIONS = {
     { name: 'receiving', count: 0, state: 'clear', why: 'nothing inbound', trend: trend('inbound', 'per day') },
     { name: 'marshalling', count: 0, state: 'clear', why: 'nothing waiting', trend: trend('served', 'per day') },
     { name: 'shop-floor', count: 0, bound: 6, state: 'clear', why: 'no run in flight, no crew on the floor', trend: trend('build duration', 'minutes') },
+    { name: 'publish', count: 0, state: 'clear', why: 'no pull request awaiting a merge', trend: trend('publishes', 'per day') },
   ],
 };
 

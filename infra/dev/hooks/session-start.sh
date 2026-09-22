@@ -10,6 +10,24 @@
 read_payload
 session_dir
 mkdir -p "$dir" 2>/dev/null || bail "cannot create $dir"
+# WHAT THIS SESSION LOADED (backlog e1c4dc93). Claude Code reads
+# .claude/agents/*.md once, right here; a definition that lands after —
+# the car that added them, an hourly fast-forward of the pod's checkout
+# — is on disk and unknown to this session, and naming it on an Agent
+# call fails that call after the dispatch door has already claimed the
+# step and filed the run. agent-start.sh hands this list to the door so
+# it can refuse first. A RESUME reads the directory again, so this runs
+# before the resume exit below. An EMPTY file says this session loaded
+# none; an ABSENT one says nothing is known, and the door refuses
+# nothing.
+agents="${CLAUDE_PROJECT_DIR:-$(field .cwd)}/.claude/agents"
+if [ -d "$agents" ]; then
+  ls -1 "$agents" 2>/dev/null | sed -n 's/\.md$//p' | sort > "$dir/definitions" \
+    || log "cannot snapshot $agents — a dispatch will not check what this session loaded"
+else
+  : > "$dir/definitions" 2>/dev/null \
+    || log "cannot write $dir/definitions — a dispatch will not check what this session loaded"
+fi
 session_packet
 if [ -n "$packet" ]; then
   log "session $(field .session_id) resumed ($(field .source)) — work-session $packet kept"
