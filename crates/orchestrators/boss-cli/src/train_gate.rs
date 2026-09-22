@@ -97,18 +97,19 @@ pub(crate) enum Standing {
 }
 
 /// PURE: the standing of one gate-run packet, from its `record-verdict`
-/// step (`verdict` green|failed|lost) and the receipt it carries (a
+/// step (`verdict` green|failed|lost|refused) and the receipt it carries (a
 /// JSON string; `verdict: refused` + `refused_because` for a refusal).
 pub(crate) fn standing(gate_run: &Value) -> Standing {
     let md = verdict_metadata(gate_run);
     let receipt = receipt(gate_run);
+    const NO_REASON: &str = "the gate refused before any check ran (no reason recorded)";
     if let Some(r) = &receipt
         && r.get("verdict").and_then(Value::as_str) == Some("refused")
     {
         let why = r
             .get("refused_because")
             .and_then(Value::as_str)
-            .unwrap_or("the gate refused before any check ran (no reason recorded)")
+            .unwrap_or(NO_REASON)
             .to_string();
         return Standing::Refused(why);
     }
@@ -116,6 +117,12 @@ pub(crate) fn standing(gate_run: &Value) -> Standing {
         Some("green") => Standing::Green,
         Some("failed") => Standing::Failed,
         Some("lost") => Standing::Lost,
+        // The step's own word, for a run whose receipt is absent or
+        // would not parse — the case the receipt read above cannot
+        // cover, and the reason this arm exists (ff5b9634). Read as
+        // Pending a refusal would hold a train waiting for a verdict
+        // that has already been given.
+        Some("refused") => Standing::Refused(NO_REASON.to_string()),
         _ => Standing::Pending,
     }
 }
@@ -427,6 +434,16 @@ mod tests {
         r["steps"][1]["metadata"]["receipt"] =
             json!({"verdict": "refused", "refused_because": "no route"});
         assert_eq!(standing(&r), Standing::Refused("no route".into()));
+        // THE STEP'S OWN WORD IS ENOUGH (backlog ff5b9634). The verdict
+        // enum carries `refused` now, so a run whose receipt is absent
+        // or unreadable — the whole reason the fallback exists — is
+        // still a refusal, not a run nobody has judged yet. Read as
+        // Pending it would hold a train forever waiting for a verdict
+        // that has already been given.
+        assert_eq!(
+            standing(&run(Some("refused"), None)),
+            Standing::Refused("the gate refused before any check ran (no reason recorded)".into())
+        );
     }
 
     #[test]

@@ -72,10 +72,19 @@ impl std::str::FromStr for StationKind {
     }
 }
 
-/// Who may claim a packet FROM this station — Class-registry
-/// vocabulary (role slugs), and since design c87fb59b car 3 the
-/// rate-card models an agent must run. Checked at the claim CAS when
-/// the claim names its station. Absent = any actor may claim.
+/// Who may claim a packet FROM this station — role slugs, and since
+/// design c87fb59b car 3 the rate-card models an agent must run.
+/// Checked at the claim CAS when the claim names its station. Absent =
+/// any actor may claim.
+///
+/// THE ROLES ARE WHATEVER THE STEP'S SELECTOR SPELLS, and that is two
+/// vocabularies, not one (backlog 4b103f0f). A projected row copies
+/// the step's `authority_role`, which may be a PLATFORM role
+/// (`platform-admin`, what a request asserts about itself) or a Class
+/// code under `(employee, role)` (`engineering-agent`, what the roster
+/// and the agents registry hold). The claim door therefore judges a
+/// claimant over EVERY role spelling the record holds for it rather
+/// than the one the request carries — see [`Self::admits_roles`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct StationCapability {
     #[serde(default)]
@@ -98,7 +107,29 @@ impl StationCapability {
     /// An empty roles list gates nobody out (a declared-but-empty
     /// capability is a vacuous constraint, not a lockout).
     pub fn allows_role(&self, role: &str) -> bool {
-        self.roles.is_empty() || self.roles.iter().any(|r| r == role)
+        self.admits_roles(&[role])
+    }
+
+    /// Whether an actor may claim, judged over EVERY role the record
+    /// holds for it: the one its request asserts, plus — for a
+    /// registered agent — the Class code its `agents` row declares.
+    ///
+    /// ONE DECISION, TWO VOCABULARIES (backlog 4b103f0f). The roster
+    /// the dispatcher nominates from reads `agents.role`, and a step
+    /// addressed `audience = { role = X }` resolves to every HOLDER of
+    /// X, agents included (migration 20260918022311). The claim door
+    /// used to compare only `user.role`, which every named CLI caller
+    /// carries as `platform-admin` — so an agent routed by the role it
+    /// HOLDS was refused at the door by the role it ASSERTS, and the
+    /// registry's `role` was read by nothing at the claim. Asking over
+    /// both spellings is what reconciles them; an empty roles list
+    /// still gates nobody out (a declared-but-empty capability is a
+    /// vacuous constraint, not a lockout).
+    pub fn admits_roles(&self, roles: &[&str]) -> bool {
+        self.roles.is_empty()
+            || roles
+                .iter()
+                .any(|held| self.roles.iter().any(|r| r == held))
     }
 
     /// Whether an actor that runs `models` (an agent's `default_model`;
@@ -1310,6 +1341,33 @@ mod tests {
         assert!(!cap.allows_role("bookkeeper"));
         // Declared-but-empty gates nobody out.
         assert!(StationCapability::default().allows_role("anyone"));
+    }
+
+    /// The role half over BOTH vocabularies (backlog 4b103f0f): a
+    /// claimant is admitted when ANY role the record holds for it is
+    /// named — the platform role its request asserts, or the Class
+    /// code its agents row declares. One spelling is the person's
+    /// case, and `allows_role` is that case by definition.
+    #[tokio::test]
+    async fn capability_admits_any_role_the_record_holds() {
+        let cap = StationCapability {
+            roles: vec!["engineering-agent".into()],
+            ..Default::default()
+        };
+        // The asserted role alone is not admitted; the row's is.
+        assert!(!cap.admits_roles(&["platform-admin"]));
+        assert!(cap.admits_roles(&["platform-admin", "engineering-agent"]));
+        // Neither spelling named is still a refusal.
+        assert!(!cap.admits_roles(&["platform-admin", "bookkeeper"]));
+        // Declared-but-empty gates nobody out, and no spelling at all
+        // (an anonymous claim) is refused by a declared list.
+        assert!(StationCapability::default().admits_roles(&[]));
+        assert!(!cap.admits_roles(&[]));
+        // One spelling IS `allows_role`.
+        assert_eq!(
+            cap.admits_roles(&["engineering-agent"]),
+            cap.allows_role("engineering-agent")
+        );
     }
 
     /// The model half of a capability (design c87fb59b car 3): an agent

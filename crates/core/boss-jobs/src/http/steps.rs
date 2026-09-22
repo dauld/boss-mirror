@@ -1702,8 +1702,25 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
             )
                 .into_response();
         }
+        // THE ROLE HALF, OVER BOTH VOCABULARIES (backlog 4b103f0f).
+        // A station's `capability.roles` is whatever the step's role
+        // selector spelled, and that is two vocabularies: a PLATFORM
+        // role (`platform-admin`, which every named CLI caller asserts
+        // about itself) or a Class code under `(employee, role)`
+        // (`engineering-agent`, which the agents registry holds and
+        // the dispatcher's roster nominates on). Judging only
+        // `user.role` read one of them, so an agent routed here by the
+        // role it HOLDS was refused by the role it ASSERTS — and the
+        // registry's `role` was read by nothing at the claim although
+        // the migration that added it says a role audience resolves to
+        // its holders, agents included (20260918022311). Both
+        // spellings, in the order they are decided: the request's
+        // first, the row's second.
+        let held_roles: Vec<&str> = std::iter::once(user.role.as_str())
+            .chain(agent_row.as_ref().and_then(|a| a.role.as_deref()))
+            .collect();
         if let Some(capability) = &row.capability
-            && !capability.allows_role(&user.role)
+            && !capability.admits_roles(&held_roles)
         {
             return (
                 StatusCode::FORBIDDEN,
@@ -1711,6 +1728,10 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
                     "error": "role not admitted by station capability",
                     "station": station_name,
                     "role": user.role,
+                    // Every spelling the door compared, not only the
+                    // asserted one: a verdict an operator has to go
+                    // re-derive is not a verdict.
+                    "actor_roles": held_roles,
                     "allowed_roles": capability.roles,
                 })),
             )

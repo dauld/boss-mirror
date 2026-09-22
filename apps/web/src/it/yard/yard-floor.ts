@@ -548,7 +548,13 @@ export function journeyStops(job: WithSteps | null): readonly JourneyStop[] {
     if (s.status === 'completed') {
       const receipt = receiptNote(s.metadata);
       const lamp: Lamp =
-        receipt === null ? 'ok' : receipt.verdict === 'green' ? 'ok' : receipt.verdict === 'lost' ? 'warn' : 'err';
+        receipt === null ? 'ok'
+          : receipt.verdict === 'green' ? 'ok'
+          // `lost` is silence and `refused` is a component declining
+          // out loud; neither judged the tree, so neither is a red
+          // stop the author has something to fix (ff5b9634).
+          : receipt.verdict === 'lost' || receipt.verdict === 'refused' ? 'warn'
+          : 'err';
       return [{ lamp, what: s.title, when: stampAt(s), note: receipt?.note ?? null }];
     }
     if (s.status === 'active' || s.status === 'ready') {

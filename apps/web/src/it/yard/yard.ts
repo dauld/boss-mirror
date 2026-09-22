@@ -456,7 +456,7 @@ export type ApproachRow = Readonly<{
    *  is `held`; a stock phrase when the marker carried no reason. */
   hold: string | null;
   /** The verdict as the gate recorded it (`green` / `failed` / `lost` /
-   *  `unreadable`), null on a publish row. */
+   *  `refused` / `unreadable`), null on a publish row. */
   verdict: string | null;
 }>;
 
@@ -539,6 +539,9 @@ export function approach(
   // there only on a verdict a check actually judged — and the limbo lane
   // carries the unjudged verdict it was settled with.
   const red = (status?.garage ?? []).map(g => gateRow(g, 'gated-red', 'failed'));
+  // The gate-exit lane carries every unjudged verdict, its own word
+  // kept: `lost`, `unreadable`, and since ff5b9634 `refused` — a
+  // component that declined out loud rather than a runner that died.
   const lost = (status?.limbo ?? []).map(l => gateRow(l, 'gate-lost', l.verdict));
   const green = (status?.stranded ?? []).map(s => gateRow(s, 'gated-green', 'green'));
   // Held last: a car with its brake on is the furthest from boarding.
@@ -618,7 +621,15 @@ export function failedChecks(receipt: unknown): readonly string[] {
   if (Array.isArray(r?.checks)) {
     return r.checks
       .filter((c): c is { name: unknown; result: unknown } => typeof c === 'object' && c !== null)
-      .filter(c => c.result !== 'pass')
+      // A REFUSED ENTRY IS NOT A FAILURE (backlog bd4e8fb1, and this
+      // copy of the rule ff5b9634). `infra/gate.sh`'s check_lint
+      // rewrites the entry of a lint that could not answer to
+      // `result: refused` precisely so a reader counting failures does
+      // not count it; a bare `!== 'pass'` counted it and named the
+      // lint where the reader expected the branch's own check.
+      // `boss_jobs::flake::failing_checks` is the same filter, server
+      // side.
+      .filter(c => c.result !== 'pass' && c.result !== 'refused')
       .map(c => c.name)
       .filter((n): n is string => typeof n === 'string');
   }

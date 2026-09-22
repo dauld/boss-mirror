@@ -26,10 +26,12 @@
 //! could not reach what it judges against — knows so the moment it
 //! happens, and `infra/gate.sh` records it: `verdict: refused` on the
 //! receipt, the refusing check's own entry `result: refused`, and
-//! `refused_because` in the lint's words. The gate-runner's verdict
-//! vocabulary is the protocol's closed `green|failed|lost`, so the
-//! packet still reads `failed`; the receipt is the specific record and
-//! every reader here takes it. Gate-run 924b4cbe is the measured case:
+//! `refused_because` in the lint's words. The packet's verdict word
+//! carries it too since ff5b9634 (`green|failed|lost|refused`), and
+//! before that it read `failed`; every reader here takes the RECEIPT
+//! either way, so a run recorded under the old vocabulary — every
+//! landed car — still reads correctly. Gate-run 924b4cbe is the
+//! measured case:
 //! `a-car-stays-under-the-edit-level` got HTTP 000 from the gate pod
 //! while the same read answered 200 elsewhere, and counting that as a
 //! red would have put the LINT's name in the flake tally below —
@@ -194,10 +196,11 @@ pub enum Prior {
 /// recorded is to the run immediately before.
 ///
 /// A REFUSAL IS READ OFF THE RECEIPT, NOT THE VERDICT WORD (backlog
-/// bd4e8fb1, measured on gate-run 924b4cbe). The gate-runner's verdict
-/// vocabulary is the protocol's closed `green|failed|lost`, so a gate
-/// that refused before any check ran is recorded `failed` — while its
-/// receipt says `verdict: refused` and carries the reason. The receipt
+/// bd4e8fb1, measured on gate-run 924b4cbe). The verdict word can say
+/// `refused` since ff5b9634, but every run recorded before it — every
+/// landed car — says `failed` for a gate that refused before any check
+/// ran, while its receipt says `verdict: refused` and carries the
+/// reason. The receipt
 /// is the specific record and it wins here, exactly as it already does
 /// in `train_gate::standing`, which reads the same two fields to spare
 /// the cars aboard a train. §Diagnosis: an infrastructure refusal is

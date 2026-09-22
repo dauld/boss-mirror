@@ -1343,7 +1343,7 @@ label = "Gate verdict"
 category = "operations"
 ux = "inline"
 version = 1
-description = "The gate runner's verdict on a gate-run — green, failed, or lost — with its machine receipt. A DEDICATED kind (not `task`) so a dispatcher rule can target `step.done.gate-verdict` for auto-park without firing on every task in the system. Completed by the runner via the API; it carries no authority_role, so it is never assigned to a person."
+description = "The gate runner's verdict on a gate-run — green, failed, lost, or refused — with its machine receipt. A DEDICATED kind (not `task`) so a dispatcher rule can target `step.done.gate-verdict` for auto-park without firing on every task in the system. Completed by the runner via the API; it carries no authority_role, so it is never assigned to a person."
 # `typical_duration_hours` is deliberately UNSET (None), the same escape
 # `task` uses: the dispatcher's jobs.complete_step classifies a marker by
 # PROPERTIES — roles empty AND duration Some(<=0) — and auto-completes
@@ -1358,9 +1358,9 @@ required_roles = []
 
   [[step_type.fields]]
   name = "verdict"
-  field_type = "green|failed|lost"
+  field_type = "green|failed|lost|refused"
   required = false
-  description = "The gate outcome the runner recorded. Optional-at-done, matching the `task` contract this replaces: the gate-run's own outcome steps already gate on it, so nothing tightens or loosens by declaring it here."
+  description = "The gate outcome the runner recorded. `refused` is an infrastructure refusal: gate.sh exited 2 and judged nothing about the branch, which is not evidence against it (CLAUDE.md §Diagnosis). This enum is the FIRST validator the step API runs - validate_metadata by kind, then the Workflow's own fields - so it must carry every word the gate-run protocol declares, or the runner's honest report is refused one layer above the row that allows it (backlog ff5b9634, measured on gate-run 9a2576fb). Optional-at-done, matching the `task` contract this replaces: the gate-run's own outcome steps already gate on it, so nothing tightens or loosens by declaring it here."
 
   [[step_type.fields]]
   name = "receipt"

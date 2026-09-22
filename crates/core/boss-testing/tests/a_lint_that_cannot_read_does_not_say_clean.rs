@@ -580,6 +580,81 @@ fn steptype_bundle_ratchet_reads_the_tree_or_says_it_could_not() {
     assert_refusal(lint, code, &out, "git rev-parse", OWNER_SAID);
 }
 
+/// The bundle path inside a fixture, and the first pipe-enum
+/// `field_type` line in it — read out of the real bundle rather than
+/// written here, so these cases cannot drift from its actual idiom.
+fn first_enum_field(fx: &Fixture) -> (std::path::PathBuf, String, String) {
+    let path = fx.dir.join("crates/core/boss-jobs/seeds/step_types.toml");
+    let bundle = std::fs::read_to_string(&path).expect("the bundle is readable");
+    let line = bundle
+        .lines()
+        .find(|l| l.trim_start().starts_with("field_type = \"") && l.contains('|'))
+        .expect("the bundle declares at least one pipe-enum field")
+        .to_string();
+    let ty = line
+        .split('"')
+        .nth(1)
+        .expect("a quoted field_type")
+        .to_string();
+    (path, line, ty)
+}
+
+/// A PIPE-ENUM THAT ONLY GAINS VALUES IS A LOOSENING (backlog ff5b9634).
+///
+/// The ratchet refused every `field_type` change, on the reasoning that
+/// telling a safe widening from a tightening "needs judgment a lint
+/// should refuse rather than guess". A strict superset needs no
+/// judgment: every value the trunk accepted is still accepted, so no
+/// in-flight step of that kind becomes uncompletable — the same
+/// property that already makes `required -> optional` legal here. The
+/// measured case was the `gate-verdict` bundle gaining `refused` to
+/// match a Workflow row that had already been published with it, where
+/// the alternative was leaving the two halves of one contract
+/// disagreeing.
+///
+/// Both halves are pinned: without the first the loosening is refused,
+/// without the second a SHRUNK enum rides in as a widening and
+/// retightens every in-flight step of the kind at the next restart.
+#[test]
+fn steptype_bundle_ratchet_allows_a_widened_enum_and_still_refuses_a_shrunk_one() {
+    let lint = "steptype-bundle-ratchet";
+
+    let fx = Fixture::new("steptype-widen");
+    let (path, line, ty) = first_enum_field(&fx);
+    let widened = line.replace(&ty, &format!("{ty}|a-value-nothing-in-flight-carries"));
+    let bundle = std::fs::read_to_string(&path).expect("readable");
+    boss_testing::write_file(&path, &bundle.replacen(&line, &widened, 1));
+    fx.commit("widen a bundle enum");
+    let (code, out) = fx.run(lint, "", false);
+    assert_eq!(
+        code, 0,
+        "a pipe-enum that only GAINS a value strands no in-flight step, so the ratchet \
+         must let it through:\n{out}"
+    );
+
+    let fx = Fixture::new("steptype-shrink");
+    let (path, line, ty) = first_enum_field(&fx);
+    let kept = ty
+        .rsplit_once('|')
+        .expect("a pipe-enum has at least two values")
+        .0
+        .to_string();
+    let shrunk = line.replace(&ty, &kept);
+    let bundle = std::fs::read_to_string(&path).expect("readable");
+    boss_testing::write_file(&path, &bundle.replacen(&line, &shrunk, 1));
+    fx.commit("shrink a bundle enum");
+    let (code, out) = fx.run(lint, "", false);
+    assert_eq!(
+        code, 1,
+        "dropping a value from a pipe-enum retightens every in-flight step of that kind \
+         at the next restart, with no version to pin against:\n{out}"
+    );
+    assert!(
+        out.contains("field_type"),
+        "the failure must say what it refused:\n{out}"
+    );
+}
+
 #[test]
 fn a_new_style_has_a_caller_reads_the_tree_or_says_it_could_not() {
     let fx = Fixture::new("a-new-style-has-a-caller");

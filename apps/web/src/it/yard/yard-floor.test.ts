@@ -1527,6 +1527,24 @@ describe("journeyStops — a packet's completed steps as a journey", () => {
     expect(journeyStops(null)).toEqual([]);
   });
 
+  // A REFUSAL IS NOT A RED STOP (backlog ff5b9634). gate.sh exits 2
+  // and writes `verdict: refused` when it declined to judge at all,
+  // with `refused_because` in the refusing component's own words. The
+  // journey has to draw that the way it draws a `lost` run — a warning
+  // that this leg produced no evidence — rather than the red that says
+  // the author has something to fix.
+  test('a refused receipt warns; it judged nothing about the branch', () => {
+    const receipt = JSON.stringify({
+      verdict: 'refused', head: 'abcdef0', mode: 'full',
+      refused_because: 'pre-flight lint a-car-stays-under-the-edit-level could not answer',
+      checks: [{ name: 'a-car-stays-under-the-edit-level', result: 'refused', seconds: 0 }],
+    });
+    const job = { steps: [{ spec_slug: 'gate', title: 'Gate', status: 'completed', completed_at: '2026-09-22T09:00:00Z', metadata: { receipt } }] };
+    expect(journeyStops(job)).toEqual([
+      { lamp: 'warn', what: 'Gate', when: '2026-09-22T09:00:00Z', note: 'refused · abcdef0' },
+    ]);
+  });
+
   // THE WIDE RECEIPT. The gate runner used to reduce gate.sh's account
   // of a run to {verdict, head, mode, fails} before reporting it; it now
   // reports the whole receipt, whose `checks` array carries every check

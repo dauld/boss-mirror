@@ -281,6 +281,10 @@ name = "a_claim_over_the_agents_hourly_budget_is_refused_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "a_station_claim_reads_every_role_the_record_holds_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "a_claim_past_the_agents_concurrent_run_cap_is_refused_pg"
 required-features = ["postgres"]
 

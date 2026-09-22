@@ -449,13 +449,13 @@ fn parse_instant(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 ///
 /// EVERY REFUSAL IS A VALUE COMPUTED HERE, from observations taken
 /// before any packet is filed — the whole of part 1 of fd217c65. The
-/// alternative fix, a `refused` terminal on the gate-run, needs a new
-/// workflow version: the protocol's `verdict` field is the closed enum
-/// `green|failed|lost` and each terminal is an `outcome` step keyed on
-/// it. That is a registry change to record a state that should not be
-/// recorded at all — a refusal is not an outcome of a run, it is the
-/// absence of one. So: no packet until there is a Job to attach it to,
-/// or a place in line for a live process to hold.
+/// gate-run now HAS a `refused` terminal (ff5b9634), and that is the
+/// right home for a run that launched and then declined — but not for
+/// this one, and the distinction is the whole reason no packet is filed
+/// here: a refusal decided before any Job exists is not an outcome of a
+/// run, it is the absence of one, and a packet recording it would be a
+/// gate-run that never ran a gate. So: no packet until there is a Job
+/// to attach it to, or a place in line for a live process to hold.
 #[derive(Debug)]
 pub(crate) enum Admission {
     /// A slot is free: file the packet and create the Job.
@@ -1766,6 +1766,42 @@ async fn observe_prior(
     }
 }
 
+/// The verdict word that belongs on the step BESIDE a receipt.
+///
+/// THE RECEIPT DECIDES, the same way the runner decides (backlog
+/// c67bdbae): `gate.sh` writes `verdict: refused` when it declined to
+/// judge at all, and a step that says something else beside it makes
+/// the packet contradict itself in one write. Until the protocol had
+/// the word this verb could only write `lost` — true of the verdict's
+/// fate, silent about the refusal, and indistinguishable from a runner
+/// that died without saying anything (backlog ff5b9634).
+///
+/// A word the protocol does not declare — no receipt, a receipt that
+/// would not parse, a verdict from some later tree — reads as `lost`:
+/// the conservative answer for a run whose record cannot be read, and
+/// never a guess the field validator would refuse.
+fn step_verdict(receipt: &Value) -> &'static str {
+    match receipt.get("verdict").and_then(Value::as_str) {
+        Some("green") => "green",
+        Some("failed") => "failed",
+        Some("refused") => "refused",
+        _ => "lost",
+    }
+}
+
+/// The `record-verdict` step's metadata for a receipt: the receipt
+/// itself as the JSON string `boss receipt` reads, and the one verdict
+/// word it names. Both refusal paths in this verb write through here so
+/// the two halves of the record cannot disagree — the failure mode
+/// measured on gate-run d14b0768, where the uploaded receipt said
+/// `refused` and the verdict beside it said something else.
+fn verdict_metadata(receipt: &Value) -> Result<Value> {
+    Ok(json!({
+        "verdict": step_verdict(receipt),
+        "receipt": serde_json::to_string(receipt)?,
+    }))
+}
+
 async fn close_refused(http: &reqwest::Client, packet: &str, reason: &str) {
     let result = async {
         let job = api(
@@ -1786,19 +1822,26 @@ async fn close_refused(http: &reqwest::Client, packet: &str, reason: &str) {
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("gate-run {packet} has no verdict step"))?
             .to_string();
-        let receipt = serde_json::to_string(&json!({
-            "verdict": "lost",
+        // A LAUNCH REFUSED IS A REFUSAL, not silence: something
+        // declined out loud, with a reason, and no check ever ran. It
+        // was filed as `lost` only because the verdict enum had no
+        // other word until ff5b9634; `lost` means the environment died
+        // before saying anything, which is a different fact and reads
+        // as a dead runner to everyone downstream.
+        let receipt = json!({
+            "verdict": "refused",
             "head": "",
             "mode": "",
-            "fails": [format!("launch refused before any Job was created: {reason}")],
-        }))?;
+            "fails": [],
+            "refused_because": format!("launch refused before any Job was created: {reason}"),
+        });
         api(
             http,
             reqwest::Method::PUT,
             &format!("/api/jobs/{packet}/steps/{step_id}"),
             Some(json!({
                 "status": "completed",
-                "metadata": { "verdict": "lost", "receipt": receipt },
+                "metadata": verdict_metadata(&receipt)?,
             })),
         )
         .await?;
@@ -1807,7 +1850,7 @@ async fn close_refused(http: &reqwest::Client, packet: &str, reason: &str) {
     .await;
     match result {
         Ok(()) => println!(
-            "boss gate: refused launch closed its own packet ({} lost)",
+            "boss gate: refused launch closed its own packet ({} refused)",
             &packet[..8.min(packet.len())]
         ),
         Err(e) => eprintln!(
@@ -3351,20 +3394,22 @@ async fn record_refusal(http: &reqwest::Client, packet: &str, receipt: &Value) {
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("gate-run {packet} has no verdict step"))?
             .to_string();
-        // The step's `verdict` is the closed enum green|failed|lost
-        // (gate-run.toml); `lost` is "the environment died", the same
-        // word `close_refused` uses for a launch that never made a Job.
-        // The refusal itself rides the receipt — `verdict: refused`,
-        // `refused_because` — exactly as gate.sh writes a headroom
-        // refusal, so `red_verdict_detail` and the train's strike rule
-        // read both the same way.
+        // THE STEP SAYS WHAT THE RECEIPT SAYS. `verdict` is the
+        // gate-run protocol's enum, and since ff5b9634 it carries
+        // `refused` — so this no longer has to file an out-loud
+        // refusal as `lost`, which meant "the environment died"
+        // and read to every consumer as a dead runner. The refusal
+        // still rides the receipt too (`verdict: refused`,
+        // `refused_because`), exactly as gate.sh writes a headroom
+        // refusal, so `red_verdict_detail` and the train's strike
+        // rule read both the same way.
         api(
             http,
             reqwest::Method::PUT,
             &format!("/api/jobs/{packet}/steps/{step_id}"),
             Some(json!({
                 "status": "completed",
-                "metadata": { "verdict": "lost", "receipt": serde_json::to_string(receipt)? },
+                "metadata": verdict_metadata(receipt)?,
             })),
         )
         .await?;
@@ -5943,6 +5988,45 @@ kind: Job\n\
     fn a_packet_without_metadata_does_not_panic() {
         let open = vec![json!({"id": "no-metadata"})];
         assert_eq!(reusable_packet(&open, "fix/x", "deadbeef"), None);
+    }
+
+    /// A REFUSAL REACHES THE STEP AS A REFUSAL (backlog ff5b9634). Both
+    /// refusal paths in this verb — the pod that never started its
+    /// containers, and the launch refused before any Job existed —
+    /// wrote `lost` beside a receipt that said `refused`, because the
+    /// protocol's verdict enum had no other word. It has one now, so
+    /// the step takes the receipt's word rather than a second reading
+    /// of the situation (§9a: the fact lives once, on the receipt).
+    #[test]
+    fn the_step_takes_the_refusal_word_off_the_receipt() {
+        assert_eq!(
+            step_verdict(&unstarted_receipt(9, &PodStart::default())),
+            "refused",
+            "the pod-never-started receipt says refused; the step beside it must agree"
+        );
+        assert_eq!(step_verdict(&json!({"verdict": "green"})), "green");
+        assert_eq!(step_verdict(&json!({"verdict": "failed"})), "failed");
+        // Unreadable is not a guess: no receipt, no verdict, or a word
+        // this tree does not know all read as `lost` — the one verdict
+        // that claims nothing and that the field validator accepts.
+        assert_eq!(step_verdict(&json!({})), "lost");
+        assert_eq!(step_verdict(&json!({"verdict": "sideways"})), "lost");
+        assert_eq!(step_verdict(&json!(null)), "lost");
+    }
+
+    /// …and both refusal paths write that word through ONE shape, so
+    /// the verdict and the receipt beside it cannot disagree. The
+    /// receipt rides as a JSON string, the encoding `boss receipt`
+    /// reads.
+    #[test]
+    fn a_refusal_and_its_receipt_are_written_as_one_metadata() {
+        let receipt = json!({"verdict": "refused", "head": "", "mode": "", "fails": [],
+                             "refused_because": "the disk floor refused"});
+        let md = verdict_metadata(&receipt).expect("a receipt serializes");
+        assert_eq!(md["verdict"], "refused");
+        let carried: Value = serde_json::from_str(md["receipt"].as_str().expect("a JSON string"))
+            .expect("the receipt rides as a JSON string");
+        assert_eq!(carried, receipt, "the receipt is copied, not retyped");
     }
 
     /// The receipt is a JSON string on the record-verdict step — the

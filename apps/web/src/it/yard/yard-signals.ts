@@ -134,7 +134,11 @@ function gateSignals(j: JobLite): Signal[] {
       // A receipt the page cannot read leaves the step's own verdict.
     }
   }
-  const sev: Signal['sev'] = verdict === 'green' ? 'ok' : verdict === 'lost' ? 'warn' : 'err';
+  // A refusal warns like a `lost` run: gate.sh exited 2 and judged
+  // nothing about the branch, so drawing it red says the author has
+  // something to fix when there is nothing there (ff5b9634).
+  const sev: Signal['sev'] =
+    verdict === 'green' ? 'ok' : verdict === 'lost' || verdict === 'refused' ? 'warn' : 'err';
   return [{
     id: `${j.id}:verdict`,
     at,

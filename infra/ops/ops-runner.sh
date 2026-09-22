@@ -73,6 +73,10 @@
 #   every reader — `boss ops --wait`, the answered-ops-request judges,
 #   the yard — takes it from there (50fede8b; see the merge door below
 #   for the request-level copy this replaced).
+# - Records how long the verb RAN, as `duration_ms` beside that exit
+#   (b7bfe821). The request's own stamps span this runner's poll
+#   latency — up to a minute — so they cannot cost a verb; this is
+#   taken around the exec. A refusal ran nothing and records neither.
 # - A per-packet problem (refusal, missing step) never kills the loop;
 #   a transport failure to the SoR fails the unit loudly, systemd
 #   records it red, and the same loud-local-failure posture as the
@@ -312,7 +316,7 @@ while [ "$i" -lt "$n" ]; do
           end' "$VERBS_FILE")
 
     outf="$workdir/out"
-    disp=""; rc_str=""; script=""
+    disp=""; rc_str=""; script=""; dur_ms=""
     reason=$(printf '%s' "$decision" | jq -r '.refuse // empty')
     if [ -n "$reason" ]; then
         disp="refused"; rc_str=""
@@ -368,9 +372,29 @@ ARGV
         # account is the one it should sign as, the same identity the
         # step completion below carries. A unit that set BOSS_ACTOR
         # itself wins — the drop-in is the operator's say.
+        # HOW LONG IT TOOK, taken around the exec and recorded beside
+        # the exit (backlog b7bfe821). opened_at-to-closed_at is the
+        # only duration the record used to carry and it is dominated
+        # by up to a minute of this runner's poll latency, so costing
+        # run-car-probe on 2026-09-19 meant inferring per-probe time
+        # from the spread within a simultaneous batch. The number is
+        # here, free, at the moment the exit is written. Milliseconds
+        # because a probe is seconds. A `date` without GNU's %N leaves
+        # a non-digit in the stamp; the guard below then records no
+        # duration rather than a nonsense one.
+        t0=$(date -u +%s%3N 2>/dev/null)
         OPS_REQUEST_ID="$job_id" BOSS_ACTOR="${BOSS_ACTOR:-$ACTOR}" \
             timeout "${verb_timeout:-$OPS_TIMEOUT}" "$@" > "$rawf" 2>&1 < /dev/null
         rc=$?
+        t1=$(date -u +%s%3N 2>/dev/null)
+        dur_ms=""
+        case ${t0:-empty}${t1:-empty} in
+            *[!0-9]*) ;;
+            *)
+                dur_ms=$((t1 - t0))
+                [ "$dur_ms" -ge 0 ] || dur_ms=0   # a clock step is not a negative run
+                ;;
+        esac
         size=$(wc -c < "$rawf")
         if [ "$size" -gt "$OPS_OUTPUT_CAP" ]; then
             head -c "$OPS_OUTPUT_CAP" "$rawf" > "$outf"
@@ -391,10 +415,11 @@ ARGV
     # (one source — the same string the journal line below prints),
     # and a reader of the packet should not have to know that.
     merged=$(printf '%s' "$step" | jq -c --rawfile out "$outf" \
-        --arg d "$disp" --arg rc "$rc_str" --arg h "$HOST_ID" '
+        --arg d "$disp" --arg rc "$rc_str" --arg h "$HOST_ID" --arg ms "${dur_ms:-}" '
         (.metadata // {})
         + {disposition: $d, output: $out, runner_host: $h}
         + (if $rc == "" then {} else {exit_code: $rc} end)
+        + (if $ms == "" then {} else {duration_ms: ($ms | tonumber)} end)
         + (if $d == "refused" then {reason: $out} else {} end)')
     payloadf="$workdir/payload"
     printf '%s' "$merged" | jq -c '{status: "completed", metadata: .}' > "$payloadf"
@@ -404,8 +429,9 @@ ARGV
     # it. Both are facts about the queue, not about the verb, so they
     # have no home on the execute step — and riding the merge door
     # makes the depth a question the jobs API answers, which the
-    # journal line alone does not. (n10's sibling packet adds the
-    # verb's own duration; this is the wait BEFORE it, not the run.)
+    # journal line alone does not. This is the wait BEFORE the verb,
+    # not the run: the run's own `duration_ms` rides the execute step
+    # with the exit it belongs to (b7bfe821).
     #
     # THE VERB'S EXIT DOES NOT RIDE HERE (backlog 50fede8b). It used to:
     # f47861a5 added `exit` beside the step's `exit_code` so a reader of
@@ -450,7 +476,7 @@ ARGV
     fi
 
     if [ "$disp" = "answered" ]; then
-        echo "ops-runner: answered $verb on $short (exit $rc_str, ${size}B)"
+        echo "ops-runner: answered $verb on $short (exit $rc_str, ${size}B, ${dur_ms:--}ms)"
         answered=$((answered + 1))
     else
         echo "ops-runner: refused $short — $reason"

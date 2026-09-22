@@ -32,7 +32,24 @@
 //! them and the packet would hang open forever, which is worse than the
 //! defect being fixed.
 
+//! THE HALF THAT CHANGE LEFT BEHIND (backlog ff5b9634). The Workflow
+//! got the word and a terminal for it; a refusal still could not be
+//! recorded, because the Workflow's field spec is the SECOND validator.
+//! `http/steps.rs` runs `validate_metadata(&step.kind, ..)` — the
+//! `gate-verdict` StepType's own `verdict` enum — and only then
+//! `validate_authored_fields(&step.fields, ..)`. The StepType still
+//! declared `green|failed|lost`, so the first validator refused the
+//! word the second had just been taught. Measured on gate-run 9a2576fb,
+//! branch fix/the-excise-accrual-resolves-both-accounts-from-the-tax-
+//! kinds-row, 2026-09-22: 13 of its 14 checks PASSED (test at 788s
+//! among them) and the pre-flight lint `a-car-stays-under-the-edit-
+//! level` got HTTP 000 reading /api/tenant/edit-level, so the receipt
+//! said `refused` — and the verdict had to be written `lost`, which is
+//! true of the verdict's fate, silent about the refusal, and
+//! indistinguishable from a dead runner.
+
 use boss_jobs::registry::seedable_platform_workflows;
+use boss_jobs::step_registry::StepRegistry;
 
 fn gate_run() -> boss_jobs::registry::WorkflowSpec {
     seedable_platform_workflows()
@@ -44,6 +61,73 @@ fn gate_run() -> boss_jobs::registry::WorkflowSpec {
 fn read(rel: &str) -> String {
     let p = boss_testing::repo_root().join(rel);
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+}
+
+/// The verdict words this protocol declares, in the Workflow row.
+fn protocol_verdicts() -> Vec<String> {
+    gate_run()
+        .steps
+        .iter()
+        .find(|s| s.title == "record-verdict")
+        .expect("record-verdict step")
+        .fields
+        .iter()
+        .find(|f| f.name == "verdict")
+        .expect("the verdict field")
+        .field_type
+        .split('|')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// A FACT THAT LIVES TWICE GETS AN EQUALITY TEST (§9a). The verdict
+/// enum is spelled in the StepType bundle and in the gate-run Workflow,
+/// and neither spelling can be deleted: the bundle is the kind's schema
+/// for every protocol that uses it, the Workflow row is this protocol's
+/// own contract. The StepType is the FIRST validator, so a word only
+/// the Workflow knows is rejected before the Workflow is ever
+/// consulted. Pinned equal here, naming the drifting value.
+#[test]
+fn the_gate_verdict_step_type_carries_every_verdict_the_protocol_declares() {
+    let registry = StepRegistry::v1();
+    let st = registry
+        .get("gate-verdict")
+        .expect("the gate-verdict step type ships in the v1 bundle");
+    let declared = st
+        .fields
+        .iter()
+        .find(|f| f.name == "verdict")
+        .expect("the verdict field on the gate-verdict step type")
+        .field_type;
+    for v in protocol_verdicts() {
+        assert!(
+            declared.split('|').map(str::trim).any(|d| d == v),
+            "the gate-run protocol declares the verdict {v:?} and the `gate-verdict` step \
+             type enumerates {declared:?}. `validate_metadata` runs BEFORE the Workflow's \
+             own fields, so the runner's honest report is refused by the schema one layer \
+             above the one that was fixed."
+        );
+    }
+}
+
+/// AND THE WORD GETS THROUGH, at the validator the step API actually
+/// runs. The pin above compares two spellings; this one asks the
+/// question the runner's PUT asks.
+#[test]
+fn a_refused_verdict_passes_the_validator_the_step_api_runs() {
+    let registry = StepRegistry::v1();
+    let md = serde_json::json!({ "verdict": "refused", "receipt": "{}" });
+    registry
+        .validate_metadata("gate-verdict", &md)
+        .unwrap_or_else(|e| {
+            panic!(
+                "recording a refusal as a refusal was refused by the step registry: {e:?} - \
+                 this is the 400 the gate runner meets, and why gate-run 9a2576fb had to be \
+                 filed as `lost`"
+            )
+        });
 }
 
 /// THE VERDICT HAS A WORD FOR A REFUSAL, and the runner can therefore

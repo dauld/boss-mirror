@@ -825,6 +825,72 @@ fn an_answered_verbs_exit_is_recorded_once_on_its_step() {
     );
 }
 
+/// HOW LONG THE VERB TOOK, RECORDED WHERE ITS EXIT IS (backlog
+/// b7bfe821). An answered request said THAT the verb exited, with what
+/// code, and what it printed — and nothing about how long it ran. The
+/// only duration derivable from the record was `opened_at` to
+/// `closed_at`, which is dominated by up to 60 s of this runner's poll
+/// latency and so cannot see a verb at all: the builder costing the
+/// run-car-probe cadence on 2026-09-19 had to infer per-probe cost
+/// from the SPREAD WITHIN a simultaneous batch — five packets filed at
+/// 16:10:55 closing across 0.5 s — which is exactly the re-derivation
+/// CLAUDE.md §Diagnosis refuses. The runner holds the number at the
+/// moment it writes the exit and was dropping it, and that matters
+/// most now: run-car-probe was 171 of the last 300 ops-requests and
+/// its cadence went daily to hourly the same day, so the verb about to
+/// dominate this serial walk had no per-run duration series to notice
+/// a change in.
+///
+/// It rides the execute step, beside `exit_code` and `output`, because
+/// it is a fact about the VERB'S RUN and not about the queue in front
+/// of it — which is why `queue_depth` / `queued_s` ride the request
+/// instead. One spelling, one writer, the 50fede8b rule above. A list
+/// read returns each row with its steps, so the series this exists for
+/// is one jobs-API query.
+///
+/// A refusal ran nothing, so it records no duration, the same way it
+/// records no exit.
+#[test]
+fn an_answered_verbs_duration_is_recorded_on_its_step() {
+    needs_jq!();
+    let root = scratch("duration-on-step");
+    stub_sor(&root);
+    let slow = root.join("slow.sh");
+    write_exec(&slow, "#!/bin/sh\nsleep 0.4\necho 'slow: done'\n");
+    let verbs = verbs_dir(
+        &root,
+        &[(
+            "slow",
+            &format!(
+                r#"{{"about":"a verb that takes a measurable moment","hosts":["forge"],"argv":["{}"],"params":[]}}"#,
+                slow.display()
+            ),
+        )],
+    );
+    packet(&root, "slow", "[]");
+    let (out, payload) = run(&root, &verbs, &[]);
+    let md = payload.unwrap_or_else(|| panic!("no step completed: {out}"));
+    assert_eq!(md["disposition"], "answered", "{md} / {out}");
+    let ms = md["duration_ms"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("no numeric duration_ms on the answered step: {md} / {out}"));
+    assert!(
+        (300..60_000).contains(&ms),
+        "the recorded duration must be the verb's own run — it slept 0.4 s and the step says {ms} ms: {md} / {out}"
+    );
+
+    // A refusal ran nothing, so there is no duration to record — the
+    // same posture as `exit_code`.
+    packet(&root, "not-a-verb", "[]");
+    let (out, payload) = run(&root, &verbs, &[]);
+    let md = payload.unwrap_or_else(|| panic!("no step completed: {out}"));
+    assert_eq!(md["disposition"], "refused", "{md} / {out}");
+    assert!(
+        md.get("duration_ms").is_none(),
+        "a refusal ran nothing to time: {md} / {out}"
+    );
+}
+
 /// A QUEUE WHOSE DEPTH NOBODY READS (backlog 1ffb3305). This runner
 /// walks up to 100 open requests SERIALLY in one oneshot with no
 /// per-verb fairness, so a latency-sensitive verb queues behind

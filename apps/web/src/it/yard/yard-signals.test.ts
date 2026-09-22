@@ -158,6 +158,18 @@ describe("yardSignals — what fired what, in the packets' own stamps", () => {
     ]);
   });
 
+  // A REFUSAL IS NOT A RED ON THE BOARD (backlog ff5b9634). gate.sh
+  // exits 2 and says in its own words that the run "judged nothing
+  // about the branch" — a disk floor, a lint that could not reach its
+  // registry. Drawn `err` it reads as the branch being bad, which is
+  // the defect CLAUDE.md §Diagnosis names and prices at four clean
+  // cars over five departures. `warn` like `lost`, and for the same
+  // reason: neither produced evidence about the tree.
+  test('a refused gate signals a warning, not a red — it judged nothing about the branch', () => {
+    const s = yardSignals([], [gateRun('g4', 'fix/w', 'refused', '2026-09-22T09:00:00Z')], []);
+    expect(s.map(x => [x.sev, x.what])).toEqual([['warn', 'gate fix/w refused']]);
+  });
+
   // The runner now reports gate.sh's WHOLE receipt rather than a
   // four-field digest of it, so what failed is read off `checks` — the
   // array that also carries each check's duration. Old receipts, on

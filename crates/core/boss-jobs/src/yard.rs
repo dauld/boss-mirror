@@ -2356,8 +2356,15 @@ pub fn garage(gate_runs: &[(Job, Vec<Step>)], settled_branches: &[String]) -> Ve
 }
 
 /// The gate exit: cars whose most-recent gate-run was never judged —
-/// `lost` (the runner died, the reaper buried it) or `unreadable` (the
-/// receipt would not parse). The other half of [`garage`]'s partition
+/// `lost` (the runner died, the reaper buried it), `unreadable` (the
+/// receipt would not parse), or `refused` (a component declined out
+/// loud, with a reason: a disk floor, a lint that could not reach its
+/// registry). The third word arrived with the verdict enum that can
+/// carry it (backlog ff5b9634); before that a refusal could only be
+/// filed as `lost` and stood here by accident of the wrong word.
+/// Claiming it deliberately is what keeps the partition total — a
+/// verdict in neither lane draws the branch NOWHERE, and a car nobody
+/// can see is a car nobody re-gates. The other half of [`garage`]'s partition
 /// over the same latest-run-per-branch grouping, so a branch can never
 /// be in both and no judged-or-not state falls between them.
 /// Sorted by branch for a stable render.
@@ -2366,7 +2373,7 @@ pub fn limbo(gate_runs: &[(Job, Vec<Step>)], settled_branches: &[String]) -> Vec
         .into_iter()
         .filter_map(|(branch, g, steps)| {
             let verdict = gate_run_verdict(steps)?;
-            matches!(verdict, "lost" | "unreadable").then(|| LimboCar {
+            matches!(verdict, "lost" | "unreadable" | "refused").then(|| LimboCar {
                 branch: branch.to_string(),
                 verdict: verdict.to_string(),
                 since: opened_since(g),
@@ -5996,6 +6003,36 @@ mod tests {
             vec![verdict_step("lost", json!([]))],
         )];
         assert!(limbo(&settled, &["fix/gone".to_string()]).is_empty());
+    }
+
+    /// A REFUSAL STANDS AT THE GATE EXIT TOO, and in neither of the
+    /// other two places (backlog ff5b9634). Until the verdict enum had
+    /// the word, a refusal could only be filed as `lost` and landed
+    /// here by accident of that; now that the runner can say `refused`,
+    /// the lane has to claim it deliberately or the branch falls
+    /// between the garage and limbo and is drawn NOWHERE — worse than
+    /// the defect, because a car nobody can see is a car nobody
+    /// re-gates. A refusal judged nothing about the tree, exactly like
+    /// a `lost` run; the only difference is that this one said so out
+    /// loud and carries a reason.
+    #[test]
+    fn a_refused_run_stands_at_the_gate_exit_and_is_not_rework() {
+        let runs = vec![(
+            gate_run_on("fix/the-lint-could-not-answer", 4),
+            vec![verdict_step("refused", json!([]))],
+        )];
+        assert!(
+            garage(&runs, &[]).is_empty(),
+            "a refusal judged nothing about the branch, so it is not rework"
+        );
+        assert_eq!(
+            limbo(&runs, &[])
+                .iter()
+                .map(|c| (c.branch.as_str(), c.verdict.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("fix/the-lint-could-not-answer", "refused")],
+            "a refused run is unjudged, and the gate exit is where unjudged runs stand"
+        );
     }
 
     /// A branch being re-gated right now is in the SLOTS, not at the

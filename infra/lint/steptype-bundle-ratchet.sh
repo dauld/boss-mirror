@@ -33,10 +33,20 @@
 #   - a field added to it must be `required = false` (new-optional is
 #     the one always-safe bundle edit);
 #   - an existing field may not move optional -> required;
-#   - an existing field may not change `field_type` (a pipe-enum IS
-#     the value contract — shrinking it tightens, and telling a safe
-#     widening from a tightening needs judgment a lint should refuse
-#     rather than guess);
+#   - an existing field may not change `field_type`, with one
+#     exception: a pipe-enum that only GAINS values. The type IS the
+#     value contract, so shrinking one tightens — but a strict superset
+#     needs no judgment to recognise, and every value the trunk
+#     accepted is still accepted, so nothing in flight becomes
+#     uncompletable. That is the same property that makes `required ->
+#     optional` legal here. This rule used to refuse the widening too,
+#     saying the distinction "needs judgment a lint should refuse
+#     rather than guess"; the measured cost (ff5b9634) was the
+#     `gate-verdict` bundle unable to gain `refused` to match a
+#     Workflow row already published with it, leaving the two halves of
+#     one contract disagreeing and a gate refusal recorded as `lost`.
+#     Every other shape — a value removed, a rename, a change between
+#     enum and scalar — is still refused;
 #   - an existing field may not be REMOVED (the UNION validator stops
 #     requiring it, other consumers — sim faker, surfaces — stop
 #     seeing it; removal is a contract change that belongs behind the
@@ -150,6 +160,21 @@ fi
 problems=0
 say() { printf '%s\n' "$*" >&2; problems=$((problems + 1)); }
 
+# Is `head` the same pipe-enum as `base` plus zero or more values? Both
+# sides must BE pipe-enums (a scalar on either side is a change of
+# shape, not a widening), and every value the trunk declared must still
+# be there. Anything else answers no and is refused above.
+enum_widens() {
+    local base="$1" head="$2" v
+    case "$base" in *'|'*) ;; *) return 1 ;; esac
+    case "$head" in *'|'*) ;; *) return 1 ;; esac
+    local IFS='|'
+    for v in $base; do
+        case "|$head|" in *"|$v|"*) ;; *) return 1 ;; esac
+    done
+    return 0
+}
+
 while IFS=$'\t' read -r kind field ftype freq; do
     [ -n "$kind" ] || continue
     if [ "$ftype" = "KIND" ]; then
@@ -175,8 +200,8 @@ while IFS=$'\t' read -r kind field ftype freq; do
     fi
     head_type=$(printf '%s' "$head_row" | cut -f3)
     head_req=$(printf '%s' "$head_row" | cut -f4)
-    if [ "$head_type" != "$ftype" ]; then
-        say "steptype-bundle-ratchet: \`$kind.$field\` changes field_type \`$ftype\` -> \`$head_type\` — the type IS the value contract; change it through the versioned workflow path."
+    if [ "$head_type" != "$ftype" ] && ! enum_widens "$ftype" "$head_type"; then
+        say "steptype-bundle-ratchet: \`$kind.$field\` changes field_type \`$ftype\` -> \`$head_type\` — the type IS the value contract; change it through the versioned workflow path. (A pipe-enum that only GAINS values is the one exception, and this is not one.)"
     fi
     if [ "$freq" = "false" ] && [ "$head_req" = "true" ]; then
         say "steptype-bundle-ratchet: \`$kind.$field\` moves optional -> required. Every in-flight \`$kind\` step retightens at the next restart with no version bump and no conversion (cdc23602's exact hazard)."
