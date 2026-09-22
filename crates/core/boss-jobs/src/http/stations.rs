@@ -9,6 +9,8 @@
 
 use super::*;
 
+use std::collections::BTreeMap;
+
 use axum::extract::Path;
 
 use crate::station_projection::derived_stations;
@@ -266,6 +268,22 @@ pub(super) async fn stations_load<R: JobsRepository + 'static, B: EventBus + 'st
         packets.push((job, steps));
     }
 
+    // The ACTIVE protocol per kind, read ONCE beside the packets — the
+    // second half of the omission question `station_reach` answers.
+    // Best-effort: a deployment with no Workflow registry wired, or a
+    // registry read that fails, reports no omission rather than
+    // refusing the whole load, because the depths above are still true.
+    let active: BTreeMap<String, crate::registry::WorkflowSpec> = match &state.kind_registry {
+        Some(reg) => reg
+            .list_active(None)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| (row.kind.clone(), row))
+            .collect(),
+        None => BTreeMap::new(),
+    };
+
     let today = boss_clock_client::now_from(&state.clock).await.date_naive();
     let mut rows: Vec<serde_json::Value> = Vec::with_capacity(stations.len());
     for spec in &stations {
@@ -289,6 +307,13 @@ pub(super) async fn stations_load<R: JobsRepository + 'static, B: EventBus + 'st
             "over_limit": bound.wip_limit.is_some_and(|l| depth as i64 > i64::from(l)),
             "oldest_opened_on": oldest,
             "oldest_age_days": oldest.map(|d| (today - d).num_days()),
+            // Packets this station's own predicate CANNOT see — absent,
+            // not deprioritised, because a projected key never reached
+            // their step (backlog abda9ab4). `depth + unreachable` is
+            // what depth should have been; zero on a network with no
+            // drift, and zero for the stations that read no projected
+            // key at all.
+            "unreachable": crate::station_reach::unreachable_packets(&bound, &packets, &active),
             "capability_roles": bound.capability.as_ref().map(|c| c.roles.clone()),
         }));
     }

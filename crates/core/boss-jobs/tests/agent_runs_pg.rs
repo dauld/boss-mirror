@@ -210,6 +210,93 @@ async fn the_database_holds_a_run_that_reported_no_tokens_as_null() {
     assert_eq!(held.usd_micros, None, "no tokens is no price");
 }
 
+/// THE OTHER SIDE OF THE CUTOVER. The 13 rows written before
+/// 20260919194503 carry `total_tokens = 0` for "the harness printed no
+/// usage line", distinguishable only by a companion
+/// `detail.tokens_reported: false`, and `agent_runs` is insert-once, so
+/// they cannot be corrected by re-reporting and MUST NOT be rewritten —
+/// a rebuild from the log would put the zeros straight back. So the
+/// reinterpretation lives in the read relation: a legacy zero reads as
+/// no count at all, which is what it was (backlog f19589ac).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pre_cutover_zero_reads_back_as_no_count() {
+    let db = TestDb::new().await;
+
+    insert_legacy(
+        &db,
+        "run-fake-zero",
+        0,
+        serde_json::json!({"tokens_reported": false}),
+    )
+    .await
+    .expect("the legacy shape is exactly what the table already holds");
+
+    // The ROW is untouched — this is a reading, not a backfill.
+    let stored: Option<i64> =
+        sqlx::query_scalar("SELECT total_tokens FROM agent_runs WHERE run_id = $1")
+            .bind("run-fake-zero")
+            .fetch_one(&db.pool)
+            .await
+            .expect("the row");
+    assert_eq!(stored, Some(0), "history is not rewritten");
+
+    let held = PgAgentRuns::new(db.pool.clone())
+        .list_runs(&RunFilter::default())
+        .await
+        .expect("lists")
+        .pop()
+        .expect("the row is there");
+    assert_eq!(held.run.tokens, TokenUsage::Unreported);
+    assert_eq!(held.run.tokens.total(), None, "a fake zero is not a zero");
+}
+
+/// And the reinterpretation is bounded by the evidence, not by a
+/// remembered date: a zero WITHOUT the flag is a row that said it
+/// measured zero, and it keeps saying so.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_zero_that_claims_to_be_measured_stays_measured() {
+    let db = TestDb::new().await;
+
+    insert_legacy(
+        &db,
+        "run-real-zero",
+        0,
+        serde_json::json!({"host": "dev-pod"}),
+    )
+    .await
+    .expect("a stated zero is storable");
+
+    let held = PgAgentRuns::new(db.pool.clone())
+        .list_runs(&RunFilter::default())
+        .await
+        .expect("lists")
+        .pop()
+        .expect("the row is there");
+    assert_eq!(held.run.tokens, TokenUsage::TotalOnly { total: 0 });
+}
+
+/// The pre-cutover shape, written the only way it can be: around the
+/// Rust writer, which no longer emits it.
+async fn insert_legacy(
+    db: &TestDb,
+    run_id: &str,
+    total: i64,
+    detail: serde_json::Value,
+) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO agent_runs \
+         (run_id, actor_id, started_at, finished_at, outcome, total_tokens, detail, recorded_at) \
+         VALUES ($1, 'claude:opus-5', NOW(), NOW(), 'success', $2, $3, NOW())",
+    )
+    .bind(run_id)
+    .bind(total)
+    .bind(detail)
+    .execute(&db.pool)
+    .await
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
 /// A measured split with no total is refused. The equality CHECK was
 /// total while `total_tokens` was NOT NULL; once it can be NULL the
 /// comparison evaluates to NULL for such a row, and Postgres treats a

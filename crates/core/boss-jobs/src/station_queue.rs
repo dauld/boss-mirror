@@ -142,7 +142,11 @@ pub struct StepMatch {
 }
 
 impl StepMatch {
-    fn matches(&self, step: &Step) -> bool {
+    /// Whether one step satisfies this clause. `pub(crate)` for
+    /// [`crate::station_reach`], which asks the same question of a
+    /// RELAXED copy of the clause and must not carry a second copy of
+    /// the match (CLAUDE.md §9a).
+    pub(crate) fn matches(&self, step: &Step) -> bool {
         if let Some(slug) = &self.slug
             && step.spec_slug.as_deref() != Some(slug.as_str())
         {

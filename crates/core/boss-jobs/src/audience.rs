@@ -65,6 +65,15 @@ impl Audience {
     }
 }
 
+/// The step-metadata key the role arm and every `q.<role>.<kind>`
+/// station predicate read. Named once so a reader asking "which keys
+/// does materialisation project" derives the answer from this module
+/// rather than keeping a list beside it (CLAUDE.md §9a).
+pub const AUTHORITY_ROLE_KEY: &str = "authority_role";
+/// The step-metadata key a `station` audience projects — readable by
+/// any station predicate through `step.metadata_equals`.
+pub const STATION_KEY: &str = "station";
+
 /// Today's three placement keys, as the projection of one audience.
 /// `assignee_id` is the step column the assignment query's individual
 /// arm reads; `authority_role` and `station` are step-metadata keys —

@@ -48,6 +48,12 @@ export type StationNode = Readonly<{
   /// were a bug — while nine days waiting is neglect at any volume.
   oldestAgeDays: number | null;
   overLimit: boolean;
+  /// Packets this station's predicate CANNOT see — absent from the
+  /// depth beside it rather than deprioritised, because a projected
+  /// key never reached their step (backlog abda9ab4). `depth +
+  /// unreachable` is what the depth should have been. `null` means the
+  /// server did not measure it, which is NOT the same as zero.
+  unreachable: number | null;
 }>;
 
 export type MapState =
@@ -94,6 +100,7 @@ export function toStationNode(row: StationRow): StationNode {
     depth: null,
     oldestAgeDays: null,
     overLimit: false,
+    unreachable: null,
   };
 }
 
@@ -179,6 +186,10 @@ export type StationLoad = Readonly<{
   depth: number;
   over_limit: boolean;
   oldest_age_days: number | null;
+  /// See `StationNode.unreachable`. Optional because a server that
+  /// predates it sends nothing, and an absent field must read as "not
+  /// measured" rather than as a clean zero.
+  unreachable?: number;
 }>;
 
 /// Fold a load response onto the nodes, in ONE pass.
@@ -199,7 +210,13 @@ export function withLoad(
   return nodes.map((n) => {
     const r = by.get(n.name);
     return r
-      ? { ...n, depth: r.depth, overLimit: r.over_limit, oldestAgeDays: r.oldest_age_days }
+      ? {
+          ...n,
+          depth: r.depth,
+          overLimit: r.over_limit,
+          oldestAgeDays: r.oldest_age_days,
+          unreachable: typeof r.unreachable === 'number' ? r.unreachable : null,
+        }
       : n;
   });
 }

@@ -4,6 +4,7 @@ import {
   disciplineLabel,
   toStationNode,
   withDepth,
+  withLoad,
   stationsStateFromResponse,
   toQueueCard,
   queueViewFromBody,
@@ -177,5 +178,52 @@ describe('queueViewFromBody', () => {
   });
   test('a station with no declared upstream gets no button', () => {
     expect(queueViewFromBody(envelope)!.upstream).toBeNull();
+  });
+});
+
+// Backlog abda9ab4: a station can omit a whole kind of work and answer
+// a correct-looking total. The server measures the omission; the map's
+// job is to carry it to the row beside the depth, and to keep "not
+// measured" distinguishable from a clean zero.
+describe('withLoad carries the unreachable count', () => {
+  test('a measured omission reaches the node', () => {
+    const nodes = withLoad(
+      [toStationNode(row({ name: 'a.platform-admin.opus-5-1m' }))],
+      [
+        {
+          station: 'a.platform-admin.opus-5-1m',
+          depth: 124,
+          over_limit: false,
+          oldest_age_days: 3,
+          unreachable: 57,
+        },
+      ],
+    );
+    expect(nodes[0]!.depth).toBe(124);
+    expect(nodes[0]!.unreachable).toBe(57);
+  });
+
+  test('a server that does not measure it reads null, never zero', () => {
+    const nodes = withLoad(
+      [toStationNode(row())],
+      [{ station: 'loading-dock', depth: 2, over_limit: false, oldest_age_days: null }],
+    );
+    expect(nodes[0]!.unreachable).toBeNull();
+  });
+
+  test('a healthy station reports a real zero', () => {
+    const nodes = withLoad(
+      [toStationNode(row())],
+      [
+        {
+          station: 'loading-dock',
+          depth: 2,
+          over_limit: false,
+          oldest_age_days: null,
+          unreachable: 0,
+        },
+      ],
+    );
+    expect(nodes[0]!.unreachable).toBe(0);
   });
 });

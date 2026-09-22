@@ -171,7 +171,10 @@
     {:else}
       <table class="atlas-stations">
         <thead>
-          <tr><th>Station</th><th>Discipline</th><th>Depth</th><th>Oldest</th><th></th></tr>
+          <tr>
+            <th>Station</th><th>Discipline</th><th>Depth</th><th>Unreachable</th><th>Oldest</th><th
+            ></th>
+          </tr>
         </thead>
         <tbody>
           {#each stationNodes as n (n.name)}
@@ -179,6 +182,14 @@
               <td>{n.title}</td>
               <td>{n.discipline}</td>
               <td>{n.depth ?? '—'}</td>
+              <!-- Packets the predicate cannot see (backlog abda9ab4).
+                   Rendered beside the depth it corrects, because a count
+                   smaller than it should be is invisible on its own; a
+                   non-zero figure is marked so the row LOOKS troubled
+                   rather than having an alarm existing elsewhere. -->
+              <td class={n.unreachable ? 'atlas-unreachable' : ''}
+                >{n.unreachable == null ? '—' : n.unreachable}</td
+              >
               <td>{n.oldestAgeDays == null ? '—' : `${n.oldestAgeDays}d`}</td>
               <td>{n.overLimit ? 'over limit' : ''}</td>
             </tr>
@@ -261,4 +272,7 @@
   .atlas-stations { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
   .atlas-stations th, .atlas-stations td { text-align: left; padding: 0.3rem 0.6rem; border-bottom: 1px solid var(--border, #d5d2ca); }
   .atlas-fail { color: var(--danger, #b3402a); font-weight: 600; }
+  /* A station omitting a whole kind of work must LOOK like it
+     (backlog abda9ab4) — a zero renders plain, a finding does not. */
+  .atlas-unreachable { color: var(--danger, #b3402a); font-weight: 600; }
 </style>

@@ -41,6 +41,17 @@ pub(super) const RUN_COLUMNS: &str = "run_id, actor_id, model, started_at, finis
      error, total_tokens, input_tokens, output_tokens, tool_calls, usd_micros, priced_by, job_id, \
      branch, detail, budget, recorded_at";
 
+/// What a READ selects from. `agent_runs` is what a WRITE inserts
+/// into, and the two are deliberately different relations: the view
+/// (20260922051115) presents a pre-cutover `total_tokens = 0` carrying
+/// `detail.tokens_reported: false` as NULL, because that is what the
+/// zero meant before the column could say it. The row itself is
+/// untouched — insert-once holds, and a rebuild from the log puts the
+/// same zeros back — so the reinterpretation has to live where the
+/// reading happens, in ONE relation rather than in every reader's
+/// memory of a cutover date (backlog f19589ac).
+pub(super) const READ_RELATION: &str = "agent_runs_read";
+
 /// `INSERT INTO agent_runs (<cols>) VALUES ($1,…,$n)`, with the
 /// placeholder list DERIVED from [`RUN_COLUMNS`] rather than typed out
 /// beside it. A hand-written `$1..$15` is the same fact twice in two
@@ -238,7 +249,7 @@ impl AgentRunLog for PgAgentRuns {
         // read holds both. A refusal commits its event and nothing
         // else, then answers `Denied`.
         let prior_rows = sqlx::query(&format!(
-            "SELECT {RUN_COLUMNS} FROM agent_runs WHERE actor_id = $1 AND finished_at >= $2"
+            "SELECT {RUN_COLUMNS} FROM {READ_RELATION} WHERE actor_id = $1 AND finished_at >= $2"
         ))
         .bind(run.actor_id.to_string())
         .bind(ADMISSION_WINDOW.cutoff(run.started_at))
@@ -322,7 +333,7 @@ impl AgentRunLog for PgAgentRuns {
         }
 
         let row = sqlx::query(&format!(
-            "SELECT {RUN_COLUMNS} FROM agent_runs WHERE run_id = $1"
+            "SELECT {RUN_COLUMNS} FROM {READ_RELATION} WHERE run_id = $1"
         ))
         .bind(&run.run_id)
         .fetch_one(&mut *tx)
@@ -344,7 +355,7 @@ impl AgentRunLog for PgAgentRuns {
         // statement instead of four assembled variants.
         let since: Option<DateTime<Utc>> = filter.since;
         let rows = sqlx::query(&format!(
-            "SELECT {RUN_COLUMNS} FROM agent_runs \
+            "SELECT {RUN_COLUMNS} FROM {READ_RELATION} \
              WHERE ($1::uuid IS NULL OR job_id = $1) \
                AND ($2::text IS NULL OR branch = $2) \
                AND ($3::text IS NULL OR actor_id = $3) \
