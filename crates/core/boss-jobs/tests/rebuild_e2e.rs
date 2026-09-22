@@ -157,6 +157,7 @@ fn fixture_job(id: &str, title: &str) -> Job {
         status: JobStatus::Open,
         priority: Priority::Standard,
         opened_on: NaiveDate::from_ymd_opt(2026, 4, 1).unwrap(),
+        opened_at: None,
         due_on: Some(NaiveDate::from_ymd_opt(2026, 4, 30).unwrap()),
         closed_on: None,
         metadata: serde_json::json!({"site": "main"}),

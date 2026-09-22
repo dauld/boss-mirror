@@ -890,6 +890,17 @@ pub async fn run(all: bool) -> Result<()> {
         crate::built_from::freshness_line(built, main.as_deref(), ancestry)
     );
 
+    // THE MEMORY INDEX — the session's other instrument, measured
+    // against a declared budget (4ea1b28c). It sits here, beside the
+    // binary's own freshness and above every lane, because it is a
+    // statement about what this session was HANDED rather than about the
+    // yard: an agent reading a truncated index does not know it is
+    // reading one, and the harness that cut it says nothing. Loud when
+    // over, quiet-but-numbered when under, and never fatal.
+    for line in crate::memory_index::report() {
+        println!("{line}");
+    }
+
     // THE REGIONS — the map's numbers, from the server's one definition
     // (design 0524fc95). A server without the read (older than this
     // verb) says so and the approach still prints; the lanes below are

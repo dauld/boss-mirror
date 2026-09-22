@@ -36,6 +36,7 @@ fn job(id: &str, partition: Partition) -> Job {
         status: JobStatus::Open,
         priority: Priority::Standard,
         opened_on: NaiveDate::from_ymd_opt(2026, 9, 15).unwrap(),
+        opened_at: None,
         due_on: None,
         closed_on: None,
         metadata: serde_json::json!({}),

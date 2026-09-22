@@ -25,6 +25,7 @@ mod host_readiness;
 mod identity;
 mod inspect;
 mod job;
+mod memory_index;
 mod merged;
 mod ops;
 mod ops_request;

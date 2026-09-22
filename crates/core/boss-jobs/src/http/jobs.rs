@@ -760,6 +760,22 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
         }
     };
 
+    // THE ADMISSION INSTANT, server-owned (backlog 6c2eba00, design
+    // f2cdff23). Stamped here and only here: the adapters keep the
+    // column out of every UPDATE, so a later PUT cannot move when the
+    // packet arrived, and a body that supplies its own value is
+    // overwritten — the same ownership `workflow_version` and the
+    // experiment arm take a few lines down.
+    //
+    // Unconditional, unlike the metadata stamp below, because the two
+    // answer different questions: `metadata.opened_at` is the precise
+    // instant behind a CLOCK-OWNED `opened_on`, and is deliberately
+    // skipped when the caller backdates the date; this field is when
+    // the packet was ADMITTED, which is now whatever date the body
+    // names. That is also what the rebuilder recovers from the create
+    // event, so live and replay read the same instant.
+    job.opened_at = Some(now);
+
     // The precise instant behind the defaulted date. `opened_on` has
     // one-day resolution by construction; the metadata stamp is what
     // lets the terminal report measure a same-day close in hours

@@ -73,6 +73,7 @@ fn request(id: &str, verb: &str) -> Job {
         status: JobStatus::Open,
         priority: Priority::Standard,
         opened_on: day(2026, 9, 20),
+        opened_at: None,
         due_on: None,
         closed_on: None,
         metadata: serde_json::json!({ "verb": verb, "host": "forge" }),

@@ -32,6 +32,7 @@ fn job(id: &str, kind: &str, subject: Subject) -> Job {
         status: JobStatus::Open,
         priority: Priority::Standard,
         opened_on: NaiveDate::from_ymd_opt(2026, 4, 1).unwrap(),
+        opened_at: None,
         due_on: None,
         closed_on: None,
         metadata: serde_json::Value::Null,

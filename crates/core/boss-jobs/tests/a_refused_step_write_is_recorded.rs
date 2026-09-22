@@ -127,6 +127,7 @@ async fn seed() -> (Router, Arc<InMemoryJobs>) {
         status: JobStatus::Open,
         priority: Priority::Standard,
         opened_on: NaiveDate::from_ymd_opt(2026, 8, 18).expect("date"),
+        opened_at: None,
         due_on: None,
         closed_on: None,
         metadata: serde_json::json!({}),

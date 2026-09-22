@@ -392,6 +392,7 @@ mod tests {
             status,
             priority: boss_core::job::Priority::Standard,
             opened_on: chrono::NaiveDate::from_ymd_opt(2026, 9, 20).unwrap(),
+            opened_at: None,
             due_on: None,
             closed_on: None,
             metadata: m,

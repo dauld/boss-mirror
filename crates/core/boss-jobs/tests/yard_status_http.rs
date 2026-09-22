@@ -240,6 +240,7 @@ fn job(kind: &str, id: &str, title: &str, status: JobStatus, metadata: Value) ->
         status,
         priority: Priority::Standard,
         opened_on: NaiveDate::from_ymd_opt(2026, 9, 3).unwrap(),
+        opened_at: None,
         due_on: None,
         closed_on: if status == JobStatus::Closed {
             Some(NaiveDate::from_ymd_opt(2026, 9, 3).unwrap())

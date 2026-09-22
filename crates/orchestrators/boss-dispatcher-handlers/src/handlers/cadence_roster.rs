@@ -78,6 +78,35 @@
 //!   (`f5da586c`). The shape is still read and still skipped; no shipped
 //!   rule exhibits it at the moment.
 //!
+//! THE CONSTRAINT THIS PUTS ON A RULE AUTHOR (backlog fbcac8b4,
+//! reported off e1b6ddf7, 2026-09-19). Because the declaration is
+//! INFERRED FROM SHAPE, a scheduled `jobs.spawn` with a literal
+//! `(kind, subject)` promises that a packet of that identity ARRIVES
+//! every N minutes, and the sweep holds it to that promise. A rule that
+//! fires CONDITIONALLY keeps no such promise: its declaration is an
+//! upper bound, so every interval on which the condition is false is a
+//! silence the sweep measures against a rule working exactly as
+//! designed. The ONE `when` this module reconciles with a cadence is a
+//! dedup guard — "is a packet of this identity already open?" — because
+//! that question the sweep can ask for itself, and the answer explains
+//! the silence by naming the packet. Every other condition is a
+//! question about the world, so it parses as [`Guard::Unreadable`] and
+//! `every_derived_cadence_has_a_readable_guard_or_none_at_all` refuses
+//! it in CI rather than letting it become a daily false alarm.
+//!
+//! So a scheduled `jobs.spawn` has TWO shapes, not three: it fires
+//! unconditionally, or it does not present a literal identity the
+//! roster can read as a cadence. Firing unconditionally is usually the
+//! cheaper half — put the idempotence in the VERB the packet runs, as
+//! `refresh-publish-drift-daily` does: `mirror-drift` finds the one
+//! open publish packet, and on a day with no such packet answers
+//! `nothing to refresh` and exits 0 before it fetches anything, so the
+//! cadence is kept and a quiet day costs one jobs-API read. The third
+//! shape — weakening the sweep to stop it alarming — is the one that
+//! costs nineteen days, and it is what this paragraph exists to
+//! forestall: the builder of e1b6ddf7 hit this constraint, routed
+//! around it correctly, and reported that it was written down nowhere.
+//!
 //! A scheduled `jobs.spawn` rule this module cannot read — a computed
 //! `kind`, a guard shape it does not know — would drop out of the roster
 //! SILENTLY, which is the defect one level up. That is why
@@ -252,6 +281,38 @@ pub fn parse_guard(when: &str) -> Guard {
         };
     }
     Guard::Unreadable(source)
+}
+
+/// What an author must do about a guard [`parse_guard`] could not read
+/// — BOTH repairs, because there are exactly two and the useful one
+/// depends on what the guard meant.
+///
+/// It lives here, beside the parser whose verdict it explains, so the
+/// pin test that fires it cannot drift from the derivation's own rules
+/// (CLAUDE.md §9a). Until backlog fbcac8b4 the message named only the
+/// first repair, which is unreachable for the case that actually
+/// arises: no parser can ask a question about the world on the sweep's
+/// behalf, so an author holding a genuinely conditional spawner was
+/// told to do the one thing that cannot work — and the next step from
+/// there is weakening the sweep.
+pub fn unreadable_guard_repair(rule: &str, guard: &str) -> String {
+    format!(
+        "clock rule `{rule}` guards on `{guard}`, which \
+         `cadence_roster::parse_guard` cannot read as the one question the sweep is able to \
+         ask for itself: is a packet of this identity already open? There are two repairs and \
+         only two.\n  \
+         (1) IF IT IS THAT QUESTION in a phrasing the parser does not know, teach \
+         `parse_guard` the shape. Left unread, the sweep calls the silence UNEXPLAINED and \
+         never names the packet holding it, which is the whole finding of cf0f5e2d.\n  \
+         (2) IF IT IS A CONDITION ON THE WORLD, this rule fires conditionally and so declares \
+         a cadence it does not keep: the literal `(kind, subject)` promises a packet every \
+         interval, and each interval the condition is false is a silence this sweep will \
+         alarm on while the rule works as designed. Fire UNCONDITIONALLY and put the \
+         idempotence in the verb the packet runs — `refresh-publish-drift-daily` is the \
+         worked example, its `mirror-drift` verb exits 0 with `nothing to refresh` on a quiet \
+         day — or stop presenting a literal identity the roster reads as a declaration.\n  \
+         Weakening the sweep is not a third repair (backlog fbcac8b4)."
+    )
 }
 
 /// `name("a", "b")` → `["a", "b"]`, and `None` unless every argument is
@@ -536,6 +597,36 @@ mod tests {
             parse_guard(r#"NOT open_job_exists("maintenance-sweep", target)"#),
             Guard::Unreadable(r#"NOT open_job_exists("maintenance-sweep", target)"#.into()),
             "a computed target is not a fixed question, so it is not read as one"
+        );
+    }
+
+    /// A conditionally-firing spawner declares a cadence it does not
+    /// keep (backlog fbcac8b4, reported off e1b6ddf7): the repair an
+    /// author meets must name THAT case, not only "teach the parser",
+    /// because no parser can ask a question about the world on the
+    /// sweep's behalf.
+    #[test]
+    fn the_unreadable_guard_repair_names_the_conditional_case() {
+        let msg = unreadable_guard_repair(
+            "refresh-publish-drift-daily",
+            r#"mirror_drift_exceeds("github-mirror", 50)"#,
+        );
+        assert!(msg.contains("refresh-publish-drift-daily"), "{msg}");
+        assert!(
+            msg.contains(r#"mirror_drift_exceeds("github-mirror", 50)"#),
+            "the guard verbatim, so the author reads what they wrote: {msg}"
+        );
+        assert!(
+            msg.contains("parse_guard"),
+            "repair 1, a dedup question in a phrasing the parser does not know: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("unconditionally"),
+            "repair 2, the conditional case this message exists for: {msg}"
+        );
+        assert!(
+            msg.contains("fbcac8b4"),
+            "the packet that measured it, as this codebase cites: {msg}"
         );
     }
 

@@ -87,6 +87,7 @@ fn packet(n: u8, kind: &str, status: JobStatus, metadata: Value) -> Job {
         status,
         priority: Priority::Standard,
         opened_on: day(2026, 9, 1 + u32::from(n)),
+        opened_at: None,
         due_on: None,
         closed_on: (status == JobStatus::Closed).then(|| day(2026, 9, 10 + u32::from(n))),
         metadata,
