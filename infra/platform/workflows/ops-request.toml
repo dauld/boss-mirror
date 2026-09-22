@@ -90,6 +90,20 @@ title = "approve"
 kind = "sign-off"
 ready_when = "steps.filed.done AND job.metadata.requires_approval"
 assurance_required = "presence"
+# WHO MUST STAMP IT. Declared because an assurance with no required
+# sign-off is unreachable by the door that enforces it (backlog
+# 148549c5): the sign-off surface renders per required role, so a step
+# with none offered the ordinary complete control instead — and that
+# path had no assurance check at all. Measured live on packet d5efbb3c,
+# where the first presence-assured step in the system completed with
+# `sign_offs: []` and no ceremony, and the host then ran the verb it was
+# gating.
+#
+# BOTH HALVES ARE NOW LOAD-BEARING and neither replaces the other. The
+# step PUT refuses a completion that carries no presence, so the control
+# holds even for a caller that never opens a browser; this line is what
+# gives a human the door that produces one.
+sign_offs_required = ["platform-admin"]
 title_template = "Approve the plan: {metadata.verb} on {metadata.host}"
 authority_role = "platform-admin"
 metadata_defaults = { procedure = "READ THE PLAN ON THIS STEP AND NOTHING ELSE. `plan` holds the document rendered on the host itself: the target named by-id, the kernel name it resolved to AT PLAN TIME, what was observed about it, and the argv that would run. The kernel name is shown because it is the thing that moves — it is evidence about when the plan was made, never the target.\n\nYOUR PASSKEY SIGNS THESE EXACT BYTES. If anything about the plan changes after you sign, the signature stops matching and the runner refuses. If the plan looks wrong, do not approve it and say why — a plan that needs an operator to eyeball which thing is meant is a verb that should not be on this path at all (q3)." }
