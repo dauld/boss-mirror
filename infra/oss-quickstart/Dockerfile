@@ -104,6 +104,11 @@ COPY infra/platform/tiers.toml ./infra/platform/tiers.toml
 # the host runner enforces (one per verb, 5086842d), listed by boss-cli's
 # build.rs; the terminal applies the same rules first.
 COPY infra/ops/verbs ./infra/ops/verbs
+# `boss tenant check` compiles the platform workflow roster in — the
+# DIRECTORY of kind files, listed by the same build.rs — because it
+# judges a tenant's sensor references offline, with no registry to ask
+# (b8d8c928).
+COPY infra/platform/workflows ./infra/platform/workflows
 
 # NO `ENV BOSS_BUILD_COMMIT` HERE — see the stage header; it is set in
 # the runtime stage so this layer keys on the sources alone.

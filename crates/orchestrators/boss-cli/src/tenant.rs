@@ -53,6 +53,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use boss_core::tenant_manifest::TenantToml;
 
+// `PLATFORM_WORKFLOW_KINDS` — the kinds the product ships, derived
+// from `infra/platform/workflows/*.toml` by build.rs, which carries
+// the reasoning.
+include!(concat!(env!("OUT_DIR"), "/platform_workflow_kinds.rs"));
+
 /// One file the product reads from a tenant directory. The order of
 /// [`CONTRACT`] is the order `check` reports and the doc's table.
 pub struct Entry {
@@ -84,6 +89,57 @@ struct Ctx {
     /// carries that refusal) — what a tax kind's account is checked
     /// against (backlog 7f163e58).
     chart: Option<BTreeSet<String>>,
+    /// The kinds `seeds/workflows.toml` declares — half of what a
+    /// sensor's `opens` is checked against (backlog b8d8c928).
+    workflows: Declared,
+    /// The ids `seeds/credentials.toml` declares — what a sensor's
+    /// `credential` is checked against, when the tenant wrote one.
+    credentials: Declared,
+}
+
+/// What a file a cross-file reference points INTO offers.
+enum Declared {
+    /// It parsed: these are the ids it declares, and a reference this
+    /// set does not hold is dangling.
+    Rows(BTreeSet<String>),
+    /// Not judged here, for one of two reasons. It EXISTS and does not
+    /// parse — its own row already carries that refusal, in the
+    /// loader's words, and a second one here would name the wrong
+    /// defect ("nothing declares it" about a file that does). Or it is
+    /// ABSENT and optional, and the registry it feeds is one the
+    /// instance may hold on its own (design e187198f: seeds bootstrap,
+    /// the instance is the truth) — a file that was never written
+    /// declares nothing and contradicts nothing.
+    NotJudged,
+}
+
+impl Declared {
+    fn holds(&self, id: &str) -> bool {
+        match self {
+            Declared::Rows(ids) => ids.contains(id),
+            Declared::NotJudged => true,
+        }
+    }
+}
+
+/// Read one referenced file into a [`Declared`]. `absent` is the
+/// verdict when there is no such file, which differs by registry: the
+/// workflow roster is REQUIRED of every tenant, so its absence is an
+/// empty roster and a reference into it dangles; an optional file the
+/// tenant never wrote is [`Declared::NotJudged`].
+fn declared<T>(
+    path: &Path,
+    absent: Declared,
+    load: impl FnOnce(&Path) -> Result<Vec<T>, String>,
+    id: impl Fn(T) -> String,
+) -> Declared {
+    if !path.is_file() {
+        return absent;
+    }
+    match load(path) {
+        Ok(rows) => Declared::Rows(rows.into_iter().map(id).collect()),
+        Err(_) => Declared::NotJudged,
+    }
 }
 
 /// What the scaffold templates need.
@@ -374,7 +430,10 @@ pub const CONTRACT: &[Entry] = &[
                 for paid payouts, both polled on the same credential; `site` push-only), credential \
                 (a `credentials` registry id; none on a push-only source), every_minutes (none on a \
                 push-only source), opens (the workflow kind one reading opens), subject_kind, \
-                enabled? — validated by `boss_jobs::sensors::load_sensors_toml`",
+                enabled? — validated by `boss_jobs::sensors::load_sensors_toml`. Cross-file: \
+                `opens` must name a workflow this tenant declares or the platform ships, and \
+                `credential` a row `seeds/credentials.toml` declares — a dangling reference \
+                passes every file-local check and opens nothing (backlog b8d8c928)",
         parse: parse_sensors,
         scaffold: Some(scaffold_sensors),
     },
@@ -751,9 +810,59 @@ fn parse_credentials(path: &Path, _: &Ctx) -> Result<String, String> {
     })
 }
 
-fn parse_sensors(path: &Path, _: &Ctx) -> Result<String, String> {
+/// The contract's cross-check on one sensor (backlog b8d8c928). A
+/// sensor names rows in two OTHER files — the workflow one reading
+/// opens, and the credential its source is read with — and until
+/// 2026-09-22 nothing held the files together: the real tenant's
+/// `www-visits` sensor declared `opens = "marketing-weekly"` on
+/// 2026-09-17 against a kind that has never existed (no workflow
+/// version of it, ever), so five days of LIVE readings reached a dead
+/// end in silence. Every file-local check passed, because the defect
+/// is BETWEEN files — CLAUDE.md §9a seen from the other side, so the
+/// refusal names the offending reference the way a drift pin does.
+///
+/// WHICH AUTHORITY. `check` is pure over the filesystem and never
+/// touches the network, so the live registry is not a source here and
+/// must not become one: a verdict that depended on which instance
+/// answered would pass or fail the same directory twice. The honest
+/// offline authority for "a workflow this tenant can open" is the
+/// tenant's own `seeds/workflows.toml` plus the kinds the PRODUCT
+/// ships ([`PLATFORM_WORKFLOW_KINDS`], derived from
+/// `infra/platform/workflows/` by build.rs) — a tenant opens a
+/// platform protocol without redeclaring it. Same rule the tax kinds
+/// follow against the chart: the file the reference points into is the
+/// authority, and its absence is refused rather than excused.
+fn cross_check_sensor(s: &boss_jobs::sensors::SensorInput, ctx: &Ctx) -> Result<(), String> {
+    if !ctx.workflows.holds(&s.opens) && !PLATFORM_WORKFLOW_KINDS.contains(&s.opens.as_str()) {
+        return Err(format!(
+            "sensor {}: opens `{}`, which is no workflow — seeds/workflows.toml does not \
+             declare it and it is none of the {} kinds the product ships. Every reading of \
+             this sensor would open nothing, silently; declare the protocol there, or name a \
+             kind that exists",
+            s.id,
+            s.opens,
+            PLATFORM_WORKFLOW_KINDS.len()
+        ));
+    }
+    // A push-only source names no credential; the loader has already
+    // refused an empty one on a polled source.
+    if !s.credential.is_empty() && !ctx.credentials.holds(&s.credential) {
+        return Err(format!(
+            "sensor {}: credential `{}`, which seeds/credentials.toml does not declare — \
+             publish sends the credentials BEFORE the sensors, because this is the id the \
+             poller reads the source's value by",
+            s.id, s.credential
+        ));
+    }
+    Ok(())
+}
+
+fn parse_sensors(path: &Path, ctx: &Ctx) -> Result<String, String> {
     let rows = boss_jobs::sensors::load_sensors_toml(path)?;
     refuse_if_stray(&read(path)?, "sensor", rows.len())?;
+    for s in &rows {
+        cross_check_sensor(s, ctx)?;
+    }
     Ok(match rows.len() {
         0 => "0 sensors".to_string(),
         n => format!(
@@ -1047,11 +1156,27 @@ pub fn declared_tenant_id(dir: &Path) -> Option<String> {
 /// Validate `dir` against [`CONTRACT`]. Pure over the filesystem: it
 /// reads, never writes, and never touches the network.
 pub fn check(dir: &Path) -> Report {
+    let tenant_id = tenant_id_of(dir);
     let ctx = Ctx {
-        tenant_id: tenant_id_of(dir),
         chart: boss_ledger::chart::load_chart_toml(&dir.join("seeds/chart_of_accounts.toml"))
             .ok()
             .map(|rows| rows.into_iter().map(|a| a.code).collect()),
+        workflows: declared(
+            &dir.join("seeds/workflows.toml"),
+            Declared::Rows(BTreeSet::new()),
+            |p| {
+                boss_jobs::seed_loader::load_workflows_with_owning_team(p, &tenant_id)
+                    .map_err(|e| e.to_string())
+            },
+            |s| s.kind,
+        ),
+        credentials: declared(
+            &dir.join("seeds/credentials.toml"),
+            Declared::NotJudged,
+            boss_jobs::credentials::load_credentials_toml,
+            |c| c.id,
+        ),
+        tenant_id,
     };
     let mut rows = Vec::new();
     let mut named: BTreeSet<String> = BTreeSet::new();
@@ -2338,6 +2463,11 @@ terminal = { outcome = "sponsored" }
         let wf = status_of(&r, "seeds/workflows.toml").unwrap();
         assert_eq!(wf.status, Status::Invalid, "{wf:?}");
         assert!(wf.detail.contains("sensor"), "{wf:?}");
+        // And the sensor row above stays OK while this file does not
+        // parse: the cross-check on `opens` (b8d8c928) judges against
+        // the kinds this file declares, so when it declares NOTHING
+        // BECAUSE IT IS BROKEN, the refusal belongs to this row alone.
+        // A second one on the sensor would name the wrong defect.
         // A policy file with no grants, and a calendar in a shape the
         // batch endpoint rejects.
         let policy = status_of(&r, "seeds/policy_rules.toml").unwrap();
@@ -2378,6 +2508,216 @@ terminal = { outcome = "sponsored" }
         let row = status_of(&r, "seeds/sensors.toml").unwrap();
         assert_eq!(row.status, Status::Invalid, "{row:?}");
         assert!(row.detail.contains("[[sensor]]"), "{row:?}");
+    }
+
+    /// One viable tenant protocol — a trigger and a terminal — for the
+    /// cross-file cases below. `trigger_kind` is one of the StepType's
+    /// own `periodic|event|operator|counterparty`, as the real
+    /// tenant's sensor-fed protocols are: the file has to PARSE, or
+    /// the cross-check has no roster to judge against.
+    const ONE_WORKFLOW: &str = r#"[[workflow]]
+kind = "receive-a-sponsorship"
+label = "Receive a sponsorship"
+category = "sales"
+subject_kinds = ["custom"]
+
+[[workflow.step]]
+title = "received"
+kind = "trigger"
+ready_when = "true"
+title_template = "Stripe reported a payment"
+metadata_defaults = { trigger_kind = "event", trigger_name = "stripe-checkout-completed" }
+
+[[workflow.step]]
+title = "sponsored"
+kind = "outcome"
+ready_when = "steps.received.done"
+title_template = "Sponsorship recognized"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "sponsored" }
+"#;
+
+    /// A tenant directory with the two files a sensor references, and
+    /// `sensors.toml` written by the caller.
+    fn sensor_fixture(tag: &str) -> PathBuf {
+        let dir = scratch_dir(tag);
+        put(&dir, "tenant.toml", "[meta]\ntenant_id = \"t\"\n");
+        put(&dir, "seeds/workflows.toml", ONE_WORKFLOW);
+        put(
+            &dir,
+            "seeds/credentials.toml",
+            "[[credential]]\nid = \"stripe-restricted-read\"\nkind = \"stripe-restricted-key\"\n\
+             issuer = \"stripe\"\nprincipal = \"the account\"\n\
+             storage_location = \"k8s Secret boss/boss-credential-broker-root key stripe\"\n",
+        );
+        dir
+    }
+
+    /// A sensor's `opens` is a reference INTO another file, and until
+    /// 2026-09-22 nothing held the two together: the real tenant's
+    /// `www-visits` sensor declared `opens = "marketing-weekly"` on
+    /// 2026-09-17 against a kind that has never existed, so five days
+    /// of live readings opened nothing, silently (backlog b8d8c928).
+    /// Every file-local check passed, because the defect is BETWEEN
+    /// files. The refusal names the sensor and the reference
+    /// (CLAUDE.md §9a).
+    #[test]
+    fn a_sensor_opening_a_workflow_nobody_declares_is_invalid_naming_the_kind() {
+        let dir = sensor_fixture("boss-cli-tenant-check-sensor-opens");
+        put(
+            &dir,
+            "seeds/sensors.toml",
+            "[[sensor]]\nid = \"www-visits\"\nsource = \"site\"\n\
+             opens = \"marketing-weekly\"\nsubject_kind = \"custom\"\n",
+        );
+        let row = status_of(&check(&dir), "seeds/sensors.toml")
+            .cloned()
+            .unwrap();
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(
+            row.detail.contains("www-visits") && row.detail.contains("marketing-weekly"),
+            "the refusal names the sensor and the kind: {row:?}"
+        );
+        assert!(
+            row.detail.contains("seeds/workflows.toml"),
+            "and where to declare it: {row:?}"
+        );
+
+        // A kind the TENANT declares is fine.
+        put(
+            &dir,
+            "seeds/sensors.toml",
+            "[[sensor]]\nid = \"www-visits\"\nsource = \"site\"\n\
+             opens = \"receive-a-sponsorship\"\nsubject_kind = \"custom\"\n",
+        );
+        assert_eq!(
+            status_of(&check(&dir), "seeds/sensors.toml")
+                .unwrap()
+                .status,
+            Status::Ok
+        );
+
+        // So is a kind the PRODUCT ships: a tenant opens a platform
+        // protocol without redeclaring it.
+        put(
+            &dir,
+            "seeds/sensors.toml",
+            "[[sensor]]\nid = \"www-visits\"\nsource = \"site\"\n\
+             opens = \"backlog-item\"\nsubject_kind = \"custom\"\n",
+        );
+        let row = status_of(&check(&dir), "seeds/sensors.toml")
+            .cloned()
+            .unwrap();
+        assert_eq!(row.status, Status::Ok, "{row:?}");
+
+        // A tenant with NO workflow roster at all declares no kind, so
+        // a tenant kind still dangles — the file is required of every
+        // tenant, and its own row says MISSING beside this one.
+        std::fs::remove_file(dir.join("seeds/workflows.toml")).unwrap();
+        put(
+            &dir,
+            "seeds/sensors.toml",
+            "[[sensor]]\nid = \"www-visits\"\nsource = \"site\"\n\
+             opens = \"receive-a-sponsorship\"\nsubject_kind = \"custom\"\n",
+        );
+        let r = check(&dir);
+        assert_eq!(
+            status_of(&r, "seeds/workflows.toml").unwrap().status,
+            Status::Missing
+        );
+        assert_eq!(
+            status_of(&r, "seeds/sensors.toml").unwrap().status,
+            Status::Invalid
+        );
+    }
+
+    /// The other reference of the same shape in the same file: the
+    /// `credentials` registry id the poller reads the source with.
+    /// `boss tenant publish` sends the credentials BEFORE the sensors
+    /// for this reason, so a dangling one lands a sensor the poller
+    /// cannot run.
+    #[test]
+    fn a_sensor_naming_a_credential_nobody_declares_is_invalid() {
+        let dir = sensor_fixture("boss-cli-tenant-check-sensor-credential");
+        put(
+            &dir,
+            "seeds/sensors.toml",
+            "[[sensor]]\nid = \"stripe-sponsorships\"\nsource = \"stripe\"\n\
+             credential = \"stripe-write-key\"\nevery_minutes = 15\n\
+             opens = \"receive-a-sponsorship\"\nsubject_kind = \"custom\"\n",
+        );
+        let row = status_of(&check(&dir), "seeds/sensors.toml")
+            .cloned()
+            .unwrap();
+        assert_eq!(row.status, Status::Invalid, "{row:?}");
+        assert!(
+            row.detail.contains("stripe-sponsorships")
+                && row.detail.contains("stripe-write-key")
+                && row.detail.contains("seeds/credentials.toml"),
+            "{row:?}"
+        );
+
+        put(
+            &dir,
+            "seeds/sensors.toml",
+            "[[sensor]]\nid = \"stripe-sponsorships\"\nsource = \"stripe\"\n\
+             credential = \"stripe-restricted-read\"\nevery_minutes = 15\n\
+             opens = \"receive-a-sponsorship\"\nsubject_kind = \"custom\"\n",
+        );
+        assert_eq!(
+            status_of(&check(&dir), "seeds/sensors.toml")
+                .unwrap()
+                .status,
+            Status::Ok
+        );
+
+        // And a tenant that wrote NO credentials file is not judged
+        // against one: that registry is optional and the instance may
+        // hold it on its own (design e187198f). The workflow roster is
+        // required of every tenant, so it has no such exemption — the
+        // case above still refuses with the file absent.
+        std::fs::remove_file(dir.join("seeds/credentials.toml")).unwrap();
+        let row = status_of(&check(&dir), "seeds/sensors.toml")
+            .cloned()
+            .unwrap();
+        assert_eq!(row.status, Status::Ok, "{row:?}");
+    }
+
+    /// The compiled roster IS `infra/platform/workflows/` — the
+    /// directory, not a hand-kept list (CLAUDE.md §9a) — and the kind
+    /// is the file name, which is the rule
+    /// `infra/gcp/publish-workflow.sh` applies. It also catches the
+    /// shared-target-dir staleness boss-testing's build.rs documents: a
+    /// roster linked from a neighbouring checkout's build would
+    /// disagree with this checkout's directory.
+    #[test]
+    fn the_platform_workflow_roster_is_the_directory() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../infra/platform/workflows");
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .expect("infra/platform/workflows/ exists")
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+            .map(|p| p.file_stem().unwrap().to_string_lossy().into_owned())
+            .collect();
+        on_disk.sort();
+        let mut compiled: Vec<String> = PLATFORM_WORKFLOW_KINDS
+            .iter()
+            .map(|k| (*k).to_string())
+            .collect();
+        compiled.sort();
+        assert_eq!(
+            compiled, on_disk,
+            "PLATFORM_WORKFLOW_KINDS is not infra/platform/workflows/*.toml — rebuild"
+        );
+        for kind in PLATFORM_WORKFLOW_KINDS {
+            let text = std::fs::read_to_string(dir.join(format!("{kind}.toml"))).unwrap();
+            assert!(
+                text.lines()
+                    .any(|l| l.trim() == format!("kind = \"{kind}\"")),
+                "{kind}.toml declares a kind other than its file name — the roster reads \
+                 the name, as publish-workflow.sh does"
+            );
+        }
     }
     /// A credential declaration (backlog ee368d0c) is judged by the
     /// registry's own loader: a row that smuggles a value under a key
