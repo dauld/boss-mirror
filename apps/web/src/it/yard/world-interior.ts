@@ -34,7 +34,7 @@
 import { AGE_THRESHOLDS, CHANNELS, ageDays, type Channel, type InboundRow } from '../receiving/receiving';
 import type { Crew } from '../crew/crew';
 import type { Siding } from '../marshalling/marshalling';
-import { INTERIOR_HEAD } from './region-contents';
+import { contentsBox } from './region-contents';
 import type { Territory } from './world';
 
 /** Which standing packets are flagged, and from which end of the
@@ -223,7 +223,6 @@ export type PlacedPlatform = Readonly<{
   boundX: number | null;
 }>;
 
-const EDGE = 8;
 /** A platform: a name line, then the track its packets stand on. */
 const PLATFORM_H = 24;
 const LABEL_H = 11;
@@ -242,12 +241,17 @@ export function platformLayout(
   t: Territory,
   platforms: ReadonlyArray<Platform>,
 ): Readonly<{ placed: ReadonlyArray<PlacedPlatform>; hidden: number }> {
-  const w = t.w - 2 * EDGE;
-  const head = Math.min(INTERIOR_HEAD, Math.max(24, t.h - PLATFORM_H - EDGE));
-  const rows = Math.max(1, Math.floor((t.h - head - EDGE) / PLATFORM_H));
+  // The room the region's contents may use — head off the top, edge
+  // and MACHINERY STRIP off the bottom. One definition, shared with
+  // `interiorLayout` (backlog 3a916816): this divided the same canvas
+  // without the strip's term, so a platform row and a machine glyph
+  // could be placed in the same pixels.
+  const box = contentsBox(t, PLATFORM_H);
+  const w = box.w;
+  const rows = Math.max(1, Math.floor(box.h / PLATFORM_H));
   const per = Math.max(1, Math.floor((w - RATE_W + MARK_GAP) / (MARK_W + MARK_GAP)));
   const placed = platforms.slice(0, rows).map((platform, i): PlacedPlatform => {
-    const y = t.y + head + i * PLATFORM_H;
+    const y = box.y + i * PLATFORM_H;
     const trackY = y + LABEL_H;
     const standing = platform.standing ?? 0;
     const drawn = Math.min(standing, per);
@@ -260,7 +264,7 @@ export function platformLayout(
     const perMark = drawn === 0 ? 1 : standing / drawn;
     const trackLen = drawn === 0 ? 0 : drawn * (MARK_W + MARK_GAP) - MARK_GAP;
     const marks = Array.from({ length: drawn }, (_, k): PlacedMark => ({
-      x: t.x + EDGE + k * (MARK_W + MARK_GAP),
+      x: box.x + k * (MARK_W + MARK_GAP),
       y: trackY,
       w: MARK_W,
       h: MARK_H,
@@ -272,7 +276,7 @@ export function platformLayout(
     const bound = platform.bound;
     return {
       platform,
-      x: t.x + EDGE,
+      x: box.x,
       y,
       w,
       h: PLATFORM_H,
@@ -282,7 +286,7 @@ export function platformLayout(
       perMark,
       boundX:
         bound !== null && bound > 0 && bound < standing
-          ? t.x + EDGE + (bound / standing) * trackLen
+          ? box.x + (bound / standing) * trackLen
           : null,
     };
   });

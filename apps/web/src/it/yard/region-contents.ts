@@ -102,28 +102,50 @@ const GAP = 4;
  *  full count/trend/why block the world draws at rest is not drawn
  *  when a territory is zoomed: the rect's room goes to the interior,
  *  which is what the zoom was for. */
-export const INTERIOR_HEAD = 64;
+const INTERIOR_HEAD = 64;
 const EDGE = 8;
+
+/** THE ROOM A REGION'S CONTENTS MAY USE — one definition, read by both
+ *  layouts that divide a region's rect (CLAUDE.md 9a; backlog
+ *  3a916816). The bottom of every territory belongs to its machinery
+ *  (car 5), and the height of that strip is read from the strip's own
+ *  definition rather than copied.
+ *
+ *  It is a function because the header clamp needs the height of ONE
+ *  row of whatever the caller is laying out: a wide, low territory
+ *  gets its contents nearer its own head, because INTERIOR_HEAD is
+ *  measured for a full-height line territory.
+ *
+ *  `platformLayout` divided this same canvas WITHOUT the strip's term
+ *  and did not import its height at all, so a platform row and a
+ *  machine glyph could be placed in the same pixels — and on the world
+ *  line's 200-high territory they were. Both callers read this now, so
+ *  the two cannot disagree about where the bottom is. */
+export function contentsBox(
+  t: Territory,
+  rowH: number,
+): Readonly<{ x: number; y: number; w: number; h: number }> {
+  const head = Math.min(INTERIOR_HEAD, Math.max(24, t.h - rowH - EDGE));
+  return {
+    x: t.x + EDGE,
+    y: t.y + head,
+    w: t.w - 2 * EDGE,
+    h: Math.max(0, t.h - head - EDGE - MACHINERY_STRIP_H),
+  };
+}
 
 /** Lay the wagons out inside the territory. What does not fit is
  *  COUNTED, never dropped silently — the yard's own "+N" idiom, so a
  *  full region reads as full rather than as a tidy one. */
 export function interiorLayout(t: Territory, wagons: ReadonlyArray<Wagon>): Readonly<{ placed: ReadonlyArray<Placed>; hidden: number }> {
-  const availW = t.w - 2 * EDGE;
-  // The garage is wide and low: it gets its plates nearer its own head,
-  // because INTERIOR_HEAD is measured for a full-height line territory.
-  const head = Math.min(INTERIOR_HEAD, Math.max(24, t.h - PLATE_H - EDGE));
-  // The bottom of every territory belongs to its machinery (car 5), so
-  // a wagon plate and a machine glyph never draw over each other. The
-  // height is read from the strip's own definition, not copied.
-  const availH = t.h - head - EDGE - MACHINERY_STRIP_H;
-  const cols = Math.max(1, Math.floor((availW + GAP) / (PLATE_W + GAP)));
-  const rows = Math.max(1, Math.floor((availH + GAP) / (PLATE_H + GAP)));
+  const box = contentsBox(t, PLATE_H);
+  const cols = Math.max(1, Math.floor((box.w + GAP) / (PLATE_W + GAP)));
+  const rows = Math.max(1, Math.floor((box.h + GAP) / (PLATE_H + GAP)));
   const capacity = cols * rows;
   const placed = wagons.slice(0, capacity).map((wagon, i): Placed => ({
     wagon,
-    x: t.x + EDGE + (i % cols) * (PLATE_W + GAP),
-    y: t.y + head + Math.floor(i / cols) * (PLATE_H + GAP),
+    x: box.x + (i % cols) * (PLATE_W + GAP),
+    y: box.y + Math.floor(i / cols) * (PLATE_H + GAP),
     w: PLATE_W,
     h: PLATE_H,
   }));

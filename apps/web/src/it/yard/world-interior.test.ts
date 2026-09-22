@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'bun:test';
 import { territoryOf } from './world';
+import { regionCanvas } from './region-canvas';
+import { MACHINERY_STRIP_H, machineryStrip } from './world-machines';
+import type { Machine } from './regions';
 import {
   PLATFORM_REGIONS,
   crewPlatforms,
@@ -254,6 +257,38 @@ describe('where the platforms go inside the outline', () => {
     expect(tail.marks.map((w) => w.flagged)).toEqual([false, false, false, false, true, true]);
     const head = platformLayout(t, [{ ...platform('a', 3), flag: { from: 'head', n: 1 } }]).placed[0]!;
     expect(head.marks.map((w) => w.flagged)).toEqual([true, false, false]);
+  });
+
+  // THE MACHINERY STRIP IS NOT THE PLATFORMS' TO USE (backlog
+  // 3a916816). `interiorLayout` subtracted it and `platformLayout` did
+  // not — world-interior.ts did not import the height at all — so the
+  // two functions dividing the same canvas disagreed about where its
+  // bottom is. Every platform region (receiving, marshalling and the
+  // shop floor) draws machinery too, so this is measured against the
+  // glyphs themselves rather than against a boundary the test restates.
+  it('reserves the machinery strip, so a platform and a machine glyph never share pixels', () => {
+    const many = Array.from({ length: 40 }, (_, i) => platform(`s${i}`, 3));
+    const machines: ReadonlyArray<Machine> = Array.from({ length: 6 }, (_, i) => ({
+      id: `m${i}`,
+      name: `machine ${i}`,
+      state: 'running',
+      why: 'at work',
+    }));
+    for (const rect of [t, regionCanvas('marshalling')]) {
+      const { placed } = platformLayout(rect, many);
+      const strip = machineryStrip(rect, machines);
+      expect(placed.length, rect.name).toBeGreaterThan(0);
+      expect(strip.placed.length, rect.name).toBe(machines.length);
+      for (const p of placed) {
+        expect(p.y + p.h, `${rect.name}/${p.platform.name}`).toBeLessThanOrEqual(
+          rect.y + rect.h - MACHINERY_STRIP_H,
+        );
+        for (const g of strip.placed) {
+          const apart = p.x + p.w <= g.x || g.x + g.w <= p.x || p.y + p.h <= g.y || g.y + g.h <= p.y;
+          expect(apart, `${rect.name}: ${p.platform.name} sits on ${g.machine.id}`).toBe(true);
+        }
+      }
+    }
   });
 });
 

@@ -8,6 +8,7 @@ import {
   interiorWagons,
   regionOfStation,
 } from './region-contents';
+import { MACHINERY_STRIP_H } from './world-machines';
 import type { Scene, Station, Wagon } from './yard-floor';
 
 // WHAT A REGION CONTAINS, AND WHERE IT GOES IN THE RECT (backlog
@@ -99,7 +100,10 @@ describe('the interior lays out inside the rect it is handed', () => {
       expect(p.x, p.wagon.id).toBeGreaterThanOrEqual(dock.x);
       expect(p.y, p.wagon.id).toBeGreaterThanOrEqual(dock.y);
       expect(p.x + p.w, p.wagon.id).toBeLessThanOrEqual(dock.x + dock.w);
-      expect(p.y + p.h, p.wagon.id).toBeLessThanOrEqual(dock.y + dock.h);
+      // Inside the outline AND clear of the machinery strip, which is
+      // the machines' room (backlog 3a916816): both layouts that divide
+      // a region's rect read one `contentsBox`, so both are pinned to it.
+      expect(p.y + p.h, p.wagon.id).toBeLessThanOrEqual(dock.y + dock.h - MACHINERY_STRIP_H);
     }
     // The plates do not sit on one another.
     for (const a of laid.placed) {
@@ -132,7 +136,9 @@ describe('the interior lays out inside the rect it is handed', () => {
       expect(laid.placed.length, t.name).toBeGreaterThan(0);
       for (const p of laid.placed) {
         expect(p.x + p.w, `${t.name}/${p.wagon.id}`).toBeLessThanOrEqual(t.x + t.w);
-        expect(p.y + p.h, `${t.name}/${p.wagon.id}`).toBeLessThanOrEqual(t.y + t.h);
+        expect(p.y + p.h, `${t.name}/${p.wagon.id}`).toBeLessThanOrEqual(
+          t.y + t.h - MACHINERY_STRIP_H,
+        );
       }
     }
   });
