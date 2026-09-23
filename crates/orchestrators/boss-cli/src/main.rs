@@ -10,6 +10,7 @@ mod cadence;
 mod car;
 mod census;
 mod channels;
+mod core_changes;
 mod credential;
 mod delivery_policy;
 mod design;
@@ -618,6 +619,13 @@ enum Commands {
         /// of record alone: no git, no dock.
         #[arg(long)]
         tiers: bool,
+        /// Print ONLY the absolute number of core file-touches landed
+        /// per day on origin/main in this checkout — the crest signal
+        /// David chose (bd93d2be): direction down, no target, no
+        /// threshold. The platform retro quotes it beside --tiers.
+        /// Reads git alone: fetch first.
+        #[arg(long, conflicts_with_all = ["tiers", "backfill_tiers"])]
+        core_changes: bool,
         /// The window: trains closed on or after this date (YYYY-MM-DD).
         /// Default for the mix: the last 30 days; for the backfill: all.
         #[arg(long)]
@@ -1671,9 +1679,12 @@ async fn main() -> Result<()> {
         Commands::Channels {
             backfill_tiers,
             tiers,
+            core_changes,
             since,
         } => {
-            if backfill_tiers {
+            if core_changes {
+                core_changes::run(since, chrono::Utc::now())
+            } else if backfill_tiers {
                 channels::backfill_tiers(since).await
             } else if tiers {
                 channels::tiers(since, chrono::Utc::now()).await

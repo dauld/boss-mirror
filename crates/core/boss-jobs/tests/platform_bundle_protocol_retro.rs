@@ -96,3 +96,43 @@ fn the_retro_collect_step_names_class_removal_as_the_direction_beside_the_readin
         );
     }
 }
+
+/// The other half of the reading (backlog bd93d2be): the ABSOLUTE
+/// number of core changes per day, the crest signal David chose on
+/// 2026-09-19 — beside the tier mix, required at collect for the same
+/// reason, and read in the direction he named with no target.
+#[test]
+fn the_retro_collect_step_requires_the_core_changes_reading() {
+    let wf = protocol_retro();
+    let collect = wf
+        .steps
+        .iter()
+        .find(|s| s.title == "collect")
+        .expect("protocol-retro has a collect step");
+    let field = collect
+        .fields
+        .iter()
+        .find(|f| f.name == "core_changes")
+        .expect("collect declares a core_changes field");
+    assert!(
+        field.required,
+        "core_changes is REQUIRED at collect: a standing reading, not a mention"
+    );
+    let procedure = collect
+        .metadata_defaults
+        .get("procedure")
+        .and_then(|v| v.as_str())
+        .expect("collect carries a procedure");
+    for phrase in [
+        "boss channels --core-changes",
+        "git fetch origin",
+        "ABSOLUTE",
+        "NO TARGET AND NO THRESHOLD",
+        "DOWN",
+    ] {
+        assert!(
+            procedure.contains(phrase),
+            "collect's procedure names `{phrase}`"
+        );
+    }
+}

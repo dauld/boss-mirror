@@ -20,8 +20,9 @@
 //!   "no packet" is a count, never a refusal.
 //! - the prompt already carries a run (`Your run is agent-run <id>`,
 //!   `boss dispatch`'s own run section — the operator ran the verb by
-//!   hand and pasted its output) → the run EXISTS; only the session is
-//!   written onto it. Filing a twin here was the obvious defect.
+//!   hand and pasted its output) → the run EXISTS; only the session and
+//!   the host the agent is starting on are written onto it. Filing a
+//!   twin here was the obvious defect.
 //! - the prompt names a packet — a `Packet: <ref>` line, or a builder
 //!   brief path `…/builders/<ref>/brief.txt` — → a dispatch exactly as
 //!   the hand verb does it (`dispatch::dispatch_at`), with the prompt
@@ -310,15 +311,22 @@ pub(crate) async fn from_hook_at(
             })
         }
         Parsed::ExistingRun { run } => {
+            // The HOST is re-stated with the session (backlog 5d1b64b3):
+            // the cluster observer ends a run whose host pod is gone, so
+            // a prompt printed on a pod that has since rolled and pasted
+            // here must say where the agent is starting now, or a live
+            // run is ended as dead within one observer pass.
+            let mut link = json!({ "host": host });
             if let Some(session) = session {
-                api_at(
-                    Method::PATCH,
-                    format!("/api/jobs/{run}/metadata"),
-                    Some(json!({ "session": session })),
-                )
-                .await
-                .with_context(|| format!("linking run {run} to session {session}"))?;
+                link["session"] = json!(session);
             }
+            api_at(
+                Method::PATCH,
+                format!("/api/jobs/{run}/metadata"),
+                Some(link),
+            )
+            .await
+            .with_context(|| format!("linking run {run} to host {host}"))?;
             eprintln!(
                 "boss dispatch --from-hook: the prompt carries run {} already — linked, not refiled",
                 &run[..8]
@@ -865,7 +873,11 @@ mod wire_tests {
     }
 
     /// A pasted `boss dispatch` prompt links the run it names to the
-    /// session and files nothing.
+    /// session and files nothing — and re-states the HOST the agent is
+    /// being launched on, because the cluster observer ends a run whose
+    /// host pod is gone (backlog 5d1b64b3): a prompt printed on a pod
+    /// that has since rolled and pasted on its successor is a live run,
+    /// and only this write says so.
     #[tokio::test]
     async fn a_prompt_carrying_a_run_is_linked_not_refiled() {
         let (base, calls) = stub().await;
@@ -876,7 +888,18 @@ mod wire_tests {
         assert_eq!(calls.len(), 1, "{calls:?}");
         assert_eq!(calls[0].0, "PATCH");
         assert_eq!(calls[0].1, format!("/api/jobs/{RUN}/metadata"));
-        assert_eq!(calls[0].2, json!({ "session": SESSION }));
+        assert_eq!(
+            calls[0].2,
+            json!({ "session": SESSION, "host": "boss-dev-0" })
+        );
+
+        // No session: the host is still where the agent starts.
+        let (base, calls) = stub().await;
+        let out = go(&base, &call(&prompt), None).await;
+        assert_eq!(out, Outcome::Linked { run: RUN.into() });
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].2, json!({ "host": "boss-dev-0" }));
     }
 
     /// No packet: counted on the session, nothing filed — and with no

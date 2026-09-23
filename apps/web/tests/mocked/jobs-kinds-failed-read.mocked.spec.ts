@@ -11,7 +11,7 @@
 // gesture (focusing the Kind select) asks again.
 
 import { expect, test, type Route } from '@playwright/test';
-import { mountPage } from './_helpers';
+import { mountPage, settledReads } from './_helpers';
 import { installSmokeMocks } from './_smokeMocks';
 
 test.describe('the jobs list when the Workflow registry read fails', () => {
@@ -28,10 +28,10 @@ test.describe('the jobs list when the Workflow registry read fails', () => {
 
     await mountPage(page, '/ux/jobs');
     // The list itself renders — the registry read is the Kind filter's,
-    // not the page's. Give the old retry loop room to run: it managed
-    // 127 reads in one mount, so a second of settling is generous.
-    await page.waitForTimeout(1_000);
-
-    expect(reads).toBe(1);
+    // not the page's. Wait for that read to ARRIVE, then give the old
+    // retry loop a second to climb (it managed 127 reads in one mount).
+    // A fixed second from mount let a late first read under gate load
+    // read as Received 0 on a correct page (backlog 3571be7f).
+    expect(await settledReads(page, () => reads, 1)).toBe(1);
   });
 });

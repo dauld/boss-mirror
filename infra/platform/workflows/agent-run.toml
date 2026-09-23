@@ -53,7 +53,13 @@
 #             `agent-run-dies-when-building-is-silent` once the packet
 #             has not moved for 2x this step's `duration_hours`. A
 #             builder that dies is a packet that ages, which is the whole
-#             reason the run is a packet.
+#             reason the run is a packet. A run whose `host` pod is
+#             gone or terminal is ended the same way within fifteen
+#             minutes by the cluster observer
+#             (infra/cluster/manifests/boss-estate-observe.yaml, backlog
+#             5d1b64b3), with a `host_gone` object beside the result —
+#             unless a gate-run naming it is open or green, whose
+#             verdict ends it instead.
 #
 # WHY `delivered` EXISTS, AND WHY IT IS NOT SPELLED `reported` (backlog
 # a9c6ed5b, 2026-09-19). Until it did, an analyst run could not close

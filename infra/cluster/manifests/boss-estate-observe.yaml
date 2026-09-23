@@ -121,6 +121,36 @@ subjects:
     name: estate-observer
     namespace: boss
 ---
+# AND THE DEV PODS, for the same reason (backlog 5d1b64b3): an
+# agent-run names the dev pod its builder runs on, and a pod that is
+# gone or terminal cannot be executing it. Kubernetes states that the
+# second it happens; the silence clock took four hours. Namespaced,
+# read-only, pods only — the observer can see a host died, not touch
+# one, and it reads no logs, exec or secrets.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: estate-observer-dev-pods
+  namespace: boss-dev
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: estate-observer-dev-pods
+  namespace: boss-dev
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: estate-observer-dev-pods
+subjects:
+  - kind: ServiceAccount
+    name: estate-observer
+    namespace: boss
+---
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -491,6 +521,133 @@ spec:
                     done <"$WORK/dead-gates.tsv"
                   else
                     echo "gate jobs unread — no dead runner can be settled this pass: $(cat "$WORK/gate-jobs.err")"
+                  fi
+                  # A DEAD HOST ENDS ITS RUNS (backlog 5d1b64b3). An
+                  # agent-run's builder is a process on the dev pod its
+                  # run names as `host` — `boss dispatch` writes it, and
+                  # the Agent hook re-states it when a printed prompt is
+                  # launched — so when that pod is gone the builder
+                  # cannot be executing. The only reader of that fact was
+                  # the four-hour silence clock
+                  # (agent-run-dies-when-building-is-silent), and it is
+                  # tuned for a builder that dies MID-run with its pod
+                  # still up. Measured 2026-09-23: two dev pod rolls at
+                  # 18:30Z and 18:52Z killed eleven runs, and all eleven
+                  # still read `building` at 19:30Z, holding eleven of the
+                  # twelve run slots the claim door enforces, so dispatch
+                  # was starved for up to four hours by a fact Kubernetes
+                  # held the second it happened. The dispatcher cannot
+                  # read it — handlers own no private view and its
+                  # ServiceAccount reads two named Secrets and nothing
+                  # else — and this observer has kubectl AND a signed
+                  # write, so it carries the fact across, as it does for
+                  # a dead gate runner above.
+                  #
+                  # WHAT DEAD MEANS, read from the pod, not assumed:
+                  #   - the pod is phase Failed or Succeeded. An EVICTED
+                  #     pod stays listed for days (0/3,
+                  #     ContainerStatusUnknown) and a terminal pod's
+                  #     containers never run again, so "the object exists"
+                  #     is NOT "the host is alive" — measured on
+                  #     boss-dev-bc5b956bf-wvsrg, Failed/Evicted and still
+                  #     listed while its four runs sat at `building`;
+                  #   - or the pod is absent AND its name is one this
+                  #     namespace's Deployments generate
+                  #     (<deployment>-<pod-template-hash>-<suffix>, the
+                  #     deployment read off a live pod's labels). A host
+                  #     that is not such a name — a workstation — is never
+                  #     judged here: absence from THIS namespace says
+                  #     nothing about a machine it never held.
+                  # A pod that is Running, Pending or Terminating is alive
+                  # for this purpose; the next pass sees it gone.
+                  #
+                  # A GATE STILL OWNS ITS ENDING. The runner Job runs in
+                  # the cluster, not on the dev pod, so a builder killed
+                  # after launching its gate leaves work that is still
+                  # going: an open gate-run naming the run, or a GREEN one
+                  # (agent-run-lands-on-gate-green lands it), is left to
+                  # that verdict and said out loud. A red gate with no
+                  # builder left to repair it is an ended run.
+                  #
+                  # WHAT IT WRITES: `building` completed with
+                  # `result = died` — the run's own terminal, the same
+                  # fact the clock writes, four hours earlier — over the
+                  # step's own metadata, plus a `host_gone` object naming
+                  # the host, what the observer saw, and when. The reclaim
+                  # rule (an-abandoned-step-is-reclaimed-when-its-run-died)
+                  # then waits its own two hours before freeing the step,
+                  # so the death is readable in the record before anything
+                  # moves. BEST-EFFORT, after the observation, like every
+                  # duty below it: a refused read costs one line.
+                  DEV_NS="${BOSS_DEV_NAMESPACE:-boss-dev}"
+                  OBSERVER_USER='{"id":"automation:estate-observer","role":"platform-admin","access_tier":"operator"}'
+                  if ! kubectl get pods -n "$DEV_NS" -o json >"$WORK/dev-pods.json" 2>"$WORK/dev-pods.err"; then
+                    echo "dev pods unread — no run can be ended by its host this pass: $(cat "$WORK/dev-pods.err")"
+                  elif ! api_curl -sf -H "x-boss-user: $OBSERVER_USER" \
+                      "$JOBS_API/api/jobs?kind=agent-run&status=open&limit=200" >"$WORK/runs.json" 2>/dev/null \
+                      || [ "$(jq -r '(.data | type) + " " + (.total | type)' "$WORK/runs.json" 2>/dev/null)" != "array number" ]; then
+                    echo "open agent-runs unread — no run can be ended by its host this pass"
+                  else
+                    jq -r '"open agent-runs: read \(.data | length) of \(.total)" + (if (.data | length) < .total then " — judging the rows read only" else "" end)' "$WORK/runs.json"
+                    jq -r --slurpfile pods "$WORK/dev-pods.json" --arg ns "$DEV_NS" '
+                      ($pods[0].items // []) as $items
+                      | ($items | map({ key: .metadata.name,
+                                        value: ((.status.phase // "Unknown") + (if .status.reason then "/" + .status.reason else "" end)) })
+                                | from_entries) as $pod
+                      | ([ $items[]
+                           | (.metadata.labels["pod-template-hash"] // "") as $h
+                           | select($h != "")
+                           | .metadata.name
+                           | select(test("-" + $h + "-[a-z0-9]+$"))
+                           | sub("-" + $h + "-[a-z0-9]+$"; "") ] | unique) as $deployments
+                      | .data[]
+                      | .id as $run
+                      | (.metadata.host // "") as $host
+                      | ([ (.steps // [])[] | select(.spec_slug == "building" and .status != "completed" and .status != "skipped") ] | .[0]) as $b
+                      | select($b != null and $host != "")
+                      | ($pod[$host]) as $seen
+                      | if $seen != null then
+                          if ($seen | test("^(Failed|Succeeded)")) then [$run, $b.id, $host, "pod \($host) is \($seen) in \($ns)"] else empty end
+                        elif any($deployments[]; . as $d | ($host | startswith($d + "-")) and ($host | ltrimstr($d + "-") | test("^[a-z0-9]+-[a-z0-9]+$"))) then
+                          [$run, $b.id, $host, "pod \($host) no longer exists in \($ns)"]
+                        else empty end
+                      | @tsv' "$WORK/runs.json" >"$WORK/dead-hosts.tsv" \
+                      || { echo "dev pods or open agent-runs did not parse — no run can be ended by its host this pass"; : >"$WORK/dead-hosts.tsv"; }
+                    while IFS="$(printf '\t')" read -r run step host seen; do
+                      [ -n "$run" ] || continue
+                      # The shape is asked of jq's OUTPUT, never `jq -e`:
+                      # jq-1.6 exits 0 on an input carrying no document
+                      # (backlog d96e38ab), and an empty answer here read
+                      # as "no gate owns this run" would end a live one.
+                      if ! api_curl -sf -H "x-boss-user: $OBSERVER_USER" \
+                          "$JOBS_API/api/jobs?kind=gate-run&limit=50&metadata=%7B%22agent_run%22%3A%22$run%22%7D" >"$WORK/run-gates.json" 2>/dev/null \
+                          || [ "$(jq -r '.data | type' "$WORK/run-gates.json" 2>/dev/null)" != array ]; then
+                        echo "run $run: $seen, but its gate-runs could not be read — left for the clock"
+                        continue
+                      fi
+                      gating=$(jq -r '[ .data[]
+                                        | select(.status == "open"
+                                                 or any((.steps // [])[]; .kind == "gate-verdict" and (.metadata.verdict // "") == "green"))
+                                        | .id ] | .[0] // empty' "$WORK/run-gates.json") || gating="unparsed"
+                      if [ -n "$gating" ]; then
+                        echo "run $run: $seen, but gate-run $gating is open or green — that verdict ends the run, not this pass"
+                        continue
+                      fi
+                      jq --arg run "$run" --arg seen "$seen" --arg host "$host" '
+                        ([ .data[] | select(.id == $run) | (.steps // [])[] | select(.spec_slug == "building") ] | .[0].metadata // {}) as $md
+                        | { status: "completed",
+                            metadata: ($md + { result: "died",
+                                               host_gone: { host: $host, seen: $seen, at: (now | todate),
+                                                            observer: "boss-estate-observe" } }) }' \
+                        "$WORK/runs.json" >"$WORK/end-run.json" \
+                        || { echo "run $run: $seen, but its step body could not be built — left for the clock"; continue; }
+                      scode=$(api_curl -s -o /dev/null -w '%{http_code}' -X PUT \
+                        -H "content-type: application/json" \
+                        -H "x-boss-user: $OBSERVER_USER" \
+                        --data-binary @"$WORK/end-run.json" \
+                        "$JOBS_API/api/jobs/$run/steps/$step") || scode="curl $?"
+                      echo "run $run: $seen — building ended died -> $scode"
+                    done <"$WORK/dead-hosts.tsv"
                   fi
               env:
                 - name: JOBS_API

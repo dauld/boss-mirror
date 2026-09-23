@@ -57,7 +57,12 @@ layer: a registry row, a rule file, a seed, a doc.
    `tier_mix` field quotes `boss channels --tiers` (79fdc808): coverage
    first — how many landed trains carry a stamp, with every share
    withheld when that is not a majority — then the tiers, direction
-   outward and no target ratio, by decision (design 32f18167).
+   outward and no target ratio, by decision (design 32f18167). Beside
+   it, the same step's required `core_changes` field quotes `boss
+   channels --core-changes` (bd93d2be): the ABSOLUTE number of files
+   in this map's `core` tier touched per day on origin/main, read
+   from git, direction down, no target and no threshold — a share can
+   be held flat while core work grows, a count cannot.
 3. **Hosting levels** (a479faf7). A tenant's `edit_level` is a tier
    name — `[meta] edit_level` in its manifest (docs/tenant-contract.md;
    `data` is data-only, `tenants`, `modules`, `core` is everything) —

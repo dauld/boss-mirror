@@ -21,7 +21,7 @@
 // names the page.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
-import { mountPage } from './_helpers';
+import { mountPage, settledReads } from './_helpers';
 import { installSmokeMocks } from './_smokeMocks';
 
 /// Fail every request to `pattern` with a 503, counting them. Registered
@@ -40,34 +40,9 @@ async function failAndCount(page: Page, pattern: RegExp): Promise<() => number> 
   return () => reads;
 }
 
-// One second is the same settling window the JobsListPage spec uses:
-// the unbounded loop managed 554 reads in it, so a bounded page's
-// count is unambiguous.
-const SETTLE_MS = 1_000;
-
-/// Wait until `expected` reads have ARRIVED, then give a loop the
-/// settling window to show itself, then take the exact count.
-///
-/// The window used to start at mount, so it bounded two things at once:
-/// how long a loop gets to climb, and how long the FIRST read may take
-/// to reach the route handler. Only the first is this spec's claim. On
-/// a loaded gate runner the second lost: 'the live system-model view
-/// reads the Workflow registry once' failed with Expected 1, Received 0
-/// for a car whose three files the spec never loads, and went green on
-/// a re-gate of the same content (backlog 28a60028, 2026-09-20). A
-/// count BELOW the claim is a late read, not a fixed page. Asserting a
-/// bound instead (at most one) would have passed that 0 — and every
-/// future 0, including a page that stopped reading at all — so the
-/// exact count stays and the wait is for the condition: the reads
-/// the page owes, under the suite's stated expect budget
-/// (playwright.mocked.config.ts), before the window opens.
-async function settledReads(page: Page, reads: () => number, expected: number): Promise<number> {
-  await expect
-    .poll(reads, { message: `waiting for the ${expected} mount-time read(s) to arrive` })
-    .toBeGreaterThanOrEqual(expected);
-  await page.waitForTimeout(SETTLE_MS);
-  return reads();
-}
+// settledReads (in _helpers) waits for the reads a page owes before its
+// settling window opens, so a late first read is not a fixed page
+// (backlog 28a60028).
 
 test.describe('a failed mount-time read is not retried without bound', () => {
   test('bottlenecks reads the Workflow registry once', async ({ page }) => {

@@ -58,6 +58,10 @@ const NOT_SCANNERS: &[(&str, &str)] = &[
         "self-test of the estate observer against a planted dispatcher endpoint",
     ),
     (
+        "a-dead-host-ends-its-runs",
+        "self-test of the estate observer against planted dev pods and runs",
+    ),
+    (
         "a-dead-runner-is-settled-by-its-observer",
         "self-test of the gate-runner observer against planted Job states",
     ),

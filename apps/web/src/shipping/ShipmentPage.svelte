@@ -14,8 +14,13 @@
   import { href } from '../router';
   import { fetchPaged } from '../data/paginated';
   import { ACCOUNTS_LIST_URL } from '../accounts/api';
+  import type { Account as AccountRow } from '../accounts/types';
 
-  type Account = { id: string; name: string };
+  // The shared row, not a local redeclaration: the accounts name column
+  // is nullable, and a local `name: string` told the checker otherwise
+  // (backlog 918af7bc; SupportPage made the same move in #567).
+  // EntityLink already falls back to the id for a null label.
+  type Account = Pick<AccountRow, 'id' | 'name'>;
 
   let { shipmentId } = $props<{ shipmentId: string }>();
 
