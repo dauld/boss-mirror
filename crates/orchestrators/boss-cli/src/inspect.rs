@@ -231,14 +231,17 @@ pub async fn accounts(
     Ok(())
 }
 
-pub async fn jobs(
+/// The listing read behind `boss inspect jobs`. An account is a Subject,
+/// and the listing has ONE subject filter, `subject_id`, for every kind:
+/// this sent `account_id=` until 2026-09-23, which the listing ignored
+/// and now refuses with a 400 (backlog 7f3e871a).
+fn jobs_url(
+    gateway: &str,
     status: Option<&str>,
     kind: Option<&str>,
     account_id: Option<&str>,
     limit: u32,
-    json: bool,
-    gateway: &str,
-) -> Result<()> {
+) -> String {
     let mut url = format!("{gateway}/api/jobs?limit={limit}");
     if let Some(s) = status {
         url.push_str(&format!("&status={s}"));
@@ -247,8 +250,20 @@ pub async fn jobs(
         url.push_str(&format!("&kind={k}"));
     }
     if let Some(a) = account_id {
-        url.push_str(&format!("&account_id={a}"));
+        url.push_str(&format!("&subject_id={a}"));
     }
+    url
+}
+
+pub async fn jobs(
+    status: Option<&str>,
+    kind: Option<&str>,
+    account_id: Option<&str>,
+    limit: u32,
+    json: bool,
+    gateway: &str,
+) -> Result<()> {
+    let url = jobs_url(gateway, status, kind, account_id, limit);
     let body = fetch_json(&url).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&body)?);
@@ -410,6 +425,24 @@ mod tests {
         assert_eq!(cell(Some(&Value::Bool(true))), "true");
         assert_eq!(cell(None), "-");
         assert_eq!(cell(Some(&Value::Null)), "-");
+    }
+
+    /// `--account-id` narrows on `subject_id`, the listing's one subject
+    /// filter. It sent `account_id=`, which the listing never read, so
+    /// `boss inspect jobs --account-id X` printed everyone's jobs; the
+    /// listing now answers that with a 400 (backlog 7f3e871a).
+    #[test]
+    fn jobs_url_filters_an_account_by_subject_id() {
+        let url = jobs_url("http://gw", Some("open"), Some("sale"), Some("acct-1"), 20);
+        assert_eq!(
+            url,
+            "http://gw/api/jobs?limit=20&status=open&kind=sale&subject_id=acct-1"
+        );
+        assert!(!url.contains("account_id"), "{url}");
+        assert_eq!(
+            jobs_url("http://gw", None, None, None, 5),
+            "http://gw/api/jobs?limit=5"
+        );
     }
 
     #[test]

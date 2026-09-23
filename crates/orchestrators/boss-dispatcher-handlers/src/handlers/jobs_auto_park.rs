@@ -1140,7 +1140,9 @@ impl Handler for JobsAutoPark {
         // readiness so the next is ready. A step the OPEN already
         // completed is skipped — the step API refuses a metadata write to
         // a completed step, so re-sending `scope` would 409 on every car
-        // a builder opened.
+        // a builder opened. Each is the evidence through the step merge
+        // door, THEN a status-only PUT — a PUT carrying metadata replaces
+        // the step's stored keys wholesale (backlog e39a9d2a).
         for w in car::finish_writes(
             &car,
             &inputs.summary,
@@ -1154,9 +1156,17 @@ impl Handler for JobsAutoPark {
         {
             write_json(
                 &self.client,
+                reqwest::Method::PATCH,
+                &format!("{}{}", self.base(), w.merge_path(car_id)),
+                &w.metadata,
+                &ctx.rule_name,
+            )
+            .await?;
+            write_json(
+                &self.client,
                 reqwest::Method::PUT,
-                &format!("{}/api/jobs/{}/steps/{}", self.base(), car_id, w.step_id),
-                &w.body,
+                &format!("{}{}", self.base(), w.status_path(car_id)),
+                &w.status_body,
                 &ctx.rule_name,
             )
             .await?;
@@ -2268,7 +2278,7 @@ mod building_car_tests {
         .expect("an opened car can be finished");
         let ids: Vec<&str> = writes.iter().map(|w| w.step_id.as_str()).collect();
         assert_eq!(ids, vec!["s-build", "s-gate"], "scope is already declared");
-        assert_eq!(writes[1].body["metadata"]["receipt"], inputs.receipt.raw);
+        assert_eq!(writes[1].metadata["receipt"], inputs.receipt.raw);
 
         // The proof intent and the channel ride the JOB, not a step, so
         // an adopted car carries what a freshly filed one would.

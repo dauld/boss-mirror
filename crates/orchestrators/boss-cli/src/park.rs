@@ -549,15 +549,24 @@ pub(crate) async fn run(
     // The writes are decided in core, shared with the auto-park handler,
     // and SKIP whatever the open already completed — the step API refuses
     // a metadata write to a completed step, so re-sending `scope` would
-    // 409 on every car a builder opened.
+    // 409 on every car a builder opened. Each is the evidence through the
+    // step merge door, THEN a status-only PUT — a PUT carrying metadata
+    // replaces the step's stored keys wholesale (backlog e39a9d2a).
     for w in finish_writes(&job, summary, excludes, test, verified, &receipt, now)
         .map_err(anyhow::Error::msg)?
     {
         crate::gate::api(
             &http,
+            reqwest::Method::PATCH,
+            &w.merge_path(&car),
+            Some(w.metadata.clone()),
+        )
+        .await?;
+        crate::gate::api(
+            &http,
             reqwest::Method::PUT,
-            &format!("/api/jobs/{car}/steps/{}", w.step_id),
-            Some(w.body),
+            &w.status_path(&car),
+            Some(w.status_body),
         )
         .await?;
     }

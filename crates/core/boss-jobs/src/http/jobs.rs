@@ -22,7 +22,18 @@ pub(super) async fn list_step_types<R: JobsRepository + 'static, B: EventBus + '
 // Jobs
 // ---------------------------------------------------------------------------
 
+/// The listing's query — and, by `deny_unknown_fields`, the ONE list of
+/// the parameters it accepts. Anything else is a 400 whose body names
+/// the parameter and lists these fields (axum's query rejection carries
+/// serde's "unknown field `x`, expected one of …"). Until 2026-09-23 an
+/// unknown parameter was dropped without a word, and every weekly
+/// department retro read `closed_since=<week start>` — which does not
+/// exist — and was handed the all-time list as its week (backlog
+/// 7f3e871a; the same shape as `department` before it existed,
+/// cc76f755). A filter the server cannot apply must not answer as if
+/// it had. Pinned in tests/jobs_list_refuses_an_unknown_parameter.rs.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ListJobsQuery {
     limit: Option<i64>,
     offset: Option<i64>,

@@ -164,7 +164,20 @@ pub fn step_fields(
 /// cancelled train can release the car by clearing the stamp).
 pub const REVIEW: &str = "Open for review";
 
-/// One step write a car's filer owes: which step, and the body to PUT.
+/// One step completion a car's filer owes: which step, the evidence to
+/// MERGE onto it, and the status-only body that then completes it.
+///
+/// TWO WRITES, IN THIS ORDER (backlog e39a9d2a, car 2 of its plan). This
+/// was one PUT of `{status, metadata}` built fresh, with no read. The
+/// step PUT REPLACES metadata wholesale, and the registry materializes
+/// keys onto every step at admission (`metadata_defaults`,
+/// `authority_role`, `station`, `audience`, `claimable`), so every
+/// `boss car open`, `boss park` and auto-park shed them. Now the
+/// evidence goes through the step merge door — [`StepWrite::merge_path`],
+/// one transaction against the row as it stands, so it cannot race — and
+/// then [`StepWrite::status_path`] takes a body carrying nothing to
+/// drop. Merge FIRST: a step's required-at-done fields are validated
+/// when it flips to completed, so the evidence must already be there.
 ///
 /// The step ID is read OFF the car, never assembled — the same rule the
 /// receipt lives by, for the same reason.
@@ -174,8 +187,34 @@ pub struct StepWrite {
     pub step_id: String,
     /// Its title, so a message can name what was written.
     pub title: &'static str,
-    /// `PUT /api/jobs/{car}/steps/{step_id}` body.
-    pub body: Value,
+    /// `PATCH /api/jobs/{car}/steps/{step_id}/metadata` body: top-level
+    /// keys merged into what the step already holds.
+    pub metadata: Value,
+    /// `PUT /api/jobs/{car}/steps/{step_id}` body, sent AFTER the merge:
+    /// the status alone.
+    pub status_body: Value,
+}
+
+impl StepWrite {
+    fn completing(step_id: &str, title: &'static str, metadata: Value) -> Self {
+        Self {
+            step_id: step_id.to_string(),
+            title,
+            metadata,
+            status_body: json!({"status": "completed"}),
+        }
+    }
+
+    /// The step merge door on `car_id` — the FIRST write.
+    pub fn merge_path(&self, car_id: &str) -> String {
+        format!("/api/jobs/{car_id}/steps/{}/metadata", self.step_id)
+    }
+
+    /// The step PUT on `car_id` — the SECOND write, carrying
+    /// [`StepWrite::status_body`].
+    pub fn status_path(&self, car_id: &str) -> String {
+        format!("/api/jobs/{car_id}/steps/{}", self.step_id)
+    }
 }
 
 /// PURE: the id of `(slug, title)` on this car, or `None` when the
@@ -248,14 +287,11 @@ pub fn open_writes(
         return Err(format!("the `{SCOPE_SLUG}` step on this car has no id"));
     };
     let at = stamp(now);
-    Ok(vec![StepWrite {
-        step_id: step_id.to_string(),
-        title: SCOPE,
-        body: json!({
-            "status": "completed",
-            "metadata": {"summary": summary, "excludes": excludes, "completed_at": at},
-        }),
-    }])
+    Ok(vec![StepWrite::completing(
+        step_id,
+        SCOPE,
+        json!({"summary": summary, "excludes": excludes, "completed_at": at}),
+    )])
 }
 
 /// PURE: the writes a GREEN owes a car — each of scope/build/gate that
@@ -292,11 +328,7 @@ pub fn finish_writes(
         let Some(step_id) = step.get("id").and_then(Value::as_str) else {
             return Err(format!("the `{slug}` step on this car has no id"));
         };
-        out.push(StepWrite {
-            step_id: step_id.to_string(),
-            title,
-            body: json!({"status": "completed", "metadata": metadata}),
-        });
+        out.push(StepWrite::completing(step_id, title, metadata));
     }
     Ok(out)
 }
@@ -2121,11 +2153,11 @@ mod building_tests {
         assert_eq!(writes.len(), 1, "one write: scope");
         assert_eq!(writes[0].step_id, "s-scope");
         assert_eq!(writes[0].title, SCOPE);
-        assert_eq!(writes[0].body["status"], "completed");
-        assert_eq!(writes[0].body["metadata"]["summary"], "does a thing");
-        assert_eq!(writes[0].body["metadata"]["excludes"], "not that");
+        assert_eq!(writes[0].status_body, json!({"status": "completed"}));
+        assert_eq!(writes[0].metadata["summary"], "does a thing");
+        assert_eq!(writes[0].metadata["excludes"], "not that");
         assert_eq!(
-            writes[0].body["metadata"]["completed_at"], "2026-09-10T18:00:00Z",
+            writes[0].metadata["completed_at"], "2026-09-10T18:00:00Z",
             "the same stamp format every other writer uses"
         );
     }
@@ -2164,13 +2196,13 @@ mod building_tests {
         let titles: Vec<&str> = writes.iter().map(|w| w.title).collect();
         assert_eq!(titles, vec![BUILD, GATE], "scope is already declared");
         assert_eq!(writes[0].step_id, "s-build");
-        assert_eq!(writes[0].body["metadata"]["test"], "ran the tests");
+        assert_eq!(writes[0].metadata["test"], "ran the tests");
         assert_eq!(writes[1].step_id, "s-gate");
         assert_eq!(
-            writes[1].body["metadata"]["receipt"], GREEN,
+            writes[1].metadata["receipt"], GREEN,
             "the receipt rides verbatim, as it does on a fresh car"
         );
-        assert_eq!(writes[1].body["metadata"]["verified"], "seen working");
+        assert_eq!(writes[1].metadata["verified"], "seen working");
     }
 
     /// And the path auto-park has always taken is unchanged: a car it
@@ -2192,11 +2224,67 @@ mod building_tests {
         assert_eq!(titles, vec![SCOPE, BUILD, GATE]);
         assert_eq!(writes[0].step_id, "s-scope");
         for w in &writes {
-            assert_eq!(w.body["status"], "completed");
+            assert_eq!(w.status_body, json!({"status": "completed"}));
             assert_eq!(
-                w.body["metadata"]["completed_at"], "2026-09-10T18:30:00Z",
+                w.metadata["completed_at"], "2026-09-10T18:30:00Z",
                 "{} was filled without saying when",
                 w.title
+            );
+        }
+    }
+
+    /// NO CAR WRITE PUTS METADATA (backlog e39a9d2a, car 2 of its plan).
+    ///
+    /// The step PUT REPLACES metadata wholesale, and the registry
+    /// materializes keys onto every step at admission —
+    /// `metadata_defaults`, `authority_role`, `station`, `audience`,
+    /// `claimable` — so these writers, which build their bodies fresh with
+    /// no read, shed every one of those keys on every `boss car open`,
+    /// `boss park` and auto-park. The evidence rides the step MERGE door
+    /// (`PATCH …/steps/{id}/metadata`, one transaction against the row as
+    /// it stands, so it cannot race) and the completion is a PUT carrying
+    /// the status and nothing else to drop.
+    #[test]
+    fn every_car_write_merges_its_evidence_and_puts_only_the_status() {
+        let opened = open_writes(&fresh("f1", BRANCH), "s", "e", at("2026-09-10T18:00:00Z"))
+            .expect("a fresh car can be opened");
+        let finished = finish_writes(
+            &fresh("f1", BRANCH),
+            "s",
+            "e",
+            "t",
+            "v",
+            &receipt(),
+            at("2026-09-10T18:30:00Z"),
+        )
+        .expect("a fresh car can be finished");
+        assert!(!opened.is_empty() && finished.len() == 3);
+        for w in opened.iter().chain(&finished) {
+            assert_eq!(
+                w.status_body,
+                json!({"status": "completed"}),
+                "{}: the PUT must carry the status alone — a metadata key in it \
+                 replaces the step's stored keys wholesale",
+                w.title
+            );
+            assert!(
+                w.metadata.as_object().is_some_and(|m| !m.is_empty()),
+                "{}: the evidence rides the merge body",
+                w.title
+            );
+            assert!(
+                w.metadata.get("status").is_none(),
+                "{}: `status` on the merge door would be a metadata key named status",
+                w.title
+            );
+            assert_eq!(
+                w.merge_path("car-1"),
+                format!("/api/jobs/car-1/steps/{}/metadata", w.step_id),
+                "the merge door, addressed through the car the step is on"
+            );
+            assert_eq!(
+                w.status_path("car-1"),
+                format!("/api/jobs/car-1/steps/{}", w.step_id)
             );
         }
     }

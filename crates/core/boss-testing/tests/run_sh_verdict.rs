@@ -321,3 +321,38 @@ fn an_unreadable_receipt_still_names_the_head() {
         "the fallback falls back to the head the runner knows: {summary}"
     );
 }
+
+/// THE VERDICT GOES THROUGH THE STEP MERGE DOOR; NO PUT CARRIES METADATA.
+///
+/// Backlog e39a9d2a (car 2 of its plan, correction 2026-09-23): the
+/// runner reported every verdict as one PUT of `{status, metadata:
+/// {verdict, receipt}}` with no read, and the step PUT replaces metadata
+/// wholesale, so each report shed the keys the registry materializes on
+/// the step (`metadata_defaults`, `authority_role`, `station`, …). The
+/// executing proof is `gate_runner_report_retry`'s
+/// `the_verdict_rides_the_merge_door_and_the_put_carries_only_status`;
+/// this is the text half, so a later edit that folds the keys back into
+/// the PUT body fails here by name even where python3 or curl is absent
+/// and that test skips.
+#[test]
+fn the_verdict_is_merged_through_the_step_merge_door() {
+    let sh = run_sh();
+    let printed: String = sh
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        printed.contains("/steps/$step_id/metadata"),
+        "the verdict and receipt must be written through PATCH …/steps/{{id}}/metadata"
+    );
+    assert!(
+        printed.contains("'{\"status\":\"completed\"}'"),
+        "the completion must be a status-only PUT body"
+    );
+    assert!(
+        !printed.contains("\"metadata\": {\"verdict\""),
+        "no PUT body may carry the verdict as metadata — a metadata body replaces the \
+         step's stored keys wholesale"
+    );
+}

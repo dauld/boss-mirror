@@ -455,13 +455,23 @@ pub(crate) async fn open(
     .ok_or_else(|| anyhow::anyhow!("filed car {id} and the API will not read it back"))?;
 
     // DECLARE THE SCOPE. The writes are decided in core, shared with the
-    // two finishers, and skip anything already done.
+    // two finishers, and skip anything already done. Each is the
+    // evidence through the step merge door, THEN a status-only PUT — a
+    // PUT carrying metadata replaces the step's stored keys wholesale
+    // (backlog e39a9d2a; `car::StepWrite` says why the order matters).
     for w in car::open_writes(&car_json, summary, excludes, now).map_err(anyhow::Error::msg)? {
         crate::gate::api(
             &http,
+            reqwest::Method::PATCH,
+            &w.merge_path(&id),
+            Some(w.metadata.clone()),
+        )
+        .await?;
+        crate::gate::api(
+            &http,
             reqwest::Method::PUT,
-            &format!("/api/jobs/{id}/steps/{}", w.step_id),
-            Some(w.body),
+            &w.status_path(&id),
+            Some(w.status_body),
         )
         .await?;
     }

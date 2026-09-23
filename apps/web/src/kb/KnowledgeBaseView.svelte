@@ -20,6 +20,7 @@
   import { href } from '../router';
   import { entityHref } from '@boss/web-kit/ui/entity-href';
   import { formatActor } from '../data/actor';
+  import { relatedJobsUrl } from './relatedJobs';
   import type { Employee } from '../people/types';
 
   type EntityKind = 'account' | 'asset';
@@ -119,16 +120,12 @@
 
   // --- Related Jobs fetch --------------------------------------------------
   $effect(() => {
-    const kind = entityKind;
     const id = entityId;
     if (!id) return;
     let cancelled = false;
-    const param = kind === 'account' ? 'account_id' : 'asset_id';
     (async () => {
       try {
-        const r = await fetch(
-          `/api/jobs?${param}=${encodeURIComponent(id)}&limit=50`,
-        );
+        const r = await fetch(relatedJobsUrl(id));
         if (cancelled) return;
         if (!r.ok) {
           jobsFailed = `HTTP ${r.status}`;

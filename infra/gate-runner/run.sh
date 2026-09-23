@@ -106,18 +106,37 @@ report_once() { # verdict, note
         5??|000) echo "gate-runner: report: GET packet answered HTTP $code"; return 75 ;;
         *) echo "gate-runner: report: GET packet answered HTTP $code"; return 1 ;;
     esac
-    step_id=$(printf '%s' "$body" | python3 -c '
+    local picked step_status stored_verdict
+    picked=$(printf '%s' "$body" | python3 -c '
 import sys, json
 j = json.load(sys.stdin)
 j = j.get("data", j)
-hits = [s["id"] for s in j["steps"] if s.get("spec_slug") == "record-verdict"]
+hits = [s for s in j["steps"] if s.get("spec_slug") == "record-verdict"]
 if len(hits) != 1:
     sys.stderr.write(
         "gate-runner: expected exactly one record-verdict step, found %d"
         " (slugs: %s) - the gate-run protocol and this runner disagree\n"
         % (len(hits), [s.get("spec_slug") for s in j["steps"]]))
     sys.exit(1)
-print(hits[0])') || return 1
+s = hits[0]
+v = (s.get("metadata") or {}).get("verdict")
+print("%s %s %s" % (s["id"], s.get("status") or "-", v if isinstance(v, str) and v else "-"))') || return 1
+    read -r step_id step_status stored_verdict <<<"$picked"
+    # A RETRY AFTER A WRITE THAT LANDED. A timeout can hide a completion
+    # the SoR did record; the next attempt then finds the step terminal,
+    # and the merge door below refuses a terminal step outright (the PUT
+    # had an idempotent re-send carve-out; the merge door has none). If
+    # the step already carries THIS verdict the report is done, and
+    # saying so is the truth. A terminal step carrying anything else
+    # falls through to the merge, whose 409 is the loud refusal a frozen
+    # step is owed (cf0021ae).
+    case "$step_status" in
+        completed|skipped)
+            if [ "$stored_verdict" = "$1" ]; then
+                echo "gate-runner: report: record-verdict step is already $step_status and already carries verdict $1 - nothing to write"
+                return 0
+            fi ;;
+    esac
     # A PER-INVOCATION file, not a fixed /tmp path: the block is lifted
     # verbatim by boss-testing's gate_runner_report_retry and run
     # concurrently there, where a shared name is a race that empties one
@@ -143,24 +162,54 @@ try:
     receipt = json.dumps(body, separators=(",", ":"))
 except Exception:
     pass
-print(json.dumps({"status": "completed",
-                  "metadata": {"verdict": verdict, "receipt": receipt}}))
+print(json.dumps({"verdict": verdict, "receipt": receipt}))
 PY
-    rc=0
-    out=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -X PUT \
-        -H "x-boss-user: $ACTOR" -H "Content-Type: application/json" \
-        -d @"$payload" \
-        "$JOBS_API/api/jobs/$GATE_RUN_JOB_ID/steps/$step_id") || rc=$?
+    # TWO WRITES: THE KEYS THROUGH THE MERGE DOOR, THEN THE STATUS ALONE.
+    #
+    # This was one PUT of {status, metadata: {verdict, receipt}} with no
+    # read before it. The step PUT REPLACES metadata wholesale, and the
+    # registry materializes keys onto every step at admission
+    # (metadata_defaults, authority_role, station, audience, claimable),
+    # so that body silently shed every key the runner did not think to
+    # send - on every gate verdict (backlog e39a9d2a, correction
+    # 2026-09-23). The server is to REFUSE such a body in that item's
+    # last car, and a runner still sending it then would stop every gate
+    # from reporting. PATCH .../steps/{id}/metadata merges against the
+    # row as it stands, in one transaction, so it cannot race; the PUT
+    # that follows carries nothing to drop.
+    #
+    # ORDER IS LOAD-BEARING: a step's required-at-done fields are
+    # validated when it flips to completed, so the verdict must be on
+    # the row before the PUT arrives. A merge that lands followed by a
+    # PUT that meets a roll is retried whole by `report`: the second
+    # merge rewrites the same two keys, carrying the later attempt's
+    # story, which is the one that is true.
+    report_write PATCH "$payload" \
+        "$JOBS_API/api/jobs/$GATE_RUN_JOB_ID/steps/$step_id/metadata" "merge verdict" \
+        || { rc=$?; rm -f "$payload"; return "$rc"; }
+    printf '%s' '{"status":"completed"}' > "$payload"
+    report_write PUT "$payload" \
+        "$JOBS_API/api/jobs/$GATE_RUN_JOB_ID/steps/$step_id" "PUT completion" \
+        || { rc=$?; rm -f "$payload"; return "$rc"; }
     rm -f "$payload"
+}
+
+# One report write, classified the way every report write is: 0 landed,
+# 75 nobody answered (a roll - retry), 1 refused (about the write itself).
+report_write() { # method, body file, url, label
+    local rc=0 out
+    out=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -X "$1" \
+        -H "x-boss-user: $ACTOR" -H "Content-Type: application/json" \
+        -d @"$2" "$3") || rc=$?
     if [ "$rc" -ne 0 ]; then
-        echo "gate-runner: report: PUT verdict failed (curl exit $rc)"
+        echo "gate-runner: report: $4 failed (curl exit $rc)"
         report_transient_curl "$rc" && return 75
         return 1
     fi
     case "$out" in
         2??) return 0 ;;
-        5??|000) echo "gate-runner: report: PUT verdict answered HTTP $out"; return 75 ;;
-        *) echo "gate-runner: report: PUT verdict answered HTTP $out"; return 1 ;;
+        5??|000) echo "gate-runner: report: $4 answered HTTP $out"; return 75 ;;
+        *) echo "gate-runner: report: $4 answered HTTP $out"; return 1 ;;
     esac
 }
 
