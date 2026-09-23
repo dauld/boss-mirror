@@ -123,6 +123,8 @@
 #   REPO_DIR (/work/boss) WORKTREES_DIR (REPO_DIR/.claude/worktrees)
 #   CARGO_TARGET_DIR (/scratch/target)
 #   SCRATCH_MOUNT (/scratch) WORK_MOUNT (/work)
+#   PROC_ROOT (/proc) — the process table a worktree lock is judged
+#     against (a test fakes it)
 #   BOSS_CLI_STORE (WORK_MOUNT/tools/image-cli) — the image CLI's
 #     generations, what the shim reads; BOSS_CLI_LINK
 #     (WORK_MOUNT/tools/bin/boss-image) — the image CLI on PATH by its
@@ -139,7 +141,7 @@ SCRATCH_FLOOR_GB="${BOSS_SCRATCH_FLOOR_GB:-50}"
 STALE_TARGET_H="${BOSS_STALE_TARGET_H:-12}"
 WORK_FLOOR_GB="${BOSS_WORK_FLOOR_GB:-6}"
 WORKTREE_MAX_AGE_H="${BOSS_WORKTREE_MAX_AGE_H:-48}"
-# Hours of git QUIET (no commit, HEAD or index write, reflog entry) before a
+# Hours of git QUIET (no commit, HEAD write or reflog entry) before a
 # worktree whose branch has LANDED — head on origin/main, no origin/
 # ref left — may go. Landed is necessary, not sufficient: a builder's
 # tree is CLEAN in the minutes between its commit and its push, and an
@@ -168,6 +170,7 @@ WORKTREES_DIR="${WORKTREES_DIR:-$REPO_DIR/.claude/worktrees}"
 TARGET_DIR="${CARGO_TARGET_DIR:-/scratch/target}"
 SCRATCH_MOUNT="${SCRATCH_MOUNT:-/scratch}"
 WORK_MOUNT="${WORK_MOUNT:-/work}"
+PROC_ROOT="${PROC_ROOT:-/proc}"
 
 for name in SCRATCH_FLOOR_GB WORK_FLOOR_GB WORKTREE_MAX_AGE_H STALE_TARGET_H WORKTREE_GRACE_H WORKTREE_IDLE_H FF_LAUNCH_WINDOW_SECS FF_DEADLINE_SECS; do
     case "${!name}" in
@@ -216,6 +219,7 @@ WT_REMOVED=0; WT_REMOVED_MIB=0
 WT_KEPT_DIRTY=0; WT_KEPT_DIRTY_NAMES=""
 WT_KEPT_UNREFERENCED=0; WT_KEPT_UNREFERENCED_NAMES=""
 WT_KEPT_LIVE=0; WT_KEPT_RECENT=0; WT_KEPT_LOCKED=0; WT_KEPT_REFUSED=0
+WT_STALE_LOCKS=0; WT_STALE_LOCK_NAMES=""
 WT_PRUNED=0
 WT_TARGETS_REMOVED=0; WT_TARGETS_MIB=0
 FLOOR_WORKTREES_REMOVED=0
@@ -551,10 +555,16 @@ fast_forward_checkout() {
 #      DETACHED tree must also have its head held by some ref, or it
 #      is kept and named the same way: the checkout is the only thing
 #      naming those commits (adce5171).
-# Locked worktrees, the main checkout and the one this run stands in
-# are never candidates — and the lock is what keeps a RUNNING agent's
-# tree: the Claude harness locks each agent worktree with its pid
-# (`claude agent agent-<id> (pid N start T)`) for the session's life.
+# Live-locked worktrees, the main checkout and the one this run stands
+# in are never candidates — and the lock is what keeps a RUNNING
+# agent's tree: the Claude harness locks each agent worktree with its
+# pid (`claude agent agent-<id> (pid N start T)`) for the session's
+# life. A lock is a claim by a PROCESS, so it is judged against the
+# process table (`lock_stale_why`): a harness lock whose pid is gone,
+# or started at another time than it recorded, is STALE, and the tree
+# is judged like any other — (1) to (3) all still apply — and named.
+# Only a tree about to be removed is unlocked, and it is re-locked if
+# git then refuses, so a stale lock the pass keeps stays as it was.
 # `git worktree remove` still runs without --force, a second lock on
 # (3).
 #
@@ -572,9 +582,18 @@ fast_forward_checkout() {
 # costs nothing, and deleting refs is a different decision.
 
 # Newest git activity in a worktree, as epoch seconds: its HEAD
-# commit's time, the mtimes of the worktree's own HEAD and index and of
-# its directory, and the time of the NEWEST ENTRY in its reflog. Read
-# BEFORE `git status`, which may itself refresh the index.
+# commit's time, the mtimes of the worktree's own HEAD and of its
+# directory, and the time of the NEWEST ENTRY in its reflog.
+#
+# The INDEX is not read (backlog e14a741c). A `git status` rewrites a
+# CLEAN tree's index to refresh its stat cache — the harness snapshots
+# every session's status as it starts, and this pass's own dirty check
+# is a status — so its mtime says someone LOOKED: measured 2026-09-23,
+# five worktrees' index files written 2026-09-21 17:11, days after
+# their last commit. What the index can hold that HEAD does not is a
+# staged change, and the dirty guard keeps that at any age; a commit,
+# checkout or reset that writes it also writes a reflog entry, read
+# below for its own time.
 #
 # The reflog is read for what it SAYS, never for its mtime (backlog
 # adce5171). Until 2026-09-23 this took the mtime of $gitdir/logs/HEAD,
@@ -596,7 +615,7 @@ worktree_last_activity() {
     local path="$1" gitdir f t newest
     newest=$(git -C "$path" log -1 --format=%ct 2>/dev/null || echo 0)
     gitdir=$(git -C "$path" rev-parse --absolute-git-dir 2>/dev/null || true)
-    for f in "$gitdir/HEAD" "$gitdir/index" "$path"; do
+    for f in "$gitdir/HEAD" "$path"; do
         [ -e "$f" ] || continue
         t=$(stat -c %Y "$f" 2>/dev/null || echo 0)
         [ "$t" -gt "$newest" ] && newest=$t
@@ -608,6 +627,44 @@ worktree_last_activity() {
     case ${t:-empty} in empty|*[!0-9]*) t=0 ;; esac
     [ "$t" -gt "$newest" ] && newest=$t
     echo "${newest:-0}"
+}
+
+# Is the process table this pass reads the POD's? The sidecar sees the
+# dev container's processes only because the pod sets
+# shareProcessNamespace (infra/cluster/manifests/boss-dev.yaml), and
+# then pid 1 is the pod's `pause`. In a namespace of its own pid 1 is
+# the sidecar's own entrypoint, every harness pid would read as gone,
+# and every LIVE agent's lock as stale — so no lock is judged there.
+proc_view_is_pods() {
+    local c=""
+    read -r c < "$PROC_ROOT/1/comm" 2>/dev/null || return 1
+    [ "$c" = pause ]
+}
+
+# Is a worktree lock STALE? Prints why and succeeds when it is; fails —
+# keep the lock — for a live one AND for any lock it cannot judge.
+# Only the harness's shape is judged, `... (pid N start T)` with T the
+# process's start time in clock ticks since boot (field 22 of
+# /proc/<pid>/stat, world-readable where /proc/<pid>/cwd is not): pid
+# gone, or pid alive with another start, means the locker is gone —
+# measured 2026-09-23 (backlog e14a741c), two locks named pid 355 start
+# 94472290 while pid 355 had started at 95092646, and their trees were
+# kept forever. Any other reason is a human's lock and is never judged.
+# The comm field is split at its LAST `) `, since a comm may hold one.
+lock_stale_why() {
+    local reason="$1" pid start line rest now_start
+    [[ "$reason" =~ \(pid\ ([0-9]+)\ start\ ([0-9]+)\) ]] || return 1
+    pid="${BASH_REMATCH[1]}"; start="${BASH_REMATCH[2]}"
+    if [ ! -e "$PROC_ROOT/$pid" ]; then
+        echo "pid $pid is gone"
+        return 0
+    fi
+    read -r line < "$PROC_ROOT/$pid/stat" 2>/dev/null || return 1
+    rest="${line##*) }"
+    now_start=$(awk '{print $20}' <<<"$rest")
+    case ${now_start:-empty} in empty|*[!0-9]*) return 1 ;; esac
+    [ "$now_start" = "$start" ] && return 1
+    echo "pid $pid started at $now_start, not the $start the lock recorded"
 }
 
 worktree_target() { echo "$SCRATCH_MOUNT/target-$(basename "$1")"; }
@@ -666,22 +723,33 @@ reclaim_gone_worktrees() {
         WT_PRUNED=$(printf '%s\n' "$pruned" | grep -c . || true)
     fi
 
-    local self now
+    local self now judge_locks=1
     self="$(pwd -P 2>/dev/null || echo /nonexistent)"
     now=$(date +%s)
+    if ! proc_view_is_pods; then
+        judge_locks=0
+        log "worktree pass: locks not judged — $PROC_ROOT/1 is not the pod's pause, so this process table cannot say a harness pid is gone; every locked tree is kept"
+    fi
 
-    # `path<TAB>branch<TAB>locked` per worktree, `detached` standing in
-    # for a HEAD with no branch; the first block is the main worktree.
-    local first=1 path branch locked window why last idle_h dirty kb head held
-    while IFS=$'\t' read -r path branch locked; do
+    # `path<TAB>branch<TAB>locked<TAB>reason` per worktree, `detached`
+    # standing in for a HEAD with no branch; the first block is the main
+    # worktree.
+    local first=1 path branch locked reason stale window why last idle_h dirty kb head held
+    while IFS=$'\t' read -r path branch locked reason; do
         [ -z "$path" ] && continue
         if [ "$first" = 1 ]; then first=0; continue; fi
         [ "$path" = "$REPO_DIR" ] && continue
         case "$self" in "$path"|"$path"/*) continue ;; esac
         [ -d "$path" ] || continue
+        stale=""
         if [ "$locked" = 1 ]; then
-            WT_KEPT_LOCKED=$((WT_KEPT_LOCKED + 1))
-            continue
+            if [ "$judge_locks" = 0 ] || ! stale=$(lock_stale_why "$reason"); then
+                WT_KEPT_LOCKED=$((WT_KEPT_LOCKED + 1))
+                continue
+            fi
+            log "  $(basename "$path"): stale lock ($stale) — judged as an ordinary candidate"
+            WT_STALE_LOCKS=$((WT_STALE_LOCKS + 1))
+            WT_STALE_LOCK_NAMES="${WT_STALE_LOCK_NAMES:+$WT_STALE_LOCK_NAMES, }$(basename "$path")"
         fi
 
         case "$branch" in
@@ -741,7 +809,19 @@ reclaim_gone_worktrees() {
         fi
 
         kb=$(du -sk "$path" 2>/dev/null | awk '{print $1}')
+        # A stale lock comes off only here, at the removal it would
+        # refuse — and goes back on, with its own reason, if git refuses
+        # anyway, so a tree the pass keeps keeps its lock (e14a741c).
+        if [ -n "$stale" ] && ! git -C "$REPO_DIR" worktree unlock "$path" 2>/dev/null; then
+            log "  kept $path (git would not unlock its stale lock; $why, idle ${idle_h}h)"
+            WT_KEPT_REFUSED=$((WT_KEPT_REFUSED + 1))
+            continue
+        fi
         if ! git -C "$REPO_DIR" worktree remove "$path" 2>/dev/null; then
+            if [ -n "$stale" ] && ! git -C "$REPO_DIR" worktree lock --reason "$reason" "$path" 2>/dev/null; then
+                log "  could not put $path's lock back ($reason)" >&2
+                problems=$((problems + 1))
+            fi
             log "  kept $path (git refused to remove it without --force; $why, idle ${idle_h}h)"
             WT_KEPT_REFUSED=$((WT_KEPT_REFUSED + 1))
             continue
@@ -752,14 +832,14 @@ reclaim_gone_worktrees() {
         remove_worktree_target "$path"
     done < <(
         git -C "$REPO_DIR" worktree list --porcelain 2>/dev/null | awk '
-            /^worktree / { if (p != "") print p "\t" b "\t" l; p=substr($0, 10); b="detached"; l=0 }
+            /^worktree / { if (p != "") print p "\t" b "\t" l "\t" r; p=substr($0, 10); b="detached"; l=0; r="" }
             /^branch /   { b=substr($0, 8); sub("^refs/heads/", "", b) }
-            /^locked/    { l=1 }
-            END { if (p != "") print p "\t" b "\t" l }
+            /^locked/    { l=1; r=substr($0, 8) }
+            END { if (p != "") print p "\t" b "\t" l "\t" r }
         '
     )
 
-    log "worktree pass: removed $WT_REMOVED worktree(s) (${WT_REMOVED_MIB}MiB) and $WT_TARGETS_REMOVED target(s) (${WT_TARGETS_MIB}MiB); kept $WT_KEPT_LIVE with an origin/ ref still in the checkout, $WT_KEPT_RECENT with git activity inside the window, $WT_KEPT_DIRTY dirty, $WT_KEPT_UNREFERENCED with a head no ref holds, $WT_KEPT_LOCKED locked, $WT_KEPT_REFUSED refused by git; pruned $WT_PRUNED entries whose directory was gone"
+    log "worktree pass: removed $WT_REMOVED worktree(s) (${WT_REMOVED_MIB}MiB) and $WT_TARGETS_REMOVED target(s) (${WT_TARGETS_MIB}MiB); kept $WT_KEPT_LIVE with an origin/ ref still in the checkout, $WT_KEPT_RECENT with git activity inside the window, $WT_KEPT_DIRTY dirty, $WT_KEPT_UNREFERENCED with a head no ref holds, $WT_KEPT_LOCKED locked, $WT_KEPT_REFUSED refused by git; pruned $WT_PRUNED entries whose directory was gone; judged $WT_STALE_LOCKS with a stale lock"
 }
 
 # ---------------------------------------------------------------------
@@ -1093,6 +1173,7 @@ record_pass() {
             "worktrees_kept_unreferenced=$WT_KEPT_UNREFERENCED" "worktrees_kept_unreferenced_names=$WT_KEPT_UNREFERENCED_NAMES" \
             "worktrees_kept_live=$WT_KEPT_LIVE" "worktrees_kept_recent=$WT_KEPT_RECENT" \
             "worktrees_kept_locked=$WT_KEPT_LOCKED" "worktrees_kept_refused=$WT_KEPT_REFUSED" \
+            "worktrees_stale_locks=$WT_STALE_LOCKS" "worktrees_stale_lock_names=$WT_STALE_LOCK_NAMES" \
             "worktrees_pruned=$WT_PRUNED" \
             "targets_removed=$WT_TARGETS_REMOVED" "targets_removed_mib=$WT_TARGETS_MIB" \
             "floor_worktrees_removed=$FLOOR_WORKTREES_REMOVED" \

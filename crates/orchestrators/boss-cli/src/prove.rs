@@ -1470,7 +1470,7 @@ pub(crate) enum Eligible {
     Live,
     /// `--recheck` re-runs a probe already recorded on the car and
     /// writes nothing, so a finished car is a legitimate target — which
-    /// is the whole reason [`all_ship_a_change_cars`] pages over closed
+    /// is the whole reason [`crate::gate::all_cars_at`] pages over closed
     /// cars instead of filtering `status=open` at the API.
     AnyStatus,
 }
@@ -1573,56 +1573,6 @@ pub(crate) fn find_car<'a>(
             listed(&candidates)
         ),
     }
-}
-
-/// Every `ship-a-change` car, paged on `total` so the target is
-/// reachable no matter how many closed cars precede it.
-///
-/// The read used to be a single `?kind=ship-a-change&limit=200`. As
-/// closed cars accumulate they fill that one page, so a legitimately
-/// open, unproven car sorting past row 200 vanishes from [`find_car`] —
-/// a false negative that grows with the pipeline's age. A `status=open`
-/// filter would not fix it — and is why this read is the one car lookup
-/// NOT built on `gate::all_open_cars`: `--recheck` re-runs the proof on
-/// a CLOSED car, so the reader must read closed cars too and let
-/// [`find_car`] decide which statuses the caller's mode admits
-/// ([`Eligible`]). Paging on `total` keeps every car reachable, open or
-/// closed.
-async fn all_ship_a_change_cars(http: &reqwest::Client, base: &str) -> Result<Vec<Value>> {
-    const PAGE: usize = 500;
-    let mut cars: Vec<Value> = Vec::new();
-    loop {
-        let body = crate::gate::api_at(
-            http,
-            base,
-            reqwest::Method::GET,
-            &format!(
-                "/api/jobs?kind=ship-a-change&limit={PAGE}&offset={}",
-                cars.len()
-            ),
-            None,
-        )
-        .await?;
-        let total = body
-            .as_ref()
-            .and_then(|v| v.get("total"))
-            .and_then(Value::as_i64)
-            .unwrap_or(0)
-            .max(0) as usize;
-        let got = {
-            let page = crate::train::rows(body)?;
-            let n = page.len();
-            cars.extend(page);
-            n
-        };
-        // Stop when a page came back empty (offset past the data) or we
-        // have accumulated the whole population. Either guard alone
-        // terminates; both together survive a miscounted `total`.
-        if got == 0 || cars.len() >= total {
-            break;
-        }
-    }
-    Ok(cars)
 }
 
 /// The car's `proven` step, refusing unless it is actually reachable.
@@ -2414,7 +2364,7 @@ pub(crate) async fn run(
     let overriding = override_reason(probe_anyway.as_deref())?;
     let http = reqwest::Client::new();
     let base = crate::gate::resolve_jobs_base(None)?;
-    let cars = all_ship_a_change_cars(&http, &base).await?;
+    let cars = crate::gate::all_cars_at(&http, &base).await?;
     // THE TREE THE PROBE'S READER COMES OUT OF (backlog 18fee481): the
     // worktree the operator is standing in, which carries
     // `infra/forge/probe-bin` by construction. Outside one there is no
@@ -3595,6 +3545,26 @@ mod tests {
     /// The stub honours `limit`/`offset` and reports the true `total`,
     /// so the reader is exercised across page boundaries with no
     /// `BOSS_JOBS_URL` anywhere in the environment.
+    /// A page with no `total` is refused, never read as the whole
+    /// population (backlog 10776b6c). The read counted a missing total
+    /// as 0, so one page of rows already "covered" it and the loop
+    /// stopped there — a car past page one was reported as no car, the
+    /// false negative the paging above exists to prevent.
+    #[tokio::test]
+    async fn a_car_page_without_a_total_is_refused_not_read_as_all() {
+        let (base, stub) = crate::gate::stub::one_request(
+            r#"{"data":[{"id":"00000000-0000-0000-0000-0000000000cc","status":"closed"}]}"#,
+        )
+        .await;
+        let http = reqwest::Client::new();
+        let why = crate::gate::all_cars_at(&http, &base)
+            .await
+            .expect_err("a page without its total cannot say the read is complete")
+            .to_string();
+        stub.abort();
+        assert!(why.contains("total"), "{why}");
+    }
+
     #[tokio::test]
     async fn a_car_past_the_first_page_is_still_reachable() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -3663,7 +3633,7 @@ mod tests {
 
         let base = format!("http://{addr}");
         let http = reqwest::Client::new();
-        let cars = all_ship_a_change_cars(&http, &base)
+        let cars = crate::gate::all_cars_at(&http, &base)
             .await
             .expect("paging read succeeds");
         assert_eq!(

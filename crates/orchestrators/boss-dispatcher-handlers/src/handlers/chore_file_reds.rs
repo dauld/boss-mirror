@@ -56,7 +56,9 @@
 //! 5. Note `judged` on the chore's packet naming what was filed and
 //!    what was already open.
 
-use super::common::{api_client, get_json, open_jobs_of_kind, owner_for_filing, write_json};
+use super::common::{
+    api_client, get_json, open_jobs_of_kind, owner_for_filing, row_or_refuse, write_json,
+};
 use super::jobs_complete_linked_step::step_by_slug;
 use super::ops_judge::JUDGED;
 use async_trait::async_trait;
@@ -227,7 +229,7 @@ impl ChoreFileReds {
             rule,
         )
         .await?;
-        Ok(job.get("data").cloned().unwrap_or(job))
+        row_or_refuse(job, &format!("GET /api/jobs/{id}")).map_err(HandlerError::Downstream)
     }
 
     async fn annotate(

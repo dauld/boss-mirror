@@ -404,9 +404,10 @@ pub(crate) fn rows(resp: Option<Value>) -> Result<Vec<Value>> {
     }
 }
 
-/// How much of a non-list body [`rows`]' refusal quotes: enough to
+/// How much of a non-list body [`rows`]' refusal quotes — and of a
+/// non-JSON answer to a write, `gate::success_answer`'s: enough to
 /// recognise an error envelope or a login page, not the whole page.
-const ROWS_REFUSAL_QUOTE: usize = 200;
+pub(crate) const ROWS_REFUSAL_QUOTE: usize = 200;
 
 /// One page of a paginated `/api/jobs` read. Kept at the historical
 /// 100 so a backlog that fits under a page still makes exactly one

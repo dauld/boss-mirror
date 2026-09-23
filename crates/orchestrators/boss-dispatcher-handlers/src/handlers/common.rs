@@ -433,6 +433,52 @@ pub(crate) fn rows_or_refuse<T: serde::de::DeserializeOwned>(
     serde_json::from_value(rows.clone()).map_err(|e| format!("{what}: rows not in shape: {e}"))
 }
 
+/// The one row a single-row read answered, or a refusal naming the
+/// reading and what the body carried instead — the single-row
+/// neighbour of [`rows_or_refuse`], and the one place this crate
+/// decides what such a body means.
+///
+/// WHY THIS EXISTS (backlog f2eac973). Seven reads spelled
+/// `.get("data").cloned().unwrap_or(job)`: unwrap an envelope, else take
+/// the body. Measured against the servers, no envelope is ever sent —
+/// `GET /api/jobs/{id}` answers a flattened `JobDetail` and `GET
+/// /api/credentials/{id}` a bare `CredentialRow` — so the hedge never
+/// fired and its fallback was the only live path: ANY 200 body was the
+/// row. `maintenance.sweep.inspect` and `dns.observe` then failed a kind
+/// check on it and returned `Ok(())`, a ready step skipped without a
+/// word. The helper therefore does not unwrap an envelope either (that
+/// would be the same guess, kept); it reads the row bare and requires
+/// the one field every such row carries, a non-empty string `id`. An
+/// envelope, an error body, `null` or a list all refuse, and the
+/// refusal lists the body's top-level keys so the next reader does not
+/// have to re-fetch it to learn what came back.
+///
+/// The refusal is a `String` for the same reason as `rows_or_refuse`:
+/// the caller picks the class, and at every current site that is
+/// `HandlerError::Downstream` — a bad answer from the far side, which a
+/// redelivery can outlive.
+pub(crate) fn row_or_refuse(body: Value, what: &str) -> Result<Value, String> {
+    if body
+        .get("id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.is_empty())
+    {
+        return Ok(body);
+    }
+    let carried = match &body {
+        Value::Object(m) => format!(
+            "keys [{}]",
+            m.keys().map(String::as_str).collect::<Vec<_>>().join(", ")
+        ),
+        Value::Array(_) => "a list".to_string(),
+        Value::Null => "null".to_string(),
+        _ => "a scalar".to_string(),
+    };
+    Err(format!(
+        "{what} answered no row (no string `id`; the body carried {carried})"
+    ))
+}
+
 /// Every open Job of `kind`, steps inline, paged on the list's `total`
 /// so a packet sorted past one page is still found — a capped page is
 /// a false negative that grows with the board's age.
@@ -765,6 +811,44 @@ mod tests {
             .expect_err("a row out of shape refuses");
         assert!(why.contains("GET /api/things"), "{why}");
         assert!(why.contains("not in shape"), "{why}");
+    }
+
+    /// Backlog f2eac973 — the single-row neighbour of 833e2d0a. Every
+    /// single-row door these handlers read (`GET /api/jobs/{id}`, a
+    /// flattened `JobDetail`; `GET /api/credentials/{id}`, a bare
+    /// `CredentialRow`) answers the row BARE, so the old
+    /// `.get("data").cloned().unwrap_or(job)` hedged for an envelope no
+    /// server sends and its fallback was the only live path: any 200
+    /// body was read as the row, and a kind check then skipped it
+    /// silently. A row is what carries its `id`; everything else —
+    /// an error body, an envelope, null, a list — refuses and says
+    /// what it did carry.
+    #[test]
+    fn a_single_row_read_with_no_id_refuses_and_a_bare_row_is_the_answer() {
+        let job = json!({ "id": "j-1", "kind": "maintenance-sweep", "steps": [] });
+        assert_eq!(
+            row_or_refuse(job.clone(), "GET /api/jobs/j-1").expect("a bare row is the answer"),
+            job,
+            "the row comes back whole"
+        );
+        for dark in [
+            json!({ "error": "forbidden" }),
+            json!({ "data": { "id": "j-1" } }),
+            json!({ "id": "" }),
+            json!({ "id": 7 }),
+            json!(null),
+            json!([{ "id": "j-1" }]),
+        ] {
+            let why = row_or_refuse(dark.clone(), "GET /api/jobs/j-1")
+                .expect_err("a body with no row id is a refusal");
+            assert!(why.contains("GET /api/jobs/j-1"), "{why}");
+            assert!(why.contains("no row"), "{why}");
+        }
+        // The refusal names what the body DID carry, so the next
+        // reader does not re-derive it (CLAUDE.md §Diagnosis).
+        let why = row_or_refuse(json!({ "error": "forbidden" }), "GET /api/jobs/j-1")
+            .expect_err("refuses");
+        assert!(why.contains("error"), "{why}");
     }
 
     /// The judgement AT THE CONSUMING LAYER. `open_jobs` is the board

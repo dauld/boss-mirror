@@ -95,7 +95,7 @@
 //! forget to ask for it, and no future rule file can reintroduce the
 //! defect (CLAUDE.md §9a).
 
-use super::common::{api_client, get_json, open_jobs_of_kind, write_json};
+use super::common::{api_client, get_json, open_jobs_of_kind, row_or_refuse, write_json};
 use super::jobs_complete_linked_step::{FOR_REQUEST, VerbFailure, step_by_slug, verb_failure};
 use async_trait::async_trait;
 use boss_dispatcher::rules::expr::{self, Value};
@@ -396,7 +396,7 @@ impl OpsJudge {
             rule,
         )
         .await?;
-        Ok(job.get("data").cloned().unwrap_or(job))
+        row_or_refuse(job, &format!("GET /api/jobs/{id}")).map_err(HandlerError::Downstream)
     }
 
     /// POST the follow-on and read the id the jobs API minted for it —

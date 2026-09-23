@@ -88,7 +88,7 @@
 //! ready. Every noun is a rule arg — `target`, `verb` — so a sweep
 //! whose measurement gains a verdict is one rule file dropped in.
 
-use super::common::{api_client, get_json, write_json};
+use super::common::{api_client, get_json, row_or_refuse, write_json};
 use super::jobs_complete_linked_step::{VerbFailure, step_by_slug, unusable_link, verb_failure};
 use async_trait::async_trait;
 use boss_dispatcher::rules::expr::Value;
@@ -255,7 +255,7 @@ impl MaintenanceSweepJudge {
             rule,
         )
         .await?;
-        Ok(job.get("data").cloned().unwrap_or(job))
+        row_or_refuse(job, &format!("GET /api/jobs/{id}")).map_err(HandlerError::Downstream)
     }
 }
 

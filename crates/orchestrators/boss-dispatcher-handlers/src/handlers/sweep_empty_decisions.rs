@@ -35,8 +35,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use super::common::{
-    StepEvent, api_client, dispatcher_actor_header, dispatcher_reader_header, rows_or_refuse,
-    sim_origin_value,
+    StepEvent, api_client, dispatcher_actor_header, dispatcher_reader_header, row_or_refuse,
+    rows_or_refuse, sim_origin_value,
 };
 use super::sweep_deploy_convergence;
 
@@ -279,7 +279,10 @@ impl Handler for MaintenanceSweepInspect {
         }
 
         let job = self.get(&format!("/api/jobs/{}", ev.job_id)).await?;
-        let job = job.get("data").cloned().unwrap_or(job);
+        // A body that is not a job would fail the kind check below and
+        // skip this ready step without a word (backlog f2eac973).
+        let job = row_or_refuse(job, &format!("GET /api/jobs/{}", ev.job_id))
+            .map_err(HandlerError::Downstream)?;
         if job.get("kind").and_then(Value::as_str) != Some("maintenance-sweep") {
             return Ok(());
         }
@@ -494,6 +497,46 @@ mod tests {
             1,
             "step-types is a bare array, and that is its answer"
         );
+    }
+
+    /// Backlog f2eac973, AT THE CONSUMING LAYER. The job read unwrapped
+    /// an envelope the jobs API never sends and fell back to the whole
+    /// body, so a 200 answer that was not a job failed the kind check
+    /// and the Inspect step was skipped with `Ok(())` — the sweep sat
+    /// ready and nothing said why. It is now a retryable refusal naming
+    /// the read.
+    #[tokio::test]
+    async fn a_job_read_that_answered_no_row_refuses_rather_than_skipping() {
+        use axum::{Json as AxJson, Router, routing::get};
+        let app = Router::new().route(
+            "/api/jobs/{id}",
+            get(|| async { AxJson(json!({ "error": "forbidden" })) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let handler =
+            MaintenanceSweepInspect::with_client(reqwest::Client::new(), format!("http://{addr}"));
+        let ctx = InvocationContext {
+            rule_name: "inspect-empty-decisions-sweep-on-step-ready".into(),
+            triggering_event_id: "evt-1".into(),
+            triggering_topic: "step.ready.checklist".into(),
+            event_payload: json!({
+                "job_id": "j-sweep",
+                "step_id": "s-inspect",
+                "kind": "checklist",
+                "metadata": {},
+            }),
+        };
+        match handler.invoke(&[], &ctx).await {
+            Err(HandlerError::Downstream(why)) => {
+                assert!(why.contains("/api/jobs/j-sweep"), "{why}");
+                assert!(why.contains("no row"), "{why}");
+            }
+            other => panic!("a body that is not a job is a refusal, got {other:?}"),
+        }
     }
 
     fn kinds() -> BTreeSet<String> {

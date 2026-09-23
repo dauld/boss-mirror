@@ -890,21 +890,29 @@ a door that stops being true is a defect worth a car.
   branch must not move** — the receipt vouches for the sha the gate
   resolved at launch, so a commit pushed after it leaves a car the dock
   refuses as "gated, then changed" — a rebase of a parked car is the
-  same event. **The repair is TWO calls, and the second is the one
-  that repairs.** Gate the new tip, then `boss rerail <car> --finish`,
-  which copies the fresh green onto the car as `regate_receipt` and
-  clears the stale skip. A BARE re-gate does not refresh anything: it
-  produces a green gate-run that sits BESIDE a car still vouching for
-  the old sha, which is the worst of both — the branch looks repaired
-  and the dock refuses it again. Measured twice, on two cars, a day
-  apart (`bb49056b`, and car 817b1b84 on 2026-09-21, which had been
-  left behind by seventeen consecutive trains and boarded the next one
-  after `--finish`). This document said the re-gate alone was enough,
-  which is read at exactly the moment someone is already recovering
-  from a mistake. Whether a re-gate carrying its `--park-*` flags
-  refreshes the car is UNTESTED — the park intent is the difference
-  between the two forms, and neither run measured it, so do not rely
-  on it; `--finish` is the door that has been observed to work. And
+  same event. **The repair is a re-gate that carries the green onto the
+  car, and there are two.** Gate the new tip WITH its `--park-*` flags,
+  or gate it and then run `boss rerail <car> --finish`; either copies
+  the fresh green onto the car as `regate_receipt` and clears the stale
+  skip. The park intent is the whole difference: a green carrying it
+  reaches the auto-park handler, which finds the car still at the dock
+  and refreshes it in place (`ParkAction::Refresh` in
+  `jobs_auto_park.rs`) — observed on car 9972ae75 (2026-09-19), whose
+  note reads "receipt machine-copied to regate_receipt by the auto-park
+  handler"; of the 300 newest closed cars on 2026-09-23, one was
+  refreshed that way and five by `--finish`. A BARE re-gate refreshes
+  nothing: its green sits BESIDE a car still vouching for the old sha,
+  which is the worst of both — the branch looks repaired and the dock
+  refuses it again. Measured twice, on two cars, a day apart
+  (`bb49056b`, and car 817b1b84 on 2026-09-21, which had been left
+  behind by seventeen consecutive trains and boarded the next one after
+  `--finish`). This document said first that the bare re-gate was
+  enough and then that the park-flagged one was untested, each read at
+  exactly the moment someone is already recovering from a mistake — so
+  since 539cad85 the verb says it at launch: a gate with no park intent
+  on a branch whose car is at the dock prints a WARNING naming the car,
+  the head it still vouches for, and the `boss rerail <car> --finish`
+  that carries the green onto it. And
   **prose with backticks does not survive argv**, and that is not a
   `--park-*` rule — it belongs to EVERY flag that carries a sentence
   (`boss triage --evidence`, `boss fold --change`, `boss design

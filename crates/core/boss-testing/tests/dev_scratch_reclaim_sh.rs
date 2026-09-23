@@ -788,6 +788,218 @@ fn a_detached_worktree_whose_head_no_ref_holds_is_kept_and_named() {
     );
 }
 
+/// A fake process table under `root/proc`, read by the pass through
+/// `PROC_ROOT`: `pid1` is what `/proc/1/comm` says (the pod's `pause`
+/// when the sidecar shares the pod's process namespace), and each
+/// `(pid, comm, start)` gets a `stat` line in the kernel's shape, its
+/// start time in field 22. Returns the root to hand the pass.
+fn fake_proc(root: &Path, pid1: &str, procs: &[(u32, &str, u64)]) -> PathBuf {
+    let proc_root = root.join("proc");
+    boss_testing::create_dir(&proc_root.join("1"));
+    boss_testing::write_file(&proc_root.join("1").join("comm"), &format!("{pid1}\n"));
+    for (pid, comm, start) in procs {
+        boss_testing::create_dir(&proc_root.join(pid.to_string()));
+        boss_testing::write_file(
+            &proc_root.join(pid.to_string()).join("stat"),
+            &format!("{pid} ({comm}) S 1 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 {start} 0 0\n"),
+        );
+    }
+    proc_root
+}
+
+/// Lock a worktree the way the Claude harness does.
+fn harness_lock(yard: &Yard, wt: &Path, reason: &str) {
+    git(
+        &yard.repo,
+        0,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            reason,
+            wt.to_str().expect("utf8"),
+        ],
+    );
+}
+
+/// A lock is a claim by a PROCESS, and a claim outlives its claimant
+/// unless something checks. The Claude harness locks each agent
+/// worktree `claude agent agent-<id> (pid N start T)` for its session,
+/// and until 2026-09-23 the pass kept every locked tree without asking
+/// whether N still lived. Measured that day (backlog e14a741c): two
+/// lock files named pid 355 start 94472290 while pid 355 had started at
+/// 95092646 — the harness had restarted, the old sessions were gone,
+/// and their trees were kept forever. /proc/<pid>/stat is
+/// world-readable, so the pid AND its start time are compared: gone, or
+/// started at another time, is a stale lock, and the tree is judged
+/// like any other — still behind the window, dirty and unreferenced-
+/// head guards — and NAMED. A live lock (the pid alive with the start
+/// it recorded) is never judged stale, and neither is a lock whose
+/// reason is not the harness's shape: that one is a human's.
+#[test]
+fn a_lock_whose_process_is_gone_or_restarted_is_stale_and_a_live_lock_is_kept() {
+    let root = boss_testing::scratch_dir("boss-dsr-stale-lock");
+    let _guard = Scratch(root.clone());
+    let yard = Yard::new(&root);
+    // Every tree UNPUSHED and idle 60h against a 48h window: without
+    // its lock, each would go. The locks alone decide.
+    let names = [
+        "agent-live",
+        "agent-restarted",
+        "agent-gone",
+        "agent-human",
+        "agent-stale-dirty",
+    ];
+    let trees: Vec<PathBuf> = names
+        .iter()
+        .map(|n| {
+            let b = format!("feat/{n}");
+            yard.worktree(n, Some(&b), 60)
+        })
+        .collect();
+    let [live, restarted, gone, human, stale_dirty] = [0, 1, 2, 3, 4].map(|i| trees[i].clone());
+    harness_lock(
+        &yard,
+        &live,
+        "claude agent agent-live (pid 355 start 95092646)",
+    );
+    harness_lock(
+        &yard,
+        &restarted,
+        "claude agent agent-restarted (pid 355 start 94472290)",
+    );
+    harness_lock(&yard, &gone, "claude agent agent-gone (pid 4242 start 100)");
+    harness_lock(&yard, &human, "operator: bisecting, leave it");
+    harness_lock(
+        &yard,
+        &stale_dirty,
+        "claude agent agent-stale-dirty (pid 4243 start 100)",
+    );
+    boss_testing::write_file(&stale_dirty.join("notes.txt"), "untracked");
+    for p in [stale_dirty.join("notes.txt"), stale_dirty.clone()] {
+        touch_at(&p, 60);
+    }
+    // The live process's comm carries `) ` itself — a comm is any 15
+    // bytes — so a parser that splits at the FIRST close-paren reads the
+    // wrong field and would call a live lock stale.
+    let proc_root = fake_proc(&root, "pause", &[(355, "x) S 1 2 3", 95092646)]);
+
+    let out = run(&root, &[("PROC_ROOT", proc_root.to_str().expect("utf8"))]);
+    let text = say(&out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        live.exists(),
+        "a lock whose pid lives with the start it recorded is never stale\n{text}"
+    );
+    assert!(
+        human.exists(),
+        "a lock that is not the harness's shape is a human's, and kept\n{text}"
+    );
+    assert!(
+        !restarted.exists(),
+        "pid 355 now started at another time: the locker is gone, the tree is judged and goes\n{text}"
+    );
+    assert!(
+        !gone.exists(),
+        "no such pid: the locker is gone, the tree is judged and goes\n{text}"
+    );
+    assert!(
+        stale_dirty.exists(),
+        "a stale lock only opens the judgement: a dirty tree is still kept\n{text}"
+    );
+    for name in ["agent-restarted", "agent-gone", "agent-stale-dirty"] {
+        assert!(
+            stdout
+                .lines()
+                .any(|l| l.contains(name) && l.contains("stale lock")),
+            "{name}'s stale lock is named in the log\n{text}"
+        );
+    }
+    assert!(
+        stdout.contains("2 locked") && stdout.contains("3 with a stale lock"),
+        "the totals count live and stale locks apart\n{text}"
+    );
+    let listed = git(&yard.repo, 0, &["worktree", "list", "--porcelain"]);
+    assert!(
+        listed.contains("pid 4243 start 100"),
+        "a stale-locked tree the pass KEEPS keeps its lock too — nothing is unlocked but to remove\n{listed}\n{text}"
+    );
+    let log = curl_log(&root);
+    let put = log
+        .lines()
+        .find(|l| l.starts_with("PUT "))
+        .unwrap_or_else(|| panic!("the run step is completed\n{log}\n{text}"));
+    assert!(
+        put.contains("\"worktrees_kept_locked\":\"2\"")
+            && put.contains("\"worktrees_stale_locks\":\"3\"")
+            && put.contains("\"worktrees_stale_lock_names\":\"agent-")
+            && put.contains("agent-restarted")
+            && put.contains("agent-gone")
+            && put.contains("agent-stale-dirty"),
+        "the packet names every stale lock\n{put}\n{text}"
+    );
+}
+
+/// The judgement above is only as good as the process table it reads.
+/// The sidecar sees the dev container's processes because the pod sets
+/// `shareProcessNamespace` (infra/cluster/manifests/boss-dev.yaml), and
+/// then pid 1 is the pod's `pause`. In a namespace of its own, pid 1 is
+/// the sidecar's own entrypoint, every harness pid reads as gone, and
+/// every LIVE agent's lock would read stale — so a view that is not
+/// pod-wide judges no lock at all, and says so.
+#[test]
+fn a_process_table_that_is_not_the_pods_judges_no_lock() {
+    let root = boss_testing::scratch_dir("boss-dsr-unshared-proc");
+    let _guard = Scratch(root.clone());
+    let yard = Yard::new(&root);
+    let locked = yard.worktree("agent-locked", Some("feat/locked"), 30);
+    yard.land("feat/locked");
+    harness_lock(
+        &yard,
+        &locked,
+        "claude agent agent-locked (pid 4242 start 100)",
+    );
+    let proc_root = fake_proc(&root, "sh", &[]);
+
+    let out = run(&root, &[("PROC_ROOT", proc_root.to_str().expect("utf8"))]);
+    let text = say(&out);
+    assert!(
+        locked.exists(),
+        "an unshared process table cannot say a harness pid is gone\n{text}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("locks not judged"),
+        "and the pass says why it did not judge\n{text}"
+    );
+}
+
+/// The index is not an activity signal. Measured 2026-09-23 (backlog
+/// e14a741c): five worktrees' index files were written 2026-09-21
+/// 17:11, days after their last commit — a `git status` refreshes the
+/// index's stat cache on a CLEAN tree, and the harness snapshots every
+/// session's status as it starts. Anything the index can hold that
+/// HEAD does not is a staged change, which the dirty guard keeps at any
+/// age; a commit, checkout or reset that writes it also writes a
+/// reflog entry, which is read for what it says. So a clean, landed
+/// tree whose only recent write is its index goes.
+#[test]
+fn an_index_refresh_on_a_clean_tree_is_not_activity() {
+    let root = boss_testing::scratch_dir("boss-dsr-index-refresh");
+    let _guard = Scratch(root.clone());
+    let yard = Yard::new(&root);
+    let landed = yard.worktree("agent-landed", Some("feat/landed"), 30);
+    yard.land("feat/landed");
+    let gitdir = PathBuf::from(git(&landed, 0, &["rev-parse", "--absolute-git-dir"]));
+    touch_at(&gitdir.join("index"), 1);
+
+    let out = run(&root, &[]);
+    let text = say(&out);
+    assert!(
+        !landed.exists(),
+        "landed, clean, 30h since any commit or reflog entry: an index refreshed an hour ago keeps nothing\n{text}"
+    );
+}
+
 // ---------------------------------------------------------------------
 // THE CLI LEG (backlog c35eda6c, retro 27fad542, 2026-09-18): the pod's
 // `boss` is the tree's by construction. Each pass takes the CLI at

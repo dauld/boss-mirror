@@ -22,10 +22,18 @@
 //! `rows_or_refuse` and states its fallback at the call site, where a
 //! reviewer can see the choice being made.
 //!
-//! What it does NOT judge, on purpose: `.get("data").cloned()
-//! .unwrap_or(job)` — the single-object envelope unwrap, which falls
-//! back to the whole body rather than to an empty list, and is a
-//! different question.
+//! THE SINGLE-ROW NEIGHBOUR (backlog f2eac973). `.get("data").cloned()
+//! .unwrap_or(job)` falls back to the whole body rather than to an
+//! empty list, and it was a different question until it was measured:
+//! every single-row door these handlers read answers the row BARE
+//! (`GET /api/jobs/{id}` is a flattened `JobDetail`, `GET
+//! /api/credentials/{id}` a bare `CredentialRow`), so the envelope it
+//! hedged for is never sent and the fallback was the only live path —
+//! any 200 body read as the row, and a kind check skipped it without a
+//! word. So the second rule, as mechanical as the first: any
+//! `.get("data")` whose chain falls back with `unwrap_or` fails this
+//! test, and a single row is read through `common::row_or_refuse`,
+//! which refuses a body that carries no row `id`.
 
 use std::path::{Path, PathBuf};
 
@@ -50,9 +58,10 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Every array read of `data` in `text`, by 1-based line, excluding the
-/// one inside [`THE_READER`].
-fn offending_lines(text: &str) -> Vec<usize> {
+/// Every `.get("data")` in `text` whose next chain (whitespace removed,
+/// [`CHAIN_WINDOW`] characters) satisfies `judged`, by 1-based line,
+/// excluding any inside [`THE_READER`].
+fn lines_where(text: &str, judged: impl Fn(&str) -> bool) -> Vec<usize> {
     // The reader's own body: from its signature to the first line that
     // closes a top-level item.
     let reader = text.find(THE_READER).map(|start| {
@@ -70,20 +79,44 @@ fn offending_lines(text: &str) -> Vec<usize> {
         if reader.as_ref().is_some_and(|r| r.contains(&at)) {
             continue;
         }
+        // A mention in a comment is not a read: the doc comments that
+        // explain WHY these rules exist quote the very chains they
+        // forbid, and a rule that refused its own explanation would be
+        // cured by deleting the explanation.
+        let line_start = text[..at].rfind('\n').map_or(0, |n| n + 1);
+        if text[line_start..at].trim_start().starts_with("//") {
+            continue;
+        }
         let chain: String = text[from..]
             .chars()
             .filter(|c| !c.is_whitespace())
             .take(CHAIN_WINDOW)
             .collect();
-        if chain.contains("as_array") || chain.contains("is_array") {
+        if judged(&chain) {
             out.push(text[..at].matches('\n').count() + 1);
         }
     }
     out
 }
 
-#[test]
-fn a_data_array_is_read_only_by_rows_or_refuse() {
+/// Every array read of `data` in `text`.
+fn offending_lines(text: &str) -> Vec<usize> {
+    lines_where(text, |chain| {
+        chain.contains("as_array") || chain.contains("is_array")
+    })
+}
+
+/// Every single-row envelope unwrap in `text`: a `.get("data")` that
+/// falls back — to the body, to a borrow of it, to anything — rather
+/// than refusing. Each `unwrap_or` variant is a guess about what the
+/// body was, so the rule names them all; an array read that also ends
+/// in `unwrap_or_default` is reported by both rules, on the same line.
+fn envelope_fallback_lines(text: &str) -> Vec<usize> {
+    lines_where(text, |chain| chain.contains(".unwrap_or"))
+}
+
+/// Every `src/**/*.rs` offence `detect` finds, as `src/<file>:<line>`.
+fn offences(detect: fn(&str) -> Vec<usize>) -> Vec<String> {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     rust_files(&src, &mut files);
@@ -94,16 +127,21 @@ fn a_data_array_is_read_only_by_rows_or_refuse() {
         files.len(),
         src.display()
     );
-    let offenders: Vec<String> = files
+    files
         .iter()
         .flat_map(|f| {
             let text = std::fs::read_to_string(f).expect("read source");
             let rel = f.strip_prefix(&src).unwrap_or(f).display().to_string();
-            offending_lines(&text)
+            detect(&text)
                 .into_iter()
                 .map(move |line| format!("src/{rel}:{line}"))
         })
-        .collect();
+        .collect()
+}
+
+#[test]
+fn a_data_array_is_read_only_by_rows_or_refuse() {
+    let offenders = offences(offending_lines);
     assert!(
         offenders.is_empty(),
         "a listing's `data` array is read outside common::rows_or_refuse — a missing \
@@ -139,4 +177,48 @@ fn the_detector_catches_every_spelling_and_spares_the_reader() {
         vec![3],
         "the line reported is the line of the read"
     );
+}
+
+#[test]
+fn a_single_row_is_read_only_by_row_or_refuse() {
+    let offenders = offences(envelope_fallback_lines);
+    assert!(
+        offenders.is_empty(),
+        "a single-row read unwraps a `data` envelope and falls back to the body — the doors \
+         these handlers read answer the row bare, so the fallback reads ANY 200 body as the \
+         row (backlog f2eac973). Read it through common::row_or_refuse:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+/// The second detector on the spellings the tree held and on the reads
+/// that are not unwraps — a POST's minted-id fallback and a k8s
+/// Secret's own `data` map read a KEY; neither stands in for a row.
+#[test]
+fn the_envelope_detector_catches_every_fallback_and_spares_key_reads() {
+    let caught = [
+        "let job = job.get(\"data\").cloned().unwrap_or(job);",
+        "Ok(job.get(\"data\").cloned().unwrap_or(job))",
+        "let run = run.get(\"data\").unwrap_or(&run);",
+        "let row = row\n    .get(\"data\")\n    .cloned()\n    .unwrap_or_else(|| row.clone());",
+    ];
+    for text in caught {
+        assert_eq!(
+            envelope_fallback_lines(text).len(),
+            1,
+            "must refuse: {text}"
+        );
+    }
+    let spared = [
+        ".or_else(|| created.get(\"data\").and_then(|d| d.get(\"id\")))",
+        "let Some(b64) = body\n    .get(\"data\")\n    .and_then(|d| d.get(key))\n    .and_then(|v| v.as_str())\nelse {",
+        "let job = row_or_refuse(job, \"GET /api/jobs/x\")?;",
+        "/// the old `.get(\"data\").cloned().unwrap_or(job)` hedged for an envelope",
+    ];
+    for text in spared {
+        assert!(
+            envelope_fallback_lines(text).is_empty(),
+            "must spare: {text}"
+        );
+    }
 }

@@ -92,7 +92,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::common::{
     StepEvent, api_client, dispatcher_actor_header, dispatcher_reader_header, get_json,
-    owner_for_filing, post_json, rows_or_refuse, sim_origin_value, write_json,
+    owner_for_filing, post_json, row_or_refuse, rows_or_refuse, sim_origin_value, write_json,
 };
 use super::credential_issuer::{
     AccessApp, AccessAppSpec, AccessApps, AccessPolicy, AccessPolicySpec, SecretStore,
@@ -1188,7 +1188,8 @@ impl DnsObserve {
             )));
         };
         let row = self.get(&format!("/api/credentials/{cred}")).await?;
-        let row = row.get("data").cloned().unwrap_or(row);
+        let row = row_or_refuse(row, &format!("GET /api/credentials/{cred}"))
+            .map_err(HandlerError::Downstream)?;
         let location = row
             .get("storage_location")
             .and_then(Json::as_str)
@@ -1511,7 +1512,10 @@ impl Handler for DnsObserve {
         let rule = ctx.rule_name.as_str();
 
         let job = self.get(&format!("/api/jobs/{}", ev.job_id)).await?;
-        let job = job.get("data").cloned().unwrap_or(job);
+        // A body that is not a job would fail the kind check below and
+        // skip this ready step without a word (backlog f2eac973).
+        let job = row_or_refuse(job, &format!("GET /api/jobs/{}", ev.job_id))
+            .map_err(HandlerError::Downstream)?;
         if job.get("kind").and_then(Json::as_str) != Some(OBSERVATION_KIND) {
             return Ok(());
         }

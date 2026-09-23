@@ -149,17 +149,35 @@ fn get(client: &Client, base: &str, path: &str) -> Result<Value> {
         .with_context(|| format!("GET {u}: the body did not parse as JSON"))
 }
 
-/// A list door's rows, whether it answers a bare array or `{data}`.
-fn rows_of(v: Value) -> Vec<Value> {
-    match v {
-        Value::Array(a) => a,
-        Value::Object(mut o) => o
-            .remove("data")
-            .or_else(|| o.remove("rules"))
-            .and_then(|d| d.as_array().cloned())
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    }
+/// A list door's rows — a bare array, `{data}`, or the dispatcher's
+/// `{rules}` — or a refusal.
+///
+/// It used to answer an empty list for anything else (backlog
+/// 10776b6c), and the dispatcher answers a failed rule load with a 200
+/// carrying `"error"` beside `"rules": []`, so an export read at that
+/// moment wrote a tenant with no rules. An envelope that names an
+/// `error` refuses with it; every other shape is decided by the one
+/// rows helper, which refuses a body that is not a list (7b7e0529).
+fn rows_of(v: Value) -> Result<Vec<Value>> {
+    let v = match v {
+        Value::Object(mut o) => {
+            if let Some(e) = o.get("error").filter(|e| !e.is_null()) {
+                bail!("the registry answered an error, so its rows cannot be read as zero: {e}");
+            }
+            match o.remove("rules") {
+                Some(rules) if !o.contains_key("data") => rules,
+                _ => Value::Object(o),
+            }
+        }
+        other => other,
+    };
+    crate::train::rows(Some(v))
+}
+
+/// One list door read, its rows refused rather than guessed, and the
+/// refusal naming the door that answered.
+fn list(client: &Client, base: &str, path: &str) -> Result<Vec<Value>> {
+    rows_of(get(client, base, path)?).with_context(|| format!("GET {base}{path}"))
 }
 
 fn str_of<'a>(v: &'a Value, key: &str) -> &'a str {
@@ -172,12 +190,12 @@ pub fn read_instance(bases: &Bases, tenant_id: &str) -> Result<Snapshot> {
     let client = seed_client()?;
     let source = format!("tenant:{tenant_id}");
 
-    let kinds = rows_of(get(&client, &bases.subjects, "/api/subject-kinds")?);
+    let kinds = list(&client, &bases.subjects, "/api/subject-kinds")?;
     let mut classes = Vec::new();
     for k in kinds.iter().map(|k| str_of(k, "kind").to_string()) {
         let path = format!("/api/classes?subject_kind={k}");
         classes.extend(
-            rows_of(get(&client, &bases.classes, &path)?)
+            list(&client, &bases.classes, &path)?
                 .into_iter()
                 .filter(|c| c.get("retired_at").is_none_or(Value::is_null)),
         );
@@ -192,7 +210,7 @@ pub fn read_instance(bases: &Bases, tenant_id: &str) -> Result<Snapshot> {
             None => "/api/locations".to_string(),
             Some(id) => format!("/api/locations?parent_id={id}"),
         };
-        for row in rows_of(get(&client, &bases.locations, &path)?) {
+        for row in list(&client, &bases.locations, &path)? {
             if row.get("retired_at").is_some_and(|r| !r.is_null()) {
                 continue;
             }
@@ -201,7 +219,7 @@ pub fn read_instance(bases: &Bases, tenant_id: &str) -> Result<Snapshot> {
         }
     }
 
-    let company_label = rows_of(get(&client, &bases.subjects, "/api/subjects/company")?)
+    let company_label = list(&client, &bases.subjects, "/api/subjects/company")?
         .into_iter()
         .find(|r| str_of(r, "id") == tenant_id)
         .and_then(|r| r.get("label").and_then(Value::as_str).map(str::to_string));
@@ -210,40 +228,32 @@ pub fn read_instance(bases: &Bases, tenant_id: &str) -> Result<Snapshot> {
         tenant_id: tenant_id.to_string(),
         company_label,
         classes,
-        accounts: rows_of(get(&client, &bases.ledger, "/api/ledger/accounts")?),
-        tax_kinds: rows_of(get(&client, &bases.ledger, "/api/ledger/tax-kinds")?),
-        sales_tax_rates: rows_of(get(&client, &bases.ledger, "/api/ledger/sales-tax-rates")?),
+        accounts: list(&client, &bases.ledger, "/api/ledger/accounts")?,
+        tax_kinds: list(&client, &bases.ledger, "/api/ledger/tax-kinds")?,
+        sales_tax_rates: list(&client, &bases.ledger, "/api/ledger/sales-tax-rates")?,
         locations,
-        calendars: rows_of(get(
-            &client,
-            &bases.calendar,
-            "/api/calendar/business-calendars",
-        )?),
-        policy: rows_of(get(&client, &bases.policy, "/api/policy/rules")?)
+        calendars: list(&client, &bases.calendar, "/api/calendar/business-calendars")?,
+        policy: list(&client, &bases.policy, "/api/policy/rules")?
             .into_iter()
             .filter(|r| r.get("active").and_then(Value::as_bool).unwrap_or(true))
             .collect(),
-        people: rows_of(get(&client, &bases.people, "/api/people")?),
-        agents: rows_of(get(&client, &bases.jobs, "/api/agents")?),
-        workflows: rows_of(get(&client, &bases.jobs, "/api/workflows")?)
+        people: list(&client, &bases.people, "/api/people")?,
+        agents: list(&client, &bases.jobs, "/api/agents")?,
+        workflows: list(&client, &bases.jobs, "/api/workflows")?
             .into_iter()
             .filter(|w| str_of(w, "owning_team") == tenant_id)
             .collect(),
-        credentials: rows_of(get(&client, &bases.jobs, "/api/credentials")?),
-        sensors: rows_of(get(&client, &bases.jobs, "/api/sensors")?)
+        credentials: list(&client, &bases.jobs, "/api/credentials")?,
+        sensors: list(&client, &bases.jobs, "/api/sensors")?
             .into_iter()
             .filter(|s| str_of(s, "tenant_id") == tenant_id)
             .collect(),
-        posting_rules: rows_of(get(&client, &bases.ledger, "/api/ledger/posting-rules")?)
+        posting_rules: list(&client, &bases.ledger, "/api/ledger/posting-rules")?
             .into_iter()
             .filter(|r| str_of(r, "source") == source)
             .collect(),
-        projections: rows_of(get(
-            &client,
-            &bases.ledger,
-            "/api/ledger/fact-projection-rules",
-        )?),
-        rules: rows_of(get(&client, &bases.dispatcher, "/api/dispatcher/rules")?)
+        projections: list(&client, &bases.ledger, "/api/ledger/fact-projection-rules")?,
+        rules: list(&client, &bases.dispatcher, "/api/dispatcher/rules")?
             .into_iter()
             .filter(|r| str_of(r, "source") == source)
             .collect(),
@@ -1020,6 +1030,45 @@ mod tests {
     use crate::tenant_publish::plan;
     use crate::tenant_publish::stub::*;
     use boss_testing::scratch::scratch_dir;
+
+    /// A REGISTRY THAT DID NOT ANSWER IS NOT AN EMPTY ONE (backlog
+    /// 10776b6c). `rows_of` turned any body that was not a list into
+    /// zero rows, and the dispatcher answers a failed rule load with a
+    /// 200 carrying `"error"` beside `"rules": []` — so an export read
+    /// in that moment wrote a tenant with no rules, well-formed and
+    /// wrong. Every such body now refuses, naming what came back.
+    #[test]
+    fn a_body_that_is_no_list_refuses_rather_than_exporting_nothing() {
+        for body in [
+            json!({"error": "load dispatcher_rules: pool timed out", "rules": []}),
+            json!({"error": "no such registry"}),
+            json!({"data": {"not": "a list"}}),
+            json!("a string"),
+        ] {
+            let why = rows_of(body.clone()).expect_err("not a list").to_string();
+            assert!(
+                why.contains("cannot be read as zero") || why.contains("error"),
+                "{body}: {why}"
+            );
+        }
+    }
+
+    /// The three honest shapes still read: a bare array, `{data}`, and
+    /// the dispatcher's `{rules}` — an empty one included.
+    #[test]
+    fn the_list_shapes_still_read() {
+        let row = json!({"id": 1});
+        assert_eq!(rows_of(json!([row])).unwrap(), vec![row.clone()]);
+        assert_eq!(
+            rows_of(json!({"data": [row], "total": 1})).unwrap(),
+            vec![row.clone()]
+        );
+        assert_eq!(
+            rows_of(json!({"rules": [row], "error": null, "authored_registry": null})).unwrap(),
+            vec![row]
+        );
+        assert!(rows_of(json!({"rules": []})).unwrap().is_empty());
+    }
 
     fn snapshot() -> Snapshot {
         Snapshot {

@@ -1063,15 +1063,12 @@ pub async fn run(all: bool) -> Result<()> {
         .and_then(Value::as_i64);
     let held_runs = rows(held_body)?;
     let held_cut = cut_note(held_total, held_runs.len());
-    let cars = rows(
-        api(
-            &http,
-            reqwest::Method::GET,
-            "/api/jobs?kind=ship-a-change&limit=800",
-            None,
-        )
-        .await?,
-    )?;
+    // Every car, paged on `total` (backlog 10776b6c): the shed, the
+    // dock's held and troubled lanes and the stranded cross-ref all read
+    // this list, and one bare `limit=800` page would have dropped the
+    // oldest landed cars out of all four silently once the yard passed
+    // 800.
+    let cars = crate::gate::all_cars(&http).await?;
     let car_branches: BTreeSet<String> = cars
         .iter()
         .map(|c| md_str(c, "branch").to_string())

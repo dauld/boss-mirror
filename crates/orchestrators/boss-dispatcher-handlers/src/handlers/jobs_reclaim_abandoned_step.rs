@@ -80,7 +80,7 @@
 //! re-claimed and re-abandoned is judged against its own run. Nothing
 //! is ever written twice.
 
-use super::common::{api_client, get_json, open_jobs, write_json};
+use super::common::{api_client, get_json, open_jobs, row_or_refuse, write_json};
 use super::jobs_age_out_step::last_moved;
 use super::jobs_complete_linked_step::{step_by_slug, unusable_link};
 use async_trait::async_trait;
@@ -372,7 +372,11 @@ impl Handler for JobsReclaimAbandonedStep {
                     &ctx.rule_name,
                 )
                 .await?;
-                let run = run.get("data").unwrap_or(&run);
+                // A body with no row is a bad answer, not "a run of
+                // another kind" to pass over (backlog f2eac973).
+                let run = row_or_refuse(run, &format!("GET /api/jobs/{run_id}"))
+                    .map_err(HandlerError::Downstream)?;
+                let run = &run;
                 // A run of another kind under this key is not this
                 // rule's business (the gate stamps `agent_run` on a
                 // gate-run too, under the same spelling).

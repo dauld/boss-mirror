@@ -71,7 +71,6 @@ crates/core/boss-jobs/src/probe.rs	#[cfg(test)] probe fixture inside a src file
 crates/orchestrators/boss-cli/src/cadence.rs	the CLI names the record in a refusal message (reads BOSS_JOBS_URL as before)
 crates/orchestrators/boss-cli/src/census.rs	#[cfg(test)] assertion that a refusal names the record
 crates/orchestrators/boss-cli/src/credential.rs	BOSS_TRAIN_FORGE_URL default and a refusal message (the CLI reads env as before)
-crates/orchestrators/boss-cli/src/doctor.rs	the CLI's BOSS_JOBS_URL default (reads env as before; a refusing default is a behaviour change for another car)
 crates/orchestrators/boss-cli/src/gate.rs	refusal prose plus #[cfg(test)] probe fixtures
 crates/orchestrators/boss-cli/src/git_auth.rs	BOSS_TRAIN_FORGE_URL default plus #[cfg(test)] fixtures
 crates/orchestrators/boss-cli/src/host_readiness.rs	#[cfg(test)] estate fixture

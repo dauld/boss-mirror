@@ -429,6 +429,16 @@ pub(crate) async fn fetch_and_resolve(http: &reqwest::Client, job_ref: &str) -> 
         let path = format!("/api/jobs?status={status}&limit={RESOLVE_PAGE}&offset={offset}");
         crate::gate::api(http, reqwest::Method::GET, &path, None).await
     };
+    resolve_through(page, job_ref).await
+}
+
+/// [`fetch_and_resolve`] over any page reader — the seam its tests go
+/// through, so the paging rules are pinned without a socket.
+pub(crate) async fn resolve_through<F, Fut>(page: F, job_ref: &str) -> Result<String>
+where
+    F: Fn(&'static str, usize) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<Value>>>,
+{
     let id_of = |row: &Value| {
         row.get("id")
             .and_then(Value::as_str)
@@ -444,15 +454,15 @@ pub(crate) async fn fetch_and_resolve(http: &reqwest::Client, job_ref: &str) -> 
     let mut read = 0usize;
     let mut to_read = RESOLVE_CLOSED_MAX;
     while read < to_read {
-        let body = page("closed", read).await?;
-        let total = body
-            .as_ref()
-            .and_then(|b| b.get("total"))
-            .and_then(Value::as_u64)
-            .map(|t| usize::try_from(t).unwrap_or(usize::MAX))
-            .unwrap_or(0);
-        to_read = closed_rows_to_read(total);
-        let rows = crate::train::rows(body)?;
+        // A page without its `total` is refused, never read as zero
+        // closed jobs (backlog 10776b6c): zero set the depth to nothing
+        // and the verb answered "no job matches" for a packet it had
+        // not looked for.
+        let body = page("closed", read)
+            .await?
+            .context("a closed-jobs page answered no JSON body")?;
+        to_read = closed_rows_to_read(crate::train::list_total(&body)?);
+        let rows = crate::train::rows(Some(body))?;
         if rows.is_empty() {
             break;
         }
@@ -847,6 +857,48 @@ pub async fn patch(job_ref: &str, path: &std::path::Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// A closed page with no `total` is refused, never read as zero
+    /// closed jobs (backlog 10776b6c). Counted as 0, it set the read
+    /// depth to 0, the loop never ran, and the verb said "no job
+    /// matches … give the full uuid" for a packet it had not looked for.
+    #[tokio::test]
+    async fn a_closed_page_without_a_total_refuses_rather_than_matching_nothing() {
+        let why = super::resolve_through(
+            |status, _offset| async move {
+                anyhow::Ok(Some(match status {
+                    "open" => serde_json::json!({"data": [], "total": 0}),
+                    _ => serde_json::json!({"data": [{"id": "abcdef12-0000-4000-8000-000000000000"}]}),
+                }))
+            },
+            "abcdef12",
+        )
+        .await
+        .expect_err("a page that cannot say how many closed jobs exist decides nothing")
+        .to_string();
+        assert!(why.contains("total"), "{why}");
+        assert!(!why.contains("no job matches"), "{why}");
+    }
+
+    /// And with its total, the same page resolves the prefix.
+    #[tokio::test]
+    async fn a_closed_page_with_its_total_resolves_the_prefix() {
+        let id = super::resolve_through(
+            |status, _offset| async move {
+                anyhow::Ok(Some(match status {
+                    "open" => serde_json::json!({"data": [], "total": 0}),
+                    _ => serde_json::json!({
+                        "data": [{"id": "abcdef12-0000-4000-8000-000000000000"}],
+                        "total": 1
+                    }),
+                }))
+            },
+            "abcdef12",
+        )
+        .await
+        .expect("resolved");
+        assert_eq!(id, "abcdef12-0000-4000-8000-000000000000");
+    }
+
     /// A STATION THAT DID NOT ANSWER IS NOT AN EMPTY ONE (backlog
     /// 7b7e0529): a body with no rows array refuses rather than printing
     /// "(empty — the station holds nothing)".

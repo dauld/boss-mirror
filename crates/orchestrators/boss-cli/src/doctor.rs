@@ -391,8 +391,21 @@ async fn check_install_services() -> Check {
 /// cluster instead of grepping.
 async fn check_step_plugins_mount() -> Check {
     let label = "step plugins";
-    let base =
-        std::env::var("BOSS_JOBS_URL").unwrap_or_else(|_| "http://10.20.0.34:7900".to_string());
+    // No default (backlog 10776b6c): this check defaulted to a literal
+    // address when BOSS_JOBS_URL was unset — the one CLI read still
+    // doing what `resolve_jobs_base` refuses everywhere else (aa783636),
+    // allowed by the address lint as "a behaviour change for another
+    // car" that was never filed. Unset now fails the check, naming why.
+    let base = match crate::gate::resolve_jobs_base(None) {
+        Ok(base) => base,
+        Err(e) => {
+            return Check {
+                label,
+                passed: false,
+                detail: format!("unknown, not clean — {e}"),
+            };
+        }
+    };
     let get = |path: String| {
         let url = format!("{base}{path}");
         async move {

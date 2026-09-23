@@ -2276,10 +2276,61 @@ pub(crate) async fn api_at_signed(
     if !status.is_success() {
         bail!("jobs api {method} {path} -> {status}: {}", body.trim());
     }
-    if body.trim().is_empty() {
-        return Ok(None);
+    success_answer(&method, path, status, &body)
+}
+
+/// What a 2xx body answers — pure, so each rule is pinned without a
+/// socket.
+///
+/// A READ keeps its old contract: a body that is not JSON is `None`,
+/// and the reader decides — `train::rows` refuses it for a list, and a
+/// single-object read's `context` names it (backlog 7b7e0529).
+///
+/// A WRITE's success is its parsed answer, not its status (backlog
+/// 10776b6c). It used to get the same `None`, and a `None` is also what
+/// a 204 gives, so a write that met a proxy's login page — or anything
+/// else answering 200 in front of the jobs API — read as done while
+/// the write may never have reached the API: a silent false success,
+/// the worst shape this class takes. Which empty answers are real was
+/// MEASURED, not assumed: every jobs-API write handler answers either
+/// JSON or `204 No Content` (the job PUT, both metadata PATCHes, the
+/// step PUT, the registry DELETEs and the scheduling/sensor/station
+/// writes), so on every write method a 204 is a success and nothing
+/// else empty is. HEAD is a read.
+pub(crate) fn success_answer(
+    method: &reqwest::Method,
+    path: &str,
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Result<Option<Value>> {
+    let write = !matches!(*method, reqwest::Method::GET | reqwest::Method::HEAD);
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        if !write || status == reqwest::StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+        bail!(
+            "jobs api {method} {path} -> {status} with an empty body: a write's success is \
+             its answer, and only a 204 answers with nothing — the write may never have \
+             reached the jobs API"
+        );
     }
-    Ok(serde_json::from_str(&body).ok())
+    match serde_json::from_str(trimmed) {
+        Ok(v) => Ok(Some(v)),
+        Err(_) if !write => Ok(None),
+        Err(_) => {
+            let cut: String = trimmed
+                .chars()
+                .take(crate::train::ROWS_REFUSAL_QUOTE)
+                .collect();
+            let more = if cut.len() < trimmed.len() { "…" } else { "" };
+            bail!(
+                "jobs api {method} {path} -> {status}, but the body is not JSON, so the write \
+                 may never have reached the jobs API (a proxy's login page answers this way); \
+                 it answered: {cut}{more}"
+            )
+        }
+    }
 }
 
 /// Every open `ship-a-change` car, across ALL pages — the operator-verb
@@ -2311,6 +2362,39 @@ pub(crate) async fn all_open_cars(http: &reqwest::Client) -> Result<Vec<Value>> 
         .await
     })
     .await
+}
+
+/// EVERY `ship-a-change` car, open and closed, across all pages — for
+/// the readers that must see landed cars too: `boss prove` (its
+/// `--recheck` proves a CLOSED car) and `boss orient` (the shed is
+/// landed cars not yet proven; the stranded cross-ref needs every car's
+/// branch).
+///
+/// Paged on `total` through [`train::list_all_pages`], which REFUSES a
+/// page without one (backlog 10776b6c). Before this, `boss prove` read
+/// a missing total as 0 — one page then "covered" the whole population
+/// — and `boss orient` read one bare `limit=800` page and never compared
+/// it to `total`, so past 800 cars the oldest landed ones would have
+/// dropped out of the shed silently (417 cars on 2026-09-23). A page is
+/// 500 so today's population is still one call.
+pub(crate) async fn all_cars_at(http: &reqwest::Client, base: &str) -> Result<Vec<Value>> {
+    const PAGE: usize = 500;
+    crate::train::list_all_pages(|offset| async move {
+        api_at(
+            http,
+            base,
+            reqwest::Method::GET,
+            &format!("/api/jobs?kind=ship-a-change&limit={PAGE}&offset={offset}"),
+            None,
+        )
+        .await
+    })
+    .await
+}
+
+/// [`all_cars_at`] against the resolved system of record.
+pub(crate) async fn all_cars(http: &reqwest::Client) -> Result<Vec<Value>> {
+    all_cars_at(http, &jobs_base()?).await
 }
 
 /// The instant a step completed, in the one format every verb writes.
@@ -6972,8 +7056,17 @@ mod agent_run_tests {
 /// (the head is where `x-boss-user` lives) and the re-gate read (the
 /// head is where the query lives).
 #[cfg(test)]
-mod stub {
-    pub(super) async fn one_request(
+pub(crate) mod stub {
+    pub(crate) async fn one_request(
+        body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<Option<String>>) {
+        one_response("200 OK", body).await
+    }
+
+    /// [`one_request`] with the status line chosen — a write's 204, or
+    /// a 200 that is not the jobs API's answer (backlog 10776b6c).
+    pub(crate) async fn one_response(
+        status: &'static str,
         body: &'static str,
     ) -> (String, tokio::task::JoinHandle<Option<String>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -6993,7 +7086,7 @@ mod stub {
                 }
             }
             let resp = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n\
                  content-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
             );
@@ -7007,7 +7100,7 @@ mod stub {
 
 #[cfg(test)]
 mod signing_tests {
-    use super::stub::one_request;
+    use super::stub::{one_request, one_response};
     use super::*;
     use crate::identity::Signature;
 
@@ -7146,6 +7239,113 @@ mod signing_tests {
             .expect_err("a page that is not JSON is no list, and must not read as zero rows")
             .to_string();
         assert!(why.contains("cannot be read as zero"), "{why}");
+    }
+
+    /// THE WRITE SIDE of the same defect (backlog 10776b6c). A write
+    /// that meets a proxy's login page answered `Ok(None)` — the shape
+    /// of a 204 — so `boss gate`, `boss prove` and `boss park` reported
+    /// success for a write that may never have reached the jobs API. A
+    /// write's success is its parsed answer, not its status, and the
+    /// refusal names the method, the path and what came back instead.
+    #[tokio::test]
+    async fn a_login_page_on_a_write_is_refused_naming_what_answered() {
+        let (base, stub) = one_request("<html><body>Sign in to continue</body></html>").await;
+        let http = reqwest::Client::new();
+        let why = api_at_signed(
+            &http,
+            &base,
+            reqwest::Method::PUT,
+            "/api/jobs/x/steps/y",
+            Some(json!({"status": "completed"})),
+            Signature::As("claude@algedonic.dev".into()),
+        )
+        .await
+        .expect_err("a 200 that is not JSON is no answer to a write")
+        .to_string();
+        stub.abort();
+        assert!(why.contains("PUT /api/jobs/x/steps/y"), "{why}");
+        assert!(why.contains("Sign in to continue"), "{why}");
+        assert!(why.contains("may never have reached"), "{why}");
+    }
+
+    /// The jobs API answers several writes — the job PUT, both metadata
+    /// PATCHes, the step PUT, a registry DELETE — with an empty 204.
+    /// That IS the answer: the refusal must not touch it.
+    #[tokio::test]
+    async fn an_empty_204_is_a_writes_success() {
+        for method in [
+            reqwest::Method::PUT,
+            reqwest::Method::PATCH,
+            reqwest::Method::DELETE,
+            reqwest::Method::POST,
+        ] {
+            let (base, stub) = one_response("204 No Content", "").await;
+            let http = reqwest::Client::new();
+            let answer = api_at_signed(
+                &http,
+                &base,
+                method.clone(),
+                "/api/jobs/x/metadata",
+                Some(json!({"k": "v"})),
+                Signature::As("claude@algedonic.dev".into()),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{method}: a 204 is a write's success: {e:#}"));
+            stub.abort();
+            assert_eq!(answer, None, "{method}");
+        }
+    }
+
+    /// An EMPTY 200 is not what the jobs API sends to a write — every
+    /// write handler answers JSON or 204 — so it is refused the same way.
+    #[tokio::test]
+    async fn an_empty_200_on_a_write_is_refused() {
+        let (base, stub) = one_request("").await;
+        let http = reqwest::Client::new();
+        let why = api_at_signed(
+            &http,
+            &base,
+            reqwest::Method::POST,
+            "/api/jobs",
+            Some(json!({"kind": "backlog-item"})),
+            Signature::As("claude@algedonic.dev".into()),
+        )
+        .await
+        .expect_err("an empty 200 is no answer to a write")
+        .to_string();
+        stub.abort();
+        assert!(why.contains("POST /api/jobs"), "{why}");
+        assert!(why.contains("204"), "{why}");
+    }
+
+    /// The quote is cut, because a login page is kilobytes.
+    #[test]
+    fn a_refused_write_quotes_at_most_the_first_200_chars() {
+        let page = format!("<html>{}</html>", "x".repeat(5_000));
+        let why = success_answer(
+            &reqwest::Method::POST,
+            "/api/jobs",
+            reqwest::StatusCode::OK,
+            &page,
+        )
+        .expect_err("refused")
+        .to_string();
+        assert!(why.contains(&page[..200]), "{why}");
+        assert!(!why.contains(&page[..201]), "{why}");
+    }
+
+    /// A read keeps its answer: `rows` and each caller's `context`
+    /// already refuse a missing body, so this car changes writes only.
+    #[test]
+    fn a_read_that_is_not_json_still_answers_none() {
+        let answer = success_answer(
+            &reqwest::Method::GET,
+            "/api/jobs",
+            reqwest::StatusCode::OK,
+            "<html>Sign in</html>",
+        )
+        .expect("a read is judged by its reader");
+        assert_eq!(answer, None);
     }
 
     /// A read attributes nothing, so it proceeds — but marked, never
