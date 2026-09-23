@@ -321,6 +321,12 @@ spec:
                     getent passwd sshd >/dev/null || useradd --system --no-create-home --home-dir /run/sshd --shell /usr/sbin/nologin sshd || true
                     mkdir -p /run/sshd && chmod 0755 /run/sshd
                     [ -f /work/ssh/ssh_host_ed25519_key ] || ssh-keygen -q -t ed25519 -N '' -f /work/ssh/ssh_host_ed25519_key
+                    # The pod's fsGroup (1500) re-modes every PVC file to 0660 at
+                    # mount, and OpenSSH refuses a group-readable host key ("no
+                    # hostkeys available -- exiting"). Dropbear never checked, so
+                    # the first boot after it left had no door at all (incident
+                    # 55d001b0, 2026-09-22). Set before sshd reads it, every boot.
+                    chmod 600 /work/ssh/ssh_host_ed25519_key || true
                     cp /etc/ssh-authorized/authorized_keys /root/.ssh/authorized_keys || true
                     chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys || true
                     # BOTH homes: sessions arrive with HOME=/work/home
@@ -443,9 +449,18 @@ spec:
                       echo 'TrustedUserCAKeys /etc/access-ssh-ca/ca.pub' >> /work/ssh/sshd_config
                       echo "ssh door: Access SSH CA present - dev.algedonic.dev certificates accepted"
                     else
-                      echo "ssh door: no /etc/access-ssh-ca/ca.pub - Secret boss-dev-access-ssh-ca is empty; the LAN key door still works, dev.algedonic.dev refuses every certificate"
+                      echo "ssh door: no /etc/access-ssh-ca/ca.pub - Secret boss-dev-access-ssh-ca is empty; dev.algedonic.dev will refuse every certificate (the key door is judged below, once sshd has started)"
                     fi
-                    /usr/sbin/sshd -f /work/ssh/sshd_config -E /work/ssh/sshd.log
+                    # Whether a door is open is a fact about the running daemon,
+                    # not the config above: sshd exits nonzero before it forks on
+                    # a refused start, so its status is the measurement, and the
+                    # refusal carries sshd's own words rather than a paraphrase.
+                    if /usr/sbin/sshd -f /work/ssh/sshd_config -E /work/ssh/sshd.log; then
+                      echo "ssh door: sshd started on :22"
+                    else
+                      echo "ssh door: CLOSED - sshd refused to start (exit $?); its log follows"
+                      tail -n 20 /work/ssh/sshd.log
+                    fi
                     # The pod's fsGroup (1500) re-modes files on the PVC at
                     # every mount, so the bastion key David authorised comes
                     # back 0660 after each roll and ssh refuses it

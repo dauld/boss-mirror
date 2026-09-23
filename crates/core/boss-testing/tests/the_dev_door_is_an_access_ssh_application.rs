@@ -156,3 +156,46 @@ fn the_estate_page_spells_the_same_hostname_as_the_route() {
         "the bastion card goes too — the way in from outside is the door itself now, not a jump through boss-gcp"
     );
 }
+
+#[test]
+fn the_host_key_is_moded_before_sshd_reads_it() {
+    // Incident 55d001b0, 2026-09-22: the pod's fsGroup (1500) re-modes
+    // every file on the PVC to 0660 at mount, OpenSSH refuses a group-
+    // readable host key ("no hostkeys available -- exiting"), and both
+    // doors were dark from the first boot after Dropbear left — which
+    // never checked the mode. The boot path already owned this for the
+    // bastion key in /work/.ssh; the host key in /work/ssh is the same
+    // fact, and the mode must be set BEFORE sshd reads the key.
+    let m = read("infra/cluster/manifests/boss-dev.yaml");
+    let sshd = m
+        .find("/usr/sbin/sshd -f /work/ssh/sshd_config")
+        .expect("the sshd invocation");
+    let chmod = m
+        .find("chmod 600 /work/ssh/ssh_host_ed25519_key")
+        .expect("the boot path must set the host key's mode — the fsGroup re-modes it to 0660 at every mount");
+    assert!(
+        chmod < sshd,
+        "the host key's chmod must run before sshd reads the key, not after"
+    );
+}
+
+#[test]
+fn the_boot_log_says_whether_sshd_came_up() {
+    // The same incident's boot log printed "the LAN key door still
+    // works" before sshd had started, and sshd then exited. A door
+    // claim is a measurement of the running daemon, not of the config:
+    // a refused start must say so in the log and carry sshd's own words.
+    let m = read("infra/cluster/manifests/boss-dev.yaml");
+    assert!(
+        !m.contains("the LAN key door still works"),
+        "the CA check runs before sshd starts, so it cannot know whether any door works"
+    );
+    assert!(
+        m.contains("ssh door: CLOSED"),
+        "a refused sshd start must be named in the boot log"
+    );
+    assert!(
+        m.contains("tail -n 20 /work/ssh/sshd.log"),
+        "the refusal carries sshd's own words, not a paraphrase"
+    );
+}
