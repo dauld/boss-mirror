@@ -486,6 +486,61 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
         Some(obj) => obj,
         None => return (StatusCode::BAD_REQUEST, "body must be a JSON object").into_response(),
     };
+
+    // A METADATA BODY THAT DROPS A STORED KEY IS REFUSED (backlog
+    // e39a9d2a, design baf738b7 answered 2026-09-23 — the one-car rule).
+    //
+    // The overlay above replaces `metadata` WHOLESALE, so a body that
+    // omits a key deletes it. Three keys were hand-carried past that
+    // replace — `authority_role`, `human_only`, `agent_run` — each
+    // after someone lost it in production (the run edge: a completer
+    // erased it and the run died four hours later on the silence clock,
+    // b91a2103), and two more step-level keys were in flight. The list
+    // grew by incident; this removes the class instead.
+    //
+    // WHY REFUSE AND NOT MERGE, since merging looks obviously nicer:
+    // merging silently changes the meaning of EVERY existing call at
+    // once — a caller that clears a key by omitting it today would stop
+    // clearing it, invisibly and retroactively. A refusal is loud and
+    // arrives at the one call site that must change, which is the shape
+    // the terminal-step refusal below already has. A read-merge-write
+    // caller sends every stored key and is untouched; a PUT with no
+    // `metadata` key (a status-only flip) is not judged; a caller whose
+    // read went stale while a concurrent writer added a key is now
+    // caught instead of erasing that key. Clearing on purpose is the
+    // merge door's job, with the key sent as `null`.
+    if let Some(sent) = body_obj.get("metadata") {
+        let missing: Vec<&str> = old
+            .metadata
+            .as_object()
+            .map(|stored| {
+                stored
+                    .keys()
+                    .filter(|k| !sent.as_object().is_some_and(|s| s.contains_key(*k)))
+                    .map(String::as_str)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !missing.is_empty() {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "metadata body drops stored keys — a step PUT replaces \
+                              metadata wholesale, so an omitted key would be deleted",
+                    "step_id": step_id.to_string(),
+                    "missing_keys": missing,
+                    "hint": format!(
+                        "send only the keys you change through the merge door, \
+                         PATCH /api/jobs/{job_id}/steps/{step_id}/metadata, where a key \
+                         sent as null is deleted; or read the step and send every stored \
+                         key back with this PUT"
+                    ),
+                })),
+            )
+                .into_response();
+        }
+    }
+
     for (k, v) in body_obj {
         merged_obj.insert(k.clone(), v.clone());
     }
@@ -513,54 +568,20 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     step.completed_by = old.completed_by.clone();
     step.completed_at = old.completed_at;
 
-    // `authority_role` is immutable across PUTs. Carry the persisted
-    // value forward so a body can neither raise nor lower the required
-    // sign-off authority — the sign-off gate above reads `old.metadata`
-    // for its decision, and this keeps the stored row consistent with
-    // that decision (a caller can't change it in a prior PUT either).
+    // `authority_role` is immutable across PUTs: the persisted value
+    // wins, so a body can neither raise nor lower the required sign-off
+    // authority — the sign-off gate reads `old.metadata` for its
+    // decision, and this keeps the stored row consistent with it. The
+    // merge door strips the key for the same reason. (Its OMISSION is
+    // the drop refusal above; `human_only` and `agent_run`, which were
+    // carried past omission beside it until e39a9d2a, need nothing
+    // here now — a body that omits either is refused, and both remain
+    // writable through the merge door, as they always were.)
     if let Some(old_obj) = old.metadata.as_object()
         && let Some(auth) = old_obj.get("authority_role").cloned()
         && let Some(obj) = step.metadata.as_object_mut()
     {
         obj.insert("authority_role".into(), auth);
-    }
-    // So is `human_only` (c17871fe): the protocol's requirement for a
-    // person is materialisation data, and a metadata PUT that omits it
-    // must not turn a human-only step into one an agent can take.
-    if let Some(old_obj) = old.metadata.as_object()
-        && let Some(flag) = old_obj.get(crate::human_only::KEY).cloned()
-        && let Some(obj) = step.metadata.as_object_mut()
-    {
-        obj.insert(crate::human_only::KEY.into(), flag);
-    }
-
-    // AND SO IS THE RUN EDGE (b91a2103). `boss dispatch` writes
-    // `agent_run` onto the step it CLAIMS, and the delivery rule
-    // follows that edge from `step.done.<kind>` to land the run
-    // (dd6d44b7) — for an analyst run, which ships no car and files no
-    // gate-run, it is the ONLY thing that makes the run land. A
-    // completer that sends `metadata` without reading and merging
-    // erased it, and the failure was silent and delayed: the
-    // completion succeeded, the work was recorded correctly, and the
-    // run then died four hours later on the silence clock as though
-    // the agent had gone quiet. Losing it breaks something invisible,
-    // which is the same reason the two keys above are carried.
-    //
-    // Carried, not frozen: unlike `authority_role` this key is NOT
-    // stripped from the merge door, because a step re-claimed by a
-    // different run must name the run that now holds it — and
-    // `boss dispatch` writes the new id through that door right after
-    // the claim (the claim route itself never touches metadata), so a
-    // carried-forward value can never outlive the next dispatch. What
-    // survives here is OMISSION, nothing more. Nor can it outlive a
-    // change of holder by any other door: the claim CAS drops the edge
-    // when the step passes to someone else (9562f6df), which is where
-    // its freshness is decided — not here.
-    if let Some(old_obj) = old.metadata.as_object()
-        && let Some(run) = old_obj.get(crate::agent_runs::EDGE_KEY).cloned()
-        && let Some(obj) = step.metadata.as_object_mut()
-    {
-        obj.insert(crate::agent_runs::EDGE_KEY.into(), run);
     }
 
     // A HUMAN-ONLY STEP REFUSES A NON-HUMAN ASSIGNEE (c17871fe). Checked

@@ -1,29 +1,24 @@
-//! The run edge survives a wholesale metadata PUT (backlog b91a2103).
+//! A step PUT whose `metadata` drops a stored key is refused, and the
+//! refusal routes to the merge door (backlog e39a9d2a, design baf738b7
+//! answered 2026-09-23: THE ONE-CAR RULE).
 //!
-//! `boss dispatch` writes `agent_run` onto the step it CLAIMS, and the
-//! `agent-run-delivers-when-its-step-is-done` rule follows that edge
-//! from `step.done.<kind>` to complete the run's `building` step with
-//! `result = delivered` (backlog dd6d44b7). The edge is therefore the
-//! only thing that makes an analyst run land: a run that ships no car
-//! has no gate-run and no parked car to land on.
+//! `PUT /api/jobs/{id}/steps/{step_id}` overlays the body onto the
+//! stored step, so a body `metadata` REPLACES the stored metadata
+//! wholesale. Three keys were carved out of that replace, each after
+//! someone lost it in production — `authority_role`, `human_only` and
+//! `agent_run` (b91a2103: a completer that sent `metadata` without
+//! merging erased the run edge, and the run died four hours later on
+//! the silence clock as though the agent had gone quiet). The list grew
+//! by incident, and two more step-level keys were in flight.
 //!
-//! `PUT /api/jobs/{id}/steps/{step_id}` replaces top-level metadata
-//! WHOLESALE, so a completer that sends `metadata` without first
-//! reading and merging erased the edge. The failure was silent and
-//! delayed: the completion succeeded, the work was recorded correctly,
-//! and the run then never delivered and died on the four-hour silence
-//! clock as though the agent had gone quiet. ~94 analyst runs are
-//! queued behind the page march, each one exposed to it.
-//!
-//! So the edge joins `authority_role` and `human_only` as a key the
-//! PUT carries forward — carried for the same reason, that losing it
-//! breaks something invisible. It is NOT immutable like
-//! `authority_role`: the merge door (`PATCH .../metadata`) still
-//! overwrites it and still deletes it with an explicit `null`, which
-//! is what makes a re-claim by a different run correct — `boss
-//! dispatch` writes the new run's id through that door right after the
-//! claim, so a carried-forward value can never outlive the next
-//! dispatch.
+//! The rule removes the class instead of enumerating it: a body whose
+//! `metadata` omits ANY key the stored step has is refused 409, naming
+//! the keys, and the caller is routed to `PATCH .../steps/{id}/metadata`
+//! — where a key is cleared by sending it as `null`, on purpose. A
+//! read-merge-write caller keeps working (it sends every stored key); a
+//! status-only PUT with no `metadata` key keeps working; a caller that
+//! read a stale copy while a concurrent writer added a key is now
+//! caught instead of erasing that key.
 
 use std::sync::Arc;
 
@@ -194,53 +189,149 @@ async fn write_edge(app: &axum::Router, job: &str, step: &str, run: &str) {
     assert!(status.is_success(), "edge patch: {status} {body}");
 }
 
-/// THE DEFECT. A completer that sends `metadata` without merging used
-/// to erase the edge, and the run behind it could never deliver.
+async fn put_step(
+    app: &axum::Router,
+    job: &str,
+    step: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    send(
+        app,
+        req("PUT", &format!("/api/jobs/{job}/steps/{step}"), body),
+    )
+    .await
+}
+
+/// THE DEFECT, refused. What a hand-built completion sends — the keys
+/// the caller cares about, no read-modify-write — used to erase the run
+/// edge. It is now refused, loudly, at the one call site that must
+/// change, and nothing is written.
 #[tokio::test]
-async fn a_wholesale_metadata_put_does_not_wipe_the_run_edge() {
+async fn a_metadata_put_that_omits_a_stored_key_is_refused_and_writes_nothing() {
+    let app = app();
+    let (job, step) = open_job(&app).await;
+    write_edge(&app, &job, &step, RUN_A).await;
+    let before = stored_metadata(&app, &job, &step).await;
+
+    let (status, body) = put_step(
+        &app,
+        &job,
+        &step,
+        serde_json::json!({
+            "status": "completed",
+            "metadata": {
+                "summary": "what the change does",
+                "excludes": "what it deliberately leaves alone",
+            },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "refused: {body}");
+    let missing: Vec<&str> = body["missing_keys"]
+        .as_array()
+        .expect("the refusal names the missing keys")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        missing.contains(&boss_jobs::agent_runs::EDGE_KEY),
+        "the run edge is named among the dropped keys: {body}",
+    );
+    assert!(
+        body["hint"].as_str().is_some_and(|h| h
+            .contains(&format!("/api/jobs/{job}/steps/{step}/metadata"))
+            && h.contains("null")),
+        "the refusal routes to the merge door and says how to clear: {body}",
+    );
+
+    let after = stored_metadata(&app, &job, &step).await;
+    assert_eq!(after, before, "a refused write writes nothing");
+    let (_, full) = send(
+        &app,
+        req("GET", &format!("/api/jobs/{job}"), serde_json::json!({})),
+    )
+    .await;
+    let row = full["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .find(|s| s["id"] == step.as_str())
+        .expect("the step")
+        .clone();
+    assert_ne!(row["status"], "completed", "nor flips the status: {row}");
+}
+
+/// The required form: read the step, merge, write every key back. The
+/// edge survives because the caller sent it, not because the server
+/// hand-carried it.
+#[tokio::test]
+async fn a_read_merge_write_put_lands() {
     let app = app();
     let (job, step) = open_job(&app).await;
     write_edge(&app, &job, &step, RUN_A).await;
 
-    let (status, body) = send(
+    let mut md = stored_metadata(&app, &job, &step).await;
+    let obj = md.as_object_mut().expect("stored metadata is an object");
+    obj.insert("summary".into(), serde_json::json!("what the change does"));
+    let (status, body) = put_step(
         &app,
-        req(
-            "PUT",
-            &format!("/api/jobs/{job}/steps/{step}"),
-            // Exactly what a hand-built completion sends: the fields
-            // the caller cares about, and no read-modify-write.
-            serde_json::json!({
-                "status": "completed",
-                "metadata": {
-                    "summary": "what the change does",
-                    "excludes": "what it deliberately leaves alone",
-                },
-            }),
-        ),
+        &job,
+        &step,
+        serde_json::json!({ "metadata": md.clone() }),
     )
     .await;
-    assert!(status.is_success(), "completing PUT: {status} {body}");
+    assert!(status.is_success(), "a merged PUT lands: {status} {body}");
 
     let stored = stored_metadata(&app, &job, &step).await;
+    assert_eq!(stored, md, "the whole merged body is what is stored");
     assert_eq!(
         stored.get(boss_jobs::agent_runs::EDGE_KEY),
         Some(&serde_json::json!(RUN_A)),
-        "the run edge is carried forward like authority_role and human_only: {stored}",
-    );
-    assert_eq!(
-        stored.get("summary"),
-        Some(&serde_json::json!("what the change does")),
-        "and the body's own keys still land: {stored}",
+        "{stored}"
     );
 }
 
-/// AND IT IS NOT IMMUTABLE. `authority_role` is stripped from the
-/// merge door too, because a step's required sign-off authority is not
-/// a caller's to change. The run edge is the opposite: a step
-/// re-claimed by a different run must name the run that now holds it,
-/// and `boss dispatch` writes that through this same door immediately
-/// after the claim. So an overwrite lands, and an explicit `null`
-/// clears — the carry-forward only ever survives OMISSION.
+/// A PUT with no `metadata` key at all — a status-only flip — touches
+/// no metadata and is not judged by this rule.
+#[tokio::test]
+async fn a_put_without_metadata_is_not_judged() {
+    let app = app();
+    let (job, step) = open_job(&app).await;
+    write_edge(&app, &job, &step, RUN_A).await;
+    let before = stored_metadata(&app, &job, &step).await;
+
+    let (status, body) =
+        put_step(&app, &job, &step, serde_json::json!({ "status": "active" })).await;
+    assert!(status.is_success(), "status-only PUT: {status} {body}");
+    assert_eq!(stored_metadata(&app, &job, &step).await, before);
+}
+
+/// `authority_role` is still not a caller's to change: a PUT that
+/// sends every key but a DIFFERENT authority lands with the stored one.
+/// (The omission half of the old carry is the refusal above; this is
+/// the half that was never about omission — the merge door strips the
+/// key for the same reason.)
+#[tokio::test]
+async fn a_put_cannot_change_the_required_authority() {
+    let app = app();
+    let (job, step) = open_job(&app).await;
+    let mut md = stored_metadata(&app, &job, &step).await;
+    let Some(stored_role) = md.get("authority_role").cloned() else {
+        panic!("precondition: the scope step declares an authority_role: {md}");
+    };
+    md["authority_role"] = serde_json::json!("somebody-else");
+    let (status, body) = put_step(&app, &job, &step, serde_json::json!({ "metadata": md })).await;
+    assert!(status.is_success(), "{status} {body}");
+    assert_eq!(
+        stored_metadata(&app, &job, &step).await["authority_role"],
+        stored_role
+    );
+}
+
+/// The door the refusal names does what it says. A step re-claimed by a
+/// different run must name the run that now holds it, and `boss
+/// dispatch` writes that through this door right after the claim; an
+/// explicit `null` is how a key is cleared on purpose.
 #[tokio::test]
 async fn the_merge_door_still_overwrites_and_clears_the_run_edge() {
     let app = app();

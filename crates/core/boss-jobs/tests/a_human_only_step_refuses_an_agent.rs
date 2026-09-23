@@ -322,26 +322,34 @@ async fn a_step_that_is_not_human_only_is_untouched() {
 }
 
 /// The declaration is protocol data on the step and a body cannot
-/// strip it: a metadata PUT that omits `human_only` leaves the step
-/// human-only, so the next assignment is still refused.
+/// strip it by omission: a metadata PUT that omits `human_only` is
+/// refused (the drop refusal, e39a9d2a — it used to be carried forward
+/// by hand), the step stays human-only, and the next assignment is
+/// still refused.
 #[tokio::test]
 async fn human_only_cannot_be_stripped_by_a_metadata_put() {
     let (app, jobs) = app();
     let job = file(&app, &jobs, "rotation", serde_json::json!({})).await;
     let kill = step_by_slug(&jobs, &job, "kill").await;
 
-    let (status, _, text) = put_step(
+    let (status, body, text) = put_step(
         &app,
         &kill,
         &user(AGENT, "platform-admin"),
         serde_json::json!({ "metadata": { "note": "stripped" } }),
     )
     .await;
-    assert!(status.is_success(), "{status} {text}");
+    assert_eq!(status, StatusCode::CONFLICT, "{text}");
+    assert!(
+        body["missing_keys"]
+            .as_array()
+            .is_some_and(|k| k.iter().any(|k| k == boss_jobs::human_only::KEY)),
+        "the refusal names the dropped declaration: {text}"
+    );
     let stored = jobs.get_step(&kill.id).await.unwrap().unwrap();
     assert!(
         boss_jobs::human_only::declared(&stored.metadata),
-        "human_only is carried forward like authority_role: {}",
+        "human_only survives an omitting PUT: {}",
         stored.metadata
     );
 
