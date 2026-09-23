@@ -10,18 +10,28 @@ use axum::{Json, Router};
 use serde::Deserialize;
 
 use boss_core::publisher::DomainPublisher;
-use boss_policy::{Action, Decision, Resource};
+use boss_policy::{Action, Decision, Resource, Scope, User};
 use boss_policy_client::{CurrentUser, PolicyClient};
 
 use crate::port::{PeopleError, PeopleRepository};
 use crate::types::Employee;
+
+/// The employee fields `Resource::compensation()` governs: a caller
+/// sees them on a row only where `Read` on that resource is granted,
+/// in that grant's scope (backlog c7484d0e, 2026-09-23 — every roster
+/// read had handed every salary to any signed-in viewer). The grants
+/// are policy rows: platform-admin in the core defaults, the tenants'
+/// HR and finance roles in their seeds.
+const COMPENSATION_FIELDS: &[&str] = &["annual_salary_cents"];
 
 pub struct PeopleApiState<R: PeopleRepository> {
     pub people: Arc<R>,
     pub publisher: Option<DomainPublisher>,
     /// Row-level authorization. None in tests that don't exercise
     /// the policy path — those handlers skip the gate and allow the
-    /// request, preserving the existing test surface.
+    /// request, preserving the existing test surface. The one
+    /// exception is pay: None is no compensation grant, so reads
+    /// redact it (see `compensation_scope`).
     pub policy: Option<Arc<dyn PolicyClient>>,
     /// SubjectKind registry — opt-in validator for tenant-extensible
     /// Subject discriminators. Today the boss-people surface accepts
@@ -103,6 +113,7 @@ struct ListEmployeesQuery {
 /// exact-match, `email` is case-insensitive; absent = no constraint.
 async fn list_employees<R: PeopleRepository + 'static>(
     State(state): State<Arc<PeopleApiState<R>>>,
+    CurrentUser(user): CurrentUser,
     Query(q): Query<ListEmployeesQuery>,
 ) -> Response {
     match state.people.all_employees().await {
@@ -123,18 +134,97 @@ async fn list_employees<R: PeopleRepository + 'static>(
                     })
                 })
                 .collect();
-            Json(filtered).into_response()
+            let pay = compensation_scope(&state, &user).await;
+            rows_response(&filtered, pay.as_ref(), &user)
         }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// The scope in which `user` may read compensation, or `None` for
+/// nowhere. No policy wired is no grant: the write gate treats `None`
+/// as allow for the tests that skip policy, but the live people-api
+/// runs with `None` (2026-09-23), and a private field must not fail
+/// open on that. A policy service that cannot answer is no grant
+/// either — the roster itself still answers, because the dispatcher's
+/// notifier and auto-assign read it by role and never need the pay.
+async fn compensation_scope<R: PeopleRepository + 'static>(
+    state: &PeopleApiState<R>,
+    user: &User,
+) -> Option<Scope> {
+    let policy = state.policy.as_ref()?;
+    match policy
+        .check(user, Action::Read, Resource::compensation())
+        .await
+    {
+        Ok(Decision::Allow { scope }) => Some(scope),
+        Ok(Decision::Deny { .. }) => None,
+        Err(e) => {
+            tracing::warn!(error = %e, user = %user.id, "compensation check failed; pay redacted");
+            None
+        }
+    }
+}
+
+/// Whether a compensation grant in `scope` covers `emp`'s row, in the
+/// vocabulary every other grant uses: `self` is the caller's own row,
+/// `team` adds their direct reports, `department:<d>` is that
+/// department. `territory` names accounts, which pay has none of.
+fn covers(scope: &Scope, user: &User, emp: &Employee) -> bool {
+    match scope {
+        Scope::All => true,
+        Scope::Self_ => emp.id == user.id,
+        Scope::Team => emp.id == user.id || user.direct_report_ids.contains(&emp.id),
+        Scope::Department(d) => emp.department.as_deref() == Some(d.as_str()),
+        Scope::None | Scope::Territory => false,
+    }
+}
+
+/// One employee row as `user` may see it. A row the grant does not
+/// cover loses the compensation KEYS — absent, not zero and not null:
+/// a zero is a claim about pay, and the tenant publish reads an
+/// explicit null as a declaration. A caller that writes such a row
+/// back keeps the stored pay (see [`update_employee`]).
+fn employee_json(
+    emp: &Employee,
+    pay: Option<&Scope>,
+    user: &User,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let mut row = serde_json::to_value(emp)?;
+    if !pay.is_some_and(|scope| covers(scope, user, emp))
+        && let Some(obj) = row.as_object_mut()
+    {
+        for field in COMPENSATION_FIELDS {
+            obj.remove(*field);
+        }
+    }
+    Ok(row)
+}
+
+fn rows_response(rows: &[Employee], pay: Option<&Scope>, user: &User) -> Response {
+    match rows
+        .iter()
+        .map(|e| employee_json(e, pay, user))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(rows) => Json(rows).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
 async fn get_employee<R: PeopleRepository + 'static>(
     State(state): State<Arc<PeopleApiState<R>>>,
+    CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
 ) -> Response {
     match state.people.employee_by_id(&id).await {
-        Ok(Some(emp)) => Json(emp).into_response(),
+        Ok(Some(emp)) => {
+            let pay = compensation_scope(&state, &user).await;
+            match employee_json(&emp, pay.as_ref(), &user) {
+                Ok(row) => Json(row).into_response(),
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            }
+        }
         Ok(None) => (StatusCode::NOT_FOUND, format!("no employee with ID {id}")).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -142,10 +232,14 @@ async fn get_employee<R: PeopleRepository + 'static>(
 
 async fn get_reports<R: PeopleRepository + 'static>(
     State(state): State<Arc<PeopleApiState<R>>>,
+    CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
 ) -> Response {
     match state.people.direct_reports(&id).await {
-        Ok(reports) => Json(reports).into_response(),
+        Ok(reports) => {
+            let pay = compensation_scope(&state, &user).await;
+            rows_response(&reports, pay.as_ref(), &user)
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -266,6 +360,26 @@ async fn update_employee<R: PeopleRepository + 'static>(
     }
     if let Err(msg) = validate_email(emp.email.as_deref()) {
         return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
+    // A caller that could not see the stored pay cannot be clearing
+    // it: the tenant publish and both engines' prepare GET a row, set
+    // one field and PUT it back, and without a compensation grant that
+    // GET came back with no salary (backlog c7484d0e). So a PUT that
+    // carries none keeps the stored one unless the caller's grant
+    // covers the row — the only caller for whom an omitted salary can
+    // mean "clear it".
+    let mut emp = emp;
+    if emp.annual_salary_cents.is_none() {
+        let stored = match state.people.employee_by_id(&id).await {
+            Ok(stored) => stored,
+            Err(e) => return people_error_response(e),
+        };
+        if let Some(stored) = stored {
+            let pay = compensation_scope(&state, &user).await;
+            if !pay.is_some_and(|scope| covers(&scope, &user, &stored)) {
+                emp.annual_salary_cents = stored.annual_salary_cents;
+            }
+        }
     }
     let stamp = crate::events::event_stamp(&state.publisher).await;
     match state
@@ -646,5 +760,215 @@ mod tests {
             .unwrap();
         let reports: Vec<Employee> = serde_json::from_slice(&body).unwrap();
         assert_eq!(reports.len(), 2);
+    }
+
+    // ---- Compensation is read by grant, not by sign-in -------------
+    //
+    // Backlog c7484d0e (2026-09-23, the /ux/people page audit): every
+    // read of the roster returned `annual_salary_cents` to any
+    // signed-in viewer. The roster itself stays open — the dispatcher's
+    // notifier and auto-assign read it by role — so the fix is the
+    // field, not the list.
+
+    const SALARY: i64 = 8_500_000;
+
+    fn paid_roster() -> Arc<InMemoryPeople> {
+        let mut boss = test_emp("emp-001", None);
+        boss.department = Some("finance".to_string());
+        let rows = [boss, test_emp("emp-002", Some("emp-001"))]
+            .into_iter()
+            .map(|mut e| {
+                e.annual_salary_cents = Some(SALARY);
+                e
+            })
+            .collect();
+        Arc::new(InMemoryPeople::new(rows))
+    }
+
+    fn app_with_policy(
+        people: Arc<InMemoryPeople>,
+        policy: Option<Arc<dyn PolicyClient>>,
+    ) -> Router {
+        router(PeopleApiState {
+            people,
+            publisher: None,
+            policy,
+            subject_kinds: None,
+            clock: Arc::new(boss_clock_client::WallClockClient),
+        })
+    }
+
+    fn caller(id: &str, role: &str, reports: &[&str]) -> String {
+        serde_json::json!({
+            "id": id,
+            "role": role,
+            "direct_report_ids": reports,
+        })
+        .to_string()
+    }
+
+    async fn read_json(app: Router, uri: &str, user: &str) -> serde_json::Value {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("x-boss-user", user)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "GET {uri}");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    /// Every row a caller can be handed: the list, the single row and
+    /// the reports list, flattened.
+    async fn every_read(app: &Router, user: &str) -> Vec<serde_json::Value> {
+        let mut rows = Vec::new();
+        for uri in ["/api/people", "/api/people/emp-001/reports"] {
+            let v = read_json(app.clone(), uri, user).await;
+            rows.extend(v.as_array().cloned().unwrap_or_default());
+        }
+        rows.push(read_json(app.clone(), "/api/people/emp-001", user).await);
+        rows.push(read_json(app.clone(), "/api/people/emp-002", user).await);
+        rows
+    }
+
+    fn salary_of(row: &serde_json::Value) -> Option<&serde_json::Value> {
+        row.as_object()
+            .expect("an employee row is an object")
+            .get("annual_salary_cents")
+    }
+
+    /// A caller with no compensation grant still reads the whole
+    /// roster — role, status, email, the fields the dispatcher routes
+    /// on — and the salary KEY is gone, not zeroed and not null: a zero
+    /// is a claim about pay, and a null reads as "no salary" to a
+    /// caller that writes the row back.
+    #[tokio::test]
+    async fn a_caller_without_a_compensation_grant_reads_the_roster_without_salary() {
+        let deny: Arc<dyn PolicyClient> =
+            Arc::new(boss_policy_client::FakePolicyClient::deny_all());
+        let app = app_with_policy(paid_roster(), Some(deny));
+        let rows = every_read(&app, &caller("emp-002", "service-tech", &[])).await;
+        assert_eq!(rows.len(), 5, "list 2 + reports 1 + two single rows");
+        for row in &rows {
+            assert_eq!(salary_of(row), None, "salary leaked: {row}");
+            assert_eq!(
+                row["role"], "service-tech",
+                "the roster itself stays readable"
+            );
+        }
+    }
+
+    /// Unwired policy is not a grant. The write gate's `None` = allow is
+    /// a test convenience, and the live people-api runs with `None`
+    /// (2026-09-23) — a private read must not fail open on that.
+    #[tokio::test]
+    async fn no_policy_wired_is_no_compensation_grant() {
+        let app = app_with_policy(paid_roster(), None);
+        for row in every_read(&app, &caller("emp-001", "platform-admin", &[])).await {
+            assert_eq!(salary_of(&row), None, "salary leaked: {row}");
+        }
+    }
+
+    /// Read on `compensation` with scope `all` shows every salary.
+    #[tokio::test]
+    async fn a_compensation_grant_shows_the_salary() {
+        let grant: Arc<dyn PolicyClient> = Arc::new(
+            boss_policy_client::FakePolicyClient::builder()
+                .allow(
+                    "head-of-people",
+                    Action::Read,
+                    Resource::compensation(),
+                    boss_policy::Scope::All,
+                )
+                .build(),
+        );
+        let app = app_with_policy(paid_roster(), Some(grant));
+        for row in every_read(&app, &caller("emp-hr", "head-of-people", &[])).await {
+            assert_eq!(salary_of(&row), Some(&serde_json::json!(SALARY)), "{row}");
+        }
+    }
+
+    /// The grant's scope is honoured row by row, in the vocabulary the
+    /// rest of policy uses: `self` is your own pay, `team` adds your
+    /// direct reports, `department:<d>` is that department's rows.
+    #[tokio::test]
+    async fn a_scoped_compensation_grant_shows_only_the_rows_it_covers() {
+        let seen = |scope: boss_policy::Scope, user: String| async move {
+            let grant: Arc<dyn PolicyClient> = Arc::new(
+                boss_policy_client::FakePolicyClient::builder()
+                    .allow("staff", Action::Read, Resource::compensation(), scope)
+                    .build(),
+            );
+            let app = app_with_policy(paid_roster(), Some(grant));
+            let list = read_json(app, "/api/people", &user).await;
+            let mut ids: Vec<String> = list
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|r| salary_of(r).is_some())
+                .map(|r| r["id"].as_str().unwrap().to_string())
+                .collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(
+            seen(boss_policy::Scope::Self_, caller("emp-002", "staff", &[])).await,
+            vec!["emp-002"]
+        );
+        assert_eq!(
+            seen(
+                boss_policy::Scope::Team,
+                caller("emp-001", "staff", &["emp-002"])
+            )
+            .await,
+            vec!["emp-001", "emp-002"]
+        );
+        assert_eq!(
+            seen(
+                boss_policy::Scope::Department("finance".into()),
+                caller("emp-x", "staff", &[])
+            )
+            .await,
+            vec!["emp-001"]
+        );
+    }
+
+    /// Four callers read a row and PUT it back to change one field —
+    /// the tenant publish's manager links and `--take`, both engines'
+    /// prepare. A redacted read written back must not wipe the pay it
+    /// never saw: without a grant, a PUT that carries no salary keeps
+    /// the stored one. Measured with no policy wired, which is how the
+    /// live people-api runs.
+    #[tokio::test]
+    async fn a_redacted_row_written_back_keeps_the_stored_salary() {
+        let people = paid_roster();
+        let app = app_with_policy(people.clone(), None);
+        let user = caller("emp-001", "platform-admin", &[]);
+        let mut row = read_json(app.clone(), "/api/people/emp-002", &user).await;
+        assert_eq!(salary_of(&row), None);
+        row["manager_id"] = serde_json::json!(null);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/people/emp-002")
+                    .header("content-type", "application/json")
+                    .header("x-boss-user", &user)
+                    .body(Body::from(row.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let stored = people.employee_by_id("emp-002").await.unwrap().unwrap();
+        assert_eq!(stored.manager_id, None, "the edit landed");
+        assert_eq!(stored.annual_salary_cents, Some(SALARY), "the pay survived");
     }
 }

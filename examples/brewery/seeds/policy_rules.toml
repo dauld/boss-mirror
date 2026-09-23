@@ -637,3 +637,21 @@ roles = [
 resource = "ledger"
 action = "read"
 scope = "all"
+
+# ------------------------------------------------------------------
+# Pay.
+#
+# `annual_salary_cents` on every people read went to any signed-in
+# viewer (backlog c7484d0e, 2026-09-23). The roster stays open — the
+# dispatcher's notifier and auto-assign read it by role — and the pay
+# on it is shown only where `compensation` Read is granted, in the
+# grant's scope. People and the books, plus platform-admin from the
+# platform defaults. audit-readonly does NOT hold it: it is also what
+# an anonymous visitor carries.
+# ------------------------------------------------------------------
+
+[[grants]]
+roles = ["ceo", "cfo", "controller", "head-of-people"]
+resource = "compensation"
+action = "read"
+scope = "all"

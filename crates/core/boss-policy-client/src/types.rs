@@ -155,6 +155,15 @@ impl Resource {
     pub fn employee() -> Self {
         Self::new("employee")
     }
+    /// An employee's pay — the fields on an `employee` row that the
+    /// `employee` grant does NOT carry (backlog c7484d0e, 2026-09-23:
+    /// every roster read had handed every salary to any signed-in
+    /// viewer). Deliberately not a shipped resource: the read-only
+    /// roles inherit Read on those, and one of them is the anonymous
+    /// visitor. Granted per role as policy rows.
+    pub fn compensation() -> Self {
+        Self::new("compensation")
+    }
     pub fn invoice() -> Self {
         Self::new("invoice")
     }
