@@ -180,9 +180,15 @@ measured = "2026-08-12: the same registration as boss.; the callback every login
 # (credential_issuer.rs, `text("type")`), in the MATCH/DRIFT comparison
 # and in the create body — so an ssh application is declared, compared
 # and applied by the same four-field vocabulary, with no handler change.
-# What is NOT a field is the certificate CA: Cloudflare generates one
-# per application, and reading its public key into the Secret the
-# manifest names is David's root ceremony, done once in the dashboard.
+# The certificate CA is `short_lived_ca`: Cloudflare keeps one per
+# application, and the observer generates it when the account holds
+# none and records its PUBLIC key on the observation packet as
+# `ssh_ca`. Copying that key into the Secret the manifest names is
+# David's root ceremony. It cannot be done from the dashboard any
+# longer: since 2026-09 it offers only the account-wide
+# Access-for-Infrastructure CA, which signs nothing `cloudflared access
+# ssh` asks for, and the client is refused "bad ca application" before
+# it reaches the pod (incident 55d001b0, 2026-09-23).
 # `enable_binding_cookie` belongs to the browser-rendered SSH flow, not
 # to the `cloudflared access ssh` one /it/estate prints, so nothing
 # here declares it; a dashboard that turns it on reads UNDECLARED on
@@ -192,6 +198,7 @@ name = "BOSS dev"
 domain = "dev.algedonic.dev"
 type = "ssh"
 session_duration = "24h"
+short_lived_ca = true
 why = "the dev workspace's ssh door: the edge asks who you are and issues a certificate for the session, instead of a key that lives forever"
 
 [[application.policy]]

@@ -622,6 +622,9 @@ pub struct AccessPolicySpec {
 ///   GET  /accounts/{a}/access/apps/{id}/policies      — the policies on one
 ///   POST /accounts/{a}/access/apps {name, domain, type, session_duration}
 ///   POST /accounts/{a}/access/apps/{id}/policies {name, decision, include, precedence}
+///   GET  /accounts/{a}/access/apps/{id}               — one application (its `aud`)
+///   GET  /accounts/{a}/access/apps/ca                 — every short-lived-certificate CA
+///   POST /accounts/{a}/access/apps/{id}/ca            — generate one application's CA
 /// Account-scoped: the account id comes from the zone (`zone_info`).
 /// There is deliberately no update and no delete: a DRIFT application
 /// is corrected FROM THE READ (fix the declaration or the dashboard),
@@ -642,6 +645,18 @@ pub trait AccessApps: Send + Sync {
         app_id: &str,
         spec: &AccessPolicySpec,
     ) -> Result<(), String>;
+    /// The public key of the application's short-lived-certificate
+    /// CA, or `None` when Cloudflare has generated none for it. That
+    /// absence is what `cloudflared access ssh` reports as "bad ca
+    /// application" (incident 55d001b0, 2026-09-23).
+    async fn short_lived_ca(
+        &self,
+        account_id: &str,
+        app_id: &str,
+    ) -> Result<Option<String>, String>;
+    /// Generates the application's CA; returns its public key.
+    async fn create_short_lived_ca(&self, account_id: &str, app_id: &str)
+    -> Result<String, String>;
 }
 
 /// The one shape the connector accepts: `cloudflared`'s
@@ -1155,6 +1170,57 @@ impl AccessApps for CloudflareApi {
             .await
             .map(|_| ())
     }
+
+    /// A CA names its application by `aud`, not by id, so the
+    /// application is read for its `aud` and the account's CA list is
+    /// matched on it. The dashboard now offers only the account-wide
+    /// Access-for-Infrastructure CA, which signs nothing
+    /// `cloudflared access ssh` asks for; this per-application CA is
+    /// reachable through the API alone.
+    async fn short_lived_ca(
+        &self,
+        account_id: &str,
+        app_id: &str,
+    ) -> Result<Option<String>, String> {
+        let aurl = self.url(&format!("/accounts/{account_id}/access/apps/{app_id}"));
+        let app = self
+            .call(self.client.get(&aurl), &format!("GET {aurl}"))
+            .await?;
+        let aud = app
+            .get("aud")
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| format!("GET {aurl}: the application carries no aud"))?;
+        let url = self.url(&format!(
+            "/accounts/{account_id}/access/apps/ca?per_page=1000"
+        ));
+        let cas = self
+            .call(self.client.get(&url), &format!("GET {url}"))
+            .await?;
+        let rows = cas
+            .as_array()
+            .ok_or_else(|| format!("GET {url}: result is not a list of CAs"))?;
+        Ok(rows
+            .iter()
+            .find(|ca| ca.get("aud").and_then(JsonValue::as_str) == Some(aud))
+            .and_then(|ca| ca.get("public_key").and_then(JsonValue::as_str))
+            .map(str::to_string))
+    }
+
+    async fn create_short_lived_ca(
+        &self,
+        account_id: &str,
+        app_id: &str,
+    ) -> Result<String, String> {
+        let url = self.url(&format!("/accounts/{account_id}/access/apps/{app_id}/ca"));
+        let result = self
+            .call(self.client.post(&url), &format!("POST {url}"))
+            .await?;
+        result
+            .get("public_key")
+            .and_then(JsonValue::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| format!("POST {url}: response result carries no public_key"))
+    }
 }
 
 /// `kubectl rollout restart` is a PATCH of a pod-template annotation
@@ -1308,6 +1374,12 @@ impl AccessApps for Unconfigured {
     ) -> Result<(), String> {
         Err(self.0.clone())
     }
+    async fn short_lived_ca(&self, _a: &str, _i: &str) -> Result<Option<String>, String> {
+        Err(self.0.clone())
+    }
+    async fn create_short_lived_ca(&self, _a: &str, _i: &str) -> Result<String, String> {
+        Err(self.0.clone())
+    }
 }
 
 #[async_trait]
@@ -1358,5 +1430,62 @@ mod cloudflare_tests {
         assert_eq!(installed_tunnel_id(""), None);
         assert_eq!(installed_tunnel_id("not json"), None);
         assert_eq!(installed_tunnel_id(r#"{"token":"x"}"#), None);
+    }
+
+    /// A Cloudflare v4 stub for the short-lived-certificate CA reads:
+    /// two applications, one CA, and the CA names its application by
+    /// `aud` — so the adapter must match on `aud`, never on id.
+    async fn ca_stub(cas: serde_json::Value) -> String {
+        use axum::extract::Path;
+        use axum::{Json as AxJson, Router, routing::get, routing::post};
+        let envelope = |result: serde_json::Value| {
+            AxJson(json!({"success": true, "errors": [], "result": result}))
+        };
+        let app = Router::new()
+            .route(
+                "/accounts/{a}/access/apps/ca",
+                get(move || {
+                    let cas = cas.clone();
+                    async move { envelope(cas) }
+                }),
+            )
+            .route(
+                "/accounts/{a}/access/apps/{id}",
+                get(move |Path((_a, id)): Path<(String, String)>| async move {
+                    envelope(json!({"id": id, "aud": format!("aud-of-{id}")}))
+                }),
+            )
+            .route(
+                "/accounts/{a}/access/apps/{id}/ca",
+                post(move |Path((_a, id)): Path<(String, String)>| async move {
+                    envelope(json!({"id": "ca-new", "aud": format!("aud-of-{id}"), "public_key": "ecdsa-sha2-nistp256 NEW"}))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn an_application_ca_is_found_by_its_aud_and_generated_when_absent() {
+        let base = ca_stub(json!([
+            {"id": "ca-1", "aud": "aud-of-app-dev", "public_key": "ecdsa-sha2-nistp256 DEV"},
+        ]))
+        .await;
+        let api = CloudflareApi::new(base, "token");
+        assert_eq!(
+            api.short_lived_ca("acct", "app-dev").await.unwrap(),
+            Some("ecdsa-sha2-nistp256 DEV".to_string())
+        );
+        assert_eq!(
+            api.short_lived_ca("acct", "app-www").await.unwrap(),
+            None,
+            "another application's CA is not this one's"
+        );
+        assert_eq!(
+            api.create_short_lived_ca("acct", "app-www").await.unwrap(),
+            "ecdsa-sha2-nistp256 NEW"
+        );
     }
 }

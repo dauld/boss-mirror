@@ -37,6 +37,15 @@
 //! READS THE ACCOUNT AGAIN so the packet records what is there, never
 //! what was sent. DRIFT is reported and alarmed, never corrected.
 //!
+//! An application declaring `short_lived_ca = true` also gets its
+//! short-lived-certificate CA: generated when the account holds none
+//! for it, and its PUBLIC key recorded on the packet as `ssh_ca` either
+//! way — the value the ssh server's `TrustedUserCAKeys` must hold. The
+//! dashboard offers only the account-wide Access-for-Infrastructure CA
+//! since 2026-09, which signs nothing `cloudflared access ssh` asks
+//! for; without the per-application CA the client is refused "bad ca
+//! application" before it reaches the server (incident 55d001b0).
+//!
 //! THE INTERLOCK. A zone record declaring `interlock = "access"` is
 //! applied — created when ABSENT (replacing whatever other type the
 //! name held), corrected when DRIFT — only once the application
@@ -215,6 +224,11 @@ pub struct DeclaredApp {
     pub app_type: String,
     pub session_duration: String,
     pub why: String,
+    /// Generate this application's short-lived-certificate CA when the
+    /// account holds none, and record its public key (see the module
+    /// doc). Only an ssh door needs one.
+    #[serde(default)]
+    pub short_lived_ca: bool,
     #[serde(default)]
     pub policy: Vec<DeclaredPolicy>,
 }
@@ -825,6 +839,9 @@ pub struct Reading {
     pub zone: Comparison,
     pub access: Vec<Json>,
     pub applied: Vec<String>,
+    /// `{domain, public_key}` for every declared short-lived CA the
+    /// account holds after this firing.
+    pub ssh_ca: Vec<Json>,
 }
 
 impl Reading {
@@ -933,6 +950,7 @@ pub fn observe_put_body(existing: &serde_json::Map<String, Json>, r: &Reading) -
     metadata.insert("verdicts".into(), Json::Array(r.zone.verdicts.clone()));
     metadata.insert("access".into(), Json::Array(r.access.clone()));
     metadata.insert("applied".into(), json!(r.applied));
+    metadata.insert("ssh_ca".into(), Json::Array(r.ssh_ca.clone()));
     metadata.insert("summary".into(), json!(r.summary()));
     metadata.insert(
         "result".into(),
@@ -1343,6 +1361,58 @@ impl DnsObserve {
         (applied, created, refused)
     }
 
+    /// Every declared `short_lived_ca` application the account holds:
+    /// its CA read, generated when absent, and its public key returned
+    /// for the packet. An application the account does not hold is
+    /// skipped — its ABSENT or REFUSED verdict already says so. A read
+    /// or create the account refuses is a REFUSED finding, the same
+    /// rule `apply_access` follows.
+    async fn apply_short_lived_cas(
+        &self,
+        account_id: &str,
+        declared: &[DeclaredApp],
+        live: &[AccessApp],
+    ) -> (Vec<String>, Vec<Json>, Vec<Json>) {
+        let mut applied = Vec::new();
+        let mut cas = Vec::new();
+        let mut refused = Vec::new();
+        for d in declared.iter().filter(|d| d.short_lived_ca) {
+            let Some(app) = live.iter().find(|a| a.domain == d.domain) else {
+                continue;
+            };
+            let key = match self.access.short_lived_ca(account_id, &app.id).await {
+                Ok(Some(key)) => key,
+                Ok(None) => match self.access.create_short_lived_ca(account_id, &app.id).await {
+                    Ok(key) => {
+                        applied.push(format!(
+                            "Access short-lived certificate CA created on {}",
+                            d.domain
+                        ));
+                        key
+                    }
+                    Err(e) => {
+                        refused.push(refused_verdict(
+                            &d.domain,
+                            &format!("create short-lived certificate CA on {}", d.domain),
+                            &e,
+                        ));
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    refused.push(refused_verdict(
+                        &d.domain,
+                        &format!("read short-lived certificate CA on {}", d.domain),
+                        &e,
+                    ));
+                    continue;
+                }
+            };
+            cas.push(json!({"domain": d.domain, "public_key": key}));
+        }
+        (applied, cas, refused)
+    }
+
     /// Execute one released zone write.
     ///
     /// The error is the account's own answer, verbatim: the caller
@@ -1512,9 +1582,14 @@ impl Handler for DnsObserve {
                 .map_err(HandlerError::Downstream)?;
             access_verdicts = compare_access(&access_decl.application, &live_apps);
         }
+        let (ca_applied, ssh_ca, ca_refused) = self
+            .apply_short_lived_cas(&info.account_id, &access_decl.application, &live_apps)
+            .await;
+        applied.extend(ca_applied);
         // What the account refused rides beside what it holds: a
         // finding on the step, in the alarm, counted as hard.
         access_verdicts.extend(refused);
+        access_verdicts.extend(ca_refused);
         // The tunnel interlock's facts: the newest converge packet's
         // ingress line and connector reading (fd75c641). Read once per
         // firing; a listing that cannot be read holds every tunnel-
@@ -1575,6 +1650,7 @@ impl Handler for DnsObserve {
             zone: comparison,
             access: access_verdicts,
             applied,
+            ssh_ca,
         };
 
         // The alarm FIRST (see the module doc for why), then the step.
@@ -1672,6 +1748,7 @@ mod tests {
             zone: c,
             access: vec![],
             applied: vec![],
+            ssh_ca: vec![],
         }
     }
 
@@ -1822,6 +1899,7 @@ mod tests {
             app_type: "self_hosted".into(),
             session_duration: "24h".into(),
             why: "test".into(),
+            short_lived_ca: false,
             policy: vec![DeclaredPolicy {
                 name: policy.into(),
                 decision: "allow".into(),
@@ -1885,6 +1963,10 @@ mod tests {
             .find(|a| a.domain == "dev.algedonic.dev")
             .expect("the dev workspace door is declared");
         assert_eq!(dev.app_type, "ssh");
+        assert!(
+            dev.short_lived_ca,
+            "the ssh door declares its CA, or cloudflared is refused 'bad ca application'"
+        );
 
         // ABSENT is what the first observation after this lands reads,
         // and what makes the handler create it — with the declared
@@ -2638,32 +2720,54 @@ measured = "2026-09-20: read from the IdP"
         reads: Mutex<usize>,
         writes: Mutex<Vec<String>>,
         refuse_policies: Option<String>,
+        /// Short-lived-certificate CA public keys, by application id.
+        /// An account built `with` its applications holds a CA for each
+        /// (the dev door's, as the account reads once the observer has
+        /// run); `without_cas` holds none.
+        cas: Mutex<HashMap<String, String>>,
+        refuse_cas: Option<String>,
     }
 
     impl FakeAccess {
-        fn with(apps: Vec<AccessApp>) -> Arc<Self> {
+        fn ca_key(app_id: &str) -> String {
+            format!("ecdsa-sha2-nistp256 CA-OF-{app_id}")
+        }
+        fn build(
+            apps: Result<Vec<AccessApp>, String>,
+            refuse_policies: Option<String>,
+            cas: HashMap<String, String>,
+            refuse_cas: Option<String>,
+        ) -> Arc<Self> {
             Arc::new(Self {
-                apps: Mutex::new(Ok(apps)),
+                apps: Mutex::new(apps),
                 reads: Mutex::new(0),
                 writes: Mutex::new(vec![]),
-                refuse_policies: None,
+                refuse_policies,
+                cas: Mutex::new(cas),
+                refuse_cas,
             })
+        }
+        fn all_cas(apps: &[AccessApp]) -> HashMap<String, String> {
+            apps.iter()
+                .map(|a| (a.id.clone(), Self::ca_key(&a.id)))
+                .collect()
+        }
+        fn with(apps: Vec<AccessApp>) -> Arc<Self> {
+            let cas = Self::all_cas(&apps);
+            Self::build(Ok(apps), None, cas, None)
+        }
+        fn without_cas(apps: Vec<AccessApp>) -> Arc<Self> {
+            Self::build(Ok(apps), None, HashMap::new(), None)
+        }
+        fn refusing_cas(apps: Vec<AccessApp>, why: &str) -> Arc<Self> {
+            Self::build(Ok(apps), None, HashMap::new(), Some(why.to_string()))
         }
         fn refusing_policies(apps: Vec<AccessApp>, why: &str) -> Arc<Self> {
-            Arc::new(Self {
-                apps: Mutex::new(Ok(apps)),
-                reads: Mutex::new(0),
-                writes: Mutex::new(vec![]),
-                refuse_policies: Some(why.to_string()),
-            })
+            let cas = Self::all_cas(&apps);
+            Self::build(Ok(apps), Some(why.to_string()), cas, None)
         }
         fn dark(msg: &str) -> Arc<Self> {
-            Arc::new(Self {
-                apps: Mutex::new(Err(msg.to_string())),
-                reads: Mutex::new(0),
-                writes: Mutex::new(vec![]),
-                refuse_policies: None,
-            })
+            Self::build(Err(msg.to_string()), None, HashMap::new(), None)
         }
         fn writes(&self) -> Vec<String> {
             self.writes.lock().unwrap().clone()
@@ -2736,6 +2840,34 @@ measured = "2026-09-20: read from the IdP"
                 }
             }
             Ok(())
+        }
+        async fn short_lived_ca(
+            &self,
+            account_id: &str,
+            app_id: &str,
+        ) -> Result<Option<String>, String> {
+            assert_eq!(account_id, "acct-1");
+            Ok(self.cas.lock().unwrap().get(app_id).cloned())
+        }
+        async fn create_short_lived_ca(
+            &self,
+            account_id: &str,
+            app_id: &str,
+        ) -> Result<String, String> {
+            assert_eq!(account_id, "acct-1");
+            self.writes
+                .lock()
+                .unwrap()
+                .push(format!("create ca on {app_id}"));
+            if let Some(why) = &self.refuse_cas {
+                return Err(why.clone());
+            }
+            let key = Self::ca_key(app_id);
+            self.cas
+                .lock()
+                .unwrap()
+                .insert(app_id.to_string(), key.clone());
+            Ok(key)
         }
     }
 
@@ -3116,6 +3248,111 @@ measured = "2026-09-20: read from the IdP"
             .find(|v| v["name"] == "boss.algedonic.dev")
             .cloned()
             .unwrap_or_else(|| panic!("no boss. verdict: {body}"))
+    }
+
+    // ----- the dev door's short-lived-certificate CA (incident 55d001b0) -----
+
+    /// 2026-09-23: the account held the dev door's application and no
+    /// CA for it — the dashboard offers only the account-wide
+    /// Access-for-Infrastructure CA — so `cloudflared access ssh` was
+    /// refused "bad ca application". The observer generates it and
+    /// records the public key the pod's sshd must trust.
+    #[tokio::test]
+    async fn the_dev_door_ca_is_generated_and_its_public_key_recorded() {
+        let (jobs, captured) = stub_jobs_api("ready", vec![], LOCATION).await;
+        let zone = FakeZone::with(as_declared());
+        let access = FakeAccess::without_cas(account_as_declared());
+        let h = handler(
+            jobs,
+            zone.clone(),
+            access.clone(),
+            secrets(),
+            declarations(),
+        );
+        h.invoke(&zone_args(), &ctx()).await.unwrap();
+
+        assert_eq!(
+            access.writes(),
+            vec!["create ca on app-dev.algedonic.dev".to_string()],
+            "only the application that declares a CA gets one"
+        );
+        let w = writes(&captured);
+        assert_eq!(w.len(), 1, "no alarm: {w:?}");
+        let body = step_put(&w);
+        assert_eq!(body["metadata"]["result"], "match");
+        assert_eq!(
+            body["metadata"]["applied"],
+            json!(["Access short-lived certificate CA created on dev.algedonic.dev"])
+        );
+        assert_eq!(
+            body["metadata"]["ssh_ca"],
+            json!([{
+                "domain": "dev.algedonic.dev",
+                "public_key": "ecdsa-sha2-nistp256 CA-OF-app-dev.algedonic.dev",
+            }])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_present_ca_is_recorded_and_not_generated_again() {
+        let (jobs, captured) = stub_jobs_api("ready", vec![], LOCATION).await;
+        let zone = FakeZone::with(as_declared());
+        let access = FakeAccess::with(account_as_declared());
+        let h = handler(
+            jobs,
+            zone.clone(),
+            access.clone(),
+            secrets(),
+            declarations(),
+        );
+        h.invoke(&zone_args(), &ctx()).await.unwrap();
+
+        assert!(access.writes().is_empty(), "{:?}", access.writes());
+        let body = step_put(&writes(&captured));
+        assert_eq!(
+            body["metadata"]["ssh_ca"],
+            json!([{
+                "domain": "dev.algedonic.dev",
+                "public_key": "ecdsa-sha2-nistp256 CA-OF-app-dev.algedonic.dev",
+            }])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_ca_is_a_finding_that_names_the_account_answer() {
+        let (jobs, captured) = stub_jobs_api("ready", vec![], LOCATION).await;
+        let zone = FakeZone::with(as_declared());
+        let why = "POST /accounts/acct-1/access/apps/app-dev.algedonic.dev/ca returned 403";
+        let access = FakeAccess::refusing_cas(account_as_declared(), why);
+        let h = handler(
+            jobs,
+            zone.clone(),
+            access.clone(),
+            secrets(),
+            declarations(),
+        );
+        h.invoke(&zone_args(), &ctx()).await.unwrap();
+
+        let w = writes(&captured);
+        assert!(
+            w.iter().any(|(p, _)| p == "POST /api/jobs"),
+            "a refused CA raises the alarm: {w:?}"
+        );
+        let body = step_put(&w);
+        assert_eq!(body["metadata"]["result"], "findings");
+        assert_eq!(body["metadata"]["ssh_ca"], json!([]));
+        let refused: Vec<&Json> = body["metadata"]["access"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|v| v["verdict"] == "REFUSED")
+            .collect();
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert_eq!(
+            refused[0]["write"],
+            "create short-lived certificate CA on dev.algedonic.dev"
+        );
+        assert_eq!(refused[0]["error"], why);
     }
 
     // ----- steady state -----
@@ -3611,6 +3848,12 @@ measured = "2026-09-20: read from the IdP"
         struct RefusingAccess(Arc<FakeAccess>);
         #[async_trait]
         impl AccessApps for RefusingAccess {
+            async fn short_lived_ca(&self, a: &str, i: &str) -> Result<Option<String>, String> {
+                self.0.short_lived_ca(a, i).await
+            }
+            async fn create_short_lived_ca(&self, a: &str, i: &str) -> Result<String, String> {
+                self.0.create_short_lived_ca(a, i).await
+            }
             async fn access_apps(&self, a: &str) -> Result<Vec<AccessApp>, String> {
                 self.0.access_apps(a).await
             }
@@ -3802,6 +4045,12 @@ measured = "2026-09-20: read from the IdP"
         struct StubbornAccess(Arc<FakeAccess>);
         #[async_trait]
         impl AccessApps for StubbornAccess {
+            async fn short_lived_ca(&self, a: &str, i: &str) -> Result<Option<String>, String> {
+                self.0.short_lived_ca(a, i).await
+            }
+            async fn create_short_lived_ca(&self, a: &str, i: &str) -> Result<String, String> {
+                self.0.create_short_lived_ca(a, i).await
+            }
             async fn access_apps(&self, a: &str) -> Result<Vec<AccessApp>, String> {
                 self.0.access_apps(a).await
             }
@@ -3884,6 +4133,12 @@ measured = "2026-09-20: read from the IdP"
         struct LaggingAccess(Arc<FakeAccess>);
         #[async_trait]
         impl AccessApps for LaggingAccess {
+            async fn short_lived_ca(&self, a: &str, i: &str) -> Result<Option<String>, String> {
+                self.0.short_lived_ca(a, i).await
+            }
+            async fn create_short_lived_ca(&self, a: &str, i: &str) -> Result<String, String> {
+                self.0.create_short_lived_ca(a, i).await
+            }
             async fn access_apps(&self, a: &str) -> Result<Vec<AccessApp>, String> {
                 let apps = self.0.access_apps(a).await?;
                 Ok(apps
