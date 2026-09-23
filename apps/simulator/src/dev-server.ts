@@ -51,8 +51,6 @@ const EXTRA_ROUTES: ReadonlyArray<readonly [string, string]> = [
   ['/api/scheduling', 'jobs'],
   // /api/events tail mounts on people-api.
   ['/api/events', 'people'],
-  // /api/snapshot is mounted on observability.
-  ['/api/snapshot', 'observability'],
   // /api/files mounts on content-api alongside bulletins/manual.
   ['/api/files', 'content'],
 ];

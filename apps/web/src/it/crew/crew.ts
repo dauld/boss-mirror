@@ -826,8 +826,9 @@ export type ActorCard = Readonly<{
 ///
 /// There is no `agents` table and no browser-reachable actor registry.
 /// `AgentSpec` is a type plus a TOML file with only an in-memory
-/// implementation; the observability service serves `/api/agents`, but
-/// that prefix is not among the ones the gateway proxies. The
+/// implementation; the observability service served `/api/agents`, but
+/// that prefix was never among the ones the gateway proxies, and the
+/// service retired on 2026-09-23 (467175e7). The
 /// `/api/agent-runs` surface on the jobs API — which DOES have a table,
 /// an `actor_id` and a `branch`, and is the richest "what is this actor
 /// building and what did it cost" read in the system — is likewise

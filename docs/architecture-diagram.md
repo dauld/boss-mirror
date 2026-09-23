@@ -129,8 +129,7 @@ role and shows how cross-service calls are shaped.
   their own narrow slice of data.
 - **Runtime automation** (purple) subscribes to NATS and reacts to
   events — `boss-dispatcher` runs the step side-effect rules off
-  `step.done.<kind>`, `boss-observability`
-  fans NATS out to browsers as SSE and serves health.
+  `step.done.<kind>`.
 - **External adapters** (pink) are library crates, not services.
   They expose a port trait any service can consume. None ship in
   v1; future candidates: payroll, banks, shipping carriers, CRMs.
@@ -145,14 +144,14 @@ The colour groups above are operational ("which subsystem") but
 the audit-bar split is orthogonal. Four tiers in the workspace
 today:
 
-- **Tier 1 — core state-machine OS** (`crates/core/`, 27 crates).
+- **Tier 1 — core state-machine OS** (`crates/core/`, 26 crates).
   `boss-gateway`, `boss-jobs-api`, `boss-dispatcher`, `boss-policy-api`,
   `boss-classes-api`, `boss-locations-api`,
   `boss-subject-kinds-api`, `boss-calendar-api`,
   `boss-content-api`, plus the libraries
   (`boss-core`, `boss-events`, `boss-ml`,
-  `boss-testing`, `boss-ports`, `boss-nats`,
-  `boss-observability`) and matching `*-client` crates. Yellow +
+  `boss-testing`, `boss-ports`, `boss-nats`) and matching
+  `*-client` crates. Yellow +
   most of the rails. **Tightest review bar; correctness protocol
   non-negotiable.**
 - **Tier 2 — company-modeling layer** (`crates/modules/`,

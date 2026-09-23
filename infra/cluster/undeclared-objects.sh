@@ -119,6 +119,14 @@
 #   undeclared-objects.sh --kubectl
 #       the resolved kubectl argv, so a caller needing its own kubectl
 #       call uses the same one rather than a second resolution.
+#   undeclared-objects.sh --namespaces
+#       the namespaces the tree OWNS, one per line, sorted — the first
+#       clause of THE SCOPE above, and nothing else. For a caller whose
+#       bound is "a namespace the tree declares" (reap-terminated-pods,
+#       backlog 85889a52), so that bound is this derivation rather than
+#       a second copy of it or a hand list. exit 4 when the manifests
+#       will not parse or declare no Namespace: no owned set is not an
+#       empty one.
 #   undeclared-objects.sh --objects-of <kubectl-json-file>
 #       kind<TAB>ns<TAB>name for every object ONE parsed manifest declares
 #       (the JSON `kubectl create --dry-run=client -o json` prints for it),
@@ -336,7 +344,7 @@ PY
 }
 
 case "${1:-}" in
-    --list|--declared|--exemptions|--exemptions-derived|--kubectl) MODE="$1" ;;
+    --list|--declared|--exemptions|--exemptions-derived|--kubectl|--namespaces) MODE="$1" ;;
     --objects-of)
         MODE="--objects-of"
         TARGET="${2:-}"
@@ -349,7 +357,7 @@ case "${1:-}" in
         [ -n "$TARGET" ] || { say "--check needs <Kind>/<namespace>/<name>"; exit 1; }
         ;;
     *)
-        say "usage: $ME --list | --check <Kind>/<ns>/<name> | --declared | --exemptions | --exemptions-derived | --kubectl | --objects-of <json>"
+        say "usage: $ME --list | --check <Kind>/<ns>/<name> | --declared | --exemptions | --exemptions-derived | --kubectl | --namespaces | --objects-of <json>"
         exit 1
         ;;
 esac
@@ -500,6 +508,10 @@ if [ "${#managed_ns[@]}" -eq 0 ]; then
     cannot_answer "$DIR declares no Namespace object — cannot tell which namespaces the tree owns"
 fi
 owns_ns() { in_set "$1" "${managed_ns[@]}"; }
+if [ "$MODE" = "--namespaces" ]; then
+    printf '%s\n' "${managed_ns[@]}"
+    exit 0
+fi
 
 # (kind, namespace) pairs in scope: a kind the tree declares in a
 # namespace the tree owns.

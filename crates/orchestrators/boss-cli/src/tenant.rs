@@ -590,22 +590,6 @@ pub const CONTRACT: &[Entry] = &[
         parse: parse_toml_only,
         scaffold: None,
     },
-    Entry {
-        paths: &["seeds/demo_agents.toml"],
-        required: false,
-        read_by: "boss-observability at boot (`demo_agents::Roster::load`), through the \
-                  `[demo_agents] roster` key infra/oss-quickstart/generate-configs.sh writes \
-                  only for a tenant that ships this file; no publish door — the agents are a \
-                  playground's synthetic /ops dashboard, never registry rows (backlog 1c68aebc: \
-                  until 2026-09-23 the example roster was a literal in that Tier 1 crate)",
-        shape: "`[[agent]]` rows: id, display_name, system_prompt, model, \
-                hourly_budget_usd_micros, max_concurrent_runs, queue_depth?, run? = {id, \
-                started_seconds_ago}, cost_hour and cost_day = {input_tokens, output_tokens, \
-                usd_micros} — every figure invented; at least one agent, unique ids, unknown \
-                keys refused; validated by `boss_observability::demo_agents::Roster::load`",
-        parse: parse_demo_agents,
-        scaffold: None,
-    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -1057,23 +1041,6 @@ fn parse_subject_kinds(path: &Path, _: &Ctx) -> Result<String, String> {
         "{} subject kinds: {} (no reader consumes this file today)",
         kinds.len(),
         kinds.join(", ")
-    ))
-}
-
-/// boss-observability's own reader (backlog 1c68aebc). The service
-/// refuses to boot on a roster this refuses, so the image-sourced
-/// bundle is judged here, by the gate, before it can ride a train.
-fn parse_demo_agents(path: &Path, _: &Ctx) -> Result<String, String> {
-    let roster = boss_observability::demo_agents::Roster::load(path).map_err(|e| e.to_string())?;
-    Ok(format!(
-        "{} demo agents: {}",
-        roster.agents.len(),
-        roster
-            .agents
-            .iter()
-            .map(|a| a.id.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
     ))
 }
 
@@ -3208,25 +3175,19 @@ terminal = { outcome = "sponsored" }
         assert!(!wf.detail.is_empty());
     }
 
-    /// The demo roster moved out of the Tier 1 crate into the tenant's
-    /// bundle (backlog 1c68aebc), and boss-observability refuses to
-    /// boot on a roster its loader refuses — so the check judges it with
-    /// that loader: the example bundle's reads OK with its agents named, and an
-    /// empty one reads INVALID in the loader's words.
+    /// The demo roster had one reader, boss-observability, and it
+    /// retired as superseded-by (backlog 467175e7, car B, 2026-09-23):
+    /// the contract no longer names `seeds/demo_agents.toml`, so a
+    /// bundle that still ships one is told the file is read by nothing
+    /// rather than judged OK by a loader for a service no pod starts.
     #[test]
-    fn the_demo_roster_is_judged_by_the_services_own_loader() {
-        let r = check(&boss_testing::repo_root().join("examples/brewery"));
-        let row = status_of(&r, "seeds/demo_agents.toml").unwrap();
-        assert_eq!(row.status, Status::Ok, "{row:?}");
-        assert!(row.detail.starts_with("4 demo agents: "), "{row:?}");
-
-        let dir = scratch_dir("boss-cli-tenant-check-empty-demo-roster");
+    fn a_demo_roster_is_no_longer_part_of_the_contract() {
+        let dir = scratch_dir("boss-cli-tenant-check-retired-demo-roster");
         write_file(&dir.join("tenant.toml"), "[meta]\ntenant_id = \"t\"\n");
-        put(&dir, "seeds/demo_agents.toml", "agent = []\n");
+        put(&dir, "seeds/demo_agents.toml", "[[agent]]\nid = \"a\"\n");
         let r = check(&dir);
         let row = status_of(&r, "seeds/demo_agents.toml").unwrap();
-        assert_eq!(row.status, Status::Invalid, "{row:?}");
-        assert!(row.detail.contains("no [[agent]] rows"), "{row:?}");
+        assert_eq!(row.status, Status::Unknown, "{row:?}");
     }
 
     /// CLAUDE.md §9a: the doc's table and the code's contract are one

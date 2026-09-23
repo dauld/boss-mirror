@@ -92,6 +92,7 @@ const SILENT: ReadonlyMap<string, string> = new Map([
   ['/it/registry/policy', 'policy rules: /api/policy/rules'],
   ['/it/auth-admin', 'auth admin: its reads fire behind a tab'],
   ['/it/operate/bottlenecks', 'bottlenecks: /api/workflows'],
+  ['/it/operate/audit', 'audit log: /api/events/stats + /tail paint "Stats unavailable:" and "Failed to load:" in words, without the marker (sweep c3e4edcc)'],
   ['/watchlist', 'watchlist: /api/people/accounts/risk-scores'],
   ['/hr', 'HR (bare alias): same as /ux/hr'],
 ]);

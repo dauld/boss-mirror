@@ -24,7 +24,6 @@ flowchart TB
             P_OPS["Operational<br/><small>shipping :7100<br/>inventory :7300<br/>commerce :7400<br/>products :7840</small>"]
             P_RAIL["Rails<br/><small>messages :7200<br/>policy :7250<br/>ledger :7080<br/>content :7090</small>"]
             P_PLAT["Platform<br/><small>docs :7050<br/>ml :7070</small>"]
-            P_OBS["Observability<br/><small>obs / snapshot / SSE :7880</small>"]
         end
 
         subgraph ScratchStack ["Scratch stack (+1000 offset)"]
@@ -72,7 +71,6 @@ flowchart TB
     classDef ops fill:#dbeafe,stroke:#1d4ed8,stroke-width:1.5px
     classDef rail fill:#d1fae5,stroke:#047857,stroke-width:1.5px
     classDef platform fill:#fef9c3,stroke:#a16207,stroke-width:1.5px
-    classDef obsbox fill:#fee2e2,stroke:#b91c1c,stroke-width:1.5px
     classDef scratch fill:#fef9c3,stroke:#a16207,stroke-width:1px,stroke-dasharray:4 3
     classDef daemon fill:#ede9fe,stroke:#6d28d9,stroke-width:1.5px
     classDef store fill:#f3f4f6,stroke:#1f2937,stroke-width:2px
@@ -83,7 +81,6 @@ flowchart TB
     class P_OPS ops
     class P_RAIL rail
     class P_PLAT platform
-    class P_OBS obsbox
     class SCR scratch
     class D2,D3,D4 daemon
     class PG,NATS_N store

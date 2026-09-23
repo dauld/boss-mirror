@@ -186,11 +186,9 @@ pub const SOLO: &[PortSpec] = &[
         prod: 7855,
         scratch: None,
     },
-    PortSpec {
-        name: "observability",
-        prod: 7880,
-        scratch: None,
-    },
+    // 7880 was `observability` until 2026-09-23: boss-observability
+    // retired as superseded-by (backlog 467175e7, car B), its cross-VM
+    // view by a region of the IT world map.
     // Audit-log read surface. boss-events owns the audit_log table
     // and the tail/stream/export router; pre-2026-06 the router
     // was mounted into boss-people-api for convenience. Split out

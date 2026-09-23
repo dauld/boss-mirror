@@ -54,6 +54,12 @@ export const ROUTES: ReadonlyArray<string> = [
   // Yard status renders the empty yard under the mock's `[]` catch-all
   // for /api/yard/status — chrome + "no trains / no cars", no crash.
   '/it/operate/yard-status',
+  // The Audit Log (catalogued as Monitoring). Deferred until 2026-09-23
+  // for want of an object-shaped /api/events/stats fixture, which
+  // _smokeMocks.ts now carries (EVENTS_STATS); its live stream answers
+  // the floor's 204, so the page falls to its snapshot poll. Its own
+  // controls are pinned in audit-log-page.mocked.spec.ts (65a273d5).
+  '/it/operate/audit',
   // The yard's FLOORS (design 0524fc95, car 2). /it above is the MAP —
   // eight region cards read from /api/yard/regions — and each yard
   // card opens the Train Yard at /it/yard/<region>, focused on that
@@ -163,7 +169,9 @@ export const LANDING_FALLBACK = '/ux/unknown-path';
 /// interaction-checked, or the reverse, with nothing to say so. One
 /// definition cannot disagree with itself (CLAUDE.md §9a).
 export const DEFERRED: ReadonlyMap<string, string> = new Map([
-  ['/it/operate/audit', 'aggregation dashboard: snapshot .length needs a faithful fixture'],
+  // '/it/operate/audit' left on 2026-09-23 (page audit 65a273d5, gap
+  // 0398c4d0): the fixture it waited for is EVENTS_STATS in
+  // _smokeMocks.ts, and audit-log-page.mocked.spec.ts pins the page.
   ['/ux/finance', 'statements .reduce needs object-shaped fixtures'],
   ['/ux/warehouse', 'summary.below_reorder_count needs a faithful fixture'],
   ['/ux/exec', '.find/.length over object-shaped summaries'],

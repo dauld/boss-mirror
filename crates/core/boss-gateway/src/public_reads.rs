@@ -43,8 +43,9 @@
 //! the inventory reads ONE module to audit every sessionless door;
 //! the observability health alias was not by design — the page that
 //! reads it holds a session, as it does for every other
-//! `/api/<service>/health` — and now meets the gate like them
-//! (main.rs, `the_observability_health_alias_refuses_a_sessionless_caller`).
+//! `/api/<service>/health` — and met the gate like them until its
+//! service retired on 2026-09-23 and the route left with it (main.rs,
+//! `the_retired_observability_routes_are_misses`).
 //! A by-design row is never an `/api` path: an `/api` read that a
 //! stranger may make is a tenant's choice, and belongs in
 //! [`PUBLISHABLE`] behind a declaration.

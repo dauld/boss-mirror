@@ -196,7 +196,7 @@ impl FromStr for ActorId {
     /// 4. `agent-` prefix with a non-empty slug →
     ///    [`Self::RegisteredAgent`]. Safe because no employee id
     ///    carries it (`emp-*`) and the prefix was already the
-    ///    convention for agent ids (boss-observability's demo agents,
+    ///    convention for agent ids (the retired boss-observability's demo agents,
     ///    `agent-inventory-reorder-advisor`).
     /// 5. Otherwise → [`Self::Human`].
     fn from_str(s: &str) -> Result<Self, Self::Err> {

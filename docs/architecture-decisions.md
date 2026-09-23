@@ -72,9 +72,8 @@ Beer is the namesake and cybernetics is first among the three
 lineages, but **VSM vocabulary does not appear in BOSS code**. It used
 to, in exactly two crates — `boss-cybernetics` (whose own header read
 "Per-VM Cybernetics coordinator (VSM S2/S3)") and
-`boss-observability` — and both retire under design 8382bbb2:
-`boss-cybernetics` retired on 2026-09-23 (below), and
-`boss-observability` retires in its own car. The
+`boss-observability` — and both retired under design 8382bbb2 on
+2026-09-23, each in its own car (below). The
 mapping is recorded here so the correspondence outlives the code that
 carried the words, because a reader arriving from Beer must be able to
 find it and a reader arriving from the code must not have to learn a
@@ -122,8 +121,29 @@ session: David decided on 2026-09-23 that running `boss dispatch
 --next` by hand counts as the runner having run (the session is the
 CPU, 57c108c2), so no headless runner stands in for the old loop. Its
 config (`infra/cybernetics/`) and its systemd unit left with it.
-`boss-observability`'s cross-VM view is superseded by a region of the
-IT world map and retires in a separate car under the same design.
+
+**`boss-observability` is retired as SUPERSEDED-BY, not deleted as
+dead** (2026-09-23, backlog 467175e7, design 8382bbb2 — the second car,
+which closed the item). It was the read side of the same design: a
+cross-VM rollup of each `boss-cybernetics` coordinator, fanned out to
+browsers. The reason is the same one, **coherence and one owner per
+rule** — a second, parallel read of agent state beside the one the
+claim door writes is two answers to one question. It is also
+**not** a line-count win. What superseded what:
+
+| `boss-observability` responsibility | superseded by |
+|---|---|
+| the cross-VM view (`/api/snapshot`, `/api/vms/*`) | a region of the IT world map (5082a08b) — the map reads the system's own regions (`/api/yard/regions`) rather than a per-VM rollup |
+| per-agent runs, queues and costs (`/api/agents`, `/api/runs`, `/api/costs`) | `/api/agent-runs` and `/api/agent-runs/cost` on the jobs API, the record the claim door writes |
+| its health alias (`/api/observability/health`) | each service's own `/api/<service>/health` |
+| the `cybernetics.>` SSE fan-out | nothing, deliberately: its only publisher was `boss-cybernetics`, retired above |
+| the playground's synthetic agents (`[demo_agents]`, the brewery's `seeds/demo_agents.toml`) | nothing, deliberately: they existed so a dashboard could show what oversight looks like before real agents ran, and real agents now run and are recorded |
+
+Removed with it: the `observability` row (7880) in `boss-ports`, and so
+its line in the container launcher and its block in the config
+generator; the gateway's three routes and its proxy target; the
+brewery's demo roster and its entry in the tenant contract; and its
+bare-metal config and setup (`infra/observability/`).
 
 **An unattended cadence will start work; until it lands, the session is
 the only supply** (design `9e1de851`, David 2026-09-22; three questions
@@ -274,6 +294,54 @@ belong to an organisation and that repoint re-models a live revenue
 path. Identification comes after triage, never at receipt, so spam
 provisions nothing. Not yet built.
 
+**The employee Class drawer stays one drawer, told apart by axis; only
+the departments move out, onto the tenant's own roster** (design
+`3dff7577`, David 2026-09-23, all three questions accepted as proposed;
+it amends the four-kind split design `32f18167` signed off on
+2026-09-19, carried by backlog `a45ab09d`). Measured live that day: the
+drawer holds 22 `employee` Classes on four axes (role 7, department 9,
+status 3, employment_type 3), and every row already names its axis in
+`member_attribute` — the explicit axis the split was weighing. What was
+broken was the readers, which asked only whether `(employee, code)`
+existed, so `role=terminated` or `department=platform-admin` passed.
+Decided: (1) **role, status and employment_type stay `employee`
+Classes** told apart by `member_attribute` — four subject kinds would
+register three with no Subjects behind them and contradict
+roles-are-Classes-of-employees, and the drift the split was meant to
+stop is refused by reading the axis instead; (2) **the department
+roster is the tenant's org chart**: the 13 catalog-derived rows of the
+`department` subject kind (migration `20260919181324`) become the
+product default a tenant starts from, and a tenant adds and retires its
+own — Algedonic's engineering, product, hosting and operations exist
+today only in the drawer, with two live actors on them — which needs a
+tenant write door and a publish path before the validators move to
+department Subjects and the drawer's department Classes retire, moved
+rather than copied, with the two actors reassigned through the API so
+the log records it; (3) **a role Class's `metadata.department`
+retires with them** — a role does not belong to a department, the
+person holding it does. Landed: the axis readers — boss-people's
+employee checks (`a45ab09d`), then the agents batch door, account-team
+roles and `GET /api/classes?member_attribute=` (`ab1e6ff8`). Not built:
+the department write door, the publish path and the move; the
+`departments` table still has no write door.
+
+**The People roster holds people** (design `7aa2d1c5`, David
+2026-09-23; answers backlog `6a123f1f`, gap 12 of the `/ux/people`
+page audit). Measured: the page's "active employees" headcount was 2 —
+the founder, and `emp-audit`, the "System Audit Account" the operator
+baseline (`boss-people/src/operator_baseline.rs`) seeds as an employee
+row — while every registered agent, which claims steps and is
+capability-checked at the claim, was absent. The proposal was to show
+agents on the roster as their own kind with a split headcount; David
+answered instead: "People should just be people. Let's actually move
+the system-audit account to the same locale as agent and system
+accounts." So the employee roster is humans only, agents stay in the
+agents registry rather than joining the headcount, and `emp-audit`
+leaves the employee table for wherever agents and system accounts are
+held — an actor being a CPU in the same machine does not make it a
+person on the org chart. Not built: the audit account is still seeded
+as an employee.
+
 The system is laid out on a **three-axis information
 architecture**: *Knowledge Bases* (durable queryable state),
 *Surfaces* (operator UI), and *Work* (Jobs + Steps that change
@@ -322,6 +390,34 @@ metadata is checked **at done, not at create**;
 (top-level fields replace wholesale; clients merge metadata keys).
 The Jobs list takes exactly one subject filter — `?subject_id=` —
 and the Job's subject column is `subject_id`.
+
+**The step PUT will refuse a metadata body that drops a stored key; it
+will not refuse every metadata body** (design `baf738b7`, David
+2026-09-23, accepted as proposed; answers backlog `e39a9d2a`). The item
+asked the PUT to refuse any `metadata` and send every caller to the
+merge door (`PATCH …/steps/{id}/metadata`). Measured before any code:
+about 100 writers send metadata with the status flip, because the
+checks that run at done read it, so that rule was five cars and made
+completion two writes that are not atomic. Decided: **refuse only a
+body that omits a key the stored step holds** — clearing by omission is
+the actual data loss, and a stale read that would drop a concurrently
+added key is caught with it — route that caller to the merge door with
+an explicit `null`, and delete the three keys `update_step` carries by
+hand (`authority_role`, `human_only`, `agent_run`); the
+refuse-every-body plan stays unbuilt unless a two-write completion is
+wanted for its own sake. **The premise under the one-car estimate was
+false, and the rule stands with a new order** (correction recorded on
+`e39a9d2a` the same afternoon): the registry materializes
+`metadata_defaults` and the audience keys into every step, so ANY PUT
+built without a prior read omits stored keys — the gate runner's
+verdict report and `boss car open` / park among them — and landing the
+refusal first would have stopped every gate and every park. The order
+is now (1) `boss hold` / `boss release` through the merge door —
+landed (#586); (2..n) every fresh-metadata writer moved to
+read-merge-write or the merge door, the gate runner and `car.rs` first,
+each converged on its host before the next; (last) the server refusal,
+which closes the item. Until it lands, the PATCH semantics above hold,
+wipe of unmentioned keys included.
 
 **A Job carries the instant it was admitted, not only the day**
 (design `f2cdff23`, David 2026-09-20, all three questions accepted as
@@ -614,6 +710,26 @@ legend both cite (resolved 2026-08-12; the redraw itself is not yet
 executed). The envelope model and the target shape of the parts not
 yet built are carried by `docs/design/job-packet-network.md`.
 
+**The experiments program starts at a named threshold, not now**
+(design `d8771dec`, David 2026-09-23, accepted as proposed; answers
+backlog `8af3aed1`). Measured against the system of record:
+`kind=protocol-experiment` answers 0 — the "iterated live" history in
+the workflow's header, and the experiment it cites, belong to the
+retired second stack; opening one needs no code, but a malformed split
+fails silently, so an experiment can sit open splitting nothing; and a
+before-and-after reading cannot credit a protocol change —
+`backlog-item` went v1→v7 in seven days with the same ten steps while
+its median cycle days swung 13×, so the period drives the number and
+only a concurrent split can tell. Decided: **experimentation begins at
+the first draft workflow version, on a kind with 20+ terminals a day,
+that adds, removes or reorders a step**; its author opens it as a Tier
+2 split (`boss-jobs/src/experiments.rs`) instead of publishing, and
+that experiment's first car is a verb that refuses a malformed split;
+the workflow header's second-stack history is corrected. None of it is
+built: no experiment has run on this instance, the refusing verb does
+not exist, and `infra/platform/workflows/protocol-experiment.toml`
+still says real experiments ran through it.
+
 **A step declares its audience once, and every surface derives its
 selector from that** (design `f5ebd2e1`, David 2026-09-11; three
 questions accepted as proposed, the fourth a constraint). The
@@ -800,6 +916,27 @@ plus one-off queries. The handler vocabulary (`po.place`,
 …) is the adapter edge — the verbs that touch the world stay code;
 which verb fires when is data.
 
+**A product rule is never born in the SPA** (design `ff1c3615`, David
+2026-09-23, option (b) as proposed; answers backlog `7d9df2fe`, found
+by the `/it/registry/rules` page audit). The page's **+ New rule**
+created a rule with no `source` — a product rule — which the boot seed
+above retires because no file names it, so it fired until the next
+restart and then vanished with only a name in a boot log; on the live
+instance 62 of 65 active rules matched the 62 files exactly and the
+other three were `tenant:algedonic`. A warning at the button, option
+(a), was declined because it keeps a control whose product is temporary
+by design — the answer-instead-of-error shape. Landed (#586): the
+button opens a page that creates nothing and names the two durable
+paths, a file under `infra/dispatcher/rules/` carried by a car or a
+tenant's `seeds/rules.toml` published into the instance
+(`NewRuleGuide.svelte`); and the draft door refuses a product draft
+under a name no authored file declares, reading the names with the
+seed's own parser so the door and the seed cannot disagree, and
+refusing every product draft when the authored directory cannot be
+read. A new version of a rule a file does name is still accepted,
+since the seed never walks a live version back — so "live authoring is
+untouched" above now holds for rules that exist, not for new ones.
+
 Where the mechanisms live now: step side-effects are rules keyed
 `step.done.<kind>` (the old `StepType.side_effects` field and the
 step-effects runner are gone); inventory auto-restock is a rule
@@ -813,6 +950,35 @@ The sim/system boundary **is** the HTTP API: one set of surfaces
 serves real actors, the simulator, and side-effect handlers
 identically; the simulator presents as the role-matched humans it
 assigns, with no exemptions anywhere in policy or validation.
+
+**A tenant cannot yet register a handler, and the direction to test is
+out-of-process** (design `153d49f7`, David 2026-09-23, accepted as
+proposed; answers backlog `ec40e269`). Measured (builder run
+`950597e7`, on `642c0171`): of 51 handlers, 29 are invoked by product
+rules, 21 only by the example tenants' seeds (13 brewery-only, 8 shared
+with the used-device shop) and one, `jobs.complete_step_matching`, only
+by Algedonic's own tenant rule. All of them live in
+`boss-dispatcher-handlers` and ONE binary registers them, so a
+tenant's published rules — and `boss tenant check` — resolve against a
+roster compiled into every deployment: the brewery's keg-deposit,
+excise-accrual and packaging handlers ship everywhere, and a hosted
+tenant can use only what the platform compiled in. Where tenant code
+runs is the hosting safety levels by crate tier (data-only / tenant /
+modules / full, 2026-09-18). Of three sketches — (a) a tenant links its
+own dispatcher binary, in-process but a binary per tenant, which a
+data-only tenant cannot ship; (b) out-of-process handlers, a rule
+naming one the tenant's engine serves over HTTP (`POST
+<engine>/handlers/<name>` with the event, returning its writes); (c)
+declarative handlers as data, a templated PUT/POST body, which cannot
+cover real logic such as packaging allocation — **(b) is spiked
+first**, since it runs tenant code in its own process under its own
+identity and policy, with idempotence and provenance to be held across
+the hop, and the same spike measures how many of the 21 reduce to (c).
+It is a direction to test, not a plan: no spike has run. Landed the
+same day: the cascade map of what each handler emits moved out of core
+into `boss-dispatcher-handlers/src/cascade.rs`, beside the code it
+describes, with core keeping only the type; the handlers themselves
+have nowhere else to be registered yet.
 
 **The forward direction inverts this contract: reaction becomes
 admission.** The network gets one admission edge — **Protocol**
@@ -1018,6 +1184,30 @@ door's own validation (codes unique, kinds and balances inside the
 table's CHECK constraints, a parent declared before its child); the
 collision itself is only visible at publish, because only the
 deployment knows its chart.
+
+**Algedonic's books read the ledger, and its bills get a protocol**
+(design `72ccb3b2`, David 2026-09-23, both questions accepted as
+proposed; from the `/ux/finance` page audit `3f964c57`). Finance is on
+for Algedonic (module decision `1054c099`). Measured: the ledger held
+one entry, a $1.00 sponsorship still in Cash in Transit awaiting its
+payout; revenue reaches the ledger only through packets
+(`receive-a-sponsorship`, `receive-a-payout`), yet the finance page's
+headline, AR aging, gross margin and Invoices tab read commerce
+invoices, which nothing writes, so the page could never agree with the
+ledger's income statement; and payables had no protocol — the ledger's
+bill endpoints held 0 bills, while PO Approvals and AP aging read
+inventory, which the company does not run. Decided: (1) **payables are
+a finance protocol, `receive-a-bill`**, on the ledger's own bill
+endpoints — one packet per invoice (cloud, domains, Cloudflare,
+software subscriptions, Stripe fees) posting to AP and then to cash on
+payment — and the inventory-backed PO Approvals and AP aging come off
+the page for a tenant without the warehouse module; (2) **the headline
+reads the ledger**, where packets already post revenue, because one
+source cannot disagree with itself; commerce invoices stay for tenants
+that sell goods, and hosting revenue (`8db1d6a6`) posts to the ledger
+the way sponsorships do. Not built: `receive-a-bill` exists in neither
+this tree nor the tenant's, and the page still reads commerce and
+inventory.
 
 **The tax regime is tenant data; the migration's kinds and rates are
 the brewery's.** (Backlog `7f163e58`; design `e187198f`, 2026-09-18.)
@@ -1568,6 +1758,64 @@ car. Tooling stays mocked Playwright — hermetic, gated, already in
 the image; "more thorough" is more assertions per page, not a
 different tool.
 
+**A department with no protocol is stood down on this instance, not
+given pages** (design `36b79159`, David 2026-09-23, accepted as
+proposed). The march kept meeting one fact. Maintenance (audit
+`015c3935`) had 0 protocols, 0 sensors and 0 rules — its 26
+`maintenance-*` rows are IT housekeeping that shares the word, and its
+pages sit behind the `equipment` module that `1054c099` turns off for
+Algedonic; People (audit `0c0265a3`) had 0 protocols and a roster of
+the founder and a system account. Each had a weekly retro with nothing
+to retrospect and pages drawing only the demo's shape, and neither is
+among the six first protocols (`86f32b7d`). Decided: **such a
+department is stood down on this instance** — no weekly retro and no
+sidebar pages until a protocol exists (modules-off already covers
+Maintenance); People gets a protocol only when a second person joins;
+and each remaining audit records "no protocol: stood down" instead of
+re-raising it. Not built: the `retro.open` handler behind
+`department-retros-weekly` still opens one retro per row of the
+`departments` table, and no stood-down marker exists for it or the
+sidebar to read.
+
+**Algedonic, LLC keeps its at-scale surfaces, lightly used, to dogfood
+them** (design `922f37be`, 2026-09-23; the proposal to turn
+`/watchlist` off here was declined). Measured by the `/watchlist` audit
+(`08b0c4f8`): no sales protocol produces or reads a churn score, the
+accounts directory holds one account (the shared Anonymous Sponsor),
+and the nightly batch that scores had fed nothing since the second
+stack retired (`9599babc`). David, recorded verbatim by the operator
+because the review box was clearing his entry (`fec57f5f`): "I wanted
+to keep watchlist and other 'at scale' needs in Algedonic, LLC even
+when it is overkill as a means to dogfood our software development. I
+want to scale really smoothly, so it is okay investing in protocols
+that may be very lightly used until we have real scale. But the
+playground instance and simulator are going to be where we really
+pressure test modules and behaviors that are relevant for companies
+with physical operations and more people than Algedonic, LLC." So
+light use is not a reason to take a surface off the company's own
+instance; the line is physical operations and headcount, which the
+playground and the simulator carry. It differs in kind from the
+stand-down above: a department with no protocol at all has nothing to
+dogfood. Nothing to build; the batch fix landed on its own (#586).
+
+**The look is one light theme, Transit, and the map's colours are the
+first to route through it** (design `dea94998`, David 2026-09-23: "I
+like where we are going with option 2, the route map / transit
+option"; answers backlog `42f66fb3`). The direction set that day: one
+LIGHT-only theme for the BOSS instance and as the company's overall
+tone, flowing into www.algedonic.dev and the GitHub presence — themes
+compared side by side first, specifics after — and every UI and
+styling car waits on it while back-end work does not. The boards were
+compared as a claude.ai Artifact linked from the packet, the gap
+exhibits (§Design docs, `26a89f11`) exist to close. Landed (#586,
+`42f66fb3`): the groundwork, not the look — the world map (`MapPage`,
+`WorldMap`, `RegionMap`) reads only a `--map-*` block in
+`apps/web/src/styles.css`, with no fallback and every value still
+today's colour, pinned by `it/yard/map-palette.test.ts` so a retired
+token fails the test rather than repainting in silence. Not built: the
+Transit palette itself, and the rest of the SPA and www on it; the SPA
+still paints the dark theme.
+
 **What the website says is checked against what the record holds;
 whether it works is a reading with a threshold named first** (design
 `59a776c5`, 2026-09-20). Correct and effective are two protocols with
@@ -1601,7 +1849,7 @@ Two install paths: single-VM bare metal (`infra/oss-quickstart/`)
 and Docker compose. File-backed auth is for evaluation; HA
 topologies return as opt-in blueprints under `infra/blueprints/`.
 Crates split into **Tier 1 — core state-machine OS**
-(`crates/core/`, 27 crates: the four primitives' services, policy,
+(`crates/core/`, 26 crates: the four primitives' services, policy,
 gateway, dispatcher, clock, expression DSL, taxonomy registries,
 calendar, content, docs, ML stack, testing, ports,
 plus `*-client` crates) and **Tier 2 — company-modeling layer**
@@ -1872,6 +2120,25 @@ log-copy migration both ride that wire. The cluster is a *client* of
 identity and a consumer of intent, never the host of either: moving
 the company is copying its log and its rules, and everything else
 regenerates.
+
+**Retiring a unit will mean masking it, because disabling is not
+retiring** (design `7b230ddf`, David 2026-09-23, accepted as proposed;
+answers backlog `9599babc`). Measured through `boss ops boss-gcp
+journal-tail` (ops-request `5acce6ec`): `boss-ml-api`, stopped and
+disabled by `retire-second-stack` on 2026-09-15, had been running on
+boss-gcp since 2026-09-20 as one process — the kept
+`boss-ml-inference-batch.service` declared `Requires=boss-ml-api.service`,
+and systemd starts a required unit whether or not it is enabled, so the
+02:30 batch revived it and it served the batch nightly against the
+retired stack's database while no prediction reached the system of
+record. The class: any kept unit that `Requires=` or `Wants=` a retired
+one brings it back. Landed (#586, `9599babc`): the batch reaches the
+cluster's ML API through the machine door, its `Requires=` is gone, and
+its packet carries the prediction count, a zero night failing loudly.
+Decided, not built: after that car converges, `retire-second-stack` is
+re-run for `boss-ml-api`, and the verb changes to **mask** what it
+retires (`systemctl mask`) and to refuse to retire a unit a kept unit
+still `Requires` — still a bounded verb, still David's to file.
 
 **A workspace declares what it guarantees; that is the half that has
 shipped.** Allocation was decided first (`2d43cbcb`, 2026-08-16): a dev
@@ -2415,6 +2682,41 @@ back — the file was the source and the database the projection. Now
 the packet is authored and the file, where one exists, is a generated
 artifact. This is the rule the rest of the system already lives by;
 design docs were the one place it was inverted.
+
+**A proposal whose substance is visual rides inside the packet as an
+exhibit, not behind a link** (design `26a89f11`, David 2026-09-23, all
+five questions accepted as proposed; from his question that day about
+richer renderings "so we don't need to go to the claude.ai links"). A
+palette, a layout or a diagram was rendered as a claude.ai Artifact and
+linked, which put what was approved outside the record and mutable,
+behind a second door, and out of `boss brief`'s sight. **HTML as the
+doc's source was rejected**: packet prose is untrusted — any actor can
+write step metadata — and the review surface
+(`infra/step-plugins/review-design.js`) runs in the reviewer's
+authenticated session, which is why it renders prose through web-kit's
+escape-first `renderMarkdown`; and the record is text that agents,
+search and this fold read. Decided: a design packet keeps its markdown
+and questions and may also carry **`exhibits = [{anchor, title, html |
+file_ref}]`**. (1) **The bytes** live inline in step metadata up to a
+size bound (proposed 256 KB), frozen when the step completes, and in
+`file_refs` above it, content-addressed and rebuilt from
+`content.file.attached`; the build first measures whether `file_refs`
+is on, and ships inline-only if it is not. (2) **An exhibit may run
+script and nothing else**: `<iframe sandbox="allow-scripts">` without
+`allow-same-origin`, loaded by `srcdoc`, under CSP `default-src 'none'`
+with inline style and script only — no network, forms, top navigation
+or fetched assets; one that needs live data is a page, not an exhibit.
+(3) **Any actor who may author a design packet may attach one**,
+agents included — the sandbox is the protection, not the author list —
+with the attaching actor recorded. (4) **A question may bind exhibits**
+by anchor and renders beside them; validation refuses an anchor the
+packet does not carry. (5) **It is proven** when the visual redesign is
+reviewed in `/it/design` with no claude.ai link. Authoring is `boss
+design --exhibit anchor|title|path.html`, read with no shell between;
+where an exhibit cannot render (a terminal, `boss brief`) it is listed
+by anchor, title, size and hash, never dropped. Not built, and not yet
+proven: the theme board (`dea94998`) was decided from a linked
+Artifact.
 
 **The legacy corpus is translated once, not indexed forever.** All 52
 markdown docs become packets and the directory stops being read;

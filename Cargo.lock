@@ -744,7 +744,6 @@ dependencies = [
  "boss-ledger",
  "boss-locations",
  "boss-nats",
- "boss-observability",
  "boss-people",
  "boss-people-client",
  "boss-policy",
@@ -1349,32 +1348,6 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "boss-observability"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-nats",
- "async-trait",
- "axum",
- "boss-core",
- "boss-nats",
- "chrono",
- "clap",
- "futures",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "toml 1.1.2+spec-1.1.0",
- "tower",
- "tower-http 0.7.0",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -1,0 +1,7 @@
+{
+  "about": "READ-ONLY: renders what `reap-terminated-pods` WOULD delete, and deletes nothing (infra/forge/reap-terminated-pods.sh --plan; backlog 85889a52, David asked 2026-09-23 for a periodic reap plus an ad hoc trigger). The scope is derived, never a parameter: every pod in a namespace the tree owns (undeclared-objects.sh --namespaces) whose phase is Failed, which no Job owns and which is not already being deleted, which failed more than an hour before the render. Each pod is listed by namespace/name/uid with its node, creationTimestamp, when it failed, status.reason, status.message and every container's terminated reason and exit code — the eviction evidence, captured before anything is deleted. No clock and no age in the bytes, pods sorted; its sha256 is printed on stderr as `plan-sha256:`, and that hash is what a passkey signs (design 17835005 q1). An empty set is a plan: `nothing to reap`. A namespace the credential cannot list is a failure, never an empty plan.",
+  "hosts": ["forge"],
+  "argv": ["infra/forge/reap-terminated-pods.sh", "--plan"],
+  "params": [],
+  "timeout": 300
+}

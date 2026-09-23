@@ -24,7 +24,11 @@ import { DEFERRED, ROUTES } from './_routes';
 // can't fake; they need faithful per-endpoint fixtures before they can be
 // gated without false positives:
 //   /ux/finance (statements .reduce) · /ux/warehouse (summary.below_reorder_count)
-//   /ux/exec (.find/.length) · /it/operate/audit (snapshot .length)
+//   /ux/exec (.find/.length)
+//
+// /it/operate/audit LEFT THIS GROUP on 2026-09-23 (page audit 65a273d5):
+// its stats read now has a faithful fixture, EVENTS_STATS in
+// _smokeMocks.ts, so it is crawled from ROUTES.
 //
 // The watchlist LEFT THIS GROUP on 2026-08-28: its `.length` crash was
 // not a fixture problem but a CAST — the page read

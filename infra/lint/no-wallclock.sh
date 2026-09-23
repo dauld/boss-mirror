@@ -137,9 +137,6 @@ ALLOWED_PREFIXES=(
   # CLI flag defaults (today = Utc::now().date_naive() unless
   # --today is passed). Operators override at runtime.
   "crates/modules/boss-ledger/src/bin/boss_ledger_recognize.rs"
-  # Demo synthetic agent loop — wallclock is the intended
-  # source; events feed the /ops live ticker, never audit_log.
-  "crates/core/boss-observability/src/demo_agents.rs"
   # Sim output: shape_driven engine wires sim-time anchors via
   # clock-api in the LiveApiOutput path (#72). The shape_driven
   # / output.rs core uses Utc::now() in test/in-memory paths

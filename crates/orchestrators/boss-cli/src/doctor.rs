@@ -328,7 +328,6 @@ const SERVICE_UNITS: &[&str] = &[
     "boss-inventory-api",
     "boss-messages-api",
     "boss-shipping-api",
-    "boss-observability",
 ];
 
 /// Probe each registered boss-* systemd service. Classification and

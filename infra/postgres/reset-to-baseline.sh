@@ -61,9 +61,9 @@ SERVICES_TO_STOP=(
     boss-dispatcher boss-products-api boss-classes-api
     boss-locations-api boss-subject-kinds-api boss-calendar-api
     boss-events-api boss-accounts-api
-    # clock-api + observability hold boss-DB pools, and the gateway proxies
-    # them; all three must stop or dropdb fails on "database is being accessed".
-    boss-clock-api boss-observability boss-gateway
+    # clock-api holds a boss-DB pool, and the gateway proxies it; both
+    # must stop or dropdb fails on "database is being accessed".
+    boss-clock-api boss-gateway
 )
 for svc in "${SERVICES_TO_STOP[@]}"; do
     systemctl stop "$svc" 2>/dev/null || true
@@ -190,8 +190,8 @@ echo "==> [8/9] rebuilding projections + GL from audit_log"
 
 echo "==> [9/9] starting boss-brewery-sim + bringing the edge back up"
 systemctl start boss-brewery-sim
-# clock-api came back in step 3; restore the observability aggregator + the
+# clock-api came back in step 3; restore the
 # gateway (the SPA's front door) that step 1 stopped.
-systemctl restart boss-observability boss-gateway 2>/dev/null || true
+systemctl restart boss-gateway 2>/dev/null || true
 
 echo "done. The demo rebuilds live from $DEMO_EPOCH."

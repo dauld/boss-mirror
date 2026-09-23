@@ -44,10 +44,6 @@ boss-dispatcher = { path = "../../core/boss-dispatcher" }
 # crate whose binary registers them — no longer in core (backlog
 # ec40e269).
 boss-dispatcher-handlers = { path = "../boss-dispatcher-handlers" }
-# `seeds/demo_agents.toml` (backlog 1c68aebc) is judged by the loader
-# boss-observability refuses to boot without — the same contract, one
-# reader.
-boss-observability = { path = "../../core/boss-observability" }
 toml = { workspace = true }
 boss-assets = { path = "../../modules/boss-assets", features = ["postgres"] }
 boss-clock-client = { path = "../../core/boss-clock-client" }

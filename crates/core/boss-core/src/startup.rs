@@ -43,10 +43,11 @@ pub fn mask_password(url: &str) -> String {
 /// Self-reported capability snapshot returned by every service's
 /// `/health` endpoint.
 ///
-/// The aggregator at `/api/snapshot/capabilities` (boss-observability)
-/// fans out, collects these, and flags any service whose `storage`
-/// is `"in-memory"` — the signature of a service accidentally built
-/// without the `postgres` feature.
+/// A reader of any service's `/health` flags a `storage` of
+/// `"in-memory"` — the signature of a service accidentally built
+/// without the `postgres` feature. (A fan-out census at
+/// `/api/snapshot/capabilities` was planned for boss-observability and
+/// never built; the crate retired on 2026-09-23, backlog 467175e7.)
 ///
 /// A write-roundtrip probe reads the same field as
 /// a defense-in-depth check.
@@ -130,8 +131,7 @@ pub fn resolve_build_commit(runtime: Option<String>, compiled: Option<&str>) -> 
 /// Standard `/health` payload every Boss `*-api` binary returns.
 ///
 /// `status` is `"ok"` while the process is serving; `capabilities`
-/// is the [`Capabilities`] snapshot the aggregator at
-/// `/api/snapshot/capabilities` fans out to collect. Build it with
+/// is the service's [`Capabilities`] snapshot. Build it with
 /// [`health_response`] — the handler is a pure const response, so a
 /// service's whole health triplet collapses to one call:
 ///

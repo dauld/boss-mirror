@@ -270,7 +270,7 @@ copy holds any information its source does not. This one held none.
 ### 10. Core vs. Example Tenant
 The core state-machine OS lives under `crates/core/` (
 among them `boss-core`, `boss-events`, `boss-jobs`, `boss-policy`,
-`boss-gateway`, `boss-observability`,
+`boss-gateway`,
 `boss-ml`, `boss-content`, `boss-testing`,
 `boss-dispatcher`, `boss-clock`, `boss-expr`, `boss-locations`, the
 two taxonomy registries (`boss-classes`, `boss-subject-kinds`),
@@ -400,8 +400,8 @@ the tier it touches.**
 
 The `infra/lint/tier-import-audit.sh` script enforces the
 Tier-1-can't-depend-on-Tier-2 rule (orchestrators excluded);
-runs cleanly today (0 violations across 27 core crates; the script's
-own line says 28 because it counts crate manifests, and `boss-expr`
+runs cleanly today (0 violations across 26 core crates; the script's
+own line says 27 because it counts crate manifests, and `boss-expr`
 carries a nested `fuzz` crate).
 
 Each domain crate has a matching `*-client` for cross-service
