@@ -50,7 +50,24 @@
 
 set -u
 
-cd "$(dirname "$0")/.."
+# THE TREE CHECKED IS THE TREE THIS SCRIPT LIVES IN, so a caller standing
+# in a different git tree is refused rather than told its tree is clean
+# (backlog 67adb415). Measured 2026-09-22: `bash /work/boss/infra/gate.sh
+# --lint` from a builder's worktree asked every git question of the main
+# checkout, found no change, skipped clippy, and printed "clippy saw the
+# crates this tree changed". Only a caller git can place in ANOTHER tree
+# is refused: outside any repository, or where git cannot answer (the
+# gate's uid on a root-owned checkout), nothing is judged and the run
+# goes on as before.
+_gate_tree=$(cd "$(dirname "$0")/.." && pwd -P)
+if _caller_tree=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null) \
+    && _caller_tree=$(cd "$_caller_tree" && pwd -P) \
+    && [ "$_caller_tree" != "$_gate_tree" ]; then
+    echo "gate.sh: refusing — this script checks the tree it lives in ($_gate_tree), and you ran it from $_caller_tree. To check that tree, run it from there: (cd $_caller_tree && bash infra/gate.sh $*)" >&2
+    exit 2
+fi
+
+cd "$_gate_tree"
 
 # The lint vocabulary, read from its one definition: `LINT_CANNOT_ANSWER`
 # (exit 3) is a lint saying "the machine could not answer", and

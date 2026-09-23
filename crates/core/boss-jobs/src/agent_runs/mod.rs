@@ -90,6 +90,20 @@ pub fn claim_changes_holder(old_holder: Option<&str>, claimant: &str, aliases: &
     }
 }
 
+/// Does this claim announce a `step.assigned.<kind>` marker? Only when
+/// [`claim_changes_holder`] says the executor changed — the same answer
+/// the run edge takes — and the step has a kind to name the topic by
+/// (backlog 735ddc03: an alias respelled to the registered id kept its
+/// edge but still announced an assignment).
+pub fn assignment_marker_due(
+    old_holder: Option<&str>,
+    claimant: &str,
+    aliases: &[String],
+    kind: &str,
+) -> bool {
+    !kind.is_empty() && claim_changes_holder(old_holder, claimant, aliases)
+}
+
 /// `metadata` without the run edge — every other key untouched.
 pub fn without_edge(metadata: &serde_json::Value) -> serde_json::Value {
     match metadata.as_object() {
@@ -151,6 +165,46 @@ mod tests {
             "agent-claude",
             &aliases
         ));
+    }
+
+    /// ONE PREDICATE FOR BOTH ANSWERS (backlog 735ddc03). The claim
+    /// route decided "did the holder change" twice: alias-aware for the
+    /// run edge, exact-string for the `step.assigned.<kind>` marker. So
+    /// a claim that only RESPELLED the holder — an alias rewritten to
+    /// the registered id — kept its run edge (no change) and still
+    /// announced an assignment (a change). The marker now asks the same
+    /// question, and a kindless step still emits none.
+    #[test]
+    fn an_assignment_is_announced_only_when_the_holder_changes() {
+        let aliases = vec!["claude@algedonic.dev".to_string()];
+        assert!(assignment_marker_due(
+            None,
+            "agent-claude",
+            &aliases,
+            "task"
+        ));
+        assert!(assignment_marker_due(
+            Some("emp-someone"),
+            "agent-claude",
+            &aliases,
+            "task"
+        ));
+        assert!(
+            !assignment_marker_due(
+                Some("claude@algedonic.dev"),
+                "agent-claude",
+                &aliases,
+                "task"
+            ),
+            "a respelled holder is not an assignment"
+        );
+        assert!(!assignment_marker_due(
+            Some("agent-claude"),
+            "agent-claude",
+            &aliases,
+            "task"
+        ));
+        assert!(!assignment_marker_due(None, "agent-claude", &aliases, ""));
     }
 
     #[test]

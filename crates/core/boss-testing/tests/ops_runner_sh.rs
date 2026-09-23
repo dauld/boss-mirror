@@ -924,6 +924,90 @@ fn an_answered_verbs_duration_is_recorded_on_its_step() {
 /// because a refused answer re-runs the verb on the next pass. The
 /// packet then says why it is stuck, and a queue alarm (a45b38c1) can
 /// quote it rather than send someone to a journal.
+/// A VERB WHOSE COMPLETION WAS REFUSED IS NEVER RUN AGAIN BY ITSELF
+/// (backlog 865d37df, post-mortem 3c3b202c). The runner runs a verb
+/// BEFORE its completion PUT, so a refused PUT left the step ready and
+/// the next pass ran the verb again: on 2026-09-22 every open verb re-ran
+/// about 120 times in two hours (58 cluster-converge packets in 66
+/// minutes from one converge request). Those verbs were reads and
+/// converges; ops-request v2 exists for destructive ones. So once the
+/// request carries a refusal whose verb RAN, the runner holds it — skips
+/// it, names the reason — and re-running is an explicit act: clearing
+/// `completion_refused`. At-most-once matters more than completion.
+#[test]
+fn a_verb_whose_completion_was_refused_runs_exactly_once_across_passes() {
+    needs_jq!();
+    let root = scratch("completion-refused-held");
+    stub_sor(&root);
+    let ran = root.join("ran.count");
+    let verb = root.join("verb.sh");
+    write_exec(
+        &verb,
+        &format!("#!/bin/sh\necho x >> \"{}\"\necho did it\n", ran.display()),
+    );
+    let verbs = verbs_dir(
+        &root,
+        &[(
+            "once",
+            &format!(
+                r#"{{"about":"a verb that must not repeat","hosts":["forge"],"argv":["{}"],"params":[]}}"#,
+                verb.display()
+            ),
+        )],
+    );
+    let log = root.join("patches.jsonl");
+    let env = vec![
+        ("STUB_PUT_CODE", "409".to_string()),
+        (
+            "STUB_PUT_BODY",
+            r#"{"error":"step has unresolved blockers"}"#.to_string(),
+        ),
+        ("STUB_PATCH_LOG", log.display().to_string()),
+    ];
+    let runs = || {
+        std::fs::read_to_string(&ran)
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+
+    // Pass 1: the verb runs, the server refuses its completion, and the
+    // refusal (verb_ran: true) is written onto the request.
+    packet(&root, "once", "[]");
+    let (out, _) = run(&root, &verbs, &env);
+    assert_eq!(runs(), 1, "the first pass runs the verb: {out}");
+    let written = std::fs::read_to_string(&log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v.get("completion_refused").is_some())
+        .unwrap_or_else(|| panic!("no refusal written: {out}"));
+    assert_eq!(written["completion_refused"]["verb_ran"], true, "{written}");
+
+    // Passes 2 and 3 see the request AS THE RUNNER LEFT IT.
+    let job = serde_json::json!({"data":[{
+        "id":"aaaaaaaa-0000-4000-8000-000000000000","status":"open",
+        "metadata":{"host":"forge","verb":"once","args":[],
+                    "completion_refused": written["completion_refused"]},
+        "steps":[{"id":"s-execute","spec_slug":"execute","status":"ready",
+                  "metadata":{"authority_role":"platform-admin"}}]}],"total":1});
+    std::fs::write(root.join("jobs.json"), job.to_string()).unwrap();
+    for pass in 2..=3 {
+        let (out, payload) = run(&root, &verbs, &env);
+        assert_eq!(
+            runs(),
+            1,
+            "pass {pass} re-ran a verb whose completion was refused: {out}"
+        );
+        assert!(payload.is_none(), "a held request is not completed: {out}");
+        assert!(
+            out.contains("held after a refused completion")
+                && out.contains("step has unresolved blockers"),
+            "the hold names itself and the server's reason: {out}"
+        );
+    }
+}
+
 #[test]
 fn a_refused_completion_is_written_onto_its_request_with_the_servers_reason() {
     needs_jq!();

@@ -850,6 +850,40 @@ pub(crate) fn landed_work_refusal(item_id: &str, cars: &[Value]) -> Option<Strin
     ))
 }
 
+/// THE IN-FLIGHT REFUSAL (5cb6530a). A packet an OPEN, unmerged car
+/// already names is refused before the claim too, naming the car.
+///
+/// Measured 2026-09-23: open cars fc92b86a and 807d47bb named packets
+/// 28dcc735 and 2d1d298e, and `boss dispatch` exited 0 on both, because
+/// the landed-work door above reads only merged cars. But a car exists
+/// only once a gate went green — the auto-park handler files it on the
+/// green — so an open car naming this packet IS the finished fix, parked
+/// or aboard a train, and a second run builds it again. A car that
+/// closed without merging (abandoned) carries nothing, and a landed one
+/// is the landed door's, whose refusal names the proof to run.
+pub(crate) fn in_flight_car_refusal(item_id: &str, cars: &[Value]) -> Option<String> {
+    let car = cars.iter().find(|c| {
+        c.pointer("/metadata/backlog_item").and_then(Value::as_str) == Some(item_id)
+            && c.get("status").and_then(Value::as_str) == Some("open")
+            && !boss_jobs::car::is_landed(c)
+    })?;
+    let branch = car
+        .pointer("/metadata/branch")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    let full = car.get("id").and_then(Value::as_str).unwrap_or("?");
+    let id = &full[..full.len().min(8)];
+    let item = &item_id[..item_id.len().min(8)];
+    Some(format!(
+        "this packet's fix is ALREADY A CAR: {id} ({branch}) is open — gated green and parked \
+         or aboard a train, since a car is filed only on a green.\n  \
+         Dispatching it spends an agent run building the same fix again (5cb6530a). Let that \
+         car land; its proof closes this packet.\n    \
+         boss dispatch {item} --force\n      \
+         if the packet asks for MORE than that car carries, say so and build the rest"
+    ))
+}
+
 /// The whole verb against an explicit base — the seam the wire tests
 /// go through. Returns the run and the prompt.
 #[allow(clippy::too_many_arguments)]
@@ -948,7 +982,9 @@ pub(crate) async fn dispatch_at(
             .and_then(crate::train::rows)
         {
             Ok(cars) => {
-                if let Some(why) = landed_work_refusal(&id, &cars) {
+                if let Some(why) =
+                    landed_work_refusal(&id, &cars).or_else(|| in_flight_car_refusal(&id, &cars))
+                {
                     bail!("{why}");
                 }
             }
@@ -2170,6 +2206,53 @@ mod tests {
     /// correctly — the link is not the defect — and both were still
     /// `open` at `Proven in prod`, so the arrival rule that closes the
     /// item had nothing to fire on.
+    /// Measured 2026-09-23 (5cb6530a): open cars fc92b86a and 807d47bb
+    /// named packets 28dcc735 and 2d1d298e, and `boss dispatch` exited 0
+    /// on both, because its only refusal read MERGED cars. A car exists
+    /// only once a gate went green (auto-park files it on the green), so
+    /// an open car naming the packet is finished work already parked or
+    /// aboard, and a second run would build it again.
+    #[test]
+    fn a_packet_whose_fix_is_already_an_open_car_is_refused_with_the_car_named() {
+        let item = "28dcc735-0000-0000-0000-000000000000";
+        let parked = json!({
+            "id": "fc92b86a-0000-0000-0000-000000000000",
+            "status": "open",
+            "metadata": { "backlog_item": item, "branch": "fix/the-alias-claim" },
+        });
+        let why = in_flight_car_refusal(item, std::slice::from_ref(&parked)).expect("refused");
+        assert!(why.contains("fc92b86a"), "{why}");
+        assert!(why.contains("fix/the-alias-claim"), "{why}");
+        assert!(why.contains("--force"), "{why}");
+
+        // A car that closed WITHOUT merging (abandoned) carries nothing.
+        let abandoned = json!({
+            "id": "e0000000-0000-0000-0000-000000000000",
+            "status": "closed",
+            "metadata": { "backlog_item": item, "branch": "fix/gave-up", "outcome": "abandoned" },
+        });
+        assert_eq!(in_flight_car_refusal(item, &[abandoned]), None);
+        assert_eq!(in_flight_car_refusal(item, &[]), None);
+
+        // A LANDED car is the landed-work door's, which says more (the
+        // proof to run); this door stays out of its way.
+        let landed = json!({
+            "id": "b0000000-0000-0000-0000-000000000000",
+            "status": "open",
+            "metadata": { "backlog_item": item, "branch": "fix/landed", "merged": "true" },
+        });
+        assert_eq!(in_flight_car_refusal(item, &[landed]), None);
+
+        // THE CONTROL LEG, as for the landed door: a row naming another
+        // packet narrows nothing, even when the server ignored `metadata=`.
+        let other = json!({
+            "id": "d0000000-0000-0000-0000-000000000000",
+            "status": "open",
+            "metadata": { "backlog_item": "aaaaaaaa-0000-0000-0000-000000000000", "branch": "fix/someone-elses" },
+        });
+        assert_eq!(in_flight_car_refusal(item, &[other]), None);
+    }
+
     #[test]
     fn a_packet_whose_car_already_landed_is_refused_with_the_car_named() {
         let item = "f47861a5-2a86-4b8e-bb01-6491377b9499";
@@ -2194,8 +2277,8 @@ mod tests {
         assert!(why.contains("boss prove"), "{why}");
         assert!(why.contains("--force"), "{why}");
 
-        // A car still BUILDING the packet is not landed work: that is
-        // the ordinary in-flight case and must not refuse.
+        // A car that has not merged is not LANDED work, so this door
+        // does not refuse it; the in-flight door does (5cb6530a, below).
         let building = json!({
             "id": "c0000000-0000-0000-0000-000000000000",
             "status": "open",

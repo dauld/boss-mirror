@@ -60,6 +60,10 @@ name = "fixture_smoke"
 required-features = ["postgres"]
 
 [[test]]
+name = "test_db_releases"
+required-features = ["postgres"]
+
+[[test]]
 name = "tenant_census_sql"
 required-features = ["postgres"]
 

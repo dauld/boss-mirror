@@ -280,7 +280,7 @@ if [ "$n" -eq 0 ]; then
     exit 0
 fi
 
-answered=0; refused=0; skipped=0; failed=0
+answered=0; refused=0; skipped=0; failed=0; held=0
 i=0
 while [ "$i" -lt "$n" ]; do
     job=$(printf '%s' "$mine" | jq -c ".[$i]")
@@ -314,6 +314,27 @@ while [ "$i" -lt "$n" ]; do
             ;;
     esac
     step_id=$(printf '%s' "$step" | jq -r '.id')
+
+    # HELD AFTER A REFUSED COMPLETION (backlog 865d37df, post-mortem
+    # 3c3b202c). The verb runs BEFORE its completion PUT, so a refused
+    # PUT used to leave the step ready and the next pass ran the verb
+    # again — every open verb ~120 times on 2026-09-22. Harmless for a
+    # read; not for a destructive verb, which is what ops-request v2
+    # exists to carry. So a request whose refusal says the verb RAN is
+    # never run again by this loop: at most once matters more than
+    # eventually completed. Clearing `completion_refused` on the request
+    # (a PATCH setting it to null) is the explicit act that releases it.
+    # A refusal that ran nothing (a refused verb's own answer) stays
+    # retryable, because retrying it repeats nothing.
+    held_why=$(printf '%s' "$job" | jq -r '
+        .metadata.completion_refused // empty
+        | select(.verb_ran == true)
+        | "HTTP \(.http // "?"): \((.reason // "") | .[0:300])"')
+    if [ -n "$held_why" ]; then
+        echo "ops-runner: $short held after a refused completion — its verb already ran and will not run again until completion_refused is cleared: $held_why" >&2
+        held=$((held + 1))
+        continue
+    fi
 
     verb=$(printf '%s' "$job" | jq -r '.metadata.verb // ""')
     args=$(printf '%s' "$job" | jq -c '.metadata.args // []')
@@ -593,5 +614,5 @@ ARGV
     fi
 done
 
-echo "ops-runner: $HOST_ID answered=$answered refused=$refused skipped=$skipped failed=$failed"
+echo "ops-runner: $HOST_ID answered=$answered refused=$refused skipped=$skipped failed=$failed held=$held"
 [ "$failed" -eq 0 ] || exit 1

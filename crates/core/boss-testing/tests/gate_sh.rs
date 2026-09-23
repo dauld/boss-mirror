@@ -1838,3 +1838,47 @@ fn every_gate_function_is_defined_above_its_first_top_level_caller() {
         early.join("\n")
     );
 }
+
+/// THE PRE-FLIGHT CHECKS THE TREE IT LIVES IN, SO IT REFUSES TO CLAIM ANOTHER.
+///
+/// Measured 2026-09-22 on one worktree, one commit, one second (backlog
+/// 67adb415): `bash /work/boss/infra/gate.sh --lint` from a builder's
+/// worktree printed "no crate implied by the tree - skipping clippy",
+/// while `bash infra/gate.sh --lint` there said "clippy on boss-testing".
+/// The script `cd`s to its own tree, so an absolute path asked every git
+/// question of the clean main checkout — and then printed "pre-flight:
+/// clean, and clippy saw the crates this tree changed", which is false
+/// and is the sentence a builder reads.
+///
+/// So a caller standing in a DIFFERENT git tree is refused before any
+/// check runs, and the refusal names the command that checks the
+/// caller's tree. A caller inside the script's own tree — the gate
+/// runner, CI, every other test in this file — is untouched.
+#[test]
+fn run_from_another_tree_the_pre_flight_refuses_rather_than_checking_its_own() {
+    let caller = boss_testing::scratch_dir("gate-sh-other-tree");
+    let init = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&caller)
+        .status()
+        .expect("git init");
+    assert!(init.success(), "git init in {}", caller.display());
+
+    let out = gate_cmd(&["--quick"])
+        .current_dir(&caller)
+        .output()
+        .expect("run gate.sh");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "gate.sh run by absolute path from another git tree must refuse (exit 2), \
+         not check its own tree and call it yours. stderr:\n{stderr}"
+    );
+    let caller_real = std::fs::canonicalize(&caller).expect("canonicalize caller");
+    assert!(
+        stderr.contains(&caller_real.display().to_string())
+            && stderr.contains("bash infra/gate.sh"),
+        "the refusal names the caller's tree and the command that checks it:\n{stderr}"
+    );
+}

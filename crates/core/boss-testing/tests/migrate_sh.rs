@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::str::FromStr;
 
-use boss_testing::test_db::scratch_database_name;
+use boss_testing::test_db::{release_scratch_database, scratch_database_name};
 use sqlx::postgres::PgConnectOptions;
 use sqlx::{Connection, Executor, PgConnection, Row};
 use uuid::Uuid;
@@ -91,11 +91,13 @@ async fn scratch_db() -> (String, String) {
     (name, url)
 }
 
-async fn drop_db(name: &str) {
-    let mut admin = admin_conn().await;
-    let _ = admin
-        .execute(format!(r#"DROP DATABASE IF EXISTS "{name}" WITH (FORCE)"#).as_str())
-        .await;
+/// Through TestDb's reaper, not a `DROP DATABASE` of our own: every
+/// drop forces a checkpoint of the whole server, and one issued here
+/// held this test until it finished — on the dev pod on 2026-09-23 a
+/// checkpoint took about 40 s, and this binary is where three builders'
+/// local suites were seen to stop (backlog 9e1ea321).
+fn drop_db(name: &str) {
+    release_scratch_database(&admin_url(), name);
 }
 
 /// Run a migrate.sh (real or copied) against `db_url` with the given
@@ -249,7 +251,7 @@ async fn the_real_schema_applies_to_a_fresh_db_and_a_rerun_is_a_noop() {
     assert_eq!(before, after, "a re-run re-applies nothing");
 
     drop(conn);
-    drop_db(&name).await;
+    drop_db(&name);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -282,7 +284,7 @@ async fn only_unrecorded_entries_apply() {
     );
 
     drop(conn);
-    drop_db(&name).await;
+    drop_db(&name);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -303,7 +305,7 @@ async fn baseline_records_without_running() {
     assert!(!table_exists(&mut conn, "t1").await);
 
     drop(conn);
-    drop_db(&name).await;
+    drop_db(&name);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -344,7 +346,7 @@ async fn a_failing_migration_is_not_recorded_and_stops_the_run() {
     assert!(table_exists(&mut conn, "t3").await);
 
     drop(conn);
-    drop_db(&name).await;
+    drop_db(&name);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -377,7 +379,7 @@ async fn editing_an_applied_migration_fails_the_next_run_by_name() {
     );
 
     drop(conn);
-    drop_db(&name).await;
+    drop_db(&name);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -415,7 +417,7 @@ async fn without_skips_matching_entries_and_does_not_record_them() {
     );
 
     drop(conn);
-    drop_db(&name).await;
+    drop_db(&name);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -450,7 +452,7 @@ async fn a_db_that_predates_the_runner_is_refused_until_baselined() {
     );
 
     drop(conn);
-    drop_db(&name).await;
+    drop_db(&name);
 }
 
 /// Two pods booting together race the schema converge — named as
@@ -519,5 +521,5 @@ async fn two_concurrent_runs_apply_each_migration_exactly_once() {
     assert_eq!(rows, 3, "exactly one bookkeeping row per migration");
 
     drop(conn);
-    drop_db(&name).await;
+    drop_db(&name);
 }

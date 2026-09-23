@@ -308,6 +308,55 @@ pub(crate) fn rerail_stamps(
         .collect()
 }
 
+/// What `--finish` did with the worktree a conflicted rerail left.
+#[derive(Debug)]
+enum Retired {
+    /// Clean, and removed.
+    Removed(String),
+    /// Uncommitted changes: kept, because they may be the only copy of
+    /// a resolution.
+    KeptDirty(String),
+    /// No such worktree — the rerail never stopped on a conflict.
+    Absent,
+    /// It exists and git could not say whether it is clean.
+    Unreadable(String, anyhow::Error),
+}
+
+impl PartialEq for Retired {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Removed(a), Self::Removed(b)) | (Self::KeptDirty(a), Self::KeptDirty(b)) => {
+                a == b
+            }
+            (Self::Absent, Self::Absent) => true,
+            (Self::Unreadable(a, _), Self::Unreadable(b, _)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// TAKE BACK THE WORKTREE A CONFLICT LEFT (backlog 3129d98a). `run`
+/// hands a conflicted rerail's worktree to the human and refuses a new
+/// rerail while it is present, and nothing took it back: 26 had piled
+/// up under `.git/rerail-wt` by 2026-09-23, one stuck mid-cherry-pick.
+/// Called by `--finish` once the car is repointed. A worktree with
+/// uncommitted changes is never removed — it may hold the only copy of
+/// a resolution — and an unreadable one is left and named.
+fn retire_rerail_worktree(common: &str, new_branch: &str) -> Retired {
+    let wt = format!("{common}/rerail-wt/{new_branch}");
+    if !std::path::Path::new(&wt).exists() {
+        return Retired::Absent;
+    }
+    match git(&wt, &["status", "--porcelain"]) {
+        Ok(s) if !s.trim().is_empty() => Retired::KeptDirty(wt),
+        Ok(_) => match git(&wt, &["worktree", "remove", "--force", &wt]) {
+            Ok(_) => Retired::Removed(wt),
+            Err(e) => Retired::Unreadable(wt, e),
+        },
+        Err(e) => Retired::Unreadable(wt, e),
+    }
+}
+
 /// The finishing half, standalone: the new branch exists and has a
 /// GREEN gate; transcribe its receipt and repoint the car. Split out
 /// so a conflict-interrupted rerail (human resolves, pushes, gates)
@@ -412,7 +461,26 @@ pub async fn run(
                  from its current green receipt instead"
             );
         }
-        return finish(&http, &car, &old_branch, &target).await;
+        finish(&http, &car, &old_branch, &target).await?;
+        // The worktree a conflict left behind, taken back now the car
+        // no longer needs it (backlog 3129d98a). Best effort: the car is
+        // already correct, and a worktree that cannot be read is named,
+        // not guessed at.
+        match git(".", &["rev-parse", "--git-common-dir"]) {
+            Ok(common) => match retire_rerail_worktree(common.trim(), &new_branch) {
+                Retired::Removed(wt) => println!("boss rerail: removed its worktree {wt}"),
+                Retired::KeptDirty(wt) => eprintln!(
+                    "boss rerail: kept {wt} — it has uncommitted changes, which may be the only \
+                     copy of a resolution; remove it by hand once they are safe"
+                ),
+                Retired::Absent => {}
+                Retired::Unreadable(wt, e) => {
+                    eprintln!("boss rerail: left {wt} in place — could not read it: {e:#}")
+                }
+            },
+            Err(e) => eprintln!("boss rerail: could not find the rerail worktrees: {e:#}"),
+        }
+        return Ok(());
     }
 
     // The rebase, in a disposable worktree cut from the CURRENT trunk.
@@ -527,6 +595,67 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    /// Measured 2026-09-23 (backlog 3129d98a): 26 worktrees under
+    /// `.git/rerail-wt`, one stuck mid-cherry-pick, because a conflict
+    /// leaves the verb's worktree for the human and `--finish` never
+    /// took it back — and `run` refuses a rerail while its worktree is
+    /// present. So `--finish` retires it: a clean one is removed, a
+    /// dirty one is kept and named (it may hold the only copy of a
+    /// resolution), and an absent one is nothing to do.
+    #[test]
+    fn finish_retires_the_worktree_a_conflict_left_and_keeps_a_dirty_one() {
+        let repo = boss_testing::scratch_dir("rerail-retire-worktree");
+        let r = repo.to_str().expect("utf-8 path");
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec![
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+        ] {
+            git(r, &args).expect("fixture git");
+        }
+        let common = git(r, &["rev-parse", "--git-common-dir"]).expect("common dir");
+        let common = if Path::new(common.trim()).is_absolute() {
+            common.trim().to_string()
+        } else {
+            repo.join(common.trim()).display().to_string()
+        };
+
+        let clean = format!("{common}/rerail-wt/fix/clean-rerail");
+        git(r, &["worktree", "add", "-q", "--detach", &clean, "main"]).expect("add clean");
+        assert_eq!(
+            retire_rerail_worktree(&common, "fix/clean-rerail"),
+            Retired::Removed(clean.clone())
+        );
+        assert!(!Path::new(&clean).exists(), "the clean worktree is gone");
+
+        let dirty = format!("{common}/rerail-wt/fix/dirty-rerail");
+        git(r, &["worktree", "add", "-q", "--detach", &dirty, "main"]).expect("add dirty");
+        std::fs::write(Path::new(&dirty).join("half-resolved.txt"), "x").expect("dirty it");
+        assert_eq!(
+            retire_rerail_worktree(&common, "fix/dirty-rerail"),
+            Retired::KeptDirty(dirty.clone())
+        );
+        assert!(
+            Path::new(&dirty).exists(),
+            "a dirty worktree is never removed"
+        );
+
+        assert_eq!(
+            retire_rerail_worktree(&common, "fix/never-conflicted-rerail"),
+            Retired::Absent
+        );
+    }
 
     /// The rerail stamps: the old branch's gate-runs (every one — a
     /// branch gated twice has two) get `rerailed_to`, the new branch's

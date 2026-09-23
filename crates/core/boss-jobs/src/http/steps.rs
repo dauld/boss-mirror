@@ -1902,10 +1902,16 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
         events::STEP_UPDATED,
         serde_json::to_value(&claimed).unwrap_or_default(),
     )];
-    // Same grammar as the PUT path: an assignment marker only when
-    // the assignee genuinely changed (a re-claim is not an
-    // assignment), payload mirroring step.ready for messages.notify.
-    if old.assignee_id.as_deref() != Some(user.id.as_str()) && !claimed.kind.is_empty() {
+    // An assignment marker only when the executor genuinely changed —
+    // the same alias-aware answer the run edge took above, so a re-claim
+    // and a respelled holder announce nothing (735ddc03). Payload
+    // mirrors step.ready for messages.notify.
+    if crate::agent_runs::assignment_marker_due(
+        old.assignee_id.as_deref(),
+        &user.id,
+        aliases,
+        &claimed.kind,
+    ) {
         let (subject_kind, subject_id) = if let Some(job) = &parent_job {
             (
                 boss_core::primitives::Subject::kind(&job.subject).to_string(),
