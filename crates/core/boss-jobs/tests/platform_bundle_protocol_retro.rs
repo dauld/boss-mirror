@@ -59,3 +59,40 @@ fn the_retro_collect_step_requires_the_tier_mix_reading() {
         );
     }
 }
+
+/// Beside the core-changes count (bd93d2be) and the tier mix sits the
+/// DIRECTION the work on the core should take (backlog 4332f3cf,
+/// design 93d2bddb): a change that REMOVES a defect class buys one core
+/// change and then none, while one that ENUMERATES another case buys a
+/// core change per incident forever. It is prose by decision, not a
+/// metric — nothing in the record marks a change as either — so the pin
+/// holds the direction, the refusal to invent a number, and the three
+/// readings named together in the one place a retro reads them.
+#[test]
+fn the_retro_collect_step_names_class_removal_as_the_direction_beside_the_readings() {
+    let wf = protocol_retro();
+    let collect = wf
+        .steps
+        .iter()
+        .find(|s| s.title == "collect")
+        .expect("protocol-retro has a collect step");
+    let procedure = collect
+        .metadata_defaults
+        .get("procedure")
+        .and_then(|v| v.as_str())
+        .expect("collect carries a procedure");
+    for phrase in [
+        "4332f3cf",
+        "bd93d2be",
+        "REMOVED",
+        "ENUMERATED",
+        "THE DIRECTION WE ARE TRYING TO CAUSE is removal",
+        "PROSE, NOT A SECOND NUMBER",
+        "the tier mix asks whether work is moving outward",
+    ] {
+        assert!(
+            procedure.contains(phrase),
+            "collect's procedure names `{phrase}`"
+        );
+    }
+}

@@ -758,7 +758,8 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
             };
             let prs = crate::regions::publish_prs(packets);
             let stamps: Vec<Instant> = prs.iter().map(|p| p.opened).collect();
-            let open: Vec<&crate::regions::PublishPr> = prs.iter().filter(|p| !p.merged).collect();
+            let open: Vec<&crate::regions::PublishPr> =
+                prs.iter().filter(|p| p.awaiting()).collect();
             let holds = open
                 .iter()
                 .map(|p| {
@@ -766,6 +767,9 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
                         &p.url,
                         if p.unjudged_red() {
                             p.reading()
+                        } else if p.state_read_at.is_empty() {
+                            // Unasked is not open (backlog a5d4322c).
+                            "its state was never read from GitHub".to_string()
                         } else {
                             "open on the mirror — the merge is a person's".to_string()
                         },
@@ -1197,23 +1201,37 @@ mod tests {
     #[test]
     fn a_pull_request_on_the_mirror_is_one_crossing_of_the_publish_border() {
         let status = empty_status();
+        // What GitHub answered when `--measure` asked (backlog
+        // a5d4322c): #240 merged, #241 still open.
+        let asked = |(mut j, steps): (Job, Vec<Step>), pr: &str, state: &str| {
+            j.metadata = json!({ "pr_state": {
+                "pr_url": pr, "state": state, "merged": state == "closed",
+                "read_at": "2026-09-19T11:00:00Z",
+            }});
+            (j, steps)
+        };
         let publish = vec![
-            publish_packet(
+            asked(
+                publish_packet(
+                    "https://mirror/pull/240",
+                    "snap-240",
+                    "mirror-a",
+                    "2026-09-19T09:00:00Z",
+                    ("failure", "109", "14"),
+                ),
                 "https://mirror/pull/240",
-                "snap-240",
-                "mirror-a",
-                "2026-09-19T09:00:00Z",
-                ("failure", "109", "14"),
+                "closed",
             ),
-            // This one's snapshot was built ON snap-240, so the
-            // mirror's main had reached it: #240 was merged. Nothing
-            // reaches snap-241, so #241 is the one still standing.
-            publish_packet(
+            asked(
+                publish_packet(
+                    "https://mirror/pull/241",
+                    "snap-241",
+                    "snap-240",
+                    "2026-09-19T10:00:00Z",
+                    ("success", "0", "0"),
+                ),
                 "https://mirror/pull/241",
-                "snap-241",
-                "snap-240",
-                "2026-09-19T10:00:00Z",
-                ("success", "0", "0"),
+                "open",
             ),
         ];
         let mut inputs = region_inputs(&status, &[], &[], &[], Some(&[]), Some(&[]));
@@ -1224,8 +1242,8 @@ mod tests {
             dispatcher_firings: Some(&[]),
         });
         let b = only(&out, "arrivals", "publish");
-        // Two PRs opened in the window; #240 merged (a later snapshot
-        // sits on it), so only #241 stands.
+        // Two PRs opened in the window; GitHub said #240 merged, so
+        // only #241 stands.
         assert_eq!(b.rate.samples, 2);
         assert_eq!(b.waiting, Some(1));
         assert_eq!(b.holds.len(), 1);

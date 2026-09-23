@@ -1043,24 +1043,95 @@ impl Conductor {
     /// `boss gate` performs, without the operator-facing guards (the
     /// train branch is the conductor's own, freshly assembled on main).
     /// What the train's gate-run says failed (`train_gate::fails`) and
-    /// why (`train_gate::fails_excerpt`), for the red-train alert — both
-    /// off the one GET. Empty when the train has no gate-run or it
-    /// cannot be read this pass — the alert then names what the forge
-    /// names, as before; a missing name is never an error here.
-    async fn train_gate_fails(&self, t: &Value) -> (Vec<String>, Vec<(String, String)>) {
+    /// why (`train_gate::fails_excerpt`), for the red-train alert, and
+    /// the head it judged (`train_gate::judged_head`), for the question
+    /// whether the red lies outside the consist — all off the one GET.
+    /// Empty when the train has no gate-run or it cannot be read this
+    /// pass — the alert then names what the forge names, as before, and
+    /// the train keeps the stall rule; a missing name is never an error
+    /// here.
+    async fn train_gate_fails(
+        &self,
+        t: &Value,
+    ) -> (Vec<String>, Vec<(String, String)>, Option<String>) {
         let Some(run_id) = t
             .pointer(&format!("/metadata/{}", crate::train_gate::KEY_RUN))
             .and_then(Value::as_str)
         else {
-            return (Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), None);
         };
         match self.get_job(run_id).await {
             Ok(run) => (
                 crate::train_gate::fails(&run),
                 crate::train_gate::fails_excerpt(&run),
+                crate::train_gate::judged_head(&run),
             ),
-            Err(_) => (Vec::new(), Vec::new()),
+            Err(_) => (Vec::new(), Vec::new(), None),
         }
+    }
+
+    /// The train's boarded cars as the jobs API holds them now, for the
+    /// once-per-car bound on an outside release. ALL or NOTHING: one car
+    /// that cannot be read might be the one carrying the stamp, so a
+    /// partial read answers empty — no early release, the stall rule
+    /// decides (backlog 5541d813).
+    async fn boarded_cars(&self, t: &Value) -> Vec<Value> {
+        let ids: Vec<&str> = t
+            .get("metadata")
+            .and_then(|m| m.get("boarded_jobs"))
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let mut cars = Vec::with_capacity(ids.len());
+        for id in ids {
+            match self.get_job(id).await {
+                Ok(car) => cars.push(car),
+                Err(_) => return Vec::new(),
+            }
+        }
+        cars
+    }
+
+    /// The evidence `red_outside_consist` judges, read from the
+    /// conductor's own clone, where the train was assembled on main:
+    /// the consist's changed files (`git diff --name-only
+    /// origin/main...<head>` — three dots, from the merge-base, so a
+    /// main that moved since assembly adds nothing) and which of the
+    /// `failing` files exist in the tree the gate judged. Any git
+    /// failure answers empty, which `red_outside_consist` reads as
+    /// "not proven" — the train then keeps the stall rule and its
+    /// strikes, exactly as before (backlog 5541d813).
+    fn consist_evidence(&self, head: &str, failing: &[String]) -> (Vec<String>, Vec<String>) {
+        if failing.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        let clone = self.cfg.clone.as_str();
+        let lines = |args: &[&str]| -> Vec<String> {
+            sh(args)
+                .map(|o| {
+                    stdout_str(&o)
+                        .lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let range = format!("origin/main...{head}");
+        let consist = lines(&["git", "-C", clone, "diff", "--name-only", &range]);
+        let mut ls = vec![
+            "git",
+            "-C",
+            clone,
+            "ls-tree",
+            "-r",
+            "--name-only",
+            head,
+            "--",
+        ];
+        ls.extend(failing.iter().map(String::as_str));
+        (consist, lines(&ls))
     }
 
     async fn launch_train_gate(&self, t: &Value, tid: &str) -> Result<String> {
@@ -1387,10 +1458,10 @@ impl Conductor {
             // so a broken alert is at worst a missing alert, never a wedge.
             // The gate's failing checks are read only on a red pass —
             // one extra GET when there is something to name.
-            let (gate_fails, gate_excerpt) = if verdict == "failing" {
+            let (gate_fails, gate_excerpt, gate_head) = if verdict == "failing" {
                 self.train_gate_fails(&t).await
             } else {
-                (Vec::new(), Vec::new())
+                (Vec::new(), Vec::new(), None)
             };
             if info.get("state").and_then(Value::as_str) == Some("OPEN")
                 && let Some(alert) = red_train_alert(
@@ -1428,20 +1499,74 @@ impl Conductor {
                 return Ok(());
             }
 
+            // A red in files no car aboard changed releases the consist
+            // NOW and UNSTRUCK (backlog 5541d813): trains 36692142 and
+            // 578a0ee9 each held the one track on a failure no car
+            // touched until an operator cancelled by hand, because the
+            // only other way out was six hours of stall and a strike on
+            // every car. Proven from the record or not at all — the
+            // receipt's located failures, the judged head's diff — and a
+            // red in a file a car DID change keeps the stall rule and its
+            // strikes. It releases; it never merges.
+            let outside = gate_head.as_deref().and_then(|head| {
+                let failing: Vec<String> = gate_fails
+                    .iter()
+                    .filter_map(|e| fails_entry_path(e))
+                    .collect();
+                let (consist, present) = self.consist_evidence(head, &failing);
+                red_outside_consist(
+                    &gate_fails,
+                    info.get("statusCheckRollup"),
+                    &consist,
+                    &present,
+                )
+            });
+            // ONCE PER CAR: the cars aboard are read only when the red is
+            // proven outside, and a car already stamped by an earlier
+            // outside release sends the train to today's path — the
+            // livelock bound for a pair red only when assembled.
+            let decision = match outside.as_deref() {
+                Some(files) => {
+                    let cars = self.boarded_cars(&t).await;
+                    outside_consist_cancel_reason(&t, verdict, files, &cars)
+                }
+                None => None,
+            };
+            let spent_note = match &decision {
+                Some(OutsideRelease::Spent(note)) => {
+                    log(format!(
+                        "train {}: {note} — holding for the stall rule",
+                        id8(&tid)
+                    ));
+                    Some(note.clone())
+                }
+                _ => None,
+            };
+            // (reason, strike, outside release granted)
+            let cancel = match decision {
+                Some(OutsideRelease::Release(reason)) => Some((reason, false, true)),
+                _ => auto_cancel_reason(&t, verdict, now, policy.stall_hours).map(|reason| {
+                    // Anything but a granted release is today's path,
+                    // strikes and all — an unread consist or a spent
+                    // release proves nothing for the cars.
+                    let reason = match &spent_note {
+                        Some(note) => format!("{reason} — {note}"),
+                        None => reason,
+                    };
+                    let strike = verdict_strikes_cars(verdict, info.get("statusCheckRollup"));
+                    (reason, strike, false)
+                }),
+            };
             if self.cfg.auto_cancel
                 && info.get("state").and_then(Value::as_str) == Some("OPEN")
-                && let Some(reason) = auto_cancel_reason(&t, verdict, now, policy.stall_hours)
+                && let Some((reason, strike, outside_release)) = cancel
             {
                 log(format!("train {} auto-cancelling: {reason}", id8(&tid)));
                 if self.cfg.dry {
                     log(format!("DRY: would cancel {} ({reason})", id8(&tid)));
                 } else {
-                    self.cancel_train(
-                        &tid,
-                        &reason,
-                        verdict_strikes_cars(verdict, info.get("statusCheckRollup")),
-                    )
-                    .await?;
+                    self.cancel_train(&tid, &reason, strike, outside_release)
+                        .await?;
                 }
                 return Ok(());
             }
@@ -3324,7 +3449,7 @@ impl Conductor {
     /// withdrawn change), and only the automatic red-stall path below
     /// has evidence that the CARS were implicated.
     pub(super) async fn cancel(&self, handle: &str, reason: &str) -> Result<()> {
-        self.cancel_train(handle, reason, false).await
+        self.cancel_train(handle, reason, false, false).await
     }
 
     /// Honour an operator's `cancel_requested` stamp — the yard's cancel
@@ -3380,7 +3505,7 @@ impl Conductor {
         log(format!("train {} cancelling: {reason}", id8(tid)));
         if self.cfg.dry {
             log(format!("DRY: would cancel {} ({reason})", id8(tid)));
-        } else if let Err(e) = self.cancel_train(tid, &reason, false).await {
+        } else if let Err(e) = self.cancel_train(tid, &reason, false, false).await {
             log(format!(
                 "train {}: cancel failed (non-fatal, train intact, retries next pass): {e}",
                 id8(tid)
@@ -3389,7 +3514,16 @@ impl Conductor {
         true
     }
 
-    async fn cancel_train(&self, handle: &str, reason: &str, count_red: bool) -> Result<()> {
+    /// `outside_release`: this cancel is a red proven outside the consist,
+    /// so every released car is stamped with the train's id as its one
+    /// such release (`KEY_OUTSIDE_RELEASE`, backlog 5541d813).
+    async fn cancel_train(
+        &self,
+        handle: &str,
+        reason: &str,
+        count_red: bool,
+        outside_release: bool,
+    ) -> Result<()> {
         let listed = rows(
             self.api(
                 Method::GET,
@@ -3546,8 +3680,11 @@ impl Conductor {
             // that predates this change still carries a completed review
             // and cannot be released; those were translated into fresh
             // packets by hand on 2026-08-15 rather than reversed.
-            self.merge_job_metadata(cid, release_stamps(car, reason, count_red))
-                .await?;
+            self.merge_job_metadata(
+                cid,
+                release_stamps(car, reason, count_red, outside_release.then_some(tid)),
+            )
+            .await?;
             log(format!("released car {} back to the dock", id8(cid)));
         }
 
@@ -3874,7 +4011,9 @@ mod tests {
         );
         c.cfg.jobs = format!("http://{addr}");
 
-        let res = c.cancel_train("t1", "forge unreachable", false).await;
+        let res = c
+            .cancel_train("t1", "forge unreachable", false, false)
+            .await;
         assert!(res.is_err(), "cancel must surface the close_pr failure");
         assert!(
             *close_called.lock().unwrap(),
@@ -3987,7 +4126,7 @@ mod tests {
         let (c, close_called) = cancel_request_conductor(jobs, true);
 
         let err = c
-            .cancel_train("t1", "bad consist", false)
+            .cancel_train("t1", "bad consist", false, false)
             .await
             .expect_err("a train with no terminal cannot be cancelled");
         let msg = err.to_string();

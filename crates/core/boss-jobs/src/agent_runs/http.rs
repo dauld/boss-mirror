@@ -39,7 +39,7 @@ use boss_policy_client::CurrentUser;
 use crate::trust::{can_read, is_trusted};
 
 use super::port::{AgentRunError, AgentRunLog};
-use super::types::{AgentRun, NewAgentRun, RunFilter, RunSummary, summarize};
+use super::types::{AgentRunView, NewAgentRun, RunFilter, RunSummary, summarize};
 
 pub struct AgentRunsApiState {
     pub log: Arc<dyn AgentRunLog>,
@@ -114,7 +114,8 @@ impl From<RunQuery> for RunFilter {
 pub struct RecordResponse {
     /// `false` means this `run_id` was already held — a retried report.
     pub recorded: bool,
-    pub run: AgentRun,
+    /// The held row with its derived basis — see [`AgentRunView`].
+    pub run: AgentRunView,
 }
 
 /// What `GET /api/agent-runs/cost` answers with: the roll-up plus the
@@ -138,7 +139,9 @@ async fn list_runs(
         return StatusCode::FORBIDDEN.into_response();
     }
     match state.log.list_runs(&q.into()).await {
-        Ok(runs) => Json(runs).into_response(),
+        Ok(runs) => {
+            Json(runs.into_iter().map(AgentRunView::from).collect::<Vec<_>>()).into_response()
+        }
         Err(e) => err_response(e),
     }
 }
@@ -163,7 +166,7 @@ async fn record_run(
             StatusCode::OK,
             Json(RecordResponse {
                 recorded: out.recorded,
-                run: out.run,
+                run: out.run.into(),
             }),
         )
             .into_response(),
@@ -473,6 +476,73 @@ mod tests {
         assert_eq!(row["usd_micros"], 1_007_940, "body: {body}");
         assert_eq!(row["priced_by"], "opus-5[1m]", "body: {body}");
         assert!(row["input_tokens"].is_null(), "body: {body}");
+        // And the row SAYS so, as the roll-up does (backlog 93fdb119):
+        // until this key rode on the row, a per-row surface could tell
+        // blended from measured only by re-deriving the server's rule
+        // from `input_tokens` and `usd_micros` itself.
+        assert_eq!(row["pricing_basis"], "blended", "body: {body}");
+    }
+
+    /// The POST's answer is a single run too, and a caller reading it
+    /// (`boss dispatch --report`) must be able to take the basis off it
+    /// rather than recompute it. All three answers, from one rule: a
+    /// measured split, a blend, and no figure at all — which is `null`,
+    /// never `split`, because there is no number to describe.
+    #[tokio::test]
+    async fn a_recorded_run_names_the_basis_of_its_own_figure() {
+        let user = Some(header("platform-admin", AccessTier::Operator));
+        let report = |run_id: &str, model: &str, tokens: serde_json::Value| {
+            let mut body = serde_json::json!({
+                "run_id": run_id,
+                "actor_id": "agent-claude",
+                "model": model,
+                "started_at": "2026-09-15T22:00:00Z",
+                "finished_at": "2026-09-15T22:10:00Z",
+                "outcome": "success",
+            });
+            if let (Some(obj), Some(t)) = (body.as_object_mut(), tokens.as_object()) {
+                obj.extend(t.clone());
+            }
+            body
+        };
+        let cases = [
+            (
+                report(
+                    "run-split",
+                    "opus-5[1m]",
+                    serde_json::json!({"input_tokens": 1000, "output_tokens": 200}),
+                ),
+                serde_json::json!("split"),
+            ),
+            (
+                report(
+                    "run-blend",
+                    "opus-5[1m]",
+                    serde_json::json!({"total_tokens": 1000}),
+                ),
+                serde_json::json!("blended"),
+            ),
+            (
+                report(
+                    "run-unpriced",
+                    "a-model-no-card-row-covers",
+                    serde_json::json!({"input_tokens": 1000, "output_tokens": 200}),
+                ),
+                serde_json::Value::Null,
+            ),
+        ];
+        for (body, want) in cases {
+            let (status, out) = post("/api/agent-runs", body, user.clone()).await;
+            assert_eq!(status, StatusCode::OK, "body: {out}");
+            let out: serde_json::Value = serde_json::from_str(&out).expect("JSON");
+            let run = &out["run"];
+            assert!(
+                run.as_object()
+                    .is_some_and(|o| o.contains_key("pricing_basis")),
+                "the key is always present, null included: {out}"
+            );
+            assert_eq!(run["pricing_basis"], want, "{out}");
+        }
     }
 
     /// The roll-up a surface reads, saying what its figure rests on.

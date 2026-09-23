@@ -544,6 +544,38 @@ impl AgentRun {
     }
 }
 
+/// ONE run as the jobs API serves it: the row, plus the basis its
+/// figure rests on, derived on the way out (backlog 93fdb119).
+///
+/// The roll-ups ([`RunSummary`], [`GroupSpend`]) carried
+/// `pricing_basis` from the day the blend landed (design 91a9bfe7) and
+/// a single run's JSON carried none, so a per-row surface — a run list,
+/// `boss dispatch --report` reading its POST's answer — could tell a
+/// blended figure from a measured one only by re-deriving the rule
+/// client-side: a second copy of a server judgement, free to drift.
+/// The basis stays DERIVED, never stored, for the reason
+/// [`PricingBasis`] gives; this type is where the derivation meets the
+/// wire, through [`AgentRun::pricing_basis`], the one rule.
+///
+/// The key is always present, `null` included: `null` means no figure
+/// to describe, which a reader must be able to tell from a server too
+/// old to say. The flattened row keeps every existing key where it
+/// was, and [`AgentRun`]'s own `Deserialize` ignores the extra one, so
+/// a reader that parses rows back into `AgentRun` is unaffected.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AgentRunView {
+    #[serde(flatten)]
+    pub run: AgentRun,
+    pub pricing_basis: Option<PricingBasis>,
+}
+
+impl From<AgentRun> for AgentRunView {
+    fn from(run: AgentRun) -> Self {
+        let pricing_basis = run.pricing_basis();
+        AgentRunView { run, pricing_basis }
+    }
+}
+
 /// Price a run against the card. `None` — unpriced, never zero — in
 /// four cases, and they are all the same case: nothing on the card
 /// could turn these tokens into a number.
@@ -1625,6 +1657,34 @@ mod tests {
             "the two rates, not the blend"
         );
         assert_eq!(run.pricing_basis(), Some(PricingBasis::Split));
+    }
+
+    #[test]
+    fn a_single_runs_wire_shape_names_its_basis_and_reads_back() {
+        // Backlog 93fdb119: the row a reader gets carries the word the
+        // roll-up carries, derived by the same rule — and a reader that
+        // parses it back into `AgentRun` loses nothing and trips on
+        // nothing (the flattened token shape included).
+        let card = card();
+        for (run, want) in [
+            (
+                recorded(a_run("claude:opus-5[1m]", 875_000, 125_000), &card),
+                serde_json::json!("split"),
+            ),
+            (
+                recorded(a_total_run("claude:opus-5[1m]", 1_000_000), &card),
+                serde_json::json!("blended"),
+            ),
+            (
+                recorded(a_total_run("claude:opus-5", 142_982), &card),
+                serde_json::Value::Null,
+            ),
+        ] {
+            let wire = serde_json::to_value(AgentRunView::from(run.clone())).expect("serializes");
+            assert_eq!(wire["pricing_basis"], want, "{wire}");
+            let back: AgentRun = serde_json::from_value(wire).expect("reads back");
+            assert_eq!(back, run);
+        }
     }
 
     #[test]

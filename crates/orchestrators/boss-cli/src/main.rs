@@ -5,6 +5,7 @@ use tracing_subscriber::EnvFilter;
 mod attach;
 mod brief;
 mod built_from;
+mod bundle_lineage;
 mod cadence;
 mod car;
 mod census;

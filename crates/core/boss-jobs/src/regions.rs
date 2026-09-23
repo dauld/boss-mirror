@@ -250,18 +250,18 @@ pub const PUBLISH_KIND: &str = "publish-to-github";
 pub const STALLED_PUBLISH_HOURS: i64 = 24;
 
 /// ONE MIRROR PULL REQUEST, as the publish packet recorded it — the
-/// `open-pr` step's own fields, the `read-checks` reading, and whether
-/// `judge-checks` judged it. NOTHING HERE IS FETCHED FROM THE MIRROR:
-/// the readback car (backlog 321f1409) put the scan on the packet
-/// precisely so a surface could read it with no credential and no
-/// second opinion.
+/// `open-pr` step's own fields, the `read-checks` reading, whether
+/// `judge-checks` judged it, and what GitHub last answered about the
+/// PR's state (`pr_state`). NOTHING HERE IS FETCHED FROM THE MIRROR:
+/// the readback car (backlog 321f1409) put the scan on the packet, and
+/// `publish-github-pr.sh --measure` puts the PR's state there (backlog
+/// a5d4322c), precisely so a surface could read both with no
+/// credential and no second opinion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishPr {
     /// The pull request, as the verb recorded it.
     pub url: String,
-    /// The snapshot commit the PR proposes — the object the mirror's
-    /// main BECOMES when a person merges it, which is what makes the
-    /// merge readable from the record (see [`publish_prs`]).
+    /// The snapshot commit the PR proposes.
     pub snapshot: String,
     /// When `open-pr` completed: the instant the PR was opened.
     pub opened: Instant,
@@ -279,12 +279,25 @@ pub struct PublishPr {
     /// it only when the scan concluded `success`, which the conclusion
     /// already says.
     pub judged: bool,
-    /// True when the record shows the mirror's main reached
-    /// [`Self::snapshot`] — that is, a person merged it.
+    /// GitHub, asked, said this PR merged.
     pub merged: bool,
+    /// GitHub, asked, said this PR is closed — merged or not.
+    pub closed: bool,
+    /// When GitHub was last asked about this PR. EMPTY when it never
+    /// was, which is not "open": the region then says the state was
+    /// never read rather than how long the PR has been open.
+    pub state_read_at: String,
 }
 
 impl PublishPr {
+    /// Still standing as far as the record knows: GitHub has not been
+    /// read saying it closed. An UNREAD PR counts here — an unasked
+    /// question is not a pass — and the region's sentence says which of
+    /// the two it is.
+    pub fn awaiting(&self) -> bool {
+        !self.closed
+    }
+
     /// A RED READING NOBODY JUDGED: the scan was read, it did not
     /// conclude `success`, and no disposition was recorded. This is
     /// design cb38d806 §2's defect exactly — "a red badge on the mirror
@@ -306,44 +319,23 @@ impl PublishPr {
     }
 }
 
-/// Every mirror head the publish packets recorded: each `open-pr`
-/// step's `mirror_head` (the parent its snapshot was built on) and each
-/// packet's `drift_refresh.mirror_head` (the daily measurement). A
-/// snapshot commit is a NEW object, so it can appear in this set only
-/// after the mirror's main reached it — which happens only when a
-/// person merges the pull request. That is the whole merge test, and it
-/// needs no credential and no second read.
-fn mirror_heads(packets: &[(Job, Vec<Step>)]) -> std::collections::HashSet<String> {
-    packets
-        .iter()
-        .flat_map(|(job, steps)| {
-            let drift = job
-                .metadata
-                .get("drift_refresh")
-                .map(|d| md_str(d, "mirror_head").to_string());
-            let open_pr = find_step(steps, "open-pr", "open-pr")
-                .map(|s| md_str(&s.metadata, "mirror_head").to_string());
-            [drift, open_pr]
-        })
-        .flatten()
-        .filter(|h| !h.is_empty())
-        .collect()
-}
-
 /// The pull requests the publish packets opened, newest first — one per
-/// packet that reached `open-pr`, with its reading and its merge state.
+/// packet that reached `open-pr`, with its reading and its state.
 ///
-/// A PR the mirror has not absorbed reads OPEN. The record cannot see a
-/// merge until the next measurement of the mirror's head (the daily
-/// drift refresh, or the next publish's snapshot), so a PR merged in
-/// that gap reads open until then. That is a LATE reading, not an
-/// invented one, and it errs in the same direction every region here
-/// does: never quiet where the record has not spoken.
+/// THE STATE IS WHAT GITHUB ANSWERED, never an inference (backlog
+/// a5d4322c). It rides the packet as `pr_state`, written by the daily
+/// `publish-github-pr.sh --measure` from GitHub's public pulls API, and
+/// is taken only when its `pr_url` is this PR's. Until 2026-09-23 the
+/// merge was inferred from a later mirror head equalling the PR's
+/// snapshot commit — true only of a fast-forward, which GitHub's merge
+/// never makes (#239 merged as merge commit b27382e5, #241 was squashed
+/// to a7061022) — so every publish PR read open forever, and on
+/// 2026-09-22 the region called #239 open for 86 hours, three days
+/// after it merged.
 pub fn publish_prs(packets: &[(Job, Vec<Step>)]) -> Vec<PublishPr> {
-    let heads = mirror_heads(packets);
     let mut prs: Vec<PublishPr> = packets
         .iter()
-        .filter_map(|(_, steps)| {
+        .filter_map(|(job, steps)| {
             let open_pr = find_step(steps, "open-pr", "open-pr")?;
             let opened = step_done_at(Some(open_pr))?;
             let url = md_str(&open_pr.metadata, "pr_url").to_string();
@@ -358,8 +350,19 @@ pub fn publish_prs(packets: &[(Job, Vec<Step>)]) -> Vec<PublishPr> {
                     .map(|s| md_str(&s.metadata, key).to_string())
                     .unwrap_or_default()
             };
+            let observed = job
+                .metadata
+                .get("pr_state")
+                .filter(|o| md_str(o, "pr_url") == url);
             Some(PublishPr {
-                merged: !snapshot.is_empty() && heads.contains(&snapshot),
+                merged: observed
+                    .and_then(|o| o.get("merged"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                closed: observed.is_some_and(|o| md_str(o, "state") == "closed"),
+                state_read_at: observed
+                    .map(|o| md_str(o, "read_at").to_string())
+                    .unwrap_or_default(),
                 url,
                 snapshot,
                 opened,
@@ -1658,6 +1661,13 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     // it was waiting for, which is ours at any streak length. A declared
     // wait not yet seen lands in neither list: its patience is stated.
     let mut seen: Vec<(String, &str)> = Vec::new();
+    // Of those told not yet, the ones that DECLARED a wait with no
+    // `seen` check (e9b164a1). The declaration exempts them from the
+    // streak bound and hands the judgement to that check — so without
+    // one nothing can ever say the event arrived, and the exemption is
+    // an escape hatch that silences the label forever. Writing the
+    // check is ours, so they are counted, not folded into the world's.
+    let mut unobserved: Vec<&str> = Vec::new();
     for (j, _) in &awaiting {
         let branch = j
             .metadata
@@ -1685,6 +1695,9 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
                     Some(crate::car::Starved::Undeclared(streak)) => starved.push((streak, branch)),
                     Some(crate::car::Starved::SeenWhileNotYet { on, .. }) => {
                         seen.push((on, branch))
+                    }
+                    None if crate::car::waits_on(&j.metadata).is_some_and(|w| w.seen.is_none()) => {
+                        unobserved.push(branch)
                     }
                     None => {}
                 }
@@ -1741,9 +1754,16 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
                 seen.len()
             ));
         }
+        if let Some(branch) = unobserved.first() {
+            ours.push(format!(
+                "{} declared a wait with no seen check — {branch}; nothing can ever say its \
+                 event arrived, so writing one is ours (boss car waits-on --seen)",
+                unobserved.len()
+            ));
+        }
         let whose = if ours.is_empty() {
             "every one asked and was told not yet — waiting on the world, not on us".to_string()
-        } else if never_probed + starved.len() + seen.len() == stale.len() {
+        } else if never_probed + starved.len() + seen.len() + unobserved.len() == stale.len() {
             ours.join("; ")
         } else {
             format!("{}; the rest asked and were told not yet", ours.join("; "))
@@ -2251,7 +2271,7 @@ fn publish(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     let (cur, prev) = count_split(w, prs.iter().map(|p| p.opened));
     let trend = rate_trend("publishes", w, cur, prev);
 
-    let open: Vec<&PublishPr> = prs.iter().filter(|p| !p.merged).collect();
+    let open: Vec<&PublishPr> = prs.iter().filter(|p| p.awaiting()).collect();
     let unjudged = open.iter().find(|p| p.unjudged_red());
     // Oldest first: the PR that has stood longest is the one the
     // sentence should name.
@@ -2265,18 +2285,25 @@ fn publish(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
             format!("{} — {}", p.url, p.reading()),
         )
     } else if let Some(p) = stalled {
-        (
-            RegionState::Troubled,
+        let age = plural(
+            usize::try_from((inputs.now - p.opened).num_hours()).unwrap_or(0),
+            "hour",
+            "hours",
+        );
+        // Openness is said only where GitHub was READ saying it
+        // (backlog a5d4322c); an unread PR is named as unread.
+        let why = if p.state_read_at.is_empty() {
             format!(
-                "{} has been open {} — past the {STALLED_PUBLISH_HOURS}h a publish may stand, and every day it does the next diff is larger",
-                p.url,
-                plural(
-                    usize::try_from((inputs.now - p.opened).num_hours()).unwrap_or(0),
-                    "hour",
-                    "hours"
-                )
-            ),
-        )
+                "{} was opened {age} ago and its state was never read from GitHub — past the {STALLED_PUBLISH_HOURS}h a publish may stand, so it is stalled or unobserved",
+                p.url
+            )
+        } else {
+            format!(
+                "{} has been open {age} (GitHub read it open at {}) — past the {STALLED_PUBLISH_HOURS}h a publish may stand, and every day it does the next diff is larger",
+                p.url, p.state_read_at
+            )
+        };
+        (RegionState::Troubled, why)
     } else if let Some(why) = held_publish(packets, inputs.now) {
         (RegionState::Troubled, why)
     } else if let Some(p) = open.first() {
@@ -3081,6 +3108,72 @@ mod tests {
                 && shed.why.contains("fix/contradicted")
                 && shed.why.contains("a real Stripe sponsorship charge"),
             "seen in the record, still not yet — ours, naming what it waited on: {}",
+            shed.why
+        );
+    }
+
+    /// A DECLARED WAIT WITH NO OBSERVER IS COUNTED, NOT SILENT (backlog
+    /// e9b164a1). b461341d exempts a declared wait from the streak bound
+    /// and hands its judgement to the `seen` check — so a declaration
+    /// with `seen` null has handed it to nothing, and without this count
+    /// it read exactly like an observed wait: "waiting on the world",
+    /// forever. All six cars declared on 2026-09-23 were in that shape.
+    #[test]
+    fn a_declared_wait_with_no_seen_check_is_counted_as_ours() {
+        let car = |branch: &str, seen: Option<&str>| {
+            let md = json!({
+                "branch": branch, "merged": true, "opened_at": "2026-09-15T10:00:00Z",
+                "proof_probe": "true",
+                "proof_attempt": {
+                    "at": "2026-09-19T11:00:00Z", "not_yet": true, "exit": 75, "probe": "true",
+                    (crate::car::NOT_YET_SINCE): "2026-09-15T11:00:00Z",
+                    (crate::car::NOT_YET_RUNS): 96,
+                },
+                (crate::car::WAITS_ON): crate::car::waits_on_value(
+                    "a real Stripe sponsorship charge", seen),
+            });
+            let j = job("ship-a-change", branch, JobStatus::Open, md);
+            let s = vec![
+                step(
+                    &j,
+                    "gate",
+                    StepStatus::Completed,
+                    Some("2026-09-15T06:00:00Z"),
+                ),
+                step(&j, "proven", StepStatus::Ready, None),
+            ];
+            (j, s)
+        };
+        let status = empty_status();
+        let read = |cars: &[(Job, Vec<Step>)]| {
+            let out = regions(&inputs(&status, &[], &[], cars, &[], Some(&[]), Some(&[])));
+            by_name(&out, "shed").clone()
+        };
+
+        let shed = read(&[car("fix/unobserved", None)]);
+        assert!(
+            shed.why.contains("1 declared a wait with no seen check")
+                && shed.why.contains("fix/unobserved")
+                && !shed.why.contains("waiting on the world"),
+            "a declaration nothing observes is ours, and counted: {}",
+            shed.why
+        );
+
+        let shed = read(&[
+            car("fix/unobserved", None),
+            car("fix/observed", Some("true")),
+        ]);
+        assert!(
+            shed.why.contains("1 declared a wait with no seen check")
+                && shed.why.contains("the rest asked and were told not yet"),
+            "an observed wait stays the world's beside it: {}",
+            shed.why
+        );
+
+        let shed = read(&[car("fix/observed", Some("true"))]);
+        assert!(
+            !shed.why.contains("no seen check"),
+            "an observed wait is not counted: {}",
             shed.why
         );
     }
@@ -4411,26 +4504,37 @@ mod tests {
     }
 
     /// §4's first troubled condition: a pull request standing past a
-    /// day. The record has the instant (`open-pr` completed) and the
-    /// merge (a later mirror head reaching the snapshot), so the region
-    /// can say STALLED without asking the mirror anything.
+    /// day. The record has the instant (`open-pr` completed) and what
+    /// GitHub answered when `--measure` asked (`pr_state`), so the
+    /// region can say STALLED from the record alone.
     #[test]
     fn a_mirror_pull_request_open_past_a_day_troubles_the_publish_region() {
         let status = empty_status();
         let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
-        // Opened 30 hours before NOW, and no later mirror head reaches
-        // its snapshot — nobody merged it.
-        let packets = vec![publish_packet(
+        // Opened 30 hours before NOW, and GitHub, asked, said open.
+        let packets = vec![observed(
+            publish_packet(
+                "https://mirror/pull/240",
+                "snap-240",
+                "mirror-a",
+                "2026-09-18T06:00:00Z",
+                Some(("success", "0", "0")),
+                false,
+            ),
             "https://mirror/pull/240",
-            "snap-240",
-            "mirror-a",
-            "2026-09-18T06:00:00Z",
-            Some(("success", "0", "0")),
+            "open",
             false,
+            "2026-09-19T00:01:08Z",
         )];
         let out = regions(&with_publish(base, Some(&packets)));
         let p = by_name(&out, "publish");
         assert_eq!(p.count, Some(1));
+        assert!(
+            p.why
+                .contains("GitHub read it open at 2026-09-19T00:01:08Z"),
+            "the why says when openness was observed: {}",
+            p.why
+        );
         assert_eq!(p.state, RegionState::Troubled, "{}", p.why);
         assert!(
             p.why.contains("pull/240"),
@@ -4487,25 +4591,86 @@ mod tests {
         assert_eq!(by_name(&out, "publish").state, RegionState::Busy);
     }
 
-    /// The merge is READ, never assumed: a later packet whose snapshot
-    /// was built on top of this one's proves the mirror's main reached
-    /// it. Merged, the PR leaves the count and the region is clear —
-    /// and the old PR's age stops troubling anything.
+    /// What `publish-github-pr.sh --measure` writes onto a publish
+    /// packet when it asks GitHub about the pull request the packet
+    /// opened (backlog a5d4322c): the PR it asked about, the state and
+    /// merge GitHub answered, and when it asked.
+    fn observed(
+        (mut j, steps): (Job, Vec<Step>),
+        pr: &str,
+        state: &str,
+        merged: bool,
+        read_at: &str,
+    ) -> (Job, Vec<Step>) {
+        j.metadata = json!({ "pr_state": {
+            "pr_url": pr, "state": state, "merged": merged, "read_at": read_at,
+        }});
+        (j, steps)
+    }
+
+    /// The merge is READ, never assumed. Measured 2026-09-22 (backlog
+    /// a5d4322c): the region called #239 open for 86 hours and itself
+    /// TROUBLED over it, while GitHub said #239 had merged three days
+    /// earlier. It had inferred the merge from a later mirror head
+    /// equalling the PR's snapshot, which a GitHub merge never makes
+    /// true — #239 merged as merge commit b27382e5 and #241 was
+    /// squashed to a7061022, neither of them the snapshot. So a later
+    /// packet built on an old one's snapshot proves nothing; what
+    /// GitHub answered does.
     #[test]
-    fn a_merged_pull_request_leaves_the_count_and_clears_the_region() {
+    fn a_pull_request_github_read_as_merged_leaves_the_count_and_clears_the_region() {
         let status = empty_status();
+        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        let packets = vec![observed(
+            publish_packet(
+                "https://mirror/pull/239",
+                "snap-239",
+                "mirror-a",
+                "2026-09-15T08:00:00Z",
+                Some(("success", "0", "0")),
+                false,
+            ),
+            "https://mirror/pull/239",
+            "closed",
+            true,
+            "2026-09-19T00:01:08Z",
+        )];
+        let out = regions(&with_publish(base, Some(&packets)));
+        let p = by_name(&out, "publish");
+        assert_eq!(p.count, Some(0), "{}", p.why);
+        assert_eq!(p.state, RegionState::Clear, "{}", p.why);
+
+        // A PR closed WITHOUT a merge awaits nothing either.
+        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        let packets = vec![observed(
+            publish_packet(
+                "https://mirror/pull/238",
+                "snap-238",
+                "mirror-a",
+                "2026-09-15T08:00:00Z",
+                Some(("success", "0", "0")),
+                false,
+            ),
+            "https://mirror/pull/238",
+            "closed",
+            false,
+            "2026-09-19T00:01:08Z",
+        )];
+        let out = regions(&with_publish(base, Some(&packets)));
+        assert_eq!(by_name(&out, "publish").count, Some(0));
+
+        // The retired inference: a later snapshot built on this one's is
+        // NOT a merge the region may claim.
         let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
         let packets = vec![
             publish_packet(
                 "https://mirror/pull/240",
                 "snap-240",
                 "mirror-a",
-                "2026-09-17T06:00:00Z",
+                "2026-09-19T11:00:00Z",
                 Some(("success", "0", "0")),
                 false,
             ),
-            // The next publish built its snapshot on snap-240, so the
-            // mirror's main HAD reached it: #240 was merged.
             publish_packet(
                 "https://mirror/pull/241",
                 "snap-241",
@@ -4516,10 +4681,56 @@ mod tests {
             ),
         ];
         let out = regions(&with_publish(base, Some(&packets)));
+        assert_eq!(
+            by_name(&out, "publish").count,
+            Some(2),
+            "a mirror head is not GitHub's answer"
+        );
+    }
+
+    /// The sentence says only what was observed. A PR whose state was
+    /// never read from GitHub is NOT "open for N hours" — that is the
+    /// claim the region could not earn (backlog a5d4322c) — it is a PR
+    /// nobody asked about, and it still troubles the region past a day,
+    /// because an unasked question is not a pass.
+    #[test]
+    fn a_pull_request_never_read_from_github_is_not_called_open() {
+        let status = empty_status();
+        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        let packets = vec![publish_packet(
+            "https://mirror/pull/239",
+            "snap-239",
+            "mirror-a",
+            "2026-09-18T06:00:00Z",
+            Some(("success", "0", "0")),
+            false,
+        )];
+        let out = regions(&with_publish(base, Some(&packets)));
         let p = by_name(&out, "publish");
-        assert_eq!(p.count, Some(1), "only #241 is still open: {}", p.why);
-        assert_eq!(p.state, RegionState::Busy, "{}", p.why);
-        assert!(p.why.contains("pull/241"), "{}", p.why);
+        assert_eq!(p.state, RegionState::Troubled, "{}", p.why);
+        assert!(!p.why.contains("has been open"), "{}", p.why);
+        assert!(p.why.contains("never read from GitHub"), "{}", p.why);
+
+        // A reading of ANOTHER pull request is no reading of this one.
+        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        let packets = vec![observed(
+            publish_packet(
+                "https://mirror/pull/239",
+                "snap-239",
+                "mirror-a",
+                "2026-09-18T06:00:00Z",
+                Some(("success", "0", "0")),
+                false,
+            ),
+            "https://mirror/pull/238",
+            "closed",
+            true,
+            "2026-09-19T00:01:08Z",
+        )];
+        let out = regions(&with_publish(base, Some(&packets)));
+        let p = by_name(&out, "publish");
+        assert_eq!(p.count, Some(1), "{}", p.why);
+        assert!(p.why.contains("never read from GitHub"), "{}", p.why);
     }
 
     /// A publish packet HELD before its pull request, as the live one

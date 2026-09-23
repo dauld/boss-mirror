@@ -16,7 +16,10 @@
 //!     gate has not spoken;
 //!   - a red gate is `failing`: it strikes the cars aboard exactly as a
 //!     red CI does (the gate's receipt names the failing check; the
-//!     conductor's strike path reads the same rollup shape);
+//!     conductor's strike path reads the same rollup shape) — UNLESS
+//!     every failure the receipt locates lies in a file no car changed
+//!     (`train::red_outside_consist`, backlog 5541d813): then the cars
+//!     are released on that pass, unstruck;
 //!   - a REFUSED gate (disk floor, network, an unstarted pod) is
 //!     infrastructure, not a verdict on the cars: the conductor files the
 //!     gate again, up to `MAX_RELAUNCHES` times, and only then reads the
@@ -170,6 +173,21 @@ pub(crate) fn fails(gate_run: &Value) -> Vec<String> {
         .collect()
 }
 
+/// PURE: the commit the gate judged — the receipt's `head`, the gate's
+/// own statement of what it tested. The conductor diffs it against main
+/// to learn what the consist changed when it asks whether a red lies
+/// outside every car (backlog 5541d813). None when the receipt names no
+/// head: then nothing about the consist is proven.
+pub(crate) fn judged_head(gate_run: &Value) -> Option<String> {
+    receipt(gate_run)
+        .as_ref()
+        .and_then(|r| r.get("head"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .map(str::to_string)
+}
+
 /// PURE: WHY a red gate-run failed — the receipt's `fails_excerpt`
 /// (`{check: text}`, the same lines the runner replays to its pod log,
 /// bounded by the runner) as `(check, text)` pairs in the receipt's key
@@ -317,7 +335,13 @@ pub(crate) fn describe(gate: Option<&Standing>, relaunches: u32) -> String {
         None => "train gate: not filed yet".to_string(),
         Some(Standing::Pending) => "train gate: running".to_string(),
         Some(Standing::Green) => "train gate: green".to_string(),
-        Some(Standing::Failed) => "train gate: RED — strikes the cars aboard".to_string(),
+        // Stamped on the ci step BEFORE the conductor asks whether the
+        // red lies outside the consist, so it must not promise a strike
+        // an unstruck release then contradicts (5541d813).
+        Some(Standing::Failed) => {
+            "train gate: RED — the cars aboard are struck unless every failure lies in a file no car changed"
+                .to_string()
+        }
         Some(Standing::Refused(why)) => format!(
             "train gate: REFUSED ({why}) — {}",
             if relaunches < MAX_RELAUNCHES {
@@ -460,6 +484,26 @@ mod tests {
         );
         assert!(fails(&run(Some("green"), None)).is_empty());
         assert!(fails(&run(None, None)).is_empty());
+    }
+
+    /// The tree a red was judged on, as the gate itself states it — the
+    /// head the conductor diffs to learn which files the consist changed
+    /// (backlog 5541d813). No receipt, or none naming a head, is None.
+    #[test]
+    fn a_gate_run_names_the_head_it_judged() {
+        let red = run(
+            Some("failed"),
+            Some(json!({"verdict": "failed", "head": "26b7e3081a52923879dd07cda85c2f3f74e7abdf"})),
+        );
+        assert_eq!(
+            judged_head(&red).as_deref(),
+            Some("26b7e3081a52923879dd07cda85c2f3f74e7abdf")
+        );
+        assert_eq!(judged_head(&run(Some("failed"), None)), None);
+        assert_eq!(
+            judged_head(&run(Some("failed"), Some(json!({"head": ""})))),
+            None
+        );
     }
 
     /// The other half of `fails` (5708cbd5): train #361's alert named
@@ -646,7 +690,13 @@ mod tests {
     #[test]
     fn the_description_says_what_the_conductor_will_do_next() {
         assert!(describe(None, 0).contains("not filed"));
-        assert!(describe(Some(&Standing::Failed), 0).contains("strikes"));
+        // The ci step is stamped with this BEFORE the conductor asks
+        // whether the red lies outside the consist, so it must not claim
+        // a strike an unstruck release then contradicts (5541d813).
+        let red = describe(Some(&Standing::Failed), 0);
+        assert!(red.contains("RED"), "{red}");
+        assert!(!red.contains("strikes the cars aboard"), "{red}");
+        assert!(red.contains("no car changed"), "{red}");
         let d = describe(Some(&Standing::Refused("no disk".into())), 1);
         assert!(d.contains("no disk") && d.contains("1 of 3"), "{d}");
         let d = describe(Some(&Standing::Lost), MAX_RELAUNCHES);

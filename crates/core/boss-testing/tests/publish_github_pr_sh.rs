@@ -1419,6 +1419,7 @@ done
 for a in "$@"; do
     if [ "$a" = "PATCH" ]; then
         cp "$payload" '{patch}'
+        {{ tr -d '\n' < "$payload"; echo; }} >> '{patches}'
         # 204 No Content: the real door returns NO body. Anything the
         # verb wants to know about its write, it must go and read.
         if [ '{merged}' = true ]; then
@@ -1431,8 +1432,14 @@ for a in "$@"; do
 done
 # `/api/jobs/<id>` is one packet; `/api/jobs?...` is a listing. The
 # read-back asks the first question and must not be handed the second.
+# `.../pulls/<n>` is GitHub's pulls API: the fixture's answer, or the
+# 404 curl -f turns into exit 22.
 for a in "$@"; do
     case "$a" in
+        */pulls/*)
+            if [ -f '{pulls}/'"${{a##*/}}"'.json' ]; then cat '{pulls}/'"${{a##*/}}"'.json'; exit 0; fi
+            echo 'curl: (22) The requested URL returned error: 404' >&2
+            exit 22 ;;
         *api/jobs/*\?*) ;;
         *api/jobs/*)
             if [ -f '{after}' ]; then cat '{after}'; else jq '.data[0]' '{jobs}'; fi
@@ -1443,6 +1450,8 @@ cat '{jobs}'
 "#,
                 log = self.root.join("curl.log").display(),
                 patch = self.root.join("patch.json").display(),
+                patches = self.root.join("patches.jsonl").display(),
+                pulls = self.gh_api.display(),
                 jobs = self.root.join("jobs.json").display(),
                 after = self.root.join("jobs-after.json").display(),
                 merged = merged,
@@ -1465,6 +1474,21 @@ cat '{jobs}'
     fn measure(&self, extra: &[(&str, String)]) -> (bool, String) {
         self.echoing_curl();
         self.go_argv("--measure", extra)
+    }
+
+    /// What GitHub's pulls API answers for pull request `n`.
+    fn github_pull(&self, n: u32, body: &str) {
+        boss_testing::write_file(&self.gh_api.join(format!("{n}.json")), body);
+    }
+
+    /// Every PATCH body the run sent, in order.
+    fn patches(&self) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(self.root.join("patches.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("a PATCH body is JSON"))
+            .collect()
     }
 
     /// The PATCH body the run sent, as JSON.
@@ -1513,6 +1537,90 @@ fn a_measure_run_records_todays_drift_on_the_open_packet() {
         run.curl_log().contains("PATCH"),
         "the measurement never reached the packet: {}",
         run.curl_log()
+    );
+}
+
+/// THE PULL REQUESTS' STATE, OBSERVED (backlog a5d4322c). The publish
+/// region called #239 open for 86 hours on 2026-09-22 while GitHub said
+/// it had merged three days earlier: nothing in the pipeline ever asked
+/// GitHub. `--measure` runs every day, so it asks — GitHub's public
+/// pulls API, no credential — for every publish PR not already read
+/// closed, and writes the answer onto the PR's own packet as
+/// `pr_state`. Every packet here is CLOSED, as a publish packet is long
+/// before its PR merges, so this also pins that the question is asked
+/// on a day with no open packet to re-measure.
+#[test]
+fn a_measure_run_records_what_github_says_about_each_publish_pull_request() {
+    if !have_real_jq() {
+        eprintln!("publish_github_pr_sh: SKIPPED — the measure path needs a real jq");
+        return;
+    }
+    let run = Run::new("measure-pr-state");
+    let pr = |n: u32| format!("https://github.com/{MIRROR_SLUG}/pull/{n}");
+    boss_testing::write_file(
+        &run.root.join("jobs.json"),
+        &format!(
+            r#"{{"total":4,"data":[
+  {{"id":"00000000-0000-0000-0000-0000000000c1","status":"closed","metadata":{{}},
+    "steps":[{{"spec_slug":"open-pr","status":"completed","metadata":{{"pr_url":"{p239}"}}}}]}},
+  {{"id":"00000000-0000-0000-0000-0000000000c2","status":"closed","metadata":{{}},
+    "steps":[{{"spec_slug":"open-pr","status":"completed","metadata":{{"pr_url":"{p240}"}}}}]}},
+  {{"id":"00000000-0000-0000-0000-0000000000c3","status":"closed",
+    "metadata":{{"pr_state":{{"pr_url":"{p238}","state":"closed","merged":true}}}},
+    "steps":[{{"spec_slug":"open-pr","status":"completed","metadata":{{"pr_url":"{p238}"}}}}]}},
+  {{"id":"00000000-0000-0000-0000-0000000000c4","status":"closed","metadata":{{}},
+    "steps":[{{"spec_slug":"open-pr","status":"skipped","metadata":{{}}}}]}}]}}"#,
+            p238 = pr(238),
+            p239 = pr(239),
+            p240 = pr(240),
+        ),
+    );
+    // #239 as GitHub answered it from the pod on 2026-09-22.
+    run.github_pull(
+        239,
+        r#"{"number":239,"state":"closed","merged":true,
+            "merged_at":"2026-09-19T14:16:04Z","closed_at":"2026-09-19T14:16:04Z"}"#,
+    );
+    // #240: no fixture, so GitHub answers 404.
+    let scan = run.planted_scan(0);
+    let (ok, out) = run.measure(&[("BOSS_SECRETS_SCAN", scan)]);
+    assert!(
+        ok,
+        "a PR GitHub would not answer for is not a failed measurement: {out}"
+    );
+
+    let states: Vec<serde_json::Value> = run
+        .patches()
+        .into_iter()
+        .filter(|p| p.get("pr_state").is_some())
+        .collect();
+    assert_eq!(states.len(), 1, "only #239 was answered: {states:?}\n{out}");
+    let st = &states[0]["pr_state"];
+    assert_eq!(st["pr_url"], pr(239).as_str(), "{st}");
+    assert_eq!(st["state"], "closed", "{st}");
+    assert_eq!(st["merged"], true, "{st}");
+    assert_eq!(st["merged_at"], "2026-09-19T14:16:04Z", "{st}");
+    assert!(
+        st["read_at"].as_str().is_some_and(|s| s.len() >= 20),
+        "no read_at: {st}"
+    );
+    let log = run.curl_log();
+    assert!(
+        log.contains("api/jobs/00000000-0000-0000-0000-0000000000c1/metadata"),
+        "the answer must land on #239's own packet: {log}"
+    );
+    assert!(
+        log.contains(&format!("repos/{MIRROR_SLUG}/pulls/239")),
+        "GitHub was never asked about #239: {log}"
+    );
+    assert!(
+        !log.contains("pulls/238"),
+        "a PR already read closed was asked again: {log}"
+    );
+    // The unanswered one is SAID, not skipped in silence.
+    assert!(
+        out.contains(&pr(240)) && out.contains("never read"),
+        "an unanswered PR must be named: {out}"
     );
 }
 

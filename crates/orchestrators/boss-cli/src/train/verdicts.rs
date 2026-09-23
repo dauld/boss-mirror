@@ -415,6 +415,164 @@ pub(crate) fn auto_cancel_reason(
     })
 }
 
+/// The repo file one train-gate `fails` entry locates its failure in:
+/// the path of `panicked at <path>:<line>:<col>`, which the gate runner
+/// writes on both of its located rungs (`<check>: <test> - panicked at
+/// …` and `<check>: panicked at …`, infra/gate-runner/run.sh `detail`).
+/// Every other rung — a test with no panic line, a `+ N more` cap, a
+/// playwright or error-line quote — locates nothing, and neither does a
+/// location outside the repository (an absolute path). None is "the
+/// record does not say", never "nowhere".
+pub(crate) fn fails_entry_path(entry: &str) -> Option<String> {
+    let loc = entry
+        .split_once("panicked at ")?
+        .1
+        .split_whitespace()
+        .next()?;
+    let loc = loc.strip_suffix(':').unwrap_or(loc);
+    let mut parts = loc.rsplitn(3, ':');
+    let (col, line, path) = (parts.next()?, parts.next()?, parts.next()?);
+    let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    (numeric(col) && numeric(line) && !path.is_empty() && !path.starts_with('/'))
+        .then(|| path.to_string())
+}
+
+/// Does a red train's failure lie OUTSIDE its consist? Some(the failing
+/// files) only when all of it is proven from the record, else None and
+/// the train keeps the stall rule and its strikes (backlog 5541d813).
+///
+/// A strike is the claim that CI found THIS consist broken. Train
+/// 36692142 (2026-09-23 02:50Z, a web unit test timing out in a tier no
+/// car touched) and train 578a0ee9 (the same morning, a boss-testing
+/// test in boss_api_sh.rs, a file on main since #572 that no car
+/// changed) both held the one track until an operator cancelled by
+/// hand, because the only other way out was six hours of stall and a
+/// strike on every car. Proven here means ALL of:
+///
+/// - the red is the train gate's alone — a failing forge check is a
+///   second red its receipt does not explain;
+/// - every `fails` entry on the receipt locates a file
+///   ([`fails_entry_path`]) — one failure the record cannot place and
+///   nothing is proven;
+/// - every located file exists in the tree the gate judged (`present`)
+///   — a path that is not a repo file says nothing about the diff;
+/// - the consist's diff was read (`consist` non-empty — nothing read is
+///   not "disjoint") and names none of them.
+///
+/// THE FILE IS THE UNIT, deliberately and with a known limit: 578a0ee9's
+/// consist touched boss-testing, so a crate-level rule would have kept
+/// it. A car that breaks a test by editing only what the test drives in
+/// ANOTHER file reads as outside here — but that car went through its
+/// own gate on the same suite first, so such a red is a flake, a stale
+/// base, or a two-car interaction, and none of those is proven against
+/// any one car either. It is released unstruck and re-boards — ONCE per
+/// car ([`outside_consist_cancel_reason`]), so a pair that is red only
+/// together meets the stall rule and its strikes the second time rather
+/// than looping. It never merges, because releasing is all this licenses.
+pub(crate) fn red_outside_consist(
+    gate_fails: &[String],
+    rollup: Option<&Value>,
+    consist: &[String],
+    present: &[String],
+) -> Option<Vec<String>> {
+    if gate_fails.is_empty() || consist.is_empty() || !failing_checks(rollup).is_empty() {
+        return None;
+    }
+    let mut files: Vec<String> = gate_fails
+        .iter()
+        .map(|e| fails_entry_path(e))
+        .collect::<Option<_>>()?;
+    files.sort();
+    files.dedup();
+    files
+        .iter()
+        .all(|f| present.contains(f) && !consist.contains(f))
+        .then_some(files)
+}
+
+/// The car stamp that records an outside-the-consist release: the id of
+/// the train that granted it. A car gets ONE such release (see
+/// [`outside_consist_cancel_reason`]).
+///
+/// NEVER CLEARED, deliberately. A car that lands closes, and a closed
+/// car never boards again, so the stamp on it is inert history; a car
+/// that does not land must keep it, because clearing it is exactly what
+/// would re-open the livelock the stamp exists to stop. So the one
+/// clearing point the bound allows ("when the car lands") would change
+/// nothing, and there is none.
+pub(crate) const KEY_OUTSIDE_RELEASE: &str = "unstruck_outside_release";
+
+/// What a red outside the consist earns this pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OutsideRelease {
+    /// Released now, unstruck, and every car stamped — the reason.
+    Release(String),
+    /// A car aboard already spent its one release: today's stall rule
+    /// and its strikes decide, and this note rides the eventual reason.
+    Spent(String),
+}
+
+/// The release a red outside the consist earns: on the pass that sees
+/// it, with no stall wait, naming the files — and the caller releases it
+/// UNSTRUCK. Only a live `failing` verdict on an unmerged train, like
+/// [`auto_cancel_reason`]; a cancel never merges anything.
+///
+/// ONCE PER CAR (operator review of 5541d813). The class the train gate
+/// exists for is the combined-tree failure (train #361): two cars, each
+/// green on its own gate, red only when assembled — and the failing
+/// test can sit in a file NEITHER touched. Released unstruck every time,
+/// the same cars re-board, go red and are released again: a livelock
+/// holding the track forever, worse than the six-hour hold. So a car
+/// that already carries [`KEY_OUTSIDE_RELEASE`] from an EARLIER train
+/// turns the answer to `Spent`, and the train falls back to the stall
+/// rule and its strikes, which is the circuit breaker (`car_hold_reason`)
+/// that stops the loop. One stamped car aboard is enough.
+///
+/// `cars` are the train's boarded cars as read; only those still riding
+/// this train count ([`releasable_cars`]). None of them — unread, or all
+/// moved on — is None: there is nothing to release early, and the stall
+/// rule decides.
+pub(crate) fn outside_consist_cancel_reason(
+    train: &Value,
+    live_verdict: &str,
+    outside: &[String],
+    cars: &[Value],
+) -> Option<OutsideRelease> {
+    if live_verdict != "failing"
+        || outside.is_empty()
+        || step_done(find_step(train, "merged", "Merged into main"))
+    {
+        return None;
+    }
+    let tid = train.get("id").and_then(Value::as_str).unwrap_or_default();
+    let aboard = releasable_cars(cars, tid);
+    if aboard.is_empty() {
+        return None;
+    }
+    let files = outside.join(", ");
+    let spent: Vec<String> = aboard
+        .iter()
+        .filter_map(|c| {
+            let prior = c
+                .get("metadata")
+                .and_then(|m| m.get(KEY_OUTSIDE_RELEASE))
+                .and_then(Value::as_str)
+                .filter(|p| !p.is_empty() && *p != tid)?;
+            let id = c.get("id").and_then(Value::as_str).unwrap_or("?");
+            Some(format!("car {} (train {})", id8(id), id8(prior)))
+        })
+        .collect();
+    if !spent.is_empty() {
+        return Some(OutsideRelease::Spent(format!(
+            "red only in {files}, outside the consist, but {} already had its one unstruck release, so the stall rule and its strikes apply (5541d813)",
+            spent.join(", ")
+        )));
+    }
+    Some(OutsideRelease::Release(format!(
+        "train gate red only in {files} — a file no car aboard changed; cars released unstruck to board a later train, once each"
+    )))
+}
+
 /// The operator's cancel stamp, parsed: `(reason, by)` when
 /// `metadata.cancel_requested` is an object carrying a non-empty
 /// `reason` and a non-empty `by`. Anything else — absent, a bare
@@ -614,10 +772,15 @@ pub(crate) fn failing_checks(rollup: Option<&Value>) -> Vec<String> {
 /// `train`/`boarded_head` cleared so the dock counts it again, why it
 /// came back, and — only when the train's CI actually judged it —
 /// one more red against its record.
+///
+/// `outside_release` is the train id when this release was granted
+/// because the red lay outside the consist: it is stamped as
+/// [`KEY_OUTSIDE_RELEASE`], so the car cannot be granted another.
 pub(crate) fn release_stamps(
     car: &Value,
     reason: &str,
     strike: bool,
+    outside_release: Option<&str>,
 ) -> Vec<(&'static str, Value)> {
     // The boarded head goes with the train stamp: this car boarded
     // nothing now, and a stale head is not evidence about whatever it
@@ -642,6 +805,9 @@ pub(crate) fn release_stamps(
             .unwrap_or(0)
             + 1;
         stamps.push(("red_trains", json!(reds)));
+    }
+    if let Some(train) = outside_release {
+        stamps.push((KEY_OUTSIDE_RELEASE, json!(train)));
     }
     stamps
 }
@@ -1382,6 +1548,267 @@ mod tests {
         );
     }
 
+    // -- a red in a file no car touched (backlog 5541d813) ------------------
+    //
+    // Train 578a0ee9 (2026-09-23) went red on the train gate's `test`
+    // check in crates/core/boss-testing/tests/boss_api_sh.rs, a file on
+    // main since #572 that no car aboard changed; its six cars sat until
+    // an operator cancelled by hand. The receipt's own `fails` line, as
+    // the gate runner wrote it, is the fixture.
+
+    const LIVE_578: &str = "test: a_roll_that_outlasts_the_window_fails_naming_the_elapsed_time - \
+         panicked at crates/core/boss-testing/tests/boss_api_sh.rs:1065:5: the failure names \
+         the call, the elapsed time, and that relaunching is safe:";
+    const LIVE_578_PATH: &str = "crates/core/boss-testing/tests/boss_api_sh.rs";
+
+    fn strs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_fails_line_locates_the_file_its_panic_names() {
+        assert_eq!(fails_entry_path(LIVE_578).as_deref(), Some(LIVE_578_PATH));
+        // The runner's second rung: a panic with no test name beside it.
+        assert_eq!(
+            fails_entry_path(
+                "test: panicked at crates/a/src/lib.rs:3:1: boom (no failing test name in this \
+                 check's output)"
+            )
+            .as_deref(),
+            Some("crates/a/src/lib.rs")
+        );
+    }
+
+    #[test]
+    fn a_fails_line_without_a_located_panic_locates_nothing() {
+        for entry in [
+            "test: x - FAILED, with no panic line for it in this check's output",
+            "test: + 3 more failing test(s) not named here (8 failed in all) - the Job log \
+             replay lists them",
+            "web-suite: no cargo test failure in this check's output; 2 playwright verdict line(s)",
+            "clippy: | error: unused variable",
+            // A location outside the repository is not a repo path to
+            // compare against a diff.
+            "test: t - panicked at /rustc/abc/library/core/src/option.rs:2:3: none",
+            "test: t - panicked at crates/a.rs: no line number",
+        ] {
+            assert_eq!(fails_entry_path(entry), None, "{entry}");
+        }
+    }
+
+    #[test]
+    fn the_live_578a0ee9_red_lies_outside_its_consist() {
+        // The consist's own diff, read from the gated head: boss-testing
+        // WAS touched, but not the failing file — the file is the unit.
+        let consist = strs(&[
+            "crates/core/boss-testing/tests/ops_runner_sh.rs",
+            "crates/orchestrators/boss-cli/src/gate.rs",
+            "infra/ops/ops-runner.sh",
+        ]);
+        let present = strs(&[LIVE_578_PATH]);
+        assert_eq!(
+            red_outside_consist(&strs(&[LIVE_578]), None, &consist, &present),
+            Some(strs(&[LIVE_578_PATH]))
+        );
+    }
+
+    #[test]
+    fn a_red_in_a_file_a_car_touched_is_the_consists() {
+        let consist = strs(&[LIVE_578_PATH, "infra/dev/boss-api"]);
+        assert_eq!(
+            red_outside_consist(&strs(&[LIVE_578]), None, &consist, &strs(&[LIVE_578_PATH])),
+            None
+        );
+    }
+
+    #[test]
+    fn a_red_is_outside_only_when_every_failure_is_located_and_proven() {
+        let consist = strs(&["crates/orchestrators/boss-cli/src/gate.rs"]);
+        let present = strs(&[LIVE_578_PATH]);
+        let unlocated = "test: y - FAILED, with no panic line for it in this check's output";
+        // One failure the record cannot place: nothing is proven.
+        assert_eq!(
+            red_outside_consist(&strs(&[LIVE_578, unlocated]), None, &consist, &present),
+            None
+        );
+        // No failures on the receipt at all: nothing is proven.
+        assert_eq!(red_outside_consist(&[], None, &consist, &present), None);
+        // The consist's diff could not be read: nothing read is not
+        // "disjoint".
+        assert_eq!(
+            red_outside_consist(&strs(&[LIVE_578]), None, &[], &present),
+            None
+        );
+        // The located file is not in the tree the gate judged — the
+        // location is not a repo file, so it proves nothing about one.
+        assert_eq!(
+            red_outside_consist(&strs(&[LIVE_578]), None, &consist, &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_red_the_forge_also_reports_is_not_the_gates_alone() {
+        // A failing forge check is a second red the gate's receipt does
+        // not explain; the train keeps today's rule.
+        let rollup = json!([{"context": "CI / web", "conclusion": "FAILURE"}]);
+        assert_eq!(
+            red_outside_consist(
+                &strs(&[LIVE_578]),
+                Some(&rollup),
+                &strs(&["crates/orchestrators/boss-cli/src/gate.rs"]),
+                &strs(&[LIVE_578_PATH])
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_red_outside_the_consist_releases_at_once_and_names_the_file() {
+        // No stamps at all: not a minute of stall is needed.
+        let t = red_train(&[], false);
+        let cars = [aboard("car-a", "t-1", None)];
+        let Some(OutsideRelease::Release(r)) =
+            outside_consist_cancel_reason(&t, "failing", &strs(&[LIVE_578_PATH]), &cars)
+        else {
+            panic!("a red no car touched releases on the pass that judges it");
+        };
+        assert!(r.contains(LIVE_578_PATH), "{r}");
+        assert!(r.contains("unstruck"), "{r}");
+    }
+
+    #[test]
+    fn an_outside_red_never_releases_a_merged_or_unred_train() {
+        let outside = strs(&[LIVE_578_PATH]);
+        let cars = [aboard("car-a", "t-1", None)];
+        assert_eq!(
+            outside_consist_cancel_reason(&red_train(&[], true), "failing", &outside, &cars),
+            None
+        );
+        for live in ["green", "pending", "aborted"] {
+            assert_eq!(
+                outside_consist_cancel_reason(&red_train(&[], false), live, &outside, &cars),
+                None,
+                "{live}"
+            );
+        }
+        assert_eq!(
+            outside_consist_cancel_reason(&red_train(&[], false), "failing", &[], &cars),
+            None
+        );
+        // No car still aboard (the boarded cars could not be read, or all
+        // moved on): nothing to release early; the stall rule decides.
+        assert_eq!(
+            outside_consist_cancel_reason(&red_train(&[], false), "failing", &outside, &[]),
+            None
+        );
+    }
+
+    /// A car as the conductor reads it: open, riding `train`, and
+    /// carrying an outside-release stamp from `spent_on` if it has one.
+    fn aboard(id: &str, train: &str, spent_on: Option<&str>) -> serde_json::Value {
+        let mut md = json!({"train": train});
+        if let Some(t) = spent_on {
+            md[KEY_OUTSIDE_RELEASE] = json!(t);
+        }
+        json!({"id": id, "status": "open", "metadata": md})
+    }
+
+    /// The car after a release: its own metadata with the stamps merged,
+    /// then boarded onto `next_train` — what the next train reads.
+    fn released_then_reboarded(
+        car: &serde_json::Value,
+        stamps: &[(&'static str, Value)],
+        next_train: &str,
+    ) -> serde_json::Value {
+        let mut car = car.clone();
+        for (k, v) in stamps {
+            car["metadata"][*k] = v.clone();
+        }
+        car["metadata"]["train"] = json!(next_train);
+        car
+    }
+
+    #[test]
+    fn two_cars_green_alone_red_together_get_one_unstruck_release_not_a_livelock() {
+        // THE CASE THE BOUND EXISTS FOR (operator review of 5541d813):
+        // the combined-tree failure the train gate is for (train #361).
+        // Two cars, each green on its own gate, go red only assembled,
+        // and the failing test sits in a file NEITHER touched. Released
+        // unstruck every time, they would re-board, go red and be
+        // released forever — a track held for good, worse than 6h.
+        let files = strs(&[LIVE_578_PATH]);
+        let first = red_train(&[], false); // id t-1
+        let cars = [aboard("car-a", "t-1", None), aboard("car-b", "t-1", None)];
+
+        // First red outside the consist: released at once, unstruck, and
+        // every car is stamped with the train that spent its release.
+        let Some(OutsideRelease::Release(reason)) =
+            outside_consist_cancel_reason(&first, "failing", &files, &cars)
+        else {
+            panic!("the first outside red releases at once");
+        };
+        let stamps: Vec<_> = cars
+            .iter()
+            .map(|c| release_stamps(c, &reason, false, Some("t-1")))
+            .collect();
+        for s in &stamps {
+            assert_eq!(
+                s.iter()
+                    .find(|(k, _)| *k == KEY_OUTSIDE_RELEASE)
+                    .map(|(_, v)| v),
+                Some(&json!("t-1")),
+                "the release is recorded on the car: {s:?}"
+            );
+            assert!(
+                !s.iter().any(|(k, _)| *k == "red_trains"),
+                "and it is unstruck: {s:?}"
+            );
+        }
+
+        // They re-board together and go red outside the consist again.
+        let mut second = red_train(&["2026-08-13T00:00:00Z"], false);
+        second["id"] = json!("t-2");
+        let again = [
+            released_then_reboarded(&cars[0], &stamps[0], "t-2"),
+            released_then_reboarded(&cars[1], &stamps[1], "t-2"),
+        ];
+        let Some(OutsideRelease::Spent(why)) =
+            outside_consist_cancel_reason(&second, "failing", &files, &again)
+        else {
+            panic!("a car that spent its release is not released early again");
+        };
+        assert!(why.contains("car-a"), "the note names the car: {why}");
+        assert!(why.contains("t-1"), "and the train that spent it: {why}");
+        // Not released early: today's stall rule decides, inside its
+        // threshold it holds…
+        assert_eq!(
+            auto_cancel_reason(&second, "failing", ts("2026-08-13T01:00:00Z"), 6),
+            None
+        );
+        // …and even ONE stamped car aboard is enough to fall back.
+        let mixed = [
+            released_then_reboarded(&cars[0], &stamps[0], "t-2"),
+            aboard("car-c", "t-2", None),
+        ];
+        assert!(matches!(
+            outside_consist_cancel_reason(&second, "failing", &files, &mixed),
+            Some(OutsideRelease::Spent(_))
+        ));
+    }
+
+    #[test]
+    fn a_stamp_naming_this_same_train_is_not_a_spent_release() {
+        // A cancel retried after stamping some cars must not read its own
+        // stamp as an earlier train's.
+        let t = red_train(&[], false); // id t-1
+        let cars = [aboard("car-a", "t-1", Some("t-1"))];
+        assert!(matches!(
+            outside_consist_cancel_reason(&t, "failing", &strs(&[LIVE_578_PATH]), &cars),
+            Some(OutsideRelease::Release(_))
+        ));
+    }
+
     // -- honouring the operator's cancel request ---------------------------
     //
     // The yard's cancel button (7a24caf3): an operator stamps
@@ -1548,7 +1975,7 @@ mod tests {
         // The strike is what was wrong. Nothing judged these cars.
         assert!(!verdict_strikes_cars("aborted", None));
         let car = json!({"id": "car-1", "metadata": {"red_trains": 1}});
-        let stamps = release_stamps(&car, "CI aborted without a verdict", false);
+        let stamps = release_stamps(&car, "CI aborted without a verdict", false, None);
         assert!(
             !stamps.iter().any(|(k, _)| *k == "red_trains"),
             "a stalled train must not touch the strike count"
@@ -1566,7 +1993,7 @@ mod tests {
         // auto-cancel is a loop that burns CI all night.
         assert!(verdict_strikes_cars("failing", None));
         let car = json!({"id": "car-1", "metadata": {"red_trains": 1}});
-        let stamps = release_stamps(&car, "CI red", true);
+        let stamps = release_stamps(&car, "CI red", true, None);
         assert_eq!(
             stamps
                 .iter()

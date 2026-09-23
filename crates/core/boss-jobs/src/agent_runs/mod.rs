@@ -119,9 +119,9 @@ pub use postgres::PgAgentRuns;
 #[cfg(feature = "postgres")]
 pub use rebuild::rebuild_agent_runs;
 pub use types::{
-    ADMISSION_WINDOW, AgentRun, EFFORT_APPLIED_FROM_SHA, EFFORT_RECORDED_FROM_SHA, EffortEra,
-    GroupSpend, NewAgentRun, PricingBasis, RateCardRow, RunFilter, RunOutcome, RunSummary,
-    TokenUsage, effort_applied_from, measure_load, price_run, pricing_basis, summarize,
+    ADMISSION_WINDOW, AgentRun, AgentRunView, EFFORT_APPLIED_FROM_SHA, EFFORT_RECORDED_FROM_SHA,
+    EffortEra, GroupSpend, NewAgentRun, PricingBasis, RateCardRow, RunFilter, RunOutcome,
+    RunSummary, TokenUsage, effort_applied_from, measure_load, price_run, pricing_basis, summarize,
 };
 
 #[cfg(test)]

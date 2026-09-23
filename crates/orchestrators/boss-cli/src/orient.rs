@@ -523,6 +523,15 @@ pub(crate) fn shed_lines(cars: &[Value]) -> Vec<String> {
                             clipped(&said)
                         ),
                         None => match boss_jobs::car::waits_on(md) {
+                            // A declaration nothing observes (e9b164a1):
+                            // exempt from the bound AND never contradicted,
+                            // so the line names the missing check.
+                            Some(w) if w.seen.is_none() => format!(
+                                "    {branch}: probe says NOT YET, waiting on {} — no seen check, \
+                                 so nothing can say it arrived (boss car waits-on --seen) — {}",
+                                clipped(&w.on),
+                                clipped(&said)
+                            ),
                             Some(w) => format!(
                                 "    {branch}: probe says NOT YET, waiting on {} — {}",
                                 clipped(&w.on),
@@ -1495,6 +1504,16 @@ pub async fn run(all: bool) -> Result<()> {
         }
     }
 
+    // BUNDLES (5449111c) — a cadence bundle file the live lineage has
+    // moved past. An author bumps the version FROM THE FILE, so a file
+    // behind live turns "bump the version" into a collision the seed
+    // refuses — and the gate, which reads only files, stays green. Said
+    // here, at session start, before anyone bumps; the judgement is the
+    // boot seed's own decision table, run dry against the live rows.
+    for line in crate::bundle_lineage::cadence_section(&http).await {
+        println!("{line}");
+    }
+
     // THE SHED — landed cars not yet proven, and what each waits on.
     let shed = shed_lines(&cars);
     if shed.is_empty() {
@@ -1908,6 +1927,31 @@ mod tests {
         let line = &shed_lines(&[declared(json!("2026-09-23T06:00:00Z"))])[0];
         assert!(
             line.contains("was seen in the record at 2026-09-23T06:00:00Z"),
+            "{line}"
+        );
+        assert!(!line.contains("no seen check"), "{line}");
+    }
+
+    /// A DECLARED WAIT WITH NO OBSERVER SAYS SO (backlog e9b164a1): a
+    /// `seen` of null exempts the car from the streak bound and hands
+    /// the judgement to nothing, so the line names the missing check
+    /// and the verb that writes one, rather than reading as patience.
+    #[test]
+    fn a_declared_wait_with_no_seen_check_names_the_missing_observer() {
+        let line = &shed_lines(&[landed(
+            "fix/unobserved",
+            json!({ "proof_probe": "bash x.sh",
+                "waits_on": {"on": "a new Stripe sponsorship charge", "seen": null},
+                "proof_attempt": {
+                "at": "2026-09-23T07:00:00Z", "exit": 75, "not_yet": true,
+                "probe": "bash x.sh", "why": "NOT YET: no charge",
+                "not_yet_since": "2026-09-19T05:50:00Z", "not_yet_runs": 86,
+            } }),
+        )])[0];
+        assert!(
+            line.contains("waiting on a new Stripe sponsorship charge")
+                && line.contains("no seen check")
+                && line.contains("boss car waits-on"),
             "{line}"
         );
     }

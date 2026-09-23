@@ -44,6 +44,10 @@
 //!    an agent spends, naming the first path, its tier and the level.
 //!    A packet declaring no paths is admitted here; the gate decides
 //!    on the diff. An instance declaring no level enforces nothing.
+//!    THE VENUE DOOR follows the block (backlog 10b07b73): a packet
+//!    whose `metadata.tenant_repo` names another repository is refused
+//!    for a `car`-lane profile, whose worktree, gate and probe are all
+//!    this tree's ([`venue_refusal`]).
 //! 3. Claims the step as the actor running the verb (`BOSS_ACTOR`;
 //!    unnamed, the claim is refused before anything is filed) through
 //!    the claim door — a Ready→Active compare-and-set that answers 409
@@ -314,6 +318,69 @@ pub(crate) fn declared_paths(job: &Value) -> Vec<String> {
 /// The packet metadata key the door reads.
 pub(crate) const PATHS_KEY: &str = "paths";
 
+/// The packet metadata key that says the deliverable lives in ANOTHER
+/// repository — a tenant repo, named the way `infra/cluster/instances.toml`
+/// names one (`tenant_repo = "david/algedonic-llc"`). Absent, the
+/// deliverable is this tree, which is every packet filed before
+/// backlog 10b07b73.
+pub(crate) const TENANT_REPO_KEY: &str = "tenant_repo";
+
+/// THE VENUE DOOR (backlog 10b07b73). The refusal for a packet whose
+/// deliverable is a tenant repo dispatched to a `car`-lane profile, or
+/// `None` when it is admitted.
+///
+/// WHY. Measured 2026-09-22: a builder dispatched at 86f32b7d, whose
+/// deliverable was registry data in david/algedonic-llc, was handed a
+/// worktree of THIS tree and a brief that was entirely this tree's gate
+/// — uid, cargo bound, phases, `boss gate`, the park flags, the forge
+/// probe. It found out from the design, built in the tenant repo by
+/// hand, and then could not end: `reported` opens on a gate's green and
+/// a tenant car has no gate, so `boss dispatch --report` refused twice
+/// and the run was left to age into `died` with its work pushed.
+/// Nothing in the car lane applies to another repo, so the run is
+/// refused before it spends rather than after it has built.
+///
+/// A `step`-lane profile ships no car, so where the deliverable lives
+/// is not its question and it is admitted. A declaration that is
+/// present but not a repo name is refused, never read as absent: a
+/// door that cannot read its input and opens anyway is a clean door
+/// that never looked (7b7e0529). A JSON null is the metadata PATCH's
+/// deletion, so it is read as no declaration.
+pub(crate) fn venue_refusal(
+    short: &str,
+    slug: &str,
+    profile: &str,
+    lane: &str,
+    job: &Value,
+) -> Option<String> {
+    if lane != crate::brief::LANE_CAR {
+        return None;
+    }
+    let declared = job.get("metadata").and_then(|m| m.get(TENANT_REPO_KEY))?;
+    if declared.is_null() {
+        return None;
+    }
+    let Some(repo) = declared.as_str().map(str::trim).filter(|r| !r.is_empty()) else {
+        return Some(format!(
+            "packet {short}'s metadata.{TENANT_REPO_KEY} cannot be read as a repository name \
+             (it is {declared}) — nothing claimed, nothing filed. Set it to the repo the \
+             deliverable lives in (as `david/algedonic-llc`), or delete it (PATCH the key to \
+             null) if the change is in this tree."
+        ));
+    };
+    Some(format!(
+        "packet {short}'s deliverable is in {repo} (metadata.{TENANT_REPO_KEY}), and `{slug}` \
+         dispatches profile `{profile}`, which is briefed in the `car` lane — a worktree of \
+         THIS tree, its gate, its park and its forge probe — nothing claimed, nothing filed.\n  \
+         None of that applies to {repo}: a tenant car has no gate to go green, so the run's \
+         `reported` step never opens and the run would age into `died` with its work pushed \
+         (measured on 86f32b7d, 2026-09-22; backlog 10b07b73).\n  \
+         Build it in {repo} itself and check it there with `boss tenant check`; no dispatch \
+         profile ships a car to a tenant repo yet. If the change is in THIS tree after all, \
+         delete metadata.{TENANT_REPO_KEY} (PATCH it to null) and dispatch again."
+    ))
+}
+
 /// The jobs API path the instance answers its edit level on.
 pub(crate) const EDIT_LEVEL_PATH: &str = "/api/tenant/edit-level";
 
@@ -454,6 +521,68 @@ pub(crate) fn definition_in(repo: &Path, settings: &Settings) -> Option<String> 
     path.is_file().then_some(name)
 }
 
+/// Whether a run gets a git worktree of its own — decided by the LANE
+/// its profile's document declares, never typed on the Agent call
+/// (backlog 65cea113, 2026-09-23).
+///
+/// WHY THE LANE. A `car`-lane profile ships a branch, and two builders
+/// in one tree collide, so it is isolated. A `step`-lane profile ships
+/// no car — the analyst rules open with "No worktree, no branch, no
+/// gate" — and yet every analyst ran worktree-isolated, because that
+/// was whatever the operator typed. Isolation is not free: the
+/// harness then refuses any command it cannot show stays inside the
+/// tree — every heredoc, `mkdir -p … && cat > … <<EOF` into the
+/// scratchpad, a `python3 -` reading stdin — none of which touches
+/// git. The page-march pilot (run d5e0f287) measured that at about
+/// three times the tool calls for one read-only run, on a march that
+/// queues ~94 of them. Same shape as the effort (e720dd00): the
+/// declaration was a noun on the packet and the control was set by
+/// hand, so the declaration now sets the control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Isolation {
+    /// A git worktree of the run's own — `isolation: "worktree"`.
+    Worktree,
+    /// The dispatching session's own directory — no `isolation` key.
+    Shared,
+}
+
+impl Isolation {
+    /// The isolation a lane asks for: the car lane builds a branch in
+    /// a tree of its own; every other lane ships no car.
+    pub(crate) fn for_lane(lane: &str) -> Self {
+        if lane == crate::brief::LANE_CAR {
+            Self::Worktree
+        } else {
+            Self::Shared
+        }
+    }
+
+    /// [`Self::for_lane`] of the lane `profile`'s document declares in
+    /// `repo` — the one reader, [`crate::documents::lane`], so a
+    /// profile with no document is isolated as the car lane it is
+    /// briefed under.
+    pub(crate) fn for_profile(repo: &Path, profile: &str) -> Result<Self> {
+        crate::documents::lane(repo, profile).map(|lane| Self::for_lane(&lane))
+    }
+}
+
+/// The isolation as a CONTROL, for the operator who pastes the prompt
+/// by hand — the hook sets it on the call ([`effort_line`]'s twin).
+pub(crate) fn isolation_line(isolation: Isolation) -> String {
+    match isolation {
+        Isolation::Worktree => "Launched with isolation worktree — this profile's lane ships a \
+             car, so the run builds in a git worktree of its own. The PreToolUse hook sets it \
+             on the Agent call; a prompt pasted by hand must pass it."
+            .to_string(),
+        Isolation::Shared => "Launched WITHOUT isolation — this profile's lane ships no car and \
+             touches no git, and a worktree-isolated session refuses every heredoc and compound \
+             command it cannot verify, about three times the tool calls for a read-only run \
+             (backlog 65cea113). The PreToolUse hook drops it from the Agent call; a prompt \
+             pasted by hand must not pass it."
+            .to_string(),
+    }
+}
+
 /// Where `session-start.sh` left the list of definitions THIS session
 /// loaded — the one moment Claude Code reads the directory.
 pub(crate) const SESSION_DEFINITIONS_ENV: &str = "BOSS_SESSION_AGENT_DEFINITIONS";
@@ -496,13 +625,22 @@ pub(crate) fn unloaded_for_session(repo: &Path, snapshot: Option<&Path>) -> Vec<
 
 /// The last part of the prompt: the run's id, and the one export that
 /// ties the gate the builder launches back to it.
-pub(crate) fn run_section(run_id: &str, settings: &Settings) -> String {
+/// `isolation` is `None` when the profile's lane could not be read:
+/// the section then names none, and the call keeps the caller's own.
+pub(crate) fn run_section(
+    run_id: &str,
+    settings: &Settings,
+    isolation: Option<Isolation>,
+) -> String {
+    let isolation = isolation
+        .map(|i| format!("{}\n", isolation_line(i)))
+        .unwrap_or_default();
     format!(
         "== THE RUN ==\n\n\
          Your run is agent-run {run_id} (profile `{}`, model {}, budget ${}, effort {}).\n\
          Before `boss gate`, in the shell you gate from: export {}={run_id}\n\
          The gate-run then records this run, and a green lands it by itself.\n\
-         {}\n{}\n",
+         {}\n{}\n{isolation}",
         settings.profile,
         settings.model,
         settings.budget_usd,
@@ -584,6 +722,10 @@ pub(crate) struct Dispatched {
     /// the definitions — the hook then leaves the call's own type
     /// rather than naming a CPU that does not exist here.
     pub subagent_type: Option<String>,
+    /// The isolation the profile's lane declares (backlog 65cea113);
+    /// `None` when the lane would not read, and the hook then leaves
+    /// the call's own.
+    pub isolation: Option<Isolation>,
 }
 
 /// The cars that name this packet as the item they build — narrowed at
@@ -836,6 +978,22 @@ pub(crate) async fn dispatch_at(
     };
     let settings = resolve(block, over).map_err(|e| anyhow::anyhow!("{e}"))?;
 
+    // THE VENUE DOOR (10b07b73): a packet whose deliverable is a tenant
+    // repo cannot be built by a car-lane run, and it is refused here —
+    // the first point the profile is known, and still before the claim.
+    // The lane is read only when the packet declares a repo, so a packet
+    // declaring none costs this door nothing.
+    if job
+        .get("metadata")
+        .and_then(|m| m.get(TENANT_REPO_KEY))
+        .is_some()
+    {
+        let lane = crate::documents::lane(repo, &settings.profile)?;
+        if let Some(why) = venue_refusal(&id[..8], &slug, &settings.profile, &lane, &job) {
+            bail!("{why}");
+        }
+    }
+
     // CLAIM FIRST. A step someone else holds is a refusal naming the
     // holder, and it must come before anything is filed. The ONE door:
     // it runs the station's capability gate when a station is named
@@ -961,7 +1119,11 @@ pub(crate) async fn dispatch_at(
         .context("the briefed step has no id")?
         .to_string();
 
-    let prompt = format!("{brief}\n{}", run_section(&run_id, &settings));
+    // Read, never fatal: a lane that will not read has already been
+    // refused by the rendered brief, and a handed prompt's dispatch is
+    // not stopped over a control the caller can still set by hand.
+    let isolation = Isolation::for_profile(repo, &settings.profile).ok();
+    let prompt = format!("{brief}\n{}", run_section(&run_id, &settings, isolation));
     if matches!(source, BriefSource::Rendered) {
         print!("{prompt}");
     }
@@ -983,6 +1145,7 @@ pub(crate) async fn dispatch_at(
         run_id,
         prompt,
         subagent_type: definition_in(repo, &settings),
+        isolation,
     })
 }
 
@@ -2169,7 +2332,7 @@ mod tests {
         assert_eq!(body["metadata"]["authority_role"], "platform-admin");
         assert_eq!(body["metadata"]["prompt_bytes"], "4242");
 
-        let s = run_section("5b1d2c3e-0000-4000-8000-000000000001", &block());
+        let s = run_section("5b1d2c3e-0000-4000-8000-000000000001", &block(), None);
         assert!(s.contains("export BOSS_AGENT_RUN=5b1d2c3e-0000-4000-8000-000000000001"));
         assert!(s.contains("opus-5[1m]") && s.contains("$5") && s.contains("high"));
         // The cap reaches the runner as the flag it passes (car 3).
@@ -2187,7 +2350,7 @@ mod tests {
                 ..block()
             };
             let name = boss_jobs::agent_spec::definition_name(effort.as_str());
-            let s = run_section("5b1d2c3e-0000-4000-8000-000000000001", &settings);
+            let s = run_section("5b1d2c3e-0000-4000-8000-000000000001", &settings, None);
             assert!(
                 s.contains(&format!("subagent_type {name}")),
                 "effort {} must name its definition: {s}",
@@ -2202,6 +2365,45 @@ mod tests {
             );
             assert_eq!(subagent_type(&settings), name);
         }
+    }
+
+    /// THE LANE DECIDES THE ISOLATION (backlog 65cea113, 2026-09-23).
+    /// A builder ships a car, so it needs a git tree of its own; an
+    /// analyst ships none — its rules say "No worktree" — yet ran
+    /// worktree-isolated anyway, because isolation was whatever the
+    /// operator typed on the Agent call. Under isolation the harness
+    /// refuses every heredoc and every command it cannot show stays in
+    /// the tree, which the page-march pilot measured at about three
+    /// times the tool calls for a read-only run. The profile's
+    /// document already declares its lane; this reads it.
+    #[test]
+    fn the_run_section_names_the_isolation_the_profiles_lane_declares() {
+        let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        assert_eq!(
+            Isolation::for_profile(&repo, "builder").expect("builder"),
+            Isolation::Worktree
+        );
+        assert_eq!(
+            Isolation::for_profile(&repo, "analyst").expect("analyst"),
+            Isolation::Shared
+        );
+        // A profile with no document is briefed in the car lane, so it
+        // is isolated the way that lane is — as it was before.
+        assert_eq!(
+            Isolation::for_profile(&repo, "no-such-profile").expect("no document"),
+            Isolation::Worktree
+        );
+
+        const RUN: &str = "5b1d2c3e-0000-4000-8000-000000000001";
+        let s = run_section(RUN, &block(), Some(Isolation::Worktree));
+        assert!(s.contains("isolation worktree"), "{s}");
+        let s = run_section(RUN, &block(), Some(Isolation::Shared));
+        assert!(s.contains("WITHOUT isolation"), "{s}");
+        assert!(s.contains("65cea113"), "the line says why: {s}");
+        // Unknown (a lane that would not read) names nothing, and the
+        // call keeps the caller's own choice.
+        let s = run_section(RUN, &block(), None);
+        assert!(!s.contains("isolation"), "{s}");
     }
 
     /// A session loads `.claude/agents/*.md` ONCE, at its start
@@ -3129,6 +3331,151 @@ mod wire_tests {
         let mut p = packet_without_projection();
         p["metadata"]["paths"] = json!(paths);
         p
+    }
+
+    /// The packet, declaring that its deliverable lives in a tenant repo.
+    fn packet_in(tenant_repo: Value) -> Value {
+        let mut p = packet_without_projection();
+        p["metadata"][TENANT_REPO_KEY] = tenant_repo;
+        p
+    }
+
+    /// The same row, its `build` step dispatched to a STEP-lane
+    /// profile — one whose deliverable is the step itself.
+    fn row_with_analyst_block() -> Value {
+        let mut r = row_with_block();
+        r["steps"][1]["agent"]["profile"] = json!("analyst");
+        r
+    }
+
+    /// THE VENUE DOOR (backlog 10b07b73). Measured 2026-09-22: a
+    /// builder dispatched at 86f32b7d, whose deliverable was registry
+    /// data in david/algedonic-llc, was handed a BOSS worktree and a
+    /// brief entirely about the BOSS gate, pushed its work to the tenant
+    /// repo, and then had no terminal to report into — `reported` opens
+    /// on a gate's green and a tenant car has no gate. A packet that
+    /// says its deliverable is a tenant repo is refused BEFORE the
+    /// claim for a car-lane profile, and the refusal names the repo and
+    /// the check that does apply there.
+    #[tokio::test]
+    async fn a_car_lane_dispatch_of_a_tenant_repo_packet_is_refused_before_the_claim() {
+        let (base, log) = stub(
+            packet_in(json!("david/algedonic-llc")),
+            row_with_block(),
+            false,
+        )
+        .await;
+        let err = dispatch_at(
+            &reqwest::Client::new(),
+            &base,
+            &repo(),
+            PACKET,
+            None,
+            None,
+            &Overrides::default(),
+            false,
+            "claude@algedonic.dev",
+            "emp-david",
+            "/wt",
+            "h",
+            BriefSource::Rendered,
+        )
+        .await
+        .expect_err("refused");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("david/algedonic-llc"),
+            "names the repo: {text}"
+        );
+        assert!(text.contains("`builder`"), "names the profile: {text}");
+        assert!(text.contains("`car` lane"), "names the lane: {text}");
+        assert!(
+            text.contains("boss tenant check"),
+            "names the check: {text}"
+        );
+        assert!(text.contains("nothing claimed, nothing filed"), "{text}");
+        assert_eq!(writes_of(&log), 0, "nothing claimed, nothing filed");
+    }
+
+    /// A step-lane profile ships no car, so where the deliverable lives
+    /// is not its question: the same packet is dispatched as any other.
+    #[tokio::test]
+    async fn a_step_lane_dispatch_of_a_tenant_repo_packet_is_admitted() {
+        let (base, _log) = stub(
+            packet_in(json!("david/algedonic-llc")),
+            row_with_analyst_block(),
+            false,
+        )
+        .await;
+        let d = dispatch_at(
+            &reqwest::Client::new(),
+            &base,
+            &repo(),
+            PACKET,
+            None,
+            None,
+            &Overrides::default(),
+            false,
+            "claude@algedonic.dev",
+            "emp-david",
+            "/wt",
+            "h",
+            BriefSource::Handed {
+                prompt: "p",
+                session: None,
+            },
+        )
+        .await
+        .expect("dispatched");
+        assert_eq!(d.run_id, RUN);
+    }
+
+    /// The pure verdict, every arm. A packet declaring nothing is this
+    /// tree's (every packet before this car). A declaration the door
+    /// cannot read is refused in the car lane rather than read as
+    /// absent — a clean door that never looked is the shape 7b7e0529
+    /// removed from the landed-work door.
+    #[test]
+    fn the_venue_verdict_reads_the_declaration_and_the_lane() {
+        let none = packet_without_projection();
+        let tenant = packet_in(json!("david/algedonic-llc"));
+        assert_eq!(
+            venue_refusal("39d0b528", "build", "builder", "car", &none),
+            None
+        );
+        assert_eq!(
+            venue_refusal("39d0b528", "build", "analyst", "step", &tenant),
+            None
+        );
+        let why = venue_refusal("39d0b528", "build", "builder", "car", &tenant).expect("refused");
+        assert!(why.contains("david/algedonic-llc"), "{why}");
+        assert!(
+            why.contains(&format!("metadata.{TENANT_REPO_KEY}")),
+            "{why}"
+        );
+        for unreadable in [
+            json!(""),
+            json!("  "),
+            json!(7),
+            json!(["david/algedonic-llc"]),
+        ] {
+            let p = packet_in(unreadable.clone());
+            let why = venue_refusal("39d0b528", "build", "builder", "car", &p)
+                .unwrap_or_else(|| panic!("{unreadable} must refuse, not read as absent"));
+            assert!(why.contains("cannot be read"), "{why}");
+        }
+        // A JSON null is how the metadata PATCH DELETES a key, so a
+        // null that survives is read as no declaration.
+        assert_eq!(
+            venue_refusal(
+                "39d0b528",
+                "build",
+                "builder",
+                "car",
+                &packet_in(Value::Null)
+            ),
+            None
+        );
     }
 
     fn writes_of(log: &Log) -> usize {

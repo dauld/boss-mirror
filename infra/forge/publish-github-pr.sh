@@ -479,6 +479,73 @@ if [ "${1:-}" = "--measure" ]; then
     mkdir -p "$STATE_DIR" 2>/dev/null || true
     [ -w "$STATE_DIR" ] || refuse "state dir $STATE_DIR is not writable (BOSS_PUBLISH_STATE_DIR)"
 
+    # 0. THE PULL REQUESTS' STATE, ASKED OF GITHUB (backlog a5d4322c).
+    #    On 2026-09-22 the publish region called #239 open for 86 hours
+    #    and itself TROUBLED over it; GitHub said #239 had merged three
+    #    days earlier. Nothing in the pipeline had ever asked: the
+    #    region inferred a merge from a mirror head equalling the PR's
+    #    snapshot, which GitHub's merge commit and squash never make
+    #    true. This pass asks. For every publish packet whose open-pr
+    #    recorded a pull request and whose `pr_state` does not already
+    #    read closed, GET the public pulls API (no credential — the
+    #    mirror is public, measured from the pod) and PATCH the answer
+    #    onto THAT packet as `pr_state`. It runs BEFORE the open-packet
+    #    lookup below because a publish packet closes at judge-checks,
+    #    long before its PR merges — the PRs to ask about are on closed
+    #    packets. A PR GitHub does not answer for is named and left
+    #    unread: the region then says "never read", not "open".
+    GITHUB_API="${BOSS_GITHUB_API:-https://api.github.com}"
+    if ! curl -fsS -H "x-boss-user: $BOSS_USER" \
+            "$BASE/api/jobs?kind=publish-to-github&limit=60" > "$workdir/published" 2>"$workdir/err"; then
+        fail "jobs API unreachable at $BASE — $(cat "$workdir/err")"
+    fi
+    jq -c '(if type == "object" and has("data") then .data else . end)
+        | .[] | . as $j
+        | ((.steps // []) | map(select(.spec_slug == "open-pr")) | .[0].metadata.pr_url // "") as $url
+        | select($url != "")
+        | select((($j.metadata.pr_state // {}) | .pr_url == $url and .state == "closed") | not)
+        | {id: $j.id, url: $url}' "$workdir/published" > "$workdir/unsettled" 2>"$workdir/err" \
+        || fail "the jobs API answered something this verb cannot read as a packet list — $(head -c 200 "$workdir/err" | tr '\n' ' ')"
+    # A limit is not a filter: say when the page did not reach the tail.
+    listed=$(jq -r '(if type == "object" and has("data") then .data else . end) | length' "$workdir/published")
+    listed_total=$(jq -r '.total? // empty' "$workdir/published")
+    case "${listed_total:-empty}" in
+        empty|*[!0-9]*) ;;
+        *) [ "$listed_total" -le "$listed" ] \
+            || say "--measure: read $listed of $listed_total publish packets — the $((listed_total - listed)) oldest were not asked about" ;;
+    esac
+    while IFS= read -r row; do
+        pr_job=$(printf '%s' "$row" | jq -r '.id')
+        pr_url=$(printf '%s' "$row" | jq -r '.url')
+        pr_number="${pr_url##*/}"
+        case "${pr_number:-empty}" in
+            empty|*[!0-9]*)
+                say "--measure: ${pr_job:0:8} recorded '$pr_url', which is not a pull request url — its state stays never read"
+                continue ;;
+        esac
+        if ! curl -fsS -H "accept: application/vnd.github+json" \
+                "$GITHUB_API/repos/$MIRROR_SLUG/pulls/$pr_number" > "$workdir/pr" 2>"$workdir/err"; then
+            say "--measure: GitHub did not answer for $pr_url — $(head -c 200 "$workdir/err" | tr '\n' ' '); its state stays never read"
+            continue
+        fi
+        if ! jq -c --arg url "$pr_url" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+                select(.state == "open" or .state == "closed")
+                | {pr_state: {pr_url: $url, number, state, merged: (.merged == true),
+                              merged_at, closed_at, read_at: $ts,
+                              read_by: "publish-github-pr --measure"}}' \
+                "$workdir/pr" > "$workdir/pr-state" 2>"$workdir/err" || [ ! -s "$workdir/pr-state" ]; then
+            say "--measure: GitHub's answer for $pr_url carries no open/closed state — its state stays never read"
+            continue
+        fi
+        if ! curl -fsS -X PATCH -H "content-type: application/json" -H "x-boss-user: $BOSS_USER" \
+                ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
+                --data-binary @"$workdir/pr-state" \
+                "$BASE/api/jobs/$pr_job/metadata" > /dev/null 2>"$workdir/err"; then
+            fail "annotating ${pr_job:0:8} with the state of $pr_url failed — $(head -c 300 "$workdir/err" | tr '\n' ' ')"
+        fi
+        say "--measure: $pr_url is $(jq -r '.pr_state | "\(.state), merged=\(.merged)"' "$workdir/pr-state") — written onto ${pr_job:0:8}"
+    done < "$workdir/unsettled"
+
     # 1. The packet. ANY open publish-to-github packet, at whatever step
     #    it is held — unlike a publish, which needs open-pr ready. One
     #    mirror, one open packet (the daily rule's guard), so the first

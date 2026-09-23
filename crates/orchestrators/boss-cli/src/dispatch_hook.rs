@@ -63,7 +63,7 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::path::Path;
 
-use crate::dispatch::{BriefSource, Dispatched, Overrides, dispatch_at};
+use crate::dispatch::{BriefSource, Dispatched, Isolation, Overrides, dispatch_at};
 
 /// The tool whose calls are dispatches.
 const AGENT_TOOL: &str = "Agent";
@@ -159,7 +159,12 @@ pub(crate) fn parse(input: &Value) -> Parsed {
 /// The hook's answer for a dispatch: the tool's input with the prompt
 /// replaced by the brief-plus-run-section, in the shape Claude Code
 /// reads off a PreToolUse hook's stdout.
-pub(crate) fn updated_input(input: &Value, prompt: &str, subagent_type: Option<&str>) -> Value {
+pub(crate) fn updated_input(
+    input: &Value,
+    prompt: &str,
+    subagent_type: Option<&str>,
+    isolation: Option<Isolation>,
+) -> Value {
     let mut tool_input = input.get("tool_input").cloned().unwrap_or(json!({}));
     tool_input["prompt"] = json!(prompt);
     // THE EFFORT REACHES A CONTROL HERE (backlog e720dd00, 2026-09-19).
@@ -171,6 +176,21 @@ pub(crate) fn updated_input(input: &Value, prompt: &str, subagent_type: Option<&
     // type rather than naming one that cannot be loaded.
     if let Some(name) = subagent_type {
         tool_input["subagent_type"] = json!(name);
+    }
+    // THE LANE SETS THE ISOLATION (backlog 65cea113, 2026-09-23), by
+    // the same reasoning one level over: a car-lane run gets its own
+    // worktree whether or not the operator typed it, and a step-lane
+    // run loses one it was handed — the worktree guard it brings
+    // refuses heredocs and compound reads that touch no git.
+    // `Isolation` says why at length; `None` leaves the caller's.
+    match (isolation, tool_input.as_object_mut()) {
+        (Some(Isolation::Worktree), Some(obj)) => {
+            obj.insert("isolation".into(), json!("worktree"));
+        }
+        (Some(Isolation::Shared), Some(obj)) => {
+            obj.remove("isolation");
+        }
+        _ => {}
     }
     json!({
         "hookSpecificOutput": {
@@ -348,7 +368,8 @@ pub(crate) async fn from_hook_at(
                 updated_input(
                     input,
                     &dispatched.prompt,
-                    dispatched.subagent_type.as_deref()
+                    dispatched.subagent_type.as_deref(),
+                    dispatched.isolation,
                 )
             );
             Ok(Outcome::Dispatched(dispatched))
@@ -508,6 +529,7 @@ mod tests {
             &call("Packet: da925366"),
             "Packet: da925366\n== THE RUN ==",
             None,
+            None,
         );
         let ti = &out["hookSpecificOutput"]["updatedInput"];
         assert_eq!(out["hookSpecificOutput"]["hookEventName"], "PreToolUse");
@@ -518,11 +540,33 @@ mod tests {
 
         // The declared effort SELECTS the CPU: the door that rewrites
         // the prompt names the definition on the call (e720dd00).
-        let named = updated_input(&call("Packet: da925366"), "p", Some("effort-high"));
+        let named = updated_input(&call("Packet: da925366"), "p", Some("effort-high"), None);
         let ti = &named["hookSpecificOutput"]["updatedInput"];
         assert_eq!(ti["subagent_type"], "effort-high");
         assert_eq!(ti["description"], "build");
         assert_eq!(ti["prompt"], "p");
+
+        // The lane decides the isolation (65cea113). A step-lane run
+        // drops the operator's `isolation`, so no worktree guard
+        // stands between an analyst and a heredoc; a car-lane run gets
+        // one whether or not the operator typed it; unknown leaves the
+        // call as it came.
+        let mut isolated = call("Packet: da925366");
+        isolated["tool_input"]["isolation"] = json!("worktree");
+        let shared = updated_input(&isolated, "p", None, Some(Isolation::Shared));
+        let ti = &shared["hookSpecificOutput"]["updatedInput"];
+        assert!(ti.get("isolation").is_none(), "{ti}");
+        assert_eq!(ti["description"], "build");
+        let built = updated_input(&call("p"), "p", None, Some(Isolation::Worktree));
+        assert_eq!(
+            built["hookSpecificOutput"]["updatedInput"]["isolation"],
+            "worktree"
+        );
+        let kept = updated_input(&isolated, "p", None, None);
+        assert_eq!(
+            kept["hookSpecificOutput"]["updatedInput"]["isolation"],
+            "worktree"
+        );
 
         assert_eq!(next_untracked(&json!({ "metadata": {} })), 1);
         assert_eq!(
@@ -724,6 +768,9 @@ mod wire_tests {
             "{}",
             d.prompt
         );
+        // The step declares `builder`, whose document's lane is `car`:
+        // the run is worktree-isolated (65cea113).
+        assert_eq!(d.isolation, Some(crate::dispatch::Isolation::Worktree));
         let calls = calls.lock().unwrap().clone();
         let filed = calls
             .iter()

@@ -926,6 +926,10 @@ fn install_rolling_stubs(f: &Fixture) -> (PathBuf, PathBuf) {
              echo call >> '{calls}'\n\
              n=$(wc -l < '{calls}')\n\
              if [ \"$n\" -le \"${{STUB_REFUSALS:-0}}\" ]; then\n\
+                 if [ -n \"${{STUB_CROSS_A_SECOND:-}}\" ]; then\n\
+                     t=$(printf '%(%s)T' -1)\n\
+                     while [ \"$(printf '%(%s)T' -1)\" = \"$t\" ]; do :; done\n\
+                 fi\n\
                  echo 'curl: (7) Failed to connect to sor.test port 7900: No route to host' >&2\n\
                  printf '\\n000'\n\
                  exit \"${{STUB_RC:-7}}\"\n\
@@ -1055,6 +1059,7 @@ fn a_roll_that_outlasts_the_window_fails_naming_the_elapsed_time() {
         &["GET", "/api/jobs"],
         &[
             ("STUB_REFUSALS", "99"),
+            ("STUB_CROSS_A_SECOND", "1"),
             ("BOSS_SOR_WAIT_SECONDS", "0"),
             ("BOSS_ACTOR", "agent-x"),
         ],
@@ -1062,9 +1067,22 @@ fn a_roll_that_outlasts_the_window_fails_naming_the_elapsed_time() {
     assert_eq!(r.code, 7, "curl's own code, as before: {}", r.stderr);
     assert_eq!(count_lines(&calls), 1);
     assert_eq!(count_lines(&sleeps), 0);
+    // The elapsed time is bash's whole-second $SECONDS, so it reads the
+    // wall clock's boundaries, not the call's length: a sub-second
+    // refusal names 0s or 1s. The stub spins across a boundary so the
+    // answer is always at least 1 — the reading is the real elapsed
+    // time, never a constant (the gate flaked on an exact "0s").
+    const NAMED: &str = "boss-api: GET /api/jobs: the jobs API refused every connection for ";
+    let elapsed = r.stderr.split_once(NAMED).and_then(|(_, rest)| {
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        rest[digits.len()..]
+            .starts_with("s (1 attempts")
+            .then(|| digits.parse::<u64>().ok())
+            .flatten()
+    });
     assert!(
-        r.stderr
-            .contains("boss-api: GET /api/jobs: the jobs API refused every connection for 0s")
+        elapsed.is_some_and(|s| s >= 1)
+            && r.stderr.contains("waited out for up to 0s")
             && r.stderr.contains("nothing was sent"),
         "the failure names the call, the elapsed time, and that relaunching is safe:\n{}",
         r.stderr
