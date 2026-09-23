@@ -168,16 +168,23 @@ pub struct BatchAccountTeamItem {
     pub notes: Option<String>,
 }
 
+/// The employee Class axis an account-team role is a value of.
+const ACCOUNT_TEAM_ROLE: &str = "account_team_role";
+
 /// Validate `role` against the Class registry under
 /// `(subject_kind='employee', member_attribute='account_team_role')`.
 /// `Ok(())` when no classes client is configured (in-memory / tests).
 async fn validate_role(classes: Option<&Arc<dyn ClassesClient>>, role: &str) -> Result<(), String> {
     let Some(c) = classes else { return Ok(()) };
     let cref = ClassRef::new("employee", role);
-    match c.class_exists(&cref).await {
+    // On its OWN axis (backlog ab1e6ff8): the employee drawer also
+    // holds role, department, status and employment_type codes, and
+    // `class_exists` accepted any of them — `owner` — as a team role.
+    match c.class_exists_on(&cref, ACCOUNT_TEAM_ROLE).await {
         Ok(true) => Ok(()),
         Ok(false) => Err(format!(
-            "role `{role}` is not an active Class in the registry"
+            "role `{role}` is not an active Class in the registry \
+             (subject_kind employee, member_attribute {ACCOUNT_TEAM_ROLE})"
         )),
         Err(e) => Err(format!("classes registry: {e}")),
     }
@@ -536,4 +543,39 @@ mod tests {
     // accepts any value; an unknown role is rejected at write time
     // against the Class registry — covered by HTTP integration tests
     // that wire a real ClassesClient.
+
+    /// An account-team role is a Class on the `account_team_role` axis
+    /// of the employee drawer, which also holds role, department,
+    /// status and employment_type (backlog ab1e6ff8). An employee
+    /// `role` code — `owner`, active and held — is not an account-team
+    /// role, and until this check asked the axis it passed as one.
+    #[tokio::test]
+    async fn a_team_role_is_checked_on_the_account_team_role_axis() {
+        use boss_classes_client::FakeClassesClient;
+        use boss_core::primitives::Class;
+        let on = |code: &str, attribute: &str| Class {
+            subject_kind: "employee".into(),
+            code: code.into(),
+            display_name: code.into(),
+            parent_code: None,
+            member_attribute: Some(attribute.into()),
+            metadata: serde_json::Value::Null,
+            sort_order: 0,
+            retired_at: None,
+        };
+        let classes: Arc<dyn ClassesClient> = Arc::new(FakeClassesClient::with_classes(vec![
+            on("territory-rep", "account_team_role"),
+            on("owner", "role"),
+        ]));
+        assert_eq!(validate_role(Some(&classes), "territory-rep").await, Ok(()));
+        let refused = validate_role(Some(&classes), "owner").await;
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|why| why.contains("owner") && why.contains("account_team_role")),
+            "an employee role is not an account-team role: {refused:?}"
+        );
+        assert!(validate_role(Some(&classes), "wizard").await.is_err());
+        assert_eq!(validate_role(None, "anything").await, Ok(()));
+    }
 }

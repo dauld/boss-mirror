@@ -81,8 +81,8 @@ use chrono::{DateTime, Utc};
 use serde_json::{Value as Json, json};
 
 use super::common::{
-    api_client, dispatcher_reader_header, get_json, owner_for_filing, post_json, sim_origin_value,
-    triage_step,
+    api_client, dispatcher_reader_header, get_json, owner_for_filing, post_json, rows_or_refuse,
+    sim_origin_value, triage_step,
 };
 
 /// The two standing conditions a sensor alarms on. Each is its own
@@ -499,12 +499,15 @@ pub fn owed_readings(listing: &Json) -> Result<Vec<Reading>, String> {
 
 /// The open alarm carrying `key`, as `(id, reason)`, if any — and
 /// whether the page can be trusted (a truncated page holds).
+///
+/// A missing, null or non-array `data` is NO ANSWER and refuses by
+/// that name (445c1494). It used to read as zero rows and was caught
+/// only by accident of the truncation check below — misnamed
+/// "truncated" — and `{"total": 0}` slipped through it as a completed
+/// read that found nothing, so the alarm it was guarding got twinned.
+/// The truncation check now means only what it says.
 pub fn open_alarm(listing: &Json, key: &str) -> Result<Option<(String, String)>, String> {
-    let rows: Vec<&Json> = listing
-        .get("data")
-        .and_then(Json::as_array)
-        .map(|a| a.iter().collect())
-        .unwrap_or_default();
+    let rows: Vec<Json> = rows_or_refuse(listing, "the open-alarm dedup read")?;
     let total = listing
         .get("total")
         .and_then(Json::as_u64)
@@ -1090,6 +1093,31 @@ mod tests {
                 .unwrap_err()
                 .contains("truncated")
         );
+    }
+
+    /// Backlog 445c1494. The dedup read's truncation check caught a
+    /// missing `data` only by accident, named it "truncated", and let
+    /// `{"total": 0}` through as a completed read that found nothing —
+    /// so the handler would file an alarm that may already be open.
+    /// A missing, null or non-array `data` is NO ANSWER and refuses by
+    /// that name; an empty array with total 0 is honest.
+    #[test]
+    fn the_dedup_read_refuses_a_listing_with_no_data_array_rather_than_twin_the_alarm() {
+        assert_eq!(
+            open_alarm(&json!({"data": [], "total": 0}), "k").unwrap(),
+            None
+        );
+        for no_answer in [
+            json!({"total": 0}),
+            json!({"data": null, "total": 0}),
+            json!({"data": {}, "total": 0}),
+            json!({"error": "forbidden"}),
+        ] {
+            let why = open_alarm(&no_answer, "k")
+                .expect_err("a listing with no rows array must hold the alarm, not twin it");
+            assert!(why.contains("no `data` array"), "{no_answer}: {why}");
+            assert!(!why.contains("truncated"), "{no_answer}: {why}");
+        }
     }
 
     /// Backlog 6c4c432a. A listing with NO `data` array is no answer —

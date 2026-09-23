@@ -559,6 +559,165 @@ pub(crate) fn triage_step(job: &Value) -> Option<(String, serde_json::Map<String
         })
 }
 
+/// The routed steps a machine may complete to withdraw an alarm once a
+/// person has triaged it — the two whose fields carry a `stale`
+/// disposition (infra/platform/workflows/backlog-item.toml: `measure`
+/// since 2802ba8c, `build` since 6c114a23). The design route has none:
+/// `draft-design` needs a design id and `design-review` is a decision.
+const WITHDRAWING_SLUGS: [&str; 2] = ["measure", "build"];
+
+/// How a machine withdraws an alarm it raised once the condition has
+/// cleared (backlog a2d8bad3).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Retraction {
+    /// Complete this step with `disposition = stale`. `metadata` is the
+    /// step's own, because a step PUT replaces it wholesale.
+    Complete {
+        slug: String,
+        step_id: String,
+        metadata: serde_json::Map<String, Value>,
+    },
+    /// No step the machine may complete: say on the PACKET that the
+    /// condition cleared, and why it is still open.
+    Annotate { why_open: String },
+}
+
+/// THE step a recovered alarm withdraws at — one definition for every
+/// machine that closes its own alarm (CLAUDE.md §9a).
+///
+/// WHY IT IS NOT ALWAYS `triage` (backlog a2d8bad3). Both closers
+/// completed the triage step, which is right only while nobody has
+/// routed the alarm. Once a person triaged it, that step was already
+/// complete, the jobs API refused the PUT as a write to a terminal
+/// step, and the machine had no other exit: alarm a6a4ae18 (CADENCE
+/// SILENT: ops-request/github-mirror), routed to `build` on 2026-09-20,
+/// had its cadence back on 2026-09-21 and sat open with `build` ready,
+/// its measurement frozen at the raise, until a person closed it on
+/// 2026-09-23.
+///
+/// So the machine withdraws at the step the packet is WAITING ON:
+/// - `triage`, while it is open — unchanged;
+/// - a READY `measure` or `build`, the step the route opened, which
+///   carries `stale` for exactly this — the claim no longer holds;
+/// - otherwise it annotates. An ACTIVE step has an executor on it, and
+///   completing a dispatched run's step fires
+///   `agent-run-delivers-when-its-step-is-done`, which lands the run as
+///   `delivered` for work it did not deliver; the design route has no
+///   withdrawal at all. The executor, or the person deciding, reads the
+///   note and closes it — a machine alarm a human has touched can still
+///   tell the human it is over.
+///
+/// A human's route is not overridden by this: the `stale` completion is
+/// stamped `cleared_by`, which both raisers' settled-suppression reads
+/// as a machine clear, so a condition that returns re-raises instead of
+/// hiding behind the close — and a HUMAN's close still holds for its
+/// settle window, exactly as before.
+///
+/// `None` is a packet with no triage step, which is not an alarm this
+/// crate can judge.
+pub(crate) fn retraction(job: &Value) -> Option<Retraction> {
+    let steps: Vec<&Value> = job
+        .get("steps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .collect();
+    let slug_of = |s: &Value| {
+        s.get("spec_slug")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let status_of = |s: &Value| s.get("status").and_then(Value::as_str).map(str::to_string);
+    let (triage_id, triage_meta) = triage_step(job)?;
+    let triage = steps
+        .iter()
+        .find(|s| slug_of(s).as_deref() == Some(TRIAGE_SLUG))?;
+    // A triage with no status is read as open: the listing always
+    // carries one, and the older fixtures do not.
+    if !matches!(
+        status_of(triage).as_deref(),
+        Some("completed") | Some("skipped")
+    ) {
+        return Some(Retraction::Complete {
+            slug: TRIAGE_SLUG.to_string(),
+            step_id: triage_id,
+            metadata: triage_meta,
+        });
+    }
+    let routed = triage
+        .pointer("/metadata/disposition")
+        .and_then(Value::as_str)
+        .unwrap_or("an unrecorded route");
+    for slug in WITHDRAWING_SLUGS {
+        let Some(step) = steps.iter().find(|s| slug_of(s).as_deref() == Some(slug)) else {
+            continue;
+        };
+        match status_of(step).as_deref() {
+            Some("ready") => {
+                return Some(Retraction::Complete {
+                    slug: slug.to_string(),
+                    step_id: step.get("id").and_then(Value::as_str)?.to_string(),
+                    metadata: step
+                        .get("metadata")
+                        .and_then(Value::as_object)
+                        .cloned()
+                        .unwrap_or_default(),
+                });
+            }
+            Some("active") => {
+                return Some(Retraction::Annotate {
+                    why_open: format!(
+                        "triage routed it to `{routed}` and `{slug}` is active — an executor \
+                         holds it, and the machine does not complete a step from under its \
+                         executor"
+                    ),
+                });
+            }
+            _ => {}
+        }
+    }
+    Some(Retraction::Annotate {
+        why_open: format!(
+            "triage routed it to `{routed}`, and no step that route has open carries a \
+             withdrawal the machine may complete"
+        ),
+    })
+}
+
+/// The packet-metadata key a recovery is stamped under — the same key
+/// `estate.recover` has written onto the packets it closes since
+/// ef421cd3, so a reader asks one question of every alarm.
+pub(crate) const RECOVERED_AT: &str = "recovered_at";
+
+/// The merge that tells a person the condition is over when the machine
+/// may not close the packet itself ([`Retraction::Annotate`]).
+pub(crate) fn recovery_note(
+    evidence: &str,
+    cleared_by: &str,
+    recovered_at: &str,
+    why_open: &str,
+) -> serde_json::Map<String, Value> {
+    let mut m = serde_json::Map::new();
+    m.insert(RECOVERED_AT.into(), Value::String(recovered_at.into()));
+    m.insert("recovered_by".into(), Value::String(cleared_by.into()));
+    m.insert(
+        "recovery".into(),
+        Value::String(format!(
+            "RECOVERED — {evidence} Still open because {why_open}. The condition this alarm \
+             was raised for no longer holds; close it as `stale` unless the route it took is \
+             still wanted without it (backlog a2d8bad3)."
+        )),
+    );
+    m
+}
+
+/// The merge that withdraws a [`recovery_note`] when the condition comes
+/// back: `null` deletes a key on `PATCH /api/jobs/{id}/metadata`, and a
+/// packet whose condition returned must not go on saying RECOVERED.
+pub(crate) fn relapse_patch() -> Value {
+    serde_json::json!({RECOVERED_AT: null, "recovered_by": null, "recovery": null})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,6 +833,184 @@ mod tests {
         assert!(
             text.contains("a check that is not running"),
             "the floor's own sentence, stated here and not per handler: {text}"
+        );
+    }
+
+    /// A step as the jobs API lists it back, for the retraction tests.
+    fn step(slug: &str, status: &str, metadata: Value) -> Value {
+        json!({"id": format!("s-{slug}"), "spec_slug": slug, "status": status, "metadata": metadata})
+    }
+
+    fn alarm(steps: Vec<Value>) -> Value {
+        json!({"id": "alarm-1", "status": "open", "steps": steps})
+    }
+
+    /// Nobody has routed it: the machine withdraws it where it has
+    /// always withdrawn it, at `triage`. A fixture with no `status` at
+    /// all is read as open — the shape every pre-existing test uses.
+    #[test]
+    fn an_untriaged_alarm_is_withdrawn_at_its_triage_step() {
+        for triage in [
+            step(
+                "triage",
+                "ready",
+                json!({"authority_role": "platform-admin"}),
+            ),
+            step(
+                "triage",
+                "active",
+                json!({"authority_role": "platform-admin"}),
+            ),
+            json!({"id": "s-triage", "spec_slug": "triage", "metadata": {"authority_role": "platform-admin"}}),
+        ] {
+            let job = alarm(vec![step("filed", "completed", json!({})), triage]);
+            match retraction(&job) {
+                Some(Retraction::Complete {
+                    slug,
+                    step_id,
+                    metadata,
+                }) => {
+                    assert_eq!(slug, TRIAGE_SLUG);
+                    assert_eq!(step_id, "s-triage");
+                    assert_eq!(metadata["authority_role"], "platform-admin");
+                }
+                other => panic!("an untriaged alarm completes triage, got {other:?}"),
+            }
+        }
+    }
+
+    /// Backlog a2d8bad3 — THE WORKED EXAMPLE, a6a4ae18. The alarm was
+    /// triaged to `build` on 2026-09-20 and its cadence came back on
+    /// 2026-09-21; the sweep's only exit was the triage step, already
+    /// complete, so the jobs API refused the PUT and the alarm sat open
+    /// with `build` ready until a person closed it on 2026-09-23. The
+    /// step the packet is WAITING ON is `build`, and `build` carries a
+    /// `stale` disposition for exactly this — the claim no longer holds.
+    #[test]
+    fn an_alarm_routed_to_build_is_withdrawn_at_its_ready_build_step() {
+        let job = alarm(vec![
+            step("filed", "completed", json!({})),
+            step(
+                "triage",
+                "completed",
+                json!({"disposition": "build", "evidence": "routed by a human"}),
+            ),
+            step("measure", "skipped", json!({})),
+            step("draft-design", "skipped", json!({})),
+            step("design-review", "skipped", json!({})),
+            step(
+                "build",
+                "ready",
+                json!({"authority_role": "platform-admin", "agent_profile": "builder"}),
+            ),
+        ]);
+        match retraction(&job) {
+            Some(Retraction::Complete {
+                slug,
+                step_id,
+                metadata,
+            }) => {
+                assert_eq!(slug, "build");
+                assert_eq!(step_id, "s-build");
+                assert_eq!(
+                    metadata["agent_profile"], "builder",
+                    "a PUT replaces step metadata wholesale, so the build's keys ride back"
+                );
+            }
+            other => panic!("a ready build is where the alarm withdraws, got {other:?}"),
+        }
+    }
+
+    /// The verify route withdraws at `measure`, which carries the same
+    /// `stale` disposition (2802ba8c).
+    #[test]
+    fn an_alarm_routed_to_verify_is_withdrawn_at_its_ready_measure_step() {
+        let job = alarm(vec![
+            step("triage", "completed", json!({"disposition": "verify"})),
+            step("measure", "ready", json!({})),
+            step("build", "skipped", json!({})),
+        ]);
+        assert!(matches!(
+            retraction(&job),
+            Some(Retraction::Complete { slug, .. }) if slug == "measure"
+        ));
+    }
+
+    /// An executor HOLDS an active build: completing it from under a
+    /// dispatched run fires `agent-run-delivers-when-its-step-is-done`
+    /// and lands the run as `delivered` for work it did not deliver. So
+    /// the machine does not complete it — it says on the packet that
+    /// the condition cleared, and the executor's verify-the-claim reads
+    /// that.
+    #[test]
+    fn a_build_an_executor_holds_is_annotated_not_completed() {
+        let job = alarm(vec![
+            step("triage", "completed", json!({"disposition": "build"})),
+            step("build", "active", json!({})),
+        ]);
+        match retraction(&job) {
+            Some(Retraction::Annotate { why_open }) => {
+                assert!(why_open.contains("`build`"), "{why_open}");
+                assert!(why_open.contains("active"), "{why_open}");
+            }
+            other => panic!("a held build is annotated, got {other:?}"),
+        }
+    }
+
+    /// The design route has no withdrawal on it: `draft-design` needs a
+    /// design id and `design-review` is a decision a person owns. The
+    /// machine completes neither, and tells them instead.
+    #[test]
+    fn a_design_route_is_annotated_because_no_step_on_it_can_withdraw() {
+        let job = alarm(vec![
+            step("triage", "completed", json!({"disposition": "design"})),
+            step("draft-design", "completed", json!({"design_id": "d-1"})),
+            step("design-review", "ready", json!({})),
+            step("build", "pending", json!({})),
+        ]);
+        match retraction(&job) {
+            Some(Retraction::Annotate { why_open }) => {
+                assert!(why_open.contains("design"), "{why_open}");
+            }
+            other => panic!("a design route is annotated, got {other:?}"),
+        }
+    }
+
+    /// No triage step is not an alarm this crate can judge.
+    #[test]
+    fn a_packet_with_no_triage_step_has_no_retraction() {
+        assert_eq!(
+            retraction(&alarm(vec![step("filed", "completed", json!({}))])),
+            None
+        );
+    }
+
+    /// The note says it is over and why the packet is still open, and
+    /// the relapse patch deletes exactly the keys the note wrote — a
+    /// packet whose condition came back must not go on saying
+    /// RECOVERED.
+    #[test]
+    fn the_recovery_note_and_its_relapse_patch_name_the_same_keys() {
+        let note = recovery_note(
+            "the cadence is arriving again",
+            "cadence.silence.sweep",
+            "2026-09-21T00:00:00+00:00",
+            "triage routed it to `design`",
+        );
+        assert_eq!(note[RECOVERED_AT], "2026-09-21T00:00:00+00:00");
+        assert_eq!(note["recovered_by"], "cadence.silence.sweep");
+        let text = note["recovery"].as_str().expect("a sentence");
+        assert!(text.contains("the cadence is arriving again"), "{text}");
+        assert!(text.contains("triage routed it to `design`"), "{text}");
+        let relapse = relapse_patch();
+        let relapse = relapse.as_object().expect("an object");
+        assert_eq!(
+            relapse.keys().collect::<Vec<_>>(),
+            note.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            relapse.values().all(Value::is_null),
+            "null deletes on PATCH"
         );
     }
 

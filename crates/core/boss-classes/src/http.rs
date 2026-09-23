@@ -65,6 +65,12 @@ async fn health() -> Json<serde_json::Value> {
 #[derive(Deserialize)]
 struct ListQuery {
     subject_kind: String,
+    /// Narrows the list to one axis of the kind. One subject_kind can
+    /// hold several taxonomies told apart only by `member_attribute` —
+    /// the employee drawer held role, department, status and
+    /// employment_type side by side on 2026-09-23 (backlog ab1e6ff8) —
+    /// so a reader after one column's values asks for that axis.
+    member_attribute: Option<String>,
 }
 
 async fn list_classes(
@@ -72,7 +78,15 @@ async fn list_classes(
     Query(q): Query<ListQuery>,
 ) -> Response {
     match state.classes.list_for_subject_kind(&q.subject_kind).await {
-        Ok(rows) => Json(rows).into_response(),
+        Ok(rows) => Json(
+            rows.into_iter()
+                .filter(|c| {
+                    q.member_attribute.is_none()
+                        || c.member_attribute.as_deref() == q.member_attribute.as_deref()
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -347,6 +361,66 @@ mod tests {
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert!(v.is_array());
         assert_eq!(v.as_array().unwrap().len(), 2);
+    }
+
+    /// One subject_kind can hold several taxonomies, told apart only by
+    /// `member_attribute` — the live employee drawer held 22 codes on
+    /// four axes on 2026-09-23 (backlog ab1e6ff8). `member_attribute`
+    /// narrows the list to one axis; an axis nothing carries answers an
+    /// empty list, not the whole drawer; and without it the list is
+    /// unchanged.
+    #[tokio::test]
+    async fn list_narrows_to_one_member_attribute() {
+        let on = |code: &str, attribute: &str| Class {
+            member_attribute: Some(attribute.into()),
+            ..employee(code, 10)
+        };
+        let rows = vec![
+            on("platform-admin", "role"),
+            on("owner", "role"),
+            on("it", "department"),
+            on("active", "status"),
+        ];
+        let codes = |uri: &'static str| {
+            let app = build_app(rows.clone());
+            async move {
+                let req = Request::builder()
+                    .uri(uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+                let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+                let v: Value = serde_json::from_slice(&body).unwrap();
+                let mut codes: Vec<String> = v
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|c| c["code"].as_str().unwrap().to_string())
+                    .collect();
+                codes.sort();
+                codes
+            }
+        };
+        assert_eq!(
+            codes("/api/classes?subject_kind=employee&member_attribute=role").await,
+            vec!["owner", "platform-admin"]
+        );
+        assert_eq!(
+            codes("/api/classes?subject_kind=employee&member_attribute=department").await,
+            vec!["it"]
+        );
+        assert!(
+            codes("/api/classes?subject_kind=employee&member_attribute=account_team_role")
+                .await
+                .is_empty(),
+            "an axis nothing carries is empty, not the whole drawer"
+        );
+        assert_eq!(
+            codes("/api/classes?subject_kind=employee").await.len(),
+            4,
+            "no filter, no change"
+        );
     }
 
     #[tokio::test]

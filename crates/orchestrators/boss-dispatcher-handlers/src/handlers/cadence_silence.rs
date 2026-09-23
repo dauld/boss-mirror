@@ -50,7 +50,11 @@
 //!    fresh measurement, never twinned. When packets start
 //!    arriving again the alarm CLOSES ITSELF (`stale` — the claim no
 //!    longer holds), stamped so the settled-suppression below can tell
-//!    a machine clear from a human's answer.
+//!    a machine clear from a human's answer. It closes at the step the
+//!    packet is waiting on — `triage`, or the ready `build`/`measure` a
+//!    person routed it to — and where the machine may not complete that
+//!    step it says RECOVERED on the packet instead (backlog a2d8bad3,
+//!    `common::retraction`).
 //!
 //! WHERE THE DECLARATION LIVES, and why it is not the workflow row.
 //! CLAUDE.md §9 prefers registry data on the Workflow, and that was
@@ -138,8 +142,8 @@ use boss_dispatcher::rules::registry::RawRule;
 
 use super::cadence_roster::{ClockCadence, Guard, clock_cadences};
 use super::common::{
-    TRIAGE_SLUG, api_client, empty_roster_refusal, get_json, owner_for_filing, post_json,
-    triage_step, write_json,
+    Retraction, TRIAGE_SLUG, api_client, empty_roster_refusal, get_json, owner_for_filing,
+    post_json, recovery_note, relapse_patch, retraction, write_json,
 };
 
 /// Arg-key prefix for one declared cadence. `interval_minutes.<kind>`
@@ -1052,7 +1056,9 @@ pub fn alarm_body(
         json!(format!(
             "Raised by cadence.silence.sweep (backlog ecca2f43): {}. {} This alarm UPDATES \
              itself on each daily pass and CLOSES itself (`stale`) the moment a packet of \
-             `{label}` arrives again — so if it is still open, the cadence is still quiet. \
+             `{label}` arrives again — or, once a person has routed it somewhere the machine \
+             may not close, says RECOVERED on the packet — so if it is still open without \
+             that, the cadence is still quiet. \
              Precedent for why this exists: maintenance-ml-inference-batch died in \
              ExecStartPre for 23 nights (e109f57e) and the five-minute \
              maintenance-estate-observe-units observer was quiet for four days (408c81f6); \
@@ -1107,12 +1113,49 @@ fn alarm_title(label: &str, v: &Verdict) -> String {
 /// The metadata merge that refreshes a STANDING alarm instead of
 /// filing a twin. `PATCH /api/jobs/{id}/metadata` merges top-level
 /// keys, so this is exactly the fields that change between passes.
+///
+/// It also withdraws a standing recovery note ([`recovered_patch`]): a
+/// routed alarm the machine could not close is told RECOVERED, and if
+/// the cadence then goes quiet again that note is false (a2d8bad3).
 pub fn refresh_patch(w: &Watched, v: &Verdict, now: DateTime<Utc>) -> Value {
-    Value::Object(measurement(w, v, now))
+    let mut m = measurement(w, v, now);
+    if let Value::Object(relapse) = relapse_patch() {
+        m.extend(relapse);
+    }
+    Value::Object(m)
 }
 
-/// The triage completion that CLOSES a standing alarm when the kind
-/// starts arriving again. `disposition = "stale"` is the backlog-item
+/// The merge onto a standing alarm whose cadence came back but which
+/// the machine may not close — routed to design, or to a step an
+/// executor holds ([`Retraction::Annotate`], backlog a2d8bad3). Today's
+/// measurement plus the recovery, so the packet stops showing the day
+/// it was raised: a6a4ae18's `last_measured_at` stayed at 2026-09-20
+/// for three days after its cadence returned.
+pub fn recovered_patch(w: &Watched, v: &Verdict, now: DateTime<Utc>, why_open: &str) -> Value {
+    let mut m = measurement(w, v, now);
+    m.extend(recovery_note(
+        &arriving_again(&w.label, v),
+        CLEARED_BY,
+        &now.to_rfc3339(),
+        why_open,
+    ));
+    Value::Object(m)
+}
+
+/// The sentence both a close and a recovery note state.
+fn arriving_again(label: &str, v: &Verdict) -> String {
+    format!(
+        "cadence.silence.sweep re-measured `{label}` and it is arriving again: {}.",
+        match v {
+            Verdict::Fresh => "its newest packet is inside the declared window".to_string(),
+            other => headline(label, other),
+        }
+    )
+}
+
+/// The step completion that CLOSES a standing alarm when the kind
+/// starts arriving again — at `triage`, or at the `build`/`measure` a
+/// person routed it to (`common::retraction`, a2d8bad3). `disposition = "stale"` is the backlog-item
 /// terminal titled "Closed — the claim no longer holds", which is
 /// precisely true: the cadence is no longer silent.
 ///
@@ -1124,13 +1167,9 @@ pub fn clear_step_body(existing: &Map<String, Value>, label: &str, v: &Verdict) 
     metadata.insert(
         "evidence".into(),
         json!(format!(
-            "cadence.silence.sweep re-measured `{label}` and it is arriving again: {}. \
-             The claim this alarm carried no longer holds; closed by machine, not by \
+            "{} The claim this alarm carried no longer holds; closed by machine, not by \
              judgement.",
-            match v {
-                Verdict::Fresh => "its newest packet is inside the declared window".to_string(),
-                other => headline(label, other),
-            }
+            arriving_again(label, v)
         )),
     );
     metadata.insert("cleared_by".into(), json!(CLEARED_BY));
@@ -1402,25 +1441,53 @@ impl Handler for CadenceSilenceSweep {
                 errors.push(format!("open alarm for {label} has no id; not cleared"));
                 continue;
             };
-            let Some((step_id, step_meta)) = triage_step(existing) else {
-                errors.push(format!(
-                    "open alarm for {label} has no `{TRIAGE_SLUG}` step; cannot close itself"
-                ));
-                continue;
-            };
-            if let Err(e) = write_json(
-                &self.client,
-                reqwest::Method::PUT,
-                &format!("{}/api/jobs/{id}/steps/{step_id}", self.base()),
-                &clear_step_body(&step_meta, label, v),
-                &ctx.rule_name,
-            )
-            .await
-            {
-                errors.push(format!("auto-close of the alarm for {label} failed: {e}"));
-                continue;
+            // The step the packet is WAITING ON, not always triage: a
+            // person may already have routed it (a2d8bad3).
+            match retraction(existing) {
+                None => {
+                    errors.push(format!(
+                        "open alarm for {label} has no `{TRIAGE_SLUG}` step; cannot close itself"
+                    ));
+                }
+                Some(Retraction::Complete {
+                    slug,
+                    step_id,
+                    metadata,
+                }) => {
+                    if let Err(e) = write_json(
+                        &self.client,
+                        reqwest::Method::PUT,
+                        &format!("{}/api/jobs/{id}/steps/{step_id}", self.base()),
+                        &clear_step_body(&metadata, label, v),
+                        &ctx.rule_name,
+                    )
+                    .await
+                    {
+                        errors.push(format!(
+                            "auto-close of the alarm for {label} at its `{slug}` step failed: {e}"
+                        ));
+                        continue;
+                    }
+                    tracing::info!(cadence = %label, step = %slug, "cadence.silence.sweep closed its own alarm — the cadence is arriving again");
+                }
+                Some(Retraction::Annotate { why_open }) => {
+                    if let Err(e) = write_json(
+                        &self.client,
+                        reqwest::Method::PATCH,
+                        &format!("{}/api/jobs/{id}/metadata", self.base()),
+                        &recovered_patch(w, v, now, &why_open),
+                        &ctx.rule_name,
+                    )
+                    .await
+                    {
+                        errors.push(format!(
+                            "recovery note on the routed alarm for {label} failed: {e}"
+                        ));
+                        continue;
+                    }
+                    tracing::info!(cadence = %label, why_open = %why_open, "cadence.silence.sweep: the cadence is arriving again; told the routed alarm it has recovered");
+                }
             }
-            tracing::info!(cadence = %label, "cadence.silence.sweep closed its own alarm — the cadence is arriving again");
         }
 
         finish(errors)
@@ -1445,6 +1512,7 @@ fn finish(errors: Vec<String>) -> Result<(), HandlerError> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::common::RECOVERED_AT;
     use super::*;
     use boss_dispatcher::rules::expr::Value as ExprValue;
 
@@ -1876,7 +1944,14 @@ mod tests {
                 {"id": "s-1", "spec_slug": "triage", "metadata": {"authority_role": "platform-admin"}}
             ],
         });
-        let (step_id, meta) = triage_step(&open).expect("the alarm has a triage step");
+        let Some(Retraction::Complete {
+            step_id,
+            metadata: meta,
+            ..
+        }) = retraction(&open)
+        else {
+            panic!("an untriaged alarm withdraws at its triage step");
+        };
         assert_eq!(step_id, "s-1");
         let body = clear_step_body(&meta, "maintenance-views-catchup", &Verdict::Fresh);
         assert_eq!(body["status"], json!("completed"));
@@ -1887,6 +1962,105 @@ mod tests {
             "a PUT replaces step metadata wholesale, so existing keys must be carried"
         );
         assert_eq!(body["metadata"]["cleared_by"], json!(CLEARED_BY));
+    }
+
+    /// Backlog a2d8bad3 — alarm a6a4ae18 as the jobs API held it: raised
+    /// 2026-09-20, triaged to `build` the same morning, its cadence back
+    /// from 2026-09-21. The sweep's only exit was the completed triage
+    /// step; now it withdraws at the ready build step, with the build's
+    /// own keys carried through and the machine's stamp on it.
+    #[test]
+    fn a_returning_kind_whose_alarm_was_routed_to_build_closes_at_the_build_step() {
+        let open = json!({
+            "id": "a6a4ae18-59ec-42c2-92d8-f6b9324fd533",
+            "status": "open",
+            "metadata": {"cadence_silence": silence_key("ops-request/github-mirror")},
+            "steps": [
+                {"id": "s-0", "spec_slug": "filed", "status": "completed", "metadata": {}},
+                {"id": "s-1", "spec_slug": "triage", "status": "completed",
+                 "metadata": {"authority_role": "platform-admin", "disposition": "build"}},
+                {"id": "s-5", "spec_slug": "build", "status": "ready",
+                 "metadata": {"authority_role": "platform-admin", "agent_profile": "builder"}}
+            ],
+        });
+        let Some(Retraction::Complete {
+            slug,
+            step_id,
+            metadata,
+        }) = retraction(&open)
+        else {
+            panic!("a ready build is where a routed alarm withdraws");
+        };
+        assert_eq!((slug.as_str(), step_id.as_str()), ("build", "s-5"));
+        let body = clear_step_body(&metadata, "ops-request/github-mirror", &Verdict::Fresh);
+        assert_eq!(body["status"], json!("completed"));
+        assert_eq!(
+            body["metadata"]["disposition"],
+            json!("stale"),
+            "build's `stale` routes to the terminal \"Closed — the claim no longer holds\""
+        );
+        assert_eq!(body["metadata"]["agent_profile"], json!("builder"));
+        assert_eq!(body["metadata"]["cleared_by"], json!(CLEARED_BY));
+
+        // And the machine's close on a HUMAN-routed packet is still a
+        // machine clear: the triage step a person completed carries no
+        // stamp, the build step does, and the stamp is what the settle
+        // window reads — a cadence that goes quiet again re-raises.
+        let mut closed = open.clone();
+        closed["status"] = json!("closed");
+        closed["closed_on"] = json!("2026-09-21");
+        closed["steps"][2]["metadata"] = body["metadata"].clone();
+        let settled = settled_recently(&[closed], at("2026-09-22T00:00:00Z"));
+        assert!(
+            settled.is_empty(),
+            "a machine clear at the build step must not suppress the next silence"
+        );
+    }
+
+    /// The design route, or a build an executor holds, cannot be
+    /// completed by the machine — so the packet is TOLD: the recovery
+    /// and today's measurement, merged onto its metadata. a6a4ae18's
+    /// `last_measured_at` stayed at the raise for three days.
+    #[test]
+    fn a_returning_kind_whose_alarm_cannot_be_closed_says_so_on_the_packet() {
+        let now = at("2026-09-21T00:00:03Z");
+        let w = watched("ops-request/github-mirror");
+        let patch = recovered_patch(&w, &Verdict::Fresh, now, "triage routed it to `design`");
+        assert_eq!(patch["last_measured_at"], json!(now.to_rfc3339()));
+        assert_eq!(patch[RECOVERED_AT], json!(now.to_rfc3339()));
+        assert_eq!(patch["recovered_by"], json!(CLEARED_BY));
+        let text = patch["recovery"].as_str().expect("a sentence");
+        assert!(text.contains("arriving again"), "{text}");
+        assert!(text.contains("triage routed it to `design`"), "{text}");
+        assert_eq!(
+            patch["condition"],
+            json!("ops-request/github-mirror is arriving on cadence"),
+            "the condition line is today's, not the raise's"
+        );
+    }
+
+    /// A cadence that goes quiet AGAIN while its alarm is open refreshes
+    /// the alarm — and the refresh withdraws any recovery note, so the
+    /// packet does not say RECOVERED over a live silence.
+    #[test]
+    fn a_refresh_withdraws_a_standing_recovery_note() {
+        let v = Verdict::Silent {
+            interval_min: 1440,
+            age_min: 4000,
+            last: "2026-09-19T00:00:00+00:00".into(),
+        };
+        let patch = refresh_patch(&watched("k"), &v, at("2026-09-22T00:00:00Z"));
+        for key in [RECOVERED_AT, "recovered_by", "recovery"] {
+            assert_eq!(
+                patch[key],
+                Value::Null,
+                "{key} must be deleted by the merge"
+            );
+            assert!(
+                patch.as_object().expect("object").contains_key(key),
+                "{key} must be SENT as null — an absent key is left as it was"
+            );
+        }
     }
 
     /// A close THIS SWEEP made must not suppress the next raise: a

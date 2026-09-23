@@ -60,7 +60,10 @@
 #   packet's wait — on one journal line per run, and writes what each
 #   answered request waited onto that request. The walk is serial and
 #   has no per-verb fairness, so this depth is the only real bound on
-#   raising any probe cadence further (backlog 1ffb3305).
+#   raising any probe cadence further (backlog 1ffb3305). The depth is
+#   the server's `total` for this host, and a reading that could not
+#   see the whole queue prints `>=` and `truncated:` instead of passing
+#   a page off as the count (2cfb4562).
 # - Executes with a wall-clock timeout (OPS_TIMEOUT, default 30s) and
 #   an output cap (OPS_OUTPUT_CAP, default 100KB); both truncations
 #   are LOUD — a marker line in the recorded output says what was cut.
@@ -155,18 +158,61 @@ fi
 ACTOR="${BOSS_OPS_ACTOR:-automation:ops-runner}"
 BOSS_USER="{\"id\":\"$ACTOR\",\"role\":\"platform-admin\",\"access_tier\":\"operator\",\"territory_account_ids\":[],\"direct_report_ids\":[],\"department\":\"platform\"}"
 
+# A LIMIT IS NOT A FILTER (backlog 2cfb4562). This read was
+# `?kind=ops-request&status=open&limit=100` — every host's open
+# requests, one page, with the `total` the API answers beside the rows
+# thrown away — so above 100 the walk silently skipped the tail and the
+# gauge below printed the page as the whole queue: a queue stuck at 400
+# read 100 forever, and no threshold above 100 could ever be crossed.
+# Now the SERVER narrows to this host (`metadata` containment, the
+# host url-encoded by jq, never spliced), the page is the API's own
+# ceiling (MAX_LIMIT in crates/core/boss-jobs/src/http/mod.rs — if the
+# two ever disagree, the comparison below says so loudly rather than
+# the page passing for the queue), and the rows are held against
+# `total` before anything reads them as a count.
+host_doc=$(jq -rn --arg h "$HOST_ID" '{host: $h} | tojson | @uri')
+QUEUE_PAGE=1000
 if ! jobs_json=$(curl -fsS -H "x-boss-user: $BOSS_USER" \
-        "$BASE/api/jobs?kind=ops-request&status=open&limit=100" 2>&1); then
+        "$BASE/api/jobs?kind=ops-request&status=open&metadata=$host_doc&limit=$QUEUE_PAGE" 2>&1); then
     echo "ops-runner: jobs-api unreachable at $BASE — $jobs_json" >&2
     exit 1
 fi
 
 # Envelope ({"data": [...]}) or bare array; keep open rows for THIS
-# host only.
+# host only — the server was asked to narrow, and this still checks.
 mine=$(printf '%s' "$jobs_json" | jq -c --arg h "$HOST_ID" '
     (if type == "object" and has("data") then .data else . end)
     | map(select(.status == "open" and (.metadata.host // "") == $h))')
 n=$(printf '%s' "$mine" | jq 'length')
+
+# THE DEPTH IS EXACT ONLY WHEN THE SERVER'S COUNT VOUCHES FOR IT. Three
+# ways it cannot: no numeric `total` (a bare array, an older shape), a
+# page that held fewer rows than `total`, or a row on the page for
+# ANOTHER host — the evidence the containment filter was not applied,
+# and then `total` is every host's (a wrong target answers instead of
+# erroring, CLAUDE.md §Doors). The first and third leave only a lower
+# bound; the second knows the depth but read part of it, and the list
+# is newest first, so the oldest packets are exactly the ones unread.
+# `truncated` names which, and the gauge prints `>=` in place of `=` so
+# no reader parsing `depth=` can take a lower bound for the count.
+depth="$n"; depth_exact=true; truncated=""
+total=$(printf '%s' "$jobs_json" | jq -r '
+    if type == "object" and (.total | type) == "number" then .total else "" end')
+rows=$(printf '%s' "$jobs_json" | jq '
+    (if type == "object" and has("data") then .data else . end) | length')
+if [ "$rows" -ne "$n" ]; then
+    depth_exact=false
+    truncated="the list was not narrowed to host $HOST_ID ($rows rows, $n for it) — its total is not this host's"
+else
+    case ${total:-empty} in
+        empty | *[!0-9]*)
+            depth_exact=false
+            truncated="the list carried no total, so how much it did not hold is unknown" ;;
+        *)
+            depth="$total"
+            [ "$n" -ge "$total" ] || truncated="read $n of $total open — the walk takes the rest on later runs" ;;
+    esac
+fi
 
 # THE READING, TAKEN BEFORE THE WALK (backlog 1ffb3305). This loop is
 # serial and has no per-verb fairness: a latency-sensitive verb waits
@@ -214,8 +260,15 @@ done <<TS
 $(printf '%s' "$mine" | jq -r '.[] | .metadata.opened_at // "-"')
 TS
 # EVERY run, depth zero included: a gauge that appears only when it is
-# non-zero cannot be told apart from a runner that stopped.
-echo "ops-runner: queue host=$HOST_ID depth=$n oldest_wait_s=$oldest_wait"
+# non-zero cannot be told apart from a runner that stopped. A reading
+# that could not see the whole queue says so on the same line (above).
+if [ -z "$truncated" ]; then
+    echo "ops-runner: queue host=$HOST_ID depth=$depth oldest_wait_s=$oldest_wait"
+elif [ "$depth_exact" = true ]; then
+    echo "ops-runner: queue host=$HOST_ID depth=$depth oldest_wait_s>=$oldest_wait truncated: $truncated"
+else
+    echo "ops-runner: queue host=$HOST_ID depth>=$depth oldest_wait_s>=$oldest_wait truncated: $truncated"
+fi
 
 if [ "$n" -eq 0 ]; then
     echo "ops-runner: no open ops-request for $HOST_ID"
@@ -452,15 +505,17 @@ ARGV
     # counted, and the unit goes red for it.
     if [ "$disp" = "answered" ]; then
         exitf="$workdir/exit"
-        jq -cn --arg w "$wait_s" --argjson d "$n" '
-            {queue_depth: $d}
+        # A lower bound rides under its own key, never as `queue_depth`
+        # — a reader of that key takes it as the count (2cfb4562).
+        jq -cn --arg w "$wait_s" --argjson d "$depth" --arg exact "$depth_exact" '
+            (if $exact == "true" then {queue_depth: $d} else {queue_depth_at_least: $d} end)
             + (if $w == "-" then {} else {queued_s: ($w | tonumber)} end)' > "$exitf"
         if ! patch_err=$(curl -fsS -X PATCH -H "content-type: application/json" \
                 -H "x-boss-user: $BOSS_USER" \
                 ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
                 --data-binary @"$exitf" \
                 "$BASE/api/jobs/$job_id/metadata" 2>&1 >/dev/null); then
-            echo "ops-runner: PATCH queue_depth=$n failed on $short — $patch_err" >&2
+            echo "ops-runner: PATCH queue_depth=$depth failed on $short — $patch_err" >&2
             failed=$((failed + 1))
         fi
     fi

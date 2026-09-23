@@ -70,8 +70,12 @@ async fn undeclared_class(
     for a in rows {
         for (attribute, code) in [("role", &a.role), ("department", &a.department)] {
             let Some(code) = code else { continue };
+            // On its OWN axis (backlog ab1e6ff8): the employee drawer
+            // holds role, department, status and employment_type codes
+            // side by side, and `class_exists` accepted a department as
+            // a role.
             let held = classes
-                .class_exists(&ClassRef::new("employee", code.as_str()))
+                .class_exists_on(&ClassRef::new("employee", code.as_str()), attribute)
                 .await
                 .map_err(|e| format!("classes registry: {e}"))?;
             if !held {
@@ -233,15 +237,27 @@ mod tests {
     }
 
     /// The door with the Class registry wired, holding exactly the
-    /// tenant's `engineering-agent` role and `engineering` department.
+    /// tenant's `engineering-agent` role and `engineering` department,
+    /// each on its own axis — the shape the live registry serves (every
+    /// live employee Class carries a member_attribute, 2026-09-23).
     fn app_with_classes(registry: &Arc<InMemoryAgents>) -> Router {
         use boss_classes_client::FakeClassesClient;
-        use boss_core::primitives::ClassRef;
+        use boss_core::primitives::Class;
+        let on = |code: &str, attribute: &str| Class {
+            subject_kind: "employee".into(),
+            code: code.into(),
+            display_name: code.into(),
+            parent_code: None,
+            member_attribute: Some(attribute.into()),
+            metadata: Value::Null,
+            sort_order: 0,
+            retired_at: None,
+        };
         router(AgentsApiState {
             registry: registry.clone() as Arc<dyn AgentsRegistry>,
-            classes: Some(Arc::new(FakeClassesClient::with(vec![
-                ClassRef::new("employee", "engineering-agent"),
-                ClassRef::new("employee", "engineering"),
+            classes: Some(Arc::new(FakeClassesClient::with_classes(vec![
+                on("engineering-agent", "role"),
+                on("engineering", "department"),
             ]))),
         })
     }
@@ -499,7 +515,15 @@ mod tests {
         assert_eq!(listing["data"][0]["role"], "engineering-agent");
         assert_eq!(listing["data"][0]["department"], "engineering");
 
-        for (attribute, code) in [("role", "wizard"), ("department", "narnia")] {
+        // An undeclared code, and a declared code on the OTHER axis: a
+        // department is not a role however active its row is (backlog
+        // ab1e6ff8 — this door asked the axis-blind question until then).
+        for (attribute, code) in [
+            ("role", "wizard"),
+            ("department", "narnia"),
+            ("role", "engineering"),
+            ("department", "engineering-agent"),
+        ] {
             let mut bad = declared.clone();
             bad[0][attribute] = json!(code);
             let (status, body) = send(

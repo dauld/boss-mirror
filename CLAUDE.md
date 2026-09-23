@@ -949,6 +949,43 @@ a door that stops being true is a defect worth a car.
   Never push a car branch to a push-mirror target — it force-syncs from
   the forge and the branch disappears.
 
+- **A credential admin can MINT is never placed by hand — the credential
+  broker.** The hand-placement IS the exposure. On 2026-09-02 the dev
+  pod's forge write token surfaced in a session transcript during a
+  placement walkthrough; the broker's manifest says it plainly: "the
+  ceremony itself was the vulnerability"
+  (`infra/cluster/manifests/boss-credential-broker.yaml`, packet
+  7ee101aa). A `rotate-a-credential` packet, opened on the credential's
+  registry id, is the door: a human completes only its `scope` step, and
+  the dispatcher's `credential.rotate.*` handler mints the replacement
+  with a root credential only it holds, PATCHes it into ONE named Secret,
+  verifies it by effect, and only then revokes the old one — each phase
+  a step on the packet and a `credential.*` event. It rotates two today:
+  the dev pod's forge token and the Cloudflare tunnel credentials.
+  Consumers read Secret mounts; for the residue a mount cannot reach — a
+  token file on a writable path, the git credential helper — `boss
+  credential pull forge` reads the one Secret the dev session's Role
+  names, writes the file, points the helper AT the file, scrubs any
+  helper carrying an inline password, and prints lengths and paths,
+  never a value. It refuses any target but `forge` and an empty Secret
+  (the broker has not run); `boss credential list` renders the registry,
+  which holds locations and never a value. The broker itself cannot
+  create a Secret or write any Secret but its named ones — the Roles are
+  `resourceNames`-scoped. **The boundary is derivability, not
+  sensitivity.** Root material — an admin kubeconfig, a talosconfig, the
+  broker's own root tokens — cannot be minted from anything the estate
+  holds, so placing it genuinely is David's act (`infra/forge/install.sh`
+  CHECKS `/etc/boss-ops/*`, never writes one). A scoped ServiceAccount
+  credential, a forge token, a tunnel secret is minted FROM something
+  admin already holds, so its path is the broker — a credential of a new
+  kind needs a handler for its issuer, never a runbook with David's name
+  in it. On 2026-09-20 a session designed a scoped cluster credential for
+  David to mint and place at `/etc/boss-ops/kubeconfig` by hand,
+  generalising install.sh's "placed once by David" from root material to
+  a derivable credential. David caught it; the protocol did not, because
+  this entry did not exist (backlog 3c779ca8; the delivery itself is
+  design 835c0c9c).
+
 **And the rule behind all of them: a wrong target answers instead of
 erroring.** A query against the wrong deployment returns `total: 0`. A
 non-existent systemd unit is `inactive`. A service checked on the wrong

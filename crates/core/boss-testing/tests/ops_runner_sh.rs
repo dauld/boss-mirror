@@ -44,10 +44,12 @@ fn write_exec(path: &Path, body: &str) {
 }
 
 /// The stubbed system of record: `bin/curl` serves `jobs.json` on any
-/// GET, copies a PUT's `--data-binary @file` payload to `put.json`,
-/// and a PATCH's to `patch.json` — the request-level `exit` the runner
-/// writes through the job metadata door (f47861a5). A `gh` stub stands
-/// in for the publish verb's `--check` tool probe.
+/// GET (recording the URL it was asked for in `get.url`, so a case can
+/// read the query the runner sent), copies a PUT's `--data-binary
+/// @file` payload to `put.json`, and a PATCH's to `patch.json` — the
+/// request-level `exit` the runner writes through the job metadata door
+/// (f47861a5). A `gh` stub stands in for the publish verb's `--check`
+/// tool probe.
 fn stub_sor(root: &Path) -> PathBuf {
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -59,6 +61,7 @@ fn stub_sor(root: &Path) -> PathBuf {
          for a in \"$@\"; do case \"$a\" in @*)\n\
              if [ \"$m\" = PATCH ]; then cp \"${a#@}\" \"$STUB_PATCH\"; else cp \"${a#@}\" \"$STUB_PUT\"; fi\n\
              exit 0;; esac; done\n\
+         for a in \"$@\"; do case \"$a\" in http*) printf '%s\\n' \"$a\" > \"$STUB_GET\";; esac; done\n\
          cat \"$STUB_JOBS\"\n",
     );
     write_exec(&bin.join("gh"), "#!/bin/sh\nexit 0\n");
@@ -73,7 +76,7 @@ fn packet_for(root: &Path, host: &str, verb: &str, args: &str) {
     std::fs::write(
         root.join("jobs.json"),
         format!(
-            r#"{{"data":[{{"id":"aaaaaaaa-0000-4000-8000-000000000000","status":"open","metadata":{{"host":"{host}","verb":"{verb}","args":{args}}},"steps":[{{"id":"s-execute","spec_slug":"execute","status":"ready","metadata":{{"authority_role":"platform-admin"}}}}]}}]}}"#
+            r#"{{"data":[{{"id":"aaaaaaaa-0000-4000-8000-000000000000","status":"open","metadata":{{"host":"{host}","verb":"{verb}","args":{args}}},"steps":[{{"id":"s-execute","spec_slug":"execute","status":"ready","metadata":{{"authority_role":"platform-admin"}}}}]}}],"total":1}}"#
         ),
     )
     .unwrap();
@@ -111,7 +114,8 @@ fn run(
         .env("OPS_VERBS_DIR", verbs)
         .env("STUB_JOBS", root.join("jobs.json"))
         .env("STUB_PUT", &put)
-        .env("STUB_PATCH", root.join("patch.json"));
+        .env("STUB_PATCH", root.join("patch.json"))
+        .env("STUB_GET", root.join("get.url"));
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
@@ -932,7 +936,7 @@ fn the_runner_reads_its_own_queue_depth_and_oldest_wait() {
 
     // An empty queue is a reading too, and the one the runner takes
     // most often.
-    std::fs::write(root.join("jobs.json"), r#"{"data":[]}"#).unwrap();
+    std::fs::write(root.join("jobs.json"), r#"{"data":[],"total":0}"#).unwrap();
     let (out, _) = run(&root, &verbs, &[]);
     assert_eq!(
         queue_line(&out),
@@ -985,6 +989,131 @@ fn the_runner_reads_its_own_queue_depth_and_oldest_wait() {
     );
 }
 
+/// A LIMIT IS NOT A FILTER (backlog 2cfb4562). The reading above was
+/// taken from `?kind=ops-request&status=open&limit=100` — EVERY host's
+/// open requests, one page of them, with the `total` the API answers
+/// beside the rows thrown away. At a depth above 100 the walk silently
+/// ignored the tail and the gauge printed the page as though it were
+/// the whole queue: a queue stuck at 400 reads 100 forever, and any
+/// threshold set above 100 could never be crossed. The same shape was
+/// found the same day in a recorded probe (limit=300 against a live
+/// total of 345, its one qualifying row in the unread tail).
+///
+/// So the query is narrowed to THIS host by the server, the rows are
+/// compared against the `total` it answers, and a reading that could
+/// not see the whole queue says so in a shape no reader can take for
+/// an exact number: `depth=` only when the count is the server's own
+/// for this host, `depth>=` when it is a lower bound, and the oldest
+/// wait likewise — the list is newest first, so the tail it did not
+/// read is exactly where the oldest packets are.
+#[test]
+fn a_queue_the_runner_could_not_see_all_of_is_not_reported_as_exact() {
+    needs_jq!();
+    let root = scratch("queue-truncated");
+    stub_sor(&root);
+    let ok = root.join("ok.sh");
+    write_exec(&ok, "#!/bin/sh\necho ok\n");
+    let verbs = verbs_dir(
+        &root,
+        &[(
+            "ok",
+            &format!(
+                r#"{{"about":"a verb that answers","hosts":["forge"],"argv":["{}"],"params":[]}}"#,
+                ok.display()
+            ),
+        )],
+    );
+
+    // The server is asked for THIS host's queue, not every host's
+    // first page: the host rides the containment filter, url-encoded.
+    queue(&root, "ok", &[Some(30)]);
+    let (out, _) = run(&root, &verbs, &[]);
+    let url = std::fs::read_to_string(root.join("get.url"))
+        .unwrap_or_else(|e| panic!("the runner made no list read: {e}; {out}"));
+    assert!(
+        url.contains("metadata=%7B%22host%22%3A%22forge%22%7D"),
+        "the list read is narrowed to this host by the server: {url}"
+    );
+    assert!(
+        !url.split(['?', '&']).any(|kv| kv.trim() == "limit=100"),
+        "the page is not the old 100 cap: {url}"
+    );
+
+    // Two rows on the page, five open: the depth is the server's count
+    // and the walk knows it saw only part of it.
+    queue_of(&root, "ok", &[Some(120), Some(30)], Some(5));
+    let (out, _) = run(&root, &verbs, &[]);
+    let line = queue_line(&out);
+    assert_eq!(
+        field(&line, "depth"),
+        "5",
+        "the depth is the server's total: {line}"
+    );
+    assert!(
+        line.contains("oldest_wait_s>=") && line.contains("truncated"),
+        "the oldest wait of a partial read is a lower bound, and the line says why: {line}"
+    );
+    assert!(
+        !line
+            .split_whitespace()
+            .any(|w| w.starts_with("oldest_wait_s=")),
+        "a lower bound is never printed in the exact shape: {line}"
+    );
+    let patch = read_patch(&root, &out);
+    assert_eq!(
+        patch["queue_depth"], 5,
+        "the request carries the whole queue's depth: {patch}"
+    );
+
+    // No `total` at all: the runner cannot know how much it did not
+    // see, so it REFUSES the exact reading rather than printing the
+    // page as the queue — and the request says "at least", under a key
+    // no reader of `queue_depth` can mistake for the count.
+    queue_of(&root, "ok", &[Some(120), Some(30)], None);
+    let (out, _) = run(&root, &verbs, &[]);
+    let line = queue_line(&out);
+    assert!(
+        line.contains("depth>=2") && line.contains("truncated"),
+        "an unverifiable count is a lower bound, named: {line}"
+    );
+    assert!(
+        !line.split_whitespace().any(|w| w.starts_with("depth=")),
+        "no exact depth without a total to check it against: {line}"
+    );
+    let patch = read_patch(&root, &out);
+    assert!(
+        patch.get("queue_depth").is_none(),
+        "a lower bound is not written as the depth: {patch}"
+    );
+    assert_eq!(patch["queue_depth_at_least"], 2, "{patch}");
+
+    // A server that ignored the host filter answers every host's
+    // `total` — the wrong-target shape (CLAUDE.md §Doors: it answers
+    // instead of erroring). A row for another host on the page is the
+    // evidence, and that total is not this host's depth.
+    std::fs::write(
+        root.join("jobs.json"),
+        r#"{"data":[{"id":"bbbbbbbb-0000-4000-8000-000000000000","status":"open","metadata":{"host":"boss-gcp","verb":"ok","args":[]},"steps":[]}],"total":1}"#,
+    )
+    .unwrap();
+    let (out, _) = run(&root, &verbs, &[]);
+    let line = queue_line(&out);
+    assert!(
+        line.contains("depth>=0") && line.contains("truncated"),
+        "another host's total is not this host's depth: {line}"
+    );
+}
+
+/// The request-level PATCH the last run wrote, or a panic naming what
+/// the run printed instead.
+fn read_patch(root: &Path, out: &str) -> serde_json::Value {
+    serde_json::from_str(
+        &std::fs::read_to_string(root.join("patch.json"))
+            .unwrap_or_else(|e| panic!("no PATCH on the request's metadata: {e}; {out}")),
+    )
+    .expect("the PATCH body is JSON")
+}
+
 /// The runner's one-line queue reading, or a panic naming what it
 /// printed instead.
 fn queue_line(out: &str) -> String {
@@ -1006,6 +1135,13 @@ fn field(line: &str, key: &str) -> String {
 /// carrying the `opened_at` a live request carries (`Some(age)`
 /// seconds ago) or none at all.
 fn queue(root: &Path, verb: &str, ages_s: &[Option<u64>]) {
+    queue_of(root, verb, ages_s, Some(ages_s.len()));
+}
+
+/// [`queue`], with the `total` the server answers beside the rows set
+/// by hand: `Some(n)` larger than the rows is a page that did not hold
+/// the whole queue, and `None` is a response that carries no `total`.
+fn queue_of(root: &Path, verb: &str, ages_s: &[Option<u64>], total: Option<usize>) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -1025,7 +1161,10 @@ fn queue(root: &Path, verb: &str, ages_s: &[Option<u64>]) {
         .collect();
     std::fs::write(
         root.join("jobs.json"),
-        format!(r#"{{"data":[{}]}}"#, rows.join(",")),
+        match total {
+            Some(t) => format!(r#"{{"data":[{}],"total":{t}}}"#, rows.join(",")),
+            None => format!(r#"{{"data":[{}]}}"#, rows.join(",")),
+        },
     )
     .unwrap();
 }
