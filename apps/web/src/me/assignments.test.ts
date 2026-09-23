@@ -328,3 +328,77 @@ describe('verdicts split from owned work', () => {
     expect(q.mine.map((r) => r.step.kind)).toEqual(['task']);
   });
 });
+
+// The founder's watch list (backlog 3bc896be, design 5877860d, decided
+// 2026-09-21): "Yours to decide" IS the per-actor queue the design
+// chose, and what it lacked was age. q2: every row carries how long it
+// has been waiting, the list sorts oldest first, and crossing a
+// declared threshold changes how the row reads. A drive packet sat in
+// a queue for two days looking handled; a list sorted by priority
+// buries exactly that packet under whatever arrived urgent this hour.
+import { waitingOf } from './assignments';
+
+describe('verdicts age, oldest first', () => {
+  const verdict = (opened_on: string | undefined, priority = 'standard') =>
+    row({
+      job_title: opened_on ?? 'undated',
+      priority,
+      opened_on,
+      step: { kind: 'sign-off', assignee_id: 'me', completion: 'human' },
+    } as RowOverrides);
+
+  test('the oldest verdict leads, even over an urgent newer one', () => {
+    const q = splitQueues(
+      [verdict('2026-09-20', 'urgent'), verdict('2026-09-12'), verdict('2026-09-18')],
+      'me',
+    );
+    expect(q.verdicts.map((r) => r.job_title)).toEqual([
+      '2026-09-12',
+      '2026-09-18',
+      '2026-09-20',
+    ]);
+  });
+
+  test('a row with no admission date sorts last rather than inventing an age', () => {
+    const q = splitQueues([verdict(undefined), verdict('2026-09-20')], 'me');
+    expect(q.verdicts.map((r) => r.job_title)).toEqual(['2026-09-20', 'undated']);
+  });
+
+  test('a blocked verdict still sits below an actionable one', () => {
+    const blocked = row({
+      job_title: 'blocked',
+      opened_on: '2026-09-01',
+      step: { kind: 'sign-off', assignee_id: 'me', status: 'pending' },
+    } as RowOverrides);
+    const q = splitQueues([blocked, verdict('2026-09-20')], 'me');
+    expect(q.verdicts.map((r) => r.job_title)).toEqual(['2026-09-20', 'blocked']);
+  });
+
+  test('owned work keeps its priority order — only the verdicts are the watch list', () => {
+    const q = splitQueues(
+      [
+        row({ opened_on: '2026-09-01', step: { assignee_id: 'me' } } as RowOverrides),
+        row({ priority: 'urgent', opened_on: '2026-09-20', step: { assignee_id: 'me' } } as RowOverrides),
+      ],
+      'me',
+    );
+    expect(q.mine[0]?.priority).toBe('urgent');
+  });
+});
+
+describe('waitingOf', () => {
+  const at = (opened_on?: string | null) =>
+    row({ opened_on, step: { assignee_id: 'me' } } as RowOverrides);
+
+  test('reads days and band against the receiving yard thresholds', () => {
+    expect(waitingOf(at('2026-09-23'), '2026-09-23')).toEqual({ days: 0, band: 'fresh' });
+    expect(waitingOf(at('2026-09-20'), '2026-09-23')).toEqual({ days: 3, band: 'fresh' });
+    expect(waitingOf(at('2026-09-19'), '2026-09-23')).toEqual({ days: 4, band: 'aging' });
+    expect(waitingOf(at('2026-09-08'), '2026-09-23')).toEqual({ days: 15, band: 'stale' });
+  });
+
+  test('no admission date is no age, never zero', () => {
+    expect(waitingOf(at(undefined), '2026-09-23')).toBeNull();
+    expect(waitingOf(at(null), '2026-09-23')).toBeNull();
+  });
+});

@@ -1,4 +1,4 @@
-// Every section id SECTION_FOR_ROUTE produces must resolve in
+// Every section id `sectionForRoute` produces must resolve in
 // ROUTE_CATALOG — that key is what highlights the sidebar row and what
 // `appForSection` uses to pick the app tab. A value that misses the
 // catalog silently renders the page under Home chrome: right content,
@@ -13,11 +13,12 @@
 // and it is showing me still in home" (CLAUDE.md §9a).
 
 import { describe, expect, test } from 'bun:test';
+import * as sectionsModule from './sections';
 import {
   DYNAMIC_APP_SECTIONS,
   HOME_CHROME_SECTIONS,
-  REGION_SECTIONS,
-  SECTION_FOR_ROUTE,
+  ROUTE_KINDS,
+  SECTIONS_PRODUCED,
   appForRoute,
   moduleForRoute,
   sectionForRoute,
@@ -26,9 +27,38 @@ import { ROUTE_CATALOG, appForSection } from './nav-catalog';
 import type { Route } from '../router';
 
 const catalogKeys = new Set(Object.keys(ROUTE_CATALOG));
-// Every section a route can light: the kind's own, plus the two a
-// yard floor's REGION answers for (car 4 of design d2154293).
-const sections = new Set([...Object.values(SECTION_FOR_ROUTE), ...Object.values(REGION_SECTIONS)]);
+// Every section a route can light — the kind's own, plus the ones a
+// PARAMETER answers for (a yard floor's region, car 4 of design
+// d2154293). sections.ts derives it, so this file no longer knows how
+// many answers there are.
+const sections = SECTIONS_PRODUCED;
+
+describe('one reader answers which row a route lights', () => {
+  test('the kind-keyed map is not a public answer', () => {
+    // Backlog c6f91515 (2026-09-20): once a row depends on a route
+    // PARAMETER, a kind-keyed map answers plausibly and wrongly — both
+    // retired yards would light the Train Yard's row, and nothing
+    // errors. So the map is private to sections.ts, and
+    // `sectionForRoute` is the one place to look. Re-exporting it (or
+    // the region map beside it) hands the next author the wrong half.
+    const exported = Object.keys(sectionsModule);
+    expect(exported).not.toContain('SECTION_FOR_ROUTE');
+    expect(exported).not.toContain('SECTION_FOR_KIND');
+    expect(exported).not.toContain('REGION_SECTIONS');
+  });
+
+  test('every section produced is one some route lights', () => {
+    // SECTIONS_PRODUCED is derived, not listed: each entry must be
+    // reachable through the reader, or it is a ghost the pins below
+    // would count as covered.
+    const lit = new Set([
+      ...ROUTE_KINDS.map((kind) => sectionForRoute({ kind } as Route)),
+      sectionForRoute({ kind: 'systemYardFloor', region: 'receiving' }),
+      sectionForRoute({ kind: 'systemYardFloor', region: 'marshalling' }),
+    ]);
+    expect([...sections].filter((s) => !lit.has(s)).sort()).toEqual([]);
+  });
+});
 
 describe('sections resolve in the nav catalog', () => {
   test('every section id is a catalog key or a documented exception', () => {
@@ -122,9 +152,9 @@ describe('the module gate a route answers to', () => {
   test('a route requires exactly the module that hides its own nav row', () => {
     // The drift this refuses: the module that HIDES a sidebar row and
     // the module that gates the ROUTE behind it are one fact.
-    for (const kind of Object.keys(SECTION_FOR_ROUTE) as ReadonlyArray<Route['kind']>) {
+    for (const kind of ROUTE_KINDS) {
       const entry = (ROUTE_CATALOG as Record<string, { module?: string } | undefined>)[
-        SECTION_FOR_ROUTE[kind]
+        sectionForRoute({ kind } as Route)
       ];
       expect(moduleForRoute({ kind } as Route)?.id ?? null, kind).toEqual(entry?.module ?? null);
     }

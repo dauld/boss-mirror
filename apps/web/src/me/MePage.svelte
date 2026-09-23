@@ -14,13 +14,14 @@
 
   import { BREAK_GLASS_ROLE, session } from '@boss/web-kit/session/session.svelte';
   import GuestHome from './GuestHome.svelte';
-  import { appNow } from '@boss/web-kit/sim-clock';
+  import { appNow, appToday } from '@boss/web-kit/sim-clock';
   import {
     fetchMyDay,
     claimStep,
     assignmentPacket,
     filterByProtocol,
     protocolCounts,
+    waitingOf,
     type MyDayQueues,
     type AssignmentRow,
   } from './assignments';
@@ -105,6 +106,10 @@
   // overwrite a newer one, and a persona switch mid-flight must not
   // bleed rows split against the old uid into the new person's page.
   let queueSeq = 0;
+  // The day a verdict's age is read against — the app clock, the one
+  // `opened_on` is stamped by, taken when the queues land so the age
+  // and the rows it describes are one reading (3bc896be).
+  let today = $state(appToday());
   async function loadQueues(uid: string, role: string): Promise<void> {
     const seq = ++queueSeq;
     const res = await fetchMyDay(uid, role);
@@ -112,6 +117,7 @@
     loading = false;
     if (res.kind === 'ready') {
       queues = res.queues;
+      today = appToday();
       loadError = null;
     } else {
       // Keep whatever was last known-good; the template says which
@@ -380,13 +386,27 @@
           {:else}
             <div class="myday-jobs-list">
               {#each shown.verdicts as row (row.step.id)}
+                {@const waited = waitingOf(row, today)}
                 <!-- Decide beside the card, the same grammar as Claim:
                      the card is the packet, the button is the queue
                      mechanic. It opens the step's real surface in a
                      modal, so a docket of verdicts is decide → next
-                     without leaving the queue (feedback 0ab5fa3a). -->
-                <div class="myday-grab-row">
+                     without leaving the queue (feedback 0ab5fa3a).
+                     The age rides beside it, toned by band, because
+                     this list is the founder's watch list and a
+                     watch list that does not age stops being read
+                     (3bc896be, design 5877860d q2). -->
+                <div class="myday-grab-row myday-verdict-row">
                   <PacketCard card={assignmentPacket(row)} />
+                  {#if waited}
+                    <span
+                      class="myday-age myday-age-{waited.band}"
+                      data-band={waited.band}
+                      title="Packet opened {row.opened_on}"
+                    >open {waited.days} d</span>
+                  {:else}
+                    <span></span>
+                  {/if}
                   <button class="myday-claim-btn" onclick={() => (deciding = row)}>
                     Decide
                   </button>
@@ -752,6 +772,27 @@
   }
   /* Mono + caps, matching the packet card's own chip treatment; only
      the color changes, and only to a declared status token. */
+  .myday-verdict-row {
+    grid-template-columns: 1fr auto auto;
+  }
+  /* A verdict's age, in the receiving yard's bands: quiet while fresh,
+     warn past 3 days, err past 14 — crossing a threshold changes how
+     the row reads, not only the number on it (3bc896be q2). */
+  .myday-age {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 10px;
+    letter-spacing: var(--ls-label, 0.1em);
+    text-transform: uppercase;
+    white-space: nowrap;
+    color: var(--static, #7a838c);
+  }
+  .myday-age-aging {
+    color: var(--warn, #d9a441);
+  }
+  .myday-age-stale {
+    color: var(--err, #e2685c);
+    font-weight: 600;
+  }
   .watch-outcome {
     font-family: var(--font-mono, ui-monospace, monospace);
     font-size: 10px;

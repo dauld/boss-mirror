@@ -72,8 +72,9 @@ export function appForRoute(route: Route): AppId {
 /// alone can no longer say which row to light: the region does, and
 /// this is the one place that reads it. Without it both would light
 /// the Train Yard's row, and a sidebar row that never highlights is
-/// a row an operator stops trusting.
-export const REGION_SECTIONS: Readonly<Record<string, string>> = {
+/// a row an operator stops trusting. Private for the reason
+/// SECTION_FOR_KIND is: `sectionForRoute` is the one reader.
+const REGION_SECTIONS: Readonly<Record<string, string>> = {
   receiving: 'system-receiving',
   marshalling: 'system-marshalling',
 };
@@ -99,15 +100,28 @@ export function moduleForRoute(route: Route): { id: string; label: string } | nu
   return { id: entry.module, label: entry.label };
 }
 
-/// Which sidebar row a route lights.
+/// Which sidebar row a route lights — the ONE answer, and the only
+/// one this module exports. Most rows are named by the route's kind
+/// (SECTION_FOR_KIND); a few depend on a route PARAMETER, which a
+/// kind-keyed map cannot express (REGION_SECTIONS, a yard floor's
+/// region). A route whose row depends on a parameter gets its branch
+/// HERE, never a second exported lookup.
 export function sectionForRoute(route: Route): string {
   if (route.kind === 'systemYardFloor') {
-    return REGION_SECTIONS[route.region] ?? SECTION_FOR_ROUTE.systemYardFloor!;
+    return REGION_SECTIONS[route.region] ?? SECTION_FOR_KIND.systemYardFloor!;
   }
-  return SECTION_FOR_ROUTE[route.kind];
+  return SECTION_FOR_KIND[route.kind];
 }
 
-export const SECTION_FOR_ROUTE: Readonly<Record<Route['kind'], string>> = {
+/// The kind half of `sectionForRoute`: NOT authoritative alone, and so
+/// not exported. It was the public answer (as SECTION_FOR_ROUTE) until
+/// car 4 of design d2154293 retired /it/operate/receiving and
+/// /it/operate/marshalling as pages: both are yard floors now, and
+/// read off this map both light the Train Yard's row — a plausible
+/// wrong answer with no error, which is the failure a reader cannot
+/// see (backlog c6f91515, 2026-09-20). Its companion is
+/// REGION_SECTIONS; its reader is `sectionForRoute`.
+const SECTION_FOR_KIND: Readonly<Record<Route['kind'], string>> = {
   // Renders outside AppShell (or has no sidebar row) — see
   // HOME_CHROME_SECTIONS for the reasons.
   login: 'me',
@@ -206,3 +220,18 @@ export const SECTION_FOR_ROUTE: Readonly<Record<Route['kind'], string>> = {
   workflowDesign: 'workflows',
   workflowDetail: 'workflows',
 };
+
+/// Every route kind — the map's keys, which the `Record` type holds
+/// complete. Exported so a pin can walk every kind through
+/// `sectionForRoute` without reaching for the map itself.
+export const ROUTE_KINDS: ReadonlyArray<Route['kind']> = Object.keys(
+  SECTION_FOR_KIND,
+) as ReadonlyArray<Route['kind']>;
+
+/// Every section a route can light: the kind's own and each one a
+/// parameter answers for. Derived here, beside both halves, so no
+/// caller has to know there are two (backlog c6f91515).
+export const SECTIONS_PRODUCED: ReadonlySet<string> = new Set([
+  ...Object.values(SECTION_FOR_KIND),
+  ...Object.values(REGION_SECTIONS),
+]);

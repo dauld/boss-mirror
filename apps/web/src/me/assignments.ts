@@ -8,6 +8,7 @@
 // role-matched step are visible context, not claimable work.
 
 import { carRow, partitionOf, type CarRow, type Partition } from '../it/yard/yard';
+import { ageBand, ageDays, type AgeBand } from '../it/receiving/receiving';
 
 export type AssignmentStep = Readonly<{
   id: string;
@@ -33,6 +34,12 @@ export type AssignmentRow = Readonly<{
   job_id: string;
   job_title: string;
   due_on?: string | null;
+  /** The day the packet was admitted (ISO date). The server has sent it
+   *  since `boss orient`'s MY WORK needed an age (port.rs, 65a89769);
+   *  this lens reads it for the founder's watch list (3bc896be).
+   *  Optional so a server that predates it still parses — and then
+   *  the row has NO age, never a zero one. */
+  opened_on?: string | null;
   workflow: string;
   subject_kind: string;
   subject_id: string;
@@ -146,6 +153,59 @@ export function orderQueue(rows: readonly AssignmentRow[]): AssignmentRow[] {
   });
 }
 
+/// The founder's watch list is "Yours to decide", oldest first.
+///
+/// Backlog 3bc896be, design 5877860d (decided 2026-09-21): David routed
+/// a drive purchase to design review because `/it/design` was the one
+/// surface that showed him what was waiting on HIM — and it sat there
+/// two days looking handled. The design chose the per-actor queue that
+/// already exists (these assigned verdicts, on My Day, which is `/`)
+/// over a flag or a fourth page, and made age not optional (q2): a list
+/// ordered by priority buries the packet that has waited longest under
+/// whatever arrived urgent this hour, which is the garage's nine-hour
+/// TROUBLED reading with a shorter list.
+///
+/// Actionable before blocked still — a pending step is not waiting on
+/// anyone yet — then oldest `opened_on` first. A row without the date
+/// (a server predating it) sorts after every dated row rather than
+/// being given one. Priority breaks ties. Owned work (`mine`) keeps
+/// {@link orderQueue}: it is pulled from, not watched.
+export function orderVerdicts(rows: readonly AssignmentRow[]): AssignmentRow[] {
+  // `sort` is stable, so a tie on both keys keeps orderQueue's priority
+  // order underneath.
+  return orderQueue(rows).sort((a, b) => {
+    const aa = a.step.status === 'ready' || a.step.status === 'active' ? 0 : 1;
+    const ab = b.step.status === 'ready' || b.step.status === 'active' ? 0 : 1;
+    if (aa !== ab) return aa - ab;
+    const oa = a.opened_on ?? '';
+    const ob = b.opened_on ?? '';
+    if (oa !== ob) {
+      if (!oa) return 1;
+      if (!ob) return -1;
+      return oa.localeCompare(ob);
+    }
+    return 0;
+  });
+}
+
+/// How long a row's packet has been open, and the band that decides how
+/// the row reads. The days and the thresholds are the receiving yard's
+/// (`ageDays`, `AGE_THRESHOLDS`: past 3 days aging, past 14 stale) —
+/// one definition of "old", not a second copy (CLAUDE.md §9a).
+///
+/// It is the PACKET's age, from `opened_on`, the same measure MY WORK
+/// and every station's `oldest_age_days` read: a step records no time
+/// it became ready, so "waiting on you since" is not a fact the row can
+/// carry yet. `null` when the row has no date — no age is shown, never
+/// an invented one.
+export type Waiting = Readonly<{ days: number; band: AgeBand }>;
+
+export function waitingOf(row: AssignmentRow, today: string): Waiting | null {
+  if (!row.opened_on) return null;
+  const days = ageDays(row.opened_on, today);
+  return { days, band: ageBand(days) };
+}
+
 export function splitQueues(
   rows: readonly AssignmentRow[],
   uid: string,
@@ -158,7 +218,7 @@ export function splitQueues(
     r => r.step.assignee_id && r.step.assignee_id !== uid,
   );
   return {
-    verdicts: orderQueue(verdicts),
+    verdicts: orderVerdicts(verdicts),
     mine: orderQueue(mine),
     upForGrabs: orderQueue(unclaimed.filter(needsAPerson)),
     // An `agent`-completion step sitting unclaimed in a person's queue

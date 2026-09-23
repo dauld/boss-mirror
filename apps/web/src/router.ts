@@ -186,7 +186,11 @@ export function parseRoute(pathname: string): Route {
     // board mounts under the world zoomed into that region. The two
     // old paths resolve to the same route rather than 404ing, because
     // they are written down in packets, briefs and this session's own
-    // notes — one surface, two spellings, not two surfaces.
+    // notes — one surface, two spellings, not two surfaces. Drop them
+    // only once nothing outside apps/web names them — check the tree
+    // AND the packets: a brief naming a dead path is worse than an
+    // alias (backlog c6f91515, 2026-09-20). Their sidebar rows are
+    // decided by the REGION, in `sectionForRoute`, not by this path.
     if (p === '/operate/marshalling') return { kind: 'systemYardFloor', region: 'marshalling' };
     if (p === '/operate/receiving') return { kind: 'systemYardFloor', region: 'receiving' };
     if (p === '/operate/yard-status') return { kind: 'systemYardStatus' };

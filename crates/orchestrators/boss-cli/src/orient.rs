@@ -233,6 +233,69 @@ fn troubled_dock_cars(cars: &[Value]) -> Vec<(String, u64, String)> {
     out
 }
 
+/// Pairs of dock cars that cannot BOTH board — `(branch, branch, files)`,
+/// each pair once, branch-sorted.
+///
+/// THE CHECK EXISTED; THE READER DID NOT (backlog 5c567c27). On
+/// 2026-09-20 three cars, each told to stay additive and each green
+/// alone, could not board together — two touched WorldMap.svelte — and
+/// the pipeline stopped for nine and a half hours with a full dock. The
+/// packet asked for a dock-time check naming the pair when the second car
+/// parks. The conductor has computed exactly that on every reconcile tick
+/// since 12a25f3e (`preview_dock`: pairwise `git merge-tree` across the
+/// parked set, onto each car's `metadata.merge_preview.conflicts_with`)
+/// and nothing read it. A check nobody reads is a check that is not
+/// running, so this is the read — of the packets orient has already
+/// fetched, no second call and no copy of the conductor's judgement.
+///
+/// ONE TICK, BOTH AT THE DOCK. The preview is rewritten only for cars
+/// still parked-ready, so a car that boarded or is held keeps the
+/// preview of the dock it last saw (measured 2026-09-23: five cars
+/// stamped 09:50 still named a branch whose 10:10 preview no longer named
+/// them). Two previews pair only when both cars are open and parked
+/// (`boss_jobs::car::is_parked`, the dock's shared predicate) and both
+/// were measured over the SAME `anchored.parked_set` — one measurement,
+/// stale-not-wrong the moment either input moves.
+fn unboardable_pairs(cars: &[Value]) -> Vec<(String, String, Vec<String>)> {
+    let set_of = |c: &Value| {
+        c.pointer("/metadata/merge_preview/anchored/parked_set")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let dock: std::collections::BTreeMap<String, (String, &Value)> = cars
+        .iter()
+        .filter(|c| c.get("status").and_then(Value::as_str) == Some("open"))
+        .filter(|c| boss_jobs::car::is_parked(c))
+        .filter_map(|c| Some((md_str(c, "branch").to_string(), (set_of(c)?, c))))
+        .collect();
+    let mut out: Vec<(String, String, Vec<String>)> = dock
+        .iter()
+        .flat_map(|(branch, (set, c))| {
+            c.pointer("/metadata/merge_preview/conflicts_with")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(move |e| {
+                    let other = e.get("branch").and_then(Value::as_str)?;
+                    let files: Vec<String> = e
+                        .get("files")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect();
+                    (branch.as_str() < other).then(|| (branch.clone(), other.to_string(), files))
+                })
+                .filter(|(_, other, _)| dock.get(other).is_some_and(|(s, _)| s == set))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 /// The two gate-run reads behind the STRANDED and HELD GREENS lanes,
 /// composed here so the test that pins their shape reads the strings
 /// the server will.
@@ -1316,6 +1379,23 @@ pub async fn run(all: bool) -> Result<()> {
         }
     }
 
+    // CANNOT BOTH BOARD — the conductor's merge preview, read (5c567c27).
+    // Each car of a pair merges clean onto main alone; together one is
+    // left at assembly. Named at the first tick after the second parks,
+    // not nine hours later at the boarding that discovers it.
+    let pairs = unboardable_pairs(&cars);
+    if !pairs.is_empty() {
+        println!(
+            "  CANNOT BOTH BOARD — {} pair(s) of dock cars that conflict with each other \
+             (land one, then boss rerail the other onto the main it landed on; rerailing \
+             both at once recreates the conflict):",
+            pairs.len()
+        );
+        for (a, b, files) in &pairs {
+            println!("    {a}  x  {b}  —  {}", files.join(", "));
+        }
+    }
+
     // MY WORK — the actor's own queue, after the dock (65a89769). One
     // read of the agents registry for the aliases, one assignments read
     // per identity; a caller nobody named is refused here and the rest
@@ -2304,6 +2384,79 @@ mod tests {
             vec![("fix/a".to_string(), 7, "no reason recorded".to_string())],
             "seven refusals are still seven refusals with no reason on the car"
         );
+    }
+
+    // ---- CANNOT BOTH BOARD (5c567c27) ---------------------------------
+
+    /// A parked car carrying the conductor's merge preview as
+    /// `preview_dock` writes it: `(branch, files)` it conflicts with,
+    /// measured over the parked set `set`.
+    fn previewed(branch: &str, review: &str, set: &str, co: &[(&str, &[&str])]) -> Value {
+        let mut c = car(branch, "open", review, json!({}));
+        let co: Vec<Value> = co
+            .iter()
+            .map(|(b, f)| json!({ "branch": b, "files": f }))
+            .collect();
+        c["metadata"]["merge_preview"] = json!({
+            "vs_main": { "clean": true },
+            "conflicts_with": co,
+            "anchored": { "main": "m", "parked_set": set },
+            "checked_at": "2026-09-23T10:10:55Z",
+        });
+        c
+    }
+
+    /// THE PAIR IS NAMED ONCE, with its files. On 2026-09-20 three cars
+    /// each green alone could not board together (WorldMap.svelte in two
+    /// of them) and the pipeline stopped nine and a half hours; the
+    /// conductor's merge preview had been measuring exactly that pair on
+    /// every tick since 12a25f3e and nothing read it. A conflict is
+    /// symmetric, so both cars carry it — one line, not two.
+    #[test]
+    fn two_dock_cars_that_conflict_with_each_other_are_one_named_pair() {
+        let cars = vec![
+            previewed("fix/b", "ready", "s1", &[("fix/a", &["WorldMap.svelte"])]),
+            previewed("fix/a", "ready", "s1", &[("fix/b", &["WorldMap.svelte"])]),
+            previewed("fix/clean", "ready", "s1", &[]),
+        ];
+        assert_eq!(
+            unboardable_pairs(&cars),
+            vec![(
+                "fix/a".to_string(),
+                "fix/b".to_string(),
+                vec!["WorldMap.svelte".to_string()],
+            )]
+        );
+    }
+
+    /// A PREVIEW IS STALE, NOT WRONG, WHEN ITS SET MOVED. The conductor
+    /// rewrites only the cars still parked-ready, so a car that boarded,
+    /// or is held, keeps the preview of the dock it last saw. Only two
+    /// previews measured over the SAME parked set (one tick) may pair,
+    /// and only two cars still at the dock — a pair with a car that has
+    /// left is a conflict nobody will meet. Measured live 2026-09-23:
+    /// five cars stamped at 09:50 still named a branch whose own 10:10
+    /// preview no longer named them.
+    #[test]
+    fn a_pair_from_another_tick_or_with_a_car_that_left_is_not_named() {
+        let cars = vec![
+            previewed("fix/a", "ready", "s1", &[("fix/b", &["x.rs"])]),
+            previewed("fix/b", "ready", "s2", &[("fix/a", &["x.rs"])]),
+            previewed("fix/c", "ready", "s3", &[("fix/gone", &["y.rs"])]),
+            previewed("fix/gone", "completed", "s3", &[("fix/c", &["y.rs"])]),
+        ];
+        assert!(unboardable_pairs(&cars).is_empty());
+    }
+
+    /// No preview is no verdict — a car the conductor never measured
+    /// pairs with nothing, rather than reading as either side of one.
+    #[test]
+    fn a_car_without_a_preview_pairs_with_nothing() {
+        let cars = vec![
+            previewed("fix/a", "ready", "s1", &[("fix/b", &["x.rs"])]),
+            car("fix/b", "open", "ready", json!({})),
+        ];
+        assert!(unboardable_pairs(&cars).is_empty());
     }
 
     // ---- MY WORK (65a89769) --------------------------------------------
