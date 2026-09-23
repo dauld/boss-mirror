@@ -491,65 +491,109 @@ pub(crate) fn shed_lines(cars: &[Value]) -> Vec<String> {
                 Some(i) => format!("{branch} (holds {})", &i[..i.len().min(8)]),
                 None => branch.to_string(),
             };
-            let branch = holds.as_str();
-            match shed_place(c) {
-                Shed::ProbePending { last: None } => {
-                    format!("    {branch}: probe pending (the forge runs it on arrival)")
-                }
-                Shed::ProbePending { last: Some(why) } => {
-                    format!("    {branch}: probe FAILING — {}", clipped(&why))
-                }
-                // A streak past the bound is named, not folded into the
-                // plain line: a probe that can never pass answers exit 75
-                // exactly like a patient one (adef5ddf). A car that
-                // DECLARED what it waits on is exempt from the bound, and
-                // named instead once its own event is seen (b461341d) —
-                // one predicate, the shed's.
-                Shed::ProbeNotYet { said } => {
-                    let md = c.get("metadata").unwrap_or(&Value::Null);
-                    match boss_jobs::car::starved(md) {
-                        Some(boss_jobs::car::Starved::Undeclared(s)) => format!(
-                            "    {branch}: probe NOT YET for {}h straight ({} runs) — past {}h, \
-                             read the probe against the tree: it may never pass — {}",
-                            s.hours,
-                            s.runs,
-                            boss_jobs::regions::NOT_YET_STARVED_HOURS,
-                            clipped(&said)
-                        ),
-                        Some(boss_jobs::car::Starved::SeenWhileNotYet { on, seen_at }) => format!(
-                            "    {branch}: probe NOT YET though what it waits on ({}) was seen \
-                             in the record at {seen_at} — read the probe against the tree — {}",
-                            clipped(&on),
-                            clipped(&said)
-                        ),
-                        None => match boss_jobs::car::waits_on(md) {
-                            // A declaration nothing observes (e9b164a1):
-                            // exempt from the bound AND never contradicted,
-                            // so the line names the missing check.
-                            Some(w) if w.seen.is_none() => format!(
-                                "    {branch}: probe says NOT YET, waiting on {} — no seen check, \
-                                 so nothing can say it arrived (boss car waits-on --seen) — {}",
-                                clipped(&w.on),
-                                clipped(&said)
-                            ),
-                            Some(w) => format!(
-                                "    {branch}: probe says NOT YET, waiting on {} — {}",
-                                clipped(&w.on),
-                                clipped(&said)
-                            ),
-                            None => {
-                                format!("    {branch}: probe says NOT YET — {}", clipped(&said))
-                            }
-                        },
-                    }
-                }
-                Shed::WaitingOn(ev) => format!("    {branch}: waiting on: {}", clipped(&ev)),
-                Shed::Unproven => format!(
-                    "    {branch}: UNPROVEN — no probe, no event; nothing mechanical can settle it (boss prove --probe)"
-                ),
-            }
+            format!("    {holds}: {}", shed_text(c))
         })
         .collect()
+}
+
+/// What a landed car's proof is waiting on, in one clause — the shed's
+/// line and MY WORK's carried row say it in the same words, because
+/// they are one fact read twice (bc416f60).
+fn shed_text(car: &Value) -> String {
+    match shed_place(car) {
+        Shed::ProbePending { last: None } => {
+            "probe pending (the forge runs it on arrival)".to_string()
+        }
+        Shed::ProbePending { last: Some(why) } => format!("probe FAILING — {}", clipped(&why)),
+        // A streak past the bound is named, not folded into the
+        // plain line: a probe that can never pass answers exit 75
+        // exactly like a patient one (adef5ddf). A car that
+        // DECLARED what it waits on is exempt from the bound, and
+        // named instead once its own event is seen (b461341d) —
+        // one predicate, the shed's.
+        Shed::ProbeNotYet { said } => {
+            let md = car.get("metadata").unwrap_or(&Value::Null);
+            match boss_jobs::car::starved(md) {
+                Some(boss_jobs::car::Starved::Undeclared(s)) => format!(
+                    "probe NOT YET for {}h straight ({} runs) — past {}h, \
+                     read the probe against the tree: it may never pass — {}",
+                    s.hours,
+                    s.runs,
+                    boss_jobs::regions::NOT_YET_STARVED_HOURS,
+                    clipped(&said)
+                ),
+                Some(boss_jobs::car::Starved::SeenWhileNotYet { on, seen_at }) => format!(
+                    "probe NOT YET though what it waits on ({}) was seen \
+                     in the record at {seen_at} — read the probe against the tree — {}",
+                    clipped(&on),
+                    clipped(&said)
+                ),
+                None => match boss_jobs::car::waits_on(md) {
+                    // A declaration nothing observes (e9b164a1):
+                    // exempt from the bound AND never contradicted,
+                    // so the line names the missing check.
+                    Some(w) if w.seen.is_none() => format!(
+                        "probe says NOT YET, waiting on {} — no seen check, \
+                         so nothing can say it arrived (boss car waits-on --seen) — {}",
+                        clipped(&w.on),
+                        clipped(&said)
+                    ),
+                    Some(w) => format!(
+                        "probe says NOT YET, waiting on {} — {}",
+                        clipped(&w.on),
+                        clipped(&said)
+                    ),
+                    None => format!("probe says NOT YET — {}", clipped(&said)),
+                },
+            }
+        }
+        Shed::WaitingOn(ev) => format!("waiting on: {}", clipped(&ev)),
+        Shed::Unproven => "UNPROVEN — no probe, no event; nothing mechanical can settle it \
+             (boss prove --probe)"
+            .to_string(),
+    }
+}
+
+/// The backlog-items an OPEN car already carries, keyed by item id, each
+/// with the clause MY WORK prints in place of the item's age: LANDED
+/// (at `Proven in prod` — merged, and what its proof waits on) or IN
+/// FLIGHT (the step the car stands at). A landed car wins over an
+/// in-flight one for the same item. Closed cars carry nothing: a merged
+/// car's close is what completes the item's step (the chain
+/// complete-feedback-branch-on-car-merged), so its row is gone anyway.
+///
+/// WHY (bc416f60). Measured 2026-09-22, working the queue oldest-first:
+/// six of the twelve oldest steps on the agent were build steps whose
+/// cars had merged three to five days earlier and stood in the shed,
+/// their probes honestly answering not-yet on a real-world event. The
+/// chain was correct — an item closes when its car proves — but MY
+/// WORK drew each one as an unstarted build of its filing age, first in
+/// line, and telling them apart cost a git-log grep per packet (nine
+/// of them from train #567, 2026-09-23). The car already holds the
+/// answer; this is that answer read at the queue, with no new write.
+pub(crate) fn carried_items(cars: &[Value]) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    for c in cars
+        .iter()
+        .filter(|c| c.get("status").and_then(Value::as_str) == Some("open"))
+    {
+        let item = md_str(c, "backlog_item");
+        if item.is_empty() {
+            continue;
+        }
+        let branch = md_str(c, "branch");
+        let step = at_step(c);
+        if step == "Proven in prod" {
+            out.insert(
+                item.to_string(),
+                format!("LANDED (car {branch}), awaiting proof: {}", shed_text(c)),
+            );
+        } else {
+            out.entry(item.to_string())
+                .or_insert_with(|| format!("IN FLIGHT (car {branch} at {step})"));
+        }
+    }
+    out
 }
 
 /// The ORPHANS listing lines for a set of forge heads, bounded to
@@ -721,7 +765,21 @@ fn my_work_hint(workflow: &str, slug: &str) -> Option<String> {
 /// by workflow, groups and rows both oldest first, each group headed
 /// by its count and closed by one hint line. Pure so the shape is
 /// testable; the caller prints the section heading from the count.
-pub(crate) fn my_work_lines(rows: &[Value], now: chrono::DateTime<chrono::Utc>) -> Vec<String> {
+///
+/// A row whose packet a car already carries (`carried`, from
+/// `carried_items`) prints what the car says in place of its age, and
+/// sorts after its group's unstarted rows: oldest-first is a rule for
+/// choosing work to START, and a carried item is not that (bc416f60).
+pub(crate) fn my_work_lines(
+    rows: &[Value],
+    carried: &std::collections::BTreeMap<String, String>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<String> {
+    let carried_by = |r: &Value| {
+        r.get("job_id")
+            .and_then(Value::as_str)
+            .and_then(|j| carried.get(j))
+    };
     let mut seen = BTreeSet::new();
     let mut keyed: Vec<(Option<chrono::NaiveDate>, &Value)> = rows
         .iter()
@@ -745,6 +803,7 @@ pub(crate) fn my_work_lines(rows: &[Value], now: chrono::DateTime<chrono::Utc>) 
     // never mistaken for today's.
     keyed.sort_by_key(|(opened, r)| {
         (
+            carried_by(r).is_some(),
             opened.is_none(),
             *opened,
             r.get("job_id")
@@ -764,7 +823,11 @@ pub(crate) fn my_work_lines(rows: &[Value], now: chrono::DateTime<chrono::Utc>) 
     }
     let mut out = Vec::new();
     for (kind, rows) in groups {
-        out.push(format!("    {kind} — {}", rows.len()));
+        let held = rows.iter().filter(|(_, r)| carried_by(r).is_some()).count();
+        out.push(match held {
+            0 => format!("    {kind} — {}", rows.len()),
+            n => format!("    {kind} — {} ({n} already carried by a car)", rows.len()),
+        });
         let mut slugs: Vec<&str> = Vec::new();
         for (opened, r) in rows {
             let job = r.get("job_id").and_then(Value::as_str).unwrap_or("");
@@ -773,9 +836,6 @@ pub(crate) fn my_work_lines(rows: &[Value], now: chrono::DateTime<chrono::Utc>) 
                 .pointer("/step/spec_slug")
                 .and_then(Value::as_str)
                 .unwrap_or("?");
-            if !slugs.contains(&slug) {
-                slugs.push(slug);
-            }
             let title: String = r
                 .get("job_title")
                 .and_then(Value::as_str)
@@ -783,6 +843,18 @@ pub(crate) fn my_work_lines(rows: &[Value], now: chrono::DateTime<chrono::Utc>) 
                 .chars()
                 .take(MY_WORK_TITLE_CHARS)
                 .collect();
+            // A carried row's hint is the carried one: "build = a change
+            // to build" is exactly the misreading this line exists to stop.
+            if let Some(state) = carried_by(r) {
+                out.push(format!(
+                    "      {id8} {kind} {slug} {} — {state}",
+                    title.trim_end()
+                ));
+                continue;
+            }
+            if !slugs.contains(&slug) {
+                slugs.push(slug);
+            }
             let age = match opened {
                 Some(d) => format!("{}d", crate::census::age_days(d, now)),
                 None => "age ?".to_string(),
@@ -792,7 +864,14 @@ pub(crate) fn my_work_lines(rows: &[Value], now: chrono::DateTime<chrono::Utc>) 
                 title.trim_end()
             ));
         }
-        let hints: Vec<String> = slugs.iter().filter_map(|s| my_work_hint(kind, s)).collect();
+        let mut hints: Vec<String> = slugs.iter().filter_map(|s| my_work_hint(kind, s)).collect();
+        if held > 0 {
+            hints.push(
+                "carried = its car holds the work; the item closes itself when that car \
+                 proves — do not build it again"
+                    .to_string(),
+            );
+        }
         if !hints.is_empty() {
             out.push(format!("      → {}", hints.join("; ")));
         }
@@ -808,6 +887,7 @@ pub(crate) fn my_work_lines(rows: &[Value], now: chrono::DateTime<chrono::Utc>) 
 pub(crate) fn my_work_section(
     identities: Option<&[String]>,
     rows: &[Value],
+    cars: &[Value],
     now: chrono::DateTime<chrono::Utc>,
 ) -> Vec<String> {
     let Some(ids) = identities else {
@@ -824,7 +904,8 @@ pub(crate) fn my_work_section(
         [one] => one.clone(),
         [first, rest @ ..] => format!("{first} (+ {})", rest.join(", ")),
     };
-    let lines = my_work_lines(rows, now);
+    let carried = carried_items(cars);
+    let lines = my_work_lines(rows, &carried, now);
     if lines.is_empty() {
         return vec![format!(
             "  MY WORK — nothing: no ready/active step is assigned to {who}"
@@ -834,8 +915,24 @@ pub(crate) fn my_work_section(
         .iter()
         .filter(|l| l.starts_with("      ") && !l.starts_with("      →"))
         .count();
+    // Counted by step id, as the lines are: one step read under two
+    // identities is one step.
+    let held = rows
+        .iter()
+        .filter(|r| {
+            r.get("job_id")
+                .and_then(Value::as_str)
+                .is_some_and(|j| carried.contains_key(j))
+        })
+        .filter_map(|r| r.pointer("/step/id").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>()
+        .len();
+    let tail = match held {
+        0 => String::new(),
+        n => format!("; {n} already carried by a car, listed last"),
+    };
     let mut out = vec![format!(
-        "  MY WORK — {count} ready/active step(s) assigned to {who} — yours to move, oldest first"
+        "  MY WORK — {count} ready/active step(s) assigned to {who} — yours to move, oldest first{tail}"
     )];
     out.extend(lines);
     out
@@ -1429,7 +1526,7 @@ pub async fn run(all: bool) -> Result<()> {
         )?);
     }
     println!();
-    for line in my_work_section(identities.as_deref(), &my_rows, now) {
+    for line in my_work_section(identities.as_deref(), &my_rows, &cars, now) {
         println!("{line}");
     }
 
@@ -2603,7 +2700,7 @@ mod tests {
                 "s-inspect",
             ),
         ];
-        let lines = my_work_lines(&rows, now);
+        let lines = my_work_lines(&rows, &carried_items(&[]), now);
         let all = lines.join("\n");
         assert_eq!(
             lines.len(),
@@ -2645,7 +2742,7 @@ mod tests {
             "s-dr",
         );
         bare.as_object_mut().unwrap().remove("opened_on");
-        let l = my_work_lines(&[bare], now).join("\n");
+        let l = my_work_lines(&[bare], &carried_items(&[]), now).join("\n");
         assert!(l.contains("(age ?)"), "{l}");
         assert!(l.contains("--answers"), "{l}");
     }
@@ -2670,20 +2767,118 @@ mod tests {
             "2026-09-17",
             "s",
         )];
-        let full = my_work_section(Some(&ids), &one, now).join("\n");
+        let full = my_work_section(Some(&ids), &one, &[], now).join("\n");
         assert!(
             full.starts_with(
                 "  MY WORK — 1 ready/active step(s) assigned to claude@algedonic.dev (+ agent-claude)"
             ),
             "{full}"
         );
-        let empty = my_work_section(Some(&ids), &[], now).join("\n");
+        let empty = my_work_section(Some(&ids), &[], &[], now).join("\n");
         assert!(empty.contains("MY WORK — nothing"), "{empty}");
         assert!(empty.contains("claude@algedonic.dev"), "{empty}");
-        let refused = my_work_section(None, &[], now).join("\n");
+        let refused = my_work_section(None, &[], &[], now).join("\n");
         assert!(refused.contains("MY WORK — REFUSED"), "{refused}");
         assert!(refused.contains("BOSS_ACTOR"), "{refused}");
         assert!(refused.contains(".config/boss/actor"), "{refused}");
+    }
+
+    /// An item a car already carries is not unstarted work, and MY WORK
+    /// must not draw it as its filing age (bc416f60). Measured
+    /// 2026-09-22: of the twelve oldest steps on the agent, six were
+    /// build steps whose cars had merged days earlier and stood in the
+    /// shed, their probes honestly answering "not yet" — and they read
+    /// as 3-to-5-day-old unstarted builds, first in an oldest-first
+    /// queue. The car already says so; the queue now reads it: landed
+    /// (with what the proof waits on) or in flight (with where), listed
+    /// after the group's unstarted rows, counted in the heading.
+    #[test]
+    fn an_item_a_car_already_carries_reads_as_carried_not_as_its_age() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-22T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let landed_item = "ea67ad87-0000-4000-8000-000000000000";
+        let flight_item = "75198b15-0000-4000-8000-000000000000";
+        let fresh_item = "a12736b1-0000-4000-8000-000000000000";
+        let rows = vec![
+            asg(
+                landed_item,
+                "backlog-item",
+                "build",
+                "Old and landed",
+                "2026-09-17",
+                "s1",
+            ),
+            asg(
+                flight_item,
+                "backlog-item",
+                "build",
+                "Old and parked",
+                "2026-09-18",
+                "s2",
+            ),
+            asg(
+                fresh_item,
+                "backlog-item",
+                "build",
+                "Newer, untouched",
+                "2026-09-20",
+                "s3",
+            ),
+        ];
+        let mut shed = landed(
+            "fix/landed",
+            json!({ "proof_probe": "bash x.sh", "proof_attempt": { "exit": 75, "not_yet": true, "why": "not yet: no real prune since convergence" } }),
+        );
+        shed["metadata"]["backlog_item"] = json!(landed_item);
+        let mut parked = car("fix/parked", "open", "ready", json!({}));
+        parked["metadata"]["backlog_item"] = json!(flight_item);
+        // A closed car carries nothing: its item's step is the chain's.
+        let mut gone = landed("fix/gone", json!({}));
+        gone["status"] = json!("closed");
+        gone["metadata"]["backlog_item"] = json!(fresh_item);
+        let cars = vec![shed, parked, gone];
+
+        let carried = carried_items(&cars);
+        assert_eq!(carried.len(), 2, "{carried:?}");
+        let lines = my_work_lines(&rows, &carried, now);
+        let all = lines.join("\n");
+        assert_eq!(
+            lines[0],
+            "    backlog-item — 3 (2 already carried by a car)"
+        );
+        // The untouched item leads, with its age; the carried follow.
+        assert_eq!(
+            lines[1],
+            "      a12736b1 backlog-item build Newer, untouched (2d)"
+        );
+        assert_eq!(
+            lines[2],
+            "      ea67ad87 backlog-item build Old and landed — LANDED (car fix/landed), \
+             awaiting proof: probe says NOT YET — not yet: no real prune since convergence"
+        );
+        assert_eq!(
+            lines[3],
+            "      75198b15 backlog-item build Old and parked — IN FLIGHT (car fix/parked at Open for review)"
+        );
+        // A carried row carries no age: its filing date is not its state.
+        assert!(!lines[2].contains("(5d)"), "{}", lines[2]);
+        assert!(all.contains("carried = "), "{all}");
+
+        // The section says how many of its count are carried.
+        let ids = vec!["claude@algedonic.dev".to_string()];
+        let section = my_work_section(Some(&ids), &rows, &cars, now).join("\n");
+        assert!(
+            section.starts_with(
+                "  MY WORK — 3 ready/active step(s) assigned to claude@algedonic.dev — \
+                 yours to move, oldest first; 2 already carried by a car, listed last"
+            ),
+            "{section}"
+        );
+        // A group with nothing carried reads exactly as before.
+        let plain = my_work_lines(&rows[2..], &carried_items(&[]), now);
+        assert_eq!(plain[0], "    backlog-item — 1");
+        assert!(!plain.join("\n").contains("carried"), "{plain:?}");
     }
 
     /// `boss orient` reads the map from the server rather than deriving
