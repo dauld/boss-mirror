@@ -49,20 +49,24 @@
 # SECTION B — layer shape, ratcheted
 # ----------------------------------
 # Section A works on Cargo.toml edges, so it is blind to a file in the
-# WRONG CRATE — which is exactly how both known confusions look. The
-# memory crate contains `claude_dispatcher.rs` (spawns `claude
-# --print`, tracks per-agent concurrency and cost: an Actors concern)
-# and `tail_http.rs` (an HTTP read surface: an Apps concern). Neither
-# creates a backward package edge, so neither is visible to A.
+# WRONG CRATE — which is exactly how both known confusions looked. The
+# memory crate contained `claude_dispatcher.rs` (spawned `claude
+# --print`, tracked per-agent concurrency and cost: an Actors concern)
+# and still contains `tail_http.rs` (an HTTP read surface: an Apps
+# concern). Neither creates a backward package edge, so neither is
+# visible to A.
 #
 # Section B checks two shapes inside memory-layer crates:
 #   memory-no-executor — must not implement AgentDispatcher
 #   memory-no-http-server — must not serve HTTP (axum routing)
 #
 # A ratchet, not a ban, following idempotence-ratchet and
-# dispatcher-rules-ratchet: today's two known files are allow-listed
-# with their reason, and the count must not grow. Fixing one means
-# deleting its allow-list line.
+# dispatcher-rules-ratchet: known files are allow-listed with their
+# reason, and the count must not grow. Fixing one means deleting its
+# allow-list line. The two memory-no-executor lines went on 2026-09-23
+# (backlog 05a003da): boss-cybernetics was retired, so both dispatchers
+# were deleted along with the AgentDispatcher port itself. The rule
+# stays as the guard against that shape coming back.
 #
 # Usage: infra/lint/layer-order-audit.sh [--self-test]
 # Exit:  0 clean / 1 violations or self-test failure
@@ -126,8 +130,6 @@ rank_of() {
 # Deleting a line is how a fix is recorded. Adding one requires a
 # reviewer to agree the layer boundary genuinely does not apply.
 read -r -d '' SHAPE_ALLOW <<'ALLOW' || true
-boss-events/claude_dispatcher.rs memory-no-executor Actors concern in the memory crate; eviction proposed in docs/design/crates-and-layers.md
-boss-events/dispatcher.rs memory-no-executor StubDispatcher — same eviction as claude_dispatcher.rs; found by this check, not by the hand pass
 boss-events/tail_http.rs memory-no-http-server Apps concern in the memory crate; eviction proposed in docs/design/crates-and-layers.md
 ALLOW
 
@@ -252,10 +254,13 @@ EOF
         fails=$((fails+1))
     fi
 
-    # Fixture 4: the same shape, but allow-listed, must be suppressed.
+    # Fixture 4: a shape that IS allow-listed must be suppressed. It
+    # planted the executor shape under claude_dispatcher.rs until that
+    # file and its allow-list line were deleted (backlog 05a003da); the
+    # one allow-listed file left is the http-server exception.
     mkdir -p "$tmp/d/boss-events/src"
     printf '[package]\nname = "boss-events"\n' > "$tmp/d/boss-events/Cargo.toml"
-    printf 'impl AgentDispatcher for Thing {}\n' > "$tmp/d/boss-events/src/claude_dispatcher.rs"
+    printf 'use axum::Router;\n' > "$tmp/d/boss-events/src/tail_http.rs"
 
     if ! check_shape "$tmp/d" >/dev/null 2>&1; then
         echo "SELF-TEST FAIL: allow-listed shape exception was still reported"

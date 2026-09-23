@@ -76,9 +76,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// How a run ended. Narrower than `boss_core::agent::Outcome`, which
-/// carries a response body and a `Cost` the caller would be asserting;
-/// this is the terminal state alone, with the tokens reported beside it.
+/// How a run ended: the terminal state alone, with the tokens reported
+/// beside it rather than inside it — a response body and a `Cost` here
+/// would be the caller asserting what the record measures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunOutcome {

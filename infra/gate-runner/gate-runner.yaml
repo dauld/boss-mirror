@@ -235,6 +235,17 @@ spec:
             runAsUser: 999
             runAsGroup: 999
             capabilities: {drop: ["ALL"]}
+          # NO DURABILITY, BECAUSE THERE IS NOTHING TO RECOVER. PGDATA is
+          # an emptyDir that dies with the pod, so a crash-safe WAL
+          # protects data no one will ever read again — and it was not
+          # free. Measured 2026-09-23 on the 17:03 train gate (gate-run
+          # 928665ee): one checkpoint spent 199.5s fsyncing 60,796 files,
+          # because every test database is a WAL_LOG copy of the
+          # template, and that slowness let blocked DROP DATABASE
+          # backends pile up to max_connections in two red train gates
+          # (backlog afaa90a3). The entrypoint prepends `postgres` to
+          # args that begin with a dash. Pinned by gate_runner_manifests.
+          args: ["-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off"]
           env:
             - {name: POSTGRES_USER, value: boss}
             - {name: POSTGRES_PASSWORD, value: boss}

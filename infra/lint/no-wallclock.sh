@@ -117,14 +117,6 @@ ALLOWED_PREFIXES=(
   "crates/core/boss-gateway/src/local_auth.rs"
   # Perf metrics — diagnostic only, never emitted as audit
   "crates/core/boss-gateway/src/perf.rs"
-  # Cybernetics-layer queue + dispatcher + cost-ledger
-  # operational state. claim_at, started_at, finished_at,
-  # cost-window math, all internal runtime accounting that
-  # never lands in audit_log.
-  "crates/core/boss-events/src/queue.rs"
-  "crates/core/boss-events/src/dispatcher.rs"
-  "crates/core/boss-events/src/ledger.rs"
-  "crates/core/boss-events/src/claude_dispatcher.rs"
   # Diagnostic CLI — checkpoint timestamps in operator output.
   "crates/core/boss-events/src/bin/boss_audit_integrity_check.rs"
   # Deprecated clock helpers, pre-Clock-as-service. The module
@@ -165,8 +157,6 @@ ALLOWED_PREFIXES=(
   # for the next-week computation.
   "crates/core/boss-jobs/src/scheduling/materialize.rs"
   "crates/core/boss-jobs/src/scheduling/http.rs"
-  # Internal data struct default constructor — Message, etc.
-  "crates/core/boss-core/src/agent.rs"
 )
 
 # Files whose entire body is exempt (e.g. CLI boundary tools

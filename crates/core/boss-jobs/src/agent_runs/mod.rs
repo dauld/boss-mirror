@@ -27,9 +27,11 @@
 //! not a `match` in Rust — is already true.
 //!
 //! **The budget is consulted here, at the record (backlog 7dd9f28c).**
-//! `boss_core::agent::BudgetDecision::decide` is the ONE rule — the
-//! cybernetics ledger (`boss_events::ledger`) and this recorder both
-//! call it — and the caps it judges against are the `agents` row's
+//! `boss_core::agent::BudgetDecision::decide` is the ONE rule — this
+//! recorder calls it, and so does the claim door's concurrency half
+//! (`crate::agent_budget`); the cybernetics ledger that once called it
+//! too went with boss-cybernetics in train #582 (backlog 05a003da) —
+//! and the caps it judges against are the `agents` row's
 //! (design 6fda05ae gave the actor one id and this module's `model`
 //! column priced the run against what it actually ran, which is what
 //! made the join possible). The recorder measures the actor's priced

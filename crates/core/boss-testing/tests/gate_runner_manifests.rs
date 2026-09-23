@@ -280,3 +280,43 @@ fn the_non_root_gate_is_given_a_writable_home() {
         );
     }
 }
+
+/// THE GATE'S DATABASE DIES WITH THE POD, SO DURABILITY BUYS NOTHING.
+///
+/// Measured 2026-09-23 on the 17:03 train gate's postgres log (gate-run
+/// 928665ee): three checkpoints in the whole gate, 36.3s (35.8s of it
+/// fsync, 4,279 files) and 200.4s (199.5s fsync, 60,796 files), and a
+/// third that never finished before the pod shut down. Every test
+/// database is a WAL_LOG copy of the template — hundreds of relation
+/// files each — so a checkpoint under fsync=on has to flush them all,
+/// and that slowness is what let blocked DROP DATABASE backends pile up
+/// to max_connections in two red train gates (backlog afaa90a3).
+///
+/// PGDATA is an emptyDir: the data cannot outlive the Job, so there is
+/// no crash it could be recovered from. Both runners carry the flags,
+/// because the local variant is "identical except the workspace" and a
+/// slow database is not part of that difference. The dev pod's own
+/// sidecar is deliberately NOT pinned here — changing it rolls the
+/// operator's session, which is a separate decision.
+#[test]
+fn the_gate_database_skips_durability_it_cannot_use() {
+    for rel in [SHARED, LOCAL] {
+        let text = read(rel);
+        let (_, pg) = pod_containers(&text)
+            .into_iter()
+            .find(|(n, _)| n == "postgres")
+            .unwrap_or_else(|| panic!("{rel} has no container named postgres"));
+        for setting in [
+            "fsync=off",
+            "synchronous_commit=off",
+            "full_page_writes=off",
+        ] {
+            assert!(
+                pg.contains(&format!("\"-c\", \"{setting}\"")),
+                "{rel}: the postgres sidecar must run with `-c {setting}`. Its data lives in \
+                 an emptyDir and dies with the pod, and with fsync on a single checkpoint \
+                 spent 199.5s flushing 60,796 test-database files in the 2026-09-23 train gate"
+            );
+        }
+    }
+}

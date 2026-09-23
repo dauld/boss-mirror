@@ -146,6 +146,11 @@ spec:
             runAsUser: 999
             runAsGroup: 999
             capabilities: {drop: ["ALL"]}
+          # No durability: PGDATA is an emptyDir that dies with the pod,
+          # and fsync cost one checkpoint 199.5s on the 2026-09-23 train
+          # gate. Same flags, and the same reasoning, as gate-runner.yaml
+          # (backlog afaa90a3).
+          args: ["-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off"]
           env:
             - {name: POSTGRES_USER, value: boss}
             - {name: POSTGRES_PASSWORD, value: boss}

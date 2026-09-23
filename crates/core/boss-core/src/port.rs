@@ -1,7 +1,3 @@
-use crate::agent::{
-    AgentId, AgentSpec, BudgetDecision, ClaimId, ClaimedMessage, Cost, Message, MessageId, Outcome,
-    RunCompletion, RunHandle, RunId, Window,
-};
 use crate::event::Event;
 use async_trait::async_trait;
 
@@ -58,7 +54,15 @@ pub enum EventStoreError {
 }
 
 // ---------------------------------------------------------------------------
-// Cybernetics ports
+// Record-only events
+//
+// This section held five more ports — MessageQueue, CostLedger,
+// AgentDispatcher, RunCompletions, AgentRegistry — whose only
+// implementations were boss-events' in-memory queue, ledger, stub and
+// `claude --print` dispatchers and TOML registry, and whose only caller
+// was boss-cybernetics. That crate was retired in train #582 and the
+// ports went with their adapters (backlog 05a003da, 2026-09-23). What
+// an agent run costs is recorded by boss-jobs' `agent_runs` module.
 // ---------------------------------------------------------------------------
 
 /// Port: transactional event recorder — the outbox-backed sink for
@@ -67,132 +71,12 @@ pub enum EventStoreError {
 /// `event_outbox` in a small transaction of its own; boss-event-relay
 /// delivers to audit_log + NATS. In-memory implementations collect
 /// for test assertion. This is how a component whose events ARE its
-/// state (cybernetics telemetry) gets the same delivery guarantee as
-/// a domain write without pretending it has a domain table.
+/// state (the gateway's auth events — a session is a cookie, not a
+/// row) gets the same delivery guarantee as a domain write without
+/// pretending it has a domain table.
 #[async_trait]
 pub trait EventRecorder: Send + Sync {
     async fn record(&self, event: &Event) -> Result<(), String>;
-}
-
-/// Port: durable per-agent inbox.
-///
-/// Messages are enqueued when they arrive from the bus, claimed by the
-/// Cybernetics loop just before dispatch, and ack'd or nack'd when the
-/// agent run completes. Implementations must serialize claims so that the
-/// same message is not dispatched twice concurrently.
-#[async_trait]
-pub trait MessageQueue: Send + Sync {
-    /// Append a message to the target agent's inbox.
-    async fn enqueue(&self, message: Message) -> Result<MessageId, QueueError>;
-
-    /// Claim the next available message for the given agent. Returns `None`
-    /// if the queue is empty. A claimed message is invisible to other
-    /// claimers until `ack` or `nack` is called, or the claim expires.
-    async fn claim_next(&self, agent: &AgentId) -> Result<Option<ClaimedMessage>, QueueError>;
-
-    /// Mark a claimed message as processed and record its outcome.
-    async fn ack(&self, claim_id: ClaimId, outcome: Outcome) -> Result<(), QueueError>;
-
-    /// Release a claim back to the queue so the message can be retried.
-    async fn nack(&self, claim_id: ClaimId, reason: String) -> Result<(), QueueError>;
-
-    /// Number of unclaimed messages waiting for the given agent.
-    async fn depth(&self, agent: &AgentId) -> Result<usize, QueueError>;
-
-    /// Depths for every agent with a non-empty queue.
-    async fn depths(&self) -> Result<Vec<(AgentId, usize)>, QueueError>;
-}
-
-/// Port: cost accounting and budget enforcement.
-#[async_trait]
-pub trait CostLedger: Send + Sync {
-    /// Record a cost attributed to an agent.
-    async fn record(&self, agent: &AgentId, cost: Cost) -> Result<(), LedgerError>;
-
-    /// Total cost for an agent over the given window.
-    async fn spent(&self, agent: &AgentId, window: Window) -> Result<Cost, LedgerError>;
-
-    /// Total cost across all agents on this VM over the given window.
-    async fn vm_spent(&self, window: Window) -> Result<Cost, LedgerError>;
-
-    /// Decide whether the agent is allowed to run right now, given its spec.
-    async fn check_budget(
-        &self,
-        agent: &AgentId,
-        spec: &AgentSpec,
-    ) -> Result<BudgetDecision, LedgerError>;
-}
-
-/// Port: spawn and track agent runs.
-#[async_trait]
-pub trait AgentDispatcher: Send + Sync {
-    /// Start a run for the given agent with a single claimed message.
-    /// Returns immediately with a handle; the run continues in the background.
-    async fn dispatch(
-        &self,
-        spec: &AgentSpec,
-        message: ClaimedMessage,
-    ) -> Result<RunHandle, DispatchError>;
-
-    /// Snapshot of currently in-flight runs on this VM.
-    async fn running(&self) -> Result<Vec<RunHandle>, DispatchError>;
-
-    /// Cancel an in-flight run.
-    async fn cancel(&self, run_id: &RunId) -> Result<(), DispatchError>;
-
-    /// Subscribe to a stream of terminal run completions. The Cybernetics
-    /// loop reads from this to know when to ack messages and record cost.
-    async fn completions(&self) -> Result<Box<dyn RunCompletions>, DispatchError>;
-}
-
-/// Stream of run completions from a dispatcher.
-#[async_trait]
-pub trait RunCompletions: Send + Sync {
-    /// Receive the next completion. Returns `None` if the dispatcher shut down.
-    async fn next(&mut self) -> Option<RunCompletion>;
-}
-
-/// Port: static agent configuration for this VM.
-#[async_trait]
-pub trait AgentRegistry: Send + Sync {
-    async fn list(&self) -> Result<Vec<AgentSpec>, RegistryError>;
-    async fn get(&self, agent: &AgentId) -> Result<Option<AgentSpec>, RegistryError>;
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum QueueError {
-    #[error("enqueue failed: {0}")]
-    EnqueueFailed(String),
-    #[error("claim failed: {0}")]
-    ClaimFailed(String),
-    #[error("unknown claim: {0}")]
-    UnknownClaim(ClaimId),
-    #[error("storage error: {0}")]
-    Storage(String),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum LedgerError {
-    #[error("record failed: {0}")]
-    RecordFailed(String),
-    #[error("query failed: {0}")]
-    QueryFailed(String),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum DispatchError {
-    #[error("agent {0} is at its concurrency limit")]
-    CapacityExceeded(AgentId),
-    #[error("unknown run: {0}")]
-    UnknownRun(RunId),
-    #[error("spawn failed: {0}")]
-    SpawnFailed(String),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum RegistryError {
-    #[error("registry lookup failed: {0}")]
-    LookupFailed(String),
 }
 
 #[cfg(test)]
@@ -207,10 +91,5 @@ mod tests {
         takes::<dyn EventBus>();
         takes::<dyn EventStream>();
         takes::<dyn EventStore>();
-        takes::<dyn MessageQueue>();
-        takes::<dyn CostLedger>();
-        takes::<dyn AgentDispatcher>();
-        takes::<dyn RunCompletions>();
-        takes::<dyn AgentRegistry>();
     }
 }

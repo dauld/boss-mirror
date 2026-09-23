@@ -154,6 +154,13 @@ and stub) plus a door, sitting inside the crate whose job is to
 remember. None of it is urgent, none of it is expensive, and all of it
 is now held by a ratchet.
 
+**Update 2026-09-23 (backlog 05a003da).** The agent-attach subsystem
+was not evicted; it was deleted. Once boss-cybernetics was retired
+(train #582), `claude_dispatcher.rs`, `dispatcher.rs`, `ledger.rs`,
+`queue.rs` and `registry.rs` had no consumer, and they went with the
+`AgentDispatcher` port they implemented. Their two allow-list lines
+went too; `tail_http.rs` is the one exception left.
+
 ## What writing the check changed
 
 The check (`infra/lint/layer-order-audit.sh`, with `--self-test`, 4/4
