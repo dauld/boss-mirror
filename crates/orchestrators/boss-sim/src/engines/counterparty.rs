@@ -1509,8 +1509,7 @@ mod tests {
         assert_eq!(snapshot.saved_on, Some(day));
         assert_eq!(snapshot.pending_count(), 1);
 
-        let dir = std::env::temp_dir().join(format!("cp-stamp-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = boss_testing::scratch_dir("cp-stamp");
         let path = dir.join("queue.json");
         snapshot.save_to_file(&path).unwrap();
         let loaded = CounterpartyState::load_from_file(&path).unwrap();

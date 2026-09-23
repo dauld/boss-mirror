@@ -135,6 +135,38 @@ pub trait ClassesClient: Send + Sync {
         &self,
         subject_kind: &str,
     ) -> Result<Vec<Class>, ClassesClientError>;
+
+    /// True iff a non-retired Class with the given key exists AND
+    /// classifies `member_attribute` — the column on the Subject its
+    /// code is a value of.
+    ///
+    /// WHY `class_exists` IS NOT ENOUGH. One subject_kind can carry
+    /// several taxonomies, told apart only by `member_attribute`: the
+    /// `employee` drawer held 22 live codes across role, department,
+    /// status and employment_type on 2026-09-23 (backlog a45ab09d). An
+    /// axis-blind check accepts any of them for any column, so an
+    /// employee's `role` could be written as `terminated` and its
+    /// `department` as `platform-admin`, and both would pass. Ask this
+    /// when the value is one column's; ask `class_exists` only when the
+    /// kind has a single taxonomy.
+    ///
+    /// Answered from `list_for_subject_kind`, which the registry already
+    /// serves, rather than a new route, so no server has to move first.
+    async fn class_exists_on(
+        &self,
+        class_ref: &ClassRef,
+        member_attribute: &str,
+    ) -> Result<bool, ClassesClientError> {
+        Ok(self
+            .list_for_subject_kind(&class_ref.subject_kind)
+            .await?
+            .iter()
+            .any(|c| {
+                c.code == class_ref.code
+                    && c.retired_at.is_none()
+                    && c.member_attribute.as_deref() == Some(member_attribute)
+            }))
+    }
 }
 
 /// Production `ClassesClient` that calls the boss-classes HTTP API
@@ -234,6 +266,26 @@ impl ClassesClient for FakeClassesClient {
             .filter(|c| c.subject_kind == subject_kind)
             .cloned()
             .collect())
+    }
+
+    /// With a fixture, the real axis-aware answer. Without one there is
+    /// no axis to consult, so the fake answers exactly as
+    /// `class_exists` does — every `permissive()` / `with(...)` test
+    /// written before the axis mattered keeps meaning what it meant.
+    async fn class_exists_on(
+        &self,
+        class_ref: &ClassRef,
+        member_attribute: &str,
+    ) -> Result<bool, ClassesClientError> {
+        if self.classes.is_empty() {
+            return self.class_exists(class_ref).await;
+        }
+        Ok(self.classes.iter().any(|c| {
+            c.subject_kind == class_ref.subject_kind
+                && c.code == class_ref.code
+                && c.retired_at.is_none()
+                && c.member_attribute.as_deref() == Some(member_attribute)
+        }))
     }
 }
 
@@ -364,5 +416,81 @@ mod tests {
         let account = c.list_for_subject_kind("account").await.unwrap();
         assert_eq!(account.len(), 1);
         assert_eq!(account[0].code, "distributor");
+    }
+
+    /// The `employee` drawer holds four taxonomies under one
+    /// subject_kind (backlog a45ab09d: role, department, status,
+    /// employment_type — 22 live codes, 2026-09-23), and `member_attribute`
+    /// is what tells them apart. A code asked for on the wrong axis is
+    /// not a member of that axis, however active its row is.
+    #[tokio::test]
+    async fn a_class_exists_only_on_its_own_axis() {
+        let on = |code: &str, attribute: &str, retired: bool| Class {
+            member_attribute: Some(attribute.into()),
+            ..class("employee", code, serde_json::Value::Null, retired)
+        };
+        let c = FakeClassesClient::with_classes(vec![
+            on("platform-admin", "role", false),
+            on("terminated", "status", false),
+            on("it", "department", false),
+            on("ceo", "role", true),
+        ]);
+        let emp = |code: &str| ClassRef::new("employee", code);
+
+        assert!(
+            c.class_exists_on(&emp("platform-admin"), "role")
+                .await
+                .unwrap()
+        );
+        assert!(
+            c.class_exists_on(&emp("terminated"), "status")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !c.class_exists_on(&emp("terminated"), "role").await.unwrap(),
+            "a status is not a role"
+        );
+        assert!(
+            !c.class_exists_on(&emp("it"), "status").await.unwrap(),
+            "a department is not a status"
+        );
+        assert!(
+            !c.class_exists_on(&emp("ceo"), "role").await.unwrap(),
+            "a retired row is not a member of anything"
+        );
+        assert!(
+            !c.class_exists_on(&ClassRef::new("account", "platform-admin"), "role")
+                .await
+                .unwrap(),
+            "subject_kind matters too"
+        );
+    }
+
+    /// A fake with no fixture has no axis to consult, so it answers the
+    /// axis-blind question it was built for — which keeps every
+    /// existing `permissive()` / `with(...)` caller meaning what it did.
+    #[tokio::test]
+    async fn a_fake_without_a_fixture_answers_as_class_exists() {
+        let permissive = FakeClassesClient::permissive();
+        assert!(
+            permissive
+                .class_exists_on(&ClassRef::new("employee", "anything"), "role")
+                .await
+                .unwrap()
+        );
+        let gated = FakeClassesClient::with(vec![ClassRef::new("employee", "ceo")]);
+        assert!(
+            gated
+                .class_exists_on(&ClassRef::new("employee", "ceo"), "role")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !gated
+                .class_exists_on(&ClassRef::new("employee", "cto"), "role")
+                .await
+                .unwrap()
+        );
     }
 }

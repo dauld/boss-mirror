@@ -57,10 +57,7 @@ impl Drop for Fixture {
 
 impl Fixture {
     fn new(name: &str) -> Self {
-        let root =
-            std::env::temp_dir().join(format!("boss-preflight-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let root = boss_testing::scratch_dir(&format!("boss-preflight-{name}"));
         let root = root.canonicalize().unwrap();
         let root = root.as_path();
         let upstream = root.join("upstream.git");

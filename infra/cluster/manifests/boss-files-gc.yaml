@@ -5,6 +5,23 @@
 # the database of the instance whose packet it completes. Config files
 # come from boss-generate-configs — the same generator the pod's own
 # services use at start, pointed at the same secret.
+#
+# SWITCHED ON 2026-09-23 (backlog 6280be03). Until then no config named
+# a [files] root and this chore no-opped nightly, which was the honest
+# result for a store that was off. It now sweeps the boss-files claim
+# (declared in boss.yaml) at the same root boss-content-api writes:
+# BOSS_FILES_ROOT hands the generator the root, and the claim is mounted
+# there. Without BOTH, the sweep would find a [files] block over an
+# empty directory and report success having deleted nothing.
+#
+# WHY IT FOLLOWS THE boss POD. boss-files is ReadWriteOnce: it attaches
+# to one node, where any number of pods may mount it. A chore scheduled
+# on another node would wedge in ContainerCreating on multi-attach, so
+# the podAffinity below puts it beside deploy/boss. The cost is that a
+# run while the boss pod is down waits Pending until it is back — which
+# is also when there is nothing to collect. The four consumers of the
+# root are held equal by
+# crates/core/boss-testing/tests/the_file_store_rides_a_declared_volume.rs.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -41,7 +58,18 @@ spec:
             runAsUser: 1500
             runAsGroup: 1500
             seccompProfile: {type: RuntimeDefault}
+          # Beside deploy/boss, on the node its RWO boss-files volume is
+          # attached to (see the header).
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector: {matchLabels: {app: boss}}
+                  topologyKey: kubernetes.io/hostname
           restartPolicy: Never
+          volumes:
+            - name: boss-files
+              persistentVolumeClaim:
+                claimName: boss-files
           containers:
             - name: chore
               image: 10.20.0.15:3000/david/boss:latest
@@ -58,14 +86,19 @@ spec:
                 - |
                   set -euo pipefail
                   /usr/local/bin/boss-generate-configs
-                  # file_refs has never been configured on (no [files] block), so
-                  # this no-ops today — which is the honest result: the SoR's
-                  # files are off, and the packet records a run that had
-                  # nothing to collect.
+                  # The [files] root comes from BOSS_FILES_ROOT below, over the
+                  # mounted boss-files claim. Refuse rather than sweep a root
+                  # that is not the store: an unmounted path is an empty
+                  # directory, and a sweep of it succeeds having done nothing.
+                  mountpoint -q "$BOSS_FILES_ROOT" || { echo "files-gc: $BOSS_FILES_ROOT is not a mounted volume — refusing to sweep" >&2; exit 1; }
                   /usr/local/bin/boss-chore.sh maintenance-files-gc "file_refs garbage collection" -- /usr/local/bin/boss-files-gc --config /etc/boss-content-api.toml
+              volumeMounts:
+                - {name: boss-files, mountPath: /var/lib/boss/files}
               env:
                 - name: RUST_LOG
                   value: info
+                - name: BOSS_FILES_ROOT
+                  value: /var/lib/boss/files
                 - name: DATABASE_URL
                   valueFrom:
                     secretKeyRef:

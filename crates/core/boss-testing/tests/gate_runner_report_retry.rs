@@ -191,13 +191,7 @@ impl Stub {
 }
 
 fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "gate-report-{tag}-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    std::fs::create_dir_all(&dir).expect("scratch dir");
-    dir
+    boss_testing::scratch_dir(&format!("gate-report-{tag}"))
 }
 
 fn start_stub(tag: &str, mode: &str, delay_secs: f32) -> Stub {

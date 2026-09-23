@@ -268,8 +268,10 @@ RUN groupadd --gid 1500 boss && \
 # sim-state dir (/var/lib/boss-sim) the brewery sim checkpoints its
 # counterparty queue into — without it the sim (UID 1500) logs
 # "could not create sim-state dir; Permission denied" and the
-# collections queue can't survive a container restart.
-RUN mkdir -p /var/lib/boss/auth /var/lib/boss-sim /etc/boss-gateway && \
+# collections queue can't survive a container restart. Same again for
+# the file_refs root (/var/lib/boss/files, BOSS_FILES_ROOT): a named
+# volume there copies this ownership, so the boss uid can write uploads.
+RUN mkdir -p /var/lib/boss/auth /var/lib/boss/files /var/lib/boss-sim /etc/boss-gateway && \
     chown -R 1500:1500 /var/lib/boss /var/lib/boss-sim /etc/boss-gateway
 
 # Binaries.

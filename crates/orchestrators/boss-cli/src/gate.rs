@@ -98,7 +98,7 @@
 //! lock. Adoption by another WAITER is not the fix either: in the
 //! measured incident the dead waiter was the only one in line.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -990,6 +990,22 @@ impl ParkIntent {
                 .map(|w| format!("boss gate: --park-probe {w}"))
                 .collect(),
         }
+    }
+
+    /// THE SHAPE ONLY THE TREE CAN SHOW, said on a `--park-probe`
+    /// (backlog 8ac42ee5): a grep whose every match in the file it reads
+    /// is a comment. `read` answers a path at the car's own tip, `at`
+    /// names that tip — because the comment that defeats a removal probe
+    /// is written by the car that does the removing, and this is the
+    /// last moment anyone reads a warning about it before an hourly NOT
+    /// YET that never clears.
+    pub fn tree_warnings(&self, at: &str, read: impl Fn(&str) -> Option<String>) -> Vec<String> {
+        self.probe
+            .as_deref()
+            .and_then(|probe| crate::prove::prose_only_warning(probe, at, read))
+            .map(|w| format!("boss gate: --park-probe {w}"))
+            .into_iter()
+            .collect()
     }
 
     pub fn require_complete(&self) -> Result<()> {
@@ -2470,6 +2486,12 @@ pub async fn run(
     // without side effects — the policy read never fails, it falls back.
     let max = max_concurrent(&http).await?;
     let mut sha = resolve_sha(branch);
+    // Read against the tip just resolved, which is the tree the car
+    // carries; a sha this clone does not have reads as nothing, and the
+    // warning is simply not said (8ac42ee5).
+    for w in park.tree_warnings(&sha, crate::prove::git_show_reader(Path::new("."), &sha)) {
+        eprintln!("{w}");
+    }
 
     // A LANDED BRANCH IS NOT GATED. Before any packet is filed or
     // reused — a refusal here costs nothing to close. See `landed_guard`.
@@ -4450,6 +4472,42 @@ mod tests {
         assert!(
             park_full().probe_warnings().is_empty(),
             "no probe, no warning"
+        );
+    }
+
+    /// A REMOVAL PROBE DEFEATED BY THE CAR'S OWN COMMENT, said at the
+    /// door where it is typed (backlog 8ac42ee5). The warning names the
+    /// file, the tip it read, and the comment line that answered, and it
+    /// stays a warning: the intent is still complete.
+    #[test]
+    fn a_park_probe_answered_only_by_a_comment_at_the_tip_is_warned_about() {
+        let mut p = park_full();
+        p.probe = Some(
+            "c=$(git show HEAD:src/region.ts | grep -c zoomBoxOf || true)\n\
+             [ \"$c\" -eq 0 ] && echo camera-gone:ok"
+                .into(),
+        );
+        p.expect = Some("camera-gone:ok".into());
+        assert!(p.require_complete().is_ok());
+        let tip = |path: &str| {
+            (path == "src/region.ts")
+                .then(|| "export const a = 1;\n// the camera (zoomBoxOf) is gone\n".to_string())
+        };
+        let said = p.tree_warnings("abc1234", tip).join("\n");
+        assert!(said.starts_with("boss gate: --park-probe"), "{said}");
+        assert!(said.contains("src/region.ts at abc1234"), "{said}");
+        assert!(
+            said.contains("src/region.ts:2: // the camera (zoomBoxOf) is gone"),
+            "{said}"
+        );
+
+        // The same probe over a tip where the name is still CODE says
+        // nothing: that is a real not-yet, and the rehearsal says so.
+        let code = |_: &str| Some("export function zoomBoxOf() {}\n".to_string());
+        assert!(p.tree_warnings("abc1234", code).is_empty());
+        assert!(
+            park_full().tree_warnings("abc1234", tip).is_empty(),
+            "no probe"
         );
     }
 

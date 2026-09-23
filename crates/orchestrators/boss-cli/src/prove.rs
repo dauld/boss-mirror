@@ -307,8 +307,10 @@ fn running_as_root() -> bool {
 pub(crate) fn execute_with(probe: &str, shell: &Shell) -> Result<Outcome> {
     let as_root = shell.user.is_some() && running_as_root();
     // The channel: a file of this process's own, named so two operators
-    // (or two rechecks) on one box never share it. It is created empty
-    // and removed after the read; the prelude opens it for append. As
+    // (or two rechecks) on one box never share it — the uid and pid by
+    // `own_temp_path` (307df975), the clock within one process. It is
+    // created empty and removed after the read; the prelude opens it
+    // for append. As
     // on the forge, the channel must not be able to take the probe down
     // with it: a temp dir that refuses the file leaves the env unset,
     // the prelude falls back to /dev/null, and the probe still runs —
@@ -317,9 +319,8 @@ pub(crate) fn execute_with(probe: &str, shell: &Shell) -> Result<Outcome> {
     // forge's `chmod 666`): it holds command names and nothing else,
     // and a channel the probe cannot append to is a channel that never
     // names the tool.
-    let channel = std::env::temp_dir().join(format!(
-        "boss-prove-notfound-{}-{}",
-        std::process::id(),
+    let channel = crate::own_temp::own_temp_path(&format!(
+        "boss-prove-notfound-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
@@ -1223,6 +1224,68 @@ pub(crate) fn shape_warnings(probe: &str) -> impl Iterator<Item = String> {
         .chain(moving)
         .chain(truncated)
         .chain(mention)
+}
+
+/// THE NINTH SHAPE, AND THE ONE THE TEXT CANNOT SHOW (backlog
+/// 8ac42ee5): a grep over a file whose every match is a COMMENT. It
+/// lives outside [`shape_warnings`] because it needs the tree — `read`
+/// answers a path at the revision `at` names — so each door that has a
+/// tree hands it one: `boss gate --park-probe` reads the car's own tip,
+/// where the comment that defeats a removal probe is written by the same
+/// car, and the hand door of `boss prove` reads HEAD where the probe
+/// runs, where a NOT YET that will never clear is otherwise
+/// indistinguishable from one that will.
+pub(crate) fn prose_only_warning(
+    probe: &str,
+    at: &str,
+    read: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let found = boss_jobs::probe::a_grep_only_prose_answers(probe, read)?;
+    let shown: Vec<String> = found
+        .lines
+        .iter()
+        .take(3)
+        .map(|(n, text)| format!("    {}:{n}: {text}", found.path))
+        .collect();
+    let more = found.lines.len().saturating_sub(shown.len());
+    let more = if more > 0 {
+        format!("\n    … and {more} more, all comments")
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "THIS PROBE'S GREP IS ANSWERED ONLY BY PROSE — `{pattern}` matches {path} at {at} on \
+         {n} line(s), and every one is a comment:\n{lines}{more}\n  \
+         Whatever the probe concludes from that count is a conclusion about a sentence. An \
+         ABSENCE assertion over it cannot pass while the comment stands — and the car that \
+         removes a thing is usually the one that writes the comment saying so — while a \
+         PRESENCE assertion passes on the mention with nothing behind it.\n  {evidence}\n  \
+         This is a warning, not a refusal: counting a mention can be the claim, and the \
+         comment test is a line-prefix scan.",
+        pattern = found.pattern,
+        path = found.path,
+        n = found.lines.len(),
+        lines = shown.join("\n"),
+        evidence = boss_jobs::probe::PROSE_ONLY_EVIDENCE,
+    ))
+}
+
+/// A reader of `<rev>:<path>` in the repository at `dir`, for
+/// [`prose_only_warning`]: `None` for anything git will not show, which
+/// the detector reads as nothing to judge.
+pub(crate) fn git_show_reader(dir: &Path, rev: &str) -> impl Fn(&str) -> Option<String> + use<> {
+    let (dir, rev) = (dir.to_path_buf(), rev.to_string());
+    move |path: &str| {
+        let o = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["show", &format!("{rev}:{path}")])
+            .output()
+            .ok()?;
+        o.status
+            .success()
+            .then(|| String::from_utf8_lossy(&o.stdout).into_owned())
+    }
 }
 
 /// The override, resolved once: `None` when the flag was not given,
@@ -2593,6 +2656,13 @@ pub(crate) async fn run(
     // — a train lands between them — and a proof stamped with a tree
     // the guard did not judge is the same gap in a new place.
     let obs = probe_tree(&shell);
+    // The shape only the tree can show, read where the probe will read
+    // it (8ac42ee5) — said BEFORE the run, so a NOT YET that follows is
+    // read beside the reason it will never clear.
+    let dir = shell.cwd.as_deref().unwrap_or_else(|| Path::new("."));
+    if let Some(w) = prose_only_warning(&probe, "HEAD", git_show_reader(dir, "HEAD")) {
+        eprintln!("boss prove: {w}");
+    }
     if from_car {
         match crate::freshness::stale_tree_guard(
             &obs,

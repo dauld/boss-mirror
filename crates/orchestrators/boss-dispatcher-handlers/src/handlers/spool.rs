@@ -277,15 +277,10 @@ mod tests {
     struct TempDir(PathBuf);
     impl TempDir {
         fn new(tag: &str) -> Self {
-            let p = std::env::temp_dir().join(format!(
-                "boss-estate-spool-test-{tag}-{}-{:?}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0)
-            ));
-            let _ = std::fs::remove_dir_all(&p);
+            // uid AND pid, and a fresh directory per call (307df975);
+            // the spool makes its own, so it starts absent.
+            let p = boss_testing::scratch_dir(&format!("boss-estate-spool-test-{tag}"));
+            let _ = std::fs::remove_dir(&p);
             Self(p)
         }
     }

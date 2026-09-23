@@ -447,44 +447,7 @@ pub async fn run(
 
     let since =
         since.unwrap_or_else(|| (now - chrono::Duration::days(TIER_WINDOW_DAYS)).date_naive());
-    let trains = crate::train::list_all_pages(|offset| {
-        let http = http.clone();
-        async move {
-            crate::gate::api(
-                &http,
-                reqwest::Method::GET,
-                &format!(
-                    "/api/jobs?kind=pr-train&status=closed&limit={}&offset={offset}",
-                    crate::train::PAGE_LIMIT
-                ),
-                None,
-            )
-            .await
-        }
-    })
-    .await?;
-    let landed: Vec<&Value> = trains
-        .iter()
-        .filter(|t| merge_ref_of(t).is_some())
-        .filter(|t| {
-            t.get("closed_on")
-                .and_then(Value::as_str)
-                .and_then(|d| d.parse::<chrono::NaiveDate>().ok())
-                .is_some_and(|closed| closed >= since)
-        })
-        .collect();
-    let tmix = tier_mix(landed.iter().copied());
-    let unread = tmix.get(UNCLASSIFIED_TIER).copied().unwrap_or(0);
-    println!(
-        "\n  TIERS over landed trains since {since} — {} train(s){}",
-        landed.len(),
-        if unread > 0 {
-            format!(" ({unread} unstamped: run boss channels --backfill-tiers)")
-        } else {
-            String::new()
-        }
-    );
-    print_tier_mix(&tmix, landed.len());
+    print_landed(since, &landed_tier_reading(&http, since).await?);
     Ok(())
 }
 
@@ -726,25 +689,190 @@ pub(crate) fn train_tiers<'a>(
     (union.into_iter().collect(), counts)
 }
 
-/// The per-tier mix over a set of trains' stamps: how many trains
-/// touched each tier. A train without the stamp is counted as
-/// [`UNCLASSIFIED_TIER`] so the window says how much of it is unread.
-pub(crate) fn tier_mix<'a>(trains: impl IntoIterator<Item = &'a Value>) -> BTreeMap<String, usize> {
-    let mut mix: BTreeMap<String, usize> = BTreeMap::new();
-    for train in trains {
-        match train
-            .pointer(&format!("/metadata/{}", boss_jobs::car::SOFTWARE_TIERS))
-            .and_then(Value::as_array)
-        {
-            Some(set) => {
-                for tier in set.iter().filter_map(Value::as_str) {
-                    *mix.entry(tier.to_string()).or_insert(0) += 1;
+/// The per-tier reading over a window of landed trains — a STANDING
+/// reading the platform retro quotes every week (backlog 79fdc808,
+/// design 32f18167), so "is the core settling" is answered from the
+/// record rather than argued.
+///
+/// Two rules are the point of the shape. It STATES ITS COVERAGE: how
+/// many trains in the window carry a stamp, beside the window. On
+/// 2026-09-19 56 of 67 landed trains carried none and the old mix
+/// printed `unclassified 83.6%` beside confident per-tier percentages,
+/// so the series built to answer the question could not answer it. A
+/// share is therefore computed over the STAMPED trains only, and when
+/// they are not a majority of the window no share is printed at all —
+/// the rule 367b2dbe applied to the input half of this verb. And it
+/// names its DIRECTION, outward, with NO TARGET RATIO: David's call,
+/// recorded so it is not re-argued — a number picked to be moved
+/// toward is managed rather than meant. Nothing here compares a share
+/// against a threshold, and nothing should.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TierReading {
+    /// Landed trains in the window.
+    pub(crate) window: usize,
+    /// Of those, the ones carrying `software_tiers` — the empty set
+    /// (a root-only train) is a stamp; a missing key is not.
+    pub(crate) stamped: usize,
+    /// Stamped trains touching each tier (a train counts once per tier).
+    pub(crate) mix: BTreeMap<String, usize>,
+}
+
+impl TierReading {
+    pub(crate) fn of<'a>(trains: impl IntoIterator<Item = &'a Value>) -> TierReading {
+        trains.into_iter().fold(
+            TierReading {
+                window: 0,
+                stamped: 0,
+                mix: BTreeMap::new(),
+            },
+            |mut r, train| {
+                r.window += 1;
+                if let Some(set) = train
+                    .pointer(&format!("/metadata/{}", boss_jobs::car::SOFTWARE_TIERS))
+                    .and_then(Value::as_array)
+                {
+                    r.stamped += 1;
+                    for tier in set.iter().filter_map(Value::as_str) {
+                        *r.mix.entry(tier.to_string()).or_insert(0) += 1;
+                    }
                 }
-            }
-            None => *mix.entry(UNCLASSIFIED_TIER.to_string()).or_insert(0) += 1,
-        }
+                r
+            },
+        )
     }
-    mix
+
+    /// Whether the stamped trains are MORE than half the window — the
+    /// bar under which a share would describe the stamped few as if
+    /// they were the whole. Exactly half is not a majority.
+    pub(crate) fn covers_a_majority(&self) -> bool {
+        self.stamped * 2 > self.window
+    }
+
+    /// The share of STAMPED trains touching `tier`, or `None` when the
+    /// stamps do not cover a majority of the window.
+    pub(crate) fn share(&self, tier: &str) -> Option<f64> {
+        self.covers_a_majority()
+            .then(|| self.mix.get(tier).copied().unwrap_or(0) as f64 / self.stamped as f64)
+    }
+
+    /// The reading as printed lines — coverage first, then the tiers in
+    /// the map's rank order (then any tier the map no longer lists),
+    /// then the direction. Pure, so the withholding rule is tested
+    /// without an API.
+    pub(crate) fn lines(&self) -> Vec<String> {
+        if self.window == 0 {
+            return vec![
+                "  coverage: no landed train in the window — nothing to read, and that is the reading"
+                    .to_string(),
+                DIRECTION_LINE.to_string(),
+            ];
+        }
+        let mut out = vec![format!(
+            "  coverage: {} of {} landed train(s) carry a tier stamp ({:.0}%)",
+            self.stamped,
+            self.window,
+            self.stamped as f64 * 100.0 / self.window as f64
+        )];
+        if !self.covers_a_majority() {
+            out.push(format!(
+                "  shares withheld: {} of {} is not a majority of the window, so a percentage \
+                 would describe the stamped few as if they were the whole — counts only",
+                self.stamped, self.window
+            ));
+        }
+        let unstamped = self.window - self.stamped;
+        if unstamped > 0 {
+            out.push(format!(
+                "  {unstamped} unstamped: boss channels --backfill-tiers reads them off their merge commits"
+            ));
+        }
+        let order: Vec<String> = boss_core::tiers::tier_map()
+            .map(|m| m.tiers.iter().map(|t| t.name.clone()).collect())
+            .unwrap_or_default();
+        let unknown: Vec<String> = self
+            .mix
+            .keys()
+            .filter(|t| !order.contains(t))
+            .cloned()
+            .collect();
+        out.extend(order.iter().chain(unknown.iter()).map(|tier| {
+            let n = self.mix.get(tier).copied().unwrap_or(0);
+            let pct = self
+                .share(tier)
+                .map(|s| format!("{:>5.1}%", s * 100.0))
+                .unwrap_or_else(|| "    —".to_string());
+            format!("    {tier:<14} {n:>4}  {pct}")
+        }));
+        out.push(DIRECTION_LINE.to_string());
+        out
+    }
+}
+
+/// The direction the reading is read in, printed with every reading so
+/// a reader never supplies a target of their own (design 32f18167).
+const DIRECTION_LINE: &str = "  direction: OUTWARD — work moving from core to the outer tiers; \
+     no target ratio, by decision (design 32f18167): read the change, not a gap to a number";
+
+/// The landed trains in a window, read from the system of record: every
+/// closed train that merged and closed on or after `since`. Paged on
+/// `total`, because a limit is a page and not a filter.
+async fn landed_tier_reading(
+    http: &reqwest::Client,
+    since: chrono::NaiveDate,
+) -> Result<TierReading> {
+    let trains = crate::train::list_all_pages(|offset| {
+        let http = http.clone();
+        async move {
+            crate::gate::api(
+                &http,
+                reqwest::Method::GET,
+                &format!(
+                    "/api/jobs?kind=pr-train&status=closed&limit={}&offset={offset}",
+                    crate::train::PAGE_LIMIT
+                ),
+                None,
+            )
+            .await
+        }
+    })
+    .await?;
+    Ok(TierReading::of(
+        trains
+            .iter()
+            .filter(|t| merge_ref_of(t).is_some())
+            .filter(|t| {
+                t.get("closed_on")
+                    .and_then(Value::as_str)
+                    .and_then(|d| d.parse::<chrono::NaiveDate>().ok())
+                    .is_some_and(|closed| closed >= since)
+            }),
+    ))
+}
+
+fn print_landed(since: chrono::NaiveDate, reading: &TierReading) {
+    println!(
+        "\n  TIERS over landed trains since {since} — {} train(s) (a train counts once per tier)",
+        reading.window
+    );
+    for line in reading.lines() {
+        println!("{line}");
+    }
+}
+
+/// `boss channels --tiers [--since <date>]` — the landed-train tier
+/// reading alone, the form the platform retro's `collect` step quotes
+/// into its `tier_mix` field every week (79fdc808). Reads only the
+/// system of record: no git, no dock.
+pub async fn tiers(
+    since: Option<chrono::NaiveDate>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
+    let since =
+        since.unwrap_or_else(|| (now - chrono::Duration::days(TIER_WINDOW_DAYS)).date_naive());
+    let reading = landed_tier_reading(&reqwest::Client::new(), since).await?;
+    println!("boss channels --tiers — is the core settling while work moves outward");
+    print_landed(since, &reading);
+    Ok(())
 }
 
 /// The merge ref a closed train records — its arrival report's
@@ -1347,16 +1475,83 @@ mod tests {
     }
 
     #[test]
-    fn the_landed_mix_counts_trains_per_tier_and_the_unstamped_ones() {
+    fn the_landed_reading_counts_trains_per_tier_over_the_stamped_and_states_its_coverage() {
         let trains = [
             json!({ "metadata": { "software_tiers": ["core", "data"] } }),
             json!({ "metadata": { "software_tiers": ["data"] } }),
+            json!({ "metadata": { "software_tiers": [] } }),
             json!({ "metadata": { "delivery_channel": "software" } }),
         ];
-        let mix = tier_mix(trains.iter());
-        assert_eq!(mix.get("core"), Some(&1));
-        assert_eq!(mix.get("data"), Some(&2));
-        assert_eq!(mix.get(UNCLASSIFIED_TIER), Some(&1));
+        let r = TierReading::of(trains.iter());
+        assert_eq!(r.window, 4);
+        // The empty set is a stamp (a root-only train); a missing key is not.
+        assert_eq!(r.stamped, 3);
+        assert_eq!(r.mix.get("core"), Some(&1));
+        assert_eq!(r.mix.get("data"), Some(&2));
+        // The unstamped train is COVERAGE, not a tier: it is not in the mix.
+        assert_eq!(r.mix.get(UNCLASSIFIED_TIER), None);
+        assert!(r.covers_a_majority());
+        // Shares are over the stamped trains, never over the window.
+        assert_eq!(r.share("data"), Some(2.0 / 3.0));
+        assert_eq!(r.share("frontend"), Some(0.0));
+        let text = r.lines().join("\n");
+        assert!(
+            text.contains("coverage: 3 of 4 landed train(s) carry a tier stamp (75%)"),
+            "{text}"
+        );
+        assert!(text.contains("66.7%"), "{text}");
+    }
+
+    /// The trap the whole series nearly failed on (79fdc808): on
+    /// 2026-09-19 56 of 67 landed trains carried no stamp and the old
+    /// mix printed "unclassified 83.6%" beside confident per-tier
+    /// percentages. A reading over a minority says so and prints no
+    /// share at all — the same rule 367b2dbe applied to the input half.
+    #[test]
+    fn a_reading_over_a_minority_of_the_window_withholds_every_share() {
+        let mut trains: Vec<Value> = (0..56).map(|_| json!({ "metadata": {} })).collect();
+        trains.extend((0..11).map(|_| json!({ "metadata": { "software_tiers": ["core"] } })));
+        let r = TierReading::of(trains.iter());
+        assert_eq!((r.window, r.stamped), (67, 11));
+        assert!(!r.covers_a_majority());
+        assert_eq!(r.share("core"), None);
+        let text = r.lines().join("\n");
+        assert!(
+            text.contains("coverage: 11 of 67 landed train(s) carry a tier stamp (16%)"),
+            "{text}"
+        );
+        assert!(text.contains("shares withheld"), "{text}");
+        assert!(
+            !text.contains("100.0%"),
+            "no percentage over the minority: {text}"
+        );
+        assert!(text.contains("--backfill-tiers"), "{text}");
+        // Exactly half is not a majority either.
+        let half = [
+            json!({ "metadata": { "software_tiers": ["core"] } }),
+            json!({ "metadata": {} }),
+        ];
+        assert_eq!(TierReading::of(half.iter()).share("core"), None);
+    }
+
+    /// The direction is named and no target is: David, design 32f18167 —
+    /// a number picked to be moved toward is managed rather than meant.
+    #[test]
+    fn the_reading_names_its_direction_outward_and_no_target_ratio() {
+        let trains = [json!({ "metadata": { "software_tiers": ["modules"] } })];
+        let text = TierReading::of(trains.iter()).lines().join("\n");
+        assert!(text.contains("direction: OUTWARD"), "{text}");
+        assert!(text.contains("no target ratio"), "{text}");
+        let empty = TierReading::of(std::iter::empty::<&Value>());
+        assert_eq!((empty.window, empty.stamped), (0, 0));
+        assert_eq!(empty.share("core"), None);
+        assert!(
+            empty
+                .lines()
+                .join("\n")
+                .contains("no landed train in the window"),
+            "an empty window is a reading, said as one"
+        );
     }
 
     // ---- the backfill's pure parts ----------------------------------------

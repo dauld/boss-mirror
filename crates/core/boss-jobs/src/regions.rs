@@ -374,6 +374,55 @@ pub fn publish_prs(packets: &[(Job, Vec<Step>)]) -> Vec<PublishPr> {
     prs
 }
 
+/// THE HELD PACKET (backlog f49ae66d, the surface half of e1b6ddf7;
+/// design cb38d806 §4). The oldest publish packet still OPEN that has
+/// opened no pull request, held past [`STALLED_PUBLISH_HOURS`], with
+/// what it has been held for, the step it waits at and the drift the
+/// daily `--measure` wrote onto it. None when there is no such packet.
+///
+/// The PR conditions cannot see this case: a packet held before its
+/// sign-off opens no PR, and while it is open the daily cadence spawns
+/// nothing (`NOT open_publish_exists`), so a quiet region is exactly
+/// what a hold used to look like — the 2026-09-17 -> 09-18 hold skipped
+/// the week and #239 arrived as 1319 files. The drift reading on the
+/// packet (`drift_refresh`, rewritten daily by
+/// `publish-github-pr.sh --measure`) is what makes the sentence a
+/// reading rather than an age.
+fn held_publish(packets: &[(Job, Vec<Step>)], now: Instant) -> Option<String> {
+    let (job, steps, since) = packets
+        .iter()
+        .filter(|(job, steps)| {
+            job.status == JobStatus::Open
+                && step_done_at(find_step(steps, "open-pr", "open-pr")).is_none()
+        })
+        .filter_map(|(job, steps)| Some((job, steps, job.opened_at.or_else(|| opened_at(job))?)))
+        .filter(|(_, _, since)| (now - *since).num_hours() >= STALLED_PUBLISH_HOURS)
+        .min_by_key(|(_, _, since)| *since)?;
+    let waiting_at = steps
+        .iter()
+        .find(|s| matches!(s.status, StepStatus::Ready | StepStatus::Active))
+        .map(|s| s.spec_slug.clone().unwrap_or_else(|| s.title.clone()))
+        .unwrap_or_else(|| "no ready step".to_string());
+    let drift = match job.metadata.get("drift_refresh") {
+        Some(d) => format!(
+            "the drift read {} commit(s) / {} file(s) ahead of the mirror at {}",
+            md_str(d, "commits_ahead"),
+            md_str(d, "files_changed"),
+            md_str(d, "measured_at"),
+        ),
+        None => "no drift measurement is on the packet".to_string(),
+    };
+    Some(format!(
+        "the publish packet opened {} has been held {} at {waiting_at} with no pull request — past the {STALLED_PUBLISH_HOURS}h a publish may stand, and no day behind it is published; {drift}",
+        since.format("%Y-%m-%d"),
+        plural(
+            usize::try_from((now - since).num_hours()).unwrap_or(0),
+            "hour",
+            "hours"
+        ),
+    ))
+}
+
 /// THE FLOOR'S BOUND: how many runs may be in flight at once, summed
 /// over the agents registry's `max_concurrent_runs`. `None` when ANY
 /// row declares no cap — an agent without one is unbounded
@@ -2108,6 +2157,10 @@ fn shop_floor(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
 ///   * A PULL REQUEST OPEN PAST [`STALLED_PUBLISH_HOURS`] — the publish
 ///     has stalled on the human gate, and every day it stands makes the
 ///     next diff larger.
+///   * A PACKET HELD PAST [`STALLED_PUBLISH_HOURS`] WITH NO PULL REQUEST
+///     ([`held_publish`], backlog f49ae66d) — the same stall one gate
+///     earlier, at the sign-off, where no PR exists for the two above
+///     to see. It reads last because it names a packet, not a PR.
 ///
 /// The trend is publishes per day: the PRs opened in each window, which
 /// is §1's own number.
@@ -2152,6 +2205,8 @@ fn publish(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
                 )
             ),
         )
+    } else if let Some(why) = held_publish(packets, inputs.now) {
+        (RegionState::Troubled, why)
     } else if let Some(p) = open.first() {
         (
             RegionState::Busy,
@@ -4250,6 +4305,102 @@ mod tests {
         assert_eq!(p.count, Some(1), "only #241 is still open: {}", p.why);
         assert_eq!(p.state, RegionState::Busy, "{}", p.why);
         assert!(p.why.contains("pull/241"), "{}", p.why);
+    }
+
+    /// A publish packet HELD before its pull request, as the live one
+    /// was shaped on 2026-09-23 (d2967a9c): open, `open-pr` not reached,
+    /// the step it waits at `ready`, and the daily `--measure` reading
+    /// on its metadata as `drift_refresh`.
+    fn held_packet(opened_at: &str, waiting_at: &str, drift: Option<Value>) -> (Job, Vec<Step>) {
+        let mut j = job(
+            PUBLISH_KIND,
+            "Publish to the public mirror",
+            JobStatus::Open,
+            drift
+                .map(
+                    |d| json!({ "drift_refresh": d, "drift_refreshed_at": "2026-09-19T00:01:08Z" }),
+                )
+                .unwrap_or_else(|| json!({})),
+        );
+        j.opened_at = Some(t(opened_at));
+        let steps = vec![
+            step(&j, "opened", StepStatus::Completed, Some(opened_at)),
+            step(&j, waiting_at, StepStatus::Ready, None),
+            step(&j, "open-pr", StepStatus::Pending, None),
+        ];
+        (j, steps)
+    }
+
+    /// THE HELD PACKET (backlog f49ae66d, the surface half of e1b6ddf7;
+    /// design cb38d806). A packet left open before its sign-off opens no
+    /// pull request, so the two PR conditions cannot see it — and it is
+    /// the hold that cost the week of 2026-09-17 -> 09-18, because the
+    /// daily cadence spawns nothing while a packet is open. Held past a
+    /// day it is troubled, and the sentence carries the step it waits
+    /// at and the drift `--measure` wrote onto it, not a symptom.
+    #[test]
+    fn a_publish_packet_held_past_a_day_without_a_pull_request_troubles_the_region() {
+        let status = empty_status();
+        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        let packets = vec![held_packet(
+            "2026-09-17T12:00:00Z",
+            "approve",
+            Some(json!({
+                "commits_ahead": "495",
+                "files_changed": "114",
+                "has_drift": "true",
+                "measured_at": "2026-09-19T00:01:08Z",
+            })),
+        )];
+        let out = regions(&with_publish(base, Some(&packets)));
+        let p = by_name(&out, "publish");
+        assert_eq!(p.state, RegionState::Troubled, "{}", p.why);
+        assert_eq!(
+            p.count,
+            Some(0),
+            "the count is still pull requests: {}",
+            p.why
+        );
+        assert!(
+            p.why.contains("48 hours"),
+            "how long it has been held: {}",
+            p.why
+        );
+        assert!(p.why.contains("approve"), "the step it waits at: {}", p.why);
+        assert!(
+            p.why.contains("495")
+                && p.why.contains("114")
+                && p.why.contains("2026-09-19T00:01:08Z"),
+            "the dated drift reading: {}",
+            p.why
+        );
+
+        // No reading on it yet is said, never drawn as a current mirror.
+        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        let bare = vec![held_packet("2026-09-17T12:00:00Z", "measure", None)];
+        let out = regions(&with_publish(base, Some(&bare)));
+        let p = by_name(&out, "publish");
+        assert_eq!(p.state, RegionState::Troubled, "{}", p.why);
+        assert!(p.why.contains("no drift measurement"), "{}", p.why);
+    }
+
+    /// Today's packet, a few hours into its own measure step, is the
+    /// cadence working — not a hold. And a packet that CLOSED without a
+    /// pull request (`nothing-to-publish`, `declined`) holds nothing.
+    #[test]
+    fn a_publish_packet_inside_its_day_or_closed_does_not_trouble_the_region() {
+        let status = empty_status();
+        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        let fresh = vec![held_packet("2026-09-19T08:00:00Z", "measure", None)];
+        let out = regions(&with_publish(base, Some(&fresh)));
+        assert_eq!(by_name(&out, "publish").state, RegionState::Clear);
+
+        let (mut closed, steps) = held_packet("2026-09-15T00:00:00Z", "declined", None);
+        closed.status = JobStatus::Closed;
+        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        let done = vec![(closed, steps)];
+        let out = regions(&with_publish(base, Some(&done)));
+        assert_eq!(by_name(&out, "publish").state, RegionState::Clear);
     }
 
     /// An unread publish list is troubled, never a mirror that reads as

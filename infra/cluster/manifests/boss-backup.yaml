@@ -34,6 +34,33 @@
 # live in this tree. Until that secret exists the CronJob's upload
 # leg fails loudly, which is the intended state: a backup leg that
 # degrades quietly is the failure this whole file is written against.
+#
+# THE FILE STORE (backlog 6280be03, 2026-09-23). file_refs keeps its
+# rows in Postgres and its BYTES on the boss-files claim (boss.yaml). A
+# dump alone restores every row pointing at bytes nobody kept, so since
+# the store was switched on each run also archives the claim, stamped
+# like the dump it pairs with (boss-files-<stamp>.tar.gz beside
+# boss-<stamp>.sql.gz), and uploads it to GCS with the dump. A restore
+# is the dump plus that archive unpacked into the new root.
+#
+# ONE ARCHIVE COVERS EVERY RETAINED DUMP, which is why fewer are kept.
+# The store is content-addressed and never rewrites an object, and
+# boss-files-gc deletes bytes only when their last ref was soft-deleted
+# more than 30 days earlier (DEFAULT_GC_GRACE_DAYS). So the newest
+# archive holds every object any dump younger than 30 days points to —
+# and every dump either copy keeps (14 days here, 21 offsite) is. Each
+# archive is a FULL copy, so keeping 14 of them would fill this volume
+# long before the dumps did; three are kept on each side, enough to
+# survive a bad night.
+#
+# NOT on the boss-gcp leg: that receiver is a deposit-only forced
+# command that names what it receives as a SQL dump, so the archive
+# rides GCS only. A restore from boss-gcp alone gets rows without bytes.
+#
+# boss-files is ReadWriteOnce, so this pod runs beside deploy/boss (the
+# podAffinity below); a run while that pod is down waits until it is
+# back. The four consumers of the root are held equal by
+# crates/core/boss-testing/tests/the_file_store_rides_a_declared_volume.rs.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -62,6 +89,13 @@ spec:
       template:
         spec:
           restartPolicy: Never
+          # Beside deploy/boss: the file-store leg mounts its RWO
+          # boss-files volume, which is attached to that pod's node.
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector: {matchLabels: {app: boss}}
+                  topologyKey: kubernetes.io/hostname
           # The dump image comes from the forge registry, like every
           # other postgres in the estate since #265/#266 (the mirror
           # verb put postgres:16-alpine there on 2026-09-08, ops-request
@@ -168,6 +202,44 @@ spec:
               volumeMounts:
                 - {name: backups, mountPath: /backup}
                 - {name: ship-key, mountPath: /keys, readOnly: true}
+            # THE FILE STORE (see the header). After the dump, never
+            # before: an object's bytes are written before its ref row
+            # commits, so an archive taken after the dump holds every
+            # object the dump points to. Same image as the dump (busybox
+            # tar, gzip, find).
+            - name: files
+              image: 10.20.0.15:3000/david/postgres:16-alpine
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -e
+                  # The volume, or nothing. Absent, this would archive an
+                  # empty directory and call it a backup of an empty store.
+                  test -d /var/lib/boss/files || { echo "files: /var/lib/boss/files is not mounted — the file store is not in this pod" >&2; exit 1; }
+                  # Paired with the dump THIS run produced, by its stamp.
+                  STAMP=$(basename "$(cat /backup/.latest)" .sql.gz)
+                  FOUT=/backup/boss-files-${STAMP#boss-}.tar.gz
+                  # Count the objects BEFORE archiving: uploads keep landing,
+                  # so the archive may hold more, never fewer. A temp file
+                  # mid-upload (sha256/<hex>.<uuid>.tmp) is not an object.
+                  WANT=$(find /var/lib/boss/files -type f | grep -cE '/sha256/[0-9a-f]+$' || true)
+                  tar -czf "$FOUT" -C /var/lib/boss/files .
+                  # VERIFY THE ARTEFACT, as the dump does: the stream is whole
+                  # and it lists at least every object counted above.
+                  gzip -t "$FOUT"
+                  tar -tzf "$FOUT" > ${TMPDIR:-/tmp}/archive.list
+                  GOT=$(grep -cE '^(\./)?sha256/[0-9a-f]+$' ${TMPDIR:-/tmp}/archive.list || true)
+                  if [ "$GOT" -lt "$WANT" ]; then
+                    echo "files: $FOUT lists $GOT objects; the store held $WANT before it was written" >&2
+                    exit 1
+                  fi
+                  echo "$FOUT" > /backup/.latest-files
+                  echo "archived $FOUT ($GOT objects, $(du -h "$FOUT" | cut -f1)), verified"
+                  # Retention: three archives (see the header). Loudly.
+                  find /backup -name 'boss-files-*.tar.gz' -mtime +2 -print -delete
+              volumeMounts:
+                - {name: backups, mountPath: /backup}
+                - {name: file-store, mountPath: /var/lib/boss/files, readOnly: true}
             # SECOND OFFSITE LEG. This was the Pod's one main container
             # until the packet wiring landed; it is an initContainer now
             # for one reason — so a container that runs AFTER it can
@@ -187,19 +259,29 @@ spec:
                   test -s "$OUT"
                   gcloud storage cp "$OUT" "gs://${BUCKET}/$(basename "$OUT")"
                   echo "uploaded $(basename "$OUT") to gs://${BUCKET}"
-                  # Retention mirrors the playground receiver's keep-21,
-                  # so the two offsite copies age out together. Prune by
-                  # NAME order, which is chronological because the stamp
-                  # is %Y%m%d-%H%M%S — never by listing order.
-                  gcloud storage ls "gs://${BUCKET}/" \
-                    | grep -E 'boss-.*\.sql\.gz$' | sort > ${TMPDIR:-/tmp}/all
-                  TOTAL=$(wc -l < ${TMPDIR:-/tmp}/all)
-                  if [ "$TOTAL" -gt 21 ]; then
-                    for obj in $(head -n $((TOTAL - 21)) ${TMPDIR:-/tmp}/all); do
-                      echo "pruning $obj"; gcloud storage rm "$obj"
-                    done
-                  fi
-                  echo "offsite copies now: $(gcloud storage ls "gs://${BUCKET}/" | grep -cE 'boss-.*\.sql\.gz$')"
+                  # The file-store archive this run produced, the same way.
+                  FOUT=$(cat /backup/.latest-files)
+                  test -s "$FOUT"
+                  gcloud storage cp "$FOUT" "gs://${BUCKET}/$(basename "$FOUT")"
+                  echo "uploaded $(basename "$FOUT") to gs://${BUCKET}"
+                  # prune PATTERN KEEP. Dumps keep 21, mirroring the
+                  # playground receiver, so the two offsite copies age out
+                  # together; file-store archives keep 3 (see the header).
+                  # Prune by NAME order, which is chronological because the
+                  # stamp is %Y%m%d-%H%M%S — never by listing order.
+                  prune() {
+                    gcloud storage ls "gs://${BUCKET}/" \
+                      | grep -E "$1" | sort > ${TMPDIR:-/tmp}/all
+                    TOTAL=$(wc -l < ${TMPDIR:-/tmp}/all)
+                    if [ "$TOTAL" -gt "$2" ]; then
+                      for obj in $(head -n $((TOTAL - $2)) ${TMPDIR:-/tmp}/all); do
+                        echo "pruning $obj"; gcloud storage rm "$obj"
+                      done
+                    fi
+                  }
+                  prune 'boss-.*\.sql\.gz$' 21
+                  prune 'boss-files-.*\.tar\.gz$' 3
+                  echo "offsite copies now: $(gcloud storage ls "gs://${BUCKET}/" | grep -cE 'boss-.*\.sql\.gz$') dumps, $(gcloud storage ls "gs://${BUCKET}/" | grep -cE 'boss-files-.*\.tar\.gz$') file-store archives"
               volumeMounts:
                 - {name: backups, mountPath: /backup, readOnly: true}
                 - {name: gcs-key, mountPath: /gcs, readOnly: true}
@@ -234,9 +316,12 @@ spec:
                   DUMP=$(basename "${OUT:-unknown}")
                   SIZE=unknown
                   if [ -n "$OUT" ] && [ -f "$OUT" ]; then SIZE=$(du -h "$OUT" | cut -f1); fi
-                  echo "close-packet: $DUMP ($SIZE), offsite boss-gcp + gcs"
+                  # The file-store archive paired with it (gcs only).
+                  FOUT=$(cat /backup/.latest-files 2>/dev/null || true)
+                  FILES=$(basename "${FOUT:-unknown}")
+                  echo "close-packet: $DUMP ($SIZE), offsite boss-gcp + gcs; $FILES to gcs"
                   /usr/local/bin/boss-step.sh maintenance-backup run \
-                      result=ok dump="$DUMP" size="$SIZE" offsite="boss-gcp,gcs" \
+                      result=ok dump="$DUMP" size="$SIZE" offsite="boss-gcp,gcs" files="$FILES" \
                     || echo "close-packet: the packet did not close (exit $?) — the dump is written, verified and shipped; only this run's visibility is lost" >&2
                   exit 0
               env:
@@ -270,3 +355,7 @@ spec:
               secret: {secretName: boss-backup-key, defaultMode: 0o400}
             - name: gcs-key
               secret: {secretName: boss-gcs-offsite, defaultMode: 0o400}
+            # The file_refs bytes (boss.yaml's boss-files claim), read-only
+            # here: the backup copies them and never writes.
+            - name: file-store
+              persistentVolumeClaim: {claimName: boss-files, readOnly: true}

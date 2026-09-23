@@ -199,8 +199,9 @@ fn the_scanner_proves_itself_on_every_invocation() {
 /// BEHAVIOUR 1 — a tree with no fixed temp path exits 0.
 ///
 /// Every shape here is one the repo uses and must keep using: the
-/// sanctioned `scratch` helpers, a pid-bearing `format!`, a `Uuid`, a
-/// `mktemp`-equivalent, and prose that merely MENTIONS a fixed path.
+/// sanctioned `scratch` helpers, a `format!` carrying the uid AND the
+/// pid, a `Uuid`, a `mktemp`-equivalent, and prose that merely MENTIONS
+/// a fixed path.
 #[test]
 fn a_hermetic_tree_is_clean() {
     let tree = Tree::new("clean");
@@ -211,11 +212,11 @@ fn a_hermetic_tree_is_clean() {
 use boss_testing::scratch;
 fn a() -> std::path::PathBuf { scratch::scratch_dir(\"boss-a\") }
 fn b() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(\"boss-b-{}\", std::process::id()))
+    std::env::temp_dir().join(format!(\"boss-b-{}-{}\", current_uid(), std::process::id()))
 }
-fn c() -> std::path::PathBuf {
+fn c(uid: u32) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
-        \"boss-c-{tag}-{}\",
+        \"boss-c-{tag}-{uid}-{}\",
         std::process::id()
     ))
 }
@@ -287,6 +288,67 @@ fn four() -> String {
              re-derive is not a verdict (CLAUDE.md §Diagnosis):\n{msg}"
         );
     }
+}
+
+/// A pid is not an owner (backlog 307df975).
+///
+/// A computed name used to pass on the pid alone. The pid makes a path
+/// unique among LIVE processes; it says nothing about a leftover from
+/// one that has exited, and pids recycle — so root and uid 65534 on the
+/// dev pod draw the same `boss-gate-rebase-<pid>-<head>` sooner or
+/// later, and the loser's `remove_dir_all` is an EPERM the verb had
+/// discarded. `boss gate --rebase`'s own replay directory was exactly
+/// this shape and passed. The uid is what turns "a leftover I cannot
+/// remove" into "a leftover I can always remove", so a computed name
+/// now carries the uid as well as the pid; either alone is named.
+#[test]
+fn a_computed_name_without_the_uid_is_named() {
+    let tree = Tree::new("pid-without-uid");
+    tree.rs(
+        "src/replay.rs",
+        "\
+fn replay(attempt: usize, head: &str) -> std::path::PathBuf {
+    std::env::temp_dir().%J(format!(
+        \"boss-gate-rebase-{}-{}-{}\",
+        std::process::id(),
+        attempt,
+        &head[..8]
+    ))
+}
+fn owned(uid: u32, head: &str) -> std::path::PathBuf {
+    std::env::temp_dir().%J(format!(
+        \"boss-gate-rebase-{uid}-{}-{}\",
+        std::process::id(),
+        &head[..8]
+    ))
+}
+fn uid_only(uid: u32) -> std::path::PathBuf {
+    std::env::temp_dir().%J(format!(\"boss-uid-only-{uid}\"))
+}
+",
+    );
+    let out = tree.run();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a pid-only and a uid-only name must each fail:\n{}",
+        text(&out)
+    );
+    let msg = text(&out);
+    assert!(
+        msg.contains("src/replay.rs:2") && msg.contains("src/replay.rs:17"),
+        "the pid-only replay path and the uid-only path must both be \
+         named:\n{msg}"
+    );
+    assert!(
+        !msg.contains("src/replay.rs:10"),
+        "a name carrying the uid AND the pid is the fix and must pass:\n{msg}"
+    );
+    assert!(
+        msg.contains("uid"),
+        "the verdict must say what is missing — the uid — or the author \
+         re-derives it from the lint's source:\n{msg}"
+    );
 }
 
 /// Instance ELEVEN, the one that motivated the lint, in its pre-fix

@@ -653,9 +653,7 @@ mod tests {
     /// recognises it as already applied and drops it.
     #[test]
     fn a_car_whose_base_was_squash_merged_is_re_railed_not_skipped() {
-        let dir = std::env::temp_dir().join(format!("boss-rerail-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = boss_testing::scratch_dir("boss-rerail");
         let d = dir.to_str().unwrap();
         let git = |args: &[&str]| {
             let mut a = vec!["git", "-C", d];
@@ -749,9 +747,7 @@ mod tests {
     /// skipped — re-railing must not paper over a real conflict.
     #[test]
     fn a_real_conflict_still_refuses_to_re_rail() {
-        let dir = std::env::temp_dir().join(format!("boss-rerail-real-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = boss_testing::scratch_dir("boss-rerail-real");
         let d = dir.to_str().unwrap();
         let git = |args: &[&str]| {
             let mut a = vec!["git", "-C", d];

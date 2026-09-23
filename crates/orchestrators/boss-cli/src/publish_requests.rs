@@ -473,17 +473,17 @@ async fn drain_one(
                 detail: format!("{e:#}"),
             },
             Ok(bytes) => {
-                // The pid, not just the request id: the dev pod runs
-                // `boss` as root AND as the gate's uid 65534, and /tmp is
-                // 1777 — two accounts fulfilling the same request would
-                // otherwise meet on one path, and the second would fail
-                // on a file it cannot write for a reason that has nothing
-                // to do with the request.
-                let path = std::env::temp_dir().join(format!(
-                    "boss-publish-request-{}-{}.bundle",
-                    id8(&jid),
-                    std::process::id()
-                ));
+                // The uid and the pid, not just the request id: the dev
+                // pod runs `boss` as root AND as the gate's uid 65534, and
+                // /tmp is 1777 — two accounts fulfilling the same request
+                // would otherwise meet on one path, and the second would
+                // fail on a file it cannot write for a reason that has
+                // nothing to do with the request. The pid alone kept two
+                // live runs apart but not a recycled pid's leftover from
+                // the other account (307df975).
+                let path =
+                    crate::own_temp::own_temp_path(&format!("boss-publish-request-{}", id8(&jid)))
+                        .with_extension("bundle");
                 std::fs::write(&path, &bytes)
                     .with_context(|| format!("writing {}", path.display()))?;
                 let _guard = TempFile(path.clone());

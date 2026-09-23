@@ -42,9 +42,7 @@ impl Drop for Scratch {
 }
 
 fn scratch(case: &str) -> (Scratch, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("checkout-lock-{case}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let dir = boss_testing::scratch_dir(&format!("checkout-lock-{case}"));
     (Scratch(dir.clone()), dir)
 }
 

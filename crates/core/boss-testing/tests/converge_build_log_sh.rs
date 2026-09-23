@@ -35,9 +35,7 @@ impl Drop for Scratch {
     }
 }
 fn scratch(name: &str) -> Scratch {
-    let p = std::env::temp_dir().join(format!("converge-build-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&p);
-    std::fs::create_dir_all(&p).expect("scratch dir");
+    let p = boss_testing::scratch_dir(&format!("converge-build-{name}"));
     Scratch(p)
 }
 

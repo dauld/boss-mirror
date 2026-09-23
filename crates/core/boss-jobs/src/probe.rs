@@ -989,6 +989,287 @@ fn bare_identifier(pattern: &str) -> Option<&str> {
     (bare && has_lower && code_shaped).then_some(name)
 }
 
+/// The measured evidence for [`a_grep_only_prose_answers`], in one
+/// copy, quoted by every door that says it (CLAUDE.md §9a).
+pub const PROSE_ONLY_EVIDENCE: &str = "\
+Measured 2026-09-20 (8ac42ee5): two cars written the same day each proved a removal by \
+counting a forbidden token in the file it was removed from and requiring 0. Both removals \
+landed, correct — and both cars read NOT YET every hour afterwards, because each car ALSO \
+added the comment recording the removal, and the comment is the one line left that names \
+the token. region-contents.ts kept zoomBoxOf and lerpBox in a two-line note saying the \
+camera was deleted; claims.ts kept api/tenant in a note saying the claim deliberately does \
+not point there. The comment did not exist when either probe was first written.\n\
+Count what only CODE can say: drop comment lines before the count \
+(grep -v -e '^ *//' -e '^ *#' | grep -c ...), or assert on the import, export or \
+definition keyword rather than on the bare word.";
+
+/// A grep in a probe whose every match, in the file it reads, is a
+/// COMMENT — the answer [`a_grep_only_prose_answers`] gives, with what
+/// a warning needs to be checkable from the warning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProseOnly {
+    /// The path the probe reads, with the probe's own plain variable
+    /// assignments (`d=apps/web/src`) substituted.
+    pub path: String,
+    /// The grep pattern as grep receives it.
+    pub pattern: String,
+    /// Every matching line, 1-based, trimmed — all of them comments.
+    pub lines: Vec<(usize, String)>,
+}
+
+/// WHEN A PROBE'S GREP IS ANSWERED ONLY BY PROSE — the ninth shape,
+/// and the first a probe's TEXT cannot show: it needs the tree the
+/// probe will read, which is why `read` is handed in (path → the file's
+/// text at the revision the door is judging, `None` when unreadable).
+///
+/// THE DEFECT (backlog 8ac42ee5, measured 2026-09-20). Two cars proved
+/// a removal with `git show HEAD:<file> | grep -c <token>` and required
+/// 0. Each removal landed and was correct, and each car read NOT YET
+/// every hour afterwards: the car that deletes a thing tends to add the
+/// comment that says it was deleted, and that comment is the last line
+/// in the file naming the token. The same match defeats a PRESENCE
+/// assertion the other way — a mention in a comment reads as the thing
+/// existing — which is the e7cf78c6 shape seen from the tree rather
+/// than the text. So the question asked here is direction-free: does
+/// this grep's answer come ONLY from comments? If it does, whatever the
+/// probe concludes is a conclusion about a sentence.
+///
+/// Conditions, each one keeping a correct probe quiet:
+///
+/// - the pipeline reads a FILE with `git show <rev>:<path>`, and the
+///   path resolves — a `$var` the probe assigned plainly is substituted,
+///   anything else (`$(…)`, an env var) leaves the grep unjudged;
+/// - the grep is not `-v`, and its pattern is a literal (or a `\|` /
+///   `-E |` alternation of literals): a regex could match a code line a
+///   literal search misses, which would turn a mixed file into a false
+///   "only prose";
+/// - the file has at least one match and EVERY match is on a comment
+///   line (`//`, `/*`, `*`, `<!--`, `#` but not `#[`/`#!`) or after a
+///   trailing ` //` / ` # ` on its line.
+///
+/// Returns the first such grep. WARNING, NOT REFUSAL, for the reason
+/// its siblings give: a probe that counts a mention on purpose is
+/// legal, and the classification of a comment is a line-prefix scan
+/// that a block comment's unmarked middle lines slip past (those read
+/// as code, which only ever keeps the door quiet).
+pub fn a_grep_only_prose_answers(
+    probe: &str,
+    read: impl Fn(&str) -> Option<String>,
+) -> Option<ProseOnly> {
+    let vars = plain_assignments(probe);
+    pipelines(probe).into_iter().find_map(|segment| {
+        let words = shell_words(segment);
+        let path = shown_path(&words, &vars)?;
+        let (pattern, alternatives, fold) = literal_grep(&words)?;
+        let lines = prose_only_matches(&read(&path)?, &alternatives, fold)?;
+        Some(ProseOnly {
+            path,
+            pattern,
+            lines,
+        })
+    })
+}
+
+/// `name=value` assignments a probe makes on a line of their own, with
+/// a value the shell does not compute (no `$`, backtick, space or
+/// operator): the `d=apps/web/src` a long probe keeps its paths short
+/// with.
+fn plain_assignments(probe: &str) -> Vec<(String, String)> {
+    probe
+        .lines()
+        .filter_map(|l| {
+            let (name, value) = l.trim().split_once('=')?;
+            let is_name = !name.is_empty()
+                && !name.starts_with(|c: char| c.is_ascii_digit())
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            let value = value.trim_matches(['\'', '"']);
+            let plain =
+                !value.is_empty() && !value.contains(['$', '`', ' ', ';', '(', ')', '|', '&']);
+            (is_name && plain).then(|| (name.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+/// A segment's words as the shell hands them to a command: quotes
+/// removed, and a backslash inside double quotes kept unless it escapes
+/// one of the four characters bash lets it escape there — so the `\|`
+/// of a basic-regex alternation reaches grep as `\|`. An unquoted `|`
+/// or `)` ends a word, since it ends the command the word belongs to.
+fn shell_words(segment: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut started = false;
+    let mut chars = segment.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                started = true;
+                cur.extend(chars.by_ref().take_while(|&q| q != '\''));
+            }
+            '"' => {
+                started = true;
+                while let Some(q) = chars.next() {
+                    match q {
+                        '"' => break,
+                        '\\' => match chars.peek() {
+                            Some(&n @ ('"' | '\\' | '$' | '`')) => {
+                                cur.push(n);
+                                chars.next();
+                            }
+                            _ => cur.push('\\'),
+                        },
+                        _ => cur.push(q),
+                    }
+                }
+            }
+            '\\' => {
+                started = true;
+                cur.extend(chars.next());
+            }
+            c if c.is_whitespace() || c == '|' || c == ')' => {
+                if started {
+                    words.push(std::mem::take(&mut cur));
+                    started = false;
+                }
+            }
+            _ => {
+                started = true;
+                cur.push(c);
+            }
+        }
+    }
+    if started {
+        words.push(cur);
+    }
+    words
+}
+
+/// The `<path>` of a `git show <rev>:<path>` in these words, with the
+/// probe's plain assignments substituted; `None` when there is no such
+/// read, or a `$` survives substitution (a path this door cannot know).
+fn shown_path(words: &[String], vars: &[(String, String)]) -> Option<String> {
+    let show = words.iter().position(|w| w == "show")?;
+    let spec = words[show + 1..].iter().find(|w| !w.starts_with('-'))?;
+    let (_, path) = spec.split_once(':')?;
+    let path = vars.iter().fold(path.to_string(), |p, (name, value)| {
+        p.replace(&format!("${{{name}}}"), value)
+            .replace(&format!("${name}"), value)
+    });
+    (!path.is_empty() && !path.contains('$')).then_some(path)
+}
+
+/// The grep in these words, when it searches for LITERALS: its pattern
+/// as written, the literal alternatives that pattern means, and whether
+/// `-i` folds case. `None` for no grep, an inverted one, or a pattern
+/// with a regex character a literal search would misread.
+fn literal_grep(words: &[String]) -> Option<(String, Vec<String>, bool)> {
+    let at = words
+        .iter()
+        .position(|w| w.rsplit('/').next() == Some("grep"))?;
+    let (mut extended, mut fixed, mut fold) = (false, false, false);
+    let mut rest = words[at + 1..].iter();
+    let pattern = loop {
+        let w = rest.next()?;
+        match w.strip_prefix('-') {
+            Some("e") => break rest.next()?.clone(),
+            Some(long) if long.starts_with('-') => match long {
+                "-invert-match" => return None,
+                "-extended-regexp" => extended = true,
+                "-fixed-strings" => fixed = true,
+                "-ignore-case" => fold = true,
+                _ => {}
+            },
+            Some(flags) if !flags.is_empty() => {
+                if flags.contains('v') {
+                    return None;
+                }
+                extended |= flags.contains('E');
+                fixed |= flags.contains('F');
+                fold |= flags.contains('i');
+            }
+            _ => break w.clone(),
+        }
+    };
+    let (alternatives, special): (Vec<&str>, &[char]) = if fixed {
+        (pattern.lines().collect(), &[])
+    } else if extended {
+        (
+            pattern.split('|').collect(),
+            &[
+                '\\', '[', ']', '*', '^', '$', '.', '+', '?', '(', ')', '{', '}',
+            ],
+        )
+    } else {
+        (
+            pattern.split("\\|").collect(),
+            &['\\', '[', ']', '*', '^', '$', '.'],
+        )
+    };
+    let literal = alternatives
+        .iter()
+        .all(|a| !a.is_empty() && !a.contains(special));
+    let alternatives: Vec<String> = alternatives
+        .iter()
+        .map(|a| {
+            if fold {
+                a.to_lowercase()
+            } else {
+                a.to_string()
+            }
+        })
+        .collect();
+    literal.then_some((pattern, alternatives, fold))
+}
+
+/// Every line matching one of `alternatives`, when there is at least
+/// one and every occurrence on every one of them sits in a comment.
+fn prose_only_matches(
+    text: &str,
+    alternatives: &[String],
+    fold: bool,
+) -> Option<Vec<(usize, String)>> {
+    let mut matched = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let hay = if fold {
+            line.to_lowercase()
+        } else {
+            line.to_string()
+        };
+        let at: Vec<usize> = alternatives
+            .iter()
+            .flat_map(|a| hay.match_indices(a.as_str()).map(|(p, _)| p))
+            .collect();
+        if at.is_empty() {
+            continue;
+        }
+        let prose_from = prose_starts_at(line);
+        if at.iter().any(|&p| prose_from.is_none_or(|from| p < from)) {
+            return None;
+        }
+        matched.push((i + 1, line.trim().to_string()));
+    }
+    (!matched.is_empty()).then_some(matched)
+}
+
+/// Where the comment on this line begins, if it has one: 0 for a line
+/// that IS a comment, or the offset of a trailing ` //` or ` # `. `#[`
+/// and `#!` open a Rust attribute and a shebang, which are code; a
+/// URL's `://` has no space before it, so it is code too.
+fn prose_starts_at(line: &str) -> Option<usize> {
+    let body = line.trim_start();
+    let whole = ["//", "/*", "*", "<!--"]
+        .iter()
+        .any(|m| body.starts_with(m))
+        || (body.starts_with('#') && !body.starts_with("#[") && !body.starts_with("#!"));
+    if whole {
+        return Some(0);
+    }
+    [" //", "\t//", " # "]
+        .iter()
+        .filter_map(|m| line.find(m))
+        .min()
+}
+
 /// The override a door records when it ran a probe its own rule
 /// refused: which rule, and the operator's stated reason. Recorded in
 /// the proof itself, because that is the record every later reader —
@@ -1788,5 +2069,130 @@ echo "ONE-HOME-FOR-A-DISPATCHER-RULE""#;
                 "{text}"
             );
         }
+    }
+
+    /// The two recorded probes backlog 8ac42ee5 measured, VERBATIM from
+    /// their cars' `proof_probe` — trimmed only of the lines that do not
+    /// read the file in question.
+    const REGION_PROBE: &str = "set -u
+d=apps/web/src/it/yard
+n=$(git show HEAD:$d/RegionMap.svelte | grep -c region-canvas || true)
+if [ \"$n\" -lt 1 ]; then echo \"not yet: this car has not converged here\"; exit 75; fi
+c=$(git show HEAD:$d/region-contents.ts | grep -c \"zoomBoxOf\\|lerpBox\\|easeInOut\\|viewBoxText\" || true)
+if [ \"$c\" -ne 0 ]; then echo \"not yet: the camera is still in the tree\"; exit 75; fi
+echo \"A REGION IS ITS OWN MAP: RegionMap draws on region-canvas and the camera is gone\"";
+
+    const CLAIMS_PROBE: &str = "set -u
+d=apps/web/src
+b=$(git show HEAD:$d/marketing/claims.ts | grep -c \"api/tenant\" || true)
+if [ \"${b:-0}\" -ne 0 ]; then echo \"not yet: the unrouted endpoint is still in the registry\"; exit 75; fi
+echo \"THE SITE CLAIMS ARE MARKED AND CHECKED\"";
+
+    /// The files as origin/main held them on 2026-09-23: the camera and
+    /// the unrouted endpoint are gone from the CODE, and each survives
+    /// only in the comment that records its absence.
+    fn tree(path: &str) -> Option<String> {
+        match path {
+            "apps/web/src/it/yard/RegionMap.svelte" => {
+                Some("<svg class=\"region-canvas\" viewBox={box}>\n".into())
+            }
+            "apps/web/src/it/yard/region-contents.ts" => Some(
+                "import { layout } from './layout';\n\
+                 // The camera is gone. It used to animate the viewBox from the\n\
+                 // whole world into a territory's rect — zoomBoxOf, lerpBox, easeInOut,\n\
+                 // viewBoxText, WORLD_BOX, ZOOM_MS — and everything drawn got larger in\n\
+                 export function regionContents() { return layout(); }\n"
+                    .into(),
+            ),
+            "apps/web/src/marketing/claims.ts" => Some(
+                "export const CLAIMS = [{\n\
+                 \x20   id: 'tenant.name',\n\
+                 \x20   // NOT the instance's own `/api/tenant/manifest` — that answers\n\
+                 \x20   reads: 'text',\n\
+                 }];\n"
+                    .into(),
+            ),
+            _ => None,
+        }
+    }
+
+    /// AN ABSENCE PROBE DEFEATED BY THE COMMENT DOCUMENTING THE ABSENCE
+    /// (backlog 8ac42ee5). Both measured probes are named, with the
+    /// file (its `$d` resolved) and the comment lines that answered.
+    #[test]
+    fn a_grep_answered_only_by_a_comment_is_named_with_its_lines() {
+        let region = a_grep_only_prose_answers(REGION_PROBE, tree)
+            .expect("the region probe's camera grep is answered only by a comment");
+        assert_eq!(region.path, "apps/web/src/it/yard/region-contents.ts");
+        assert_eq!(
+            region.pattern,
+            "zoomBoxOf\\|lerpBox\\|easeInOut\\|viewBoxText"
+        );
+        assert_eq!(
+            region.lines.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            vec![3, 4],
+            "{region:?}"
+        );
+
+        let claims = a_grep_only_prose_answers(CLAIMS_PROBE, tree)
+            .expect("the claims probe's endpoint grep is answered only by a comment");
+        assert_eq!(claims.path, "apps/web/src/marketing/claims.ts");
+        assert_eq!(claims.pattern, "api/tenant");
+        assert_eq!(claims.lines.len(), 1, "{claims:?}");
+        assert!(claims.lines[0].1.starts_with("// NOT"), "{claims:?}");
+    }
+
+    /// A match in CODE silences it, and so does no match at all: the
+    /// first is a real not-yet (or a real presence), the second is the
+    /// absence the probe asked for. A trailing comment is prose, a URL's
+    /// `//` is not, and a Rust attribute's `#[` is code.
+    #[test]
+    fn a_grep_with_any_code_match_or_no_match_is_not_named() {
+        let probe = "c=$(git show HEAD:src/a.ts | grep -c zoomBoxOf)";
+        for (file, named) in [
+            (
+                "export function zoomBoxOf() {}\n// zoomBoxOf is going\n",
+                false,
+            ),
+            ("export function other() {}\n", false),
+            ("const u = 'https://x/zoomBoxOf';\n", false),
+            ("layout(); // zoomBoxOf went here\n", true),
+            ("# zoomBoxOf retired\n", true),
+            ("#[zoomBoxOf]\nfn a() {}\n", false),
+            ("<!-- zoomBoxOf retired -->\n", true),
+            (" * zoomBoxOf retired\n", true),
+        ] {
+            let found = a_grep_only_prose_answers(probe, |_| Some(file.to_string()));
+            assert_eq!(found.is_some(), named, "{file:?} -> {found:?}");
+        }
+    }
+
+    /// What it cannot judge honestly it leaves alone: an unreadable file,
+    /// an unresolvable path, an inverted grep, a regex, and a grep over
+    /// something that is not a file read.
+    #[test]
+    fn a_grep_it_cannot_judge_is_left_alone() {
+        let comment = |_: &str| Some("// zoomBoxOf retired\n".to_string());
+        for probe in [
+            "git show HEAD:$UNSET/a.ts | grep -c zoomBoxOf",
+            "git show HEAD:a.ts | grep -vc zoomBoxOf",
+            "git show HEAD:a.ts | grep -c 'zoom.*Of'",
+            "boss-sor-read /api/jobs | grep -c zoomBoxOf",
+        ] {
+            assert_eq!(a_grep_only_prose_answers(probe, comment), None, "{probe}");
+        }
+        assert_eq!(
+            a_grep_only_prose_answers("git show HEAD:a.ts | grep -c zoomBoxOf", |_| None),
+            None,
+            "an unreadable file is not a finding"
+        );
+        // And the case-folding and -E spellings are read, not skipped.
+        assert!(
+            a_grep_only_prose_answers("git show HEAD:a.ts | grep -ci ZOOMBOXOF", comment).is_some()
+        );
+        assert!(
+            a_grep_only_prose_answers("git show HEAD:a.ts | grep -Ec 'lerpBox|zoomBoxOf'", comment)
+                .is_some()
+        );
     }
 }

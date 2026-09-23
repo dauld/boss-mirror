@@ -54,14 +54,12 @@ const SCRIPT: &str = "infra/forge/request-reclaim-disk.sh";
 const SWEEP_UNIT: &str = "infra/forge/disk-floor-sweep.service";
 const WORKFLOW: &str = ".forgejo/workflows/ci.yml";
 
-/// Every fixture path carries `{pid}`: the gate runs as uid 65534 and
-/// several of these suites share one machine, so a fixed temp path is a
-/// collision waiting for a parallel run.
+/// Every fixture path carries the uid and the pid (`scratch`): the gate
+/// runs as uid 65534 and several of these suites share one machine, so a
+/// fixed temp path is a collision waiting for a parallel run, and a
+/// pid-only one waits for a recycled pid under the other uid (307df975).
 fn fixture_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("boss-reclaim-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("mkdir fixture");
-    dir
+    boss_testing::scratch_dir(&format!("boss-reclaim-{name}"))
 }
 
 /// A stub `df` reporting a fixed number of free GB in POSIX columns, and

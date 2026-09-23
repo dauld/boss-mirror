@@ -211,9 +211,7 @@ fn summary_block() -> String {
 
 /// Run the lifted block over a receipt file and return what it produced.
 fn summarize(tag: &str, receipt_body: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("boss-gate-summary-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let dir = boss_testing::scratch_dir(&format!("boss-gate-summary-{tag}"));
     let receipt = dir.join("receipt.json");
     std::fs::write(&receipt, receipt_body).expect("write receipt");
     let harness = dir.join("harness.sh");

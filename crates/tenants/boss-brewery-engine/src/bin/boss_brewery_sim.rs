@@ -1398,8 +1398,7 @@ mod day_cursor_tests {
 
     #[test]
     fn epoch_rewind_cleanup_removes_checkpoint() {
-        let dir = std::env::temp_dir().join(format!("rewind-cleanup-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = boss_testing::scratch_dir("rewind-cleanup");
         let path = dir.join("counterparty-queue.json");
         std::fs::write(&path, "{}").unwrap();
         cleanup_for_epoch_rewind(&path).unwrap();

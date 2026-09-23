@@ -27,10 +27,11 @@
 //! WHAT IS FAKED, AND WHY ONLY THAT. `pg_dump`, `ssh`, `gcloud` and
 //! `apk` come from the container images and cannot run here, so they
 //! are shims that record what they were asked to do. `gzip`, `du`,
-//! `find`, `grep` and `tail` are the real thing, so the artefact
+//! `find`, `grep`, `tail` and `tar` are the real thing, so the artefact
 //! verification this manifest is written around is genuinely exercised
 //! — including the case it exists for, a `pg_dump` that dies mid-stream
-//! and leaves a perfectly valid gzip.
+//! and leaves a perfectly valid gzip, and the file-store archive the
+//! `files` leg writes from a real `sha256/<hex>` tree.
 //!
 //! `boss-maintenance-wrap.sh` and `boss-step.sh` are shimmed too, and
 //! that is a deliberate choice rather than a shortcut. Driving the real
@@ -60,10 +61,28 @@ const MANIFEST: &str = "infra/cluster/manifests/boss-backup.yaml";
 /// closer is the only main container — it runs if and only if every
 /// leg before it passed, which is what makes `result=ok` true when it
 /// writes it.
-const INIT_ORDER: &[&str] = &["open-packet", "dump", "offsite-gcs"];
+///
+/// `files` (backlog 6280be03, 2026-09-23) archives the file_refs byte
+/// store AFTER the dump — the order that makes the pair restorable: an
+/// object's bytes land before its ref row commits, so an archive taken
+/// after the dump holds every object the dump points to.
+const INIT_ORDER: &[&str] = &["open-packet", "dump", "files", "offsite-gcs"];
 const MAIN_ORDER: &[&str] = &["close-packet"];
 
 const KIND: &str = "maintenance-backup";
+
+/// The objects `run_pod` puts in the file store: (sha256 hex, bytes).
+/// The hex is the real digest of the bytes, as the store keys them.
+const OBJECTS: &[(&str, &str)] = &[
+    (
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "hello",
+    ),
+    (
+        "486ea46224d1bb4fb680f34f7c9ad96a8f24ec88be73ea8e5a6c65260e9cb8a7",
+        "world",
+    ),
+];
 
 fn manifest() -> String {
     let path = repo_root().join(MANIFEST);
@@ -183,6 +202,13 @@ enum Fail {
     /// The packet will not close (the SoR is dark). The backup already
     /// happened; only its visibility is lost.
     Close,
+    /// The file store's volume is not in the pod: an archive of the
+    /// empty directory where it should be would read as a backup of an
+    /// empty store.
+    NoStore,
+    /// The store is mounted and holds no object yet — the state the
+    /// SoR is in the day it is switched on. That is a good backup.
+    EmptyStore,
 }
 
 impl Fail {
@@ -194,6 +220,8 @@ impl Fail {
             Fail::Ship => "ship",
             Fail::Upload => "upload",
             Fail::Close => "close",
+            Fail::NoStore => "no-store",
+            Fail::EmptyStore => "empty-store",
         }
     }
 }
@@ -204,6 +232,9 @@ struct PodRun {
     /// Everything the run did, in order: `open:`, `exec:`, `close:`.
     seq: Vec<String>,
     log: String,
+    /// What the run left on the backups volume: each file's name, and
+    /// for a `.tar.gz` the entries `tar -tzf` lists in it.
+    backups: Vec<(String, Vec<String>)>,
 }
 
 impl PodRun {
@@ -245,7 +276,14 @@ impl PodRun {
 /// here only so it can be redirected. Nothing on this host is built at
 /// it, and `assert_rebased` below proves no `/tmp` path survives into a
 /// script this host runs.
-const REBASE: &[(&str, &str)] = &[("/backup", "backup"), ("/keys", "keys"), ("/gcs", "gcs")];
+const REBASE: &[(&str, &str)] = &[
+    ("/backup", "backup"),
+    ("/keys", "keys"),
+    ("/gcs", "gcs"),
+    // The file_refs store, at the path every pod mounts it on — the
+    // same path boss-content-api records as each row's `bucket`.
+    ("/var/lib/boss/files", "files"),
+];
 
 /// The scratch files a script writes for ITSELF (`k`, `all`) no longer
 /// need a REBASE row each: the manifest writes them under
@@ -301,8 +339,23 @@ fn run_pod(tag: &str, fail: Fail) -> PodRun {
     // which is what makes this unique across accounts as well as across
     // live processes.
     let dir = scratch::scratch_dir(&format!("boss-backup-pod-{tag}"));
-    for sub in ["backup", "keys", "gcs", "bin", "tmp"] {
+    for sub in ["backup", "keys", "gcs", "bin", "tmp", "files"] {
         scratch::create_dir(&dir.join(sub));
+    }
+    // The file store, laid out the way LocalDiskStorage writes it:
+    // `sha256/<hex>` under the root. Two objects, so a count that is
+    // off by one cannot pass as whole.
+    match fail {
+        Fail::NoStore => {
+            let _ = std::fs::remove_dir_all(dir.join("files"));
+        }
+        Fail::EmptyStore => {}
+        _ => {
+            scratch::create_dir(&dir.join("files/sha256"));
+            for (hex, body) in OBJECTS {
+                scratch::write_file(&dir.join(format!("files/sha256/{hex}")), body);
+            }
+        }
     }
     let seq = dir.join("sequence.log");
     scratch::write_file(&seq, "");
@@ -342,7 +395,7 @@ fn run_pod(tag: &str, fail: Fail) -> PodRun {
          case \"$1 ${2:-}\" in\n\
            'auth activate-service-account') exit 0 ;;\n\
            'storage cp')\n\
-             echo \"exec:upload\" >> \"$BOSS_TEST_SEQ\"\n\
+             echo \"exec:upload $(basename \"$3\")\" >> \"$BOSS_TEST_SEQ\"\n\
              if [ \"$BOSS_TEST_FAIL\" = \"upload\" ]; then echo 'upload failed' >&2; exit 1; fi\n\
              exit 0 ;;\n\
            'storage ls') echo \"gs://boss-offsite-test/boss-20260908-091100.sql.gz\"; exit 0 ;;\n\
@@ -429,11 +482,36 @@ fn run_pod(tag: &str, fail: Fail) -> PodRun {
         .lines()
         .map(str::to_string)
         .collect();
+    let mut backups: Vec<(String, Vec<String>)> = std::fs::read_dir(dir.join("backup"))
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .map(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    let entries = if name.ends_with(".tar.gz") {
+                        let out = Command::new("tar")
+                            .arg("-tzf")
+                            .arg(e.path())
+                            .output()
+                            .expect("tar lists an archive");
+                        String::from_utf8_lossy(&out.stdout)
+                            .lines()
+                            .map(str::to_string)
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    (name, entries)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    backups.sort();
     let _ = std::fs::remove_dir_all(&dir);
     PodRun {
         ran,
         seq: seq_lines,
         log,
+        backups,
     }
 }
 
@@ -675,4 +753,100 @@ fn the_packet_containers_name_the_system_of_record() {
         "the packet containers must point at the in-cluster jobs API by service DNS, the way \
          every sibling CronJob does"
     );
+}
+
+// ------------------------------------------------------ the file store
+
+impl PodRun {
+    /// The dump this run left, by name.
+    fn dump(&self) -> Option<&str> {
+        self.backups
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .find(|n| n.starts_with("boss-") && n.ends_with(".sql.gz"))
+    }
+    /// The file-store archive this run left, and what it holds.
+    fn archive(&self) -> Option<&(String, Vec<String>)> {
+        self.backups
+            .iter()
+            .find(|(n, _)| n.starts_with("boss-files-") && n.ends_with(".tar.gz"))
+    }
+}
+
+/// THE DEFECT (backlog 6280be03): boss-backup.yaml was pg_dump only, so
+/// once file_refs is switched on a restore would bring back every
+/// `file_refs` row pointing at bytes nobody kept. A healthy run must
+/// leave the store's objects in an archive stamped like the dump it
+/// pairs with, ship it offsite, and say so on the packet.
+#[test]
+fn a_healthy_run_archives_the_file_store_beside_its_dump() {
+    let r = run_pod("files", Fail::Nothing);
+    assert!(r.succeeded(), "the happy path must pass:\n{}", r.log);
+    let dump = r.dump().expect("the run left its dump");
+    let stamp = dump
+        .strip_prefix("boss-")
+        .and_then(|s| s.strip_suffix(".sql.gz"))
+        .expect("the dump is boss-<stamp>.sql.gz");
+    let (archive, entries) = r.archive().unwrap_or_else(|| {
+        panic!(
+            "no file-store archive on the volume: {:?}\n{}",
+            r.backups, r.log
+        )
+    });
+    assert_eq!(
+        archive,
+        &format!("boss-files-{stamp}.tar.gz"),
+        "the archive must carry the stamp of the dump it restores with"
+    );
+    for (hex, _) in OBJECTS {
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.trim_start_matches("./") == format!("sha256/{hex}")),
+            "object sha256/{hex} is missing from {archive}: {entries:?}"
+        );
+    }
+    assert!(
+        r.seq.iter().any(|l| l == &format!("exec:upload {archive}")),
+        "the archive must go offsite with the dump: {:?}",
+        r.seq
+    );
+    let closes = r.closes();
+    assert!(
+        closes.len() == 1 && closes[0].contains(&format!("files={archive}")),
+        "the packet must name the archive this run produced: {closes:?}"
+    );
+}
+
+/// The day the store is switched on it holds nothing, and that is a
+/// good backup, not a failure: it must pass and still leave an archive.
+#[test]
+fn an_empty_store_is_a_good_backup() {
+    let r = run_pod("files-empty", Fail::EmptyStore);
+    assert!(r.succeeded(), "an empty store must back up:\n{}", r.log);
+    assert!(
+        r.archive().is_some(),
+        "an empty store still leaves an (empty) archive: {:?}",
+        r.backups
+    );
+    assert_eq!(r.closes().len(), 1, "{}", r.log);
+}
+
+/// A pod without the store's volume would archive an empty directory
+/// and report a backup of an empty store. It must fail instead, before
+/// anything goes offsite, and never close green.
+#[test]
+fn a_missing_store_never_closes_the_packet_green() {
+    let r = run_pod("files-missing", Fail::NoStore);
+    assert!(
+        !r.succeeded(),
+        "a backup without the file store must fail the Job:\n{}",
+        r.log
+    );
+    assert!(
+        !r.ran_container("offsite-gcs"),
+        "nothing may ship when the store was not archived:\n{}",
+        r.log
+    );
+    assert!(r.closes().is_empty(), "{:?}\n{}", r.closes(), r.log);
 }

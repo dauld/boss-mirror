@@ -55,6 +55,8 @@ boss-calendar-client = { path = "../../core/boss-calendar-client" }
 # HTTP API. infra/lint/sim-boundary-audit.sh enforces this.
 
 [dev-dependencies]
+# `scratch_dir`: a temp fixture carries the uid and the pid (307df975).
+boss-testing = { path = "../../core/boss-testing" }
 
 [lints]
 workspace = true

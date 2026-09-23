@@ -55,13 +55,7 @@ struct RunOutcome {
 /// whose infer-batch should fail (curl exit 22, an HTTP error).
 fn run_with_failures(fail: &[&str]) -> RunOutcome {
     let root = repo_root();
-    let dir = std::env::temp_dir().join(format!(
-        "boss-infer-batch-{}-{:?}",
-        std::process::id(),
-        fail
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("mkdir tmp");
+    let dir = boss_testing::scratch_dir("boss-infer-batch");
 
     let log = dir.join("invoked.log");
     let fake = dir.join("curl");

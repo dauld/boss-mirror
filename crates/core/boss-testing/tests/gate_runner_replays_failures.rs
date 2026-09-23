@@ -123,12 +123,7 @@ impl Extracted {
 
 /// Run the extractor over a crafted receipt + log.
 fn run_extractor(receipt: &str, log: &str) -> Extracted {
-    let dir = std::env::temp_dir().join(format!(
-        "gate-detail-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let dir = boss_testing::scratch_dir("gate-detail");
 
     let script = dir.join("extract.py");
     let receipt_path = dir.join("receipt.json");

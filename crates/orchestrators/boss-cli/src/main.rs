@@ -30,6 +30,7 @@ mod merged;
 mod ops;
 mod ops_request;
 mod orient;
+mod own_temp;
 mod owner;
 mod park;
 mod prose;
@@ -570,8 +571,14 @@ enum Commands {
         /// Read each CLOSED train's merge commit in this checkout and
         /// stamp software_tiers on the train (idempotent: a train that
         /// carries it is skipped) instead of printing the mixes.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "tiers")]
         backfill_tiers: bool,
+        /// Print ONLY the tier reading over landed trains — coverage
+        /// first, direction outward, no target ratio — the form the
+        /// platform retro quotes every week (79fdc808). Reads the system
+        /// of record alone: no git, no dock.
+        #[arg(long)]
+        tiers: bool,
         /// The window: trains closed on or after this date (YYYY-MM-DD).
         /// Default for the mix: the last 30 days; for the backfill: all.
         #[arg(long)]
@@ -1564,10 +1571,13 @@ async fn main() -> Result<()> {
         }
         Commands::Channels {
             backfill_tiers,
+            tiers,
             since,
         } => {
             if backfill_tiers {
                 channels::backfill_tiers(since).await
+            } else if tiers {
+                channels::tiers(since, chrono::Utc::now()).await
             } else {
                 channels::run(since, chrono::Utc::now()).await
             }

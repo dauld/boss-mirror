@@ -174,6 +174,28 @@ spec:
     requests:
       storage: 1Gi
 ---
+# The file_refs byte store — every attachment's bytes, content-addressed
+# at <root>/sha256/<hex> (backlog 6280be03, 2026-09-23). DECLARED here so
+# the converge creates it; a hostPath is refused cluster-wide and an
+# emptyDir would lose every upload on a roll, leaving file_refs rows that
+# point at nothing. Its bytes are archived beside the nightly pg_dump by
+# boss-backup.yaml, and swept by boss-files-gc.yaml — both mount this
+# claim, and because it is ReadWriteOnce both are pinned to this pod's
+# node (crates/core/boss-testing/tests/the_file_store_rides_a_declared_volume.rs
+# holds the four consumers to one root). Longhorn volumes expand in
+# place; 20Gi is a start, not a ceiling.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: boss-files
+  namespace: boss
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 20Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -197,8 +219,8 @@ spec:
   # retiring the pod holding the volume. A stuck rollout beats a
   # two-minute outage only in the sense that it lasts longer.
   #
-  # Two things gated zero-downtime here; one is answered and the other
-  # is half-answered, so `Recreate` still stands:
+  # Three things gate zero-downtime here; one is answered, one is
+  # half-answered and one is new, so `Recreate` still stands:
   #   1. `boss-auth` (RWO) held TWO files. session.key — the HMAC
   #      signing key for session cookies — has moved to the read-only
   #      `boss-session-key` Secret mounted below: it is read, never
@@ -213,8 +235,13 @@ spec:
   #   2. ANSWERED: infra/postgres/migrate.sh now takes a pg_advisory
   #      lock (MIG_LOCK_KEY), so two pods starting together no longer
   #      race the schema converge.
-  # RollingUpdate cannot flip until the PVC is gone (credentials.toml),
-  # so `Recreate` is still correct here; the window is shortened rather
+  #   3. `boss-files` (RWO, 2026-09-23) holds the file_refs bytes and is
+  #      written at runtime by boss-content-api — the same multi-attach
+  #      block as boss-auth, and it does not go away with WebAuthn: it
+  #      goes when the bytes move to shared storage (an RWX volume or an
+  #      object store behind the FileStorage port).
+  # RollingUpdate cannot flip until both RWO claims are gone, so
+  # `Recreate` is still correct here; the window is shortened rather
   # than removed (see readinessProbe below). DO NOT change `strategy`.
   #
   # Not a gate, though it is the usual objection: boss-dispatcher binds
@@ -258,8 +285,17 @@ spec:
       # Longhorn volume mounts root:root 0755 — so the credential store
       # was unwritable and boss-auth failed on the temp file. fsGroup
       # makes the kubelet chgrp the volume and set setgid on it.
+      #
+      # OnRootMismatch (2026-09-23, with boss-files): the default policy
+      # re-walks and re-chowns EVERY file on every mount, and boss-files
+      # grows by one file per attachment — under `Recreate` that walk
+      # would lengthen the dark window of every roll as the store grew.
+      # The root carries the right group and setgid after the first
+      # mount, so later mounts skip the walk; files the boss uid writes
+      # inherit gid 1500 from the setgid directory anyway.
       securityContext:
         fsGroup: 1500
+        fsGroupChangePolicy: OnRootMismatch
       imagePullSecrets:
         - {name: forgejo-registry}
       volumes:
@@ -273,12 +309,20 @@ spec:
         #
         # This volume USED to also hold session.key; that moved to the
         # read-only `boss-session-key` Secret below. credentials.toml is
-        # the only file left here, and the last thing keeping this RWO
-        # PVC (and `strategy: Recreate`) alive until WebAuthn retires it
-        # (packet e9703d8f).
+        # the only file left here, and what keeps this RWO PVC (and,
+        # with boss-files below, `strategy: Recreate`) alive until
+        # WebAuthn retires it (packet e9703d8f).
         - name: boss-auth
           persistentVolumeClaim:
             claimName: boss-auth
+        # The file_refs byte store (the boss-files claim above). The
+        # config generator writes boss-content-api's [files] root from
+        # BOSS_FILES_ROOT, which the container below names as this
+        # volume's mountPath; fsGroup makes it writable by the boss uid,
+        # as it does boss-auth.
+        - name: boss-files
+          persistentVolumeClaim:
+            claimName: boss-files
         # The session-cookie HMAC key, read-only, projected from a
         # Secret so every pod reads the SAME bytes — the fix for the
         # cross-pod mass-signout (2026-08-26) and step 1 toward a
@@ -420,6 +464,11 @@ spec:
             - {name: BOSS_BOOTSTRAP_ADMIN_EMAIL, value: david@algedonic.dev}
             - {name: BOSS_STATIC_DIR, value: /opt/boss/spa}
             - {name: BOSS_AUTH_FILE, value: /var/lib/boss/auth/credentials.toml}
+            # file_refs ON (backlog 6280be03): the generator writes the
+            # content service's [files] root from this, and only when it
+            # is set. It is the boss-files mountPath below and must stay
+            # so — boss-content-api records it as every row's `bucket`.
+            - {name: BOSS_FILES_ROOT, value: /var/lib/boss/files}
             - {name: BOSS_AUTH_PROVIDER, value: local-auth}
             # Deliberate: this is a public demonstration. Anonymous
             # visitors get a synthetic audit-readonly session — read every
@@ -648,6 +697,9 @@ spec:
             # used to share this mount; it is now the read-only Secret
             # below, and credentials.toml is all that is left here.)
             - {name: boss-auth, mountPath: /var/lib/boss/auth}
+            # The file_refs bytes, writable — boss-content-api writes
+            # every upload here (temp file, then rename into sha256/).
+            - {name: boss-files, mountPath: /var/lib/boss/files}
             # The session-cookie HMAC key, read-only, from the Secret.
             # Its own mount at a NEW path — deliberately NOT overlaying
             # /var/lib/boss/auth, so the writable credential store and

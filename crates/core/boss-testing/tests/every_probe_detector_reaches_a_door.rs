@@ -51,17 +51,34 @@ use std::collections::BTreeSet;
 /// as "takes a probe" and immediately reported `commands_invoked` as
 /// an orphan. The distinction is the fix, not an exemption for that
 /// one name, because the next extractor would be reported too.
+///
+/// A SIGNATURE IS READ WHOLE, not by its first line (backlog 8ac42ee5).
+/// The first detector that needs more than the text —
+/// `a_grep_only_prose_answers(probe, read)`, which reads the tree the
+/// probe will read — is long enough that rustfmt breaks its signature
+/// over four lines, and a line-by-line read keyed on `(probe: &str)`
+/// would have declared it absent and passed with it orphaned.
 fn declared_detectors() -> BTreeSet<String> {
     let src = std::fs::read_to_string(repo_root().join("crates/core/boss-jobs/src/probe.rs"))
         .expect("probe.rs is readable");
-    src.lines()
-        .filter_map(|l| {
-            let l = l.trim_start();
-            let rest = l.strip_prefix("pub fn ")?;
-            if !rest.contains("(probe: &str)") {
+    src.split("\npub fn ")
+        .skip(1)
+        .map(|chunk| {
+            let signature = chunk.split('{').next().unwrap_or_default();
+            signature
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .replace("( ", "(")
+                .replace(", )", ")")
+        })
+        .filter_map(|rest| {
+            if !rest.contains("(probe: &str)") && !rest.contains("(probe: &str,") {
                 return None;
             }
-            let returns = rest.split("->").nth(1)?.trim();
+            // The LAST arrow: a reader argument's `Fn(&str) -> …` carries
+            // one of its own, and it is not what the detector returns.
+            let returns = rest.rsplit("->").next()?.trim();
             let judges = returns.starts_with("Option<") || returns.starts_with("bool");
             if !judges {
                 return None;

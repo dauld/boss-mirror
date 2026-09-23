@@ -19,7 +19,8 @@ pub struct PgPeople {
     /// Optional Class registry client. When present, every write
     /// validates the closed-set attributes of `Employee` (`role`,
     /// `department`, `employment_type`, `status`) against
-    /// `class_exists("employee", code)` before the row hits the DB.
+    /// `class_exists_on(("employee", code), column)` before the row
+    /// hits the DB — on the column's own axis, not merely the kind.
     /// `skill_level` is a numeric range (1..=5), not a closed enum,
     /// so it stays on its CHECK and is not a Class registry
     /// candidate.
@@ -90,18 +91,7 @@ impl PgPeople {
         let Some(classes) = &self.classes else {
             return Ok(());
         };
-        let class_ref = ClassRef::new("employee", code);
-        let exists = classes.class_exists(&class_ref).await.map_err(|e| {
-            // Upstream service failure — surface as Storage so the
-            // caller's retry/error UX matches a DB hiccup.
-            PeopleError::Storage(format!("classes registry: {e}"))
-        })?;
-        if !exists {
-            return Err(PeopleError::Conflict(format!(
-                "{attribute} `{code}` is not an active Class in the registry"
-            )));
-        }
-        Ok(())
+        validate_employee_class(classes.as_ref(), attribute, code).await
     }
 
     /// Reject writes whose `location` doesn't resolve to an active
@@ -122,6 +112,39 @@ impl PgPeople {
         }
         Ok(())
     }
+}
+
+/// Reject a write whose `attribute` column names a code that is not an
+/// active `employee` Class ON THAT AXIS.
+///
+/// The `employee` drawer holds four taxonomies under one subject_kind —
+/// role, department, status, employment_type, 22 live codes on
+/// 2026-09-23 (backlog a45ab09d) — and the column name IS the Class's
+/// `member_attribute` (the column on the Subject whose value equals the
+/// code). Until that day this asked only whether `(employee, code)`
+/// existed, so `role = "terminated"` and `department = "platform-admin"`
+/// both passed. Asking on the axis is what keeps the four apart while
+/// they still share a kind.
+async fn validate_employee_class(
+    classes: &dyn ClassesClient,
+    attribute: &str,
+    code: &str,
+) -> Result<(), PeopleError> {
+    let class_ref = ClassRef::new("employee", code);
+    let exists = classes
+        .class_exists_on(&class_ref, attribute)
+        .await
+        .map_err(|e| {
+            // Upstream service failure — surface as Storage so the
+            // caller's retry/error UX matches a DB hiccup.
+            PeopleError::Storage(format!("classes registry: {e}"))
+        })?;
+    if !exists {
+        return Err(PeopleError::Conflict(format!(
+            "{attribute} `{code}` is not an active `{attribute}` Class in the registry"
+        )));
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -542,4 +565,74 @@ struct CertRow {
 
 // Employee taxonomies (employment_type, status, …) carry no Rust-side
 // closed set: every value is validated at write time against the Class
-// registry (see PgPeople::validate_employee_class).
+// registry (see validate_employee_class).
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use boss_classes_client::FakeClassesClient;
+    use boss_core::primitives::Class;
+
+    /// One row per axis the live `employee` drawer carries (22 codes
+    /// across role, department, status and employment_type, read from
+    /// `GET /api/classes?subject_kind=employee` on 2026-09-23 — backlog
+    /// a45ab09d), enough to ask each column about another's code.
+    fn drawer() -> FakeClassesClient {
+        let row = |code: &str, attribute: &str| Class {
+            subject_kind: "employee".into(),
+            code: code.into(),
+            display_name: code.into(),
+            parent_code: None,
+            member_attribute: Some(attribute.into()),
+            metadata: serde_json::Value::Null,
+            sort_order: 0,
+            retired_at: None,
+        };
+        FakeClassesClient::with_classes(vec![
+            row("platform-admin", "role"),
+            row("it", "department"),
+            row("terminated", "status"),
+            row("contractor", "employment_type"),
+        ])
+    }
+
+    #[tokio::test]
+    async fn each_column_accepts_the_codes_of_its_own_axis() {
+        let classes = drawer();
+        for (attribute, code) in [
+            ("role", "platform-admin"),
+            ("department", "it"),
+            ("status", "terminated"),
+            ("employment_type", "contractor"),
+        ] {
+            assert!(
+                validate_employee_class(&classes, attribute, code)
+                    .await
+                    .is_ok(),
+                "{attribute} `{code}` is on its own axis"
+            );
+        }
+    }
+
+    /// The defect: until 2026-09-23 the check asked only whether
+    /// `(employee, code)` existed, so a status passed as a role and a
+    /// role as a department.
+    #[tokio::test]
+    async fn a_column_refuses_another_axis_code_by_name() {
+        let classes = drawer();
+        for (attribute, code) in [
+            ("role", "terminated"),
+            ("department", "platform-admin"),
+            ("status", "contractor"),
+            ("employment_type", "it"),
+        ] {
+            match validate_employee_class(&classes, attribute, code).await {
+                Err(PeopleError::Conflict(msg)) => assert!(
+                    msg.contains(attribute) && msg.contains(code),
+                    "the refusal names the column and the code: {msg}"
+                ),
+                other => panic!("{attribute} `{code}` must be refused, got {other:?}"),
+            }
+        }
+    }
+}

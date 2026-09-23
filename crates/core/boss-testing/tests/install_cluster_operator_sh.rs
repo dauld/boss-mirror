@@ -86,7 +86,9 @@ fn both_callers_source_the_one_definition() {
 
 #[test]
 fn absent_credentials_are_named_and_nothing_is_written() {
-    let dir = std::env::temp_dir().join(format!("boss-co-absent-{}", std::process::id()));
+    // A path that must NOT exist: the per-name root, which nothing here
+    // creates.
+    let dir = boss_testing::scratch_path("boss-co-absent");
     let (rc, out) = sh("install_cluster_operator", dir.to_str().expect("utf8"));
     assert_eq!(
         rc, 0,
@@ -108,8 +110,7 @@ fn a_credential_with_the_wrong_ownership_is_reported_with_what_it_actually_is() 
     // point: whatever it CAN make is wrong, and the check must say so
     // rather than pass. A silent pass here would mean a world-readable
     // kubeconfig reported as ready.
-    let dir = std::env::temp_dir().join(format!("boss-co-mode-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
+    let dir = boss_testing::scratch_dir("boss-co-mode");
     for cred in ["talosconfig", "kubeconfig"] {
         std::fs::write(dir.join(cred), "placeholder").expect("write");
     }

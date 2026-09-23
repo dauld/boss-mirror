@@ -1632,11 +1632,10 @@ mod tests {
     struct SpoolDir(std::path::PathBuf);
     impl SpoolDir {
         fn new(tag: &str) -> Self {
-            let p = std::env::temp_dir().join(format!(
-                "boss-estate-compare-test-{tag}-{}",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_dir_all(&p);
+            // uid AND pid (307df975); the spool makes its own directory,
+            // so it starts absent, as it always did.
+            let p = boss_testing::scratch_dir(&format!("boss-estate-compare-test-{tag}"));
+            let _ = std::fs::remove_dir(&p);
             Self(p)
         }
     }

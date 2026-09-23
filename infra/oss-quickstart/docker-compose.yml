@@ -131,6 +131,10 @@ services:
       BOSS_STATIC_DIR: /opt/boss/spa
       BOSS_AUTH_FILE: /var/lib/boss/auth/credentials.toml
       BOSS_AUTH_PROVIDER: local-auth
+      # File attachments (file_refs): the config generator switches the
+      # store on only where a durable root is named, and this is it —
+      # the boss-files volume below, so uploads outlive the container.
+      BOSS_FILES_ROOT: /var/lib/boss/files
       # Guest access: adds a "Browse as a guest" button to /login
       # (POST /api/auth/guest) that mints an `audit-readonly`
       # session — read every projection, write nothing. Sessions
@@ -179,6 +183,7 @@ services:
       RUST_LOG: ${BOSS_LOG_LEVEL:-info}
     volumes:
       - boss-auth:/var/lib/boss/auth:ro
+      - boss-files:/var/lib/boss/files
     depends_on:
       postgres:
         condition: service_healthy
@@ -205,3 +210,6 @@ volumes:
   # Credentials file lives in its own volume so a `docker compose
   # down` (without -v) preserves it across stack restarts.
   boss-auth:
+  # Attachment bytes (BOSS_FILES_ROOT), for the same reason. Back it up
+  # with postgres-data: the rows live there, the bytes here.
+  boss-files:

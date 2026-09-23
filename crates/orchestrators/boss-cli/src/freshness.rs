@@ -516,11 +516,14 @@ fn replay_once(repo: &Path, branch: &str) -> anyhow::Result<Replay> {
     // with --force: a retry (18909a43) or a second caller replaying that
     // head pulled the directory out from under the first, which reads as
     // "failed before any conflict could be read". The counter makes the
-    // path unique within this process; the pid, between processes.
+    // path unique within this process; the pid, between processes; the
+    // uid, between accounts — root and the gate's 65534 share this 1777
+    // directory, and a recycled pid's leftover from the other one is a
+    // directory this run can neither remove nor add a worktree at
+    // (307df975).
     static ATTEMPT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let tmp = std::env::temp_dir().join(format!(
-        "boss-gate-rebase-{}-{}-{}",
-        std::process::id(),
+    let tmp = crate::own_temp::own_temp_path(&format!(
+        "boss-gate-rebase-{}-{}",
         ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         &old_head[..8.min(old_head.len())]
     ));

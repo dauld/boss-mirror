@@ -34,8 +34,8 @@
 # that makes it this run's own. Two shapes are refused:
 #
 #   1. `std::env::temp_dir().join(...)` whose name is a fixed literal, or
-#      a `format!` that interpolates nothing unique. This is the shape the
-#      packet's title names.
+#      a `format!` that does not interpolate BOTH the uid and the pid.
+#      This is the shape the packet's title names.
 #   2. a string literal opening `"/tmp/<name>` or `"/var/tmp/<name>`.
 #
 # ACCEPTED, and each is the shape of the fix:
@@ -45,12 +45,29 @@
 #     collision, the uid turns "a leftover I cannot remove" into "a
 #     leftover I can always remove". Read its module note; it is the
 #     reasoning this lint enforces.
-#   * a name interpolating `std::process::id()`, `Uuid::new_v4()`, or
-#     `scratch_path`. The pid alone is accepted because it removes the
-#     concurrent half, which is the half that has bitten; `scratch` is
-#     the complete fix and is what the message recommends.
+#   * a name interpolating the uid AND `std::process::id()`, or a
+#     `Uuid::new_v4()`, or built by `scratch_path`. The uid is spelled
+#     however the site reads it — `current_uid()`, `{uid}`, `euid()` —
+#     and the scanner accepts any identifier that is `uid` or ends in
+#     `_uid`/`euid`, because which call yields it is not in the text.
 #   * `temp_dir().join(<expression>)` — a computed name is not a literal
 #     and this lint does not judge it.
+#
+# WHY THE PID ALONE IS NO LONGER ENOUGH (backlog 307df975, 2026-09-23).
+# Until then a pid-bearing name passed, "because it removes the
+# concurrent half, which is the half that has bitten". But this lint's
+# own refusal names the OTHER half as the hazard — root and uid 65534 on
+# one 1777 directory — and a pid says nothing about a leftover from a
+# process that has EXITED: pids recycle, so two uids draw the same name
+# sooner or later, and the second one's `remove_dir_all` is an EPERM.
+# `boss gate --rebase`'s replay worktree was
+# `boss-gate-rebase-<pid>-<attempt>-<head>` in the verb itself, not a
+# test, and passed; so did a score more. The rule the lint recommends —
+# `scratch`, uid AND pid — is now the rule it enforces: the pid covers
+# concurrency, the uid covers ownership
+# (crates/core/boss-testing/src/scratch.rs, "Why both the pid and the
+# uid"). A uid without a pid is refused too, since that is the
+# concurrent collision between two parallel worktrees running as root.
 #   * prose. A comment may name a fixed path; several must, to tell the
 #     story.
 #
@@ -111,6 +128,9 @@
 #   * whether a literal is ever actually handed to the filesystem. It
 #     refuses the SHAPE, because instance eleven's literal was handed to
 #     `str::replace` and reached the filesystem two frames later.
+#   * whether the `uid` a name mentions is the uid. A format string
+#     spelling the word `uid` as fixed text reads as carrying it; the
+#     token is judged by name, not by value.
 #
 # EXIT STATUS (house style, infra/lint/lib/git-answer.sh):
 #   0  the tree was read and no Rust file builds a fixed temp path
@@ -301,19 +321,30 @@ findings_in() { # file
                 }
 
                 # Shape 1 — the packet`s named shape: a temp_dir() path
-                # whose name is a fixed literal or a format! that
-                # interpolates nothing unique. Only a literal or a
-                # format! is judged; a computed name is not a literal.
+                # whose name is a fixed literal or a format! that does
+                # not carry both the uid and the pid (307df975). Only a
+                # literal or a format! is judged; a computed name is not
+                # a literal.
                 if (line ~ /temp_dir\(\)[ \t]*\.join\([ \t]*"/ ||
                     line ~ /temp_dir\(\)[ \t]*\.join\([ \t]*format!\(/) {
                     stmt = statement(i)
-                    if (stmt !~ /process::id/ && stmt !~ /Uuid::new_v4/ &&
-                        stmt !~ /scratch_dir/ && stmt !~ /scratch_path/ &&
-                        stmt !~ /current_uid/) {
+                    # Padded rather than anchored: a `(^|x)` alternation
+                    # is one more construct to trust mawk with.
+                    padded = " " stmt " "
+                    has_pid = (stmt ~ /process::id/)
+                    has_uid = (padded ~ /[^A-Za-z]e?uid[^A-Za-z]/)
+                    if (stmt !~ /Uuid::new_v4/ && stmt !~ /scratch_dir/ &&
+                        stmt !~ /scratch_path/ && !(has_pid && has_uid)) {
                         if (!declared(i)) {
                             path = quoted_after(stmt, ".join(")
                             if (path == "") path = "<the joined name>"
-                            printf "%d\t%s\ta temp_dir() name with no per-process token\n", i, path
+                            if (has_pid)
+                                why = "a temp_dir() name with the pid but not the uid"
+                            else if (has_uid)
+                                why = "a temp_dir() name with the uid but not the pid"
+                            else
+                                why = "a temp_dir() name with no per-process token"
+                            printf "%d\t%s\t%s\n", i, path, why
                         }
                     }
                 }
@@ -344,12 +375,12 @@ self_test() {
     {
         printf '//! A comment may name %s/all and must not trip the scanner.\n' "$r"
         printf 'fn a() -> PathBuf { scratch::scratch_dir("boss-a") }\n'
-        printf 'fn b() -> PathBuf { std::env::temp_dir().join(format!("b-{}", std::process::id())) }\n'
+        printf 'fn b() -> PathBuf { std::env::temp_dir().join(format!("b-{}-{}", current_uid(), std::process::id())) }\n'
         printf 'fn c() -> PathBuf { std::env::temp_dir().join(format!("c-{}", Uuid::new_v4())) }\n'
         printf 'fn d(n: &Path) -> PathBuf { std::env::temp_dir().join(n) }\n'
-        printf 'fn e() -> PathBuf {\n'
+        printf 'fn e(uid: u32) -> PathBuf {\n'
         printf '    std::env::temp_dir().join(format!(\n'
-        printf '        "e-{tag}-{}",\n'
+        printf '        "e-{tag}-{uid}-{}",\n'
         printf '        std::process::id()\n'
         printf '    ))\n'
         printf '}\n'
@@ -378,6 +409,19 @@ self_test() {
     printf 'let p = PathBuf::from("%s/boss-fixture");\n'              "$r"     >"$t/bad3.rs"
     printf 'let q = String::from("/var/tmp/boss-fixture");\n'                  >"$t/bad4.rs"
     printf 'script.replace("%s/k", &format!("{}/k", dir.display()));\n' "$r"   >"$t/bad5.rs"
+    # A pid is not an owner (307df975): the replay worktree boss gate
+    # --rebase shipped, and its mirror image, a uid with no pid.
+    {
+        printf 'let tmp = std::env::temp_dir().join(format!(\n'
+        printf '    "boss-gate-rebase-{}-{}-{}",\n'
+        printf '    std::process::id(),\n'
+        printf '    attempt,\n'
+        printf '    &head[..8]\n'
+        printf '));\n'
+    } >"$t/bad9.rs"
+    printf 'let d = std::env::temp_dir().join(format!("boss-mine-{uid}"));\n'     >"$t/bad10.rs"
+    # A word that merely contains the letters is not the uid.
+    printf 'let d = std::env::temp_dir().join(format!("fluid-{guid}-{}", std::process::id()));\n' >"$t/bad11.rs"
     {
         printf '// shared-tmp-ok\n'
         printf 'let p = PathBuf::from("%s/bare-marker");\n' "$r"
@@ -402,7 +446,7 @@ self_test() {
         printf '\n'
         printf 'fn two() -> String { String::from("%s/two") }\n' "$r"
     } >"$t/bad8.rs"
-    for f in bad1 bad2 bad3 bad4 bad5 bad6 bad7 bad8; do
+    for f in bad1 bad2 bad3 bad4 bad5 bad6 bad7 bad8 bad9 bad10 bad11; do
         [ -n "$(findings_in "$t/$f.rs")" ] || {
             echo "$NAME: self-test FAILED — the scanner passed:" >&2
             sed 's/^/    /' "$t/$f.rs" >&2
@@ -419,7 +463,7 @@ self_test() {
         esac
     done
 
-    echo "$NAME: self-test ok — six accepted shapes (scratch, a pid, a Uuid, a computed name, a declared intent, a declaration inside an argument list) and a prose mention pass; eight refused shapes (a literal join, a tokenless format!, /tmp and /var/tmp literals, a rebase argument, a reasonless marker, and a declaration leaking to a sibling in both brace and one-line form) are each named"
+    echo "$NAME: self-test ok — six accepted shapes (scratch, a uid and a pid, a Uuid, a computed name, a declared intent, a declaration inside an argument list) and a prose mention pass; eleven refused shapes (a literal join, a tokenless format!, a pid without the uid, a uid without the pid, a uid-like word that is not one, /tmp and /var/tmp literals, a rebase argument, a reasonless marker, and a declaration leaking to a sibling in both brace and one-line form) are each named"
 }
 
 if [ "${1:-}" = "--self-test" ]; then self_test; exit $?; fi
@@ -449,9 +493,12 @@ EOF
 if [ "$findings" -gt 0 ]; then
     cat >&2 <<'MSG'
 
-FAIL — the finding(s) above build a fixture at a FIXED path under a
-world-writable sticky directory. /tmp and /var/tmp are mode 1777, so that
-is one path shared by every uid and every process on the box. This repo
+FAIL — the finding(s) above build a path under a world-writable sticky
+directory that this run does not own outright: a FIXED name, or a
+computed one missing the uid or the pid. /tmp and /var/tmp are mode
+1777, so a fixed name is one path shared by every uid and every process
+on the box, and a pid-only one is shared with every leftover a recycled
+pid left there under another uid. This repo
 has hit the resulting collision fourteen times; the gate runs as uid
 65534 and a pod session runs as root, and builders run in parallel
 worktrees, so it is contended in both directions and concurrently.
@@ -465,8 +512,12 @@ THE FIX, in order of preference:
          let dir = scratch::scratch_dir("boss-thing-test");
          scratch::write_file(&dir.join("fixture"), body);
 
-  2. In a crate that cannot depend on boss-testing, interpolate
-     `std::process::id()` (and ideally the uid) into the name yourself.
+  2. In a crate that cannot depend on boss-testing, interpolate the uid
+     AND `std::process::id()` into the name yourself. The pid alone is
+     refused: it separates live processes, but pids recycle, so a
+     leftover from an exited run under ANOTHER uid can hold the name
+     and this run cannot remove it. The uid makes every leftover one
+     you own (crates/core/boss-testing/src/scratch.rs).
 
   3. If the literal is LEGITIMATE — it names another machine's path (a
      container script's, quoted in order to be rebased), an expectation

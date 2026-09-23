@@ -41,6 +41,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # integration test that wired `[batch.*]` tenant.toml rows is
 # being rewritten to use the `[periodic.*]` + Workflow path that
 # replaces it.
+# `scratch_dir`: a temp fixture carries the uid and the pid (307df975).
+boss-testing = { path = "../../core/boss-testing" }
 
 [lints]
 workspace = true
