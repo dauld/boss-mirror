@@ -354,7 +354,8 @@ table; aggregations rebuild on-demand + periodically.
 A **Job** is a bounded unit of coordinated work: stable identity,
 owner, subject, status, and a structured list of Steps. The
 **Workflow registry** is append-only and versioned; in-flight Jobs
-pin to the version they opened under; creation is blocked against
+pin to the version they opened under unless an actor explicitly moves
+them (the re-pin door, below); creation is blocked against
 `draft` and `retired` kinds. Adding a new workflow means adding a
 Workflow row — never a `match` branch in core code.
 
@@ -437,6 +438,46 @@ observed is worse than none; (3) **admission grows no create-time
 check** for declared-required fields as part of this — validators
 still run at done, and a server-stamped field needs none. The metadata
 stamp is still written for the readers already on it.
+
+**A packet stays on its admission version unless an actor moves it, and
+the move is on the record** (design `7cf202a9`, David 2026-09-23, all
+five questions accepted as proposed; answers backlog `4347a1af`). The
+item said the re-pin machinery had no door; measured, it had one —
+`POST /api/jobs/{id}/convert`, landed in train #150 on 2026-08-30,
+gated on the ordinary job-write permission, answering 409 with the
+obstacles when `convertibility_for_packet` is not automatic and
+otherwise updating `jobs.workflow_version` under a plain `job.updated`.
+No CLI verb calls it, no test covers it, and no open packet carries a
+re-pin's signature. It also moves less than it reports: a step's
+`procedure` is projected into the step row at materialisation, so
+converting page-audit `c0d2caf0` from v1 to v3 would answer
+`converted: true` while its `measure` and `file` steps kept v1's text —
+the only thing that changed between those versions — and a target that
+inserts a step (backlog-item v1 → v7 adds `draft-design`) would walk the
+packet to a step no row holds. 112 of 296 open packets were pinned
+behind their kind's active version that evening. Decided: (1) **the
+guarantee, restated so the code can hold it** — a packet stays on its
+admission version unless an actor explicitly moves it; a move is
+refused when it would retroactively demand evidence or strand a step;
+the move is on the record — with `/convert` the one door and a CLI twin,
+`boss job convert <packet> [--to vN] [--dry-run]`, whose dry run
+returns the verdict without writing; (2) **a re-pin re-projects the
+target's step defaults, procedure included, onto every step not yet
+completed, materialises any step the target inserts, and leaves
+completed steps with the text they ran under** — and until that lands
+the door refuses any move whose target changes a pending step's
+procedure or inserts a step; (3) **a `job.repinned` event** (from, to,
+actor, steps re-projected, steps inserted) plus a `repins` list appended
+to the packet's metadata, so admitted-at-v3 and moved-to-v3 read
+differently without diffing `job.updated` payloads; (4) **authority
+narrows to `platform-admin`**, the role that owns the Workflow registry,
+from any job writer; (5) **never automatic, never on publish** — a
+cohort move (the 47 page-audits on v1) is the per-packet door run in a
+loop by an operator after a dry run, each packet its own event,
+revisited once moves have been counted. Not yet built: on main the
+route still admits any job writer, refuses no changed procedure and
+emits a plain `job.updated`, so the guarantee above is decided and the
+door does not yet hold it.
 
 The brewery's `wholesale-keg-order` is the worked example of
 agent-gated fulfillment: an `availability-gate` reads finished-goods
@@ -786,6 +827,49 @@ design is the evidence for any wider category. Landed on My Day (`/`):
 and bands each row by the receiving yard's own age thresholds (past 3
 days aging, past 14 stale) — one definition of old, not a second copy.
 The derived list waits on that measurement.
+
+**Stuck is a packet past its own place's bound whose next move is ours,
+counted per third and never summed** (design `cf820810`, David
+2026-09-23, all seven questions accepted as proposed; answers backlog
+`4142d821`, two of the figures for the HUD frame `c1253e50`). Not a
+composite score: each number keeps its name and its denominator and
+clicks back to the region that owns it. Measured on `/api/yard/regions`
+that evening: the delivery half already existed — every region carries
+a `trend`, this window against the previous with sample counts, and
+arrivals read 30 a day against 29 — and the shed already told stuck
+from waiting (`PROOF_STALE_HOURS = 24`; `NOT_YET_STARVED_HOURS = 72`,
+measured over 1,812 ops-requests; `waits_on` with `car::starved`;
+"troubled means ours", `3881f5c9`). The gap was the incident's
+population: three cars could not board for 9.5 hours while the dock
+said the boarding depth was met, because only the conductor reads the
+declared `boards_after` edge (`boards_after_outcome` in
+`boss-cli/src/train/boarding.rs`) and the dock region counts parked
+cars against `threshold_met` without asking whether they can board.
+Decided: (1) **stuck is past the declared bound AND the next move is
+ours**; past the bound but waiting on a declared outside owner — the
+world, an event, a named human's act — is **waiting**, shown beside
+stuck and never summed into it, the shed's rule extended to every
+region; (2) **the population is the union of five that already have
+owners**, with no new measure: receiving past the 3-day triage band,
+stations not draining or over WIP, hand-held cars and held greens
+(garage), parked cars whose `boards_after` predecessor has not landed
+(dock), and landed cars past 24 hours whose move is ours (shed), each
+count clicking through to its region; (3) **counted per third** — queue
+management, actors building, delivery — never across them, since one
+total would read 271 receiving packets plus one shed car and hide which
+half moved; (4) **the paired delivery number is arrivals per day
+against the previous window**, read from the arrivals trend, while dock
+wait and time at CI stay on their own regions; (5) **unknown is not
+zero** — a station whose flow cube is blind contributes `?` and its
+third reads `≥ n + ?` (one station, 170 standing, read that way); (6)
+**one `stuck` block on `GET /api/yard/regions`** — per third: stuck,
+waiting, oldest age, owning regions — read by the HUD and `boss orient`
+and recomputed by no client; (7) **the dock is repaired first, as its
+own car**: `boards_after_outcome` moves into `boss_jobs::car` so the
+dock and the conductor share one reading, and the dock says "N parked,
+M cannot board" and stays busy rather than claiming a train is due.
+Not yet built: `boards_after_outcome` is still the conductor's alone,
+and the regions read carries no `stuck` block.
 
 ## Step types are property bundles; the alphabet is the mechanisms
 
@@ -1138,6 +1222,48 @@ settled as one decision, because one writer inserting in sequence is
 what makes id order ≡ commit order, which is exactly what log-tailing
 needs to never miss a row; if sustained demand ever approaches
 ~1K/sec, both reopen together.
+
+**A correction names what it corrects, and every reader is handed it**
+(design `4105b020`, David 2026-09-23, all six questions accepted as
+proposed; answers backlog `56727f95`). A completed step is frozen, and
+correctly; a damaged sentence on one could only be corrected BESIDE
+it — backlog-item `f3e091f0`'s triage evidence still reads "Ordering
+trap confirmed:  is required of every rule", its fix under a job
+metadata key, `evidence_correction`, that nothing reads. Measured across
+all 15,039 jobs: about 132 corrections under 25 key names — one batch
+key on 107 jobs, 24 hand-invented keys on 25 more, and one correction of
+a correction joined to it only by its name (gate-run `9a2576fb`,
+`verdict_correction` then `verdict_correction_withdrawn`). The server
+taught the habit: the terminal-freeze 409 in `http/steps.rs` sends a
+correcting author to "the parent job's metadata" and names no key.
+`reproof` and `regate_receipt` were already the working shape — a
+reserved key plus a reader obliged to look — without the generality.
+Decided: (1) **first-class, not a convention readers learn to find**,
+because 25 key names are the measurement of a convention authors do
+not keep; (2) **one reserved append-only list, `corrections`, in job
+metadata**, entries `{step, field, reads, should_read, why, by, at}`,
+written only through `POST /api/jobs/{id}/steps/{step_id}/corrections`
+and a `boss correct` verb with `-file` twins; the door refuses an open
+step, a field the step does not hold, and a `reads` excerpt absent from
+the stored text, emits `job.step.corrected`, and the generic metadata
+PATCH refuses the key — the step and its audit event are never touched;
+(3) **the reader is handed it, not asked to search**: the job GET
+attaches each step's entries as `step.corrections`, one shared web
+component marks the field, `boss brief` prints each correction under
+the field it corrects, and the original is never replaced in the
+render — both are shown; (4) **a correction is withdrawn only by
+appending** an entry carrying `withdraws: <index>`; (5) **separate from,
+and lighter than, `correct-the-record`**, which is for a published
+claim whose premise changed decisions, holds 0 packets (control:
+`kind=backlog-item` answered 692 on the same connection), and whose
+`applied` step will use this door when the false claim sits in a
+completed step — a damaged sentence needs a signature, not a review;
+(6) **no backfill**, since rewriting the ~132 would mean guessing a step
+and field for each; the 409 hint names the new door instead, and two
+weeks after it ships the scan is re-run with a target of zero new
+ad-hoc keys. `reproof` and `regate_receipt` stay as they are: they
+supersede by precedence, and each has its reader. Not yet built: the
+409 still sends an author to free-form job metadata.
 
 ## Finance & ledger
 
@@ -1815,6 +1941,46 @@ today's colour, pinned by `it/yard/map-palette.test.ts` so a retired
 token fails the test rather than repainting in silence. Not built: the
 Transit palette itself, and the rest of the SPA and www on it; the SPA
 still paints the dark theme.
+
+**One map per floor: the region map draws its own slice of the yard,
+and YardPage retires** (design `fe77a1d2`, David 2026-09-23, all three
+questions accepted as proposed; answers backlog `c0565f48`, finishing
+the consolidation design `d2154293` decided on 2026-09-19 — "let's
+have this become THE surface"). Measured: `/it/yard/<region>` already
+swapped to the region's own map (`ca37478f`), but for the six floor
+regions `MapPage` still mounted `<YardPage focus={region} embedded>`
+beneath it, and embedded YardPage still drew `YardMap` — the WHOLE
+six-region floor — so `/it/yard/dock` showed the dock's wagons twice, a
+plate and then a wagon, with five other regions underneath. Two facts
+set the order: the region map's plates cannot be clicked, so every
+selection that drives the entity panel and its verbs comes from
+`YardMap` or the departure board; and `YardMap`'s drawing already
+splits on region lines through the total `STATION_REGION` record in
+`region-contents.ts`. The platform regions (receiving, marshalling,
+shop floor) were already the end state — a region map, then that
+region's working panels. Decided: (1) **each floor region draws only
+its own slice**, so a wagon crossing from the dock to the track leaves
+one map and appears on the next rather than sliding across one floor;
+the crossing stays visible at the world level, where the borders carry
+it, and the departure board still lists every wagon — a whole-floor
+seventh view is the second page the consolidation removes; (2) **three
+cars, and no detail leaves before its replacement is on screen**: split
+`YardMap` into one pure layout function per region, keyed through
+`STATION_REGION`, with no change on screen and a test that the six
+slices' union draws what `YardMap` draws today; then `RegionMap` draws
+its slice with `selected` and `onselect`, so every wagon, bay and
+locomotive selects into the entity panel, and embedded YardPage stops
+drawing `YardMap` in that same car; then the deck (alerts, departure
+board, entity panel and verbs, production and signals) moves into a
+`FloorDeck` that `MapPage` mounts, the source-reading tests repoint, and
+`YardPage.svelte` is deleted, every route unchanged (`/it/yard` still
+resolves to the track). The last two both edit `MapPage`, so they ride
+one after the other; (3) **built now in the `--map-*` tokens**, not held
+for the Transit reskin above, which chooses how the map looks rather
+than what it shows and will then restyle one map per region instead of
+two. Not yet built: `YardPage.svelte` still draws `YardMap` when
+embedded ("STILL DRAWN when embedded, deliberately"), and no
+per-region layout function exists.
 
 **What the website says is checked against what the record holds;
 whether it works is a reading with a threshold named first** (design
