@@ -59,6 +59,7 @@ use boss_dispatcher_handlers::handlers::{
     network_census::NetworkCensus,
     ops_file_tag_release::OpsFileTagRelease,
     ops_judge::OpsJudge,
+    ops_queue_alarm::OpsQueueAlarm,
     packaging_allocate::PackagingAllocate,
     people_hire::PeopleHire,
     people_terminate::PeopleTerminate,
@@ -393,6 +394,17 @@ async fn main() -> Result<()> {
             // measurement that did not finish chains nothing, and files
             // an urgent packet to the platform owner instead.
             handlers.register(OpsJudge::new(
+                cfg.jobs_api_url.clone(),
+                platform_owner.clone(),
+            ));
+            // The reader the ops-runner's queue gauge was built for
+            // (a45b38c1): every five minutes, read the open ops-request
+            // queue itself and file `ops_queue:<host>` when a host's
+            // oldest waiting request is past five of the runner's own
+            // cadences — silent (a dead or wedged runner) or not
+            // draining — and withdraw it when the queue drains. It
+            // reads the queue, not the runner, so a dead runner is seen.
+            handlers.register(OpsQueueAlarm::new(
                 cfg.jobs_api_url.clone(),
                 platform_owner.clone(),
             ));

@@ -901,6 +901,32 @@ enum CarAction {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Say what an open car's proof waits on — parked, or landed and
+    /// awaiting proof.
+    ///
+    /// Records `waits_on` on the car through the metadata PATCH. A car
+    /// that declares its wait is never named "ours to read" for the
+    /// length of its not-yet streak alone; it is named the moment its
+    /// `--seen` check finds the event in the record while the probe
+    /// still says not yet (backlog b461341d). SINGLE-quote both values.
+    WaitsOn {
+        /// The car: its branch, or 8+ characters of its id.
+        car: String,
+        /// The event or the actor the proof waits on, as prose.
+        #[arg(long, required_unless_present = "clear")]
+        on: Option<String>,
+        /// Shell text that exits 0 once that event is in the record. Run
+        /// by the door that records each not-yet, on the forge, under the
+        /// probe's rules. Without it the wait can never be contradicted.
+        #[arg(long, conflicts_with = "clear")]
+        seen: Option<String>,
+        /// Remove the declaration.
+        #[arg(long, conflicts_with = "on")]
+        clear: bool,
+        /// Print the PATCH body without writing it.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1465,6 +1491,13 @@ async fn main() -> Result<()> {
                 )
                 .await
             }
+            CarAction::WaitsOn {
+                car: given,
+                on,
+                seen,
+                clear,
+                dry_run,
+            } => car::waits_on(&given, on.as_deref(), seen.as_deref(), clear, dry_run).await,
         },
         Commands::Workflow { action } => match action {
             WorkflowAction::Publish {

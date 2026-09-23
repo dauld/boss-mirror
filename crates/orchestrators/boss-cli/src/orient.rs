@@ -438,22 +438,39 @@ pub(crate) fn shed_lines(cars: &[Value]) -> Vec<String> {
                 }
                 // A streak past the bound is named, not folded into the
                 // plain line: a probe that can never pass answers exit 75
-                // exactly like a patient one (adef5ddf).
-                Shed::ProbeNotYet { said } => match c
-                    .get("metadata")
-                    .and_then(boss_jobs::car::not_yet_streak)
-                    .filter(|s| s.hours >= boss_jobs::regions::NOT_YET_STARVED_HOURS)
-                {
-                    Some(s) => format!(
-                        "    {branch}: probe NOT YET for {}h straight ({} runs) — past {}h, \
-                         read the probe against the tree: it may never pass — {}",
-                        s.hours,
-                        s.runs,
-                        boss_jobs::regions::NOT_YET_STARVED_HOURS,
-                        clipped(&said)
-                    ),
-                    None => format!("    {branch}: probe says NOT YET — {}", clipped(&said)),
-                },
+                // exactly like a patient one (adef5ddf). A car that
+                // DECLARED what it waits on is exempt from the bound, and
+                // named instead once its own event is seen (b461341d) —
+                // one predicate, the shed's.
+                Shed::ProbeNotYet { said } => {
+                    let md = c.get("metadata").unwrap_or(&Value::Null);
+                    match boss_jobs::car::starved(md) {
+                        Some(boss_jobs::car::Starved::Undeclared(s)) => format!(
+                            "    {branch}: probe NOT YET for {}h straight ({} runs) — past {}h, \
+                             read the probe against the tree: it may never pass — {}",
+                            s.hours,
+                            s.runs,
+                            boss_jobs::regions::NOT_YET_STARVED_HOURS,
+                            clipped(&said)
+                        ),
+                        Some(boss_jobs::car::Starved::SeenWhileNotYet { on, seen_at }) => format!(
+                            "    {branch}: probe NOT YET though what it waits on ({}) was seen \
+                             in the record at {seen_at} — read the probe against the tree — {}",
+                            clipped(&on),
+                            clipped(&said)
+                        ),
+                        None => match boss_jobs::car::waits_on(md) {
+                            Some(w) => format!(
+                                "    {branch}: probe says NOT YET, waiting on {} — {}",
+                                clipped(&w.on),
+                                clipped(&said)
+                            ),
+                            None => {
+                                format!("    {branch}: probe says NOT YET — {}", clipped(&said))
+                            }
+                        },
+                    }
+                }
                 Shed::WaitingOn(ev) => format!("    {branch}: waiting on: {}", clipped(&ev)),
                 Shed::Unproven => format!(
                     "    {branch}: UNPROVEN — no probe, no event; nothing mechanical can settle it (boss prove --probe)"
@@ -1782,6 +1799,37 @@ mod tests {
             "{line}"
         );
         assert!(!line.contains("straight"), "{line}");
+    }
+
+    /// A DECLARED WAIT (backlog b461341d): the same 97h streak reads as
+    /// the world's, naming what it waits on — and as ours once the
+    /// declared event was seen while the probe still said not yet.
+    #[test]
+    fn a_declared_wait_names_what_it_waits_on_and_is_ours_once_seen() {
+        let declared = |seen_at: Value| {
+            landed(
+                "fix/declared",
+                json!({ "proof_probe": "bash x.sh",
+                    "waits_on": {"on": "a cut-a-release packet David opens", "seen": "true"},
+                    "proof_attempt": {
+                    "at": "2026-09-23T07:00:00Z", "exit": 75, "not_yet": true,
+                    "probe": "bash x.sh", "why": "NOT YET: no tag",
+                    "not_yet_since": "2026-09-19T05:50:00Z", "not_yet_runs": 86,
+                    "waits_on_seen_at": seen_at,
+                } }),
+            )
+        };
+        let line = &shed_lines(&[declared(Value::Null)])[0];
+        assert!(
+            line.contains("probe says NOT YET, waiting on a cut-a-release packet David opens"),
+            "{line}"
+        );
+        assert!(!line.contains("straight"), "{line}");
+        let line = &shed_lines(&[declared(json!("2026-09-23T06:00:00Z"))])[0];
+        assert!(
+            line.contains("was seen in the record at 2026-09-23T06:00:00Z"),
+            "{line}"
+        );
     }
 
     #[test]

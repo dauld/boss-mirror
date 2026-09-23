@@ -27,6 +27,7 @@
 
 import { formatDate } from '@boss/web-kit/ui/date';
 import type { ClusterMachine, RunnerMachine } from './yard-machines';
+import { standingNote } from '../../jobs/position';
 export type { ClusterMachine, RunnerMachine } from './yard-machines';
 import {
   DELIVERY_CHANNELS,
@@ -558,12 +559,13 @@ export function journeyStops(job: WithSteps | null): readonly JourneyStop[] {
       return [{ lamp, what: s.title, when: stampAt(s), note: receipt?.note ?? null }];
     }
     // The step it stands at carries its status beside its title, in
-    // the server's words (`boss_jobs::yard::standing_at`): titles are
-    // perfect-tense by convention, and `DEPARTED — merged into main`
+    // the server's words (`boss_jobs::yard::standing_at`, spelled once
+    // for the web as `standingNote` and pinned to it — 3102fe7a): titles
+    // are perfect-tense by convention, and `DEPARTED — merged into main`
     // beside a pulsing lamp was read as done while main had not moved
     // (train 47391bfc, 2026-09-23; 648a68a9).
     if (s.status === 'active' || s.status === 'ready') {
-      return [{ lamp: 'working', what: s.title, when: null, note: `${s.status}, not yet done` }];
+      return [{ lamp: 'working', what: s.title, when: null, note: standingNote(s.status) }];
     }
     return [];
   });

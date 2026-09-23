@@ -528,10 +528,105 @@ pub(crate) async fn open(
     Ok(())
 }
 
+/// `boss car waits-on <car>` — say what an open car's proof waits on
+/// (backlog b461341d).
+///
+/// WHY A VERB. adef5ddf names a probe that has said not-yet for 72h
+/// without a break as ours to read, and all six cars it measured were
+/// honest waits on the world. The car has to be able to say so, and six
+/// already-landed cars have to be able to say so AFTER their park — so
+/// this is the metadata PATCH (`boss_jobs::car::WAITS_ON`), with the
+/// declaration built in the one shape the shed reads and a `seen` check
+/// held to the rules the forge will run it under, BEFORE it is written.
+pub(crate) async fn waits_on(
+    given: &str,
+    on: Option<&str>,
+    seen: Option<&str>,
+    clear: bool,
+    dry_run: bool,
+) -> Result<()> {
+    let body = waits_on_body(on, seen, clear)?;
+    let http = reqwest::Client::new();
+    let (found, branch) = crate::rerail::find_car(&http, given).await?;
+    let id = found
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("car {branch} carries no id"))?;
+    if dry_run {
+        println!("boss car waits-on: DRY — would PATCH /api/jobs/{id}/metadata with {body}");
+        return Ok(());
+    }
+    crate::gate::api(
+        &http,
+        reqwest::Method::PATCH,
+        &format!("/api/jobs/{id}/metadata"),
+        Some(body.clone()),
+    )
+    .await?;
+    println!("boss car waits-on: {branch} ({id}) now carries {body}");
+    Ok(())
+}
+
+/// The PATCH body, or the refusal — pure, so the rules are testable.
+/// A blank `on` is refused (it would declare nothing and silence the
+/// label anyway), and so is a `seen` check the recording door would
+/// refuse to run: a check that never runs is a wait nothing can ever
+/// contradict, which is the silence this field exists to end.
+pub(crate) fn waits_on_body(on: Option<&str>, seen: Option<&str>, clear: bool) -> Result<Value> {
+    if clear {
+        return Ok(serde_json::json!({ (car::WAITS_ON): Value::Null }));
+    }
+    let on = on.map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| {
+        anyhow::anyhow!("--on names nothing: say which event or actor the proof waits on")
+    })?;
+    if let Some(s) = seen.map(str::trim).filter(|s| !s.is_empty())
+        && let Some(r) = crate::prove::admit(s, true).refusal
+    {
+        bail!("--seen is refused under the rules the forge runs it by — {r}");
+    }
+    Ok(serde_json::json!({ (car::WAITS_ON): car::waits_on_value(on, seen) }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// THE DECLARATION IS WRITTEN IN THE SHAPE THE SHED READS
+    /// (b461341d): whatever the verb PATCHes, `boss_jobs::car::waits_on`
+    /// reads back; a blank `on` is refused; `--clear` deletes the key
+    /// (the metadata door deletes a null).
+    #[test]
+    fn a_waits_on_body_reads_back_as_the_declaration_the_shed_reads() {
+        let body = waits_on_body(Some(" a red crawl "), Some("exit 0"), false).unwrap();
+        assert_eq!(
+            car::waits_on(&body),
+            Some(car::WaitsOn {
+                on: "a red crawl".into(),
+                seen: Some("exit 0".into())
+            })
+        );
+        let body = waits_on_body(Some("an operator publish"), None, false).unwrap();
+        assert_eq!(car::waits_on(&body).unwrap().seen, None);
+        assert!(waits_on_body(Some("  "), None, false).is_err());
+        assert!(waits_on_body(None, None, false).is_err());
+        assert_eq!(
+            waits_on_body(None, None, true).unwrap(),
+            json!({"waits_on": null})
+        );
+    }
+
+    /// A `seen` check the recording door would refuse is refused HERE,
+    /// at the operator's terminal, rather than silently never running.
+    #[test]
+    fn a_seen_check_the_forge_would_refuse_is_refused_at_the_verb() {
+        // An unidentified read of the jobs API's own port: the forge's
+        // door refuses it, because it answers a narrowed world.
+        let refused = "curl -s \"$BOSS_JOBS_URL/api/jobs?kind=x\" | grep -q x";
+        let err = waits_on_body(Some("x"), Some(refused), false).unwrap_err();
+        assert!(err.to_string().contains("--seen is refused"), "{err}");
+        assert!(waits_on_body(Some("x"), Some("true"), false).is_ok());
+    }
 
     const BRANCH: &str = "feat/a-car-opens-when-the-build-starts";
 

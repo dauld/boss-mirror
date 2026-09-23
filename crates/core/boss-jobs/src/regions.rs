@@ -1604,6 +1604,12 @@ pub const PROOF_STALE_HOURS: i64 = 24;
 /// recheck wait) while every stuck car clears it. Like the bound above it is a threshold for LOOKING:
 /// the probe is still rechecked hourly and may still pass. What changes
 /// is whose move the sentence says it is.
+///
+/// ONLY FOR A CAR THAT NEVER SAID WHAT IT WAITS ON (backlog b461341d):
+/// the triage of the six cars this bound measured found all six honest
+/// waits on the world, so a car declaring `waits_on` is judged by
+/// whether its declared event has been SEEN instead — see
+/// `boss_jobs::car::starved`, the one predicate the shed and orient read.
 pub const NOT_YET_STARVED_HOURS: i64 = 72;
 
 /// THE SHED: landed cars awaiting proof — open cars whose live step is
@@ -1647,6 +1653,11 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     // cannot pass looks exactly like this, so it is ours to read, not
     // the world's to answer (adef5ddf). Longest streak first.
     let mut starved: Vec<(crate::car::NotYetStreak, &str)> = Vec::new();
+    // Of those told not yet, the ones whose OWN declared wait is already
+    // in the record (b461341d) — the probe cannot see what the car said
+    // it was waiting for, which is ours at any streak length. A declared
+    // wait not yet seen lands in neither list: its patience is stated.
+    let mut seen: Vec<(String, &str)> = Vec::new();
     for (j, _) in &awaiting {
         let branch = j
             .metadata
@@ -1669,10 +1680,14 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
                 ShedPlace::ProbePending { last: None }
             ) {
                 never_probed += 1;
-            } else if let Some(streak) = crate::car::not_yet_streak(&j.metadata)
-                && streak.hours >= NOT_YET_STARVED_HOURS
-            {
-                starved.push((streak, branch));
+            } else {
+                match crate::car::starved(&j.metadata) {
+                    Some(crate::car::Starved::Undeclared(streak)) => starved.push((streak, branch)),
+                    Some(crate::car::Starved::SeenWhileNotYet { on, .. }) => {
+                        seen.push((on, branch))
+                    }
+                    None => {}
+                }
             }
         }
     }
@@ -1718,9 +1733,17 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
                 longest.runs
             ));
         }
+        if let Some((on, branch)) = seen.first() {
+            ours.push(format!(
+                "{} told not yet AFTER what they declared they wait on was seen in the record \
+                 — {branch}, waiting on {on}; the probe cannot see its own event, so it is ours \
+                 to read",
+                seen.len()
+            ));
+        }
         let whose = if ours.is_empty() {
             "every one asked and was told not yet — waiting on the world, not on us".to_string()
-        } else if never_probed + starved.len() == stale.len() {
+        } else if never_probed + starved.len() + seen.len() == stale.len() {
             ours.join("; ")
         } else {
             format!("{}; the rest asked and were told not yet", ours.join("; "))
@@ -3001,6 +3024,63 @@ mod tests {
         assert!(
             shed.why.contains("1 told not yet") && shed.why.contains("the rest"),
             "names the starved one and leaves the rest to the world: {}",
+            shed.why
+        );
+    }
+
+    /// A CAR THAT SAID WHAT IT WAITS ON IS NOT STARVED BY DURATION
+    /// (backlog b461341d). All six cars adef5ddf's streak measured were
+    /// honest waits on the world; with `waits_on` declared, a 96h streak
+    /// is the world's — until the declared event is SEEN in the record
+    /// while the probe still says not-yet, which is ours at once.
+    #[test]
+    fn a_declared_wait_is_the_worlds_until_its_event_is_seen() {
+        let car = |branch: &str, seen_at: Option<&str>| {
+            let mut attempt = json!({
+                "at": "2026-09-19T11:00:00Z", "not_yet": true, "exit": 75, "probe": "true",
+                (crate::car::NOT_YET_SINCE): "2026-09-15T11:00:00Z",
+                (crate::car::NOT_YET_RUNS): 96,
+            });
+            if let Some(s) = seen_at {
+                attempt[crate::car::WAITS_ON_SEEN_AT] = json!(s);
+            }
+            let md = json!({
+                "branch": branch, "merged": true, "opened_at": "2026-09-15T10:00:00Z",
+                "proof_probe": "true", "proof_attempt": attempt,
+                (crate::car::WAITS_ON): crate::car::waits_on_value(
+                    "a real Stripe sponsorship charge", Some("true")),
+            });
+            let j = job("ship-a-change", branch, JobStatus::Open, md);
+            let s = vec![
+                step(
+                    &j,
+                    "gate",
+                    StepStatus::Completed,
+                    Some("2026-09-15T06:00:00Z"),
+                ),
+                step(&j, "proven", StepStatus::Ready, None),
+            ];
+            (j, s)
+        };
+        let status = empty_status();
+        let read = |cars: &[(Job, Vec<Step>)]| {
+            let out = regions(&inputs(&status, &[], &[], cars, &[], Some(&[]), Some(&[])));
+            by_name(&out, "shed").clone()
+        };
+
+        let shed = read(&[car("fix/declared", None)]);
+        assert!(
+            shed.why.contains("waiting on the world") && !shed.why.contains("ours to read"),
+            "a declared wait not yet seen is the world's, at 96h: {}",
+            shed.why
+        );
+
+        let shed = read(&[car("fix/contradicted", Some("2026-09-19T10:00:00Z"))]);
+        assert!(
+            shed.why.contains("ours to read")
+                && shed.why.contains("fix/contradicted")
+                && shed.why.contains("a real Stripe sponsorship charge"),
+            "seen in the record, still not yet — ours, naming what it waited on: {}",
             shed.why
         );
     }

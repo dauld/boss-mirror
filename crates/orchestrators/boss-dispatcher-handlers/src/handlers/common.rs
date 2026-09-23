@@ -1172,8 +1172,10 @@ mod lane_pin {
              `\"input_channel\": super::common::lane_label(InputChannel::<lane>)` inside \
              an inline object."
         );
+        // Nine since `ops.queue.alarm` (a45b38c1), which files
+        // `ops_queue:<host>` stamped `Telemetry`.
         assert_eq!(
-            filings, 8,
+            filings, 9,
             "the number of machine filing sites changed. That is fine — but check the new \
              one stamps a lane, then update this count, which exists so a filing that \
              DISAPPEARS from the scan (a renamed key, a reshaped body) cannot read as \

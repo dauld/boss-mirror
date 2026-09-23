@@ -482,6 +482,111 @@ pub fn not_yet_streak(md: &Value) -> Option<NotYetStreak> {
     })
 }
 
+/// WHAT THE CAR SAYS IT WAITS ON (backlog b461341d). Duration alone
+/// cannot tell stuck from patient: the operator triage of the six cars
+/// adef5ddf's streak measured past its bound (b8c4267f, 4b05fe3e,
+/// f71a3c90, b94cb42f, 59398050, 7f01b854, 2026-09-23) found ALL SIX
+/// honestly waiting on the world — a publish failure that has not
+/// happened, a tenant publish, a red crawl, a release David has not
+/// opened, a destructive prune that is his call, a real Stripe charge —
+/// and none with a wrong probe. So about three days after that bound
+/// converged the shed would have called six honest waits "ours to read",
+/// the false signal the label exists to prevent, pointed the other way.
+///
+/// So the car SAYS what it waits on, as `{"on": <prose naming the event
+/// or the actor>, "seen": <optional shell text>}`. `seen` is a second,
+/// smaller probe, run by the same door and on the same host as the
+/// proof probe whenever that one answers not-yet, which exits 0 once the
+/// awaited event is in the record. It is what turns the declaration from
+/// a belief into something the record can contradict: a probe still
+/// saying not-yet AFTER its own declared event was seen is the true
+/// "ours to read", at any streak length. Written by `boss car waits-on`
+/// (or the metadata PATCH it wraps), read by [`starved`].
+pub const WAITS_ON: &str = "waits_on";
+/// On a not-yet `proof_attempt`: when the car's declared `seen` check
+/// first exited 0 in an unbroken run of sightings, or `null`. Carried by
+/// [`carried_seen_at`].
+pub const WAITS_ON_SEEN_AT: &str = "waits_on_seen_at";
+
+/// A car's declared wait, read back. `None` for no declaration, and for
+/// one that names nothing — a blank `on` must not silence the label by
+/// merely being present.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitsOn {
+    pub on: String,
+    pub seen: Option<String>,
+}
+
+fn non_blank(v: Option<&Value>) -> Option<String> {
+    v.and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+pub fn waits_on(md: &Value) -> Option<WaitsOn> {
+    let w = md.get(WAITS_ON)?;
+    Some(WaitsOn {
+        on: non_blank(w.get("on"))?,
+        seen: non_blank(w.get("seen")),
+    })
+}
+
+/// The declaration in the one shape [`waits_on`] reads — what the verb
+/// PATCHes, and what an operator writing the PATCH by hand should copy.
+pub fn waits_on_value(on: &str, seen: Option<&str>) -> Value {
+    let seen = seen.map(str::trim).filter(|s| !s.is_empty());
+    json!({"on": on.trim(), "seen": seen})
+}
+
+/// When the declared event was first seen, for a run that `seen` it (or
+/// not): the prior attempt's sighting if it had one, else this run's
+/// instant; `None` for a run that did not see it — a sighting that stops
+/// is not a sighting.
+pub fn carried_seen_at(prior: Option<&Value>, seen: bool, at: &str) -> Option<String> {
+    if !seen {
+        return None;
+    }
+    Some(
+        prior
+            .and_then(|p| p.get(WAITS_ON_SEEN_AT))
+            .and_then(Value::as_str)
+            .unwrap_or(at)
+            .to_string(),
+    )
+}
+
+/// Why a not-yet car is ours to read rather than the world's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Starved {
+    /// No declared wait, and the probe has said not-yet without a break
+    /// past `regions::NOT_YET_STARVED_HOURS` — adef5ddf's rule, which is
+    /// all the record can say of a car that never said what it waits on.
+    Undeclared(NotYetStreak),
+    /// The car declared what it waits on, its `seen` check found that
+    /// in the record, and the probe STILL said not-yet.
+    SeenWhileNotYet { on: String, seen_at: String },
+}
+
+/// Is this car's not-yet ours to read? One definition, read by the
+/// shed and by `boss orient`. A DECLARED wait not yet seen is never
+/// starved, however long — its patience is stated, and it becomes ours
+/// the moment the record holds what it named.
+pub fn starved(md: &Value) -> Option<Starved> {
+    let streak = not_yet_streak(md)?;
+    match waits_on(md) {
+        None => (streak.hours >= crate::regions::NOT_YET_STARVED_HOURS)
+            .then_some(Starved::Undeclared(streak)),
+        Some(w) => md
+            .pointer(&format!("/proof_attempt/{WAITS_ON_SEEN_AT}"))
+            .and_then(Value::as_str)
+            .map(|seen_at| Starved::SeenWhileNotYet {
+                on: w.on,
+                seen_at: seen_at.to_string(),
+            }),
+    }
+}
+
 /// THE ITEM A CAR ANSWERS, AND AUTHORISES THE CLOSE OF.
 ///
 /// The declared one-to-one job edge (`('ship-a-change', 'backlog_item',
@@ -2166,5 +2271,99 @@ mod not_yet_streak_tests {
         });
         assert_eq!(not_yet_streak(&replaced), None);
         assert_eq!(not_yet_streak(&json!({})), None);
+    }
+}
+
+#[cfg(test)]
+mod waits_on_tests {
+    use super::*;
+
+    const PROBE: &str = "grep -c x f || exit 75";
+
+    /// A car at `proven` whose probe has said not-yet for `hours` straight.
+    fn waiting(hours: i64, waits: Option<Value>, seen_at: Option<&str>) -> Value {
+        let last = chrono::DateTime::parse_from_rfc3339("2026-09-26T12:00:00Z").unwrap();
+        let since = (last - chrono::Duration::hours(hours)).to_rfc3339();
+        let mut attempt = json!({
+            "at": last.to_rfc3339(), "exit": 75, "not_yet": true, "probe": PROBE,
+            NOT_YET_SINCE: since, NOT_YET_RUNS: hours + 1,
+        });
+        if let Some(s) = seen_at {
+            attempt[WAITS_ON_SEEN_AT] = json!(s);
+        }
+        let mut md = json!({PROOF_PROBE: PROBE, "proof_attempt": attempt});
+        if let Some(w) = waits {
+            md[WAITS_ON] = w;
+        }
+        md
+    }
+
+    /// UNDECLARED: exactly adef5ddf's rule — past the bound it is ours to
+    /// read, under it nobody's business yet.
+    #[test]
+    fn an_undeclared_wait_is_starved_only_past_the_bound() {
+        assert!(matches!(
+            starved(&waiting(97, None, None)),
+            Some(Starved::Undeclared(NotYetStreak { hours: 97, .. }))
+        ));
+        assert_eq!(starved(&waiting(40, None, None)), None);
+    }
+
+    /// DECLARED AND NOT SEEN: the car said what it waits on and the
+    /// record does not hold it yet, so however long the streak, the move
+    /// is the world's (the six cars b461341d triaged, at 97h to 134h).
+    #[test]
+    fn a_declared_wait_not_yet_seen_is_never_starved() {
+        let w = waits_on_value("a Stripe sponsorship charge", None);
+        assert_eq!(starved(&waiting(134, Some(w), None)), None);
+    }
+
+    /// DECLARED AND SEEN, PROBE STILL NOT YET: the event the car named
+    /// is in the record and the probe still cannot see it — the true
+    /// "ours to read", at any streak length.
+    #[test]
+    fn a_declared_wait_seen_while_the_probe_says_not_yet_is_ours_at_once() {
+        let w = waits_on_value("a red crawl", Some("true"));
+        let md = waiting(3, Some(w), Some("2026-09-26T11:00:00Z"));
+        assert_eq!(
+            starved(&md),
+            Some(Starved::SeenWhileNotYet {
+                on: "a red crawl".into(),
+                seen_at: "2026-09-26T11:00:00Z".into(),
+            })
+        );
+    }
+
+    /// A declaration must name something: a blank `on` is no declaration,
+    /// so it cannot silence the label by being present.
+    #[test]
+    fn a_blank_or_malformed_declaration_is_no_declaration() {
+        assert_eq!(waits_on(&json!({WAITS_ON: {"on": "  "}})), None);
+        assert_eq!(waits_on(&json!({WAITS_ON: "prose only"})), None);
+        assert!(starved(&waiting(97, Some(json!({"on": ""})), None)).is_some());
+        assert_eq!(
+            waits_on(&json!({WAITS_ON: waits_on_value("x", Some(" "))})),
+            Some(WaitsOn {
+                on: "x".into(),
+                seen: None
+            })
+        );
+    }
+
+    /// The first run that saw the event dates the sighting; later runs
+    /// that still see it keep that date, and a run that does not see it
+    /// clears it.
+    #[test]
+    fn a_sighting_is_dated_from_the_first_run_that_saw_it() {
+        let prior = json!({WAITS_ON_SEEN_AT: "2026-09-26T09:00:00Z"});
+        assert_eq!(
+            carried_seen_at(Some(&prior), true, "2026-09-26T10:00:00Z").as_deref(),
+            Some("2026-09-26T09:00:00Z")
+        );
+        assert_eq!(
+            carried_seen_at(None, true, "2026-09-26T10:00:00Z").as_deref(),
+            Some("2026-09-26T10:00:00Z")
+        );
+        assert_eq!(carried_seen_at(Some(&prior), false, "x"), None);
     }
 }

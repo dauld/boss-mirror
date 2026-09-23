@@ -676,6 +676,20 @@ const AGENT_RUNS_RAW = {
         { spec_slug: 'reported', status: 'pending' },
       ],
     },
+    // A run waiting at its report: the title is perfect-tense, so the
+    // step's status rides beside it or `Report recorded` reads as done
+    // (3102fe7a).
+    {
+      id: '5b1d2c3e-0000-4000-8000-000000000003',
+      kind: 'agent-run',
+      status: 'open',
+      title: 'builder run: waiting to report',
+      metadata: { packet: 'q' },
+      steps: [
+        { spec_slug: 'building', title: 'Building', status: 'completed' },
+        { spec_slug: 'reported', title: 'Report recorded', status: 'ready' },
+      ],
+    },
     // A run between states: nothing open on it yet.
     {
       id: '5b1d2c3e-0000-4000-8000-000000000002',
@@ -687,15 +701,16 @@ const AGENT_RUNS_RAW = {
     },
     { kind: 'agent-run', status: 'open', title: 'no id, not a row' },
   ],
-  total: 3,
+  total: 4,
 };
 
 describe('parseAgentRuns', () => {
   it('reads the dispatch-time keys and the step the run is at', () => {
     const runs = parseAgentRuns(AGENT_RUNS_RAW);
-    expect(runs.length).toBe(2);
+    expect(runs.length).toBe(3);
     const run = runs[0]!;
-    const between = runs[1]!;
+    const between = runs[2]!;
+    expect(runs[1]!.at).toBe('Report recorded (ready, not yet done)');
     expect(run.packet).toBe('39d0b528-ff69-4cb8-ba82-408b641da66c');
     expect(run.step).toBe('build');
     expect(run.agent).toBe('claude@algedonic.dev');
@@ -703,7 +718,8 @@ describe('parseAgentRuns', () => {
     expect(run.budgetUsd).toBe(5);
     expect(run.effort).toBe('high');
     expect(run.host).toBe('boss-dev-0');
-    expect(run.at).toBe('building');
+    // No title on the row: the slug stands in for it, status beside.
+    expect(run.at).toBe('building (ready, not yet done)');
     expect(run.openedAt).toBe('2026-09-18T19:40:00.000000Z');
     // Absence is null, never a made-up value.
     expect(between.at).toBeNull();
@@ -713,7 +729,7 @@ describe('parseAgentRuns', () => {
   });
 
   it('accepts a bare array as readily as a page', () => {
-    expect(parseAgentRuns(AGENT_RUNS_RAW.data).length).toBe(2);
+    expect(parseAgentRuns(AGENT_RUNS_RAW.data).length).toBe(3);
     expect(parseAgentRuns(null)).toEqual([]);
   });
 });

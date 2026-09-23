@@ -38,11 +38,20 @@ pub(crate) fn empty_listing() -> Value {
 pub(crate) struct Stub {
     pub base: String,
     writes: Arc<Mutex<Vec<String>>>,
+    sent: Arc<Mutex<Vec<(String, Value)>>>,
 }
 
 impl Stub {
     pub(crate) fn writes(&self) -> Vec<String> {
         self.writes.lock().unwrap().clone()
+    }
+
+    /// Every ACCEPTED write as `("METHOD /path", body)` — what was
+    /// written, for a test that asserts on the body and not only on
+    /// the path (`ops_queue_alarm`, a45b38c1). A body that is not JSON
+    /// is `null`; a write refused 409 is not here, it is in `writes`.
+    pub(crate) fn sent(&self) -> Vec<(String, Value)> {
+        self.sent.lock().unwrap().clone()
     }
 }
 
@@ -53,11 +62,14 @@ impl Stub {
 /// method is recorded as a write and answered with a created id.
 pub(crate) async fn serve(answers: Vec<(&'static str, Value)>) -> Stub {
     let writes: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sent: Arc<Mutex<Vec<(String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
     let log = writes.clone();
+    let bodies = sent.clone();
     let answers = Arc::new(answers);
-    let app = Router::new().fallback(move |method: Method, uri: Uri, _body: Bytes| {
+    let app = Router::new().fallback(move |method: Method, uri: Uri, body: Bytes| {
         let answers = answers.clone();
         let log = log.clone();
+        let bodies = bodies.clone();
         async move {
             if method != Method::GET {
                 // A write to a step the fixtures hold as finished is
@@ -73,6 +85,10 @@ pub(crate) async fn serve(answers: Vec<(&'static str, Value)>) -> Stub {
                     return terminal_step_refusal(sid);
                 }
                 log.lock().unwrap().push(format!("{method} {}", uri.path()));
+                bodies.lock().unwrap().push((
+                    format!("{method} {}", uri.path()),
+                    serde_json::from_slice(&body).unwrap_or(Value::Null),
+                ));
                 return axum::Json(json!({ "id": "stub-created" })).into_response();
             }
             answer(&answers, &uri)
@@ -84,6 +100,7 @@ pub(crate) async fn serve(answers: Vec<(&'static str, Value)>) -> Stub {
     Stub {
         base: format!("http://{addr}"),
         writes,
+        sent,
     }
 }
 

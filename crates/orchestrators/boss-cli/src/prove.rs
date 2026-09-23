@@ -953,6 +953,75 @@ pub(crate) fn attempt_json(
     })
 }
 
+/// THE DECLARED WAIT, OBSERVED (backlog b461341d). A not-yet from a car
+/// that declared what it waits on (`boss_jobs::car::WAITS_ON`) with a
+/// `seen` check runs that check here, with the same shell and on the
+/// same host as the probe, and stamps the attempt with what it found:
+/// `waits_on_exit` (the check's exit, `null` when it could not run) and
+/// `waits_on_seen_at` (when the event was first seen, `null` when it was
+/// not). The shed then reads "seen, and the probe STILL said not yet" as
+/// ours to read at once, and "not seen" as the world's however long.
+///
+/// A check that cannot run — refused by the door's own admission rule,
+/// or naming a tool this host lacks — is NOT a sighting: it leaves the
+/// wait the world's, which is the wrong direction for silence, so the
+/// exit rides the attempt as `null` for a reader to see, and the refusal
+/// is said on stderr at the run that met it. Anything but a not-yet, or
+/// a car with no `seen` check, is returned untouched.
+fn with_wait_observed(
+    attempt: Value,
+    car: &Value,
+    shell: &Shell,
+    prior: Option<&Value>,
+    at: &str,
+) -> Value {
+    if attempt.get("not_yet").and_then(Value::as_bool) != Some(true) {
+        return attempt;
+    }
+    let Some(seen) = car
+        .get("metadata")
+        .and_then(boss_jobs::car::waits_on)
+        .and_then(|w| w.seen)
+    else {
+        return attempt;
+    };
+    let exit = match admit(&seen, true).refusal {
+        Some(r) => {
+            eprintln!("boss prove: the declared wait's seen check is refused — {r}");
+            None
+        }
+        None => match execute_with(&seen, shell) {
+            Ok(o) if o.missing_tools.is_empty() => Some(o.exit),
+            Ok(o) => {
+                eprintln!(
+                    "boss prove: the declared wait's seen check did not run — missing {}",
+                    o.missing_tools.join(", ")
+                );
+                None
+            }
+            Err(e) => {
+                eprintln!("boss prove: the declared wait's seen check did not run — {e}");
+                None
+            }
+        },
+    };
+    stamp_wait(attempt, prior, exit, at)
+}
+
+/// The pure half of [`with_wait_observed`]: exit 0 is a sighting,
+/// dated from the first run in an unbroken line of them.
+fn stamp_wait(attempt: Value, prior: Option<&Value>, exit: Option<i32>, at: &str) -> Value {
+    let seen_at = boss_jobs::car::carried_seen_at(prior, exit == Some(0), at);
+    match attempt {
+        Value::Object(mut m) => {
+            m.insert("waits_on_exit".into(), json!(exit));
+            m.insert(boss_jobs::car::WAITS_ON_SEEN_AT.into(), json!(seen_at));
+            Value::Object(m)
+        }
+        other => other,
+    }
+}
+
 /// WHICH PROBES THIS DOOR WILL RUN (backlog 23b2dffa).
 ///
 /// TWO DOORS RUN A CAR'S RECORDED PROBE AND ONLY ONE CHECKED IT. `boss
@@ -2308,6 +2377,7 @@ pub(crate) async fn run_unattended(car_id: &str, now: chrono::DateTime<chrono::U
     };
     let prior = car.pointer("/metadata/proof_attempt");
     let attempt = attempt_json(&probe, Some(&expect), &o, &here, &at, &why, prior);
+    let attempt = with_wait_observed(attempt, &car, &shell, prior, &at);
     crate::gate::api(
         &http,
         reqwest::Method::PATCH,
@@ -2713,6 +2783,7 @@ pub(crate) async fn run(
             }
             let prior = car.pointer("/metadata/proof_attempt");
             let attempt = attempt_json(&probe, expect.as_deref(), &o, &here, &at, &why, prior);
+            let attempt = with_wait_observed(attempt, car, &shell, prior, &at);
             crate::gate::api(
                 &http,
                 reqwest::Method::PATCH,
@@ -5403,6 +5474,46 @@ ugrep: warning: complete\": No such file or directory\n";
         assert!(
             hand.contains("This says nothing about whether the change works"),
             "{hand}"
+        );
+    }
+
+    /// THE DECLARED WAIT IS OBSERVED BY THE DOOR THAT RECORDS THE
+    /// NOT-YET (backlog b461341d): a `seen` check that exits 0 stamps a
+    /// sighting, one that does not stamps none, and a car with no
+    /// declaration — or an attempt that is not a not-yet — is untouched.
+    #[test]
+    fn a_not_yet_runs_the_cars_declared_seen_check_and_stamps_what_it_found() {
+        let o = Outcome {
+            exit: 75,
+            stdout: "not yet: none\n".into(),
+            stderr: String::new(),
+            missing_tools: Vec::new(),
+        };
+        let attempt = attempt_json("true", Some("x:ok"), &o, "h", "T1", "NOT YET: none", None);
+        let car = |seen: &str| json!({"metadata": {"waits_on": boss_jobs::car::waits_on_value("an event", Some(seen))}});
+        let shell = Shell::here(None);
+
+        let a = with_wait_observed(attempt.clone(), &car("true"), &shell, None, "T1");
+        assert_eq!(a["waits_on_exit"], 0);
+        assert_eq!(a[boss_jobs::car::WAITS_ON_SEEN_AT], "T1");
+
+        let a = with_wait_observed(attempt.clone(), &car("exit 3"), &shell, None, "T1");
+        assert_eq!(a["waits_on_exit"], 3);
+        assert_eq!(a[boss_jobs::car::WAITS_ON_SEEN_AT], Value::Null);
+
+        let undeclared = json!({"metadata": {}});
+        let a = with_wait_observed(attempt.clone(), &undeclared, &shell, None, "T1");
+        assert_eq!(a, attempt);
+
+        // A sighting keeps the date of the first run that saw it.
+        let prior = json!({(boss_jobs::car::WAITS_ON_SEEN_AT): "T0"});
+        let a = stamp_wait(attempt.clone(), Some(&prior), Some(0), "T1");
+        assert_eq!(a[boss_jobs::car::WAITS_ON_SEEN_AT], "T0");
+
+        let failed = json!({"not_yet": false, "exit": 1});
+        assert_eq!(
+            with_wait_observed(failed.clone(), &car("true"), &shell, None, "T1"),
+            failed
         );
     }
 }

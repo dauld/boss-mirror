@@ -28,6 +28,7 @@
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import { href } from '../../router';
   import type { Job, Step } from '../../jobs/types';
+  import { standingOf } from '../../jobs/position';
 
   type LoadState =
     | { kind: 'loading' }
@@ -77,11 +78,10 @@
     return typeof v === 'string' ? v : v == null ? '' : String(v);
   };
 
-  /// The step someone can act on now — what the experiment is waiting for.
-  const waitingOn = (j: Job): string => {
-    const s = stepsOf(j).find((x) => x.status === 'ready' || x.status === 'active');
-    return s?.spec_slug ?? '';
-  };
+  /// The step someone can act on now — what the experiment is waiting
+  /// for — with its status beside it, so a terminal like `promoted`
+  /// standing ready does not read as already promoted (3102fe7a).
+  const waitingOn = (j: Job): string => standingOf({ ...j, steps: [...stepsOf(j)] }) ?? '';
 
   const outcomeOf = (j: Job): string => {
     const o = (j.metadata as Record<string, unknown> | undefined)?.outcome;

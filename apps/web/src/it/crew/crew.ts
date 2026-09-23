@@ -28,6 +28,7 @@
 // it is absent. `crew.test.ts` pins its absence.
 
 import { fetchRemote, type Remote } from '../../data/remote';
+import { standingAt } from '../../jobs/position';
 import { partitionOf, type Partition } from '@boss/web-kit/ui/packet-card';
 import { isHumanActor } from '../../data/actor';
 
@@ -314,8 +315,8 @@ export type AgentRun = Readonly<{
   budgetUsd: number | null;
   effort: string | null;
   host: string | null;
-  /// The run's own open step (`briefed` / `building` / `reported`), or
-  /// `null` between states.
+  /// The run's own open step, as the standing phrase — `Report recorded
+  /// (ready, not yet done)` — or `null` between states.
   at: string | null;
   openedAt: string | null;
   /// The work-session the run was dispatched from (design 511fa7d4 car
@@ -342,7 +343,13 @@ export function parseAgentRuns(raw: unknown): ReadonlyArray<AgentRun> {
         budgetUsd: num(m.budget_usd),
         effort: str(m.effort),
         host: str(m.host),
-        at: open ? str(open.spec_slug) : null,
+        // Its title with its status beside it: the run's titles are
+        // perfect-tense (`Report recorded`), and the bare slug
+        // `reported` beside a run still waiting to report read as done
+        // (3102fe7a, after 648a68a9).
+        at: open
+          ? standingAt(str(open.title) ?? str(open.spec_slug) ?? '', str(open.status) ?? '')
+          : null,
         openedAt: str(m.opened_at) ?? str(r.opened_on),
         session: str(m.session),
       };

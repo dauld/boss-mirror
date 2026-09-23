@@ -318,6 +318,22 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
                 "jobs.step.completed",
             ],
         ),
+        // The ops-runner queue watch (a45b38c1): a five-minute clock rule
+        // that reads the open ops-request queue and, per host whose
+        // oldest waiting request is past the bound, files
+        // (`jobs.job.created`) or refreshes (`jobs.job.updated`) the
+        // `ops_queue:<host>` estate alarm, withdrawing it through the
+        // step it waits on (`jobs.step.completed`) once the queue
+        // drains. Every write is a backlog-item write; it never writes
+        // an ops-request, so it cannot make the queue it watches move.
+        (
+            "ops.queue.alarm",
+            vec![
+                "jobs.job.created",
+                "jobs.job.updated",
+                "jobs.step.completed",
+            ],
+        ),
         ("messages.notify", vec![]),
         // Tells the filer how their packet ended. A sink, like every
         // other notifier — the message is the end of the cascade, not

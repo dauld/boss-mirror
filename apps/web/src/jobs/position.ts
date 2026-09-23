@@ -14,12 +14,39 @@ export function currentStep(j: Job): Step | undefined {
   return steps.find((s) => s.status === 'ready' || s.status === 'active');
 }
 
+/// The phrase for a step a packet is STANDING AT: its name with its
+/// own status beside it, because step titles are perfect-tense by house
+/// convention and `DEPARTED — merged into main` alone was read as done
+/// while main had not moved (train 47391bfc, 2026-09-23; 648a68a9). The
+/// server spells it as `boss_jobs::yard::standing_at` and hands it as-is
+/// where it can (the yard status's `at_step`); a raw step row carries no
+/// such field, so the web spells it here once, held equal to the
+/// server's format string by position.test.ts (3102fe7a).
+export function standingAt(name: string, status: string): string {
+  return `${name} (${standingNote(status)})`;
+}
+
+/// The part of [`standingAt`] beside the name, for a surface that
+/// already shows the name in its own place (the journey's stops).
+export function standingNote(status: string): string {
+  return `${status}, not yet done`;
+}
+
 /// The fleet-node key the Job sits at: `spec_slug`, else title.
 export function positionOf(j: Job): string | null {
   const current = currentStep(j);
   if (!current) return null;
   const slug = (current as Step & { spec_slug?: string | null }).spec_slug;
   return slug && slug !== '' ? slug : (current.title ?? null);
+}
+
+/// Where the Job stands, as a person reads it: its position with the
+/// current step's status beside it (`promoted (ready, not yet done)`),
+/// or `null` when no step is in flight.
+export function standingOf(j: Job): string | null {
+  const current = currentStep(j);
+  const pos = positionOf(j);
+  return current && pos ? standingAt(pos, current.status) : null;
 }
 
 const PRIORITY_ORDER: Record<string, number> = {

@@ -115,6 +115,15 @@ const SPAWNS_NOTHING_ON_PURPOSE: &[(&str, &str)] = &[
          would otherwise be for.",
     ),
     (
+        "ops-runner-queue-watched-every-5-minutes",
+        "runs `ops.queue.alarm`, which reads the open ops-request queue and files the \
+         `ops_queue:<host>` estate alarm only when a host's oldest waiting request has waited \
+         past five runner cadences (backlog a45b38c1). On a healthy day it produces NOTHING, \
+         and that zero is the healthy reading; what it would file is an alarm keyed by host, \
+         not a packet of a kind a sweep could count. It is itself the watch on a cadence — \
+         the runner's — that no packet reports.",
+    ),
+    (
         "agent-run-dies-when-building-is-silent",
         "runs `jobs.age_out_step`, which completes the `building` step of every open \
          agent-run that has gone silent past the bound (design c87fb59b car 2, backlog \

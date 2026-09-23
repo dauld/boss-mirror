@@ -1,0 +1,32 @@
+# ---------------------------------------------------------------------
+# The ops-runner queue is read every five minutes (backlog a45b38c1,
+# the half 2cfb4562 left unbuilt). The runner writes a queue gauge onto
+# every request it answers — and a runner that has stopped answers
+# nothing, so its gauge cannot report its own death, and no unit
+# observer watches `boss-ops-runner` on either host. The
+# `ops.queue.alarm` handler reads the QUEUE instead: every open
+# ops-request, from the jobs API, and files the estate alarm
+# `ops_queue:<host>` (deduped by `estate_finding`, withdrawn when the
+# queue drains) when a host's oldest waiting request has waited past
+# five of the runner's own one-minute cadence — the bound calibrated on
+# the week's queued_s series, which is in the handler's module docs.
+#
+# NO DEDUP GUARD, ON PURPOSE — the sensors-poll shape. A firing that
+# finds every queue under the bound writes nothing; a stalled queue is
+# one packet, refreshed only when its diagnosis changes. There is no
+# packet this rule could twin.
+[[rule]]
+name = "ops-runner-queue-watched-every-5-minutes"
+why = """
+A TIMER over a THRESHOLD. A runner that has died emits nothing, so no
+event can report it: "a request has waited five minutes and nothing
+answered" is a LEVEL integrated over time, observed only by reading the
+queue on a clock (the standing exemption: no packet causes "five
+minutes passed"). It is the arm CLAUDE.md §Diagnosis asks for — one
+that does not need the patient: the runner is not consulted, its queue
+is. It adds no routing and refuses nothing: it files and withdraws one
+alarm per host, and every ops-request moves exactly as it did before.
+"""
+schedule = { cadence = "every-5-minutes", anchor_date = "2026-09-23" }
+[[rule.do]]
+handler = "ops.queue.alarm"

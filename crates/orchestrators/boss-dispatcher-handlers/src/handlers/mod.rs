@@ -55,6 +55,7 @@ pub mod messages_notify_job_terminal;
 pub mod network_census;
 pub mod ops_file_tag_release;
 pub mod ops_judge;
+pub mod ops_queue_alarm;
 pub mod packaging_allocate;
 pub mod people_hire;
 pub mod people_terminate;
