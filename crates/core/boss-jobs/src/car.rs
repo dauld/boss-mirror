@@ -378,6 +378,110 @@ pub fn proof_intent(
     m
 }
 
+/// THE NOT-YET STREAK (backlog adef5ddf). A car's `proof_attempt` is
+/// REPLACED on every run, so until 2026-09-23 it said what the last run
+/// answered and nothing about how long it had been answering it. `exit
+/// 75` means "early, not wrong", and a probe that can NEVER pass says
+/// exactly that too: car b8c4267f greps a literal a later car removed on
+/// 9a grounds, car 52e0287e takes the last of four matches where the
+/// call is the second. Both were counted as patiently waiting and
+/// rechecked hourly — measured over the 1812 ops-requests on record
+/// (2026-09-17 to 09-23): six open cars at 86 to 88 consecutive
+/// not-yets each, spanning 97h to 134h, and no probe run ever answered
+/// them otherwise. The exit code cannot tell starving from waiting; the
+/// length of the streak is the only signal there is, so each attempt now
+/// carries where its streak began and how many runs it holds.
+///
+/// Written by the doors that record an attempt
+/// (`boss prove`'s `attempt_json`), read by [`not_yet_streak`].
+pub const NOT_YET_SINCE: &str = "not_yet_since";
+/// How many consecutive runs of the same probe have answered not-yet,
+/// this one included. See [`NOT_YET_SINCE`].
+pub const NOT_YET_RUNS: &str = "not_yet_runs";
+
+/// Did this recorded attempt answer NOT YET? The flag the doors stamp,
+/// or a bare exit 75 on records older than the flag — one definition,
+/// read by the shed's classification and the streak both.
+pub fn attempt_said_not_yet(attempt: &Value) -> bool {
+    attempt.get("not_yet").and_then(Value::as_bool) == Some(true)
+        || attempt.get("exit").and_then(Value::as_i64) == Some(75)
+}
+
+/// Where a not-yet run's streak began and how many runs it now holds,
+/// given the car's PRIOR attempt: `(since, runs)`, for a run at `at` of
+/// `probe`. The streak continues only across not-yets of the SAME probe
+/// text — a corrected probe is the repair for a starved one, and must
+/// not inherit its four days. A prior record written before these keys
+/// existed dates the streak from its own `at`, the earliest not-yet this
+/// door can vouch for.
+pub fn carried_not_yet_streak(prior: Option<&Value>, probe: &str, at: &str) -> (String, u64) {
+    let continuing = prior.filter(|p| {
+        attempt_said_not_yet(p) && p.get("probe").and_then(Value::as_str) == Some(probe)
+    });
+    match continuing {
+        Some(p) => {
+            let since = p
+                .get(NOT_YET_SINCE)
+                .and_then(Value::as_str)
+                .or_else(|| p.get("at").and_then(Value::as_str))
+                .unwrap_or(at);
+            let runs = p
+                .get(NOT_YET_RUNS)
+                .and_then(Value::as_u64)
+                .filter(|n| *n > 0)
+                .unwrap_or(1);
+            (since.to_string(), runs + 1)
+        }
+        None => (at.to_string(), 1),
+    }
+}
+
+/// A car's not-yet streak, read back: how many hours lie between its
+/// first and its latest not-yet, and how many runs answered it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotYetStreak {
+    pub hours: i64,
+    pub runs: u64,
+}
+
+/// The streak on a car's metadata, if its last run answered not-yet.
+///
+/// Measured between two RUNS, never against the clock: a recheck that
+/// stopped firing must not age a streak nobody is asking. And `None`
+/// when the car's recorded probe is no longer the text that ran, so a
+/// probe corrected by a metadata PATCH stops reading as starved at once
+/// rather than at the next hourly write.
+pub fn not_yet_streak(md: &Value) -> Option<NotYetStreak> {
+    let attempt = md.get("proof_attempt")?;
+    if !attempt_said_not_yet(attempt) {
+        return None;
+    }
+    let ran = attempt.get("probe").and_then(Value::as_str);
+    let recorded = md.get(PROOF_PROBE).and_then(Value::as_str);
+    if let (Some(ran), Some(recorded)) = (ran, recorded)
+        && ran != recorded
+    {
+        return None;
+    }
+    let instant = |k: &str| {
+        attempt
+            .get(k)
+            .and_then(Value::as_str)
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+    };
+    let last = instant("at")?;
+    let since = instant(NOT_YET_SINCE).unwrap_or(last);
+    let runs = attempt
+        .get(NOT_YET_RUNS)
+        .and_then(Value::as_u64)
+        .filter(|n| *n > 0)
+        .unwrap_or(1);
+    Some(NotYetStreak {
+        hours: (last - since).num_hours(),
+        runs,
+    })
+}
+
 /// THE ITEM A CAR ANSWERS, AND AUTHORISES THE CLOSE OF.
 ///
 /// The declared one-to-one job edge (`('ship-a-change', 'backlog_item',
@@ -1945,5 +2049,122 @@ mod building_tests {
             Some("s-build")
         );
         assert!(step_id_for(&json!({"steps": []}), BUILD_SLUG, BUILD).is_none());
+    }
+}
+
+#[cfg(test)]
+mod not_yet_streak_tests {
+    use super::*;
+
+    const PROBE: &str = "grep -c x f || exit 75";
+
+    fn not_yet(at: &str, since: Option<&str>, runs: Option<u64>) -> Value {
+        let mut a = json!({"at": at, "exit": 75, "not_yet": true, "probe": PROBE});
+        if let Some(s) = since {
+            a[NOT_YET_SINCE] = json!(s);
+        }
+        if let Some(n) = runs {
+            a[NOT_YET_RUNS] = json!(n);
+        }
+        a
+    }
+
+    /// The first not-yet of a streak starts it at this run.
+    #[test]
+    fn a_first_not_yet_starts_the_streak_at_this_run() {
+        let (since, runs) = carried_not_yet_streak(None, PROBE, "2026-09-23T07:00:00Z");
+        assert_eq!((since.as_str(), runs), ("2026-09-23T07:00:00Z", 1));
+    }
+
+    /// A not-yet after a not-yet of the SAME probe keeps the streak's
+    /// start and counts the run — the only way a reader can later tell
+    /// "asked once" from "asked 86 times across four days".
+    #[test]
+    fn a_not_yet_after_a_not_yet_carries_the_start_and_counts() {
+        let prior = not_yet(
+            "2026-09-23T06:00:00Z",
+            Some("2026-09-19T05:50:00Z"),
+            Some(85),
+        );
+        let (since, runs) = carried_not_yet_streak(Some(&prior), PROBE, "2026-09-23T07:00:00Z");
+        assert_eq!((since.as_str(), runs), ("2026-09-19T05:50:00Z", 86));
+    }
+
+    /// A record written before the streak existed still vouches for its
+    /// own run: its `at` is the earliest not-yet this door can prove, so
+    /// the streak starts there rather than at zero on every car already
+    /// standing in the shed when this lands.
+    #[test]
+    fn a_legacy_not_yet_record_dates_the_streak_from_its_own_run() {
+        let prior = not_yet("2026-09-23T06:00:00Z", None, None);
+        let (since, runs) = carried_not_yet_streak(Some(&prior), PROBE, "2026-09-23T07:00:00Z");
+        assert_eq!((since.as_str(), runs), ("2026-09-23T06:00:00Z", 2));
+    }
+
+    /// THE STREAK BELONGS TO THE PROBE TEXT. A corrected probe is the
+    /// repair for a starved one (52e0287e), and inheriting the old
+    /// probe's four days would name the repair starved on its first run.
+    /// And a run that answered anything but not-yet ends the streak.
+    #[test]
+    fn a_new_probe_or_a_different_answer_restarts_the_streak() {
+        let prior = not_yet(
+            "2026-09-23T06:00:00Z",
+            Some("2026-09-19T05:50:00Z"),
+            Some(85),
+        );
+        let (since, runs) =
+            carried_not_yet_streak(Some(&prior), "a corrected probe", "2026-09-23T07:00:00Z");
+        assert_eq!((since.as_str(), runs), ("2026-09-23T07:00:00Z", 1));
+
+        let failed =
+            json!({"at": "2026-09-23T06:00:00Z", "exit": 1, "not_yet": false, "probe": PROBE});
+        let (since, runs) = carried_not_yet_streak(Some(&failed), PROBE, "2026-09-23T07:00:00Z");
+        assert_eq!((since.as_str(), runs), ("2026-09-23T07:00:00Z", 1));
+    }
+
+    /// The reader: the streak's length is measured between its first and
+    /// its latest not-yet — two runs that happened — never against the
+    /// clock, so a recheck that stopped running cannot age a streak.
+    #[test]
+    fn the_streak_reads_back_as_hours_between_its_first_and_latest_run() {
+        let md = json!({
+            PROOF_PROBE: PROBE,
+            "proof_attempt": not_yet("2026-09-23T07:00:00Z", Some("2026-09-19T05:50:00Z"), Some(86)),
+        });
+        assert_eq!(
+            not_yet_streak(&md),
+            Some(NotYetStreak {
+                hours: 97,
+                runs: 86
+            })
+        );
+        // Legacy: one run vouched for, no length yet.
+        let md = json!({
+            PROOF_PROBE: PROBE,
+            "proof_attempt": not_yet("2026-09-23T07:00:00Z", None, None),
+        });
+        assert_eq!(
+            not_yet_streak(&md),
+            Some(NotYetStreak { hours: 0, runs: 1 })
+        );
+    }
+
+    /// No streak when the last run did not say not-yet, and none when the
+    /// car's recorded probe is no longer the one that ran — a probe
+    /// corrected by a metadata PATCH stops reading as starved at once,
+    /// not an hour later when the recheck next writes.
+    #[test]
+    fn no_streak_for_another_answer_or_a_since_replaced_probe() {
+        let failed = json!({
+            PROOF_PROBE: PROBE,
+            "proof_attempt": {"at": "2026-09-23T07:00:00Z", "exit": 1, "probe": PROBE},
+        });
+        assert_eq!(not_yet_streak(&failed), None);
+        let replaced = json!({
+            PROOF_PROBE: "a corrected probe",
+            "proof_attempt": not_yet("2026-09-23T07:00:00Z", Some("2026-09-19T05:50:00Z"), Some(86)),
+        });
+        assert_eq!(not_yet_streak(&replaced), None);
+        assert_eq!(not_yet_streak(&json!({})), None);
     }
 }

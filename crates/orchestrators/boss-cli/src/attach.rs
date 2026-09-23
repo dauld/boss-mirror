@@ -434,6 +434,22 @@ mod tests {
         .await
     }
 
+    /// What a stub handler takes, even when it ignores it: axum's
+    /// `Bytes` extractor reads the WHOLE request body before the handler
+    /// runs, so the stub answers a request it has finished reading.
+    ///
+    /// WHY (backlog cef615f6, 2026-09-23). A handler that answers
+    /// without reading lets the server write its response and close
+    /// while `Part::file` is still streaming the file part; the client's
+    /// next write meets a closed socket. Measured on this module's tests,
+    /// 400 runs 12 at a time, twice: 23 and 27 failed, every one `error
+    /// writing a body to connection: Broken pipe`, and only in the two
+    /// stub tests — the real files router, which parses the multipart
+    /// body, never lost. It was never a bind race: `serve` binds before
+    /// it returns, and the kernel queues a connect on a bound socket
+    /// before anything calls accept.
+    type WholeRequest = axum::body::Bytes;
+
     async fn serve(app: axum::Router) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -557,10 +573,13 @@ mod tests {
     #[tokio::test]
     async fn a_store_that_is_switched_off_is_refused_not_reported() {
         // What boss-content-api mounts when its config has no [files]
-        // table: 200 on every /api/files path, with an envelope.
+        // table: 200 on every /api/files path, with an envelope. This
+        // stub reads the request before it answers (`WholeRequest`);
+        // boss_content_api.rs's own handler does not, and that race is
+        // the store's to fix, not this test's to reproduce.
         let off = axum::Router::new().route(
             "/api/files",
-            axum::routing::any(|| async {
+            axum::routing::any(|_: WholeRequest| async {
                 axum::Json(json!({"kind": "unconfigured", "reason": "no [files] block"}))
             }),
         );
@@ -573,8 +592,8 @@ mod tests {
             as_agent(),
         )
         .await
-        .unwrap_err()
-        .to_string();
+        .unwrap_err();
+        let e = format!("{e:#}");
         assert!(e.contains("not switched on"), "{e}");
     }
 
@@ -595,7 +614,7 @@ mod tests {
         let liar = axum::Router::new()
             .route(
                 "/api/files",
-                axum::routing::post(move || {
+                axum::routing::post(move |_: WholeRequest| {
                     let row = row.clone();
                     async move { (axum::http::StatusCode::CREATED, axum::Json(row)) }
                 }),
@@ -613,8 +632,8 @@ mod tests {
             as_agent(),
         )
         .await
-        .unwrap_err()
-        .to_string();
+        .unwrap_err();
+        let e = format!("{e:#}");
         assert!(e.contains("does not read back"), "{e}");
     }
 

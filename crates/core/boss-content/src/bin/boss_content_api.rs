@@ -152,7 +152,17 @@ fn unconfigured_files_router() -> Router {
     // envelope and renders the same "not available in this deployment"
     // callout as before; the difference is the response is now a
     // 200 OK from the auditor's vantage point.
-    let handler = any(|| async {
+    //
+    // The body is read to its end BEFORE answering (backlog 1fe351e8,
+    // 2026-09-23). Answering first let hyper close a connection whose
+    // upload was still arriving, so `boss attach` of a file larger than
+    // one socket buffer saw Broken pipe instead of this refusal — 40 of
+    // 40 runs of the 16 MiB test below. It is streamed and discarded
+    // rather than taken as `Bytes`: that extractor stops at axum's 2 MB
+    // DefaultBodyLimit and answers 413, which would change the status
+    // and still leave the rest of the upload unread.
+    let handler = any(|body: axum::body::Body| async move {
+        drain(body).await;
         (
             StatusCode::OK,
             [("content-type", "application/json")],
@@ -162,6 +172,16 @@ fn unconfigured_files_router() -> Router {
     Router::new()
         .route("/api/files", handler.clone())
         .route("/api/files/{*rest}", handler)
+}
+
+/// Read a request body to its end, keeping none of it. A body that
+/// errors (the client went away) ends the read; the answer that
+/// follows then has nowhere to go, which is the client's choice.
+async fn drain(mut body: axum::body::Body) {
+    use axum::body::HttpBody;
+    while let Some(Ok(_)) =
+        std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await
+    {}
 }
 
 async fn build_files_router(
@@ -206,4 +226,73 @@ async fn build_files_router(
         clock,
     };
     Ok(files_router_fn(state))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Backlog 1fe351e8 (found by the builder of cef615f6, 2026-09-23):
+    /// the switched-off store answered before reading the upload, so a
+    /// `boss attach` whose file is larger than one socket buffer could
+    /// see Broken pipe instead of the named refusal. Sixteen MiB is far
+    /// past any socket buffer the kernel grants, so the client is still
+    /// writing when an early answer goes out — the race is forced, not
+    /// sampled.
+    #[tokio::test]
+    async fn an_upload_larger_than_a_socket_buffer_gets_the_named_refusal() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, unconfigured_files_router())
+                .await
+                .unwrap();
+        });
+
+        const BODY_LEN: usize = 16 * 1024 * 1024;
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (mut rd, mut wr) = stream.into_split();
+        let writer = tokio::spawn(async move {
+            let head = format!(
+                "POST /api/files HTTP/1.1\r\nhost: {addr}\r\n\
+                 content-type: application/octet-stream\r\n\
+                 content-length: {BODY_LEN}\r\n\r\n"
+            );
+            wr.write_all(head.as_bytes()).await?;
+            let chunk = vec![b'x'; 64 * 1024];
+            for _ in 0..BODY_LEN / chunk.len() {
+                wr.write_all(&chunk).await?;
+            }
+            wr.flush().await?;
+            Ok::<_, std::io::Error>(wr)
+        });
+        let wrote = writer.await.unwrap();
+        assert!(
+            wrote.is_ok(),
+            "the upload was cut off mid-body: {:?}",
+            wrote.err()
+        );
+
+        let mut answer = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while !String::from_utf8_lossy(&answer).contains("\"kind\":\"unconfigured\"") {
+            match rd.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(n) => answer.extend_from_slice(&chunk[..n]),
+                Err(e) => panic!("reading the answer failed: {e}"),
+            }
+        }
+        let answer = String::from_utf8_lossy(&answer);
+        assert!(
+            answer.starts_with("HTTP/1.1 200"),
+            "status changed: {answer}"
+        );
+        assert!(
+            answer.contains(
+                r#"{"kind":"unconfigured","reason":"file-references surface not configured"#
+            ),
+            "the named refusal did not arrive: {answer}"
+        );
+    }
 }

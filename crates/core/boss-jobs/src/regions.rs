@@ -635,10 +635,7 @@ pub fn shed_place(md: &Value) -> ShedPlace {
     let event = md_str(md, crate::car::PROOF_EVENT);
     if !probe.is_empty() {
         let attempt = md.get("proof_attempt");
-        let not_yet = attempt.is_some_and(|a| {
-            a.get("not_yet").and_then(Value::as_bool) == Some(true)
-                || a.get("exit").and_then(Value::as_i64) == Some(75)
-        });
+        let not_yet = attempt.is_some_and(crate::car::attempt_said_not_yet);
         let last = attempt
             .and_then(|a| a.get("why"))
             .and_then(Value::as_str)
@@ -1586,6 +1583,29 @@ pub(crate) fn released_awaiting_repair<'a>(
 /// than "landed" for that reason.
 pub const PROOF_STALE_HOURS: i64 = 24;
 
+/// How long a probe may answer `not yet` WITHOUT A BREAK before the shed
+/// stops calling it the world's move (backlog adef5ddf).
+///
+/// WHY A SECOND BOUND. [`PROOF_STALE_HOURS`] times the CAR; this times
+/// the ANSWER, read from the streak each attempt carries
+/// (`boss_jobs::car::not_yet_streak`). A probe that can never pass —
+/// b8c4267f greps a literal a later car deliberately removed, 52e0287e
+/// reads the wrong occurrence of a call — exits 75 exactly like a
+/// patient one, and the shed said "waiting on the world, not on us" of
+/// both.
+///
+/// WHY 72 HOURS, measured over the 1812 ops-requests on record
+/// (2026-09-17 to 09-23). Of 37 not-yet streaks that ended in a pass,
+/// the longest under the hourly recheck spanned 61h (a4a2118e, 46 runs)
+/// and the longest at all 75h (8c4f8ed9, a weekly Stripe event, under
+/// the old daily recheck). The six open cars still answering not-yet
+/// were at 97h to 134h. So a day would have named six of the honest
+/// waits that later passed, and three days names one (that 75h daily-
+/// recheck wait) while every stuck car clears it. Like the bound above it is a threshold for LOOKING:
+/// the probe is still rechecked hourly and may still pass. What changes
+/// is whose move the sentence says it is.
+pub const NOT_YET_STARVED_HOURS: i64 = 72;
+
 /// THE SHED: landed cars awaiting proof — open cars whose live step is
 /// `proven`. Troubled when one is UNPROVEN (no probe, no event: nothing
 /// mechanical can settle it) or its probe is FAILING; busy while any
@@ -1622,6 +1642,11 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     // with no attempt on record is us not asking. Same age, opposite
     // meaning, and until 2026-09-22 the same sentence.
     let mut never_probed = 0usize;
+    // Of the stale ones that were told not yet, those told so without a
+    // break for longer than [`NOT_YET_STARVED_HOURS`] — a probe that
+    // cannot pass looks exactly like this, so it is ours to read, not
+    // the world's to answer (adef5ddf). Longest streak first.
+    let mut starved: Vec<(crate::car::NotYetStreak, &str)> = Vec::new();
     for (j, _) in &awaiting {
         let branch = j
             .metadata
@@ -1644,10 +1669,15 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
                 ShedPlace::ProbePending { last: None }
             ) {
                 never_probed += 1;
+            } else if let Some(streak) = crate::car::not_yet_streak(&j.metadata)
+                && streak.hours >= NOT_YET_STARVED_HOURS
+            {
+                starved.push((streak, branch));
             }
         }
     }
     stale.sort_by_key(|(hours, _)| std::cmp::Reverse(*hours));
+    starved.sort_by_key(|(s, _)| std::cmp::Reverse(s.hours));
 
     let n = awaiting.len();
     let (state, why) = if !unproven.is_empty() {
@@ -1669,12 +1699,31 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
         // a stale proof is worth a look either way — but a reader who
         // sees "told not yet" knows to go look at the WORLD, and one
         // who sees "never probed" knows to go run something.
-        let whose = if never_probed == 0 {
+        // THREE ANSWERS, not two (adef5ddf): never asked (on us), told
+        // not yet for days without a break (on us to read — a probe that
+        // cannot pass says exactly this), and told not yet (the world's).
+        let mut ours: Vec<String> = Vec::new();
+        if never_probed > 0 {
+            ours.push(format!(
+                "{never_probed} never probed — nothing has run their proof, which is on us"
+            ));
+        }
+        if let Some((longest, branch)) = starved.first() {
+            ours.push(format!(
+                "{} told not yet without a break past {NOT_YET_STARVED_HOURS}h — longest {}h \
+                 over {} runs, {branch}; a probe that cannot pass says exactly this, so it is \
+                 ours to read, not the world's",
+                starved.len(),
+                longest.hours,
+                longest.runs
+            ));
+        }
+        let whose = if ours.is_empty() {
             "every one asked and was told not yet — waiting on the world, not on us".to_string()
-        } else if never_probed == stale.len() {
-            format!("{never_probed} never probed — nothing has run their proof, which is on us")
+        } else if never_probed + starved.len() == stale.len() {
+            ours.join("; ")
         } else {
-            format!("{never_probed} never probed — on us; the rest asked and were told not yet")
+            format!("{}; the rest asked and were told not yet", ours.join("; "))
         };
         (
             RegionState::Troubled,
@@ -2866,6 +2915,92 @@ mod tests {
         assert!(
             shed.why.contains("1 never probed"),
             "names how many are on us, alongside the rest: {}",
+            shed.why
+        );
+    }
+
+    /// A PROBE THAT HAS ANSWERED NOT-YET FOR DAYS IS NOT WAITING ON THE
+    /// WORLD (backlog adef5ddf). The split above read every told-not-yet
+    /// car as the world's move, and two of the six measured at 86+
+    /// consecutive not-yets could never pass: b8c4267f greps a literal a
+    /// later car removed, 52e0287e reads the wrong occurrence of a call.
+    /// Exit 75 cannot tell them apart from a patient probe; the length of
+    /// the streak can, so a streak past [`NOT_YET_STARVED_HOURS`] is
+    /// named as ours to read — and a short one, same car age, is not.
+    #[test]
+    fn a_not_yet_that_has_lasted_days_is_ours_to_read_not_the_worlds() {
+        // NOW is 2026-09-19T12:00:00Z; both cars opened four days ago,
+        // so the car's age cannot be what separates them — only the
+        // streak the attempt carries.
+        let aged = |branch: &str, since: &str, runs: u64| {
+            let md = json!({
+                "branch": branch,
+                "merged": true,
+                "opened_at": "2026-09-15T10:00:00Z",
+                "proof_probe": "true",
+                "proof_attempt": {
+                    "at": "2026-09-19T11:00:00Z",
+                    "not_yet": true,
+                    "exit": 75,
+                    "probe": "true",
+                    (crate::car::NOT_YET_SINCE): since,
+                    (crate::car::NOT_YET_RUNS): runs,
+                },
+            });
+            let j = job("ship-a-change", branch, JobStatus::Open, md);
+            let s = vec![
+                step(
+                    &j,
+                    "gate",
+                    StepStatus::Completed,
+                    Some("2026-09-15T06:00:00Z"),
+                ),
+                step(&j, "proven", StepStatus::Ready, None),
+            ];
+            (j, s)
+        };
+        let status = empty_status();
+        let read = |cars: &[(Job, Vec<Step>)]| {
+            let out = regions(&inputs(&status, &[], &[], cars, &[], Some(&[]), Some(&[])));
+            by_name(&out, "shed").clone()
+        };
+
+        // STARVED: 96 runs across 96 hours, all not-yet.
+        let shed = read(&[aged("fix/starved", "2026-09-15T11:00:00Z", 96)]);
+        assert_eq!(shed.state, RegionState::Troubled, "{}", shed.why);
+        assert!(
+            !shed.why.contains("waiting on the world"),
+            "a streak of days is not the world's move: {}",
+            shed.why
+        );
+        assert!(
+            shed.why.contains("ours to read") && shed.why.contains("fix/starved"),
+            "it names the car, as ours to read: {}",
+            shed.why
+        );
+        assert!(
+            shed.why.contains("96h") && shed.why.contains("96 runs"),
+            "carrying the streak, which is the finding: {}",
+            shed.why
+        );
+
+        // THE CONTROL: same age, a six-hour streak — still the world's.
+        let shed = read(&[aged("fix/patient", "2026-09-19T05:00:00Z", 7)]);
+        assert!(
+            shed.why.contains("waiting on the world"),
+            "a short streak is still an honest wait: {}",
+            shed.why
+        );
+        assert!(!shed.why.contains("ours to read"), "{}", shed.why);
+
+        // MIXED: both counts survive together.
+        let shed = read(&[
+            aged("fix/starved", "2026-09-15T11:00:00Z", 96),
+            aged("fix/patient", "2026-09-19T05:00:00Z", 7),
+        ]);
+        assert!(
+            shed.why.contains("1 told not yet") && shed.why.contains("the rest"),
+            "names the starved one and leaves the rest to the world: {}",
             shed.why
         );
     }

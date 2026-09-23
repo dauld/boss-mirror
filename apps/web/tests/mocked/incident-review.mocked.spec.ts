@@ -137,19 +137,37 @@ async function installIncidentReviewMocks(
 ///
 /// No budget of its own: `expect.poll` inherits the one
 /// playwright.mocked.config.ts states for the suite.
+///
+/// THE HEADING IS THE ANSWERED READ, NOT THE END OF THE WORK (backlog
+/// c90faeb1). `.sir-head` proves the Job read was answered — nothing
+/// else paints it — but a throw the answer schedules lands a macrotask
+/// LATER, and a poll that read the heading in between resolved green:
+/// idle that gap is microseconds, on a loaded gate it is not, and train
+/// 2026-09-23 07:01 was struck by it. So once the heading is there the
+/// guard queues one macrotask of its own in the page and waits for it.
+/// Timers of equal delay run in the order they were queued, and anything
+/// the answer queued was queued before the heading could be read, so by
+/// the time ours runs every such task has run, and each throw's
+/// `pageerror` has crossed the protocol ahead of our reply. That is an
+/// ORDER, not a duration — it holds at any load, and it adds no budget.
 async function findingsRendered(
   page: import('@playwright/test').Page,
   errs: readonly string[],
 ): Promise<void> {
+  const threw = () => {
+    // Thrown, not returned: a returned mismatch keeps polling and
+    // spends the whole budget before it says anything, and a plugin
+    // that has already thrown is never going to paint.
+    if (errs.length > 0) throw new Error(`plugin threw: ${errs.join(' | ')}`);
+  };
   await expect
     .poll(async () => {
-      // Thrown, not returned: a returned mismatch keeps polling and
-      // spends the whole budget before it says anything, and a plugin
-      // that has already thrown is never going to paint.
-      if (errs.length > 0) throw new Error(`plugin threw: ${errs.join(' | ')}`);
+      threw();
       return (await page.locator('.sir-head').count()) > 0;
     })
     .toBe(true);
+  await page.evaluate(() => new Promise<void>((done) => setTimeout(done, 0)));
+  threw();
 }
 
 test('the findings render as one document: job metadata + what each step found', async ({
@@ -230,6 +248,18 @@ test('a completed review is read-only — the record, not another form', async (
 // false green (backlog b1b7021c). Registers, paints the placeholder,
 // and throws from the callback that renders the document, so the throw
 // cannot land before the read this plugin waits on.
+//
+// AND LANDS BEHIND A BUSY RENDERER (backlog c90faeb1). The throw is one
+// macrotask after the paint, and that macrotask is the whole window a
+// loaded gate widened: on train 2026-09-23 07:01 (gate-run 138db986)
+// the guard's poll read `.sir-head` inside it and resolved, striking the
+// train's four cars, none of which touched this file. Idle, the window
+// is microseconds and the poll never lands in it, so the pin passed
+// every quiet run and failed only on a busy machine. Thirty 50 ms tasks
+// queued ahead of the throw are that load, stated: 1.5 s of renderer
+// work between paint and throw, longer than the poll's widest interval,
+// so the guard as it stood failed 5 of 5 here with the gate's own
+// "Resolved to value: undefined" — every run, not only the busy ones.
 const THROWS_WHEN_ITS_DATA_ARRIVES = `
 window.__boss_register_step_plugin('incident-review', function (container, props) {
   var root = document.createElement('div');
@@ -238,6 +268,9 @@ window.__boss_register_step_plugin('incident-review', function (container, props
   container.appendChild(root);
   fetch('/api/jobs/' + props.jobId).then(function () {
     root.innerHTML = '<div class="sir-head"><h3>Post-mortem findings</h3></div>';
+    for (var i = 0; i < 30; i++) {
+      setTimeout(function () { var t = Date.now(); while (Date.now() - t < 50) {} }, 0);
+    }
     setTimeout(function () { throw new Error('late plugin throw'); }, 0);
   });
 });

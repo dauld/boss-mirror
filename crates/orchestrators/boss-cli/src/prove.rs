@@ -911,6 +911,13 @@ pub(crate) fn unrunnable_why_unattended(
 /// `unrunnable` and `missing_tools` are the not-found channel's
 /// finding, from whichever door ran the prelude (46f67333). `expect` is
 /// `null` under `--exit-only`, as `proof_json` records it.
+///
+/// `prior` is the car's CURRENT `proof_attempt`, which this record
+/// replaces: a not-yet carries its streak forward from it
+/// (`boss_jobs::car::carried_not_yet_streak`, backlog adef5ddf), because
+/// the replace is the only moment the previous answer is still in hand.
+/// Anything else carries no streak — `null` and `0`, never an absent
+/// key, so the shape the yard reads is one shape.
 pub(crate) fn attempt_json(
     probe: &str,
     expect: Option<&str>,
@@ -918,8 +925,18 @@ pub(crate) fn attempt_json(
     host: &str,
     at: &str,
     why: &str,
+    prior: Option<&Value>,
 ) -> Value {
+    let not_yet = why.starts_with("NOT YET");
+    let (since, runs) = if not_yet {
+        let (s, n) = boss_jobs::car::carried_not_yet_streak(prior, probe, at);
+        (json!(s), n)
+    } else {
+        (Value::Null, 0)
+    };
     json!({
+        (boss_jobs::car::NOT_YET_SINCE): since,
+        (boss_jobs::car::NOT_YET_RUNS): runs,
         "at": at,
         "exit": o.exit,
         "stdout": clip(&o.stdout),
@@ -931,7 +948,7 @@ pub(crate) fn attempt_json(
         "unrunnable": !o.missing_tools.is_empty(),
         // The flag is the sentence's: a record whose `not_yet` and `why`
         // disagree cannot be written from here.
-        "not_yet": why.starts_with("NOT YET"),
+        "not_yet": not_yet,
         "missing_tools": o.missing_tools,
     })
 }
@@ -2339,7 +2356,8 @@ pub(crate) async fn run_unattended(car_id: &str, now: chrono::DateTime<chrono::U
         Verdict::NotProven(e) => e.to_string(),
         Verdict::Proven => unreachable!("handled above"),
     };
-    let attempt = attempt_json(&probe, Some(&expect), &o, &here, &at, &why);
+    let prior = car.pointer("/metadata/proof_attempt");
+    let attempt = attempt_json(&probe, Some(&expect), &o, &here, &at, &why, prior);
     crate::gate::api(
         &http,
         reqwest::Method::PATCH,
@@ -2709,7 +2727,8 @@ pub(crate) async fn run(
                 );
                 std::process::exit(UNRUNNABLE_EXIT);
             }
-            let attempt = attempt_json(&probe, expect.as_deref(), &o, &here, &at, &why);
+            let prior = car.pointer("/metadata/proof_attempt");
+            let attempt = attempt_json(&probe, expect.as_deref(), &o, &here, &at, &why, prior);
             crate::gate::api(
                 &http,
                 reqwest::Method::PATCH,
@@ -2742,7 +2761,8 @@ pub(crate) async fn run(
                 );
                 std::process::exit(NOT_YET_EXIT);
             }
-            let attempt = attempt_json(&probe, expect.as_deref(), &o, &here, &at, &why);
+            let prior = car.pointer("/metadata/proof_attempt");
+            let attempt = attempt_json(&probe, expect.as_deref(), &o, &here, &at, &why, prior);
             crate::gate::api(
                 &http,
                 reqwest::Method::PATCH,
@@ -4544,7 +4564,7 @@ ugrep: warning: complete\": No such file or directory\n";
             !why.contains("CANNOT BE READ") && !why.contains("NOT PROVEN"),
             "the two verdicts about the claim must not appear: {why}"
         );
-        let a = attempt_json(&probe, Some("pods:ok"), &o, "pod-7", "now", &why);
+        let a = attempt_json(&probe, Some("pods:ok"), &o, "pod-7", "now", &why, None);
         assert_eq!(a["unrunnable"], true);
         assert_eq!(a["missing_tools"], json!(["kubectl"]));
         assert_eq!(a["not_yet"], false);
@@ -5314,7 +5334,7 @@ ugrep: warning: complete\": No such file or directory\n";
             stderr: String::new(),
             missing_tools: Vec::new(),
         };
-        let a = attempt_json("true", Some("x:ok"), &o, "h", "now", "NOT YET: none");
+        let a = attempt_json("true", Some("x:ok"), &o, "h", "now", "NOT YET: none", None);
         let keys: std::collections::BTreeSet<&str> =
             a.as_object().unwrap().keys().map(String::as_str).collect();
         let want: std::collections::BTreeSet<&str> = [
@@ -5329,12 +5349,63 @@ ugrep: warning: complete\": No such file or directory\n";
             "unrunnable",
             "not_yet",
             "missing_tools",
+            boss_jobs::car::NOT_YET_SINCE,
+            boss_jobs::car::NOT_YET_RUNS,
         ]
         .into_iter()
         .collect();
         assert_eq!(keys, want);
         assert_eq!(a["not_yet"], true);
         assert_eq!(a["unrunnable"], false);
+    }
+
+    /// THE ATTEMPT CARRIES ITS NOT-YET STREAK (backlog adef5ddf). Both
+    /// doors write through here, so both hand the car's PRIOR attempt in
+    /// and the record says how long this probe has been answering not
+    /// yet — the one signal that tells a starved probe from a patient
+    /// one. A run that is not a not-yet carries no streak (null, zero),
+    /// so the shape stays one shape.
+    #[test]
+    fn a_not_yet_attempt_carries_the_streak_from_the_prior_one() {
+        let o = Outcome {
+            exit: 75,
+            stdout: "not yet: none\n".into(),
+            stderr: String::new(),
+            missing_tools: Vec::new(),
+        };
+        let prior = json!({
+            "at": "2026-09-23T06:00:00Z", "exit": 75, "not_yet": true, "probe": "true",
+            "not_yet_since": "2026-09-19T05:50:00Z", "not_yet_runs": 85,
+        });
+        let a = attempt_json(
+            "true",
+            Some("x:ok"),
+            &o,
+            "h",
+            "2026-09-23T07:00:00Z",
+            "NOT YET: none",
+            Some(&prior),
+        );
+        assert_eq!(a[boss_jobs::car::NOT_YET_SINCE], "2026-09-19T05:50:00Z");
+        assert_eq!(a[boss_jobs::car::NOT_YET_RUNS], 86);
+
+        let red = Outcome {
+            exit: 1,
+            stdout: String::new(),
+            stderr: "FAILED\n".into(),
+            missing_tools: Vec::new(),
+        };
+        let a = attempt_json(
+            "true",
+            Some("x:ok"),
+            &red,
+            "h",
+            "2026-09-23T07:00:00Z",
+            "FAILED",
+            Some(&prior),
+        );
+        assert_eq!(a[boss_jobs::car::NOT_YET_SINCE], Value::Null);
+        assert_eq!(a[boss_jobs::car::NOT_YET_RUNS], 0);
     }
 
     /// THE DID-NOT-RUN SENTENCE at the unattended door names the forge's

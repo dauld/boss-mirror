@@ -215,8 +215,10 @@ pub struct TrainStatus {
     pub id: String,
     pub title: String,
     pub phase: TrainPhase,
-    /// The title of the step the train currently sits at (the first
-    /// ready/active one), for the operator who wants the exact step.
+    /// The step the train currently sits at (the first ready/active
+    /// one), for the operator who wants the exact step — its title with
+    /// its status beside it ([`standing_at`]), because a perfect-tense
+    /// title alone reads as done (648a68a9).
     pub at_step: Option<String>,
     /// Why it is not moving, when it is not. Prominent by being its own
     /// field rather than buried in a step's metadata.
@@ -259,13 +261,31 @@ pub struct TrainStatus {
     pub eta: TrainEta,
 }
 
-/// The title of the first ready-or-active step — the exact place the
-/// train sits, matching `boss orient`'s `at_step`.
+/// The first ready-or-active step — the exact place the train sits —
+/// as [`standing_at`] spells it, the phrase `boss orient` prints too.
 fn at_step(steps: &[Step]) -> Option<String> {
-    steps
-        .iter()
-        .find(|s| matches!(s.status, StepStatus::Ready | StepStatus::Active))
-        .map(|s| s.title.clone())
+    steps.iter().find_map(|s| match s.status {
+        StepStatus::Ready => Some(standing_at(&s.title, "ready")),
+        StepStatus::Active => Some(standing_at(&s.title, "active")),
+        _ => None,
+    })
+}
+
+/// A step a packet is STANDING AT, spelled so its name cannot be read
+/// as the fact it names: the title, with the step's own status beside
+/// it. Step titles are written in the perfect tense by house convention
+/// — 169 of 328 across the 57 published Workflows end in `-ed`
+/// (measured 2026-09-22) — which reads true of a completed step and
+/// false of one the packet is waiting at. `boss orient` printed
+/// `at: In transit — cluster converged` while that step was READY
+/// (train 8b365d83), and the operator spent minutes hunting a second
+/// defect behind a fix that had worked; on 2026-09-23 the yard showed
+/// `DEPARTED — merged into main` for train 47391bfc while main had not
+/// moved, and it was read as done (648a68a9). The titles are right and
+/// stay; the fix is here, in the one phrase every renderer of "where it
+/// stands" shares — the yard status, the borders, `boss orient`.
+pub fn standing_at(title: &str, status: &str) -> String {
+    format!("{title} ({status}, not yet done)")
 }
 
 /// The phase a train is in: the furthest step reached. A train whose
@@ -2996,6 +3016,57 @@ mod tests {
             anchor_date: None,
             business_calendar: None,
         }
+    }
+
+    // ---- where it stands ----
+
+    /// Train 47391bfc, 2026-09-23 07:21Z: CI completed, `merged` READY,
+    /// main had not moved — and the place it stood read "DEPARTED —
+    /// merged into main", which the operator took as done (648a68a9).
+    /// The title stays; the step's own status rides beside it, so the
+    /// name cannot be read as the fact it names.
+    #[test]
+    fn a_step_the_train_stands_at_carries_its_status_beside_its_title() {
+        let steps = vec![
+            done("ci", "Yard inspection — CI verdict", "2026-09-23T07:20:56Z"),
+            step(
+                "merged",
+                "DEPARTED — merged into main",
+                StepStatus::Ready,
+                json!({}),
+            ),
+            step(
+                "deployed",
+                "In transit — deployed to the playground",
+                StepStatus::Pending,
+                json!({}),
+            ),
+        ];
+        assert_eq!(
+            at_step(&steps).as_deref(),
+            Some("DEPARTED — merged into main (ready, not yet done)")
+        );
+
+        let claimed = vec![step(
+            "converged",
+            "In transit — cluster converged",
+            StepStatus::Active,
+            json!({}),
+        )];
+        assert_eq!(
+            at_step(&claimed).as_deref(),
+            Some("In transit — cluster converged (active, not yet done)")
+        );
+    }
+
+    /// The one phrase every renderer of "where a packet stands" shares —
+    /// `boss orient` calls it on raw JSON, so it takes the status word.
+    #[test]
+    fn standing_at_names_the_status_word_it_was_handed() {
+        assert_eq!(
+            standing_at("Train arrived", "ready"),
+            "Train arrived (ready, not yet done)"
+        );
     }
 
     // ---- phase ----

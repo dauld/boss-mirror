@@ -48,6 +48,30 @@ fn at_step(v: &Value) -> String {
         .to_string()
 }
 
+/// One IN TRANSIT line: the train, and the step it stands at with that
+/// step's status beside the title. `at_step` alone printed
+/// `at: In transit — cluster converged` for a READY step and was read as
+/// done (648a68a9); the phrase is the server's (`yard::standing_at`),
+/// so this line and the yard cannot disagree. `at_step` itself stays the
+/// bare title — the shed and the residue sweep compare it to one.
+fn in_transit_line(t: &Value) -> String {
+    let title = t.get("title").and_then(Value::as_str).unwrap_or("?");
+    let at = t
+        .get("steps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find_map(|s| {
+            let status = s.get("status").and_then(Value::as_str)?;
+            matches!(status, "ready" | "active").then(|| {
+                let step = s.get("title").and_then(Value::as_str).unwrap_or("?");
+                boss_jobs::yard::standing_at(step, status)
+            })
+        })
+        .unwrap_or_else(|| "—".to_string());
+    format!("    {title}  at: {at}")
+}
+
 /// One GATING line for a running gate-run. A car's run is its branch. A
 /// TRAIN's run (`metadata.train_gate`, filed by the conductor for the
 /// train branch — design 128b5496) is the train being tested, not a car
@@ -412,9 +436,24 @@ pub(crate) fn shed_lines(cars: &[Value]) -> Vec<String> {
                 Shed::ProbePending { last: Some(why) } => {
                     format!("    {branch}: probe FAILING — {}", clipped(&why))
                 }
-                Shed::ProbeNotYet { said } => {
-                    format!("    {branch}: probe says NOT YET — {}", clipped(&said))
-                }
+                // A streak past the bound is named, not folded into the
+                // plain line: a probe that can never pass answers exit 75
+                // exactly like a patient one (adef5ddf).
+                Shed::ProbeNotYet { said } => match c
+                    .get("metadata")
+                    .and_then(boss_jobs::car::not_yet_streak)
+                    .filter(|s| s.hours >= boss_jobs::regions::NOT_YET_STARVED_HOURS)
+                {
+                    Some(s) => format!(
+                        "    {branch}: probe NOT YET for {}h straight ({} runs) — past {}h, \
+                         read the probe against the tree: it may never pass — {}",
+                        s.hours,
+                        s.runs,
+                        boss_jobs::regions::NOT_YET_STARVED_HOURS,
+                        clipped(&said)
+                    ),
+                    None => format!("    {branch}: probe says NOT YET — {}", clipped(&said)),
+                },
                 Shed::WaitingOn(ev) => format!("    {branch}: waiting on: {}", clipped(&ev)),
                 Shed::Unproven => format!(
                     "    {branch}: UNPROVEN — no probe, no event; nothing mechanical can settle it (boss prove --probe)"
@@ -946,11 +985,7 @@ pub async fn run(all: bool) -> Result<()> {
     )?;
     println!("\n  IN TRANSIT — {} train(s)", trains.len());
     for t in &trains {
-        println!(
-            "    {}  at: {}",
-            t.get("title").and_then(Value::as_str).unwrap_or("?"),
-            at_step(t)
-        );
+        println!("{}", in_transit_line(t));
     }
 
     // Gates running now.
@@ -1414,6 +1449,31 @@ pub async fn run(all: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// `IN TRANSIT` printed `at: In transit — cluster converged` while
+    /// that step was READY (train 8b365d83, 2026-09-22), and was read as
+    /// "the cluster has converged" mid-incident (648a68a9). The line
+    /// carries the step's status beside its title, in the server's own
+    /// words (`boss_jobs::yard::standing_at`), so the terminal and the
+    /// yard say the same thing.
+    #[test]
+    fn a_train_in_transit_names_the_status_of_the_step_it_stands_at() {
+        use serde_json::json;
+        let train = json!({
+            "title": "PR train 2026-09-23 07:01",
+            "steps": [
+                {"title": "Yard inspection — CI verdict", "status": "completed"},
+                {"title": "DEPARTED — merged into main", "status": "ready"},
+                {"title": "Train arrived", "status": "pending"},
+            ],
+        });
+        assert_eq!(
+            super::in_transit_line(&train),
+            "    PR train 2026-09-23 07:01  at: DEPARTED — merged into main (ready, not yet done)"
+        );
+        let nowhere = json!({"title": "PR train x", "steps": []});
+        assert_eq!(super::in_transit_line(&nowhere), "    PR train x  at: —");
+    }
+
     /// A TRAIN's gate-run (128b5496) in the GATING lane is the train being
     /// tested, not a car being gated. On 2026-09-14 `boss orient` listed
     /// `train/20260914-1641` and a car branch as two indistinguishable
@@ -1696,6 +1756,35 @@ mod tests {
             json!({ "proof_probe": "bash x.sh", "proof_attempt": { "exit": 75, "why": "later" } }),
         );
         assert!(matches!(shed_place(&bare), Shed::ProbeNotYet { .. }));
+    }
+
+    /// A NOT-YET THAT HAS LASTED DAYS IS NAMED AS SUCH (backlog adef5ddf):
+    /// the line carries the streak and says the probe is ours to read,
+    /// because exit 75 from a probe that can never pass reads exactly like
+    /// a patient one. A short streak keeps the plain line.
+    #[test]
+    fn a_not_yet_streak_past_the_bound_is_named_on_the_line() {
+        let streak = |since: &str, runs: u64| {
+            landed(
+                "fix/starved",
+                json!({ "proof_probe": "bash x.sh", "proof_attempt": {
+                    "at": "2026-09-23T07:00:00Z", "exit": 75, "not_yet": true,
+                    "probe": "bash x.sh", "why": "NOT YET: grep found 0",
+                    "not_yet_since": since, "not_yet_runs": runs,
+                } }),
+            )
+        };
+        let line = &shed_lines(&[streak("2026-09-19T05:50:00Z", 86)])[0];
+        assert!(
+            line.contains("NOT YET for 97h straight (86 runs)") && line.contains("read the probe"),
+            "{line}"
+        );
+        let line = &shed_lines(&[streak("2026-09-23T01:00:00Z", 7)])[0];
+        assert!(
+            line.contains("probe says NOT YET — NOT YET: grep"),
+            "{line}"
+        );
+        assert!(!line.contains("straight"), "{line}");
     }
 
     #[test]

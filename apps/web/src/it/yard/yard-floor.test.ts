@@ -1511,7 +1511,9 @@ describe("journeyStops — a packet's completed steps as a journey", () => {
     expect(journeyStops(job)).toEqual([
       { lamp: 'ok', what: 'Opened', when: null, note: null },
       { lamp: 'ok', what: 'Gate', when: '2026-09-07T22:10:00Z', note: 'green · b4f3815' },
-      { lamp: 'working', what: 'Open for review', when: null, note: null },
+      // The step it stands at names its status beside its title: a
+      // perfect-tense title alone reads as done (648a68a9).
+      { lamp: 'working', what: 'Open for review', when: null, note: 'ready, not yet done' },
     ]);
   });
 
