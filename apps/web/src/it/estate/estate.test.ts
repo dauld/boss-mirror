@@ -192,7 +192,7 @@ describe('the dev workspace door', () => {
     const steps = devDoorSteps();
     expect(steps.map((s) => s.command)).toEqual([
       'cloudflared --version',
-      'cloudflared access ssh-config --hostname dev.algedonic.dev >> ~/.ssh/config',
+      'cloudflared access ssh-config --hostname dev.algedonic.dev --short-lived-cert >> ~/.ssh/config',
       'ssh root@dev.algedonic.dev',
     ]);
     // A command pasted blind is a command nobody can judge.

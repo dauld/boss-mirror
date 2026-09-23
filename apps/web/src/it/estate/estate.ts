@@ -119,7 +119,7 @@ export function devDoorSteps(host: string = DEV_DOOR_HOST): readonly DoorStep[] 
     },
     {
       what: 'Teach ssh the route, once per machine',
-      command: `cloudflared access ssh-config --hostname ${host} >> ~/.ssh/config`,
+      command: `cloudflared access ssh-config --hostname ${host} --short-lived-cert >> ~/.ssh/config`,
       why: `it appends a ProxyCommand stanza for ${host}; ssh then reaches it like any other host.`,
     },
     {

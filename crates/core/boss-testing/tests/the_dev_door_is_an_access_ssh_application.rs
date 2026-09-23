@@ -199,3 +199,64 @@ fn the_boot_log_says_whether_sshd_came_up() {
         "the refusal carries sshd's own words, not a paraphrase"
     );
 }
+
+#[test]
+fn the_access_principal_may_log_in_as_root() {
+    // Cloudflare issues the short-lived certificate for the user's EMAIL
+    // PREFIX (david@algedonic.dev → principal `david`), and with no
+    // principals file sshd requires that principal to equal the login
+    // name — so `ssh root@dev.algedonic.dev`, what /it/estate prints,
+    // was refused by construction (incident 55d001b0). The mapping lists
+    // exactly the prefixes access.toml's policy lets through the edge:
+    // two spellings of one fact, pinned here (CLAUDE.md §9a). The file
+    // lives under /etc/ssh, not the PVC: StrictModes refuses a
+    // principals file below a group-writable directory, and the pod's
+    // fsGroup makes every PVC directory one.
+    let m = read("infra/cluster/manifests/boss-dev.yaml");
+    assert!(
+        m.contains("AuthorizedPrincipalsFile /etc/ssh/authorized_principals/%u"),
+        "sshd must map certificate principals to a login name"
+    );
+    let line = m
+        .lines()
+        .map(str::trim)
+        .find(|l| l.ends_with("> /etc/ssh/authorized_principals/root"))
+        .expect("the boot path must write root's principals file");
+    let mut written: Vec<&str> = line
+        .trim_start_matches("printf '%s\\n'")
+        .trim_end_matches("> /etc/ssh/authorized_principals/root")
+        .split_whitespace()
+        .collect();
+    written.sort_unstable();
+
+    let access = read("infra/cluster/dns/access.toml");
+    let app = access
+        .split("[[application]]")
+        .find(|a| a.contains(&format!("domain = \"{DOOR}\"")))
+        .expect("the door's Access application");
+    let emails = app
+        .lines()
+        .find(|l| l.trim_start().starts_with("include.emails"))
+        .expect("the door's allow policy names its emails");
+    let mut prefixes: Vec<&str> = emails
+        .split('"')
+        .filter(|s| s.contains('@'))
+        .filter_map(|e| e.split('@').next())
+        .collect();
+    prefixes.sort_unstable();
+    assert_eq!(
+        written, prefixes,
+        "root's principals (infra/cluster/manifests/boss-dev.yaml) must be the email prefixes infra/cluster/dns/access.toml admits to {DOOR}"
+    );
+}
+
+#[test]
+fn the_estate_page_asks_for_a_short_lived_certificate() {
+    // Without --short-lived-cert the stanza cloudflared writes carries
+    // no CertificateFile, and ssh offers no certificate at all.
+    let page = read("apps/web/src/it/estate/estate.ts");
+    assert!(
+        page.contains("cloudflared access ssh-config --hostname ${host} --short-lived-cert"),
+        "apps/web/src/it/estate/estate.ts must print the ssh-config command with --short-lived-cert"
+    );
+}

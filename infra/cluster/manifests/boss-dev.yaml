@@ -426,7 +426,22 @@ spec:
                     AuthorizedKeysFile /root/.ssh/authorized_keys
                     AcceptEnv LANG LC_*
                     Subsystem sftp /usr/lib/openssh/sftp-server
+                    AuthorizedPrincipalsFile /etc/ssh/authorized_principals/%u
                     SD
+                    # WHO a certificate may log in as. Access issues the session's
+                    # certificate for the email PREFIX (david@algedonic.dev ->
+                    # `david`), and without this map sshd requires that principal
+                    # to equal the login name, so `ssh root@dev.algedonic.dev`
+                    # was refused by construction (incident 55d001b0, measured
+                    # both ways against a throwaway CA in this pod). The names are
+                    # the prefixes infra/cluster/dns/access.toml admits, held equal
+                    # by the_dev_door_is_an_access_ssh_application.rs. On the
+                    # container's own /etc, not the PVC: StrictModes refuses a
+                    # principals file below a group-writable directory, and the
+                    # fsGroup makes every PVC directory one. Key logins ignore it.
+                    mkdir -p /etc/ssh/authorized_principals
+                    printf '%s\n' david > /etc/ssh/authorized_principals/root
+                    chmod 644 /etc/ssh/authorized_principals/root
                     # THE ACCESS SSH CA, and why the line is conditional.
                     # TrustedUserCAKeys is what makes the short-lived
                     # certificate Cloudflare Access issues for one
