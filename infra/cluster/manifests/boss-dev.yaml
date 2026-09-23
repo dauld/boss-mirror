@@ -152,6 +152,23 @@ subjects:
     name: dev-session
     namespace: boss-dev
 ---
+# WHO THE BUILD NODE EVICTS FIRST. Under disk pressure the kubelet ranks
+# pods by "usage exceeds request", then by priority. Gates run at the
+# default 0 and are the one workload a retry recovers; this pod holds
+# the operator's live session, two builders' shells and the warm
+# target/. Measured 2026-09-23: evicted six times in eight days, every
+# time for ephemeral-storage on w-1 while a gate built
+# (the_dev_pod_is_not_the_first_evicted.rs). Never preempts: this
+# orders eviction only, and must not bump a running gate at scheduling.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: boss-dev-session
+value: 1000
+globalDefault: false
+preemptionPolicy: Never
+description: "The interactive dev session outranks gate Jobs under node pressure; never preempts."
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -219,6 +236,7 @@ spec:
       # a hand-carried gate verb on another machine.
       serviceAccountName: dev-session
       automountServiceAccountToken: true
+      priorityClassName: boss-dev-session
       # PID 1 must reap. The dev container's entrypoint is `sleep`,
       # which never wait()s, so daemonized children became unkillable
       # zombies during the ssh door's first bring-up (2026-08-30).
@@ -230,6 +248,10 @@ spec:
         # The workspace volume is group-owned so a non-root build can
         # write to it, matching boss.yaml's posture for boss-auth.
         fsGroup: 1500
+        # Re-own the PVC only when its root is wrong. The default walks
+        # all 40Gi on every mount — the kubelet's own "taking longer than
+        # expected" warning on the 2026-09-23 restart.
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: dev
@@ -598,8 +620,17 @@ spec:
           # pod at 4 / 8Gi requested the node holds 16 / 32Gi of
           # requests, and the limits overcommit the way each gate's
           # (20 CPU / 32Gi) already does.
+          #
+          # EPHEMERAL STORAGE, because a request of none made this pod the
+          # kubelet's first eviction under disk pressure (see the
+          # boss-dev-session PriorityClass above). 100Gi is the cold
+          # `cargo test --all-features` target (~74G, measured above) plus
+          # this container's writable layer (~10G at the 2026-09-23
+          # eviction) and pgdata. A request, not a limit: exceeding it
+          # evicts nothing on its own; it only decides the order under
+          # pressure. Beside three gate slots at 90Gi each it fits w-1.
           resources:
-            requests: {cpu: "4", memory: 8Gi}
+            requests: {cpu: "4", memory: 8Gi, ephemeral-storage: 100Gi}
             limits: {cpu: "16", memory: 32Gi}
           volumeMounts:
             - {name: work, mountPath: /work}
