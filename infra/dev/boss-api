@@ -101,6 +101,11 @@
 # waited, with curl's own exit code. The CLI's twin is
 # `train::waiting_out_a_roll` (crates/orchestrators/boss-cli), the same
 # rule and the same 120s over reqwest's own connect classification.
+# The function itself lives in ../lib/curl-through-a-roll.sh since
+# backlog 834ddb7c (2026-09-23): the pre-flight lints that read a
+# registry needed the same wait, and a second copy is the defect
+# (CLAUDE.md §9a). A copy of this script without that file refuses
+# before curl, like one without its route table.
 set -euo pipefail
 
 METHOD=${1:-}; API_PATH=${2:-}; BODY=${3:-}
@@ -233,29 +238,20 @@ TOK=$(cat "${BOSS_MACHINE_TOKEN_FILE:-/etc/boss/machine-token}" 2>/dev/null || t
 
 # curl, re-sent only while the request never left (the header above
 # says which exits those are and why). Prints the answer; returns
-# curl's own code, so a caller sees exactly what it saw before.
-curl_through_a_roll() {
-  local started=$SECONDS attempt=1 pause=2 rc answer elapsed
-  while :; do
-    rc=0; answer=$(curl "$@") || rc=$?
-    case "$rc" in
-      6|7) ;;
-      *) printf '%s' "$answer"; return "$rc" ;;
-    esac
-    elapsed=$((SECONDS - started))
-    if [ "$elapsed" -ge "$WAIT_WINDOW" ]; then
-      echo "boss-api: $METHOD $API_PATH: the jobs API refused every connection for ${elapsed}s ($attempt attempts, curl exit $rc; waited out for up to ${WAIT_WINDOW}s in case it was a rollout) — nothing was sent, so nothing landed and relaunching is safe" >&2
-      return "$rc"
-    fi
-    [ "$pause" -le $((WAIT_WINDOW - elapsed)) ] || pause=$((WAIT_WINDOW - elapsed))
-    echo "boss-api: the jobs API is not answering (a rollout?) — retrying $METHOD $API_PATH in ${pause}s (${elapsed}s of ${WAIT_WINDOW}s, curl exit $rc)" >&2
-    sleep "$pause"
-    attempt=$((attempt + 1))
-    pause=$((pause * 2)); [ "$pause" -le 15 ] || pause=15
-  done
+# curl's own code, so a caller sees exactly what it saw before. The
+# ONE definition is in infra/lib, found from this file's real location
+# ($HERE is readlink -f'd above: the pod reaches this through a
+# symlink). Sourced here, after every refusal above, so each of those
+# still refuses in its own words whether or not the file is present.
+ROLL_LIB="$HERE/../lib/curl-through-a-roll.sh"
+[ -r "$ROLL_LIB" ] || {
+  echo "boss-api: refusing $METHOD $API_PATH: $ROLL_LIB is missing — a copy of this script without the tree's infra/lib cannot wait out a rollout, and sending without that wait would make a rollout minute a failed write again (backlog 034002b3)" >&2
+  exit 2
 }
+# shellcheck source=../lib/curl-through-a-roll.sh
+. "$ROLL_LIB"
 
-out=$(curl_through_a_roll "${args[@]}" "$BASE$API_PATH")
+out=$(curl_through_a_roll "$WAIT_WINDOW" boss-api 'the jobs API' "$METHOD $API_PATH" "${args[@]}" "$BASE$API_PATH")
 code=${out##*$'\n'}
 body=${out%"$code"}
 printf '%s' "$body"

@@ -291,9 +291,12 @@ infra/lint/conservation-invariants.sh
 
 CI configuration: [`.forgejo/workflows/ci.yml`](.forgejo/workflows/ci.yml),
 which runs on the internal forge and invokes the one gate definition,
-[`infra/gate.sh`](infra/gate.sh). The public GitHub mirror is a backup of
-source, not part of CI/CD: it carries only the CodeQL and Scorecard
-security scans. Every merged train converges the cluster on its own
+[`infra/gate.sh`](infra/gate.sh). The public GitHub mirror runs the same
+script, full mode, on every publish PR
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)), beside the
+CodeQL and Scorecard security scans — so its green check means the tree
+passed the gate, not only that static analysis found nothing. It gates
+nothing: trains merge on the forge. Every merged train converges the cluster on its own
 (the forge builds the image for the merge sha and rolls it;
 [`docs/runbooks/operator.md`](docs/runbooks/operator.md) §Deploy).
 

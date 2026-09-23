@@ -66,6 +66,8 @@ cd "$LINT_DIR/../.." || exit 1
 . "$LINT_DIR/lib/git-answer.sh" || exit 3
 . "$LINT_DIR/lib/trunk-ref.sh" || exit 3
 . "$LINT_DIR/lib/tiers.sh" || exit 3
+# The read waits out a rollout before it refuses (backlog 834ddb7c).
+. "$LINT_DIR/lib/sor-read.sh" || exit 3
 
 LINT=a-car-stays-under-the-edit-level
 BASE="${BOSS_JOBS_URL:-http://boss-jobs-internal.boss.svc.cluster.local:7900}"
@@ -87,7 +89,7 @@ command -v jq >/dev/null 2>&1 || skip "jq is not on this box"
 
 body=$(mktemp) || exit 1
 trap 'rm -f "$body"' EXIT
-code=$(curl -sS -m 10 -o "$body" -w '%{http_code}' "$URL" 2>/dev/null)
+code=$(lint_sor_read "$LINT" "the jobs API" "$URL" "$body")
 case "$code" in
     200) ;;
     404)

@@ -237,8 +237,22 @@ const BOOTSTRAP_ROLE: &str = "platform-admin";
 
 async fn create_employee<R: PeopleRepository + 'static>(
     State(state): State<Arc<PeopleApiState<R>>>,
+    CurrentUser(user): CurrentUser,
     Json(emp): Json<Employee>,
 ) -> Response {
+    // Hiring is Create on employee (backlog 69906ab9: after 8cdad84c
+    // gated the PUT, this route still took no caller). The seed writers
+    // sign as platform-admin, which the core default rules grant.
+    if let Err(refused) = crate::grants::require(
+        state.policy.as_ref(),
+        &user,
+        Action::Create,
+        Resource::employee(),
+    )
+    .await
+    {
+        return refused;
+    }
     if let Err(msg) = validate_email(emp.email.as_deref()) {
         return (StatusCode::BAD_REQUEST, msg).into_response();
     }
@@ -368,8 +382,20 @@ async fn update_employee<R: PeopleRepository + 'static>(
 
 async fn delete_employee<R: PeopleRepository + 'static>(
     State(state): State<Arc<PeopleApiState<R>>>,
+    CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
 ) -> Response {
+    // Deleting an employee is Delete on employee (backlog 69906ab9).
+    if let Err(refused) = crate::grants::require(
+        state.policy.as_ref(),
+        &user,
+        Action::Delete,
+        Resource::employee(),
+    )
+    .await
+    {
+        return refused;
+    }
     let stamp = crate::events::event_stamp(&state.publisher).await;
     match state
         .people
@@ -1011,5 +1037,73 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// CREATE AND DELETE ASK THE POLICY TOO (backlog 69906ab9). After
+    /// 8cdad84c gated the PUT, POST /api/people and DELETE
+    /// /api/people/{id} still took no caller at all. A read grant alone
+    /// is refused, the roster is untouched, and the seed writers'
+    /// platform-admin identity passes both on the default rules.
+    #[tokio::test]
+    async fn create_and_delete_need_their_own_grants() {
+        let people = paid_roster();
+        let read_only = || -> Arc<dyn PolicyClient> {
+            Arc::new(
+                boss_policy_client::FakePolicyClient::builder()
+                    .allow(
+                        "hr",
+                        Action::Read,
+                        Resource::employee(),
+                        boss_policy::Scope::All,
+                    )
+                    .build(),
+            )
+        };
+        let mut hire = people.employee_by_id("emp-002").await.unwrap().unwrap();
+        hire.id = "emp-new".into();
+        hire.email = Some("new@example.test".into());
+        boss_testing::TestRequest::post("/api/people")
+            .as_user("emp-hr", "hr")
+            .json(&serde_json::to_value(&hire).unwrap())
+            .send(&app_with_policy(people.clone(), Some(read_only())))
+            .await
+            .assert_status(StatusCode::FORBIDDEN);
+        assert!(people.employee_by_id("emp-new").await.unwrap().is_none());
+        boss_testing::TestRequest::delete("/api/people/emp-002")
+            .as_user("emp-hr", "hr")
+            .send(&app_with_policy(people.clone(), Some(read_only())))
+            .await
+            .assert_status(StatusCode::FORBIDDEN);
+        assert!(people.employee_by_id("emp-002").await.unwrap().is_some());
+
+        let defaults = || -> Arc<dyn PolicyClient> {
+            Arc::new(
+                boss_policy_client::defaults::default_rules()
+                    .into_iter()
+                    .fold(boss_policy_client::FakePolicyClient::builder(), |b, r| {
+                        b.allow(r.role, r.action, r.resource, r.scope)
+                    })
+                    .build(),
+            )
+        };
+        let created = boss_testing::TestRequest::post("/api/people")
+            .as_user("automation:tenant-seed", "platform-admin")
+            .json(&serde_json::to_value(&hire).unwrap())
+            .send(&app_with_policy(people.clone(), Some(defaults())))
+            .await;
+        assert_ne!(
+            created.status,
+            StatusCode::FORBIDDEN,
+            "platform-admin may create"
+        );
+        let removed = boss_testing::TestRequest::delete("/api/people/emp-002")
+            .as_user("automation:tenant-seed", "platform-admin")
+            .send(&app_with_policy(people.clone(), Some(defaults())))
+            .await;
+        assert_ne!(
+            removed.status,
+            StatusCode::FORBIDDEN,
+            "platform-admin may delete"
+        );
     }
 }

@@ -189,6 +189,9 @@ cd "$(dirname "$0")/../.." || exit 1
 . infra/lint/lib/scanned.sh || exit 3
 # shellcheck source=infra/lint/lib/git-answer.sh
 . infra/lint/lib/git-answer.sh || exit 3
+# The live read waits out a rollout before it refuses (backlog 834ddb7c).
+# shellcheck source=infra/lint/lib/sor-read.sh
+. infra/lint/lib/sor-read.sh || exit 3
 
 BUNDLE="infra/platform/workflows"
 TENANT_GLOB="examples/*/seeds/workflows.toml"
@@ -900,9 +903,14 @@ PY
     #    caller with somewhere to put the answer, and it must exit 75
     #    (EX_TEMPFAIL) rather than 0 when the registry cannot be read.
     #    A link-local port nothing listens on: refused in ~6ms, and no
-    #    DNS lookup, so the resolver flake cannot make this hang.
+    #    DNS lookup, so the resolver flake cannot make this hang. A
+    #    refused connect is waited out as a rollout since backlog
+    #    834ddb7c (lib/sor-read.sh), so this child — which runs on every
+    #    invocation, the gate's included — asks for no wait at all:
+    #    without the zero it would sit a full window on a port that is
+    #    refused by design.
     if [ -z "${BOSS_LINT_SELFTEST_CHILD:-}" ]; then
-        out=$(BOSS_LINT_SELFTEST_CHILD=1 BOSS_JOBS_URL="http://[::1]:9" bash "$0" --require-live 2>&1); rc=$?
+        out=$(BOSS_LINT_SELFTEST_CHILD=1 BOSS_SOR_WAIT_SECONDS=0 BOSS_JOBS_URL="http://[::1]:9" bash "$0" --require-live 2>&1); rc=$?
         [ "$rc" -eq 75 ] || { echo "self-test FAILED: --require-live against an unreachable registry exited $rc, expected 75: $out" >&2; rm -rf "$t"; return 1; }
         grep -qF "SKIPPED the live comparison" <<< "$out" \
             || { echo "self-test FAILED: the skip is not loud: $out" >&2; rm -rf "$t"; return 1; }
@@ -1123,7 +1131,7 @@ command -v python3 >/dev/null 2>&1 || skip "python3 is not on this box"
 
 body=$(mktemp) || exit 1
 trap 'rm -f "$body"' EXIT
-code=$(curl -sS -m 10 -o "$body" -w '%{http_code}' "$URL" 2>/dev/null)
+code=$(lint_sor_read "$NAME" "the jobs API" "$URL" "$body")
 # 000 is curl's "never got an answer" — no route, refused, timed out.
 [ "$code" = "200" ] || skip "$URL answered HTTP $code"
 

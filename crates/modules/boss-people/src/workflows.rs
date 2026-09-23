@@ -131,10 +131,23 @@ pub struct EmployeeChangeRecord {
 
 async fn update_status(
     State(state): State<WorkflowState>,
+    CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
     _headers: axum::http::HeaderMap,
     Json(body): Json<UpdateStatus>,
 ) -> Response {
+    // A status change writes the employee row and its change log: the
+    // Update grant the PUT of the row needs (backlog 69906ab9).
+    if let Err(refused) = crate::grants::require(
+        state.policy.as_ref(),
+        &user,
+        Action::Update,
+        Resource::employee(),
+    )
+    .await
+    {
+        return refused;
+    }
     // Read the canonical Employee — we need its full state to emit
     // the `EMPLOYEE_UPDATED` event with a complete row payload (the
     // rebuilder requires it for upsert).
@@ -260,9 +273,22 @@ async fn record_change(
 
 async fn start_onboarding(
     State(state): State<WorkflowState>,
+    CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
     _headers: axum::http::HeaderMap,
 ) -> Response {
+    // A status change writes the employee row and its change log: the
+    // Update grant the PUT of the row needs (backlog 69906ab9).
+    if let Err(refused) = crate::grants::require(
+        state.policy.as_ref(),
+        &user,
+        Action::Update,
+        Resource::employee(),
+    )
+    .await
+    {
+        return refused;
+    }
     update_employee_status(
         &state,
         &id,
@@ -275,9 +301,22 @@ async fn start_onboarding(
 
 async fn start_offboarding(
     State(state): State<WorkflowState>,
+    CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
     _headers: axum::http::HeaderMap,
 ) -> Response {
+    // A status change writes the employee row and its change log: the
+    // Update grant the PUT of the row needs (backlog 69906ab9).
+    if let Err(refused) = crate::grants::require(
+        state.policy.as_ref(),
+        &user,
+        Action::Update,
+        Resource::employee(),
+    )
+    .await
+    {
+        return refused;
+    }
     update_employee_status(
         &state,
         &id,
@@ -428,6 +467,37 @@ mod tests {
             .send(&app(Arc::new(FakePolicyClient::deny_all())))
             .await
             .assert_status(StatusCode::FORBIDDEN);
+    }
+
+    /// The status routes write the employee row AND its change log, and
+    /// took no caller at all after 8cdad84c gated the PUT (backlog
+    /// 69906ab9): each needs Update on employee, like the PUT it
+    /// mirrors. A read grant alone is refused before anything is read.
+    #[tokio::test]
+    async fn the_status_routes_need_employee_update_not_read() {
+        let read_only = || -> Arc<dyn PolicyClient> {
+            Arc::new(
+                FakePolicyClient::builder()
+                    .allow("hr", Action::Read, Resource::employee(), Scope::All)
+                    .build(),
+            )
+        };
+        TestRequest::put("/api/people/emp-002/status")
+            .as_user("emp-hr", "hr")
+            .json(&serde_json::json!({ "status": "on-leave" }))
+            .send(&app(read_only()))
+            .await
+            .assert_status(StatusCode::FORBIDDEN);
+        for path in [
+            "/api/people/emp-002/onboard",
+            "/api/people/emp-002/offboard",
+        ] {
+            TestRequest::post(path)
+                .as_user("emp-hr", "hr")
+                .send(&app(read_only()))
+                .await
+                .assert_status(StatusCode::FORBIDDEN);
+        }
     }
 
     #[tokio::test]

@@ -2,8 +2,10 @@
 #
 # This is THE CI workflow: the gate running on our own iron, so a change
 # is validated where it is built and deployed rather than by someone
-# else's infrastructure. The public GitHub mirror is a backup of source
-# and runs none of it (its ci.yml was deleted 2026-09-08, design 7b59af2c).
+# else's infrastructure. The public GitHub mirror gates nothing; since
+# backlog 2328c95e its own .github/workflows/ci.yml runs infra/gate.sh in
+# full on each publish PR, so the public green means the tree passed the
+# same one gate (its earlier ci.yml was deleted 2026-09-08, design 7b59af2c).
 #
 # The container image is ours, from our registry, and carries node as
 # well as the Rust toolchain: Forgejo runs actions/checkout as a

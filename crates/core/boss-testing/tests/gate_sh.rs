@@ -19,11 +19,11 @@
 //!   a trimmed roster is exactly the under-covering gate that let both
 //!   #226 failures through.
 //!
-//! There is ONE CI workflow now: `.forgejo/workflows/ci.yml`. The GitHub
-//! copy (`.github/workflows/ci.yml`) ran only on the public mirror —
-//! which is a backup of source, not part of CI/CD (design 7b59af2c,
-//! 2026-09-08) — and was deleted with it, so the pair it once formed
-//! with the forge file is gone rather than pinned.
+//! The GitHub workflow (`.github/workflows/ci.yml`) was deleted on
+//! 2026-09-08 (design 7b59af2c) and came back on backlog 2328c95e,
+//! because a public green that compiled nothing read as a green gate.
+//! It runs this script in full on the public mirror and gates nothing;
+//! its pins live in `the_mirror_runs_the_one_gate.rs`.
 //!
 //! Every test names the offending entry when it fails.
 

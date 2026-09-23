@@ -86,6 +86,9 @@ cd "$(dirname "$0")/../.." || exit 1
 . infra/lint/lib/scanned.sh || exit 3
 # shellcheck source=infra/lint/lib/git-answer.sh
 . infra/lint/lib/git-answer.sh || exit 3
+# The live read waits out a rollout before it refuses (backlog 834ddb7c).
+# shellcheck source=infra/lint/lib/sor-read.sh
+. infra/lint/lib/sor-read.sh || exit 3
 
 RULES_DIR="infra/dispatcher/rules"
 BASE="${BOSS_DISPATCHER_URL:-http://boss-dispatcher-internal.boss.svc.cluster.local:7950}"
@@ -126,7 +129,7 @@ command -v python3 >/dev/null 2>&1 || skip "python3 is not on this box"
 
 body=$(mktemp) || exit 1
 trap 'rm -f "$body"' EXIT
-code=$(curl -sS -m 10 -o "$body" -w '%{http_code}' "$URL" 2>/dev/null)
+code=$(lint_sor_read the-live-rules-are-the-authored-rules "the dispatcher" "$URL" "$body")
 # 000 is curl's "never got an answer" — no route, refused, timed out.
 [ "$code" = "200" ] || skip "$URL answered HTTP $code"
 

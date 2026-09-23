@@ -882,6 +882,7 @@ fn without_a_table_every_path_goes_to_the_base_as_before() {
     let script_text = std::fs::read_to_string(repo_root().join(SCRIPT)).expect("read boss-api");
     write_exec(&lone.join("boss-api"), &script_text);
     write_file(&lone.join("sor-url"), "http://lone.test:7900\n");
+    lay_roll_lib_beside(&lone);
     let r = Fixture::finish(
         f.command(&lone.join("boss-api")),
         &["GET", "/api/people/accounts"],
@@ -892,6 +893,71 @@ fn without_a_table_every_path_goes_to_the_base_as_before() {
         f.curl_argv().last().map(String::as_str),
         Some("http://lone.test:7900/api/people/accounts"),
         "absent both tables, the path is not routed"
+    );
+}
+
+/// The roll wait's one definition (backlog 834ddb7c), laid where a copy
+/// of the door at `dir/boss-api` looks for it: `dir/../lib/`, the tree's
+/// `infra/dev` → `infra/lib` shape.
+fn lay_roll_lib_beside(dir: &Path) {
+    const ROLL_LIB: &str = "infra/lib/curl-through-a-roll.sh";
+    let lib = dir.parent().expect("a parent").join("lib");
+    create_dir(&lib);
+    write_file(
+        &lib.join("curl-through-a-roll.sh"),
+        &std::fs::read_to_string(repo_root().join(ROLL_LIB)).expect("read the roll lib"),
+    );
+}
+
+/// NO LIB, NO REQUEST. The wait lives in infra/lib since backlog
+/// 834ddb7c, so a copy of the door without it cannot wait out a roll —
+/// and a door that sent anyway would make a rollout minute a failed
+/// write again, silently. It refuses before curl, naming the file, the
+/// way a copy without its route table does.
+#[test]
+fn a_copy_without_the_roll_lib_is_refused_before_curl() {
+    let f = Fixture::new("no-roll-lib");
+    let lone = f.root.join("lone");
+    create_dir(&lone);
+    let script_text = std::fs::read_to_string(repo_root().join(SCRIPT)).expect("read boss-api");
+    write_exec(&lone.join("boss-api"), &script_text);
+    write_file(&lone.join("sor-url"), "http://lone.test:7900\n");
+    let r = Fixture::finish(
+        f.command(&lone.join("boss-api")),
+        &["GET", "/api/jobs"],
+        &[("BOSS_ACTOR", "agent-x")],
+    );
+    assert_eq!(r.code, 2, "no lib, no request: {}", r.stderr);
+    assert!(f.curl_argv().is_empty(), "curl must not run");
+    assert!(
+        r.stderr.contains("curl-through-a-roll.sh"),
+        "the refusal names the file it could not read: {}",
+        r.stderr
+    );
+}
+
+/// THROUGH A SYMLINK the door finds the lib beside its REAL file, never
+/// beside the link — the pod reaches it as /work/tools/bin/boss-api, a
+/// symlink into the checkout, and /work/tools/lib does not exist.
+#[test]
+fn through_a_symlink_the_door_finds_the_lib_beside_its_real_file() {
+    let f = Fixture::new("roll-lib-symlink");
+    let link = f.root.join("tools-bin");
+    create_dir(&link);
+    std::os::unix::fs::symlink(repo_root().join(SCRIPT), link.join("boss-api"))
+        .expect("link the door");
+    let r = Fixture::finish(
+        f.command(&link.join("boss-api")),
+        &["GET", "/api/jobs"],
+        &[
+            ("BOSS_ACTOR", "agent-x"),
+            ("BOSS_JOBS_URL", "http://sor.test:7900"),
+        ],
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(
+        f.curl_argv().last().map(String::as_str),
+        Some("http://sor.test:7900/api/jobs")
     );
 }
 

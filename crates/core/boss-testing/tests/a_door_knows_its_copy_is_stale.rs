@@ -115,6 +115,15 @@ impl Pod {
             }
         }
         write_file(&dev.join("sor-url"), "http://sor.test:7900\n");
+        // boss-api's roll wait lives in infra/lib (backlog 834ddb7c),
+        // and the door refuses before curl without it.
+        let lib = checkout.join("infra/lib");
+        create_dir(&lib);
+        write_file(
+            &lib.join("curl-through-a-roll.sh"),
+            &std::fs::read_to_string(repo_root().join("infra/lib/curl-through-a-roll.sh"))
+                .expect("read the roll lib"),
+        );
         git(&checkout, &["init", "-q", "-b", "main"]);
         git(&checkout, &["add", "-A"]);
         git(&checkout, &["commit", "-qm", "doors"]);
@@ -463,6 +472,14 @@ fn a_copy_with_no_checkout_behind_it_runs_silently() {
             write_exec(&loose.join(f), &body);
         }
     }
+    // The roll wait, where the loose copy looks for it: ../lib.
+    let lib = pod.root.join("lib");
+    create_dir(&lib);
+    write_file(
+        &lib.join("curl-through-a-roll.sh"),
+        &std::fs::read_to_string(pod.checkout.join("infra/lib/curl-through-a-roll.sh"))
+            .expect("read the roll lib"),
+    );
     let out = Command::new(loose.join("boss-api"))
         .current_dir(&loose)
         .env(

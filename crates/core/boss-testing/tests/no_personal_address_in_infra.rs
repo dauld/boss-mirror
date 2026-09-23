@@ -105,16 +105,22 @@ fn text(out: &Output) -> String {
 }
 
 /// How many helpers `copy_lint_libs` carries into a tree — the .sh files
-/// under infra/lint/lib/, counted from the directory, never typed.
+/// in each of its directories (`LINT_LIB_DIRS`: infra/lint/lib/ and,
+/// since backlog 834ddb7c, infra/lib/), counted, never typed.
 fn lint_lib_count() -> usize {
-    std::fs::read_dir(repo_root().join("infra/lint/lib"))
-        .expect("infra/lint/lib")
-        .filter(|e| {
-            e.as_ref()
-                .ok()
-                .is_some_and(|e| e.path().extension().is_some_and(|x| x == "sh"))
+    boss_testing::LINT_LIB_DIRS
+        .iter()
+        .map(|dir| {
+            std::fs::read_dir(repo_root().join(dir))
+                .unwrap_or_else(|e| panic!("{dir}: {e}"))
+                .filter(|e| {
+                    e.as_ref()
+                        .ok()
+                        .is_some_and(|e| e.path().extension().is_some_and(|x| x == "sh"))
+                })
+                .count()
         })
-        .count()
+        .sum()
 }
 
 /// The pattern and the domain rule prove themselves on every invocation

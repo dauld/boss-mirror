@@ -76,6 +76,11 @@ pub fn dispatcher_rules_dir() -> PathBuf {
     repo_root().join("infra/dispatcher/rules")
 }
 
+/// The directories [`copy_lint_libs`] carries, every `.sh` in each —
+/// public so a test that counts what a fixture holds counts the same
+/// list rather than a copy of it.
+pub const LINT_LIB_DIRS: [&str; 2] = ["infra/lint/lib", "infra/lib"];
+
 /// Copy the shared lint library — every file under `infra/lint/lib/` —
 /// into a fixture tree at `<fixture>/infra/lint/lib/`, so a lint copied
 /// into that fixture finds what it sources the way it does in the repo.
@@ -88,22 +93,32 @@ pub fn dispatcher_rules_dir() -> PathBuf {
 /// verdict about the fixture. The directory is the definition
 /// (CLAUDE.md §9a), so a lib added tomorrow is carried without this
 /// function changing.
+///
+/// `infra/lib/` is carried too, since backlog 834ddb7c (2026-09-23):
+/// `lib/sor-read.sh` sources the roll wait's one definition,
+/// `infra/lib/curl-through-a-roll.sh`, which the door `infra/dev/boss-api`
+/// shares — so a lint lib now reaches one directory out, and a fixture
+/// carrying only `infra/lint/lib/` would refuse (exit 3) on the missing
+/// source. Same rule: the directory is the definition.
 pub fn copy_lint_libs(fixture: &Path) {
-    let src = repo_root().join("infra/lint/lib");
-    let dst = fixture.join("infra/lint/lib");
-    std::fs::create_dir_all(&dst).unwrap_or_else(|e| panic!("create {}: {e}", dst.display()));
-    let entries = std::fs::read_dir(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
-    let mut copied = 0;
-    for entry in entries {
-        let path = entry.expect("a lib entry").path();
-        if path.extension().is_some_and(|e| e == "sh") {
-            let to = dst.join(path.file_name().expect("a file name"));
-            std::fs::copy(&path, &to)
-                .unwrap_or_else(|e| panic!("copy {} -> {}: {e}", path.display(), to.display()));
-            copied += 1;
+    for rel in LINT_LIB_DIRS {
+        let src = repo_root().join(rel);
+        let dst = fixture.join(rel);
+        std::fs::create_dir_all(&dst).unwrap_or_else(|e| panic!("create {}: {e}", dst.display()));
+        let entries =
+            std::fs::read_dir(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
+        let mut copied = 0;
+        for entry in entries {
+            let path = entry.expect("a lib entry").path();
+            if path.extension().is_some_and(|e| e == "sh") {
+                let to = dst.join(path.file_name().expect("a file name"));
+                std::fs::copy(&path, &to)
+                    .unwrap_or_else(|e| panic!("copy {} -> {}: {e}", path.display(), to.display()));
+                copied += 1;
+            }
         }
+        assert!(copied > 0, "{} holds no .sh to copy", src.display());
     }
-    assert!(copied > 0, "{} holds no .sh to copy", src.display());
 }
 
 /// Copy `infra/gate.sh` into a fixture tree at `<fixture>/infra/`,

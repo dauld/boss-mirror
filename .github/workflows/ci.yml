@@ -1,0 +1,159 @@
+# CI — the public mirror runs THE gate: infra/gate.sh, full mode.
+#
+# WHY THIS FILE IS BACK (backlog 2328c95e; David's feedback 5565fe33,
+# "Github CI checks no longer running, stuck on yellow"). From
+# 2026-09-08 (design 7b59af2c) the mirror carried only CodeQL and
+# Scorecard. Both compile nothing — CodeQL runs build-mode: none — so a
+# green publish PR meant static analysis found nothing and said NOTHING
+# about whether the tree builds or its suites pass, while anyone reading
+# a public repository takes a green check to mean exactly that. Measured
+# 2026-09-22: PR 241 carried three check runs, all CodeQL, and no test
+# had ever run on the mirror since the deletion. The mirror is public,
+# so GitHub-hosted runner minutes are free; the only real cost was a
+# second definition of the checks to keep green, and there is none here.
+#
+# ONE DEFINITION (CLAUDE.md §9a). The checks live in infra/gate.sh — the
+# same script the cluster gate-runner runs for every car and every train
+# (infra/gate-runner/run.sh). This file is ENVIRONMENT only: toolchain,
+# a scratch Postgres, bun, a browser, disk. A `run:` line here that is a
+# check (cargo test, clippy, fmt, an infra/lint/ script, a bun suite) is
+# the pair reopening, and
+# crates/core/boss-testing/tests/the_mirror_runs_the_one_gate.rs refuses
+# it, refuses a subset mode (--quick, --lint, --auto, -p), and refuses an
+# action not pinned to a sha.
+#
+# NOTHING IS EXCLUDED. gate.sh has no skip-by-name, and the full mode is
+# what the cluster runs, so every check it names runs here. If one
+# cannot run on a GitHub runner, it reds BY NAME in the gate's own
+# `::group::gate: <name>` block and in .gate-receipt.json, printed at the
+# end of the job — a visible red to fix in the environment above, never
+# a check quietly left out.
+#
+# RUNS ON GITHUB, NOT THE FORGE. It reaches no estate address and no
+# forge registry: every image and action below is public. That is the
+# opposite of .forgejo/workflows/ci.yml's rule (check out from the forge,
+# never github.com), and correctly so — here github.com is local.
+name: CI
+
+on:
+  # push to main as well as the PR: the dependency cache below is saved
+  # on main and restored by the next publish PR, which is what keeps a
+  # daily PR from recompiling ~400 third-party crates from nothing.
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # A dropped crates.io download is weather, not a verdict on the tree.
+  CARGO_NET_RETRY: "10"
+
+jobs:
+  gate:
+    name: Gate (infra/gate.sh, full)
+    runs-on: ubuntu-latest
+    # A cold full gate on a 4-vCPU runner: the cluster's warm run is
+    # 3-10 minutes and the forge's cold one was ~13 on a Ryzen, so this
+    # allows for several times that and still ends a wedged run.
+    timeout-minutes: 180
+    env:
+      # The DB-backed suites reach Postgres exactly as the cluster
+      # gate's do (infra/gate-runner/gate-runner.yaml): an admin URL at
+      # a scratch server hosting no database named `boss`, so TestDb's
+      # production-server guard holds with no override.
+      BOSS_TEST_POSTGRES_ADMIN_URL: postgres://boss:boss@127.0.0.1:5432/postgres
+      # The gate-runner's own bound: parallel DB-backed tests exhaust a
+      # single Postgres's connections (infra/gate-runner/run.sh).
+      RUST_TEST_THREADS: "2"
+      # Debuginfo off. The workspace's test build otherwise fills the
+      # runner's disk partway through `test` (rustc-LLVM "No space left
+      # on device" — the mirror's previous workflow, 2026-08).
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: boss
+          POSTGRES_PASSWORD: boss
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      # fetch-depth: 0 because the gate's history lints
+      # (migrations-append-only, steptype-bundle-ratchet) need a trunk
+      # ref to tell history from the change, and refuse without one:
+      # "no trunk ref found (tried origin/main, ...)". A shallow checkout
+      # failed every mirror PR that way in 2026-08.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Free runner disk
+        # ~14 GB free by default; the workspace's build needs more.
+        # Inline rm rather than a third-party action, so every action
+        # stays sha-pinned.
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install the tools the gate invokes by name
+        # infra/forge/boss-ci/required-tools.txt is the list the gate's
+        # image carries; git, curl, jq, python3 and node are already on
+        # the runner image, psql and tmux may not be.
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q postgresql-client tmux
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Install the pinned Rust toolchain
+        # rust-toolchain.toml names the channel (patch digit included)
+        # and the rustfmt + clippy components the gate runs.
+        run: |
+          rustup toolchain install
+          cargo --version
+
+      - name: Cache cargo registry + dependency artifacts
+        # Third-party dependencies only; the workspace's own crates are
+        # pruned before saving, so our code always compiles from source.
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.1
+        with:
+          cache-on-failure: true
+
+      - name: Install web dependencies and the Playwright browser
+        # The cluster bakes chromium into its image at
+        # /opt/ms-playwright; a GitHub runner has none, and the gate's
+        # web-suite check runs the mocked Playwright specs. Installing
+        # the browser is environment, so it lives here and not in the
+        # gate. PUPPETEER_SKIP_DOWNLOAD for the gate's own reason: bun
+        # aborts the whole install on puppeteer's failed postinstall.
+        working-directory: apps/web
+        run: |
+          PUPPETEER_SKIP_DOWNLOAD=1 bun install --frozen-lockfile
+          bunx playwright install --with-deps chromium
+
+      - name: Gate
+        run: infra/gate.sh
+
+      - name: The gate's receipt
+        # The receipt names every check and its verdict. Printed on
+        # every outcome, because a red whose receipt died with the
+        # runner is a red someone has to re-derive.
+        if: always()
+        run: cat .gate-receipt.json || echo "no receipt — the gate stopped before it could write one"

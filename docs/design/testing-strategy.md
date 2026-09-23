@@ -235,8 +235,9 @@ answer "yes" stops the search:
 
 ## What CI actually runs today
 
-`.forgejo/workflows/ci.yml` (the forge; the GitHub mirror is a backup
-of source and runs no CI of ours):
+`.forgejo/workflows/ci.yml` (the forge; the GitHub mirror runs
+`infra/gate.sh` in full on each publish PR via `.github/workflows/ci.yml`,
+backlog 2328c95e, and gates nothing):
 
 ```yaml
 - Apply schema (infra/postgres/migrate.sh — the schema/ manifest as an ordered migration list)
