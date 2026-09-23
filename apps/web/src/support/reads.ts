@@ -23,6 +23,7 @@
 // 9a is about. Re-exported because this page and its test already
 // import them from here; the definition is one file, not seven.
 import type { ReadState } from '../data/readState';
+import { compareSortValues } from '@boss/web-kit/ui/sort';
 export { failedRead, okRead, type ReadState } from '../data/readState';
 
 /// What the Account Health tab renders. The tab's rows are built from
@@ -82,13 +83,17 @@ export function deviceCellMeaning(devices: ReadState): 'no-device' | 'unknown' {
 /// ORDERED, not merely unfiltered: accounts with open cases sort first,
 /// so the worklist reading the filter used to give is kept rather than
 /// traded away. Ties break by name so two reads of the same data look
-/// the same.
+/// the same. An unnamed account (the accounts domain is identity-first,
+/// so name is null until enriched) ties before the named ones, by
+/// web-kit's no-data-first convention rather than by throwing
+/// (backlog ae7d1ce4).
 export function orderedHealthRows<
-  T extends { openCount: number; account: { name: string } },
+  T extends { openCount: number; account: { name: string | null } },
 >(rows: ReadonlyArray<T>): T[] {
   return [...rows].sort(
     (a, b) =>
-      b.openCount - a.openCount || a.account.name.localeCompare(b.account.name),
+      b.openCount - a.openCount ||
+      compareSortValues(a.account.name, b.account.name),
   );
 }
 

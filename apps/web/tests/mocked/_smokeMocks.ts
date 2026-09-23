@@ -32,6 +32,34 @@ export const MODULES_ON: Readonly<Record<string, boolean>> = {
   parts: true, qa: true, shipping: true, support: true, warehouse: true, shop: true, sim: true,
 };
 
+/// The LIVE tenant's modules, as the gateway served them on 2026-09-19
+/// (`GET /api/tenant/manifest` → `"modules":{}`): nothing listed, so
+/// every gated surface is off. MODULES_ON above is shaped so a module
+/// gate cannot be seen at all — every gate answers "on" — which is how
+/// /ux/support stayed gated on 'shipping' and labelled "Shipments" with
+/// no mocked spec able to notice (backlog 5b2f3240, gap 10 of the
+/// /ux/support audit). A spec that pins a gate installs this shape
+/// through installTenantManifest, after installSmokeMocks.
+export const MODULES_LIVE: Readonly<Record<string, boolean>> = {};
+
+/// `GET /api/tenant/manifest` with the given modules — the one place a
+/// spec says which tenant it is rendering for. Registered routes win in
+/// reverse order, so calling this after installSmokeMocks replaces the
+/// all-on manifest the crawl needs.
+export async function installTenantManifest(
+  page: Page,
+  modules: Readonly<Record<string, boolean>>,
+): Promise<void> {
+  await page.route(/\/api\/tenant\/manifest$/, (r) =>
+    json(r, {
+      display_name: 'Algedonic Ales',
+      tenant_id: 'brewery',
+      modules,
+      labels: {},
+    }),
+  );
+}
+
 /// The platform's department Classes (01-registries.sql) as `/api/classes`
 /// rows — the EMPLOYEE DRAWER: the values an employee's `department`
 /// column may take, which the policy flyout's scope picker reads.
@@ -327,14 +355,7 @@ export async function installSmokeMocks(page: Page): Promise<void> {
   // something deterministic to read. A module is on only when listed
   // true (ce68f137), so the playground persona lists every module the
   // SPA gates — the crawl has to reach the pages behind them.
-  await page.route(/\/api\/tenant\/manifest$/, (r) =>
-    json(r, {
-      display_name: 'Algedonic Ales',
-      tenant_id: 'brewery',
-      modules: MODULES_ON,
-      labels: {},
-    }),
-  );
+  await installTenantManifest(page, MODULES_ON);
   await page.route(/\/api\/views(\?|$)/, (r) =>
     json(r, [
       {

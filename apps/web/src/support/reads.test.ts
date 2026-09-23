@@ -131,6 +131,19 @@ describe('Account Health shows accounts, not only accounts in trouble', () => {
     orderedHealthRows(input);
     expect(input.map((r) => r.account.name)).toEqual(['Quiet', 'Busy']);
   });
+
+  // Backlog ae7d1ce4. The page now types its accounts from the accounts
+  // domain, which is identity-first: name is null until enriched. The
+  // tie-break called name.localeCompare, so one unnamed account among
+  // equals threw and took the tab down with it.
+  test('an unnamed account breaks ties without throwing, before the named ones', () => {
+    const rows = orderedHealthRows([
+      { account: { name: 'Beta' }, openCount: 0 },
+      { account: { name: null }, openCount: 0 },
+      { account: { name: 'Alpha' }, openCount: 0 },
+    ]);
+    expect(rows.map((r) => r.account.name)).toEqual([null, 'Alpha', 'Beta']);
+  });
 });
 
 // Packet e0a40c81, gap 11 of the same audit. `daysOpen > 14` decided
