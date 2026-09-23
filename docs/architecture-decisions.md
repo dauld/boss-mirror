@@ -125,6 +125,30 @@ config (`infra/cybernetics/`) and its systemd unit left with it.
 `boss-observability`'s cross-VM view is superseded by a region of the
 IT world map and retires in a separate car under the same design.
 
+**An unattended cadence will start work; until it lands, the session is
+the only supply** (design `9e1de851`, David 2026-09-22; three questions
+accepted as proposed, eligibility widened). Measured over 5.5 days and
+132 trains: gate launches fell to zero for six hours every night, 07Z to
+12Z, and five of the six longest gaps between trains ended between
+13:55Z and 14:21Z — when the operator woke, not when a machine
+recovered. Of 61 dispatcher rules, four manage an agent run's lifecycle
+and none starts one; all 125 runs on record were filed by an operator
+session. A skipped car becomes a total stop only when it is the last one
+on the dock, which is the overnight condition, so the seven-hour stall of
+2026-09-22 was downstream of supply rather than a separate fault.
+Decided: a cadence rule dispatching ready steps (1) **up to a
+concurrency starting at three**, half the observed session peak, raised
+on a reading; (2) **until a per-night USD ceiling declared in the rule
+row**, where it stops and files one packet saying so — never a silent
+stop, which would look exactly like the failure it fixes; (3) **from any
+queue the actor has policy to work** (David: "Any queue that the actor
+has policy to work should be available to be worked overnight too");
+(4) **with the bound read from the agents registry and enforced server
+side**, never a second copy in the rule row (§9a). The claim door
+already judges `agents.max_concurrent_runs` (backlog `57c108c2`); the
+cadence itself is not built, which is why the paragraph above records
+the session as the CPU.
+
 *Algedonic* signals keep their Beer meaning throughout: rules firing
 on threshold events, routed past the normal reporting line because
 they are urgent.
@@ -222,6 +246,34 @@ account types, asset models, departments all land in the one
 right; the Composite primitive is heterogeneous and laws-checked
 via proptest at the trait boundary.
 
+**A person who writes to us is a contact, found by the address they
+wrote from** (design `5548d85f`, 2026-09-21; David answered two
+questions and delegated two). Measured: `accounts` has no email column,
+and `account_facts` is a projection that answers what happened to an
+account, never which account an address is — so `receive-a-sponsorship`'s
+rule "customer id or email already on an account: use that account"
+describes a lookup the schema cannot perform, and every sponsorship so
+far has landed on `acct-anonymous-sponsor`. A support inbox makes the
+gap load-bearing: an address that finds nobody makes every thread an
+orphan and the second email from a customer a stranger. Decided:
+(1) **contact first**, which neither offered option was — the PERSON is
+primary, handles attach to the contact (`(kind, value) -> contact_id`,
+unique on `(kind, value)`), a contact MAY point at an organisation when
+known rather than guessed, and `accounts` is untouched and becomes the
+organisation half; "contact" because it names the relationship, the word
+a CRM reader already knows (David: "contact works"); (2) **handles are
+additive and never reassigned by a protocol** — anyone can put any
+address in a From header, so letting inbound mail repoint a handle makes
+takeover a matter of sending an email; a wrong handle is corrected by a
+human act with a record; (3) the anonymous-counterparty rule is
+**dissolved, not answered** — mail always carries an address, so a real
+message gets a contact keyed on it; (4) **the tables land as their own
+car, then `receive-a-sponsorship`'s reconciliation is repointed as its
+own small car** right after, because a sponsor is a person who may
+belong to an organisation and that repoint re-models a live revenue
+path. Identification comes after triage, never at receipt, so spam
+provisions nothing. Not yet built.
+
 The system is laid out on a **three-axis information
 architecture**: *Knowledge Bases* (durable queryable state),
 *Surfaces* (operator UI), and *Work* (Jobs + Steps that change
@@ -300,6 +352,57 @@ gate is the release valve that bounds open WIP the way human
 stock-judgment does in a real brewery; finished-goods / COGS draw on the
 billing line items.
 
+**Support's `receive-a-message` is the first protocol of a department
+that is not IT** (design `bffc0aba`, David 2026-09-21, all four
+questions accepted as proposed; the first of the six first protocols in
+the order `3613f0af` set). Measured that day: 116 of 126 open
+backlog-items named no department, and about five were genuinely non-IT.
+The loop adds two ends to standing machinery — the sensor cadence, one
+packet per reading, `sensor_unreadable` filing an urgent deduped packet
+for a source that refuses — namely a mail source adapter idempotent by
+`Message-ID` and the protocol row. The mailbox is a dedicated Agent B
+account on Proton Mail Business, `support@algedonic.dev` routed to it
+with no forward to a human, and Proton has no plain IMAP, so inbound
+needs Proton Bridge. Decided: (1) **Bridge runs on boss-gcp**, installed
+by its converge with the keyring login a one-time human act — and before
+building, establish whether a logged-out Bridge can answer politely with
+an EMPTY mailbox; if it can, the adapter asserts reachability separately
+from message count, or a dead daemon reads as a quiet inbox; (2) **the
+body lives on the packet**, and the inbox message carries a subject and
+a pointer until replies land; (3) v1's terminal was **answered in BOSS**,
+superseded the same day by the send loop below; (4) **a spam terminal
+reached by a disposition at the first step**, and no automatic
+classifier on day one, because a wrong auto-close loses a real customer.
+Landed: a sensor may carry a `selector` naming one stream within its
+source, so two inboxes on one mailbox open two protocols
+(`20260921034443-a-sensor-selects-within-its-source.sql`). The adapter,
+the Bridge host and the protocol row are not built; the tenant's
+`support` module is on (design `1054c099`).
+
+**Agent B sends nothing without the founder's passkey on the words**
+(design `3a89774d`, David 2026-09-21: "I do not want any outbound email
+sent by this protocol, or more broadly Agent B, without my sign off by
+pressing a UI button on a gating step"). No new control is needed:
+`assurance_required = "presence"` on a `sign-off` is enforced with no
+bypass, and the stamp is re-checked against the step's CURRENT shape, so
+an edit after approving voids the approval. The protocol is `received`
+→ `triage` (real or spam) → `draft` (agent) → `approve` (sign-off,
+presence; the founder reads and edits HERE, so what he signs is what he
+ended with, and there is no revise loop) → `sent` (agent; apart from
+`approve` so a failed send never reads as a withheld approval) →
+`answered` | `spam`. Decided: (1) **the transport does not refuse a
+send on its own** — the requirement is scoped to this protocol and the
+ones Agent B will help run, the way the conductor runs the yard, so a
+code path that never enters a step is not closed by it, knowingly;
+(2) **presence on every outbound** for this protocol ("passkey entry is
+as fast as touching my fingerprint"); (3) **the agent drafts**, fetching
+from the record to support the draft rather than writing words alone;
+(4) **a failed send leaves `sent` open and loud**, the sensor's shape,
+and the approval stays valid because the words did not change — the
+packet must never reach `answered` when nothing left the building. Not
+yet built; the send needs an SMTP submission transport behind
+`MailTransport`, beside the log and HTTP-API ones.
+
 **Workflows bootstrap through Jobs.** The system-owned
 `workflow-design` kind authors new Workflows inside a Job (draft
 edits live in the authoring Job; the terminal `workflow-publish`
@@ -371,6 +474,35 @@ graph and are deliberately out of scope. It generalizes into a
 **header registry** carrying name, value shape, edge-ness
 (resolution + `on_missing`), and which protocol reads the header;
 `authority_role`'s triple duty gets named and split as it lands.
+
+**A relationship between packets is a declared fact, not a trigger's
+precondition** (design `c0d2787a`, David 2026-09-21, all five questions
+accepted as proposed). Measured that afternoon: six packets filed in one
+session recorded how they related four ways — `prerequisite_for`,
+`prerequisite`, `prerequisite_of`, `related` — none declared in
+`job_edges`, so none resolved, rendered in a Links panel, was ref-checked
+or could be queried; meanwhile the one declared spelling, `answers`, was
+REFUSED by `boss design --answers` because its target was a build
+disposition with no `design-review` to complete. The system permitted the
+weak spelling of the fact and forbade the strong one; the verb's guard was
+doing model work. Decided: (1) **a small typed set of relation edges**,
+declared like the others and grown on evidence, because the four
+spellings meant different things; (2) **a decision edge records and says
+what it causes** — "completes nothing" is printed, never a refusal,
+since declining a true fact loses more than a side effect that does not
+fire; (3) **stored once on the source, resolved both ways by readers** —
+a reverse copy is §9a drift; (4) **a job id in an undeclared metadata
+field is counted**, a warning first, as the measure of whether the habit
+changed; (5) **declarations stay in migrations**, because an edge changes
+what the write path refuses, which is schema. Landed: three
+behaviourless `'*'` relations — `occasioned_by`, `duplicate_of`,
+`supersedes` (`20260921162511-a-packet-relation-is-declared.sql`),
+`on_missing = abort`; the proposed prerequisite relation is deliberately
+absent, because `waiting_on` already is one and the dispatcher wakes its
+waiter when the blocker closes — two of the four freeform spellings meant
+exactly that, and would never have woken anyone. `boss design` records
+the edge and prints what it will not cause, and `boss census` reports
+undeclared job-id fields without raising.
 
 **Stations are the network's nodes, and everything about one is
 registry data** (living reference: `docs/design/stations.md`). A
@@ -514,6 +646,30 @@ until it lands, a decision that must reach a person is assigned to
 them by id, which is the one selector every surface honours today
 (2026-09-15: six operator decisions assigned that way, each with the
 ask written on the step as `context_md`).
+
+**The founder's watch list is his own assigned queue, aged, on the
+surface he already reads** (design `5877860d`, David 2026-09-21, all
+four questions accepted as proposed; built as backlog `3bc896be`).
+Measured: David routed a drive purchase (`b2d5b546`) to design review
+because `/it/design` was the one surface that showed what was waiting
+on HIM; it sat there with no `design_id`, at a step nothing could
+complete, while the work it described happened and was recorded on it —
+visible and inert, which looks handled. Decided: (1) **a per-actor
+queue** — what `boss orient`'s MY WORK already is for an agent — rather
+than a `watched_by` flag (one more thing to remember at the worst
+moment) or a derived "needs him" list (the receiving queue under another
+name, and the right SECOND step once measured); (2) **age is not
+optional**: every row carries how long it has waited, oldest first, and
+crossing a declared threshold changes how the row reads, because an
+accurate signal that never changes stops being read (learning
+`84f8f9b9`: the garage read TROUBLED identically for nine hours);
+(3) **no new page** — it renders where he already looks; (4) **assigned
+steps first, measured second** — what he routes to design without a
+design is the evidence for any wider category. Landed on My Day (`/`):
+"Yours to decide" orders actionable verdicts oldest `opened_on` first
+and bands each row by the receiving yard's own age thresholds (past 3
+days aging, past 14 stale) — one definition of old, not a second copy.
+The derived list waits on that measurement.
 
 ## Step types are property bundles; the alphabet is the mechanisms
 
@@ -1104,6 +1260,87 @@ unreported run answer `None`; a measured split always wins; (3) **the
 record an assurance nobody has, so the series starts where the pricing
 does.
 
+**A destructive change is approved by the founder's passkey over a
+rendered plan and executed by the machine** (design `17835005`, David
+2026-09-21, all five questions accepted as proposed). The occasion was
+commissioning the forge's new disk: a second NVMe renumbered the devices,
+and the drive that looked new by number was carrying the system —
+approving "format nvme0n1" would have approved destroying it. So **the
+guard matters more than the approval**: bounded verb, machine-checked
+preconditions, plan, passkey-bound approval, recorded execution, the
+passkey last of the five. Decided: (1) **the signature binds a rendered
+plan** — the target resolved by-id, preconditions evaluated live on the
+host — never a verb call; (2) **a runner never trusts an approved
+field**: the system of record issues a short-lived single-use
+capability, host-side verification of the enrolled key being later
+hardening, and the weakness stated plainly — this trusts the SoR;
+(3) **eligible is a declared verb whose dangerous outcome machine-checked
+preconditions exclude**, however destructive; a verb that needs someone
+to eyeball which thing is meant is not eligible behind any approval —
+the line moves from who acts to who decides, and stays sharp; (4) **an
+approval is single-use, minutes long, consumed when the runner begins
+and voided by drift**; (5) `commission-a-disk` is the first verb.
+Landed: read-only planners `plan-a-disk-commission` and
+`plan-a-tenant-merge`, which evaluate exactly the write path's
+preconditions and refuse (exit 78) what cannot run; the mutating
+`commission-a-disk` and `merge-tenant-main`, each declaring
+`requires_approval` and re-checking immediately before writing; and
+ops-request's `approve` step, the first presence-assured step in the
+system — the plan rides in that step's metadata, so the WebAuthn
+assertion over its shape hash signs the plan's bytes with no second hash
+to keep in agreement, and an edit after the ceremony voids the stamp.
+The capability a runner would verify is not built, so the ops-runner
+refuses every `requires_approval` verb: the gate exists before the
+power.
+
+**Presence authorises a break-glass enrolment, and the bootstrap token
+retires** (design `03451237`, David 2026-09-22, all four questions
+accepted as proposed). Independence is a property of the ASSERT path —
+hardware key plus PIN opens the door whatever else is down — while
+enrolment is an administrative act done while things work: the founder's
+software passkey may AUTHORISE administering the emergency credential and
+may never BE it, and the refusal of synced and unattested authenticators
+stays exactly as strict. Today `enroll_gate` admits a break-glass session
+or the bootstrap token while nothing is enrolled, and that
+zero-credentials condition, which exists only to bound a shared secret,
+forces a repair (two keys bound to a retired relying-party id,
+`1c4c100a`) to empty the store first and open a window with no emergency
+door at all. Decided: (1) **one authorisation packet per key**, its step
+naming label, relying-party id and deployment, stamped with
+`assurance_required = "presence"`, the gateway re-computing the shape
+hash against the step's current content before it enrols — the
+mechanism `17835005` settled, pointed at a second subject; (2) **who may
+authorise is a named list of employee ids on the gateway**, starting
+with David, not a role — a role is registry data, and would make
+enrolment depend on whoever can write a policy row; (3) **single-use by
+record**: the gateway writes the credential id and instant onto the step
+and refuses a step already carrying one, naming it; (4) **the token
+retires**, and with it the zero-credentials window. Not yet built.
+
+**One bootstrap, at the identity layer** (design `af6dfcdb`, David
+2026-09-22: "a 1-time password for the admin's initial passkey
+enrollment and then real security takes over from there"; all four
+questions accepted as proposed). Retiring the break-glass token left a
+fresh instance no way in; the answer moves the bootstrap down, from an
+emergency credential to an identity, so the system has exactly one.
+Measured: `infra/oss-quickstart/init.sh` sets the bootstrap admin's
+password from `BOSS_BOOTSTRAP_ADMIN_PASSWORD`, defaulting to the literal
+`change-me`, prints it and asks for a rotation nothing forces or
+notices — a standing default credential on a public quickstart.
+Decided: (1) **the window closes when the admin holds a passkey**, not
+by a spent flag — no state to write, nothing left armed by a crash, and a
+reader checks it with a question whose answer is obvious; (2) **the
+password is generated and printed once**, the variable kept as an
+override for scripted installs and the default removed; (3) **once the
+passkey is enrolled, the bootstrap admin's local-auth row is removed** —
+`credentials.toml` stays for deployments that never enrol a passkey —
+with the counter recorded: an adopter whose only passkey dies is locked
+out, which may argue for keeping the row until a second factor exists;
+(4) **a fresh instance reaches break-glass enrolment only through the
+admin passkey**, so a shared secret never authorises an emergency
+credential, at the cost of a window where that passkey is the only door.
+Not yet built: `init.sh` still defaults to `change-me`.
+
 ## Calendar
 
 Reservations store **UTC**; `strength` defaults `hard` for
@@ -1491,6 +1728,30 @@ the stamp and the export verb follow. The rule is stated for tenants in
 `docs/tenant-contract.md` ("The instance is the truth; `--take`
 overwrites by decision").
 
+**A module is on only when its tenant lists it `true`, and an instance
+says how many at boot** (design `1054c099`, David 2026-09-22). Measured:
+the company's own gateway answered `"modules":{}`, and under the contract
+the brewery's `tenant.toml` states (a missing key is off, the same as
+`false`) all ten module-gated surfaces had been off since the
+declaration existed. It went unseen while the nav catalog and the route
+switch disagreed about which module gated which route, and surfaced when
+car `f9b43965` made them one fact: a missing declaration is not an
+error, it is a confident empty answer. The declaration lives in the
+tenant repo that `infra/cluster/instances.toml` names, so which modules
+the company runs is a business statement, not a car. Decided: Algedonic
+runs `finance`, `exec` and `support` (support "as that is our email
+inbound for now"); `calendar` only once dated work is modelled as Jobs
+with a `release_date`, since an empty surface is worse than a hidden
+one; the six physical-operations modules are WRITTEN `false` with the
+reason rather than left missing; prod's absent `edit_level` is
+confirmed intended. The platform half: **an instance states its module
+count at boot** — a tenant running only jobs, people and messages is
+legitimate, so a refusal would be wrong, but silence let ten surfaces go
+missing. Landed: the services launcher and the gateway each print one
+line (`modules on: <n> of <m> declared`, naming both sides), and the live
+manifest reads exec, finance and support on and every other declared
+module off.
+
 ## Deployment, the forge, and the cluster
 
 **Deployment is modeled on how networks patch** (living reference:
@@ -1754,6 +2015,29 @@ held for a David-timed restart) and 4-wide niced cargo for `agent-*`
 worktrees (`infra/dev/wt-cargo`), which took the throttling from
 2,177 periods to ~350 over the next ten hours.
 
+**Upgrading Claude Code is a bounded ops verb that David or the agent
+may run** (design `773236fc`, David 2026-09-22, all three questions
+accepted as proposed). Sometimes a new model is blocked on the upgrade,
+so it is a precondition for working rather than housekeeping. Measured:
+`/work/home/.local/bin/claude` is a symlink into self-contained binaries
+under `versions/` on the persistent `/work` PVC — an upgrade is one
+symlink flip, rollback is pointing it at a NAMED version already on disk
+with no network, a running session keeps the binary it exec'd, and a
+pod roll loses nothing. Decided: a verb `upgrade-claude-code` under
+`infra/ops/verbs/` that resolves the target to a concrete version and
+records it (never "latest", which names nothing), records the version it
+leaves as the rollback target, defers while a `gate-run` is launching,
+proves itself by `claude --version` or re-points to the recorded version
+and reports failed, and prunes; (1) **the agent files and runs it** —
+bounded, offline-reversible and unable to touch work in flight, so
+gating it on David gates a model on his being at his desk; he keeps the
+UI entry; (2) **the target is per request**, recorded on the packet,
+never pinned in the tree, which would make every upgrade a car and a
+converge; (3) **three versions are kept**. Upgrading at pod start is
+rejected: it makes the pipeline's tool whatever the registry served at
+boot, with no receipt and no named rollback. Not yet built; the dev pod's
+manifest only installs the tool when it is absent.
+
 **Cluster management runs on an internal host; the workstation is a
 terminal** (design `1bc4b4ed`, David 2026-09-12: "I would rather one of
 the internalized systems be where commands run"). Measured: every
@@ -1810,6 +2094,30 @@ boss-gcp), since a talosconfig has no scoped form and a full one on the
 public edge is the unbounded grant the scoping exists to avoid — so
 the converge reports the truth about that host rather than a
 permanently red absence. The delivery verb is not yet built.
+
+**Agent B's mailbox: BOSS holds the operational pair, the founder holds
+the account** (design `0ec5e1d2`, David 2026-09-21, all three questions
+accepted as proposed). The keyvault already exists — the credentials
+registry holds knowledge and never values, values live in k8s Secrets
+read only to send them, the broker mints, verifies by effect and
+revokes — so the question was what goes in it. Agent B has four secrets
+and they are not one risk: the Proton account password (the whole
+mailbox, including changing its recovery address), the MFA seed, the
+Bridge IMAP password (one Bridge install, localhost only) and the SMTP
+submission token (send as Agent B, nothing more). Decided: (1) **BOSS
+holds the IMAP password and the submission token; David holds the
+account password and the MFA seed**, and neither of his ever enters the
+registry, the tree or a transcript — an agent holding the account
+password can take the mailbox, which no protocol step needs; the same
+scoped-not-root split as the break-glass kubeconfig above; (2) **both
+BOSS-held secrets are registry-declared and broker-rotated**, the shape
+of `stripe-restricted-read`, never hand-placed; (3) **MFA goes on now**,
+its cost accepted knowingly: Bridge keeps its session in the host
+keyring, so a session that dies at 03:00 stops the mail sensor —
+`sensor_unreadable` makes that loud, and recovery needs David. Not yet
+built: the credentials registry holds no Agent B row. Whether the
+founder-held pair belongs on the one-stick recovery kit (`c1bb822e`) is
+that kit's question.
 
 **The knobs outside the tree become declared settings** (design
 `16115a17`, David 2026-09-12; all four questions accepted as proposed).
