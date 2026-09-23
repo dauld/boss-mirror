@@ -425,7 +425,12 @@ async fn check_step_plugins_mount() -> Check {
     };
     let (plugins, workflows) = tokio::join!(
         get("/api/jobs/step-plugins".into()),
-        get("/api/workflows?limit=500".into())
+        // No `limit`: the door takes none (`ListKindsQuery` is
+        // `category` only) and answers every active workflow, so the
+        // `limit=500` this read carried was a cap it never had. The
+        // comparison below refuses a short page if one ever comes
+        // (backlog 6cf47547).
+        get("/api/workflows".into())
     );
     let (Some(plugins), Some(workflows)) = (plugins, workflows) else {
         return Check {
@@ -476,7 +481,7 @@ pub(crate) fn orphaned_plugin_kinds(
 ) -> anyhow::Result<Vec<String>> {
     use anyhow::Context as _;
     let rows = |v: &serde_json::Value, what: &str| {
-        crate::train::rows(Some(v.clone())).with_context(|| format!("the {what} registry"))
+        crate::train::every_row(Some(v.clone())).with_context(|| format!("the {what} registry"))
     };
     let active = |v: &serde_json::Value| v.get("status").and_then(|s| s.as_str()) == Some("active");
     let used: std::collections::BTreeSet<String> = rows(workflows, "workflows")?
@@ -705,5 +710,20 @@ mod tests {
         let why = orphaned_plugin_kinds(&json!({}), &json!([]))
             .expect_err("nor is a body with no rows zero plugins");
         assert!(format!("{why:#}").contains("step-plugins"), "{why:#}");
+    }
+
+    /// A PAGE OF WORKFLOWS IS NOT THE REGISTRY (backlog 6cf47547). A
+    /// short page reads as fewer workflows, so every plugin mounted only
+    /// by an unread one is named orphaned — the false alarm that gets a
+    /// check muted. A body whose `total` counts more rows than it
+    /// carries refuses, naming the registry, rather than judging a page.
+    #[test]
+    fn a_short_page_of_workflows_refuses_rather_than_orphaning_the_rest() {
+        let plugins = json!([{"kind": "checklist", "status": "active"}]);
+        let page = json!({"data": [{"status": "active", "steps": []}], "total": 2});
+        let why = orphaned_plugin_kinds(&plugins, &page)
+            .expect_err("one workflow of two is a page, not the registry");
+        let why = format!("{why:#}");
+        assert!(why.contains("workflows") && why.contains("1 of 2"), "{why}");
     }
 }

@@ -1114,6 +1114,10 @@ pub(crate) fn render(
     job: Option<&Value>,
     profile: &str,
     active: Option<&Value>,
+    // The dispatching session's own commit trailer, when it supplied
+    // one (`documents::TRAILER_ENV`, backlog 89d1572c) — read at the
+    // verb's edge, so this renderer stays a function of its arguments.
+    trailer: Option<&str>,
 ) -> Result<String> {
     let invs = invariants(repo)?;
     let lane = crate::documents::lane(repo, profile)?;
@@ -1134,7 +1138,7 @@ pub(crate) fn render(
     }
     out.push_str(&invariant_section(&invs, &lane));
     out.push_str(&format!("\n{HOW_TO_USE}\n\n"));
-    out.push_str(&crate::documents::section(repo, profile, &invs)?);
+    out.push_str(&crate::documents::section(repo, profile, &invs, trailer)?);
     Ok(out)
 }
 
@@ -1174,7 +1178,13 @@ pub async fn run(packet_ref: Option<String>, profile_override: Option<String>) -
     let profile = profile_override.unwrap_or_else(|| profile_for(job.as_ref(), active.as_ref()));
     print!(
         "{}",
-        render(&repo, job.as_ref(), &profile, active.as_ref())?
+        render(
+            &repo,
+            job.as_ref(),
+            &profile,
+            active.as_ref(),
+            crate::documents::supplied_trailer().as_deref(),
+        )?
     );
     Ok(())
 }
@@ -1766,7 +1776,7 @@ mod tests {
         assert_eq!(profile_for(Some(&undeclared), None), "builder");
         assert_eq!(profile_for(None, None), "builder");
 
-        let out = render(&repo(), Some(&undeclared), "builder", None).expect("renders");
+        let out = render(&repo(), Some(&undeclared), "builder", None, None).expect("renders");
         let packet = out.find("== THE PACKET").expect("the packet half");
         let invariants = out.find("== THE INVARIANTS").expect("the invariant half");
         let rules = out.find("== THE RULES").expect("the rules half");
@@ -1777,7 +1787,7 @@ mod tests {
         assert!(out.contains("# Builder rules"));
         assert!(out.contains(HOW_TO_USE));
         // No packet: invariants and rules alone.
-        let alone = render(&repo(), None, "builder", None).expect("renders");
+        let alone = render(&repo(), None, "builder", None, None).expect("renders");
         assert!(!alone.contains("== THE PACKET"));
         assert!(alone.contains("== THE RULES"));
     }
@@ -1911,7 +1921,7 @@ mod tests {
             }],
         });
         assert_eq!(step_section(&build), None);
-        let rendered = render(&repo(), Some(&build), "builder", None).expect("renders");
+        let rendered = render(&repo(), Some(&build), "builder", None, None).expect("renders");
         assert!(!rendered.contains("== THE STEP"), "{rendered}");
     }
 
@@ -1947,8 +1957,8 @@ mod tests {
     #[test]
     fn a_lane_is_briefed_with_its_own_invariants_and_none_of_the_others() {
         let job = a_step_with_a_specification();
-        let analyst = render(&repo(), Some(&job), "analyst", None).expect("renders");
-        let builder = render(&repo(), Some(&job), "builder", None).expect("renders");
+        let analyst = render(&repo(), Some(&job), "analyst", None, None).expect("renders");
+        let builder = render(&repo(), Some(&job), "builder", None, None).expect("renders");
 
         // The car lane's invariants are absent from the step lane...
         for car_only in [
@@ -2138,7 +2148,7 @@ mod tests {
     fn the_brief_dates_the_specification_it_renders() {
         let job = pinned_at_v2();
         let row = active_row(3, "Read the PAGE, then COMPLETE it.");
-        let out = render(&repo(), Some(&job), "analyst", Some(&row)).expect("renders");
+        let out = render(&repo(), Some(&job), "analyst", Some(&row), None).expect("renders");
         let packet = out.find("== THE PACKET").expect("the packet half");
         let protocol = out.find("== THE PROTOCOL").expect("the protocol half");
         let step = out.find("== THE STEP").expect("the step half");

@@ -153,16 +153,20 @@ fn running_commit(jobs_url: &str) -> Option<String> {
 pub fn run(clone: Option<String>, remote: Option<String>, jobs_url: Option<String>) -> Result<()> {
     let clone = clone.unwrap_or_else(|| ".".to_string());
     let remote = remote.unwrap_or_else(|| "origin".to_string());
-    let jobs_url = jobs_url
-        .or_else(|| std::env::var("BOSS_JOBS_URL").ok())
-        .unwrap_or_else(|| "http://10.20.0.34:7900".to_string());
+    // No default (backlog 6cf47547): the literal fallback here was the
+    // last CLI read the address lint still allowed, and a default that
+    // is right on one host and silently wrong on another is the defect
+    // `resolve_jobs_base` exists to refuse (aa783636) — so `running`
+    // resolves the way every other read verb does: flag, env, refuse.
+    let jobs_url = crate::gate::resolve_jobs_base(jobs_url.as_deref())?;
+    let jobs_url = jobs_url.trim_end_matches('/');
 
     let g = Generations {
         main: sh(&["git", "-C", &clone, "ls-remote", &remote, "refs/heads/main"])
             .and_then(|s| s.split_whitespace().next().map(str::to_string)),
         deployed: sh(&["readlink", "/usr/local/boss/current"])
             .map(|s| s.rsplit('/').next().unwrap_or(&s).to_string()),
-        running: running_commit(&jobs_url),
+        running: running_commit(jobs_url),
     };
 
     println!("boss running:");

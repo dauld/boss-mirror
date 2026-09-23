@@ -559,30 +559,46 @@ impl Api {
     }
 
     async fn get_raw(&mut self, path: &str) -> Result<(reqwest::StatusCode, Value)> {
-        let url = format!("{}{path}", self.base);
         self.calls += 1;
-        // Waits out a jobs-API roll (backlog 034002b3), like every verb.
-        let user = crate::identity::header(&crate::identity::reader());
-        let resp = crate::train::send_through_a_roll(&format!("GET {url}"), || {
-            self.client.get(&url).header("x-boss-user", user.as_str())
-        })
-        .await?;
-        let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .with_context(|| format!("read body of {url}"))?;
-        let body = serde_json::from_str(&text).unwrap_or(Value::Null);
-        Ok((status, body))
+        get_raw_at(&self.client, &self.base, path).await
     }
 
     async fn get(&mut self, path: &str) -> Result<Value> {
-        let (status, body) = self.get_raw(path).await?;
-        if !status.is_success() {
-            bail!("GET {}{path} -> HTTP {status}", self.base);
-        }
-        Ok(body)
+        self.calls += 1;
+        get_at(&self.client, &self.base, path).await
     }
+}
+
+/// One GET, uncounted — [`Api`] counts around it, and a paged read that
+/// borrows the client (the car list, via `gate::all_cars_via`) counts
+/// its own pages and adds them to [`Api::calls`].
+async fn get_raw_at(
+    client: &reqwest::Client,
+    base: &str,
+    path: &str,
+) -> Result<(reqwest::StatusCode, Value)> {
+    let url = format!("{base}{path}");
+    // Waits out a jobs-API roll (backlog 034002b3), like every verb.
+    let user = crate::identity::header(&crate::identity::reader());
+    let resp = crate::train::send_through_a_roll(&format!("GET {url}"), || {
+        client.get(&url).header("x-boss-user", user.as_str())
+    })
+    .await?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .with_context(|| format!("read body of {url}"))?;
+    let body = serde_json::from_str(&text).unwrap_or(Value::Null);
+    Ok((status, body))
+}
+
+async fn get_at(client: &reqwest::Client, base: &str, path: &str) -> Result<Value> {
+    let (status, body) = get_raw_at(client, base, path).await?;
+    if !status.is_success() {
+        bail!("GET {base}{path} -> HTTP {status}");
+    }
+    Ok(body)
 }
 
 /// The rows of a listing — the envelope's `data` array or a bare array —
@@ -889,10 +905,20 @@ async fn collect(opts: Options, now: DateTime<Utc>) -> Result<Census> {
         .get("/api/jobs?kind=gate-run&limit=60")
         .await
         .and_then(|body| rows(&body, "GET /api/jobs?kind=gate-run"));
-    let car_read = api
-        .get("/api/jobs?kind=ship-a-change&limit=800")
+    // Every car, paged on `total` (backlog 6cf47547): a bare `limit=800`
+    // page never compared to `total` would, past 800 cars, have named
+    // the green gate-run of a car on the unread tail stranded. The
+    // pages ride the census's own client and are counted into its cost.
+    let pages = std::sync::atomic::AtomicUsize::new(0);
+    let car_read = {
+        let (client, base, pages) = (&api.client, api.base.as_str(), &pages);
+        crate::gate::all_cars_via(|path| async move {
+            pages.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            get_at(client, base, &path).await.map(Some)
+        })
         .await
-        .and_then(|body| rows(&body, "GET /api/jobs?kind=ship-a-change"));
+    };
+    api.calls += pages.into_inner();
     if let (Ok(gate_runs), Ok(cars)) = (gate_run_read, car_read) {
         let car_branches: BTreeSet<String> = cars
             .iter()

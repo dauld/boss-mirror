@@ -773,39 +773,13 @@ fn build_router(
     if let Some(la) = local_auth_state {
         // Passkey ceremony (docs/design/presence.md, packet 7218c3f1):
         // best-effort mount — a malformed BOSS_PUBLIC_URL must degrade
-        // to "no passkey routes", never crash the front door.
+        // to "no passkey routes", never crash the front door. The route
+        // list is `passkey_router`'s, the one the tests drive; it was
+        // spelled out here as well until backlog 3bddce66 (2026-09-23).
         let app = match boss_gateway::passkey::PasskeyState::from_env(la.session_key.clone()) {
-            Ok(pk) => {
-                let pk = std::sync::Arc::new(pk);
-                app.route(
-                    "/api/auth/passkey/register/begin",
-                    axum::routing::post(boss_gateway::passkey::register_begin)
-                        .with_state(pk.clone()),
-                )
-                .route(
-                    "/api/auth/passkey/register/finish",
-                    axum::routing::post(boss_gateway::passkey::register_finish)
-                        .with_state(pk.clone()),
-                )
-                .route(
-                    "/api/auth/passkey/assert/begin",
-                    axum::routing::post(boss_gateway::passkey::assert_begin).with_state(pk.clone()),
-                )
-                .route(
-                    "/api/auth/passkey/assert/finish",
-                    axum::routing::post(boss_gateway::passkey::assert_finish)
-                        .with_state(pk.clone()),
-                )
-                .route(
-                    "/api/auth/passkey/credentials",
-                    axum::routing::get(boss_gateway::passkey::credentials_list)
-                        .with_state(pk.clone()),
-                )
-                .route(
-                    "/api/auth/passkey/credentials/{credential_id}",
-                    axum::routing::delete(boss_gateway::passkey::credentials_remove).with_state(pk),
-                )
-            }
+            Ok(pk) => app.merge(boss_gateway::passkey::passkey_router(std::sync::Arc::new(
+                pk,
+            ))),
             Err(e) => {
                 tracing::warn!(error = %e, "passkey ceremony not mounted");
                 app

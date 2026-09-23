@@ -94,17 +94,41 @@ impl PasskeyState {
     }
 }
 
-pub fn passkey_router(state: Arc<PasskeyState>) -> Router {
+/// Every passkey route, the one list: the gateway's `main.rs` merges
+/// this router and the tests drive it. Until backlog 3bddce66
+/// (2026-09-23) `main.rs` spelled the six routes out itself and this
+/// list lacked the credential removal, so what the tests mounted was
+/// not what production served (CLAUDE.md 9a). Generic over the outer
+/// router's state because each route carries its own.
+pub fn passkey_router<S>(state: Arc<PasskeyState>) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
     Router::new()
-        .route("/api/auth/passkey/register/begin", post(register_begin))
-        .route("/api/auth/passkey/register/finish", post(register_finish))
-        .route("/api/auth/passkey/assert/begin", post(assert_begin))
-        .route("/api/auth/passkey/assert/finish", post(assert_finish))
+        .route(
+            "/api/auth/passkey/register/begin",
+            post(register_begin).with_state(state.clone()),
+        )
+        .route(
+            "/api/auth/passkey/register/finish",
+            post(register_finish).with_state(state.clone()),
+        )
+        .route(
+            "/api/auth/passkey/assert/begin",
+            post(assert_begin).with_state(state.clone()),
+        )
+        .route(
+            "/api/auth/passkey/assert/finish",
+            post(assert_finish).with_state(state.clone()),
+        )
         .route(
             "/api/auth/passkey/credentials",
-            axum::routing::get(credentials_list),
+            axum::routing::get(credentials_list).with_state(state.clone()),
         )
-        .with_state(state)
+        .route(
+            "/api/auth/passkey/credentials/{credential_id}",
+            axum::routing::delete(credentials_remove).with_state(state),
+        )
 }
 
 /// The browser-safe listing: the session's OWN passkeys, metadata
@@ -304,6 +328,11 @@ fn err(status: StatusCode, msg: impl Into<String>) -> ErrResp {
 /// {e}`, and since 2e893e27 and f3436d99 the browser renders it.
 const PEOPLE_UNREACHABLE: &str = "people unreachable";
 
+/// The same for boss-jobs: the step read in `assert_begin` failed on
+/// the internal jobs URL, which `jobs unreachable: {e}` printed to the
+/// browser until backlog 3bddce66 (2026-09-23).
+const JOBS_UNREACHABLE: &str = "jobs unreachable";
+
 /// A passkey ceremony refusal, written to the gateway log and then
 /// returned unchanged. Until backlog f3436d99 (2026-09-23) `assert_begin`
 /// and `assert_finish` told only the browser why they refused, so a
@@ -385,12 +414,11 @@ impl PasskeyState {
         if !resp.status().is_success() {
             return Err(err(StatusCode::BAD_GATEWAY, "credential lookup failed"));
         }
-        resp.json::<Vec<Value>>().await.map_err(|e| {
-            err(
-                StatusCode::BAD_GATEWAY,
-                format!("credential list malformed: {e}"),
-            )
-        })
+        // Fixed text: the decode error names the URL it read and can
+        // quote the value it choked on (backlog 3bddce66, 2026-09-23).
+        resp.json::<Vec<Value>>()
+            .await
+            .map_err(|_| err(StatusCode::BAD_GATEWAY, "credential list malformed"))
     }
 
     /// Stored rows carry `public_key` = b64url(serde_json(Passkey)).
@@ -655,12 +683,16 @@ pub async fn assert_begin(
             .send()
             .await;
         match resp {
+            // This refusal and the unreachable one below are fixed text
+            // since backlog 3bddce66 (2026-09-23): reqwest's errors
+            // name the internal jobs URL, and a decode error can quote
+            // the job it choked on.
             Ok(r) if r.status().is_success() => match r.json().await {
                 Ok(v) => v,
-                Err(e) => {
+                Err(_) => {
                     return refused(
                         "job malformed",
-                        err(StatusCode::BAD_GATEWAY, format!("job malformed: {e}")),
+                        err(StatusCode::BAD_GATEWAY, "job malformed"),
                     );
                 }
             },
@@ -668,10 +700,10 @@ pub async fn assert_begin(
                 let reason = format!("job fetch: {}", r.status());
                 return refused(&reason, err(StatusCode::BAD_GATEWAY, reason.clone()));
             }
-            Err(e) => {
+            Err(_) => {
                 return refused(
                     "jobs unreachable",
-                    err(StatusCode::BAD_GATEWAY, format!("jobs unreachable: {e}")),
+                    err(StatusCode::BAD_GATEWAY, JOBS_UNREACHABLE),
                 );
             }
         }
@@ -892,10 +924,12 @@ async fn consume_challenge(state: &PasskeyState, id: &str) -> Result<Value, ErrR
         .await
         .map_err(|_| err(StatusCode::BAD_GATEWAY, PEOPLE_UNREACHABLE))?;
     match resp.status() {
+        // Fixed text: the decode error names the consume URL, which
+        // carries the challenge id (backlog 3bddce66, 2026-09-23).
         s if s.is_success() => resp
             .json()
             .await
-            .map_err(|e| err(StatusCode::BAD_GATEWAY, format!("challenge malformed: {e}"))),
+            .map_err(|_| err(StatusCode::BAD_GATEWAY, "challenge malformed")),
         reqwest::StatusCode::GONE => Err(err(
             StatusCode::GONE,
             "challenge already spent or expired — begin again",

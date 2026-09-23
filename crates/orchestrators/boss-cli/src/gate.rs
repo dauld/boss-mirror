@@ -2376,18 +2376,29 @@ pub(crate) async fn all_open_cars(http: &reqwest::Client) -> Result<Vec<Value>> 
 /// — and `boss orient` read one bare `limit=800` page and never compared
 /// it to `total`, so past 800 cars the oldest landed ones would have
 /// dropped out of the shed silently (417 cars on 2026-09-23). A page is
-/// 500 so today's population is still one call.
+/// 500 so today's population is still one call — the query and the
+/// page are [`all_cars_via`]'s, the one car read every verb shares.
 pub(crate) async fn all_cars_at(http: &reqwest::Client, base: &str) -> Result<Vec<Value>> {
-    const PAGE: usize = 500;
-    crate::train::list_all_pages(|offset| async move {
-        api_at(
-            http,
-            base,
-            reqwest::Method::GET,
-            &format!("/api/jobs?kind=ship-a-change&limit={PAGE}&offset={offset}"),
-            None,
-        )
+    all_cars_via(|path| async move { api_at(http, base, reqwest::Method::GET, &path, None).await })
         .await
+}
+
+/// The one car query, paged on `total`, over whatever transport the
+/// caller reads through: `fetch` is handed each page's path and returns
+/// its body. [`all_cars_at`] hands it the signed jobs-API read; the
+/// census hands it its own client, which counts every call it reports
+/// as its cost — and until backlog 6cf47547 read one bare `limit=800`
+/// page it never compared to `total`.
+pub(crate) async fn all_cars_via<F, Fut>(fetch: F) -> Result<Vec<Value>>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<Value>>>,
+{
+    const PAGE: usize = 500;
+    crate::train::list_all_pages(|offset| {
+        fetch(format!(
+            "/api/jobs?kind=ship-a-change&limit={PAGE}&offset={offset}"
+        ))
     })
     .await
 }
@@ -6091,6 +6102,40 @@ mod tests {
         }
     }
 
+    /// The census read the car list as one bare `limit=800` page and
+    /// never compared it to `total` (backlog 6cf47547), so past 800 cars
+    /// its stranded-green note would have named a car's green gate-run
+    /// stranded because the car sat on the unread tail. `all_cars_via`
+    /// is the one car query, paged on `total`, handed to whatever
+    /// transport the caller counts its calls through.
+    #[tokio::test]
+    async fn all_cars_via_reads_the_car_past_one_page() {
+        let asked = std::sync::Mutex::new(Vec::<String>::new());
+        let cars = all_cars_via(|path: String| {
+            asked.lock().unwrap().push(path.clone());
+            async move {
+                let row = if path.contains("offset=0") {
+                    "car-1"
+                } else {
+                    "car-2"
+                };
+                anyhow::Ok(Some(json!({"data": [{"id": row}], "total": 2})))
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(cars.len(), 2, "the car on page two is read");
+        let asked = asked.into_inner().unwrap();
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        assert!(
+            asked
+                .iter()
+                .all(|p| p.starts_with("/api/jobs?kind=ship-a-change&")),
+            "{asked:?}"
+        );
+        assert!(asked[1].ends_with("offset=1"), "{asked:?}");
+    }
+
     /// EVERY read verb resolves its instance through this one function,
     /// so the `127.0.0.1` trap cannot re-grow in any single verb. Pin
     /// the precedence (flag over env) and the refusal on the pure form,
@@ -7069,22 +7114,12 @@ pub(crate) mod stub {
         status: &'static str,
         body: &'static str,
     ) -> (String, tokio::task::JoinHandle<Option<String>>) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.ok()?;
-            let mut buf = Vec::new();
-            let mut chunk = [0u8; 2048];
-            loop {
-                match sock.read(&mut chunk).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                }
-                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                    break;
-                }
-            }
+            let request = read_request(&mut sock).await;
             let resp = format!(
                 "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n\
                  content-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -7092,9 +7127,50 @@ pub(crate) mod stub {
             );
             let _ = sock.write_all(resp.as_bytes()).await;
             let _ = sock.shutdown().await;
-            Some(String::from_utf8_lossy(&buf).into_owned())
+            Some(request)
         });
         (format!("http://{addr}"), handle)
+    }
+
+    /// Read one whole request: the head up to its blank line, then as
+    /// many body bytes as its `content-length` names. Answering before
+    /// the body is drained closes a socket the client is still writing
+    /// to, which it sees as Broken pipe once the body outgrows a socket
+    /// buffer (backlog 1fe351e8, the race the builder of cef615f6
+    /// measured at 1 in 16 under load). A closed socket ends it with
+    /// what arrived, so the caller's assertion names the gap.
+    pub(crate) async fn read_request(sock: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 8192];
+        let mut want: Option<usize> = None;
+        loop {
+            if want.is_none() {
+                want = buf
+                    .windows(4)
+                    .position(|w| w == b"\r\n\r\n")
+                    .map(|end| end + 4 + content_length(&buf[..end]));
+            }
+            if want.is_some_and(|total| buf.len() >= total) {
+                break;
+            }
+            match sock.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    /// The `content-length` a request head declares — zero when it
+    /// declares none, which is every body-less read.
+    fn content_length(head: &[u8]) -> usize {
+        String::from_utf8_lossy(head)
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.trim().parse().ok())
+            .unwrap_or(0)
     }
 }
 
@@ -7131,6 +7207,34 @@ mod signing_tests {
         );
     }
 
+    /// Backlog 1fe351e8: the stub answered after the request HEAD and
+    /// never read the body, so a body larger than one socket buffer met
+    /// a closed socket mid-write — Broken pipe instead of the answer.
+    /// Small JSON bodies ride in with the head, which is why nothing
+    /// failed yet; this body cannot.
+    #[tokio::test]
+    async fn a_write_larger_than_a_socket_buffer_reaches_the_stub_whole() {
+        let (base, stub) = one_request("{}").await;
+        let big = "x".repeat(4 << 20);
+        let http = reqwest::Client::new();
+        api_at_signed(
+            &http,
+            &base,
+            reqwest::Method::PUT,
+            "/api/jobs/x/steps/y",
+            Some(json!({"filler": big, "status": "completed"})),
+            Signature::As("claude@algedonic.dev".into()),
+        )
+        .await
+        .expect("the stub reads the whole write before it answers");
+        let request = stub.await.unwrap().expect("the stub read a request");
+        assert!(
+            request.ends_with(r#""status":"completed"}"#),
+            "the stub must drain the body it was sent; it read {} bytes",
+            request.len()
+        );
+    }
+
     /// Backlog 034002b3, at the wire: a write sent while the jobs API is
     /// mid-roll (nothing listening, so the connect is refused) is not a
     /// failed verb — it is sent again once the API comes back, and it
@@ -7138,23 +7242,19 @@ mod signing_tests {
     /// at once and the operator relaunched by hand.
     #[tokio::test]
     async fn a_write_sent_during_a_roll_arrives_once_the_api_is_back() {
-        // A port nothing serves yet: bind, note it, let it go.
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let base = format!("http://127.0.0.1:{port}");
+        // A port nothing serves yet, HELD across the roll: bound but not
+        // listening, so a connect is refused exactly as a dark API's is,
+        // and no other process can take the port in the gap — freeing it
+        // and rebinding 300 ms later let one (backlog 1fe351e8).
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let base = format!("http://{}", socket.local_addr().unwrap());
         let back = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-                .await
-                .unwrap();
+            let listener = socket.listen(16).unwrap();
             let (mut sock, _) = listener.accept().await.unwrap();
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let mut chunk = [0u8; 4096];
-            let n = sock.read(&mut chunk).await.unwrap();
-            let head = String::from_utf8_lossy(&chunk[..n]).into_owned();
+            use tokio::io::AsyncWriteExt;
+            let head = super::stub::read_request(&mut sock).await;
             let _ = sock
                 .write_all(
                     b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\

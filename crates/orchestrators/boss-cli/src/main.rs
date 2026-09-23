@@ -204,7 +204,8 @@ enum Commands {
         /// car when the gate goes green — no hand-park. Requires the
         /// other three --park-* below (a car needs a full receipt) and
         /// ONE of --park-backlog-item / --park-partial-item /
-        /// --park-no-item (a car says which item it fixes).
+        /// --park-no-item / --park-design (a car says which item it
+        /// fixes).
         #[arg(long)]
         park_summary: Option<String>,
         /// Auto-park: what the change deliberately leaves out.
@@ -220,11 +221,12 @@ enum Commands {
         /// that item's build, so the arrival rule routes its triage and
         /// COMPLETES its build when the car lands — which closes it.
         ///
-        /// One of this, --park-partial-item or --park-no-item is
-        /// REQUIRED with any --park-* flag. Measured 2026-09-10
-        /// (e1325456): 13 of 19 open cars named no item, so their items
-        /// stayed open after the fix was live and an operator closed
-        /// them by hand with a worse record than the car's own arrival.
+        /// One of this, --park-partial-item, --park-no-item or
+        /// --park-design is REQUIRED with any --park-* flag. Measured
+        /// 2026-09-10 (e1325456): 13 of 19 open cars named no item, so
+        /// their items stayed open after the fix was live and an
+        /// operator closed them by hand with a worse record than the
+        /// car's own arrival.
         #[arg(long)]
         park_backlog_item: Option<String>,
         /// Auto-park: the item this change is ONE PIECE of — recorded as
@@ -471,6 +473,11 @@ enum Commands {
     /// memory and the uid one was wrong in all ten (cc9ddc5d). A brief
     /// references this instead of retyping it; nothing printed here is
     /// a sentence somebody typed about the gate.
+    ///
+    /// The commit trailer a builder's rules ask for is the dispatching
+    /// session's OWN attribution lines, supplied in
+    /// `BOSS_COMMIT_TRAILER` (one trailer per line); unset, the rules
+    /// say so rather than name a model the CLI cannot know (89d1572c).
     Brief {
         /// The packet: its full uuid, 8+ characters of its id, or its
         /// branch. Omit it to print the invariants alone.
@@ -488,7 +495,10 @@ enum Commands {
     /// Workflow row; a step declaring none is refused, naming the
     /// fix), and PRINTS the exact prompt: `boss brief`'s rendering plus
     /// the run id. The prompt is stdout and nothing else is, so
-    /// `boss dispatch <packet> > prompt.txt` is what you paste.
+    /// `boss dispatch <packet> > prompt.txt` is what you paste. Set
+    /// `BOSS_COMMIT_TRAILER` to your own session's attribution lines
+    /// and the prompt's rules carry them as the commit trailer, saying
+    /// where they came from (89d1572c).
     Dispatch {
         /// The hook's door (design 511fa7d4 car 2b): read a Claude Code
         /// PreToolUse payload on stdin and record the Agent call as a

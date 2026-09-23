@@ -103,3 +103,99 @@ fn rule_seven_names_every_item_answer_the_gate_accepts() {
         );
     }
 }
+
+const MAIN: &str = "crates/orchestrators/boss-cli/src/main.rs";
+
+/// The `boss gate` flags whose help (their `///` doc, which clap renders
+/// as `--help`) spells out the item-answer choice — any field of the
+/// `Gate` variant whose doc names two or more of the flags, counting its
+/// own — each paired with the flags that doc names.
+fn gate_help_that_states_the_choice(flags: &[String]) -> Vec<(String, Vec<String>)> {
+    struct Find<'f> {
+        flags: &'f [String],
+        found_gate: bool,
+        out: Vec<(String, Vec<String>)>,
+    }
+    impl<'ast> Visit<'ast> for Find<'_> {
+        fn visit_variant(&mut self, v: &'ast syn::Variant) {
+            if v.ident != "Gate" {
+                return;
+            }
+            self.found_gate = true;
+            for field in &v.fields {
+                let Some(ident) = &field.ident else { continue };
+                let own = format!("--{}", ident.to_string().replace('_', "-"));
+                let doc: String = field
+                    .attrs
+                    .iter()
+                    .filter(|a| a.path().is_ident("doc"))
+                    .filter_map(|a| match &a.meta {
+                        syn::Meta::NameValue(syn::MetaNameValue {
+                            value:
+                                syn::Expr::Lit(syn::ExprLit {
+                                    lit: syn::Lit::Str(s),
+                                    ..
+                                }),
+                            ..
+                        }) => Some(s.value()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let named: Vec<String> = self
+                    .flags
+                    .iter()
+                    .filter(|f| **f == own || doc.contains(f.as_str()))
+                    .cloned()
+                    .collect();
+                if named.len() >= 2 {
+                    self.out.push((own, named));
+                }
+            }
+        }
+    }
+    let src = std::fs::read_to_string(repo_root().join(MAIN)).expect("main.rs is readable");
+    let file = syn::parse_file(&src).expect("main.rs parses");
+    let mut find = Find {
+        flags,
+        found_gate: false,
+        out: Vec::new(),
+    };
+    find.visit_file(&file);
+    assert!(find.found_gate, "no `Gate` variant in {MAIN}");
+    find.out
+}
+
+/// `boss gate --help` must carry the same choice rule 7 does, because
+/// rule 7 sends builders to it ("`boss gate --help` is where each one's
+/// meaning is defined").
+///
+/// MEASURED (backlog 72d7bc98, 2026-09-23). The help for
+/// `--park-backlog-item` read "One of this, --park-partial-item or
+/// --park-no-item is REQUIRED", and `--park-summary`'s read "ONE of
+/// --park-backlog-item / --park-partial-item / --park-no-item" — each
+/// one answer short of the set `require_item_answer` accepts, omitting
+/// `--park-design`. Once 0906495a pinned rule 7, the help was the
+/// stale-by-one layer. The set is the same `let given` list the rule-7
+/// pin reads, so a fifth answer fails both pins by name.
+#[test]
+fn gate_help_names_every_item_answer_wherever_it_states_the_choice() {
+    let flags = item_answer_flags();
+    let stating = gate_help_that_states_the_choice(&flags);
+    assert!(
+        stating.iter().any(|(own, _)| own == "--park-backlog-item"),
+        "the help for `--park-backlog-item` in {MAIN} no longer states the \
+         item-answer choice (found {stating:?}) — the scan is broken, or the \
+         sentence moved and this pin must follow it"
+    );
+    for (own, named) in &stating {
+        for flag in &flags {
+            assert!(
+                named.contains(flag),
+                "the help for `{own}` in {MAIN} states the item-answer choice \
+                 but omits `{flag}`, which `require_item_answer` in {GATE} accepts \
+                 (backlog 72d7bc98) — it names only {named:?}"
+            );
+        }
+    }
+}

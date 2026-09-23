@@ -157,7 +157,10 @@ fn get(client: &Client, base: &str, path: &str) -> Result<Value> {
 /// carrying `"error"` beside `"rules": []`, so an export read at that
 /// moment wrote a tenant with no rules. An envelope that names an
 /// `error` refuses with it; every other shape is decided by the one
-/// rows helper, which refuses a body that is not a list (7b7e0529).
+/// rows helper, which refuses a body that is not a list (7b7e0529) —
+/// and, through `every_row`, one whose `total` counts more rows than it
+/// carries (6cf47547): the export rewrites the repo's files from these
+/// rows, so a page read as the registry would drop the rest from them.
 fn rows_of(v: Value) -> Result<Vec<Value>> {
     let v = match v {
         Value::Object(mut o) => {
@@ -171,7 +174,7 @@ fn rows_of(v: Value) -> Result<Vec<Value>> {
         }
         other => other,
     };
-    crate::train::rows(Some(v))
+    crate::train::every_row(Some(v))
 }
 
 /// One list door read, its rows refused rather than guessed, and the
@@ -1051,6 +1054,38 @@ mod tests {
                 "{body}: {why}"
             );
         }
+    }
+
+    /// A PAGE IS NOT THE REGISTRY (backlog 6cf47547). `/api/agents` and
+    /// `/api/sensors` answer `{data, total}`; if either ever paged by
+    /// default, the export read one page and rewrote the repo's seed
+    /// file with the rows it happened to get. A body whose `total`
+    /// counts more rows than it carries now refuses, and the refusal
+    /// names the door — served here by a real socket, because the door
+    /// name is added by `list`, not by the rows helper.
+    #[test]
+    fn a_short_page_with_a_larger_total_refuses_rather_than_exporting_less() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf);
+            let body = json!({"data": [{"id": "agent-a"}], "total": 2}).to_string();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            sock.write_all(resp.as_bytes()).unwrap();
+        });
+        let why = list(&seed_client().unwrap(), &base, "/api/agents")
+            .expect_err("one row of two is a page, not the registry");
+        server.join().unwrap();
+        let why = format!("{why:#}");
+        assert!(why.contains("/api/agents"), "names the door: {why}");
+        assert!(why.contains("1 of 2"), "names the shortfall: {why}");
     }
 
     /// The three honest shapes still read: a bare array, `{data}`, and

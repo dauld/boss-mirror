@@ -201,8 +201,8 @@ if command -v jq >/dev/null 2>&1; then
     printf '#!/bin/sh\nexit 0\n' > "$tmp/rbin/gh"; chmod +x "$tmp/rbin/gh"
     cat > "$tmp/rbin/curl" <<'EOF'
 #!/bin/sh
-# The system of record, stubbed: a PUT records its payload; a GET serves the fixture.
-for a in "$@"; do case "$a" in @*) cp "${a#@}" "$STUB_PUT"; exit 0;; esac; done
+# The system of record, stubbed: a PUT records its payload and answers 200 (the runner reads the status, 3c3b202c); a GET serves the fixture.
+for a in "$@"; do case "$a" in @*) cp "${a#@}" "$STUB_PUT"; printf 200; exit 0;; esac; done
 cat "$STUB_JOBS"
 EOF
     chmod +x "$tmp/rbin/curl"

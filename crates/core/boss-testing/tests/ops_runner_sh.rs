@@ -49,17 +49,26 @@ fn write_exec(path: &Path, body: &str) {
 /// @file` payload to `put.json`, and a PATCH's to `patch.json` — the
 /// request-level `exit` the runner writes through the job metadata door
 /// (f47861a5). A `gh` stub stands in for the publish verb's `--check`
-/// tool probe.
+/// tool probe. Every PATCH is also appended to `STUB_PATCH_LOG` when
+/// set, because one pass may write two (the queue reading, then a
+/// refused completion). A PUT answers `STUB_PUT_CODE` (default 200) on
+/// `-w` and writes `STUB_PUT_BODY` to its `-o` file — the server's
+/// refusal, which is what a refused completion must carry.
 fn stub_sor(root: &Path) -> PathBuf {
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     write_exec(
         &bin.join("curl"),
         "#!/bin/sh\n\
-         m=GET; prev=\n\
-         for a in \"$@\"; do [ \"$prev\" = -X ] && m=\"$a\"; prev=\"$a\"; done\n\
+         m=GET; prev=; o=; w=\n\
+         for a in \"$@\"; do [ \"$prev\" = -X ] && m=\"$a\"; [ \"$prev\" = -o ] && o=\"$a\"; [ \"$prev\" = -w ] && w=1; prev=\"$a\"; done\n\
          for a in \"$@\"; do case \"$a\" in @*)\n\
-             if [ \"$m\" = PATCH ]; then cp \"${a#@}\" \"$STUB_PATCH\"; else cp \"${a#@}\" \"$STUB_PUT\"; fi\n\
+             if [ \"$m\" = PATCH ]; then cp \"${a#@}\" \"$STUB_PATCH\"\n\
+                 if [ -n \"${STUB_PATCH_LOG:-}\" ]; then cat \"${a#@}\" >> \"$STUB_PATCH_LOG\"; echo >> \"$STUB_PATCH_LOG\"; fi\n\
+             else cp \"${a#@}\" \"$STUB_PUT\"\n\
+                 if [ -n \"$o\" ]; then printf '%s' \"${STUB_PUT_BODY:-}\" > \"$o\"; fi\n\
+                 if [ -n \"$w\" ]; then printf '%s' \"${STUB_PUT_CODE:-200}\"; fi\n\
+             fi\n\
              exit 0;; esac; done\n\
          for a in \"$@\"; do case \"$a\" in http*) printf '%s\\n' \"$a\" > \"$STUB_GET\";; esac; done\n\
          cat \"$STUB_JOBS\"\n",
@@ -892,6 +901,119 @@ fn an_answered_verbs_duration_is_recorded_on_its_step() {
     assert!(
         md.get("duration_ms").is_none(),
         "a refusal ran nothing to time: {md} / {out}"
+    );
+}
+
+/// A REFUSED COMPLETION SAYS WHY, ON THE REQUEST (post-mortem
+/// 3c3b202c). On 2026-09-22 from 00:50 to 02:54 UTC both runners
+/// stalled together, the forge's oldest request waiting 7394 s, and
+/// nothing in the system of record named a cause. The cause: ops-request
+/// v2 gated `execute` on `NOT requires_approval OR approve.done`, and
+/// the step PUT's unresolved-blockers guard refused every completion
+/// over the pending `approve` with a 409 (fixed in bd0f3369). The runner
+/// ran each verb, met the 409, counted it `failed` and moved on, so it
+/// re-ran every open request's verb once a minute for two hours. What
+/// the record held about that: nothing. `curl -f` threw away the 409's
+/// body, which named the blocker, so even the journal carried only the
+/// status, and the unit going red was watched by nobody.
+///
+/// So a completion the server REFUSES (it answered, and not 2xx) is
+/// written onto the request through the metadata door, which kept
+/// working all night: the status, the server's own words, when, how
+/// many times, and whether the verb ran anyway. That last one matters
+/// because a refused answer re-runs the verb on the next pass. The
+/// packet then says why it is stuck, and a queue alarm (a45b38c1) can
+/// quote it rather than send someone to a journal.
+#[test]
+fn a_refused_completion_is_written_onto_its_request_with_the_servers_reason() {
+    needs_jq!();
+    let root = scratch("completion-refused");
+    stub_sor(&root);
+    let ok = root.join("ok.sh");
+    write_exec(&ok, "#!/bin/sh\necho ok\n");
+    let verbs = verbs_dir(
+        &root,
+        &[(
+            "ok",
+            &format!(
+                r#"{{"about":"a verb that answers","hosts":["forge"],"argv":["{}"],"params":[]}}"#,
+                ok.display()
+            ),
+        )],
+    );
+    let refusal = r#"{"error":"step has unresolved blockers","step_id":"s-execute","unresolved_blockers":["s-approve=pending"]}"#;
+    let log = root.join("patches.jsonl");
+    let env = |log: &Path| {
+        vec![
+            ("STUB_PUT_CODE", "409".to_string()),
+            ("STUB_PUT_BODY", refusal.to_string()),
+            ("STUB_PATCH_LOG", log.display().to_string()),
+        ]
+    };
+    let refused_patch = |log: &Path, out: &str| -> serde_json::Value {
+        std::fs::read_to_string(log)
+            .unwrap_or_else(|e| panic!("no PATCH at all: {e}; {out}"))
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("a PATCH body is JSON"))
+            .find(|v| v.get("completion_refused").is_some())
+            .unwrap_or_else(|| panic!("the refused completion never reached the request: {out}"))
+    };
+
+    packet(&root, "ok", "[]");
+    let (out, _) = run(&root, &verbs, &env(&log));
+    assert!(
+        out.contains("step has unresolved blockers"),
+        "the journal line carries the server's reason, not only its status: {out}"
+    );
+    let r = &refused_patch(&log, &out)["completion_refused"];
+    assert_eq!(r["http"], 409, "{r} / {out}");
+    assert!(
+        r["reason"]
+            .as_str()
+            .is_some_and(|s| s.contains("s-approve=pending")),
+        "the server's own words ride the request: {r}"
+    );
+    assert_eq!(r["count"], 1, "{r}");
+    assert_eq!(r["verb_ran"], true, "the verb ran before the refusal: {r}");
+    let first = r["first_at"].as_str().unwrap_or_default().to_string();
+    assert!(
+        first.ends_with('Z') && r["last_at"] == first.as_str(),
+        "a first refusal is stamped once, in UTC: {r}"
+    );
+    assert!(
+        out.contains("failed=1"),
+        "a refused completion is still a failed pass, and the unit still goes red: {out}"
+    );
+
+    // The next pass meets the same refusal. The request already carries
+    // the first one, and the record accumulates rather than resets: how
+    // long a request has been jammed is the number a reader wants.
+    std::fs::write(
+        root.join("jobs.json"),
+        r#"{"data":[{"id":"aaaaaaaa-0000-4000-8000-000000000000","status":"open","metadata":{"host":"forge","verb":"ok","args":[],"completion_refused":{"http":409,"count":4,"first_at":"2026-09-22T00:51:02Z"}},"steps":[{"id":"s-execute","spec_slug":"execute","status":"ready","metadata":{"authority_role":"platform-admin"}}]}],"total":1}"#,
+    )
+    .unwrap();
+    let _ = std::fs::remove_file(&log);
+    let (out, _) = run(&root, &verbs, &env(&log));
+    let r = &refused_patch(&log, &out)["completion_refused"];
+    assert_eq!(r["count"], 5, "{r} / {out}");
+    assert_eq!(r["first_at"], "2026-09-22T00:51:02Z", "{r}");
+
+    // A completion the server ACCEPTS writes no refusal.
+    packet(&root, "ok", "[]");
+    let _ = std::fs::remove_file(&log);
+    let (out, payload) = run(
+        &root,
+        &verbs,
+        &[("STUB_PATCH_LOG", log.display().to_string())],
+    );
+    assert!(payload.is_some(), "{out}");
+    assert!(
+        !std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains("completion_refused"),
+        "an accepted completion is not a refusal: {out}"
     );
 }
 

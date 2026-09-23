@@ -206,6 +206,109 @@ pub(crate) fn expand(body: &str, invariants: &[crate::brief::Invariant]) -> Resu
     Ok(out)
 }
 
+/// Where a rules document asks for the COMMIT TRAILER — on a line of
+/// its own, filled by [`fill_trailer`] when the prompt is rendered
+/// (backlog 89d1572c, 2026-09-23).
+///
+/// THE CASE. Rule 5 of the builder document spelled the trailer as a
+/// literal naming one model and version, and every builder dispatched
+/// on 2026-09-23 ran as a newer one — so each car's commit credited the
+/// wrong model unless the operator overrode the rule in that prompt,
+/// which several did, by hand, every time. That is the per-prompt
+/// restatement the uid invariant was wrong in ten times (cc9ddc5d),
+/// and a document is the wrong home for the fact in the first place:
+/// the CLI rendering it cannot know which model will read it.
+///
+/// THE HONEST SOURCE is the session that dispatches. Its harness hands
+/// it its own attribution lines (the `Co-Authored-By` and session
+/// lines it is told to end commits with); nothing hands them to a
+/// process it runs, so the session SUPPLIES them through
+/// [`TRAILER_ENV`], and the prompt says that is where they came from.
+/// Unsupplied, the prompt says THAT — and sends the builder to its own
+/// harness's lines — rather than printing a literal that may be wrong.
+/// The pin `no_rules_document_renders_a_model_name_the_cli_cannot_know`
+/// refuses a model name anywhere in a rendered document.
+pub(crate) const TRAILER: &str = "{{trailer}}";
+
+/// The variable the dispatching session puts its own attribution lines
+/// in, one trailer per line, for `boss brief` and `boss dispatch` to
+/// fill [`TRAILER`] with.
+pub(crate) const TRAILER_ENV: &str = "BOSS_COMMIT_TRAILER";
+
+/// The trailer the shell running this verb supplied, unvalidated —
+/// [`fill_trailer`] judges it. The one place the variable is read, so
+/// both verbs that render a brief read it the same way.
+pub(crate) fn supplied_trailer() -> Option<String> {
+    std::env::var(TRAILER_ENV).ok()
+}
+
+/// A git trailer line: `Token: value`, the token letters, digits and
+/// hyphens. Anything else in a supplied value is prose, and prose
+/// would land as the last paragraph of every commit the builder makes.
+fn is_trailer_line(line: &str) -> bool {
+    line.split_once(": ").is_some_and(|(token, value)| {
+        !token.is_empty()
+            && token.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            && !value.trim().is_empty()
+    })
+}
+
+/// The lines [`TRAILER`] renders as: the supplied lines and where they
+/// came from, or the sentence saying none was supplied. A blank value
+/// is no value. A value holding a line that is not a trailer is
+/// REFUSED, naming the line.
+fn trailer_block(supplied: Option<&str>) -> Result<Vec<String>> {
+    let lines: Vec<&str> = supplied
+        .into_iter()
+        .flat_map(str::lines)
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return Ok(vec![
+            format!("No trailer was supplied to this prompt: {TRAILER_ENV} was unset where it was"),
+            "rendered, and the CLI cannot know which model will run you, so none is printed here"
+                .into(),
+            "rather than one that may be wrong. End the message with the commit attribution lines"
+                .into(),
+            "YOUR session's harness gives you, copied exactly — never a model name typed from memory,"
+                .into(),
+            "from an old commit, or from this document.".into(),
+        ]);
+    }
+    if let Some(bad) = lines.iter().find(|l| !is_trailer_line(l)) {
+        anyhow::bail!(
+            "{TRAILER_ENV} holds `{bad}`, which is not a trailer line (`Token: value`); it \
+             carries the dispatching session's own attribution lines, one per line"
+        );
+    }
+    let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+    out.push(format!(
+        "(the dispatching session's own attribution lines, supplied through {TRAILER_ENV} when"
+    ));
+    out.push(
+        "this prompt was rendered; if your harness gives you different ones, use those and say so)"
+            .into(),
+    );
+    Ok(out)
+}
+
+/// `body` with [`TRAILER`] replaced by [`trailer_block`], indented four
+/// spaces as an invariant's quote is. A body that asks for no trailer
+/// is returned as it is, whatever was supplied.
+pub(crate) fn fill_trailer(body: &str, supplied: Option<&str>) -> Result<String> {
+    if !body.contains(TRAILER) {
+        return Ok(body.to_string());
+    }
+    let block: String = trailer_block(supplied)?
+        .iter()
+        .map(|l| format!("    {l}\n"))
+        .collect();
+    Ok(body
+        .replace(&format!("{TRAILER}\n"), &block)
+        .replace(TRAILER, block.trim_end()))
+}
+
 /// The rules section of a brief: the document's body under a header
 /// that names the profile and the file, or the one line that says
 /// which file would serve a profile that has none.
@@ -218,12 +321,13 @@ pub(crate) fn section(
     repo: &Path,
     profile: &str,
     invariants: &[crate::brief::Invariant],
+    trailer: Option<&str>,
 ) -> Result<String> {
     Ok(match read(repo, profile)? {
         Some(doc) => format!(
             "== THE RULES — profile `{profile}`, from {} ==\n\n{}",
             path_for(profile),
-            expand(&body(&doc), invariants)?
+            fill_trailer(&expand(&body(&doc), invariants)?, trailer)?
         ),
         None => format!(
             "== THE RULES — profile `{profile}` has no document ==\n\n\
@@ -496,7 +600,7 @@ mod tests {
         );
         let invs = crate::brief::invariants(&repo()).expect("the invariants derive");
         for profile in &profiles {
-            let rendered = section(&repo(), profile, &invs).expect("the section renders");
+            let rendered = section(&repo(), profile, &invs, None).expect("the section renders");
             assert!(
                 !rendered.contains("has no document"),
                 "{} declares profile `{profile}` and nothing serves it",
@@ -508,8 +612,8 @@ mod tests {
     #[test]
     fn a_profile_with_no_document_is_a_line_that_names_the_file() {
         let invs = crate::brief::invariants(&repo()).expect("the invariants derive");
-        let s =
-            section(&repo(), "no-such-profile", &invs).expect("a missing document is not an error");
+        let s = section(&repo(), "no-such-profile", &invs, None)
+            .expect("a missing document is not an error");
         assert!(s.contains("has no document"), "{s}");
         assert!(
             s.contains("infra/platform/documents/no-such-profile-rules.md"),
@@ -520,7 +624,7 @@ mod tests {
     #[test]
     fn the_section_names_the_profile_and_the_file_it_came_from() {
         let invs = crate::brief::invariants(&repo()).expect("the invariants derive");
-        let s = section(&repo(), "builder", &invs).expect("the builder rules render");
+        let s = section(&repo(), "builder", &invs, None).expect("the builder rules render");
         assert!(s.starts_with(
             "== THE RULES — profile `builder`, from infra/platform/documents/builder-rules.md =="
         ));
@@ -676,7 +780,7 @@ mod tests {
             .iter()
             .find(|i| i.name == "base check")
             .expect("a base-check invariant");
-        let rendered = section(&repo(), "builder", &invs).expect("the section renders");
+        let rendered = section(&repo(), "builder", &invs, None).expect("the section renders");
         for line in &inv.lines {
             assert!(
                 rendered.contains(line.as_str()),
@@ -871,6 +975,126 @@ mod tests {
             expanded.contains(&limits),
             "a builder reading the expanded rules never sees the cgroup the manifest \
              declares: `{limits}`"
+        );
+    }
+
+    /// A model name as a trailer spells one — `Claude Opus 5`,
+    /// `Claude Sonnet 4.6`. What the pin below refuses anywhere in a
+    /// rendered rules document.
+    fn names_a_model(text: &str) -> Option<String> {
+        let re = regex::Regex::new(r"Claude (Opus|Sonnet|Haiku|Fable)\b[^\n]*")
+            .expect("the pattern compiles");
+        re.find(text).map(|m| m.as_str().to_string())
+    }
+
+    const A_TRAILER: &str = "Co-Authored-By: Claude Opus 9.9 (test context) <noreply@anthropic.com>\n\
+         Claude-Session: https://claude.ai/code/session_test";
+
+    /// THE PIN (backlog 89d1572c, 2026-09-23). Rule 5 of the builder
+    /// rules spelled `Co-Authored-By: Claude Opus 5 (1M context)` while
+    /// every builder dispatched that day ran as Claude Opus 5.5, so a
+    /// car credited the wrong model unless the operator overrode the
+    /// rule in each prompt — the per-prompt restatement that was wrong
+    /// in ten briefs (cc9ddc5d). The CLI rendering a document cannot
+    /// know which model will read it, so no document in the bundle may
+    /// name one: rendered with no trailer supplied, not one model name
+    /// and not one trailer line reaches a reader.
+    #[test]
+    fn no_rules_document_renders_a_model_name_the_cli_cannot_know() {
+        let invs = crate::brief::invariants(&repo()).expect("the invariants derive");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(repo().join(DIR)).expect("the bundle directory") {
+            let path = entry.expect("a directory entry").path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Some(profile) = name.strip_suffix("-rules.md") else {
+                continue;
+            };
+            seen += 1;
+            let rendered = section(&repo(), profile, &invs, None).expect("the section renders");
+            assert_eq!(
+                names_a_model(&rendered),
+                None,
+                "{name} renders a model name; the dispatching session supplies the trailer \
+                 through {TRAILER_ENV}"
+            );
+            assert!(
+                !rendered
+                    .lines()
+                    .any(|l| l.trim_start().starts_with("Co-Authored-By:")),
+                "{name} renders a trailer line of its own"
+            );
+        }
+        assert!(
+            seen >= 2,
+            "the bundle holds the builder and analyst documents"
+        );
+    }
+
+    /// The builder document asks for the trailer through the
+    /// placeholder, once, rather than spelling one.
+    #[test]
+    fn the_builder_document_takes_its_trailer_from_the_placeholder() {
+        let doc = read(&repo(), "builder")
+            .expect("readable")
+            .expect("infra/platform/documents/builder-rules.md is authored");
+        assert_eq!(body(&doc).matches(TRAILER).count(), 1);
+    }
+
+    /// Supplied, the dispatching session's own lines reach the builder
+    /// verbatim, and the prompt says where they came from — a trailer
+    /// with no provenance is a literal someone typed.
+    #[test]
+    fn a_supplied_trailer_is_printed_verbatim_and_names_its_source() {
+        let invs = crate::brief::invariants(&repo()).expect("the invariants derive");
+        let s = section(&repo(), "builder", &invs, Some(A_TRAILER)).expect("renders");
+        for line in A_TRAILER.lines() {
+            assert!(
+                s.contains(&format!("    {line}\n")),
+                "the supplied line `{line}` is not in the rules: {s}"
+            );
+        }
+        assert!(s.contains(TRAILER_ENV) && s.contains("dispatching session"));
+        assert!(
+            !s.contains(TRAILER),
+            "an unexpanded placeholder reached a reader"
+        );
+    }
+
+    /// Unsupplied, the rules SAY so and send the builder to its own
+    /// harness's lines — never a silent hole, never a literal.
+    #[test]
+    fn an_unsupplied_trailer_says_so_and_names_the_harness() {
+        let invs = crate::brief::invariants(&repo()).expect("the invariants derive");
+        let s = section(&repo(), "builder", &invs, None).expect("renders");
+        assert!(s.contains(TRAILER_ENV), "{s}");
+        assert!(s.contains("harness"), "{s}");
+        assert!(
+            !s.contains(TRAILER),
+            "an unexpanded placeholder reached a reader"
+        );
+        // A blank value is no value: it must not render as an empty
+        // trailer under a confident header.
+        let blank = section(&repo(), "builder", &invs, Some("  \n")).expect("renders");
+        assert_eq!(blank, s);
+    }
+
+    /// A supplied value that is not trailer lines is REFUSED, naming
+    /// the line: rendered through, prose would land as the last
+    /// paragraph of every commit the builder makes.
+    #[test]
+    fn a_supplied_trailer_that_is_not_trailer_lines_is_refused() {
+        let err = fill_trailer("x\n{{trailer}}\n", Some("Claude Opus 5.5, I think"))
+            .expect_err("prose is not a trailer");
+        assert!(
+            format!("{err:#}").contains("Claude Opus 5.5, I think"),
+            "{err:#}"
+        );
+        // A body with no placeholder is left alone whatever is supplied.
+        assert_eq!(
+            fill_trailer("no placeholder\n", Some(A_TRAILER)).expect("fills"),
+            "no placeholder\n"
         );
     }
 }

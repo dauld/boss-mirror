@@ -85,6 +85,11 @@
 #   records it red, and the same loud-local-failure posture as the
 #   estate observers applies (3ddd8333: silent-on-curl-failure does
 #   not get a second landing).
+# - A completion the SERVER REFUSES is written onto the request as
+#   `completion_refused` (status, the server's words, first/last,
+#   count, whether the verb ran), so a jammed packet names its own
+#   cause (post-mortem 3c3b202c: two hours of 409s that only a journal
+#   ever saw, and only as a number).
 # - No maintenance-wrap packet pair, deliberately: this fires every
 #   minute, and a packet per firing would drown the board. Its
 #   product IS packets — the ops-requests it answers — and its
@@ -520,15 +525,64 @@ ARGV
         fi
     fi
 
-    if ! put_err=$(curl -fsS -X PUT -H "content-type: application/json" \
+    # A REFUSED COMPLETION SAYS WHY, ON THE REQUEST (post-mortem
+    # 3c3b202c). This PUT was `curl -f`, which throws the response body
+    # away. On 2026-09-22 00:50-02:54 UTC the server refused every
+    # completion on both hosts with a 409 whose body named the blocker
+    # (`step has unresolved blockers`, the ops-request v2 `approve`
+    # step; fixed in bd0f3369). The journal held "409" and nothing else,
+    # the red unit had no reader, and the verbs re-ran once a minute for
+    # two hours. So the status and the server's words are kept. A
+    # refusal (the server answered, and not 2xx) is also written onto
+    # the request through the metadata door, which kept working all
+    # night: the packet then says why it is stuck. A transport failure
+    # (no answer at all) has no words to keep and no door to write
+    # through, so it stays a journal line and a red unit, as before.
+    putbodyf="$workdir/put-body"
+    : > "$putbodyf"
+    put_code=$(curl -sS -o "$putbodyf" -w '%{http_code}' -X PUT \
+            -H "content-type: application/json" \
             -H "x-boss-user: $BOSS_USER" \
             ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
             --data-binary @"$payloadf" \
-            "$BASE/api/jobs/$job_id/steps/$step_id" 2>&1 >/dev/null); then
-        echo "ops-runner: PUT failed on $short — $put_err" >&2
-        failed=$((failed + 1))
-        continue
-    fi
+            "$BASE/api/jobs/$job_id/steps/$step_id" 2>"$workdir/put-err") || put_code=""
+    case "${put_code:-000}" in
+        2??) ;;
+        000)
+            echo "ops-runner: PUT failed on $short — $(cat "$workdir/put-err")" >&2
+            failed=$((failed + 1))
+            continue
+            ;;
+        *)
+            said=$(head -c 2000 "$putbodyf" | tr '\n' ' ')
+            echo "ops-runner: PUT refused on $short — HTTP $put_code: $said" >&2
+            # Accumulates from what the request already carries: how long
+            # a request has been jammed, and how often its verb re-ran,
+            # is the number a reader wants. `verb_ran` because a refused
+            # answer is re-run on the next pass (harmless for a read,
+            # not for a destructive verb).
+            refusedf="$workdir/refused"
+            printf '%s' "$job" | jq -c --arg code "$put_code" --rawfile body "$putbodyf" \
+                --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg d "$disp" '
+                (.metadata.completion_refused // {}) as $prev
+                | {completion_refused: {
+                    http: ($code | tonumber),
+                    reason: ($body | .[0:2000]),
+                    first_at: ($prev.first_at // $at),
+                    last_at: $at,
+                    count: (($prev.count // 0) + 1),
+                    verb_ran: ($d == "answered")}}' > "$refusedf"
+            if ! patch_err=$(curl -fsS -X PATCH -H "content-type: application/json" \
+                    -H "x-boss-user: $BOSS_USER" \
+                    ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
+                    --data-binary @"$refusedf" \
+                    "$BASE/api/jobs/$job_id/metadata" 2>&1 >/dev/null); then
+                echo "ops-runner: could not record the refusal on $short — $patch_err" >&2
+            fi
+            failed=$((failed + 1))
+            continue
+            ;;
+    esac
 
     if [ "$disp" = "answered" ]; then
         echo "ops-runner: answered $verb on $short (exit $rc_str, ${size}B, ${dur_ms:--}ms)"

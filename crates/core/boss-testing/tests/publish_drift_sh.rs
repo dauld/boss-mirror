@@ -670,7 +670,7 @@ fn run_runner(c: &Case, verbs: &Path, args: &str) -> (String, Option<serde_json:
     write_exec(
         &c.bin.join("curl"),
         r#"#!/bin/sh
-for a in "$@"; do case "$a" in @*) cp "${a#@}" "$STUB_PUT"; exit 0;; esac; done
+for a in "$@"; do case "$a" in @*) cp "${a#@}" "$STUB_PUT"; printf 200; exit 0;; esac; done
 url=""
 for a in "$@"; do case "$a" in http*) url="$a" ;; esac; done
 case "$url" in

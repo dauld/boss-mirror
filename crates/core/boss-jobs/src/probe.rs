@@ -1085,7 +1085,10 @@ pub struct ProseOnly {
 ///   "only prose";
 /// - the file has at least one match and EVERY match is on a comment
 ///   line (`//`, `/*`, `*`, `<!--`, `#` but not `#[`/`#!`) or after a
-///   trailing ` //` / ` # ` on its line.
+///   trailing ` //` / ` # ` on its line — except a `///` inside the
+///   body of a clap-derived item, which is the `--help` text the binary
+///   renders, so a grep of it checks behaviour (`clap_help_lines`,
+///   backlog ab918f00).
 ///
 /// Returns the first such grep. WARNING, NOT REFUSAL, for the reason
 /// its siblings give: a probe that counts a mention on purpose is
@@ -1268,6 +1271,7 @@ fn prose_only_matches(
     alternatives: &[String],
     fold: bool,
 ) -> Option<Vec<(usize, String)>> {
+    let help = clap_help_lines(text);
     let mut matched = Vec::new();
     for (i, line) in text.lines().enumerate() {
         let hay = if fold {
@@ -1282,13 +1286,95 @@ fn prose_only_matches(
         if at.is_empty() {
             continue;
         }
-        let prose_from = prose_starts_at(line);
+        let prose_from = prose_starts_at(line).filter(|_| !help[i]);
         if at.iter().any(|&p| prose_from.is_none_or(|from| p < from)) {
             return None;
         }
         matched.push((i + 1, line.trim().to_string()));
     }
     (!matched.is_empty()).then_some(matched)
+}
+
+/// The derives whose item body clap renders: every `///` on a field or
+/// variant inside one is `--help` text.
+const CLAP_DERIVES: [&str; 4] = ["Parser", "Subcommand", "Args", "ValueEnum"];
+
+/// Which lines of `text` are a `///` that clap RENDERS — a doc comment
+/// inside the body of an item deriving one of [`CLAP_DERIVES`], on a
+/// field or a variant, with an `#[arg]` / `#[command]` or without one
+/// (a positional field and a subcommand variant usually carry none).
+///
+/// Backlog ab918f00, measured 2026-09-23: car 72d7bc98 proved a
+/// `boss gate --help` fix by grepping two sentences out of boss-cli's
+/// main.rs, and the gate warned it was answered only by prose — but
+/// both lines were `///` on `#[arg]` fields, the text the binary prints.
+/// A probe that greps them checks shipped behaviour, not a comment.
+///
+/// A text scan, not a Rust parser (boss-jobs carries no syn, and this
+/// feeds a warning): the body runs from the item's `{` to the brace
+/// that closes it, counting braces outside comments and string
+/// literals. The doc ABOVE the item is left as prose — above a
+/// `Subcommand` enum clap never renders it (boss-cli's own note on
+/// `Commands` is about a clippy allow), so only a `Parser`'s about text
+/// is missed, and a miss here errs toward the warning it always gave.
+fn clap_help_lines(text: &str) -> Vec<bool> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut help = vec![false; lines.len()];
+    let mut i = 0;
+    while i < lines.len() {
+        if !lines[i].trim_start().starts_with("#[derive(") {
+            i += 1;
+            continue;
+        }
+        // The derive list may wrap; it ends at the first `)]`.
+        let close = (i..lines.len())
+            .find(|&j| lines[j].contains(")]"))
+            .unwrap_or(i);
+        let clap = lines[i..=close].iter().any(|l| {
+            l.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|w| CLAP_DERIVES.contains(&w))
+        });
+        i = close + 1;
+        if !clap {
+            continue;
+        }
+        let mut depth = 0usize;
+        let mut opened = false;
+        'body: while i < lines.len() {
+            let line = lines[i];
+            i += 1;
+            match prose_starts_at(line) {
+                Some(0) => {
+                    help[i - 1] = opened && line.trim_start().starts_with("///");
+                    continue;
+                }
+                from => {
+                    let mut quoted = false;
+                    let mut escaped = false;
+                    for c in line[..from.unwrap_or(line.len())].chars() {
+                        match c {
+                            _ if escaped => escaped = false,
+                            '\\' if quoted => escaped = true,
+                            '"' => quoted = !quoted,
+                            _ if quoted => {}
+                            '{' => {
+                                depth += 1;
+                                opened = true;
+                            }
+                            '}' => depth = depth.saturating_sub(1),
+                            // `struct U;` — an item with no body.
+                            ';' if !opened => break 'body,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            if opened && depth == 0 {
+                break;
+            }
+        }
+    }
+    help
 }
 
 /// Where the comment on this line begins, if it has one: 0 for a line
@@ -2280,5 +2366,150 @@ echo \"THE SITE CLAIMS ARE MARKED AND CHECKED\"";
             a_grep_only_prose_answers("git show HEAD:a.ts | grep -Ec 'lerpBox|zoomBoxOf'", comment)
                 .is_some()
         );
+    }
+
+    /// Car 72d7bc98's recorded probe, VERBATIM (parked 2026-09-23 on
+    /// fix/boss-gate-help-names-every-item-answer). Its first grep reads
+    /// two sentences of `boss gate --help` out of boss-cli's main.rs.
+    const CLAP_HELP_PROBE: &str = r#"m=$(git show HEAD:crates/orchestrators/boss-cli/src/main.rs | grep -c -e '--park-no-item / --park-design (a car says' -e '--park-design is REQUIRED with any --park-')
+t=$(git show HEAD:crates/core/boss-testing/tests/builder_rules_carry_the_item_answer_choice.rs | grep -c 'fn gate_help_names_every_item_answer_wherever_it_states_the_choice()')
+case ${m:-empty}${t:-empty} in 21) echo 'gate help names all four item answers, pinned'; exit 0;; esac
+echo "not yet: help lines $m, pin $t"
+exit 75"#;
+
+    /// The Gate variant as that car left it: lines 170-231 of
+    /// crates/orchestrators/boss-cli/src/main.rs on its branch, verbatim,
+    /// inside the `#[derive(Subcommand)]` enum that holds them.
+    const CLAP_GATE_VARIANT: &str = r##"#[derive(Subcommand)]
+enum Commands {
+    /// Launch a gate for a branch — files or reuses the gate-run
+    /// packet, renders the runner Job, and creates it.
+    ///
+    /// Replaces the seven-step by-hand sequence recorded in 51ca3405.
+    /// Gates run in PARALLEL: every workspace is a per-run emptyDir
+    /// seeded from a warm target, so verdicts are independent by
+    /// construction. At the concurrency bound (BOSS_GATE_MAX_CONCURRENT,
+    /// default 3) `--wait` QUEUES — the gate-run takes a place in line
+    /// and launches when a slot frees, oldest first, so one call
+    /// replaces a hand-rolled retry loop. Without `--wait` the bound
+    /// refuses, naming the running gates and filing nothing.
+    Gate {
+        /// Branch to gate.
+        branch: String,
+        /// Gate mode: "auto" (or "--auto"), or "-p `<crate>`". Empty = full.
+        ///
+        /// Checked before the cluster is touched — an unknown mode is a
+        /// refusal here, not a red gate forty minutes from now.
+        #[arg(long)]
+        mode: Option<String>,
+        /// Runner manifest. Defaults to infra/gate-runner/gate-runner.yaml.
+        #[arg(long)]
+        manifest: Option<std::path::PathBuf>,
+        /// Kubernetes namespace holding the gate Jobs.
+        #[arg(long, default_value = "boss-dev")]
+        namespace: String,
+        /// Poll the gate-run packet until it reports a verdict.
+        #[arg(long)]
+        wait: bool,
+        /// Show what would happen without filing or creating anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Auto-park on green: what the change does (first sentence =
+        /// title). Stamped onto the gate-run so the dispatcher files the
+        /// car when the gate goes green — no hand-park. Requires the
+        /// other three --park-* below (a car needs a full receipt) and
+        /// ONE of --park-backlog-item / --park-partial-item /
+        /// --park-no-item / --park-design (a car says which item it
+        /// fixes).
+        #[arg(long)]
+        park_summary: Option<String>,
+        /// Auto-park: what the change deliberately leaves out.
+        #[arg(long)]
+        park_excludes: Option<String>,
+        /// Auto-park: what was run, and what it proves.
+        #[arg(long)]
+        park_test: Option<String>,
+        /// Auto-park: what was observed working beyond the gate.
+        #[arg(long)]
+        park_verified: Option<String>,
+        /// Auto-park: the backlog item this change answers. This car IS
+        /// that item's build, so the arrival rule routes its triage and
+        /// COMPLETES its build when the car lands — which closes it.
+        ///
+        /// One of this, --park-partial-item, --park-no-item or
+        /// --park-design is REQUIRED with any --park-* flag. Measured
+        /// 2026-09-10 (e1325456): 13 of 19 open cars named no item, so
+        /// their items stayed open after the fix was live and an
+        /// operator closed them by hand with a worse record than the
+        /// car's own arrival.
+        #[arg(long)]
+        park_backlog_item: Option<String>,
+    },
+}
+"##;
+
+    /// A CLAP DOC COMMENT IS THE `--help` TEXT, NOT PROSE (backlog
+    /// ab918f00). Both sentences the probe greps are `///` lines on
+    /// `#[arg]` fields, which clap renders as the binary's help, so the
+    /// probe checks shipped behaviour — and the gate warned that it was
+    /// answered only by a comment.
+    #[test]
+    fn a_grep_answered_by_clap_help_text_is_not_named() {
+        let tree = |path: &str| {
+            (path == "crates/orchestrators/boss-cli/src/main.rs")
+                .then(|| CLAP_GATE_VARIANT.to_string())
+        };
+        assert_eq!(a_grep_only_prose_answers(CLAP_HELP_PROBE, tree), None);
+    }
+
+    /// And ONLY clap's: a `///` inside the body of a clap-derived item —
+    /// a field or a variant, with an attribute or without one — is
+    /// rendered; a `///` anywhere else, a plain `//` inside the item, and
+    /// the doc above a `Subcommand` enum (never rendered) stay prose.
+    #[test]
+    fn a_doc_comment_outside_a_clap_item_body_is_still_prose() {
+        let probe = "git show HEAD:src/main.rs | grep -c zoomBoxOf";
+        for (file, named) in [
+            (
+                "#[derive(Parser)]\nstruct Cli {\n    /// zoomBoxOf here\n    ip: String,\n}\n",
+                false,
+            ),
+            (
+                "#[derive(Debug, clap::Subcommand)]\nenum C {\n    /// zoomBoxOf here\n    Reach { ip: String },\n}\n",
+                false,
+            ),
+            (
+                "#[derive(\n    Debug,\n    Args,\n)]\nstruct A {\n    /// zoomBoxOf here\n    #[arg(long)]\n    ip: String,\n}\n",
+                false,
+            ),
+            (
+                "#[derive(Parser)]\nstruct Cli {\n    #[arg(default_value = \"}\")]\n    /// zoomBoxOf here\n    ip: String,\n}\n",
+                false,
+            ),
+            ("/// zoomBoxOf retired\npub fn a() {}\n", true),
+            (
+                "#[derive(Debug, Clone)]\nstruct S {\n    /// zoomBoxOf retired\n    a: u8,\n}\n",
+                true,
+            ),
+            (
+                "#[derive(Parser)]\nstruct Cli {\n    // zoomBoxOf retired\n    ip: String,\n}\n",
+                true,
+            ),
+            (
+                "/// zoomBoxOf retired\n#[derive(Subcommand)]\nenum C {\n    Doctor,\n}\n",
+                true,
+            ),
+            (
+                "#[derive(Parser)]\nstruct Cli {\n    ip: String,\n}\n/// zoomBoxOf retired\nfn b() {}\n",
+                true,
+            ),
+            (
+                "#[derive(Args)]\nstruct U;\n/// zoomBoxOf retired\nfn c() {}\n",
+                true,
+            ),
+        ] {
+            let found = a_grep_only_prose_answers(probe, |_| Some(file.to_string()));
+            assert_eq!(found.is_some(), named, "{file:?} -> {found:?}");
+        }
     }
 }

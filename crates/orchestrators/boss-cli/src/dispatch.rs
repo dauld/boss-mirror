@@ -884,7 +884,13 @@ pub(crate) async fn dispatch_at(
                     .ok()
                     .flatten(),
             };
-            crate::brief::render(repo, Some(&claimed), &settings.profile, active.as_ref())?
+            crate::brief::render(
+                repo,
+                Some(&claimed),
+                &settings.profile,
+                active.as_ref(),
+                crate::documents::supplied_trailer().as_deref(),
+            )?
         }
         BriefSource::Handed { prompt, .. } => prompt.to_string(),
     };

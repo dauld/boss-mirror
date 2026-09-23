@@ -29,7 +29,7 @@ use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use boss_gateway::passkey::{PasskeyState, credentials_remove, passkey_router};
+use boss_gateway::passkey::{PasskeyState, passkey_router};
 use boss_gateway::session::{COOKIE_NAME, Session};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -127,11 +127,11 @@ async fn dark() -> String {
     format!("http://{addr}")
 }
 
-/// The ceremony's routes, with the removal mounted the way the
-/// gateway's `main.rs` mounts it — `passkey_router` does not carry it.
+/// The ceremony's routes, as the gateway's `main.rs` mounts them —
+/// `passkey_router` carries the removal since backlog 3bddce66.
 fn router(people_base: String) -> Router {
     let origin = Url::parse("https://boss.test").unwrap();
-    let state = Arc::new(PasskeyState {
+    passkey_router(Arc::new(PasskeyState {
         session_key: KEY.to_vec(),
         http: reqwest::Client::new(),
         jobs_base: people_base.clone(),
@@ -140,11 +140,7 @@ fn router(people_base: String) -> Router {
             .unwrap()
             .build()
             .unwrap(),
-    });
-    passkey_router(state.clone()).route(
-        "/api/auth/passkey/credentials/{credential_id}",
-        delete(credentials_remove).with_state(state),
-    )
+    }))
 }
 
 async fn call(

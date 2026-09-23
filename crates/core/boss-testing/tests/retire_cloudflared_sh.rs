@@ -731,7 +731,7 @@ fn run_runner(c: &Case, verbs: &Path, args: &str) -> (String, Option<serde_json:
     write_exec(
         &c.bin.join("curl"),
         "#!/bin/sh\n\
-         for a in \"$@\"; do case \"$a\" in @*) cp \"${a#@}\" \"$STUB_PUT\"; exit 0;; esac; done\n\
+         for a in \"$@\"; do case \"$a\" in @*) cp \"${a#@}\" \"$STUB_PUT\"; printf 200; exit 0;; esac; done\n\
          for a in \"$@\"; do case \"$a\" in *kind=maintenance-cluster-converge*) cat \"$STUB_CONVERGES\"; exit 0;; esac; done\n\
          cat \"$STUB_JOBS\"\n",
     );

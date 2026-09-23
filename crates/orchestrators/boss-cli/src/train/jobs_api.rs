@@ -404,6 +404,36 @@ pub(crate) fn rows(resp: Option<Value>) -> Result<Vec<Value>> {
     }
 }
 
+/// The rows of a list read that must be the WHOLE list — [`rows`], and
+/// a refusal when the envelope's `total` counts more rows than it
+/// carries (backlog 6cf47547).
+///
+/// For a reader that cannot page — a door that takes no `offset`, where
+/// [`list_all_pages`] would only re-read page one — and whose caller
+/// treats the rows as the registry: `boss tenant export` rewrites the
+/// tenant repo's seed files from them, so one page read as the whole
+/// drops the rest from the repo, well-formed and silent. Measured
+/// 2026-09-23, no door the export reads pages today (`/api/agents` and
+/// `/api/sensors` answer `total` as the length of `data`); this is what
+/// makes the day one starts to loud rather than lossy. A bare array, or
+/// an envelope with no numeric `total`, carries no count to hold the
+/// rows to and reads as [`rows`] does.
+pub(crate) fn every_row(resp: Option<Value>) -> Result<Vec<Value>> {
+    let total = resp
+        .as_ref()
+        .and_then(|b| b.get("total"))
+        .and_then(Value::as_u64);
+    let got = rows(resp)?;
+    match total {
+        Some(total) if (got.len() as u64) < total => bail!(
+            "a list read answered {} of {total} rows — one page of a paged list, so reading \
+             it as the whole registry would drop the rest",
+            got.len()
+        ),
+        _ => Ok(got),
+    }
+}
+
 /// How much of a non-list body [`rows`]' refusal quotes — and of a
 /// non-JSON answer to a write, `gate::success_answer`'s: enough to
 /// recognise an error envelope or a login page, not the whole page.
@@ -944,6 +974,28 @@ mod tests {
         assert_eq!(next_offset(150, 150), None);
         // defensive — a `total` that shrank mid-read never asks for more.
         assert_eq!(next_offset(150, 160), None);
+    }
+
+    /// A SHORT PAGE IS NOT THE REGISTRY (backlog 6cf47547). A read that
+    /// must hold every row — a tenant export, which rewrites the repo's
+    /// seed files from it — refuses a body whose `total` counts more
+    /// rows than it carries, rather than reading one page as the whole.
+    #[test]
+    fn every_row_refuses_a_short_page_and_reads_a_whole_one() {
+        let short = json!({"data": [{"id": "a"}], "total": 2});
+        let why = every_row(Some(short))
+            .expect_err("1 of 2 is a page")
+            .to_string();
+        assert!(why.contains("1 of 2"), "names the shortfall: {why}");
+
+        let whole = json!({"data": [{"id": "a"}, {"id": "b"}], "total": 2});
+        assert_eq!(every_row(Some(whole)).unwrap().len(), 2);
+        // A bare array, and an envelope without `total`, carry no count
+        // to compare against — read as they always were.
+        assert_eq!(every_row(Some(json!([{"id": "a"}]))).unwrap().len(), 1);
+        assert_eq!(every_row(Some(json!({"data": []}))).unwrap().len(), 0);
+        // Still the one rows helper underneath: a non-list refuses.
+        assert!(every_row(Some(json!({"data": "nope", "total": 0}))).is_err());
     }
 
     #[test]

@@ -77,7 +77,6 @@ crates/orchestrators/boss-cli/src/host_readiness.rs	#[cfg(test)] estate fixture
 crates/orchestrators/boss-cli/src/prove.rs	#[cfg(test)] probe fixture
 crates/orchestrators/boss-cli/src/publish.rs	#[cfg(test)] clone-URL fixture
 crates/orchestrators/boss-cli/src/queue.rs	#[cfg(test)] assertion that a refusal names the record
-crates/orchestrators/boss-cli/src/running.rs	the CLI's BOSS_JOBS_URL default (reads env as before)
 crates/orchestrators/boss-cli/src/train/forge.rs	the Forgejo adapter's BOSS_TRAIN_FORGE_URL default (the CLI reads env as before)
 crates/orchestrators/boss-cli/src/train/jobs_api.rs	#[cfg(test)] fixture: the transport error a blip classifies
 crates/orchestrators/boss-cli/src/train/mod.rs	the conductor Config's BOSS_TRAIN_FORGE_URL default (the CLI reads env as before)
