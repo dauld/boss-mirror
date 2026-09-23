@@ -3,7 +3,10 @@
 // Pure functions over strings — the page's HTML and the values read for
 // each claim come in as data, so the whole judgement is unit-testable
 // and a broken check is a failing test before it is a wrong green
-// (design 59a776c5). Fetching is the caller's job and lives at the edge.
+// (design 59a776c5). Fetching is the caller's job and lives at the edge:
+// `resolve-claims.ts` reads each claim's row through injected readers,
+// and `the-landing-page-claims.test.ts` is the caller that runs it on
+// every gate (backlog e1524f57).
 
 import { CLAIMS, claimById, type Claim } from './claims';
 

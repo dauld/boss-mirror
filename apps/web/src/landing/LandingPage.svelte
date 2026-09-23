@@ -8,8 +8,8 @@
 
   // EVERY CLAIM THIS PAGE MAKES IS MARKED (design 59a776c5). A
   // `data-claim` is a promise that src/marketing/claims.ts names the row
-  // that answers it, and that check-the-claims refuses when the two
-  // disagree. Adding an assertion to this page means adding a mark and a
+  // that answers it, and the web suite refuses when the two disagree
+  // (src/marketing/the-landing-page-claims.test.ts, backlog e1524f57). Adding an assertion to this page means adding a mark and a
   // row; an UNMARKED assertion is invisible to the check, which is why
   // the checker also fingerprints the prose and says so when the words
   // move but the claim set does not.

@@ -47,7 +47,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use serde_json::Value;
 
 use crate::train::truthy;
@@ -159,15 +159,12 @@ pub async fn run(want: &str) -> Result<()> {
     let base = crate::gate::resolve_jobs_base(None)?;
     let url = format!("{base}/api/jobs?kind=user-feedback&limit=200");
     let client = reqwest::Client::new();
-    let resp = client
-        .get(&url)
-        .header(
-            "x-boss-user",
-            crate::identity::header(&crate::identity::reader()),
-        )
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?;
+    // Waits out a jobs-API roll (backlog 034002b3), like every verb.
+    let user = crate::identity::header(&crate::identity::reader());
+    let resp = crate::train::send_through_a_roll(&format!("GET {url}"), || {
+        client.get(&url).header("x-boss-user", user.as_str())
+    })
+    .await?;
     if !resp.status().is_success() {
         bail!("GET {url}: HTTP {}", resp.status());
     }

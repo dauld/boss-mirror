@@ -561,16 +561,12 @@ impl Api {
     async fn get_raw(&mut self, path: &str) -> Result<(reqwest::StatusCode, Value)> {
         let url = format!("{}{path}", self.base);
         self.calls += 1;
-        let resp = self
-            .client
-            .get(&url)
-            .header(
-                "x-boss-user",
-                crate::identity::header(&crate::identity::reader()),
-            )
-            .send()
-            .await
-            .with_context(|| format!("GET {url}"))?;
+        // Waits out a jobs-API roll (backlog 034002b3), like every verb.
+        let user = crate::identity::header(&crate::identity::reader());
+        let resp = crate::train::send_through_a_roll(&format!("GET {url}"), || {
+            self.client.get(&url).header("x-boss-user", user.as_str())
+        })
+        .await?;
         let status = resp.status();
         let text = resp
             .text()
@@ -589,14 +585,21 @@ impl Api {
     }
 }
 
-fn rows(body: &Value) -> Vec<Value> {
-    if let Some(a) = body.as_array() {
-        return a.clone();
+/// The rows of a listing — the envelope's `data` array or a bare array —
+/// or a refusal naming the reading.
+///
+/// It used to answer an EMPTY list for any other shape (backlog
+/// 228faa58, the class 833e2d0a collapsed in the dispatcher's
+/// handlers). `get_raw` parses a non-JSON body to `Null`, so a 200
+/// login page from a proxy in front of the jobs API, or an error
+/// envelope, read as "no stations" and "no open packets" — and the
+/// census printed a clean bill for a board it had never seen. An empty
+/// ARRAY is still honest: a registry may hold nothing.
+fn rows(body: &Value, what: &str) -> Result<Vec<Value>> {
+    match body.as_array().or_else(|| body.get("data")?.as_array()) {
+        Some(rows) => Ok(rows.clone()),
+        None => bail!("{what} answered no `data` array, so its rows cannot be read as zero"),
     }
-    body.get("data")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
 }
 
 /// Split one `/api/jobs` row into the Job and its embedded steps.
@@ -645,7 +648,7 @@ async fn collect(opts: Options, now: DateTime<Utc>) -> Result<Census> {
 
     // --- stations -------------------------------------------------
     let stations_body = api.get("/api/stations").await?;
-    let stations: Vec<StationSpec> = rows(&stations_body)
+    let stations: Vec<StationSpec> = rows(&stations_body, "GET /api/stations")?
         .into_iter()
         .filter_map(|r| serde_json::from_value(r).ok())
         .filter(|s: &StationSpec| s.status == WorkflowStatus::Active)
@@ -717,7 +720,7 @@ async fn collect(opts: Options, now: DateTime<Utc>) -> Result<Census> {
                 "/api/jobs?status=open&limit={want}&offset={offset}"
             ))
             .await?;
-        let page = rows(&body);
+        let page = rows(&body, "GET /api/jobs?status=open")?;
         let got = page.len();
         packets.extend(page.iter().filter_map(packet_from_row));
         offset += got;
@@ -794,10 +797,15 @@ async fn collect(opts: Options, now: DateTime<Utc>) -> Result<Census> {
         .collect();
 
     // --- edge integrity -------------------------------------------
-    let (edges, declarations_from) = match api.get("/api/jobs/job-edges").await {
-        Ok(body) => (
-            rows(&body)
-                .into_iter()
+    // A body with no `data` array falls back exactly as a failed read
+    // does, and says so in the same note (228faa58).
+    let edges_read = api
+        .get("/api/jobs/job-edges")
+        .await
+        .and_then(|body| rows(&body, "GET /api/jobs/job-edges"));
+    let (edges, declarations_from) = match edges_read {
+        Ok(rows) => (
+            rows.into_iter()
                 .filter_map(|r| serde_json::from_value::<JobEdgeSpec>(r).ok())
                 .collect::<Vec<_>>(),
             format!("{base}/api/jobs/job-edges"),
@@ -872,10 +880,19 @@ async fn collect(opts: Options, now: DateTime<Utc>) -> Result<Census> {
     // open-packet slice above never sees. BEST-EFFORT: it is one hygiene
     // note, not a hard dependency, so a failed read skips it rather than
     // failing the whole census.
-    let gate_run_read = api.get("/api/jobs?kind=gate-run&limit=60").await;
-    let car_read = api.get("/api/jobs?kind=ship-a-change&limit=800").await;
-    if let (Ok(gate_run_body), Ok(car_body)) = (gate_run_read, car_read) {
-        let car_branches: BTreeSet<String> = rows(&car_body)
+    // A body with no `data` array skips the note the way a failed read
+    // does, rather than reading as "no cars" and naming every green
+    // gate-run stranded (228faa58).
+    let gate_run_read = api
+        .get("/api/jobs?kind=gate-run&limit=60")
+        .await
+        .and_then(|body| rows(&body, "GET /api/jobs?kind=gate-run"));
+    let car_read = api
+        .get("/api/jobs?kind=ship-a-change&limit=800")
+        .await
+        .and_then(|body| rows(&body, "GET /api/jobs?kind=ship-a-change"));
+    if let (Ok(gate_runs), Ok(cars)) = (gate_run_read, car_read) {
+        let car_branches: BTreeSet<String> = cars
             .iter()
             .filter_map(|c| {
                 c.get("metadata")
@@ -884,7 +901,7 @@ async fn collect(opts: Options, now: DateTime<Utc>) -> Result<Census> {
                     .map(str::to_string)
             })
             .collect();
-        let stranded = stranded_gate_runs(&rows(&gate_run_body), &car_branches);
+        let stranded = stranded_gate_runs(&gate_runs, &car_branches);
         if !stranded.is_empty() {
             notes.push(format!(
                 "{} stranded gate-run(s) — gated green, never parked, so never on the dock: {}",
@@ -1030,7 +1047,7 @@ async fn resolve_universe(
         let body = api
             .get(&format!("/api/jobs?limit={want}&offset={offset}"))
             .await?;
-        let page = rows(&body);
+        let page = rows(&body, "GET /api/jobs (id scan)")?;
         let got = page.len();
         for r in &page {
             if let Some(id) = r.get("id").and_then(Value::as_str) {
@@ -2034,9 +2051,42 @@ mod tests {
 
     #[test]
     fn rows_reads_both_the_envelope_and_a_bare_array() {
-        assert_eq!(rows(&json!({"data": [1, 2], "total": 9})).len(), 2);
-        assert_eq!(rows(&json!([1, 2, 3])).len(), 3);
-        assert!(rows(&json!({})).is_empty());
+        assert_eq!(
+            rows(&json!({"data": [1, 2], "total": 9}), "GET /x")
+                .expect("envelope")
+                .len(),
+            2
+        );
+        assert_eq!(rows(&json!([1, 2, 3]), "GET /x").expect("bare").len(), 3);
+        // An EMPTY array is an honest answer and stays one.
+        assert!(
+            rows(&json!({"data": [], "total": 0}), "GET /x")
+                .expect("empty")
+                .is_empty()
+        );
+    }
+
+    /// A body with no `data` array is no answer, and the census used to
+    /// read it as zero rows — so a 200 login page (parsed to `Null` by
+    /// `get_raw`) or an error envelope printed "0 open packets" as a
+    /// clean census (backlog 228faa58, the class 833e2d0a named).
+    #[test]
+    fn rows_refuses_a_body_with_no_data_array_naming_the_reading() {
+        for body in [
+            json!({}),
+            Value::Null,
+            json!({"data": null}),
+            json!({"data": {}}),
+            json!({"error": "forbidden"}),
+        ] {
+            let why = rows(&body, "GET /api/stations")
+                .expect_err(&format!("{body} must refuse, not read as zero rows"))
+                .to_string();
+            assert!(
+                why.contains("GET /api/stations"),
+                "names the reading: {why}"
+            );
+        }
     }
 
     #[test]

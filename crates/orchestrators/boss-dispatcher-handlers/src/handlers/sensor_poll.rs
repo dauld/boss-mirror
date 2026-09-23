@@ -40,9 +40,12 @@
 //! reason changes, so a persisting condition is one packet and not a
 //! metadata write every five minutes) and marks the poll so the next
 //! attempt waits the sensor's own period. The next GOOD read closes it
-//! through its triage step (`disposition = stale`, the estate.recover
-//! idiom). A network blip is a `Downstream` error: the firing NAKs, the
-//! poll is NOT marked, and the next tick retries.
+//! (`disposition = stale`, the estate.recover idiom) at the step it is
+//! waiting on — `triage`, or the `build`/`measure` a person routed it
+//! to — or, where the machine may not close it, tells it RECOVERED and
+//! withdraws that note if the condition returns (`common::retraction`,
+//! backlog 6072ff60). A network blip is a `Downstream` error: the
+//! firing NAKs, the poll is NOT marked, and the next tick retries.
 //!
 //! AN UNOPENABLE PACKET IS THE SAME SHAPE, ONE STEP LATER (backlog
 //! f50a9ec1, 2026-09-17). A source that reads fine can still declare a
@@ -81,8 +84,8 @@ use chrono::{DateTime, Utc};
 use serde_json::{Value as Json, json};
 
 use super::common::{
-    api_client, dispatcher_reader_header, get_json, owner_for_filing, post_json, rows_or_refuse,
-    sim_origin_value, triage_step,
+    RECOVERED_AT, Retraction, api_client, dispatcher_reader_header, get_json, owner_for_filing,
+    post_json, recovery_note, relapse_patch, retraction, rows_or_refuse, sim_origin_value,
 };
 
 /// The two standing conditions a sensor alarms on. Each is its own
@@ -497,8 +500,29 @@ pub fn owed_readings(listing: &Json) -> Result<Vec<Reading>, String> {
         .map_err(|e| format!("readings not in shape: {e}"))
 }
 
-/// The open alarm carrying `key`, as `(id, reason)`, if any — and
-/// whether the page can be trusted (a truncated page holds).
+/// One open alarm as the dedup read found it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAlarm {
+    pub id: String,
+    /// The reason it was raised or last refreshed with.
+    pub reason: String,
+    /// It carries a standing recovery note (`common::recovery_note`) —
+    /// a routed alarm told the condition cleared, which a relapse must
+    /// withdraw (backlog 6072ff60).
+    pub told: bool,
+}
+
+/// Does this packet carry a standing recovery note? One reading of the
+/// listing row and of the full packet alike.
+fn told(packet: &Json) -> bool {
+    packet
+        .get("metadata")
+        .and_then(|m| m.get(RECOVERED_AT))
+        .is_some_and(|v| !v.is_null())
+}
+
+/// The open alarm carrying `key`, if any — and whether the page can be
+/// trusted (a truncated page holds).
 ///
 /// A missing, null or non-array `data` is NO ANSWER and refuses by
 /// that name (445c1494). It used to read as zero rows and was caught
@@ -506,7 +530,7 @@ pub fn owed_readings(listing: &Json) -> Result<Vec<Reading>, String> {
 /// "truncated" — and `{"total": 0}` slipped through it as a completed
 /// read that found nothing, so the alarm it was guarding got twinned.
 /// The truncation check now means only what it says.
-pub fn open_alarm(listing: &Json, key: &str) -> Result<Option<(String, String)>, String> {
+pub fn open_alarm(listing: &Json, key: &str) -> Result<Option<OpenAlarm>, String> {
     let rows: Vec<Json> = rows_or_refuse(listing, "the open-alarm dedup read")?;
     let total = listing
         .get("total")
@@ -525,17 +549,36 @@ pub fn open_alarm(listing: &Json, key: &str) -> Result<Option<(String, String)>,
         .iter()
         .find(|j| j.pointer("/metadata/estate_finding").and_then(Json::as_str) == Some(key))
         .and_then(|j| {
-            Some((
-                j.get("id")?.as_str()?.to_string(),
-                j.pointer("/metadata/reason")
+            Some(OpenAlarm {
+                id: j.get("id")?.as_str()?.to_string(),
+                reason: j
+                    .pointer("/metadata/reason")
                     .and_then(Json::as_str)
                     .unwrap_or_default()
                     .to_string(),
-            ))
+                told: told(j),
+            })
         }))
 }
 
-/// The triage completion that closes a recovered alarm.
+/// Who a sensor alarm's retraction is stamped as.
+const CLEARED_BY: &str = "sensor.poll";
+
+/// What a later success proves — the one sentence a close and a
+/// recovery note both state.
+fn recovery_evidence(sensor_id: &str, condition: Condition, at: DateTime<Utc>) -> String {
+    format!(
+        "sensor.poll {} sensor `{sensor_id}` successfully at {}; the condition this alarm \
+         carried no longer holds.",
+        condition.recovered_by(),
+        at.to_rfc3339()
+    )
+}
+
+/// The step completion that closes a recovered alarm — at `triage`, or
+/// at the `build`/`measure` a person routed it to (`common::retraction`,
+/// backlog 6072ff60). `existing` is that step's own metadata, carried
+/// through because a step PUT replaces it wholesale.
 pub fn recover_step_body(
     existing: &serde_json::Map<String, Json>,
     sensor_id: &str,
@@ -547,14 +590,12 @@ pub fn recover_step_body(
     metadata.insert(
         "evidence".into(),
         json!(format!(
-            "sensor.poll {} sensor `{sensor_id}` successfully at {}; the condition this alarm \
-             carried no longer holds. Closed by machine from the success, not by judgement.",
-            condition.recovered_by(),
-            at.to_rfc3339()
+            "{} Closed by machine from the success, not by judgement.",
+            recovery_evidence(sensor_id, condition, at)
         )),
     );
-    metadata.insert("cleared_by".into(), json!("sensor.poll"));
-    metadata.insert("recovered_at".into(), json!(at.to_rfc3339()));
+    metadata.insert("cleared_by".into(), json!(CLEARED_BY));
+    metadata.insert(RECOVERED_AT.into(), json!(at.to_rfc3339()));
     json!({"status": "completed", "metadata": metadata})
 }
 
@@ -713,7 +754,7 @@ impl SensorPoll {
         Ok(())
     }
 
-    async fn open_alarm_for(&self, key: &str) -> Result<Option<(String, String)>, HandlerError> {
+    async fn open_alarm_for(&self, key: &str) -> Result<Option<OpenAlarm>, HandlerError> {
         let listing = self
             .get(&format!(
                 "/api/jobs?kind=backlog-item&status=open&limit={DEDUP_PAGE}"
@@ -725,6 +766,17 @@ impl SensorPoll {
     /// File the alarm, or refresh the open one when the reason moved,
     /// or leave it when nothing changed. One mechanism for both
     /// conditions; the alarm's key is what tells them apart.
+    ///
+    /// A RELAPSE WITHDRAWS THE RECOVERY NOTE (backlog 6072ff60). A
+    /// routed alarm the machine may not close is told RECOVERED
+    /// ([`Self::recover`]); if the condition then comes back, that note
+    /// is false. The held path writes nothing to the packet by design —
+    /// one packet, not a metadata write every five minutes — which is
+    /// exactly why the note would stand through the relapse unless the
+    /// held path withdraws it, as cadence.silence.sweep and
+    /// estate.recover withdraw theirs (a2d8bad3). It is one write, on
+    /// the first failing read only: after it the packet is no longer
+    /// told, and the held path is silent again.
     async fn raise_or_refresh(
         &self,
         sensor: &SensorRow,
@@ -734,18 +786,36 @@ impl SensorPoll {
         let reason = &alarm.reason;
         let owner = owner_for_filing(self.owner.as_ref(), self.name()).await;
         match self.open_alarm_for(&key).await? {
-            Some((id, held)) if held == *reason => {
-                tracing::info!(finding = %key, packet = %id, "sensor.poll: alarm already open with this reason");
+            Some(open) if open.reason == *reason => {
+                let id = &open.id;
+                if open.told {
+                    self.write(
+                        reqwest::Method::PATCH,
+                        &format!("/api/jobs/{id}/metadata"),
+                        &relapse_patch(),
+                        &sensor.id,
+                    )
+                    .await?;
+                    tracing::warn!(finding = %key, packet = %id, "sensor.poll: the condition is back; withdrew the recovery note");
+                } else {
+                    tracing::info!(finding = %key, packet = %id, "sensor.poll: alarm already open with this reason");
+                }
                 Ok("held")
             }
-            Some((id, _)) => {
+            Some(OpenAlarm { id, .. }) => {
                 // The fresh body's metadata, whole: a merge on the
                 // packet, so every key the reason moved with (the
-                // detail, the reading's id) moves with it.
+                // detail, the reading's id) moves with it — and the
+                // nulls that withdraw a standing recovery note, since
+                // a new failure is a relapse too.
+                let mut patch = alarm_body(sensor, alarm, &owner)["metadata"].clone();
+                if let (Some(m), Json::Object(relapse)) = (patch.as_object_mut(), relapse_patch()) {
+                    m.extend(relapse);
+                }
                 self.write(
                     reqwest::Method::PATCH,
                     &format!("/api/jobs/{id}/metadata"),
-                    &alarm_body(sensor, alarm, &owner)["metadata"],
+                    &patch,
                     &sensor.id,
                 )
                 .await?;
@@ -766,8 +836,16 @@ impl SensorPoll {
         }
     }
 
-    /// Close the open alarm for `condition`, if one is, through its
-    /// triage step.
+    /// Withdraw the open alarm for `condition`, if one is, at the step
+    /// the packet is waiting on (`common::retraction`).
+    ///
+    /// It completed `triage` only, so once a person had routed the
+    /// alarm the jobs API refused the PUT as a write to a terminal step
+    /// — a 409 on every poll of a healthy sensor, and an alarm that
+    /// never retracted (backlog 6072ff60, the sensor half of a2d8bad3).
+    /// Now a ready `measure`/`build` is completed `stale`, and a route
+    /// the machine may not complete is TOLD, once, that the condition
+    /// cleared; a relapse withdraws that note ([`Self::raise_or_refresh`]).
     async fn recover(
         &self,
         sensor: &SensorRow,
@@ -775,22 +853,46 @@ impl SensorPoll {
         at: DateTime<Utc>,
     ) -> Result<(), HandlerError> {
         let key = condition.key(&sensor.id);
-        let Some((id, _)) = self.open_alarm_for(&key).await? else {
+        let Some(OpenAlarm { id, .. }) = self.open_alarm_for(&key).await? else {
             return Ok(());
         };
         let job = self.get(&format!("/api/jobs/{id}")).await?;
-        let Some((step_id, existing)) = triage_step(&job) else {
-            tracing::warn!(finding = %key, packet = %id, "sensor.poll: the open alarm has no triage step to close");
-            return Ok(());
-        };
-        self.write(
-            reqwest::Method::PUT,
-            &format!("/api/jobs/{id}/steps/{step_id}"),
-            &recover_step_body(&existing, &sensor.id, condition, at),
-            &sensor.id,
-        )
-        .await?;
-        tracing::info!(finding = %key, packet = %id, "sensor.poll closed the alarm: the condition no longer holds");
+        match retraction(&job) {
+            None => {
+                tracing::warn!(finding = %key, packet = %id, "sensor.poll: the open alarm has no triage step to close");
+            }
+            Some(Retraction::Complete {
+                slug,
+                step_id,
+                metadata,
+            }) => {
+                self.write(
+                    reqwest::Method::PUT,
+                    &format!("/api/jobs/{id}/steps/{step_id}"),
+                    &recover_step_body(&metadata, &sensor.id, condition, at),
+                    &sensor.id,
+                )
+                .await?;
+                tracing::info!(finding = %key, packet = %id, step = %slug, "sensor.poll closed the alarm: the condition no longer holds");
+            }
+            // A packet already told is not told again on every poll.
+            Some(Retraction::Annotate { .. }) if told(&job) => {}
+            Some(Retraction::Annotate { why_open }) => {
+                self.write(
+                    reqwest::Method::PATCH,
+                    &format!("/api/jobs/{id}/metadata"),
+                    &Json::Object(recovery_note(
+                        &recovery_evidence(&sensor.id, condition, at),
+                        CLEARED_BY,
+                        &at.to_rfc3339(),
+                        &why_open,
+                    )),
+                    &sensor.id,
+                )
+                .await?;
+                tracing::info!(finding = %key, packet = %id, why_open = %why_open, "sensor.poll: the condition cleared; told the routed alarm it has recovered");
+            }
+        }
         Ok(())
     }
 
@@ -1081,7 +1183,11 @@ mod tests {
         });
         assert_eq!(
             open_alarm(&listing, "sensor_unreadable:stripe-sponsorships").unwrap(),
-            Some(("alarm-1".into(), "401".into()))
+            Some(OpenAlarm {
+                id: "alarm-1".into(),
+                reason: "401".into(),
+                told: false,
+            })
         );
         assert_eq!(
             open_alarm(&listing, "sensor_unreadable:other").unwrap(),
@@ -1344,16 +1450,43 @@ mod tests {
                         let c = c3.clone();
                         let alarms = a4.clone();
                         async move {
-                            // A completed triage step closes the
-                            // packet, so it leaves the open listing —
-                            // as the real API's terminal does.
+                            // A write to a terminal step is refused, as
+                            // the real step API refuses it — the 409 a
+                            // routed alarm's triage answered on every
+                            // poll (backlog 6072ff60).
+                            let terminal = alarms
+                                .lock()
+                                .unwrap()
+                                .iter()
+                                .filter(|r| r["id"] == id)
+                                .flat_map(|r| r["steps"].as_array().cloned().unwrap_or_default())
+                                .any(|s| {
+                                    s["id"] == sid
+                                        && matches!(
+                                            s["status"].as_str(),
+                                            Some("completed") | Some("skipped")
+                                        )
+                                });
+                            if terminal {
+                                c.lock()
+                                    .unwrap()
+                                    .push((format!("PUT /api/jobs/{id}/steps/{sid} (409)"), body));
+                                return (
+                                    axum::http::StatusCode::CONFLICT,
+                                    "step is completed; annotate via PATCH /api/jobs/{id}/metadata",
+                                )
+                                    .into_response();
+                            }
+                            // A completed step closes the packet, so it
+                            // leaves the open listing — as the real
+                            // API's terminal does.
                             if body["status"] == "completed" {
                                 alarms.lock().unwrap().retain(|r| r["id"] != id);
                             }
                             c.lock()
                                 .unwrap()
                                 .push((format!("PUT /api/jobs/{id}/steps/{sid}"), body));
-                            AxJson(json!({ "ok": true }))
+                            AxJson(json!({ "ok": true })).into_response()
                         }
                     },
                 ),
@@ -2055,5 +2188,129 @@ mod tests {
         h.invoke(&[], &ctx()).await.unwrap();
         assert!(source.reads.lock().unwrap().is_empty());
         assert!(stub.packets().is_empty());
+    }
+
+    // ----- a routed alarm (backlog 6072ff60, the sensor half of a2d8bad3) -----
+
+    const UNREADABLE: &str = "sensor_unreadable:stripe-sponsorships";
+
+    /// An open alarm a person has already triaged: `triage` completed
+    /// with the route it took, and the route's `build` step at
+    /// `route_status`.
+    fn routed_alarm(reason: &str, route_status: &str) -> Json {
+        json!({
+            "id": "alarm-r",
+            "kind": "backlog-item",
+            "status": "open",
+            "metadata": {"estate_finding": UNREADABLE, "reason": reason},
+            "steps": [
+                {"id": "alarm-r-triage", "spec_slug": "triage", "status": "completed",
+                 "metadata": {"authority_role": "platform-admin", "disposition": "build"}},
+                {"id": "alarm-r-build", "spec_slug": "build", "status": route_status,
+                 "metadata": {"authority_role": "platform-admin"}}
+            ]
+        })
+    }
+
+    /// THE DEFECT. A good read closed its alarm only by completing
+    /// `triage`, so an alarm a person had routed answered 409 on every
+    /// poll and never retracted. It withdraws at the step the packet is
+    /// waiting on — the ready `build` — and never touches the terminal
+    /// triage.
+    #[tokio::test]
+    async fn a_routed_alarm_is_withdrawn_at_its_ready_step_not_refused_at_triage() {
+        let stub = stub_jobs_api(vec![routed_alarm("stripe answered 401", "ready")]).await;
+        declare(&stub).await;
+        let source = InMemorySource::answering(vec![obs("ch_1", "2026-09-17T09:00:00Z", 1)]);
+        handler(&stub, source, Some("k"))
+            .invoke(&[], &ctx())
+            .await
+            .expect("a good read retracts a routed alarm without a 409");
+        assert!(
+            stub.writes("PUT /api/jobs/alarm-r/steps/alarm-r-triage")
+                .is_empty(),
+            "the terminal triage is not written: {:?}",
+            stub.writes("PUT")
+        );
+        let puts = stub.writes("PUT /api/jobs/alarm-r/steps/alarm-r-build");
+        assert_eq!(puts.len(), 1, "{:?}", stub.writes("PUT"));
+        assert_eq!(puts[0].1["status"], "completed");
+        assert_eq!(puts[0].1["metadata"]["disposition"], "stale");
+        assert_eq!(puts[0].1["metadata"]["cleared_by"], "sensor.poll");
+        assert_eq!(puts[0].1["metadata"]["authority_role"], "platform-admin");
+    }
+
+    /// A route an executor holds is not completed from under it: the
+    /// packet is TOLD it recovered, once — the next good read, with the
+    /// note standing, writes nothing.
+    #[tokio::test]
+    async fn an_alarm_whose_route_is_held_is_told_it_recovered_once() {
+        let stub = stub_jobs_api(vec![routed_alarm("stripe answered 401", "active")]).await;
+        declare(&stub).await;
+        let source = InMemorySource::answering(vec![obs("ch_1", "2026-09-17T09:00:00Z", 1)]);
+        let h = handler(&stub, source, Some("k"));
+        h.invoke(&[], &ctx()).await.expect("told, not refused");
+        assert!(stub.writes("PUT /api/jobs/alarm-r").is_empty());
+        let patches = stub.writes("PATCH /api/jobs/alarm-r/metadata");
+        assert_eq!(patches.len(), 1, "{patches:?}");
+        let note = &patches[0].1;
+        assert_eq!(
+            note[super::super::common::RECOVERED_AT],
+            "2026-09-17T10:05:00+00:00"
+        );
+        assert_eq!(note["recovered_by"], "sensor.poll");
+        let recovery = note["recovery"].as_str().unwrap();
+        assert!(recovery.starts_with("RECOVERED"), "{recovery}");
+        assert!(recovery.contains("stripe-sponsorships"), "{recovery}");
+        assert!(recovery.contains("`build` is active"), "{recovery}");
+
+        // The note stands (the stub does not merge, so set it as the
+        // real API would): the next good read does not tell it again.
+        stub.alarms.lock().unwrap()[0]["metadata"]["recovered_at"] =
+            json!("2026-09-17T10:05:00+00:00");
+        h.invoke(&[], &ctx_at("2026-09-17T10:20:00+00:00"))
+            .await
+            .unwrap();
+        assert_eq!(stub.writes("PATCH /api/jobs/alarm-r/metadata").len(), 1);
+    }
+
+    /// THE CATCH. The held path — the same reason again — writes
+    /// nothing to the packet, so a RECOVERED note written on recovery
+    /// would stand through a relapse. It is withdrawn on the first
+    /// failing read, as cadence and estate withdraw theirs; a refresh
+    /// (a new reason) withdraws it in the same merge.
+    #[tokio::test]
+    async fn a_relapse_withdraws_the_recovery_note_on_the_held_path_and_on_a_refresh() {
+        let mut told = routed_alarm("stripe answered 401", "active");
+        told["metadata"]["recovered_at"] = json!("2026-09-17T09:50:00+00:00");
+        told["metadata"]["recovery"] = json!("RECOVERED — ...");
+        let stub = stub_jobs_api(vec![told]).await;
+        declare(&stub).await;
+        let source = InMemorySource::failing(SourceError::Unreadable("stripe answered 401".into()));
+        let h = handler(&stub, source.clone(), Some("k"));
+        h.invoke(&[], &ctx()).await.unwrap();
+        assert!(stub.packets().is_empty(), "held, never twinned");
+        let patches = stub.writes("PATCH /api/jobs/alarm-r/metadata");
+        assert_eq!(patches.len(), 1, "{patches:?}");
+        assert_eq!(patches[0].1, super::super::common::relapse_patch());
+
+        source.set(Err(SourceError::Unreadable("stripe answered 403".into())));
+        h.invoke(&[], &ctx_at("2026-09-17T10:20:00+00:00"))
+            .await
+            .unwrap();
+        let patches = stub.writes("PATCH /api/jobs/alarm-r/metadata");
+        assert_eq!(patches.len(), 2, "{patches:?}");
+        assert_eq!(patches[1].1["reason"], "stripe answered 403");
+        for key in [
+            super::super::common::RECOVERED_AT,
+            "recovered_by",
+            "recovery",
+        ] {
+            assert!(
+                patches[1].1.as_object().unwrap().contains_key(key) && patches[1].1[key].is_null(),
+                "{key} is withdrawn by a null in the merge: {}",
+                patches[1].1
+            );
+        }
     }
 }

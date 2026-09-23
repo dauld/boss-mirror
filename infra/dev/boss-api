@@ -82,6 +82,25 @@
 #   BOSS_ACTOR_FILE            line in this file ($HOME/.config/boss/actor,
 #                              as the boss CLI reads it)
 #   BOSS_MACHINE_TOKEN_FILE  the machine token, sent only when it exists
+#   BOSS_SOR_WAIT_SECONDS    how long a refused connect is waited out as
+#                              a rollout (whole seconds; 0 = not at all);
+#                              else 120
+#
+# A ROLLOUT IS WAITED OUT (backlog 034002b3, twice on 2026-09-23). The
+# stack rolls with strategy Recreate, so every train that converges
+# takes the jobs API dark for about a minute, and every write through
+# this door in that minute exited 7 (`No route to host`) at once and
+# had to be relaunched by hand. `curl_through_a_roll` re-sends ONLY a
+# request that never left: curl exit 6 (could not resolve host) or 7
+# (could not connect — refused, no route, network unreachable). Any
+# other exit may be a request the server received — 28 is one code for
+# a connect timeout AND a transfer that timed out after the body went,
+# 52 and 56 are a reply lost after sending — so it is surfaced as
+# before, and an HTTP status is an answer whatever it says. Each wait
+# prints one line; past the window the door fails naming how long it
+# waited, with curl's own exit code. The CLI's twin is
+# `train::waiting_out_a_roll` (crates/orchestrators/boss-cli), the same
+# rule and the same 120s over reqwest's own connect classification.
 set -euo pipefail
 
 METHOD=${1:-}; API_PATH=${2:-}; BODY=${3:-}
@@ -90,6 +109,13 @@ case "$METHOD" in
   *) echo "usage: boss-api GET|POST|PUT|PATCH|DELETE /api/path [body.json]" >&2; exit 2 ;;
 esac
 [ -n "$API_PATH" ] || { echo "usage: boss-api GET|POST|PUT|PATCH|DELETE /api/path [body.json]" >&2; exit 2; }
+WAIT_WINDOW=${BOSS_SOR_WAIT_SECONDS:-120}
+case "$WAIT_WINDOW" in
+  ''|*[!0-9]*)
+    echo "boss-api: BOSS_SOR_WAIT_SECONDS='$WAIT_WINDOW' is not a whole number of seconds — refusing rather than reading it as no wait or as forever" >&2
+    exit 2
+    ;;
+esac
 
 # readlink -f: the pod invokes this through a symlink, and sor-url sits
 # beside the FILE, not the link.
@@ -205,7 +231,31 @@ TOK=$(cat "${BOSS_MACHINE_TOKEN_FILE:-/etc/boss/machine-token}" 2>/dev/null || t
 [ -n "$TOK" ] && args+=( -H "X-Boss-Machine-Token: $TOK" )
 [ -n "$BODY" ] && args+=( --data-binary "@$BODY" )
 
-out=$(curl "${args[@]}" "$BASE$API_PATH")
+# curl, re-sent only while the request never left (the header above
+# says which exits those are and why). Prints the answer; returns
+# curl's own code, so a caller sees exactly what it saw before.
+curl_through_a_roll() {
+  local started=$SECONDS attempt=1 pause=2 rc answer elapsed
+  while :; do
+    rc=0; answer=$(curl "$@") || rc=$?
+    case "$rc" in
+      6|7) ;;
+      *) printf '%s' "$answer"; return "$rc" ;;
+    esac
+    elapsed=$((SECONDS - started))
+    if [ "$elapsed" -ge "$WAIT_WINDOW" ]; then
+      echo "boss-api: $METHOD $API_PATH: the jobs API refused every connection for ${elapsed}s ($attempt attempts, curl exit $rc; waited out for up to ${WAIT_WINDOW}s in case it was a rollout) — nothing was sent, so nothing landed and relaunching is safe" >&2
+      return "$rc"
+    fi
+    [ "$pause" -le $((WAIT_WINDOW - elapsed)) ] || pause=$((WAIT_WINDOW - elapsed))
+    echo "boss-api: the jobs API is not answering (a rollout?) — retrying $METHOD $API_PATH in ${pause}s (${elapsed}s of ${WAIT_WINDOW}s, curl exit $rc)" >&2
+    sleep "$pause"
+    attempt=$((attempt + 1))
+    pause=$((pause * 2)); [ "$pause" -le 15 ] || pause=15
+  done
+}
+
+out=$(curl_through_a_roll "${args[@]}" "$BASE$API_PATH")
 code=${out##*$'\n'}
 body=${out%"$code"}
 printf '%s' "$body"

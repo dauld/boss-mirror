@@ -82,6 +82,11 @@ percent-encoding = "2"
 regex = "1"
 
 [dev-dependencies]
+# Paused time (backlog 034002b3): a jobs-API call against a dark SoR
+# now waits out a rollout for 120s, and a test that pins what a
+# best-effort read does when the SoR is dark walks that window on the
+# runtime's clock instead of spending two real minutes of every gate.
+tokio = { workspace = true, features = ["test-util"] }
 # dock_preview's tests prove trial_merge against REAL git in a scratch
 # repo (fixtures of what we hope merge-tree prints would pin nothing).
 tempfile = "3"

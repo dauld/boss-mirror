@@ -248,6 +248,38 @@ confirmed() { # <line> -> 0 iff it names this sha
 
 mkdir -p "$STORE" || refuse "failed: cannot create $STORE" "the generation store could not be created"
 
+# --- one install at a time per store ----------------------------------------
+# CONCURRENT INSTALLS TAKE TURNS (backlog 9e1f037a). Every run of one
+# sha stages in the same `.staging-<sha>` and begins by removing it, so
+# two runs at once delete and refill each other's pull mid-walk. On the
+# dev pod that is the common case, not a corner: every builder's shim
+# runs this before a write verb once a train lands (and re-runs it every
+# 30 s while the image is late), beside the sidecar's hourly pass.
+# Measured 2026-09-23 against the real registry, image boss:8c122d9 —
+# the one the packet's "blob digest mismatch" named: alone it installs
+# clean; two to four concurrent runs gave 12 refusals in 14, every one
+# of them blaming the IMAGE ("layer 26 is '', not a gzip tar", "has no
+# amd64/linux manifest", "arrived with no bytes"), and one walked past
+# the layer that carries the binary — which is how the packet's refusal
+# came to name layer 1 at all. So the whole run holds one lock on the
+# store: the runs that waited find the generation the first installed
+# and fetch nothing (`relinked`/`unchanged`), and the lock also covers
+# `current`, the wrapper and the prune, which every sha shares. The fd
+# is opened read-only — flock needs no write access, and the store is
+# shared between accounts (the pod's dev container and its sidecar). A
+# wait past the bound is `not yet` (75): the holder is pulling, and
+# the callers that retry on 75 retry.
+LOCK="$STORE/.install.lock"
+LOCK_WAIT="${BOSS_CLI_LOCK_WAIT:-$PULL_TIMEOUT}"
+command -v flock >/dev/null 2>&1 \
+    || refuse "refused: no flock on this host" "two installs into $STORE at once destroy each other's staging, so this run takes $LOCK first, and flock (util-linux) is not on PATH"
+[ -e "$LOCK" ] || : >>"$LOCK" 2>/dev/null
+exec 9<"$LOCK" || refuse "failed: cannot open $LOCK" "the store's install lock could not be opened for reading"
+if ! flock -w "$LOCK_WAIT" 9; then
+    refuse "not yet: another install into $STORE held its lock for ${LOCK_WAIT}s" \
+        "a concurrent run of this installer is still pulling into $STORE (BOSS_CLI_LOCK_WAIT=${LOCK_WAIT}s); nothing was touched. Retry: the waiter that gets the lock finds its generation, if the holder installed one, and fetches nothing."
+fi
+
 # --- the wrapper, current with the tree -------------------------------------
 # Copied, never linked: /opt/boss is a checkout the converge moves, and
 # a link into it would make `boss` change bytes mid-fast-forward.

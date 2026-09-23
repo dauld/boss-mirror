@@ -317,11 +317,12 @@ pub(crate) const EDIT_LEVEL_PATH: &str = "/api/tenant/edit-level";
 /// not open a run.
 pub(crate) async fn edit_level_at(http: &reqwest::Client, base: &str) -> Result<Option<String>> {
     let url = format!("{base}{EDIT_LEVEL_PATH}");
-    let resp = http
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("reading the instance's edit level at {url}"))?;
+    // Waits out a jobs-API roll (backlog 034002b3), like every verb.
+    let resp = crate::train::send_through_a_roll(
+        &format!("reading the instance's edit level at {url}"),
+        || http.get(&url),
+    )
+    .await?;
     let status = resp.status();
     if status == reqwest::StatusCode::NOT_FOUND {
         eprintln!(

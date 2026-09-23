@@ -28,7 +28,8 @@
 //! and its token endpoint hands out a pull token with no credentials,
 //! so the pull is curl + tar. Both defects are pinned here: the tag in
 //! the URL is the short sha (and the full sha is never requested), and
-//! nothing on PATH but curl, jq, tar, gzip and sha256sum is needed.
+//! nothing on PATH but curl, jq, tar, gzip, sha256sum and flock (the
+//! store lock concurrent installs take turns on, backlog 9e1f037a) is needed.
 //!
 //! What each case pins: the binary lands under a per-FULL-sha
 //! generation and `/usr/local/bin/boss` is a wrapper that names that
@@ -213,7 +214,9 @@ impl Case {
         // credentials; manifests and blobs need the bearer token.
         // STUB_TOKEN_DOWN makes the token endpoint unreachable (curl
         // exit 7); STUB_CORRUPT_BLOB serves every blob with bytes
-        // appended, so no blob hashes to its digest.
+        // appended, so no blob hashes to its digest; STUB_BLOB_DELAY
+        // holds every blob fetch open that many seconds, the window in
+        // which a second install of the same sha used to land.
         write_exec(
             &bin.join("curl"),
             r#"#!/usr/bin/env bash
@@ -259,6 +262,7 @@ case "$path" in
   v2/david/boss/blobs/sha256:*)
     d="${path##*/}"
     if [ -f "$STUB_REGISTRY/blobs/$d" ]; then
+      [ -n "${STUB_BLOB_DELAY:-}" ] && sleep "$STUB_BLOB_DELAY"
       cp "$STUB_REGISTRY/blobs/$d" "$out"
       [ -n "${STUB_CORRUPT_BLOB:-}" ] && echo corrupt >> "$out"
       if [ -n "${STUB_VANISHING_BLOB:-}" ]; then rm -f "$out"; printf 200; exit 0; fi
@@ -775,6 +779,72 @@ fn a_fetch_that_leaves_no_bytes_is_refused_as_no_bytes_not_as_a_mismatch() {
         c.current().is_none() && !c.link.exists(),
         "nothing is installed: {out}"
     );
+}
+
+/// CONCURRENT INSTALLS OF ONE SHA TAKE TURNS (backlog 9e1f037a). On the
+/// dev pod the installer has many callers for the SAME sha at the same
+/// moment — every builder's shim runs it before a write verb once a
+/// train lands, and polls it every 30 s while the image is late, beside
+/// the reclaim sidecar's hourly pass — and each run used to `rm -rf` and
+/// refill ONE staging directory, `.staging-<sha>`, with no lock.
+/// Measured 2026-09-23 against the real forge registry, image
+/// 10.20.0.15:3000/david/boss:8c122d9 — the image the packet's refusal
+/// named: alone it installs clean (layer 4 carries the binary, digest
+/// verified); two to four concurrent runs into one store gave 12
+/// refusals in 14, none of them true — "layer 26 is '', not a gzip
+/// tar", "has no amd64/linux manifest", "lists no layers", "layer 4 is
+/// not a readable gzip tar", "layer 9 arrived with no bytes" — and one
+/// run walked PAST layer 4 to layer 3, the only way the packet's refusal
+/// could have named layer 1 at all. A refusal that blames the image for
+/// a collision between two installers sends its reader to the registry.
+#[test]
+fn concurrent_installs_of_one_sha_take_turns_and_pull_the_image_once() {
+    if !tools() || !has("flock") {
+        return;
+    }
+    let c = Case::new("concurrent");
+    let children: Vec<_> = (0..4)
+        .map(|_| {
+            let mut cmd = Command::new("bash");
+            cmd.arg(repo_root().join(SCRIPT)).arg(SHA_A);
+            c.env(&mut cmd, &[("STUB_BLOB_DELAY", "0.4".into())]);
+            cmd.stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("install-cli-from-image.sh starts")
+        })
+        .collect();
+    let outs: Vec<_> = children
+        .into_iter()
+        .map(|ch| {
+            ch.wait_with_output()
+                .expect("install-cli-from-image.sh ends")
+        })
+        .collect();
+    for out in &outs {
+        let t = text(out);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "every concurrent install confirms — none refuses over another's staging: {t}"
+        );
+        assert!(t.contains("CONFIRMED"), "{t}");
+    }
+    assert_eq!(c.current().as_deref(), Some(SHA_A));
+    let blobs = c
+        .requests()
+        .iter()
+        .filter(|u| u.contains("/blobs/"))
+        .count();
+    assert_eq!(
+        blobs,
+        2,
+        "the two layers are pulled ONCE: the runs that waited find the generation \
+         the first one installed and fetch nothing: {:?}",
+        c.requests()
+    );
+    let (_, v) = c.version_through_link();
+    assert!(v.contains(&format!("built from {SHA_A}")), "{v}");
 }
 
 /// A layer ABOVE the one carrying the binary that whites it out means

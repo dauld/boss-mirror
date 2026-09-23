@@ -81,11 +81,12 @@ impl Handler for JobsClearWaiting {
         let listing: serde_json::Value = resp.json().await.map_err(|e| {
             HandlerError::Downstream(format!("GET {list_url} response not JSON: {e}"))
         })?;
-        let waiters = listing
-            .get("data")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        // A listing with no `data` array is NO ANSWER. Read as zero
+        // waiters it ACKed the close — the one event that will ever wake
+        // them — and every waiter stayed blocked (backlog 37fc5837).
+        let waiters: Vec<serde_json::Value> =
+            super::common::rows_or_refuse(&listing, "the waiter read (GET /api/jobs?waiting_on=)")
+                .map_err(HandlerError::Downstream)?;
 
         for waiter in waiters {
             let Some(id) = waiter.get("id").and_then(|v| v.as_str()) else {
@@ -153,5 +154,18 @@ mod tests {
         let h = JobsClearWaiting::new("http://127.0.0.1:1");
         let res = h.invoke(&[], &ctx(json!({ "id": "j-1" }))).await;
         assert!(matches!(res, Err(HandlerError::Downstream(_))));
+    }
+
+    /// A waiter read with no `data` array is no answer (backlog
+    /// 37fc5837). Read as zero waiters it acked the close, and the
+    /// close is the only event that will ever wake them — so every
+    /// waiter stayed blocked, silently. Refusing redelivers instead.
+    #[tokio::test]
+    async fn a_waiter_read_with_no_data_array_refuses_by_name() {
+        use crate::handlers::listing_stub::{assert_refused_by_name, no_data_array, serve};
+        let stub = serve(vec![("/api/jobs?waiting_on=j-1", no_data_array())]).await;
+        let h = JobsClearWaiting::new(stub.base.clone());
+        let res = h.invoke(&[], &ctx(json!({ "id": "j-1" }))).await;
+        assert_refused_by_name(res, "the waiter read");
     }
 }

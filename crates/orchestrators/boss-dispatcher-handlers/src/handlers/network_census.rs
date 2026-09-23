@@ -406,15 +406,17 @@ impl Handler for NetworkCensus {
         // 3. Station coverage.
         let stations =
             get_json(&self.client, &format!("{}/api/stations", self.base()), rule).await?;
-        let rows: Vec<&serde_json::Value> = stations
-            .get("data")
-            .and_then(|v| v.as_array())
-            .map(|r| r.iter().collect())
-            .unwrap_or_default();
+        // A station list with no `data` array is NO ANSWER. Read as zero
+        // stations it recorded a census that evaluated nothing as a
+        // measured datapoint — the partial count LIMITS says must fail
+        // the firing instead (backlog 37fc5837).
+        let rows: Vec<serde_json::Value> =
+            super::common::rows_or_refuse(&stations, "GET /api/stations")
+                .map_err(HandlerError::Downstream)?;
         let mut per_actor_skipped = 0i64;
         let mut evaluated = 0i64;
         let mut stationed: HashSet<String> = HashSet::new();
-        for row in rows {
+        for row in &rows {
             let Some(name) = row.get("name").and_then(|v| v.as_str()) else {
                 continue;
             };
@@ -634,5 +636,33 @@ mod tests {
             "name": "q.brewer.task",
             "predicate": {"kind": "brew-batch"},
         })));
+    }
+
+    /// A station list with no `data` array is no answer (backlog
+    /// 37fc5837). Read as zero stations, the census recorded a day on
+    /// which nothing was evaluated as a measured datapoint — the
+    /// partial count this handler's own LIMITS refuse to land. It now
+    /// fails the firing, and no census event is written.
+    #[tokio::test]
+    async fn a_station_list_with_no_data_array_refuses_and_records_nothing() {
+        use crate::handlers::listing_stub::{
+            assert_refused_by_name, empty_listing, no_data_array, serve,
+        };
+        let stub = serve(vec![
+            ("/api/jobs", empty_listing()),
+            ("/api/stations", no_data_array()),
+        ])
+        .await;
+        let ctx = InvocationContext {
+            rule_name: "network-census-daily".into(),
+            triggering_event_id: "clock-2026-09-23".into(),
+            triggering_topic: "schedule".into(),
+            event_payload: json!({ "_day": "2026-09-23" }),
+        };
+        let res = NetworkCensus::new(stub.base.clone())
+            .invoke(&[], &ctx)
+            .await;
+        assert_eq!(stub.writes(), Vec::<String>::new(), "no census recorded");
+        assert_refused_by_name(res, "GET /api/stations");
     }
 }

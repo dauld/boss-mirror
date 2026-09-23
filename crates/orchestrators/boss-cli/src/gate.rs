@@ -2180,17 +2180,22 @@ pub(crate) async fn api_at_signed(
     signature: identity::Signature,
 ) -> Result<Option<Value>> {
     let signer = identity::apply(signature)?;
-    let mut req = http
-        .request(method.clone(), format!("{base}{path}"))
-        .header("x-boss-user", identity::header(&signer))
-        .header("content-type", "application/json");
-    if let Some(p) = &payload {
-        req = req.json(p);
-    }
-    let resp = req
-        .send()
-        .await
-        .with_context(|| format!("jobs api {method} {path}"))?;
+    let user = identity::header(&signer);
+    let url = format!("{base}{path}");
+    // A refused connect is waited out — the stack rolls with Recreate
+    // and is dark for about a minute per converge (backlog 034002b3);
+    // anything past the connect is surfaced as it always was.
+    let resp = crate::train::send_through_a_roll(&format!("jobs api {method} {path}"), || {
+        let req = http
+            .request(method.clone(), &url)
+            .header("x-boss-user", user.as_str())
+            .header("content-type", "application/json");
+        match &payload {
+            Some(p) => req.json(p),
+            None => req,
+        }
+    })
+    .await?;
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
@@ -6876,6 +6881,56 @@ mod signing_tests {
         );
     }
 
+    /// Backlog 034002b3, at the wire: a write sent while the jobs API is
+    /// mid-roll (nothing listening, so the connect is refused) is not a
+    /// failed verb — it is sent again once the API comes back, and it
+    /// arrives once. Until this, `boss gate` and `boss design` exited 1
+    /// at once and the operator relaunched by hand.
+    #[tokio::test]
+    async fn a_write_sent_during_a_roll_arrives_once_the_api_is_back() {
+        // A port nothing serves yet: bind, note it, let it go.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let base = format!("http://127.0.0.1:{port}");
+        let back = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let (mut sock, _) = listener.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut chunk = [0u8; 4096];
+            let n = sock.read(&mut chunk).await.unwrap();
+            let head = String::from_utf8_lossy(&chunk[..n]).into_owned();
+            let _ = sock
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                      content-length: 2\r\nconnection: close\r\n\r\n{}",
+                )
+                .await;
+            head
+        });
+        let http = reqwest::Client::new();
+        api_at_signed(
+            &http,
+            &base,
+            reqwest::Method::POST,
+            "/api/jobs",
+            Some(json!({"kind": "backlog-item"})),
+            Signature::As("claude@algedonic.dev".into()),
+        )
+        .await
+        .expect("a refused connect is waited out, not surfaced");
+        let head = back.await.unwrap();
+        assert!(
+            head.starts_with("POST /api/jobs"),
+            "the write reached the API once it was back; head was:\n{head}"
+        );
+    }
+
     /// The loud case. A write nobody named does not go out at all —
     /// and in particular does not go out as automation, which is the
     /// whole defect.
@@ -7058,14 +7113,22 @@ mod regate_tests {
     }
 
     /// An unreadable record is not a prior: the gate runs, the stamp is
-    /// simply absent — a dark SoR must not refuse a launch.
-    #[tokio::test]
+    /// simply absent — a dark SoR must not refuse a launch. Since
+    /// backlog 034002b3 the read first waits out a rollout (the launch's
+    /// own POST needs the SoR anyway), so this walks that window on a
+    /// paused clock: still None, and no real two minutes spent.
+    #[tokio::test(start_paused = true)]
     async fn an_unreachable_record_stamps_nothing_and_refuses_nothing() {
         let http = reqwest::Client::new();
+        let started = tokio::time::Instant::now();
         assert!(
             observe_prior(&http, "http://127.0.0.1:9", "fix/x", "abc123")
                 .await
                 .is_none()
+        );
+        assert!(
+            started.elapsed() >= crate::train::ROLL_WAIT.window,
+            "a dark SoR is waited out before the stamp is given up"
         );
     }
 }

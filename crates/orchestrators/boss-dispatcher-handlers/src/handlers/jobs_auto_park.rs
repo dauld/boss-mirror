@@ -29,7 +29,8 @@ use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext};
 use boss_jobs::car::{self, Receipt};
 
 use super::common::{
-    StepEvent, api_client, dispatcher_actor_header, get_json, owner_for_filing, write_json,
+    StepEvent, api_client, dispatcher_actor_header, get_json, owner_for_filing, rows_or_refuse,
+    write_json,
 };
 
 pub struct JobsAutoPark {
@@ -854,11 +855,12 @@ impl Handler for JobsAutoPark {
                 &ctx.rule_name,
             )
             .await?;
-            let rows: Vec<Value> = page
-                .get("data")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
+            // A page with no `data` array is NO ANSWER. Read as zero
+            // cars it sent `park_action` to `File` — a twin of the car
+            // at the dock — so this read fails toward a write, and it
+            // refuses rather than guess (backlog 37fc5837).
+            let rows: Vec<Value> = rows_or_refuse(&page, "the open-car read (GET /api/jobs)")
+                .map_err(HandlerError::Downstream)?;
             let got = rows.len();
             cars.extend(rows);
             let total = page
@@ -900,17 +902,12 @@ impl Handler for JobsAutoPark {
             &ctx.rule_name,
         )
         .await?;
-        let all: Vec<Value> = cars
-            .iter()
-            .cloned()
-            .chain(
-                closed
-                    .get("data")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default(),
-            )
-            .collect();
+        // The same refusal, for the same reason: read as "nothing
+        // landed", an error-shaped body files a car for work already on
+        // main (backlog 37fc5837).
+        let landed: Vec<Value> = rows_or_refuse(&closed, "the landed-car read (GET /api/jobs)")
+            .map_err(HandlerError::Downstream)?;
+        let all: Vec<Value> = cars.iter().cloned().chain(landed).collect();
         // ONE DECISION, taken on what the SoR holds: skip (landed, or
         // aboard a train), refresh the car at the dock, finish the car a
         // builder opened, or file.
@@ -2624,5 +2621,100 @@ mod building_car_tests {
             }
             other => panic!("the rerailed building car is the one to finish: {other:?}"),
         }
+    }
+}
+
+/// AN ERROR-SHAPED LISTING NEVER PARKS (backlog 37fc5837). Both car
+/// reads here fail TOWARD A WRITE: read as "no cars", a body with no
+/// `data` array sends `park_action` to `File`, which is a twin of a car
+/// already at the dock, or a car for work that has already landed.
+/// Driven end to end, so each test fails on its own read site.
+#[cfg(test)]
+mod no_data_array_tests {
+    use super::*;
+    use crate::handlers::listing_stub::{
+        assert_refused_by_name, empty_listing, no_data_array, serve,
+    };
+
+    const GATE_RUN: &str = "0c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f";
+
+    fn green_gate_run() -> Value {
+        json!({
+            "id": GATE_RUN,
+            "kind": "gate-run",
+            "metadata": {
+                "branch": "fix/x",
+                "sha": "abc",
+                "park_summary": "does a thing.",
+                "park_excludes": "not that",
+                "park_test": "ran it",
+                "park_verified": "seen",
+            },
+        })
+    }
+
+    fn green_verdict() -> InvocationContext {
+        InvocationContext {
+            rule_name: "jobs.auto-park".into(),
+            triggering_event_id: "evt-green-1".into(),
+            triggering_topic: "step.done.gate-verdict".into(),
+            event_payload: json!({
+                "job_id": GATE_RUN,
+                "step_id": "s-verdict",
+                "kind": "gate-verdict",
+                "metadata": {
+                    "verdict": "green",
+                    "receipt": "{\"verdict\":\"green\",\"head\":\"deadbeef\",\"mode\":\"full\",\"fails\":[]}",
+                },
+            }),
+        }
+    }
+
+    fn handler(base: String) -> Arc<JobsAutoPark> {
+        JobsAutoPark::new(
+            base,
+            "http://unused",
+            Arc::new(boss_core::platform_owner::Fixed("emp-owner".into())),
+        )
+    }
+
+    #[tokio::test]
+    async fn an_open_car_read_with_no_data_array_refuses_and_files_nothing() {
+        let stub = serve(vec![
+            (
+                "/api/jobs/0c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f",
+                green_gate_run(),
+            ),
+            ("/api/jobs?status=open", no_data_array()),
+            ("/api/jobs?status=closed", empty_listing()),
+        ])
+        .await;
+        let res = handler(stub.base.clone())
+            .invoke(&[], &green_verdict())
+            .await;
+        assert_eq!(stub.writes(), Vec::<String>::new(), "no car filed blind");
+        assert_refused_by_name(res, "the open-car read");
+    }
+
+    #[tokio::test]
+    async fn a_landed_car_read_with_no_data_array_refuses_and_files_nothing() {
+        let stub = serve(vec![
+            (
+                "/api/jobs/0c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f",
+                green_gate_run(),
+            ),
+            ("/api/jobs?status=open", empty_listing()),
+            ("/api/jobs?status=closed", no_data_array()),
+        ])
+        .await;
+        let res = handler(stub.base.clone())
+            .invoke(&[], &green_verdict())
+            .await;
+        assert_eq!(
+            stub.writes(),
+            Vec::<String>::new(),
+            "no car filed for work that may have landed"
+        );
+        assert_refused_by_name(res, "the landed-car read");
     }
 }

@@ -540,11 +540,12 @@ impl CredentialRotateCloudflareTunnel {
                 ))
                 .await?;
             let total = body.get("total").and_then(JsonValue::as_u64).unwrap_or(0) as usize;
-            let page: Vec<JsonValue> = body
-                .get("data")
-                .and_then(JsonValue::as_array)
-                .cloned()
-                .unwrap_or_default();
+            // A page with no `data` array is NO ANSWER. Read as zero
+            // rows it broke the loop on `got == 0` and the sweep ACKed
+            // having looked at nothing (backlog 37fc5837).
+            let page: Vec<JsonValue> =
+                super::common::rows_or_refuse(&body, "the open-rotation read (GET /api/jobs)")
+                    .map_err(HandlerError::Downstream)?;
             let got = page.len();
             rows.extend(page);
             if got == 0 || rows.len() >= total {
@@ -2737,6 +2738,32 @@ mod tests {
         assert_eq!(events[0].1["job_id"], JOB);
         assert_eq!(events[0].1["complete"], true);
         assert_eq!(events[0].1["deleted"].as_array().unwrap().len(), 2);
+    }
+
+    /// An open-rotation read with no `data` array is no answer (backlog
+    /// 37fc5837). The paged loop stopped on `got == 0` and returned NO
+    /// ROTATIONS, so the clock door ACKed a sweep that looked at nothing
+    /// and a deferred revoke stayed deferred with nobody told — the
+    /// 833e2d0a defect in this handler's own copy of the walk.
+    #[tokio::test]
+    async fn an_open_rotation_read_with_no_data_array_refuses_by_name() {
+        use crate::handlers::listing_stub::{assert_refused_by_name, no_data_array, serve};
+        let cf = FakeCloudflare::with_tunnels(vec![
+            tun("t-new", NEW_NAME, 2),
+            tun("t-old", "boss-cluster-e202c7c3", 0),
+        ]);
+        let secrets = installed_secret("t-new");
+        let restarter = FakeRestarter::live(cf.clone());
+        let stub = serve(vec![("/api/jobs", no_data_array())]).await;
+
+        let h = handler(stub.base.clone(), cf.clone(), secrets, restarter);
+        let res = h.invoke(&sweep_args(), &clock_ctx()).await;
+        assert!(
+            cf.deleted.lock().unwrap().is_empty(),
+            "nothing revoked blind"
+        );
+        assert_eq!(stub.writes(), Vec::<String>::new());
+        assert_refused_by_name(res, "the open-rotation read");
     }
 
     #[tokio::test]

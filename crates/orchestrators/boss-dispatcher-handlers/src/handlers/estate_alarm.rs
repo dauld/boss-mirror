@@ -88,7 +88,7 @@ use serde_json::{Value, json};
 
 use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext};
 
-use super::common::{api_client, get_json, owner_for_filing, post_json};
+use super::common::{api_client, get_json, owner_for_filing, post_json, rows_or_refuse};
 use super::estate_compare::{HOST_SCOPE, KNOWN_SCOPE, UNITS_SCOPE};
 
 /// Consecutive same-series comparisons a hard finding must survive to
@@ -581,7 +581,12 @@ impl Handler for EstateAlarm {
             // The recorded series IS the state (the handler keeps
             // none). Scope travels down in the query — a page across
             // all scopes is spent by whichever series ticks fastest.
-            match get_json(
+            //
+            // A series with no `data` array is NO ANSWER, and it fails
+            // soft exactly as a failed fetch does. Read as an empty series
+            // nothing persisted and the pass ACKed clean — the alarm
+            // silently not alarming (backlog 37fc5837).
+            let recent = get_json(
                 &self.client,
                 &format!(
                     "{}/api/estate/comparisons?scope={scope}&limit=20",
@@ -590,13 +595,12 @@ impl Handler for EstateAlarm {
                 &ctx.rule_name,
             )
             .await
-            {
-                Ok(recent) => {
-                    let rows: Vec<Value> = recent
-                        .get("data")
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default();
+            .and_then(|recent| {
+                rows_or_refuse::<Value>(&recent, &format!("the comparisons read (scope {scope})"))
+                    .map_err(HandlerError::Downstream)
+            });
+            match recent {
+                Ok(rows) => {
                     // Rows are event envelopes; the comparison rides in
                     // `payload` (recorded verbatim by the dumb door). Fall
                     // back to the row itself so a flattened future shape
@@ -628,7 +632,10 @@ impl Handler for EstateAlarm {
         // is exactly when a dead observer is lying loudest.
         let now = boss_clock_client::now_from(&self.clock).await;
         for (watched_scope, per_host) in WATCHED_SERIES {
-            let obs = match get_json(
+            // The same refusal, failing soft the same way: an error-shaped
+            // series read as empty is a dead observer nobody hears about
+            // (backlog 37fc5837).
+            let obs = get_json(
                 &self.client,
                 &format!(
                     "{}/api/estate/observations?scope={watched_scope}&limit=50",
@@ -637,8 +644,15 @@ impl Handler for EstateAlarm {
                 &ctx.rule_name,
             )
             .await
-            {
-                Ok(o) => o,
+            .and_then(|obs| {
+                rows_or_refuse::<Value>(
+                    &obs,
+                    &format!("the observations read (scope {watched_scope})"),
+                )
+                .map_err(HandlerError::Downstream)
+            });
+            let rows = match obs {
+                Ok(rows) => rows,
                 Err(e) => {
                     errors.push(format!(
                         "observation fetch for scope {watched_scope} failed; other scopes still checked: {e}"
@@ -646,11 +660,6 @@ impl Handler for EstateAlarm {
                     continue;
                 }
             };
-            let rows: Vec<Value> = obs
-                .get("data")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
             for stale in stale_series(&rows, per_host, watched_scope, now) {
                 let body = staleness_body(&stale, &evidence, &owner);
                 to_raise.entry(unobserved_key(&stale)).or_insert(body);
@@ -1296,5 +1305,68 @@ mod tests {
             settled.contains("unit_unhealthy:boss-gcp/other.service"),
             "a human's stale still holds for the week"
         );
+    }
+}
+
+/// AN ALARM READ WITH NO `data` ARRAY IS NO ANSWER (backlog 37fc5837).
+/// Both halves read a series and, handed an error-shaped body, used to
+/// read it as an empty series: the persistence half then found nothing
+/// persistent and the silence half nothing stale, and the pass ACKed
+/// clean — the alarm system silently not alarming. Each now lands in
+/// the pass's error accumulator, so the firing NAKs and names the read.
+#[cfg(test)]
+mod no_data_array_tests {
+    use super::*;
+    use crate::handlers::listing_stub::{
+        assert_refused_by_name, empty_listing, no_data_array, serve,
+    };
+
+    fn firing(comparison: Value) -> InvocationContext {
+        InvocationContext {
+            rule_name: "estate-alarm".into(),
+            triggering_event_id: "evt-cmp-1".into(),
+            triggering_topic: "estate.comparison.recorded".into(),
+            event_payload: comparison,
+        }
+    }
+
+    fn handler(base: String) -> Arc<EstateAlarm> {
+        // The clock is unreachable on purpose: the silence half's `now`
+        // falls back, and nothing here depends on its value.
+        EstateAlarm::new(
+            base,
+            "http://127.0.0.1:1",
+            Arc::new(boss_core::platform_owner::Fixed("emp-owner".into())),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_comparisons_read_with_no_data_array_refuses_by_name() {
+        let stub = serve(vec![
+            ("/api/estate/comparisons", no_data_array()),
+            ("/api/estate/observations", empty_listing()),
+            ("/api/jobs", empty_listing()),
+        ])
+        .await;
+        // A hard finding, so the persistence half fetches its series.
+        let hard = json!({
+            "scope": "kubernetes-nodes",
+            "findings": { "not_ready": ["cp-2"] },
+        });
+        let res = handler(stub.base.clone()).invoke(&[], &firing(hard)).await;
+        assert_refused_by_name(res, "the comparisons read");
+    }
+
+    #[tokio::test]
+    async fn an_observations_read_with_no_data_array_refuses_by_name() {
+        let stub = serve(vec![
+            ("/api/estate/observations", no_data_array()),
+            ("/api/jobs", empty_listing()),
+        ])
+        .await;
+        // No findings: only the silence half runs, on every firing.
+        let quiet = json!({ "scope": "kubernetes-nodes", "findings": {} });
+        let res = handler(stub.base.clone()).invoke(&[], &firing(quiet)).await;
+        assert_refused_by_name(res, "the observations read");
     }
 }

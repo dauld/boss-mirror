@@ -44,7 +44,12 @@
 //!     path, so it is reached by name, the way the forge's
 //!     `boss-gateway-read` reaches it. Without this a builder
 //!     rehearsing a gateway probe hand-set the host and the port table
-//!     and was not using the door at all.
+//!     and was not using the door at all;
+//!   * a rollout is waited out (backlog 034002b3, 2026-09-23): a curl
+//!     that never got its request out (exit 6 or 7) is re-sent for up
+//!     to `BOSS_SOR_WAIT_SECONDS` (120) with a visible line per wait,
+//!     then fails naming the elapsed time; every other exit and every
+//!     HTTP status is surfaced on the first attempt.
 
 use boss_testing::{create_dir, repo_root, scratch_dir, write_exec, write_file};
 use std::path::{Path, PathBuf};
@@ -154,6 +159,8 @@ impl Fixture {
             // the suite.
             .env_remove("BOSS_SOR_PORTS")
             .env_remove("BOSS_SOR_SERVICE")
+            // Nor the roll wait's window (backlog 034002b3).
+            .env_remove("BOSS_SOR_WAIT_SECONDS")
             .env_remove("STUB_BODY")
             .env_remove("STUB_CODE");
         cmd
@@ -885,5 +892,205 @@ fn without_a_table_every_path_goes_to_the_base_as_before() {
         f.curl_argv().last().map(String::as_str),
         Some("http://lone.test:7900/api/people/accounts"),
         "absent both tables, the path is not routed"
+    );
+}
+
+// -- a rollout is waited out ----------------------------------------------
+//
+// Backlog 034002b3, twice on 2026-09-23: the stack rolls with strategy
+// Recreate, so every converging train takes the jobs API dark for about
+// a minute, and every write through this door in that minute exited 7
+// (`No route to host`) at once and had to be relaunched by hand. curl
+// exits 6 (could not resolve host) and 7 (could not connect: refused,
+// no route, network unreachable) only when the request never left —
+// those, and only those, are waited out. Every other exit may be a
+// request that reached the server (28 is one code for a connect timeout
+// AND a transfer that timed out after the body went; 52 and 56 are a
+// reply lost after sending), so it is surfaced as before, and an HTTP
+// status is an answer.
+
+/// Replace the fixture's curl with one that refuses its first
+/// `STUB_REFUSALS` calls the way real curl does under `-sS -w
+/// '\n%{http_code}'` (its message on stderr, `000` on stdout, exit
+/// `STUB_RC`, default 7), then answers as the plain stub does. Every
+/// call is counted in `curl-calls.txt`. And a `sleep` that records the
+/// wait it was asked for in `sleeps.txt` and returns at once, so a test
+/// reads the backoff without spending it.
+fn install_rolling_stubs(f: &Fixture) -> (PathBuf, PathBuf) {
+    let calls = f.root.join("curl-calls.txt");
+    let sleeps = f.root.join("sleeps.txt");
+    write_exec(
+        &f.bin.join("curl"),
+        &format!(
+            "#!/usr/bin/env bash\n\
+             echo call >> '{calls}'\n\
+             n=$(wc -l < '{calls}')\n\
+             if [ \"$n\" -le \"${{STUB_REFUSALS:-0}}\" ]; then\n\
+                 echo 'curl: (7) Failed to connect to sor.test port 7900: No route to host' >&2\n\
+                 printf '\\n000'\n\
+                 exit \"${{STUB_RC:-7}}\"\n\
+             fi\n\
+             : > \"$STUB_ARGV\"\n\
+             for a in \"$@\"; do printf '%s\\n' \"$a\" >> \"$STUB_ARGV\"; done\n\
+             printf '%s\\n%s' \"${{STUB_BODY:-}}\" \"${{STUB_CODE:-200}}\"\n",
+            calls = calls.display()
+        ),
+    );
+    write_exec(
+        &f.bin.join("sleep"),
+        &format!(
+            "#!/usr/bin/env bash\necho \"$1\" >> '{}'\n",
+            sleeps.display()
+        ),
+    );
+    (calls, sleeps)
+}
+
+fn count_lines(path: &Path) -> usize {
+    std::fs::read_to_string(path)
+        .map(|s| s.lines().count())
+        .unwrap_or(0)
+}
+
+#[test]
+fn a_refused_connect_is_waited_out_and_the_write_goes_out_once_the_api_is_back() {
+    let f = Fixture::new("roll-waited");
+    let (calls, sleeps) = install_rolling_stubs(&f);
+    let body = f.root.join("body.json");
+    write_file(&body, r#"{"kind":"backlog-item"}"#);
+    let r = f.run(
+        &["POST", "/api/jobs", body.to_str().expect("utf8")],
+        &[
+            ("STUB_REFUSALS", "2"),
+            ("STUB_BODY", r#"{"id":"j1"}"#),
+            ("BOSS_ACTOR", "agent-x"),
+        ],
+    );
+    assert_eq!(
+        r.code, 0,
+        "the write lands once the API is back: {}",
+        r.stderr
+    );
+    assert_eq!(
+        r.stdout, "{\"id\":\"j1\"}\n",
+        "only the answer reaches stdout"
+    );
+    assert_eq!(count_lines(&calls), 3, "two refusals, then the write");
+    let said = r
+        .stderr
+        .lines()
+        .filter(|l| {
+            l.contains("the jobs API is not answering (a rollout?) — retrying POST /api/jobs")
+        })
+        .count();
+    assert_eq!(said, 2, "one visible line per wait:\n{}", r.stderr);
+    assert_eq!(
+        std::fs::read_to_string(&sleeps).unwrap_or_default(),
+        "2\n4\n",
+        "the waits back off"
+    );
+    assert!(r.stderr.ends_with("HTTP:200\n"), "{}", r.stderr);
+}
+
+#[test]
+fn a_dns_failure_is_waited_out_too() {
+    // exit 6: the name did not resolve, so nothing was sent.
+    let f = Fixture::new("roll-dns");
+    let (calls, _) = install_rolling_stubs(&f);
+    let r = f.run(
+        &["GET", "/api/jobs"],
+        &[
+            ("STUB_REFUSALS", "1"),
+            ("STUB_RC", "6"),
+            ("BOSS_ACTOR", "agent-x"),
+        ],
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(count_lines(&calls), 2);
+}
+
+#[test]
+fn only_a_request_that_never_left_is_retried() {
+    for rc in ["28", "52", "56"] {
+        let f = Fixture::new(&format!("roll-not-{rc}"));
+        let (calls, sleeps) = install_rolling_stubs(&f);
+        let body = f.root.join("body.json");
+        write_file(&body, "{}");
+        let r = f.run(
+            &["POST", "/api/jobs", body.to_str().expect("utf8")],
+            &[
+                ("STUB_REFUSALS", "1"),
+                ("STUB_RC", rc),
+                ("BOSS_ACTOR", "agent-x"),
+            ],
+        );
+        assert_eq!(
+            r.code.to_string(),
+            rc,
+            "curl {rc} may have reached the server — surfaced with curl's own code: {}",
+            r.stderr
+        );
+        assert_eq!(count_lines(&calls), 1, "curl {rc} is asked once");
+        assert_eq!(count_lines(&sleeps), 0, "curl {rc} is not waited out");
+        assert!(!r.stderr.contains("retrying"), "{}", r.stderr);
+    }
+    // And an HTTP status is an answer, even a 503.
+    let f = Fixture::new("roll-not-503");
+    let (calls, _) = install_rolling_stubs(&f);
+    let r = f.run(
+        &["GET", "/api/jobs"],
+        &[("STUB_CODE", "503"), ("BOSS_ACTOR", "agent-x")],
+    );
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    assert_eq!(count_lines(&calls), 1, "a 503 is asked once");
+}
+
+#[test]
+fn a_roll_that_outlasts_the_window_fails_naming_the_elapsed_time() {
+    // BOSS_SOR_WAIT_SECONDS is the window; 0 means the first refusal is
+    // already past it, so the failure is read without spending one.
+    let f = Fixture::new("roll-outlasted");
+    let (calls, sleeps) = install_rolling_stubs(&f);
+    let r = f.run(
+        &["GET", "/api/jobs"],
+        &[
+            ("STUB_REFUSALS", "99"),
+            ("BOSS_SOR_WAIT_SECONDS", "0"),
+            ("BOSS_ACTOR", "agent-x"),
+        ],
+    );
+    assert_eq!(r.code, 7, "curl's own code, as before: {}", r.stderr);
+    assert_eq!(count_lines(&calls), 1);
+    assert_eq!(count_lines(&sleeps), 0);
+    assert!(
+        r.stderr
+            .contains("boss-api: GET /api/jobs: the jobs API refused every connection for 0s")
+            && r.stderr.contains("nothing was sent"),
+        "the failure names the call, the elapsed time, and that relaunching is safe:\n{}",
+        r.stderr
+    );
+    assert!(
+        r.stdout.is_empty(),
+        "no body on a refused connect: {:?}",
+        r.stdout
+    );
+
+    // A window that is not a whole number of seconds is refused before
+    // curl runs, rather than read as zero or as forever.
+    let r = f.run(
+        &["GET", "/api/jobs"],
+        &[("BOSS_SOR_WAIT_SECONDS", "2m"), ("BOSS_ACTOR", "agent-x")],
+    );
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert!(r.stderr.contains("BOSS_SOR_WAIT_SECONDS"), "{}", r.stderr);
+    assert_eq!(count_lines(&calls), 1, "curl did not run");
+}
+
+#[test]
+fn the_default_window_is_two_minutes() {
+    let text = std::fs::read_to_string(repo_root().join(SCRIPT)).expect("read boss-api");
+    assert!(
+        text.contains("WAIT_WINDOW=${BOSS_SOR_WAIT_SECONDS:-120}"),
+        "the door waits out a roll for 120s, the same window as the CLI's ROLL_WAIT"
     );
 }

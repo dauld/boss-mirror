@@ -178,6 +178,136 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// The operator verbs' roll wait
+//
+// Backlog 034002b3, measured twice on 2026-09-23: the stack deployment
+// rolls with strategy Recreate (two RWO claims, three with boss-files),
+// so every train that converges takes the jobs API dark for about a
+// minute. Every verb that writes through it — `boss gate`, `boss
+// design`, `boss job file`, `boss dispatch` — exited 1 at once on `No
+// route to host`, and the operator (the 263f6b9 rollout) or the builder
+// (the 3669951 rollout, pod 28s old) had to notice and relaunch by
+// hand. The conductor's blip guard above is three attempts over six
+// seconds, sized for a pod that rolls one replica at a time; it does
+// not cover a Recreate minute, and its rules (5xx and ambiguous blips
+// retried when idempotent) are the loop's, not an operator's.
+//
+// This wait is narrower and longer. It retries ONE failure — a connect
+// that never established — because that is the one failure that proves
+// the request never reached a server: nothing was received, so nothing
+// landed, and a POST may go again. Any status is an answer. A timeout
+// or a body that died after the request went out may be a packet
+// already filed, so it is surfaced on the first attempt under every
+// method, GET included — a verb's read and its write are not told apart
+// here, and the price of a read surfaced once is a relaunch, the same
+// as before. The wait is visible (one line per retry, on stderr) and
+// bounded: past the window the verb fails naming how long it waited.
+// ---------------------------------------------------------------------------
+
+/// How long an operator verb waits out a jobs API that refuses its
+/// connections, and how the waits between attempts grow.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RollWait {
+    /// Past this much elapsed time a refused connect is an outage, not
+    /// a roll, and the verb surfaces it.
+    pub(crate) window: Duration,
+    /// The first wait between attempts; each further wait doubles.
+    pub(crate) first: Duration,
+    /// No single wait is longer than this, so the attempt after the
+    /// API comes back is at most this late.
+    pub(crate) cap: Duration,
+}
+
+/// Two minutes: a Recreate roll is about one (backlog 034002b3), and a
+/// jobs API still refusing after twice that is worth a human's eyes.
+pub(crate) const ROLL_WAIT: RollWait = RollWait {
+    window: Duration::from_secs(120),
+    first: Duration::from_secs(2),
+    cap: Duration::from_secs(15),
+};
+
+impl RollWait {
+    /// The wait after attempt `n` failed: doubling from `first`,
+    /// capped at `cap`.
+    pub(crate) fn backoff(&self, attempt: u32) -> Duration {
+        (self.first * 2u32.pow(attempt.saturating_sub(1).min(16))).min(self.cap)
+    }
+}
+
+/// Run `op` until it gets past the connect, or the roll outlasts
+/// `wait.window`. `what` names the call (`jobs api POST /api/jobs`) in
+/// every line `say` prints and in the failure. The ONE definition every
+/// operator verb's jobs-API call goes through — via [`send_through_a_roll`]
+/// — so the rule "only a refused connect is retried" lives once.
+pub(crate) async fn waiting_out_a_roll<T, F, Fut>(
+    wait: &RollWait,
+    what: &str,
+    say: &(dyn Fn(&str) + Sync),
+    mut op: F,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, ApiFailure>>,
+{
+    // The runtime's clock, not the wall's: the same instant `sleep`
+    // below advances, so a paused-time test can walk the whole window
+    // without spending it (a best-effort read against a dark SoR would
+    // otherwise cost every gate two real minutes).
+    let started = tokio::time::Instant::now();
+    let mut attempt = 1u32;
+    loop {
+        let failure = match op().await {
+            Ok(v) => return Ok(v),
+            Err(f) => f,
+        };
+        if failure.kind != Failure::Connect {
+            return Err(failure.cause);
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= wait.window {
+            let cause = short_cause(&failure.cause, 120);
+            return Err(failure.cause.context(format!(
+                "{what}: the jobs API refused every connection for {:.0}s ({attempt} attempts, \
+                 waited out for up to {:.0}s in case it was a rollout) — nothing was sent, so \
+                 nothing landed and relaunching is safe. Last: {cause}",
+                elapsed.as_secs_f64(),
+                wait.window.as_secs_f64(),
+            )));
+        }
+        let pause = wait.backoff(attempt).min(wait.window - elapsed);
+        say(&format!(
+            "the jobs API is not answering (a rollout?) — retrying {what} in {:.0}s \
+             ({:.0}s of {:.0}s): {}",
+            pause.as_secs_f64(),
+            elapsed.as_secs_f64(),
+            wait.window.as_secs_f64(),
+            short_cause(&failure.cause, 120),
+        ));
+        tokio::time::sleep(pause).await;
+        attempt += 1;
+    }
+}
+
+/// Send the request `build` makes, waiting out a jobs-API roll
+/// ([`ROLL_WAIT`]) and saying so on stderr. `build` is called once per
+/// attempt because a request with a body cannot be re-sent. Every
+/// status comes back to the caller as the answer it is.
+pub(crate) async fn send_through_a_roll(
+    what: &str,
+    build: impl Fn() -> reqwest::RequestBuilder,
+) -> Result<reqwest::Response> {
+    waiting_out_a_roll(&ROLL_WAIT, what, &|m| eprintln!("boss: {m}"), || {
+        let req = build();
+        async move {
+            req.send()
+                .await
+                .map_err(|e| ApiFailure::transport(e, what.to_string()))
+        }
+    })
+    .await
+}
+
+// ---------------------------------------------------------------------------
 // jobs-api helpers
 // ---------------------------------------------------------------------------
 
@@ -1106,5 +1236,153 @@ mod tests {
             0,
             "an answer is not a blip and journals none"
         );
+    }
+
+    // -- the operator verbs' roll wait --------------------------------------
+    //
+    // Backlog 034002b3, twice on 2026-09-23: the stack rolls with
+    // strategy Recreate, so every converging train takes the jobs API
+    // dark for about a minute, and an operator's `boss design` and a
+    // builder's first `boss gate` each died at once on `No route to
+    // host`. A refused connect proves nothing was sent, so the verb
+    // waits it out — and ONLY it: anything past the connect may have
+    // landed a write.
+
+    /// The tests' wait: the same decisions, over milliseconds.
+    const QUICK_ROLL: RollWait = RollWait {
+        window: Duration::from_millis(40),
+        first: Duration::from_millis(2),
+        cap: Duration::from_millis(5),
+    };
+
+    /// A journal that keeps its lines, so a test can read what the
+    /// operator would have seen.
+    fn keeping_journal(lines: &std::sync::Mutex<Vec<String>>) -> impl Fn(&str) + Sync {
+        move |l| lines.lock().unwrap().push(l.to_string())
+    }
+
+    #[tokio::test]
+    async fn a_refused_connect_is_waited_out_until_the_api_answers() {
+        let mut calls = 0u32;
+        let lines = std::sync::Mutex::new(Vec::new());
+        let out: Result<u8> = waiting_out_a_roll(
+            &QUICK_ROLL,
+            "jobs api POST /api/jobs",
+            &keeping_journal(&lines),
+            || {
+                calls += 1;
+                let attempt = calls;
+                async move {
+                    if attempt < 3 {
+                        Err(blip(Failure::Connect))
+                    } else {
+                        Ok(7)
+                    }
+                }
+            },
+        )
+        .await;
+        assert_eq!(out.unwrap(), 7, "the write goes out once the API answers");
+        assert_eq!(calls, 3, "stops the moment the connect succeeds");
+        let lines = lines.into_inner().unwrap();
+        assert_eq!(lines.len(), 2, "one visible line per wait: {lines:?}");
+        for l in &lines {
+            assert!(
+                l.contains("the jobs API is not answering (a rollout?) — retrying"),
+                "the wait must be visible and say what it is: {l}"
+            );
+            assert!(l.contains("POST /api/jobs"), "names the call: {l}");
+        }
+    }
+
+    #[tokio::test]
+    async fn only_a_refused_connect_is_waited_out() {
+        // Everything past the connect is either an ANSWER (any status)
+        // or a request that may have reached the server — a timeout or
+        // a dropped body under a POST could be a packet already filed,
+        // so it is surfaced on the first attempt under every method.
+        for method in [Method::GET, Method::POST] {
+            for kind in [
+                Failure::Ambiguous,
+                Failure::Http(503),
+                Failure::Http(422),
+                Failure::Malformed,
+            ] {
+                let mut calls = 0u32;
+                let lines = std::sync::Mutex::new(Vec::new());
+                let out: Result<()> = waiting_out_a_roll(
+                    &QUICK_ROLL,
+                    &format!("jobs api {method} /api/jobs"),
+                    &keeping_journal(&lines),
+                    || {
+                        calls += 1;
+                        let kind = kind.clone();
+                        async move { Err(blip(kind)) }
+                    },
+                )
+                .await;
+                assert!(out.is_err(), "{method} {kind:?} surfaces");
+                assert_eq!(calls, 1, "{method} {kind:?} is asked once");
+                assert!(
+                    lines.into_inner().unwrap().is_empty(),
+                    "{method} {kind:?} is not a roll and journals none"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_roll_that_outlasts_the_window_fails_naming_the_elapsed_time() {
+        let mut calls = 0u32;
+        let lines = std::sync::Mutex::new(Vec::new());
+        let err = waiting_out_a_roll::<(), _, _>(
+            &QUICK_ROLL,
+            "jobs api POST /api/jobs",
+            &keeping_journal(&lines),
+            || {
+                calls += 1;
+                async { Err(blip(Failure::Connect)) }
+            },
+        )
+        .await
+        .expect_err("a jobs API still dark after the window is an outage");
+        assert!(calls > 1, "it waited before giving up ({calls} attempt)");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("jobs api POST /api/jobs")
+                && said.contains("refused every connection for")
+                && said.contains("Connection refused (os error 61)"),
+            "the failure names the call, the elapsed time and the cause: {said}"
+        );
+        assert!(
+            said.contains("nothing was sent"),
+            "and says a refused connect landed nothing, so relaunching is safe: {said}"
+        );
+    }
+
+    #[test]
+    fn the_roll_wait_covers_a_recreate_roll_and_backs_off() {
+        // About a minute dark per converge (Recreate, three RWO
+        // claims); two minutes covers it with room, and is short
+        // enough that a real outage still reaches the operator.
+        assert_eq!(ROLL_WAIT.window, Duration::from_secs(120));
+        assert_eq!(ROLL_WAIT.backoff(1), Duration::from_secs(2));
+        assert_eq!(ROLL_WAIT.backoff(2), Duration::from_secs(4));
+        assert_eq!(ROLL_WAIT.backoff(3), Duration::from_secs(8));
+        assert_eq!(ROLL_WAIT.backoff(9), ROLL_WAIT.cap, "capped");
+    }
+
+    #[tokio::test]
+    async fn a_real_refused_connect_is_what_the_wait_retries() {
+        // The production failure end to end: reqwest's error for a port
+        // nothing serves must classify as Connect, or the wait above
+        // pins a shape the wire never produces.
+        let err = reqwest::Client::new()
+            .get("http://127.0.0.1:1/api/jobs")
+            .send()
+            .await
+            .expect_err("nothing serves port 1");
+        let f = ApiFailure::transport(err, "GET /api/jobs".into());
+        assert_eq!(f.kind, Failure::Connect);
     }
 }

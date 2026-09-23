@@ -284,15 +284,13 @@ pub fn render_credentials(rows: &[boss_jobs::credentials::CredentialRow]) -> Str
 async fn list() -> Result<()> {
     let base = jobs_base()?;
     let url = format!("{base}/api/credentials");
-    let resp = reqwest::Client::new()
-        .get(&url)
-        .header(
-            "x-boss-user",
-            crate::identity::header(&crate::identity::reader()),
-        )
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?;
+    // Waits out a jobs-API roll (backlog 034002b3), like every verb.
+    let client = reqwest::Client::new();
+    let user = crate::identity::header(&crate::identity::reader());
+    let resp = crate::train::send_through_a_roll(&format!("GET {url}"), || {
+        client.get(&url).header("x-boss-user", user.as_str())
+    })
+    .await?;
     if !resp.status().is_success() {
         bail!("GET {url} returned {}", resp.status());
     }
