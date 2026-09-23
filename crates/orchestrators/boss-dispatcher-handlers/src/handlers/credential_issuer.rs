@@ -1196,9 +1196,13 @@ impl AccessApps for CloudflareApi {
         let cas = self
             .call(self.client.get(&url), &format!("GET {url}"))
             .await?;
-        let rows = cas
-            .as_array()
-            .ok_or_else(|| format!("GET {url}: result is not a list of CAs"))?;
+        // An account with no per-application CA answers `null`
+        // (observation e41e3836, 2026-09-23).
+        let rows = match &cas {
+            JsonValue::Null => return Ok(None),
+            JsonValue::Array(rows) => rows,
+            other => return Err(format!("GET {url}: result is not a list of CAs: {other}")),
+        };
         Ok(rows
             .iter()
             .find(|ca| ca.get("aud").and_then(JsonValue::as_str) == Some(aud))
@@ -1487,5 +1491,20 @@ mod cloudflare_tests {
             api.create_short_lived_ca("acct", "app-www").await.unwrap(),
             "ecdsa-sha2-nistp256 NEW"
         );
+    }
+
+    /// Measured 2026-09-23 (observation e41e3836): an account holding
+    /// no per-application CA answered the list `success: true` with a
+    /// result that was not a list, and the handler refused it without
+    /// saying what it was. An empty account is `null`; anything else
+    /// is refused QUOTING the result, so the next surprise names itself.
+    #[tokio::test]
+    async fn an_account_without_cas_answers_null_and_that_is_none() {
+        let api = CloudflareApi::new(ca_stub(serde_json::Value::Null).await, "token");
+        assert_eq!(api.short_lived_ca("acct", "app-dev").await.unwrap(), None);
+
+        let api = CloudflareApi::new(ca_stub(json!({"surprise": 1})).await, "token");
+        let err = api.short_lived_ca("acct", "app-dev").await.unwrap_err();
+        assert!(err.contains(r#"{"surprise":1}"#), "{err}");
     }
 }
