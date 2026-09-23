@@ -34,7 +34,6 @@ flowchart TB
 
         subgraph Daemons ["Local daemons + timers"]
             direction LR
-            D1["boss-cybernetics<br/><small>event-driven agents</small>"]
             D2["boss-dispatcher<br/><small>step.done rule dispatch</small>"]
             D3["boss-brewery-sim<br/><small>tenant sim tick (timer)</small>"]
             D4["Periodic sweeps (timers)<br/><small>audit-integrity-check &middot; conservation-invariants<br/>files-gc &middot; ledger-recognize<br/>messages-events-purge &middot; ml-inference-batch</small>"]
@@ -86,5 +85,5 @@ flowchart TB
     class P_PLAT platform
     class P_OBS obsbox
     class SCR scratch
-    class D1,D2,D3,D4 daemon
+    class D2,D3,D4 daemon
     class PG,NATS_N store

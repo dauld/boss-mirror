@@ -819,22 +819,38 @@ impl JobsRepository for PgJobs {
     async fn recent_events_by_kind(
         &self,
         kind: &str,
-        scope: Option<&str>,
+        window: &crate::port::EventWindow,
         limit: i64,
-    ) -> Result<Vec<serde_json::Value>, JobsError> {
+    ) -> Result<crate::port::EventPage, JobsError> {
         // The SQL lives in boss-events, which owns audit_log — this
         // crate already writes through its `record_event_in_tx`, and
         // reading through its helper keeps the table's ownership in
         // one place rather than growing a second copy of the query.
-        // `scope` travels down WITH the limit rather than being applied
-        // to the page that comes back: filtering here would leave a
-        // slow series exactly as unreadable as it was before.
-        let rows = boss_events::tail_http::recent_by_kind(&self.pool, kind, scope, limit)
-            .await
-            .map_err(JobsError::Storage)?;
-        rows.into_iter()
+        // The whole window travels down WITH the limit rather than
+        // being applied to the page that comes back: filtering here
+        // would leave a slow series, or an old window, exactly as
+        // unreadable as it was before.
+        let page = boss_events::tail_http::recent_by_kind(
+            &self.pool,
+            kind,
+            &boss_events::tail_http::KindWindow {
+                scope: window.scope.as_deref(),
+                since: window.since,
+                until: window.until,
+            },
+            limit,
+        )
+        .await
+        .map_err(JobsError::Storage)?;
+        let rows = page
+            .rows
+            .into_iter()
             .map(|r| serde_json::to_value(r).map_err(|e| JobsError::Storage(e.to_string())))
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(crate::port::EventPage {
+            rows,
+            total: page.total,
+        })
     }
 
     async fn step_flow_cube(

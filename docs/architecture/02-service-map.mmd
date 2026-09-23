@@ -48,7 +48,6 @@ flowchart TB
 
     subgraph Agents ["Runtime automation &mdash; NATS-subscribed daemons + timers"]
         direction LR
-        CYB["boss-cybernetics<br/><small>event-driven agent runtime</small>"]
         OBS["boss-observability<br/><small>NATS &rarr; SSE fan-out<br/>cybernetics aggregator</small>"]
         SER["boss-dispatcher<br/><small>step.done.&lt;kind&gt; &rarr;<br/>data-driven rule registry</small>"]
         INV_CHECK["boss-conservation-invariants<br/><small>periodic sweeps<br/>(timer)</small>"]
@@ -102,6 +101,6 @@ flowchart TB
     class POL_S,LDG_S,MSG_S,CONT_S rail
     class ML_S platform
     class BREW,UDS tenant
-    class CYB,OBS,SER,INV_CHECK agent
+    class OBS,SER,INV_CHECK agent
     class PG,NATS infra
     class C_NOTE client

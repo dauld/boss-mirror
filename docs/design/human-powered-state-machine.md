@@ -158,7 +158,8 @@ machine's history from t=0.
 
 ## Agents as additional executors
 
-Agents (in `boss-cybernetics` and elsewhere) are **not a separate
+Agents (registered in the `agents` registry and dispatched onto
+steps by `boss dispatch`) are **not a separate
 system that talks to the state machine from outside**. They are
 additional CPUs inside the same machine. They read the same State
 through the same ports, they execute the same StepTypes, they pass
@@ -166,10 +167,12 @@ through the same policy gate, they emit the same events.
 
 The only thing that differs between a human CPU and an agent CPU is
 **latency, throughput, and legal scope** — all of which are policy
-knobs, not architectural ones. This is why `boss-cybernetics` is
-scoped to AI-agent plumbing and explicitly *not* business-event
-handlers: the cybernetics crate is "how we mount additional CPUs
-into the machine", not a place where business logic lives. Business
+knobs, not architectural ones. This is why the agent plumbing (the
+claim door's budget and concurrency bounds, the `agent-run` packet)
+is explicitly *not* business-event handlers: it is "how we mount
+additional CPUs into the machine", not a place where business logic
+lives. (It used to be a crate of its own, `boss-cybernetics`, retired
+2026-09-23 as superseded-by — see docs/architecture-decisions.md.) Business
 event handlers live next to the publishers that emit the events
 they react to (the escalation router, the bank-sweep handler —
 all in their domain services).

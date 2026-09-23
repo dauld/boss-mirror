@@ -72,7 +72,9 @@ Beer is the namesake and cybernetics is first among the three
 lineages, but **VSM vocabulary does not appear in BOSS code**. It used
 to, in exactly two crates — `boss-cybernetics` (whose own header read
 "Per-VM Cybernetics coordinator (VSM S2/S3)") and
-`boss-observability` — and both retire under design 8382bbb2. The
+`boss-observability` — and both retire under design 8382bbb2:
+`boss-cybernetics` retired on 2026-09-23 (below), and
+`boss-observability` retires in its own car. The
 mapping is recorded here so the correspondence outlives the code that
 carried the words, because a reader arriving from Beer must be able to
 find it and a reader arriving from the code must not have to learn a
@@ -92,19 +94,36 @@ S4-ish work and `boss-policy` does S5-ish work, but neither
 correspondence is tight enough to assert, and a mapping asserted
 loosely is the decoration this section exists to prevent.
 
-**Four of `boss-cybernetics`' five stated responsibilities already
-live elsewhere**, which is why it retires rather than being rebuilt:
-budget caps before dispatch, one-at-a-time dispatch and chaining on
-completion are all enforced at the claim door and by dispatcher rules;
-lifecycle telemetry is the audit log plus `agent_runs`. **The fifth is
-a real gap, not a translation**: its per-agent durable inbox has no
-successor yet, and the decision (8382bbb2) is that it lands as a
-**station** plus the existing `agent-run` kind rather than as a second
-coordinator — a station is already the systems word for a queue that
-holds work until there is capability, and that keeps one budget gate
-rather than two implementations of one rule. **Neither crate is
-deleted before that inbox exists**: retiring the old mechanism before
-the new one is live is how a capability is lost by accident.
+**`boss-cybernetics` is retired as SUPERSEDED-BY, not deleted as
+dead** (2026-09-23, backlog 467175e7, design 8382bbb2). Its design was
+right and was overtaken: every responsibility it stated now has an
+owner elsewhere, and the reason it goes is **coherence and one owner
+per rule** — two implementations of one budget gate, one dispatch door
+and one queue are two places for the same rule to drift. It is **not**
+a line-count win, and recording it as one would misrepresent why it
+went. What superseded what, so the record answers the question
+directly:
+
+| `boss-cybernetics` responsibility | superseded by |
+|---|---|
+| budget caps before dispatch | `boss-jobs/src/agent_budget.rs` — the claim door reserves the step's budget against the actor's hour, before the CAS |
+| one-at-a-time dispatch | `boss dispatch` — one `agent-run` packet per step, bounded by `agents.max_concurrent_runs` at the claim |
+| lifecycle telemetry | `agent_runs` plus the run packet's terminals |
+| chaining on completion | the `agent-run` workflow's terminals and the dispatcher rules firing off them |
+| the per-agent durable inbox | a **station** (923b6571), pulled through the same claim door by `boss dispatch --next --station` |
+
+The inbox was **the real gap, not a translation**, and the ordering
+this decision set was held: the crate did not leave the tree until the
+station inbox (923b6571), this mapping (6872efd4) and the reclaim of
+work a dead executor had claimed (a3397b01) had all landed, because
+retiring the old mechanism before the new one is live is how a
+capability is lost by accident. The inbox's caller is the operator's
+session: David decided on 2026-09-23 that running `boss dispatch
+--next` by hand counts as the runner having run (the session is the
+CPU, 57c108c2), so no headless runner stands in for the old loop. Its
+config (`infra/cybernetics/`) and its systemd unit left with it.
+`boss-observability`'s cross-VM view is superseded by a region of the
+IT world map and retires in a separate car under the same design.
 
 *Algedonic* signals keep their Beer meaning throughout: rules firing
 on threshold events, routed past the normal reporting line because
@@ -1281,7 +1300,7 @@ topologies return as opt-in blueprints under `infra/blueprints/`.
 Crates split into **Tier 1 — core state-machine OS**
 (`crates/core/`, 27 crates: the four primitives' services, policy,
 gateway, dispatcher, clock, expression DSL, taxonomy registries,
-calendar, content, docs, ML stack, cybernetics, testing, ports,
+calendar, content, docs, ML stack, testing, ports,
 plus `*-client` crates) and **Tier 2 — company-modeling layer**
 (`crates/modules/`, 16 crates: people, accounts, commerce,
 inventory, shipping, ledger, products, messages, catalog, assets,

@@ -417,12 +417,11 @@ export type YardState = Readonly<{
    *  to the dock to the train; a gating branch is matched to its car
    *  here, and only a branch with no car falls back to the gate packet. */
   cars: readonly CarRow[];
-  /** The publish dock's queue, mapped 1:1 — branches asking to reach a
-   *  gate. The upstream HALF of the approach that is not a gate verdict;
-   *  the verdict lanes come from `/api/yard/status` and the two are
-   *  composed by [`approach`], wherever both are held. Empty when the
-   *  cluster cannot serve the station queue: additive, never a reason
-   *  the yard fails to render. */
+  /** The open publish-request packets, mapped 1:1 — branches asking to
+   *  reach a gate. The upstream HALF of the approach that is not a gate
+   *  verdict; the verdict lanes come from `/api/yard/status` and the two
+   *  are composed by [`approach`], wherever both are held. Empty when the
+   *  read fails: additive, never a reason the yard fails to render. */
   publishing: readonly ApproachRow[];
   /** The raw packets the signals panel reads its stamps from — every
    *  train in the window (open and closed, as served: newest first)
@@ -468,12 +467,19 @@ export type ApproachLanes = Readonly<
   Pick<YardStatus, 'stranded' | 'held' | 'garage' | 'limbo'>
 >;
 
-/** The publish dock's own rows: branches asking to be published to the
- *  forge, which have not reached a gate yet. The station's queue IS the
- *  answer here — membership from the registry predicate, order from the
- *  declared discipline — so this maps 1:1 and judges nothing. */
-export function publishRows(publishQueue: StationQueueEnvelope | null): readonly ApproachRow[] {
-  return (publishQueue?.data ?? [])
+/** The publish requests' own rows: branches asking to be published to
+ *  the forge, which have not reached a gate yet. Maps 1:1 and judges
+ *  nothing; the open filter stays so a stale page cannot draw a request
+ *  that has already been answered.
+ *
+ *  Read from the packets, not a station (backlog 31c371b3, 2026-09-22):
+ *  this used to take the queue of a `publish-dock` station that no
+ *  stations row ever declared, so the lane was empty on every instance
+ *  since it was drawn (a031da14, 2026-08-31) and looked like "nothing is
+ *  publishing". `infra/lint/every-spa-station-is-declared.sh` now refuses
+ *  a station literal the platform bundle does not hold. */
+export function publishRows(publishRequests: readonly JobLite[] | null): readonly ApproachRow[] {
+  return (publishRequests ?? [])
     .filter(j => j.status === 'open')
     .map(j => {
       const md = (j.metadata ?? {}) as {
@@ -514,7 +520,8 @@ export function publishRows(publishQueue: StationQueueEnvelope | null): readonly
  *
  *  ADDITIVE: no status (the endpoint is down, or has not answered yet)
  *  means the gate lanes are unknown, not empty-and-fine — so the
- *  approach shows what the station does say and the page still renders.
+ *  approach shows the publish requests it does hold and the page still
+ *  renders.
  *  A lane an older server does not send reads as empty the same way. */
 export function approach(
   publishing: readonly ApproachRow[],
@@ -1320,7 +1327,7 @@ export function assembleYard(
   // a report. Additive parameters go on the end.
   report: TerminalReport | null = null,
   gateRuns: readonly JobLite[] = [],
-  publishQueue: StationQueueEnvelope | null = null,
+  publishRequests: readonly JobLite[] | null = null,
   // The day's closed trains as the record served them, with the list's
   // own `total` so a cut-off page is known to be one. Last, additive.
   dayPage: Readonly<{ data: readonly JobLite[]; total: number }> | null = null,
@@ -1368,7 +1375,7 @@ export function assembleYard(
     delivery: deliveryStats(report),
     awaitingProof: awaitingProof(ships).map(carRow),
     day: dayPage === null ? null : dayOf(dayPage, shipById, medians, nowMs),
-    publishing: publishRows(publishQueue),
+    publishing: publishRows(publishRequests),
     packets: { trains, gateRuns },
     cars: ships
       .filter(j => j.status === 'open')
@@ -1394,7 +1401,7 @@ async function fetchStationQueue(name: string): Promise<StationQueueEnvelope | n
 }
 
 export async function fetchYard(): Promise<YardState | null> {
-  const [tr, sr, dockQueue, report, gateRuns, publishQueue, dayPage] = await Promise.all([
+  const [tr, sr, dockQueue, report, gateRuns, publishRequests, dayPage] = await Promise.all([
     // 40, not 20: the window has to hold the open trains, the five
     // arrivals the board shows, AND the arrivals the ETA medians are
     // taken over — cancelled trains sit in the same list and would
@@ -1417,7 +1424,15 @@ export async function fetchYard(): Promise<YardState | null> {
       .then((r) => (r.ok ? (r.json() as Promise<{ data?: JobLite[] }>) : null))
       .then((b) => b?.data ?? [])
       .catch(() => [] as JobLite[]),
-    fetchStationQueue('publish-dock'),
+    // The publish requests, where they live: open publish-request
+    // packets (a platform workflow, so every instance publishes the
+    // kind). Additive the same way — a failed read draws no rows. It was
+    // a `publish-dock` station queue until 31c371b3, and no such station
+    // was ever declared, so that read 404'd on every load.
+    fetch('/api/jobs?kind=publish-request&status=open&limit=50')
+      .then((r) => (r.ok ? (r.json() as Promise<{ data?: JobLite[] }>) : null))
+      .then((b) => (b && Array.isArray(b.data) ? b.data : null))
+      .catch(() => null),
     // THE DAY FROM THE RECORD, for the production tile: every pr-train
     // closed today on the authoritative clock (`closed_within=0`). Its
     // `total` rides along so a cut-off page is known. Additive: null on
@@ -1430,7 +1445,7 @@ export async function fetchYard(): Promise<YardState | null> {
   if (!tr.ok || !sr.ok) return null;
   const trains = ((await tr.json()) as { data?: JobLite[] }).data ?? [];
   const ships = ((await sr.json()) as { data?: JobLite[] }).data ?? [];
-  return assembleYard(trains, ships, dockQueue, Date.now(), report, gateRuns, publishQueue, dayPage);
+  return assembleYard(trains, ships, dockQueue, Date.now(), report, gateRuns, publishRequests, dayPage);
 }
 
 // ---------------------------------------------------------------------

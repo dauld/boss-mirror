@@ -117,8 +117,7 @@ echo "    clock-api sim mode confirmed (epoch primed to ${START})"
 echo "==> [1/10] dropping + recreating boss DB"
 # Stop every boss service that holds a connection to the boss DB.
 # `|| true` so a missing-on-this-box unit doesn't abort the script
-# (different fleets carry different subsets — boss-cybernetics is
-# optional, the brewery deploy currently doesn't run it).
+# (different fleets carry different subsets).
 SERVICES=(
     boss-jobs-api
     boss-policy-api
@@ -132,7 +131,6 @@ SERVICES=(
     boss-content-api
     boss-messages-api
     boss-ml-api
-    boss-cybernetics
     boss-dispatcher
     # 2026-05-27: products / classes / locations / subject-kinds /
     # calendar were missing from this list, so the
@@ -224,7 +222,6 @@ START_ORDER=(
     boss-content-api
     boss-messages-api
     boss-ml-api
-    boss-cybernetics
     boss-jobs-api
     boss-dispatcher
 )

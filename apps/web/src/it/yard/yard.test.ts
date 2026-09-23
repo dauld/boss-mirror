@@ -417,6 +417,44 @@ describe('fetchYard against the station endpoint', () => {
     }) as typeof fetch;
   }
 
+  // THE PUBLISH LANE READ A STATION NOBODY DECLARED (backlog 31c371b3,
+  // 2026-09-22). From a031da14 (2026-08-31) the lane fetched
+  // `/api/stations/publish-dock/queue`, and no stations row by that name
+  // was ever authored — not in a migration, not in
+  // infra/platform/stations/ — so the read 404'd on every load and the
+  // lane drew empty, which reads exactly like "nothing is publishing".
+  // The packets it wanted are publish-request Jobs, a platform workflow
+  // every instance publishes, so the lane reads them where they live.
+  test('the publishing lane reads open publish-request packets, not an undeclared station', async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.includes('/api/stations/loading-dock/queue')) return json(envelope());
+      if (url.includes('kind=publish-request'))
+        return json({
+          data: [
+            {
+              id: 'p1', kind: 'publish-request', title: 'Publish fix/y', status: 'open',
+              opened_on: '2026-09-22', metadata: { branch: 'fix/y', requested_by: 'pod' },
+              steps: [],
+            },
+          ],
+          total: 1,
+        });
+      if (url.includes('/api/stations/')) return json('no active station', 404);
+      return json({ data: [] });
+    }) as typeof fetch;
+    const y = await fetchYard();
+    expect(y?.publishing.map(r => [r.id, r.branch, r.state, r.note])).toEqual([
+      ['p1', 'fix/y', 'publishing', 'pod'],
+    ]);
+    expect(urls.filter(u => u.includes('/api/stations/'))).toEqual(['/api/stations/loading-dock/queue']);
+    expect(urls.filter(u => u.includes('kind=publish-request'))).toEqual([
+      '/api/jobs?kind=publish-request&status=open&limit=50',
+    ]);
+  });
+
   test('when the endpoint serves, the dock reads its own station row', async () => {
     stub(() => json(envelope({ total: 1, data: [dockJob('s1')] })));
     const y = await fetchYard();
@@ -1157,7 +1195,7 @@ describe('awaitingProof', () => {
 // that used to live here — a superseded red, a same-day green answering
 // it, which run is a branch's latest, the freshness window — are pinned
 // in `stranded.rs` and `yard.rs` instead. What is left for this lens is
-// the publish-dock rows, the mapping of the server's four lanes onto the
+// the publish-request rows, the mapping of the server's four lanes onto the
 // approach order, and the contract that a missing status is ADDITIVE.
 // ---------------------------------------------------------------------
 
@@ -1184,11 +1222,6 @@ function ship(branch: string, over: Partial<JobLite> = {}): JobLite {
   };
 }
 
-const publishEnv = (jobs: readonly JobLite[]): StationQueueEnvelope => ({
-  station: 'publish-dock', kind: 'batch', discipline: ['priority', 'age'],
-  over_limit: false, total: jobs.length, data: jobs,
-});
-
 /** The server's verdict lanes, as the status payload carries them. */
 const lanes = (over: Partial<ApproachLanes> = {}): ApproachLanes => ({
   stranded: [],
@@ -1206,20 +1239,20 @@ const publishRequest = (branch: string, over: Partial<JobLite> = {}): JobLite =>
 
 describe('the approach lane', () => {
   test('open publish-requests ride in front, with the requester on the row', () => {
-    const rows = approach(publishRows(publishEnv([publishRequest('fix/y')])), lanes());
+    const rows = approach(publishRows([publishRequest('fix/y')]), lanes());
     expect(rows.map(r => ({ state: r.state, note: r.note, verdict: r.verdict }))).toEqual([
       { state: 'publishing', note: 'pod', verdict: null },
     ]);
   });
 
   test('a closed publish-request is done asking — no row', () => {
-    const rows = approach(publishRows(publishEnv([publishRequest('fix/y', { status: 'closed' })])), lanes());
+    const rows = approach(publishRows([publishRequest('fix/y', { status: 'closed' })]), lanes());
     expect(rows).toEqual([]);
   });
 
   test('the four server lanes stand in order: publishing, red, gate exit, green, held', () => {
     const rows = approach(
-      publishRows(publishEnv([publishRequest('fix/pub')])),
+      publishRows([publishRequest('fix/pub')]),
       lanes({
         garage: [{ branch: 'fix/red', failed_check: 'test', since: '2026-08-31', packet_id: 'g-red', sha: 'r'.repeat(40) }],
         limbo: [{ branch: 'fix/lost', verdict: 'lost', since: '2026-08-31', packet_id: 'g-lost', sha: null }],
@@ -1287,9 +1320,9 @@ describe('the approach lane', () => {
     expect(unreadable.map(r => [r.state, r.verdict])).toEqual([['gate-lost', 'unreadable']]);
   });
 
-  test('no status is ADDITIVE: the station rows still draw and the gate lanes read empty', () => {
+  test('no status is ADDITIVE: the publish rows still draw and the gate lanes read empty', () => {
     // The status endpoint being down must never take the page with it.
-    const rows = approach(publishRows(publishEnv([publishRequest('fix/y')])), null);
+    const rows = approach(publishRows([publishRequest('fix/y')]), null);
     expect(rows.map(r => r.state)).toEqual(['publishing']);
     expect(approach([], null)).toEqual([]);
   });

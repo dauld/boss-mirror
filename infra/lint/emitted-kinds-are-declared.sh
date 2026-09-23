@@ -84,9 +84,10 @@ declared() {
 # Deliberately EXCLUDED, because they are not audit-log writes:
 #   - `#[cfg(test)] mod { … }` bodies (fixtures like "order.created")
 #     and everything under a tests/ directory.
-#   - `hub.publish(Event::new(…))` / the free `event()` telemetry fn in
-#     boss-cybernetics — SSE/telemetry broadcasts that never reach the
-#     outbox (e.g. `cybernetics.cost.recorded`). Matching only the
+#   - `hub.publish(Event::new(…))` — SSE/telemetry broadcasts that
+#     never reach the outbox (e.g. `cybernetics.cost.recorded`; the
+#     free `event()` telemetry fn that also did this left with
+#     boss-cybernetics, 467175e7). Matching only the
 #     `let … = Event::new(` assignment form, never `publish(Event::new(`,
 #     is what draws that line.
 #   - fact kinds (`finance.*`) and dispatcher rule topics (`step.done`,

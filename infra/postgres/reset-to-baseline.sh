@@ -58,7 +58,7 @@ SERVICES_TO_STOP=(
     boss-jobs-api boss-policy-api boss-people-api boss-commerce-api
     boss-inventory-api boss-shipping-api boss-assets-api boss-catalog-api
     boss-ledger-api boss-content-api boss-messages-api boss-ml-api
-    boss-cybernetics boss-dispatcher boss-products-api boss-classes-api
+    boss-dispatcher boss-products-api boss-classes-api
     boss-locations-api boss-subject-kinds-api boss-calendar-api
     boss-events-api boss-accounts-api
     # clock-api + observability hold boss-DB pools, and the gateway proxies
@@ -105,7 +105,7 @@ for svc in boss-policy-api boss-classes-api boss-locations-api \
            boss-commerce-api boss-inventory-api boss-shipping-api \
            boss-messages-api boss-calendar-api boss-content-api \
            boss-events-api boss-ledger-api boss-ml-api \
-           boss-cybernetics boss-clock-api boss-jobs-api boss-dispatcher; do
+           boss-clock-api boss-jobs-api boss-dispatcher; do
     systemctl restart "$svc" 2>/dev/null || echo "  (skipped $svc — not installed)"
 done
 # Give jobs-api a beat to reconcile the platform workflow-design.

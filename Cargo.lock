@@ -927,30 +927,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "boss-cybernetics"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "boss-clock-client",
- "boss-core",
- "boss-events",
- "boss-nats",
- "chrono",
- "clap",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "toml 1.1.2+spec-1.1.0",
- "tower",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "boss-dispatcher"
 version = "0.1.0"
 dependencies = [

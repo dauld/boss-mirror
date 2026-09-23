@@ -587,6 +587,26 @@ pub struct EstateBatchOutcome {
     pub roles_inserted: usize,
 }
 
+/// Which rows of one event kind [`JobsRepository::recent_events_by_kind`]
+/// reads: an exact payload `scope`, and a half-open `[since, until)`
+/// window on the event's timestamp — every filter applied where the
+/// limit is. All absent reads the whole kind.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EventWindow {
+    pub scope: Option<String>,
+    pub since: Option<DateTime<Utc>>,
+    pub until: Option<DateTime<Utc>>,
+}
+
+/// One page of an event series, newest first, as the raw rows
+/// `{event_id, timestamp, source, kind, payload}`, and how many rows
+/// its WINDOW holds — so `rows.len() < total` says there is more.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EventPage {
+    pub rows: Vec<serde_json::Value>,
+    pub total: i64,
+}
+
 /// The fact one declaration leaves: `node.declared`, once per node the
 /// batch changed (its row inserted, or a role landed on it), carrying
 /// the declaration, what landed, and `declared_by` from the stamp.
@@ -804,12 +824,19 @@ pub trait JobsRepository: Send + Sync {
     /// This is the same rule `TailQuery::simulated` states in
     /// boss-events: a filter has to be where the LIMIT is applied, or
     /// it does not really filter.
+    ///
+    /// The window's `since` (inclusive) and `until` (exclusive) obey the
+    /// same rule, in time rather than cadence (backlog bf362f25): a
+    /// post-mortem thirty hours on could not reach the rows it needed
+    /// through a reader that only ever served the newest page. The
+    /// page's `total` counts the whole window, so a caller compares its
+    /// rows against it instead of mistaking a full page for the answer.
     async fn recent_events_by_kind(
         &self,
         kind: &str,
-        scope: Option<&str>,
+        window: &EventWindow,
         limit: i64,
-    ) -> Result<Vec<serde_json::Value>, JobsError>;
+    ) -> Result<EventPage, JobsError>;
 
     /// The station flow cube over `[since, now]` — how many
     /// obligations of each `(job kind, step kind, spec slug, authority

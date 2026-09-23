@@ -183,6 +183,32 @@ $_stem
             _out="$_out $_stem.$_ext"
         done
     done
+    # THE OPS-REQUEST RUNNER, WHERE THIS HOST RUNS ONE (backlog bf362f25).
+    # It is not a roles.toml row — it fires every minute and its product
+    # is packets, so boss-gcp-converges-itself.sh refuses it as one — and
+    # so the rows above never reached it: on 2026-09-22/23 it was red
+    # every minute on boss-gcp while this observer posted a clean reading
+    # every five, and post-mortem 3c3b202c found no estate record of it
+    # at all. Whether a host gets one is asked of the one definition,
+    # install-ops-runner.sh --in-role, under the same roles — never
+    # restated here — so a host outside the role (or under the
+    # dark-registry sentinel) does not watch a runner it never installs.
+    _runner="$_infra/ops/install-ops-runner.sh"
+    if [ ! -f "$_runner" ]; then
+        echo "observe-units: $_runner is not readable, so whether this host runs an" >&2
+        echo "    ops-request runner cannot be asked. REFUSING rather than watching less." >&2
+        return 1
+    fi
+    _rc=0
+    BOSS_NODE_ROLES="${BOSS_NODE_ROLES:-}" bash "$_runner" --in-role >/dev/null 2>&1 || _rc=$?
+    case "$_rc" in
+    0) _out="$_out boss-ops-runner.timer boss-ops-runner.service" ;;
+    1) ;;
+    *)
+        echo "observe-units: $_runner --in-role exited $_rc — neither yes nor no. REFUSING." >&2
+        return 1
+        ;;
+    esac
     if [ -z "$_out" ]; then
         echo "observe-units: every roles.toml row was skipped or excluded, so the" >&2
         echo "    derived roster is empty. REFUSING; nothing to watch is a config fault." >&2

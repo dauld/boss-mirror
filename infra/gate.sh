@@ -849,7 +849,26 @@ path_map() {
     { printf '%s\n' "$paths" | path_shapes
       printf '%s\n' "$paths" | input_crates
       printf '%s\n' "$paths" | schema_crates
-    } | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' '
+    } | tr ' ' '\n' | sed '/^$/d' | sort -u | live_crates | tr '\n' ' '
+}
+
+# A DELETED CRATE IS NOT A SCOPE. The first shape in `path_shapes` reads
+# the crate name off `crates/<tier>/<name>/…`, and a car that retires a
+# crate changes every file under it — so until 2026-09-23 the map named
+# the crate the car had just removed, and `--lint` ran `cargo clippy -p
+# boss-cybernetics`, which cargo refuses ("did not match any packages")
+# before checking anything (backlog 467175e7, car A). `--auto` would
+# have handed the gate the same impossible `-p`. The files are gone, so
+# there is nothing of that crate left to compile; what the retirement
+# can break lives in the crates that still exist, and those are named by
+# their own paths. `[ -f ]` is a builtin, so the filter costs no process.
+live_crates() {
+    local name manifest
+    while read -r name; do
+        for manifest in crates/*/"$name"/Cargo.toml; do
+            if [ -f "$manifest" ]; then printf '%s\n' "$name"; break; fi
+        done
+    done
 }
 
 path_shapes() {
@@ -936,6 +955,13 @@ scope_self_test() {
     # The tier segment must not be mistaken for the crate name.
     _case "tier is not the crate" "boss-people" "crates/modules/boss-people/src/http.rs"
     _case "a crate's root files count" "boss-jobs" "crates/core/boss-jobs/Cargo.toml"
+    # A retired crate's files are all in the diff and none are in the
+    # tree; cargo cannot build a `-p` for it (467175e7). A fictional
+    # name, so the answer is the filter's alone.
+    _case "a deleted crate implies no crate" "" \
+        "crates/core/boss-zz-retired/src/lib.rs" "crates/core/boss-zz-retired/Cargo.toml"
+    _case "a deleted crate beside a live one implies the live one" "boss-cli" \
+        "crates/core/boss-zz-retired/src/lib.rs" "crates/orchestrators/boss-cli/src/doctor.rs"
     # Everything outside those two trees implies nothing to scope —
     # the lints already run repo-wide.
     # gate.sh and ci.yml are READ by boss-testing's gate_sh.rs, so a
@@ -1035,8 +1061,16 @@ scope_self_test() {
     # and infra/lint/*. Editing one of these scoped to NO crate, so the
     # only test that runs the script never ran on the car that changed it.
     _case "a script boss-testing executes implies boss-testing" "boss-testing" \
-        "infra/ops/ops-runner.sh" "infra/forge/checkout-lock.sh" \
+        "infra/forge/checkout-lock.sh" \
         "infra/maintenance/forge-token-audit.py" "infra/prep-github-publish.sh"
+    # ops-runner.sh left the case above on 2026-09-23 because the answer
+    # for it CHANGED, and changed correctly (backlog 10eecbbc): boss-jobs'
+    # the_list_envelope_holds_what_its_readers_assume.rs now reads it to
+    # hold the jobs-list reader it names (`QUEUE_PAGE=1000`), so editing
+    # the runner can redden boss-jobs as well as boss-testing's tests that
+    # execute it. Derived, not listed — this case is the record of it.
+    _case "a script two crates read implies both" "boss-jobs boss-testing" \
+        "infra/ops/ops-runner.sh"
     _case "docs outside design/ imply no crate" "" "docs/invariants/x.toml" "README.md"
     # …unless a crate READS it. gate_sh.rs asserts this runbook tells a
     # developer to set core.hooksPath, so editing the runbook can redden

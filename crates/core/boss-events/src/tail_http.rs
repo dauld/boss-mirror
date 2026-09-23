@@ -232,26 +232,75 @@ async fn events_health() -> Response {
 /// through its own reader. Filtering the returned page in Rust would
 /// not fix that: by then the slow rows are already gone.
 ///
-/// One statement with a nullable bind rather than the tail's dynamic
-/// composition — there is exactly one optional filter here, and
-/// `$2::text IS NULL` says "no filter" without building SQL by hand.
+/// `since` (inclusive) and `until` (exclusive) bound the series in time
+/// — the half-open window [`TailQuery`] states — and sit in the same
+/// WHERE clause for the same reason (backlog bf362f25). A reader that
+/// could only ever see the newest page could not answer a post-mortem:
+/// thirty hours after an incident the oldest reachable estate row was
+/// already past the window it needed, while every row was still in the
+/// log. `until` is the before-cursor: the oldest timestamp on one page
+/// is the `until` of the next.
+///
+/// `total` is the count of the WINDOW, not of the page, so a caller can
+/// tell a whole answer (rows == total) from the head of a longer one —
+/// the comparison a bare `limit=` read never makes (e7cf78c6). It is a
+/// second statement, not a transaction with the first: a row appended
+/// between them can make `total` one ahead of an unbounded page, never
+/// behind, and an `until`-bounded window is closed and cannot move.
+///
+/// One statement per question with nullable binds rather than the
+/// tail's dynamic composition — `$n IS NULL` says "no filter" without
+/// building SQL by hand.
 pub async fn recent_by_kind(
     pool: &PgPool,
     kind: &str,
-    scope: Option<&str>,
+    window: &KindWindow<'_>,
     limit: i64,
-) -> Result<Vec<AuditEntry>, String> {
-    sqlx::query_as::<_, AuditEntry>(
-        "SELECT event_id, timestamp, source, kind, payload FROM audit_log \
-         WHERE kind = $1 AND ($2::text IS NULL OR payload->>'scope' = $2) \
-         ORDER BY timestamp DESC LIMIT $3",
-    )
+) -> Result<KindPage, String> {
+    const WHERE: &str = "WHERE kind = $1 \
+         AND ($2::text IS NULL OR payload->>'scope' = $2) \
+         AND ($3::timestamptz IS NULL OR timestamp >= $3) \
+         AND ($4::timestamptz IS NULL OR timestamp < $4)";
+    let rows = sqlx::query_as::<_, AuditEntry>(&format!(
+        "SELECT event_id, timestamp, source, kind, payload FROM audit_log {WHERE} \
+         ORDER BY timestamp DESC LIMIT $5"
+    ))
     .bind(kind)
-    .bind(scope)
+    .bind(window.scope)
+    .bind(window.since)
+    .bind(window.until)
     .bind(limit)
     .fetch_all(pool)
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    let (total,): (i64,) =
+        sqlx::query_as(&format!("SELECT COUNT(*)::BIGINT FROM audit_log {WHERE}"))
+            .bind(kind)
+            .bind(window.scope)
+            .bind(window.since)
+            .bind(window.until)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    Ok(KindPage { rows, total })
+}
+
+/// Which rows of one kind [`recent_by_kind`] reads: an exact payload
+/// `scope`, and a half-open `[since, until)` window on `timestamp`.
+/// Every field absent reads the whole kind.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct KindWindow<'a> {
+    pub scope: Option<&'a str>,
+    pub since: Option<DateTime<Utc>>,
+    pub until: Option<DateTime<Utc>>,
+}
+
+/// One page of a kind's rows, newest first, and how many rows its
+/// window holds in all.
+#[derive(Debug, Clone)]
+pub struct KindPage {
+    pub rows: Vec<AuditEntry>,
+    pub total: i64,
 }
 
 /// One `(job kind, step kind, spec slug, authority role)` cell of the

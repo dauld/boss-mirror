@@ -11,7 +11,7 @@ use std::sync::Arc;
 use boss_core::event::Event;
 use boss_core::port::EventBus;
 use boss_jobs::PgJobs;
-use boss_jobs::port::JobsRepository;
+use boss_jobs::port::{EventWindow, JobsRepository};
 use boss_testing::{RecordingEventBus, TestDb};
 use sqlx::PgPool;
 
@@ -40,6 +40,13 @@ fn scoped_event(kind: &str, scope: &str, marker: &str) -> Event {
     )
 }
 
+fn in_scope(scope: &str) -> EventWindow {
+    EventWindow {
+        scope: Some(scope.to_string()),
+        ..EventWindow::default()
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn reads_one_exact_kind_newest_first_with_limit() {
     let db = TestDb::new().await;
@@ -55,9 +62,10 @@ async fn reads_one_exact_kind_newest_first_with_limit() {
     drain_outbox(&db.pool).await;
 
     let rows = repo
-        .recent_events_by_kind("jobs.estate.observed", None, 1)
+        .recent_events_by_kind("jobs.estate.observed", &EventWindow::default(), 1)
         .await
-        .expect("read back");
+        .expect("read back")
+        .rows;
     assert_eq!(rows.len(), 1, "limit respected");
     assert_eq!(
         rows[0]["payload"]["marker"], "obs-2",
@@ -65,9 +73,10 @@ async fn reads_one_exact_kind_newest_first_with_limit() {
     );
 
     let all = repo
-        .recent_events_by_kind("jobs.estate.observed", None, 50)
+        .recent_events_by_kind("jobs.estate.observed", &EventWindow::default(), 50)
         .await
-        .expect("read back");
+        .expect("read back")
+        .rows;
     assert_eq!(all.len(), 2, "only the observed kind counts");
 }
 
@@ -97,34 +106,115 @@ async fn scope_filters_before_the_limit() {
     drain_outbox(&db.pool).await;
 
     let scoped = repo
-        .recent_events_by_kind("jobs.estate.observed", Some("codebase"), 50)
+        .recent_events_by_kind("jobs.estate.observed", &in_scope("codebase"), 50)
         .await
-        .expect("read back");
+        .expect("read back")
+        .rows;
     assert_eq!(scoped.len(), 1, "one codebase observation");
     assert_eq!(scoped[0]["payload"]["marker"], "nightly");
 
     let k8s = repo
-        .recent_events_by_kind("jobs.estate.observed", Some("kubernetes-nodes"), 50)
+        .recent_events_by_kind("jobs.estate.observed", &in_scope("kubernetes-nodes"), 50)
         .await
-        .expect("read back");
+        .expect("read back")
+        .rows;
     assert_eq!(k8s.len(), 10, "the fast scope, all of it");
 
     let unknown = repo
-        .recent_events_by_kind("jobs.estate.observed", Some("nonesuch"), 50)
+        .recent_events_by_kind("jobs.estate.observed", &in_scope("nonesuch"), 50)
         .await
-        .expect("read back");
+        .expect("read back")
+        .rows;
     assert!(unknown.is_empty(), "an unrecorded scope is empty, not all");
 
     // A limit smaller than the number of BURIED rows: only a filter
     // that reaches the WHERE clause can still find the nightly row.
     let buried = repo
-        .recent_events_by_kind("jobs.estate.observed", Some("codebase"), 2)
+        .recent_events_by_kind("jobs.estate.observed", &in_scope("codebase"), 2)
         .await
-        .expect("read back");
+        .expect("read back")
+        .rows;
     assert_eq!(
         buried.len(),
         1,
         "the slow scope survives a limit its neighbours would have filled"
     );
     assert_eq!(buried[0]["payload"]["marker"], "nightly");
+}
+
+/// The SQL half of the time window (backlog bf362f25), pinned against
+/// the numbers `estate_readers_http.rs` asserts of the in-memory
+/// reader: `since` inclusive, `until` exclusive, both in the WHERE
+/// clause beside the scope, and `total` the count of the WINDOW rather
+/// than the page. The load-bearing leg is the cursor walk — a page
+/// capped below the window, then the next page read with the oldest
+/// timestamp on the first as its `until`, reaching the oldest row.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_time_window_pages_back_and_counts_itself() {
+    let db = TestDb::new().await;
+    let repo = PgJobs::new(db.pool.clone());
+
+    let t0: chrono::DateTime<chrono::Utc> = "2026-09-22T00:00:00Z".parse().unwrap();
+    let mut events: Vec<Event> = (0..12)
+        .map(|i| {
+            Event::new(
+                "jobs",
+                "jobs.estate.observed",
+                serde_json::json!({"scope": "host-units", "marker": format!("u-{i}")}),
+                t0 + chrono::Duration::minutes(i),
+            )
+        })
+        .collect();
+    // A neighbour scope inside the same window must not be counted.
+    events.push(Event::new(
+        "jobs",
+        "jobs.estate.observed",
+        serde_json::json!({"scope": "host", "marker": "h-0"}),
+        t0 + chrono::Duration::minutes(5),
+    ));
+    repo.record_events(&events).await.expect("events record");
+    drain_outbox(&db.pool).await;
+
+    let window = EventWindow {
+        scope: Some("host-units".to_string()),
+        since: Some(t0 + chrono::Duration::minutes(2)),
+        until: Some(t0 + chrono::Duration::minutes(10)),
+    };
+    let first = repo
+        .recent_events_by_kind("jobs.estate.observed", &window, 3)
+        .await
+        .expect("read back");
+    let markers = |rows: &[serde_json::Value]| -> Vec<String> {
+        rows.iter()
+            .map(|r| r["payload"]["marker"].as_str().unwrap_or("?").to_string())
+            .collect()
+    };
+    assert_eq!(markers(&first.rows), vec!["u-9", "u-8", "u-7"]);
+    assert_eq!(
+        first.total, 8,
+        "minutes 2..10, one scope: the window, not the page"
+    );
+
+    let cursor: chrono::DateTime<chrono::Utc> = first.rows[2]["timestamp"]
+        .as_str()
+        .expect("rows carry their timestamp")
+        .parse()
+        .expect("an RFC 3339 instant");
+    let next = repo
+        .recent_events_by_kind(
+            "jobs.estate.observed",
+            &EventWindow {
+                until: Some(cursor),
+                ..window.clone()
+            },
+            50,
+        )
+        .await
+        .expect("read back");
+    assert_eq!(
+        markers(&next.rows),
+        vec!["u-6", "u-5", "u-4", "u-3", "u-2"],
+        "the rows before the cursor, down to the inclusive since"
+    );
+    assert_eq!(next.total, 5, "a whole answer: rows == total");
 }

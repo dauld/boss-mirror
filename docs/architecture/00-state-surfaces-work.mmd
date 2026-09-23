@@ -24,7 +24,7 @@ flowchart LR
         direction TB
         JOBS["<b>Jobs + Steps</b><br/>coordination primitive<br/><small>every workflow is a Job;<br/>Steps are the typed unit of work.<br/><code>Step.embedded_job</code> &rarr; recursion<br/>(a Step can be a Job)</small>"]
         REG["<b>Registries</b><br/>workflows as data<br/><small>JobKind + StepPlugin + StepType +<br/>SubjectKind &mdash; new work lands<br/>as rows, not code</small>"]
-        AUTO["<b>Automation runners</b><br/>event &rarr; work<br/><small>boss-cybernetics (agents)<br/>boss-dispatcher (step side-effects)<br/>tenant tick engines (e.g. brewery)</small>"]
+        AUTO["<b>Automation runners</b><br/>event &rarr; work<br/><small>boss-dispatcher (step side-effects)<br/>tenant tick engines (e.g. brewery)</small>"]
     end
 
     %% The cycle reads left-to-right: State feeds Surfaces (reads),

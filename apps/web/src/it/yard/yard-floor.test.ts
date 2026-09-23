@@ -137,9 +137,10 @@ const arrivedWith = (trainId: string, at: string, c: CarRow): TrainRow =>
     cars: [c],
   });
 
-/** A publish-dock row — the one approach lane the client still supplies
- *  (the station's queue, mapped 1:1). The verdict lanes come from the
- *  status payload's `garage` / `limbo` / `stranded` / `held` below. */
+/** A publish-request row — the one approach lane the client still
+ *  supplies (the open publish-request packets, mapped 1:1). The verdict
+ *  lanes come from the status payload's `garage` / `limbo` / `stranded`
+ *  / `held` below. */
 const publishRow = (id: string, branch: string, over: Partial<ApproachRow> = {}): ApproachRow => ({
   id,
   branch,

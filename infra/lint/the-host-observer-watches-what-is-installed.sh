@@ -43,6 +43,14 @@
 #      were uninstalled, and the observer filed twelve urgent
 #      `unit_unhealthy` alarms for units read `not-found` every five
 #      minutes — a broken watch list reported as a broken host
+#   8. the ops-request runner is watched exactly where it is installed —
+#      where infra/ops/install-ops-runner.sh --in-role says this host's
+#      roles give it one — both halves, and nowhere else. It is not a
+#      roles.toml row (it fires every minute; boss-gcp-converges-itself.sh
+#      refuses it as one), so the row derivation alone never reached it:
+#      on 2026-09-22/23 boss-ops-runner was red every minute on a host
+#      whose observer posted a clean reading every five, and post-mortem
+#      3c3b202c found no estate record of it at all (backlog bf362f25)
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
@@ -93,6 +101,20 @@ $roster"
         want=$((want + 1))
     done
 done
+# The runner's pair, where the one predicate says the host gets one
+# (check 8). Unset roles install a runner, exactly as they install every
+# row, so the every-row roster carries it too.
+runner="$repo/infra/ops/install-ops-runner.sh"
+if env -u BOSS_NODE_ROLES bash "$runner" --in-role; then
+    for ext in timer service; do
+        grep -qx "boss-ops-runner.$ext" <<< "$roster" \
+            || fail "boss-ops-runner.$ext is installed on a host that declares no roles and the
+    observer does not watch it — a runner red every minute would leave no estate record,
+    which is what post-mortem 3c3b202c found (backlog bf362f25). Roster was:
+$roster"
+        want=$((want + 1))
+    done
+fi
 [ "$want" -ge 20 ] \
     || fail "only $want units were expected of the roster — the scrape or the derivation
     broke, and a green result here would mean nothing"
@@ -216,6 +238,35 @@ $sentinel_roster"
     a dark registry must narrow the watch to [always], never widen it:
 $sentinel_roster"
 
+# 8. THE RUNNER, BY ITS OWN PREDICATE. boss-gcp's roles as of
+#    2026-09-23 name ops-runner, so its runner is installed there and must
+#    be watched there; the roles check 7 reads (no ops-runner) and the
+#    dark-registry sentinel install none, so watching one would read
+#    not-found forever — the 2026-09-15 false alarms again.
+runner_roles="cluster-operator,ml-batch-host,off-cluster-observer,ops-runner,wireguard-bastion"
+BOSS_NODE_ROLES="$runner_roles" bash "$runner" --in-role \
+    || fail "install-ops-runner.sh --in-role says roles '$runner_roles' get no runner, or has
+    no such mode — the predicate this check compares against broke"
+! BOSS_NODE_ROLES="$roles" bash "$runner" --in-role \
+    || fail "install-ops-runner.sh --in-role says roles '$roles' (no ops-runner) get a runner"
+runner_roster="$(env -u UNITS -u HOST_ID -u JOBS_API BOSS_NODE_ROLES="$runner_roles" bash "$observer" --roster 2>&1)" \
+    || fail "observe-units.sh --roster under BOSS_NODE_ROLES='$runner_roles' exited non-zero:
+$runner_roster"
+for ext in timer service; do
+    grep -qx "boss-ops-runner.$ext" <<< "$runner_roster" \
+        || fail "boss-ops-runner.$ext is installed under roles '$runner_roles' and the observer
+    does not watch it (backlog bf362f25). Roster was:
+$runner_roster"
+    ! grep -qx "boss-ops-runner.$ext" <<< "$role_roster" \
+        || fail "boss-ops-runner.$ext is watched under roles '$roles', which install no runner —
+    a not-found reading forever:
+$role_roster"
+    ! grep -qx "boss-ops-runner.$ext" <<< "$sentinel_roster" \
+        || fail "boss-ops-runner.$ext is watched under the registry-unread sentinel, which
+    installs no runner — a dark registry must narrow the watch, never widen it:
+$sentinel_roster"
+done
+
 lint_scanned the-host-observer-watches-what-is-installed "$got" "unit(s) derived from the installer's roles.toml rows"
-echo "the-host-observer-watches-what-is-installed: ok — the host-units roster is derived from the installer's roles.toml rows ($got units, both halves of $((got / 2)) pairs, $n_excl justified exclusions), boss-ml-inference-batch.timer among them, the unit file holds no second copy, an unreadable source refuses with EX_CONFIG instead of answering a smaller question, and under boss-gcp's roles the roster is the installer's in-role set ($role_got units)"
+echo "the-host-observer-watches-what-is-installed: ok — the host-units roster is derived from the installer's roles.toml rows ($got units, both halves of $((got / 2)) pairs, $n_excl justified exclusions), boss-ml-inference-batch.timer among them, the unit file holds no second copy, an unreadable source refuses with EX_CONFIG instead of answering a smaller question, under boss-gcp's roles the roster is the installer's in-role set ($role_got units), and the ops-request runner is watched exactly where install-ops-runner.sh --in-role installs one"
 exit 0

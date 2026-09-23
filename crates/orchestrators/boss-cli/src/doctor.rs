@@ -329,7 +329,6 @@ const SERVICE_UNITS: &[&str] = &[
     "boss-messages-api",
     "boss-shipping-api",
     "boss-observability",
-    "boss-cybernetics",
 ];
 
 /// Probe each registered boss-* systemd service. Classification and
@@ -550,7 +549,9 @@ mod tests {
     /// e0cebcff, the observed shape: `boss doctor` on boss-gcp said
     /// "9/10 active — boss-cybernetics not running. Check journalctl"
     /// and journalctl returned nothing, because systemd had no unit
-    /// file at all. A never-installed unit must be reported as absent
+    /// file at all. (That unit has since retired with its crate,
+    /// backlog 467175e7; the tests below use another unit as their
+    /// example, since the classification never depended on which.) A never-installed unit must be reported as absent
     /// with its own remedy, not as a crashed one.
     #[test]
     fn a_never_installed_unit_is_absent_not_crashed() {
@@ -560,12 +561,12 @@ mod tests {
         );
         let c = services_check_from_states(&[
             ("boss-jobs".into(), UnitState::Active),
-            ("boss-cybernetics".into(), UnitState::NotInstalled),
+            ("boss-shipping-api".into(), UnitState::NotInstalled),
         ]);
         assert!(!c.passed);
         assert!(
             c.detail
-                .contains("boss-cybernetics not installed on this host"),
+                .contains("boss-shipping-api not installed on this host"),
             "absent unit must be named as absent: {}",
             c.detail
         );
@@ -603,7 +604,7 @@ mod tests {
         let c = services_check_from_states(&[
             ("boss-jobs".into(), UnitState::Active),
             ("boss-gateway".into(), UnitState::Inactive),
-            ("boss-cybernetics".into(), UnitState::NotInstalled),
+            ("boss-shipping-api".into(), UnitState::NotInstalled),
         ]);
         assert!(c.detail.starts_with("1/3 active"), "{}", c.detail);
         assert!(c.detail.contains("journalctl"), "{}", c.detail);

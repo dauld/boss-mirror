@@ -416,28 +416,35 @@ impl JobsRepository for InMemoryJobs {
     async fn recent_events_by_kind(
         &self,
         kind: &str,
-        scope: Option<&str>,
+        window: &crate::port::EventWindow,
         limit: i64,
-    ) -> Result<Vec<serde_json::Value>, JobsError> {
+    ) -> Result<crate::port::EventPage, JobsError> {
         // `recorded` is append-order, so newest-first is a reverse —
         // the same ordering contract the Pg impl gets from
         // `ORDER BY timestamp DESC`.
         //
-        // ORDER MATTERS: both filters run BEFORE `take`, mirroring a
+        // ORDER MATTERS: every filter runs BEFORE `take`, mirroring a
         // WHERE clause preceding its LIMIT. Taking first and filtering
-        // after would reproduce the very defect this argument exists to
+        // after would reproduce the very defect these arguments exist to
         // fix, and would do it only in this adapter — a divergence the
         // Pg pairing test in estate_readers_pg.rs is there to catch.
-        let rows = self
+        // `total` is counted over the same filtered set, before `take`.
+        let matched: Vec<boss_core::event::Event> = self
             .recorded_events()
             .into_iter()
             .rev()
             .filter(|e| e.kind == kind)
             .filter(|e| {
-                scope.is_none_or(|want| {
+                window.scope.as_deref().is_none_or(|want| {
                     e.payload.get("scope").and_then(|s| s.as_str()) == Some(want)
                 })
             })
+            .filter(|e| window.since.is_none_or(|since| e.timestamp >= since))
+            .filter(|e| window.until.is_none_or(|until| e.timestamp < until))
+            .collect();
+        let total = matched.len() as i64;
+        let rows = matched
+            .into_iter()
             .take(limit.max(0) as usize)
             .map(|e| {
                 serde_json::json!({
@@ -449,7 +456,7 @@ impl JobsRepository for InMemoryJobs {
                 })
             })
             .collect();
-        Ok(rows)
+        Ok(crate::port::EventPage { rows, total })
     }
 
     async fn step_flow_cube(

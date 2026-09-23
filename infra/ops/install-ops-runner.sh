@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # install-ops-runner.sh — ONE definition of how a host gets an ops
 # runner. Usage: install-ops-runner.sh <estate node id>
+#                install-ops-runner.sh --in-role
 #
 # Two hosts answer ops-request packets and both install the runner from
 # here: the forge, through infra/forge/install.sh (forge-converge, every
@@ -69,6 +70,33 @@ set -uo pipefail
 # caller set BOSS_RUN_SUMMARY_FILE; a no-op otherwise.
 # shellcheck source=infra/run-summary.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/run-summary.sh"
+
+# shellcheck source=infra/estate/node-roles.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../estate" && pwd)/node-roles.sh"
+
+# THE ONE PREDICATE: does a host with these roles get a runner? Read by
+# the install below and, through `--in-role`, by anything that must
+# agree with it without installing anything. EMPTY roles install as
+# before roles existed; the `registry-unread` sentinel names no role, so
+# a dark read never widens what a host runs. See the role block below
+# for why the declaration is the cause.
+wants_runner() {
+    [ -z "${BOSS_NODE_ROLES:-}" ] || has_role ops-runner
+}
+
+# `--in-role`: exit 0 if BOSS_NODE_ROLES gets a runner, 1 if not, and
+# nothing else — no root, no systemctl, no SoR, nothing written. It
+# exists for infra/estate/observe-units.sh (backlog bf362f25): the
+# runner is not a roles.toml row, so the observer's row-derived roster
+# never watched it, and on 2026-09-22/23 boss-ops-runner went red every
+# minute on a host whose observer posted a clean reading every five —
+# post-mortem 3c3b202c found no estate record of it at all. The observer
+# asks HERE rather than restating the predicate, so what a host installs
+# and what its observer watches stay one answer (CLAUDE.md §9a).
+if [ "${1:-}" = "--in-role" ]; then
+    wants_runner
+    exit $?
+fi
 
 HOST="${1:?usage: install-ops-runner.sh <estate node id>}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -152,9 +180,7 @@ refuse() { # <what failed>
 # retire's after-snapshot showed disabled units gone from the listing
 # with their files still on disk (infra/gcp/uninstall-not-in-role.sh,
 # bound 5).
-# shellcheck source=infra/estate/node-roles.sh
-. "$REPO/infra/estate/node-roles.sh"
-if [ -n "${BOSS_NODE_ROLES:-}" ] && ! has_role ops-runner; then
+if ! wants_runner; then
     declared="$HOST declares $BOSS_NODE_ROLES (source: ${BOSS_NODE_ROLES_SOURCE:-preset})"
     present=""
     for ext in service timer; do

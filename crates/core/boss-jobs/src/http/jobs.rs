@@ -258,6 +258,14 @@ pub(super) async fn list_jobs<R: JobsRepository + 'static, B: EventBus + 'static
         j["steps"] = serde_json::to_value(&steps).unwrap_or_default();
         enriched.push(j);
     }
+    // THE ENVELOPE IS A WIRE CONTRACT TOO (backlog 10eecbbc): shell,
+    // Rust and the web read these four fields, and three of those
+    // readers DEFAULT a missing `total` to the page's length or to 0 —
+    // so dropping or reshaping it turns every truncated page into a
+    // whole list without an error anywhere. `limit` echoes the limit
+    // APPLIED (after the clamp), not the one asked for. The readers and
+    // what each assumes are listed, and held, in
+    // tests/the_list_envelope_holds_what_its_readers_assume.rs.
     Json(serde_json::json!({
         "data": enriched,
         "total": total,
@@ -1935,6 +1943,13 @@ pub(super) struct EstateEventsQuery {
     /// Exact-match filter on the payload's top-level `scope`, e.g.
     /// `codebase` or `kubernetes-nodes`. Absent reads every series.
     scope: Option<String>,
+    /// Only rows with `timestamp >= since` (RFC 3339).
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    /// Only rows with `timestamp < until` — the before-cursor: the
+    /// oldest timestamp on one page is the `until` of the next. An
+    /// instant that does not parse is a 400 from the extractor, never
+    /// read as absent, which would answer the newest page instead.
+    until: Option<chrono::DateTime<chrono::Utc>>,
     limit: Option<i64>,
 }
 
@@ -1963,6 +1978,18 @@ pub(super) struct EstateEventsQuery {
 /// could not be read through the one door that serves it. Asking for
 /// a scope answers about THAT scope — 50 rows of a nightly series is
 /// fifty nights, not half a day.
+///
+/// `?since=` / `?until=` do the same for TIME (backlog bf362f25). The
+/// cap had no way past it: post-mortem 3c3b202c, thirty hours after an
+/// incident, found the oldest reachable rows at 2026-09-22T20:52Z
+/// (observations) and 2026-09-23T06:50Z (comparisons), with the window
+/// it needed behind both — and the rows still in the log, which is
+/// append-only (measured through the events tail the same day: every
+/// estate row back to the log's first hour, 2026-09-16T23:58Z). The cap
+/// stays; `until=` walks past it a page at a time, and `total` counts
+/// the window so a reader compares its rows to it rather than taking a
+/// full page for the whole answer. Both are in the WHERE clause, beside
+/// the scope and before the limit.
 pub(super) async fn list_estate_observations<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
     CurrentUser(_user): CurrentUser,
@@ -1985,15 +2012,19 @@ async fn estate_events<R: JobsRepository + 'static, B: EventBus + 'static>(
     q: &EstateEventsQuery,
 ) -> Response {
     let limit = q.limit.unwrap_or(5).clamp(1, 50);
-    // The scope reaches the repository, which pushes it to the WHERE
-    // clause. Narrowing the page after it comes back would leave the
-    // slow series exactly as unreadable as it was.
-    match state
-        .jobs
-        .recent_events_by_kind(kind, q.scope.as_deref(), limit)
-        .await
-    {
-        Ok(rows) => Json(serde_json::json!({ "data": rows })).into_response(),
+    // The scope and the window reach the repository, which pushes them
+    // to the WHERE clause. Narrowing the page after it comes back would
+    // leave the slow series, and the old window, exactly as unreadable
+    // as they were.
+    let window = crate::port::EventWindow {
+        scope: q.scope.clone(),
+        since: q.since,
+        until: q.until,
+    };
+    match state.jobs.recent_events_by_kind(kind, &window, limit).await {
+        Ok(page) => {
+            Json(serde_json::json!({ "data": page.rows, "total": page.total })).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
