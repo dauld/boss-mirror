@@ -699,12 +699,13 @@ spec:
           env:
             - {name: CARGO_TARGET_DIR, value: /scratch/target}
             - {name: REPO_DIR, value: /work/boss}
-            # Floors: keep the node-local scratch fs above 50G free
-            # (a cold `cargo test --all-features` needs ~74G of target,
-            # so this reclaims well before a build is starved) and the
-            # 40Gi work PVC above 6G. Worktrees idle longer than 48h are
-            # eligible; anything newer, locked, or dirty is left alone.
-            - {name: BOSS_SCRATCH_FLOOR_GB, value: "50"}
+            # Floors: the node-local scratch floor is the script's own
+            # default, a SHARE of the fs (25%) held above the kubelet's
+            # 15% eviction line — the 50G it was here sat below that
+            # line, so the kubelet always acted first (2026-09-23). The
+            # 40Gi work PVC is kept above 6G. Worktrees idle longer than
+            # 48h are eligible; anything newer, locked, or dirty is left
+            # alone.
             - {name: BOSS_WORK_FLOOR_GB, value: "6"}
             - {name: BOSS_WORKTREE_MAX_AGE_H, value: "48"}
           securityContext:
