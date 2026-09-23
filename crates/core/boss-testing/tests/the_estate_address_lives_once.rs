@@ -148,6 +148,20 @@ fn the_env_file_renders_every_key_from_the_source() {
         value_of_str(&r.out, "JOBS_API"),
         value_of_str(&r.out, "BOSS_JOBS_URL")
     );
+    // The instance's ML API: the record's host on the port boss-ports
+    // names for `ml` — derived, never declared, so it cannot point at a
+    // different instance from the record (backlog 9599babc: the nightly
+    // batch fed a retired stack's database for a week at 127.0.0.1:7070).
+    let host = sor
+        .rsplit_once(':')
+        .map(|(h, _)| h.to_string())
+        .unwrap_or_else(|| panic!("sor_url {sor} carries no port"));
+    assert_eq!(
+        value_of_str(&r.out, "BOSS_ML_API_URL"),
+        format!("{host}:{}", boss_ports::prod("ml")),
+        "{}",
+        r.out
+    );
     // A comment saying where it came from and not to edit it: the next
     // converge rewrites the file.
     assert!(r.out.starts_with("# /etc/boss/sor.env"), "{}", r.out);

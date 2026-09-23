@@ -1,7 +1,6 @@
 [Unit]
 Description=Boss ML — daily infer-batch trigger
-After=network-online.target boss-ml-api.service
-Requires=boss-ml-api.service
+After=network-online.target
 
 [Service]
 EnvironmentFile=/etc/boss/sor.env
@@ -19,11 +18,31 @@ User=boss
 # outranks a drop-in the same way. The `-` is the other half: the packet is
 # VISIBILITY, never a precondition — 23 nights of stale predictions
 # were the price of an ExecStartPre that could refuse the run.
-# The ML API itself stays local: it works this host's database
-# (/etc/boss-ml-api.toml, postgres://127.0.0.1/boss).
+#
+# THE ML API IS THE RECORD'S TOO (backlog 9599babc, 2026-09-23). This
+# unit used to say the ML API "stays local" — Environment=BOSS_ML_API_URL=
+# http://127.0.0.1:7070 plus Requires=boss-ml-api.service — and after the
+# second stack's retirement (ops-request 7912c9ae, 2026-09-15) that local
+# API was the retired stack's, over the retired stack's database. The
+# retirement stopped and DISABLED it; Requires= starts a required unit
+# whether or not it is enabled, so every 02:30 brought it back, every POST
+# answered 2xx, and seven packets said ok while the record's risk scores
+# stayed empty. The address now comes from the same rendered file as the
+# record's — BOSS_ML_API_URL, the record's host on boss-ports' `ml` port,
+# which the LAN machine door (boss-jobs-internal.yaml) carries — and
+# nothing here depends on a local ML API at all.
+#
+# What the run DID reaches its packet: run-inference-batch.sh writes
+# predictions_written, predictions_by_model, ml_api_url and its
+# exit_status here, and the ExecStopPost closer merges them onto the run
+# step (infra/run-summary.sh). Declared once so both Exec lines agree on
+# the path. User=boss cannot write /run itself, so the file lives in the
+# unit's own RuntimeDirectory, which systemd removes only after
+# ExecStopPost has run.
+RuntimeDirectory=boss-ml-inference-batch
+Environment=BOSS_RUN_SUMMARY_FILE=/run/boss-ml-inference-batch/summary.json
 ExecStartPre=-/opt/boss/infra/boss-maintenance-wrap.sh maintenance-ml-inference-batch "ML inference batch"
 ExecStart=/opt/boss/infra/ml/run-inference-batch.sh
 ExecStopPost=-/opt/boss/infra/boss-step.sh maintenance-ml-inference-batch run
-Environment=BOSS_ML_API_URL=http://127.0.0.1:7070
 StandardOutput=journal
 StandardError=journal

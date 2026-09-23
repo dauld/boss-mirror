@@ -52,7 +52,11 @@
 # store joined on 2026-09-23 (backlog 7610dd2f): `boss attach` posts a
 # file to boss-content-api's /api/files and reads it back by id, and a
 # car's probe reads the same bytes — every /api/files path, including
-# the `_audit` and `_upload-url` routes the same router mounts. Everything
+# the `_audit` and `_upload-url` routes the same router mounts. The ML
+# API joined the same day (backlog 9599babc): the nightly inference
+# batch on boss-gcp POSTs /api/ml/models/<id>/infer-batch here, where
+# it had been reaching the retired second stack's ML API on loopback,
+# and a car's probe reads /api/ml/models the same way. Everything
 # unlisted — jobs, steps, the yard, agents, sensors, workflows — is the
 # jobs API.
 sor_service_for_path() {
@@ -74,6 +78,7 @@ sor_service_for_path() {
         /api/subject-kinds|/api/subject-kinds/*)               service=subject-kinds ;;
         /api/subjects|/api/subjects/*)                         service=subject-kinds ;;
         /api/files|/api/files/*)                               service=content ;;
+        /api/ml|/api/ml/*)                                     service=ml ;;
         *)                                                    service=jobs ;;
     esac
     # SOR-ROUTES-END

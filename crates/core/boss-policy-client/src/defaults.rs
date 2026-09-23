@@ -114,6 +114,18 @@ pub fn default_rules() -> Vec<Rule> {
         ));
     }
 
+    // Pay (backlog c7484d0e, 2026-09-23). Not a shipped resource, so
+    // none of the read-only roles below inherit it — the auditor role
+    // is also what an anonymous visitor carries. The deploy superuser
+    // reads it here; tenants grant their HR and finance roles in
+    // `examples/<tenant>/seeds/policy_rules.toml`.
+    rules.push(Rule::new(
+        "platform-admin",
+        Resource::compensation(),
+        Read,
+        Scope::All,
+    ));
+
     // ------------------------------------------------------------------
     // Audit-readonly — external auditors / OSS anonymous visitors /
     // the seeded `emp-audit` login. Read on every shipped resource;
@@ -404,5 +416,24 @@ mod tests {
         assert_eq!(guest.len(), 1);
         assert_eq!(guest[0].resource, Resource::workflow());
         assert_eq!(guest[0].action, Action::Read);
+    }
+
+    /// Pay is read by grant (backlog c7484d0e, 2026-09-23). The deploy
+    /// superuser holds it; the auditor role — which is also what an
+    /// anonymous OSS visitor and the seeded `emp-audit` login carry —
+    /// does not, which is why `compensation` is kept OUT of
+    /// `shipped_resources`, whose Read every read-only role inherits.
+    #[test]
+    fn only_platform_admin_reads_compensation_by_default() {
+        let holders: Vec<_> = default_rules()
+            .into_iter()
+            .filter(|r| r.resource == Resource::compensation())
+            .map(|r| (r.role, r.action, r.scope))
+            .collect();
+        assert_eq!(
+            holders,
+            vec![("platform-admin".to_string(), Action::Read, Scope::All)]
+        );
+        assert!(!shipped_resources().contains(&Resource::compensation()));
     }
 }

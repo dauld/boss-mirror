@@ -251,15 +251,17 @@
 </section>
 
 <style>
-  /* YardMap's classes, by name and by token — the rails are the strong
-     border, the ties the hairline, the ground the void, the outlines
-     the sheds, the lamps the lamps. Nothing new enters the system
-     here; the count is the deck's entity title (18px, 600). */
+  /* YardMap's classes, by name — the rails are the strong rule, the
+     ties the rule, the ground the map's bg, the outlines the sheds, the
+     lamps each state's line. Every colour is a --map-* token from
+     styles.css with no fallback, so the palette lives once and a
+     retired token fails map-palette.test.ts (42f66fb3). The count is
+     the deck's entity title (18px, 600). */
   .yard {
-    --rail: var(--border-strong, #3a434d);
-    --tie: var(--hairline, #2a3138);
-    background: var(--void, #0d1014);
-    border: 1px solid var(--hairline, #2a3138);
+    --rail: var(--map-rule-strong);
+    --tie: var(--map-rule);
+    background: var(--map-bg);
+    border: 1px solid var(--map-rule);
     padding: var(--s2, 8px);
     overflow-x: auto;
     margin-top: var(--s3, 12px);
@@ -272,23 +274,23 @@
     font-family: var(--font-mono, ui-monospace, monospace);
   }
   .yard text {
-    fill: var(--static, #7a838c);
+    fill: var(--map-muted);
     font-size: 10px;
     letter-spacing: 0.08em;
     text-transform: uppercase;
   }
   .yard text.tiny { font-size: 9px; letter-spacing: 0.04em; text-transform: none; }
-  .yard text.count { font-size: 18px; font-weight: 600; fill: var(--fog, #e8ecef); letter-spacing: 0; text-transform: none; }
-  .yard text.err { fill: var(--err, #e2685c); }
+  .yard text.count { font-size: 18px; font-weight: 600; fill: var(--map-ink); letter-spacing: 0; text-transform: none; }
+  .yard text.err { fill: var(--map-bad-ink); }
   .rail { stroke: var(--rail); stroke-width: 2; fill: none; }
-  .rail[data-state='busy'] { stroke: var(--warn, #d9a441); }
-  .rail[data-state='troubled'] { stroke: var(--err, #e2685c); }
+  .rail[data-state='busy'] { stroke: var(--map-warn-edge); }
+  .rail[data-state='troubled'] { stroke: var(--map-bad-edge); }
   /* The traffic: dashes running the rail from A to B. Weight and speed
      come from the measured rate; `unknown` is deliberately a sparse,
      unlit dotting so an unmeasured rail cannot read as an empty one. */
-  .traffic { fill: none; stroke: var(--ok, #4fb98a); stroke-linecap: round; opacity: 0.85;
+  .traffic { fill: none; stroke: var(--map-ok-edge); stroke-linecap: round; opacity: 0.85;
     stroke-width: 2; stroke-dasharray: 2 10; animation: flow 3s linear infinite; }
-  .traffic[data-density='unknown'] { stroke: var(--static, #7a838c); stroke-dasharray: 1 7;
+  .traffic[data-density='unknown'] { stroke: var(--map-muted); stroke-dasharray: 1 7;
     opacity: 0.4; animation: none; }
   .traffic[data-density='none'] { stroke: none; animation: none; }
   .traffic[data-density='light'] { stroke-width: 2; stroke-dasharray: 2 14; animation-duration: 4s; }
@@ -296,37 +298,37 @@
   .traffic[data-density='heavy'] { stroke-width: 4; stroke-dasharray: 6 6; animation-duration: 1.4s; }
   @keyframes flow { to { stroke-dashoffset: -48; } }
   /* The token standing on the rail: what waits to cross, right now. */
-  .token { fill: var(--ink, #12161c); stroke: var(--border-strong, #3a434d); stroke-width: 1.5; }
-  .token.busy { stroke: var(--warn, #d9a441); }
-  .token.troubled { stroke: var(--err, #e2685c); }
+  .token { fill: var(--map-surface); stroke: var(--map-rule-strong); stroke-width: 1.5; }
+  .token.busy { stroke: var(--map-warn-edge); }
+  .token.troubled { stroke: var(--map-bad-edge); }
   .yard text.token-count { font-size: 9px; letter-spacing: 0; text-transform: none;
-    fill: var(--fog, #e8ecef); }
-  .yard text.rate { fill: var(--static, #7a838c); }
+    fill: var(--map-ink); }
+  .yard text.rate { fill: var(--map-muted); }
   /* The machine's lamp above the rail. Unlit = nothing records it. */
-  .glyph { fill: var(--ink, #12161c); stroke: var(--border-strong, #3a434d); }
-  .glyph.ok { fill: var(--ok, #4fb98a); stroke: var(--ok, #4fb98a); }
-  .glyph.err { fill: var(--err, #e2685c); stroke: var(--err, #e2685c); animation: blink 1s steps(2) infinite; }
+  .glyph { fill: var(--map-surface); stroke: var(--map-rule-strong); }
+  .glyph.ok { fill: var(--map-ok-edge); stroke: var(--map-ok-edge); }
+  .glyph.err { fill: var(--map-bad-edge); stroke: var(--map-bad-edge); animation: blink 1s steps(2) infinite; }
   .crossing { cursor: help; }
   .tie { stroke: var(--tie); stroke-width: 6; stroke-dasharray: 3 9; fill: none; }
-  .shed { fill: var(--ink, #12161c); stroke: var(--border-strong, #3a434d); }
-  .shed.err { stroke: var(--err, #e2685c); }
-  .shed.warn { stroke: var(--warn, #d9a441); }
+  .shed { fill: var(--map-surface); stroke: var(--map-rule-strong); }
+  .shed.err { stroke: var(--map-bad-edge); }
+  .shed.warn { stroke: var(--map-warn-edge); }
   .machine { cursor: pointer; outline: none; }
   /* THE ZOOM. The camera is the viewBox (region-contents.ts); these are only
      what the zoom LOOKS like: the territories the camera left fade
      back, the one it is in does not, and the ground around it is the
      way out. No new tokens — the plates are YardMap's wagon body and
      its lamps. */
-  .frame { fill: var(--void, #0d1014); cursor: zoom-out; }
+  .frame { fill: var(--map-bg); cursor: zoom-out; }
   .territory.away { opacity: 0.35; }
   .territory.here .shed { stroke-width: 2; }
-  .leave { cursor: zoom-out; fill: var(--static, #7a838c); font-size: 9px; letter-spacing: 0.08em; }
-  .leave:hover, .leave:focus-visible { fill: var(--fog, #e8ecef); }
-  .plate .wagon { fill: var(--ink, #12161c); stroke: var(--border-strong, #3a434d); }
-  .plate .wagon.ok { stroke: var(--ok, #4fb98a); }
-  .plate .wagon.warn { stroke: var(--warn, #d9a441); }
-  .plate .wagon.red { stroke: var(--err, #e2685c); }
-  .yard text.plate-tag { fill: var(--fog, #e8ecef); letter-spacing: 0; }
+  .leave { cursor: zoom-out; fill: var(--map-muted); font-size: 9px; letter-spacing: 0.08em; }
+  .leave:hover, .leave:focus-visible { fill: var(--map-ink); }
+  .plate .wagon { fill: var(--map-surface); stroke: var(--map-rule-strong); }
+  .plate .wagon.ok { stroke: var(--map-ok-edge); }
+  .plate .wagon.warn { stroke: var(--map-warn-edge); }
+  .plate .wagon.red { stroke: var(--map-bad-edge); }
+  .yard text.plate-tag { fill: var(--map-ink); letter-spacing: 0; }
   /* THE PLATFORMS (car 4), in the same grammar: the track is a tie, a
      mark is a wagon body, the bound is a signal on the track. Every
      colour is a named token — a state or a surface never enters this
@@ -334,19 +336,19 @@
      dimmer than a figure and never the same ink as a 0, because the
      two are different facts. */
   .platform .track { stroke: var(--tie); stroke-width: 1; }
-  .platform .mark { fill: var(--static); }
-  .platform .mark.flagged { fill: var(--err); }
-  .platform .bound { stroke: var(--warn); stroke-width: 1; }
-  .yard text.standing { fill: var(--fog); letter-spacing: 0; }
-  .yard text.rate { fill: var(--static); letter-spacing: 0; }
-  .yard text.unknown { fill: var(--static); opacity: 0.6; font-style: italic; }
-  .lamp.working { fill: var(--warn, #d9a441); }
-  .lamp.off { fill: var(--border-strong, #3a434d); }
-  .machine:hover .shed, .machine:focus-visible .shed { stroke: var(--fog, #e8ecef); }
-  .lamp { fill: var(--border-strong, #3a434d); }
-  .lamp.ok { fill: var(--ok, #4fb98a); }
-  .lamp.warn { fill: var(--warn, #d9a441); }
-  .lamp.err { fill: var(--err, #e2685c); animation: blink 1s steps(2) infinite; }
+  .platform .mark { fill: var(--map-muted); }
+  .platform .mark.flagged { fill: var(--map-bad-edge); }
+  .platform .bound { stroke: var(--map-warn-edge); stroke-width: 1; }
+  .yard text.standing { fill: var(--map-ink); letter-spacing: 0; }
+  .yard text.rate { fill: var(--map-muted); letter-spacing: 0; }
+  .yard text.unknown { fill: var(--map-muted); opacity: 0.6; font-style: italic; }
+  .lamp.working { fill: var(--map-warn-edge); }
+  .lamp.off { fill: var(--map-rule-strong); }
+  .machine:hover .shed, .machine:focus-visible .shed { stroke: var(--map-ink); }
+  .lamp { fill: var(--map-rule-strong); }
+  .lamp.ok { fill: var(--map-ok-edge); }
+  .lamp.warn { fill: var(--map-warn-edge); }
+  .lamp.err { fill: var(--map-bad-edge); animation: blink 1s steps(2) infinite; }
   @keyframes blink { 50% { opacity: 0.25; } }
   /* THE MACHINE GLYPHS (car 5). No colour is declared here: the
      housing is the map's own `.shed` and the parts inside it are its

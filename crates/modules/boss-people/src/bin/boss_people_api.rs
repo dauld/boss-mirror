@@ -117,6 +117,21 @@ async fn main() -> Result<()> {
         )))
     });
 
+    // Row-level authorization, wired the way boss-ledger-api wires it:
+    // sim traffic authorized at the boundary, real traffic enforced
+    // per role. Until 2026-09-23 this binary passed `policy: None`, so
+    // the employee Update gate never ran in production and the change
+    // log answered every caller (backlog 8cdad84c). The write callers
+    // it now meets — the tenant publish, both engines' prepare, the
+    // dispatcher — all sign as platform-admin, which the core default
+    // rules grant Update on `employee`.
+    let policy: Arc<dyn boss_policy_client::PolicyClient> =
+        Arc::new(boss_policy_client::SimBypassPolicyClient::new(Arc::new(
+            boss_policy_client::ReqwestPolicyClient::new(
+                std::env::var("BOSS_POLICY_URL").unwrap_or_else(|_| boss_ports::url("policy")),
+            ),
+        )));
+
     // Mount workflow and search routers first (more-specific routes),
     // then merge the people CRUD router (has catch-all /{id}).
     let mut app = boss_people::workflows::workflow_router(
@@ -124,6 +139,7 @@ async fn main() -> Result<()> {
         std::sync::Arc::new(boss_people::PgPeople::new(pool.clone())),
         publisher.clone(),
         clock.clone(),
+        Some(policy.clone()),
     )
     .merge(boss_people::requisitions::requisitions_router(
         pool.clone(),
@@ -134,6 +150,7 @@ async fn main() -> Result<()> {
         pool.clone(),
         publisher.clone(),
         clock.clone(),
+        Some(policy.clone()),
     ))
     .merge(boss_people::scope::scope_router(pool.clone()))
     .merge(boss_people::webauthn::webauthn_router(
@@ -182,7 +199,7 @@ async fn main() -> Result<()> {
     let state = PeopleApiState {
         people,
         publisher,
-        policy: None,
+        policy: Some(policy),
         subject_kinds,
         clock,
     };

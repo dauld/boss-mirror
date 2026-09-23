@@ -85,6 +85,29 @@ pub trait MessageRepository: Send + Sync {
         stamp: &boss_core::publisher::EventStamp,
     ) -> Result<u32, MessageError>;
 
+    /// Archive every UNREAD notice under `path_prefix` whose id starts
+    /// with `id_prefix`, of ANY kind, returning how many moved. The
+    /// retirement path for the notices the machine sends about a step
+    /// (backlog 0b2bac00, 2026-09-23): the dispatcher's notifier sends
+    /// an assignee's ready/assigned notice as a `direct` with the id
+    /// `notify:{step}:{recipient}`, and `expire_signals_under` above
+    /// never touches a direct, so 83 of David's 90 direct notices
+    /// pointed at completed steps while his badge counted them.
+    ///
+    /// The id prefix is the narrowing, where the kind is above. A
+    /// person's direct carries a minted id and a `done:` announcement
+    /// its own prefix, so neither moves; the caller names the prefix
+    /// (a dispatcher rule's argument), so which notices retire is rule
+    /// data rather than a list in this crate. Unread only, and
+    /// archived rather than read or deleted, for the reasons above.
+    async fn expire_notices_under(
+        &self,
+        path_prefix: &str,
+        id_prefix: &str,
+        now: DateTime<Utc>,
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<u32, MessageError>;
+
     async fn archive_message(
         &self,
         id: &str,

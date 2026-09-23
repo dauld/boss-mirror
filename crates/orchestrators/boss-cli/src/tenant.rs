@@ -1906,6 +1906,15 @@ pub enum TenantAction {
         /// each service's own localhost port, the in-pod launcher path).
         #[arg(long)]
         gateway: Option<String>,
+        /// Publish through the LAN machine door instead: ONE host, each
+        /// service on its own `boss_ports` port, exactly as `export
+        /// --door` reads. Give the address the estate spells as
+        /// BOSS_JOBS_URL. This is the operator seat's route into a
+        /// deployment (backlog e32a423e) — every write is still signed
+        /// as the seed identity, which `--gateway` cannot carry because
+        /// the gateway answers a sessionless caller 401.
+        #[arg(long, conflicts_with = "gateway")]
+        door: Option<String>,
         /// Print every write the publish WOULD make; no HTTP.
         #[arg(long)]
         dry_run: bool,
@@ -2002,14 +2011,16 @@ pub async fn dispatch(cmd: Cmd) -> Result<()> {
         Cmd::Tenant(TenantAction::Publish {
             dir,
             gateway,
+            door,
             dry_run,
             take,
         }) => {
             let take = crate::tenant_publish::Take::parse(take.as_deref())?;
             let plan = crate::tenant_publish::plan(&dir)?;
-            let bases = crate::tenant_publish::Bases::resolve(gateway.as_deref());
+            let (bases, routing) =
+                crate::tenant_publish::Bases::routed(gateway.as_deref(), door.as_deref())?;
             println!("{}", plan.render_header(dry_run));
-            println!("{}", bases.describe(gateway.as_deref()));
+            println!("{routing}");
             println!("{}", take.describe());
             if dry_run {
                 for s in &plan.steps {
@@ -2079,17 +2090,8 @@ pub async fn dispatch(cmd: Cmd) -> Result<()> {
                     dir.display()
                 );
             };
-            let (bases, routing) = match door.as_deref() {
-                Some(d) => (
-                    crate::tenant_publish::Bases::on_door(d)?,
-                    format!("routing: each service's own port on the machine door {d}"),
-                ),
-                None => {
-                    let bases = crate::tenant_publish::Bases::resolve(gateway.as_deref());
-                    let line = bases.describe(gateway.as_deref());
-                    (bases, line)
-                }
-            };
+            let (bases, routing) =
+                crate::tenant_publish::Bases::routed(gateway.as_deref(), door.as_deref())?;
             println!("{routing}");
             // The doors are blocking reqwest, like publish's.
             let snap = tokio::task::spawn_blocking({

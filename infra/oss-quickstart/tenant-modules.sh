@@ -100,6 +100,43 @@ service_wanted() {
     return 1
 }
 
+# modules_on_line — one line naming how many modules the tenant runs,
+# which, and out of how many it declares. The launcher's log and the
+# --plan door share it.
+#
+# WHY (backlog fa77e3d7, design 1054c099 question `startup-line`, decided
+# 2026-09-23). Measured 2026-09-22: prod's manifest declared no module at
+# all, so every module-gated surface was off, and nothing ever said so —
+# the instance booted and answered every read correctly. A missing key
+# being off is the contract and stays; a tenant that runs only jobs,
+# people and messages is legitimate, so this refuses nothing. It states
+# the count, so `modules on: 0 of 0` is in the pod log the day it
+# converges. The denominator is what the manifest DECLARES, not the SPA
+# catalog's module list: that list lives in apps/web/src/shell/
+# nav-catalog.ts, and a second copy here would drift from it (§9a).
+modules_on_line() {
+    local f
+    if ! f="$(tenant_manifest_path)"; then
+        echo "modules on: undeclared (no tenant manifest; every service starts)"
+        return 0
+    fi
+    awk '
+        /^[[:space:]]*\[/ { in_modules = ($0 ~ /^[[:space:]]*\[modules\][[:space:]]*(#.*)?$/); next }
+        in_modules {
+            line = $0; sub(/#.*/, "", line)
+            if (match(line, /^[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*=[[:space:]]*(true|false)[[:space:]]*$/)) {
+                k = line; sub(/[[:space:]]*=.*/, "", k); sub(/^[[:space:]]*/, "", k)
+                declared++
+                if (line ~ /=[[:space:]]*true/) { on++; names = names (names == "" ? "" : " ") k }
+            }
+        }
+        END {
+            printf "modules on: %d of %d declared (%s) — a module missing from [modules] is off\n",
+                on, declared, (names == "" ? "none" : names)
+        }
+    ' "$f"
+}
+
 # derive_sim_env — BOSS_SIM_ENABLED from the manifest's `sim` when the
 # deployment did not set it, then the loopback pair when the sim runs.
 # Prints one `sim …` line and one `webhook …` line (the launcher's log

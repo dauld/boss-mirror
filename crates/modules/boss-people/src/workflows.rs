@@ -21,11 +21,14 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use boss_core::publisher::DomainPublisher;
+use boss_policy::{Action, Resource};
+use boss_policy_client::{CurrentUser, PolicyClient};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 use crate::events::EMPLOYEE_CHANGE_RECORDED;
+use crate::grants::ChangeReader;
 use crate::port::PeopleRepository;
 
 #[derive(Clone)]
@@ -42,6 +45,10 @@ pub struct WorkflowState {
     /// audit_log timestamps follow the deployment's sim/wall mode
     /// instead of leaking wallclock.
     pub clock: std::sync::Arc<dyn boss_clock_client::ClockClient>,
+    /// Gates the per-employee change log the way
+    /// `/api/people/changes` is gated (backlog 8cdad84c). `None` only
+    /// in tests: the gate allows and pay stays hidden.
+    pub policy: Option<Arc<dyn PolicyClient>>,
 }
 
 pub fn workflow_router(
@@ -49,12 +56,14 @@ pub fn workflow_router(
     people: Arc<dyn PeopleRepository>,
     publisher: Option<DomainPublisher>,
     clock: Arc<dyn boss_clock_client::ClockClient>,
+    policy: Option<Arc<dyn PolicyClient>>,
 ) -> Router {
     let state = WorkflowState {
         pool: Arc::new(pool),
         people,
         publisher,
         clock,
+        policy,
     };
     Router::new()
         .route("/api/people/{id}/status", put(update_status))
@@ -97,6 +106,9 @@ struct EmployeeChange {
     notes: Option<String>,
     initiated_by: Option<String>,
     created_at: chrono::DateTime<chrono::Utc>,
+    /// What a `department:<d>` grant is judged on; never sent.
+    #[serde(skip)]
+    employee_department: Option<String>,
 }
 
 /// Audit-trail event payload for `EMPLOYEE_CHANGE_RECORDED`. The
@@ -176,27 +188,57 @@ async fn update_status(
     Json(serde_json::json!({"ok": true})).into_response()
 }
 
-async fn list_changes(State(state): State<WorkflowState>, Path(id): Path<String>) -> Response {
+async fn list_changes(
+    State(state): State<WorkflowState>,
+    CurrentUser(user): CurrentUser,
+    Path(id): Path<String>,
+) -> Response {
+    // One employee's history is the same log `/api/people/changes`
+    // serves, read the same way (backlog 8cdad84c).
+    let reader = match ChangeReader::admit(state.policy.as_ref(), user).await {
+        Ok(reader) => reader,
+        Err(refused) => return refused,
+    };
     let rows: Result<Vec<EmployeeChange>, _> = sqlx::query_as(
-        "SELECT id, employee_id, kind, from_value, to_value, effective_date, notes, initiated_by, created_at \
-         FROM employee_changes WHERE employee_id = $1 ORDER BY created_at DESC",
+        "SELECT c.id, c.employee_id, c.kind, c.from_value, c.to_value, c.effective_date, \
+                c.notes, c.initiated_by, c.created_at, e.department AS employee_department \
+         FROM employee_changes c LEFT JOIN employees e ON e.id = c.employee_id \
+         WHERE c.employee_id = $1 ORDER BY c.created_at DESC",
     )
     .bind(&id)
     .fetch_all(state.pool.as_ref())
     .await;
 
     match rows {
-        Ok(changes) => Json(changes).into_response(),
+        Ok(changes) => reader.respond(&changes, |row| {
+            (
+                &row.employee_id,
+                row.employee_department.as_deref(),
+                &row.kind,
+            )
+        }),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 
 async fn record_change(
     State(state): State<WorkflowState>,
+    CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
-    _headers: axum::http::HeaderMap,
     Json(body): Json<RecordChange>,
 ) -> Response {
+    // Recording a change is editing the employee: the Update grant a
+    // PUT of the row needs (backlog 8cdad84c).
+    if let Err(refused) = crate::grants::require(
+        state.policy.as_ref(),
+        &user,
+        Action::Update,
+        Resource::employee(),
+    )
+    .await
+    {
+        return refused;
+    }
     if let Err(e) = record_change_inner(
         &state,
         EmployeeChangeRecord {
@@ -353,5 +395,57 @@ fn derive_change_kind(from: &str, to: &str) -> &'static str {
         ("on-leave", "active") => "leave-end",
         (_, "active") => "onboard",
         _ => "role-change",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The per-employee change log is gated like `/api/people/changes`
+    //! (backlog 8cdad84c). The gate refuses before the pool is touched,
+    //! so the pool is lazy and pointed at a host that cannot resolve.
+    use super::*;
+    use boss_policy::Scope;
+    use boss_policy_client::FakePolicyClient;
+    use boss_testing::TestRequest;
+
+    fn app(policy: Arc<dyn PolicyClient>) -> Router {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://never-connected.invalid/none")
+            .expect("a lazy pool does not connect");
+        workflow_router(
+            pool,
+            Arc::new(crate::InMemoryPeople::new(vec![])),
+            None,
+            Arc::new(boss_clock_client::WallClockClient),
+            Some(policy),
+        )
+    }
+
+    #[tokio::test]
+    async fn one_employees_change_log_refuses_a_reader_without_an_employee_read_grant() {
+        TestRequest::get("/api/people/emp-002/changes")
+            .as_user("emp-002", "service-tech")
+            .send(&app(Arc::new(FakePolicyClient::deny_all())))
+            .await
+            .assert_status(StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn recording_one_employees_change_needs_employee_update_not_read() {
+        let read_only: Arc<dyn PolicyClient> = Arc::new(
+            FakePolicyClient::builder()
+                .allow("hr", Action::Read, Resource::employee(), Scope::All)
+                .build(),
+        );
+        TestRequest::post("/api/people/emp-002/changes")
+            .as_user("emp-hr", "hr")
+            .json(&serde_json::json!({
+                "kind": "promotion",
+                "to_value": "9500000",
+                "effective_date": "2026-09-23",
+            }))
+            .send(&app(read_only))
+            .await
+            .assert_status(StatusCode::FORBIDDEN);
     }
 }

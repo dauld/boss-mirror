@@ -325,3 +325,96 @@ async fn get_inbox_for_unknown_employee_returns_empty_list() {
 fn _kind_marker() -> MessageKind {
     MessageKind::direct()
 }
+
+// ---------------------------------------------------------------------------
+// POST /api/messages/expire — with an id prefix, the notices about a step
+// ---------------------------------------------------------------------------
+
+/// The notice an assignee got when a step became theirs, in the shape
+/// the dispatcher's notifier sends it: a `direct`, id
+/// `notify:{step}:{recipient}`, linked to the step.
+fn step_notice(id: &str, recipient: &str, step_path: &str) -> Message {
+    let mut m = message_fixture(id);
+    m.sender_id = "automation:dispatcher".to_string();
+    m.recipient_id = recipient.to_string();
+    m.entity_ref = Some(boss_messages::types::EntityRef {
+        entity_type: "step".to_string(),
+        entity_id: "s1".to_string(),
+        entity_path: Some(step_path.to_string()),
+    });
+    m
+}
+
+/// Backlog 0b2bac00: the unread-direct count is the badge and the
+/// "waiting on you" headline, and a notice about a step that has ended
+/// must leave it. Before this, the expire door moved signals only, so a
+/// direct notice outlived its step for good.
+#[tokio::test]
+async fn post_expire_with_an_id_prefix_retires_a_steps_direct_notice() {
+    let step = "/jobs/job-1/steps/s1";
+    let mut from_a_person = step_notice("msg-human", "emp-d", step);
+    from_a_person.sender_id = "emp-colleague".to_string();
+    let app = MessageTestApp::with_messages(vec![
+        step_notice("notify:s1:emp-d", "emp-d", step),
+        from_a_person,
+    ]);
+
+    let unread_direct = |router: axum::Router| async move {
+        let resp = TestRequest::get("/api/messages/unread/emp-d?kind=direct")
+            .send(&router)
+            .await;
+        resp.assert_status(StatusCode::OK);
+        let v: serde_json::Value = resp.assert_json();
+        v["count"].as_u64().unwrap()
+    };
+    assert_eq!(unread_direct(app.router.clone()).await, 2);
+
+    let resp = TestRequest::post("/api/messages/expire")
+        .json(&json!({ "entity_path_prefix": step, "id_prefix": "notify:" }))
+        .send(&app.router)
+        .await;
+    resp.assert_status(StatusCode::OK);
+    let v: serde_json::Value = resp.assert_json();
+    assert_eq!(v["expired"], 1);
+
+    assert_eq!(
+        unread_direct(app.router.clone()).await,
+        1,
+        "the notice left the count; the person's question did not"
+    );
+    let event = app.assert_recorded("messages.message.archived");
+    assert_eq!(event.payload["id"], "notify:s1:emp-d");
+}
+
+/// An empty id prefix would match every id under the path — a person's
+/// direct included — so it is refused, as an empty path already is.
+/// 422, because the dispatcher's POST reads that as permanent: the same
+/// body fails the same way on every retry.
+#[tokio::test]
+async fn post_expire_refuses_an_empty_id_prefix() {
+    let step = "/jobs/job-1/steps/s1";
+    let app = MessageTestApp::with_messages(vec![step_notice("notify:s1:emp-d", "emp-d", step)]);
+
+    let resp = TestRequest::post("/api/messages/expire")
+        .json(&json!({ "entity_path_prefix": step, "id_prefix": " " }))
+        .send(&app.router)
+        .await;
+    resp.assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+    app.assert_not_recorded("messages.message.archived");
+}
+
+/// Without an id prefix the door is what it was: unread signals only,
+/// and a direct stays — the job-close rule relies on exactly that.
+#[tokio::test]
+async fn post_expire_without_an_id_prefix_still_leaves_a_direct() {
+    let step = "/jobs/job-1/steps/s1";
+    let app = MessageTestApp::with_messages(vec![step_notice("notify:s1:emp-d", "emp-d", step)]);
+
+    let resp = TestRequest::post("/api/messages/expire")
+        .json(&json!({ "entity_path_prefix": "/jobs/job-1" }))
+        .send(&app.router)
+        .await;
+    resp.assert_status(StatusCode::OK);
+    let v: serde_json::Value = resp.assert_json();
+    assert_eq!(v["expired"], 0);
+}

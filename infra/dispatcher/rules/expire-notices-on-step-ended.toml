@@ -1,0 +1,39 @@
+# ---------------------------------------------------------------------
+# Retire a step's notices when the step ends (backlog 0b2bac00,
+# 2026-09-23).
+#
+# `messages.notify` sends the assignee of a ready or newly-assigned step
+# a `direct`, id `notify:{step}:{recipient}`. The only expiry was
+# `expire-signals-on-job-closed`, which moves unread SIGNALS when a JOB
+# closes, so a direct notice outlived its step for good. Measured for
+# emp-david over 2026-09-16T23:54Z..2026-09-23T16:40Z: 90 direct
+# notices, 1 read; of the 89 steps readable, 83 completed and 1
+# skipped, and all 84 counted in his badge and his "waiting on you"
+# headline.
+#
+# `jobs.step.updated` rather than `step.done.*`, because it is the one
+# topic that carries BOTH ways a step ends: a completion, and a skip
+# (a terminal close skips every open step, each with its own
+# `jobs.step.updated`, and no `step.skipped.*` topic exists). `status`
+# is on every serialized Step, so the predicate cannot fail to
+# evaluate on this busy topic.
+#
+# Which notices move is the handler's, read from the notifier's own
+# id-prefix constant: a person's direct about the step and the `done:`
+# announcement the step's end sends are never touched.
+# ---------------------------------------------------------------------
+[[rule]]
+name = "expire-notices-on-step-ended"
+why = """
+A CROSS-PROTOCOL REACTOR, the same exemption as
+expire-signals-on-job-closed: no Workflow can express "when a step of
+ANY kind ends, retire the inbox notices about it", because the notices
+belong to the messages domain, which only observed the step. A notice
+that a step is waiting on you stops being true when the step ends, and
+nothing retracted it: 83 of David's 90 direct notices pointed at
+completed steps on 2026-09-23 (backlog 0b2bac00).
+"""
+on_event = "jobs.step.updated"
+when = 'status = "completed" OR status = "skipped"'
+[[rule.do]]
+handler = "messages.expire_notices"

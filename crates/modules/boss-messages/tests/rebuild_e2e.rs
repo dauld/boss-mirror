@@ -237,3 +237,89 @@ async fn rebuild_skips_pre_enrichment_sent_events() {
     assert_eq!(rows[0].id, "msg-new");
     assert!(rows[0].read_at.is_some());
 }
+
+/// Backlog 0b2bac00, against the real adapter: a step's direct notice
+/// retired through the expire door leaves the unread-direct count the
+/// badge reads, a person's direct about the same step stays, and the
+/// retirement is one `messages.message.archived` per row — so the
+/// rebuilder lands on the same projection from the log alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retired_step_notice_leaves_the_badge_and_rebuilds() {
+    let db = TestDb::new().await;
+    let router = build_app(db.pool.clone());
+    let step = "/jobs/job-1/steps/step-1";
+
+    for (id, sender) in [
+        ("notify:step-1:emp_d", "automation:dispatcher"),
+        ("msg-from-a-person", "emp-colleague"),
+    ] {
+        TestRequest::post("/api/messages/send")
+            .json(&serde_json::json!({
+                "id": id,
+                "sender_id": sender,
+                "recipient_id": "emp_d",
+                "subject": "Ready: task",
+                "body": "b",
+                "kind": "direct",
+                "entity_ref": {
+                    "entity_type": "step",
+                    "entity_id": "step-1",
+                    "entity_path": step,
+                },
+            }))
+            .send(&router)
+            .await
+            .assert_status(StatusCode::CREATED);
+    }
+
+    async fn unread_direct(router: &Router) -> u64 {
+        let resp = TestRequest::get("/api/messages/unread/emp_d?kind=direct")
+            .send(router)
+            .await;
+        resp.assert_status(StatusCode::OK);
+        let v: serde_json::Value = resp.assert_json();
+        v["count"].as_u64().unwrap()
+    }
+    assert_eq!(unread_direct(&router).await, 2);
+
+    // `notify_` would match `notify:` under LIKE, where `_` is a
+    // wildcard; the adapter compares the prefix literally.
+    let resp = TestRequest::post("/api/messages/expire")
+        .json(&serde_json::json!({ "entity_path_prefix": step, "id_prefix": "notify_" }))
+        .send(&router)
+        .await;
+    resp.assert_status(StatusCode::OK);
+    let v: serde_json::Value = resp.assert_json();
+    assert_eq!(v["expired"], 0, "the id prefix is literal, not a pattern");
+
+    let resp = TestRequest::post("/api/messages/expire")
+        .json(&serde_json::json!({ "entity_path_prefix": step, "id_prefix": "notify:" }))
+        .send(&router)
+        .await;
+    resp.assert_status(StatusCode::OK);
+    let v: serde_json::Value = resp.assert_json();
+    assert_eq!(v["expired"], 1);
+    assert_eq!(
+        unread_direct(&router).await,
+        1,
+        "the notice left the count; the person's question did not"
+    );
+
+    let delivered = drain_outbox(&db.pool).await;
+    assert_eq!(delivered, 3, "2 sent + 1 archived");
+    let before = snapshot_messages(&db.pool).await;
+    let archived: Vec<_> = before.iter().filter(|r| r.kind == "archived").collect();
+    assert_eq!(archived.len(), 1);
+    assert_eq!(archived[0].id, "notify:step-1:emp_d");
+
+    sqlx::query("DELETE FROM messages")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    rebuild_messages(&db.pool).await.expect("rebuild succeeds");
+    assert_eq!(
+        before,
+        snapshot_messages(&db.pool).await,
+        "the retirement rebuilds from the log alone"
+    );
+}

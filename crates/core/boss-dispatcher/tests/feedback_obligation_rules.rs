@@ -113,6 +113,14 @@ async fn a_merged_car_fires_the_completion_with_its_edge_and_branches() {
         "backlog_item",
         "the rule must follow the DECLARED job edge, not a prose field"
     );
+    // v5 (a994f533): and every OTHER item the car answers, through the
+    // declared list edge — the same constant the edge registry serves,
+    // so the rule cannot name a key the write path does not ref-check.
+    assert_eq!(
+        arg_of(m, "jobs.complete_linked_step", "also_link"),
+        boss_jobs::car::ALSO_ANSWERS,
+        "the rule must follow the declared list edge too"
+    );
     assert_eq!(
         arg_of(m, "jobs.complete_linked_step", "steps"),
         "investigate,design-review,build"

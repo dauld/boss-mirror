@@ -68,6 +68,10 @@ name = "audit_log_e2e"
 required-features = ["postgres"]
 
 [[test]]
+name = "change_log_policy"
+required-features = ["postgres"]
+
+[[test]]
 name = "operator_baseline_seed_e2e"
 required-features = ["postgres"]
 

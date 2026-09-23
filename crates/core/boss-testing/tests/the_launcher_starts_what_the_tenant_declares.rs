@@ -239,6 +239,74 @@ fn an_undeclared_tenant_keeps_the_old_roster() {
     );
 }
 
+/// A tenant directory whose seeds/tenant.toml carries `modules_block`
+/// verbatim after its [meta] — so a manifest with NO [modules] table,
+/// or one holding only comments, can be written as-is.
+fn tenant_with(root: &Path, name: &str, modules_block: &str) -> PathBuf {
+    let dir = root.join(name);
+    create_dir(&dir.join("seeds"));
+    write_file(
+        &dir.join("seeds/tenant.toml"),
+        &format!(
+            "[meta]\ntenant_id = \"{name}\"\ndisplay_name = \"{name}\"\n\n{modules_block}\n[other]\nx = 1\n"
+        ),
+    );
+    dir
+}
+
+#[test]
+fn an_instance_says_at_boot_how_many_modules_it_runs() {
+    // Backlog fa77e3d7, design 1054c099 question `startup-line`
+    // (decided 2026-09-23). Measured 2026-09-22: prod's gateway answered
+    // /api/tenant/manifest with `"modules":{}` — every module-gated
+    // surface off — and nothing had ever said so. The instance booted,
+    // answered every read correctly, and was silently missing them, for
+    // as long as two SPA readers disagreed about which module gated
+    // which route. A refusal would be wrong (a tenant that runs only
+    // jobs/people/messages is legitimate), so the launcher states the
+    // count, the names, and the contract that made it zero.
+    let root = scratch_dir("launcher-names-its-module-count");
+
+    // The live Algedonic shape: no [modules] table at all, and the
+    // same with a table holding only a comment.
+    for (name, block) in [
+        ("absent", ""),
+        ("empty", "[modules]\n# nothing declared yet\n"),
+    ] {
+        let dir = tenant_with(&root, name, block);
+        let (rc, out) = plan(&[("BOSS_TENANT_DIR", &dir.display().to_string())]);
+        assert_eq!(rc, 0, "{out}");
+        assert_eq!(
+            line(&out, "modules on: ").as_deref(),
+            Some("modules on: 0 of 0 declared (none) — a module missing from [modules] is off"),
+            "{name}:\n{out}"
+        );
+    }
+
+    // Declared on and declared off, in the file's order; a false is
+    // counted as declared, not as on.
+    let brew = tenant(&root, "brewery", &["sim", "equipment", "shipping"]);
+    let (rc, out) = plan(&[("BOSS_TENANT_DIR", &brew.display().to_string())]);
+    assert_eq!(rc, 0, "{out}");
+    assert_eq!(
+        line(&out, "modules on: ").as_deref(),
+        Some(
+            "modules on: 4 of 5 declared (jobs sim equipment shipping) — a module missing from [modules] is off"
+        ),
+        "{out}"
+    );
+
+    // No manifest at all: nothing is derived, and the line says so
+    // rather than counting an absent file as zero.
+    let (rc, out) = plan(&[]);
+    assert_eq!(rc, 0, "{out}");
+    assert_eq!(
+        line(&out, "modules on: ").as_deref(),
+        Some("modules on: undeclared (no tenant manifest; every service starts)"),
+        "{out}"
+    );
+}
+
 #[test]
 fn the_cluster_manifest_carries_neither_half_of_the_sims_loopback_pair() {
     // The pair is the sim engine's wiring, derived by the launcher when

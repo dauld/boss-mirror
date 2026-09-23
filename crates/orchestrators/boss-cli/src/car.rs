@@ -538,20 +538,31 @@ pub(crate) async fn open(
 /// this is the metadata PATCH (`boss_jobs::car::WAITS_ON`), with the
 /// declaration built in the one shape the shed reads and a `seen` check
 /// held to the rules the forge will run it under, BEFORE it is written.
+///
+/// IT MERGES (backlog e9b164a1 piece 3). The declaration grew an `owner`
+/// and a `max_wait_hours` (3881f5c9), and the metadata door merges
+/// top-level keys only, so a verb that PATCHed the whole object from its
+/// own flags dropped whatever it was not given — an owner added by hand
+/// was lost to the next `--seen`. So the verb reads the car's declaration
+/// first and writes it back with only the given fields replaced.
 pub(crate) async fn waits_on(
     given: &str,
-    on: Option<&str>,
-    seen: Option<&str>,
+    fields: &WaitsOnFields,
     clear: bool,
     dry_run: bool,
 ) -> Result<()> {
-    let body = waits_on_body(on, seen, clear)?;
+    // Refuse a bad flag before the read: the rules need no car.
+    if !clear {
+        fields.update()?;
+    }
     let http = reqwest::Client::new();
     let (found, branch) = crate::rerail::find_car(&http, given).await?;
     let id = found
         .get("id")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("car {branch} carries no id"))?;
+    let recorded = found.pointer(&format!("/metadata/{}", car::WAITS_ON));
+    let body = waits_on_body(recorded, fields, clear)?;
     if dry_run {
         println!("boss car waits-on: DRY — would PATCH /api/jobs/{id}/metadata with {body}");
         return Ok(());
@@ -567,24 +578,106 @@ pub(crate) async fn waits_on(
     Ok(())
 }
 
+/// The fields of a declared wait as a writer was GIVEN them — by `boss
+/// car waits-on`'s flags, by `boss gate --park-waits-on*`, or by the
+/// `[waits_on]` table of a park file. Each is the `boss_jobs::car` key
+/// of the same name; one absent is one not stated, which a merge keeps.
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WaitsOnFields {
+    pub on: Option<String>,
+    pub seen: Option<String>,
+    pub owner: Option<String>,
+    pub max_wait_hours: Option<u32>,
+}
+
+impl WaitsOnFields {
+    pub(crate) fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The fields given, as the object [`car::merge_waits_on`] overlays —
+    /// or the refusal, naming the flag. A blank `on` or `seen` is
+    /// refused (a blank `on` declares nothing, and a blank `seen` is an
+    /// observer that never runs), and so is a `seen` check the recording
+    /// door would refuse to run: a check that never runs is a wait
+    /// nothing can ever contradict, which is the silence this field
+    /// exists to end. An owner is `world` or an actor's id — ONE token,
+    /// because the reader takes any other string as the actor it names,
+    /// and prose there would be a wait on nobody. Patience is positive:
+    /// the reader ignores a zero, so writing one would record a limit
+    /// that is not one.
+    pub(crate) fn update(&self) -> Result<Value> {
+        if self.is_empty() {
+            bail!(
+                "nothing to declare: give --on, --seen, --owner or --max-wait-hours \
+                 (or --clear to remove the declaration)"
+            );
+        }
+        let blank = |flag: &str, v: &Option<String>| -> Result<Option<String>> {
+            match v.as_deref().map(str::trim) {
+                Some("") => bail!("{flag} is empty — leave it out, or give it the text"),
+                other => Ok(other.map(str::to_string)),
+            }
+        };
+        if self.on.as_deref().is_some_and(|o| o.trim().is_empty()) {
+            bail!("--on names nothing: say which event or actor the proof waits on");
+        }
+        let on = blank("--on", &self.on)?;
+        let seen = blank("--seen", &self.seen)?;
+        let owner = blank("--owner", &self.owner)?;
+        if let Some(s) = seen.as_deref()
+            && let Some(r) = crate::prove::admit(s, true).refusal
+        {
+            bail!("--seen is refused under the rules the forge runs it by — {r}");
+        }
+        if let Some(o) = owner.as_deref()
+            && o.contains(char::is_whitespace)
+        {
+            bail!(
+                "--owner '{o}' is not an id: it is `world` for an event nobody here can \
+                 cause, or the one-word id of the actor whose act it is — the shed \
+                 reads it as that actor, so prose there is a wait on nobody"
+            );
+        }
+        if self.max_wait_hours == Some(0) {
+            bail!("--max-wait-hours 0 is no patience at all: give a positive number of hours");
+        }
+        let mut m = serde_json::Map::new();
+        let mut put = |k: &str, v: Option<Value>| {
+            if let Some(v) = v {
+                m.insert(k.to_string(), v);
+            }
+        };
+        put("on", on.map(Value::from));
+        put("seen", seen.map(Value::from));
+        put(car::WAITS_ON_OWNER, owner.map(Value::from));
+        put(
+            car::WAITS_ON_MAX_WAIT_HOURS,
+            self.max_wait_hours.map(Value::from),
+        );
+        Ok(Value::Object(m))
+    }
+}
+
 /// The PATCH body, or the refusal — pure, so the rules are testable.
-/// A blank `on` is refused (it would declare nothing and silence the
-/// label anyway), and so is a `seen` check the recording door would
-/// refuse to run: a check that never runs is a wait nothing can ever
-/// contradict, which is the silence this field exists to end.
-pub(crate) fn waits_on_body(on: Option<&str>, seen: Option<&str>, clear: bool) -> Result<Value> {
+/// `recorded` is the car's own `waits_on`; the given fields are merged
+/// into it, and a result naming no `on` is refused.
+pub(crate) fn waits_on_body(
+    recorded: Option<&Value>,
+    fields: &WaitsOnFields,
+    clear: bool,
+) -> Result<Value> {
     if clear {
         return Ok(serde_json::json!({ (car::WAITS_ON): Value::Null }));
     }
-    let on = on.map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| {
-        anyhow::anyhow!("--on names nothing: say which event or actor the proof waits on")
+    let merged = car::merge_waits_on(recorded, &fields.update()?).ok_or_else(|| {
+        anyhow::anyhow!(
+            "--on names nothing, and the car declares no event to attach these to: say \
+             which event or actor the proof waits on"
+        )
     })?;
-    if let Some(s) = seen.map(str::trim).filter(|s| !s.is_empty())
-        && let Some(r) = crate::prove::admit(s, true).refusal
-    {
-        bail!("--seen is refused under the rules the forge runs it by — {r}");
-    }
-    Ok(serde_json::json!({ (car::WAITS_ON): car::waits_on_value(on, seen) }))
+    Ok(serde_json::json!({ (car::WAITS_ON): merged }))
 }
 
 #[cfg(test)]
@@ -598,7 +691,8 @@ mod tests {
     /// (the metadata door deletes a null).
     #[test]
     fn a_waits_on_body_reads_back_as_the_declaration_the_shed_reads() {
-        let body = waits_on_body(Some(" a red crawl "), Some("exit 0"), false).unwrap();
+        let body =
+            waits_on_body(None, &given(Some(" a red crawl "), Some("exit 0")), false).unwrap();
         assert_eq!(
             car::waits_on(&body),
             Some(car::WaitsOn {
@@ -606,14 +700,23 @@ mod tests {
                 seen: Some("exit 0".into())
             })
         );
-        let body = waits_on_body(Some("an operator publish"), None, false).unwrap();
+        let body = waits_on_body(None, &given(Some("an operator publish"), None), false).unwrap();
         assert_eq!(car::waits_on(&body).unwrap().seen, None);
-        assert!(waits_on_body(Some("  "), None, false).is_err());
-        assert!(waits_on_body(None, None, false).is_err());
+        assert!(waits_on_body(None, &given(Some("  "), None), false).is_err());
+        assert!(waits_on_body(None, &given(None, None), false).is_err());
         assert_eq!(
-            waits_on_body(None, None, true).unwrap(),
+            waits_on_body(None, &given(None, None), true).unwrap(),
             json!({"waits_on": null})
         );
+    }
+
+    /// The fields a test hands the verb: `on` and `seen` as given.
+    fn given(on: Option<&str>, seen: Option<&str>) -> WaitsOnFields {
+        WaitsOnFields {
+            on: on.map(str::to_string),
+            seen: seen.map(str::to_string),
+            ..WaitsOnFields::default()
+        }
     }
 
     /// A `seen` check the recording door would refuse is refused HERE,
@@ -623,9 +726,60 @@ mod tests {
         // An unidentified read of the jobs API's own port: the forge's
         // door refuses it, because it answers a narrowed world.
         let refused = "curl -s \"$BOSS_JOBS_URL/api/jobs?kind=x\" | grep -q x";
-        let err = waits_on_body(Some("x"), Some(refused), false).unwrap_err();
+        let err = waits_on_body(None, &given(Some("x"), Some(refused)), false).unwrap_err();
         assert!(err.to_string().contains("--seen is refused"), "{err}");
-        assert!(waits_on_body(Some("x"), Some("true"), false).is_ok());
+        assert!(waits_on_body(None, &given(Some("x"), Some("true")), false).is_ok());
+    }
+
+    /// THE VERB MERGES (backlog e9b164a1 piece 3). It used to PATCH the
+    /// whole object, so re-stating `on` and `seen` dropped the `owner` an
+    /// operator had added by hand — and a wait without an owner reads as
+    /// ours. Now each flag given replaces its field and nothing else is
+    /// touched, so `--owner` alone can be added to a car that already
+    /// declares its `on`.
+    #[test]
+    fn the_verb_merges_into_the_declaration_the_car_carries() {
+        let recorded =
+            json!({"on": "a release", "seen": "true", "owner": "emp-david", "max_wait_hours": 48});
+        let fields = given(Some("a tagged release"), Some("exit 0"));
+        let body = waits_on_body(Some(&recorded), &fields, false).unwrap();
+        assert_eq!(body["waits_on"]["owner"], "emp-david");
+        assert_eq!(body["waits_on"]["max_wait_hours"], 48);
+        assert_eq!(body["waits_on"]["on"], "a tagged release");
+
+        let owner_only = WaitsOnFields {
+            owner: Some("world".into()),
+            max_wait_hours: Some(336),
+            ..WaitsOnFields::default()
+        };
+        let seeded = car::waits_on_value("a Stripe charge", Some("true"));
+        let body = waits_on_body(Some(&seeded), &owner_only, false).unwrap();
+        assert_eq!(car::wait_owner(&body), Some(car::WaitOwner::World));
+        assert_eq!(body["waits_on"][car::WAITS_ON_MAX_WAIT_HOURS], 336);
+        assert_eq!(car::waits_on(&body).unwrap().seen.as_deref(), Some("true"));
+        // An owner with nothing to attach it to declares nothing.
+        let err = waits_on_body(None, &owner_only, false).unwrap_err();
+        assert!(err.to_string().contains("--on"), "{err}");
+    }
+
+    /// AN OWNER IS AN ID, AND PATIENCE IS POSITIVE. The reader takes any
+    /// non-blank owner other than `world` as the actor it names, so prose
+    /// ("David opens it") written there would be a wait on an actor who
+    /// does not exist; and a zero patience is no declaration at all.
+    #[test]
+    fn an_owner_is_one_token_and_a_max_wait_is_positive() {
+        let with = |owner: &str, max: Option<u32>| WaitsOnFields {
+            on: Some("x".into()),
+            owner: Some(owner.into()),
+            max_wait_hours: max,
+            ..WaitsOnFields::default()
+        };
+        assert!(waits_on_body(None, &with("emp-david", Some(1)), false).is_ok());
+        let err = waits_on_body(None, &with("David opens it", None), false).unwrap_err();
+        assert!(err.to_string().contains("--owner"), "{err}");
+        assert!(waits_on_body(None, &with("  ", None), false).is_err());
+        let err = waits_on_body(None, &with("world", Some(0)), false).unwrap_err();
+        assert!(err.to_string().contains("--max-wait-hours"), "{err}");
     }
 
     const BRANCH: &str = "feat/a-car-opens-when-the-build-starts";

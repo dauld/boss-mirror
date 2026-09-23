@@ -1,9 +1,12 @@
 //! HTTP surface: health + readiness probes, the read-only cascade-viz
 //! `rules` feed, and the rule-authoring write endpoints (create-draft /
 //! validate / publish / retire) that back the SPA authoring UI. The
-//! authoring writes go through `crate::rules::authoring`; the running
-//! RulesRunner picks up a published change on its next restart (live
-//! hot-reload is a planned follow-up).
+//! authoring writes go through `crate::rules::authoring`; the binary's
+//! supervision loop polls a fingerprint of `dispatcher_rules` every 30s
+//! and rebuilds the runners when it moves (backlog 1e576baf), so a
+//! published change is live without a restart. A product draft no
+//! authored file names is refused at the door — the boot seed would
+//! retire it (backlog 7d9df2fe).
 //!
 //! `/api/dispatcher/health` answers 200 while the PROCESS is up — necessary
 //! but NOT sufficient: the consumer loops run detached and can die while the
@@ -25,7 +28,9 @@ use axum::{Json, Router};
 use crate::cascade;
 use crate::liveness::DispatcherLiveness;
 use crate::rules::authoring::{self, AuthoringError};
-use crate::rules::registry::{ENFORCED_STATUS, RawRule, authored_why, load_active_rules};
+use crate::rules::registry::{
+    ENFORCED_STATUS, RawRule, authored_why, load_active_rules, parse_raw_path,
+};
 
 /// HTTP state: the consumer-liveness handle + the Postgres pool, so the
 /// read-only `/api/dispatcher/rules` surface can serve the rule registry
@@ -282,11 +287,78 @@ fn split_draft_body(body: serde_json::Value) -> Result<(RawRule, Option<String>)
     Ok((rule, source))
 }
 
+/// Refuse a PRODUCT draft (`source` absent) under a name no file in the
+/// authored registry declares; `None` lets it through.
+///
+/// WHY (backlog 7d9df2fe, design ff1c3615 — David chose option b,
+/// 2026-09-23). `rules::seed` runs at every dispatcher boot and retires
+/// each active product-sourced rule no file names. So a product rule
+/// created here, once published, fired until the next restart and was
+/// then retired, the only trace a name in a boot log's `retired` list.
+/// The SPA's "+ New rule" was the one caller that made them — `boss
+/// tenant publish` always sends `tenant:<id>` — and it now points at
+/// the two durable paths instead; this refusal makes the class
+/// impossible rather than merely unoffered. A NEW VERSION of a rule a
+/// file does name is still accepted: the seed never walks a live
+/// version back (it reports it `behind`), so that edit survives.
+///
+/// The authored names are read with `parse_raw_path`, the seed's own
+/// reader, so the door and the seed cannot disagree about what the
+/// tree authors. A registry that is unset or will not read refuses
+/// every product draft (503, naming the knob or the directory): the
+/// door cannot vouch for a rule it cannot compare, and answering
+/// "allowed" there is the confident wrong answer.
+fn unauthored_product_draft(
+    name: &str,
+    source: Option<&str>,
+    authored_dir: Option<&std::path::Path>,
+) -> Option<(StatusCode, String)> {
+    if source.is_some() {
+        return None;
+    }
+    let Some(dir) = authored_dir else {
+        return Some((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "BOSS_DISPATCHER_RULES is unset, so this dispatcher cannot read which product \
+             rules the tree authors, and a product draft it cannot compare is refused"
+                .to_string(),
+        ));
+    };
+    let authored = match parse_raw_path(dir) {
+        Ok(authored) => authored,
+        Err(e) => {
+            return Some((
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!(
+                    "the authored rule registry at {} will not read ({e}), so a product \
+                     draft cannot be compared against it and is refused",
+                    dir.display()
+                ),
+            ));
+        }
+    };
+    if authored.rules.iter().any(|r| r.name == name) {
+        return None;
+    }
+    Some((
+        StatusCode::BAD_REQUEST,
+        format!(
+            "no file in the authored registry names `{name}`, so the dispatcher's boot seed \
+             would retire this product rule at its next restart. A rule that lasts is \
+             authored one of two ways: a file infra/dispatcher/rules/{name}.toml carried by a \
+             car, or a [[rule]] in a tenant's seeds/rules.toml published by `boss tenant \
+             publish` (source tenant:<id>)"
+        ),
+    ))
+}
+
 /// `POST /api/dispatcher/rules` — append a new draft version of a rule.
 /// Body is the rule spec (name, on_event, when?, do[], delay?, version?)
 /// plus an optional `source` ([`split_draft_body`]). The draft is validated
 /// (must load via `Rule::from_raw`) before it persists; `201` on success
-/// returns the stored draft. A name another source owns is refused 400.
+/// returns the stored draft. A name another source owns is refused 400,
+/// and so is a product draft no authored file names
+/// ([`unauthored_product_draft`]).
 async fn create_rule_draft(
     State(state): State<HttpState>,
     Json(body): Json<serde_json::Value>,
@@ -295,6 +367,13 @@ async fn create_rule_draft(
         Ok(split) => split,
         Err(e) => return (StatusCode::UNPROCESSABLE_ENTITY, e).into_response(),
     };
+    if let Some(refusal) = unauthored_product_draft(
+        &rule.name,
+        source.as_deref(),
+        state.authored_rules_dir.as_deref(),
+    ) {
+        return refusal.into_response();
+    }
     match authoring::create_draft(&state.pool, &rule, source.as_deref()).await {
         Ok(v) => (StatusCode::CREATED, Json(v)).into_response(),
         Err(e) => authoring_err(e),
@@ -470,6 +549,68 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("onevent"), "{e}");
+    }
+
+    /// A PRODUCT DRAFT NO FILE NAMES IS REFUSED AT THE DOOR (backlog
+    /// 7d9df2fe, design ff1c3615 option b). The boot seed retires every
+    /// active product-sourced rule no file in the authored registry
+    /// names, so such a draft, once published, lived until the next
+    /// dispatcher restart and its retirement showed only in a boot log.
+    /// The SPA's "+ New rule" was the only caller that made one; the
+    /// refusal makes the class impossible instead of merely unoffered.
+    #[test]
+    fn a_product_draft_no_authored_file_names_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("sweep.toml"),
+            "[[rule]]\nname = \"sweep\"\nwhy = \"\"\"\na timer\n\"\"\"\n\
+             on_event = \"x.y\"\n[[rule.do]]\nhandler = \"noop\"\n",
+        )
+        .unwrap();
+
+        assert!(
+            unauthored_product_draft("sweep", None, Some(dir.path())).is_none(),
+            "a new version of a rule a file authors is the live-edit path the seed keeps"
+        );
+
+        let (code, why) = unauthored_product_draft("scratch", None, Some(dir.path()))
+            .expect("a product rule no file names is the seed's to retire");
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        for named in [
+            "scratch",
+            "infra/dispatcher/rules/scratch.toml",
+            "seeds/rules.toml",
+        ] {
+            assert!(why.contains(named), "the refusal must name {named}: {why}");
+        }
+
+        assert!(
+            unauthored_product_draft("scratch", Some("tenant:acme"), Some(dir.path())).is_none(),
+            "a tenant's rule is the tenant's protocol data; the seed never retires it"
+        );
+    }
+
+    /// When the door cannot read what the tree authors it cannot tell a
+    /// durable product draft from a doomed one, so it refuses rather
+    /// than answer (CLAUDE.md §Doors: a wrong target answers instead of
+    /// erroring) — and says which knob or which directory.
+    #[test]
+    fn a_product_draft_is_refused_when_the_authored_registry_will_not_read() {
+        let (code, why) = unauthored_product_draft("sweep", None, None)
+            .expect("an unset registry cannot vouch for any product rule");
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(why.contains("BOSS_DISPATCHER_RULES"), "{why}");
+
+        let missing = std::path::Path::new("/nonexistent/dispatcher/rules");
+        let (code, why) = unauthored_product_draft("sweep", None, Some(missing))
+            .expect("an unreadable registry cannot vouch for any product rule");
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(why.contains("/nonexistent/dispatcher/rules"), "{why}");
+
+        assert!(
+            unauthored_product_draft("sweep", Some("tenant:acme"), None).is_none(),
+            "a tenant draft does not depend on the product's directory"
+        );
     }
 
     /// A rule the system enforces that NO authored file records reads as

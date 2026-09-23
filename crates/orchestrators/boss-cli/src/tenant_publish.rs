@@ -331,6 +331,27 @@ impl Bases {
         })
     }
 
+    /// The route a `boss tenant` verb takes, and the one line that says
+    /// so: the machine door when one is given, else a gateway, else the
+    /// in-pod localhost ports. Publish and export both call this, so the
+    /// two cannot route one flag two ways (backlog e32a423e: export had
+    /// `--door` and publish had none, leaving an approved publish from
+    /// the operator's seat no way in). clap holds `door` and `gateway`
+    /// exclusive; a door wins here only as a guard.
+    pub fn routed(gateway: Option<&str>, door: Option<&str>) -> Result<(Self, String)> {
+        Ok(match door {
+            Some(d) => (
+                Self::on_door(d)?,
+                format!("routing: each service's own port on the machine door {d}"),
+            ),
+            None => {
+                let bases = Self::resolve(gateway);
+                let line = bases.describe(gateway);
+                (bases, line)
+            }
+        })
+    }
+
     /// One line for the report header: what a write was routed to.
     pub fn describe(&self, gateway: Option<&str>) -> String {
         match gateway {
@@ -3103,6 +3124,53 @@ mod tests {
         // well-formed URL that reads a different stack.
         assert!(Bases::on_door("http://").is_err());
         assert!(Bases::on_door("   ").is_err());
+    }
+
+    /// `boss tenant publish --door` (backlog e32a423e, 2026-09-23): the
+    /// operator's seat reaches production only through the machine
+    /// door — the gateway answers the seed identity 401 and the dev
+    /// session cannot exec into the boss namespace — so publish routes
+    /// the way export does, through the ONE function both verbs call.
+    /// Every registry a publish writes lands on its own prod port of
+    /// the given host, the routing line names the door, and a base
+    /// with no host is refused before any write is planned.
+    #[test]
+    fn a_door_routes_every_registry_a_publish_writes_to_its_prod_port() {
+        let (b, routing) = Bases::routed(None, Some("http://door:7900")).unwrap();
+        for (field, service) in [
+            (&b.classes, "classes"),
+            (&b.ledger, "ledger"),
+            (&b.locations, "locations"),
+            (&b.calendar, "calendar"),
+            (&b.subjects, "subject-kinds"),
+            (&b.policy, "policy"),
+            (&b.people, "people"),
+            (&b.jobs, "jobs"),
+            (&b.dispatcher, "dispatcher"),
+        ] {
+            assert_eq!(
+                field,
+                &format!("http://door:{}", boss_ports::prod(service)),
+                "{service} rides the door on its own prod port"
+            );
+        }
+        assert!(
+            routing.contains("machine door http://door:7900"),
+            "{routing}"
+        );
+
+        // No host is a refusal, not a URL that reads another stack.
+        assert!(Bases::routed(None, Some("http://")).is_err());
+        assert!(Bases::routed(None, Some("  ")).is_err());
+
+        // Without a door, the gateway and the in-pod default are
+        // unchanged — the same bases and line `resolve` gives.
+        let (g, line) = Bases::routed(Some("http://gw:8080"), None).unwrap();
+        assert_eq!(g, Bases::resolve(Some("http://gw:8080")));
+        assert!(line.contains("gateway http://gw:8080"), "{line}");
+        let (d, line) = Bases::routed(None, None).unwrap();
+        assert_eq!(d, Bases::resolve(None));
+        assert!(line.contains("boss_ports"), "{line}");
     }
 
     fn line_of<'a>(lines: &'a [String], path: &str) -> &'a str {

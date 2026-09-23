@@ -151,6 +151,10 @@ pub(crate) struct ParkProse {
     pub probe: Option<String>,
     pub expect: Option<String>,
     pub proof_event: Option<String>,
+    /// The `[waits_on]` table: the `--park-waits-on*` flags, one object
+    /// (backlog e9b164a1). Its `seen` is shell, the reason a file door
+    /// exists at all.
+    pub waits_on: Option<crate::car::WaitsOnFields>,
 }
 
 /// Read a park file. Unknown keys are refused (serde names the key and
@@ -179,6 +183,7 @@ pub(crate) fn park_file(path: &Path) -> Result<ParkProse> {
         probe: tidy("probe", parsed.probe)?,
         expect: tidy("expect", parsed.expect)?,
         proof_event: tidy("proof_event", parsed.proof_event)?,
+        waits_on: parsed.waits_on,
     })
 }
 
@@ -361,6 +366,41 @@ expect = 'claim:ok'
             "the probe's quotes arrive unescaped and its final newline is dropped"
         );
         assert!(got.proof_event.is_none());
+    }
+
+    /// THE WAIT IS ONE TABLE (backlog e9b164a1 piece 3): `[waits_on]`
+    /// carries the declaration the car will hold — its `seen` check is
+    /// shell like a probe, so it earns the file door for the same reason
+    /// — and a misspelled key inside it is refused like one outside.
+    #[test]
+    fn the_park_file_carries_a_declared_wait_as_one_table() {
+        let dir = scratch_dir("prose-park-file-waits-on");
+        let path = dir.join("park.toml");
+        write_file(
+            &path,
+            r#"summary = 's'
+[waits_on]
+on = 'a new Stripe sponsorship charge'
+seen = '''boss-sor-read "/api/jobs?kind=x" | jq -e '.total > 0' >/dev/null'''
+owner = 'world'
+max_wait_hours = 336
+"#,
+        );
+        let got = park_file(&path).expect("read").waits_on.expect("the table");
+        assert_eq!(got.on.as_deref(), Some("a new Stripe sponsorship charge"));
+        assert_eq!(
+            got.seen.as_deref(),
+            Some(r#"boss-sor-read "/api/jobs?kind=x" | jq -e '.total > 0' >/dev/null"#)
+        );
+        assert_eq!(got.owner.as_deref(), Some("world"));
+        assert_eq!(got.max_wait_hours, Some(336));
+
+        write_file(
+            &path,
+            "summary = 's'\n[waits_on]\non = 'x'\nowners = 'world'\n",
+        );
+        let err = format!("{:#}", park_file(&path).expect_err("refused"));
+        assert!(err.contains("owners"), "{err}");
     }
 
     /// A misspelled key is refused, naming the keys the file takes: a

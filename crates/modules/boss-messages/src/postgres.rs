@@ -268,6 +268,55 @@ impl MessageRepository for PgMessages {
         Ok(ids.len() as u32)
     }
 
+    async fn expire_notices_under(
+        &self,
+        path_prefix: &str,
+        id_prefix: &str,
+        now: DateTime<Utc>,
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<u32, MessageError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| MessageError::Storage(e.to_string()))?;
+
+        // Same shape as `expire_signals_under`: RETURNING id so each
+        // row moved gets its own event. `starts_with` rather than LIKE
+        // for the id — a notice id is `notify:{uuid}:{recipient}`, and a
+        // recipient id may carry `_`, which LIKE would read as a
+        // wildcard. Any kind but `archived`: an assignee's notice is a
+        // `direct`, which is the whole point (backlog 0b2bac00).
+        let ids: Vec<(String,)> = sqlx::query_as(
+            "UPDATE messages SET kind = 'archived' \
+             WHERE entity_path LIKE $1 || '%' \
+               AND starts_with(id, $2) \
+               AND kind <> 'archived' \
+               AND read_at IS NULL \
+             RETURNING id",
+        )
+        .bind(path_prefix)
+        .bind(id_prefix)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| MessageError::Storage(e.to_string()))?;
+
+        for (id,) in &ids {
+            let event = stamp.event(
+                crate::events::MESSAGE_ARCHIVED,
+                serde_json::json!({ "id": id, "archived_at": now, "reason": "entity-past-relevancy" }),
+            );
+            boss_events::outbox::record_event_in_tx(&mut tx, &event)
+                .await
+                .map_err(|e| MessageError::Storage(e.to_string()))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| MessageError::Storage(e.to_string()))?;
+        Ok(ids.len() as u32)
+    }
+
     async fn archive_message(
         &self,
         id: &str,

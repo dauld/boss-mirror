@@ -91,6 +91,12 @@ impl JobEdgesRegistry for InMemoryJobEdges {
             ),
             mk(
                 "ship-a-change",
+                crate::car::ALSO_ANSWERS,
+                "job_id_list",
+                "Every other backlog/feedback Job this change answers — each closes on merge, as backlog_item does",
+            ),
+            mk(
+                "ship-a-change",
                 "partial_item",
                 "job_id",
                 "An item this change is ONE PIECE of — provenance only; it does not close on merge",
@@ -248,6 +254,40 @@ mod tests {
         );
         assert!(
             MIGRATION.contains("'ship-a-change', 'partial_item', 'job_id'"),
+            "the migration must seed the same triple the in-memory list serves"
+        );
+        assert!(
+            MIGRATION.contains(&edge.description),
+            "the migration's description must match the in-memory one, or the two \
+             registries disagree about what the edge means: {}",
+            edge.description
+        );
+    }
+
+    /// THE SAME PIN FOR THE LIST OF EVERY OTHER ITEM A CAR ANSWERS
+    /// (a994f533). A list, where every car edge before it is one id: a
+    /// change that answers two items must be able to close both, and the
+    /// write path ref-checks and normalises each element only when the
+    /// row says `job_id_list`.
+    #[tokio::test]
+    async fn the_also_answers_edge_matches_the_migration_that_seeds_it() {
+        const MIGRATION: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../infra/postgres/schema/",
+            "20260923144557-a-car-names-every-item-it-answers.sql"
+        ));
+        let edges = InMemoryJobEdges.list().await.expect("list");
+        let edge = edges
+            .iter()
+            .find(|e| e.source_kind == "ship-a-change" && e.field_path == crate::car::ALSO_ANSWERS)
+            .expect("ship-a-change.also_answers must be in the in-memory defaults");
+
+        assert_eq!(
+            edge.field_kind, "job_id_list",
+            "a car may answer several items"
+        );
+        assert!(
+            MIGRATION.contains("'ship-a-change', 'also_answers', 'job_id_list'"),
             "the migration must seed the same triple the in-memory list serves"
         );
         assert!(

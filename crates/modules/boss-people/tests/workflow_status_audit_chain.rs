@@ -61,6 +61,7 @@ fn build_app(pool: PgPool) -> Router {
         people,
         None,
         std::sync::Arc::new(boss_clock_client::WallClockClient),
+        None,
     )
     .merge(people_router(crud_state))
 }

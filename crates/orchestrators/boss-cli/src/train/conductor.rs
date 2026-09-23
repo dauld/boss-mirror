@@ -1956,6 +1956,23 @@ impl Conductor {
         let mut cars: Vec<(String, Value, String)> = Vec::new(); // (id, job, branch)
         for j0 in listed {
             let jid = job_id(&j0)?.to_string();
+            // A car off the dock keeps no preview (20d0d717): nothing
+            // here rewrites it, so it would name the dock it last saw
+            // forever. Cleared once, on the tick after it leaves — and
+            // best-effort, so one failed write cannot cost the parked
+            // cars their preview this tick; it is retried on the next.
+            if left_the_dock_with_a_preview(&j0) && !self.cfg.dry {
+                match self
+                    .merge_job_metadata(&jid, vec![("merge_preview", Value::Null)])
+                    .await
+                {
+                    Ok(_) => log(format!(
+                        "{}: merge preview cleared (left the dock)",
+                        id8(&jid)
+                    )),
+                    Err(e) => log(format!("{}: merge preview clear failed: {e}", id8(&jid))),
+                }
+            }
             if !parked_ready(&j0) {
                 continue;
             }

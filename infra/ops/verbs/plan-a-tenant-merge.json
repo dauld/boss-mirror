@@ -1,0 +1,10 @@
+{
+  "about": "READ-ONLY: renders what `merge-tenant-main` WOULD land on an instance's tenant main, and writes nothing (infra/forge/merge-tenant-main.sh --plan; backlog 01d3a701, David asked for the pair 2026-09-22). The tenant repo and the branch it lands on are the instance's own tenant_repo / tenant_ref from infra/cluster/instances.toml, never a parameter. The plan names main's sha, the merge branch's sha and its tree, every commit main does not yet hold, each merge's parents and the RESOLUTION — every byte the merge commit holds that the automatic merge of its parents does not, so a reviewer approves the conflict judgement rather than infers it — the `boss tenant check` report on the merged tree, and the seed files that reach the live registries. A branch that does not contain main, an octopus merge, or a merged tree the check does not PASS is a refusal, exit 78, not a plan. No clock and no URL in the bytes; its sha256 is printed on stderr as `plan-sha256:`, and that hash is what a passkey signs (design 17835005 q1: the signature binds a rendered plan, not a verb call).",
+  "hosts": ["forge"],
+  "argv": ["infra/forge/merge-tenant-main.sh", "--plan", "{1}", "{2}"],
+  "params": [
+    { "name": "instance", "pattern": "^[a-z][a-z0-9-]{0,30}$" },
+    { "name": "merge_branch", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$" }
+  ],
+  "timeout": 300
+}

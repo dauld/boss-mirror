@@ -826,6 +826,17 @@ schema_crates() {
     if [ -n "$(schema_paths)" ]; then printf '%s\n' "${GATE_SCHEMA_READERS}"; fi
 }
 
+# Did this change move the schema at all — the question the receipt,
+# the `-p` refusal and `--auto` each ask. Defined HERE, above every
+# caller: bash defines a function when execution reaches it, and until
+# 2026-09-23 it sat below the `-p` refusal that calls it, so that path
+# printed `schema_touched: command not found` and dropped the line
+# saying the schema widened the scope (backlog d8637703; pinned by
+# gate_sh.rs `every_gate_function_is_defined_above_its_first_top_level_caller`).
+schema_touched() {
+    if [ -n "$(changed_paths | schema_paths)" ]; then echo yes; else echo no; fi
+}
+
 # The derived half of the map: which crates read the paths on stdin.
 input_crates() {
     awk -v idx="${GATE_FILE_INPUTS}" '
@@ -1237,10 +1248,9 @@ fi
 # change to every crate that stands up the schema (`schema_readers`),
 # so a migration-only car derives a scope like any other and the
 # fixture runs unscoped ahead of it as before. What remains here is the
-# question the receipt asks: did the schema move at all.
-schema_touched() {
-    if [ -n "$(changed_paths | schema_paths)" ]; then echo yes; else echo no; fi
-}
+# question the receipt asks: did the schema move at all — `schema_touched`,
+# defined beside `schema_paths` above, because the `-p` refusal asks it
+# too and runs first.
 
 # Which ref is "the trunk" for deriving a branch's own commits. The
 # remote-tracking main this repo actually uses, with the local branch
@@ -2014,7 +2024,27 @@ fi
 # STILL NOT A GATE. The build and the test suites remain unproven, and
 # a DB-backed test cannot run here at all. This narrows the red-gate
 # classes by one; it does not replace the gate.
+#
+# THE SCOPE SELF-TEST RUNS HERE TOO, first, because it is the gate's
+# first act on `--auto` and needs no build. Until 2026-09-23 it ran only
+# on the gate's own paths, so a stale case in it passed `--lint` twice
+# and then red gate-run 1f412b9e before any check ran, leaving no
+# receipt (backlog d8637703). It exits 2 naming the case, as the gate
+# does — and ahead of `crates_from_paths`, the map it checks, because
+# the clippy scope below is derived from that map.
+#
+# ONLY WHERE THERE IS A WORKSPACE for the map to name. The self-test
+# checks its cases against this tree's crates and `cargo metadata`, so on
+# a tree with no Cargo.toml — the synthetic trees boss-testing drives
+# this script in — every case fails for want of a crate, not for a stale
+# map. It says so rather than skipping in silence; the repo always has
+# one, so here the check always runs.
 if [ "$LINT" -eq 1 ]; then
+    if [ -f Cargo.toml ]; then
+        scope_self_test
+    else
+        echo "pre-flight: no Cargo.toml here — no workspace for the scope self-test to check the path map against"
+    fi
     refuse_untracked_files
     run_preflight
     LINT_CRATES=$(crates_from_paths)

@@ -1617,8 +1617,20 @@ pub const NOT_YET_STARVED_HOURS: i64 = 72;
 
 /// THE SHED: landed cars awaiting proof — open cars whose live step is
 /// `proven`. Troubled when one is UNPROVEN (no probe, no event: nothing
-/// mechanical can settle it) or its probe is FAILING; busy while any
-/// waits. The trend is cars proven per day.
+/// mechanical can settle it) or its probe is FAILING, or when a car
+/// past [`PROOF_STALE_HOURS`] waits on something that is OURS; busy
+/// while any waits and none is ours. The trend is cars proven per day.
+///
+/// TROUBLED MEANS OURS (backlog 3881f5c9). Until 2026-09-23 every stale
+/// car troubled the shed, so it read red while its own words said
+/// "waiting on the world, not on us" — six honest waits (a Stripe
+/// charge, a release David opens, his destructive prune, a tenant
+/// publish, a red crawl, a failed publish) painted exactly like a broken
+/// probe. A stale wait is someone else's move only when the car
+/// DECLARES it, something OBSERVES it, and it names the OWNER
+/// (`boss_jobs::car::owned_wait`); it stays theirs until the event is
+/// seen while the probe still says not yet, or it outlives a max wait
+/// the car itself declared.
 fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     let awaiting = awaiting_proof(inputs.cars);
     let mut unproven = Vec::new();
@@ -1668,6 +1680,16 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     // an escape hatch that silences the label forever. Writing the
     // check is ours, so they are counted, not folded into the world's.
     let mut unobserved: Vec<&str> = Vec::new();
+    // WHOSE MOVE (3881f5c9): of those told not yet, the ones with NO
+    // declared wait (not yet starved — nothing on the car says whose
+    // move it is), the ones that declared and observe a wait but name no
+    // owner, the ones past the max wait they declared, and — the only
+    // ones that are not ours — those waiting on their declared owner.
+    let mut undeclared: Vec<&str> = Vec::new();
+    let mut prose_only: Vec<&str> = Vec::new();
+    let mut unowned: Vec<&str> = Vec::new();
+    let mut overdue: Vec<(crate::car::OwnedWait, i64, &str)> = Vec::new();
+    let mut theirs: Vec<(crate::car::OwnedWait, &str)> = Vec::new();
     for (j, _) in &awaiting {
         let branch = j
             .metadata
@@ -1685,22 +1707,26 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
         let hours = (inputs.now - opened.with_timezone(&chrono::Utc)).num_hours();
         if hours >= PROOF_STALE_HOURS {
             stale.push((hours, branch));
-            if matches!(
-                shed_place(&j.metadata),
-                ShedPlace::ProbePending { last: None }
-            ) {
-                never_probed += 1;
-            } else {
-                match crate::car::starved(&j.metadata) {
+            match shed_place(&j.metadata) {
+                ShedPlace::ProbePending { last: None } => never_probed += 1,
+                // Only prose names what it waits on, and no probe runs,
+                // so no `seen` check ever runs either: nothing observes it.
+                ShedPlace::WaitingOn(_) => prose_only.push(branch),
+                _ => match crate::car::starved(&j.metadata) {
                     Some(crate::car::Starved::Undeclared(streak)) => starved.push((streak, branch)),
                     Some(crate::car::Starved::SeenWhileNotYet { on, .. }) => {
                         seen.push((on, branch))
                     }
-                    None if crate::car::waits_on(&j.metadata).is_some_and(|w| w.seen.is_none()) => {
-                        unobserved.push(branch)
-                    }
-                    None => {}
-                }
+                    None => match crate::car::waits_on(&j.metadata) {
+                        None => undeclared.push(branch),
+                        Some(w) if w.seen.is_none() => unobserved.push(branch),
+                        Some(_) => match crate::car::owned_wait(&j.metadata) {
+                            Some(o) if o.overdue(hours) => overdue.push((o, hours, branch)),
+                            Some(o) => theirs.push((o, branch)),
+                            None => unowned.push(branch),
+                        },
+                    },
+                },
             }
         }
     }
@@ -1723,13 +1749,13 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
         // named, because "9 awaiting proof" sends a reader to a list
         // while "105h, fix/x" sends them to a car.
         // WHOSE MOVE IS IT. The age says something is stuck; this says
-        // whether anyone here can unstick it. Never a fourth state —
-        // a stale proof is worth a look either way — but a reader who
-        // sees "told not yet" knows to go look at the WORLD, and one
-        // who sees "never probed" knows to go run something.
-        // THREE ANSWERS, not two (adef5ddf): never asked (on us), told
-        // not yet for days without a break (on us to read — a probe that
-        // cannot pass says exactly this), and told not yet (the world's).
+        // whether anyone here can unstick it, and since 3881f5c9 it
+        // also decides the colour: only a declared, observed, owned
+        // wait is someone else's move, and a shed of nothing else is
+        // busy, not troubled. Every other answer is ours, each named
+        // for what there is to do — run the probe, read one that cannot
+        // pass (adef5ddf), read one blind to its own event (b461341d),
+        // write the seen check (e9b164a1), or declare whose move it is.
         let mut ours: Vec<String> = Vec::new();
         if never_probed > 0 {
             ours.push(format!(
@@ -1761,15 +1787,60 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
                 unobserved.len()
             ));
         }
-        let whose = if ours.is_empty() {
-            "every one asked and was told not yet — waiting on the world, not on us".to_string()
-        } else if never_probed + starved.len() + seen.len() + unobserved.len() == stale.len() {
-            ours.join("; ")
+        if let Some(branch) = undeclared.first() {
+            ours.push(format!(
+                "{} told not yet with no declared wait — {branch}; saying whose move it is \
+                 is ours (boss car waits-on)",
+                undeclared.len()
+            ));
+        }
+        if let Some(branch) = prose_only.first() {
+            ours.push(format!(
+                "{} wait on an event only prose names, with no probe — {branch}; nothing \
+                 observes it, so it is ours",
+                prose_only.len()
+            ));
+        }
+        if let Some(branch) = unowned.first() {
+            ours.push(format!(
+                "{} declared no owner for their wait — {branch}; naming one (world, or the \
+                 actor whose act it is) is ours",
+                unowned.len()
+            ));
+        }
+        if let Some((o, hours, branch)) = overdue.first() {
+            ours.push(format!(
+                "{} past the max wait they declared — {branch}, waiting on {}: {}, {hours}h \
+                 against {}h; ours to read",
+                overdue.len(),
+                o.owner,
+                o.on,
+                o.max_wait_hours.unwrap_or_default()
+            ));
+        }
+        // Named one by one: a wait on the world and a wait on David's
+        // act are different errands, and "6 waiting" sends no one to
+        // either.
+        let waits = theirs
+            .iter()
+            .map(|(o, branch)| format!("waiting on {}: {} ({branch})", o.owner, o.on))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let (state, whose) = if ours.is_empty() {
+            (RegionState::Busy, format!("none ours — {waits}"))
+        } else if theirs.is_empty() {
+            (RegionState::Troubled, ours.join("; "))
         } else {
-            format!("{}; the rest asked and were told not yet", ours.join("; "))
+            (
+                RegionState::Troubled,
+                format!(
+                    "{}; the rest wait on their declared owner — {waits}",
+                    ours.join("; ")
+                ),
+            )
         };
         (
-            RegionState::Troubled,
+            state,
             format!(
                 "{} of {n} open past {PROOF_STALE_HOURS}h — oldest {oldest}h, {branch} — {whose}",
                 stale.len()
@@ -3034,11 +3105,13 @@ mod tests {
             shed.why
         );
 
-        // THE CONTROL: same age, a six-hour streak — still the world's.
+        // THE CONTROL: same age, a six-hour streak — not starved. It
+        // declared no wait, so it is still not the world's (3881f5c9):
+        // nothing on the car says whose move it is.
         let shed = read(&[aged("fix/patient", "2026-09-19T05:00:00Z", 7)]);
         assert!(
-            shed.why.contains("waiting on the world"),
-            "a short streak is still an honest wait: {}",
+            shed.why.contains("no declared wait") && !shed.why.contains("waiting on the world"),
+            "a short undeclared streak is not starved, and not the world's either: {}",
             shed.why
         );
         assert!(!shed.why.contains("ours to read"), "{}", shed.why);
@@ -3049,8 +3122,9 @@ mod tests {
             aged("fix/patient", "2026-09-19T05:00:00Z", 7),
         ]);
         assert!(
-            shed.why.contains("1 told not yet") && shed.why.contains("the rest"),
-            "names the starved one and leaves the rest to the world: {}",
+            shed.why.contains("1 told not yet without a break")
+                && shed.why.contains("1 told not yet with no declared wait"),
+            "names the starved one and the undeclared one apart: {}",
             shed.why
         );
     }
@@ -3074,8 +3148,10 @@ mod tests {
             let md = json!({
                 "branch": branch, "merged": true, "opened_at": "2026-09-15T10:00:00Z",
                 "proof_probe": "true", "proof_attempt": attempt,
-                (crate::car::WAITS_ON): crate::car::waits_on_value(
-                    "a real Stripe sponsorship charge", Some("true")),
+                (crate::car::WAITS_ON): {
+                    "on": "a real Stripe sponsorship charge", "seen": "true",
+                    (crate::car::WAITS_ON_OWNER): "world",
+                },
             });
             let j = job("ship-a-change", branch, JobStatus::Open, md);
             let s = vec![
@@ -3101,6 +3177,7 @@ mod tests {
             "a declared wait not yet seen is the world's, at 96h: {}",
             shed.why
         );
+        assert_eq!(shed.state, RegionState::Busy, "{}", shed.why);
 
         let shed = read(&[car("fix/contradicted", Some("2026-09-19T10:00:00Z"))]);
         assert!(
@@ -3129,8 +3206,10 @@ mod tests {
                     (crate::car::NOT_YET_SINCE): "2026-09-15T11:00:00Z",
                     (crate::car::NOT_YET_RUNS): 96,
                 },
-                (crate::car::WAITS_ON): crate::car::waits_on_value(
-                    "a real Stripe sponsorship charge", seen),
+                (crate::car::WAITS_ON): {
+                    "on": "a real Stripe sponsorship charge", "seen": seen,
+                    (crate::car::WAITS_ON_OWNER): "world",
+                },
             });
             let j = job("ship-a-change", branch, JobStatus::Open, md);
             let s = vec![
@@ -3165,7 +3244,8 @@ mod tests {
         ]);
         assert!(
             shed.why.contains("1 declared a wait with no seen check")
-                && shed.why.contains("the rest asked and were told not yet"),
+                && shed.why.contains("the rest wait on their declared owner")
+                && shed.why.contains("waiting on the world"),
             "an observed wait stays the world's beside it: {}",
             shed.why
         );
@@ -3174,6 +3254,127 @@ mod tests {
         assert!(
             !shed.why.contains("no seen check"),
             "an observed wait is not counted: {}",
+            shed.why
+        );
+    }
+
+    /// THE SHED'S COLOUR FOLLOWS WHOSE MOVE THE WAIT IS (backlog
+    /// 3881f5c9). Measured 2026-09-23 ~16:05Z: the shed read troubled
+    /// with the words "every one asked and was told not yet — waiting on
+    /// the world, not on us" — the region said the waits were not ours
+    /// and painted them red anyway, so red stopped meaning ours to fix.
+    /// Troubled is now only ours; a declared, observed, owned wait —
+    /// on the world or on a named actor's act — is busy and says whose,
+    /// until it runs past a max wait the car itself declared.
+    #[test]
+    fn the_shed_is_troubled_only_by_waits_that_are_ours() {
+        let car = |branch: &str, on: &str, owner: Value, max: Value| {
+            let md = json!({
+                "branch": branch, "merged": true, "opened_at": "2026-09-15T10:00:00Z",
+                "proof_probe": "true",
+                "proof_attempt": {
+                    "at": "2026-09-19T11:00:00Z", "not_yet": true, "exit": 75, "probe": "true",
+                    (crate::car::NOT_YET_SINCE): "2026-09-15T11:00:00Z",
+                    (crate::car::NOT_YET_RUNS): 96,
+                },
+                (crate::car::WAITS_ON): {
+                    "on": on, "seen": "true",
+                    (crate::car::WAITS_ON_OWNER): owner,
+                    (crate::car::WAITS_ON_MAX_WAIT_HOURS): max,
+                },
+            });
+            let j = job("ship-a-change", branch, JobStatus::Open, md);
+            let s = vec![
+                step(
+                    &j,
+                    "gate",
+                    StepStatus::Completed,
+                    Some("2026-09-15T06:00:00Z"),
+                ),
+                step(&j, "proven", StepStatus::Ready, None),
+            ];
+            (j, s)
+        };
+        let status = empty_status();
+        let read = |cars: &[(Job, Vec<Step>)]| {
+            let out = regions(&inputs(&status, &[], &[], cars, &[], Some(&[]), Some(&[])));
+            by_name(&out, "shed").clone()
+        };
+        let world = || {
+            car(
+                "feat/stripe",
+                "a Stripe charge",
+                json!("world"),
+                Value::Null,
+            )
+        };
+        let david = || {
+            car(
+                "feat/release",
+                "a cut-a-release packet",
+                json!("emp-david"),
+                Value::Null,
+            )
+        };
+
+        // THEIRS: the world's event and a named actor's act, 98h open.
+        let shed = read(&[world(), david()]);
+        assert_eq!(
+            shed.state,
+            RegionState::Busy,
+            "declared, observed, owned waits are not ours: {}",
+            shed.why
+        );
+        assert!(
+            shed.why
+                .contains("waiting on the world: a Stripe charge (feat/stripe)")
+                && shed
+                    .why
+                    .contains("waiting on emp-david: a cut-a-release packet"),
+            "and it says whose move each one is: {}",
+            shed.why
+        );
+
+        // PAST ITS OWN DECLARED PATIENCE: 98h open against a 72h max.
+        let late = car("feat/late", "a Stripe charge", json!("world"), json!(72));
+        let shed = read(&[late, david()]);
+        assert_eq!(shed.state, RegionState::Troubled, "{}", shed.why);
+        assert!(
+            shed.why.contains("past the max wait they declared")
+                && shed.why.contains("feat/late")
+                && shed.why.contains("the rest wait on their declared owner"),
+            "{}",
+            shed.why
+        );
+
+        // NO OWNER: the prose may name David, the field does not.
+        let unowned = car(
+            "feat/unowned",
+            "a release (David opens it)",
+            Value::Null,
+            Value::Null,
+        );
+        let shed = read(&[unowned]);
+        assert_eq!(shed.state, RegionState::Troubled, "{}", shed.why);
+        assert!(
+            shed.why.contains("declared no owner") && shed.why.contains("feat/unowned"),
+            "an owner is declared, never read out of prose: {}",
+            shed.why
+        );
+
+        // AN EVENT ONLY PROSE NAMES: no probe runs, so no `seen` check
+        // does either — nothing observes it (the dev-door login car,
+        // 2026-09-23, is this shape).
+        let (mut j, s) = world();
+        j.metadata = json!({
+            "branch": "feat/prose", "merged": true, "opened_at": "2026-09-15T10:00:00Z",
+            "proof_event": "David logs in through the dev door",
+        });
+        let shed = read(&[(j, s), david()]);
+        assert_eq!(shed.state, RegionState::Troubled, "{}", shed.why);
+        assert!(
+            shed.why.contains("only prose names") && shed.why.contains("feat/prose"),
+            "{}",
             shed.why
         );
     }

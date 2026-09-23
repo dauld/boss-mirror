@@ -758,8 +758,8 @@ pub(crate) fn block(inv: &Invariant) -> Vec<String> {
         .collect()
 }
 
-/// The packet half: the envelope, the step it is at, and EVERY metadata
-/// key verbatim.
+/// The packet half: the envelope, the step it is at, EVERY metadata key
+/// verbatim, and every key of every completed step's metadata likewise.
 ///
 /// Untruncated on purpose. `boss job get` fits values to the terminal,
 /// which is right for scanning a list; here a clipped claim is the
@@ -808,13 +808,60 @@ pub(crate) fn packet_section(job: &Value) -> String {
         None => out.push_str("now at: no ready or active step\n"),
     }
 
-    let md: BTreeMap<String, Value> = job
-        .get("metadata")
+    let md = sorted_metadata(job);
+    out.push_str(&format!("\nmetadata ({} key(s)), in full:\n", md.len()));
+    out.push_str(&key_blocks(&md));
+
+    // EVERY COMPLETED STEP'S METADATA, IN FULL (backlog 3cdad35a,
+    // measured by builder run df220512 on 3bc896be, 2026-09-23). The
+    // record of what a packet has already decided lives on its steps,
+    // not in its own metadata: triage's `evidence` and `disposition`,
+    // the `design_id` of the approved design that answers it. That
+    // brief showed an item as an open question while its steps carried
+    // the design approved two days earlier, and every dispatch since
+    // has carried an operator note telling the builder to GET the
+    // steps by hand. Completed steps only — a skipped step recorded no
+    // work, and the step the packet is AT is THE STEP section's — and
+    // every key, uncurated, for the reason the job's own are.
+    for step in crate::envelope::steps(job)
+        .into_iter()
+        .filter(|s| s.get("status").and_then(Value::as_str) == Some("completed"))
+    {
+        let l = crate::envelope::step_line(step);
+        let s = |k: &str| step.get(k).and_then(Value::as_str);
+        let md = sorted_metadata(step);
+        out.push_str(&format!(
+            "\ncompleted step `{}` — {}, kind {}{}{}, metadata ({} key(s)), in full:\n",
+            l.slug,
+            l.title,
+            l.kind,
+            s("completed_by")
+                .map(|b| format!(", by {b}"))
+                .unwrap_or_default(),
+            s("completed_at")
+                .map(|t| format!(" at {t}"))
+                .unwrap_or_default(),
+            md.len(),
+        ));
+        out.push_str(&key_blocks(&md));
+    }
+    out
+}
+
+/// A row's `metadata`, keys sorted so two reads print in one order.
+fn sorted_metadata(row: &Value) -> BTreeMap<String, Value> {
+    row.get("metadata")
         .and_then(Value::as_object)
         .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-        .unwrap_or_default();
-    out.push_str(&format!("\nmetadata ({} key(s)), in full:\n", md.len()));
-    for (k, v) in &md {
+        .unwrap_or_default()
+}
+
+/// Each key and its value verbatim — a string as its own lines, any
+/// other value as JSON — indented under the key. The one "in full"
+/// shape every metadata block in the brief prints.
+fn key_blocks<'a>(md: impl IntoIterator<Item = (&'a String, &'a Value)>) -> String {
+    let mut out = String::new();
+    for (k, v) in md {
         let rendered = match v {
             Value::String(s) => s.clone(),
             other => other.to_string(),
@@ -903,19 +950,7 @@ pub(crate) fn step_section(job: &Value) -> Option<String> {
             ));
         }
     }
-    for (k, v) in &spec {
-        let rendered = match v {
-            Value::String(s) => s.clone(),
-            other => other.to_string(),
-        };
-        out.push_str(&format!("\n  {k}:\n"));
-        for line in rendered.lines() {
-            out.push_str(&format!("    {line}\n"));
-        }
-        if rendered.is_empty() {
-            out.push_str("    (empty)\n");
-        }
-    }
+    out.push_str(&key_blocks(&spec));
     Some(out)
 }
 
@@ -1654,6 +1689,70 @@ mod tests {
         assert!(out.contains("2 key(s)"));
         assert!(out.contains("triage"), "the step the packet is at: {out}");
         assert!(out.contains("cc9ddc5d-7e43-4a74-91f9-273b9ca2ba6a"));
+    }
+
+    /// THE DECISION LIVES ON THE STEPS, SO THE BRIEF PRINTS THEM
+    /// (backlog 3cdad35a, measured by builder run df220512 on 3bc896be,
+    /// 2026-09-23). That item's brief showed an open question; its
+    /// steps carried the approved design that answered it, and the
+    /// triage step's evidence and disposition — exactly what a builder
+    /// needs — were on a step too. The shape below is the live
+    /// backlog-item's: a completed trigger, a completed triage, a
+    /// completed design step, a skipped one, and the active build.
+    #[test]
+    fn the_packet_half_prints_every_completed_steps_metadata_in_full() {
+        let long = "e".repeat(400);
+        let job = json!({
+            "id": "3bc896be-0000-4000-8000-000000000000",
+            "kind": "backlog-item",
+            "metadata": { "area": "platform" },
+            "steps": [
+                { "spec_slug": "entered", "kind": "trigger", "status": "completed",
+                  "title": "Item enters the backlog",
+                  "metadata": { "trigger_name": "item-enters-the-backlog" } },
+                { "spec_slug": "triage", "kind": "task", "status": "completed",
+                  "title": "Measure the claim, choose a route",
+                  "completed_by": "agent-claude",
+                  "completed_at": "2026-09-23T14:53:42.043974Z",
+                  "metadata": {
+                      "disposition": "design",
+                      "evidence": format!("{long}\nsecond line of evidence"),
+                  } },
+                { "spec_slug": "design", "kind": "task", "status": "completed",
+                  "title": "File the design",
+                  "metadata": { "design_id": "5877860d-aaaa-4bbb-8ccc-000000000000" } },
+                { "spec_slug": "answer", "kind": "answer-question", "status": "skipped",
+                  "title": "Answer the question",
+                  "metadata": { "skipped_key": "not a record of work done" } },
+                { "spec_slug": "build", "kind": "task", "status": "active",
+                  "title": "Build the change",
+                  "metadata": { "agent_run": "run-of-the-reader" } },
+            ],
+        });
+        let out = packet_section(&job);
+        // Every key of every completed step, untruncated, lines kept.
+        assert!(out.contains(&long), "{out}");
+        assert!(out.contains("    second line of evidence\n"), "{out}");
+        assert!(out.contains("disposition:\n    design\n"), "{out}");
+        assert!(
+            out.contains("5877860d-aaaa-4bbb-8ccc-000000000000"),
+            "{out}"
+        );
+        assert!(out.contains("item-enters-the-backlog"), "{out}");
+        // Each block names its step the way a surface does, and who
+        // completed it when the record says.
+        assert!(out.contains("Measure the claim, choose a route"), "{out}");
+        assert!(out.contains("step `triage`"), "{out}");
+        assert!(out.contains("agent-claude"), "{out}");
+        assert!(out.contains("2026-09-23T14:53:42.043974Z"), "{out}");
+        // Only COMPLETED steps: a skipped step recorded no work, and the
+        // step the packet is at has its own section.
+        assert!(!out.contains("skipped_key"), "{out}");
+        assert!(!out.contains("run-of-the-reader"), "{out}");
+        // In the packet's own step order.
+        let triage = out.find("step `triage`").expect("triage");
+        let design = out.find("step `design`").expect("design");
+        assert!(triage < design, "{out}");
     }
 
     #[test]

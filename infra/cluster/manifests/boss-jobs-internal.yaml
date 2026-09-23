@@ -75,6 +75,17 @@
 # the jobs API's writes are already on this IP, and content-api checks
 # every upload as Update on its job or step through boss-policy.
 #
+# The ML API joined the same day (backlog 9599babc). The nightly
+# inference batch runs on boss-gcp (role ml-batch-host) and POSTs each
+# model's infer-batch; it had been posting to 127.0.0.1:7070 there — the
+# retired second stack's ML API over the retired stack's database — so
+# seven packets said ok while this instance's risk scores stayed empty.
+# Its address is now the record's host on this port, rendered into
+# /etc/boss/sor.env (infra/estate/render-sor-env.sh BOSS_ML_API_URL).
+# Same trust class as the rows above: infer-batch is a write, and it
+# writes predictions derived from data the jobs API's writes on this
+# same IP already reach.
+#
 # The ports are boss-ports' prod ports under boss-ports' names, and
 # the all-in-one pod listens on each (generate-configs.sh binds
 # 0.0.0.0, and the policy API, whose bind it does not set, is widened
@@ -110,3 +121,4 @@ spec:
     - {port: 7860, targetPort: 7860, name: calendar}
     - {port: 7830, targetPort: 7830, name: subject-kinds}
     - {port: 7090, targetPort: 7090, name: content}
+    - {port: 7070, targetPort: 7070, name: ml}

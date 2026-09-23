@@ -188,10 +188,11 @@
 <style>
   /* The yard's classes, as YardPage.svelte declares them (Svelte scopes
      a component's styles, so the page carries its own copy of the ones
-     it uses — same names, same tokens, nothing new). */
+     it uses — same names, nothing new). The colours are the map's own
+     --map-* tokens, with no fallback (42f66fb3, map-palette.test.ts). */
   .yard-root { padding: 0 32px 32px; }
-  .yard-empty { color: var(--static, #78716c); padding: 12px 0; font-size: 14px; }
+  .yard-empty { color: var(--map-muted); padding: 12px 0; font-size: 14px; }
   .yard-flow { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
-    letter-spacing: var(--ls-nav, 0.14em); color: var(--static, #7A838C);
-    border-top: 1px solid var(--hairline, #2A3138); margin-top: 28px; padding-top: 12px; }
+    letter-spacing: var(--ls-nav, 0.14em); color: var(--map-muted);
+    border-top: 1px solid var(--map-rule); margin-top: 28px; padding-top: 12px; }
 </style>

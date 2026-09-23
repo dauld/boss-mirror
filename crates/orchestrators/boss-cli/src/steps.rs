@@ -653,31 +653,29 @@ pub(crate) fn holdable(car: &Value) -> Result<&Value, String> {
     }
 }
 
-/// The review step's metadata with the hold on — the marker in the one
-/// shape `stranded::hold_reason` reads (a non-blank string). Every
-/// other key rides through: PATCH-on-PUT replaces metadata wholesale.
-pub(crate) fn hold_metadata(review: &Value, reason: &str) -> Value {
-    let mut md = review
-        .get("metadata")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    md.insert("hold".into(), json!(reason.trim()));
-    Value::Object(md)
+/// The merge-door body that puts the hold on — the marker in the one
+/// shape `stranded::hold_reason` reads (a non-blank string). One key,
+/// so every other key on the review step stays where it is by
+/// construction rather than by being read and sent back.
+pub(crate) fn hold_patch(reason: &str) -> Value {
+    json!({ "hold": reason.trim() })
 }
 
-/// The review step's metadata with the hold OFF — the key removed, not
-/// nulled or falsed. `hold_reason` reads `false`/`""` as released too,
-/// but a released car that still carries the key reads as "held then
-/// released" to every eye that is not that function.
-pub(crate) fn release_metadata(review: &Value) -> Value {
-    let mut md = review
-        .get("metadata")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    md.remove("hold");
-    Value::Object(md)
+/// The merge-door body that takes the hold OFF — the key DELETED (the
+/// merge door deletes a key sent as an explicit null), not falsed.
+/// `hold_reason` reads `false`/`""` as released too, but a released car
+/// that still carries the key reads as "held then released" to every
+/// eye that is not that function.
+///
+/// Why the merge door (e39a9d2a, 2026-09-23): until this, release PUT
+/// the review step's whole metadata back with `hold` left out — a clear
+/// by OMISSION, which worked only because the step PUT replaces
+/// metadata wholesale. The PUT still does; the merge door is simply the
+/// door a deliberate clear belongs at: it names the key that goes, and
+/// it cannot erase a key another writer set between our read and our
+/// write, which a whole-metadata PUT built from that read can.
+pub(crate) fn release_patch_body() -> Value {
+    json!({ "hold": Value::Null })
 }
 
 // ----------------------------------------------------------------------
@@ -794,7 +792,8 @@ impl Wire {
 
     /// The step's MERGE door: keys land one at a time and an explicit
     /// null DELETES one. The only door that can clear `agent_run`,
-    /// which the PUT below carries forward on omission (b91a2103).
+    /// which the PUT below carries forward on omission (b91a2103), and
+    /// the door `boss hold` / `boss release` write through (e39a9d2a).
     async fn patch_step_metadata(&self, job_id: &str, step_id: &str, body: Value) -> Result<()> {
         self.call(
             reqwest::Method::PATCH,
@@ -978,9 +977,9 @@ pub(crate) async fn fold(
 }
 
 /// `Some(reason)` holds, `None` releases — one path, because both are
-/// the same PUT of the review step's metadata with one key present or
-/// absent, and the read-back checks the key the same way the readers
-/// do (`stranded::hold_reason`).
+/// the same one-key write to the review step's merge door (the key
+/// set, or nulled to delete it), and the read-back checks the key the
+/// same way the readers do (`stranded::hold_reason`).
 pub(crate) async fn hold(wire: &Wire, car: &str, reason: Option<&str>) -> Result<()> {
     if let Some(r) = reason
         && r.trim().is_empty()
@@ -997,8 +996,8 @@ pub(crate) async fn hold(wire: &Wire, car: &str, reason: Option<&str>) -> Result
         .and_then(Value::as_str)
         .unwrap_or("?");
     let already = boss_jobs::stranded::hold_reason(review.get("metadata").unwrap_or(&Value::Null));
-    let metadata = match reason {
-        Some(r) => hold_metadata(review, r),
+    let patch = match reason {
+        Some(r) => hold_patch(r),
         None => {
             if already.is_none() {
                 println!(
@@ -1008,13 +1007,12 @@ pub(crate) async fn hold(wire: &Wire, car: &str, reason: Option<&str>) -> Result
                 );
                 return Ok(());
             }
-            release_metadata(review)
+            release_patch_body()
         }
     };
     let jid = crate::envelope::job_id(&packet).context("the car has no id")?;
     let sid = step_id(review)?;
-    wire.put_step(jid, sid, json!({ "metadata": metadata }))
-        .await?;
+    wire.patch_step_metadata(jid, sid, patch).await?;
 
     let after = wire.packet(jid).await?;
     let now = boss_jobs::stranded::hold_reason(
@@ -1030,7 +1028,7 @@ pub(crate) async fn hold(wire: &Wire, car: &str, reason: Option<&str>) -> Result
             title_of(&packet)
         ),
         (Some(_), held) => bail!(
-            "the API answered the PUT but the review step reads back {} — the hold did not take",
+            "the API answered the write but the review step reads back {} — the hold did not take",
             held.map(|h| format!("holding {h:?}"))
                 .unwrap_or_else(|| "with no hold".into())
         ),
@@ -1041,7 +1039,7 @@ pub(crate) async fn hold(wire: &Wire, car: &str, reason: Option<&str>) -> Result
             already.unwrap_or_default()
         ),
         (None, Some(held)) => {
-            bail!("the API answered the PUT but the review step still reads as held: {held:?}")
+            bail!("the API answered the write but the review step still reads as held: {held:?}")
         }
     }
     Ok(())
@@ -2020,22 +2018,18 @@ mod tests {
     /// The marker in the shape every reader reads (`stranded::hold_reason`
     /// — the conductor's `parked_ready`, the loading-dock row's
     /// `metadata_unmarked`, the yard's held lane, `boss orient`): a
-    /// non-blank string on the REVIEW step, every other key kept.
+    /// non-blank string on the REVIEW step. The patch is that ONE key,
+    /// so the merge door leaves every other key where it was (the
+    /// end-to-end test below reads that back).
     #[test]
-    fn a_hold_is_the_marker_the_readers_read_and_keeps_the_steps_keys() {
-        let c = car(
-            "ready",
-            json!({ "authority_role": "platform-admin", "procedure": "Left ready" }),
-        );
-        let review = holdable(&c).expect("parked");
-        let md = hold_metadata(review, " waiting on a kubectl delete ");
+    fn a_hold_is_the_marker_the_readers_read_and_nothing_else() {
+        let md = hold_patch(" waiting on a kubectl delete ");
+        assert_eq!(md, json!({ "hold": "waiting on a kubectl delete" }));
         assert_eq!(
             boss_jobs::stranded::hold_reason(&md).as_deref(),
             Some("waiting on a kubectl delete"),
             "the one reader the conductor uses must read it back"
         );
-        assert_eq!(md["authority_role"], json!("platform-admin"));
-        assert_eq!(md["procedure"], json!("Left ready"));
         let steps: Vec<boss_core::job::Step> = vec![serde_json::from_value(json!({
             "title": "Open for review", "spec_slug": "review", "status": "ready", "metadata": md,
         }))
@@ -2047,18 +2041,12 @@ mod tests {
         );
     }
 
-    /// Released = the KEY REMOVED. `hold: false` reads as released to
-    /// `hold_reason` but as "held, then released" to every other eye.
+    /// Released = the KEY REMOVED: an explicit null, which the merge
+    /// door deletes. `hold: false` reads as released to `hold_reason`
+    /// but as "held, then released" to every other eye.
     #[test]
-    fn a_release_removes_the_key_rather_than_falsing_it() {
-        let c = car(
-            "ready",
-            json!({ "authority_role": "platform-admin", "hold": "x" }),
-        );
-        let md = release_metadata(holdable(&c).unwrap());
-        assert!(md.get("hold").is_none(), "{md}");
-        assert_eq!(md["authority_role"], json!("platform-admin"));
-        assert!(boss_jobs::stranded::hold_reason(&md).is_none());
+    fn a_release_deletes_the_key_rather_than_falsing_it() {
+        assert_eq!(release_patch_body(), json!({ "hold": null }));
     }
 
     #[test]
@@ -2481,17 +2469,10 @@ mod tests {
             let puts = s.puts.lock().unwrap();
             assert_eq!(puts.len(), 1);
             assert_eq!(
-                puts[0].0,
-                "/c6bd173e-3dc9-426f-8fff-866a3b2a6117/steps/s-review"
+                puts[0].0, "/c6bd173e-3dc9-426f-8fff-866a3b2a6117/steps/s-review/metadata",
+                "a hold is a one-key write to the merge door"
             );
-            assert_eq!(
-                puts[0].1["metadata"]["hold"],
-                json!("waiting on a kubectl delete")
-            );
-            assert!(
-                puts[0].1.get("status").is_none(),
-                "a hold does not touch status"
-            );
+            assert_eq!(puts[0].1, json!({ "hold": "waiting on a kubectl delete" }));
         }
         assert_eq!(
             boss_jobs::stranded::hold_reason(&s.packets.lock().unwrap()[0]["steps"][1]["metadata"])
@@ -2499,6 +2480,19 @@ mod tests {
             Some("waiting on a kubectl delete")
         );
         hold(&wire, "c6bd173e", None).await.expect("releases");
+        {
+            // A release is a DELIBERATE clear, and the merge door is the
+            // door for one: an explicit null deletes the key and touches
+            // nothing else (e39a9d2a). Through the step PUT it was a
+            // clear by OMISSION — the whole metadata sent back without
+            // `hold` — resting on the PUT's wholesale replace.
+            let puts = s.puts.lock().unwrap();
+            assert_eq!(
+                puts[1].0,
+                "/c6bd173e-3dc9-426f-8fff-866a3b2a6117/steps/s-review/metadata"
+            );
+            assert_eq!(puts[1].1, json!({ "hold": null }));
+        }
         let md = s.packets.lock().unwrap()[0]["steps"][1]["metadata"].clone();
         assert!(md.get("hold").is_none(), "{md}");
         assert_eq!(md["authority_role"], json!("platform-admin"));

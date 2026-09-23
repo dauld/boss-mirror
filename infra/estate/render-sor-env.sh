@@ -35,6 +35,17 @@
 #                             (publish-github-pr, read-publish-checks).
 #                             Derived rather than declared for the same
 #                             reason JOBS_API is: two lines can disagree.
+#   BOSS_ML_API_URL           the instance's ML API — the record's host on
+#                             the `ml` port of the machine door's table
+#                             (infra/forge/sor-ports.env, pinned to
+#                             crates/core/boss-ports). The nightly
+#                             inference batch on the ml-batch-host reads
+#                             it. DERIVED, so it cannot name a different
+#                             instance from the record: until 2026-09-23
+#                             the batch's unit spelled 127.0.0.1:7070,
+#                             the retired second stack's ML API, and
+#                             seven packets said ok while the record's
+#                             risk scores stayed empty (backlog 9599babc).
 #
 # Backlog 5222163e (audit H10): until this file, the address was a
 # literal in 47 files and the forge's in 62.
@@ -80,6 +91,22 @@ if [ -z "$mirror_slug" ]; then
     exit 1
 fi
 
+# The ML API: sor_url with its port replaced by the door table's `ml`
+# row. A table without the row, or a sor_url without a port, is refused
+# here — the batch would otherwise start with no address, or the wrong one.
+PORTS_TABLE="$HERE/../forge/sor-ports.env"
+ml_port="$(sed -n 's/^ml=\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$PORTS_TABLE" 2>/dev/null | sed -n 1p)"
+if [ -z "$ml_port" ]; then
+    echo "render-sor-env: $PORTS_TABLE carries no \`ml=<port>\` row — the inference batch would have no ML API; refusing to render" >&2
+    exit 1
+fi
+case "$sor_url" in
+    *://*:[0-9]*) ml_url="${sor_url%:*}:$ml_port" ;;
+    *)
+        echo "render-sor-env: sor_url = \"$sor_url\" carries no port — nothing can put the ML API's port beside its host; refusing to render" >&2
+        exit 1 ;;
+esac
+
 render() {
     printf '# /etc/boss/sor.env — rendered from infra/estate/estate.toml by the host'"'"'s install.\n'
     printf '# Do not edit: the next converge rewrites it. Change the source.\n'
@@ -91,6 +118,7 @@ render() {
     printf 'BOSS_FORGE_JOURNAL_URL=%s\n' "$forge_journal"
     printf 'BOSS_MIRROR_URL=%s\n' "$mirror_url"
     printf 'BOSS_MIRROR_SLUG=%s\n' "$mirror_slug"
+    printf 'BOSS_ML_API_URL=%s\n' "$ml_url"
 }
 
 case "${1:-}" in

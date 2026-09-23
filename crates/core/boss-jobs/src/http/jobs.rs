@@ -524,10 +524,10 @@ pub(super) struct LaunchCalendarQuery {
     to: Option<chrono::NaiveDate>,
 }
 
-/// Launch-calendar projection per examples/used-device-shop/design/marketing-needs.md E2. Returns every
-/// open/in-flight `marketing-motion` Job with its tier-4
-/// `marketing-launch` step's date + channel, plus the Job's current
-/// tier. Frontend renders at `/calendar` (standalone) and in the exec
+/// Launch-calendar projection per examples/used-device-shop/design/marketing-needs.md E2. Returns one
+/// row per launch step (any step carrying `launch_date`) on every
+/// open/in-flight Job, with the step's date + channel and the Job's
+/// current tier — whatever the Job's kind (backlog 649b3303). Frontend renders at `/calendar` (standalone) and in the exec
 /// dashboard next-30-days panel.
 pub(super) async fn launch_calendar<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,

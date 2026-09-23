@@ -226,16 +226,16 @@
 </section>
 
 <style>
-  /* The yard's own classes and tokens — the same names WorldMap and
-     YardMap use, because Svelte scopes styles per component and a
-     region map must look like the world it came out of. Nothing new
-     enters the system here, and no state or surface appears as a hex
-     (42f66fb3). */
+  /* The yard's own classes — the same names WorldMap and YardMap use,
+     because Svelte scopes styles per component and a region map must
+     look like the world it came out of. Every colour is the same
+     --map-* token WorldMap reads, with no fallback, so no state or
+     surface appears as a hex (42f66fb3, map-palette.test.ts). */
   .yard {
-    --rail: var(--border-strong, #3a434d);
-    --tie: var(--hairline, #2a3138);
-    background: var(--void, #0d1014);
-    border: 1px solid var(--hairline, #2a3138);
+    --rail: var(--map-rule-strong);
+    --tie: var(--map-rule);
+    background: var(--map-bg);
+    border: 1px solid var(--map-rule);
     padding: var(--s2, 8px);
     overflow-x: auto;
     margin-top: var(--s3, 12px);
@@ -248,16 +248,16 @@
     font-family: var(--font-mono, ui-monospace, monospace);
   }
   .yard text {
-    fill: var(--static, #7a838c);
+    fill: var(--map-muted);
     font-size: 10px;
     letter-spacing: 0.08em;
     text-transform: uppercase;
   }
   .yard text.tiny { font-size: 9px; letter-spacing: 0.04em; text-transform: none; }
-  .yard text.err { fill: var(--err, #e2685c); }
-  .shed { fill: var(--ink, #12161c); stroke: var(--border-strong, #3a434d); }
-  .shed.err { stroke: var(--err, #e2685c); }
-  .shed.warn { stroke: var(--warn, #d9a441); }
+  .yard text.err { fill: var(--map-bad-ink); }
+  .shed { fill: var(--map-surface); stroke: var(--map-rule-strong); }
+  .shed.err { stroke: var(--map-bad-edge); }
+  .shed.warn { stroke: var(--map-warn-edge); }
 
   /* THE HEAD is HTML, not SVG. On the world line it had to be text
      inside an outline, wrapped by hand to the slot's width; a region
@@ -272,45 +272,45 @@
   }
   .leave {
     background: none;
-    border: 1px solid var(--hairline, #2a3138);
-    color: var(--static, #7a838c);
+    border: 1px solid var(--map-rule);
+    color: var(--map-muted);
     font: inherit;
     font-size: 11px;
     letter-spacing: var(--ls-nav, 0.14em);
     padding: 4px 10px;
     cursor: pointer;
   }
-  .leave:hover, .leave:focus-visible { color: var(--fog, #e8ecef); border-color: var(--border-strong, #3a434d); }
-  .region-name { font-size: 15px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fog, #e8ecef); }
-  .region-count { font-size: 18px; font-weight: 600; color: var(--fog, #e8ecef); }
-  .region-state { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--static, #7a838c); }
-  .region-state.err { color: var(--err, #e2685c); }
-  .region-trend { font-size: 11px; color: var(--static, #7a838c); }
+  .leave:hover, .leave:focus-visible { color: var(--map-ink); border-color: var(--map-rule-strong); }
+  .region-name { font-size: 15px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--map-ink); }
+  .region-count { font-size: 18px; font-weight: 600; color: var(--map-ink); }
+  .region-state { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--map-muted); }
+  .region-state.err { color: var(--map-bad-ink); }
+  .region-trend { font-size: 11px; color: var(--map-muted); }
   .region-why { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px;
-    color: var(--static, #7a838c); margin-top: var(--s2, 8px); }
-  .region-why.err { color: var(--err, #e2685c); }
+    color: var(--map-muted); margin-top: var(--s2, 8px); }
+  .region-why.err { color: var(--map-bad-ink); }
   .lamp-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block;
-    background: var(--border-strong, #3a434d); }
-  .lamp-dot.ok { background: var(--ok, #4fb98a); }
-  .lamp-dot.warn { background: var(--warn, #d9a441); }
-  .lamp-dot.err { background: var(--err, #e2685c); animation: blink 1s steps(2) infinite; }
+    background: var(--map-rule-strong); }
+  .lamp-dot.ok { background: var(--map-ok-edge); }
+  .lamp-dot.warn { background: var(--map-warn-edge); }
+  .lamp-dot.err { background: var(--map-bad-edge); animation: blink 1s steps(2) infinite; }
 
-  .plate .wagon { fill: var(--ink, #12161c); stroke: var(--border-strong, #3a434d); }
-  .plate .wagon.ok { stroke: var(--ok, #4fb98a); }
-  .plate .wagon.warn { stroke: var(--warn, #d9a441); }
-  .plate .wagon.red { stroke: var(--err, #e2685c); }
-  .yard text.plate-tag { fill: var(--fog, #e8ecef); letter-spacing: 0; }
+  .plate .wagon { fill: var(--map-surface); stroke: var(--map-rule-strong); }
+  .plate .wagon.ok { stroke: var(--map-ok-edge); }
+  .plate .wagon.warn { stroke: var(--map-warn-edge); }
+  .plate .wagon.red { stroke: var(--map-bad-edge); }
+  .yard text.plate-tag { fill: var(--map-ink); letter-spacing: 0; }
   .platform .track { stroke: var(--tie); stroke-width: 1; }
-  .platform .mark { fill: var(--static); }
-  .platform .mark.flagged { fill: var(--err); }
-  .platform .bound { stroke: var(--warn); stroke-width: 1; }
-  .yard text.standing { fill: var(--fog); letter-spacing: 0; }
-  .yard text.rate { fill: var(--static); letter-spacing: 0; }
-  .yard text.unknown { fill: var(--static); opacity: 0.6; font-style: italic; }
-  .lamp { fill: var(--border-strong, #3a434d); }
-  .lamp.ok { fill: var(--ok, #4fb98a); }
-  .lamp.warn { fill: var(--warn, #d9a441); }
-  .lamp.err { fill: var(--err, #e2685c); animation: blink 1s steps(2) infinite; }
+  .platform .mark { fill: var(--map-muted); }
+  .platform .mark.flagged { fill: var(--map-bad-edge); }
+  .platform .bound { stroke: var(--map-warn-edge); stroke-width: 1; }
+  .yard text.standing { fill: var(--map-ink); letter-spacing: 0; }
+  .yard text.rate { fill: var(--map-muted); letter-spacing: 0; }
+  .yard text.unknown { fill: var(--map-muted); opacity: 0.6; font-style: italic; }
+  .lamp { fill: var(--map-rule-strong); }
+  .lamp.ok { fill: var(--map-ok-edge); }
+  .lamp.warn { fill: var(--map-warn-edge); }
+  .lamp.err { fill: var(--map-bad-edge); animation: blink 1s steps(2) infinite; }
   @keyframes blink { 50% { opacity: 0.25; } }
   /* The machine glyphs, as car 5 declared them: the housing is the
      map's own `.shed`, the parts are its `.lamp` tones, and what tells

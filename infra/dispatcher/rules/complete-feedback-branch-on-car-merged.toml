@@ -88,9 +88,19 @@ into forge CI.)
 # is untouched. The single-object form is still accepted (a tenant's
 # own row keeps parsing). Pinned per kind against the live Workflows by
 # feedback_obligation_rules.rs.
-version = 4
+#
+# v5 (backlog a994f533; no migration for the rule — the edge it reads
+# is declared by 20260923144557): `also_link` names `also_answers`, a
+# `job_id_list` on the car of every OTHER item it answers, and the
+# handler gives each the same route and build completion as
+# `backlog_item`. A car holds one `backlog_item`, so a change that
+# answered two items left the second open, and on 2026-09-23 two such
+# items (5994de6d, cab50f4c) were dispatched to builders who spent a run
+# each rediscovering a landing. A car with no list is answered exactly
+# as v4 answered it.
+version = 5
 on_event = "jobs.job.closed"
 when = "kind = \"ship-a-change\" AND outcome = \"merged\""
 [[rule.do]]
 handler = "jobs.complete_linked_step"
-args = { link = "\"backlog_item\"", steps = "\"investigate,design-review,build\"", done_metadata = '"{\"verdict\": \"approved\", \"answer\": \"shipped: {branch} — {title}\"}"', route = '"[{\"kind\": \"backlog-item\", \"step\": \"triage\", \"metadata\": {\"disposition\": \"build\", \"evidence\": \"shipped and proven: {branch} — {title} (car {car})\"}}, {\"kind\": \"user-feedback\", \"step\": \"triage\", \"metadata\": {\"disposition\": \"build\", \"evidence\": \"shipped and proven: {branch} — {title} (car {car})\"}}]"' }
+args = { link = "\"backlog_item\"", also_link = "\"also_answers\"",steps = "\"investigate,design-review,build\"", done_metadata = '"{\"verdict\": \"approved\", \"answer\": \"shipped: {branch} — {title}\"}"', route = '"[{\"kind\": \"backlog-item\", \"step\": \"triage\", \"metadata\": {\"disposition\": \"build\", \"evidence\": \"shipped and proven: {branch} — {title} (car {car})\"}}, {\"kind\": \"user-feedback\", \"step\": \"triage\", \"metadata\": {\"disposition\": \"build\", \"evidence\": \"shipped and proven: {branch} — {title} (car {car})\"}}]"' }

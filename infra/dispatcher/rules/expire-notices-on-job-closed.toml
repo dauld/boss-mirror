@@ -1,0 +1,28 @@
+# ---------------------------------------------------------------------
+# The backstop to expire-notices-on-step-ended (backlog 0b2bac00,
+# 2026-09-23): retire every step notice under a job when the job
+# closes.
+#
+# A terminal close skips each open step and so reaches the step rule on
+# its own, but a close by status write does not touch the steps, and a
+# ready step on a closed job never ends. Its notice would then wait on
+# its recipient forever. Same handler; `jobs.job.closed` names the job
+# (`id`) and no step, so the whole job's notices move.
+#
+# Separate from expire-signals-on-job-closed on purpose: that rule's
+# narrowing is by KIND (signals only, never a direct), this one's by
+# the notifier's id prefix, and a person's direct about the job is left
+# alone by both.
+# ---------------------------------------------------------------------
+[[rule]]
+name = "expire-notices-on-job-closed"
+why = """
+A CROSS-PROTOCOL REACTOR, the backstop of expire-notices-on-step-ended:
+a job closed by a status write leaves its open steps open, so the
+step rule never fires for them, and their notices would wait on their
+recipients forever. No single Workflow can declare "when a job of ANY
+kind closes, retire the notices about its steps" (backlog 0b2bac00).
+"""
+on_event = "jobs.job.closed"
+[[rule.do]]
+handler = "messages.expire_notices"

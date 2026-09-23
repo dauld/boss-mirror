@@ -171,6 +171,42 @@ impl MessageRepository for InMemoryMessages {
         Ok(ids.len() as u32)
     }
 
+    async fn expire_notices_under(
+        &self,
+        path_prefix: &str,
+        id_prefix: &str,
+        now: DateTime<Utc>,
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<u32, MessageError> {
+        let ids: Vec<String> = {
+            let mut guard = self.messages.write().await;
+            let mut hit = Vec::new();
+            for m in guard.iter_mut() {
+                let under = m.entity_ref.as_ref().is_some_and(|e| {
+                    e.entity_path
+                        .as_deref()
+                        .is_some_and(|p| p.starts_with(path_prefix))
+                });
+                if under
+                    && m.id.starts_with(id_prefix)
+                    && m.kind.0 != MessageKind::ARCHIVED
+                    && m.read_at.is_none()
+                {
+                    m.kind = MessageKind::ARCHIVED.into();
+                    hit.push(m.id.clone());
+                }
+            }
+            hit
+        };
+        for id in &ids {
+            self.record(stamp.event(
+                crate::events::MESSAGE_ARCHIVED,
+                serde_json::json!({ "id": id, "archived_at": now, "reason": "entity-past-relevancy" }),
+            ));
+        }
+        Ok(ids.len() as u32)
+    }
+
     async fn archive_message(
         &self,
         id: &str,
@@ -458,6 +494,83 @@ mod expiry_tests {
             .await
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    /// A notice the machine sent about a STEP stops being true when the
+    /// step ends, whatever its kind (backlog 0b2bac00: 83 of David's 90
+    /// direct notices pointed at completed steps, and every one of them
+    /// counted in his "waiting on you" headline and badge). The id
+    /// prefix is what makes it a notice: the notifier's ids are
+    /// `notify:{step}:{recipient}`, and nothing else under the step is
+    /// touched — a person's direct about the same step, the `done:`
+    /// announcement the step's END sends, a read notice, a sibling step.
+    #[tokio::test]
+    async fn expires_only_unread_notices_by_id_under_the_prefix() {
+        let step = "/jobs/job-1/steps/s1";
+        let mut from_a_person = msg("msg-human", MessageKind::DIRECT, Some(step), false);
+        from_a_person.sender_id = "emp-colleague".to_string();
+        let repo = InMemoryMessages::new(vec![
+            msg("notify:s1:emp-001", MessageKind::DIRECT, Some(step), false),
+            // An older role-fallback notice, sent as a signal: the same
+            // notice, and just as finished.
+            msg("notify:s1:emp-002", MessageKind::SIGNAL, Some(step), false),
+            from_a_person,
+            msg("done:s1:emp-001", MessageKind::DIRECT, Some(step), false),
+            msg("notify:s1:emp-003", MessageKind::DIRECT, Some(step), true),
+            msg(
+                "notify:s2:emp-001",
+                MessageKind::DIRECT,
+                Some("/jobs/job-1/steps/s2"),
+                false,
+            ),
+        ]);
+
+        let n = repo
+            .expire_notices_under(step, "notify:", Utc::now(), &stamp())
+            .await
+            .unwrap();
+        assert_eq!(n, 2, "the step's two unread notices, and nothing else");
+
+        async fn kind_of(repo: &InMemoryMessages, id: &str) -> String {
+            repo.message_by_id(id).await.unwrap().unwrap().kind.0
+        }
+        assert_eq!(
+            kind_of(&repo, "notify:s1:emp-001").await,
+            MessageKind::ARCHIVED
+        );
+        assert_eq!(
+            kind_of(&repo, "notify:s1:emp-002").await,
+            MessageKind::ARCHIVED
+        );
+        assert_eq!(
+            kind_of(&repo, "msg-human").await,
+            MessageKind::DIRECT,
+            "a person asking about the step does not stop asking because it ended"
+        );
+        assert_eq!(
+            kind_of(&repo, "done:s1:emp-001").await,
+            MessageKind::DIRECT,
+            "the announcement that the step ended is not a notice that it is waiting"
+        );
+        assert_eq!(
+            kind_of(&repo, "notify:s1:emp-003").await,
+            MessageKind::DIRECT,
+            "a read message already did its job"
+        );
+        assert_eq!(
+            kind_of(&repo, "notify:s2:emp-001").await,
+            MessageKind::DIRECT,
+            "the prefix must not leak across steps"
+        );
+        assert_eq!(
+            repo.unread_count("emp-001", Some(MessageKind::DIRECT))
+                .await
+                .unwrap(),
+            3,
+            "the retired notice leaves the unread-direct count the badge reads \
+             (the person's, the done announcement's and the sibling step's stay)"
+        );
+        assert_eq!(repo.recorded_events().len(), 2, "one event per row moved");
     }
 
     #[tokio::test]

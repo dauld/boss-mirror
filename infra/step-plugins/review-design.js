@@ -287,13 +287,66 @@
       return r ? r.decision : '';
     }
 
-    function setResolution(anchor, decision) {
+    // THE UNSAVED ANSWER OUTLIVES THE MOUNT (backlog fec57f5f).
+    //
+    // An answer lives only in `resolutions` until Save, and this
+    // closure dies with the mount. The host used to remount the plugin
+    // on every packet reload, so a long answer David was typing kept
+    // clearing itself — the plugin came back from the step's SAVED
+    // resolutions, usually none. The host no longer does that, but a
+    // genuine remount (a page reload, leaving and coming back, a
+    // status move) still would. So every keystroke is also a draft in
+    // sessionStorage, keyed by step and question, restored on mount
+    // and spent by a successful save. Per-tab and best-effort: storage
+    // can be absent or throw (a private window, blocked site data), and
+    // then the surface behaves exactly as it did before.
+    function draftKey(anchor) {
+      return `boss.review-design.draft:${step.id}:${anchor}`;
+    }
+    function readDraft(anchor) {
+      try {
+        return window.sessionStorage.getItem(draftKey(anchor));
+      } catch (_) {
+        return null;
+      }
+    }
+    function writeDraft(anchor, decision) {
+      try {
+        window.sessionStorage.setItem(draftKey(anchor), decision);
+      } catch (_) {
+        // No storage: the in-memory answer is all there is.
+      }
+    }
+    function dropDraft(anchor) {
+      try {
+        window.sessionStorage.removeItem(draftKey(anchor));
+      } catch (_) {
+        // Nothing was stored.
+      }
+    }
+    function upsertResolution(anchor, decision) {
       const idx = resolutions.findIndex((x) => x.anchor === anchor);
       if (idx >= 0) {
         resolutions[idx] = { anchor, decision };
       } else {
         resolutions.push({ anchor, decision });
       }
+    }
+    // A completed review is a record, not a form: its drafts are not
+    // laid over what was decided.
+    function restoreDrafts() {
+      if (isDone) return;
+      questions.forEach((q) => {
+        const draft = readDraft(q.anchor);
+        if (draft !== null && draft !== resolutionFor(q.anchor)) {
+          upsertResolution(q.anchor, draft);
+        }
+      });
+    }
+
+    function setResolution(anchor, decision) {
+      upsertResolution(anchor, decision);
+      writeDraft(anchor, decision);
       renderActions();
       renderProgress();
     }
@@ -460,6 +513,7 @@
       rail.appendChild(
         h('div', { className: 'srd-rail-title' }, `Decisions (${questions.length})`),
       );
+      restoreDrafts();
       questions.forEach((q) => {
         const addressed = resolutionFor(q.anchor).trim().length > 0;
         const ta = h('textarea', {
@@ -620,7 +674,14 @@
         // 1. Land ALL metadata writes first (title + metadata are what
         //    sign-off stamps attest — a stamp taken before the last
         //    metadata write goes stale and the completion 409s).
+        //    The answers are on the step now, so their drafts are spent
+        //    — but only a draft still equal to what was SENT: text typed
+        //    while the save was in flight is unsaved and keeps its draft.
+        const sent = resolutions.map((r) => ({ ...r }));
         await mergeOwnedKeys();
+        sent.forEach((r) => {
+          if (readDraft(r.anchor) === r.decision) dropDraft(r.anchor);
+        });
 
         // 2. A save has always flipped a pending step active before
         //    any stamp lands. Status cannot travel through the

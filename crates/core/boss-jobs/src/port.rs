@@ -173,7 +173,8 @@ pub struct LaunchCalendarRow {
     /// Min sort_order of any non-done step = current tier. Null means
     /// every step is terminal but the Job isn't closed yet.
     pub current_tier: Option<i32>,
-    /// `launch_date` from the tier-4 `marketing-launch` step's metadata.
+    /// `launch_date` from the launch step's metadata (the step carrying
+    /// the field — `marketing-launch` declares it).
     /// Null when the step exists but the date hasn't been set yet.
     pub launch_date: Option<chrono::NaiveDate>,
     /// Channel label from the launch step ("email" / "webinar" / etc.).
@@ -1249,12 +1250,14 @@ pub trait JobsRepository: Send + Sync {
     ) -> Result<Vec<(String, i32, i64)>, JobsError>;
 
     /// Projection backing the launch-calendar surface and the exec
-    /// next-30-days panel per examples/used-device-shop/design/marketing-needs.md E2. Returns every
-    /// open/in-flight `marketing-motion` Job joined to its tier-4
-    /// `marketing-launch` step so the caller can render a forward
-    /// calendar. `from` / `to` bound the launch_date window; Jobs
-    /// whose launch step has no date yet are returned with `launch_date
-    /// = None` so the UI can bucket them under "unscheduled".
+    /// next-30-days panel per examples/used-device-shop/design/marketing-needs.md E2. Returns one
+    /// row per launch step — any step carrying the `launch_date` field
+    /// (the StepType registry declares it on `marketing-launch`) — on
+    /// every open/in-flight Job, whatever the Job's kind, so the caller
+    /// can render a forward calendar. No kind is named here (backlog
+    /// 649b3303). `from` / `to` bound the launch_date window; launch
+    /// steps with no date yet are returned with `launch_date = None` so
+    /// the UI can bucket them under "unscheduled".
     async fn list_launch_calendar(
         &self,
         from: chrono::NaiveDate,

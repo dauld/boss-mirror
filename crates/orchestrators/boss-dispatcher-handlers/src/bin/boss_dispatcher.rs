@@ -54,6 +54,7 @@ use boss_dispatcher_handlers::handlers::{
     ledger_tax_accrue::LedgerTaxAccrue,
     ledger_tax_remit::LedgerTaxRemit,
     messages_expire_for_job::MessagesExpireForJob,
+    messages_expire_notices::MessagesExpireNotices,
     messages_notify::MessagesNotify,
     messages_notify_job_terminal::MessagesNotifyJobTerminal,
     network_census::NetworkCensus,
@@ -727,6 +728,11 @@ async fn main() -> Result<()> {
             // (David, 2026-08-14). Unread signals only — the port
             // carries why a direct never expires with the job.
             handlers.register(MessagesExpireForJob::new(cfg.messages_api_url.clone()));
+            // ...and the step notifier's own notices — directs among
+            // them — once their step ends or their job closes (backlog
+            // 0b2bac00: 83 of David's 90 direct notices pointed at
+            // completed steps).
+            handlers.register(MessagesExpireNotices::new(cfg.messages_api_url.clone()));
             let helpers = Arc::new(InventoryHelpers::new(
                 cfg.inventory_api_url.clone(),
                 cfg.jobs_api_url.clone(),

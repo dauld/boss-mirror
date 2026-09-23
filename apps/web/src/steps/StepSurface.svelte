@@ -75,11 +75,23 @@
   let pluginProbeFailed = $state(false);
   // Bumped by the Retry affordance so the probe effect re-runs.
   let retryNonce = $state(0);
+  // The probe depends on the KIND, never the step object (backlog
+  // fec57f5f). It read `step.kind` inside the effect, which made the
+  // whole `step` prop a dependency; JobDetailPage replaces the packet
+  // on every SSE frame and every fallback poll, so each reload reset
+  // this to null, the `{#if}` below unmounted the plugin, and the
+  // review-design box lost the answer David was typing. A $derived
+  // primitive only notifies when its VALUE changes, so a same-kind
+  // reload never re-runs the probe and never unmounts a mounted
+  // plugin. Which step and which status the plugin shows is
+  // StepPluginMount's to judge, by id and status.
+  let kind = $derived(step.kind);
   $effect(() => {
     void retryNonce;
+    const k = kind;
     pluginAvailable = null;
     let cancelled = false;
-    probeActivePlugin(step.kind).then((probe) => {
+    probeActivePlugin(k).then((probe) => {
       if (cancelled) return;
       if (probe.kind === 'failed') {
         pluginProbeFailed = true;
@@ -204,7 +216,7 @@
     </a>
   </div>
   <StepPluginMount
-    kind={step.kind}
+    {kind}
     {step}
     {jobId}
     {onUpdate}

@@ -29,6 +29,13 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 
+/// The id prefix of the notice a step's READY or ASSIGNED event sends —
+/// `notify:{step}:{recipient}` — when the rule passes no `id_prefix`.
+/// One constant because `messages.expire_notices` retires exactly these
+/// when the step ends (backlog 0b2bac00): the sender and the retirer
+/// read the same definition, so the two cannot drift apart.
+pub const DEFAULT_ID_PREFIX: &str = "notify";
+
 #[derive(Debug, Deserialize)]
 struct EmployeeLite {
     id: String,
@@ -89,7 +96,7 @@ impl Handler for MessagesNotify {
                 Value::String(s) => Some(s.as_str()),
                 _ => None,
             })
-            .unwrap_or("notify");
+            .unwrap_or(DEFAULT_ID_PREFIX);
 
         // An ASSIGNEE wins over a role, and a step with neither is the
         // only no-op.

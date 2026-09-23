@@ -180,8 +180,11 @@ done
 # `--plan` prints the decision per service and exits without starting
 # anything: the door the shell test uses, and what an operator asks
 # when a service is missing from a pod ("was it skipped, and why?").
-# (Called in THIS shell, not a subshell: it exports.)
+# The first line under the header names how many modules the tenant
+# runs (modules_on_line — backlog fa77e3d7: prod declared none for days
+# and nothing said so). (Called in THIS shell, not a subshell: it exports.)
 echo "==> tenant modules:"
+modules_on_line
 derive_sim_env
 if [[ "${1:-}" == "--plan" ]]; then
     for svc in "${SERVICES[@]}"; do

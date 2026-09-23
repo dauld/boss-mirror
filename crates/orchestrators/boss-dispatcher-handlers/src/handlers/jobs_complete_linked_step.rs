@@ -177,6 +177,16 @@
 //! completing `step`, for the same reason the edge cannot be
 //! job-level.
 //!
+//! ## Every item the close answers (v8, a994f533)
+//!
+//! - `also_link = "<key>"` — a `job_id_list` edge on the closing
+//!   packet naming every OTHER item it answers. Each gets the same
+//!   guards, route and completion the primary `link` gets, in order,
+//!   after it. A car's `backlog_item` holds one id, so a change that
+//!   answered two left the second open, and `boss dispatch` handed that
+//!   landed-but-unclosed item to a builder twice on 2026-09-23. Absent,
+//!   nothing is read: every rule before v8 is untouched.
+//!
 //! ## Idempotence
 //!
 //! JetStream is at-least-once and the close marker is emitted from
@@ -505,6 +515,31 @@ fn link_on_completing_step<'a>(payload: &'a serde_json::Value, link: &str) -> Op
         .filter(|s| !s.is_empty())
 }
 
+/// PURE over the closing packet's metadata: the usable ids of the
+/// `job_id_list` edge under `key`, in order, trimmed. An element that
+/// cannot name a Job is skipped the way an unusable single edge is. A
+/// value that is not an array is said and read as empty — the write
+/// path's trigger skips a non-array `job_id_list` without ref-checking
+/// it, so nothing vouches for what it holds.
+fn listed_links(meta: &serde_json::Value, key: &str, rule: &str) -> Vec<String> {
+    match meta.get(key) {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::Array(ids)) => ids
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter_map(|id| usable_link(id, key, rule))
+            .map(str::to_string)
+            .collect(),
+        Some(other) => {
+            tracing::warn!(rule = %rule, link = %key,
+                "list edge is not an array ({other}) — reading no items from it");
+            Vec::new()
+        }
+    }
+}
+
 /// `unusable_link` as a filter: the id when it can name a Job, `None`
 /// with the warning already said when it cannot. One definition, used
 /// by both edge sources — a link that cannot name a Job is a skip, not
@@ -635,21 +670,90 @@ impl Handler for JobsCompleteLinkedStep {
         // free-text case: a car whose motivating item is named only in
         // `backlog_text` prose, or one filed against nothing at all.
         // Both ship exactly as before.
-        let target_id = match step_link {
-            Some(id) => id,
-            None => {
-                let Some(id) = closing_meta
-                    .get(link)
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .and_then(|id| usable_link(id, link, &ctx.rule_name))
-                else {
-                    return Ok(());
-                };
-                id
-            }
+        let primary: Option<String> = match step_link {
+            Some(id) => Some(id.to_string()),
+            None => closing_meta
+                .get(link)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .and_then(|id| usable_link(id, link, &ctx.rule_name))
+                .map(str::to_string),
         };
+        // The list edge (v8, a994f533): every OTHER item the close
+        // answers, read only when the rule row names its key. A car's
+        // `backlog_item` holds one id, so a change that answered two
+        // items left the second open as landed-but-unclosed residue —
+        // and `boss dispatch` handed it to a builder, twice on
+        // 2026-09-23 (5994de6d, cab50f4c), each run spent rediscovering
+        // a landing. Ids repeated, or equal to the primary, are read once.
+        let items: Vec<String> = match arg(args, "also_link") {
+            Some(Value::String(key)) if !key.is_empty() => {
+                listed_links(&closing_meta, key, &ctx.rule_name)
+                    .into_iter()
+                    .fold(primary.into_iter().collect(), |mut seen, id| {
+                        if !seen.contains(&id) {
+                            seen.push(id);
+                        }
+                        seen
+                    })
+            }
+            _ => primary.into_iter().collect(),
+        };
+
+        let close = Close {
+            id: closing_id,
+            job: closing,
+            meta: closing_meta,
+            allowed,
+            evidence_key,
+            answer,
+            args,
+        };
+        // EVERY ITEM THE CLOSE ANSWERS (v8, a994f533). The primary
+        // edge first, then each id on the list the rule names in
+        // `also_link`, and each gets exactly the obligation the primary
+        // gets. A failure on one returns the error and the event
+        // redelivers; the items already answered fall out at their own
+        // guards, so the retry costs the list nothing but reads.
+        for target_id in &items {
+            self.answer_item(&close, target_id, ctx).await?;
+        }
+        Ok(())
+    }
+}
+
+/// What the close carries into every item it answers — read once off
+/// the closing packet and the rule row, shared across the list (v8,
+/// a994f533).
+struct Close<'a> {
+    id: &'a str,
+    job: serde_json::Value,
+    meta: serde_json::Value,
+    allowed: Vec<&'a str>,
+    evidence_key: &'a str,
+    answer: AnswerSpec,
+    args: &'a [(String, Value)],
+}
+
+impl JobsCompleteLinkedStep {
+    /// The obligation, discharged against ONE item: every guard, the
+    /// route, the completion, the note on both ends — unchanged from
+    /// the single-item handler it was cut out of, so an item named on
+    /// the list is answered exactly as the primary is.
+    async fn answer_item(
+        &self,
+        close: &Close<'_>,
+        target_id: &str,
+        ctx: &InvocationContext,
+    ) -> Result<(), HandlerError> {
+        let closing_id: &str = close.id;
+        let closing = &close.job;
+        let closing_meta = &close.meta;
+        let allowed: &[&str] = &close.allowed;
+        let evidence_key: &str = close.evidence_key;
+        let answer = &close.answer;
+        let args = close.args;
 
         let target = self.get_job(target_id, &ctx.rule_name).await?;
 
@@ -669,15 +773,15 @@ impl Handler for JobsCompleteLinkedStep {
         // line matched" note on both ends is what left the publish step
         // ready and silent for five hours.
         if let (Some(OnFailure::AnnotateAndAlert), Some(failure)) =
-            (answer.on_failure, verb_failure(&closing))
+            (answer.on_failure, verb_failure(closing))
         {
             return self
                 .annotate_and_alert(
                     closing_id,
-                    &closing_meta,
+                    closing_meta,
                     target_id,
                     &target,
-                    &allowed,
+                    allowed,
                     &failure,
                     ctx,
                 )
@@ -690,7 +794,7 @@ impl Handler for JobsCompleteLinkedStep {
         // or was killed before its last line — and the step it would
         // have completed stays with its person. Said on both ends, like
         // a dead link; idempotent under redelivery like it too.
-        let answer_groups = match answer.groups(&closing) {
+        let answer_groups = match answer.groups(closing) {
             Ok(groups) => groups,
             Err(why) => {
                 tracing::warn!(
@@ -735,7 +839,7 @@ impl Handler for JobsCompleteLinkedStep {
         // different disposition value). A re-delivery finds the branch
         // already `completed` and falls out here.
         let mut shipped: Option<Shipped> = None;
-        let step = match open_step(&target, &allowed).cloned() {
+        let step = match open_step(&target, allowed).cloned() {
             Some(step) => step,
             None => {
                 // THE ROUTE (v3, dda0713c). No branch is open because
@@ -760,7 +864,7 @@ impl Handler for JobsCompleteLinkedStep {
                     // Silent on a redelivery; loud when the link
                     // pointed at a packet this obligation cannot act
                     // on. See `noop_reason`.
-                    if let Some(why) = noop_reason(&target, &allowed) {
+                    if let Some(why) = noop_reason(&target, allowed) {
                         tracing::warn!(
                             rule = %ctx.rule_name,
                             car = %closing_id,
@@ -797,7 +901,7 @@ impl Handler for JobsCompleteLinkedStep {
                     return Ok(());
                 };
                 let facts = self
-                    .shipped(closing_id, &closing, &closing_meta, &answer_groups, ctx)
+                    .shipped(closing_id, closing, closing_meta, &answer_groups, ctx)
                     .await;
                 self.complete_step(
                     target_id,
@@ -810,7 +914,7 @@ impl Handler for JobsCompleteLinkedStep {
                 .await?;
                 shipped = Some(facts);
                 let routed = self.get_job(target_id, &ctx.rule_name).await?;
-                match open_step(&routed, &allowed).cloned() {
+                match open_step(&routed, allowed).cloned() {
                     Some(step) => step,
                     // The route wrote a disposition none of `steps`
                     // answers to — rule authoring, pinned by
@@ -842,7 +946,7 @@ impl Handler for JobsCompleteLinkedStep {
         let facts = match shipped {
             Some(f) => f,
             None => {
-                self.shipped(closing_id, &closing, &closing_meta, &answer_groups, ctx)
+                self.shipped(closing_id, closing, closing_meta, &answer_groups, ctx)
                     .await
             }
         };
@@ -2231,6 +2335,148 @@ mod tests {
             2,
             "the noop note lands on the car and on the packet"
         );
+    }
+
+    const SECOND_PACKET: &str = "55555555-5555-5555-5555-555555555555";
+
+    /// A second untriaged backlog item, its step ids distinct from the
+    /// first's so a recorded PUT says which item it landed on.
+    fn second_untriaged_packet() -> serde_json::Value {
+        json!({
+            "id": SECOND_PACKET,
+            "kind": "backlog-item",
+            "title": "The same defect, filed a second time from another angle",
+            "status": "open",
+            "metadata": {},
+            "steps": [
+                { "id": "s2-triage", "spec_slug": "triage", "status": "ready", "metadata": {} },
+                { "id": "s2-investigate", "spec_slug": "investigate", "status": "pending",
+                  "metadata": {} },
+                { "id": "s2-build", "spec_slug": "build", "status": "pending", "metadata": {} },
+            ],
+        })
+    }
+
+    /// The live rule's args (v5, a994f533): v4's, plus the list key.
+    fn args_with_also() -> Vec<(String, Value)> {
+        let mut a = args_with_routes();
+        a.push((
+            "also_link".to_string(),
+            Value::String("also_answers".into()),
+        ));
+        a
+    }
+
+    /// A CAR THAT ANSWERS TWO ITEMS CLOSES BOTH (a994f533).
+    ///
+    /// Measured twice on 2026-09-23: 5994de6d's fix landed in #572/#574
+    /// on cars filed under other items, and cab50f4c's in #527 on car
+    /// c842f18b, which named only 3ec04168. `backlog_item` holds ONE id,
+    /// so the second item stayed open as landed-but-unclosed residue and
+    /// `boss dispatch` handed it to a builder, who spent a run
+    /// rediscovering the landing. The list edge lets the car name every
+    /// item it answers, and each gets the same route and the same build
+    /// completion the primary gets.
+    #[tokio::test]
+    async fn a_car_closes_every_item_it_also_answers() {
+        let (base, puts, patches) = mock_jobs(vec![
+            car(json!({
+                "backlog_item": PACKET,
+                "also_answers": [SECOND_PACKET],
+                "train": TRAIN,
+                "branch": "fix/x",
+            })),
+            untriaged_packet(),
+            second_untriaged_packet(),
+            train(),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
+        h.invoke(&args_with_also(), &ctx(close_marker()))
+            .await
+            .expect("runs");
+
+        let steps: Vec<String> = puts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(s, _)| s.clone())
+            .collect();
+        assert_eq!(
+            steps,
+            vec!["s-triage", BRANCH_STEP, "s2-triage", "s2-build"],
+            "the primary item first, then every listed one, each routed then built"
+        );
+        let calls = puts.lock().unwrap().clone();
+        assert_eq!(calls[3].1["metadata"]["arrived_from"]["car"], CAR);
+        assert!(patches.lock().unwrap().is_empty(), "{:?}", patches.lock());
+    }
+
+    /// Redelivery is as idempotent across the list as for one item: the
+    /// second delivery finds every branch completed and writes nothing.
+    #[tokio::test]
+    async fn a_redelivered_close_writes_nothing_more_across_the_list() {
+        let (base, puts, _) = mock_jobs(vec![
+            car(json!({ "backlog_item": PACKET, "also_answers": [SECOND_PACKET] })),
+            untriaged_packet(),
+            second_untriaged_packet(),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
+        for _ in 0..2 {
+            h.invoke(&args_with_also(), &ctx(close_marker()))
+                .await
+                .expect("runs");
+        }
+        assert_eq!(puts.lock().unwrap().len(), 4, "{:?}", puts.lock());
+    }
+
+    /// An element that cannot name a Job is skipped the way an unusable
+    /// `backlog_item` is — said, not retried — and costs the rest of the
+    /// list nothing. The list stands alone, too: a car may name its
+    /// items only there.
+    #[tokio::test]
+    async fn an_unusable_listed_item_is_skipped_and_the_rest_still_close() {
+        let (base, puts, _) = mock_jobs(vec![
+            car(json!({ "also_answers": ["bb86d687", SECOND_PACKET] })),
+            second_untriaged_packet(),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
+        h.invoke(&args_with_also(), &ctx(close_marker()))
+            .await
+            .expect("runs");
+        let steps: Vec<String> = puts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(s, _)| s.clone())
+            .collect();
+        assert_eq!(steps, vec!["s2-triage", "s2-build"]);
+    }
+
+    /// The list is read only when the rule names it — the key is the
+    /// rule row's to choose, like `link` — so a rule without
+    /// `also_link` closes exactly what it closed before.
+    #[tokio::test]
+    async fn a_rule_that_names_no_list_reads_none() {
+        let (base, puts, _) = mock_jobs(vec![
+            car(json!({ "backlog_item": PACKET, "also_answers": [SECOND_PACKET] })),
+            untriaged_packet(),
+            second_untriaged_packet(),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
+        h.invoke(&args_with_routes(), &ctx(close_marker()))
+            .await
+            .expect("runs");
+        let steps: Vec<String> = puts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(s, _)| s.clone())
+            .collect();
+        assert_eq!(steps, vec!["s-triage", BRANCH_STEP]);
     }
 
     /// The obligation itself: a merged car completes the branch its

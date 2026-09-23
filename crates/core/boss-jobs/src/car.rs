@@ -539,6 +539,26 @@ pub fn waits_on_value(on: &str, seen: Option<&str>) -> Value {
     json!({"on": on.trim(), "seen": seen})
 }
 
+/// A written declaration MERGED into the one the car carries (backlog
+/// e9b164a1 piece 3): each field `update` carries replaces that field,
+/// every other field `existing` declares is kept. `None` when the result
+/// names no `on` — a declaration of nothing, which neither writer may
+/// record. One definition for both writers, `boss car waits-on` and the
+/// auto-park handler's copy of `--park-waits-on`, because the object is
+/// wider than its first two fields now: an `owner` and a patience
+/// written by hand must survive a writer that re-states only `on`, and
+/// the metadata door merges top-level keys only.
+pub fn merge_waits_on(existing: Option<&Value>, update: &Value) -> Option<Value> {
+    let mut merged = existing
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    merged.extend(update.as_object()?.clone());
+    let merged = Value::Object(merged);
+    waits_on(&json!({ WAITS_ON: merged.clone() }))?;
+    Some(merged)
+}
+
 /// When the declared event was first seen, for a run that `seen` it (or
 /// not): the prior attempt's sighting if it had one, else this run's
 /// instant; `None` for a run that did not see it — a sighting that stops
@@ -587,6 +607,81 @@ pub fn starved(md: &Value) -> Option<Starved> {
     }
 }
 
+/// WHOSE MOVE A DECLARED WAIT IS (backlog 3881f5c9). Inside `waits_on`:
+/// `"world"` for an event nobody here can cause, or the id of the actor
+/// whose act it is. DECLARED, never inferred — `on` prose that says
+/// "David opens it" names no owner, because a reader that guessed an
+/// owner out of prose would be the mostly-sure the shed exists to
+/// refuse. No writer sets it yet (`boss car waits-on` writes only `on`
+/// and `seen`); until one does, it is written through the metadata
+/// PATCH, and a car without it reads as ours.
+pub const WAITS_ON_OWNER: &str = "owner";
+/// Inside `waits_on`, optional: how many hours from the car's opening
+/// the owner's move may take before the wait is ours again. A positive
+/// integer or nothing — patience is the car's to state, not a default.
+pub const WAITS_ON_MAX_WAIT_HOURS: &str = "max_wait_hours";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WaitOwner {
+    World,
+    Actor(String),
+}
+
+impl std::fmt::Display for WaitOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WaitOwner::World => f.write_str("the world"),
+            WaitOwner::Actor(a) => f.write_str(a),
+        }
+    }
+}
+
+/// The owner a car's `waits_on` declares, or `None` for none or blank.
+pub fn wait_owner(md: &Value) -> Option<WaitOwner> {
+    let owner = non_blank(md.get(WAITS_ON)?.get(WAITS_ON_OWNER))?;
+    Some(if owner.eq_ignore_ascii_case("world") {
+        WaitOwner::World
+    } else {
+        WaitOwner::Actor(owner)
+    })
+}
+
+/// A wait that is someone else's move.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedWait {
+    pub owner: WaitOwner,
+    pub on: String,
+    pub max_wait_hours: Option<i64>,
+}
+
+impl OwnedWait {
+    /// Past the patience the car declared, measured on its age.
+    pub fn overdue(&self, age_hours: i64) -> bool {
+        self.max_wait_hours.is_some_and(|max| age_hours > max)
+    }
+}
+
+/// Is this car's wait someone else's move? Only when all four hold: it
+/// DECLARED the wait, something OBSERVES it (a `seen` check), it names
+/// an OWNER, and the event has not been seen while the probe says
+/// not-yet ([`starved`] is `None`). Anything short of that is ours —
+/// the shed's troubled colour means exactly that set.
+pub fn owned_wait(md: &Value) -> Option<OwnedWait> {
+    let w = waits_on(md)?;
+    w.seen.as_ref()?;
+    if starved(md).is_some() {
+        return None;
+    }
+    Some(OwnedWait {
+        owner: wait_owner(md)?,
+        on: w.on,
+        max_wait_hours: md
+            .pointer(&format!("/{WAITS_ON}/{WAITS_ON_MAX_WAIT_HOURS}"))
+            .and_then(Value::as_i64)
+            .filter(|h| *h > 0),
+    })
+}
+
 /// THE ITEM A CAR ANSWERS, AND AUTHORISES THE CLOSE OF.
 ///
 /// The declared one-to-one job edge (`('ship-a-change', 'backlog_item',
@@ -618,6 +713,17 @@ pub const BACKLOG_ITEM: &str = "backlog_item";
 /// work outstanding. This key records the same provenance under a name
 /// NO rule reads, which is what makes it inert at arrival.
 pub const PARTIAL_ITEM: &str = "partial_item";
+
+/// EVERY OTHER ITEM A CAR ANSWERS, AND AUTHORISES THE CLOSE OF.
+///
+/// A `job_id_list` edge beside [`BACKLOG_ITEM`], followed on merge by
+/// the same arrival rule (its `also_link`), so each listed item is
+/// routed and built exactly as the primary is. `backlog_item` holds ONE
+/// id, and on 2026-09-23 two landed items stayed open that way and were
+/// dispatched to builders who rediscovered the landing: 5994de6d (its
+/// fix rode on cars filed under three other items) and cab50f4c (car
+/// c842f18b named only 3ec04168). Backlog a994f533.
+pub const ALSO_ANSWERS: &str = "also_answers";
 /// Why this car names no item at all — the answer a deliberately
 /// item-less car gives (`--park-no-item`). Item-less cars legitimately
 /// exist (a fix asked for in conversation, a defect found while
@@ -692,6 +798,11 @@ pub const PARK_EXPECT: &str = "park_expect";
 pub const PARK_PROOF_EVENT: &str = "park_proof_event";
 pub const PARK_NO_ITEM: &str = "park_no_item";
 pub const PARK_PARTIAL_ITEM: &str = "park_partial_item";
+/// `boss gate --park-waits-on` (backlog e9b164a1 piece 3): the car's
+/// declared wait as the builder states it at park — an object carrying
+/// only the [`WAITS_ON`] fields given. The auto-park handler MERGES it
+/// onto the car's `waits_on` with [`merge_waits_on`], never replaces.
+pub const PARK_WAITS_ON: &str = "park_waits_on";
 
 /// The item provenance a car carries beyond the closing edge: the item
 /// it is one piece of, or the reason it names none. Absent and blank
@@ -2298,6 +2409,46 @@ mod waits_on_tests {
         md
     }
 
+    /// THE WRITER MERGES, IT DOES NOT REPLACE (backlog e9b164a1 piece 3).
+    /// Until this, `boss car waits-on` PATCHed the whole object, so a
+    /// re-statement of `on` or `seen` dropped an `owner` an operator had
+    /// added by hand — and a wait without an owner reads as ours. Each
+    /// field the update carries replaces that field; every other field
+    /// the car already declares is kept; a result naming no `on` declares
+    /// nothing and is `None`.
+    #[test]
+    fn a_written_declaration_merges_into_the_one_the_car_carries() {
+        let owned = json!({"on": "a release", "seen": "true", WAITS_ON_OWNER: "emp-david"});
+        let got = merge_waits_on(
+            Some(&owned),
+            &json!({"on": "a tagged release", "seen": "exit 0"}),
+        );
+        assert_eq!(
+            got,
+            Some(json!({"on": "a tagged release", "seen": "exit 0", WAITS_ON_OWNER: "emp-david"}))
+        );
+        // An owner and a patience added to a declaration keep its on/seen.
+        let got = merge_waits_on(
+            Some(&waits_on_value("a Stripe charge", Some("true"))),
+            &json!({WAITS_ON_OWNER: "world", WAITS_ON_MAX_WAIT_HOURS: 336}),
+        )
+        .unwrap();
+        let md = json!({ WAITS_ON: got });
+        assert_eq!(wait_owner(&md), Some(WaitOwner::World));
+        assert_eq!(waits_on(&md).unwrap().seen.as_deref(), Some("true"));
+        assert_eq!(md[WAITS_ON][WAITS_ON_MAX_WAIT_HOURS], 336);
+        // Nothing to merge into and no `on`: nothing is declared.
+        assert_eq!(
+            merge_waits_on(None, &json!({WAITS_ON_OWNER: "world"})),
+            None
+        );
+        // A non-object recorded by hand is replaced, not merged into.
+        assert_eq!(
+            merge_waits_on(Some(&json!("prose only")), &json!({"on": "x"})),
+            Some(json!({"on": "x"}))
+        );
+    }
+
     /// UNDECLARED: exactly adef5ddf's rule — past the bound it is ours to
     /// read, under it nobody's business yet.
     #[test]
@@ -2365,5 +2516,80 @@ mod waits_on_tests {
             Some("2026-09-26T10:00:00Z")
         );
         assert_eq!(carried_seen_at(Some(&prior), false, "x"), None);
+    }
+
+    /// A declared wait with its owner and optional patience added.
+    fn owned(on: &str, seen: Option<&str>, owner: Value, max: Value) -> Value {
+        let mut w = waits_on_value(on, seen);
+        w[WAITS_ON_OWNER] = owner;
+        w[WAITS_ON_MAX_WAIT_HOURS] = max;
+        w
+    }
+
+    /// THE OWNER IS READ, NEVER INFERRED (backlog 3881f5c9): `world`
+    /// (any case) is the world, any other non-blank string is the actor
+    /// named, and a blank or missing owner is no owner — the `on` prose
+    /// saying "David opens it" does not make David the owner.
+    #[test]
+    fn a_wait_owner_is_the_declared_field_and_nothing_else() {
+        let md =
+            |owner: Value| json!({WAITS_ON: owned("an event", Some("true"), owner, Value::Null)});
+        assert_eq!(wait_owner(&md(json!(" World "))), Some(WaitOwner::World));
+        assert_eq!(
+            wait_owner(&md(json!("emp-david"))),
+            Some(WaitOwner::Actor("emp-david".into()))
+        );
+        assert_eq!(wait_owner(&md(json!("  "))), None);
+        assert_eq!(wait_owner(&md(Value::Null)), None);
+        let prose = json!({WAITS_ON: waits_on_value("a release (David opens it)", Some("true"))});
+        assert_eq!(wait_owner(&prose), None);
+    }
+
+    /// OBSERVED, OWNED, NOT SEEN: someone else's move, and only that.
+    /// Every one of the three missing — the owner, the `seen` check, or
+    /// the event still unseen — leaves the wait ours.
+    #[test]
+    fn an_owned_wait_is_only_a_declared_observed_owned_unseen_one() {
+        let w = owned("a Stripe charge", Some("true"), json!("world"), json!(336));
+        let md = waiting(134, Some(w.clone()), None);
+        assert_eq!(
+            owned_wait(&md),
+            Some(OwnedWait {
+                owner: WaitOwner::World,
+                on: "a Stripe charge".into(),
+                max_wait_hours: Some(336),
+            })
+        );
+        // Seen while not yet: ours, not the owner's.
+        assert_eq!(
+            owned_wait(&waiting(3, Some(w), Some("2026-09-26T11:00:00Z"))),
+            None
+        );
+        // No `seen` check: nothing can say the event came.
+        let unobserved = owned("a Stripe charge", None, json!("world"), Value::Null);
+        assert_eq!(owned_wait(&waiting(134, Some(unobserved), None)), None);
+        // No owner.
+        let unowned = waits_on_value("a Stripe charge", Some("true"));
+        assert_eq!(owned_wait(&waiting(134, Some(unowned), None)), None);
+        // Undeclared.
+        assert_eq!(owned_wait(&waiting(134, None, None)), None);
+    }
+
+    /// PATIENCE IS OPTIONAL AND BOUNDED ONLY WHEN DECLARED: no
+    /// `max_wait_hours` is never overdue; a declared one is overdue past
+    /// it on the car's age; a zero, negative or non-numeric one is no
+    /// declaration, so it cannot turn a car overdue the hour it lands.
+    #[test]
+    fn a_declared_max_wait_bounds_the_owned_wait_and_nothing_else_does() {
+        let read = |max: Value| {
+            let w = owned("a release", Some("true"), json!("emp-david"), max);
+            owned_wait(&waiting(10, Some(w), None)).unwrap()
+        };
+        assert!(!read(Value::Null).overdue(10_000));
+        assert!(read(json!(48)).overdue(49));
+        assert!(!read(json!(48)).overdue(48));
+        assert_eq!(read(json!(0)).max_wait_hours, None);
+        assert_eq!(read(json!(-5)).max_wait_hours, None);
+        assert_eq!(read(json!("48")).max_wait_hours, None);
     }
 }

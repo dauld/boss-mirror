@@ -1698,3 +1698,143 @@ fn the_doors_list_names_the_mode_that_proves_clippy() {
          exists to prevent (packet 410e21e2). The entry as written:\n{door}"
     );
 }
+
+/// `--lint` RUNS THE CHECK THE GATE'S FIRST ACT RUNS.
+///
+/// MEASURED on origin/main 1d917084, 2026-09-23 (backlog d8637703).
+/// `scope_self_test` is build-free and was called on only two paths, `-p`
+/// and `--auto` — the gate's own. Gate-run 1f412b9e went red before any
+/// check ran, on `gate.sh scope self-test FAIL: a script boss-testing
+/// executes implies boss-testing -> [boss-jobs boss-testing], wanted
+/// [boss-testing]`, and no receipt was written. The branch had passed
+/// `--lint` twice. A pre-flight that skips the check the gate runs first
+/// vouches for a tree the gate refuses in its first second.
+///
+/// Read out of the `--lint` branch rather than run: `--lint` compiles
+/// (clippy), and `scope_self_test` is silent on success, so a run could
+/// not tell "held" from "never asked". The call must precede the scope
+/// it vouches for — `crates_from_paths` is the map it tests.
+#[test]
+fn lint_runs_the_scope_self_test_before_the_scope_it_vouches_for() {
+    let gate = read("infra/gate.sh");
+    let lines: Vec<&str> = gate.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.trim_end() == "if [ \"$LINT\" -eq 1 ]; then")
+        .expect("infra/gate.sh no longer has a --lint branch");
+    let len = lines[start..]
+        .iter()
+        .position(|l| *l == "fi")
+        .expect("the --lint branch never closes at column 0");
+    let branch = &lines[start..start + len];
+
+    let scope = branch
+        .iter()
+        .position(|l| {
+            let t = l.trim_start();
+            !t.starts_with('#') && t.contains("crates_from_paths")
+        })
+        .expect("the --lint branch no longer derives its scope from crates_from_paths");
+    match branch.iter().position(|l| l.trim() == "scope_self_test") {
+        Some(at) => assert!(
+            at < scope,
+            "the --lint branch calls scope_self_test AFTER crates_from_paths — it derives \
+             the clippy scope from a map it has not yet checked:\n{}",
+            branch.join("\n")
+        ),
+        None => panic!(
+            "the --lint branch never calls scope_self_test, so a stale scope fixture passes \
+             the pre-flight and reds the gate before any check runs (gate-run 1f412b9e, \
+             backlog d8637703). The branch reads:\n{}",
+            branch.join("\n")
+        ),
+    }
+}
+
+/// EVERY FUNCTION IS DEFINED ABOVE ITS FIRST TOP-LEVEL CALLER.
+///
+/// bash defines a function when execution reaches its definition, so a
+/// top-level line that calls one defined further down answers `command
+/// not found` — and inside `$(...)` that is an empty string, not an
+/// error, so the surrounding test simply goes the other way. MEASURED on
+/// origin/main 1d917084 (backlog d8637703, reported by builder run
+/// 2094f5d9): the `-p` refusal ran `$(schema_touched)` at :1167 and the
+/// function was defined at :1207, so the refusal printed `schema_touched:
+/// command not found` and silently dropped the line saying a schema
+/// change widened the scope.
+///
+/// Read for EVERY function, not only that one, because the shape is the
+/// file's and not the function's: the script is one long top-level
+/// program with its functions defined inline, where the next one moved
+/// or added is the next instance. Only column-0 definitions (`name() {`
+/// through a column-0 `}`) and only call-shaped uses count — a statement
+/// start, `$(`, `if`, `!`, `then`, `do`, or after `;`, `&`, `|` — so a
+/// function's name inside a sentence an `echo` prints does not (`check`
+/// is one: "nothing to check." is printed above `check()`).
+#[test]
+fn every_gate_function_is_defined_above_its_first_top_level_caller() {
+    let gate = read("infra/gate.sh");
+    let lines: Vec<&str> = gate.lines().collect();
+
+    let def = regex::Regex::new(r"^([A-Za-z_][A-Za-z0-9_]*)\(\) \{").expect("definition regex");
+    let mut defined: Vec<(String, usize)> = Vec::new();
+    let mut in_body = vec![false; lines.len()];
+    let mut i = 0;
+    while i < lines.len() {
+        let Some(name) = def.captures(lines[i]).map(|c| c[1].to_string()) else {
+            i += 1;
+            continue;
+        };
+        if !defined.iter().any(|(n, _)| *n == name) {
+            defined.push((name, i));
+        }
+        let end = lines[i..]
+            .iter()
+            .position(|l| *l == "}")
+            .map_or(lines.len() - 1, |n| i + n);
+        in_body[i..=end].iter_mut().for_each(|b| *b = true);
+        i = end + 1;
+    }
+    assert!(
+        defined.len() >= 20,
+        "only {} function definition(s) were read out of infra/gate.sh — the shape this \
+         test reads has changed, and a pin that matches nothing passes while proving nothing",
+        defined.len()
+    );
+
+    let mut called = 0usize;
+    let mut early: Vec<String> = Vec::new();
+    for (name, at) in &defined {
+        let call = regex::Regex::new(&format!(
+            r"(?:^|[;&|(]\s*|\bthen\s+|\bdo\s+|\bif\s+|!\s+){}(?:\s|$|\)|;)",
+            regex::escape(name)
+        ))
+        .expect("call regex");
+        let first = lines.iter().enumerate().find(|(k, l)| {
+            let t = l.trim();
+            !in_body[*k] && !t.starts_with('#') && call.is_match(t)
+        });
+        if let Some((k, l)) = first {
+            called += 1;
+            if k < *at {
+                early.push(format!(
+                    "{name}: called at line {}, defined at line {}: {}",
+                    k + 1,
+                    at + 1,
+                    l.trim()
+                ));
+            }
+        }
+    }
+    assert!(
+        called >= 10,
+        "only {called} function(s) were found called at top level — the call shape this \
+         test reads has changed, and a pin that matches nothing passes while proving nothing"
+    );
+    assert!(
+        early.is_empty(),
+        "infra/gate.sh calls a function above its definition, which bash answers with \
+         `command not found` (backlog d8637703):\n{}",
+        early.join("\n")
+    );
+}

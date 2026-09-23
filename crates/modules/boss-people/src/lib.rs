@@ -7,6 +7,7 @@
 pub mod assets_client;
 #[cfg(feature = "postgres")]
 pub mod employee_changes;
+mod grants;
 pub mod http;
 pub mod in_memory;
 pub mod operator_baseline;

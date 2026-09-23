@@ -45,10 +45,17 @@
       : `${rules.length} active rule${rules.length === 1 ? '' : 's'} — the side-effect wiring boss-dispatcher runs`}
   />
 
+  <!-- "+ New rule" opens the authoring guidance, not a form (backlog
+       7d9df2fe, design ff1c3615): a product rule made in the SPA was
+       retired by the dispatcher's boot seed at the next restart. -->
   <div style="padding:0 24px 16px; display:flex; gap:12px; align-items:center">
     <Link to={href('/it/registry/rules/new')} className="wb-btn wb-btn-primary">
       + New rule
     </Link>
+    <span style="font-size:13px">
+      A rule lasts when it is written down: a file under infra/dispatcher/rules/, or a
+      tenant's seeds/rules.toml.
+    </span>
   </div>
 
   {#if error}
@@ -57,8 +64,8 @@
 
   {#if rules.length === 0 && !loading && !error}
     <p class="empty" style="padding:0 24px">
-      No active dispatcher rules. Create one with
-      <Link to={href('/it/registry/rules/new')}>+ New rule</Link>.
+      No active dispatcher rules. A rule is authored as a file or a tenant seed —
+      <Link to={href('/it/registry/rules/new')}>+ New rule</Link> says how.
     </p>
   {/if}
 

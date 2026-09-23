@@ -1985,10 +1985,17 @@ impl JobsRepository for PgJobs {
         from: chrono::NaiveDate,
         to: chrono::NaiveDate,
     ) -> Result<Vec<LaunchCalendarRow>, JobsError> {
-        // Every open/pending/pending-sign-off marketing-motion joined
-        // to its single launch step (the one carrying launch_date). We pull the
-        // launch_date + launch_channel out of step metadata in SQL so
-        // the caller doesn't have to fetch the step rows separately.
+        // Every open/pending/pending-sign-off Job joined to each of its
+        // launch steps (the ones carrying launch_date), one row per
+        // launch step. The Job's kind is not read: a packet is on the
+        // calendar because a step carries the `launch_date` field the
+        // StepType registry declares, never because its kind is a name
+        // spelled here (backlog 649b3303 — this read filtered on a
+        // tenant Workflow kind, `marketing-motion`, in Tier 1). The join
+        // is therefore INNER: a Job with no launch step is not a launch.
+        // We pull the launch_date + launch_channel out of step metadata
+        // in SQL so the caller doesn't have to fetch the step rows
+        // separately.
         // `current_tier` mirrors the computation in
         // `jobs_tier_distribution` (min non-done sort_order; -1 when
         // everything is terminal).
@@ -2043,10 +2050,9 @@ impl JobsRepository for PgJobs {
                    l.launch_date,
                    l.launch_channel
             FROM jobs j
-            LEFT JOIN launches l ON l.job_id = j.id
+            JOIN launches l      ON l.job_id = j.id
             LEFT JOIN tiers t    ON t.job_id = j.id
-            WHERE j.kind = 'marketing-motion'
-              AND j.status NOT IN ('closed','cancelled')
+            WHERE j.status NOT IN ('closed','cancelled')
               AND (
                 l.launch_date IS NULL
                 OR l.launch_date BETWEEN $1 AND $2

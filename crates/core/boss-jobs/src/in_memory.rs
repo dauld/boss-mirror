@@ -964,73 +964,73 @@ impl JobsRepository for InMemoryJobs {
         use boss_core::primitives::Subject as _;
         let state = self.inner.lock().expect("poisoned");
         let mut out = Vec::new();
+        // The Job's kind is not read: a packet is on the calendar
+        // because a step carries the `launch_date` field the StepType
+        // registry declares — one row per such step — never because its
+        // kind is a name spelled here (backlog 649b3303: this read
+        // filtered on a tenant Workflow kind (`marketing-motion`) in
+        // Tier 1). One row per launch step is what PgJobs' join answers;
+        // this fold used to keep whichever launch step the HashMap
+        // visited last, so the two adapters disagreed on a packet with
+        // two. `the_launch_calendar_reads_a_property_not_a_kind.rs` runs
+        // one contract against both.
         for job in state.jobs.values() {
-            if job.kind != "marketing-motion" {
-                continue;
-            }
             if matches!(job.status, JobStatus::Closed | JobStatus::Cancelled) {
                 continue;
             }
+            let steps: Vec<&Step> = state
+                .steps
+                .values()
+                .filter(|s| s.job_id == job.id)
+                .collect();
 
             // Tier = min sort_order of any non-done step, or -1.
-            let (tier, launch_step) = state.steps.values().filter(|s| s.job_id == job.id).fold(
-                (None::<i32>, None::<&Step>),
-                |(tier, launch), s| {
-                    let new_tier = if matches!(
-                        s.status,
-                        StepStatus::Pending | StepStatus::Ready | StepStatus::Active,
-                    ) {
-                        Some(tier.map_or(s.sort_order, |t| t.min(s.sort_order)))
-                    } else {
-                        tier
-                    };
-                    // property, not kind: the launch step is whichever
-                    // step carries launch_date (no-step-kind-match rule)
-                    let new_launch = if s.metadata.get("launch_date").is_some() {
-                        Some(s)
-                    } else {
-                        launch
-                    };
-                    (new_tier, new_launch)
-                },
+            let current_tier = Some(
+                steps
+                    .iter()
+                    .filter(|s| {
+                        matches!(
+                            s.status,
+                            StepStatus::Pending | StepStatus::Ready | StepStatus::Active,
+                        )
+                    })
+                    .map(|s| s.sort_order)
+                    .min()
+                    .unwrap_or(-1),
             );
-            let current_tier = Some(tier.unwrap_or(-1));
 
-            let (launch_date, launch_channel) = match launch_step {
-                Some(s) => {
-                    let d = s
-                        .metadata
-                        .get("launch_date")
-                        .and_then(|v| v.as_str())
-                        .and_then(|v| chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d").ok());
-                    let c = s
-                        .metadata
-                        .get("launch_channel")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    (d, c)
-                }
-                None => (None, None),
+            // property, not kind: a launch step is any step carrying
+            // launch_date (no-step-kind-match rule). An empty string
+            // reads as absent, as NULLIF does in PgJobs.
+            let text = |s: &Step, key: &str| {
+                s.metadata
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_string)
             };
-
-            if let Some(d) = launch_date
-                && (d < from || d > to)
+            for s in steps
+                .iter()
+                .filter(|s| s.metadata.get("launch_date").is_some())
             {
-                continue;
+                let launch_date = text(s, "launch_date")
+                    .and_then(|v| chrono::NaiveDate::parse_from_str(&v, "%Y-%m-%d").ok());
+                if let Some(d) = launch_date
+                    && (d < from || d > to)
+                {
+                    continue;
+                }
+                out.push(LaunchCalendarRow {
+                    job_id: job.id,
+                    title: job.title.clone(),
+                    owner_id: Some(job.owner_id.clone()),
+                    subject_id: Some(job.subject.id().to_string()),
+                    status: job.status,
+                    current_tier,
+                    launch_date,
+                    launch_channel: text(s, "launch_channel"),
+                });
             }
-
-            let subject_id = Some(job.subject.id().to_string());
-
-            out.push(LaunchCalendarRow {
-                job_id: job.id,
-                title: job.title.clone(),
-                owner_id: Some(job.owner_id.clone()),
-                subject_id,
-                status: job.status,
-                current_tier,
-                launch_date,
-                launch_channel,
-            });
         }
         out.sort_by(|a, b| {
             a.launch_date

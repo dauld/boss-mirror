@@ -406,6 +406,19 @@ pub(crate) fn parked_ready(job: &Value) -> bool {
         .is_none()
 }
 
+/// Does this car carry a dock merge preview it is no longer at the dock
+/// to have refreshed? `preview_dock` rewrites the preview only on
+/// parked-ready cars, so a car that boarded or was held kept the verdict
+/// of the dock it last saw, forever — measured 2026-09-23: five cars
+/// stamped at 09:50 still named a branch whose own 10:10 preview no
+/// longer named them (backlog 20d0d717). The conductor clears it; a car
+/// that returns to the dock is measured afresh on the next tick.
+pub(crate) fn left_the_dock_with_a_preview(job: &Value) -> bool {
+    job.pointer("/metadata/merge_preview")
+        .is_some_and(|p| !p.is_null())
+        && !parked_ready(job)
+}
+
 // ---------------------------------------------------------------------------
 // The dock pin — `parked_ready` against the SEEDED loading-dock row.
 // ---------------------------------------------------------------------------
@@ -1037,6 +1050,30 @@ mod tests {
         assert!(!parked_ready(&j));
         j["metadata"] = json!({"branch": ""});
         assert!(!parked_ready(&j));
+    }
+
+    /// A preview outlives nothing but the dock (20d0d717): a boarded or
+    /// held car's preview is cleared, a parked-ready car's is kept for
+    /// the tick to refresh, and a car with none has nothing to clear.
+    #[test]
+    fn a_car_that_left_the_dock_has_its_preview_cleared() {
+        let mut parked = ready_car();
+        parked["metadata"]["merge_preview"] = json!({"vs_main": {"clean": true}});
+        assert!(!left_the_dock_with_a_preview(&parked));
+
+        let mut boarded = parked.clone();
+        boarded["metadata"]["train"] = json!("train-job-id");
+        assert!(left_the_dock_with_a_preview(&boarded));
+
+        let mut held = parked.clone();
+        held["steps"][0]["metadata"] = json!({"hold": "waiting on a node"});
+        assert!(left_the_dock_with_a_preview(&held));
+
+        let mut bare = ready_car();
+        bare["metadata"]["train"] = json!("train-job-id");
+        assert!(!left_the_dock_with_a_preview(&bare));
+        bare["metadata"]["merge_preview"] = Value::Null;
+        assert!(!left_the_dock_with_a_preview(&bare));
     }
 
     #[test]

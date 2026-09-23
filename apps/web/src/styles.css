@@ -149,6 +149,38 @@
 }
 
 /* =============================================================================
+   The map — its palette in the route-map grammar
+   --------------------------------------------------------------------------
+   Design dea94998 (2026-09-23) chose board B · Transit, light only. This
+   block is the groundwork for it, not the look: every value below is the
+   colour the map shows today, so nothing on screen moves. What changes is
+   that the map (MapPage, WorldMap, RegionMap) reads ONLY these names and
+   states no fallback, so round 2 is an edit to this block, and a token it
+   retires fails the pin (it/yard/map-palette.test.ts) rather than letting
+   a stale hex repaint the old palette in silence (backlog 42f66fb3).
+
+   Prefixed because the bare Transit names collide here: this system's
+   --ink is a panel ground, where Transit's is text. A state is a LINE
+   colour with three parts — ink for its words, bg for a wash, edge for
+   the line itself (rails, outlines, lamps). No map state wears a wash
+   today, so every bg is transparent, which is what it shows.
+   ========================================================================== */
+:root {
+  --map-bg: var(--void);               /* the ground the map is drawn on */
+  --map-surface: var(--ink);           /* bodies on it: sheds, wagons, tokens */
+  --map-ink: var(--fog);               /* figures and names */
+  --map-muted: var(--static);          /* labels, rates, the unmeasured */
+  --map-rule: var(--hairline);         /* frames and the ties */
+  --map-rule-strong: var(--border-strong); /* rails, outlines, unlit lamps */
+  --map-accent: var(--signal);
+  --map-link: var(--signal);
+
+  --map-ok-ink: var(--ok);     --map-ok-bg: transparent;   --map-ok-edge: var(--ok);
+  --map-warn-ink: var(--warn); --map-warn-bg: transparent; --map-warn-edge: var(--warn);
+  --map-bad-ink: var(--err);   --map-bad-bg: transparent;  --map-bad-edge: var(--err);
+}
+
+/* =============================================================================
    Base
    ========================================================================== */
 

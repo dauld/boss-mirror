@@ -891,6 +891,10 @@ pub struct ParkIntent {
     pub probe: Option<String>,
     pub expect: Option<String>,
     pub proof_event: Option<String>,
+    /// The wait this car's probe declares — `--park-waits-on*`, or the
+    /// park file's `[waits_on]` table (backlog e9b164a1 piece 3).
+    /// Stamped whole as [`PARK_WAITS_ON`]; empty is no declaration.
+    pub waits_on: crate::car::WaitsOnFields,
 }
 
 /// WHICH PROBES ARE LEGAL — borrowed, not restated. The two rules this
@@ -914,7 +918,7 @@ pub use boss_jobs::probe::{
 /// The gate-run key each proof flag stamps. The auto-park handler
 /// reads these and writes the car's `proof_*` keys
 /// (`boss_jobs::car::PROOF_*`).
-pub use boss_jobs::car::{PARK_EXPECT, PARK_PROBE, PARK_PROOF_EVENT};
+pub use boss_jobs::car::{PARK_EXPECT, PARK_PROBE, PARK_PROOF_EVENT, PARK_WAITS_ON};
 
 /// The gate-run keys the two non-closing item answers stamp. The
 /// auto-park handler copies them onto the car as
@@ -956,6 +960,7 @@ impl ParkIntent {
             && self.probe.is_none()
             && self.expect.is_none()
             && self.proof_event.is_none()
+            && self.waits_on.is_empty()
     }
 
     /// Refuse a PARTIAL intent. Auto-park files a car with a full
@@ -1011,6 +1016,42 @@ impl ParkIntent {
             .collect()
     }
 
+    /// THE WAIT A PARK DECLARES IS A WHOLE ONE (backlog e9b164a1). Six
+    /// cars on 2026-09-23 had waits written after their park with `seen`
+    /// null — a declaration nothing observes, which silences the starved
+    /// label for good. So a park that declares a wait names its event,
+    /// gives the check that sees it, and has a probe whose not-yet it
+    /// explains; the field rules (a one-token owner, a `seen` the forge
+    /// will run, a positive patience) are the verb's, borrowed whole.
+    fn require_an_observed_wait(&self) -> Result<()> {
+        let w = &self.waits_on;
+        if w.is_empty() {
+            return Ok(());
+        }
+        if w.on.is_none() {
+            anyhow::bail!(
+                "--park-waits-on-* without --park-waits-on '<event>': a wait must say what \
+                 it waits on."
+            );
+        }
+        if w.seen.is_none() {
+            anyhow::bail!(
+                "--park-waits-on needs --park-waits-on-seen '<shell that exits 0 once the \
+                 event is in the record>': a wait nothing observes can never be contradicted, \
+                 so it silences the starved label for good (backlog e9b164a1)."
+            );
+        }
+        if self.probe.is_none() {
+            anyhow::bail!(
+                "--park-waits-on without --park-probe: a declared wait explains a probe's \
+                 not-yet, and this car records no probe to say one."
+            );
+        }
+        w.update()
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("--park-waits-on: {e}"))
+    }
+
     pub fn require_complete(&self) -> Result<()> {
         if self.is_empty() {
             return Ok(());
@@ -1027,6 +1068,7 @@ impl ParkIntent {
             ),
             _ => {}
         }
+        self.require_an_observed_wait()?;
         if self.probe.is_some() && self.proof_event.is_some() {
             anyhow::bail!(
                 "--park-probe and --park-proof-event together: a car is proven by a probe \
@@ -1363,6 +1405,9 @@ impl ParkIntent {
         put(PARK_PROBE, &self.probe);
         put(PARK_EXPECT, &self.expect);
         put(PARK_PROOF_EVENT, &self.proof_event);
+        if let Ok(w) = self.waits_on.update() {
+            m.insert(PARK_WAITS_ON.to_string(), w);
+        }
         Value::Object(m)
     }
 
@@ -1383,6 +1428,7 @@ impl ParkIntent {
             PARK_PROBE: Value::Null,
             PARK_EXPECT: Value::Null,
             PARK_PROOF_EVENT: Value::Null,
+            PARK_WAITS_ON: Value::Null,
         })
     }
 }
@@ -4429,6 +4475,10 @@ mod tests {
             probe: Some("true".into()),
             expect: Some("x".into()),
             proof_event: Some("a red train".into()),
+            waits_on: crate::car::WaitsOnFields {
+                on: Some("an event".into()),
+                ..Default::default()
+            },
         };
         let stampable: std::collections::BTreeSet<String> = everything
             .metadata_patch()
@@ -4471,6 +4521,66 @@ mod tests {
         assert_eq!(m[PARK_PROBE], probe);
         assert_eq!(m[PARK_EXPECT], "PARK_PROBE_OK");
         assert!(m.get(PARK_PROOF_EVENT).is_none());
+    }
+
+    /// THE WAIT RIDES THE PARK, WHOLE (backlog e9b164a1 piece 3). Six
+    /// cars on 2026-09-23 had their waits written after the park by
+    /// hand, each with `seen` null — a declaration nothing observes,
+    /// which silences the starved label for good. So the gate takes the
+    /// declaration where every other fact about the car is stated, and
+    /// refuses one without its `seen` check, one naming no event, and
+    /// one on a car with no probe to say not-yet.
+    #[test]
+    fn a_declared_wait_rides_the_park_intent_with_its_observer() {
+        let mut p = park_full();
+        p.probe = Some("boss-sor-read /api/jobs/x | grep -q PARK_PROBE_OK".into());
+        p.expect = Some("PARK_PROBE_OK".into());
+        p.waits_on = crate::car::WaitsOnFields {
+            on: Some("a new Stripe sponsorship charge".into()),
+            seen: Some("true".into()),
+            owner: Some("world".into()),
+            max_wait_hours: Some(336),
+        };
+        assert!(p.require_complete().is_ok());
+        assert_eq!(
+            p.metadata_patch()[PARK_WAITS_ON],
+            json!({
+                "on": "a new Stripe sponsorship charge", "seen": "true",
+                "owner": "world", "max_wait_hours": 336,
+            })
+        );
+
+        let mut unseen = p.clone();
+        unseen.waits_on.seen = None;
+        let e = unseen.require_complete().unwrap_err().to_string();
+        assert!(e.contains("--park-waits-on-seen"), "{e}");
+
+        let mut unnamed = p.clone();
+        unnamed.waits_on.on = None;
+        let e = unnamed.require_complete().unwrap_err().to_string();
+        assert!(e.contains("--park-waits-on"), "{e}");
+
+        let mut unprobed = p.clone();
+        unprobed.probe = None;
+        unprobed.expect = None;
+        let e = unprobed.require_complete().unwrap_err().to_string();
+        assert!(e.contains("--park-probe"), "{e}");
+
+        let bad_owner = crate::car::WaitsOnFields {
+            owner: Some("David opens it".into()),
+            ..p.waits_on.clone()
+        };
+        let mut prose_owner = p.clone();
+        prose_owner.waits_on = bad_owner;
+        assert!(prose_owner.require_complete().is_err());
+
+        // A wait alone is park intent, and clearing a landed branch
+        // clears it too (the exhaustive check above holds the keys).
+        let only = ParkIntent {
+            waits_on: p.waits_on.clone(),
+            ..Default::default()
+        };
+        assert!(!only.is_empty());
     }
 
     /// WHERE A PROBE RUNS (f9304366). A recorded probe runs on the

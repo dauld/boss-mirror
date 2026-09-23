@@ -346,6 +346,11 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         // notification must not wake anything up, which is the whole
         // point of archiving it.
         ("messages.expire_for_job", vec![]),
+        // Archives the step notifier's unread notices — directs
+        // included — when their step ends or their job closes (rules
+        // expire-notices-on-step-ended / -on-job-closed, backlog
+        // 0b2bac00). A sink for the same reason as the one above.
+        ("messages.expire_notices", vec![]),
         ("webhook.notify", vec![]),
     ])
 }
@@ -366,27 +371,73 @@ pub struct SystemEdge {
     pub label: &'static str,
 }
 
-/// The non-rule edges that complete the cascade. Small + fixed: jobs-api
-/// step-lifecycle mechanics + the AR collections loop.
+/// The non-rule edges that complete the cascade: jobs-api step-lifecycle
+/// mechanics + the AR collections loop.
+///
+/// Every jobs-API topic here is spelled through `boss_jobs::events`, so a
+/// renamed kind fails to compile rather than draw an edge nothing travels.
+/// The `step.<family>.*` topics have no constant — boss-jobs formats them
+/// per step kind — so the test
+/// `the_step_families_the_jobs_api_publishes_are_the_system_edges_heads`
+/// holds them equal to the families its source publishes, and
+/// `every_shipped_trigger_has_something_upstream` holds the whole list to
+/// the rule directory (CLAUDE.md §9a). Until backlog cf13bd12 this was
+/// five hand rows pinned only by `!is_empty()`, and it missed
+/// `jobs.job.closed` and `step.assigned.*`: 23 of 46 event-triggered
+/// rules drew on /it/registry/dispatcher with nothing upstream, the
+/// largest trigger class among them, so no loop that closes through a
+/// packet's closure was drawn or lit as a cycle.
 pub fn system_edges() -> Vec<SystemEdge> {
+    use boss_jobs::events::{JOB_CLOSED, JOB_CREATED, JOB_UPDATED, STEP_COMPLETED};
     vec![
         SystemEdge {
-            from: "jobs.job.created",
+            from: JOB_CREATED,
             to: "step.ready.*",
             kind: "jobs-api",
             label: "a new Job's entry steps become ready",
         },
         SystemEdge {
-            from: "jobs.step.completed",
+            from: STEP_COMPLETED,
             to: "step.done.*",
             kind: "jobs-api",
             label: "a completed step emits its done topic",
         },
         SystemEdge {
-            from: "jobs.step.completed",
+            from: STEP_COMPLETED,
             to: "step.ready.*",
             kind: "jobs-api",
             label: "completing a step readies its dependents",
+        },
+        // A Job PUT re-evaluates readiness against the pinned Workflow,
+        // so a metadata write wakes a metadata-gated step in the same
+        // transaction (`reevaluate_and_persist`, aa9980c8) — the edge
+        // `jobs.clear_waiting` exists to travel.
+        SystemEdge {
+            from: JOB_UPDATED,
+            to: "step.ready.*",
+            kind: "jobs-api",
+            label: "a metadata write wakes a metadata-gated step",
+        },
+        // Completing a terminal step closes its packet, and so does the
+        // all-steps-terminal catch-all (both in boss-jobs http/steps.rs).
+        // No handler closes a Job by a status PUT — the third close site
+        // is an operator's — so the step completion is the only in-system
+        // cause, and it is the one every rule on the close travels.
+        SystemEdge {
+            from: STEP_COMPLETED,
+            to: JOB_CLOSED,
+            kind: "jobs-api",
+            label: "completing a terminal step closes its packet",
+        },
+        // The dispatcher's own assignment loop (dispatcher.rs, not a
+        // rule) places a ready, unassigned step with an executor through
+        // a step PUT, and the jobs API marks the assignee change. A claim
+        // by an actor is the same marker from outside the rule set.
+        SystemEdge {
+            from: "step.ready.*",
+            to: "step.assigned.*",
+            kind: "jobs-api",
+            label: "the assignment loop places a ready step with an executor",
         },
         SystemEdge {
             from: "commerce.invoice.created",
@@ -403,13 +454,167 @@ pub fn system_edges() -> Vec<SystemEdge> {
     ]
 }
 
+/// A topic that re-enters the rule set from OUTSIDE it — no handler and
+/// no jobs-API mechanic causes it — so the graph draws it as a root, and
+/// that root is true. Declared rather than left implicit so
+/// `every_shipped_trigger_has_something_upstream` can tell a real root
+/// from a missing edge (backlog cf13bd12).
+#[derive(Debug, Clone, Serialize)]
+pub struct OutsideOrigin {
+    pub topic: &'static str,
+    /// Who records it, in words.
+    pub label: &'static str,
+}
+
+pub const OUTSIDE_ORIGINS: &[OutsideOrigin] = &[OutsideOrigin {
+    // Each host's observer (infra/estate/observe-lib.sh) POSTs what it
+    // found to /api/estate/observation on its own timer; nothing a rule
+    // does causes an observation (59ef456a).
+    topic: boss_jobs::events::ESTATE_OBSERVED,
+    label: "a host's estate observer records what machines it found",
+}];
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::registry::parse_raw_path;
+    use crate::rules::registry::{TopicPattern, parse_raw_path};
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
+    /// Either side may be the wildcard, exactly as the page's
+    /// `topicMatch(p, trg) || topicMatch(trg, p)` joins them.
+    fn topics_meet(a: &str, b: &str) -> bool {
+        let one_way = |p: &str, t: &str| TopicPattern::parse(p).is_ok_and(|p| p.matches(t));
+        a == b || one_way(a, b) || one_way(b, a)
+    }
+
+    /// The event kinds boss-jobs declares, read from the one file that
+    /// declares them (`pub const NAME: &str = "..."` in events.rs).
+    fn jobs_declared_kinds() -> BTreeSet<String> {
+        let path = boss_testing::repo_root().join("crates/core/boss-jobs/src/events.rs");
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let re = regex::Regex::new(r#"(?m)^pub const [A-Z_]+: &str = "([^"]+)";"#).expect("regex");
+        let kinds: BTreeSet<String> = re.captures_iter(&src).map(|c| c[1].to_string()).collect();
+        assert!(
+            kinds.contains("jobs.job.closed"),
+            "events.rs parse found {kinds:?}"
+        );
+        kinds
+    }
+
+    /// The per-step-kind topic families the jobs API publishes
+    /// (`format!("step.<family>.{}", kind)`), as the wildcard a rule
+    /// subscribes with. No constant names them, so the publishing
+    /// source is the definition.
+    fn jobs_step_families() -> BTreeSet<String> {
+        fn walk(dir: &Path, re: &regex::Regex, out: &mut BTreeSet<String>) {
+            let entries =
+                std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
+            for entry in entries {
+                let path = entry.expect("a dir entry").path();
+                if path.is_dir() {
+                    walk(&path, re, out);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    let src = std::fs::read_to_string(&path)
+                        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+                    out.extend(re.captures_iter(&src).map(|c| format!("step.{}.*", &c[1])));
+                }
+            }
+        }
+        let re = regex::Regex::new(r#"format!\(\s*"step\.([a-z_-]+)\.\{"#).expect("regex");
+        let mut out = BTreeSet::new();
+        walk(
+            &boss_testing::repo_root().join("crates/core/boss-jobs/src"),
+            &re,
+            &mut out,
+        );
+        assert!(out.contains("step.done.*"), "boss-jobs scan found {out:?}");
+        out
+    }
+
+    /// Backlog cf13bd12: /it/registry/dispatcher drew 23 of 46
+    /// event-triggered rules with nothing upstream, because
+    /// `system_edges` was a hand list that missed `jobs.job.closed` and
+    /// `step.assigned.*`, and its only test was `!is_empty()`. Every
+    /// topic a shipped rule listens on must now be caused by something
+    /// the graph draws — a handler's emit, a system edge — or be named
+    /// an outside origin, so a root on the page is a true root.
+    #[test]
+    fn every_shipped_trigger_has_something_upstream() {
+        let path = boss_testing::dispatcher_rules_dir();
+        let raw = parse_raw_path(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let produced: Vec<&str> = handler_emits()
+            .into_values()
+            .flatten()
+            .chain(system_edges().into_iter().map(|e| e.to))
+            .chain(OUTSIDE_ORIGINS.iter().map(|o| o.topic))
+            .collect();
+        let orphans: BTreeSet<String> = raw
+            .rules
+            .iter()
+            .filter_map(|r| r.on_event.as_deref().map(|t| (t, r.name.as_str())))
+            .filter(|(t, _)| !produced.iter().any(|p| topics_meet(p, t)))
+            .map(|(t, name)| format!("{t} (rule {name})"))
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "these triggers have nothing upstream — add the system edge that causes each, \
+             or name it in OUTSIDE_ORIGINS: {orphans:#?}"
+        );
+    }
+
+    /// The step-topic families are the half of the jobs API's output no
+    /// constant names; each one it publishes must be the head of a
+    /// jobs-api system edge, and every such edge must name one it
+    /// publishes — an equality, so a new family reds here by name.
+    #[test]
+    fn the_step_families_the_jobs_api_publishes_are_the_system_edges_heads() {
+        let published = jobs_step_families();
+        let drawn: BTreeSet<String> = system_edges()
+            .into_iter()
+            .filter(|e| e.kind == "jobs-api" && e.to.starts_with("step."))
+            .map(|e| e.to.to_string())
+            .collect();
+        let undrawn: Vec<_> = published.difference(&drawn).collect();
+        let stale: Vec<_> = drawn.difference(&published).collect();
+        assert!(
+            undrawn.is_empty() && stale.is_empty(),
+            "published by boss-jobs but no system edge leads to it: {undrawn:?}; \
+             a system edge leads to it but boss-jobs never publishes it: {stale:?}"
+        );
+    }
+
+    /// Every jobs-API topic the cascade names — either end of a
+    /// jobs-api edge, a handler's `jobs.*` emit, an outside origin —
+    /// is a kind boss-jobs declares, so a renamed or invented topic
+    /// cannot draw an edge nothing travels.
+    #[test]
+    fn every_jobs_topic_the_cascade_names_is_one_boss_jobs_publishes() {
+        let declared = jobs_declared_kinds();
+        let families = jobs_step_families();
+        let is_published = |t: &str| declared.contains(t) || families.contains(t);
+        let named: BTreeSet<&str> = system_edges()
+            .into_iter()
+            .filter(|e| e.kind == "jobs-api")
+            .flat_map(|e| [e.from, e.to])
+            .chain(
+                handler_emits()
+                    .into_values()
+                    .flatten()
+                    .filter(|t| t.starts_with("jobs.")),
+            )
+            .chain(OUTSIDE_ORIGINS.iter().map(|o| o.topic))
+            .collect();
+        let unknown: Vec<_> = named.into_iter().filter(|t| !is_published(t)).collect();
+        assert!(
+            unknown.is_empty(),
+            "named in the cascade, published by no boss-jobs site: {unknown:?}"
+        );
+    }
 
     #[test]
-    fn emits_and_system_edges_present() {
+    fn the_restock_loop_edge_and_a_sink_are_present() {
         let emits = handler_emits();
         // The load-bearing loop: parts.consume → inventory.item.consumed.
         assert!(
@@ -417,7 +622,6 @@ mod tests {
             "restock loop edge must be present"
         );
         assert!(emits["messages.notify"].is_empty(), "notifier is a sink");
-        assert!(!system_edges().is_empty());
     }
 
     /// Drift guard: every handler the shipped registry references must

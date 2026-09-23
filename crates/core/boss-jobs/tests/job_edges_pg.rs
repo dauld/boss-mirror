@@ -138,6 +138,14 @@ async fn registry_seeds_exactly_the_declared_edges() {
                 "boarded_jobs".into(),
                 "job_id_list".into()
             ),
+            // Every OTHER item a car answers (a994f533) — a list, each
+            // element ref-checked, followed on merge by the same rule
+            // as backlog_item through its `also_link`.
+            (
+                "ship-a-change".into(),
+                "also_answers".into(),
+                "job_id_list".into()
+            ),
             (
                 "ship-a-change".into(),
                 "backlog_item".into(),

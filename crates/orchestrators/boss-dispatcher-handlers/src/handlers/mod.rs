@@ -50,6 +50,7 @@ pub mod ledger_tax_remit;
 #[cfg(test)]
 mod listing_stub;
 pub mod messages_expire_for_job;
+pub mod messages_expire_notices;
 pub mod messages_notify;
 pub mod messages_notify_job_terminal;
 pub mod network_census;

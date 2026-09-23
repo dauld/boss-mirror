@@ -334,13 +334,39 @@ enum Commands {
         /// Never with --park-probe.
         #[arg(long)]
         park_proof_event: Option<String>,
+        /// Auto-park: the event (or the actor's act) this car's probe
+        /// WAITS ON, as prose — recorded on the car as `waits_on.on`, so
+        /// a long not-yet reads as a declared wait rather than a probe
+        /// nobody reads. Needs --park-waits-on-seen and --park-probe: a
+        /// wait nothing observes silences the starved label for good
+        /// (backlog e9b164a1). Merged into any wait the car already
+        /// declares, never over it.
+        #[arg(long, value_name = "EVENT")]
+        park_waits_on: Option<String>,
+        /// The wait's observer: shell text that exits 0 once the event is
+        /// in the record, run on the forge under the probe's rules
+        /// (`waits_on.seen`). A shell text is safest in --park-file's
+        /// `[waits_on]` table, where no word expansion happens.
+        #[arg(long, value_name = "SHELL")]
+        park_waits_on_seen: Option<String>,
+        /// Whose move the wait is (`waits_on.owner`): `world`, or the id
+        /// of the actor whose act it is. Without it the shed reads the
+        /// wait as ours.
+        #[arg(long, value_name = "WORLD|ACTOR")]
+        park_waits_on_owner: Option<String>,
+        /// Hours from the car's opening the owner's move may take before
+        /// the wait is ours again (`waits_on.max_wait_hours`). Optional.
+        #[arg(long, value_name = "HOURS")]
+        park_waits_on_max_wait_hours: Option<u32>,
         /// Auto-park: every prose text of the park in ONE TOML file, read
         /// with no shell in the path — `summary`, `excludes`, `test`,
         /// `verified`, `probe`, `expect`, `proof_event`, each the
         /// `--park-*` flag of that name. Write it beside the gate script;
         /// single-quoted TOML strings ('...' and '''...''' for a
         /// multi-line probe) keep backticks, quotes and backslashes
-        /// exactly. Exclusive with every flag it carries. The item flags
+        /// exactly. A `[waits_on]` table (`on`, `seen`, `owner`,
+        /// `max_wait_hours`) carries the --park-waits-on* flags the same
+        /// way. Exclusive with every flag it carries. The item flags
         /// (--park-backlog-item and its siblings) stay flags: they are
         /// ids, not prose (backlog 6f1e9b99).
         #[arg(
@@ -349,7 +375,8 @@ enum Commands {
             conflicts_with_all = [
                 "park_summary", "park_excludes", "park_test", "park_verified",
                 "park_probe", "park_probe_file", "park_expect", "park_expect_file",
-                "park_proof_event",
+                "park_proof_event", "park_waits_on", "park_waits_on_seen",
+                "park_waits_on_owner", "park_waits_on_max_wait_hours",
             ]
         )]
         park_file: Option<std::path::PathBuf>,
@@ -920,19 +947,34 @@ enum CarAction {
     /// length of its not-yet streak alone; it is named the moment its
     /// `--seen` check finds the event in the record while the probe
     /// still says not yet (backlog b461341d). SINGLE-quote both values.
+    ///
+    /// It MERGES into the declaration the car already carries: each flag
+    /// given replaces its field and every other field is kept, so an
+    /// owner can be added without restating the event, and restating the
+    /// event does not drop the owner (backlog e9b164a1).
     WaitsOn {
         /// The car: its branch, or 8+ characters of its id.
         car: String,
-        /// The event or the actor the proof waits on, as prose.
-        #[arg(long, required_unless_present = "clear")]
+        /// The event or the actor the proof waits on, as prose. Needed
+        /// unless the car already declares one.
+        #[arg(long)]
         on: Option<String>,
         /// Shell text that exits 0 once that event is in the record. Run
         /// by the door that records each not-yet, on the forge, under the
         /// probe's rules. Without it the wait can never be contradicted.
-        #[arg(long, conflicts_with = "clear")]
+        #[arg(long)]
         seen: Option<String>,
+        /// Whose move the wait is: `world` for an event nobody here can
+        /// cause, or the id of the actor whose act it is (emp-david).
+        /// Without it the shed reads the wait as ours.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Hours from the car's opening the owner's move may take before
+        /// the wait is ours again. Optional; positive.
+        #[arg(long)]
+        max_wait_hours: Option<u32>,
         /// Remove the declaration.
-        #[arg(long, conflicts_with = "on")]
+        #[arg(long, conflicts_with_all = ["on", "seen", "owner", "max_wait_hours"])]
         clear: bool,
         /// Print the PATCH body without writing it.
         #[arg(long)]
@@ -1506,9 +1548,19 @@ async fn main() -> Result<()> {
                 car: given,
                 on,
                 seen,
+                owner,
+                max_wait_hours,
                 clear,
                 dry_run,
-            } => car::waits_on(&given, on.as_deref(), seen.as_deref(), clear, dry_run).await,
+            } => {
+                let fields = car::WaitsOnFields {
+                    on,
+                    seen,
+                    owner,
+                    max_wait_hours,
+                };
+                car::waits_on(&given, &fields, clear, dry_run).await
+            }
         },
         Commands::Workflow { action } => match action {
             WorkflowAction::Publish {
@@ -1737,6 +1789,10 @@ async fn main() -> Result<()> {
             park_expect,
             park_expect_file,
             park_proof_event,
+            park_waits_on,
+            park_waits_on_seen,
+            park_waits_on_owner,
+            park_waits_on_max_wait_hours,
             park_file,
             force_regate,
             stale_base_anyway,
@@ -1775,6 +1831,12 @@ async fn main() -> Result<()> {
                 )?
                 .or(from_file.expect),
                 proof_event: park_proof_event.or(from_file.proof_event),
+                waits_on: from_file.waits_on.unwrap_or(car::WaitsOnFields {
+                    on: park_waits_on,
+                    seen: park_waits_on_seen,
+                    owner: park_waits_on_owner,
+                    max_wait_hours: park_waits_on_max_wait_hours,
+                }),
             };
             gate::run(
                 &branch,
@@ -2202,6 +2264,9 @@ mod tests {
             "--park-expect",
             "--park-expect-file",
             "--park-proof-event",
+            "--park-waits-on",
+            "--park-waits-on-seen",
+            "--park-waits-on-owner",
         ] {
             let mut with = base.to_vec();
             with.extend([flag, "x"]);
@@ -2210,6 +2275,61 @@ mod tests {
                 "--park-file with {flag} must be refused"
             );
         }
+        let mut with = base.to_vec();
+        with.extend(["--park-waits-on-max-wait-hours", "48"]);
+        assert!(Cli::try_parse_from(with).is_err());
+    }
+
+    /// `boss car waits-on` MERGES (backlog e9b164a1 piece 3), so `--on`
+    /// is no longer required: an owner or a patience can be added to a
+    /// car that already declares its event. `--clear` still stands alone.
+    #[test]
+    fn the_waits_on_verb_takes_an_owner_without_restating_the_event() {
+        let ok = [
+            "boss",
+            "car",
+            "waits-on",
+            "feat/x",
+            "--owner",
+            "world",
+            "--max-wait-hours",
+            "336",
+        ];
+        Cli::try_parse_from(ok).unwrap_or_else(|e| panic!("--owner alone parses: {e}"));
+        let with_clear = [
+            "boss", "car", "waits-on", "feat/x", "--owner", "world", "--clear",
+        ];
+        assert!(Cli::try_parse_from(with_clear).is_err());
+    }
+
+    /// `boss tenant publish` takes the machine door as export does
+    /// (backlog e32a423e), and `--door` and `--gateway` are exclusive
+    /// on both: one publish has one route.
+    #[test]
+    fn tenant_publish_takes_the_machine_door_exclusive_of_the_gateway() {
+        for verb in ["publish", "export"] {
+            let base = ["boss", "tenant", verb, "dir"];
+            let mut door = base.to_vec();
+            door.extend(["--door", "http://door:7900"]);
+            Cli::try_parse_from(door.clone())
+                .unwrap_or_else(|e| panic!("tenant {verb} --door should parse: {e}"));
+            let mut both = door;
+            both.extend(["--gateway", "http://gw:8080"]);
+            assert!(
+                Cli::try_parse_from(both).is_err(),
+                "tenant {verb} --door and --gateway are exclusive"
+            );
+        }
+        Cli::try_parse_from([
+            "boss",
+            "tenant",
+            "publish",
+            "dir",
+            "--door",
+            "http://door:7900",
+            "--dry-run",
+        ])
+        .unwrap_or_else(|e| panic!("--door with --dry-run prints the plan: {e}"));
     }
 
     /// Every top-level verb resolves. This is the smoke contract for

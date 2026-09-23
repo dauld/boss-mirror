@@ -262,6 +262,29 @@ fn the_gateway_row_is_on_the_door_and_its_reader_names_it() {
     );
 }
 
+/// The ML API is on the door because the nightly inference batch on the
+/// ml-batch-host reaches it here (backlog 9599babc, 2026-09-23): until
+/// then the batch POSTed to 127.0.0.1:7070 on boss-gcp, the retired
+/// second stack's ML API, and the system of record's risk scores stayed
+/// empty behind seven `ok` packets. The batch's address is rendered as
+/// the record's host on this port (render-sor-env.sh BOSS_ML_API_URL),
+/// so dropping the row here strands it again.
+#[test]
+fn the_ml_api_is_on_the_door_for_the_inference_batch() {
+    let port = boss_ports::prod("ml");
+    assert_eq!(
+        manifest_ports().get("ml").map(|(p, _)| *p),
+        Some(port),
+        "{MANIFEST} does not expose the ML API on its boss-ports port — the nightly batch \
+         on boss-gcp has no way to reach the instance it scores"
+    );
+    assert_eq!(
+        env_ports().get("ml").copied(),
+        Some(port),
+        "{PORTS_ENV} has no ml row — render-sor-env.sh derives BOSS_ML_API_URL from it"
+    );
+}
+
 #[test]
 fn the_jobs_api_is_still_on_the_door() {
     assert_eq!(
