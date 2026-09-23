@@ -179,6 +179,10 @@ fn run(scratch: &Path, extra: &[(&str, &str)]) -> Output {
         .env("REPO_DIR", scratch.join("work").join("repo"))
         .env("WORKTREES_DIR", scratch.join("work").join("wt"))
         .env("BOSS_STALE_TARGET_H", "12")
+        // The floor is a share of the REAL filesystem the fixture sits
+        // on, so a nearly full test host would fire it and reclaim the
+        // fixtures other tests expect kept. Off unless a test asks.
+        .env("BOSS_SCRATCH_FLOOR_PCT", "0")
         // The packet goes to the stub above, never to a real system of
         // record, and a transport failure gives up at once.
         .env("BOSS_JOBS_URL", "http://sor.test:7900")
@@ -1559,4 +1563,160 @@ fn a_fast_forward_git_refuses_is_loud_and_lands_on_the_packet() {
         "and it NAMES THE FILE — without that the reader has an exit code and a sha, and \
          must go to the host's journal to learn which path refused\n{put}\n{text}"
     );
+}
+
+// ---------------------------------------------------------------------
+// The floor sits ABOVE the kubelet's eviction line, and under it the
+// idle builders' targets go first, least recently used.
+//
+// Measured 2026-09-23 from the `free_gb` every gate receipt records for
+// w-1: the node drained from ~600 GB free to ~140 GB over 8–12 hours,
+// the kubelet evicted the dev pod at its 15% line (~139 GiB), and free
+// space jumped straight back to ~600 GB — six evictions in eight days.
+// What refilled it was the builders' per-worktree targets on /scratch.
+// This pass never acted: its floor was 50 GB, ninety below the line the
+// kubelet enforces, so the eviction always came first; and even under
+// the floor it trimmed only the primary target's incremental cache,
+// never the siblings that held the bulk. The floor is now a SHARE of
+// the filesystem, as the kubelet's own threshold is, and under it the
+// sibling targets are reclaimed oldest-touched first until it is met,
+// sparing any touched within the live window — the mtime is the
+// liveness check per dir, as in the stale-target pass.
+// ---------------------------------------------------------------------
+
+/// A cargo-shaped target holding `mib` MiB of real (non-sparse) bytes.
+fn sized_target(root: &Path, name: &str, hours_ago: u64, mib: usize) -> PathBuf {
+    let d = target_dir(root, name, hours_ago);
+    let blob = d.join("debug").join("deps").join("libbig.rlib");
+    std::fs::write(&blob, vec![7u8; mib * 1024 * 1024]).expect("write blob");
+    for p in [
+        blob,
+        d.join("debug").join("deps"),
+        d.join("debug"),
+        d.clone(),
+    ] {
+        touch_at(&p, hours_ago);
+    }
+    d
+}
+
+fn du_kb(path: &Path) -> u64 {
+    let out = Command::new("du")
+        .arg("-sk")
+        .arg(path)
+        .output()
+        .expect("du");
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .and_then(|n| n.parse().ok())
+        .expect("du -sk prints a number")
+}
+
+/// A `df` that reports the scratch fixture as a filesystem of
+/// `STUB_DF_SIZE_GB` whose free space is `STUB_DF_CAP_KB` minus what
+/// the fixture holds now, with each fixture MiB read as one GB — so a
+/// reclaim of a 3 MiB target shows as 3 GB freed. Any other path is
+/// roomy, so the /work floor never fires.
+fn stub_df(bin: &Path) {
+    boss_testing::write_exec(
+        &bin.join("df"),
+        concat!(
+            "#!/usr/bin/env bash\n",
+            "m=\"${@: -1}\"\n",
+            "if [ \"$m\" = \"$STUB_DF_SCRATCH\" ]; then\n",
+            "    used=$(du -sk \"$m\" | cut -f1)\n",
+            "    free=$(( (STUB_DF_CAP_KB - used) * 1024 ))\n",
+            "    size=$(( STUB_DF_SIZE_GB * 1024 * 1024 ))\n",
+            "else\n",
+            "    free=$(( 1 << 40 )); size=$(( 1 << 41 ))\n",
+            "fi\n",
+            "echo 'Filesystem 1024-blocks Used Available Capacity Mounted on'\n",
+            "echo \"stub $size 0 $free 0% $m\"\n",
+        ),
+    );
+}
+
+#[test]
+fn under_the_floor_idle_sibling_targets_go_oldest_first_until_it_is_met() {
+    let root = boss_testing::scratch_dir("boss-dsr-floor-lru");
+    let _guard = Scratch(root.clone());
+    boss_testing::create_dir(&root.join("work").join("wt"));
+    boss_testing::create_dir(&root.join("work").join("repo"));
+    let bin = stub_curl(&root);
+    stub_df(&bin);
+    let primary = target_dir(&root, "target", 0);
+    let oldest = sized_target(&root, "target-idle-5h", 5, 3);
+    let older = sized_target(&root, "target-idle-3h", 3, 3);
+    let newer = sized_target(&root, "target-idle-1h", 1, 3);
+    let live = sized_target(&root, "target-building-now", 0, 3);
+
+    // A 20 GB filesystem with a 50% floor = 10 GB; 5.5 GB free now.
+    // Removing the 5h target frees 3 (8.5, still under); the 3h one
+    // frees 3 more (11.5, met) — and there the pass must stop.
+    let cap = du_kb(&root) + 5 * 1024 + 512;
+    let out = run(
+        &root,
+        &[
+            ("BOSS_SCRATCH_FLOOR_PCT", "50"),
+            ("STUB_DF_SCRATCH", root.to_str().expect("utf-8 path")),
+            ("STUB_DF_CAP_KB", &cap.to_string()),
+            ("STUB_DF_SIZE_GB", "20"),
+        ],
+    );
+    let text = say(&out);
+    assert!(
+        !oldest.exists(),
+        "the least recently used idle target goes first\n{text}"
+    );
+    assert!(
+        !older.exists(),
+        "the next oldest goes while still under the floor\n{text}"
+    );
+    assert!(
+        newer.exists(),
+        "the pass stops the moment the floor is met\n{text}"
+    );
+    assert!(
+        live.exists(),
+        "a target touched inside the live window belongs to a build\n{text}"
+    );
+    assert!(
+        primary.exists(),
+        "the primary target is the incremental trim's, never removed whole\n{text}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("target-idle-5h") && stdout.contains("target-idle-3h"),
+        "each reclaimed target is named\n{text}"
+    );
+    let log = curl_log(&root);
+    let put = log
+        .lines()
+        .find(|l| l.starts_with("PUT "))
+        .unwrap_or_else(|| panic!("an acting pass records itself\n{log}\n{text}"));
+    assert!(
+        put.contains("\"floor_targets_reclaimed\":\"2\""),
+        "the packet counts what the floor pass took\n{put}\n{text}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a met floor is a clean pass\n{text}"
+    );
+}
+
+#[test]
+fn a_floor_share_that_is_not_a_percentage_is_refused() {
+    let root = boss_testing::scratch_dir("boss-dsr-badpct");
+    let _guard = Scratch(root.clone());
+    for bad in ["lots", "101"] {
+        let out = run(&root, &[("BOSS_SCRATCH_FLOOR_PCT", bad)]);
+        assert_eq!(out.status.code(), Some(64), "{bad}: {}", say(&out));
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("SCRATCH_FLOOR_PCT"),
+            "{}",
+            say(&out)
+        );
+    }
 }

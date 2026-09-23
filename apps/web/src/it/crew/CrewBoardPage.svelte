@@ -24,9 +24,13 @@
   import {
     actorCards,
     CAR_WINDOW,
+    costText,
     crews,
     fetchCrew,
     pipelineTrack,
+    silence,
+    silenceText,
+    SILENT_BOUND_HOURS,
     takenNotProgressed,
     waitText,
     type ActorCard,
@@ -436,11 +440,12 @@
         <thead>
           <tr>
             <th>agent</th><th>run</th><th>on</th><th>at</th><th>model · budget · effort</th>
-            <th>host</th><th>since</th>
+            <th>host</th><th>since</th><th>unmoved</th>
           </tr>
         </thead>
         <tbody>
           {#each crew.agentRuns.data as r (r.id)}
+            {@const quiet = silence(r, loadedAt.toISOString())}
             <tr>
               <td>{r.agent === null ? '—' : formatActor(r.agent)}</td>
               <td><a href={href(`/ux/jobs/${r.id}`)}>{r.title}</a></td>
@@ -464,6 +469,13 @@
                   {formatRelative(r.openedAt, loadedAt)}
                 {/if}
               </td>
+              <td class="crew-num">
+                {#if quiet === null}
+                  <span class="crew-unknown">{r.building ? 'not recorded' : '—'}</span>
+                {:else}
+                  <span class:crew-silent={quiet.past}>{silenceText(quiet)}</span>
+                {/if}
+              </td>
             </tr>
           {/each}
         </tbody>
@@ -471,7 +483,82 @@
       <p class="crew-note">
         Open runs only: a run that landed, was refused or died is history the packet's own page
         tells. "At" is the run's own step — briefed, building, reported — not the step it is
-        executing on its packet, which "on" names.
+        executing on its packet, which "on" names. "Unmoved" is how long a BUILDING run's packet
+        has stood with no step completed — the same reading the hourly age-out rule takes, which
+        completes the run as died past {SILENT_BOUND_HOURS}h. A run past the bound is one that rule
+        has not reached yet. A run waiting at its report is held by the gate, not silent, and shows
+        no reading.
+      </p>
+    {/if}
+
+    <!-- ======================= WHAT RUNS COST ======================= -->
+    <!-- The finish record (backlog 5082a08b, design 8382bbb2): the
+         agent fleet read from the system of record — `agent_runs` —
+         rather than a dashboard on its own port. A row exists only once
+         a run reaches a terminal, so cost is a property of FINISHED
+         runs; the open ones above have none to show yet. -->
+    <div class="crew-section">05 — WHAT RUNS COST</div>
+
+    {#if crew.runRecords.kind === 'failed'}
+      <p class="crew-fail load-failed">
+        The finish record did not answer: {crew.runRecords.error}. An unreadable record is not a
+        fleet that spent nothing.
+      </p>
+    {:else if crew.runRecords.data.length === 0}
+      <p class="crew-stage-blank">No finished run is recorded.</p>
+    {:else}
+      <table class="crew-table">
+        <thead>
+          <tr>
+            <th>actor</th><th>run</th><th>outcome</th><th>branch</th><th>effort</th>
+            <th>took</th><th>cost</th><th>finished</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each crew.runRecords.data as f (f.runId)}
+            <tr>
+              <td>{f.actor === null ? '—' : formatActor(f.actor)}</td>
+              <td><a href={href(`/ux/jobs/${f.runId}`)}>{f.runId.slice(0, 8)}</a></td>
+              <td>{f.outcome ?? '—'}</td>
+              <td>
+                {#if f.branch === null}
+                  <span class="crew-unknown">not recorded</span>
+                {:else}
+                  {f.branch}
+                {/if}
+              </td>
+              <td>
+                {#if f.effort === null}
+                  <span class="crew-unknown">not recorded</span>
+                {:else}
+                  {f.effort}
+                {/if}
+              </td>
+              <td class="crew-num">{f.minutes === null ? '—' : `${f.minutes} min`}</td>
+              <td class="crew-num">
+                {#if f.usdMicros === null}
+                  <span class="crew-unknown">{costText(f)}</span>
+                {:else}
+                  {costText(f)}
+                {/if}
+              </td>
+              <td class="crew-num">
+                {#if f.finishedAt === null}
+                  <span class="crew-unknown">not recorded</span>
+                {:else}
+                  {formatRelative(f.finishedAt, loadedAt)}
+                {/if}
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+      <p class="crew-note">
+        The newest {CAR_WINDOW} runs the record holds — a window, not a total, so no sum is drawn.
+        "Not priced" is a run whose report carried no tokens the rate card could price; it is not
+        a free run. Rows from before the effort instrumentation and before branches were recorded
+        on the finish record say "not recorded" rather than guess, and a run without a branch can
+        still be followed to its car through its own packet.
       </p>
     {/if}
   {/if}
@@ -702,6 +789,10 @@
   .crew-num {
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
+  }
+  .crew-silent {
+    color: var(--danger, #a3302a);
+    font-weight: 600;
   }
   .crew-floor {
     font-style: italic;

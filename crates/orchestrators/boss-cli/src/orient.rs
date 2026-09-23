@@ -1686,13 +1686,13 @@ pub async fn run(all: bool) -> Result<()> {
         }
     }
 
-    // BUNDLES (5449111c) — a cadence bundle file the live lineage has
+    // BUNDLES (5449111c) — a versioned bundle file the live lineage has
     // moved past. An author bumps the version FROM THE FILE, so a file
     // behind live turns "bump the version" into a collision the seed
     // refuses — and the gate, which reads only files, stays green. Said
     // here, at session start, before anyone bumps; the judgement is the
     // boot seed's own decision table, run dry against the live rows.
-    for line in crate::bundle_lineage::cadence_section(&http).await {
+    for line in crate::bundle_lineage::bundles_section(&http).await {
         println!("{line}");
     }
 

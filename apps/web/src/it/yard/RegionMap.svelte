@@ -169,8 +169,7 @@
           {/each}
           {#if laid.hidden > 0}
             <!-- what did not fit is COUNTED, never quietly dropped -->
-            <text x={REGION_CANVAS.width - HEAD_X} y={REGION_CANVAS.height - 6} text-anchor="end" class="tiny"
-              >+{laid.hidden} more</text>
+            <text x={laid.note.x} y={laid.note.y} text-anchor="end" class="tiny">+{laid.hidden} more</text>
           {/if}
         </g>
       {/if}
@@ -194,7 +193,9 @@
           </g>
         {/each}
         {#if interior.hidden > 0}
-          <text x={REGION_CANVAS.width - HEAD_X} y={REGION_CANVAS.height - 6} text-anchor="end" class="tiny"
+          <!-- placed by the layout, above its first row — never in the
+               machinery strip (backlog ba83225e) -->
+          <text x={interior.note.x} y={interior.note.y} text-anchor="end" class="tiny"
             >+{interior.hidden} more</text>
         {/if}
       </g>

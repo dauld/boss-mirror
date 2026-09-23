@@ -134,10 +134,27 @@ export function contentsBox(
   };
 }
 
+/** Where a layout's "+N more" note is drawn: right-aligned to the
+ *  contents box, on a baseline just above its first row (backlog
+ *  ba83225e). RegionMap drew it at the canvas's bottom edge minus six —
+ *  inside the machinery strip, clear of the glyphs only because they
+ *  fill from the left. Above the box is the band the head clamp keeps
+ *  (never under 24 px), which neither the rows nor the strip can reach,
+ *  and the note has no descender, so its baseline is its lowest pixel. */
+export type NoteAt = Readonly<{ x: number; y: number }>;
+const NOTE_GAP = 4;
+
+export function overflowNoteAt(box: Readonly<{ x: number; y: number; w: number }>): NoteAt {
+  return { x: box.x + box.w, y: box.y - NOTE_GAP };
+}
+
 /** Lay the wagons out inside the territory. What does not fit is
  *  COUNTED, never dropped silently — the yard's own "+N" idiom, so a
  *  full region reads as full rather than as a tidy one. */
-export function interiorLayout(t: Territory, wagons: ReadonlyArray<Wagon>): Readonly<{ placed: ReadonlyArray<Placed>; hidden: number }> {
+export function interiorLayout(
+  t: Territory,
+  wagons: ReadonlyArray<Wagon>,
+): Readonly<{ placed: ReadonlyArray<Placed>; hidden: number; note: NoteAt }> {
   const box = contentsBox(t, PLATE_H);
   const cols = Math.max(1, Math.floor((box.w + GAP) / (PLATE_W + GAP)));
   const rows = Math.max(1, Math.floor((box.h + GAP) / (PLATE_H + GAP)));
@@ -149,5 +166,5 @@ export function interiorLayout(t: Territory, wagons: ReadonlyArray<Wagon>): Read
     w: PLATE_W,
     h: PLATE_H,
   }));
-  return { placed, hidden: Math.max(0, wagons.length - placed.length) };
+  return { placed, hidden: Math.max(0, wagons.length - placed.length), note: overflowNoteAt(box) };
 }

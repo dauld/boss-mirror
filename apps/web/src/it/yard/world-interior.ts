@@ -34,7 +34,7 @@
 import { AGE_THRESHOLDS, CHANNELS, ageDays, type Channel, type InboundRow } from '../receiving/receiving';
 import type { Crew } from '../crew/crew';
 import type { Siding } from '../marshalling/marshalling';
-import { contentsBox } from './region-contents';
+import { contentsBox, overflowNoteAt, type NoteAt } from './region-contents';
 import type { Territory } from './world';
 
 /** Which standing packets are flagged, and from which end of the
@@ -240,7 +240,7 @@ const RATE_W = 26;
 export function platformLayout(
   t: Territory,
   platforms: ReadonlyArray<Platform>,
-): Readonly<{ placed: ReadonlyArray<PlacedPlatform>; hidden: number }> {
+): Readonly<{ placed: ReadonlyArray<PlacedPlatform>; hidden: number; note: NoteAt }> {
   // The room the region's contents may use — head off the top, edge
   // and MACHINERY STRIP off the bottom. One definition, shared with
   // `interiorLayout` (backlog 3a916816): this divided the same canvas
@@ -290,5 +290,5 @@ export function platformLayout(
           : null,
     };
   });
-  return { placed, hidden: Math.max(0, platforms.length - placed.length) };
+  return { placed, hidden: Math.max(0, platforms.length - placed.length), note: overflowNoteAt(box) };
 }

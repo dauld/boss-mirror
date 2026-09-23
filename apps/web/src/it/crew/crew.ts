@@ -323,6 +323,14 @@ export type AgentRun = Readonly<{
   /// 2b: written by `boss dispatch --from-hook`), or `null` for a run
   /// dispatched by hand.
   session: string | null;
+  /// When the packet last MOVED: the newest `completed_at` across its
+  /// completed steps, else `metadata.opened_at` — the instant the
+  /// age-out rule measures silence from (backlog 5082a08b). `null` when
+  /// the record holds neither.
+  lastMovedAt: string | null;
+  /// `building` is open (ready or active) — the one state the age-out
+  /// rule reads, so the only one silence is stated for.
+  building: boolean;
 }>;
 
 export function parseAgentRuns(raw: unknown): ReadonlyArray<AgentRun> {
@@ -352,9 +360,126 @@ export function parseAgentRuns(raw: unknown): ReadonlyArray<AgentRun> {
           : null,
         openedAt: str(m.opened_at) ?? str(r.opened_on),
         session: str(m.session),
+        // The handler's own reading, not a variant of it: the stamps
+        // are RFC 3339 UTC from one server clock, so the newest is the
+        // largest instant; `opened_on` (a date) is not an instant and
+        // is not a fallback here.
+        lastMovedAt:
+          steps
+            .filter((s) => str(s.status) === 'completed')
+            .map((s) => str(s.completed_at))
+            .filter((t): t is string => t !== null && Number.isFinite(Date.parse(t)))
+            .reduce<string | null>(
+              (a, t) => (a === null || Date.parse(t) > Date.parse(a) ? t : a),
+              null,
+            ) ?? str(m.opened_at),
+        building: steps.some(
+          (s) =>
+            str(s.spec_slug) === 'building' &&
+            (str(s.status) === 'ready' || str(s.status) === 'active'),
+        ),
       };
     })
     .filter((a) => a.id !== '');
+}
+
+// ---------------------------------------------------------------------
+// Silence — which open runs have not moved (backlog 5082a08b)
+// ---------------------------------------------------------------------
+
+/// The hours a run's `building` may stand with the packet unmoved
+/// before `agent-run-dies-when-building-is-silent` completes it `died`:
+/// that rule's `hours` arg. It lives twice because a browser cannot
+/// read the rules directory, so crew.test.ts holds the two equal
+/// (CLAUDE.md 9a) — the board must never call a run silent on a
+/// different clock from the rule that kills it.
+export const SILENT_BOUND_HOURS = 4;
+
+export type Silence = Readonly<{ hours: number; past: boolean }>;
+
+/// How long an open run has stood unmoved, against the bound. `null`
+/// for a run whose `building` is not open (the rule does not age it —
+/// a run waiting at `reported` is held by the gate, not silent) and for
+/// one whose record holds no instant: an unmeasured silence is not
+/// zero. Past the bound the run is one the hourly rule has not yet
+/// reached, and the board says so rather than waiting for the tick.
+export function silence(run: AgentRun, nowIso: string): Silence | null {
+  if (!run.building || run.lastMovedAt === null) return null;
+  const ms = Date.parse(nowIso) - Date.parse(run.lastMovedAt);
+  if (!Number.isFinite(ms)) return null;
+  const hours = Math.round((Math.max(0, ms) / 3_600_000) * 10) / 10;
+  return { hours, past: hours > SILENT_BOUND_HOURS };
+}
+
+export function silenceText(s: Silence): string {
+  return s.past
+    ? `${s.hours}h unmoved — past the ${SILENT_BOUND_HOURS}h bound`
+    : `${s.hours}h unmoved`;
+}
+
+// ---------------------------------------------------------------------
+// The finish record — `GET /api/agent-runs` (backlog 5082a08b)
+// ---------------------------------------------------------------------
+
+/// One row of `agent_runs`: a run that reached a terminal, with what it
+/// cost. `boss dispatch --report` writes it, keyed by the agent-run
+/// packet's id, and ONLY at a terminal — the row is insert-once
+/// (8f1de7bf) — so an OPEN run has no cost to show yet, and this is a
+/// list of finished runs rather than a column on the open ones.
+///
+/// Two limits of the record ride on the rows rather than being papered
+/// over: rows before the effort instrumentation carry no `effort`
+/// (fd5ce137's era boundary), and rows before 65c9c05a carry no branch.
+/// Each renders as not recorded, never as a guess.
+export type RunRecord = Readonly<{
+  runId: string;
+  actor: string | null;
+  model: string | null;
+  outcome: string | null;
+  finishedAt: string | null;
+  /// Wall-clock minutes, start to finish; `null` without both stamps.
+  minutes: number | null;
+  tokens: number | null;
+  /// Priced cost in micro-dollars; `null` is UNPRICED, never free.
+  usdMicros: number | null;
+  branch: string | null;
+  packet: string | null;
+  effort: string | null;
+}>;
+
+export function parseRunRecords(raw: unknown): ReadonlyArray<RunRecord> {
+  return rows(raw)
+    .map((r) => {
+      const detail = (r.detail && typeof r.detail === 'object' ? r.detail : {}) as Record<
+        string,
+        unknown
+      >;
+      const started = Date.parse(str(r.started_at) ?? '');
+      const finished = Date.parse(str(r.finished_at) ?? '');
+      return {
+        runId: str(r.run_id) ?? '',
+        actor: str(r.actor_id),
+        model: str(r.model),
+        outcome: str(r.outcome),
+        finishedAt: str(r.finished_at),
+        minutes:
+          Number.isFinite(started) && Number.isFinite(finished)
+            ? Math.round((finished - started) / 60_000)
+            : null,
+        tokens: num(r.total_tokens),
+        usdMicros: num(r.usd_micros),
+        branch: str(r.branch),
+        packet: str(r.job_id),
+        effort: str(detail.effort),
+      };
+    })
+    .filter((r) => r.runId !== '');
+}
+
+/// A run's cost as the board prints it. Unpriced is said in words: a
+/// `$0.00` for a run nobody priced would read as a free one.
+export function costText(r: RunRecord): string {
+  return r.usdMicros === null ? 'not priced' : `$${(r.usdMicros / 1_000_000).toFixed(2)}`;
 }
 
 // ---------------------------------------------------------------------
@@ -851,16 +976,19 @@ export type CrewState = Readonly<{
   agentRuns: Exclude<Remote<ReadonlyArray<AgentRun>>, { kind: 'loading' }>;
   /// OPEN sessions: the crews on the floor right now.
   sessions: Exclude<Remote<ReadonlyArray<Session>>, { kind: 'loading' }>;
+  /// The newest finished runs from `agent_runs`, with what each cost.
+  runRecords: Exclude<Remote<ReadonlyArray<RunRecord>>, { kind: 'loading' }>;
 }>;
 
 export async function fetchCrew(): Promise<CrewState> {
-  const [cars, gateRuns, yard, waits, agentRuns, sessions] = await Promise.all([
+  const [cars, gateRuns, yard, waits, agentRuns, sessions, runRecords] = await Promise.all([
     fetchRemote(`/api/jobs?kind=ship-a-change&limit=${CAR_WINDOW}`, parseCars),
     fetchRemote(`/api/jobs?kind=gate-run&limit=${CAR_WINDOW}`, parseGateRuns),
     fetchRemote('/api/yard/status', parseYard),
     fetchRemote('/api/jobs/queue-age', parseWaits),
     fetchRemote(`/api/jobs?kind=agent-run&status=open&limit=${CAR_WINDOW}`, parseAgentRuns),
     fetchRemote(`/api/jobs?kind=work-session&status=open&limit=${CAR_WINDOW}`, parseSessions),
+    fetchRemote(`/api/agent-runs?limit=${CAR_WINDOW}`, parseRunRecords),
   ]);
-  return { cars, gateRuns, yard, waits, agentRuns, sessions };
+  return { cars, gateRuns, yard, waits, agentRuns, sessions, runRecords };
 }

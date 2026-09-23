@@ -28,10 +28,11 @@
 //! out on the record in the packet, since that is a boot overwriting
 //! an operator's live decision.
 //!
-//! GENERIC OVER `Declared` so the other versioned bundles (stations,
-//! step plugins, delivery policy) can join by supplying their live
-//! lineage; this car wires cadence, the registry where the collision
-//! was measured, and leaves the others to the packet's open sweep.
+//! GENERIC OVER `Declared`, and the sweep joined through it: cadence
+//! first (the registry where the collision was measured), then
+//! stations and step plugins, whose files declare their version the
+//! same way and so can collide the same way — each read by its own
+//! loader and its own lineage route, never a guessed key.
 
 use boss_jobs::bundle_seed::{Declared, SeedOutcome, decide};
 
@@ -69,18 +70,32 @@ pub(crate) fn lineage_line<S: Declared>(registry: &str, spec: &S, live: &[S]) ->
     }
 }
 
-/// Where the cadence bundle lives in the tree — the directory the boot
-/// seed publishes from (`boss-platform-workflow-seed`'s sibling of
-/// `infra/platform/workflows`).
+/// Where each versioned bundle lives in the tree — the directories the
+/// boot seed publishes from (siblings of `infra/platform/workflows`).
 const CADENCE_BUNDLE: &str = "infra/platform/cadence";
+const STATIONS_BUNDLE: &str = "infra/platform/stations";
+const STEP_PLUGINS_BUNDLE: &str = "infra/platform/step-plugins";
 
-/// orient's BUNDLES section from what was read: how many rows were
-/// compared, how many the registry has never held (the window between
-/// a car's merge and the seed — said as a count, because an empty
-/// lineage is also what a wrong target answers), the lines an author
-/// must hear, and the rows whose lineage could not be read. Pure, so
-/// the words are pinned without a socket.
+/// Each registry's own lineage route, keyed by the name its seed keys
+/// by (`Declared::name` — a step plugin's `kind`).
+fn cadence_versions(name: &str) -> String {
+    format!("/api/cadence/rules/{name}/versions")
+}
+fn station_versions(name: &str) -> String {
+    format!("/api/stations/{name}/versions")
+}
+fn step_plugin_versions(name: &str) -> String {
+    format!("/api/jobs/step-plugins/{name}/versions")
+}
+
+/// orient's BUNDLES section for one registry, from what was read: how
+/// many rows were compared, how many the registry has never held (the
+/// window between a car's merge and the seed — said as a count,
+/// because an empty lineage is also what a wrong target answers), the
+/// lines an author must hear, and the rows whose lineage could not be
+/// read. Pure, so the words are pinned without a socket.
 pub(crate) fn section_lines(
+    registry: &str,
     compared: usize,
     not_live: usize,
     flagged: &[String],
@@ -89,13 +104,13 @@ pub(crate) fn section_lines(
     let mut out = Vec::new();
     if flagged.is_empty() {
         out.push(format!(
-            "\n  BUNDLES — cadence: {} of {compared} rule(s) judged against their live \
+            "\n  BUNDLES — {registry}: {} of {compared} row(s) judged against their live \
              lineage, none behind or contradicted ({not_live} not live yet)",
             compared - unread.len()
         ));
     } else {
         out.push(format!(
-            "\n  BUNDLES — {} cadence rule(s) whose FILE a version bump would collide with \
+            "\n  BUNDLES — {} {registry} row(s) whose FILE a version bump would collide with \
              or be ignored against ({compared} compared, {not_live} not live yet). Bump from \
              the LIVE newest, never the file (5449111c):",
             flagged.len()
@@ -110,44 +125,89 @@ pub(crate) fn section_lines(
     out
 }
 
-/// The cadence half of orient's BUNDLES section: every rule this
+/// One registry's half of orient's BUNDLES section: every row this
 /// checkout's bundle declares, put through the seed's decision against
 /// the lineage the system of record answers now. Never fatal — a tree
 /// or a read that fails prints why, and the approach still prints.
-pub(crate) async fn cadence_section(http: &reqwest::Client) -> Vec<String> {
-    use boss_jobs::cadence::CadenceRuleSpec;
+async fn registry_section<S: Declared + serde::de::DeserializeOwned>(
+    http: &reqwest::Client,
+    registry: &str,
+    bundle: &str,
+    load: fn(&std::path::Path) -> Result<Vec<S>, boss_jobs::seed_loader::SeedLoaderError>,
+    versions: fn(&str) -> String,
+) -> Vec<String> {
     let dir = match crate::brief::repo_root() {
-        Ok(root) => root.join(CADENCE_BUNDLE),
-        Err(e) => return vec![format!("\n  BUNDLES — skipped: {e}")],
+        Ok(root) => root.join(bundle),
+        Err(e) => return vec![format!("\n  BUNDLES — {registry}: skipped: {e}")],
     };
-    let specs = match boss_jobs::seed_loader::load_cadence_rules(&dir) {
+    let specs = match load(&dir) {
         Ok(specs) => specs,
         Err(e) => {
             return vec![format!(
-                "\n  BUNDLES — skipped: could not read {}: {e}",
+                "\n  BUNDLES — {registry}: skipped: could not read {}: {e}",
                 dir.display()
             )];
         }
     };
     let (mut flagged, mut unread, mut not_live) = (Vec::new(), Vec::new(), 0);
     for spec in &specs {
-        let path = format!("/api/cadence/rules/{}/versions", spec.name());
-        let live = crate::gate::api(http, reqwest::Method::GET, &path, None)
+        let live = crate::gate::api(http, reqwest::Method::GET, &versions(spec.name()), None)
             .await
             .and_then(crate::train::rows)
             .and_then(|rows| {
                 rows.into_iter()
-                    .map(serde_json::from_value::<CadenceRuleSpec>)
+                    .map(serde_json::from_value::<S>)
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(anyhow::Error::from)
             });
         match live {
             Ok(live) if live.is_empty() => not_live += 1,
-            Ok(live) => flagged.extend(lineage_line("cadence", spec, &live)),
-            Err(e) => unread.push(format!("cadence/{}: {e:#}", spec.name())),
+            Ok(live) => flagged.extend(lineage_line(registry, spec, &live)),
+            Err(e) => unread.push(format!("{registry}/{}: {e:#}", spec.name())),
         }
     }
-    section_lines(specs.len(), not_live, &flagged, &unread)
+    section_lines(registry, specs.len(), not_live, &flagged, &unread)
+}
+
+/// orient's BUNDLES section: every versioned bundle whose registry
+/// answers its lineage — cadence (where the collision was measured),
+/// stations and step plugins (the sweep, 5449111c). Delivery policy
+/// declares a version too, but its registry serves only the ACTIVE row
+/// (`/api/delivery/policy/{name}`), and a lineage read as one row
+/// would call a superseded declaration "behind" when it is the
+/// operator's own history — so it waits for a versions route rather
+/// than being judged from half the facts.
+pub(crate) async fn bundles_section(http: &reqwest::Client) -> Vec<String> {
+    use boss_jobs::seed_loader::{load_cadence_rules, load_stations, load_step_plugins};
+    let mut out = registry_section(
+        http,
+        "cadence",
+        CADENCE_BUNDLE,
+        |d| load_cadence_rules(d),
+        cadence_versions,
+    )
+    .await;
+    out.extend(
+        registry_section(
+            http,
+            "stations",
+            STATIONS_BUNDLE,
+            |d| load_stations(d),
+            station_versions,
+        )
+        .await,
+    );
+    out.extend(
+        registry_section(
+            http,
+            "step-plugins",
+            STEP_PLUGINS_BUNDLE,
+            |d| load_step_plugins(d),
+            step_plugin_versions,
+        )
+        .await,
+    );
+    out
 }
 
 #[cfg(test)]
@@ -225,15 +285,52 @@ mod tests {
     /// and an unread lineage is named, never folded into agreement.
     #[test]
     fn the_section_counts_what_it_compared_and_names_what_it_could_not_read() {
-        let quiet = section_lines(3, 0, &[], &[]).join("\n");
-        assert!(quiet.contains("3 of 3 rule(s) judged"), "{quiet}");
+        let quiet = section_lines("cadence", 3, 0, &[], &[]).join("\n");
+        assert!(quiet.contains("cadence: 3 of 3 row(s) judged"), "{quiet}");
         assert!(quiet.contains("none behind"), "{quiet}");
-        let loud = section_lines(3, 1, &["cadence/train-window: BEHIND".into()], &[]).join("\n");
-        assert!(loud.contains("1 cadence rule(s)"), "{loud}");
+        let loud = section_lines(
+            "cadence",
+            3,
+            1,
+            &["cadence/train-window: BEHIND".into()],
+            &[],
+        )
+        .join("\n");
+        assert!(loud.contains("1 cadence row(s)"), "{loud}");
         assert!(loud.contains("1 not live yet"), "{loud}");
         assert!(loud.contains("    cadence/train-window: BEHIND"), "{loud}");
-        let unread = section_lines(3, 0, &[], &["cadence/x: HTTP 502".into()]).join("\n");
+        let unread =
+            section_lines("cadence", 3, 0, &[], &["cadence/x: HTTP 502".into()]).join("\n");
         assert!(unread.contains("UNREAD — cadence/x: HTTP 502"), "{unread}");
-        assert!(unread.contains("2 of 3 rule(s) judged"), "{unread}");
+        assert!(unread.contains("2 of 3 row(s) judged"), "{unread}");
+    }
+
+    /// The packet's sweep (5449111c): stations and step plugins declare
+    /// their version in the file exactly as cadence does, so they can
+    /// collide the same way, and orient judges them too. Each directory
+    /// is loaded by ITS OWN loader — the packet's hand measurement
+    /// resolved two station names to a nested `kind`, which is why the
+    /// sweep is code. A constant pointing at a moved directory would
+    /// print "skipped" forever; this loads each from the tree.
+    #[test]
+    fn every_bundle_orient_judges_loads_from_the_tree_by_its_own_loader() {
+        let root = crate::brief::repo_root().expect("repo root");
+        let dir = |d: &str| root.join(d);
+        let cadence = boss_jobs::seed_loader::load_cadence_rules(dir(CADENCE_BUNDLE)).unwrap();
+        let stations = boss_jobs::seed_loader::load_stations(dir(STATIONS_BUNDLE)).unwrap();
+        let plugins = boss_jobs::seed_loader::load_step_plugins(dir(STEP_PLUGINS_BUNDLE)).unwrap();
+        assert!(!cadence.is_empty() && !stations.is_empty() && !plugins.is_empty());
+        // The lineage path each is read from is the registry's own
+        // versions route, keyed by the name the seed keys by.
+        assert_eq!(
+            station_versions("loading-dock"),
+            "/api/stations/loading-dock/versions"
+        );
+        assert_eq!(
+            step_plugin_versions("sign-off"),
+            "/api/jobs/step-plugins/sign-off/versions"
+        );
+        assert!(stations.iter().any(|s| Declared::name(s) == "loading-dock"));
+        assert!(plugins.iter().any(|p| Declared::name(p) == "sign-off"));
     }
 }

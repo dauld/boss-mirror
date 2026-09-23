@@ -2023,53 +2023,84 @@ fn verdict_metadata(receipt: &Value) -> Result<Value> {
     }))
 }
 
-async fn close_refused(http: &reqwest::Client, packet: &str, reason: &str) {
-    let result = async {
-        let job = api(
-            http,
-            reqwest::Method::GET,
-            &format!("/api/jobs/{packet}"),
-            None,
-        )
-        .await?
-        .ok_or_else(|| anyhow!("gate-run {packet} vanished"))?;
-        let step_id = job
-            .get("steps")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .find(|s| s.get("title").and_then(Value::as_str) == Some("Record the receipt"))
-            .and_then(|s| s.get("id"))
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("gate-run {packet} has no verdict step"))?
-            .to_string();
-        // A LAUNCH REFUSED IS A REFUSAL, not silence: something
-        // declined out loud, with a reason, and no check ever ran. It
-        // was filed as `lost` only because the verdict enum had no
-        // other word until ff5b9634; `lost` means the environment died
-        // before saying anything, which is a different fact and reads
-        // as a dead runner to everyone downstream.
-        let receipt = json!({
-            "verdict": "refused",
-            "head": "",
-            "mode": "",
-            "fails": [],
-            "refused_because": format!("launch refused before any Job was created: {reason}"),
-        });
-        api(
-            http,
+/// The two writes that record a receipt on the verdict step, in order:
+/// the verdict and receipt through the step's MERGE door, then a
+/// status-only flip. Pure, so the shape is pinned without a socket.
+///
+/// Why two writes and not the one PUT this used to be (e39a9d2a, the
+/// car after the gate-runner's, 2026-09-23): the step PUT REPLACES
+/// `metadata` wholesale, and the registry materializes the step's
+/// `metadata_defaults` onto it at admission — gate-run.toml gives the
+/// verdict step `heartbeat_at` — so a fresh `{verdict, receipt}` body
+/// deletes every stored key it does not name. The item's last car makes
+/// the PUT refuse such a body outright; this verb would then fail to
+/// close the very packets it exists to close. The merge door lands the
+/// keys against the row as it stands and touches nothing else. It goes
+/// FIRST because `verdict` is required at done and the flip is where
+/// that is judged. The runner (infra/gate-runner/run.sh) writes the same
+/// step the same way, so the record reads one way whichever side wrote.
+fn verdict_writes(
+    packet: &str,
+    step_id: &str,
+    receipt: &Value,
+) -> Result<Vec<(reqwest::Method, String, Value)>> {
+    Ok(vec![
+        (
+            reqwest::Method::PATCH,
+            format!("/api/jobs/{packet}/steps/{step_id}/metadata"),
+            verdict_metadata(receipt)?,
+        ),
+        (
             reqwest::Method::PUT,
-            &format!("/api/jobs/{packet}/steps/{step_id}"),
-            Some(json!({
-                "status": "completed",
-                "metadata": verdict_metadata(&receipt)?,
-            })),
-        )
-        .await?;
-        Ok::<(), anyhow::Error>(())
+            format!("/api/jobs/{packet}/steps/{step_id}"),
+            json!({ "status": "completed" }),
+        ),
+    ])
+}
+
+/// Record `receipt` on the gate-run's `Record the receipt` step — the
+/// one writer both refusal paths share, so neither can drift back to a
+/// metadata-carrying PUT on its own.
+async fn write_verdict(http: &reqwest::Client, packet: &str, receipt: &Value) -> Result<()> {
+    let job = api(
+        http,
+        reqwest::Method::GET,
+        &format!("/api/jobs/{packet}"),
+        None,
+    )
+    .await?
+    .ok_or_else(|| anyhow!("gate-run {packet} vanished"))?;
+    let step_id = job
+        .get("steps")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|s| s.get("title").and_then(Value::as_str) == Some("Record the receipt"))
+        .and_then(|s| s.get("id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("gate-run {packet} has no verdict step"))?
+        .to_string();
+    for (method, path, body) in verdict_writes(packet, &step_id, receipt)? {
+        api(http, method, &path, Some(body)).await?;
     }
-    .await;
-    match result {
+    Ok(())
+}
+
+async fn close_refused(http: &reqwest::Client, packet: &str, reason: &str) {
+    // A LAUNCH REFUSED IS A REFUSAL, not silence: something
+    // declined out loud, with a reason, and no check ever ran. It
+    // was filed as `lost` only because the verdict enum had no
+    // other word until ff5b9634; `lost` means the environment died
+    // before saying anything, which is a different fact and reads
+    // as a dead runner to everyone downstream.
+    let receipt = json!({
+        "verdict": "refused",
+        "head": "",
+        "mode": "",
+        "fails": [],
+        "refused_because": format!("launch refused before any Job was created: {reason}"),
+    });
+    match write_verdict(http, packet, &receipt).await {
         Ok(()) => println!(
             "boss gate: refused launch closed its own packet ({} refused)",
             &packet[..8.min(packet.len())]
@@ -3717,48 +3748,16 @@ fn pod_start(namespace: &str, job_name: &str) -> PodStart {
 /// `close_refused`: a failure to write is said, not raised, because the
 /// wait is about to end with the reason either way.
 async fn record_refusal(http: &reqwest::Client, packet: &str, receipt: &Value) {
-    let result = async {
-        let job = api(
-            http,
-            reqwest::Method::GET,
-            &format!("/api/jobs/{packet}"),
-            None,
-        )
-        .await?
-        .ok_or_else(|| anyhow!("gate-run {packet} vanished"))?;
-        let step_id = job
-            .get("steps")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .find(|s| s.get("title").and_then(Value::as_str) == Some("Record the receipt"))
-            .and_then(|s| s.get("id"))
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("gate-run {packet} has no verdict step"))?
-            .to_string();
-        // THE STEP SAYS WHAT THE RECEIPT SAYS. `verdict` is the
-        // gate-run protocol's enum, and since ff5b9634 it carries
-        // `refused` — so this no longer has to file an out-loud
-        // refusal as `lost`, which meant "the environment died"
-        // and read to every consumer as a dead runner. The refusal
-        // still rides the receipt too (`verdict: refused`,
-        // `refused_because`), exactly as gate.sh writes a headroom
-        // refusal, so `red_verdict_detail` and the train's strike
-        // rule read both the same way.
-        api(
-            http,
-            reqwest::Method::PUT,
-            &format!("/api/jobs/{packet}/steps/{step_id}"),
-            Some(json!({
-                "status": "completed",
-                "metadata": verdict_metadata(receipt)?,
-            })),
-        )
-        .await?;
-        Ok::<(), anyhow::Error>(())
-    }
-    .await;
-    if let Err(e) = result {
+    // THE STEP SAYS WHAT THE RECEIPT SAYS. `verdict` is the
+    // gate-run protocol's enum, and since ff5b9634 it carries
+    // `refused` — so this no longer has to file an out-loud
+    // refusal as `lost`, which meant "the environment died"
+    // and read to every consumer as a dead runner. The refusal
+    // still rides the receipt too (`verdict: refused`,
+    // `refused_because`), exactly as gate.sh writes a headroom
+    // refusal, so `red_verdict_detail` and the train's strike
+    // rule read both the same way.
+    if let Err(e) = write_verdict(http, packet, receipt).await {
         eprintln!(
             "boss gate: could not record the refusal on packet {packet}: {e:#}\n  \
              the packet stays open; the overdue alarm will find it."
@@ -6709,6 +6708,40 @@ kind: Job\n\
         let carried: Value = serde_json::from_str(md["receipt"].as_str().expect("a JSON string"))
             .expect("the receipt rides as a JSON string");
         assert_eq!(carried, receipt, "the receipt is copied, not retyped");
+    }
+
+    /// Both refusal writers record the verdict through the step's MERGE
+    /// door and then flip the status with a body that carries NO
+    /// `metadata` — so the keys the registry materialized onto the
+    /// verdict step (`heartbeat_at`, from gate-run.toml's
+    /// metadata_defaults) survive, and the step PUT's coming refusal
+    /// of a metadata body that drops a stored key (e39a9d2a) never
+    /// sees one from this verb. Merge first: `verdict` is required at
+    /// done, and the flip is where that is judged.
+    #[test]
+    fn a_refused_verdict_merges_its_keys_then_flips_the_status_alone() {
+        let receipt = json!({"verdict": "refused", "head": "", "mode": "", "fails": [],
+                             "refused_because": "the disk floor refused"});
+        let writes = verdict_writes("pkt-1", "s-verdict", &receipt).expect("a receipt serializes");
+        assert_eq!(writes.len(), 2, "one merge, one flip: {writes:?}");
+
+        let (method, path, body) = &writes[0];
+        assert_eq!(*method, reqwest::Method::PATCH);
+        assert_eq!(path, "/api/jobs/pkt-1/steps/s-verdict/metadata");
+        assert_eq!(
+            body,
+            &verdict_metadata(&receipt).expect("a receipt serializes"),
+            "the merge carries exactly the verdict and its receipt"
+        );
+
+        let (method, path, body) = &writes[1];
+        assert_eq!(*method, reqwest::Method::PUT);
+        assert_eq!(path, "/api/jobs/pkt-1/steps/s-verdict");
+        assert_eq!(
+            body,
+            &json!({"status": "completed"}),
+            "the flip carries no metadata, so it can drop no stored key"
+        );
     }
 
     /// The receipt is a JSON string on the record-verdict step — the

@@ -98,10 +98,11 @@ pub struct TenantManifest {
 /// `/etc/boss-gateway/tenant.toml` if present, else
 /// `/opt/boss/examples/brewery/seeds/tenant.toml` (the brewery demo).
 ///
-/// Absent → empty manifest. The SPA defaults to "all modules
-/// enabled" when the manifest payload is empty, so a missing file
-/// falls back to that all-enabled default rather than blanking the
-/// UI. A file that exists but does not parse refused the BOOT
+/// Absent → empty manifest, and the SPA reads an empty `modules` as
+/// every module OFF — a module is on only when listed true (ce68f137;
+/// this comment said "all enabled" until backlog fa77e3d7). The boot
+/// says how many are on (`modules_boot_line`), so an empty
+/// declaration is visible. A file that exists but does not parse refused the BOOT
 /// (`load_tenant_toml`); reaching this handler with one means the
 /// file changed under the running gateway, which is logged and
 /// answered empty rather than blanking the UI mid-flight.
@@ -195,6 +196,57 @@ pub(crate) fn load_tenant_toml() -> Result<Option<TenantToml>, String> {
     TenantToml::parse(&text)
         .map(Some)
         .map_err(|e| format!("{path}: {e}"))
+}
+
+/// The boot's one line about `[modules]`: how many are on, and the
+/// names on each side. Returns the on-count beside the line so the
+/// caller can raise zero to a warning.
+///
+/// WHY (design 1054c099, question startup-line; backlog fa77e3d7,
+/// 2026-09-22): prod's manifest answered `"modules":{}` — every
+/// module-gated surface off — and nothing said so. It became visible
+/// only when two SPA readers that had disagreed about it were made one
+/// fact. Zero on is a legitimate tenant (one that runs only jobs,
+/// people and messages), so this states rather than refuses.
+///
+/// The count is of what the manifest DECLARES, not "of N known": the
+/// module names live in the SPA's nav catalog (and the list in
+/// docs/tenant-contract.md), and a third copy here would be a fact
+/// living twice with no pin (CLAUDE.md §9a).
+pub(crate) fn modules_boot_line(manifest: Option<&TenantToml>) -> (usize, String) {
+    const OFF: &str = "every module-gated surface is off";
+    let Some(t) = manifest else {
+        return (
+            0,
+            format!("tenant modules on: 0; no tenant manifest, so {OFF} (a missing key is off)"),
+        );
+    };
+    let names = |want: bool| {
+        t.modules
+            .iter()
+            .filter(|(_, on)| **on == want)
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+    };
+    let (on, off) = (names(true), names(false));
+    let head = format!(
+        "tenant modules on: {} of {} declared",
+        on.len(),
+        t.modules.len()
+    );
+    let line = match (on.is_empty(), off.is_empty()) {
+        (true, true) => {
+            format!("{head}; the manifest lists no [modules], so {OFF} (a missing key is off)")
+        }
+        (true, false) => format!("{head}; declared off: {}; {OFF}", off.join(", ")),
+        (false, true) => format!("{head}; on: {}", on.join(", ")),
+        (false, false) => format!(
+            "{head}; on: {}; declared off: {}",
+            on.join(", "),
+            off.join(", ")
+        ),
+    };
+    (on.len(), line)
 }
 
 /// The request-time reader: the boot already refused a file that
@@ -445,6 +497,54 @@ shop = true
         assert!(
             err.contains("line 5"),
             "the refusal carries toml's line for the bad one: {err}"
+        );
+    }
+
+    /// The boot states how many modules are on (design 1054c099,
+    /// question startup-line; backlog fa77e3d7). Prod answered
+    /// `"modules":{}` for weeks and nothing said so, because an empty
+    /// declaration is a confident answer, not an error. Zero on is a
+    /// legitimate tenant, so it is a line, not a refusal — but the
+    /// line carries the count, the names on each side, and what zero
+    /// means for the SPA.
+    #[test]
+    fn the_boot_line_names_how_many_modules_are_on() {
+        let empty = TenantToml::parse("[meta]\ntenant_id = \"algedonic\"\n").unwrap();
+        let (on, line) = modules_boot_line(Some(&empty));
+        assert_eq!(on, 0);
+        assert_eq!(
+            line,
+            "tenant modules on: 0 of 0 declared; the manifest lists no [modules], \
+             so every module-gated surface is off (a missing key is off)"
+        );
+
+        let (on, line) = modules_boot_line(None);
+        assert_eq!(on, 0);
+        assert_eq!(
+            line,
+            "tenant modules on: 0; no tenant manifest, \
+             so every module-gated surface is off (a missing key is off)"
+        );
+
+        let some = TenantToml::parse(
+            "[modules]\nfinance = true\nexec = true\nshop = false\nsupport = true\nqa = false\n",
+        )
+        .unwrap();
+        let (on, line) = modules_boot_line(Some(&some));
+        assert_eq!(on, 3);
+        assert_eq!(
+            line,
+            "tenant modules on: 3 of 5 declared; on: exec, finance, support; \
+             declared off: qa, shop"
+        );
+
+        let all_off = TenantToml::parse("[modules]\nsim = false\n").unwrap();
+        let (on, line) = modules_boot_line(Some(&all_off));
+        assert_eq!(on, 0);
+        assert_eq!(
+            line,
+            "tenant modules on: 0 of 1 declared; declared off: sim; \
+             every module-gated surface is off"
         );
     }
 

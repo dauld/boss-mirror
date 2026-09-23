@@ -197,11 +197,18 @@ async fn main() -> Result<()> {
     // but does not parse is refused here too, naming the file and
     // toml's line (api.rs `load_tenant_toml`, backlog 4f1ba1f9): the
     // configuration the router is built from, not a boot check.
-    let declared = api::load_tenant_toml()
+    let manifest = api::load_tenant_toml()
         .map_err(|e| anyhow::anyhow!("{e}"))
-        .context("reading the tenant manifest")?
-        .map(|t| t.gateway.public_reads)
-        .unwrap_or_default();
+        .context("reading the tenant manifest")?;
+    // How many modules are on, said once at boot (design 1054c099;
+    // backlog fa77e3d7): prod ran with `modules = {}` — every
+    // module-gated surface off — and no line anywhere said so. Zero is
+    // legitimate, so it warns rather than refuses.
+    match api::modules_boot_line(manifest.as_ref()) {
+        (0, line) => tracing::warn!("{line}"),
+        (_, line) => tracing::info!("{line}"),
+    }
+    let declared = manifest.map(|t| t.gateway.public_reads).unwrap_or_default();
     let public_reads = public_reads::PublicReads::resolve(&declared)
         .map_err(|e| anyhow::anyhow!("{e}"))
         .context("resolving [gateway] public_reads from the tenant manifest")?;

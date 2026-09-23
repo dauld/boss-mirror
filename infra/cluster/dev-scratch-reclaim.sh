@@ -24,8 +24,9 @@
 # and each fills a different way:
 #   * WORK  (/work, the ReadWriteOnce PVC): the git clone + its
 #     worktrees. Reclaim = prune stale git worktrees.
-#   * SCRATCH (/scratch, the node-local emptyDir): CARGO_TARGET_DIR.
-#     Reclaim = drop the regenerable incremental-compilation cache.
+#   * SCRATCH (/scratch, the node-local emptyDir): CARGO_TARGET_DIR and
+#     every builder's sibling target. Reclaim = the idle siblings, least
+#     recently used first, then the primary's incremental cache.
 # Each is checked against its own floor and reclaimed independently.
 #
 # AND SINCE 2026-09-18, ONE PASS THAT SPANS BOTH AND IS NOT
@@ -100,7 +101,10 @@
 #     bash /work/boss/infra/cluster/dev-scratch-reclaim.sh
 #
 # Tunables (env, with in-sidecar defaults):
-#   BOSS_SCRATCH_FLOOR_GB    free GB to keep on /scratch     (default 50)
+#   BOSS_SCRATCH_FLOOR_PCT   share of /scratch's filesystem to keep
+#                            free, as a percentage          (default 25)
+#   BOSS_LIVE_TARGET_MIN     minutes since a sibling target was touched
+#                            before the floor pass may take it (default 30)
 #   BOSS_STALE_TARGET_H      hours before a sibling target dir is dead (default 12)
 #   BOSS_WORK_FLOOR_GB       free GB to keep on /work        (default 6)
 #   BOSS_WORKTREE_MAX_AGE_H  only prune worktrees older than; also the
@@ -133,7 +137,18 @@
 #     stubs it)
 set -euo pipefail
 
-SCRATCH_FLOOR_GB="${BOSS_SCRATCH_FLOOR_GB:-50}"
+# The scratch floor is a SHARE of the filesystem, because the line it
+# must stay ahead of is one: the kubelet evicts the pod when the node
+# fs falls below 15% free (measured on w-1 2026-09-23: 139 GiB of 929).
+# A floor in GB sat at 50 — ninety GB BELOW that line — so the kubelet
+# evicted the whole pod six times in eight days while this pass never
+# fired once. 25% keeps ~90 GiB of margin on w-1, over two hours of the
+# ~40 GB/h the builders were measured filling it at, on any node size.
+SCRATCH_FLOOR_PCT="${BOSS_SCRATCH_FLOOR_PCT:-25}"
+# A sibling target touched this recently belongs to a build in flight;
+# the floor pass never takes it (the mtime is the per-dir liveness
+# check, as in the stale-target pass).
+LIVE_TARGET_MIN="${BOSS_LIVE_TARGET_MIN:-30}"
 # Hours a SIBLING target dir may go untouched before it is a dead cache.
 # Every builder gets its own CARGO_TARGET_DIR under the scratch mount
 # (boss brief says so), and a landed branch's target outlives it by
@@ -172,7 +187,7 @@ SCRATCH_MOUNT="${SCRATCH_MOUNT:-/scratch}"
 WORK_MOUNT="${WORK_MOUNT:-/work}"
 PROC_ROOT="${PROC_ROOT:-/proc}"
 
-for name in SCRATCH_FLOOR_GB WORK_FLOOR_GB WORKTREE_MAX_AGE_H STALE_TARGET_H WORKTREE_GRACE_H WORKTREE_IDLE_H FF_LAUNCH_WINDOW_SECS FF_DEADLINE_SECS; do
+for name in SCRATCH_FLOOR_PCT LIVE_TARGET_MIN WORK_FLOOR_GB WORKTREE_MAX_AGE_H STALE_TARGET_H WORKTREE_GRACE_H WORKTREE_IDLE_H FF_LAUNCH_WINDOW_SECS FF_DEADLINE_SECS; do
     case "${!name}" in
         ''|*[!0-9]*)
             echo "dev-scratch-reclaim: $name must be a whole number, got '${!name}'" >&2
@@ -180,6 +195,10 @@ for name in SCRATCH_FLOOR_GB WORK_FLOOR_GB WORKTREE_MAX_AGE_H STALE_TARGET_H WOR
             ;;
     esac
 done
+if [ "$SCRATCH_FLOOR_PCT" -gt 100 ]; then
+    echo "dev-scratch-reclaim: SCRATCH_FLOOR_PCT is a percentage, got '$SCRATCH_FLOOR_PCT'" >&2
+    exit 64
+fi
 
 log() { echo "dev-scratch-reclaim: $*"; }
 
@@ -210,6 +229,12 @@ free_kb() {
     df -Pk "$m" | awk 'NR==2 {print $4}'
 }
 
+# The filesystem's size, in KB — the base the scratch floor's share is
+# taken of.
+size_kb() {
+    df -Pk "$1" | awk 'NR==2 {print $2}'
+}
+
 problems=0
 
 # Totals every pass leaves for the record at the end.
@@ -224,6 +249,7 @@ WT_PRUNED=0
 WT_TARGETS_REMOVED=0; WT_TARGETS_MIB=0
 FLOOR_WORKTREES_REMOVED=0
 STALE_TARGETS_RECLAIMED=0
+FLOOR_TARGETS_RECLAIMED=0; FLOOR_TARGETS_MIB=0
 INCREMENTAL_DROPPED=0
 
 # ---------------------------------------------------------------------
@@ -927,18 +953,32 @@ reclaim_work() {
 # SCRATCH: the regenerable incremental cache under CARGO_TARGET_DIR.
 # ---------------------------------------------------------------------
 reclaim_scratch() {
-    local kb gb
+    local kb gb SCRATCH_FLOOR_GB
     kb=$(free_kb "$SCRATCH_MOUNT")
     if [ -z "$kb" ]; then
         log "$SCRATCH_MOUNT not mounted — skipping build-cache reclaim"
         return 0
     fi
     gb=$((kb / 1024 / 1024))
+    SCRATCH_FLOOR_GB=$(( $(size_kb "$SCRATCH_MOUNT") / 1024 / 1024 * SCRATCH_FLOOR_PCT / 100 ))
     if [ "$gb" -ge "$SCRATCH_FLOOR_GB" ]; then
-        log "$SCRATCH_MOUNT ${gb}GB free >= ${SCRATCH_FLOOR_GB}GB floor — no build-cache reclaim"
+        log "$SCRATCH_MOUNT ${gb}GB free >= ${SCRATCH_FLOOR_GB}GB floor (${SCRATCH_FLOOR_PCT}%) — no build-cache reclaim"
         return 0
     fi
-    log "$SCRATCH_MOUNT ${gb}GB free < ${SCRATCH_FLOOR_GB}GB floor — reclaiming regenerable build cache"
+    log "$SCRATCH_MOUNT ${gb}GB free < ${SCRATCH_FLOOR_GB}GB floor (${SCRATCH_FLOOR_PCT}%) — reclaiming regenerable build cache"
+
+    # The siblings first: every builder's own target, least recently
+    # touched first, until the floor is met. They hold the bulk (the
+    # 2026-09-23 sawtooth was ~450 GB of them), each is regenerable
+    # (wt-cargo reseeds one from the primary), and each carries its own
+    # liveness in its mtime — so no build_running() guard, which would
+    # see some builder's cargo on a busy pod and defer forever.
+    reclaim_targets_to_floor "$SCRATCH_FLOOR_GB"
+    gb=$(( $(free_kb "$SCRATCH_MOUNT") / 1024 / 1024 ))
+    if [ "$gb" -ge "$SCRATCH_FLOOR_GB" ]; then
+        log "$SCRATCH_MOUNT ${gb}GB free — floor met by the sibling targets"
+        return 0
+    fi
 
     if [ ! -d "$TARGET_DIR" ]; then
         log "$TARGET_DIR does not exist — nothing to reclaim"
@@ -974,6 +1014,45 @@ reclaim_scratch() {
         log "  full rebuild's worth of cost — run \`cargo clean\` deliberately, or an operator decides." >&2
         problems=$((problems + 1))
     fi
+}
+
+# Under the floor: sibling target dirs, least recently touched first,
+# until free space reaches $1 GB. A dir touched inside LIVE_TARGET_MIN
+# is a build in flight and is never taken; the primary TARGET_DIR is
+# the incremental trim's and never removed whole.
+reclaim_targets_to_floor() {
+    local floor="$1" d kb gb n=0 mib=0 cutoff
+    cutoff="@$(( $(date +%s) - LIVE_TARGET_MIN * 60 ))"
+    while IFS=$'\t' read -r _ d; do
+        [ -n "$d" ] || continue
+        gb=$(( $(free_kb "$SCRATCH_MOUNT") / 1024 / 1024 ))
+        [ "$gb" -lt "$floor" ] || break
+        if [ -n "$(find "$d" -maxdepth 3 -newermt "$cutoff" -print -quit 2>/dev/null)" ]; then
+            log "  kept $d — touched within ${LIVE_TARGET_MIN}m, a build in flight"
+            continue
+        fi
+        kb=$(du -sk "$d" 2>/dev/null | awk '{print $1}')
+        if rm -rf "$d"; then
+            n=$((n + 1))
+            mib=$((mib + ${kb:-0} / 1024))
+            log "floor target reclaimed: $d ($((${kb:-0} / 1024))MiB, least recently used; ${gb}GB free < ${floor}GB floor)"
+        else
+            log "could not remove target $d" >&2
+            problems=$((problems + 1))
+        fi
+    done < <(
+        for d in "$SCRATCH_MOUNT"/*/; do
+            d="${d%/}"
+            [ -d "$d" ] || continue
+            [ "$d" = "$TARGET_DIR" ] && continue
+            [ -f "$d/CACHEDIR.TAG" ] || [ -d "$d/debug" ] || [ -d "$d/release" ] || continue
+            # The newest mtime at depth <= 3 is when a build last wrote.
+            printf '%s\t%s\n' "$(find "$d" -maxdepth 3 -printf '%T@\n' 2>/dev/null | sort -n | tail -n1)" "$d"
+        done | sort -n
+    )
+    FLOOR_TARGETS_RECLAIMED=$n
+    FLOOR_TARGETS_MIB=$mib
+    log "floor-target pass: $n sibling target(s) reclaimed (${mib}MiB), least recently used first"
 }
 
 # ---------------------------------------------------------------------
@@ -1138,7 +1217,7 @@ install_tree_cli() {
 RECLAIM_KIND=maintenance-dev-scratch-reclaim
 record_pass() {
     local acted
-    acted=$((WT_REMOVED + WT_TARGETS_REMOVED + WT_PRUNED + FLOOR_WORKTREES_REMOVED + STALE_TARGETS_RECLAIMED + INCREMENTAL_DROPPED))
+    acted=$((WT_REMOVED + WT_TARGETS_REMOVED + WT_PRUNED + FLOOR_WORKTREES_REMOVED + STALE_TARGETS_RECLAIMED + FLOOR_TARGETS_RECLAIMED + INCREMENTAL_DROPPED))
     if [ "$acted" -eq 0 ] && [ "$problems" -eq 0 ]; then
         log "nothing reclaimed and no floor unmet — a pass that only looked files no packet"
         return 0
@@ -1178,6 +1257,7 @@ record_pass() {
             "targets_removed=$WT_TARGETS_REMOVED" "targets_removed_mib=$WT_TARGETS_MIB" \
             "floor_worktrees_removed=$FLOOR_WORKTREES_REMOVED" \
             "stale_targets_reclaimed=$STALE_TARGETS_RECLAIMED" \
+            "floor_targets_reclaimed=$FLOOR_TARGETS_RECLAIMED" "floor_targets_mib=$FLOOR_TARGETS_MIB" \
             "incremental_dirs_dropped=$INCREMENTAL_DROPPED" \
             "cli_sha=$CLI_SHA" "cli_result=$CLI_RESULT" \
         || log "could not complete the $RECLAIM_KIND run step — its packet stays open for the next acting pass to complete" >&2
