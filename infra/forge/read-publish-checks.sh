@@ -31,12 +31,22 @@
 #      completed `open-pr` step — the sha publish-github-pr RECORDED
 #      when it pushed (`snapshot_commit`), never re-derived;
 #   2. reads GET /repos/<mirror>/commits/<head>/check-runs — the
-#      mirror is public, so no credential — and WAITS until every
-#      check-run on the head is completed (Analyze (rust) took 13 min
-#      on both #238 and #239), polling every $POLL seconds up to
-#      $DEADLINE, which is below the verb's allowlist timeout so the
-#      script's own FAILED line is what the packet sees, never the
-#      runner's kill;
+#      mirror is public, so no credential — and WAITS until the
+#      code-scanning checks are completed: the check named $SCAN_CHECK
+#      and its `Analyze (…)` jobs (Analyze (rust) took 13 min on both
+#      #238 and #239), polling every $POLL seconds up to $DEADLINE,
+#      which is below the verb's allowlist timeout so the script's own
+#      FAILED line is what the packet sees, never the runner's kill.
+#      ONLY those, since backlog d167e7d7 (2026-09-23): the mirror now
+#      runs the full infra/gate.sh on every PR (car 5ede7044), cold on a
+#      4-vCPU GitHub runner, which outlasts $DEADLINE — so waiting for
+#      EVERY check-run held the forge's serial ops-runner for 25 minutes
+#      and then failed the read with complete=false, though
+#      `judge-checks` reads nothing but the scan. Every other check-run
+#      is recorded as it stood when read — one still running is named
+#      in `still_running` with status in_progress and no conclusion,
+#      never a verdict. A head with nothing running at all is read as
+#      before, including one that carries no $SCAN_CHECK run;
 #   3. reads the code-scanning check's annotations (every page the API
 #      exposes; GitHub caps a check-run's exposed annotations, and the
 #      reading records the declared count beside the read count);
@@ -89,6 +99,10 @@ GITHUB_API="${BOSS_GITHUB_API:-https://api.github.com}"
 # The check whose annotations are the alerts. GitHub's code-scanning
 # roll-up posts as one check-run named for the tool.
 SCAN_CHECK="${BOSS_CODE_SCANNING_CHECK:-CodeQL}"
+# Its per-language jobs, by name prefix — GitHub's CodeQL setup names
+# them `Analyze (rust)`, `Analyze (javascript-typescript)`. The wait
+# covers these and $SCAN_CHECK, nothing else (backlog d167e7d7).
+SCAN_JOBS="${BOSS_CODE_SCANNING_JOBS:-Analyze (}"
 POLL="${BOSS_CHECKS_POLL_SECONDS:-60}"
 DEADLINE="${BOSS_CHECKS_DEADLINE_SECONDS:-1500}"
 # GitHub pages a check-run's annotations 100 at a time; ten pages is
@@ -125,8 +139,8 @@ check_inputs() {
 if [ "${1:-}" = "--check" ]; then
     echo "$me --check"
     echo "  mirror     : $MIRROR_SLUG via $GITHUB_API (public, unauthenticated)"
-    echo "  scan check : $SCAN_CHECK"
-    echo "  wait       : every ${POLL}s up to ${DEADLINE}s for the head's check-runs to complete"
+    echo "  scan check : $SCAN_CHECK, with its jobs named '$SCAN_JOBS…'"
+    echo "  wait       : every ${POLL}s up to ${DEADLINE}s for those check-runs to complete; every other one is recorded as it stands"
     echo "  jobs api   : ${BOSS_JOBS_URL:-<unset — the ops-runner pins it on its Exec line>}"
     if check_inputs; then
         echo "$me: --check ok"
@@ -202,10 +216,22 @@ while :; do
         seen=1
         total=$(jq -r '.total_count // 0' "$checks")
         running=$(jq -r '[.check_runs[]? | select(.status != "completed") | .name] | join(", ")' "$checks")
+        # The scan is read when its check has COMPLETED and none of its
+        # jobs is still running. A head where only a non-scanning check
+        # has registered is not yet — the gate can start before CodeQL.
+        scan_state=$(jq -r --arg n "$SCAN_CHECK" --arg p "$SCAN_JOBS" '
+            [.check_runs[]?] as $r
+            | if ([$r[] | select(.name == $n or (.name | startswith($p)))
+                        | select(.status != "completed")] | length) > 0 then "running"
+              elif ([$r[] | select(.name == $n)] | length) == 0 then "absent"
+              else "done" end' "$checks")
         case "${total:-0}" in
             0) note="no check-runs registered on ${head:0:12} yet" ;;
-            *) if [ -z "$running" ]; then break; fi
-               note="$total check-runs on ${head:0:12}, still running: $running" ;;
+            *) if [ -z "$running" ] || [ "$scan_state" = "done" ]; then break; fi
+               case "$scan_state" in
+                   absent) note="$total check-runs on ${head:0:12}, no $SCAN_CHECK check-run yet, still running: $running" ;;
+                   *) note="$total check-runs on ${head:0:12}, still running: $running" ;;
+               esac ;;
         esac
     else
         note="GET commits/${head:0:12}/check-runs — $(head -c 200 "$workdir/err" | tr '\n' ' ')"
@@ -220,7 +246,8 @@ while :; do
                     read_at: $at, head: $head, pr_url: $pr, complete: false, note: $note,
                     checks: [.check_runs[]? | {name, status, conclusion, title: .output.title,
                                               annotations: .output.annotations_count, url: .html_url,
-                                              app: .app.slug}]}}' "$checks" > "$workdir/partial"
+                                              app: .app.slug}],
+                    still_running: [.check_runs[]? | select(.status != "completed") | .name]}}' "$checks" > "$workdir/partial"
             curl -fsS -X PATCH -H "content-type: application/json" -H "x-boss-user: $BOSS_USER" \
                 ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
                 --data-binary @"$workdir/partial" "$BASE/api/jobs/$job_id/metadata" > /dev/null 2>"$workdir/err" \
@@ -231,7 +258,11 @@ while :; do
     say "not yet — $note; polling again in ${POLL}s"
     sleep "$POLL"
 done
-say "$total check-runs on ${head:0:12}, all completed"
+if [ -z "$running" ]; then
+    say "$total check-runs on ${head:0:12}, all completed"
+else
+    say "$total check-runs on ${head:0:12}, the code-scanning checks completed; recorded as still running: $running"
+fi
 
 # 3. The scanning check's annotations, every page.
 scan_id=$(jq -r --arg n "$SCAN_CHECK" '[.check_runs[] | select(.name == $n)] | .[0].id // empty' "$checks")
@@ -264,6 +295,9 @@ jq -n -c --slurpfile checks "$checks" --slurpfile ann "$ann" \
         read_at: $at, head: $head, pr_url: $pr, complete: true,
         checks: [$runs[] | {name, status, conclusion, title: .output.title,
                             annotations: .output.annotations_count, url: .html_url, app: .app.slug}],
+        # As read, not waited for: a check here is still running and has
+        # no conclusion on this record (backlog d167e7d7).
+        still_running: [$runs[] | select(.status != "completed") | .name],
         alerts: (if $s == null then {check: $scan, conclusion: "absent", read: 0, by_rule: [], by_file: [], by_level: {}}
                  else {
                     check: $scan, conclusion: ($s.conclusion // "none"), title: $s.output.title,

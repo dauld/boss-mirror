@@ -93,6 +93,11 @@ fn the_steps_agents_execute_today_declare_their_agent_block() {
         "page-audit/file analyst $1.00 low",
         "page-audit/test builder $5.00 high",
         "page-audit/revise builder $3.00 medium",
+        // The fold (2026-09-23): a car writing the settled paragraphs
+        // into docs/architecture-decisions.md, so the builder setting.
+        // Without it `boss dispatch` refused every answered design by
+        // name and 34 waited at `fold` with no way to hand them out.
+        "design-doc/fold builder $5.00 high",
     ]
     .into_iter()
     .map(str::to_string)

@@ -132,6 +132,13 @@ title = "fold"
 kind = "task"
 ready_when = "steps.review.done"
 title_template = "Fold it into current truth"
+# WHO EXECUTES THE FOLD (2026-09-23). The fold is agent work — a car
+# that writes the settled paragraphs into docs/architecture-decisions.md
+# and then records `boss fold` — but the step declared no agent block,
+# so `boss dispatch` refused it by name and 34 answered designs waited
+# at this step with no way to hand them out (the last fold car was
+# briefed by hand). The builder profile, because the output is a car.
+agent = { profile = "builder", model = "opus-5[1m]", budget_usd = 5, effort = "high" }
 metadata_defaults = { procedure = """State what CURRENT TRUTH gains from this doc now that its questions are answered, and where. 'Nothing' is a legitimate answer and still has to be written down with its reason — that is the whole point of the step existing.
 
 The fold is the current-truth reading, assembled per topic, with the decision history beside it rather than inlined (Q2). Today that is docs/architecture-decisions.md, maintained by hand because merging prose has nuance a generator cannot judge. This step does not automate that judgement; it makes skipping it visible.

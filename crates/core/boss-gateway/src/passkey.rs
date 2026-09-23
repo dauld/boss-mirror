@@ -160,6 +160,32 @@ pub async fn credentials_list(
     Json(out).into_response()
 }
 
+/// ONE PATH SEGMENT OF A PEOPLE REQUEST, OR A REFUSAL (backlog
+/// a0dd9387; CodeQL rust/request-forgery on mirror PR 242). Every
+/// people call here is signed as the gateway's own platform-admin actor
+/// ([`sign_as_gateway`]), so a value formatted into its path decides
+/// which privileged request is made. Two such values come from the
+/// caller — a removal's `credential_id` (axum decodes percent-escapes,
+/// so a slash arrives inside the one segment) and a finish's
+/// `challenge_id` — and a traversal in either would steer the request
+/// to another people path. So a segment must be an id: the base64url
+/// alphabet plus `.` and `@`, which covers credential ids, challenge
+/// uuids and employee ids, and never `.` or `..` on its own. Anything
+/// else is refused with 400 BEFORE a request is made.
+fn people_segment<'a>(value: &'a str, what: &str) -> Result<&'a str, ErrResp> {
+    let well_formed = !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'@'));
+    if well_formed {
+        Ok(value)
+    } else {
+        Err(err(StatusCode::BAD_REQUEST, format!("malformed {what}")))
+    }
+}
+
 /// `DELETE /api/auth/passkey/credentials/{credential_id}` — remove one
 /// of the session's own passkeys. The rule lives in boss-people (the
 /// last one stays, 409 in the user's terms); this proxies for the
@@ -177,9 +203,16 @@ pub async fn credentials_remove(
     let refused = |reason: &str, r: ErrResp| {
         presence_refused("credentials_remove", Some(&employee_id), reason, r)
     };
+    let (employee, credential) = match (
+        people_segment(&employee_id, "employee id"),
+        people_segment(&credential_id, "credential id"),
+    ) {
+        (Ok(e), Ok(c)) => (e, c),
+        (Err(r), _) | (_, Err(r)) => return refused("credential removal: malformed id", r),
+    };
     let url = format!(
-        "{}/api/people/{}/webauthn-credentials/{}",
-        state.people_base, employee_id, credential_id
+        "{}/api/people/{employee}/webauthn-credentials/{credential}",
+        state.people_base
     );
     let resp = match state.request(reqwest::Method::DELETE, url).send().await {
         Ok(r) => r,
@@ -402,6 +435,7 @@ impl PasskeyState {
     }
 
     async fn stored_passkeys(&self, employee_id: &str) -> Result<Vec<Value>, ErrResp> {
+        let employee_id = people_segment(employee_id, "employee id")?;
         let url = format!(
             "{}/api/people/{}/webauthn-credentials",
             self.people_base, employee_id
@@ -912,6 +946,9 @@ pub async fn assert_finish(
 
 /// Consume a challenge row: 410 → replay/too-slow, 404 → never minted.
 async fn consume_challenge(state: &PasskeyState, id: &str) -> Result<Value, ErrResp> {
+    // The id comes back from the caller's finish body: an id, or a
+    // refusal before any request (a0dd9387, `people_segment`).
+    let id = people_segment(id, "challenge id")?;
     let resp = state
         .request(
             reqwest::Method::POST,

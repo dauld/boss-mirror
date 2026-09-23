@@ -60,6 +60,11 @@ pub const PRIOR_FAILED: &str = "prior_failed";
 /// green carrying [`REGATE_OF`]: the prior red was a flake, and this is
 /// the id of it.
 pub const FLAKE_OF: &str = "flake_of";
+/// Beside [`REGATE_OF`]: the head the prior was looked up at — the
+/// REQUESTED head. The verdict covers the GATED head, and a branch that
+/// moved between the two must not turn a green on one tree into a flake
+/// of a red on another (backlog 90f8e64c; [`regate_head_moved`]).
+pub const REGATE_HEAD: &str = "regate_head";
 /// Beside [`FLAKE_OF`]: the prior's [`PRIOR_FAILED`], copied — the
 /// checks that went red then green at one head.
 pub const FLAKY_CHECKS: &str = "flaky_checks";
@@ -250,9 +255,27 @@ pub fn prior(runs: &[Value], branch: &str, sha: &str) -> Option<Prior> {
 }
 
 /// The metadata a re-gate carries at launch, merged onto the fresh
-/// gate-run: the prior's id and what it named.
-pub fn regate_patch(prior: &PriorRed) -> Value {
-    json!({ REGATE_OF: prior.id, PRIOR_FAILED: prior.failed })
+/// gate-run: the prior's id, what it named, and the head the prior was
+/// looked up at ([`REGATE_HEAD`]).
+pub fn regate_patch(prior: &PriorRed, head: &str) -> Value {
+    json!({ REGATE_OF: prior.id, PRIOR_FAILED: prior.failed, REGATE_HEAD: head })
+}
+
+/// The requested head a re-gate's relation was decided at, and the head
+/// its green receipt vouches for, when both are known and DIFFER — the
+/// case in which the green is not a flake of the red (backlog 90f8e64c).
+/// `None` when they agree or either is unknown.
+pub fn regate_head_moved(
+    gate_run_metadata: &Value,
+    gated_head: Option<&str>,
+) -> Option<(String, String)> {
+    let requested = gate_run_metadata
+        .get(REGATE_HEAD)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let gated = gated_head.map(str::trim).filter(|s| !s.is_empty())?;
+    (requested != gated).then(|| (requested.to_string(), gated.to_string()))
 }
 
 /// The line `boss gate` prints at launch, so the operator running the
@@ -288,7 +311,10 @@ pub fn refusal_line(sha: &str, id: &str, why: &str) -> String {
 /// its car: `None` when it re-gated nothing. The caller has already
 /// established the verdict is green — a red after a red must not reach
 /// this, and the handler's cheap reject is that guard.
-pub fn flake_patch(gate_run_metadata: &Value) -> Option<Value> {
+pub fn flake_patch(gate_run_metadata: &Value, gated_head: Option<&str>) -> Option<Value> {
+    if regate_head_moved(gate_run_metadata, gated_head).is_some() {
+        return None;
+    }
     let prior = gate_run_metadata
         .get(REGATE_OF)
         .and_then(Value::as_str)
@@ -426,8 +452,8 @@ mod tests {
         assert_eq!(prior.verdict, "failed");
         assert_eq!(prior.failed, vec!["test".to_string()]);
         assert_eq!(
-            regate_patch(&prior),
-            json!({ "regate_of": "aaaa1111", "prior_failed": ["test"] })
+            regate_patch(&prior, "abc"),
+            json!({ "regate_of": "aaaa1111", "prior_failed": ["test"], "regate_head": "abc" })
         );
         let line = launch_line("abcdef0123456789", &prior);
         assert!(line.contains("re-gating abcdef012345"), "{line}");
@@ -613,15 +639,54 @@ mod tests {
     fn a_green_carrying_regate_of_stamps_the_flake() {
         let md = json!({ "branch": "fix/x", "regate_of": "aaaa1111", "prior_failed": ["test"] });
         assert_eq!(
-            flake_patch(&md),
+            flake_patch(&md, Some("abc")),
             Some(json!({ "flake_of": "aaaa1111", "flaky_checks": ["test"] }))
         );
         assert!(green_note(&md).expect("a note").contains("aaaa1111"));
         let plain = json!({ "branch": "fix/x" });
-        assert_eq!(flake_patch(&plain), None);
+        assert_eq!(flake_patch(&plain, Some("abc")), None);
         assert_eq!(green_note(&plain), None);
         let blank = json!({ "branch": "fix/x", "regate_of": " " });
-        assert_eq!(flake_patch(&blank), None);
+        assert_eq!(flake_patch(&blank, Some("abc")), None);
+    }
+
+    /// THE RELATION IS DECIDED AT THE REQUESTED HEAD, THE VERDICT COVERS
+    /// THE GATED ONE (backlog 90f8e64c: 2 of 644 gate-runs had
+    /// requested_head != sha). A branch pushed between the launch's read
+    /// and the runner's clone would let a green for one tree be stamped
+    /// a flake of a red on another. So the launch records the head it
+    /// looked the prior up at, and a green whose receipt vouches for a
+    /// DIFFERENT head stamps nothing — naming both. A run stamped before
+    /// this existed, or a receipt with no head, is judged as before.
+    #[test]
+    fn a_green_on_a_moved_head_is_not_a_flake_of_the_red() {
+        let md = json!({
+            "branch": "fix/x", "regate_of": "aaaa1111", "prior_failed": ["test"],
+            "regate_head": "abc",
+        });
+        assert!(
+            flake_patch(&md, Some("abc")).is_some(),
+            "same head: a flake"
+        );
+        assert_eq!(
+            flake_patch(&md, Some("def")),
+            None,
+            "the gate verified another tree"
+        );
+        assert_eq!(
+            regate_head_moved(&md, Some("def")),
+            Some(("abc".to_string(), "def".to_string()))
+        );
+        assert_eq!(regate_head_moved(&md, Some("abc")), None);
+        assert!(
+            flake_patch(&md, None).is_some(),
+            "a receipt with no head cannot contradict"
+        );
+        let legacy = json!({ "branch": "fix/x", "regate_of": "aaaa1111", "prior_failed": [] });
+        assert!(
+            flake_patch(&legacy, Some("def")).is_some(),
+            "a run stamped before regate_head existed is judged as before"
+        );
     }
 
     /// THE COUNT: three flakes on `test`, one on `clippy`, one whose

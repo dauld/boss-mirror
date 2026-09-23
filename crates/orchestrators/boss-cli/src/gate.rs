@@ -3029,7 +3029,7 @@ pub async fn run(
             &http,
             reqwest::Method::PATCH,
             &format!("/api/jobs/{packet}/metadata"),
-            Some(boss_jobs::flake::regate_patch(p)),
+            Some(boss_jobs::flake::regate_patch(p, &sha)),
         )
         .await
     {
@@ -7702,8 +7702,8 @@ mod regate_tests {
             "the read narrows: {head}"
         );
         assert_eq!(
-            boss_jobs::flake::regate_patch(&prior),
-            json!({ "regate_of": "aaaa1111-0000", "prior_failed": ["test"] })
+            boss_jobs::flake::regate_patch(&prior, "abc"),
+            json!({ "regate_of": "aaaa1111-0000", "prior_failed": ["test"], "regate_head": "abc" })
         );
     }
 

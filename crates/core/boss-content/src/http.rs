@@ -250,10 +250,25 @@ async fn section_update(
     }
 }
 
+/// The history answers only what the read would (backlog 18345a5b):
+/// it asks `get_section` for the caller first, so an unpublished section
+/// or one whose audience does not match is the read's 404 here too.
+/// Until then the route took no caller and returned every version's
+/// full body, so a section the read refused was readable through it.
 async fn section_history(
     State(state): State<Arc<ContentApiState>>,
+    headers: HeaderMap,
     Path(slug): Path<String>,
 ) -> Response {
+    let user = match user_from_headers(&headers) {
+        Ok(u) => u,
+        Err(e) => return e.into_response(),
+    };
+    match state.repo.get_section(&slug, &user).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return (StatusCode::NOT_FOUND, format!("section {slug}")).into_response(),
+        Err(e) => return err(e),
+    }
     match state.repo.section_history(&slug).await {
         Ok(rows) => Json(rows).into_response(),
         Err(e) => err(e),

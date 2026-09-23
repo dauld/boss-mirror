@@ -215,7 +215,28 @@ fn flake_stamp(gate_run: &Value, verdict_meta: &serde_json::Map<String, Value>) 
     if verdict_meta.get("verdict").and_then(Value::as_str) != Some("green") {
         return None;
     }
-    boss_jobs::flake::flake_patch(gate_run.get("metadata")?)
+    let md = gate_run.get("metadata")?;
+    // The head the green VERIFIED, from its receipt: a relation decided
+    // at a different requested head is not this green's flake (90f8e64c).
+    let gated = gated_head(verdict_meta);
+    if let Some((requested, verified)) = boss_jobs::flake::regate_head_moved(md, gated.as_deref()) {
+        tracing::warn!(
+            "not a flake: the re-gate's relation was decided at {requested} but this green \
+             verified {verified} — the branch moved between the launch and the clone"
+        );
+    }
+    boss_jobs::flake::flake_patch(md, gated.as_deref())
+}
+
+/// The head a verdict's receipt vouches for, if it names one. The
+/// receipt rides the verdict step verbatim as a JSON string.
+fn gated_head(verdict_meta: &serde_json::Map<String, Value>) -> Option<String> {
+    let raw = verdict_meta.get("receipt").and_then(Value::as_str)?;
+    let parsed: Value = serde_json::from_str(raw).ok()?;
+    parsed
+        .get("head")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// PURE: the metadata patch a re-gate writes onto the car already at
@@ -1276,6 +1297,24 @@ mod tests {
         let patch = refresh_patch(&json!({}), &inputs, "re-gated in place");
         assert_eq!(patch["flake_of"], "aaaa1111-0000");
         assert_eq!(patch["flaky_checks"], json!(["test"]));
+    }
+
+    /// Backlog 90f8e64c: the relation was decided at the REQUESTED head
+    /// (`regate_head`), the green verifies the GATED one (its receipt's
+    /// `head`). When they differ the branch moved mid-launch, and the
+    /// green is not a flake of that red.
+    #[test]
+    fn a_green_that_verified_another_head_stamps_no_flake() {
+        let moved = gate_run(json!({
+            "park_summary": "s", "park_excludes": "e", "park_test": "t", "park_verified": "v",
+            "regate_of": "aaaa1111-0000", "prior_failed": ["test"], "regate_head": "cafe",
+        }));
+        assert_eq!(flake_stamp(&moved, &green_step_meta()), None);
+        let same = gate_run(json!({
+            "park_summary": "s", "park_excludes": "e", "park_test": "t", "park_verified": "v",
+            "regate_of": "aaaa1111-0000", "prior_failed": ["test"], "regate_head": "deadbeef",
+        }));
+        assert!(flake_stamp(&same, &green_step_meta()).is_some());
     }
 
     /// A red after a red is the branch's: nothing is stamped. And a

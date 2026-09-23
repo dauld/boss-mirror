@@ -143,7 +143,10 @@ No ssh from the pod. Three doors, all read-only:
   `dauld-github-token`, and refuses loudly without it; `--check`
   validates its inputs with no network), `read-publish-checks` (the
   second machine step of publish-to-github v7: waits for the mirror
-  PR's check-runs over the PUBLIC API — no token — reads the CodeQL
+  PR's code-scanning check-runs (CodeQL and its Analyze jobs — every
+  other check, the mirror's own gate among them, is recorded as it
+  stands when read, backlog d167e7d7) over the PUBLIC API — no token —
+  reads the CodeQL
   annotations and writes the reading onto the publish packet as
   `code_scanning`, so the `judge-checks` step and David's merge follow a
   judged reading instead of a red badge; the wait blocks this runner

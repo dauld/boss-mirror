@@ -28,6 +28,9 @@
 //!   * with a check-run still running, nothing is written until it
 //!     completes, and past the deadline the verb FAILS naming the run
 //!     still in flight — a partial reading, never a clean one;
+//!   * only the code-scanning checks are waited for (backlog d167e7d7):
+//!     a non-scanning check still running — the mirror's full gate —
+//!     is recorded as running and does not hold the reading;
 //!   * a publish packet whose `open-pr` step recorded no head sha is a
 //!     refusal naming the step, not a read of nothing;
 //!   * `--check` asks only for the tools and the addresses, no network.
@@ -46,6 +49,12 @@ const PR_URL: &str = "https://github.com/algedonic-dev/boss/pull/239";
 /// The CodeQL check-run's id in the fixture — the annotations URL
 /// GitHub hands back is keyed on it.
 const CODEQL_RUN: &str = "105867839495";
+/// A deadline for a case that must END in a reading. The default three
+/// seconds is a count of polls for the cases that must run out of time;
+/// under a loaded pod one poll took seven (2026-09-23, load 124), so a
+/// case that reads on its first or second poll gets room to, and still
+/// exits the moment it reads.
+const ROOMY: (&str, &str) = ("BOSS_CHECKS_DEADLINE_SECONDS", "60");
 
 fn fixture(name: &str) -> PathBuf {
     repo_root()
@@ -449,7 +458,7 @@ fn an_empty_check_list_is_not_yet_and_the_next_poll_reads_it() {
     run.route(&format!("/commits/{HEAD}/check-runs"), &empty);
     run.route_pr239_complete();
 
-    let (code, text) = run.go(&[], &[]);
+    let (code, text) = run.go(&[], &[ROOMY]);
     assert_eq!(code, 0, "{text}");
     assert_eq!(run.reading()["complete"], true);
     assert_eq!(
@@ -460,6 +469,116 @@ fn an_empty_check_list_is_not_yet_and_the_next_poll_reads_it() {
         "the verb polled once more after the empty list, and no more:\n{}",
         run.log()
     );
+}
+
+/// The mirror's own CI check, as `.github/workflows/ci.yml` names its
+/// job (car 5ede7044) — a full `infra/gate.sh` on a cold GitHub runner.
+const MIRROR_GATE: &str = "Gate (infra/gate.sh, full)";
+
+/// #239's three completed check-runs plus the mirror gate, still in
+/// flight — the head a publish PR carries once the mirror runs the gate.
+fn pr239_with_the_gate_running() -> serde_json::Value {
+    let mut checks = fixture_json("check-runs-pr239.json");
+    let runs = checks["check_runs"].as_array_mut().unwrap();
+    let mut gate = runs[1].clone();
+    gate["id"] = serde_json::json!(1);
+    gate["name"] = serde_json::json!(MIRROR_GATE);
+    gate["status"] = serde_json::json!("in_progress");
+    gate["conclusion"] = serde_json::Value::Null;
+    gate["completed_at"] = serde_json::Value::Null;
+    runs.push(gate);
+    checks["total_count"] = serde_json::json!(runs.len());
+    checks
+}
+
+/// The reading waits for the code-scanning checks ONLY — the check named
+/// by `BOSS_CODE_SCANNING_CHECK` and its `Analyze (…)` jobs — because
+/// that is all `judge-checks` reads (backlog d167e7d7). A cold full gate
+/// on a GitHub runner outlasts the 1500 s deadline, and waiting on it
+/// held the forge's serial ops-runner the whole time and then failed the
+/// read with `complete: false`. Every other check is recorded as it
+/// stood when read: still running, named as running, never a conclusion.
+#[test]
+fn a_non_scanning_check_still_running_does_not_hold_the_reading() {
+    let run = Run::new("gate-running", open_pr_done());
+    let checks = run.root.join("check-runs-gate-running.json");
+    write_file(&checks, &pr239_with_the_gate_running().to_string());
+    run.route(&format!("/commits/{HEAD}/check-runs"), &checks);
+    run.route_pr239_complete();
+
+    let (code, text) = run.go(&[], &[ROOMY]);
+    assert_eq!(code, 0, "{text}");
+    assert_eq!(
+        run.log()
+            .matches(&format!("/commits/{HEAD}/check-runs"))
+            .count(),
+        1,
+        "the scanning checks were done on the first poll; nothing waited on the gate:\n{}",
+        run.log()
+    );
+    let reading = run.reading();
+    assert_eq!(reading["complete"], true);
+    assert_eq!(reading["alerts"]["read"], 100);
+    let gate = reading["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == MIRROR_GATE)
+        .unwrap_or_else(|| panic!("the gate is on the reading: {reading}"));
+    assert_eq!(gate["status"], "in_progress", "named as running");
+    assert_eq!(
+        gate["conclusion"],
+        serde_json::Value::Null,
+        "a running check has no conclusion on the record"
+    );
+    assert_eq!(
+        reading["still_running"],
+        serde_json::json!([MIRROR_GATE]),
+        "the reading names what was still running when it was read"
+    );
+    assert_eq!(run.step_put()["status"], "completed");
+    let last = text.lines().last().unwrap_or("");
+    assert!(
+        rule_pattern().captures(last).is_some(),
+        "the answer line is still last: {last}"
+    );
+}
+
+/// The gate can register before CodeQL does. A head whose only check-run
+/// is a running non-scanning one has no scanning result to read yet —
+/// "not yet", never a reading of an absent scan.
+#[test]
+fn a_running_gate_before_the_scan_registers_is_not_yet() {
+    let run = Run::new("gate-before-scan", open_pr_done());
+    let mut only_gate = pr239_with_the_gate_running();
+    let runs: Vec<serde_json::Value> = only_gate["check_runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["name"] == MIRROR_GATE)
+        .cloned()
+        .collect();
+    only_gate["check_runs"] = serde_json::json!(runs);
+    only_gate["total_count"] = serde_json::json!(1);
+    let first = run.root.join("gate-only.once.json");
+    write_file(&first, &only_gate.to_string());
+    run.route(&format!("/commits/{HEAD}/check-runs"), &first);
+    let then = run.root.join("check-runs-gate-running.json");
+    write_file(&then, &pr239_with_the_gate_running().to_string());
+    run.route(&format!("/commits/{HEAD}/check-runs"), &then);
+    run.route_pr239_complete();
+
+    let (code, text) = run.go(&[], &[ROOMY]);
+    assert_eq!(code, 0, "{text}");
+    assert_eq!(
+        run.log()
+            .matches(&format!("/commits/{HEAD}/check-runs"))
+            .count(),
+        2,
+        "the gate alone was not yet; the next poll read the scan:\n{}",
+        run.log()
+    );
+    assert_eq!(run.reading()["alerts"]["conclusion"], "failure");
 }
 
 #[test]
