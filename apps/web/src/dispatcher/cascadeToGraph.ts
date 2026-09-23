@@ -12,9 +12,18 @@
 // Loops close because event nodes are shared by topic string (an emit and
 // an on_event of the same name are one node) and via `match` edges across
 // wildcards. `inCycle` is filled from Tarjan SCCs so the page can light up
-// the feedback cycles (restock, DAG-advance, AR).
+// the feedback cycles.
+//
+// Only what a live rule invokes is drawn (backlog ec40e269). The feed's
+// `handler_emits` is the dispatcher BUILD's roster — every handler the
+// binary registers — and on 2026-09-23 21 of its 51 were invoked by no
+// live rule (the company-module handlers whose rules moved to the example
+// tenants' seeds), so drawing the roster put 42 of 158 nodes on the page
+// showing wiring no live protocol produces. A handler is drawn when a rule
+// fires it; an event when a rule listens for it or a drawn handler emits
+// it; a system edge when its source event is drawn.
 
-import type { DispatcherRule, DispatcherRules } from './types';
+import type { DispatcherRule, DispatcherRules, SystemEdge } from './types';
 
 export type CascadeNodeKind = 'event' | 'rule' | 'handler';
 export type CascadeEdgeKind = 'trigger' | 'do' | 'emit' | 'system' | 'match';
@@ -91,21 +100,38 @@ const CADENCE_WORDS: Readonly<Record<string, string>> = {
   hourly: 'every hour',
 };
 
+/** The handlers a rule fires, and what each of them emits — the part of
+ *  the build's roster the live rules actually wire. */
+export function invokedEmits(data: DispatcherRules): Record<string, ReadonlyArray<string>> {
+  const roster = data.handler_emits ?? {};
+  const invoked = new Set((data.rules ?? []).flatMap((r) => r.do.map((d) => d.handler)));
+  return Object.fromEntries([...invoked].map((h) => [h, roster[h] ?? []]));
+}
+
 export function buildCascade(data: DispatcherRules): Cascade {
   const rules = data.rules ?? [];
-  const emits = data.handler_emits ?? {};
-  const systemEdges = data.system_edges ?? [];
+  const emits = invokedEmits(data);
 
   // Universes.
   const eventSet = new Set<string>(triggerTopics(rules));
   for (const list of Object.values(emits)) for (const e of list) eventSet.add(e);
-  for (const se of systemEdges) {
-    eventSet.add(se.from);
-    eventSet.add(se.to);
+  // A system edge is drawn once its source is; one may feed another, so
+  // take them to a fixpoint (the list is a handful long).
+  const systemEdges: SystemEdge[] = [];
+  let pending: SystemEdge[] = [...(data.system_edges ?? [])];
+  for (let grew = true; grew; ) {
+    grew = false;
+    const next: SystemEdge[] = [];
+    for (const se of pending) {
+      if (eventSet.has(se.from)) {
+        systemEdges.push(se);
+        eventSet.add(se.to);
+        grew = true;
+      } else next.push(se);
+    }
+    pending = next;
   }
-  const handlerSet = new Set<string>();
-  for (const r of rules) for (const d of r.do) handlerSet.add(d.handler);
-  for (const h of Object.keys(emits)) handlerSet.add(h);
+  const handlerSet = new Set<string>(Object.keys(emits));
 
   // Nodes (cycle flags filled after edges).
   type RawNode = Omit<CascadeNode, 'inCycle'>;

@@ -1008,7 +1008,7 @@ mod tests {
     fn the_handler_is_registered_under_its_name() {
         let h = MaintenanceSweepJudge::with_client(reqwest::Client::new(), "http://unused");
         assert_eq!(h.name(), "maintenance.sweep.judge");
-        let emits = boss_dispatcher::cascade::handler_emits()
+        let emits = crate::cascade::handler_emits()
             .get("maintenance.sweep.judge")
             .cloned()
             .expect("the cascade table knows this handler");

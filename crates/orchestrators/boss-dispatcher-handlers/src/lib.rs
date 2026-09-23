@@ -26,4 +26,5 @@
 //! `crates/core/boss-jobs/tests/a_listed_packet_carries_its_steps.rs`,
 //! which also carries the reasoning; read it before adding a job-level
 //! copy of anything a step already states.
+pub mod cascade;
 pub mod handlers;

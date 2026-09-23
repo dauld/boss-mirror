@@ -1113,7 +1113,7 @@ mod tests {
         let h = JobsReclaimAbandonedStep::with_client(reqwest::Client::new(), "http://unused");
         assert_eq!(h.name(), "jobs.reclaim_abandoned_step");
         assert_eq!(
-            boss_dispatcher::cascade::handler_emits()
+            crate::cascade::handler_emits()
                 .get("jobs.reclaim_abandoned_step")
                 .cloned(),
             Some(vec!["jobs.step.updated"]),

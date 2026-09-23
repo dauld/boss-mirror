@@ -1172,7 +1172,7 @@ mod tests {
     fn the_handler_is_registered_under_its_name() {
         let h = judge("http://unused".to_string());
         assert_eq!(h.name(), "ops.judge");
-        let emits = boss_dispatcher::cascade::handler_emits()
+        let emits = crate::cascade::handler_emits()
             .get("ops.judge")
             .cloned()
             .expect("the cascade table knows this handler");

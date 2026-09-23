@@ -696,7 +696,7 @@ mod tests {
         let h = OpsFileTagRelease::with_client(reqwest::Client::new(), "http://unused");
         assert_eq!(h.name(), "ops.file_tag_release");
         assert_eq!(
-            boss_dispatcher::cascade::handler_emits()
+            crate::cascade::handler_emits()
                 .get("ops.file_tag_release")
                 .cloned(),
             Some(vec!["jobs.job.created"]),

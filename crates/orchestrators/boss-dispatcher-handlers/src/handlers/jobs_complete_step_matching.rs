@@ -799,7 +799,7 @@ mod tests {
         let h = JobsCompleteStepMatching::with_client(reqwest::Client::new(), "http://unused");
         assert_eq!(h.name(), "jobs.complete_step_matching");
         assert_eq!(
-            boss_dispatcher::cascade::handler_emits()
+            crate::cascade::handler_emits()
                 .get("jobs.complete_step_matching")
                 .cloned(),
             Some(vec!["jobs.step.completed"]),

@@ -4,8 +4,11 @@
   Renders the reactive layer the boss-dispatcher runs: trigger event →
   rule → handler(s) → emitted events → (loop back). Loops close where an
   emitted topic re-triggers a rule; jobs-api/external "system" edges that
-  re-enter the rule set are drawn distinctly, and the feedback cycles
-  (restock, DAG-advance, AR) are highlighted. Data: GET /api/dispatcher/rules.
+  re-enter the rule set are drawn distinctly, and the feedback cycles are
+  highlighted. Only what a live rule invokes is drawn and counted: the
+  feed's handler_emits is the dispatcher build's whole roster, most of
+  whose company-module handlers no rule on a given instance fires
+  (backlog ec40e269). Data: GET /api/dispatcher/rules.
   Layout dagre LR; render Svelte Flow (same stack as the Workflow graph).
 -->
 <script lang="ts">
@@ -14,7 +17,7 @@
   import type { Node, Edge } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
   import dagre from '@dagrejs/dagre';
-  import { buildCascade, describeTrigger, filterCascadeFromEvents, triggerTopics, type Cascade } from './cascadeToGraph';
+  import { buildCascade, describeTrigger, filterCascadeFromEvents, invokedEmits, triggerTopics, type Cascade } from './cascadeToGraph';
   import type { DispatcherRules } from './types';
   import { href, navigate } from '../router';
 
@@ -137,7 +140,7 @@
     if (selected.startsWith('evt:')) {
       const event = selected.slice(4);
       const triggers = data.rules.filter((r) => r.on_event === event).map((r) => r.name);
-      const emittedBy = Object.entries(data.handler_emits)
+      const emittedBy = Object.entries(invokedEmits(data))
         .filter(([, list]) => list.includes(event))
         .map(([h]) => h);
       return { kind: 'event' as const, event, triggers, emittedBy };
@@ -147,7 +150,7 @@
 
   const counts = $derived({
     rules: data?.rules.length ?? 0,
-    handlers: Object.keys(data?.handler_emits ?? {}).length,
+    handlers: fullCascade.nodes.filter((n) => n.kind === 'handler').length,
     cycleNodes: fullCascade.nodes.filter((n) => n.inCycle).length,
   });
 </script>

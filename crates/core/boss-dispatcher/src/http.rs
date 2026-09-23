@@ -45,6 +45,10 @@ pub struct HttpState {
     /// `None` is served as `why: null` with the reason stated, never as
     /// "no rule records a why".
     pub authored_rules_dir: Option<PathBuf>,
+    /// What the assembler declared about the handlers it registered —
+    /// served verbatim as `handler_emits` + `system_edges`. Core spells
+    /// no handler of its own (backlog ec40e269; see [`cascade`]).
+    pub cascade: Arc<cascade::Cascade>,
 }
 
 pub fn router(state: HttpState) -> Router {
@@ -194,8 +198,9 @@ fn authored_whys(dir: Option<&std::path::Path>) -> (BTreeMap<String, String>, se
 /// `schedule`), `when`, `do`/args, `delay`, plus the `why` its authored
 /// file records and whether it is `authored` at all (see
 /// [`rule_views`]) — alongside `authored_registry` (where the whys came
-/// from) and the static cascade metadata: per-handler emitted events +
-/// the jobs-api/external "system edges" that close the feedback loops.
+/// from) and the cascade metadata the assembler declared
+/// ([`HttpState::cascade`]): per-handler emitted events + the
+/// jobs-api/external "system edges" that close the feedback loops.
 ///
 /// Queries the table per request — a low-traffic admin view, and reading
 /// live reflects any rule edits without a restart.
@@ -230,15 +235,20 @@ async fn rules(State(state): State<HttpState>) -> Json<serde_json::Value> {
         serde_json::Value::Array(rule_views(&raw.rules, ENFORCED_STATUS, &why, &sources)),
     );
     out.insert("authored_registry".into(), authored_registry);
+    insert_cascade(&mut out, &state.cascade);
+    Json(serde_json::Value::Object(out))
+}
+
+/// The assembler's declared cascade, as the feed's two fields.
+fn insert_cascade(out: &mut serde_json::Map<String, serde_json::Value>, c: &cascade::Cascade) {
     out.insert(
         "handler_emits".into(),
-        serde_json::to_value(cascade::handler_emits()).unwrap_or_default(),
+        serde_json::to_value(&c.handler_emits).unwrap_or_default(),
     );
     out.insert(
         "system_edges".into(),
-        serde_json::to_value(cascade::system_edges()).unwrap_or_default(),
+        serde_json::to_value(&c.system_edges).unwrap_or_default(),
     );
-    Json(serde_json::Value::Object(out))
 }
 
 // ---------------------------------------------------------------------------
@@ -670,5 +680,34 @@ mod tests {
         assert_eq!(map.len(), 1);
         assert_eq!(block["rules"], 1);
         assert!(block["error"].is_null(), "{block}");
+    }
+
+    /// The cascade the read surface serves is the one its ASSEMBLER
+    /// declared, not a roster core spells (backlog ec40e269): core names
+    /// no handler, so a handler only a tenant's assembly registers is
+    /// served exactly as that assembly declared it.
+    #[test]
+    fn the_cascade_served_is_the_one_the_assembler_declared() {
+        let declared = cascade::Cascade {
+            handler_emits: BTreeMap::from([("tenant.only.thing", vec!["tenant.only.done"])]),
+            system_edges: vec![cascade::SystemEdge {
+                from: "tenant.only.done",
+                to: "step.ready.*",
+                kind: "jobs-api",
+                label: "a label",
+            }],
+        };
+        let mut out = serde_json::Map::new();
+        insert_cascade(&mut out, &declared);
+        assert_eq!(
+            out["handler_emits"],
+            serde_json::json!({"tenant.only.thing": ["tenant.only.done"]})
+        );
+        assert_eq!(out["system_edges"][0]["from"], "tenant.only.done");
+
+        let mut out = serde_json::Map::new();
+        insert_cascade(&mut out, &cascade::Cascade::default());
+        assert_eq!(out["handler_emits"], serde_json::json!({}));
+        assert_eq!(out["system_edges"], serde_json::json!([]));
     }
 }

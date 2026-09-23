@@ -738,6 +738,7 @@ dependencies = [
  "boss-content",
  "boss-core",
  "boss-dispatcher",
+ "boss-dispatcher-handlers",
  "boss-events",
  "boss-jobs",
  "boss-ledger",

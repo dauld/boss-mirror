@@ -69,6 +69,40 @@ describe('buildCascade', () => {
   });
 });
 
+describe('a handler no live rule invokes', () => {
+  // Measured on the system of record 2026-09-23 (backlog ec40e269): 21 of
+  // the 51 handlers the dispatcher build declares are invoked by no live
+  // rule — the company-module handlers whose rules moved to the example
+  // tenants' seeds — and drawing them put 42 of 158 nodes on the page
+  // showing wiring no live protocol produces, the AR loop among them.
+  const data: DispatcherRules = {
+    rules: [{ name: 'spawn', on_event: 'step.done.x', when: null, do: [{ handler: 'jobs.spawn', args: {} }], version: 1 }],
+    handler_emits: {
+      'jobs.spawn': ['jobs.job.created'],
+      'commerce.invoice.issue': ['commerce.invoice.created'],
+    },
+    system_edges: [
+      { from: 'jobs.job.created', to: 'step.ready.*', kind: 'jobs-api', label: 'entry steps ready' },
+      { from: 'commerce.invoice.created', to: 'commerce.invoice.paid', kind: 'external', label: 'settled' },
+    ],
+  };
+
+  test('is not drawn, and neither is what only it would emit', () => {
+    const ids = new Set(buildCascade(data).nodes.map((n) => n.id));
+    expect(ids.has('hdl:jobs.spawn')).toBe(true);
+    expect(ids.has('hdl:commerce.invoice.issue')).toBe(false);
+    expect(ids.has('evt:commerce.invoice.created')).toBe(false);
+  });
+
+  test('a system edge from an event nothing drawn produces is not drawn', () => {
+    const g = buildCascade(data);
+    const ids = new Set(g.nodes.map((n) => n.id));
+    expect(ids.has('evt:step.ready.*')).toBe(true);
+    expect(ids.has('evt:commerce.invoice.paid')).toBe(false);
+    expect(g.edges.every((e) => ids.has(e.source) && ids.has(e.target))).toBe(true);
+  });
+});
+
 describe('filterCascadeFromEvents', () => {
   // a → r1 → h1 → (emit) b → r2 → h2(sink)
   const data: DispatcherRules = {

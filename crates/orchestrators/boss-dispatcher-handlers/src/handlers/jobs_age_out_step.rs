@@ -585,7 +585,7 @@ mod tests {
         let h = JobsAgeOutStep::with_client(reqwest::Client::new(), "http://unused");
         assert_eq!(h.name(), "jobs.age_out_step");
         assert_eq!(
-            boss_dispatcher::cascade::handler_emits()
+            crate::cascade::handler_emits()
                 .get("jobs.age_out_step")
                 .cloned(),
             Some(vec!["jobs.step.completed"]),

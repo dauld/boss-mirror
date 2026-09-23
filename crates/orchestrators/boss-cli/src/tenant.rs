@@ -995,7 +995,7 @@ fn parse_rules(path: &Path, _: &Ctx) -> Result<String, String> {
     use boss_dispatcher::rules::{authoring, registry};
     let raw = registry::parse_raw_file(path).map_err(|e| e.to_string())?;
     refuse_if_stray(&read(path)?, "rule", raw.rules.len())?;
-    let known = boss_dispatcher::cascade::handler_emits();
+    let known = boss_dispatcher_handlers::cascade::handler_emits();
     let mut lines = Vec::new();
     for rule in &raw.rules {
         authoring::validate(rule).map_err(|e| e.to_string())?;
@@ -1003,7 +1003,7 @@ fn parse_rules(path: &Path, _: &Ctx) -> Result<String, String> {
             if !known.contains_key(step.handler.as_str()) {
                 return Err(format!(
                     "rule `{}` names handler `{}`, which this build of BOSS does not have \
-                     (boss_dispatcher::cascade::handler_emits lists {} handlers); the publish \
+                     (boss_dispatcher_handlers::cascade::handler_emits lists {} handlers); the publish \
                      door would accept it and the dispatcher would refuse it at dispatch as \
                      UnknownHandler",
                     rule.name,

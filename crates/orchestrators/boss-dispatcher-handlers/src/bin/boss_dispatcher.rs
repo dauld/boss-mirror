@@ -616,7 +616,7 @@ async fn main() -> Result<()> {
                     platform_owner.clone(),
                 ));
             }
-            // Packaging allocation — splits a brewed batch across formats by
+            // Packaging allocation — splits a produced batch across formats by
             // demand and writes the packaged quantities, so the whole batch
             // always packages (WIP → FG, never dumped).
             handlers.register(PackagingAllocate::new(
@@ -674,15 +674,15 @@ async fn main() -> Result<()> {
             // unaware of who, if anyone, is on the other end.
             handlers.register(WebhookNotify::new(cfg.webhook_url.clone()));
             handlers.register(LedgerTaxRemit::new(cfg.ledger_api_url.clone()));
-            // Per-production excise-tax accrual (DR 6550 / CR 2320),
-            // fired on `step.done.production-produce` — the brewery's
-            // federal beer excise liability accrues at packaging time,
-            // drained quarterly by the excise-tax-filing Workflow.
+            // Per-production tax accrual (DR 6550 / CR 2320), fired by a
+            // tenant's rule when production completes — the liability
+            // accrues at production time and the tenant's filing
+            // Workflow drains it.
             handlers.register(LedgerTaxAccrue::new(cfg.ledger_api_url.clone()));
-            // A reconciled keg-return packet settles its deposit:
+            // A reconciled container-return packet settles its deposit:
             // DR 1000 / CR 2400 at the fleet-out date, DR 2400 /
             // CR 1000 refund + CR 4150 forfeiture at the return date
-            // (93f936b9, the full balance-sheet keg model).
+            // (93f936b9, the full balance-sheet deposit model).
             handlers.register(LedgerKegDepositSettle::new(
                 cfg.jobs_api_url.clone(),
                 cfg.ledger_api_url.clone(),
@@ -885,6 +885,9 @@ async fn main() -> Result<()> {
         live,
         pool,
         authored_rules_dir: cfg.authored_rules_dir.clone(),
+        // What the handlers registered above emit — declared beside their
+        // code, not in core (backlog ec40e269).
+        cascade: Arc::new(boss_dispatcher_handlers::cascade::cascade()),
     });
     let bind: SocketAddr = cfg
         .http_bind
