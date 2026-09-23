@@ -186,12 +186,16 @@ impl NetworkCensus {
                 self.base()
             );
             let page = get_json(&self.client, &url, rule).await?;
-            let rows = page
-                .get("data")
-                .and_then(|v| v.as_array())
-                .map(Vec::len)
-                .unwrap_or(0);
-            packets.extend(packet_views(&page));
+            // A page with no `data` array is no answer. Read as zero
+            // rows it ENDED the paging, and the census recorded the
+            // packets it had not read as not there (backlog d4698bc2).
+            let rows: Vec<serde_json::Value> = super::common::rows_or_refuse(
+                &page,
+                "the open-packet read (GET /api/jobs?status=open)",
+            )
+            .map_err(HandlerError::Downstream)?;
+            packets.extend(packet_views(&rows));
+            let rows = rows.len();
             offset += rows as i64;
             let total = page.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
             if rows == 0 || offset >= total {
@@ -232,70 +236,64 @@ pub(crate) struct PacketView {
     pub assigned: bool,
 }
 
-/// Parse one `GET /api/jobs` page into [`PacketView`]s. Rows without
-/// an id are dropped rather than invented; a missing `steps` array
-/// reads as "no workable step", which errs toward orphaned — the
-/// loud direction, and the read failing outright is already a hard
-/// error upstream.
-pub(crate) fn packet_views(page: &serde_json::Value) -> Vec<PacketView> {
-    page.get("data")
-        .and_then(|v| v.as_array())
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|job| {
-                    let id = job.get("id")?.as_str()?.to_string();
-                    let partition = job
-                        .get("partition")
-                        .and_then(|v| v.as_str())
-                        .and_then(|w| w.parse::<Partition>().ok())
-                        .unwrap_or_else(|| {
-                            Partition::from_legacy_simulated(
-                                job.get("simulated").and_then(|v| v.as_bool()) == Some(true),
-                            )
-                        });
-                    let empty = Vec::new();
-                    let steps = job
-                        .get("steps")
-                        .and_then(|v| v.as_array())
-                        .unwrap_or(&empty);
-                    let workable_step = |s: &&serde_json::Value| {
-                        matches!(
-                            s.get("status").and_then(|v| v.as_str()),
-                            Some("ready") | Some("active")
-                        )
-                    };
-                    let workable = steps.iter().any(|s| workable_step(&s));
-                    let assigned = steps.iter().filter(workable_step).any(|s| {
-                        s.get("assignee_id")
-                            .and_then(|v| v.as_str())
-                            .is_some_and(|a| !a.is_empty())
-                    });
-                    Some(PacketView {
-                        id,
-                        partition,
-                        workable,
-                        assigned,
-                    })
-                })
-                .collect()
+/// Parse the rows of one `GET /api/jobs` page into [`PacketView`]s.
+/// Rows without an id are dropped rather than invented; a missing
+/// `steps` array reads as "no workable step", which errs toward
+/// orphaned — the loud direction. The page's own `data` array is
+/// judged by the caller through `common::rows_or_refuse` (d4698bc2):
+/// taking the page here used to read a missing array as zero packets.
+pub(crate) fn packet_views(rows: &[serde_json::Value]) -> Vec<PacketView> {
+    rows.iter()
+        .filter_map(|job| {
+            let id = job.get("id")?.as_str()?.to_string();
+            let partition = job
+                .get("partition")
+                .and_then(|v| v.as_str())
+                .and_then(|w| w.parse::<Partition>().ok())
+                .unwrap_or_else(|| {
+                    Partition::from_legacy_simulated(
+                        job.get("simulated").and_then(|v| v.as_bool()) == Some(true),
+                    )
+                });
+            let empty = Vec::new();
+            let steps = job
+                .get("steps")
+                .and_then(|v| v.as_array())
+                .unwrap_or(&empty);
+            let workable_step = |s: &&serde_json::Value| {
+                matches!(
+                    s.get("status").and_then(|v| v.as_str()),
+                    Some("ready") | Some("active")
+                )
+            };
+            let workable = steps.iter().any(|s| workable_step(&s));
+            let assigned = steps.iter().filter(workable_step).any(|s| {
+                s.get("assignee_id")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|a| !a.is_empty())
+            });
+            Some(PacketView {
+                id,
+                partition,
+                workable,
+                assigned,
+            })
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 /// The member job ids of one station-queue envelope (`data: [Job]`).
-/// An unrecognised body claims no members — safe here because a
-/// failed queue READ is a hard error upstream; this only shapes a
-/// 2xx body.
-pub(crate) fn queue_member_ids(queue: &serde_json::Value) -> Vec<String> {
-    queue
-        .get("data")
-        .and_then(|v| v.as_array())
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|j| j.get("id").and_then(|v| v.as_str()).map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+/// An unrecognised 2xx body is NO ANSWER and refuses: it used to claim
+/// no members, which counted every packet that station holds as an
+/// orphan in a recorded datapoint (backlog d4698bc2) — "a failed READ
+/// is a hard error upstream" covered a non-2xx, not a wrong-shaped 200.
+pub(crate) fn queue_member_ids(queue: &serde_json::Value) -> Result<Vec<String>, String> {
+    let rows: Vec<serde_json::Value> =
+        super::common::rows_or_refuse(queue, "the queue read (GET /api/stations/<name>/queue)")?;
+    Ok(rows
+        .iter()
+        .filter_map(|j| j.get("id").and_then(|v| v.as_str()).map(str::to_string))
+        .collect())
 }
 
 /// Q1's space half, computed: workable packets vs the union of every
@@ -430,7 +428,10 @@ impl Handler for NetworkCensus {
                 rule,
             )
             .await?;
-            stationed.extend(queue_member_ids(&queue));
+            stationed.extend(
+                queue_member_ids(&queue)
+                    .map_err(|why| HandlerError::Downstream(format!("station {name}: {why}")))?,
+            );
             evaluated += 1;
         }
 
@@ -486,9 +487,8 @@ impl Handler for NetworkCensus {
 mod tests {
     use super::*;
 
-    fn page(jobs: serde_json::Value) -> serde_json::Value {
-        let total = jobs.as_array().map(Vec::len).unwrap_or(0);
-        json!({"data": jobs, "total": total})
+    fn page(jobs: serde_json::Value) -> Vec<serde_json::Value> {
+        serde_json::from_value(jobs).expect("a fixture page is an array")
     }
 
     #[test]
@@ -550,9 +550,12 @@ mod tests {
         let ids = queue_member_ids(&json!({
             "station": "q.brewer.task", "total": 2,
             "data": [{"id": "j1"}, {"id": "j2"}],
-        }));
+        }))
+        .expect("an envelope with rows");
         assert_eq!(ids, vec!["j1", "j2"]);
-        assert!(queue_member_ids(&json!({"error": "nope"})).is_empty());
+        // An unrecognised body used to claim no members, which counted
+        // every packet the station held as an orphan (d4698bc2).
+        assert!(queue_member_ids(&json!({"error": "nope"})).is_err());
     }
 
     fn pv(id: &str, partition: Partition, workable: bool, assigned: bool) -> PacketView {
@@ -664,5 +667,62 @@ mod tests {
             .await;
         assert_eq!(stub.writes(), Vec::<String>::new(), "no census recorded");
         assert_refused_by_name(res, "GET /api/stations");
+    }
+
+    /// Backlog d4698bc2: an open-packet page with no `data` array read
+    /// as zero rows, which ENDED THE PAGING — the census then recorded
+    /// a day with no workable packet and no orphan as a measured
+    /// datapoint. It refuses by name now.
+    #[tokio::test]
+    async fn an_open_packet_page_with_no_data_array_refuses_and_records_nothing() {
+        use crate::handlers::listing_stub::{
+            assert_refused_by_name, empty_listing, no_data_array, serve,
+        };
+        let stub = serve(vec![
+            ("/api/jobs?limit=1000", no_data_array()),
+            ("/api/jobs", empty_listing()),
+            ("/api/stations", empty_listing()),
+        ])
+        .await;
+        let ctx = InvocationContext {
+            rule_name: "network-census-daily".into(),
+            triggering_event_id: "clock-2026-09-23".into(),
+            triggering_topic: "schedule".into(),
+            event_payload: json!({ "_day": "2026-09-23" }),
+        };
+        let res = NetworkCensus::new(stub.base.clone())
+            .invoke(&[], &ctx)
+            .await;
+        assert_eq!(stub.writes(), Vec::<String>::new(), "no census recorded");
+        assert_refused_by_name(res, "the open-packet read");
+    }
+
+    /// And a station queue with no `data` array: read as no members,
+    /// every packet it holds would have counted as an orphan.
+    #[tokio::test]
+    async fn a_station_queue_with_no_data_array_refuses_and_records_nothing() {
+        use crate::handlers::listing_stub::{
+            assert_refused_by_name, empty_listing, no_data_array, serve,
+        };
+        let stub = serve(vec![
+            ("/api/jobs", empty_listing()),
+            ("/api/stations/triage/queue", no_data_array()),
+            (
+                "/api/stations",
+                json!({ "data": [{ "name": "triage" }], "total": 1 }),
+            ),
+        ])
+        .await;
+        let ctx = InvocationContext {
+            rule_name: "network-census-daily".into(),
+            triggering_event_id: "clock-2026-09-23".into(),
+            triggering_topic: "schedule".into(),
+            event_payload: json!({ "_day": "2026-09-23" }),
+        };
+        let res = NetworkCensus::new(stub.base.clone())
+            .invoke(&[], &ctx)
+            .await;
+        assert_eq!(stub.writes(), Vec::<String>::new(), "no census recorded");
+        assert_refused_by_name(res, "the queue read");
     }
 }

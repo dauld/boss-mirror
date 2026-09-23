@@ -1,9 +1,18 @@
 //! Synthetic agent oversight for tenants without real
-//! `boss-cybernetics` deployed yet. The brewery playground uses
-//! this so `/ops` shows what agent oversight LOOKS like before
+//! `boss-cybernetics` deployed yet. A playground tenant uses this
+//! so `/ops` shows what agent oversight LOOKS like before
 //! anyone wires their first real agent in. Tenants leaving
 //! `demo_agents` absent in the obs config get the real
 //! aggregator path — this code is gated behind that flag.
+//!
+//! THE AGENTS ARE THE TENANT'S (backlog 1c68aebc, 2026-09-23). Until
+//! then this module carried one example tenant's roster as a `json!`
+//! literal — hop-sourcing scouts and tap-launch copywriters in a Tier
+//! 1 crate every adopter ships, describing a business most adopters
+//! do not run (CLAUDE.md §10). The mechanism stays here; the roster is a
+//! [`Roster`] read from the file the `[demo_agents]` block names,
+//! which lives in the tenant's own directory
+//! (`examples/brewery/seeds/demo_agents.toml`).
 //!
 //! Two surfaces:
 //!
@@ -18,11 +27,14 @@
 //!    cost.recorded pings. Operators see live agent activity
 //!    without any real LLM calls.
 
+use std::path::Path;
 use std::time::Duration;
 
 use crate::aggregator::VmResult;
 use crate::sse::SseHub;
 use boss_core::event::Event;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::watch;
 use tokio::time::interval;
@@ -30,108 +42,152 @@ use tracing::info;
 
 const VM_ID: &str = "demo-vm";
 
-/// Brewery-flavoured agent roster. Realistic names, budgets, and
-/// concurrency caps so the /ops Agents panel reads like a real
-/// cybernetics deployment.
-fn agent_specs() -> Value {
-    json!([
-        {
-            "id": "agent-hop-sourcing-scout",
-            "display_name": "Hop sourcing scout",
-            "system_prompt": "Watch supplier price feeds + cone-quality reports; flag any cultivar where the trailing 30-day price climbs >10% or COA fails the brewery's spec.",
-            "model": "claude-haiku-4-5",
-            "hourly_budget_usd_micros": 250_000,
-            "max_concurrent_runs": 3
-        },
-        {
-            "id": "agent-tap-launch-copywriter",
-            "display_name": "Tap launch copywriter",
-            "system_prompt": "Draft tap-handle copy + social-post variants for new releases. One pass per tap-launch Workflow step.done event.",
-            "model": "claude-sonnet-4-6",
-            "hourly_budget_usd_micros": 1_500_000,
-            "max_concurrent_runs": 2
-        },
-        {
-            "id": "agent-inventory-reorder-advisor",
-            "display_name": "Inventory reorder advisor",
-            "system_prompt": "Compute days-of-cover per SKU from the rolling consumption window; recommend reorder qtys when projected stockout < lead_time + 5d.",
-            "model": "claude-haiku-4-5",
-            "hourly_budget_usd_micros": 400_000,
-            "max_concurrent_runs": 5
-        },
-        {
-            "id": "agent-tasting-note-synthesizer",
-            "display_name": "QA tasting-note synthesizer",
-            "system_prompt": "Synthesize tasting-panel notes into a structured QA record. Triggered by step.done.handoff; one run per batch.",
-            "model": "claude-sonnet-4-6",
-            "hourly_budget_usd_micros": 800_000,
-            "max_concurrent_runs": 2
+/// A tenant's demo roster: the agents the synthetic dashboard shows,
+/// with the invented figures that make each panel read as populated.
+/// Parsed from TOML `[[agent]]` rows; unknown keys are refused so a
+/// misspelt figure is an error, not a silent zero.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Roster {
+    #[serde(rename = "agent")]
+    pub agents: Vec<DemoAgent>,
+}
+
+/// One synthetic agent. The first six fields are the shape
+/// boss-cybernetics answers on `/agents`; the rest feed the queues,
+/// runs and costs panels.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DemoAgent {
+    pub id: String,
+    pub display_name: String,
+    pub system_prompt: String,
+    pub model: String,
+    pub hourly_budget_usd_micros: u64,
+    pub max_concurrent_runs: u32,
+    #[serde(default)]
+    pub queue_depth: u32,
+    /// A run shown as in flight, if any.
+    #[serde(default)]
+    pub run: Option<DemoRun>,
+    pub cost_hour: DemoCost,
+    pub cost_day: DemoCost,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DemoRun {
+    pub id: String,
+    /// How long before the snapshot the run is shown as started.
+    pub started_seconds_ago: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DemoCost {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub usd_micros: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RosterError {
+    #[error("reading demo roster {path}: {source}")]
+    Io {
+        path: String,
+        source: std::io::Error,
+    },
+    #[error("demo roster is not valid: {0}")]
+    Toml(#[from] toml::de::Error),
+    /// The telemetry loop cycles the roster, so an empty one has
+    /// nothing to cycle and the dashboard nothing to show.
+    #[error("demo roster declares no [[agent]] rows")]
+    Empty,
+    #[error("demo roster declares agent id `{0}` twice")]
+    DuplicateId(String),
+}
+
+impl Roster {
+    /// Parse and validate a roster from its TOML text.
+    pub fn parse(text: &str) -> Result<Self, RosterError> {
+        let roster: Roster = toml::from_str(text)?;
+        roster.validate()?;
+        Ok(roster)
+    }
+
+    /// Read the roster the `[demo_agents]` block names.
+    pub fn load(path: &Path) -> Result<Self, RosterError> {
+        let text = std::fs::read_to_string(path).map_err(|source| RosterError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
+        Self::parse(&text)
+    }
+
+    fn validate(&self) -> Result<(), RosterError> {
+        if self.agents.is_empty() {
+            return Err(RosterError::Empty);
         }
-    ])
-}
+        let mut seen = std::collections::HashSet::new();
+        self.agents
+            .iter()
+            .find(|a| !seen.insert(a.id.as_str()))
+            .map_or(Ok(()), |a| Err(RosterError::DuplicateId(a.id.clone())))
+    }
 
-fn queues() -> Value {
-    json!([
-        { "agent": "agent-hop-sourcing-scout", "depth": 2 },
-        { "agent": "agent-tap-launch-copywriter", "depth": 1 },
-        { "agent": "agent-inventory-reorder-advisor", "depth": 4 },
-        { "agent": "agent-tasting-note-synthesizer", "depth": 1 }
-    ])
-}
+    fn agent_specs(&self) -> Value {
+        Value::Array(
+            self.agents
+                .iter()
+                .map(|a| {
+                    json!({
+                        "id": a.id,
+                        "display_name": a.display_name,
+                        "system_prompt": a.system_prompt,
+                        "model": a.model,
+                        "hourly_budget_usd_micros": a.hourly_budget_usd_micros,
+                        "max_concurrent_runs": a.max_concurrent_runs,
+                    })
+                })
+                .collect(),
+        )
+    }
 
-fn runs() -> Value {
-    let now = chrono::Utc::now();
-    let started_a = (now - chrono::Duration::seconds(42)).to_rfc3339();
-    let started_b = (now - chrono::Duration::seconds(11)).to_rfc3339();
-    json!([
-        { "id": "run-hop-001", "agent": "agent-hop-sourcing-scout", "started_at": started_a },
-        { "id": "run-inv-014", "agent": "agent-inventory-reorder-advisor", "started_at": started_b }
-    ])
-}
+    fn queues(&self) -> Value {
+        Value::Array(
+            self.agents
+                .iter()
+                .map(|a| json!({ "agent": a.id, "depth": a.queue_depth }))
+                .collect(),
+        )
+    }
 
-fn costs() -> Value {
-    json!([
-        {
-            "agent": "agent-hop-sourcing-scout",
-            "cost": { "input_tokens": 14_220, "output_tokens": 2_140, "usd_micros": 8_400 },
-            "window": "hour"
-        },
-        {
-            "agent": "agent-tap-launch-copywriter",
-            "cost": { "input_tokens": 2_500, "output_tokens": 1_800, "usd_micros": 24_500 },
-            "window": "hour"
-        },
-        {
-            "agent": "agent-inventory-reorder-advisor",
-            "cost": { "input_tokens": 31_400, "output_tokens": 4_600, "usd_micros": 19_200 },
-            "window": "hour"
-        },
-        {
-            "agent": "agent-tasting-note-synthesizer",
-            "cost": { "input_tokens": 4_100, "output_tokens": 2_900, "usd_micros": 36_800 },
-            "window": "hour"
-        },
-        {
-            "agent": "agent-hop-sourcing-scout",
-            "cost": { "input_tokens": 312_000, "output_tokens": 48_000, "usd_micros": 184_000 },
-            "window": "day"
-        },
-        {
-            "agent": "agent-tap-launch-copywriter",
-            "cost": { "input_tokens": 41_000, "output_tokens": 28_000, "usd_micros": 412_000 },
-            "window": "day"
-        },
-        {
-            "agent": "agent-inventory-reorder-advisor",
-            "cost": { "input_tokens": 720_000, "output_tokens": 92_000, "usd_micros": 388_000 },
-            "window": "day"
-        },
-        {
-            "agent": "agent-tasting-note-synthesizer",
-            "cost": { "input_tokens": 78_000, "output_tokens": 58_000, "usd_micros": 644_000 },
-            "window": "day"
-        }
-    ])
+    fn runs(&self, now: DateTime<Utc>) -> Value {
+        Value::Array(
+            self.agents
+                .iter()
+                .filter_map(|a| a.run.as_ref().map(|r| (a, r)))
+                .map(|(a, r)| {
+                    let started = now - chrono::Duration::seconds(r.started_seconds_ago);
+                    json!({ "id": r.id, "agent": a.id, "started_at": started.to_rfc3339() })
+                })
+                .collect(),
+        )
+    }
+
+    /// Every agent's hour window, then every agent's day window — the
+    /// order the dashboard has always received.
+    fn costs(&self) -> Value {
+        let window = |name: &str, pick: fn(&DemoAgent) -> &DemoCost| {
+            self.agents
+                .iter()
+                .map(|a| json!({ "agent": a.id, "cost": pick(a), "window": name }))
+                .collect::<Vec<_>>()
+        };
+        let mut rows = window("hour", |a| &a.cost_hour);
+        rows.extend(window("day", |a| &a.cost_day));
+        Value::Array(rows)
+    }
 }
 
 /// Build the five VmResult arrays the SPA expects. Each carries
@@ -142,20 +198,25 @@ fn costs() -> Value {
 /// `/ops` view can render an honest banner distinguishing the
 /// synthetic surface from a real cybernetics deployment. Without
 /// it, a first-time visitor would see "4 agents · $X/hr token
-/// spend" and reasonably conclude the brewery is running real LLM
+/// spend" and reasonably conclude the tenant is running real LLM
 /// workers.
-pub fn snapshot() -> serde_json::Value {
+pub fn snapshot(roster: &Roster) -> serde_json::Value {
+    snapshot_at(roster, Utc::now())
+}
+
+/// [`snapshot`] at a given instant — pure, so it can be tested.
+pub fn snapshot_at(roster: &Roster, now: DateTime<Utc>) -> serde_json::Value {
     json!({
         "demo_mode": true,
         "health": [vm_result(json!({
             "vm_id": VM_ID,
             "status": "healthy",
-            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "timestamp": now.to_rfc3339(),
         }))],
-        "agents": [vm_result(agent_specs())],
-        "queues": [vm_result(queues())],
-        "runs": [vm_result(runs())],
-        "costs": [vm_result(costs())],
+        "agents": [vm_result(roster.agent_specs())],
+        "queues": [vm_result(roster.queues())],
+        "runs": [vm_result(roster.runs(now))],
+        "costs": [vm_result(roster.costs())],
     })
 }
 
@@ -172,21 +233,24 @@ fn vm_result(body: Value) -> Value {
 /// Spawn a tokio task that pushes a periodic stream of synthetic
 /// cybernetics telemetry events into the SSE hub. The cycle walks
 /// dispatch.requested → dispatch.started → dispatch.completed
-/// across the four demo agents, interleaved with cost.recorded
+/// across the roster's agents, interleaved with cost.recorded
 /// pings. Cancels cleanly when the watch flips.
-pub fn spawn_telemetry_loop(hub: SseHub, tick_seconds: u64, cancel: watch::Receiver<bool>) {
+pub fn spawn_telemetry_loop(
+    hub: SseHub,
+    roster: Roster,
+    tick_seconds: u64,
+    cancel: watch::Receiver<bool>,
+) {
     tokio::spawn(async move {
-        info!(tick_seconds, "demo-agents telemetry loop starting");
+        info!(
+            tick_seconds,
+            agents = roster.agents.len(),
+            "demo-agents telemetry loop starting"
+        );
         let mut tick = interval(Duration::from_secs(tick_seconds.max(1)));
         // Skip the first immediate tick so the first batch lands
         // `tick_seconds` after startup, not at startup.
         tick.tick().await;
-        let agents = [
-            "agent-hop-sourcing-scout",
-            "agent-tap-launch-copywriter",
-            "agent-inventory-reorder-advisor",
-            "agent-tasting-note-synthesizer",
-        ];
         let mut counter: u64 = 0;
         let mut cancel = cancel;
         loop {
@@ -196,7 +260,16 @@ pub fn spawn_telemetry_loop(hub: SseHub, tick_seconds: u64, cancel: watch::Recei
                     break;
                 }
                 _ = tick.tick() => {
-                    let agent = agents[(counter as usize) % agents.len()];
+                    // `Roster::load` refuses an empty roster, so the
+                    // modulus is never zero; `get` keeps it panic-free
+                    // for a roster built some other way.
+                    let Some(demo) = roster
+                        .agents
+                        .get((counter as usize) % roster.agents.len().max(1))
+                    else {
+                        break;
+                    };
+                    let agent = demo.id.as_str();
                     let phase = counter % 3;
                     let kind = match phase {
                         0 => "cybernetics.dispatch.requested",
@@ -217,7 +290,7 @@ pub fn spawn_telemetry_loop(hub: SseHub, tick_seconds: u64, cancel: watch::Recei
                         1 => json!({
                             "agent": agent,
                             "run_id": run_id,
-                            "model": "claude-haiku-4-5",
+                            "model": demo.model,
                         }),
                         _ => json!({
                             "agent": agent,
@@ -237,7 +310,7 @@ pub fn spawn_telemetry_loop(hub: SseHub, tick_seconds: u64, cancel: watch::Recei
                         "boss-cybernetics/demo-vm",
                         kind,
                         payload,
-                        chrono::Utc::now(),
+                        Utc::now(),
                     ));
 
                     // After every completed phase, sneak in a
@@ -255,7 +328,7 @@ pub fn spawn_telemetry_loop(hub: SseHub, tick_seconds: u64, cancel: watch::Recei
                             "boss-cybernetics/demo-vm",
                             "cybernetics.cost.recorded",
                             cost,
-                            chrono::Utc::now(),
+                            Utc::now(),
                         ));
                     }
 
@@ -264,4 +337,130 @@ pub fn spawn_telemetry_loop(hub: SseHub, tick_seconds: u64, cancel: watch::Recei
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A roster unlike the example tenant's: the mechanism must render
+    /// whatever tenant it is handed.
+    const LAB: &str = r#"
+[[agent]]
+id = "agent-sample-triage"
+display_name = "Sample triage"
+system_prompt = "Route incoming samples to a bench."
+model = "claude-haiku-4-5"
+hourly_budget_usd_micros = 100_000
+max_concurrent_runs = 1
+queue_depth = 3
+run = { id = "run-triage-007", started_seconds_ago = 30 }
+cost_hour = { input_tokens = 10, output_tokens = 20, usd_micros = 30 }
+cost_day = { input_tokens = 100, output_tokens = 200, usd_micros = 300 }
+
+[[agent]]
+id = "agent-plate-reader"
+display_name = "Plate reader"
+system_prompt = "Summarise plate reads."
+model = "claude-sonnet-4-6"
+hourly_budget_usd_micros = 200_000
+max_concurrent_runs = 2
+cost_hour = { input_tokens = 1, output_tokens = 2, usd_micros = 3 }
+cost_day = { input_tokens = 4, output_tokens = 5, usd_micros = 6 }
+"#;
+
+    fn body<'a>(snap: &'a Value, panel: &str) -> &'a Value {
+        &snap[panel][0]["body"]
+    }
+
+    #[test]
+    fn the_snapshot_is_rendered_from_the_roster_it_is_handed() {
+        let roster = Roster::parse(LAB).unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-09-23T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let snap = snapshot_at(&roster, now);
+
+        assert_eq!(snap["demo_mode"], json!(true));
+        assert_eq!(
+            body(&snap, "agents")[0],
+            json!({
+                "id": "agent-sample-triage",
+                "display_name": "Sample triage",
+                "system_prompt": "Route incoming samples to a bench.",
+                "model": "claude-haiku-4-5",
+                "hourly_budget_usd_micros": 100_000,
+                "max_concurrent_runs": 1,
+            })
+        );
+        assert_eq!(
+            body(&snap, "queues"),
+            &json!([
+                { "agent": "agent-sample-triage", "depth": 3 },
+                { "agent": "agent-plate-reader", "depth": 0 },
+            ])
+        );
+        // Only an agent with a `run` is shown in flight, dated from `now`.
+        assert_eq!(
+            body(&snap, "runs"),
+            &json!([{
+                "id": "run-triage-007",
+                "agent": "agent-sample-triage",
+                "started_at": "2026-09-23T11:59:30+00:00",
+            }])
+        );
+        let windows: Vec<(&str, &str)> = body(&snap, "costs")
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| (c["agent"].as_str().unwrap(), c["window"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            windows,
+            [
+                ("agent-sample-triage", "hour"),
+                ("agent-plate-reader", "hour"),
+                ("agent-sample-triage", "day"),
+                ("agent-plate-reader", "day"),
+            ]
+        );
+        assert_eq!(
+            body(&snap, "costs")[2]["cost"],
+            json!({ "input_tokens": 100, "output_tokens": 200, "usd_micros": 300 })
+        );
+    }
+
+    #[test]
+    fn an_empty_roster_is_refused() {
+        assert!(matches!(
+            Roster::parse("agent = []").unwrap_err(),
+            RosterError::Empty
+        ));
+    }
+
+    #[test]
+    fn a_duplicate_agent_id_is_refused_by_name() {
+        let twice = format!("{LAB}\n{}", &LAB[LAB.find("[[agent]]").unwrap()..]);
+        let err = Roster::parse(&twice).unwrap_err();
+        assert!(
+            matches!(&err, RosterError::DuplicateId(id) if id == "agent-sample-triage"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_misspelt_figure_is_refused_not_zeroed() {
+        let typo = LAB.replacen("queue_depth", "queue_dept", 1);
+        let err = Roster::parse(&typo).unwrap_err();
+        assert!(err.to_string().contains("queue_dept"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_roster_file_names_its_path() {
+        let err = Roster::load(Path::new("/nonexistent/demo_agents.toml")).unwrap_err();
+        assert!(
+            err.to_string().contains("/nonexistent/demo_agents.toml"),
+            "{err}"
+        );
+    }
 }

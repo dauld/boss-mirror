@@ -1,0 +1,39 @@
+# The forge backs itself up (backlog 121831e6): a nightly `forgejo dump`
+# of the repositories and Forgejo's own database, verified, kept on this
+# host in a bounded count. forge-backup.sh carries what is dumped and
+# why, what is proven before a file is called a backup, and the disk
+# floor it will not cross.
+#
+# Install (forge host): in install.sh's UNITS list, so forge-converge
+# installs and enables it on its next tick after this lands on main.
+[Unit]
+Description=BOSS forge: nightly forgejo dump of the repositories and database, verified, kept locally
+After=docker.service
+Requires=docker.service
+
+[Service]
+# The system of record for the wrap pair, from /etc/boss/sor.env —
+# rendered by install.sh from infra/estate/estate.toml (backlog 5222163e).
+EnvironmentFile=/etc/boss/sor.env
+Type=oneshot
+# Root, for the SYSTEM docker daemon Forgejo runs on and for a retention
+# directory only root can read: the archive carries app.ini's secrets,
+# the JWT signing key and the SSH host keys.
+User=root
+# What the run proved — archive, sha256, size, repositories, the
+# database's bytes, kept/pruned, free space before and after, and the
+# offsite leg stated as none — merged onto the packet's run step by the
+# ExecStopPost below (infra/run-summary.sh). A refusal records its
+# reason as `refused`.
+Environment=BOSS_RUN_SUMMARY_FILE=/run/forge-backup.summary.json
+# The irreplaceable part measured ~480M on 2026-09-21; a dump is a
+# minute or two. Thirty minutes is a hang, not a slow night.
+TimeoutStartSec=30min
+# The wrap pair: the timer is the EXECUTOR, the Job is the VISIBILITY
+# (timers-leave-a-packet). Best-effort open (`-`): the packet is never a
+# precondition of the backup — an arm that needs the patient is not an
+# arm (CLAUDE.md §Diagnosis). A refused run exits non-zero, and the
+# ExecStopPost closes the packet on `failed` with how it died.
+ExecStartPre=-/home/david/boss/infra/boss-maintenance-wrap.sh maintenance-forge-backup "Forge backup"
+ExecStart=/home/david/boss/infra/forge/forge-backup.sh
+ExecStopPost=-/home/david/boss/infra/boss-step.sh maintenance-forge-backup run

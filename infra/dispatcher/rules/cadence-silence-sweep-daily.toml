@@ -110,15 +110,18 @@ declared kind and files, refreshes, or closes ONE alarm packet per
 silent kind. (Ratchet history: 59 -> 60, 2026-09-08, migration
 202609082300.)
 """
-# v6 carries one more declaration (maintenance-playground-crawl, 1440 —
-# the nightly CronJob, design 0e07ce64) and nothing else; v5 did the
-# same for maintenance-surface-usage, v4 for maintenance-protocol-drift
-# and v3 for maintenance-codebase-metrics.
+# v7 carries one more declaration (maintenance-forge-backup, 1440 — the
+# forge's nightly forgejo dump, backlog 121831e6: a backup that stops
+# does not look broken, it looks like the last good night, and the DR
+# rehearsal would find out) and nothing else; v6 did the same for
+# maintenance-playground-crawl (design 0e07ce64), v5 for
+# maintenance-surface-usage, v4 for maintenance-protocol-drift and v3
+# for maintenance-codebase-metrics.
 # CHANGING A RULE IS BUMPING THIS INTEGER: the seed writes the row at the
 # version this file declares, retiring the incumbent, so a bump is the
 # whole act and no migration follows it.
-version = 6
+version = 7
 schedule = { cadence = "daily", anchor_date = "2026-09-09" }
 [[rule.do]]
 handler = "cadence.silence.sweep"
-args = { "interval_minutes.maintenance-audit-integrity" = "1440", "interval_minutes.maintenance-backup" = "1440", "interval_minutes.maintenance-boss-gcp-converge" = "30", "interval_minutes.maintenance-cluster-converge" = "10", "interval_minutes.maintenance-cluster-watchdog" = "5", "interval_minutes.maintenance-codebase-metrics" = "1440", "interval_minutes.maintenance-conservation-invariants" = "60", "interval_minutes.maintenance-disk-floor-sweep" = "60", "interval_minutes.maintenance-estate-observe-host" = "1440", "interval_minutes.maintenance-estate-observe-units" = "5", "interval_minutes.maintenance-files-gc" = "1440", "interval_minutes.maintenance-forge-converge" = "10", "interval_minutes.maintenance-ledger-recognize" = "1440", "interval_minutes.maintenance-ledger-replay" = "1440", "interval_minutes.maintenance-messages-purge" = "1440", "interval_minutes.maintenance-ml-inference-batch" = "1440", "interval_minutes.maintenance-playground-crawl" = "1440", "interval_minutes.maintenance-protocol-drift" = "1440", "interval_minutes.maintenance-reap-ci-jobs" = "1440", "interval_minutes.maintenance-search-reindex" = "10", "interval_minutes.maintenance-surface-usage" = "1440", "interval_minutes.maintenance-views-catchup" = "5" }
+args = { "interval_minutes.maintenance-audit-integrity" = "1440", "interval_minutes.maintenance-backup" = "1440", "interval_minutes.maintenance-boss-gcp-converge" = "30", "interval_minutes.maintenance-cluster-converge" = "10", "interval_minutes.maintenance-cluster-watchdog" = "5", "interval_minutes.maintenance-codebase-metrics" = "1440", "interval_minutes.maintenance-conservation-invariants" = "60", "interval_minutes.maintenance-disk-floor-sweep" = "60", "interval_minutes.maintenance-estate-observe-host" = "1440", "interval_minutes.maintenance-estate-observe-units" = "5", "interval_minutes.maintenance-files-gc" = "1440", "interval_minutes.maintenance-forge-backup" = "1440", "interval_minutes.maintenance-forge-converge" = "10", "interval_minutes.maintenance-ledger-recognize" = "1440", "interval_minutes.maintenance-ledger-replay" = "1440", "interval_minutes.maintenance-messages-purge" = "1440", "interval_minutes.maintenance-ml-inference-batch" = "1440", "interval_minutes.maintenance-playground-crawl" = "1440", "interval_minutes.maintenance-protocol-drift" = "1440", "interval_minutes.maintenance-reap-ci-jobs" = "1440", "interval_minutes.maintenance-search-reindex" = "10", "interval_minutes.maintenance-surface-usage" = "1440", "interval_minutes.maintenance-views-catchup" = "5" }

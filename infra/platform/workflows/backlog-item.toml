@@ -84,8 +84,20 @@ authority_role = "platform-admin"
 # `closed` terminal, which says the work was completed. A measurement
 # is the step most likely to disprove the thing that prompted it, and
 # it was the one step that could not say so.
+#
+# AND THE MEASUREMENT ITSELF IS REQUIRED (backlog 828381c0). That fixed
+# where a disproving measurement could ROUTE; it gave no measurement
+# anywhere to LAND. On 2026-09-22 `boss step complete dd92d961 --step
+# measure` with no fields completed the step and closed the packet
+# holding nothing measured — a bare completion was the only one this
+# row permitted — and 648a68a9's real finding the same night had to be
+# annotated onto the packet instead. No evidence is not a pass, at the
+# step that exists to produce it: `evidence` is triage's name for the
+# same thing, and every machine withdrawal (sensor.poll, estate.recover,
+# cadence silence) already writes it when it completes this step.
 fields = [
   { name = "disposition", field_type = "stale|duplicate|decline", required = false },
+  { name = "evidence", field_type = "string", required = true },
 ]
 
 # THE DESIGN ROUTE OPENS THE DRAFT FIRST (backlog f90ca046, 2026-09-18)

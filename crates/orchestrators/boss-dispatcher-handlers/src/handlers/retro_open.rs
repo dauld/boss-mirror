@@ -123,14 +123,17 @@ pub fn decide(newest_opened_on: Option<NaiveDate>, today: NaiveDate) -> Decision
 
 /// The newest packet's `opened_on` out of a `/api/jobs?…&limit=1`
 /// listing (newest-opened first), or `None` for an empty page.
-pub fn newest_opened_on(listing: &Value) -> Option<NaiveDate> {
-    listing
-        .get("data")?
-        .as_array()?
-        .first()?
-        .get("opened_on")?
-        .as_str()
-        .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+///
+/// A listing with no `data` array REFUSES (backlog d4698bc2): read as
+/// an empty page it meant "no retro ever", and [`decide`] opens on
+/// that — a twin of this week's retro filed on a bad answer.
+pub fn newest_opened_on(listing: &Value) -> Result<Option<NaiveDate>, String> {
+    let rows: Vec<Value> = super::common::rows_or_refuse(listing, "the newest-retro read")?;
+    Ok(rows
+        .first()
+        .and_then(|r| r.get("opened_on"))
+        .and_then(Value::as_str)
+        .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()))
 }
 
 /// One department's retro packet. The Subject is the department code
@@ -321,8 +324,9 @@ impl Handler for RetroOpen {
                 &ctx.rule_name,
             )
             .await
+            .and_then(|l| newest_opened_on(&l).map_err(HandlerError::Downstream))
             {
-                Ok(l) => newest_opened_on(&l),
+                Ok(newest) => newest,
                 Err(e) => {
                     errors.push(format!("{}: newest-retro read failed: {e}", d.code));
                     continue;
@@ -371,9 +375,10 @@ impl Handler for RetroOpen {
                 &ctx.rule_name,
             )
             .await
+            .and_then(|l| newest_opened_on(&l).map_err(HandlerError::Downstream))
             {
                 Err(e) => errors.push(format!("{kind}: newest-retro read failed: {e}")),
-                Ok(l) => match decide(newest_opened_on(&l), today) {
+                Ok(newest) => match decide(newest, today) {
                     Decision::AlreadyThisWeek(day) => {
                         tracing::info!(kind = %kind, opened_on = %day, "retro.open: the platform retro was opened this week already");
                     }
@@ -489,9 +494,21 @@ mod tests {
             { "id": "a", "opened_on": "2026-09-21", "status": "open" },
             { "id": "b", "opened_on": "2026-09-14", "status": "closed" },
         ], "total": 2 });
-        assert_eq!(newest_opened_on(&l), Some(d("2026-09-21")));
-        assert_eq!(newest_opened_on(&json!({ "data": [], "total": 0 })), None);
-        assert_eq!(newest_opened_on(&json!({ "error": "x" })), None);
+        assert_eq!(newest_opened_on(&l), Ok(Some(d("2026-09-21"))));
+        assert_eq!(
+            newest_opened_on(&json!({ "data": [], "total": 0 })),
+            Ok(None)
+        );
+    }
+
+    /// Backlog d4698bc2: an error body read as "no retro ever", which
+    /// DECIDES Open — a twin of this week's retro filed on the far
+    /// side's bad answer. No `data` array refuses now, by name.
+    #[test]
+    fn a_newest_retro_read_with_no_data_array_refuses_rather_than_opening_a_twin() {
+        let why = newest_opened_on(&json!({ "error": "x" })).expect_err("no answer");
+        assert!(why.contains("no `data` array"), "{why}");
+        assert!(why.contains("the newest-retro read"), "{why}");
     }
 
     /// THE FLOOR (backlog 86ebf7fc). A roster read that SUCCEEDS and

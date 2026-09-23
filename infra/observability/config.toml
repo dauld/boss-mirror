@@ -14,6 +14,10 @@ bind = "127.0.0.1:7880"
 nats_url = "nats://127.0.0.1:4222"
 
 # Synthetic-agent mode. Comment out (and add `[[vms]]` entries) to
-# attach real cybernetics workers instead.
+# attach real cybernetics workers instead. The agents shown are the
+# tenant's roster, not the service's (backlog 1c68aebc): setup.sh
+# installs the brewery's examples/brewery/seeds/demo_agents.toml beside
+# this file and fills in @BOSS_CONFIG_DIR@ as it installs.
 [demo_agents]
+roster = "@BOSS_CONFIG_DIR@/boss-observability-demo-agents.toml"
 tick_seconds = 8

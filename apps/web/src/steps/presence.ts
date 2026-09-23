@@ -23,7 +23,7 @@ const bytesToB64url = (buf: ArrayBuffer): string =>
     .replace(/\//g, '_')
     .replace(/=+$/, '');
 
-import { enrolmentFailure } from '../me/passkeyHints';
+import { assertionFailure, enrolmentFailure } from '../me/passkeyHints';
 
 export type PresenceRefusal = Readonly<{
   required?: string;
@@ -61,7 +61,11 @@ export async function performPresenceCeremony(
     );
   }
   if (!begin.ok) {
-    throw new Error(`presence ceremony unavailable (${begin.status})`);
+    // The gateway's refusal text names which of its steps failed (job
+    // fetch, stored passkeys, challenge mint); the status alone does
+    // not (backlog 2e893e27).
+    const text = await begin.text().catch(() => '');
+    throw new Error(`presence ceremony unavailable (${begin.status}): ${text}`);
   }
   const opts = (await begin.json()) as {
     challenge_id: string;
@@ -87,8 +91,14 @@ export async function performPresenceCeremony(
         timeout: opts.publicKey.timeout,
       },
     })) as PublicKeyCredential | null;
-  } catch {
-    throw new Error('Passkey prompt was declined or timed out.');
+  } catch (err) {
+    // The DOMException name is the only copy of WHICH failure this was;
+    // a bare `catch` here said 'declined or timed out' for an origin
+    // mismatch and an empty allow-list too (backlog 2e893e27 — the
+    // enrolment half of this defect was f1fd9168).
+    throw new Error(
+      assertionFailure(err, opts.publicKey.allowCredentials.length),
+    );
   }
   if (!credential) throw new Error('Passkey prompt returned no credential.');
   const assertion = credential.response as AuthenticatorAssertionResponse;
@@ -113,7 +123,11 @@ export async function performPresenceCeremony(
     }),
   });
   if (!finish.ok) {
-    throw new Error(`assertion rejected (${finish.status})`);
+    // e.g. 410 'challenge already spent or expired — begin again', or
+    // the verifier's own reason on a 401 — the text the enrolment
+    // finish below already surfaces.
+    const text = await finish.text().catch(() => '');
+    throw new Error(`assertion rejected (${finish.status}): ${text}`);
   }
   const { ticket } = (await finish.json()) as { ticket: string };
   return ticket;

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   CEREMONY_DECLINED,
   PHONE_QR_HINT,
+  assertionFailure,
   enrolmentFailure,
 } from './passkeyHints';
 
@@ -101,5 +102,72 @@ describe('an enrolment failure says WHICH failure', () => {
   test('a non-Error throw still produces something a person can report', () => {
     expect(enrolmentFailure('boom')).toContain('boom');
     expect(enrolmentFailure(undefined)).toBeTruthy();
+  });
+});
+
+// Backlog 2e893e27 (2026-09-21): the ASSERTION flow — proving presence
+// on a gated step — had the same bare `catch {` one function above the
+// enrolment fix, and threw 'Passkey prompt was declined or timed out.'
+// for every outcome. Two of the outcomes it swallowed are not that: an
+// origin mismatch is the site's fault, and a prompt that asked for no
+// named passkey cannot have been declined for the reason it gave.
+describe('an assertion failure says WHICH failure', () => {
+  const dom = (name: string) => {
+    const e = new Error(`${name} raised`);
+    e.name = name;
+    return e;
+  };
+
+  test('every message names the browser reason, so a report can be diagnosed', () => {
+    for (const name of ['NotAllowedError', 'SecurityError', 'AbortError']) {
+      expect(assertionFailure(dom(name), 1)).toContain(name);
+    }
+  });
+
+  test('a declined prompt also names the passkey that is not on this device', () => {
+    // NotAllowedError is ALSO what a browser raises when none of the
+    // named passkeys is on the device — it does not say which, on
+    // purpose — so the message may not claim the person declined.
+    const msg = assertionFailure(dom('NotAllowedError'), 2);
+    expect(msg).toContain('declined');
+    expect(msg).toContain('not available on this device');
+  });
+
+  test('an origin mismatch is named as a site problem, not a declined prompt', () => {
+    const msg = assertionFailure(dom('SecurityError'), 1);
+    expect(msg).toContain('address');
+    expect(msg).not.toContain('declined');
+  });
+
+  test('a cancelled prompt says cancelled', () => {
+    const msg = assertionFailure(dom('AbortError'), 1);
+    expect(msg).toContain('cancelled');
+    expect(msg).not.toContain('timed out');
+  });
+
+  test('a prompt that named none of your passkeys says so rather than blaming you', () => {
+    // The assertion-only case: an empty allowCredentials. The gateway
+    // refuses to begin with NO passkey (409), so an empty list means
+    // stored rows that carry no credential id — nothing the person did.
+    const msg = assertionFailure(dom('NotAllowedError'), 0);
+    expect(msg).toContain('did not name any of your passkeys');
+    expect(msg).toContain('NotAllowedError');
+    expect(msg).not.toContain('declined');
+  });
+
+  test('an unrecognised failure is reported verbatim rather than flattened', () => {
+    // InvalidStateError means something at enrolment and nothing here,
+    // so it is an unknown in this function and must not claim a cause.
+    for (const name of ['InvalidStateError', 'SomeFutureError']) {
+      const msg = assertionFailure(dom(name), 1);
+      expect(msg).toContain(name);
+      expect(msg).not.toContain('declined');
+      expect(msg).not.toContain('timed out');
+    }
+  });
+
+  test('a non-Error throw still produces something a person can report', () => {
+    expect(assertionFailure('boom', 1)).toContain('boom');
+    expect(assertionFailure(undefined, 1)).toBeTruthy();
   });
 });

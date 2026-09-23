@@ -143,6 +143,7 @@ stating plainly:
 | `seeds/excise_rates.toml` | no | boss-brewery-engine prepare (`seeds_dir/excise_rates.toml`) | brewery engine data (`effective_from`, `[[schedule]]`); check parses TOML only | no |
 | `seeds/parts.toml` | no | boss-brewery-engine `load_parts` (raw-materials catalog + opening balances) | brewery engine data (`[[parts]]`); check parses TOML only | no |
 | `seeds/products.toml` | no | NO READER (measured 2026-09-16): the brewery's finished-product catalog is hardcoded in its prepare, which says to keep it in sync with this file | brewery engine data (`[[products]]`); check parses TOML only | no |
+| `seeds/demo_agents.toml` | no | boss-observability at boot (`demo_agents::Roster::load`), through the `[demo_agents] roster` key infra/oss-quickstart/generate-configs.sh writes only for a tenant that ships this file; no publish door — the agents are a playground's synthetic /ops dashboard, never registry rows (backlog 1c68aebc: until 2026-09-23 the example roster was a literal in that Tier 1 crate) | `[[agent]]` rows: id, display_name, system_prompt, model, hourly_budget_usd_micros, max_concurrent_runs, queue_depth?, run? = {id, started_seconds_ago}, cost_hour and cost_day = {input_tokens, output_tokens, usd_micros} — every figure invented; at least one agent, unique ids, unknown keys refused; validated by `boss_observability::demo_agents::Roster::load` | no |
 <!-- contract-table:end -->
 
 

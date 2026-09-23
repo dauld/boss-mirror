@@ -130,7 +130,7 @@ pub async fn discard(kind: &str, version: i32) -> Result<()> {
         None,
     )
     .await?;
-    let versions = crate::gate::rows(
+    let versions = crate::train::rows(
         crate::gate::api(
             &http,
             reqwest::Method::GET,
@@ -138,7 +138,7 @@ pub async fn discard(kind: &str, version: i32) -> Result<()> {
             None,
         )
         .await?,
-    );
+    )?;
     let still_there = versions
         .iter()
         .any(|v| v.get("version").and_then(serde_json::Value::as_i64) == Some(i64::from(version)));
@@ -222,7 +222,7 @@ pub async fn publish(kind: &str, path: &std::path::Path, dry: bool) -> Result<()
     }
 
     // REFUSE INTO A DIRTY REGISTRY, before writing anything.
-    let versions = crate::gate::rows(
+    let versions = crate::train::rows(
         crate::gate::api(
             &http,
             reqwest::Method::GET,
@@ -230,7 +230,7 @@ pub async fn publish(kind: &str, path: &std::path::Path, dry: bool) -> Result<()
             None,
         )
         .await?,
-    );
+    )?;
     if let Some(stale) = blocking_draft(&versions, None) {
         bail!(
             "a draft of {kind} v{stale} is already sitting in the registry, and publish \

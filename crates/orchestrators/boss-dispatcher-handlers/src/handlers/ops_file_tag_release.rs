@@ -77,7 +77,7 @@ use serde_json::{Value, json};
 
 use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext, arg_string};
 
-use super::common::{api_client, get_json, open_jobs_of_kind, post_json};
+use super::common::{api_client, get_json, open_jobs_of_kind, post_json, rows_or_refuse};
 
 /// The allowlisted verb (infra/ops/verbs/tag-release.json) and the
 /// host that answers it.
@@ -278,11 +278,14 @@ impl Handler for OpsFileTagRelease {
             &ctx.rule_name,
         )
         .await?;
-        let trains: Vec<Value> = trains
-            .get("data")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        // No `data` array is a bad answer, retryable. Read as zero trains
+        // it became the PERMANENT refusal below — "no landed commit to
+        // tag" — and the firing was never redelivered (d4698bc2).
+        let trains: Vec<Value> = rows_or_refuse(
+            &trains,
+            "the landed-train read (GET /api/jobs?kind=pr-train)",
+        )
+        .map_err(HandlerError::Downstream)?;
         let Some((train_id, merge_ref)) = newest_merged_train(&trains) else {
             return Err(HandlerError::Permanent(format!(
                 "ops.file_tag_release: no closed pr-train with a completed merged step and a \

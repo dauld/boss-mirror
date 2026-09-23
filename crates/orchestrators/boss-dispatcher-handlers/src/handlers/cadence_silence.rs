@@ -143,7 +143,7 @@ use boss_dispatcher::rules::registry::RawRule;
 use super::cadence_roster::{ClockCadence, Guard, clock_cadences};
 use super::common::{
     Retraction, TRIAGE_SLUG, api_client, empty_roster_refusal, get_json, owner_for_filing,
-    post_json, recovery_note, relapse_patch, retraction, write_json,
+    post_json, recovery_note, relapse_patch, retraction, rows_or_refuse, write_json,
 };
 
 /// Arg-key prefix for one declared cadence. `interval_minutes.<kind>`
@@ -281,11 +281,11 @@ impl CadenceSilenceSweep {
             self.base()
         );
         let listing = get_json(&self.client, &url, rule_name).await?;
-        let rows: Vec<Value> = listing
-            .get("data")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        // No `data` array is no answer, not "nothing is holding it":
+        // read as zero rows it was a silent NO-BLOCK, and a suppressed
+        // cadence was reported dead with its remedy unnamed (d4698bc2).
+        let rows: Vec<Value> = rows_or_refuse(&listing, &format!("the guard read ({url})"))
+            .map_err(HandlerError::Downstream)?;
         Ok(oldest_open_block(&rows, guard))
     }
 }
@@ -1228,14 +1228,24 @@ impl Handler for CadenceSilenceSweep {
                 findings.push((w, verdict(&w.declared, None, None, now)));
                 continue;
             }
-            let listing = match get_json(
+            // A listing with no `data` array fails like a failed read:
+            // read as zero rows it said "this kind never filed", which is
+            // a silence finding raised on the far side's bad answer
+            // (d4698bc2).
+            let rows: Vec<Value> = match get_json(
                 &self.client,
                 &format!("{}{}", self.base(), w.newest_packet_path()),
                 &ctx.rule_name,
             )
             .await
-            {
-                Ok(l) => l,
+            .and_then(|l| {
+                rows_or_refuse(
+                    &l,
+                    &format!("the newest-packet read ({})", w.newest_packet_path()),
+                )
+                .map_err(HandlerError::Downstream)
+            }) {
+                Ok(rows) => rows,
                 Err(e) => {
                     errors.push(format!(
                         "newest-packet read for {} failed; other cadences still swept: {e}",
@@ -1244,11 +1254,6 @@ impl Handler for CadenceSilenceSweep {
                     continue;
                 }
             };
-            let rows: Vec<Value> = listing
-                .get("data")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
             let newest = newest_packet_at(&rows);
             // No packet ever gets ONE more read: when was the kind
             // declared? Silence starts there, not at the beginning of
@@ -1357,11 +1362,19 @@ impl Handler for CadenceSilenceSweep {
                 return finish(errors);
             }
         };
-        let rows: Vec<Value> = body
-            .get("data")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        // No `data` array was held before only by accident of the
+        // truncation check below (a count with no rows looks short); it
+        // is refused now for what it is (d4698bc2).
+        let rows: Vec<Value> = match rows_or_refuse(&body, "the dedup read (GET /api/jobs)") {
+            Ok(rows) => rows,
+            Err(why) => {
+                errors.push(format!(
+                    "{why}; {} finding(s) held for retry to avoid duplicate alarms",
+                    findings.len()
+                ));
+                return finish(errors);
+            }
+        };
         // The list's own `total` is authoritative over the page length;
         // a missing `total` is treated as truncated (fail-safe).
         let complete = body
@@ -2404,6 +2417,140 @@ mod tests {
         assert_eq!(
             body["metadata"]["expected_interval_minutes"],
             json!("undetermined")
+        );
+    }
+
+    // ----- the reads and writes, end to end against a stub jobs API -----
+    //
+    // Until d4698bc2 nothing in this module spoke HTTP: every test above
+    // is of a pure decision, so no test could see a read that took an
+    // error body for an empty list, or a close the step API refuses.
+
+    /// The sweep at a fixed instant, against `base`.
+    fn sweep_at(base: &str, now: &str) -> CadenceSilenceSweep {
+        let snapshot: boss_clock_client::ClockNow =
+            serde_json::from_value(json!({ "now": now, "simulated": false })).expect("clock now");
+        CadenceSilenceSweep {
+            client: api_client(),
+            jobs_base: base.to_string(),
+            clock: Arc::new(boss_clock_client::FixedClockClient::new(snapshot)),
+            rules: Vec::new(),
+            owner: Arc::new(boss_core::platform_owner::Fixed("emp-owner".into())),
+        }
+    }
+
+    const NOW: &str = "2026-09-23T12:00:00Z";
+
+    fn hourly(kind: &str) -> Vec<(String, ExprValue)> {
+        vec![(format!("{ARG_PREFIX}{kind}"), ExprValue::Int(60))]
+    }
+
+    fn sweep_ctx() -> InvocationContext {
+        InvocationContext {
+            rule_name: "cadence-silence-daily".into(),
+            triggering_event_id: "clock-2026-09-23".into(),
+            triggering_topic: "schedule".into(),
+            event_payload: json!({}),
+        }
+    }
+
+    /// Backlog d4698bc2: the guard's read with no `data` array read as
+    /// "nothing is holding it" — a silent NO-BLOCK, so a suppressed
+    /// cadence was reported as dead and its real remedy, the packet
+    /// holding it, was never named. It refuses by name now, and the
+    /// caller reports the silence unexplained and NAKs.
+    #[tokio::test]
+    async fn a_guard_read_with_no_data_array_refuses_rather_than_finding_no_block() {
+        use crate::handlers::listing_stub::{no_data_array, serve};
+        let stub = serve(vec![("/api/jobs", no_data_array())]).await;
+        let why = sweep_at(&stub.base, NOW)
+            .blocking_packet("ops-request", "github-mirror", "guard", "rule")
+            .await
+            .expect_err("no `data` array is no answer");
+        let HandlerError::Downstream(why) = why else {
+            panic!("a bad answer is retryable: {why:?}");
+        };
+        assert!(why.contains("no `data` array"), "{why}");
+        assert!(why.contains("the guard read"), "{why}");
+    }
+
+    /// The newest-packet read: no `data` array read as "this kind has
+    /// never filed", which is a silence finding — an alarm raised on
+    /// the far side's bad answer rather than on the cadence.
+    #[tokio::test]
+    async fn a_newest_packet_read_with_no_data_array_refuses_and_raises_nothing() {
+        use crate::handlers::listing_stub::{
+            assert_refused_by_name, empty_listing, no_data_array, serve,
+        };
+        let stub = serve(vec![
+            ("/api/jobs?kind=backlog-item", empty_listing()),
+            ("/api/jobs?kind=maintenance-k", no_data_array()),
+        ])
+        .await;
+        let res = sweep_at(&stub.base, NOW)
+            .invoke(&hourly("maintenance-k"), &sweep_ctx())
+            .await;
+        assert_eq!(stub.writes(), Vec::<String>::new(), "no alarm raised");
+        assert_refused_by_name(res, "the newest-packet read");
+    }
+
+    /// The dedup read was already held, but only by accident of its
+    /// truncation check (a count with no rows looked truncated). It
+    /// now refuses for what it is.
+    #[tokio::test]
+    async fn a_dedup_read_with_no_data_array_refuses_by_name() {
+        use crate::handlers::listing_stub::{assert_refused_by_name, no_data_array, serve};
+        let stub = serve(vec![
+            ("/api/jobs?kind=backlog-item", no_data_array()),
+            (
+                "/api/jobs?kind=maintenance-k",
+                json!({ "data": [packet("2026-09-23T11:30:00Z")], "total": 1 }),
+            ),
+        ])
+        .await;
+        let res = sweep_at(&stub.base, NOW)
+            .invoke(&hourly("maintenance-k"), &sweep_ctx())
+            .await;
+        assert_eq!(stub.writes(), Vec::<String>::new());
+        assert_refused_by_name(res, "the dedup read");
+    }
+
+    /// A returning kind whose alarm a person routed to `build` closes at
+    /// the build step — against a stub that refuses a write to the
+    /// answered triage with 409 as the step API does, so the a2d8bad3
+    /// regression (completing triage) fails here rather than live.
+    #[tokio::test]
+    async fn a_returning_kind_closes_its_routed_alarm_at_build_through_an_honest_step_api() {
+        use crate::handlers::listing_stub::serve;
+        let alarm = json!({
+            "id": "a6a4ae18",
+            "status": "open",
+            "metadata": {"cadence_silence": silence_key("maintenance-k")},
+            "steps": [
+                {"id": "a6a4ae18-triage", "spec_slug": "triage", "status": "completed",
+                 "metadata": {"authority_role": "platform-admin", "disposition": "build"}},
+                {"id": "a6a4ae18-build", "spec_slug": "build", "status": "ready",
+                 "metadata": {"authority_role": "platform-admin"}},
+            ],
+        });
+        let stub = serve(vec![
+            (
+                "/api/jobs?kind=backlog-item",
+                json!({ "data": [alarm], "total": 1 }),
+            ),
+            (
+                "/api/jobs?kind=maintenance-k",
+                json!({ "data": [packet("2026-09-23T11:30:00Z")], "total": 1 }),
+            ),
+        ])
+        .await;
+        sweep_at(&stub.base, NOW)
+            .invoke(&hourly("maintenance-k"), &sweep_ctx())
+            .await
+            .expect("the close answered");
+        assert_eq!(
+            stub.writes(),
+            vec!["PUT /api/jobs/a6a4ae18/steps/a6a4ae18-build".to_string()]
         );
     }
 }

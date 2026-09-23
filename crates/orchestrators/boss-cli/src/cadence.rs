@@ -1112,7 +1112,10 @@ async fn open_packet(kind: &str, rule: &str, now: DateTime<Utc>) -> Result<i32> 
     }
 
     let http = reqwest::Client::new();
-    let open = crate::gate::rows(
+    // A HARD read: an answer that is not a list refuses rather than
+    // reading as "none open", which would file a second packet beside
+    // the open one (backlog 7b7e0529).
+    let open = crate::train::rows(
         crate::gate::api(
             &http,
             reqwest::Method::GET,
@@ -1120,7 +1123,7 @@ async fn open_packet(kind: &str, rule: &str, now: DateTime<Utc>) -> Result<i32> 
             None,
         )
         .await?,
-    );
+    )?;
     if !open.is_empty() {
         log(format!(
             "{rule}: an open {kind} packet exists — leaving it to be completed rather than \
@@ -1602,7 +1605,9 @@ async fn lineage(wire: &crate::steps::Wire, name: &str) -> Result<Vec<Value>> {
             None,
         )
         .await?;
-    Ok(crate::gate::rows(body))
+    // An unreadable lineage refuses: read as empty, it would say the
+    // version a retire or publish just wrote is not there (7b7e0529).
+    crate::train::rows(body)
 }
 
 /// `boss cadence retire <name>` — retire the active version of a rule

@@ -92,3 +92,59 @@ export function enrolmentFailure(err: unknown): string {
       );
   }
 }
+
+/** The ASSERTION twin of `enrolmentFailure` — the browser's failure
+ *  when a passkey is asked to SIGN (proving presence on a gated step),
+ *  said in words a person can act on and always carrying the browser's
+ *  own reason.
+ *
+ *  WHY THIS EXISTS. `performPresenceCeremony` caught
+ *  navigator.credentials.get with the same bare `catch {` the enrolment
+ *  fix removed one function below it, and threw 'Passkey prompt was
+ *  declined or timed out.' for every outcome (backlog 2e893e27,
+ *  2026-09-21). Assertion runs on every presence-gated step, where
+ *  enrolment runs once per device, so it is the higher-traffic copy of
+ *  the defect that made f1fd9168 repeat a55d9a01.
+ *
+ *  A sibling, not the same function: InvalidStateError means nothing
+ *  when signing, so here it is an unknown and reported verbatim; and
+ *  `offered` — how many passkeys the gateway named in allowCredentials —
+ *  is an assertion-only fact. The gateway refuses to begin with no
+ *  passkey at all (409), so an empty list means stored rows that carry
+ *  no credential id: the site's problem, not a declined prompt. */
+export function assertionFailure(err: unknown, offered: number): string {
+  const name =
+    err instanceof Error && err.name ? err.name : String(err ?? 'unknown error');
+  const because = ` (the browser reported ${name}.)`;
+
+  switch (name) {
+    // The spec folds "no matching passkey on this device" into this
+    // name on purpose (so a site cannot probe which passkeys exist),
+    // so the message may not claim the person declined.
+    case 'NotAllowedError':
+      return offered === 0
+        ? 'The site did not name any of your passkeys for the browser to ask for, so no signature came back. ' +
+            'That is a problem with how this account’s passkeys are stored, not with your device.' +
+            because
+        : 'The passkey prompt ended without a signature: it was declined, it timed out, ' +
+            'or the passkey you enrolled is not available on this device — try the device or phone you enrolled with.' +
+            because;
+
+    case 'SecurityError':
+      return (
+        'This site’s address does not match the domain its passkeys are registered to, so the browser refused. ' +
+        'That is a problem with how the site is being reached, not with your device.' +
+        because
+      );
+
+    case 'AbortError':
+      return 'The passkey prompt was cancelled before it finished.' + because;
+
+    default:
+      return (
+        'The passkey prompt failed, and the browser gave a reason this page does not recognise. ' +
+        'Please report it with the reason below.' +
+        because
+      );
+  }
+}

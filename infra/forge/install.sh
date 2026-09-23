@@ -118,6 +118,12 @@ sor_require BOSS_JOBS_URL BOSS_FORGE_JOURNAL_URL
 #   has been dark longer than a deploy, and says so every 5 minutes.
 #   No maintenance wrap, by design: the 2026-09-05 outage lasted four
 #   hours because every loop that could act needed the API it watched.
+# forge-backup: a nightly `forgejo dump` of the repositories and
+#   Forgejo's database, verified and kept here in a bounded count
+#   (backlog 121831e6). Until it, the forge held the only copy of the
+#   repository, the runner registration and the signing keys, and
+#   nothing copied them. Local only — the offsite legs need a
+#   credential this host does not hold, and every run says so.
 UNITS=(
     reap-dead-ci-jobs
     cluster-deploy-runner
@@ -125,6 +131,7 @@ UNITS=(
     forge-converge
     estate-observe-host
     cluster-watchdog
+    forge-backup
 )
 
 installed=0

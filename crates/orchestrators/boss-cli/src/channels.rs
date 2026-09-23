@@ -18,7 +18,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 /// The lane vocabulary itself now lives in `boss_jobs::channels`, so
@@ -234,6 +234,24 @@ pub(crate) fn proactive_share(mix: &BTreeMap<InputChannel, usize>) -> Option<f64
     Some(proactive as f64 / total as f64)
 }
 
+/// A list read's rows and its `total`, or a refusal naming the read.
+///
+/// Both halves refuse (backlog 7b7e0529). This verb read `data` and
+/// `total` with a default each, so a body carrying neither — a proxy's
+/// login page, an error envelope — reported "0 work-originating job(s)
+/// (0 backlog + 0 feedback)", a clean mix of nothing, from a door that
+/// was never answered. The rows go through the one rows helper and the
+/// count through `list_total`, which refuses a missing `total` for the
+/// same reason.
+fn listed(body: Option<Value>, what: &str) -> Result<(Vec<Value>, usize)> {
+    let body = body.with_context(|| {
+        format!("{what} answered no JSON body, so its rows cannot be read as zero")
+    })?;
+    let total = crate::train::list_total(&body).with_context(|| what.to_string())?;
+    let rows = crate::train::rows(Some(body)).with_context(|| what.to_string())?;
+    Ok((rows, total))
+}
+
 /// `boss channels` — read recent work-originating jobs and report the
 /// input-channel mix with the proactive-vs-reactive reading, the
 /// delivery mix over the dock, and the per-tier mix (ba429e7f) over the
@@ -256,17 +274,7 @@ pub async fn run(
         None,
     )
     .await?;
-    let bl_total = bl
-        .as_ref()
-        .and_then(|b| b.get("total"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as usize;
-    let backlog: Vec<Value> = bl
-        .as_ref()
-        .and_then(|b| b.get("data"))
-        .and_then(Value::as_array)
-        .map(|r| r.to_vec())
-        .unwrap_or_default();
+    let (backlog, bl_total) = listed(bl, "the backlog read")?;
     let capped = bl_total > backlog.len();
 
     // Every user-feedback job is the user-feedback lane, so it needs a
@@ -278,11 +286,7 @@ pub async fn run(
         None,
     )
     .await?;
-    let uf_total = uf
-        .as_ref()
-        .and_then(|b| b.get("total"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as usize;
+    let (_, uf_total) = listed(uf, "the user-feedback count")?;
 
     let mut mix = input_mix(&backlog);
     // The same rows read a second way: how each lane was ARRIVED at.
@@ -1082,6 +1086,30 @@ pub(crate) fn changed_paths_for(branch: &str) -> Option<Vec<String>> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// NOTHING READ IS NOT ZERO (backlog 7b7e0529). The backlog read
+    /// defaulted both `data` and `total`, so a body carrying neither
+    /// printed "0 work-originating job(s)" as if the lanes were empty.
+    #[test]
+    fn a_read_with_no_rows_or_no_total_refuses_naming_the_read() {
+        for body in [
+            None,
+            Some(json!({})),
+            Some(json!({"error": "forbidden"})),
+            Some(json!({"data": []})),
+            Some(json!({"total": 3})),
+        ] {
+            let why = listed(body.clone(), "the backlog read")
+                .expect_err(&format!("{body:?} must refuse, not read as 0 of 0"));
+            assert!(format!("{why:#}").contains("the backlog read"), "{why:#}");
+        }
+        let (rows, total) =
+            listed(Some(json!({"data": [], "total": 0})), "the backlog read").expect("a real zero");
+        assert_eq!((rows.len(), total), (0, 0));
+        let (rows, total) = listed(Some(json!({"data": [{"id": "a"}], "total": 7})), "x")
+            .expect("a page of a larger set");
+        assert_eq!((rows.len(), total), (1, 7));
+    }
 
     fn job(kind: &str, md: Value) -> Value {
         json!({ "kind": kind, "metadata": md })

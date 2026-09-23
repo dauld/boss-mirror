@@ -47,7 +47,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use crate::train::truthy;
@@ -169,13 +169,8 @@ pub async fn run(want: &str) -> Result<()> {
         bail!("GET {url}: HTTP {}", resp.status());
     }
     let body: Value = resp.json().await?;
-    let rows = match body {
-        Value::Object(mut o) if o.contains_key("data") => o.remove("data").unwrap_or(Value::Null),
-        other => other,
-    };
-    let Value::Array(rows) = rows else {
-        bail!("expected a job list from {url}");
-    };
+    // The one rows helper decides the shape (backlog 7b7e0529).
+    let rows = crate::train::rows(Some(body)).with_context(|| format!("GET {url}"))?;
 
     let mut buckets: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
     for k in ["waiting", "with-agent", "done"] {

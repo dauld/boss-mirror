@@ -86,7 +86,7 @@ use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext};
 
 use super::common::{
     RECOVERED_AT, Retraction, api_client, get_json, recovery_note, relapse_patch, retraction,
-    write_json,
+    rows_or_refuse, write_json,
 };
 use super::estate_alarm::{DEDUP_PAGE, PERSIST_N, hard_finding_keys};
 
@@ -344,11 +344,12 @@ impl Handler for EstateRecover {
             &ctx.rule_name,
         )
         .await?;
-        let open_rows: Vec<Value> = listing
-            .get("data")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        // A listing with no `data` array is no answer. Read as zero
+        // rows it found no alarm on the series, returned healthy, and
+        // every recovered alarm stayed open with nothing saying why
+        // (backlog d4698bc2).
+        let open_rows: Vec<Value> = rows_or_refuse(&listing, "the open-alarm read (GET /api/jobs)")
+            .map_err(HandlerError::Downstream)?;
         // A truncated page is not a safety problem here the way it is
         // for the raiser's dedup: every close is judged on the series,
         // not on a packet's absence, and an alarm beyond the page is
@@ -417,11 +418,14 @@ impl Handler for EstateRecover {
             &ctx.rule_name,
         )
         .await?;
-        let rows: Vec<Value> = recent
-            .get("data")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        // No series is not "too few readings yet": read as zero rows it
+        // left the alarm open as if the evidence were still arriving
+        // (d4698bc2).
+        let rows: Vec<Value> = rows_or_refuse(
+            &recent,
+            &format!("the comparisons read (GET /api/estate/comparisons?scope={scope})"),
+        )
+        .map_err(HandlerError::Downstream)?;
 
         for r in recovered(&open_rows, &rows, scope, host, PERSIST_N) {
             let key = &r.key;
@@ -905,6 +909,8 @@ mod tests {
 
     // ----- the writes, witnessed against a stub jobs API -----
 
+    use crate::handlers::listing_stub::{step_is_terminal, terminal_step_refusal};
+    use axum::response::IntoResponse;
     use axum::{Json, Router, extract::Path, extract::Query, routing::get};
     use std::sync::Mutex;
 
@@ -917,6 +923,7 @@ mod tests {
         let puts: Writes = Arc::new(Mutex::new(Vec::new()));
         let patches: Writes = Arc::new(Mutex::new(Vec::new()));
         let total = open.len();
+        let open_for_puts = open.clone();
         let open = Arc::new(open);
         let rows = Arc::new(rows);
         let app = Router::new()
@@ -947,11 +954,21 @@ mod tests {
             .route("/api/jobs/{id}/steps/{step_id}", {
                 let puts = puts.clone();
                 axum::routing::put(
-                    move |Path((_id, step_id)): Path<(String, String)>, Json(body): Json<Value>| {
+                    move |Path((id, step_id)): Path<(String, String)>, Json(body): Json<Value>| {
                         let puts = puts.clone();
+                        let finished = step_is_terminal(&open_for_puts, &id, &step_id);
                         async move {
+                            // A step a person already answered is
+                            // refused as the real step API refuses it
+                            // (d4698bc2) — this stub used to accept it.
+                            if finished {
+                                puts.lock()
+                                    .unwrap()
+                                    .push((format!("{step_id} (409)"), body));
+                                return terminal_step_refusal(&step_id);
+                            }
                             puts.lock().unwrap().push((step_id, body));
-                            axum::http::StatusCode::NO_CONTENT
+                            axum::http::StatusCode::NO_CONTENT.into_response()
                         }
                     },
                 )
@@ -1149,6 +1166,63 @@ mod tests {
 
         assert!(puts.lock().unwrap().is_empty());
         assert!(patches.lock().unwrap().is_empty());
+    }
+
+    /// Backlog d4698bc2: an open-alarm listing with no `data` array read
+    /// as "no alarms on this series", so the pass returned healthy and
+    /// every recovered alarm stayed open with nothing saying why. It
+    /// now refuses by name and the firing is redelivered.
+    #[tokio::test]
+    async fn an_open_alarm_read_with_no_data_array_refuses_and_writes_nothing() {
+        use crate::handlers::listing_stub::{assert_refused_by_name, no_data_array, serve};
+        let (clean, _) = clean_series();
+        let stub = serve(vec![("/api/jobs", no_data_array())]).await;
+        let res = EstateRecover::new(&stub.base)
+            .invoke(&[], &firing(payload(&clean).clone()))
+            .await;
+        assert_eq!(stub.writes(), Vec::<String>::new());
+        assert_refused_by_name(res, "the open-alarm read");
+    }
+
+    /// And the series itself: a comparisons read with no `data` array
+    /// read as zero rows — too few to judge, so the alarm silently
+    /// stayed open. No series is not "not enough evidence yet".
+    #[tokio::test]
+    async fn a_comparisons_read_with_no_data_array_refuses_and_writes_nothing() {
+        use crate::handlers::listing_stub::{assert_refused_by_name, no_data_array, serve};
+        let (clean, _) = clean_series();
+        let open = alarm("fdd10ec8", KEY, "host-units", Some("boss-gcp"), "open");
+        let stub = serve(vec![
+            ("/api/jobs", json!({ "data": [open], "total": 1 })),
+            ("/api/estate/comparisons", no_data_array()),
+        ])
+        .await;
+        let res = EstateRecover::new(&stub.base)
+            .invoke(&[], &firing(payload(&clean).clone()))
+            .await;
+        assert_eq!(stub.writes(), Vec::<String>::new());
+        assert_refused_by_name(res, "the comparisons read");
+    }
+
+    /// The stub answers a close aimed at a step a person already
+    /// answered the way the real step API does — 409, recorded — so a
+    /// handler that regressed to writing the completed triage fails
+    /// here instead of on every live pass (backlog d4698bc2; the
+    /// regression itself was a2d8bad3).
+    #[tokio::test]
+    async fn the_stub_refuses_a_write_to_a_finished_step_as_the_step_api_does() {
+        let (_, rows) = clean_series();
+        let (base, puts, _) = stub(vec![routed("e1fea3b2", "build", "build", "ready")], rows).await;
+        let answer = reqwest::Client::new()
+            .put(format!("{base}/api/jobs/e1fea3b2/steps/e1fea3b2-triage"))
+            .json(&json!({ "status": "completed" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(answer.status(), 409);
+        let puts = puts.lock().unwrap();
+        assert_eq!(puts.len(), 1);
+        assert_eq!(puts[0].0, "e1fea3b2-triage (409)");
     }
 
     #[tokio::test]

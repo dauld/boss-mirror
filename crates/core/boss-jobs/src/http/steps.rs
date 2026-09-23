@@ -1637,6 +1637,22 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
     // reads its Subject identity.
     let parent_job = state.jobs.get_job(&job_id).await.ok().flatten();
 
+    // The step's agent block as every gate below reads it: the packet's
+    // own projection, else its kind's ACTIVE row (backlog 51aef4dd) —
+    // the resolution the station queue made, so the door an agent
+    // claims through agrees with the queue it read. Read only when the
+    // step carries no projection; best-effort, since a registry that
+    // cannot answer leaves the step as recorded, which is how every
+    // claim was judged before. `old` itself stays as recorded: it is
+    // what the CAS writes back, and the resolution is never written.
+    let active_row = match (&state.kind_registry, &parent_job) {
+        (Some(reg), Some(job)) if crate::agent_spec::projected(&old.metadata).is_none() => {
+            reg.get_active(&job.kind).await.ok()
+        }
+        _ => None,
+    };
+    let resolved = crate::agent_spec::resolved(&old, active_row.as_ref());
+
     // The claimant's agents row, read once for the two gates below:
     // the station's model capability and the budget reservation.
     // `None` is a person or an unregistered login — neither gate
@@ -1688,7 +1704,8 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
         };
         let needs_steps = bound.as_ref().is_some_and(|s| s.predicate.needs_steps());
         let steps = if needs_steps {
-            state.jobs.list_steps(&job_id).await.unwrap_or_default()
+            let steps = state.jobs.list_steps(&job_id).await.unwrap_or_default();
+            crate::agent_spec::resolved_steps(&steps, active_row.as_ref())
         } else {
             Vec::new()
         };
@@ -1775,7 +1792,8 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
     if let (Some(door), Some(row), Some(budget_usd)) = (
         state.agent_budget.as_ref(),
         agent_row.as_ref(),
-        old.metadata
+        resolved
+            .metadata
             .get(crate::agent_spec::BUDGET_KEY)
             .and_then(|v| v.as_f64()),
     ) {
@@ -1818,7 +1836,7 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
     // After the budget gate, because `BudgetDecision::decide` reports
     // money before concurrency and the two doors keep that order.
     if let Some(row) = agent_row.as_ref()
-        && crate::agent_budget::declares_an_agent_run(&old.metadata)
+        && crate::agent_budget::declares_an_agent_run(&resolved.metadata)
         && let Some(cap) = row.max_concurrent_runs.and_then(|n| u32::try_from(n).ok())
     {
         // Every spelling of the actor: the registered id and the

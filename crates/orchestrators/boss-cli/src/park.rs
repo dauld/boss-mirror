@@ -327,7 +327,7 @@ pub(crate) async fn run(
 
     // The receipt first: refuse before anything is created, so a red
     // gate costs a line of output rather than a half-filled packet.
-    let open = crate::gate::rows(
+    let open = crate::train::rows(
         crate::gate::api(
             &http,
             reqwest::Method::GET,
@@ -335,7 +335,7 @@ pub(crate) async fn run(
             None,
         )
         .await?,
-    );
+    )?;
     let head_now = crate::gate::resolve_sha(branch);
     let receipt = receipt_for(&open, branch, &head_now)?;
     println!(
@@ -369,7 +369,7 @@ pub(crate) async fn run(
             // whichever query happened to run first.
             let mut all = Vec::new();
             for kind in ["backlog-item", "user-feedback"] {
-                all.extend(crate::gate::rows(
+                all.extend(crate::train::rows(
                     crate::gate::api(
                         &http,
                         reqwest::Method::GET,
@@ -377,7 +377,7 @@ pub(crate) async fn run(
                         None,
                     )
                     .await?,
-                ));
+                )?);
             }
             let full = resolve_job_id(&all, &given)?;
             if full != given {

@@ -743,6 +743,7 @@ dependencies = [
  "boss-ledger",
  "boss-locations",
  "boss-nats",
+ "boss-observability",
  "boss-people",
  "boss-people-client",
  "boss-policy",

@@ -35,7 +35,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use super::common::{
-    StepEvent, api_client, dispatcher_actor_header, dispatcher_reader_header, sim_origin_value,
+    StepEvent, api_client, dispatcher_actor_header, dispatcher_reader_header, rows_or_refuse,
+    sim_origin_value,
 };
 use super::sweep_deploy_convergence;
 
@@ -238,12 +239,22 @@ pub(crate) fn wanted_target(
     }
 }
 
-fn data_rows(v: &Value) -> Vec<Value> {
-    v.get("data")
-        .and_then(Value::as_array)
-        .cloned()
-        .or_else(|| v.as_array().cloned())
-        .unwrap_or_default()
+/// The rows of a `GET /api/jobs` listing, or a retryable refusal naming
+/// the read. This replaced `data_rows`, which took either envelope or a
+/// bare array and read ANY other body as zero rows — so an error answer
+/// meant zero trains, zero approval kinds or zero open packets, and the
+/// sweep cleared on a read that saw nothing (backlog d4698bc2).
+fn listing_rows(v: &Value, what: &str) -> Result<Vec<Value>, HandlerError> {
+    rows_or_refuse(v, what).map_err(HandlerError::Downstream)
+}
+
+/// `/api/jobs/step-types` answers a BARE array (boss-jobs
+/// `list_step_types`), not an envelope — its own shape, judged here
+/// rather than guessed at beside the listings.
+fn step_type_rows(v: &Value) -> Result<Vec<Value>, HandlerError> {
+    v.as_array().cloned().ok_or_else(|| {
+        HandlerError::Downstream("GET /api/jobs/step-types answered no array".into())
+    })
 }
 
 #[async_trait]
@@ -313,7 +324,8 @@ impl Handler for MaintenanceSweepInspect {
                     ))
                 })?;
             let trains = self.get("/api/jobs?kind=pr-train&limit=200").await?;
-            let insp = sweep_deploy_convergence::inspect(&data_rows(&trains), now, &actor);
+            let trains = listing_rows(&trains, "the train read (GET /api/jobs?kind=pr-train)")?;
+            let insp = sweep_deploy_convergence::inspect(&trains, now, &actor);
             return self
                 .complete(
                     ctx,
@@ -342,12 +354,13 @@ impl Handler for MaintenanceSweepInspect {
             .to_string();
 
         let step_types = self.get("/api/jobs/step-types").await?;
-        let approval = approval_kinds(&data_rows(&step_types));
+        let approval = approval_kinds(&step_type_rows(&step_types)?);
 
         // The warm packets: open Jobs whose approval steps have completed
         // are the ones still worth asking the approver about.
         let open = self.get("/api/jobs?status=open&limit=1000").await?;
-        let findings = empty_approval_decisions(&data_rows(&open), &approval, &since);
+        let open = listing_rows(&open, "the open-packet read (GET /api/jobs?status=open)")?;
+        let findings = empty_approval_decisions(&open, &approval, &since);
 
         // Complete the Inspect checklist. Its own fields are `findings`
         // and `measured`; the checklist bundle wants `items`. One item
@@ -455,6 +468,33 @@ impl MaintenanceSweepInspect {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Backlog d4698bc2: `data_rows` read an error body as zero rows —
+    /// zero trains, zero approval kinds, zero open packets — and the
+    /// sweep CLEARED with "no empty approval decisions" on a read that
+    /// saw nothing. Each of the three reads now refuses by name.
+    #[test]
+    fn a_read_that_answered_no_rows_refuses_rather_than_clearing_the_sweep() {
+        let bad = json!({ "error": "narrowed" });
+        let why = |r: Result<Vec<Value>, HandlerError>| match r {
+            Err(HandlerError::Downstream(why)) => why,
+            other => panic!("a bad answer is a retryable refusal, got {other:?}"),
+        };
+        assert!(why(listing_rows(&bad, "the open-packet read")).contains("the open-packet read"));
+        assert!(why(step_type_rows(&bad)).contains("step-types"));
+        assert_eq!(
+            listing_rows(&json!({ "data": [], "total": 0 }), "x").unwrap(),
+            Vec::<Value>::new(),
+            "an empty listing is an answer"
+        );
+        assert_eq!(
+            step_type_rows(&json!([{ "kind": "sign-off" }]))
+                .unwrap()
+                .len(),
+            1,
+            "step-types is a bare array, and that is its answer"
+        );
+    }
 
     fn kinds() -> BTreeSet<String> {
         ["sign-off".to_string()].into_iter().collect()

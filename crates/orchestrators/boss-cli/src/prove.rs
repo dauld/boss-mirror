@@ -1094,6 +1094,16 @@ pub(crate) fn admit(probe: &str, from_car: bool) -> Admission {
              can run, or record it as --park-proof-event."
         ));
     }
+    if from_car && let Some(verb) = boss_jobs::probe::changes_directory(probe) {
+        warnings.push(format!(
+            "boss prove: NOTE — this car's recorded probe runs `{verb}`, and on the forge \
+             the door has already placed it in the converged checkout; a pod path there \
+             is `No such file or directory` and an exit 1 on the car (4bb6797c). It runs \
+             HERE, so proving by hand is fine; `boss gate --park-probe` refuses this text, \
+             so re-park the car with the `{verb}` dropped — `git show HEAD:<path>` reads \
+             the converged tree from where the door puts it."
+        ));
+    }
     if from_car && let Some(var) = boss_jobs::probe::names_an_actor(probe) {
         warnings.push(format!(
             "boss prove: NOTE — this car's recorded probe assigns `{var}`, which would name \
@@ -1583,7 +1593,7 @@ async fn all_ship_a_change_cars(http: &reqwest::Client, base: &str) -> Result<Ve
             .unwrap_or(0)
             .max(0) as usize;
         let got = {
-            let page = crate::gate::rows(body);
+            let page = crate::train::rows(body)?;
             let n = page.len();
             cars.extend(page);
             n
@@ -3791,6 +3801,23 @@ mod tests {
             false,
         );
         assert!(hand.warnings.is_empty(), "{:?}", hand.warnings);
+    }
+
+    /// A car-carried probe that `cd`s is named here too (4bb6797c): on
+    /// this pod `cd /work/boss` works, so the hand run is fine and is
+    /// not refused — but the forge has no such path, so the recorded
+    /// text is what needs re-parking, and `boss gate` refuses it. A
+    /// probe typed by hand (`--probe`) is the operator's own shell and
+    /// is not this rule's business.
+    #[test]
+    fn a_car_carried_probe_that_changes_directory_is_named_but_not_refused() {
+        let probe = "cd /work/boss && git show HEAD:x | grep -q y && echo ok";
+        let a = admit(probe, true);
+        assert!(a.refusal.is_none(), "{:?}", a.refusal);
+        let w = a.warnings.first().expect("the cd is named");
+        assert!(w.contains("`cd`"), "{w}");
+        assert!(w.contains("converged checkout"), "{w}");
+        assert!(admit(probe, false).warnings.is_empty());
     }
 
     /// A named read is not this rule's business, and a MENTION is not a

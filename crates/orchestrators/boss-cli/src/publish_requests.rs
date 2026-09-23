@@ -34,7 +34,8 @@ use chrono::{DateTime, Utc};
 use reqwest::Method;
 use serde_json::{Value, json};
 
-use crate::gate::{api, rows, stamp};
+use crate::gate::{api, stamp};
+use crate::train::rows;
 use crate::train::{find_step, id8, metadata_map, step_done};
 
 /// What a publish-request packet asks for, read off its metadata.
@@ -519,7 +520,7 @@ pub(crate) async fn run(clone: &str, remote: &str, dry: bool, now: DateTime<Utc>
             None,
         )
         .await?,
-    );
+    )?;
     if open.is_empty() {
         println!("publish-requests: queue empty");
         return Ok(());

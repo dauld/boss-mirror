@@ -148,7 +148,7 @@ impl ItemAnswer {
         // query ran first (381a4872).
         let mut all = Vec::new();
         for kind in ["backlog-item", "user-feedback"] {
-            all.extend(crate::gate::rows(
+            all.extend(crate::train::rows(
                 crate::gate::api(
                     http,
                     reqwest::Method::GET,
@@ -156,7 +156,7 @@ impl ItemAnswer {
                     None,
                 )
                 .await?,
-            ));
+            )?);
         }
         let resolve = |flag: &str, given: Option<String>| -> Result<Option<String>> {
             let Some(given) = given else {

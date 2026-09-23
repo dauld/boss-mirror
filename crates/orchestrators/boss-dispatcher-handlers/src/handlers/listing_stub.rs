@@ -60,6 +60,18 @@ pub(crate) async fn serve(answers: Vec<(&'static str, Value)>) -> Stub {
         let log = log.clone();
         async move {
             if method != Method::GET {
+                // A write to a step the fixtures hold as finished is
+                // refused, as the real step API refuses it (backlog
+                // d4698bc2) — recorded, so a test can see the attempt.
+                if method == Method::PUT
+                    && let Some((id, sid)) = step_path(uri.path())
+                    && step_is_terminal(&fixture_rows(&answers), id, sid)
+                {
+                    log.lock()
+                        .unwrap()
+                        .push(format!("{method} {} (409)", uri.path()));
+                    return terminal_step_refusal(sid);
+                }
                 log.lock().unwrap().push(format!("{method} {}", uri.path()));
                 return axum::Json(json!({ "id": "stub-created" })).into_response();
             }
@@ -73,6 +85,72 @@ pub(crate) async fn serve(answers: Vec<(&'static str, Value)>) -> Stub {
         base: format!("http://{addr}"),
         writes,
     }
+}
+
+/// `/api/jobs/{id}/steps/{sid}` split into its two ids.
+fn step_path(path: &str) -> Option<(&str, &str)> {
+    let rest = path.strip_prefix("/api/jobs/")?;
+    let (id, sid) = rest.split_once("/steps/")?;
+    (!id.is_empty() && !sid.is_empty() && !sid.contains('/')).then_some((id, sid))
+}
+
+/// Every packet row the stub's fixtures answer with. A fixture with no
+/// `data` array holds no packets — deliberately empty here, because the
+/// only question is which steps this stub knows to be finished, and a
+/// refusal fixture holds none.
+fn fixture_rows(answers: &[(&'static str, Value)]) -> Vec<Value> {
+    answers
+        .iter()
+        .flat_map(|(_, body)| {
+            super::common::rows_or_refuse::<Value>(body, "a stub fixture").unwrap_or_default()
+        })
+        .collect()
+}
+
+/// Does `rows` hold step `sid` of packet `id` at a terminal status?
+///
+/// WHY A STUB MUST ASK (backlog d4698bc2). The real step API refuses a
+/// metadata write to a completed or skipped step with 409 (`boss-jobs`
+/// `http/steps.rs`: "step is terminal — these fields are immutable").
+/// The estate stub answered every PUT with success and the cadence
+/// sweep had no stub at all, so a handler completing a triage step a
+/// person had already answered passed its tests while the live API
+/// refused it on every pass — which is how the retraction 409 went
+/// unseen until a2d8bad3. `sensor_poll`'s stub learned this first
+/// (6072ff60); this is the one definition the others share.
+pub(crate) fn step_is_terminal(rows: &[Value], id: &str, sid: &str) -> bool {
+    rows.iter()
+        .filter(|r| r.get("id").and_then(Value::as_str) == Some(id))
+        .flat_map(|r| {
+            r.get("steps")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .any(|s| {
+            s.get("id").and_then(Value::as_str) == Some(sid)
+                && matches!(
+                    s.get("status").and_then(Value::as_str),
+                    Some("completed") | Some("skipped")
+                )
+        })
+}
+
+/// The 409 the real step API answers a write to a terminal step with —
+/// its error and its hint, so a handler's error text reads the same
+/// under test as in the dead-letter.
+pub(crate) fn terminal_step_refusal(sid: &str) -> Response {
+    (
+        StatusCode::CONFLICT,
+        axum::Json(json!({
+            "error": "step is terminal — these fields are immutable",
+            "step_id": sid,
+            "hint": "a completed step is a record of what happened. To correct or \
+                     annotate it, write to the parent job's metadata \
+                     (PATCH /api/jobs/{id}/metadata) instead.",
+        })),
+    )
+        .into_response()
 }
 
 fn answer(answers: &[(&'static str, Value)], uri: &Uri) -> Response {
@@ -101,5 +179,41 @@ pub(crate) fn assert_refused_by_name(res: Result<(), HandlerError>, read: &str) 
             assert!(why.contains(read), "the refusal names {read:?}: {why}");
         }
         other => panic!("a body with no `data` array must refuse, naming {read:?}; got {other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The stub is only as honest as the API it stands in for: a PUT to
+    /// a step its fixtures hold as completed is a 409, recorded as
+    /// refused, while a PUT to a ready step still succeeds.
+    #[tokio::test]
+    async fn a_put_to_a_finished_step_is_refused_409_as_the_step_api_refuses_it() {
+        let stub = serve(vec![(
+            "/api/jobs",
+            json!({ "data": [{ "id": "j1", "steps": [
+                { "id": "j1-triage", "status": "completed" },
+                { "id": "j1-build", "status": "ready" },
+            ]}], "total": 1 }),
+        )])
+        .await;
+        let client = reqwest::Client::new();
+        let put = |sid: &str| {
+            client
+                .put(format!("{}/api/jobs/j1/steps/{sid}", stub.base))
+                .json(&json!({ "status": "completed" }))
+                .send()
+        };
+        assert_eq!(put("j1-triage").await.unwrap().status(), 409);
+        assert!(put("j1-build").await.unwrap().status().is_success());
+        assert_eq!(
+            stub.writes(),
+            vec![
+                "PUT /api/jobs/j1/steps/j1-triage (409)".to_string(),
+                "PUT /api/jobs/j1/steps/j1-build".to_string(),
+            ]
+        );
     }
 }

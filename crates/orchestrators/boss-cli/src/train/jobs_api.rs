@@ -358,19 +358,55 @@ pub(crate) fn track_occupied_by(open_trains: &[Value]) -> Option<String> {
     })
 }
 
-/// The list body, whether or not the endpoint wrapped it in
-/// `{"data": [...]}`.
+/// The rows of a list read — a bare array, or the envelope's `data`
+/// array — or a refusal. THE one rows helper in boss-cli: the
+/// conductor, every operator verb, the census, the doctor and the
+/// queue all read a listing through here (backlog 7b7e0529).
+///
+/// There were five, and they disagreed. `gate::rows` — ~40 callers,
+/// orient, park, dispatch, cadence and job among them — answered an
+/// EMPTY list for anything that was not a list, while this one refused;
+/// `gate::api` answers `Ok(None)` for a 200 whose body is not JSON (a
+/// proxy's login page, an error envelope), so through that helper a
+/// dark or wrong door read as an empty yard: the "a wrong target
+/// answers instead of erroring" failure CLAUDE.md §Doors names. The
+/// census's and the doctor's copies were the same decision written
+/// again (§9a), so they call this one now.
+///
+/// An empty ARRAY is still an honest answer — a registry may hold
+/// nothing. Only a body that is not a list is refused, and the refusal
+/// quotes what came back, cut short, because a login page is kilobytes.
+/// A caller that is deliberately best-effort turns the refusal into its
+/// own fallback, AT its call site and saying so — never by this helper
+/// guessing zero on its behalf.
 pub(crate) fn rows(resp: Option<Value>) -> Result<Vec<Value>> {
-    let resp = resp.ok_or_else(|| anyhow!("empty response for a list call"))?;
+    let resp = resp.ok_or_else(|| {
+        anyhow!(
+            "a list read answered no JSON body (an empty 200, or a page that is not JSON — a \
+             proxy's login page answers this way), so its rows cannot be read as zero"
+        )
+    })?;
     let list = match resp {
         Value::Object(mut o) if o.contains_key("data") => o.remove("data").unwrap_or(Value::Null),
         other => other,
     };
     match list {
         Value::Array(v) => Ok(v),
-        other => bail!("expected a job list, got: {other}"),
+        other => {
+            let seen = other.to_string();
+            let cut: String = seen.chars().take(ROWS_REFUSAL_QUOTE).collect();
+            let more = if cut.len() < seen.len() { "…" } else { "" };
+            bail!(
+                "a list read answered no array (neither bare nor under `data`), so its rows \
+                 cannot be read as zero; it answered: {cut}{more}"
+            )
+        }
     }
 }
+
+/// How much of a non-list body [`rows`]' refusal quotes: enough to
+/// recognise an error envelope or a login page, not the whole page.
+const ROWS_REFUSAL_QUOTE: usize = 200;
 
 /// One page of a paginated `/api/jobs` read. Kept at the historical
 /// 100 so a backlog that fits under a page still makes exactly one
@@ -798,6 +834,51 @@ mod tests {
     use super::*;
     use crate::train::test_support::*;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Both list shapes read, and an empty array stays an honest zero.
+    #[test]
+    fn rows_reads_a_bare_array_and_the_envelope() {
+        let bare = rows(Some(serde_json::json!([1, 2, 3]))).expect("bare");
+        assert_eq!(bare.len(), 3);
+        let wrapped = rows(Some(serde_json::json!({"data": [1, 2], "total": 9}))).expect("env");
+        assert_eq!(wrapped.len(), 2);
+        assert!(
+            rows(Some(serde_json::json!({"data": [], "total": 0})))
+                .expect("an empty registry is an answer")
+                .is_empty()
+        );
+    }
+
+    /// Everything that is not a list refuses — no body (what `gate::api`
+    /// answers for a 200 that is not JSON), an error envelope, a `data`
+    /// that is not an array — and the refusal quotes the body, CUT, so
+    /// a login page does not bury the line that says what failed
+    /// (backlog 7b7e0529).
+    #[test]
+    fn rows_refuses_what_is_not_a_list_and_quotes_it_short() {
+        for body in [
+            None,
+            Some(Value::Null),
+            Some(serde_json::json!({})),
+            Some(serde_json::json!({"error": "forbidden"})),
+            Some(serde_json::json!({"data": null})),
+            Some(serde_json::json!({"data": {"id": "x"}})),
+            Some(serde_json::json!("<html>sign in</html>")),
+        ] {
+            let why = rows(body.clone())
+                .expect_err(&format!("{body:?} must refuse, not read as zero rows"))
+                .to_string();
+            assert!(why.contains("cannot be read as zero"), "{why}");
+        }
+        let page = "x".repeat(10_000);
+        let why = rows(Some(Value::String(page))).unwrap_err().to_string();
+        assert!(
+            why.len() < 600,
+            "a page is quoted short: {} chars",
+            why.len()
+        );
+        assert!(why.ends_with('…'), "and says it was cut: {why}");
+    }
 
     /// 2026-09-04: two gate-runs whose pods were evicted sat at
     /// `record-verdict` for 17 hours, each holding one of three gate

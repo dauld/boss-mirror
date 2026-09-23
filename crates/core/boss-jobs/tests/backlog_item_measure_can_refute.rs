@@ -286,7 +286,10 @@ async fn a_refuting_measurement_reaches_the_terminal_its_disposition_names() {
             &job_id,
             &after,
             "measure",
-            serde_json::json!({ "disposition": disposition }),
+            serde_json::json!({
+                "disposition": disposition,
+                "evidence": "Re-measured on origin/main: the claim no longer holds.",
+            }),
         )
         .await;
         let after = read(&app, &job_id).await;
@@ -326,7 +329,14 @@ async fn a_measurement_that_held_still_closes_the_item_as_completed() {
     let app = app();
     let (job_id, after) = routed_to_measure(&app).await;
 
-    complete(&app, &job_id, &after, "measure", serde_json::json!({})).await;
+    complete(
+        &app,
+        &job_id,
+        &after,
+        "measure",
+        serde_json::json!({ "evidence": "Re-measured on origin/main: the claim holds." }),
+    )
+    .await;
     let after = read(&app, &job_id).await;
 
     for slug in ["stale", "duplicate", "declined"] {
@@ -349,4 +359,46 @@ async fn a_measurement_that_held_still_closes_the_item_as_completed() {
         "a confirmed measurement closes the packet as completed: {:#?}",
         done["metadata"]
     );
+}
+
+/// NO EVIDENCE IS NOT A PASS, at the step that exists to produce it
+/// (backlog 828381c0). Measured on 2026-09-22: `boss step complete
+/// dd92d961 --step measure` with no fields completed the step and the
+/// packet went straight to `closed`, holding nothing measured — the
+/// row declared only an optional `disposition`, so a bare completion
+/// was the ONLY one it permitted. A second packet (648a68a9) had a real
+/// finding the same night and nowhere on the step to put it.
+///
+/// So `measure` requires `evidence`, the name `triage` already uses,
+/// and the validator refuses a bare completion exactly as it refuses a
+/// bare triage: the step stays open and the refusal names the field.
+#[tokio::test]
+async fn a_measurement_with_nothing_measured_is_refused() {
+    let app = app();
+    let (job_id, after) = routed_to_measure(&app).await;
+
+    for extra in [
+        serde_json::json!({}),
+        // A refutation is a measurement too: a disposition alone is
+        // still nothing measured.
+        serde_json::json!({ "disposition": "stale" }),
+    ] {
+        let (status, body) = try_complete(&app, &job_id, &after, "measure", extra.clone()).await;
+        assert!(
+            status.is_client_error(),
+            "completing `measure` with {extra} must be refused, got {status}: {body}"
+        );
+        assert!(
+            body.to_string().contains("evidence"),
+            "the refusal must name the field the step lacks: {body}"
+        );
+    }
+
+    let still = read(&app, &job_id).await;
+    assert!(
+        actionable(&still, "measure"),
+        "the refused measurement stays open — it is `{}`",
+        status_of(&still, "measure")
+    );
+    assert_eq!(still["status"], "open", "nothing measured closes nothing");
 }

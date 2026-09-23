@@ -105,6 +105,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 
 use crate::identity;
+// The ONE rows helper (backlog 7b7e0529): a body that is not a list
+// refuses rather than reading as an empty yard. See `train::rows`.
+use crate::train::rows;
 
 /// The COMPILED fallback for how many gates run at once — the last
 /// resort when neither the env override nor the delivery policy can be
@@ -902,8 +905,8 @@ pub struct ParkIntent {
 /// (c0ac92b8) joined them the same way: predicate and evidence in
 /// `boss_jobs::probe`, the refusal's wording at each door.
 pub use boss_jobs::probe::{
-    SOR_READER, SOR_USER_VAR, names_an_actor as probe_names_an_actor,
-    needs_absent_tool as probe_needs_absent_tool,
+    SOR_READER, SOR_USER_VAR, changes_directory as probe_changes_directory,
+    names_an_actor as probe_names_an_actor, needs_absent_tool as probe_needs_absent_tool,
     reads_git_time_with_an_offset as probe_reads_git_time_with_an_offset,
     reads_the_sor_unidentified as probe_reads_the_sor_unidentified,
 };
@@ -1048,6 +1051,24 @@ impl ParkIntent {
                  own journal, the converged checkout — or, if only the cluster can show it, \
                  record the car as --park-proof-event and prove it by hand.\n\n\
                  The absence list is infra/forge/host-absent-tools.txt."
+            );
+        }
+        if let Some(probe) = &self.probe
+            && let Some(verb) = probe_changes_directory(probe)
+        {
+            anyhow::bail!(
+                "--park-probe runs `{verb}`, and a recorded probe does not move: the door \
+                 places it in the converged checkout of main.\n\n\
+                 It runs on the forge host, as david, with cwd already that checkout \
+                 (boss prove --from-car --unattended) — not on this pod, whose checkout \
+                 paths the forge does not have. Measured 2026-09-22 (4bb6797c): two cars \
+                 recorded `cd /work/boss && git show HEAD:… | grep -q …`, both claims \
+                 were true in the converged tree, and both came back as exit 1 with \
+                 `cd: /work/boss: No such file or directory`, TROUBLED in the shed.\n\n\
+                 Drop the `{verb}`: `git show HEAD:<path>` reads the converged tree from \
+                 where the door put you, and a relative path already resolves there.\n\n\
+                 The rule is stated with the forge's tool list, \
+                 infra/forge/host-absent-tools.txt."
             );
         }
         if let Some(probe) = &self.probe
@@ -1759,6 +1780,50 @@ pub(crate) fn gated_car_guard(
     }
 }
 
+/// PURE: the warning a gate owes when its green will strand a parked car.
+///
+/// WHY (backlog 539cad85, the durable half of bb49056b). A green refreshes
+/// a car at the dock only when it carries park intent — the auto-park
+/// handler reads the `park_*` keys and writes `regate_receipt` onto the
+/// parked car (`ParkAction::Refresh`; observed on car 9972ae75,
+/// 2026-09-19). A BARE re-gate goes green beside the car and changes
+/// nothing on it, so the car keeps vouching for the head it was parked at
+/// and every train refuses it as "gated, then changed". Measured twice:
+/// car 179c1859 (2026-09-20) and car 817b1b84 (2026-09-21), the second
+/// left behind by seventeen trains. CLAUDE.md said a bare re-gate was
+/// enough, and correcting the document did not stop the verb accepting
+/// one silently; this gate already holds both facts at launch.
+///
+/// A WARNING, NOT A REFUSAL: gating a branch without parking it is
+/// legitimate (re-running a flaked check, a hand repair), so this says
+/// what will not happen and names the call that does it. Only a car AT
+/// THE DOCK is named — a boarded car is the conductor's, and a spent one
+/// is history — by the same predicate the auto-park handler refreshes.
+pub(crate) fn unrefreshed_car_warning(
+    branch: &str,
+    has_park_intent: bool,
+    cars: &[Value],
+) -> Option<String> {
+    if has_park_intent {
+        return None;
+    }
+    let car = boss_jobs::car::parked_car_for(cars, branch)?;
+    let id = car.get("id").and_then(Value::as_str).unwrap_or("?");
+    let id = &id[..8.min(id.len())];
+    let vouches = crate::receipt::select_receipt(car)
+        .and_then(|r| r.get("head").and_then(Value::as_str).map(str::to_string))
+        .map(|h| format!("the head its receipt names, {}", &h[..12.min(h.len())]))
+        .unwrap_or_else(|| "the receipt it was parked with".to_string());
+    Some(format!(
+        "boss gate: WARNING — car {id} is parked at the dock for {branch}, and this gate \
+         carries no park intent, so a green here will NOT refresh it: the car keeps \
+         vouching for {vouches}, and a train refuses it as \"gated, then changed\" if the \
+         branch has moved (cars 179c1859, 817b1b84; backlog 539cad85).\n  \
+         After this green, carry it onto the car with: boss rerail {id} --finish\n  \
+         If you only meant to re-run a check, nothing is wrong."
+    ))
+}
+
 /// Gather the landing signals: a quiet fetch of main so the local
 /// objects can answer the content comparison (a clone behind the forge
 /// is how 26b3d203's wrong answers were made), then `boss merged`'s
@@ -1770,16 +1835,25 @@ async fn observe_landing(http: &reqwest::Client, branch: &str, sha: &str) -> Opt
         .args(["fetch", "--quiet", "origin", "main"])
         .status();
     let v = crate::merged::verdict(&crate::merged::observe(".", "origin", branch));
-    let cars = rows(
-        api(
-            http,
-            reqwest::Method::GET,
-            &format!("/api/jobs?kind=ship-a-change&status=closed&subject_id={branch}&limit=20"),
-            None,
-        )
-        .await
-        .unwrap_or(None),
-    );
+    // BEST EFFORT, like every signal here: an unreadable list — a dark
+    // door, or a 200 that is not a list, which `rows` refuses rather
+    // than reading as "no closed car" (7b7e0529) — is judged without the
+    // cars, and SAID, because silence would read as a clean guard.
+    let cars = api(
+        http,
+        reqwest::Method::GET,
+        &format!("/api/jobs?kind=ship-a-change&status=closed&subject_id={branch}&limit=20"),
+        None,
+    )
+    .await
+    .and_then(rows)
+    .unwrap_or_else(|e| {
+        eprintln!(
+            "boss gate: could not read the closed cars for {branch} ({e:#}) — the landed \
+             guard judges from git alone"
+        );
+        Vec::new()
+    });
     landing(&v, &cars, branch, sha)
 }
 
@@ -1854,8 +1928,9 @@ async fn observe_prior(
         None,
     )
     .await
+    .and_then(rows)
     {
-        Ok(body) => boss_jobs::flake::prior(&rows(body), branch, sha),
+        Ok(runs) => boss_jobs::flake::prior(&runs, branch, sha),
         Err(e) => {
             eprintln!(
                 "boss gate: could not read earlier gate-runs at this head ({e:#}) — the gate \
@@ -2207,16 +2282,6 @@ pub(crate) async fn api_at_signed(
     Ok(serde_json::from_str(&body).ok())
 }
 
-pub(crate) fn rows(v: Option<Value>) -> Vec<Value> {
-    v.and_then(|v| {
-        v.get("data")
-            .and_then(Value::as_array)
-            .cloned()
-            .or_else(|| v.as_array().cloned())
-    })
-    .unwrap_or_default()
-}
-
 /// Every open `ship-a-change` car, across ALL pages — the operator-verb
 /// counterpart to the conductor's `train::list_all_pages`, built on the
 /// `gate::api` client the CLI verbs speak through (a different client
@@ -2524,6 +2589,11 @@ pub async fn run(
         GatedGuard::Forced(note) => println!("{note}"),
         GatedGuard::Refuse(why) => bail!("{why}"),
     }
+    // A BARE RE-GATE LEAVES A PARKED CAR WHERE IT IS — said at launch,
+    // from the same read, rather than left to a document (539cad85).
+    if let Some(w) = unrefreshed_car_warning(branch, !park.is_empty(), &open_cars) {
+        eprintln!("{w}");
+    }
 
     // Reuse before filing. See `reusable_packet`.
     let open = rows(
@@ -2534,7 +2604,7 @@ pub async fn run(
             None,
         )
         .await?,
-    );
+    )?;
     let reuse = reusable_packet(&open, branch, &sha);
 
     // A REUSED PACKET MAY ALREADY BE GATING — and attaching to it is
@@ -3637,7 +3707,12 @@ async fn wait_for_slot(
         {
             Ok(v) => {
                 absent_since = None;
-                rows(v)
+                // A 200 that is not a list is not a roll — a roll is a
+                // refused connect or a 5xx, both `Err` above — so it
+                // stops the wait rather than reading as an empty queue,
+                // which would have put this place at the front
+                // (7b7e0529).
+                rows(v)?
             }
             Err(e) if is_transient(&format!("{e:#}")) => {
                 let since = *absent_since.get_or_insert_with(std::time::Instant::now);
@@ -4139,6 +4214,57 @@ mod tests {
         );
     }
 
+    /// A BARE RE-GATE OF A PARKED CAR'S BRANCH SAYS IT WILL NOT REFRESH
+    /// THE CAR (backlog 539cad85). Cars 179c1859 and 817b1b84 were each
+    /// re-gated without `--park-*`, went green, and kept vouching for the
+    /// old head — 817b1b84 through seventeen trains. The warning names
+    /// the car and the one call that carries the green onto it.
+    #[test]
+    fn a_bare_regate_of_a_parked_cars_branch_says_the_car_is_not_refreshed() {
+        let docked = [carried(None)];
+        let w = unrefreshed_car_warning(TWIN_BRANCH, false, &docked)
+            .expect("a parked car and no park intent is warned about");
+        assert!(w.contains("car d08a6418"), "names the car: {w}");
+        assert!(w.contains("NOT refresh"), "says what will not happen: {w}");
+        assert!(
+            w.contains("boss rerail d08a6418 --finish"),
+            "names the call that does: {w}"
+        );
+        assert!(
+            w.contains("cd0c4f7bdadf"),
+            "names the head the car still vouches for: {w}"
+        );
+    }
+
+    /// Silent everywhere else. Park intent refreshes a parked car in
+    /// place (the auto-park handler's `ParkAction::Refresh`, observed on
+    /// car 9972ae75, 2026-09-19); a boarded or spent car is not at the
+    /// dock; and another branch's car, or none, has nothing to strand.
+    #[test]
+    fn the_unrefreshed_car_warning_is_silent_unless_a_parked_car_is_left_behind() {
+        let docked = [carried(None)];
+        assert_eq!(
+            unrefreshed_car_warning(TWIN_BRANCH, true, &docked),
+            None,
+            "park intent refreshes the car"
+        );
+        assert_eq!(unrefreshed_car_warning(TWIN_BRANCH, false, &[]), None);
+        assert_eq!(
+            unrefreshed_car_warning("feat/other", false, &docked),
+            None,
+            "another branch's car does not answer"
+        );
+        let aboard = [carried(Some("d72ecdb9"))];
+        assert_eq!(
+            unrefreshed_car_warning(TWIN_BRANCH, false, &aboard),
+            None,
+            "a car aboard a train is not at the dock"
+        );
+        let mut spent = carried(None);
+        spent["steps"][1]["status"] = json!("completed");
+        assert_eq!(unrefreshed_car_warning(TWIN_BRANCH, false, &[spent]), None);
+    }
+
     #[test]
     fn an_unlanded_branch_proceeds_even_when_forced() {
         assert_eq!(
@@ -4357,6 +4483,37 @@ mod tests {
         assert!(e.contains("BOSS_ACTOR"), "{e}");
         assert!(e.contains("does not act"), "{e}");
         assert!(e.contains("host-absent-tools.txt"), "{e}");
+    }
+
+    /// A RECORDED PROBE DOES NOT `cd` (backlog 4bb6797c). The measured
+    /// probe, verbatim in shape: two cars on 2026-09-22 recorded it,
+    /// both claims were true in the converged tree, and both read
+    /// TROUBLED in the shed because the forge has no `/work/boss`. The
+    /// door that refuses a tool the forge lacks refuses this too, at the
+    /// same moment, and names what to write instead.
+    #[test]
+    fn a_probe_that_changes_directory_is_refused_at_gate_time() {
+        let mut p = park_full();
+        p.probe = Some(
+            "cd /work/boss && git show HEAD:apps/web/src/it/yard.ts | grep -q 'repair in \
+             flight' && echo garage:ok"
+                .into(),
+        );
+        p.expect = Some("garage:ok".into());
+        let e = p.require_complete().unwrap_err().to_string();
+        assert!(e.contains("`cd`"), "{e}");
+        assert!(e.contains("converged checkout"), "{e}");
+        assert!(e.contains("git show HEAD:"), "{e}");
+        assert!(e.contains("host-absent-tools.txt"), "{e}");
+
+        // The same probe without the move is the shape every briefed
+        // builder already wrote, and it is complete.
+        p.probe = Some(
+            "git show HEAD:apps/web/src/it/yard.ts | grep -q 'repair in flight' && echo \
+             garage:ok"
+                .into(),
+        );
+        assert!(p.require_complete().is_ok(), "{:?}", p.require_complete());
     }
 
     /// A PROBE READS THE SYSTEM OF RECORD AS A NAMED READER (61085a9e).
@@ -6961,6 +7118,34 @@ mod signing_tests {
             "a refused write must not reach the socket"
         );
         stub.abort();
+    }
+
+    /// A DARK DOOR IS NOT AN EMPTY YARD (backlog 7b7e0529). `api_at`
+    /// answers `Ok(None)` for a 200 whose body is not JSON — a proxy's
+    /// login page, say — and the rows helper every operator verb read
+    /// through turned that into an empty list, so `boss orient` printed
+    /// "0 train(s)" for a yard it had never seen and `boss cadence`
+    /// would have filed a second packet beside an open one. The one rows
+    /// helper refuses it instead.
+    #[tokio::test]
+    async fn a_login_page_on_a_list_read_is_refused_not_read_as_empty() {
+        let (base, stub) = one_request("<html><body>Sign in to continue</body></html>").await;
+        let http = reqwest::Client::new();
+        let body = api_at_signed(
+            &http,
+            &base,
+            reqwest::Method::GET,
+            "/api/jobs?kind=pr-train&status=open&limit=10",
+            None,
+            Signature::Unidentified,
+        )
+        .await
+        .expect("a 200 is an answer, not a transport failure");
+        stub.abort();
+        let why = rows(body)
+            .expect_err("a page that is not JSON is no list, and must not read as zero rows")
+            .to_string();
+        assert!(why.contains("cannot be read as zero"), "{why}");
     }
 
     /// A read attributes nothing, so it proceeds — but marked, never

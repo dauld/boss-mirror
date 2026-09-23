@@ -490,6 +490,14 @@ fn a_clean_worktree_whose_branch_is_gone_from_the_forge_is_removed_with_its_targ
     let recent = yard.worktree("agent-recent", Some("feat/recent"), 1);
     // No branch at all: judged by idleness, and 7 days is the bar.
     let detached_old = yard.worktree("agent-detached-old", None, 24 * 10);
+    // ...and whose head a ref still holds, so removing the checkout
+    // loses no commit (the orphan case is its own test below).
+    let detached_old_head = git(&detached_old, 0, &["rev-parse", "HEAD"]);
+    git(
+        &yard.repo,
+        0,
+        &["update-ref", "refs/pulls/1", &detached_old_head],
+    );
     let detached_new = yard.worktree("agent-detached-new", None, 24 * 2);
     // Its directory is already gone: only the admin entry remains.
     let vanished = yard.worktree("agent-vanished", Some("feat/vanished"), 30);
@@ -641,6 +649,142 @@ fn a_checkout_without_origin_main_skips_the_pass_and_records_why() {
             && put.contains("origin/main")
             && put.contains("\"result\":\"incomplete\""),
         "the packet carries the skip AND why, as an incomplete pass\n{put}\n{text}"
+    );
+}
+
+/// The mtime of a worktree's reflog, as epoch seconds.
+fn reflog_mtime(worktree: &Path) -> u64 {
+    let gitdir = PathBuf::from(git(worktree, 0, &["rev-parse", "--absolute-git-dir"]));
+    std::fs::metadata(gitdir.join("logs/HEAD"))
+        .and_then(|m| m.modified())
+        .expect("reflog mtime")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs()
+}
+
+/// ONE repo-wide git operation must not read as activity in every
+/// worktree at once. Measured 2026-09-21 (backlog adce5171): the gone-
+/// branch pass removed nothing and kept 373 of 397 worktrees "with git
+/// activity inside the window", because the idle clock took the MAX of
+/// four signals and one of them — the mtime of `$gitdir/logs/HEAD` —
+/// read EXACTLY 32h on three unrelated worktrees whose own HEAD, index
+/// and directory were 73h, 80h and 101h quiet. Re-measured 2026-09-23:
+/// 154 worktrees' reflogs rewritten inside four seconds at 2026-09-22
+/// 05:43:30Z, beside a write of info/refs and objects/info — a `git gc`,
+/// whose `reflog expire --all` rewrites every worktree's reflog whether
+/// or not an entry expires. The fixture does exactly that, for real,
+/// and the three trees idle past their windows must still go.
+///
+/// What a reflog SAYS is kept as a signal: each entry carries the time
+/// git wrote it, and an expire copies entries without redating them.
+/// So a tree whose only recent act is a reflog entry (a reset that
+/// moved no file this pass reads) is kept.
+#[test]
+fn a_repo_wide_reflog_rewrite_is_not_activity_in_every_worktree() {
+    let root = boss_testing::scratch_dir("boss-dsr-gc-touch");
+    let _guard = Scratch(root.clone());
+    let yard = Yard::new(&root);
+
+    let landed = yard.worktree("agent-landed", Some("feat/landed"), 30);
+    yard.land("feat/landed");
+    let abandoned = yard.worktree("agent-abandoned", Some("feat/abandoned"), 60);
+    let detached = yard.worktree("agent-detached", None, 24 * 10);
+    // A detached head the pass may remove is one some ref still holds —
+    // here a forge PR ref, the shape `refs/pulls/<n>` takes on the pod.
+    let detached_head = git(&detached, 0, &["rev-parse", "HEAD"]);
+    git(
+        &yard.repo,
+        0,
+        &["update-ref", "refs/pulls/1", &detached_head],
+    );
+    // Quiet by every file signal for 60h, but its reflog's newest ENTRY
+    // is an hour old: someone is working here.
+    let working = yard.worktree("agent-working", Some("feat/working"), 60);
+    git(&working, 1, &["reset", "-q", "--soft", "HEAD"]);
+    let gitdir = PathBuf::from(git(&working, 0, &["rev-parse", "--absolute-git-dir"]));
+    for p in [gitdir.join("HEAD"), gitdir.join("index"), working.clone()] {
+        touch_at(&p, 60);
+    }
+
+    // The repo-wide operation: what `git gc` runs first.
+    git(&yard.repo, 0, &["reflog", "expire", "--all"]);
+    let now = unix_now();
+    for wt in [&landed, &abandoned, &detached, &working] {
+        assert!(
+            now.saturating_sub(reflog_mtime(wt)) < 600,
+            "precondition: the expire rewrote {}'s reflog, as a gc does",
+            wt.display()
+        );
+    }
+
+    let out = run(&root, &[]);
+    let text = say(&out);
+    assert!(
+        !landed.exists(),
+        "landed, idle 30h against a 12h grace: a gc's reflog rewrite is not activity\n{text}"
+    );
+    assert!(
+        !abandoned.exists(),
+        "unpushed, idle 60h against 48h: removed despite the gc\n{text}"
+    );
+    assert!(
+        !detached.exists(),
+        "detached, idle 10 days, its head on a ref: removed despite the gc\n{text}"
+    );
+    assert!(
+        working.exists(),
+        "a reflog ENTRY an hour old is activity, whatever the other files say\n{text}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("worktree pass: removed 3"),
+        "the totals say so\n{text}"
+    );
+}
+
+/// A detached HEAD whose commit no ref holds is UNPUSHED WORK: the
+/// worktree's own HEAD and reflog are the only things naming it, and
+/// `git worktree remove` deletes both, leaving the commit to the next
+/// gc. Measured 2026-09-23 on the pod: of the 16 detached worktrees the
+/// corrected idle clock makes due, 13 sit on a ref (a forge PR ref, a
+/// branch) and 3 — preflight-2026-09-10b, preflight-3way, preflight-f73
+/// — on none. Those are kept and NAMED, on the log and on the packet,
+/// the way a dirty tree is, so an operator can decide.
+#[test]
+fn a_detached_worktree_whose_head_no_ref_holds_is_kept_and_named() {
+    let root = boss_testing::scratch_dir("boss-dsr-orphan-head");
+    let _guard = Scratch(root.clone());
+    let yard = Yard::new(&root);
+    let orphan = yard.worktree("agent-orphan", None, 24 * 10);
+    // One tree the pass does remove, so it acts and files its packet.
+    let landed = yard.worktree("agent-landed", Some("feat/landed"), 30);
+    yard.land("feat/landed");
+
+    let out = run(&root, &[]);
+    let text = say(&out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        orphan.exists(),
+        "a commit only this worktree names is never thrown to the gc\n{text}"
+    );
+    assert!(
+        stdout.contains("agent-orphan") && stdout.contains("no ref holds"),
+        "the kept tree is named with why\n{text}"
+    );
+    assert!(
+        stdout.contains("1 with a head no ref holds"),
+        "and counted on the totals line\n{text}"
+    );
+    assert!(!landed.exists(), "the landed tree beside it goes\n{text}");
+    let log = curl_log(&root);
+    let put = log
+        .lines()
+        .find(|l| l.starts_with("PUT "))
+        .unwrap_or_else(|| panic!("the run step is completed\n{log}\n{text}"));
+    assert!(
+        put.contains("\"worktrees_kept_unreferenced\":\"1\"")
+            && put.contains("\"worktrees_kept_unreferenced_names\":\"agent-orphan"),
+        "the packet names the kept tree too\n{put}\n{text}"
     );
 }
 

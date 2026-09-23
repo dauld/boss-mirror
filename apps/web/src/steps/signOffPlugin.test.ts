@@ -87,15 +87,19 @@ function loadBundle(routes: (url: string, init?: RequestInit) => unknown) {
     });
     const result = routes(url, init);
     if (result === undefined) return Promise.reject(new Error(`unrouted: ${url}`));
-    return Promise.resolve({
-      ok: (result as { __status?: number }).__status === undefined,
-      status: (result as { __status?: number }).__status ?? 200,
+    const status = (result as { __status?: number }).__status ?? 200;
+    const res = {
+      ok: status >= 200 && status < 300,
+      status,
       json: async () => result,
       text: async () =>
         typeof (result as { __text?: string }).__text === 'string'
           ? (result as { __text: string }).__text
           : JSON.stringify(result),
-    });
+      // sign() reads a 422 through clone() so the body stays readable.
+      clone: () => res,
+    };
+    return Promise.resolve(res);
   };
   // eslint-disable-next-line no-new-func
   new Function(readFileSync(BUNDLE, 'utf8'))();
@@ -470,5 +474,72 @@ describe('sign-off v3 — the signature follows the decision', () => {
 
     expect(allText(c)).toContain(`409: ${body}`);
     expect(buttonNamed(c, 'Sign off as platform-admin')).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------
+// The presence ceremony names what failed (backlog f3436d99).
+//
+// The plugin runs its own copy of the ceremony — a bundle cannot import
+// the app's presence.ts — and until this car it dropped the gateway's
+// refusal text at both ends: 'presence ceremony unavailable (502)' said
+// nothing about WHICH of the gateway's steps refused (job fetch, stored
+// passkeys, challenge mint), and 'assertion rejected (410)' hid 'challenge
+// already spent or expired — begin again'. The app's copy carries the
+// text beside the status since 2e893e27; the plugin says the same.
+
+describe('sign-off — the presence ceremony names what failed', () => {
+  const BEGIN = '/api/auth/passkey/assert/begin';
+  const FINISH = '/api/auth/passkey/assert/finish';
+  const presenceGated = (url: string, init?: RequestInit) =>
+    url === SIGN && init?.method === 'POST' ? { __status: 422, required: 'presence' } : undefined;
+  const beginOptions = {
+    challenge_id: 'chal-1',
+    shape_hash: 'h',
+    publicKey: {
+      challenge: 'AAAA',
+      rpId: 'boss.test',
+      allowCredentials: [{ type: 'public-key', id: 'AAAA' }],
+      userVerification: 'required',
+      timeout: 60000,
+    },
+  };
+  const buf = () => new Uint8Array([1, 2, 3]).buffer;
+  const credential = {
+    id: 'cred',
+    rawId: buf(),
+    type: 'public-key',
+    response: { authenticatorData: buf(), clientDataJSON: buf(), signature: buf(), userHandle: null },
+  };
+
+  test('a refused begin shows the gateway text beside the status', async () => {
+    const refusal = 'job fetch: 403 Forbidden';
+    const { mount } = loadBundle(
+      (url, init) =>
+        presenceGated(url, init) ?? (url === BEGIN ? { __status: 502, __text: refusal } : undefined),
+    );
+    const c = new FakeNode();
+    mount(c, { step: bypassStep(), jobId: 'job-1', onUpdate() {} });
+    buttonNamed(c, 'Sign off as platform-admin')!.fire('click');
+    await settled();
+    expect(allText(c)).toContain(`presence ceremony unavailable (502): ${refusal}`);
+  });
+
+  test('a refused finish shows the gateway text beside the status', async () => {
+    const refusal = 'challenge already spent or expired — begin again';
+    const { mount, calls } = loadBundle(
+      (url, init) =>
+        presenceGated(url, init) ??
+        (url === BEGIN ? beginOptions : url === FINISH ? { __status: 410, __text: refusal } : undefined),
+    );
+    (globalThis as unknown as Record<string, unknown>).navigator = {
+      credentials: { get: async () => credential },
+    };
+    const c = new FakeNode();
+    mount(c, { step: bypassStep(), jobId: 'job-1', onUpdate() {} });
+    buttonNamed(c, 'Sign off as platform-admin')!.fire('click');
+    await settled();
+    expect(calls.map((x) => x.url)).toContain(FINISH);
+    expect(allText(c)).toContain(`assertion rejected (410): ${refusal}`);
   });
 });

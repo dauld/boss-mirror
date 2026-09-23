@@ -92,7 +92,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::common::{
     StepEvent, api_client, dispatcher_actor_header, dispatcher_reader_header, get_json,
-    owner_for_filing, post_json, sim_origin_value, write_json,
+    owner_for_filing, post_json, rows_or_refuse, sim_origin_value, write_json,
 };
 use super::credential_issuer::{
     AccessApp, AccessAppSpec, AccessApps, AccessPolicy, AccessPolicySpec, SecretStore,
@@ -534,14 +534,14 @@ pub struct TunnelFacts {
 
 impl TunnelFacts {
     /// Off the newest `maintenance-cluster-converge` packet's `run` step
-    /// (the listing is newest-first). A listing without one reads as
-    /// no facts — the gate then holds, never releases.
-    pub fn from_listing(listing: &Json) -> Self {
-        listing
-            .get("data")
-            .and_then(Json::as_array)
-            .into_iter()
-            .flatten()
+    /// (the listing is newest-first). A listing with no such packet
+    /// reads as no facts — the gate then holds, never releases. A
+    /// listing with no `data` array is no answer and refuses; the caller
+    /// states its own fallback (d4698bc2).
+    pub fn from_listing(listing: &Json) -> Result<Self, String> {
+        let rows: Vec<Json> = rows_or_refuse(listing, "the converge read (GET /api/jobs)")?;
+        Ok(rows
+            .iter()
             .flat_map(|j| {
                 j.get("steps")
                     .and_then(Json::as_array)
@@ -561,7 +561,7 @@ impl TunnelFacts {
                     connector: text("cloudflared"),
                 }
             })
-            .unwrap_or_default()
+            .unwrap_or_default())
     }
 }
 
@@ -1019,11 +1019,9 @@ pub fn alarm_refresh(observation_id: &str, r: &Reading) -> Json {
 /// The open packet already carrying `key`, if any, and whether the page
 /// that answered can be trusted to be complete.
 pub fn already_open(listing: &Json, key: &str) -> Result<Option<String>, String> {
-    let rows: Vec<&Json> = listing
-        .get("data")
-        .and_then(Json::as_array)
-        .map(|a| a.iter().collect())
-        .unwrap_or_default();
+    // No `data` array refuses for what it is; it was held before only
+    // by accident of the truncation check below (d4698bc2).
+    let rows: Vec<Json> = rows_or_refuse(listing, "the dedup read (GET /api/jobs)")?;
     let total = listing
         .get("total")
         .and_then(Json::as_u64)
@@ -1594,13 +1592,20 @@ impl Handler for DnsObserve {
         // ingress line and connector reading (fd75c641). Read once per
         // firing; a listing that cannot be read holds every tunnel-
         // interlocked record rather than releasing it blind.
-        let converge = self
+        // The fallback is DELIBERATE and stated here, where it is chosen:
+        // a failed read and an answer with no `data` array both yield no
+        // facts, and no facts HOLDS every tunnel-interlocked record.
+        let tunnel_facts = self
             .get(&format!(
                 "/api/jobs?kind={CONVERGE_KIND}&status=closed&limit=1"
             ))
             .await
-            .unwrap_or_else(|_| json!({"data": []}));
-        let tunnel_facts = TunnelFacts::from_listing(&converge);
+            .map_err(|e| e.to_string())
+            .and_then(|listing| TunnelFacts::from_listing(&listing))
+            .unwrap_or_else(|why| {
+                tracing::warn!(%why, "dns.observe: no converge facts; every tunnel-interlocked record holds");
+                TunnelFacts::default()
+            });
         let gate_for = |v: &Json| -> Interlock {
             let hostname = v.get("name").and_then(Json::as_str).unwrap_or_default();
             match v.get("interlock").and_then(Json::as_str) {
@@ -2523,7 +2528,7 @@ measured = "2026-09-20: read from the IdP"
                 }}
             ]
         }]});
-        let facts = TunnelFacts::from_listing(&listing);
+        let facts = TunnelFacts::from_listing(&listing).expect("a listing");
         assert_eq!(tunnel_gate("id.algedonic.dev", &facts), TunnelGate::Routed);
         assert_eq!(
             tunnel_gate("boss.algedonic.dev", &facts),
@@ -2548,8 +2553,12 @@ measured = "2026-09-20: read from the IdP"
         );
         assert_eq!(
             TunnelFacts::from_listing(&json!({"data": []})),
-            TunnelFacts::default(),
+            Ok(TunnelFacts::default()),
             "no converge packet: no facts, and every tunnel gate holds"
+        );
+        assert!(
+            TunnelFacts::from_listing(&json!({"total": 1})).is_err(),
+            "no `data` array is no answer — the caller states the hold (d4698bc2)"
         );
         assert_eq!(
             tunnel_gate("id.algedonic.dev", &TunnelFacts::default()),

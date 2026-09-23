@@ -134,16 +134,17 @@ pub(crate) struct Overrides {
 }
 
 /// The block as car 1 projects it onto a materialised step: four
-/// plain keys, all present or the step declares none.
+/// plain keys, all present or the step declares none — read by
+/// `boss_jobs::agent_spec::projected`, the reader the station queue
+/// and the claim door also use (backlog 51aef4dd), so what counts as
+/// "carries a projection" is decided once.
 pub(crate) fn block_on_step(step: &Value) -> Option<Settings> {
-    use boss_jobs::agent_spec::{BUDGET_KEY, EFFORT_KEY, MODEL_KEY, PROFILE_KEY};
-    let md = step.get("metadata")?;
-    let text = |k: &str| md.get(k).and_then(Value::as_str).map(str::to_string);
+    let a = boss_jobs::agent_spec::projected(step.get("metadata")?)?;
     Some(Settings {
-        profile: text(PROFILE_KEY)?,
-        model: text(MODEL_KEY)?,
-        budget_usd: md.get(BUDGET_KEY).and_then(Value::as_f64)?,
-        effort: text(EFFORT_KEY)?,
+        profile: a.profile,
+        model: a.model,
+        budget_usd: a.budget_usd,
+        effort: a.effort.as_str().to_string(),
     })
 }
 
@@ -188,6 +189,13 @@ pub(crate) fn block_in_row(row: &Value, slug: &str) -> Option<Settings> {
 /// packet is pinned to the version it was admitted under, and writing
 /// v3's block onto a v1 packet would make the record state a
 /// declaration that version never made.
+///
+/// Its typed twin is `boss_jobs::agent_spec::resolved`, which the
+/// station queue and the claim door use (backlog 51aef4dd): the same
+/// rule over a `Step` and a `WorkflowSpec` rather than the JSON this
+/// verb reads, sharing `projected` so "carries a projection" is decided
+/// once. The row half stays here because this verb holds the row as
+/// served JSON, not as a parsed spec.
 pub(crate) fn settings_for(step: &Value, row: Option<&Value>) -> Option<Settings> {
     block_on_step(step).or_else(|| {
         let slug = step.get("spec_slug").and_then(Value::as_str)?;
@@ -785,14 +793,28 @@ pub(crate) async fn dispatch_at(
     // hosting door above is — an agent that has claimed a step has
     // already started spending. Best-effort on the READ only: a jobs
     // API that cannot answer this one query must not stop a dispatch
-    // it would otherwise admit, so an unreachable read is silence and
-    // the dispatch proceeds. What is never best-effort is the verdict:
-    // a page that DID come back and names a landed car refuses.
-    if !force
-        && let Ok(body) = api_at(Method::GET, cars_for_item_query(&id), None).await
-        && let Some(why) = landed_work_refusal(&id, &crate::gate::rows(body))
-    {
-        bail!("{why}");
+    // it would otherwise admit, so an unreadable read lets the dispatch
+    // proceed. What is never best-effort is the verdict: a page that DID
+    // come back and names a landed car refuses. And the fallback is
+    // SAID, not silent: an answer that is not a list (a proxy's login
+    // page) used to read as "no car names this packet" through the old
+    // empty-reading rows helper, which is a clean door that never looked
+    // (backlog 7b7e0529).
+    if !force {
+        match api_at(Method::GET, cars_for_item_query(&id), None)
+            .await
+            .and_then(crate::train::rows)
+        {
+            Ok(cars) => {
+                if let Some(why) = landed_work_refusal(&id, &cars) {
+                    bail!("{why}");
+                }
+            }
+            Err(e) => eprintln!(
+                "boss dispatch: could not read the cars that name {id} ({e:#}) — the \
+                 landed-work door is not judged for this dispatch"
+            ),
+        }
     }
 
     // The block: the packet's projection, else the active row's step,
@@ -986,21 +1008,27 @@ pub(crate) async fn dispatch_at(
 // resolve a queue that does not exist and answer "nothing waiting"
 // instead of erroring — the wrong-target shape CLAUDE.md warns about.
 
-/// The step an inbox hands out: ready, nobody's, and carrying the
-/// agent model — which is exactly what made the packet a member of an
-/// `a.<role>.<model>` station, so the verb selects on the same fact
-/// the queue did rather than a second opinion about it.
+/// The step an inbox hands out: ready, nobody's, and declaring an
+/// agent block — through [`settings_for`], the packet's projection
+/// else `row`'s step (the kind's ACTIVE row). That is exactly what made
+/// the packet a member of an `a.<role>.<model>` station since backlog
+/// 51aef4dd resolved membership against the active row, so the verb
+/// selects on the same fact the queue did rather than a second opinion
+/// about it. Selecting on the projection alone would read a queue of
+/// 47 pinned page-audit packets and take none of them.
 ///
 /// ACTIVE steps are deliberately not candidates although the station
 /// holds them (a queue shows what is being worked as well as what is
 /// waiting): they are somebody's, and the claim would 409.
-pub(crate) fn waiting_step(job: &Value) -> Option<&Value> {
-    crate::envelope::steps(job).into_iter().find(|s| {
+pub(crate) fn waiting_step<'a>(job: &'a Value, row: Option<&Value>) -> Option<&'a Value> {
+    open_unheld(job).find(|s| settings_for(s, row).is_some())
+}
+
+/// Ready steps nobody holds — the candidates [`waiting_step`] judges.
+fn open_unheld(job: &Value) -> impl Iterator<Item = &Value> {
+    crate::envelope::steps(job).into_iter().filter(|s| {
         s.get("status").and_then(Value::as_str) == Some("ready")
             && s.get("assignee_id").and_then(Value::as_str).is_none()
-            && s.get("metadata")
-                .and_then(|m| m.get(boss_jobs::agent_spec::MODEL_KEY))
-                .is_some()
     })
 }
 
@@ -1042,11 +1070,31 @@ pub(crate) async fn next_at(
         })
         .unwrap_or_default();
 
+    let mut rows: std::collections::BTreeMap<String, Option<Value>> =
+        std::collections::BTreeMap::new();
     for id in &members {
         let job = api_at(Method::GET, format!("/api/jobs/{id}"))
             .await?
             .with_context(|| format!("packet {} read returned no body", &id[..8.min(id.len())]))?;
-        let Some(step) = waiting_step(&job) else {
+        // The kind's row is read only when a ready, unheld step cannot
+        // answer alone — the same laziness `dispatch_at` keeps — and
+        // once per kind, however many of its packets the queue holds.
+        let kind = job
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string();
+        if waiting_step(&job, None).is_none()
+            && open_unheld(&job).next().is_some()
+            && !rows.contains_key(&kind)
+        {
+            let row = api_at(Method::GET, format!("/api/workflows/{kind}"))
+                .await
+                .with_context(|| format!("reading the {kind} Workflow row for its agent block"))?;
+            rows.insert(kind.clone(), row);
+        }
+        let row = rows.get(&kind).and_then(Option::as_ref);
+        let Some(step) = waiting_step(&job, row) else {
             continue;
         };
         let slug = step
@@ -1633,7 +1681,7 @@ pub(crate) async fn report_at(
         .pointer("/metadata/agent")
         .and_then(Value::as_str)
         .with_context(|| format!("run {short} names no agent"))?;
-    let agents = crate::gate::rows(api_at(Method::GET, "/api/agents".to_string(), None).await?);
+    let agents = crate::train::rows(api_at(Method::GET, "/api/agents".to_string(), None).await?)?;
     let actor_id = resolve_agent(&agents, login).with_context(|| {
         format!(
             "run {short} signs as {login:?}, which no agents row names — register it (an \
@@ -3726,6 +3774,21 @@ mod wire_tests {
         /// The waiting one, behind it.
         const WAITING: &str = "22222222-0000-4000-8000-000000000002";
         const INBOX_RUN: &str = "33333333-0000-4000-8000-000000000003";
+        /// Admitted before its kind declared an agent block: its step
+        /// carries the role and no `agent_` key (backlog 51aef4dd).
+        const PINNED: &str = "44444444-0000-4000-8000-000000000004";
+
+        fn pinned_packet() -> Value {
+            json!({
+                "id": PINNED, "kind": "backlog-item", "title": "Pinned before the block",
+                "status": "open", "priority": "standard", "opened_on": "2026-09-19",
+                "metadata": { "detail": "Admitted under a version with no agent block." },
+                "steps": [
+                    { "id": "p-build", "spec_slug": "build", "status": "ready", "title": "Build",
+                      "metadata": { "authority_role": "platform-admin" } },
+                ],
+            })
+        }
 
         fn agent_metadata() -> Value {
             json!({
@@ -3783,6 +3846,9 @@ mod wire_tests {
                     ("GET", p) if p == format!("/api/jobs/{WAITING}") => {
                         ("200 OK", waiting_packet().to_string())
                     }
+                    ("GET", p) if p == format!("/api/jobs/{PINNED}") => {
+                        ("200 OK", pinned_packet().to_string())
+                    }
                     ("GET", "/api/tenant/edit-level") => (
                         "200 OK",
                         json!({ "edit_level": Value::Null, "manifest": "t.toml" }).to_string(),
@@ -3818,7 +3884,10 @@ mod wire_tests {
                     // The edge onto the claimed step (dd6d44b7): a
                     // queued dispatch writes it exactly as a hand one
                     // does — one code path, one door.
-                    ("PATCH", p) if p.starts_with(&format!("/api/jobs/{WAITING}/steps/")) => {
+                    ("PATCH", p)
+                        if p.starts_with(&format!("/api/jobs/{WAITING}/steps/"))
+                            || p.starts_with(&format!("/api/jobs/{PINNED}/steps/")) =>
+                    {
                         ("204 No Content", String::new())
                     }
                     _ => ("404 Not Found", format!("unstubbed {method} {target}")),
@@ -3924,26 +3993,64 @@ mod wire_tests {
         #[test]
         fn a_waiting_step_is_ready_nobodys_and_carries_the_model() {
             assert_eq!(
-                waiting_step(&waiting_packet()).and_then(|s| s["spec_slug"].as_str()),
+                waiting_step(&waiting_packet(), None).and_then(|s| s["spec_slug"].as_str()),
                 Some("build")
             );
             assert!(
-                waiting_step(&held_packet()).is_none(),
+                waiting_step(&held_packet(), None).is_none(),
                 "active is not waiting"
             );
 
             let mut assigned = waiting_packet();
             assigned["steps"][1]["assignee_id"] = json!("agent-someone");
             assert!(
-                waiting_step(&assigned).is_none(),
+                waiting_step(&assigned, Some(&row_with_block())).is_none(),
                 "ready but held is not waiting — the claim would 409"
             );
 
             let mut no_block = waiting_packet();
             no_block["steps"][1]["metadata"] = json!({ "authority_role": "platform-admin" });
             assert!(
-                waiting_step(&no_block).is_none(),
-                "no agent model is not agent work, which is what the station matched on"
+                waiting_step(&no_block, None).is_none(),
+                "no block on the step and no row in hand is not agent work"
+            );
+        }
+
+        /// THE 51aef4dd CASE, at the inbox: a packet pinned to a version
+        /// with no block, whose ACTIVE row declares one, is a member of
+        /// the agent station — so the inbox must be able to take it, or
+        /// it reads a queue of 47 page-audit packets and takes none.
+        #[test]
+        fn a_step_pinned_before_its_block_waits_when_the_active_row_declares_one() {
+            let pinned = pinned_packet();
+            assert!(waiting_step(&pinned, None).is_none());
+            assert_eq!(
+                waiting_step(&pinned, Some(&row_with_block()))
+                    .and_then(|s| s["spec_slug"].as_str()),
+                Some("build")
+            );
+        }
+
+        /// And end to end: the queue names only the pinned packet, and
+        /// the verb reads the kind's row, finds the block, and claims.
+        #[tokio::test]
+        async fn the_inbox_takes_a_packet_pinned_before_its_block() {
+            let (base, log) = inbox_stub(vec![json!({ "id": PINNED })]).await;
+            take_next(&base)
+                .await
+                .expect("dispatches")
+                .expect("the pinned packet is taken");
+            let calls = log.calls.lock().unwrap().clone();
+            let claims: Vec<String> = calls
+                .iter()
+                .filter(|(m, p, _)| m == "POST" && p.contains("/claim"))
+                .map(|(_, p, _)| p.clone())
+                .collect();
+            assert_eq!(
+                claims,
+                vec![format!(
+                    "/api/jobs/{PINNED}/steps/p-build/claim?station={STATION}"
+                )]
             );
         }
     }

@@ -692,14 +692,19 @@ impl Handler for EstateAlarm {
                 ),
                 &ctx.rule_name,
             )
-            .await;
+            .await
+            // No `data` array is no answer, and HOLDS like a failed read.
+            // It was held before only by accident of the truncation
+            // check (a count with no rows looks short); an error body
+            // carrying `total: 0` would have passed that and raised
+            // blind (d4698bc2).
+            .and_then(|body| {
+                rows_or_refuse::<Value>(&body, "the dedup read (GET /api/jobs)")
+                    .map(|rows| (rows, body))
+                    .map_err(HandlerError::Downstream)
+            });
             match listing {
-                Ok(body) => {
-                    let rows: Vec<Value> = body
-                        .get("data")
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default();
+                Ok((rows, body)) => {
                     // The list's own `total` is authoritative over the
                     // page length; a missing `total` is treated as
                     // truncated (fail-safe), never as zero.

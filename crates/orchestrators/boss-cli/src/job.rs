@@ -284,10 +284,14 @@ pub(crate) fn render_packet(job: &Value, width: usize) -> String {
 /// An EMPTY queue says so in words. A header with no rows under it reads
 /// identically to a failed read, which is precisely the
 /// indistinguishable-from-a-true-negative class this verb exists to end.
-pub(crate) fn station_table(body: &Value, width: usize) -> String {
+///
+/// A body with no rows array REFUSES (backlog 7b7e0529): read as zero
+/// rows, a station answering an error envelope printed "empty", which is
+/// that same class one layer down.
+pub(crate) fn station_table(body: &Value, width: usize) -> Result<String> {
     let g = |k: &str| body.get(k).and_then(Value::as_str).unwrap_or("-");
     let total = body.get("total").and_then(Value::as_u64).unwrap_or(0);
-    let rows = crate::gate::rows(Some(body.clone()));
+    let rows = crate::train::rows(Some(body.clone()))?;
     let discipline = body
         .get("discipline")
         .and_then(Value::as_array)
@@ -316,7 +320,7 @@ pub(crate) fn station_table(body: &Value, width: usize) -> String {
     );
     if rows.is_empty() {
         out.push_str("  (empty — the station holds nothing)\n");
-        return out;
+        return Ok(out);
     }
     let kw = rows
         .iter()
@@ -339,7 +343,7 @@ pub(crate) fn station_table(body: &Value, width: usize) -> String {
         out.push_str(&fit(&line, width));
         out.push('\n');
     }
-    out
+    Ok(out)
 }
 
 /// What the packet holds NOW for each key the patch sent — the whole
@@ -431,7 +435,7 @@ pub(crate) async fn fetch_and_resolve(http: &reqwest::Client, job_ref: &str) -> 
             .map(str::to_string)
             .context("matched a job with no id")
     };
-    let open = crate::gate::rows(page("open", 0).await?);
+    let open = crate::train::rows(page("open", 0).await?)?;
     match resolve(&open, job_ref) {
         Ok(row) => return id_of(row),
         Err(e) if e.to_string().starts_with("no job matches") => {}
@@ -448,7 +452,7 @@ pub(crate) async fn fetch_and_resolve(http: &reqwest::Client, job_ref: &str) -> 
             .map(|t| usize::try_from(t).unwrap_or(usize::MAX))
             .unwrap_or(0);
         to_read = closed_rows_to_read(total);
-        let rows = crate::gate::rows(body);
+        let rows = crate::train::rows(body)?;
         if rows.is_empty() {
             break;
         }
@@ -502,7 +506,7 @@ pub async fn station(name: &str, raw: bool) -> Result<()> {
     .await?
     .with_context(|| format!("the station read for {name:?} returned no body"))?;
     if raw {
-        let packets: Vec<Value> = crate::gate::rows(Some(body.clone()))
+        let packets: Vec<Value> = crate::train::rows(Some(body.clone()))?
             .iter()
             .map(|r| {
                 json!({
@@ -530,7 +534,7 @@ pub async fn station(name: &str, raw: bool) -> Result<()> {
             }))?
         );
     } else {
-        print!("{}", station_table(&body, width()));
+        print!("{}", station_table(&body, width())?);
     }
     Ok(())
 }
@@ -665,7 +669,7 @@ pub async fn list(
         .as_ref()
         .and_then(|b| b.get("total"))
         .and_then(Value::as_u64);
-    let rows = crate::gate::rows(body);
+    let rows = crate::train::rows(body)?;
     let w = width();
     for r in &rows {
         println!("{}", list_line(r, w));
@@ -843,6 +847,18 @@ pub async fn patch(job_ref: &str, path: &std::path::Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// A STATION THAT DID NOT ANSWER IS NOT AN EMPTY ONE (backlog
+    /// 7b7e0529): a body with no rows array refuses rather than printing
+    /// "(empty — the station holds nothing)".
+    #[test]
+    fn a_station_body_with_no_rows_refuses_rather_than_reading_empty() {
+        let body = serde_json::json!({"error": "no such station", "total": 0});
+        let why = super::station_table(&body, 120)
+            .expect_err("an error envelope is not an empty queue")
+            .to_string();
+        assert!(why.contains("cannot be read as zero"), "{why}");
+    }
+
     #[test]
     fn a_prefix_lookup_reads_the_whole_closed_set_when_it_fits_and_the_bound_when_not() {
         assert_eq!(super::closed_rows_to_read(0), 0);
@@ -1131,7 +1147,7 @@ mod tests {
               "title": "ESTATE ALARM: disk_tight:w-1 persisted", "metadata": {} }
           ]
         });
-        let out = station_table(&body, 120);
+        let out = station_table(&body, 120).expect("a station body with rows");
 
         // The station's own facts, which are the reason to ask a station
         // rather than list jobs: depth, discipline, and the WIP limit.
@@ -1156,11 +1172,8 @@ mod tests {
         // defect class this verb exists for.
         let empty = json!({"station": "loading-dock", "kind": "batch",
                            "discipline": ["priority"], "total": 0, "data": []});
-        assert!(
-            station_table(&empty, 120).contains("empty"),
-            "{}",
-            station_table(&empty, 120)
-        );
+        let empty = station_table(&empty, 120).expect("an empty queue is an answer");
+        assert!(empty.contains("empty"), "{empty}");
     }
 
     #[test]

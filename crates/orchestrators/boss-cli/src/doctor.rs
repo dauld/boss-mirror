@@ -421,7 +421,16 @@ async fn check_step_plugins_mount() -> Check {
             detail: "could not read the registries — unknown, not clean".into(),
         };
     };
-    let orphans = orphaned_plugin_kinds(&plugins, &workflows);
+    let orphans = match orphaned_plugin_kinds(&plugins, &workflows) {
+        Ok(orphans) => orphans,
+        Err(e) => {
+            return Check {
+                label,
+                passed: false,
+                detail: format!("could not read the registries ({e:#}) — unknown, not clean"),
+            };
+        }
+    };
     Check {
         passed: orphans.is_empty(),
         label,
@@ -441,19 +450,23 @@ async fn check_step_plugins_mount() -> Check {
 
 /// The comparison, pure — which registered plugin kinds no active
 /// workflow declares a step of.
+///
+/// Either registry answering something that is not a list REFUSES
+/// (backlog 7b7e0529). It used to read as zero rows, and zero
+/// WORKFLOWS is the worst reading this check can make: no step mounts
+/// anything, so every active plugin was reported orphaned — a loud false
+/// alarm of exactly the kind that gets a check muted. The one rows
+/// helper decides the shape, so this cannot disagree with the verbs.
 pub(crate) fn orphaned_plugin_kinds(
     plugins: &serde_json::Value,
     workflows: &serde_json::Value,
-) -> Vec<String> {
-    let rows = |v: &serde_json::Value| -> Vec<serde_json::Value> {
-        v.get("data")
-            .and_then(|d| d.as_array())
-            .or_else(|| v.as_array())
-            .cloned()
-            .unwrap_or_default()
+) -> anyhow::Result<Vec<String>> {
+    use anyhow::Context as _;
+    let rows = |v: &serde_json::Value, what: &str| {
+        crate::train::rows(Some(v.clone())).with_context(|| format!("the {what} registry"))
     };
     let active = |v: &serde_json::Value| v.get("status").and_then(|s| s.as_str()) == Some("active");
-    let used: std::collections::BTreeSet<String> = rows(workflows)
+    let used: std::collections::BTreeSet<String> = rows(workflows, "workflows")?
         .iter()
         .filter(|w| active(w))
         .flat_map(|w| {
@@ -464,7 +477,7 @@ pub(crate) fn orphaned_plugin_kinds(
         })
         .filter_map(|s| s.get("kind").and_then(|k| k.as_str()).map(str::to_string))
         .collect();
-    let mut orphans: Vec<String> = rows(plugins)
+    let mut orphans: Vec<String> = rows(plugins, "step-plugins")?
         .iter()
         .filter(|p| active(p))
         .filter_map(|p| p.get("kind").and_then(|k| k.as_str()).map(str::to_string))
@@ -472,7 +485,7 @@ pub(crate) fn orphaned_plugin_kinds(
         .collect();
     orphans.sort();
     orphans.dedup();
-    orphans
+    Ok(orphans)
 }
 
 pub async fn run_install() -> Result<()> {
@@ -620,7 +633,7 @@ mod tests {
             {"status": "active", "steps": [{"kind": "task"}, {"kind": "review-design"}]}
         ]);
         assert_eq!(
-            orphaned_plugin_kinds(&plugins, &workflows),
+            orphaned_plugin_kinds(&plugins, &workflows).unwrap(),
             vec!["scope-declaration".to_string()]
         );
     }
@@ -637,7 +650,7 @@ mod tests {
             {"status": "retired", "steps": [{"kind": "incident-review"}]}
         ]);
         assert_eq!(
-            orphaned_plugin_kinds(&plugins, &workflows),
+            orphaned_plugin_kinds(&plugins, &workflows).unwrap(),
             vec!["incident-review".to_string()]
         );
     }
@@ -649,7 +662,11 @@ mod tests {
     fn a_retired_plugin_is_not_reported() {
         let plugins = json!([{"kind": "marketing-brief", "status": "retired"}]);
         let workflows = json!([{"status": "active", "steps": [{"kind": "task"}]}]);
-        assert!(orphaned_plugin_kinds(&plugins, &workflows).is_empty());
+        assert!(
+            orphaned_plugin_kinds(&plugins, &workflows)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// Both list shapes the API uses — a bare array, or wrapped in
@@ -659,6 +676,21 @@ mod tests {
     fn both_envelope_shapes_are_read() {
         let bare = json!([{"kind": "checklist", "status": "active"}]);
         let wrapped = json!({"data": [{"status": "active", "steps": [{"kind": "checklist"}]}]});
-        assert!(orphaned_plugin_kinds(&bare, &wrapped).is_empty());
+        assert!(orphaned_plugin_kinds(&bare, &wrapped).unwrap().is_empty());
+    }
+
+    /// A REGISTRY THAT DID NOT ANSWER A LIST IS NOT AN EMPTY ONE
+    /// (backlog 7b7e0529). Read as zero workflows, an error envelope made
+    /// every active plugin "orphaned" — so the check must refuse, and
+    /// name which registry it could not read.
+    #[test]
+    fn an_unreadable_registry_refuses_rather_than_orphaning_everything() {
+        let plugins = json!([{"kind": "checklist", "status": "active"}]);
+        let why = orphaned_plugin_kinds(&plugins, &json!({"error": "bad gateway"}))
+            .expect_err("an error envelope is not zero workflows");
+        assert!(format!("{why:#}").contains("workflows"), "{why:#}");
+        let why = orphaned_plugin_kinds(&json!({}), &json!([]))
+            .expect_err("nor is a body with no rows zero plugins");
+        assert!(format!("{why:#}").contains("step-plugins"), "{why:#}");
     }
 }

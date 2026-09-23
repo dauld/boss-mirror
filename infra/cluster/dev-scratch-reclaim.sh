@@ -139,7 +139,7 @@ SCRATCH_FLOOR_GB="${BOSS_SCRATCH_FLOOR_GB:-50}"
 STALE_TARGET_H="${BOSS_STALE_TARGET_H:-12}"
 WORK_FLOOR_GB="${BOSS_WORK_FLOOR_GB:-6}"
 WORKTREE_MAX_AGE_H="${BOSS_WORKTREE_MAX_AGE_H:-48}"
-# Hours of git QUIET (no commit, no HEAD, index or reflog write) before a
+# Hours of git QUIET (no commit, HEAD or index write, reflog entry) before a
 # worktree whose branch has LANDED — head on origin/main, no origin/
 # ref left — may go. Landed is necessary, not sufficient: a builder's
 # tree is CLEAN in the minutes between its commit and its push, and an
@@ -214,6 +214,7 @@ WT_PASS=skipped; WT_PASS_REASON=""
 WT_MAIN_SHA=""; WT_MAIN_TS=""
 WT_REMOVED=0; WT_REMOVED_MIB=0
 WT_KEPT_DIRTY=0; WT_KEPT_DIRTY_NAMES=""
+WT_KEPT_UNREFERENCED=0; WT_KEPT_UNREFERENCED_NAMES=""
 WT_KEPT_LIVE=0; WT_KEPT_RECENT=0; WT_KEPT_LOCKED=0; WT_KEPT_REFUSED=0
 WT_PRUNED=0
 WT_TARGETS_REMOVED=0; WT_TARGETS_MIB=0
@@ -540,14 +541,22 @@ fast_forward_checkout() {
 #      is not set on the pod), which keeps a worktree, never removes
 #      one: every error here is on the side of keeping;
 #   2. git has been QUIET in it for the window (1) chose — no commit,
-#      no HEAD, index or reflog write — because a builder's tree is
-#      clean for the minutes between its commit and its push;
+#      no HEAD or index write, no new reflog ENTRY (an entry's own
+#      time, never the file's mtime, which a gc rewrites in every
+#      worktree at once — backlog adce5171) — because a builder's tree
+#      is clean for the minutes between its commit and its push;
 #   3. the tree is CLEAN: `git status --porcelain` empty, untracked
 #      files included. A dirty tree is kept and NAMED with its count,
-#      in the log and on the packet, so an operator can decide.
+#      in the log and on the packet, so an operator can decide. A
+#      DETACHED tree must also have its head held by some ref, or it
+#      is kept and named the same way: the checkout is the only thing
+#      naming those commits (adce5171).
 # Locked worktrees, the main checkout and the one this run stands in
-# are never candidates. `git worktree remove` still runs without
-# --force, a second lock on (3).
+# are never candidates — and the lock is what keeps a RUNNING agent's
+# tree: the Claude harness locks each agent worktree with its pid
+# (`claude agent agent-<id> (pid N start T)`) for the session's life.
+# `git worktree remove` still runs without --force, a second lock on
+# (3).
 #
 # A PASS THAT CANNOT ANSWER — no refs/remotes/origin/main, git refusing
 # — removes nothing AND RECORDS IT: `worktree_pass=skipped` with the
@@ -563,18 +572,41 @@ fast_forward_checkout() {
 # costs nothing, and deleting refs is a different decision.
 
 # Newest git activity in a worktree, as epoch seconds: its HEAD
-# commit's time and the mtimes of the worktree's own HEAD, index and
-# reflog — every git command that could mean "in use" touches one of
-# those. Read BEFORE `git status`, which may itself refresh the index.
+# commit's time, the mtimes of the worktree's own HEAD and index and of
+# its directory, and the time of the NEWEST ENTRY in its reflog. Read
+# BEFORE `git status`, which may itself refresh the index.
+#
+# The reflog is read for what it SAYS, never for its mtime (backlog
+# adce5171). Until 2026-09-23 this took the mtime of $gitdir/logs/HEAD,
+# and a repo-wide `git gc` rewrites that file in EVERY worktree at once
+# — its `reflog expire --all` copies each worktree's entries to a new
+# file whether or not one expires. Measured 2026-09-21: the pass kept
+# 373 of 397 worktrees "with git activity inside the window", and three
+# unrelated ones whose HEAD, index and directory were 73h, 80h and 101h
+# quiet all read logs/HEAD EXACTLY 32h old. Re-measured 2026-09-23: 154
+# reflogs rewritten inside four seconds at 2026-09-22 05:43:30Z, beside
+# gc's writes of info/refs and objects/info. Because the measure is a
+# MAX, one such touch reset the idle clock of the whole population, so
+# a pass could only ever remove what a window shorter than the gc
+# interval let through. Each reflog line carries the time git wrote it
+# (`<old> <new> <ident> <epoch> <tz><TAB><message>`), and an expire
+# copies lines without redating them, so the last line's epoch is the
+# last act in THIS worktree and nothing another command did to the file.
 worktree_last_activity() {
     local path="$1" gitdir f t newest
     newest=$(git -C "$path" log -1 --format=%ct 2>/dev/null || echo 0)
     gitdir=$(git -C "$path" rev-parse --absolute-git-dir 2>/dev/null || true)
-    for f in "$gitdir/HEAD" "$gitdir/index" "$gitdir/logs/HEAD" "$path"; do
+    for f in "$gitdir/HEAD" "$gitdir/index" "$path"; do
         [ -e "$f" ] || continue
         t=$(stat -c %Y "$f" 2>/dev/null || echo 0)
         [ "$t" -gt "$newest" ] && newest=$t
     done
+    t=0
+    if [ -f "$gitdir/logs/HEAD" ]; then
+        t=$(tail -n 1 "$gitdir/logs/HEAD" 2>/dev/null | cut -f1 | awk '{print $(NF-1)}')
+    fi
+    case ${t:-empty} in empty|*[!0-9]*) t=0 ;; esac
+    [ "$t" -gt "$newest" ] && newest=$t
     echo "${newest:-0}"
 }
 
@@ -640,7 +672,7 @@ reclaim_gone_worktrees() {
 
     # `path<TAB>branch<TAB>locked` per worktree, `detached` standing in
     # for a HEAD with no branch; the first block is the main worktree.
-    local first=1 path branch locked window why last idle_h dirty kb
+    local first=1 path branch locked window why last idle_h dirty kb head held
     while IFS=$'\t' read -r path branch locked; do
         [ -z "$path" ] && continue
         if [ "$first" = 1 ]; then first=0; continue; fi
@@ -684,6 +716,30 @@ reclaim_gone_worktrees() {
             continue
         fi
 
+        # A DETACHED head names its commit in two places only — the
+        # worktree's HEAD and its reflog — and `git worktree remove`
+        # deletes both, handing any commit no ref holds to the next gc.
+        # That is unpushed work, as surely as a dirty tree is uncommitted
+        # work, so it is kept and NAMED the same way (backlog adce5171).
+        # A branch needs no such check: its ref outlives the checkout.
+        # Measured 2026-09-23: of the 16 detached trees the corrected
+        # idle clock makes due, 13 sit on a ref (a forge PR ref, a
+        # branch) and 3 on none. `--count=1` stops at the first ref that
+        # holds it; a git that cannot answer reads as no ref, and keeps.
+        if [ "$branch" = detached ]; then
+            head=$(git -C "$path" rev-parse -q --verify HEAD 2>/dev/null || true)
+            held=""
+            if [ -n "$head" ]; then
+                held=$(git -C "$REPO_DIR" for-each-ref --count=1 --format='%(refname)' --contains "$head" 2>/dev/null || true)
+            fi
+            if [ -z "$held" ]; then
+                log "  kept $path (detached at ${head:0:8}, a head no ref holds: removing the checkout would leave its commits to gc; idle ${idle_h}h)"
+                WT_KEPT_UNREFERENCED=$((WT_KEPT_UNREFERENCED + 1))
+                WT_KEPT_UNREFERENCED_NAMES="${WT_KEPT_UNREFERENCED_NAMES:+$WT_KEPT_UNREFERENCED_NAMES, }$(basename "$path")"
+                continue
+            fi
+        fi
+
         kb=$(du -sk "$path" 2>/dev/null | awk '{print $1}')
         if ! git -C "$REPO_DIR" worktree remove "$path" 2>/dev/null; then
             log "  kept $path (git refused to remove it without --force; $why, idle ${idle_h}h)"
@@ -703,7 +759,7 @@ reclaim_gone_worktrees() {
         '
     )
 
-    log "worktree pass: removed $WT_REMOVED worktree(s) (${WT_REMOVED_MIB}MiB) and $WT_TARGETS_REMOVED target(s) (${WT_TARGETS_MIB}MiB); kept $WT_KEPT_LIVE with an origin/ ref still in the checkout, $WT_KEPT_RECENT with git activity inside the window, $WT_KEPT_DIRTY dirty, $WT_KEPT_LOCKED locked, $WT_KEPT_REFUSED refused by git; pruned $WT_PRUNED entries whose directory was gone"
+    log "worktree pass: removed $WT_REMOVED worktree(s) (${WT_REMOVED_MIB}MiB) and $WT_TARGETS_REMOVED target(s) (${WT_TARGETS_MIB}MiB); kept $WT_KEPT_LIVE with an origin/ ref still in the checkout, $WT_KEPT_RECENT with git activity inside the window, $WT_KEPT_DIRTY dirty, $WT_KEPT_UNREFERENCED with a head no ref holds, $WT_KEPT_LOCKED locked, $WT_KEPT_REFUSED refused by git; pruned $WT_PRUNED entries whose directory was gone"
 }
 
 # ---------------------------------------------------------------------
@@ -1034,6 +1090,7 @@ record_pass() {
             "origin_main_sha=$WT_MAIN_SHA" "origin_main_ref_ts=$WT_MAIN_TS" \
             "worktrees_removed=$WT_REMOVED" "worktrees_removed_mib=$WT_REMOVED_MIB" \
             "worktrees_kept_dirty=$WT_KEPT_DIRTY" "worktrees_kept_dirty_names=$WT_KEPT_DIRTY_NAMES" \
+            "worktrees_kept_unreferenced=$WT_KEPT_UNREFERENCED" "worktrees_kept_unreferenced_names=$WT_KEPT_UNREFERENCED_NAMES" \
             "worktrees_kept_live=$WT_KEPT_LIVE" "worktrees_kept_recent=$WT_KEPT_RECENT" \
             "worktrees_kept_locked=$WT_KEPT_LOCKED" "worktrees_kept_refused=$WT_KEPT_REFUSED" \
             "worktrees_pruned=$WT_PRUNED" \

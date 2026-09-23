@@ -19,7 +19,10 @@ use anyhow::Result;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-use crate::gate::{AbandonedPlace, abandoned_places, api, queue_order, rows};
+use crate::gate::{AbandonedPlace, abandoned_places, api, queue_order};
+// The one rows helper: a read that is not a list refuses rather than
+// printing an empty yard (backlog 7b7e0529).
+use crate::train::rows;
 
 fn md_str<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get("metadata")
@@ -940,7 +943,7 @@ pub async fn run(all: bool) -> Result<()> {
             None,
         )
         .await?,
-    );
+    )?;
     println!("\n  IN TRANSIT — {} train(s)", trains.len());
     for t in &trains {
         println!(
@@ -959,7 +962,7 @@ pub async fn run(all: bool) -> Result<()> {
             None,
         )
         .await?,
-    );
+    )?;
     // A QUEUED run is not gating: it is waiting for a slot and has no
     // Job at all (boss_jobs::yard::QUEUED_AT). Reporting it as GATING
     // would overstate what the node is doing by exactly the number of
@@ -1014,7 +1017,7 @@ pub async fn run(all: bool) -> Result<()> {
         .as_ref()
         .and_then(|b| b.get("total"))
         .and_then(Value::as_i64);
-    let gate_runs = rows(stranded_body);
+    let gate_runs = rows(stranded_body)?;
     let stranded_cut = cut_note(stranded_total, gate_runs.len());
     // Held greens: read BY THE HOLD, so a hold is seen for as long as it
     // stands, whatever gated after it.
@@ -1023,7 +1026,7 @@ pub async fn run(all: bool) -> Result<()> {
         .as_ref()
         .and_then(|b| b.get("total"))
         .and_then(Value::as_i64);
-    let held_runs = rows(held_body);
+    let held_runs = rows(held_body)?;
     let held_cut = cut_note(held_total, held_runs.len());
     let cars = rows(
         api(
@@ -1033,7 +1036,7 @@ pub async fn run(all: bool) -> Result<()> {
             None,
         )
         .await?,
-    );
+    )?;
     let car_branches: BTreeSet<String> = cars
         .iter()
         .map(|c| md_str(c, "branch").to_string())
@@ -1121,7 +1124,7 @@ pub async fn run(all: bool) -> Result<()> {
             None,
         )
         .await?,
-    ));
+    )?);
     match crate::git_auth::command()
         .args(["ls-remote", "--heads", "origin"])
         .output()
@@ -1215,12 +1218,11 @@ pub async fn run(all: bool) -> Result<()> {
         .and_then(|d| d.get("total"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    // Read once, and refused if it is not a list: "0 car(s) parked"
+    // from a dark door is the empty-yard answer (7b7e0529).
+    let dock = rows(dock)?;
     println!("\n  DOCK — {dock_total} car(s) parked");
-    for c in dock
-        .as_ref()
-        .map(|d| rows(Some(d.clone())))
-        .unwrap_or_default()
-    {
+    for c in &dock {
         println!(
             "    {}",
             c.get("title").and_then(Value::as_str).unwrap_or("?")
@@ -1271,7 +1273,7 @@ pub async fn run(all: bool) -> Result<()> {
     // of the approach still prints (identity's read/write split).
     let identities = match crate::identity::caller() {
         Some(c) => {
-            let agents = rows(api(&http, reqwest::Method::GET, "/api/agents", None).await?);
+            let agents = rows(api(&http, reqwest::Method::GET, "/api/agents", None).await?)?;
             Some(my_work_identities(&c.id, &agents))
         }
         None => None,
@@ -1286,7 +1288,7 @@ pub async fn run(all: bool) -> Result<()> {
                 None,
             )
             .await?,
-        ));
+        )?);
     }
     println!();
     for line in my_work_section(identities.as_deref(), &my_rows, now) {
@@ -1300,9 +1302,6 @@ pub async fn run(all: bool) -> Result<()> {
     // so it fetches; like ORPHANS, a failed read prints WHY and skips
     // rather than failing the verb.
     let mut fresh_targets: Vec<String> = dock
-        .as_ref()
-        .map(|d| rows(Some(d.clone())))
-        .unwrap_or_default()
         .iter()
         .map(|c| md_str(c, "branch").to_string())
         .filter(|b| !b.is_empty())

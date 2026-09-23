@@ -725,18 +725,37 @@ pub(crate) fn invariant_section(invs: &[Invariant], lane: &str) -> String {
             Grounding::Derived(_) => String::new(),
         };
         out.push_str(&format!("\n{}   [{}{mark}]\n", inv.name, inv.authority));
-        for l in &inv.lines {
+        for l in block(inv) {
             out.push_str(&format!("    {l}\n"));
-        }
-        // A value read out of some OTHER file says so here, grouped by
-        // that file and in the order the values were read. One
-        // authority standing for every value is what let the gate's gid
-        // ride under a file that does not contain it (d334116c).
-        for (from, values) in foreign_sources(inv) {
-            out.push_str(&format!("    {}\n", foreign_source_line(&values, &from)));
         }
     }
     out
+}
+
+/// What a reader sees of `inv` under its header, wherever it is read:
+/// its lines, then one attribution per file OTHER than its authority
+/// that a substituted value came out of, grouped by that file and in
+/// the order the values were read. One authority standing for every
+/// value is what let the gate's gid ride under a file that does not
+/// contain it (d334116c).
+///
+/// Both renderers read this — the invariants section and a rules
+/// document's `{{invariant:<name>}}` quote — because until 2026-09-22
+/// the quote printed only the lines, and builder rule 2 handed the dev
+/// pod's cgroup to a reader with no file to check it against, on the
+/// day the same figure was found stale in four places (a7469d74). One
+/// function, so the value and its source cannot part by which of the
+/// two a reader reads.
+pub(crate) fn block(inv: &Invariant) -> Vec<String> {
+    inv.lines
+        .iter()
+        .cloned()
+        .chain(
+            foreign_sources(inv)
+                .into_iter()
+                .map(|(from, values)| foreign_source_line(&values, &from)),
+        )
+        .collect()
 }
 
 /// The packet half: the envelope, the step it is at, and EVERY metadata

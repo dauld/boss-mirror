@@ -64,7 +64,13 @@ sudo cp -r "${WEB_DIST}"/* "${BOSS_STATIC_DIR}/"
 
 # ---------- Config ----------
 echo "==> Installing config to ${INSTALL_CONFIG}"
-sudo install -m 0644 "${SOURCE_CONFIG}" "${INSTALL_CONFIG}"
+# The demo roster is the brewery tenant's file (backlog 1c68aebc), no
+# longer compiled into the service; the config names where it lands.
+sudo install -m 0644 "${REPO_ROOT}/examples/brewery/seeds/demo_agents.toml" \
+    "${BOSS_CONFIG_DIR}/boss-observability-demo-agents.toml"
+sed "s|@BOSS_CONFIG_DIR@|${BOSS_CONFIG_DIR}|g" "${SOURCE_CONFIG}" \
+    | sudo tee "${INSTALL_CONFIG}" >/dev/null
+sudo chmod 0644 "${INSTALL_CONFIG}"
 
 # ---------- User ----------
 echo "==> Creating boss-observability user"

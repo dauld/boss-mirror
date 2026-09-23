@@ -324,7 +324,7 @@ async fn finish(
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("car has no id"))?;
     let head = gate::resolve_sha(new_branch);
-    let gate_runs = gate::rows(
+    let gate_runs = crate::train::rows(
         gate::api(
             http,
             reqwest::Method::GET,
@@ -332,7 +332,7 @@ async fn finish(
             None,
         )
         .await?,
-    );
+    )?;
     // Machine-copied, green-preferring, head-matched — every property
     // the by-hand transcription kept getting wrong, in one call.
     let receipt = park::receipt_for(&gate_runs, new_branch, &head)?;

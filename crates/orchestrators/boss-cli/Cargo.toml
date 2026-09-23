@@ -40,6 +40,10 @@ boss-policy = { path = "../../core/boss-policy", default-features = false }
 # same `cascade::handler_emits` roster the product's rules are — a
 # second parser would be a second contract.
 boss-dispatcher = { path = "../../core/boss-dispatcher" }
+# `seeds/demo_agents.toml` (backlog 1c68aebc) is judged by the loader
+# boss-observability refuses to boot without — the same contract, one
+# reader.
+boss-observability = { path = "../../core/boss-observability" }
 toml = { workspace = true }
 boss-assets = { path = "../../modules/boss-assets", features = ["postgres"] }
 boss-clock-client = { path = "../../core/boss-clock-client" }

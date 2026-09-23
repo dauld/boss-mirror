@@ -118,6 +118,46 @@ pub fn needs_absent_tool(probe: &str) -> Option<&'static str> {
         .find_map(|c| absent.iter().find(|a| **a == c).copied())
 }
 
+/// The builtins that move the shell somewhere else before the probe
+/// reads anything.
+const CHANGES_DIRECTORY: [&str; 2] = ["cd", "pushd"];
+
+/// A RECORDED PROBE DOES NOT `cd` — the door places it — and the verb
+/// that moves it anyway, if it spells one.
+///
+/// THE DEFECT (backlog 4bb6797c, measured 2026-09-22). Two cars in one
+/// night recorded `cd /work/boss && git show HEAD:… | grep -q …`, and
+/// both came back from the forge as exit 1 with `cd: /work/boss: No
+/// such file or directory`, reading TROUBLED in the shed with both
+/// claims true in the converged tree. `/work/boss` is the DEV POD's
+/// checkout; the unattended door runs the probe on the forge, as david,
+/// with cwd ALREADY the converged checkout of main (`BOSS_PROBE_DIR`,
+/// default `/home/david/boss`). It is the same class as
+/// [`needs_absent_tool`] — a fact of the pod the forge does not have —
+/// and it is refused at the same door for the same reason: at gate
+/// time, on the builder's terminal, instead of hours later as an exit
+/// code on a car.
+///
+/// WHY ANY `cd` AND NOT A PATH LIST. A `cd` to the forge's own checkout
+/// would run; a list of right and wrong paths would then be a second
+/// copy of `BOSS_PROBE_DIR` held by nobody (CLAUDE.md §9a), and the
+/// rule it would buy refuses nothing a correct probe needs —
+/// `git show HEAD:<path>` reads the converged tree from where the door
+/// put it, and a relative path already resolves there. Measured the
+/// same night, the population is exactly the two defects: of 19 open
+/// cars carrying a recorded probe, 2 contained a `cd` to an absolute
+/// path, both failing, and every probe a briefed builder wrote was
+/// clean — so one rule stated plainly costs no correct probe.
+///
+/// Read in command position through [`commands_invoked`], so a `cd`
+/// that is only mentioned — a grep pattern, `--format=%cd`, `echo cd` —
+/// is not a move.
+pub fn changes_directory(probe: &str) -> Option<&'static str> {
+    commands_invoked(probe)
+        .into_iter()
+        .find_map(|c| CHANGES_DIRECTORY.iter().find(|v| **v == c).copied())
+}
+
 /// The two variables the CLI reads to learn WHO is running it
 /// (boss-cli `identity.rs`: the env var, then the file the second
 /// names). Spelled here rather than imported because that crate is an
@@ -1387,6 +1427,52 @@ mod tests {
                 None,
                 "the forge has the CLI since 9f00a805: {probe}"
             );
+        }
+    }
+
+    /// A RECORDED PROBE DOES NOT `cd` (backlog 4bb6797c). The two
+    /// measured instances, both 2026-09-22, both failing on the forge
+    /// with `cd: /work/boss: No such file or directory` — plus the
+    /// forge's OWN checkout path, which would run but is refused all the
+    /// same: the rule is that the door places the probe, not a path
+    /// list, and a `cd` to the right path is one keystroke from the
+    /// wrong one. Every command position counts, as for an absent tool.
+    #[test]
+    fn a_probe_that_changes_directory_is_named() {
+        for (probe, verb) in [
+            (
+                "cd /work/boss && git show HEAD:apps/web/src/it/yard.ts | grep -q \"repair in flight\" && echo garage:ok",
+                "cd",
+            ),
+            (
+                "cd /work/boss\ngit show HEAD:crates/core/boss-jobs/src/shed.rs | grep -q 'waits on the world' && echo shed:ok",
+                "cd",
+            ),
+            ("cd /home/david/boss && git log -1 --format=%ct", "cd"),
+            ("(cd crates && git show HEAD:Cargo.toml) | grep -q x", "cd"),
+            (
+                "pushd /work/boss >/dev/null; git show HEAD:x | grep -q y",
+                "pushd",
+            ),
+        ] {
+            assert_eq!(changes_directory(probe), Some(verb), "{probe}");
+        }
+    }
+
+    /// And a probe that stays where the door put it is not this rule's
+    /// business — including a `cd` that is only MENTIONED, as an
+    /// argument, a grep pattern, or a git format placeholder.
+    #[test]
+    fn a_probe_that_stays_in_the_converged_checkout_is_not_named() {
+        for probe in [
+            "git show HEAD:crates/core/boss-jobs/src/probe.rs | grep -q 'pub fn changes_directory' && echo ok",
+            "grep -c '^COPY infra/estate' /home/david/boss/infra/oss-quickstart/Dockerfile",
+            "git log -1 --date=unix --format=%cd | grep -q . && echo claim:ok",
+            "git show HEAD:infra/forge/install.sh | grep -q 'cd /home/david/boss' && echo ok",
+            "echo cd",
+            "boss-sor-read /api/yard/status | jq -e '.dock_depth == 1' >/dev/null && echo ok",
+        ] {
+            assert_eq!(changes_directory(probe), None, "{probe}");
         }
     }
 

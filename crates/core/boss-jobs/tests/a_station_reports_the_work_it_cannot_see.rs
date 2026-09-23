@@ -11,6 +11,15 @@
 //! it could see; there was no error, no warning, and no figure that
 //! looked wrong.
 //!
+//! THE REPAIR, backlog 51aef4dd (2026-09-23). Reporting the omission
+//! was half of it; the other half is that the station now SERVES those
+//! packets. A step carrying no agent projection is resolved against
+//! its kind's ACTIVE Workflow row before any station clause reads it
+//! (`boss_jobs::agent_spec::resolved`), in memory, writing nothing to
+//! the packet — so the pinned packet is a member, its queue lists it,
+//! the claim door admits it through that station, and the omission
+//! figure falls to zero because there is no longer an omission.
+//!
 //! The unit tests in `station_reach` prove the arithmetic. They cannot
 //! prove the thing that matters to an operator: that the figure
 //! reaches the surface that draws the queue, beside the depth it
@@ -135,6 +144,14 @@ fn harness() -> Harness {
                 Scope::All,
             )
             .allow("platform-admin", Action::Read, Resource::job(), Scope::All)
+            // The claim door's own policy check, so a claim through the
+            // station reaches the membership gate this file is about.
+            .allow(
+                "platform-admin",
+                Action::Update,
+                Resource::step(),
+                Scope::All,
+            )
             .build(),
     );
     let bus = RecordingEventBus::new();
@@ -156,7 +173,7 @@ fn harness() -> Harness {
     }
 }
 
-async fn open_packet(app: &axum::Router, id: &str) {
+async fn open_packet(app: &axum::Router, id: &str) -> String {
     let body = serde_json::json!({
         "kind": "backlog-item",
         "subject": { "subject_kind": "custom", "id": id },
@@ -187,6 +204,48 @@ async fn open_packet(app: &axum::Router, id: &str) {
         "{}",
         String::from_utf8_lossy(&bytes)
     );
+    let job: serde_json::Value = serde_json::from_slice(&bytes).expect("job json");
+    job["id"].as_str().expect("job id").to_string()
+}
+
+async fn get_json(app: &axum::Router, path: &str) -> serde_json::Value {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::get(path)
+                .header("x-boss-user", user_header("emp-david", "platform-admin"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{path}: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    serde_json::from_slice(&bytes).expect("json")
+}
+
+/// Admit a packet under v1, then publish v2 over it — the drift
+/// produced the way production produced it for the 47 page-audit
+/// packets (pinned at v1, active row v3).
+async fn a_packet_pinned_before_the_block(h: &Harness) -> String {
+    let id = open_packet(&h.app, "pinned-to-v1").await;
+    let actor = boss_core::actor::ActorId::human("emp-david");
+    let now = chrono::Utc::now();
+    h.kinds
+        .create_draft(protocol_v2(), &actor, now)
+        .await
+        .expect("draft v2");
+    h.kinds
+        .publish("backlog-item", &actor, now)
+        .await
+        .expect("publish v2");
+    id
 }
 
 async fn load_row(app: &axum::Router) -> serde_json::Value {
@@ -212,35 +271,82 @@ async fn load_row(app: &axum::Router) -> serde_json::Value {
         .unwrap_or_else(|| panic!("`{STATION}` absent from the load: {v:#}"))
 }
 
-/// THE MEASURED DEFECT, at the surface. A packet admitted under v1
-/// carries neither projected key, so the station's depth omits it —
-/// and the row now says so beside that depth, which is the whole
-/// point: a count smaller than it should be is invisible unless the
-/// difference is printed next to it.
+/// THE MEASURED DEFECT, repaired at the surface. A packet admitted
+/// under v1 carries no agent projection; its kind's ACTIVE row routes
+/// the step to this station, so it is a member — depth counts it — and
+/// nothing is unreachable. Until 51aef4dd this read depth 0 and
+/// unreachable 1: the omission reported, not repaired.
 #[tokio::test]
-async fn a_drifted_packet_is_reported_beside_the_depth_it_is_missing_from() {
+async fn a_packet_pinned_before_its_block_is_a_member_of_the_station_its_active_row_names() {
     let h = harness();
-    open_packet(&h.app, "pinned-to-v1").await;
-
-    let actor = boss_core::actor::ActorId::human("emp-david");
-    let now = chrono::Utc::now();
-    h.kinds
-        .create_draft(protocol_v2(), &actor, now)
-        .await
-        .expect("draft v2");
-    h.kinds
-        .publish("backlog-item", &actor, now)
-        .await
-        .expect("publish v2");
+    let _ = a_packet_pinned_before_the_block(&h).await;
 
     let row = load_row(&h.app).await;
     assert_eq!(
-        row["depth"], 0,
-        "the drifted packet must not be a member — that is the defect, not the fix: {row:#}"
+        row["depth"], 1,
+        "the pinned packet must be a member — its active row routes it here: {row:#}"
     );
     assert_eq!(
-        row["unreachable"], 1,
-        "the omission must be REPORTED, or the station answers a correct-looking total: {row:#}"
+        row["unreachable"], 0,
+        "a member is not an omission, so the figure must fall to zero: {row:#}"
+    );
+}
+
+/// The queue an agent READS lists it. The load row counting it is not
+/// enough if the door an agent takes work from still cannot see it.
+#[tokio::test]
+async fn the_agent_queue_lists_a_packet_pinned_before_its_block() {
+    let h = harness();
+    let id = a_packet_pinned_before_the_block(&h).await;
+
+    let queue = get_json(&h.app, &format!("/api/stations/{STATION}/queue")).await;
+    assert_eq!(queue["total"], 1, "{queue:#}");
+    assert_eq!(queue["data"][0]["id"], id.as_str(), "{queue:#}");
+}
+
+/// The claim door asks the SAME membership question when a claim names
+/// its station; answered from the packet's copy alone it would refuse
+/// "packet is not at this station" for a packet the queue just listed.
+/// And the resolution answers a question, it writes nothing: the
+/// claimed step still carries no `agent_model` of its own.
+#[tokio::test]
+async fn a_claim_through_the_station_admits_a_packet_pinned_before_its_block() {
+    let h = harness();
+    let id = a_packet_pinned_before_the_block(&h).await;
+    let job = get_json(&h.app, &format!("/api/jobs/{id}")).await;
+    let step_id = job["steps"]
+        .as_array()
+        .and_then(|steps| steps.iter().find(|s| s["spec_slug"] == "build"))
+        .and_then(|s| s["id"].as_str())
+        .unwrap_or_else(|| panic!("a build step on the packet: {job:#}"))
+        .to_string();
+
+    let resp = h
+        .app
+        .clone()
+        .oneshot(
+            Request::post(format!(
+                "/api/jobs/{id}/steps/{step_id}/claim?station={STATION}"
+            ))
+            .header("x-boss-user", user_header("emp-david", "platform-admin"))
+            .body(Body::empty())
+            .expect("request"),
+        )
+        .await
+        .expect("response");
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.expect("body").to_bytes();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let claimed: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert!(
+        claimed["metadata"].get("agent_model").is_none(),
+        "resolving must never write the active row's declaration onto a packet pinned to a \
+         version that made none: {claimed:#}"
     );
 }
 

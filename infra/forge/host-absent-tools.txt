@@ -171,3 +171,16 @@ kubectl
 #     that fails closed) is still refused and still needs
 #     `--probe-anyway`: what makes it safe is its control, which is
 #     program logic, not something a text scan can see.
+
+# A probe that MOVES is refused too (backlog 4bb6797c, measured
+# 2026-09-22): `cd` or `pushd` in command position. The door runs the
+# probe with cwd already the converged checkout of main, so a move is
+# never needed — `git show HEAD:<path>` reads the tree from there, and
+# a relative path resolves there — and the measured move was to
+# /work/boss, the DEV POD's checkout, which this host does not have:
+# two cars, both claims true in the converged tree, both exit 1 with
+# `cd: /work/boss: No such file or directory`, TROUBLED in the shed.
+# Any `cd` rather than a list of wrong paths, because a list would be a
+# second copy of BOSS_PROBE_DIR held by nobody; of 19 open cars with a
+# recorded probe that night, the only two that moved were those two.
+# The rule is boss_jobs::probe::changes_directory.

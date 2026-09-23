@@ -94,7 +94,7 @@ use serde_json::{Value as Json, json};
 use boss_dispatcher::rules::expr::Value;
 use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext};
 
-use super::common::{api_client, get_json, post_json};
+use super::common::{api_client, get_json, post_json, rows_or_refuse};
 use super::spool::{PostFuture, Spool};
 
 /// The cluster scope this comparator understands. The observer stamps
@@ -696,15 +696,7 @@ async fn compare_and_record(
 
     let declared = async {
         let nodes = get_json(client, &format!("{base}/api/estate/nodes"), rule).await?;
-        nodes
-            .get("data")
-            .and_then(Json::as_array)
-            .cloned()
-            .ok_or_else(|| {
-                HandlerError::Downstream(
-                    "GET /api/estate/nodes: response carries no data array".into(),
-                )
-            })
+        rows_or_refuse::<Json>(&nodes, "GET /api/estate/nodes").map_err(HandlerError::Downstream)
     };
 
     let body = if scope == KNOWN_SCOPE {

@@ -9,8 +9,9 @@
 //
 // That car fixed one page and audited no other. These are the three
 // pages the audit named as suspects. Each is measured here rather
-// than reasoned about: a 503 on the read each one makes at mount,
-// then a second of settling, then the count. None of them carries the
+// than reasoned about: a 503 on the read each one makes at mount, a
+// wait until that read has ARRIVED, then a second of settling, then
+// the count. None of them carries the
 // shape today — FleetPage and SubjectsClassesPage load from onMount
 // (which runs once and tracks nothing), and SystemModelLiveView's two
 // $effects read only `selectedKind` and `spec`, neither of which a
@@ -44,17 +45,40 @@ async function failAndCount(page: Page, pattern: RegExp): Promise<() => number> 
 // count is unambiguous.
 const SETTLE_MS = 1_000;
 
+/// Wait until `expected` reads have ARRIVED, then give a loop the
+/// settling window to show itself, then take the exact count.
+///
+/// The window used to start at mount, so it bounded two things at once:
+/// how long a loop gets to climb, and how long the FIRST read may take
+/// to reach the route handler. Only the first is this spec's claim. On
+/// a loaded gate runner the second lost: 'the live system-model view
+/// reads the Workflow registry once' failed with Expected 1, Received 0
+/// for a car whose three files the spec never loads, and went green on
+/// a re-gate of the same content (backlog 28a60028, 2026-09-20). A
+/// count BELOW the claim is a late read, not a fixed page. Asserting a
+/// bound instead (at most one) would have passed that 0 — and every
+/// future 0, including a page that stopped reading at all — so the
+/// exact count stays and the wait is for the condition: the reads
+/// the page owes, under the suite's stated expect budget
+/// (playwright.mocked.config.ts), before the window opens.
+async function settledReads(page: Page, reads: () => number, expected: number): Promise<number> {
+  await expect
+    .poll(reads, { message: `waiting for the ${expected} mount-time read(s) to arrive` })
+    .toBeGreaterThanOrEqual(expected);
+  await page.waitForTimeout(SETTLE_MS);
+  return reads();
+}
+
 test.describe('a failed mount-time read is not retried without bound', () => {
   test('bottlenecks reads the Workflow registry once', async ({ page }) => {
     await installSmokeMocks(page);
     const reads = await failAndCount(page, /\/api\/workflows$/);
 
     await mountPage(page, '/it/operate/bottlenecks');
-    await page.waitForTimeout(SETTLE_MS);
 
     // onMount, once. The page's 10s poll re-reads the fleet view, not
     // the registry, so nothing here should climb.
-    expect(reads()).toBe(1);
+    expect(await settledReads(page, reads, 1)).toBe(1);
   });
 
   test('subjects and classes reads the SubjectKind taxonomy once', async ({ page }) => {
@@ -62,9 +86,8 @@ test.describe('a failed mount-time read is not retried without bound', () => {
     const reads = await failAndCount(page, /\/api\/subject-kinds$/);
 
     await mountPage(page, '/it/registry/subjects');
-    await page.waitForTimeout(SETTLE_MS);
 
-    expect(reads()).toBe(1);
+    expect(await settledReads(page, reads, 1)).toBe(1);
   });
 
   test('the live system-model view reads the Workflow registry once', async ({ page }) => {
@@ -74,12 +97,11 @@ test.describe('a failed mount-time read is not retried without bound', () => {
     // The landing page is the router's catch-all, so an unrouted /ux
     // path is how a mocked mount reaches SystemModelLiveView.
     await mountPage(page, '/ux/not-a-route');
-    await page.waitForTimeout(SETTLE_MS);
 
     // A failed registry read leaves `selectedKind` empty, which is
     // what both of this component's $effects key off — so neither
     // re-runs, and the 1s live poll reads /api/jobs/live, not this.
-    expect(reads()).toBe(1);
+    expect(await settledReads(page, reads, 1)).toBe(1);
   });
 
   test('the live system-model view reads a failing Workflow spec a bounded number of times', async ({
@@ -93,8 +115,7 @@ test.describe('a failed mount-time read is not retried without bound', () => {
     const reads = await failAndCount(page, /\/api\/workflows\/[^/?]+$/);
 
     await mountPage(page, '/ux/not-a-route');
-    await page.waitForTimeout(SETTLE_MS);
 
-    expect(reads()).toBe(2);
+    expect(await settledReads(page, reads, 2)).toBe(2);
   });
 });

@@ -15,8 +15,8 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use boss_observability::aggregator::{Aggregator, Endpoint, VmResult};
-use boss_observability::config::{Config, DemoAgentsConfig};
-use boss_observability::demo_agents;
+use boss_observability::config::Config;
+use boss_observability::demo_agents::{self, Roster};
 use boss_observability::sse::{SseHub, run_nats_forwarder};
 use clap::Parser;
 use serde::Serialize;
@@ -43,7 +43,9 @@ struct Cli {
 struct AppState {
     hub: SseHub,
     aggregator: Arc<Aggregator>,
-    demo_agents: Option<DemoAgentsConfig>,
+    /// The tenant's roster when `[demo_agents]` is set: its presence
+    /// is what switches `/api/snapshot` to the synthetic answer.
+    demo_roster: Option<Arc<Roster>>,
 }
 
 #[tokio::main]
@@ -67,6 +69,21 @@ async fn main() -> Result<()> {
         "boss-observability starting"
     );
 
+    // The roster is the tenant's file (backlog 1c68aebc). A block
+    // naming one that is missing or malformed refuses here, naming the
+    // path, rather than serving an empty "demo" that reads as real;
+    // `boss tenant check` judges the same file with the same loader
+    // before the bundle can ride a train.
+    let demo_roster = match &cfg.demo_agents {
+        Some(demo) => Some(Arc::new(Roster::load(&demo.roster).with_context(|| {
+            format!(
+                "[demo_agents] roster in {} could not be loaded",
+                cli.config.display()
+            )
+        })?)),
+        None => None,
+    };
+
     let hub = SseHub::new();
     let aggregator = Arc::new(Aggregator::new(cfg.vms.clone()));
 
@@ -84,14 +101,19 @@ async fn main() -> Result<()> {
         }
     });
 
-    if let Some(demo) = cfg.demo_agents.clone() {
-        demo_agents::spawn_telemetry_loop(hub.clone(), demo.tick_seconds, cancel_rx.clone());
+    if let (Some(demo), Some(roster)) = (&cfg.demo_agents, &demo_roster) {
+        demo_agents::spawn_telemetry_loop(
+            hub.clone(),
+            roster.as_ref().clone(),
+            demo.tick_seconds,
+            cancel_rx.clone(),
+        );
     }
 
     let state = AppState {
         hub: hub.clone(),
         aggregator: aggregator.clone(),
-        demo_agents: cfg.demo_agents.clone(),
+        demo_roster,
     };
     let app = build_router(state, cfg.static_dir.as_deref());
 
@@ -209,8 +231,8 @@ async fn all_costs(State(s): State<AppState>) -> impl IntoResponse {
 }
 
 async fn snapshot(State(s): State<AppState>) -> impl IntoResponse {
-    if s.demo_agents.is_some() {
-        return axum::Json(demo_agents::snapshot()).into_response();
+    if let Some(roster) = s.demo_roster.as_deref() {
+        return axum::Json(demo_agents::snapshot(roster)).into_response();
     }
     #[derive(Serialize)]
     struct Snapshot {

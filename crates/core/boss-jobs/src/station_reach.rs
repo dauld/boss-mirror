@@ -37,6 +37,15 @@
 //! data — the registry, the packets and the predicate are all already
 //! in the reader's hand — and it would have answered on day one.
 //!
+//! THE AGENT HALF IS NOW REPAIRED, NOT ONLY REPORTED (backlog
+//! 51aef4dd, 2026-09-23). The station read and the claim door resolve
+//! a step's missing agent block against its kind's ACTIVE row before
+//! the predicate reads it ([`crate::agent_spec::resolved`]), so a
+//! packet short only an `agent_` key is a member and is not counted
+//! here. What this still counts is a packet short an AUDIENCE key
+//! (`authority_role`, `station`), which stays as admitted: who does
+//! the work is the contract, how an agent runs it is resourcing.
+//!
 //! WHY A NUMBER AND NOT AN ALARM. Measured across all fifteen live
 //! stations on 2026-09-22 before this was written: fourteen read zero
 //! and one read 57. A surfaced figure is therefore not noise — it is

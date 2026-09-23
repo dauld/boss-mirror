@@ -48,7 +48,7 @@ fi
 
 fail() { echo "FAIL: $*" >&2; echo "--- installer output:" >&2; cat "$tmp/out" >&2; exit 1; }
 
-for u in reap-dead-ci-jobs cluster-deploy-runner disk-floor-sweep forge-converge estate-observe-host cluster-watchdog boss-ops-runner; do
+for u in reap-dead-ci-jobs cluster-deploy-runner disk-floor-sweep forge-converge estate-observe-host cluster-watchdog forge-backup boss-ops-runner; do
     for ext in service timer; do
         [[ -f "$tmp/etc/$u.$ext" ]] || fail "$u.$ext was not installed"
     done
@@ -68,7 +68,7 @@ grep -qx "ExecStart=$repo/infra/ops/ops-runner.sh" "$dropin" \
 [[ -f "$tmp/sor.env" ]] || fail "install.sh did not render the address file (INSTALL_SOR_ENV=$tmp/sor.env)"
 sor_url=$(sed -n 's/^BOSS_JOBS_URL=//p' "$tmp/sor.env")
 [[ -n "$sor_url" ]] || fail "the rendered address file names no BOSS_JOBS_URL: $(cat "$tmp/sor.env")"
-for u in reap-dead-ci-jobs cluster-deploy-runner disk-floor-sweep forge-converge estate-observe-host cluster-watchdog boss-ops-runner; do
+for u in reap-dead-ci-jobs cluster-deploy-runner disk-floor-sweep forge-converge estate-observe-host cluster-watchdog forge-backup boss-ops-runner; do
     grep -qE '^EnvironmentFile=-?/etc/boss/sor.env$' "$tmp/etc/$u.service" \
         || fail "$u.service does not read /etc/boss/sor.env — it would start with no system of record"
     [[ ! -e "$tmp/etc/$u.service.d/jobs-url.conf" ]] \

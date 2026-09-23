@@ -294,6 +294,34 @@ fn err2(status: StatusCode, msg: impl Into<String>) -> Response {
     (status, msg.into()).into_response()
 }
 
+/// A presence refusal, written to the gateway log and then returned
+/// unchanged. Until backlog f3436d99 (2026-09-23) `assert_begin` and
+/// `assert_finish` told only the browser why they refused, so a failed
+/// presence approval could not be diagnosed from the server.
+///
+/// `reason` is what the log carries, and it is built ONLY from fixed
+/// text, an HTTP status, or the error text webauthn-rs gives (its
+/// errors are fixed strings) — never from the refusal's own message,
+/// which can hold a reqwest error naming the URL it failed on, and the
+/// consume URL carries the challenge id. Nothing here logs a challenge
+/// id, a credential id or any credential material; the employee id is
+/// the only identifier.
+fn presence_refused(
+    ceremony: &'static str,
+    employee_id: Option<&str>,
+    reason: &str,
+    (status, msg): ErrResp,
+) -> Response {
+    tracing::warn!(
+        ceremony,
+        employee_id = employee_id.unwrap_or("none"),
+        status = status.as_u16(),
+        reason,
+        "presence ceremony refused"
+    );
+    (status, msg).into_response()
+}
+
 /// The gateway's own service identity: the actor its server-side
 /// calls sign as, and the `owner_id` of what those calls open.
 pub const GATEWAY_ACTOR: &str = "automation:gateway";
@@ -560,8 +588,10 @@ pub async fn assert_begin(
 ) -> Response {
     let (sess, employee_id) = match employee_session(&headers, &state.session_key) {
         Ok(v) => v,
-        Err(r) => return r.into_response(),
+        Err(r) => return presence_refused("assert_begin", None, "session", r),
     };
+    let refused =
+        |reason: &str, r: ErrResp| presence_refused("assert_begin", Some(&employee_id), reason, r);
     // The step's CURRENT content is what the passkey will approve.
     let job_url = format!("{}/api/jobs/{}", state.jobs_base, body.job_id);
     let job: Value = {
@@ -582,22 +612,33 @@ pub async fn assert_begin(
         match resp {
             Ok(r) if r.status().is_success() => match r.json().await {
                 Ok(v) => v,
-                Err(e) => return err2(StatusCode::BAD_GATEWAY, format!("job malformed: {e}")),
+                Err(e) => {
+                    return refused(
+                        "job malformed",
+                        err(StatusCode::BAD_GATEWAY, format!("job malformed: {e}")),
+                    );
+                }
             },
             Ok(r) => {
-                return err2(
-                    StatusCode::BAD_GATEWAY,
-                    format!("job fetch: {}", r.status()),
+                let reason = format!("job fetch: {}", r.status());
+                return refused(&reason, err(StatusCode::BAD_GATEWAY, reason.clone()));
+            }
+            Err(e) => {
+                return refused(
+                    "jobs unreachable",
+                    err(StatusCode::BAD_GATEWAY, format!("jobs unreachable: {e}")),
                 );
             }
-            Err(e) => return err2(StatusCode::BAD_GATEWAY, format!("jobs unreachable: {e}")),
         }
     };
     let Some(step) = job["steps"]
         .as_array()
         .and_then(|s| s.iter().find(|s| s["id"] == body.step_id.as_str()))
     else {
-        return err2(StatusCode::NOT_FOUND, "no such step on that job");
+        return refused(
+            "no such step on that job",
+            err(StatusCode::NOT_FOUND, "no such step on that job"),
+        );
     };
     let title = step["title"].as_str().unwrap_or_default();
     let metadata = step.get("metadata").cloned().unwrap_or(Value::Null);
@@ -608,12 +649,15 @@ pub async fn assert_begin(
 
     let rows = match state.stored_passkeys(&employee_id).await {
         Ok(v) => v,
-        Err(r) => return r.into_response(),
+        Err(r) => return refused("stored passkeys", r),
     };
     if rows.is_empty() {
-        return err2(
-            StatusCode::CONFLICT,
-            "no passkey enrolled — enrol one before approving presence-gated steps",
+        return refused(
+            "no passkey enrolled",
+            err(
+                StatusCode::CONFLICT,
+                "no passkey enrolled — enrol one before approving presence-gated steps",
+            ),
         );
     }
 
@@ -635,7 +679,14 @@ pub async fn assert_begin(
         .send()
         .await;
     if !matches!(&mint, Ok(r) if r.status().is_success()) {
-        return err2(StatusCode::BAD_GATEWAY, "challenge mint failed");
+        let reason = match &mint {
+            Ok(r) => format!("challenge mint: {}", r.status()),
+            Err(_) => "challenge mint: people unreachable".to_string(),
+        };
+        return refused(
+            &reason,
+            err(StatusCode::BAD_GATEWAY, "challenge mint failed"),
+        );
     }
 
     let allow: Vec<Value> = rows
@@ -671,16 +722,21 @@ pub async fn assert_finish(
 ) -> Response {
     let (_sess, employee_id) = match employee_session(&headers, &state.session_key) {
         Ok(v) => v,
-        Err(r) => return r.into_response(),
+        Err(r) => return presence_refused("assert_finish", None, "session", r),
     };
+    let refused =
+        |reason: &str, r: ErrResp| presence_refused("assert_finish", Some(&employee_id), reason, r);
     let row = match consume_challenge(&state, &body.challenge_id).await {
         Ok(v) => v,
-        Err(r) => return r.into_response(),
+        Err(r) => return refused("challenge consume", r),
     };
     if row["flow"] != "presence" || row["employee_id"] != employee_id.as_str() {
-        return err2(
-            StatusCode::FORBIDDEN,
-            "challenge was minted for someone else",
+        return refused(
+            "challenge minted for someone else",
+            err(
+                StatusCode::FORBIDDEN,
+                "challenge was minted for someone else",
+            ),
         );
     }
     let (Some(challenge_b64), Some(step_id), Some(shape_hash), Some(nonce)) = (
@@ -689,19 +745,22 @@ pub async fn assert_finish(
         row["shape_hash"].as_str(),
         row["nonce"].as_str(),
     ) else {
-        return err2(
-            StatusCode::BAD_GATEWAY,
+        return refused(
             "challenge row missing presence binding",
+            err(
+                StatusCode::BAD_GATEWAY,
+                "challenge row missing presence binding",
+            ),
         );
     };
 
     let rows = match state.stored_passkeys(&employee_id).await {
         Ok(v) => v,
-        Err(r) => return r.into_response(),
+        Err(r) => return refused("stored passkeys", r),
     };
     let passkeys = match PasskeyState::passkey_jsons(&rows) {
         Ok(v) => v,
-        Err(r) => return r.into_response(),
+        Err(r) => return refused("stored passkey rows", r),
     };
     // Build the crate's own AuthenticationState through serde — the
     // documented experts-only seam for a server-supplied challenge.
@@ -719,10 +778,16 @@ pub async fn assert_finish(
             }
         })) {
             Ok(v) => v,
+            // The serde error can quote the value it choked on, and
+            // that value is credential material — the log gets the
+            // stage only.
             Err(e) => {
-                return err2(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("authentication state rebuild failed: {e}"),
+                return refused(
+                    "authentication state rebuild failed",
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("authentication state rebuild failed: {e}"),
+                    ),
                 );
             }
         };
@@ -731,7 +796,10 @@ pub async fn assert_finish(
         .finish_passkey_authentication(&body.credential, &auth_state)
     {
         Ok(v) => v,
-        Err(e) => return err2(StatusCode::UNAUTHORIZED, format!("assertion rejected: {e}")),
+        Err(e) => {
+            let reason = format!("assertion rejected: {e}");
+            return refused(&reason, err(StatusCode::UNAUTHORIZED, reason.clone()));
+        }
     };
 
     // Advance the sign counter — clone detection lives in the crate,

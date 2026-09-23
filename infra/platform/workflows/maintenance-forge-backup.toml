@@ -1,0 +1,55 @@
+# forge-backup.service (forge host) — backlog 121831e6.
+#
+# The forge held the only copy of the repository, Forgejo's database
+# (users, PRs, issues, the act_runner registration) and its signing
+# keys, and nothing copied them. This packet is the record of each
+# nightly copy: the run step carries what forge-backup.sh proved
+# (archive, sha256, size, repositories, the database's bytes, kept and
+# pruned, free space) or `refused` naming why, and `offsite` stating
+# plainly that no copy has left the host yet.
+[[workflow]]
+kind = "maintenance-forge-backup"
+label = "Forge backup"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = "Nightly forgejo dump on the forge host - the repositories and Forgejo's database (SQL through Forgejo's own connection, never a copy of the live SQLite file), app.ini and the signing keys; the 35G OCI registry, logs and indexes skipped as regenerable. Verified before it is kept (gzip -t; forgejo-db.sql, app.ini and a repository present; no registry data; a minimum size), refused below the disk floor, kept locally in a bounded count. Local only: the offsite legs need a credential on the forge, and every run records offsite=none."
+metadata = { owner_role = "platform-admin" }
+
+[[workflow.step]]
+title = "scheduled"
+kind = "trigger"
+ready_when = "true"
+title_template = "Timer fired"
+metadata_defaults = { trigger_kind = "periodic", trigger_name = "systemd-timer" }
+
+[[workflow.step]]
+title = "run"
+kind = "task"
+ready_when = "steps.scheduled.done"
+title_template = "Run to completion"
+# The step is the automation's and says so (backlog 4f909642): born
+# assigned to the actor boss-step.sh signs as, so the dispatcher's
+# executes-lane never nominates it to the agent and no role queue
+# lists it.
+audience = { individual = "automation:boss-step" }
+fields = [{ name = "result", field_type = "string", required = true }]
+
+[[workflow.step]]
+title = "completed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result = \"ok\""
+title_template = "Maintenance completed"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "completed" }
+
+# A refused run (below the floor, a dump that died, an archive that
+# could not be proven) records how, from ExecStopPost, and lands here —
+# never open, looking like a run in progress.
+[[workflow.step]]
+title = "failed"
+kind = "outcome"
+ready_when = "steps.run.done AND steps.run.metadata.result != \"ok\""
+title_template = "Maintenance failed"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "failed" }

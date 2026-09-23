@@ -987,8 +987,9 @@ scope_self_test() {
     # load this exact file, so a shape change there reddens the sim.
     # boss-testing since 2026-09-17 (backlog b03f38de):
     # generate_configs_sh.rs runs the config generator against this
-    # manifest and asserts the brewery's id is what turns [demo_agents]
-    # on, so an id change there must run that test too.
+    # manifest and asserts the roster beside it is what turns
+    # [demo_agents] on (backlog 1c68aebc), so a manifest change there
+    # must run that test too.
     _case "a tenant manifest implies the sim that parses it" "boss-brewery-engine boss-sim boss-testing" \
         "examples/brewery/seeds/tenant.toml"
     # A bundle edit beside a boss-jobs edit must name boss-jobs ONCE:

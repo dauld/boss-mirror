@@ -339,7 +339,14 @@
         body: JSON.stringify({ job_id: jobId, step_id: step.id }),
       });
       if (begin.status === 409) throw new Error('No passkey enrolled — add one first.');
-      if (!begin.ok) throw new Error(`presence ceremony unavailable (${begin.status})`);
+      if (!begin.ok) {
+        // The gateway's refusal text names which of its steps refused
+        // (job fetch, stored passkeys, challenge mint); the status alone
+        // does not. The app's own copy of the ceremony says the same
+        // since 2e893e27 (backlog f3436d99).
+        const text = await begin.text().catch(() => '');
+        throw new Error(`presence ceremony unavailable (${begin.status}): ${text}`);
+      }
       const opts = await begin.json();
       const cred = await navigator.credentials.get({
         publicKey: {
@@ -373,7 +380,12 @@
           },
         }),
       });
-      if (!finish.ok) throw new Error(`assertion rejected (${finish.status})`);
+      if (!finish.ok) {
+        // e.g. 410 'challenge already spent or expired — begin again',
+        // or the verifier's own reason on a 401.
+        const text = await finish.text().catch(() => '');
+        throw new Error(`assertion rejected (${finish.status}): ${text}`);
+      }
       return (await finish.json()).ticket;
     }
 

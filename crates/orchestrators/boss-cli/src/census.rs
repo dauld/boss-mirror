@@ -595,11 +595,13 @@ impl Api {
 /// envelope, read as "no stations" and "no open packets" — and the
 /// census printed a clean bill for a board it had never seen. An empty
 /// ARRAY is still honest: a registry may hold nothing.
+///
+/// The shape itself is decided by the one rows helper, `train::rows`
+/// (backlog 7b7e0529); this only names the reading.
 fn rows(body: &Value, what: &str) -> Result<Vec<Value>> {
-    match body.as_array().or_else(|| body.get("data")?.as_array()) {
-        Some(rows) => Ok(rows.clone()),
-        None => bail!("{what} answered no `data` array, so its rows cannot be read as zero"),
-    }
+    crate::train::rows(Some(body.clone())).with_context(|| {
+        format!("{what} answered no `data` array, so its rows cannot be read as zero")
+    })
 }
 
 /// Split one `/api/jobs` row into the Job and its embedded steps.

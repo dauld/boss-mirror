@@ -30,17 +30,22 @@ pub struct Config {
     /// When set, /api/snapshot returns synthetic agent data
     /// instead of fanning out to real VMs, and the SSE channel
     /// emits a periodic stream of plausible telemetry events.
-    /// For the brewery playground (and any deployment that
-    /// hasn't wired up real cybernetics yet) so the /ops surface
-    /// shows what real-agent oversight would look like. Tenants
-    /// running real agents leave this absent and configure `vms`
-    /// instead.
+    /// For a playground tenant that ships a demo roster (its
+    /// `seeds/demo_agents.toml`) so the /ops surface
+    /// shows what real-agent oversight would look like before real
+    /// cybernetics is wired in. Tenants running real agents leave
+    /// this absent and configure `vms` instead.
     #[serde(default)]
     pub demo_agents: Option<DemoAgentsConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DemoAgentsConfig {
+    /// The tenant's demo roster (`demo_agents::Roster`), required.
+    /// The agents a demo shows are tenant content, so they live in
+    /// the tenant's directory rather than in this Tier 1 crate
+    /// (backlog 1c68aebc, 2026-09-23).
+    pub roster: std::path::PathBuf,
     /// Seconds between synthetic SSE telemetry ticks. Defaults to
     /// 8 seconds — fast enough that the operator sees activity,
     /// slow enough not to spam.
@@ -182,10 +187,36 @@ bind = "0.0.0.0:7800"
 nats_url = "nats://localhost:4222"
 
 [demo_agents]
+roster = "/opt/tenant/seeds/demo_agents.toml"
 "#,
         )
         .unwrap();
-        assert_eq!(on.demo_agents.map(|d| d.tick_seconds), Some(8));
+        let demo = on.demo_agents.unwrap();
+        assert_eq!(demo.tick_seconds, 8);
+        assert_eq!(
+            demo.roster,
+            std::path::PathBuf::from("/opt/tenant/seeds/demo_agents.toml")
+        );
+    }
+
+    /// A demo block names the TENANT's roster (backlog 1c68aebc,
+    /// 2026-09-23): the agents it shows are tenant content and no
+    /// longer ship inside this Tier 1 crate, so a block with no roster
+    /// has nothing to show and is refused at parse, naming the key,
+    /// rather than rendering an empty "demo" that reads as a real one.
+    #[test]
+    fn a_demo_block_without_a_roster_is_refused() {
+        let err = toml::from_str::<Config>(
+            r#"
+bind = "0.0.0.0:7800"
+nats_url = "nats://localhost:4222"
+
+[demo_agents]
+tick_seconds = 8
+"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("roster"), "{err}");
     }
 
     #[test]

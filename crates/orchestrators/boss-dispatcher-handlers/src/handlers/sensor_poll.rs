@@ -476,11 +476,7 @@ pub fn alarm_body(sensor: &SensorRow, alarm: &Alarm, owner: &str) -> Json {
 /// the service or the policy scope is right, and the firing naks
 /// loudly instead of terminating.
 pub fn sensors(listing: &Json) -> Result<Vec<SensorRow>, String> {
-    let rows = listing
-        .get("data")
-        .filter(|d| d.is_array())
-        .ok_or_else(|| "GET /api/sensors answered no `data` array".to_string())?;
-    serde_json::from_value(rows.clone()).map_err(|e| format!("sensors not in shape: {e}"))
+    rows_or_refuse(listing, "GET /api/sensors")
 }
 
 /// The readings still owed a packet, as the sensors API answered them.
@@ -492,12 +488,7 @@ pub fn sensors(listing: &Json) -> Result<Vec<SensorRow>, String> {
 /// alive, and the audit-log fact never opens (0767c830). An EMPTY
 /// array stays honest — a sensor may genuinely owe nothing.
 pub fn owed_readings(listing: &Json) -> Result<Vec<Reading>, String> {
-    let rows = listing
-        .get("data")
-        .and_then(Json::as_array)
-        .ok_or_else(|| "the owed-readings read answered no `data` array".to_string())?;
-    serde_json::from_value(Json::Array(rows.clone()))
-        .map_err(|e| format!("readings not in shape: {e}"))
+    rows_or_refuse(listing, "the owed-readings read")
 }
 
 /// One open alarm as the dedup read found it.

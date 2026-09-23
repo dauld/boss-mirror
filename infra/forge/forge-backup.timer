@@ -1,0 +1,17 @@
+# Nightly, half an hour after the cluster's own pg backup (09:10 UTC,
+# boss-backup.yaml), so the two copies of the estate's records are taken
+# within the same hour. Persistent: a night the host was off runs at
+# the next boot instead of being skipped silently. The cadence is
+# declared to the silence sweep (cadence-silence-sweep-daily,
+# maintenance-forge-backup = 1440), and timers-leave-a-packet check 9
+# holds the two numbers equal.
+[Unit]
+Description=BOSS forge backup (nightly, 09:40 UTC)
+
+[Timer]
+OnCalendar=*-*-* 09:40:00 UTC
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

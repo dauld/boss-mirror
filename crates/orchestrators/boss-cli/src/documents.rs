@@ -166,7 +166,9 @@ pub(crate) const OPEN: &str = "{{invariant:";
 pub(crate) const CLOSE: &str = "}}";
 
 /// Every `{{invariant:<name>}}` in `body` replaced by that
-/// invariant's lines, indented four spaces as the brief indents them.
+/// invariant's block (`brief::block`: its lines, then where any value
+/// was read from a file other than its authority), indented four
+/// spaces as the brief indents them.
 ///
 /// A name no invariant carries is REFUSED, naming the names there
 /// are: rendered through, it would hand a builder a literal
@@ -189,7 +191,9 @@ pub(crate) fn expand(body: &str, invariants: &[crate::brief::Invariant]) -> Resu
                 invariants.iter().map(|i| i.name).collect::<Vec<_>>()
             );
         };
-        for line in &inv.lines {
+        // The invariant's whole block, attribution included — the
+        // same lines the invariants section prints (a7469d74).
+        for line in crate::brief::block(inv) {
             out.push_str(&format!("    {line}\n"));
         }
         // The lines each carry their own newline, so the one that
@@ -724,6 +728,63 @@ mod tests {
         assert_eq!(
             expand("nothing to do\n", &invs).expect("expands"),
             "nothing to do\n"
+        );
+    }
+
+    /// A QUOTED VALUE KEEPS ITS SOURCE (backlog a7469d74, 2026-09-22).
+    /// The invariants section prints a reading whose file is not the
+    /// invariant's authority under its lines; `expand` printed only the
+    /// lines, so a builder reading rule 2 got the dev pod's cgroup with
+    /// no file to check it against. A reading out of the authority
+    /// itself adds no line, by the section's own predicate.
+    #[test]
+    fn a_quoted_invariant_names_the_file_a_foreign_value_was_read_from() {
+        use crate::brief::{Grounding, Invariant, Reading};
+        let invs = vec![Invariant {
+            name: "cargo jobs",
+            authority: "infra/dev/pod-build.env".into(),
+            lines: vec!["jobs 6".into(), "cgroup 16".into()],
+            lanes: vec![crate::brief::LANE_CAR],
+            grounding: Grounding::Derived(vec![
+                Reading::read("infra/dev/pod-build.env", "6"),
+                Reading::read("infra/cluster/manifests/boss-dev.yaml", "16"),
+            ]),
+        }];
+        assert_eq!(
+            expand(
+                &format!("before\n{}\nafter\n", quote_of("cargo jobs")),
+                &invs
+            )
+            .expect("expands"),
+            "before\n    jobs 6\n    cgroup 16\n    \
+             (16 read from infra/cluster/manifests/boss-dev.yaml)\nafter\n"
+        );
+    }
+
+    /// ONE RULE READ TWICE, pinned on the live tree: every invariant a
+    /// rules document can quote expands to exactly the block the
+    /// invariants section prints for it, attribution included, so the
+    /// value and its source cannot be separated by which of the two a
+    /// reader happens to read (a7469d74).
+    #[test]
+    fn a_quoted_invariant_expands_to_its_block_in_the_invariants_section() {
+        let invs = crate::brief::invariants(&repo()).expect("the invariants derive");
+        let mut foreign = 0;
+        for inv in &invs {
+            foreign += crate::brief::foreign_sources(inv).len();
+            let block = crate::brief::invariant_section(std::slice::from_ref(inv), inv.lanes[0]);
+            let quoted = expand(&format!("{}\n", quote_of(inv.name)), &invs).expect("expands");
+            assert!(
+                block.ends_with(&quoted),
+                "the {:?} invariant quotes differently from its section block:\n\
+                 {quoted}\n--- vs ---\n{block}",
+                inv.name
+            );
+        }
+        assert!(
+            foreign > 0,
+            "no invariant in this tree reads a value out of a second file, so this pin \
+             checks nothing about attributions"
         );
     }
 

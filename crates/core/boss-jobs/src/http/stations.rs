@@ -33,6 +33,30 @@ pub(super) fn stations_or_503<R: JobsRepository, B: EventBus>(
     })
 }
 
+/// The ACTIVE Workflow row per kind — what a step's agent block
+/// resolves against ([`crate::agent_spec::resolved`]) and what
+/// `station_reach` measures drift from.
+///
+/// Best-effort, and the degraded answer is the pre-51aef4dd one: with
+/// no registry wired, or a read that fails, nothing resolves and each
+/// station answers from the packets' own projections, as it did before
+/// — a queue that still holds everything it held, rather than a
+/// refusal that holds nothing.
+pub(super) async fn active_rows<R: JobsRepository, B: EventBus>(
+    state: &JobsApiState<R, B>,
+) -> BTreeMap<String, crate::registry::WorkflowSpec> {
+    match &state.kind_registry {
+        Some(reg) => reg
+            .list_active(None)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| (row.kind.clone(), row))
+            .collect(),
+        None => BTreeMap::new(),
+    }
+}
+
 fn station_err_response(err: StationError) -> Response {
     match err {
         StationError::NotFound(msg) => (StatusCode::NOT_FOUND, msg).into_response(),
@@ -259,30 +283,21 @@ pub(super) async fn stations_load<R: JobsRepository + 'static, B: EventBus + 'st
         Ok(r) => r,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
+    // The ACTIVE protocol per kind, read ONCE — the second half of the
+    // omission question `station_reach` answers, and the row each
+    // packet's agent block resolves against (backlog 51aef4dd), so the
+    // depth here and the queue an agent reads count the same members.
+    let active = active_rows(&state).await;
+
     // Fetched ONCE and shared. Every constraint station matches on a
     // step, so per-station fetching would re-read the same rows 55
     // times.
     let mut packets = Vec::with_capacity(jobs.len());
     for job in jobs {
         let steps = state.jobs.list_steps(&job.id).await.unwrap_or_default();
+        let steps = crate::agent_spec::resolved_steps(&steps, active.get(&job.kind));
         packets.push((job, steps));
     }
-
-    // The ACTIVE protocol per kind, read ONCE beside the packets — the
-    // second half of the omission question `station_reach` answers.
-    // Best-effort: a deployment with no Workflow registry wired, or a
-    // registry read that fails, reports no omission rather than
-    // refusing the whole load, because the depths above are still true.
-    let active: BTreeMap<String, crate::registry::WorkflowSpec> = match &state.kind_registry {
-        Some(reg) => reg
-            .list_active(None)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|row| (row.kind.clone(), row))
-            .collect(),
-        None => BTreeMap::new(),
-    };
 
     let today = boss_clock_client::now_from(&state.clock).await.date_naive();
     let mut rows: Vec<serde_json::Value> = Vec::with_capacity(stations.len());
@@ -521,17 +536,39 @@ pub(super) async fn station_queue<R: JobsRepository + 'static, B: EventBus + 'st
     // surface without them can only render a list.
     let needs_steps =
         spec.predicate.needs_steps() || spec.lens.as_ref().is_some_and(|l| l.with_steps);
+    // A step clause may read the agent block, which a packet admitted
+    // before its kind declared one does not carry: resolve it against
+    // the ACTIVE row before the predicate reads it (backlog 51aef4dd —
+    // 47 page-audit packets sat three days absent from the agent
+    // station). One registry read per queue, only when steps are read.
+    let active = if needs_steps {
+        active_rows(&state).await
+    } else {
+        BTreeMap::new()
+    };
     let mut packets = Vec::with_capacity(jobs.len());
+    // The steps AS RECORDED, for a lens that draws them: the resolution
+    // decides membership, it is never shown as what the packet holds.
+    let mut recorded: BTreeMap<String, Vec<boss_core::job::Step>> = BTreeMap::new();
     for job in jobs {
         let steps = if needs_steps {
-            state.jobs.list_steps(&job.id).await.unwrap_or_default()
+            let steps = state.jobs.list_steps(&job.id).await.unwrap_or_default();
+            let resolved = crate::agent_spec::resolved_steps(&steps, active.get(&job.kind));
+            recorded.insert(job.id.to_string(), steps);
+            resolved
         } else {
             Vec::new()
         };
         packets.push((job, steps));
     }
 
-    Json(evaluate_station(&spec, packets, today)).into_response()
+    let mut queue = evaluate_station(&spec, packets, today);
+    for (id, steps) in queue.steps.iter_mut() {
+        if let Some(as_recorded) = recorded.remove(id) {
+            *steps = as_recorded;
+        }
+    }
+    Json(queue).into_response()
 }
 
 // ---------------------------------------------------------------------------
