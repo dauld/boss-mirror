@@ -22,11 +22,13 @@
   import type { Asset, Job, Account } from './types';
   import type { Invoice } from '../finance/types';
   import { fetchPaged, isCapped, type Paged } from '../data/paginated';
+  import { fetchAccountsPage } from './api';
   import { moduleEnabled } from '@boss/web-kit/session/manifest.svelte';
 
   type Tier = Account['tier'] | 'all';
 
   let accounts = $state<Account[]>([]);
+  let accountsPage = $state<Paged<Account> | null>(null);
   let devicesPage = $state<Paged<Asset> | null>(null);
   let jobsPage = $state<Paged<Job> | null>(null);
   let loading = $state(true);
@@ -63,8 +65,11 @@
     (async () => {
       try {
         const includeJobs = supportOn;
-        const [pResp, dPaged, jPaged, iPaged] = await Promise.all([
-          fetch('/api/people/accounts'),
+        const [pPaged, dPaged, jPaged, iPaged] = await Promise.all([
+          // The directory itself is enveloped since backlog 2d1d298e
+          // (2026-09-23) — it was an unbounded bare array, so this list
+          // could not say when it was incomplete.
+          fetchAccountsPage(),
           // `/api/assets` — `/api/assets/systems` was the fleet-era
           // path; it has no route and fell through to
           // `/api/assets/{asset_id}` → 404, so this list rendered
@@ -78,10 +83,10 @@
           // truncation if a tenant blows past it.
           fetchPaged<Invoice>('/api/commerce/invoices?limit=10000'),
         ]);
-        if (!pResp.ok) throw new Error(`accounts HTTP ${pResp.status}`);
-        const pBody = await pResp.json();
+        if (pPaged.kind === 'failed') throw new Error(pPaged.error);
         if (!cancelled) {
-          accounts = Array.isArray(pBody) ? pBody : (pBody.data ?? []);
+          accountsPage = pPaged.page;
+          accounts = [...pPaged.page.data];
           // Device/ticket/AR columns are secondary joins — a failed
           // side-load degrades those columns, it does not fail the
           // account list itself.
@@ -187,6 +192,14 @@
     motif="tap"
   />
 
+  {#if isCapped(accountsPage)}
+    <OverflowBanner
+      showing={accounts.length}
+      total={accountsPage!.total}
+      noun="accounts"
+      hint="The list and its filters cover only the accounts loaded."
+    />
+  {/if}
   {#if isCapped(devicesPage)}
     <OverflowBanner
       showing={devices.length}

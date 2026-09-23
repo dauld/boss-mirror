@@ -105,6 +105,7 @@ impl Fixture {
                  d=\"{log}/$n\"; mkdir -p \"$d\"\n\
                  for a in \"$@\"; do printf '%s\\0' \"$a\"; done > \"$d/argv\"\n\
                  [ -n \"$3\" ] && cp \"$3\" \"$d/body\"\n\
+                 printf '%s' \"${{BOSS_DOOR_FRESHNESS:-}}\" > \"$d/freshness\"\n\
                  {exit_early}\n\
                  case \"$1\" in\n\
                    GET) printf '%s' '{{\"id\":\"{SESSION}\",\"kind\":\"work-session\",\"steps\":[{{\"id\":\"st-opened\",\"spec_slug\":\"opened\",\"status\":\"completed\"}},{{\"id\":\"st-active\",\"spec_slug\":\"active\",\"status\":\"ready\",\"metadata\":{{\"authority_role\":\"platform-admin\"}}}}]}}' ;;\n\
@@ -152,6 +153,42 @@ impl Fixture {
         .unwrap_or_default()
     }
 
+    /// What `BOSS_DOOR_FRESHNESS` held for the n-th `boss-api` call.
+    fn api_freshness(&self, n: usize) -> String {
+        std::fs::read_to_string(
+            self.root
+                .join("api-calls")
+                .join(n.to_string())
+                .join("freshness"),
+        )
+        .unwrap_or_default()
+    }
+
+    /// Put the stub `boss-api` where the pod's real one lives: behind
+    /// a symlink into a checkout one commit behind an `origin/main`
+    /// that changed it — so `door_is_stale` calls it stale, as it did
+    /// the pod's copy for most of 2026-09-19 (backlog 0b36dd65).
+    fn make_boss_api_stale(&self) {
+        let checkout = self.root.join("checkout");
+        boss_testing::create_dir(&checkout);
+        let door = checkout.join("boss-api");
+        std::fs::rename(self.bin.join("boss-api"), &door).expect("move the stub");
+        git(&checkout, &["init", "-q", "-b", "main"]);
+        git(&checkout, &["add", "-A"]);
+        git(&checkout, &["commit", "-qm", "the door"]);
+        let old = git(&checkout, &["rev-parse", "HEAD"]);
+        let body = std::fs::read_to_string(&door).expect("read the stub");
+        write_exec(&door, &format!("{body}# changed on origin/main\n"));
+        git(&checkout, &["commit", "-qam", "the door, changed"]);
+        let main = git(&checkout, &["rev-parse", "HEAD"]);
+        git(
+            &checkout,
+            &["update-ref", "refs/remotes/origin/main", &main],
+        );
+        git(&checkout, &["reset", "-q", "--hard", &old]);
+        std::os::unix::fs::symlink(&door, self.bin.join("boss-api")).expect("symlink the door");
+    }
+
     /// Run one hook with `payload` on stdin and the stub bin dir on
     /// PATH (`with_bin`), or a PATH with no `boss` at all.
     fn run(&self, hook: &str, payload: &str, with_bin: bool) -> (i32, String, String) {
@@ -183,6 +220,22 @@ impl Fixture {
             String::from_utf8_lossy(&out.stderr).into_owned(),
         )
     }
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(["-c", "user.email=t@test", "-c", "user.name=test"])
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+    assert!(
+        out.status.success(),
+        "git {args:?} in {}: {}",
+        dir.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 fn start_payload(source: &str) -> String {
@@ -643,6 +696,60 @@ fn session_end_completes_active_as_clean_through_boss_api() {
         !f.state.join("s-1").exists(),
         "the session's state is cleared"
     );
+}
+
+/// A session ending while the pod's `boss-api` is a stale copy still
+/// ends clean — and says it wrote past a stale door, on a line of its
+/// own (backlog 584dc9da). Since 0b36dd65 a stale door REFUSES a write
+/// with exit 78, and the pod's checkout was behind for most of
+/// 2026-09-19, so without the override most sessions would fall to
+/// the clock at the one moment nobody reads the journal. The distinct
+/// line keeps the override countable: if closing a session past a
+/// stale door is ever the wrong call, how often it happened is in the
+/// journal rather than re-derived.
+#[test]
+fn session_end_writes_past_a_stale_door_and_says_so() {
+    let f = Fixture::new("end-stale");
+    f.stub_boss(false);
+    f.make_boss_api_stale();
+    std::fs::create_dir_all(f.state.join("s-1")).unwrap();
+    std::fs::write(f.state.join("s-1").join("packet"), format!("{SESSION}\n")).unwrap();
+    let payload = r#"{"session_id":"s-1","cwd":"/work/boss","hook_event_name":"SessionEnd","reason":"logout"}"#;
+    let (code, out, err) = f.run("session-end.sh", payload, true);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out, "");
+    let calls = f.calls("api-calls");
+    assert!(
+        calls.iter().any(|(a, _)| a[0] == "PUT"),
+        "the step is still completed: {calls:?}"
+    );
+    for (n, (argv, _)) in calls.iter().enumerate() {
+        assert_eq!(
+            f.api_freshness(n),
+            "off",
+            "boss-api {argv:?} ran without the override, so a stale door refuses it"
+        );
+    }
+    assert!(
+        err.contains("past a stale door"),
+        "the write past a stale door is reported on its own line: {err}"
+    );
+    assert!(err.contains("ended clean"), "{err}");
+}
+
+/// A fresh door ends the session without the stale-door line — the
+/// line counts stale doors, not session ends.
+#[test]
+fn session_end_on_a_fresh_door_says_nothing_about_freshness() {
+    let f = Fixture::new("end-fresh");
+    f.stub_boss(false);
+    std::fs::create_dir_all(f.state.join("s-1")).unwrap();
+    std::fs::write(f.state.join("s-1").join("packet"), format!("{SESSION}\n")).unwrap();
+    let payload = r#"{"session_id":"s-1","cwd":"/work/boss","hook_event_name":"SessionEnd","reason":"logout"}"#;
+    let (code, _, err) = f.run("session-end.sh", payload, true);
+    assert_eq!(code, 0, "{err}");
+    assert!(!err.contains("stale door"), "{err}");
+    assert!(err.contains("ended clean"), "{err}");
 }
 
 /// Every hook exits 0 with a failing `boss`, with no `boss` on PATH,

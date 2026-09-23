@@ -728,6 +728,9 @@ impl JobsRepository for InMemoryJobs {
             let Some(existing) = state.steps.get_mut(&key) else {
                 return Err(JobsError::StepNotFound(*step_id));
             };
+            // Exact spelling only: no alias admission here, unlike the
+            // Pg adapter — the port doc on `claim_step_at` states the
+            // gap (backlog 28dcc735).
             let held_by_actor = existing.assignee_id.as_deref() == Some(actor);
             let claimable = existing.status == StepStatus::Ready
                 && (existing.assignee_id.is_none() || held_by_actor);
@@ -737,6 +740,13 @@ impl JobsRepository for InMemoryJobs {
                     holder: existing.assignee_id.clone(),
                     status: format!("{:?}", existing.status).to_lowercase(),
                 });
+            }
+            // A new holder does not inherit the previous run's edge
+            // (9562f6df). No alias table here, so the holder is `actor`
+            // exactly — the Pg adapter admits its aliases too.
+            if crate::agent_runs::claim_changes_holder(existing.assignee_id.as_deref(), actor, &[])
+            {
+                existing.metadata = crate::agent_runs::without_edge(&existing.metadata);
             }
             existing.assignee_id = Some(actor.to_string());
             existing.status = StepStatus::Active;
@@ -1945,5 +1955,71 @@ mod tests {
         let (rows, _) = repo.list_jobs(&only_open, 100, 0).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, open.id);
+    }
+
+    /// THE IN-MEMORY CLAIM HAS NO ALIAS NOTION, AND SAYS SO (backlog
+    /// 28dcc735). The Pg claim admits a holder spelled by any alias of
+    /// the claimant (`actor_aliases`, backlog d7fef617); this adapter
+    /// has no alias source and compares spellings exactly. Giving it
+    /// one would mint a second identity registry to keep in step with
+    /// the table, so the port doc states the rule as adapter-scoped
+    /// instead, and this test pins the gap the doc names: the day this
+    /// adapter learns aliases, this fails and the port doc changes
+    /// with it.
+    #[tokio::test]
+    async fn an_aliased_holder_is_refused_in_memory_because_it_has_no_alias_source() {
+        let repo = InMemoryJobs::default();
+        let job = make_job("backlog-item");
+        repo.create_job(&job).await.unwrap();
+        let mut step =
+            Step::new(job.id, "task", "Build it", 0).with_assignee("claude@algedonic.dev");
+        step.status = StepStatus::Ready;
+        repo.add_step(&step).await.unwrap();
+
+        let refused = repo
+            .claim_step_at(&step.id, "agent-claude", Utc::now(), &[])
+            .await;
+        match refused {
+            Err(JobsError::ClaimConflict { holder, status }) => {
+                assert_eq!(holder.as_deref(), Some("claude@algedonic.dev"));
+                assert_eq!(status, "ready");
+            }
+            other => panic!("the in-memory claim must refuse an aliased holder, got {other:?}"),
+        }
+    }
+
+    /// The port doc is the contract a THIRD adapter is written against,
+    /// so the alias rule the Pg adapter enforces must be in it, scoped
+    /// to that adapter, with both pins named (backlog 28dcc735: until
+    /// then it described neither adapter fully). `include_str!` of the
+    /// Pg test makes a renamed or deleted pin a compile error here
+    /// rather than a dangling name in prose.
+    #[test]
+    fn the_port_doc_states_the_alias_rule_and_names_both_pins() {
+        const PORT: &str = include_str!("port.rs");
+        const PG_PIN: &str = include_str!("../tests/step_claim_admits_an_aliased_holder_pg.rs");
+        let end = PORT
+            .find("    async fn claim_step_at(")
+            .expect("the port declares claim_step_at");
+        let doc: Vec<&str> = PORT[..end]
+            .lines()
+            .rev()
+            .take_while(|l| l.trim_start().starts_with("///"))
+            .collect();
+        let doc = doc.into_iter().rev().collect::<Vec<_>>().join("\n");
+        for needle in [
+            "actor_aliases",
+            "step_claim_admits_an_aliased_holder_pg",
+            "an_aliased_holder_is_refused_in_memory_because_it_has_no_alias_source",
+        ] {
+            assert!(
+                doc.contains(needle),
+                "the claim_step_at port doc must name {needle}; it reads:\n{doc}"
+            );
+        }
+        assert!(
+            PG_PIN.contains("fn a_claim_as_the_registered_id_takes_a_step_held_by_its_alias"),
+            "the Pg pin the port doc names must still hold the admission test"
+        );
     }
 }

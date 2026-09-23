@@ -1374,6 +1374,17 @@ impl JobsRepository for PgJobs {
         // Directional on purpose — an alias claiming a step the
         // registered id holds is not `me`, because nothing signs as
         // the alias any more.
+        //
+        // AND A NEW HOLDER DOES NOT INHERIT THE PREVIOUS RUN'S EDGE
+        // (backlog 9562f6df). When the stored holder is not `me` —
+        // which the WHERE below admits only as NULL — the claim hands
+        // the step to a different executor, so the `agent_run` edge
+        // ($4) the last run left is dropped in the same statement. The
+        // SET reads the OLD `assignee_id`, and a holder in `me` (the
+        // claimant, or its alias being respelled) keeps the edge: a
+        // re-claim is idempotent. Same rule as
+        // `agent_runs::claim_changes_holder`, which the route uses for
+        // the event it records.
         let row = sqlx::query(
             r#"
             WITH me AS (
@@ -1381,7 +1392,15 @@ impl JobsRepository for PgJobs {
                 UNION
                 SELECT alias FROM actor_aliases WHERE actor_id = $2
             )
-            UPDATE steps SET assignee_id = $2, status = 'active', updated_at = $3
+            UPDATE steps SET
+                assignee_id = $2,
+                status = 'active',
+                updated_at = $3,
+                metadata = CASE
+                    WHEN assignee_id IS NULL OR assignee_id NOT IN (SELECT id FROM me)
+                    THEN metadata - $4::text
+                    ELSE metadata
+                END
             WHERE id = $1
               AND (
                     (status = 'ready' AND (assignee_id IS NULL OR assignee_id IN (SELECT id FROM me)))
@@ -1393,6 +1412,7 @@ impl JobsRepository for PgJobs {
         .bind(*step_id.inner().as_uuid())
         .bind(actor)
         .bind(now)
+        .bind(crate::agent_runs::EDGE_KEY)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| JobsError::Storage(e.to_string()))?;

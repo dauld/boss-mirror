@@ -276,9 +276,19 @@ spec:
             # and a certificate the edge issues per session is the
             # whole point of an Access SSH door. One capability, in
             # exchange for retiring a key that lived forever.
+            #
+            # AUDIT_WRITE because the swap was tried only with ssh -T.
+            # Every INTERACTIVE login authenticated, allocated a pty,
+            # and died 0.1s later: Debian's sshd records a pty login to
+            # the kernel audit subsystem and ends the session when that
+            # write is refused ("linux_audit_write_entry failed:
+            # Operation not permitted"). Reproduced 2026-09-23 against a
+            # debug sshd in the live pod; ssh -T allocates no pty, so it
+            # was the one login that worked. Baseline Pod Security
+            # allows it, like the other three.
             capabilities:
               drop: ["ALL"]
-              add: ["SETGID", "SETUID", "SYS_CHROOT"]
+              add: ["SETGID", "SETUID", "SYS_CHROOT", "AUDIT_WRITE"]
           ports:
             - {name: ssh, containerPort: 22}
           # The ssh door + session env, declared. Everything in here
@@ -448,8 +458,8 @@ spec:
                     # session an acceptable credential - the reason this
                     # door left Dropbear, which cannot verify a
                     # certificate against a CA at all. The public key is
-                    # David's root ceremony (read it from the Cloudflare
-                    # dashboard into the Secret the volumes below name);
+                    # David's root ceremony (copy it from the dns
+                    # observation into the Secret the volumes below name);
                     # until it is there the file is absent, and naming
                     # an absent file would leave the door authorising by
                     # the mounted key alone with nothing saying why. So
@@ -785,14 +795,17 @@ spec:
         # certificate good for minutes instead of an operator loading
         # a key that lives forever.
         #
-        # THE ROOT CEREMONY, David's, once per application: read the
-        # CA's public key off the Cloudflare dashboard (Access → the
-        # dev.algedonic.dev application → SSH → the public key) and
+        # THE ROOT CEREMONY, David's, once per application: copy the
+        # CA's public key from the dns observation packet, which
+        # records it as `ssh_ca` (access.toml short_lived_ca = true
+        # makes dns.observe generate it through the API; the dashboard
+        # offers only the account-wide Infrastructure CA, which never
+        # signs for cloudflared access ssh — incident 55d001b0), and
         # load it here. Public key material, like the authorized_keys
         # Secret above, so any operator can carry it - but the tree
         # never holds the value:
         #   kubectl create secret generic boss-dev-access-ssh-ca \
-        #     -n boss-dev --from-file=ca.pub=<the dashboard's key>
+        #     -n boss-dev --from-file=ca.pub=<the observation's ssh_ca key>
         # `optional: true`, the posture every Secret on this pod takes:
         # an absent Secret is a closed door with a reason in
         # postStart.log, never a pod stuck in ContainerCreating.

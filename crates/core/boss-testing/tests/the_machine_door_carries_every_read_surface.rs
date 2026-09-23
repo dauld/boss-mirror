@@ -275,6 +275,29 @@ fn the_jobs_api_is_still_on_the_door() {
     );
 }
 
+/// A PORT ON THE DOOR IS A LISTENER ON THE POD. The Service can carry
+/// a port whose process listens only on loopback, and then the door
+/// refuses it while every pin above stays green: measured 2026-09-23,
+/// 10.20.0.34:7250 refused with the policy row present, because
+/// boss-policy-api binds 127.0.0.1 unless `BOSS_POLICY_BIND_HOST` says
+/// otherwise and nothing said so (car 11eea434's probe, a day not-yet).
+/// The policy API is the one service on the door whose bind is not set
+/// by generate-configs.sh, so it is widened in the pod's env.
+#[test]
+fn the_policy_api_listens_where_the_door_sends_it() {
+    assert!(
+        manifest_ports().contains_key("policy"),
+        "{MANIFEST} no longer carries policy; delete this test with it"
+    );
+    let pod = read("infra/cluster/manifests/boss.yaml");
+    assert!(
+        pod.lines()
+            .any(|l| l.trim() == r#"- {name: BOSS_POLICY_BIND_HOST, value: "0.0.0.0"}"#),
+        "infra/cluster/manifests/boss.yaml must set BOSS_POLICY_BIND_HOST to 0.0.0.0: the door \
+         carries policy, and boss-policy-api binds 127.0.0.1 without it"
+    );
+}
+
 /// ONE ROUTE TABLE, EVERY DOOR. The forge's two probe readers and the
 /// pod's `boss-api` all source the route file from beside themselves,
 /// and none carries a `case` of its own: the prefix rules live in one

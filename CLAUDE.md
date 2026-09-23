@@ -917,11 +917,16 @@ a door that stops being true is a defect worth a car.
   rule", caught only because bash printed "why: command not found"
   (backlog 2376b89e). **SINGLE-quote every prose value** — the backtick
   then arrives intact — or pass the text through the flag's `-file`
-  twin (`--evidence-file`, `--change-file`, `--markdown-file`), where
-  no word expansion happens at all. **No verb can refuse this for
-  you**: the substitution happens before the process starts, so a
-  literal-backtick check would refuse the single-quoted spelling that
-  works and pass the double-quoted one that does not. The reasoning is
+  twin (`--evidence-file`, `--change-file`, `--markdown-file`,
+  `--verified-file`, `--method-file`, `--summary-file`, `--title-file`),
+  where no word expansion happens at all. A park's prose is ONE object,
+  so it has ONE file rather than six twins: `boss gate --park-file
+  park.toml` carries `summary`, `excludes`, `test`, `verified`, `probe`,
+  `expect` and `proof_event` as TOML literal strings (backlog
+  6f1e9b99). **No verb can refuse this for you**: the substitution
+  happens before the process starts, so a literal-backtick check would
+  refuse the single-quoted spelling that works and pass the
+  double-quoted one that does not. The reasoning is
   in `crates/orchestrators/boss-cli/src/prose.rs`, pinned by a test.
 
 - **The train's gate is the assembled tree's test — it belongs in the

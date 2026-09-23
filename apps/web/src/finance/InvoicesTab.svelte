@@ -17,6 +17,7 @@
     type PaymentMethod,
   } from './types';
   import type { Account } from '../accounts/types';
+  import { fetchAccountsPage } from '../accounts/api';
   import { formatMoney } from '@boss/web-kit/ui/money';
 
   type Props = {
@@ -43,12 +44,8 @@
     let cancelled = false;
     (async () => {
       try {
-        const r = await fetch('/api/people/accounts');
-        if (!r.ok) return;
-        const body = await r.json();
-        if (!cancelled) {
-          accounts = Array.isArray(body) ? body : (body.data ?? []);
-        }
+        const r = await fetchAccountsPage();
+        if (r.kind === 'ready' && !cancelled) accounts = [...r.page.data];
       } catch {
         // Ignore — invoices still render without friendly account names.
       }

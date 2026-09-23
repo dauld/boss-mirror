@@ -119,8 +119,8 @@ export function devDoorSteps(host: string = DEV_DOOR_HOST): readonly DoorStep[] 
     },
     {
       what: 'Teach ssh the route, once per machine',
-      command: `cloudflared access ssh-config --hostname ${host} --short-lived-cert >> ~/.ssh/config`,
-      why: `it appends a ProxyCommand stanza for ${host}; ssh then reaches it like any other host.`,
+      command: `grep -qsF 'Match host ${host} ' ~/.ssh/config || cloudflared access ssh-config --hostname ${host} --short-lived-cert | sed '/^Add to your/d' >> ~/.ssh/config`,
+      why: `it appends a ProxyCommand stanza for ${host}; ssh then reaches it like any other host. The sed drops cloudflared's "Add to your …/.ssh/config:" banner, which ssh cannot parse, and the grep makes a second run a no-op.`,
     },
     {
       what: 'Open the workspace',

@@ -73,10 +73,12 @@
 #     observed, never assumed: a confirm that did not land `current`
 #     on origin/main is still a refusal);
 # 75 — not yet: the deploy runner builds the image a few minutes after
-#     each train and it is not in the registry. The refusal stands and
-#     says how long ago origin/main landed (its committer epoch against
-#     now — integers, never ISO strings) so the caller waits rather
-#     than rebuilds;
+#     each train and it is not in the registry. The shim WAITS for it —
+#     re-runs the leg on a poll, bounded, one line per attempt (backlog
+#     f0bb99c1, the block at the install below) — and at the bound the
+#     refusal stands and says how long ago origin/main landed (its
+#     committer epoch against now — integers, never ISO strings) so the
+#     caller looks at the late image rather than rebuilds;
 # anything else — the installer refused (registry dark, digest
 #     mismatch): its complete output rides the refusal, the only copy.
 # Reads keep their warning and install nothing; `--built` asked for
@@ -98,6 +100,8 @@
 #   BOSS_SHIM_TARGET_ROOT=/some/dir   the build's root (/scratch)
 #   BOSS_SHIM_IMAGE_STORE=/some/dir   the image store (/work/tools/image-cli)
 #   BOSS_SHIM_INSTALLER=/some/exe     the install leg (dev-scratch-reclaim.sh --cli)
+#   BOSS_SHIM_CLI_WAIT=<seconds>      the longest a write waits for the image (900; 0 = refuse at once)
+#   BOSS_SHIM_CLI_POLL=<seconds>      how often it re-runs the leg meanwhile (30)
 #   BOSS_SHIM_VERBOSE=1               say which candidate ran, and its sha
 #
 # The system of record has ONE spelling, in `sor-url` beside this
@@ -237,20 +241,64 @@ still="Reads (orient, brief, receipt, …) still run under a warning."
 
 # A write, and the caller did not ask for the build: run the install
 # leg and read its status (the block above says why).
+#
+# AND WAIT AT THE DOOR WHILE IT SAYS NOT YET (backlog f0bb99c1,
+# 2026-09-23). The not-yet refusal was correct and had no verb behind
+# it, so three people hand-rolled the same wait in two days: a builder
+# slept seven minutes and retried, the operator wrote an until-loop on
+# the store's `current`, a triager wrapped three calls in a 40-attempt
+# poll. The condition is local and the action is to wait — mechanical,
+# so the machine's. While the leg answers 75 the shim re-runs it every
+# BOSS_SHIM_CLI_POLL seconds (30), one line per attempt naming the sha
+# it waits for and when it gives up, for at most BOSS_SHIM_CLI_WAIT
+# seconds (900; 0 refuses at once, the old behaviour). The bound is a
+# measurement, not a hope: on 2026-09-23 the pod's store shows the image
+# for a train installed 3 and 8 minutes after its merge, so fifteen
+# covers the deploy runner with room — and a wait past it is a late
+# image to look at, not a wait to extend, so it ends in the same loud
+# refusal, saying how long it waited. A value that is not a whole
+# number is refused rather than guessed (a poll of 0 would spin).
+wait_s="${BOSS_SHIM_CLI_WAIT:-900}"
+poll_s="${BOSS_SHIM_CLI_POLL:-30}"
 if [ "$prefer" != build ] && [ -n "$main" ]; then
+  case "$wait_s" in
+    ''|*[!0-9]*) echo "boss: BOSS_SHIM_CLI_WAIT='$wait_s' is not a whole number of seconds — the longest this shim waits for the tree's CLI (unset: 900; 0: refuse at once)" >&2; exit 64 ;;
+  esac
+  case "$poll_s" in
+    ''|*[!0-9]*|0) echo "boss: BOSS_SHIM_CLI_POLL='$poll_s' is not a whole number of seconds above 0 — how often this shim re-runs the install leg while it waits (unset: 30)" >&2; exit 64 ;;
+  esac
+  if [ $((wait_s % 60)) -eq 0 ]; then bound="$((wait_s / 60)) min"; else bound="${wait_s}s"; fi
+  landed_age() {
+    local landed
+    landed="$(git -C "$here" log -1 --format=%ct "$main" 2>/dev/null || true)"
+    case "$landed" in
+      ''|*[!0-9]*) echo "origin/main ${main:0:8} landed at a time git could not read" ;;
+      *) echo "origin/main ${main:0:8} landed $(( ($(date +%s) - landed) / 60 )) min ago" ;;
+    esac
+  }
   echo "boss: $why — installing the tree's CLI at ${main:0:8} from the cluster image ($install) before running ${1}" >&2
-  log="$(mktemp "${TMPDIR:-/tmp}/boss-shim-install.XXXXXX")"
-  rc=0
   # The link follows the store: <tools>/image-cli -> <tools>/bin/boss-image,
   # the leg's own default for the pod's paths — so a scratch store never
   # relinks the pod's boss-image (a rehearsal did, 2026-09-19).
   link="$(dirname "$store")/bin/boss-image"
-  if [ -n "${BOSS_SHIM_INSTALLER:-}" ]; then
-    BOSS_CLI_STORE="$store" BOSS_CLI_LINK="$link" "$BOSS_SHIM_INSTALLER" >"$log" 2>&1 || rc=$?
-  else
-    REPO_DIR="${REPO_DIR:-$repo}" BOSS_CLI_STORE="$store" BOSS_CLI_LINK="$link" \
-      bash "$repo/infra/cluster/dev-scratch-reclaim.sh" --cli >"$log" 2>&1 || rc=$?
-  fi
+  started="$(date +%s)"
+  while :; do
+    log="$(mktemp "${TMPDIR:-/tmp}/boss-shim-install.XXXXXX")"
+    rc=0
+    if [ -n "${BOSS_SHIM_INSTALLER:-}" ]; then
+      BOSS_CLI_STORE="$store" BOSS_CLI_LINK="$link" "$BOSS_SHIM_INSTALLER" >"$log" 2>&1 || rc=$?
+    else
+      REPO_DIR="${REPO_DIR:-$repo}" BOSS_CLI_STORE="$store" BOSS_CLI_LINK="$link" \
+        bash "$repo/infra/cluster/dev-scratch-reclaim.sh" --cli >"$log" 2>&1 || rc=$?
+    fi
+    [ "$rc" -eq 75 ] || break
+    now="$(date +%s)"
+    [ $((now + poll_s - started)) -le "$wait_s" ] || break
+    rm -f "$log"
+    echo "boss: waiting — the image for ${main:0:8} is not in the registry yet ($(landed_age); the deploy runner builds it a few minutes after each train). Retrying in ${poll_s}s, then running ${1}; gives up after $bound, $((now - started))s waited so far (BOSS_SHIM_CLI_WAIT=0 refuses at once)." >&2
+    sleep "$poll_s"
+  done
+  waited=$(( $(date +%s) - started ))
   case "$rc" in
     0)
       rm -f "$log"
@@ -263,12 +311,11 @@ if [ "$prefer" != build ] && [ -n "$main" ]; then
       exit 78 ;;
     75)
       rm -f "$log"
-      landed="$(git -C "$here" log -1 --format=%ct "$main" 2>/dev/null || true)"
-      case "$landed" in
-        ''|*[!0-9]*) age="origin/main ${main:0:8} landed at a time git could not read" ;;
-        *) age="origin/main ${main:0:8} landed $(( ($(date +%s) - landed) / 60 )) min ago" ;;
-      esac
-      echo "boss: REFUSED — $why; $refused. Ran $install: not yet — the image for ${main:0:8} is not in the registry; $age, and the deploy runner builds the image a few minutes after each train. Wait and retry (this shim installs it then); a rebuild ($rebuild) takes longer than the wait. $still" >&2
+      if [ "$wait_s" -eq 0 ]; then
+        echo "boss: REFUSED — $why; $refused. Ran $install: not yet — the image for ${main:0:8} is not in the registry; $(landed_age), and the deploy runner builds the image a few minutes after each train. Wait and retry (this shim installs it then, and waits for it itself with BOSS_SHIM_CLI_WAIT unset); a rebuild ($rebuild) takes longer than the wait. $still" >&2
+      else
+        echo "boss: REFUSED — $why; $refused. Ran $install until the bound: not yet — waited ${waited}s (BOSS_SHIM_CLI_WAIT=$wait_s) and the image for ${main:0:8} never reached the registry; $(landed_age), and the deploy runner builds it a few minutes after each train, so an image this late is the deploy runner's to look at, not a wait to extend. $still" >&2
+      fi
       exit 78 ;;
     *)
       sed 's/^/boss:   cli: /' "$log" >&2

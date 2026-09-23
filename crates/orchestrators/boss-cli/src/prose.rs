@@ -125,6 +125,63 @@ pub(crate) fn opt_text_or_file(
     text_or_file(flag, file_flag, text, file).map(Some)
 }
 
+/// The prose of one park, read from `boss gate --park-file` (backlog
+/// 6f1e9b99). Each field is the `--park-*` flag of the same name, and a
+/// field left out is a flag not given — `ParkIntent`'s own checks still
+/// decide what a park must carry, so there is one rule, not two.
+///
+/// WHY ONE FILE AND NOT SIX TWINS. What a park carries is one object
+/// about one car, authored together; `--park-probe-file` and
+/// `--park-expect-file` (302bc2f2) were the first two of what would
+/// have become six `-file` flags, each a path to a file holding one
+/// sentence. The `--park-*` prose is written by every builder on every
+/// car — the highest-traffic prose that crosses argv in the pipeline —
+/// and a builder already writes the gate command into a script file
+/// before running it (builder rules, rule 7), so one TOML file beside
+/// that script costs no step the builder was not already taking. TOML's
+/// literal strings (`'...'`, `'''...'''`) keep backslashes, quotes and
+/// backticks exactly, which is the property the door exists for.
+#[derive(Debug, Default, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ParkProse {
+    pub summary: Option<String>,
+    pub excludes: Option<String>,
+    pub test: Option<String>,
+    pub verified: Option<String>,
+    pub probe: Option<String>,
+    pub expect: Option<String>,
+    pub proof_event: Option<String>,
+}
+
+/// Read a park file. Unknown keys are refused (serde names the key and
+/// the keys it takes), and a value that is EMPTY is refused naming its
+/// key — the same rule [`text_or_file`] applies to a flag.
+pub(crate) fn park_file(path: &Path) -> Result<ParkProse> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("--park-file: reading {}", path.display()))?;
+    let parsed: ParkProse = toml::from_str(&raw)
+        .with_context(|| format!("--park-file: {} is not a park file", path.display()))?;
+    let tidy = |key: &str, value: Option<String>| -> Result<Option<String>> {
+        match value.map(|v| v.trim_end().to_string()) {
+            Some(v) if v.trim().is_empty() => bail!(
+                "--park-file: `{key}` in {} is empty — nothing would be recorded. Leave the \
+                 key out, or give it the text.",
+                path.display()
+            ),
+            other => Ok(other),
+        }
+    };
+    Ok(ParkProse {
+        summary: tidy("summary", parsed.summary)?,
+        excludes: tidy("excludes", parsed.excludes)?,
+        test: tidy("test", parsed.test)?,
+        verified: tidy("verified", parsed.verified)?,
+        probe: tidy("probe", parsed.probe)?,
+        expect: tidy("expect", parsed.expect)?,
+        proof_event: tidy("proof_event", parsed.proof_event)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,6 +322,85 @@ mod tests {
             None,
         )
         .expect("accepted");
+    }
+
+    /// THE PARK FILE (backlog 6f1e9b99): the six texts of one park in
+    /// one TOML file, read with no shell anywhere in the path. A
+    /// literal string keeps a probe's backslashes, quotes and backticks
+    /// exactly — the three things argv damaged (302bc2f2, 2376b89e).
+    #[test]
+    fn the_park_file_carries_every_text_exactly() {
+        let dir = scratch_dir("prose-park-file");
+        let path = dir.join("park.toml");
+        write_file(
+            &path,
+            r#"summary = 'Add the door. The `why` survives.'
+excludes = "Nothing else."
+test = 'wt-cargo test -p boss-cli: 12 passed'
+verified = 'An operator reads the car.'
+probe = '''
+n=$(git show HEAD:a.rs | grep -c "pub fn park_file" || true)
+test "$n" -ge 1 && echo claim:ok
+'''
+expect = 'claim:ok'
+"#,
+        );
+        let got = park_file(&path).expect("read");
+        assert_eq!(
+            got.summary.as_deref(),
+            Some("Add the door. The `why` survives.")
+        );
+        assert_eq!(got.excludes.as_deref(), Some("Nothing else."));
+        assert_eq!(got.expect.as_deref(), Some("claim:ok"));
+        assert_eq!(
+            got.probe.as_deref(),
+            Some(
+                "n=$(git show HEAD:a.rs | grep -c \"pub fn park_file\" || true)\n\
+                 test \"$n\" -ge 1 && echo claim:ok"
+            ),
+            "the probe's quotes arrive unescaped and its final newline is dropped"
+        );
+        assert!(got.proof_event.is_none());
+    }
+
+    /// A misspelled key is refused, naming the keys the file takes: a
+    /// `verfied` silently dropped would surface later as a car refused
+    /// for a missing receipt, with the author sure they wrote it.
+    #[test]
+    fn the_park_file_refuses_a_key_it_does_not_take() {
+        let dir = scratch_dir("prose-park-file-key");
+        let path = dir.join("park.toml");
+        write_file(&path, "summary = 'x'\nverfied = 'y'\n");
+        let err = format!("{:#}", park_file(&path).expect_err("refused"));
+        assert!(
+            err.contains("verfied") && err.contains("verified") && err.contains("park.toml"),
+            "{err}"
+        );
+    }
+
+    /// An empty value is refused like an emptied flag, naming the key —
+    /// nothing would be recorded for it.
+    #[test]
+    fn the_park_file_refuses_an_empty_value() {
+        let dir = scratch_dir("prose-park-file-empty");
+        let path = dir.join("park.toml");
+        write_file(&path, "summary = 'x'\ntest = '''\n\n'''\n");
+        let err = format!("{:#}", park_file(&path).expect_err("refused"));
+        assert!(err.contains("test") && err.contains("empty"), "{err}");
+    }
+
+    /// A missing park file names itself.
+    #[test]
+    fn a_missing_park_file_names_the_path() {
+        let dir = scratch_dir("prose-park-file-missing");
+        let err = format!(
+            "{:#}",
+            park_file(&dir.join("nope.toml")).expect_err("refused")
+        );
+        assert!(
+            err.contains("--park-file") && err.contains("nope.toml"),
+            "{err}"
+        );
     }
 
     /// Neither flag given is a refusal that names both.

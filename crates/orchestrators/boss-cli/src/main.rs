@@ -329,6 +329,25 @@ enum Commands {
         /// Never with --park-probe.
         #[arg(long)]
         park_proof_event: Option<String>,
+        /// Auto-park: every prose text of the park in ONE TOML file, read
+        /// with no shell in the path — `summary`, `excludes`, `test`,
+        /// `verified`, `probe`, `expect`, `proof_event`, each the
+        /// `--park-*` flag of that name. Write it beside the gate script;
+        /// single-quoted TOML strings ('...' and '''...''' for a
+        /// multi-line probe) keep backticks, quotes and backslashes
+        /// exactly. Exclusive with every flag it carries. The item flags
+        /// (--park-backlog-item and its siblings) stay flags: they are
+        /// ids, not prose (backlog 6f1e9b99).
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with_all = [
+                "park_summary", "park_excludes", "park_test", "park_verified",
+                "park_probe", "park_probe_file", "park_expect", "park_expect_file",
+                "park_proof_event",
+            ]
+        )]
+        park_file: Option<std::path::PathBuf>,
         /// Gate a branch whose content ALREADY landed on main, stating
         /// why (e.g. to close a dead gate-run packet). Refused by
         /// default: a landed branch's next step is deletion, and a
@@ -513,12 +532,17 @@ enum Commands {
         /// The other end of the run: record the builder's handback on
         /// the run named by `<PACKET>`, complete its `reported` step when
         /// the green has opened it, and write the finish to agent_runs.
-        #[arg(long, requires = "summary")]
+        #[arg(long, requires = "handback")]
         report: bool,
         /// With --report: the handback (packet, branch, sha, gate, what
         /// changed, what it saw).
-        #[arg(long, requires = "report")]
+        #[arg(long, requires = "report", group = "handback")]
         summary: Option<String>,
+        /// With --report: the handback, read from this file — the longest
+        /// prose any verb takes, so the one most worth keeping out of the
+        /// shell (backlog 6f1e9b99). Exclusive with --summary.
+        #[arg(long, requires = "report", group = "handback")]
+        summary_file: Option<std::path::PathBuf>,
         /// With --report: what the run cost in dollars, as the session's
         /// usage line reports it.
         #[arg(long, requires = "report")]
@@ -637,9 +661,16 @@ enum Commands {
         /// What the probe means, in prose, for a human reader.
         #[arg(long)]
         verified: Option<String>,
+        /// The meaning, read from this file — no shell between the bytes
+        /// and the proof (backlog 6f1e9b99). Exclusive with --verified.
+        #[arg(long, conflicts_with = "verified")]
+        verified_file: Option<std::path::PathBuf>,
         /// How it was checked, if that needs saying.
         #[arg(long)]
         method: Option<String>,
+        /// The method, read from this file. Exclusive with --method.
+        #[arg(long, conflicts_with = "method")]
+        method_file: Option<std::path::PathBuf>,
         /// Re-run the proof already recorded and report whether it
         /// still holds. Read-only: records nothing.
         #[arg(long)]
@@ -675,7 +706,7 @@ enum Commands {
         /// yet, 2 refused. The car is a full id; the probe runs as
         /// BOSS_PROBE_USER in BOSS_PROBE_DIR under BOSS_PROBE_TIMEOUT
         /// with the read-only reader on its PATH, never as root.
-        #[arg(long, requires = "from_car", conflicts_with_all = ["recheck", "replace", "dry_run", "verified", "method", "probe_anyway"])]
+        #[arg(long, requires = "from_car", conflicts_with_all = ["recheck", "replace", "dry_run", "verified", "verified_file", "method", "method_file", "probe_anyway"])]
         unattended: bool,
         /// Run a probe this verb REFUSES, stating why.
         ///
@@ -1208,8 +1239,12 @@ enum JobAction {
         #[arg(long)]
         kind: String,
         /// The packet's title.
-        #[arg(long)]
-        title: String,
+        #[arg(long, required_unless_present = "title_file")]
+        title: Option<String>,
+        /// The title, read from this file — no shell between the bytes
+        /// and the record (backlog 6f1e9b99). Exclusive with --title.
+        #[arg(long, conflicts_with = "title")]
+        title_file: Option<std::path::PathBuf>,
         /// standard | urgent (default standard).
         #[arg(long)]
         priority: Option<String>,
@@ -1454,11 +1489,20 @@ async fn main() -> Result<()> {
             JobAction::File {
                 kind,
                 title,
+                title_file,
                 priority,
                 metadata,
                 subject_id,
                 channel,
-            } => job::file(&kind, &title, priority, metadata, subject_id, channel).await,
+            } => {
+                let title = crate::prose::text_or_file(
+                    "--title",
+                    "--title-file",
+                    title,
+                    title_file.as_deref(),
+                )?;
+                job::file(&kind, &title, priority, metadata, subject_id, channel).await
+            }
             JobAction::Patch { job, patch } => job::patch(&job, &patch).await,
         },
         Commands::Orient { all } => orient::run(all).await,
@@ -1493,6 +1537,7 @@ async fn main() -> Result<()> {
             effort,
             report,
             summary,
+            summary_file,
             spend_usd,
             tokens,
             force,
@@ -1502,7 +1547,12 @@ async fn main() -> Result<()> {
             if report {
                 dispatch::report(
                     packet,
-                    summary.unwrap_or_default(),
+                    crate::prose::text_or_file(
+                        "--summary",
+                        "--summary-file",
+                        summary,
+                        summary_file.as_deref(),
+                    )?,
                     spend_usd,
                     tokens,
                     chrono::Utc::now(),
@@ -1554,7 +1604,9 @@ async fn main() -> Result<()> {
             expect,
             exit_only,
             verified,
+            verified_file,
             method,
+            method_file,
             recheck,
             replace,
             dry_run,
@@ -1565,6 +1617,18 @@ async fn main() -> Result<()> {
             if unattended {
                 return prove::run_unattended(&car, chrono::Utc::now()).await;
             }
+            let verified = crate::prose::opt_text_or_file(
+                "--verified",
+                "--verified-file",
+                verified,
+                verified_file.as_deref(),
+            )?;
+            let method = crate::prose::opt_text_or_file(
+                "--method",
+                "--method-file",
+                method,
+                method_file.as_deref(),
+            )?;
             prove::run(
                 &car,
                 probe,
@@ -1616,16 +1680,24 @@ async fn main() -> Result<()> {
             park_expect,
             park_expect_file,
             park_proof_event,
+            park_file,
             force_regate,
             stale_base_anyway,
             rebase,
             hold,
         } => {
+            // clap holds --park-file exclusive with every flag it
+            // carries, so at most one side of each `or` is present.
+            let from_file = park_file
+                .as_deref()
+                .map(crate::prose::park_file)
+                .transpose()?
+                .unwrap_or_default();
             let park = gate::ParkIntent {
-                summary: park_summary,
-                excludes: park_excludes,
-                test: park_test,
-                verified: park_verified,
+                summary: park_summary.or(from_file.summary),
+                excludes: park_excludes.or(from_file.excludes),
+                test: park_test.or(from_file.test),
+                verified: park_verified.or(from_file.verified),
                 backlog_item: park_backlog_item,
                 partial_item: park_partial_item,
                 no_item: park_no_item,
@@ -1636,14 +1708,16 @@ async fn main() -> Result<()> {
                     "--park-probe-file",
                     park_probe,
                     park_probe_file.as_deref(),
-                )?,
+                )?
+                .or(from_file.probe),
                 expect: crate::prose::opt_text_or_file(
                     "--park-expect",
                     "--park-expect-file",
                     park_expect,
                     park_expect_file.as_deref(),
-                )?,
-                proof_event: park_proof_event,
+                )?
+                .or(from_file.expect),
+                proof_event: park_proof_event.or(from_file.proof_event),
             };
             gate::run(
                 &branch,
@@ -1948,6 +2022,12 @@ mod tests {
                 "--change",
                 "--change-file",
             ),
+            (
+                "job file",
+                vec!["boss", "job", "file", "--kind", "backlog-item"],
+                "--title",
+                "--title-file",
+            ),
         ] {
             // One of the pair is required.
             assert!(
@@ -1968,6 +2048,108 @@ mod tests {
             assert!(
                 Cli::try_parse_from(both).is_err(),
                 "{verb} {text} and {file} are exclusive"
+            );
+        }
+    }
+
+    /// The OPTIONAL prose flags get the same twin (backlog 6f1e9b99):
+    /// absent is still absent, either alone parses, both together are
+    /// refused. `boss prove --verified` and `--method` are sentences a
+    /// reader relies on; `boss dispatch --summary` is a builder's whole
+    /// handback, the longest prose any verb takes.
+    #[test]
+    fn an_optional_prose_flag_has_a_file_door() {
+        for (verb, args, text, file) in [
+            (
+                "prove",
+                vec!["boss", "prove", "abcd1234"],
+                "--verified",
+                "--verified-file",
+            ),
+            (
+                "prove",
+                vec!["boss", "prove", "abcd1234"],
+                "--method",
+                "--method-file",
+            ),
+            (
+                "dispatch --report",
+                vec!["boss", "dispatch", "abcd1234", "--report"],
+                "--summary",
+                "--summary-file",
+            ),
+        ] {
+            for flag in [text, file] {
+                let mut with = args.clone();
+                with.extend([flag, "what was measured"]);
+                Cli::try_parse_from(with)
+                    .unwrap_or_else(|e| panic!("{verb} {flag} should parse: {e}"));
+            }
+            let mut both = args.clone();
+            both.extend([text, "inline", file, "handback.md"]);
+            assert!(
+                Cli::try_parse_from(both).is_err(),
+                "{verb} {text} and {file} are exclusive"
+            );
+        }
+        // --report still needs a handback, and either spelling is one.
+        assert!(Cli::try_parse_from(["boss", "dispatch", "abcd1234", "--report"]).is_err());
+        // A handback file without --report means nothing and is refused.
+        assert!(
+            Cli::try_parse_from(["boss", "dispatch", "abcd1234", "--summary-file", "h.md"])
+                .is_err()
+        );
+        // The unattended door records nothing typed, so it refuses both
+        // spellings of the prose it would ignore.
+        for flag in ["--verified-file", "--method-file"] {
+            assert!(
+                Cli::try_parse_from([
+                    "boss",
+                    "prove",
+                    "abcd1234",
+                    "--from-car",
+                    "--unattended",
+                    flag,
+                    "x.md"
+                ])
+                .is_err(),
+                "--unattended with {flag}"
+            );
+        }
+    }
+
+    /// ONE FILE FOR A PARK, NOT SIX TWINS (backlog 6f1e9b99). The park
+    /// prose is one object about one car, so `--park-file` carries all
+    /// of it and conflicts with every flag it replaces — a value given
+    /// twice would be a question of which one the car records.
+    #[test]
+    fn the_park_file_replaces_the_prose_flags_it_carries() {
+        let base = [
+            "boss",
+            "gate",
+            "feat/x",
+            "--park-backlog-item",
+            "abcd1234",
+            "--park-file",
+            "park.toml",
+        ];
+        Cli::try_parse_from(base).unwrap_or_else(|e| panic!("--park-file parses: {e}"));
+        for flag in [
+            "--park-summary",
+            "--park-excludes",
+            "--park-test",
+            "--park-verified",
+            "--park-probe",
+            "--park-probe-file",
+            "--park-expect",
+            "--park-expect-file",
+            "--park-proof-event",
+        ] {
+            let mut with = base.to_vec();
+            with.extend([flag, "x"]);
+            assert!(
+                Cli::try_parse_from(with).is_err(),
+                "--park-file with {flag} must be refused"
             );
         }
     }

@@ -192,11 +192,22 @@ describe('the dev workspace door', () => {
     const steps = devDoorSteps();
     expect(steps.map((s) => s.command)).toEqual([
       'cloudflared --version',
-      'cloudflared access ssh-config --hostname dev.algedonic.dev --short-lived-cert >> ~/.ssh/config',
+      "grep -qsF 'Match host dev.algedonic.dev ' ~/.ssh/config || cloudflared access ssh-config --hostname dev.algedonic.dev --short-lived-cert | sed '/^Add to your/d' >> ~/.ssh/config",
       'ssh root@dev.algedonic.dev',
     ]);
     // A command pasted blind is a command nobody can judge.
     expect(steps.every((s) => s.why.length > 0 && s.what.length > 0)).toBe(true);
+  });
+
+  test('the route step appends only the stanza, and only once', () => {
+    // cloudflared prints "Add to your <home>/.ssh/config:" above the
+    // stanza. It is not a # comment, so appending it raw leaves a line
+    // ssh refuses to parse, and the operator deleted it by hand every
+    // time. A second run appended a second stanza, so the step is
+    // guarded on the one it writes.
+    const route = devDoorSteps()[1]?.command ?? '';
+    expect(route).toContain("sed '/^Add to your/d'");
+    expect(route.startsWith("grep -qsF 'Match host dev.algedonic.dev ' ~/.ssh/config || ")).toBe(true);
   });
 
   test('every step names the host it was given, so one constant moves them all', () => {

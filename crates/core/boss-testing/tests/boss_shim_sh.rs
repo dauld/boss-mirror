@@ -178,6 +178,15 @@ impl Fixture {
     /// at `<store>/boss` — copied from a staging dir this plants, so
     /// the confirmed state is observed by the shim, never assumed.
     fn installer_confirms(&self, sha: &str) {
+        self.installer_arrives_after(0, sha);
+    }
+
+    /// The installer answers not yet (75) on its first `misses` calls
+    /// and then confirms `sha` as above — the deploy runner finishing
+    /// the image while the shim waits at the door (backlog f0bb99c1).
+    /// The call count is the install log's own line count, so the stub
+    /// keeps no state of its own; `misses` 0 is `installer_confirms`.
+    fn installer_arrives_after(&self, misses: usize, sha: &str) {
         let staged = self.root.join("staged");
         boss_testing::create_dir(&staged.join(sha));
         stub(&staged.join(sha).join("boss"), "image", "");
@@ -190,6 +199,10 @@ impl Fixture {
             &format!(
                 "#!/usr/bin/env bash\n\
                  echo \"store=${{BOSS_CLI_STORE:-unset}} link=${{BOSS_CLI_LINK:-unset}} args=$*\" >> {log}\n\
+                 if [ \"$(wc -l < {log})\" -le {misses} ]; then\n\
+                 echo \"stub-installer: not yet — no image for origin/main\"\n\
+                 exit 75\n\
+                 fi\n\
                  mkdir -p \"$BOSS_CLI_STORE\"\n\
                  cp -R {staged}/. \"$BOSS_CLI_STORE\"/\n\
                  ln -sfn {sha} \"$BOSS_CLI_STORE/current\"\n\
@@ -232,25 +245,44 @@ impl Fixture {
     }
 
     fn run(&self, args: &[&str], env: &[(&str, &str)]) -> (i32, String) {
+        let mut cmd = self.command(args);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        output(cmd)
+    }
+
+    /// The shim with this fixture's roots and installer, and the wait
+    /// off; a test that needs the environment otherwise (the default
+    /// bound, which is `BOSS_SHIM_CLI_WAIT` UNSET) edits the command.
+    fn command(&self, args: &[&str]) -> Command {
         let mut cmd = Command::new(repo_root().join(SCRIPT));
         cmd.args(args)
             .env("BOSS_SHIM_TARGET_ROOT", &self.root)
             .env("BOSS_SHIM_IMAGE_STORE", &self.store)
             .env("BOSS_SHIM_INSTALLER", &self.installer)
+            // A not-yet refusal refuses at once unless a test asks the
+            // shim to wait (backlog f0bb99c1): the default bound is
+            // minutes, and every test here that is not about the wait
+            // is about what the refusal says.
+            .env("BOSS_SHIM_CLI_WAIT", "0")
+            .env_remove("BOSS_SHIM_CLI_POLL")
             .env_remove("BOSS_JOBS_URL")
             .env_remove("BOSS_SHIM_BUILT")
             .env_remove("BOSS_SHIM_VERBOSE");
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
-        let out = cmd.output().expect("run the boss shim");
-        let merged = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        (out.status.code().unwrap_or(-1), merged)
+        cmd
     }
+}
+
+/// Run the shim; its exit code and stdout+stderr merged.
+fn output(mut cmd: Command) -> (i32, String) {
+    let out = cmd.output().expect("run the boss shim");
+    let merged = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.code().unwrap_or(-1), merged)
 }
 
 fn short(sha: &str) -> &str {
@@ -566,6 +598,150 @@ fn the_not_yet_refusal_names_how_long_ago_origin_main_landed() {
         out.contains("wait"),
         "and tells the caller to wait rather than rebuild: {out}"
     );
+}
+
+/// THE SHIM WAITS AT ITS OWN DOOR (backlog f0bb99c1). Three people
+/// hand-rolled this wait in two days — a builder slept seven minutes
+/// and retried, the operator wrote an until-loop, a triager wrapped
+/// three calls in a 40-attempt poll — because the not-yet refusal was
+/// correct and had no verb behind it. Now the shim re-runs the same
+/// install leg on a poll, says on every attempt what it is waiting for
+/// and when it gives up, and runs the write on the tree's CLI the moment
+/// the image lands.
+#[test]
+fn a_write_waits_for_the_image_and_runs_when_it_arrives() {
+    let f = Fixture::new("waits");
+    let main = main_sha();
+    let behind = behind_sha();
+    f.image(&behind);
+    f.installer_arrives_after(2, &main);
+
+    let (rc, out) = f.run(
+        &["gate", "fix/x", "--wait"],
+        &[("BOSS_SHIM_CLI_WAIT", "60"), ("BOSS_SHIM_CLI_POLL", "1")],
+    );
+    assert_eq!(rc, 0, "the write runs once the image lands: {out}");
+    assert!(
+        out.contains("ran=image") && out.contains(&format!("built from {main}")),
+        "the tree's CLI answers, at origin/main: {out}"
+    );
+    let args: Vec<&str> = out.lines().filter_map(|l| l.strip_prefix("arg=")).collect();
+    assert_eq!(args, ["gate", "fix/x", "--wait"], "argv intact: {out}");
+    let waiting: Vec<&str> = out
+        .lines()
+        .filter(|l| l.starts_with("boss: waiting"))
+        .collect();
+    assert_eq!(
+        waiting.len(),
+        2,
+        "one line per not-yet attempt, saying what it waits for: {out}"
+    );
+    for line in &waiting {
+        assert!(
+            line.contains(short(&main)) && line.contains("gives up after 1 min"),
+            "each line names the sha it waits for and the bound: {line}"
+        );
+        assert!(
+            line.contains("BOSS_SHIM_CLI_WAIT=0"),
+            "and how to refuse at once instead: {line}"
+        );
+    }
+    assert_eq!(
+        f.install_log().lines().count(),
+        3,
+        "two misses and the confirm: {}",
+        f.install_log()
+    );
+    assert!(!out.contains("REFUSED"), "no refusal: {out}");
+}
+
+/// A wait that never sees the image is BOUNDED and fails LOUDLY — the
+/// packet's own warning: a wait that never gives up is the wedge this
+/// system keeps filing about. The refusal says how long it waited, how
+/// long ago origin/main landed, and that the late image is the thing to
+/// look at, not the wait to extend.
+#[test]
+fn a_wait_that_outlasts_its_bound_refuses_and_says_how_long_it_waited() {
+    let f = Fixture::new("waits-out");
+    let main = main_sha();
+    f.image(&behind_sha());
+    let started = std::time::Instant::now();
+    let (rc, out) = f.run(
+        &["gate", "x"],
+        &[("BOSS_SHIM_CLI_WAIT", "2"), ("BOSS_SHIM_CLI_POLL", "1")],
+    );
+    let took = started.elapsed().as_secs();
+    assert_eq!(rc, 78, "a write is refused at the bound: {out}");
+    assert!(took < 15, "the bound holds ({took}s for a 2s wait): {out}");
+    let refusal = out
+        .lines()
+        .find(|l| l.contains("REFUSED"))
+        .unwrap_or_else(|| panic!("one REFUSED line: {out}"));
+    assert!(
+        refusal.contains("waited") && refusal.contains(short(&main)),
+        "the refusal says it waited, and for which sha: {refusal}"
+    );
+    assert!(
+        landed_minutes_in(refusal).is_some(),
+        "and how long ago origin/main landed: {refusal}"
+    );
+    assert!(
+        f.install_log().lines().count() >= 2,
+        "the leg was retried within the bound: {}",
+        f.install_log()
+    );
+    assert!(!out.contains("ran="), "nothing is exec'd: {out}");
+}
+
+/// With the variable UNSET the wait is on, and bounded at fifteen
+/// minutes — measured 2026-09-23 from the pod's store, the image for a
+/// train landed three and eight minutes after its merge, so fifteen
+/// covers the runner with room, and still ends inside the window a
+/// builder's foreground call can wait.
+#[test]
+fn the_wait_is_on_by_default_and_bounded_at_fifteen_minutes() {
+    let f = Fixture::new("waits-default");
+    let main = main_sha();
+    f.image(&behind_sha());
+    f.installer_arrives_after(1, &main);
+    let mut cmd = f.command(&["gate", "x"]);
+    cmd.env_remove("BOSS_SHIM_CLI_WAIT")
+        .env("BOSS_SHIM_CLI_POLL", "1");
+    let (rc, out) = output(cmd);
+    assert_eq!(rc, 0, "{out}");
+    let line = out
+        .lines()
+        .find(|l| l.starts_with("boss: waiting"))
+        .unwrap_or_else(|| panic!("the default waits: {out}"));
+    assert!(
+        line.contains("gives up after 15 min"),
+        "the default bound: {line}"
+    );
+}
+
+/// A bound that is not a whole number of seconds is refused, naming the
+/// variable, rather than guessed at — and a poll of 0 would spin.
+#[test]
+fn a_wait_bound_that_is_not_a_number_is_refused_not_guessed() {
+    for (key, value) in [
+        ("BOSS_SHIM_CLI_WAIT", "ten"),
+        ("BOSS_SHIM_CLI_WAIT", "-5"),
+        ("BOSS_SHIM_CLI_POLL", "0"),
+        ("BOSS_SHIM_CLI_POLL", "1.5"),
+    ] {
+        let f = Fixture::new(&format!("waits-bad-{}", value.replace('.', "_")));
+        f.image(&behind_sha());
+        let (rc, out) = f.run(&["gate", "x"], &[(key, value)]);
+        assert_eq!(rc, 64, "{key}={value} is a usage error: {out}");
+        assert!(
+            out.contains(key) && out.contains(value),
+            "the refusal names {key} and its value: {out}"
+        );
+        assert!(
+            f.install_log().is_empty() && !out.contains("ran="),
+            "nothing installed, nothing exec'd: {out}"
+        );
+    }
 }
 
 /// `--built` asked for the build outright; a stale build is refused as

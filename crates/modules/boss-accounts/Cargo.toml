@@ -81,3 +81,7 @@ required-features = ["postgres"]
 [[test]]
 name = "team_members_audit_chain"
 required-features = ["postgres"]
+
+[[test]]
+name = "list_accounts_envelope"
+required-features = ["postgres"]

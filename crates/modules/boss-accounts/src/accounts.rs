@@ -1,6 +1,6 @@
 //! Accounts API — customer account directory.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -14,6 +14,15 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 use boss_assets_client::{AssetsClient, AssetsClientError};
+
+/// Page bounds for `GET /api/people/accounts` — the same pair
+/// boss-assets and boss-commerce use. `MAX_LIST_LIMIT` is public so a
+/// caller that wants "every account" can ask for the most it may have
+/// and then read `total` to learn whether it got them (backlog
+/// 2d1d298e: this read had no LIMIT at all, so it answered the whole
+/// table and nothing said how big that was).
+pub const DEFAULT_LIST_LIMIT: i64 = 100;
+pub const MAX_LIST_LIMIT: i64 = 1000;
 
 #[derive(Clone)]
 pub struct AccountsState {
@@ -231,15 +240,62 @@ async fn mirror_territory_rep(
     Ok(evt)
 }
 
-async fn list_accounts(State(state): State<AccountsState>) -> Response {
-    let rows: Result<Vec<Account>, _> =
-        sqlx::query_as("SELECT id, name, director, city, state, tier, customer_since, territory_rep_id, account_type FROM accounts ORDER BY id")
-            .fetch_all(state.pool.as_ref())
-            .await;
+#[derive(Deserialize)]
+struct ListParams {
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
 
-    match rows {
-        Ok(accounts) => Json(accounts).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+/// The `{data, total, limit, offset}` envelope every boss-* list
+/// endpoint answers. `total` is the DB-wide count, so `total >
+/// data.len()` is how a caller knows the page is capped.
+#[derive(Serialize)]
+struct AccountsPage {
+    data: Vec<Account>,
+    total: i64,
+    limit: i64,
+    offset: i64,
+}
+
+/// `GET /api/people/accounts` — one bounded page of the directory.
+///
+/// Until 2026-09-23 this was an unbounded `SELECT … ORDER BY id`
+/// answered as a bare array (backlog 2d1d298e, from the /ux/support
+/// page audit): no caller could cap-check it, so the page that read it
+/// beside two enveloped reads had two honesty levels in one render.
+async fn list_accounts(
+    State(state): State<AccountsState>,
+    Query(params): Query<ListParams>,
+) -> Response {
+    let limit = params
+        .limit
+        .unwrap_or(DEFAULT_LIST_LIMIT)
+        .clamp(1, MAX_LIST_LIMIT);
+    let offset = params.offset.unwrap_or(0).max(0);
+
+    let total: Result<i64, _> = sqlx::query_scalar("SELECT COUNT(*) FROM accounts")
+        .fetch_one(state.pool.as_ref())
+        .await;
+    let rows: Result<Vec<Account>, _> = sqlx::query_as(
+        "SELECT id, name, director, city, state, tier, customer_since, territory_rep_id, account_type \
+         FROM accounts ORDER BY id LIMIT $1 OFFSET $2",
+    )
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(state.pool.as_ref())
+    .await;
+
+    match (rows, total) {
+        (Ok(data), Ok(total)) => Json(AccountsPage {
+            data,
+            total,
+            limit,
+            offset,
+        })
+        .into_response(),
+        (Err(e), _) | (_, Err(e)) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
     }
 }
 

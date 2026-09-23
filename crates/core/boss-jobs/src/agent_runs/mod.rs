@@ -64,6 +64,43 @@
 /// (backlog b91a2103) so a wholesale metadata write cannot erase it.
 pub const EDGE_KEY: &str = "agent_run";
 
+/// Whether a claim hands a step to a DIFFERENT holder — the one case in
+/// which the claim clears [`EDGE_KEY`] (backlog 9562f6df).
+///
+/// Freshness of the edge belongs at the claim: a step that came free
+/// with the previous run still named, and was then claimed outside
+/// `boss dispatch` (a person in the UI), kept naming that run, and the
+/// delivery rule would land it off a completion it did not do. Both
+/// release doors — `boss step release` and
+/// `jobs.reclaim_abandoned_step` — already null the edge as they free
+/// the step; this is the same decision for every door that frees a step
+/// WITHOUT nulling it, taken where the executor actually changes.
+///
+/// NOT on every claim: a re-claim by the holder is idempotent by design,
+/// and the holder spelled by one of its aliases (design 6fda05ae) is the
+/// holder — the CAS respelling it is not a change of executor.
+/// `boss dispatch` claims first and writes the new run's edge after, so
+/// clearing here never races the edge a dispatch is about to write.
+pub fn claim_changes_holder(old_holder: Option<&str>, claimant: &str, aliases: &[String]) -> bool {
+    match old_holder {
+        None => true,
+        Some(h) => h != claimant && !aliases.iter().any(|a| a == h),
+    }
+}
+
+/// `metadata` without the run edge — every other key untouched.
+pub fn without_edge(metadata: &serde_json::Value) -> serde_json::Value {
+    match metadata.as_object() {
+        Some(obj) => serde_json::Value::Object(
+            obj.iter()
+                .filter(|(k, _)| k.as_str() != EDGE_KEY)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        ),
+        None => metadata.clone(),
+    }
+}
+
 pub mod events;
 pub mod http;
 pub mod in_memory;
@@ -86,3 +123,41 @@ pub use types::{
     GroupSpend, NewAgentRun, PricingBasis, RateCardRow, RunFilter, RunOutcome, RunSummary,
     TokenUsage, effort_applied_from, measure_load, price_run, pricing_basis, summarize,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The three holders a claim can meet (9562f6df): nobody, the
+    /// claimant under either spelling, and someone else.
+    #[test]
+    fn only_a_different_holder_is_a_change() {
+        let aliases = vec!["claude@algedonic.dev".to_string()];
+        assert!(claim_changes_holder(None, "agent-claude", &aliases));
+        assert!(!claim_changes_holder(
+            Some("agent-claude"),
+            "agent-claude",
+            &aliases
+        ));
+        assert!(!claim_changes_holder(
+            Some("claude@algedonic.dev"),
+            "agent-claude",
+            &aliases
+        ));
+        assert!(claim_changes_holder(
+            Some("emp-someone"),
+            "agent-claude",
+            &aliases
+        ));
+    }
+
+    #[test]
+    fn without_edge_drops_the_edge_and_nothing_else() {
+        let md = serde_json::json!({ EDGE_KEY: "run-1", "notes": "kept" });
+        assert_eq!(without_edge(&md), serde_json::json!({ "notes": "kept" }));
+        assert_eq!(
+            without_edge(&serde_json::Value::Null),
+            serde_json::Value::Null
+        );
+    }
+}

@@ -19,9 +19,9 @@ import type {
 import { href } from '../router';
 import { entityHref } from '@boss/web-kit/ui/entity-href';
 import { formatMoney } from '@boss/web-kit/ui/money';
-import { fetchPaged, type Paged } from '../data/paginated';
+import { fetchPaged, type Paged, type PagedResult } from '../data/paginated';
 import {
-  AccountListSchema,
+  AccountSchema,
   AccountTeamMemberListSchema,
   AccountNoteListSchema,
   AssetSchema,
@@ -297,11 +297,29 @@ export async function createAccountNote(input: {
   };
 }
 
+/// The account directory, one bounded page. `GET /api/people/accounts`
+/// answered an unbounded bare array until backlog 2d1d298e
+/// (2026-09-23), so seven pages each special-cased its shape and none
+/// could tell a capped list from a complete one. It now answers the
+/// `{data, total, limit, offset}` envelope; read it here, and render an
+/// OverflowBanner on `isCapped(page)`. 1000 is the service's
+/// MAX_LIST_LIMIT — a larger ask is clamped, and the envelope's own
+/// `limit` and `total` stay truthful either way, so the banner does
+/// not depend on this number matching the server's.
+export const ACCOUNTS_LIST_URL = '/api/people/accounts?limit=1000';
+
+export function fetchAccountsPage(): Promise<PagedResult<Account>> {
+  return fetchPaged<Account>(ACCOUNTS_LIST_URL);
+}
+
+/// One account by id. This scanned the whole directory for the id
+/// until 2d1d298e, which a bounded list read can no longer answer for
+/// an account past the first page; the detail route is the question
+/// actually being asked (it also carries `contacts`, ignored here).
 async function fetchAccount(id: string): Promise<Account | null> {
-  const url = '/api/people/accounts';
-  const result = await fetchValidated(url, AccountListSchema);
-  const list = unwrap(url, result) ?? [];
-  return list.find((p) => p.id === id) ?? null;
+  const url = `/api/people/accounts/${q(id)}`;
+  const result = await fetchValidated(url, AccountSchema);
+  return unwrap(url, result);
 }
 
 async function fetchJson<T>(url: string): Promise<T | null> {

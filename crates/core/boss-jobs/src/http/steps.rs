@@ -552,7 +552,10 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     // `boss dispatch` writes the new id through that door right after
     // the claim (the claim route itself never touches metadata), so a
     // carried-forward value can never outlive the next dispatch. What
-    // survives here is OMISSION, nothing more.
+    // survives here is OMISSION, nothing more. Nor can it outlive a
+    // change of holder by any other door: the claim CAS drops the edge
+    // when the step passes to someone else (9562f6df), which is where
+    // its freshness is decided — not here.
     if let Some(old_obj) = old.metadata.as_object()
         && let Some(run) = old_obj.get(crate::agent_runs::EDGE_KEY).cloned()
         && let Some(obj) = step.metadata.as_object_mut()
@@ -1865,6 +1868,17 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
     let mut claimed = old.clone();
     claimed.assignee_id = Some(user.id.clone());
     claimed.status = StepStatus::Active;
+    // The CAS drops the previous run's edge when the holder changes
+    // (9562f6df); the event says so too, or the log would go on naming
+    // a run the row no longer names. The claimant's aliases come from
+    // its agents row — the same holder the CAS reads as `me`.
+    let aliases = agent_row
+        .as_ref()
+        .map(|r| r.aliases.as_slice())
+        .unwrap_or_default();
+    if crate::agent_runs::claim_changes_holder(old.assignee_id.as_deref(), &user.id, aliases) {
+        claimed.metadata = crate::agent_runs::without_edge(&claimed.metadata);
+    }
 
     let mut claim_events = vec![stamp.event(
         events::STEP_UPDATED,

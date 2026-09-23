@@ -177,6 +177,10 @@ name = "step_claim_admits_an_aliased_holder_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "the_claim_clears_the_run_edge_when_the_holder_changes_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "step_terminal_refusal"
 required-features = ["postgres"]
 

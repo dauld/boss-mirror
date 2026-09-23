@@ -21,7 +21,6 @@ export const AccountSchema = z.object({
   customer_since: z.string().nullable(),
   territory_rep_id: z.string().nullable(),
 });
-export const AccountListSchema = z.array(AccountSchema);
 
 /// `GET /api/assets?account_id=…`. `account_id`,
 /// `warranty_through`, `oem_serial` are all legitimately nullable on

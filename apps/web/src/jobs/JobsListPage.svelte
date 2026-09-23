@@ -15,6 +15,7 @@
   import WriteGate from '@boss/web-kit/ui/WriteGate.svelte';
   import { appToday } from '@boss/web-kit/sim-clock';
   import { registeredAdHoc } from './adHoc';
+  import { ACCOUNTS_LIST_URL } from '../accounts/api';
 
   let userId = $derived(
     session.value.kind === 'ready' ? session.value.user.id : '',
@@ -271,7 +272,7 @@
   // mapping reflects the actual service URLs in the dev-server +
   // gateway proxy table.
   const SUBJECT_LIST_URLS: Record<string, string> = {
-    account: '/api/people/accounts',
+    account: ACCOUNTS_LIST_URL,
     vendor: '/api/inventory/vendors',
     employee: '/api/people',
     location: '/api/locations',

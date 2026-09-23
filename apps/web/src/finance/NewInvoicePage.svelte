@@ -6,6 +6,7 @@
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import Section from '@boss/web-kit/ui/Section.svelte';
   import type { Account } from '../accounts/types';
+  import { fetchAccountsPage } from '../accounts/api';
   import {
     INVOICE_STATUS_LABEL,
     revenueCategoryLabel,
@@ -59,18 +60,21 @@
   /// no explanation — an outage disguised as an empty roster (packet
   /// 3fba9c35, the false-empty sweep).
   let accountsFailed = $state<string | null>(null);
+  // The directory is a bounded page (2d1d298e): past the cap, the
+  // picker cannot offer every account, and says so.
+  let accountsTotal = $state(0);
   $effect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const r = await fetch('/api/people/accounts');
-        if (!r.ok) {
-          if (!cancelled) accountsFailed = `HTTP ${r.status}`;
+        const r = await fetchAccountsPage();
+        if (r.kind === 'failed') {
+          if (!cancelled) accountsFailed = r.error;
           return;
         }
-        const body = await r.json();
         if (!cancelled) {
-          accounts = Array.isArray(body) ? body : (body.data ?? []);
+          accounts = [...r.page.data];
+          accountsTotal = r.page.total;
           accountsFailed = null;
         }
       } catch (e) {
@@ -243,6 +247,11 @@
           {#if accountsFailed}
             <div class="ni-hint load-failed" role="alert">
               Couldn't load accounts — {accountsFailed}
+            </div>
+          {:else if accountsTotal > accounts.length}
+            <div class="ni-hint" role="status">
+              Showing the first {accounts.length} of {accountsTotal} accounts; an account
+              past them is not in this list.
             </div>
           {/if}
           {#if selectedAccount}

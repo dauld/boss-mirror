@@ -67,7 +67,8 @@
 #
 # The ports are boss-ports' prod ports under boss-ports' names, and
 # the all-in-one pod listens on each (generate-configs.sh binds
-# 0.0.0.0), so port == targetPort. Which services, on which port, is
+# 0.0.0.0, and the policy API, whose bind it does not set, is widened
+# by BOSS_POLICY_BIND_HOST in boss.yaml), so port == targetPort. Which services, on which port, is
 # the same fact as the reader's route table and the runner's
 # infra/forge/sor-ports.env: boss-testing's
 # the_machine_door_carries_every_read_surface.rs holds all three equal

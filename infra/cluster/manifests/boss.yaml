@@ -523,6 +523,14 @@ spec:
             # already bind 0.0.0.0 (generate-configs.sh), so only the
             # dispatcher needs this.
             - {name: BOSS_DISPATCHER_BIND, value: "0.0.0.0:7950"}
+            # The policy API off loopback, for the same reason: the LAN
+            # machine door (boss-jobs-internal.yaml) carries policy:7250,
+            # and boss-policy-api binds 127.0.0.1 unless this says
+            # otherwise, so the door refused that one port while the
+            # Service listed it (car 11eea434, 2026-09-23; David agreed
+            # to the policy reads on the LAN door the same day). Pinned
+            # by the_machine_door_carries_every_read_surface.rs.
+            - {name: BOSS_POLICY_BIND_HOST, value: "0.0.0.0"}
             # The credential broker's root credential + issuer endpoint
             # (7ee101aa; RBAC + the credential's declaration live in
             # boss-credential-broker.yaml). The Secret is minted ONCE by

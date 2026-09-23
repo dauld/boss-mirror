@@ -61,8 +61,27 @@ fn the_capability_set_carries_the_chroot_the_privsep_child_makes() {
     // chroots to /run/sshd, which is why Dropbear was chosen in
     // 2026-08-30 and why the swap costs exactly this one capability.
     assert!(
-        m.contains(r#"add: ["SETGID", "SETUID", "SYS_CHROOT"]"#),
+        m.contains(r#"add: ["SETGID", "SETUID", "SYS_CHROOT", "AUDIT_WRITE"]"#),
         "sshd's preauth privsep child chroots; without SYS_CHROOT it dies there, which is the history this manifest already carried"
+    );
+}
+
+#[test]
+fn the_capability_set_carries_the_audit_write_a_pty_login_makes() {
+    // Measured 2026-09-23 against a debug sshd in the live pod: every
+    // interactive login authenticated, allocated /dev/pts/N, then died
+    // at "linux_audit_write_entry failed: Operation not permitted" —
+    // Debian's sshd records a pty login to the kernel audit subsystem
+    // and treats EPERM there as fatal. `ssh -T` allocates no pty, so it
+    // worked, and that is all the swap from Dropbear was tried with.
+    let m = read("infra/cluster/manifests/boss-dev.yaml");
+    let caps = m
+        .lines()
+        .find(|l| l.contains("add: [\"SETGID\""))
+        .unwrap_or_default();
+    assert!(
+        caps.contains("\"AUDIT_WRITE\""),
+        "a pty login writes an audit record and sshd ends the session when it cannot: {caps}"
     );
 }
 

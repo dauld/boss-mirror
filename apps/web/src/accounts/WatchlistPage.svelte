@@ -8,6 +8,7 @@
   import SearchInput from '@boss/web-kit/ui/SearchInput.svelte';
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
   import type { Account } from './types';
+  import { fetchAccountsPage } from './api';
 
   type RiskFactors = {
     days_since_last_invoice: number | null;
@@ -52,9 +53,9 @@
     let cancelled = false;
     (async () => {
       try {
-        const [rResp, pResp] = await Promise.all([
+        const [rResp, pPaged] = await Promise.all([
           fetch('/api/people/accounts/risk-scores?limit=200&min_score=0'),
-          fetch('/api/people/accounts'),
+          fetchAccountsPage(),
         ]);
         if (!rResp.ok) throw new Error(`${rResp.status}`);
         // PARSE, DO NOT CAST. This read `(await rResp.json()) as {
@@ -72,10 +73,9 @@
         if (!parsed.success) throw new Error('unexpected risk-score payload');
         if (!cancelled)
           loadState = { kind: 'ready', scores: parsed.data.accounts as RiskScore[] };
-        if (pResp.ok) {
-          const pBody = await pResp.json();
-          if (!cancelled) accounts = Array.isArray(pBody) ? pBody : (pBody.data ?? []);
-        }
+        // Names only: a failed or capped directory read leaves the
+        // unmatched rows showing their id, as before.
+        if (pPaged.kind === 'ready' && !cancelled) accounts = [...pPaged.page.data];
       } catch (e) {
         if (!cancelled) loadState = { kind: 'error', message: String(e) };
       }

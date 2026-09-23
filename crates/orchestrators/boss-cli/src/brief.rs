@@ -421,9 +421,16 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
             name: "cargo jobs",
             authority: env_file.to_string(),
             lines: vec![
-                format!("set -a; . {env_file}; set +a     # CARGO_BUILD_JOBS={jobs}"),
-                "Nothing else bounds cargo here (there is no .cargo/config.toml), so the".into(),
-                "default is one job per CPU — 32 on this pod, because nproc reads the NODE".into(),
+                // ONE PLAIN COMMAND (65cea113): the `set -a; . file`
+                // spelling this line carried is refused by a
+                // worktree-isolated builder's harness, and wt-cargo
+                // already sources the file itself.
+                format!(
+                    "wt-cargo <cargo args>     # reads CARGO_BUILD_JOBS={jobs} from {env_file}"
+                ),
+                "Nothing else bounds cargo here (there is no .cargo/config.toml), so a bare".into(),
+                "cargo's default is one job per CPU — 32 on this pod, because nproc reads the NODE"
+                    .into(),
                 format!("and not the cgroup, which the dev pod declares as {cgroup}."),
             ],
             lanes: vec![LANE_CAR],
@@ -620,7 +627,13 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
         name: "pre-flight",
         authority: doors.to_string(),
         lines: vec![
-            format!("bash {door} > <your scratch dir>/preflight.log 2>&1; echo $?"),
+            // ONE PLAIN COMMAND (65cea113): a trailing `; echo $?`
+            // made the line a list, which a worktree-isolated builder's
+            // harness refuses to run; the exit code it echoed is the
+            // command's own, and the harness reports that.
+            format!("bash {door} > <your scratch dir>/preflight.log 2>&1"),
+            "Its exit status is the verdict — the tool reports it; in a shell, run".into(),
+            "echo $? as the NEXT command, never chained to this one on the same line.".into(),
             "The `Before pushing` door of CLAUDE.md §Doors, read out of that entry:".into(),
             "the whole build-free pre-flight PLUS clippy scoped to the crates this tree".into(),
             "changed, seconds against the ~11 minutes a gate costs. It is not a gate —".into(),
@@ -2149,5 +2162,44 @@ mod tests {
             1,
             "the pre-flight invariant names a gate.sh mode more than once:\n{lines}"
         );
+    }
+
+    /// AN INVARIANT'S FIRST LINE RUNS AS ONE PLAIN COMMAND (backlog
+    /// 65cea113, 2026-09-23). The first line of an invariant is the one
+    /// a builder copies into a shell, and a builder here runs in a
+    /// worktree-isolated agent session whose harness refuses a command
+    /// it cannot show stays out of another tree's git. Measured on run
+    /// dba4bb17 against this tree, both invariant lines as printed:
+    /// `bash infra/gate.sh --lint > <log> 2>&1; echo $?` was refused as
+    /// "a construct too complex to verify", and `set -a; . infra/dev/
+    /// pod-build.env; set +a` as "a string through ., which can't be
+    /// verified" — while `bash infra/gate.sh --lint > <log> 2>&1` alone
+    /// ran, and the tool reported its exit code. Three builders in one
+    /// night each rediscovered the split by hand. The exit code the
+    /// `; echo $?` printed is the command's own, so nothing is lost by
+    /// dropping it; a pipe, a list or a sourced file is what the guard
+    /// refuses, so none of them may appear before a trailing comment.
+    #[test]
+    fn every_invariants_first_line_runs_as_one_plain_command() {
+        let invs = invariants(&repo()).expect("the invariants derive from this tree");
+        let refused = [";", "&&", "||", "|", "$?", "$("];
+        for inv in &invs {
+            let first = inv.lines.first().expect("an invariant has a first line");
+            let command = first.split(" #").next().unwrap_or(first).trim();
+            for op in refused {
+                assert!(
+                    !command.contains(op),
+                    "the {:?} invariant's first line carries `{op}`, which a worktree-isolated \
+                     builder's harness refuses to run: {first}",
+                    inv.name
+                );
+            }
+            assert!(
+                !command.starts_with(". ") && !command.starts_with("source "),
+                "the {:?} invariant's first line sources a file, which the harness refuses: \
+                 {first}",
+                inv.name
+            );
+        }
     }
 }

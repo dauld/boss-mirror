@@ -109,9 +109,16 @@ export async function probeTree(
 
 // Bind `port` (0 = "any free one"), then let it go: resolves the port
 // actually bound, or null if something already holds it.
+//
+// The probe drops every connection it accepts. close() calls back only
+// once every accepted connection has ended, so a client that knocked
+// while the probe was up — on the pod, another worktree's runner or
+// browser retrying :5174 — and kept its socket open made this wait
+// forever (backlog e3470b9a; pinned in dev-tree.test.ts, 30 of 30 runs
+// hung before this line and none after).
 function tryBind(port: number): Promise<number | null> {
   return new Promise((resolve) => {
-    const probe = createServer();
+    const probe = createServer((socket) => socket.destroy());
     probe.once('error', () => resolve(null));
     probe.listen(port, () => {
       const address = probe.address();

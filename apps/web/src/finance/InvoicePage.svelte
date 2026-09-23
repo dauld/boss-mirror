@@ -19,6 +19,7 @@
   } from './types';
   import { formatMoney } from '@boss/web-kit/ui/money';
   import type { Account } from '../accounts/types';
+  import { fetchAccountsPage } from '../accounts/api';
   import { href } from '../router';
 
   type Props = { invoiceId: string };
@@ -39,15 +40,12 @@
     fetchState = { kind: 'loading' };
     (async () => {
       try {
-        const [invResp, pResp] = await Promise.all([
+        const [invResp, pPaged] = await Promise.all([
           fetch(`/api/commerce/invoices/${encodeURIComponent(id)}`),
-          fetch('/api/people/accounts'),
+          fetchAccountsPage(),
         ]);
         if (cancelled) return;
-        if (pResp.ok) {
-          const body = await pResp.json();
-          accounts = Array.isArray(body) ? body : (body.data ?? []);
-        }
+        if (pPaged.kind === 'ready') accounts = [...pPaged.page.data];
         if (invResp.status === 404) {
           fetchState = { kind: 'notfound' };
           return;

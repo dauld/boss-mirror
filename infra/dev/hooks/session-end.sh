@@ -15,7 +15,30 @@ read_payload
 session_dir
 session_packet
 [ -n "$packet" ] || bail "no work-session for session $(field .session_id) — nothing to end"
-command -v boss-api >/dev/null 2>&1 || bail "boss-api is not on PATH — work-session $packet is left to the clock"
+door=$(command -v boss-api 2>/dev/null) || bail "boss-api is not on PATH — work-session $packet is left to the clock"
+# PAST A STALE DOOR (backlog 584dc9da). Since 0b36dd65 boss-api
+# REFUSES a write (exit 78) when its own copy is behind origin/main,
+# and the pod's checkout was behind for most of 2026-09-19 — so a
+# session ending then fell to the bail below, "left to the clock",
+# at the one moment nobody reads the journal. The refusal guards the
+# door's routing and flags from going stale; this write is the
+# session closing its OWN packet, on the jobs port every copy of the
+# door has routed to since it existed, and the clock rule that closes
+# it otherwise knows less than this hook does. So the hook writes
+# with the override — and first asks the door's own helper whether
+# the override is doing anything, and says so on a line of its own,
+# so how often a session ends past a stale door is a count in the
+# journal, not a re-derivation, if this call is ever the wrong one.
+# The judgement is local git and no fetch (door-freshness.sh).
+freshness="$(dirname "$(readlink -f "$0")")/../door-freshness.sh"
+if [ -r "$freshness" ]; then
+  # shellcheck source=infra/dev/door-freshness.sh
+  . "$freshness"
+  if stale=$(door_is_stale "$door"); then
+    log "work-session $packet is ended past a stale door (BOSS_DOOR_FRESHNESS=off): $stale"
+  fi
+fi
+export BOSS_DOOR_FRESHNESS=off
 job=$(boss-api GET "/api/jobs/$packet" 2>/dev/null) \
   || bail "cannot read work-session $packet — left to the clock"
 # The open `active` step, and its metadata: PATCH-on-PUT replaces

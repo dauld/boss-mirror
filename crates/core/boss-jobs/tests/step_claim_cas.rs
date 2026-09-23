@@ -113,3 +113,66 @@ async fn a_dispatcher_assigned_ready_step_is_not_poachable() {
         other => panic!("poaching must conflict, got {other:?}"),
     }
 }
+
+/// A step seeded with a run edge naming the run that last executed it,
+/// beside one ordinary metadata key the claim must not touch.
+async fn seeded_step_with_edge(
+    status: StepStatus,
+    assignee: Option<&str>,
+) -> (InMemoryJobs, StepId) {
+    let (jobs, step_id) = seeded_step(status, assignee).await;
+    let mut step = jobs.get_step(&step_id).await.unwrap().unwrap();
+    step.metadata = serde_json::json!({
+        boss_jobs::agent_runs::EDGE_KEY: "run-that-went-before",
+        "notes": "kept",
+    });
+    jobs.update_step(&step).await.unwrap();
+    (jobs, step_id)
+}
+
+/// FRESHNESS OF THE RUN EDGE BELONGS AT THE CLAIM (backlog 9562f6df).
+/// A step that came free with the previous run's `agent_run` still on
+/// it — freed by any door that did not null it — and was then claimed
+/// by someone else, a person in the UI say, kept naming that run, so a
+/// completion by the new holder would deliver onto a run that did not
+/// do the work. The claim that CHANGES the holder clears the edge.
+#[tokio::test]
+async fn a_claim_by_a_new_holder_clears_the_previous_runs_edge() {
+    let (jobs, step_id) = seeded_step_with_edge(StepStatus::Ready, None).await;
+    let won = jobs
+        .claim_step_at(&step_id, "emp-b", Utc::now(), &[])
+        .await
+        .expect("claim");
+    assert!(
+        won.metadata.get(boss_jobs::agent_runs::EDGE_KEY).is_none(),
+        "a new holder must not inherit the previous run's edge: {}",
+        won.metadata
+    );
+    assert_eq!(won.metadata["notes"], "kept", "only the edge is cleared");
+    let after = jobs.get_step(&step_id).await.unwrap().unwrap();
+    assert!(
+        after
+            .metadata
+            .get(boss_jobs::agent_runs::EDGE_KEY)
+            .is_none()
+    );
+}
+
+/// And a re-claim by the SAME holder is the idempotent no-op it was
+/// designed to be — the edge its own dispatch wrote survives it, both
+/// on a step it already holds active and on one nominated to it.
+#[tokio::test]
+async fn a_reclaim_by_the_holder_keeps_its_run_edge() {
+    for status in [StepStatus::Active, StepStatus::Ready] {
+        let (jobs, step_id) = seeded_step_with_edge(status, Some("emp-a")).await;
+        let again = jobs
+            .claim_step_at(&step_id, "emp-a", Utc::now(), &[])
+            .await
+            .expect("re-claim by the holder");
+        assert_eq!(
+            again.metadata[boss_jobs::agent_runs::EDGE_KEY],
+            "run-that-went-before",
+            "a {status:?} step re-claimed by its holder keeps its edge"
+        );
+    }
+}

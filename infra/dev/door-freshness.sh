@@ -55,6 +55,12 @@
 # history, backlog 49d9e99d). BOSS_DOOR_FRESHNESS=off silences the
 # whole helper for someone who means it.
 #
+# A CALLER OUTSIDE THE ROSTER means it: hooks/session-end.sh closes its
+# own session's packet through boss-api with the override set, and
+# first calls door_is_stale itself so each write past a stale door is
+# one journal line (backlog 584dc9da). A guard added here changes every
+# caller of a door, and the hooks are callers no roster enumerates.
+#
 # Pinned by crates/core/boss-testing/tests/a_door_knows_its_copy_is_stale.rs,
 # which also refuses a new executable in this directory that does not
 # source this file (CLAUDE.md §9a: a comment asking the next person to

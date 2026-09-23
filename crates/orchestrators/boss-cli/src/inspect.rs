@@ -68,6 +68,15 @@ fn unwrap_rows(body: &Value) -> &[Value] {
     &[]
 }
 
+/// `(rows read, DB-wide total)` when an envelope carries fewer rows
+/// than its `total` — the part of the list this read never saw. A bare
+/// array says nothing either way, so it answers `None`.
+fn unread_tail(body: &Value) -> Option<(usize, u64)> {
+    let read = unwrap_rows(body).len();
+    let total = body.get("total").and_then(Value::as_u64)?;
+    (total > read as u64).then_some((read, total))
+}
+
 /// Render a value as a one-line string fit for a table cell.
 /// Strings come through unquoted; everything else is JSON-encoded
 /// and truncated.
@@ -165,7 +174,10 @@ pub async fn accounts(
     json: bool,
     gateway: &str,
 ) -> Result<()> {
-    let url = format!("{gateway}/api/people/accounts");
+    // The directory is a bounded page since backlog 2d1d298e: ask for
+    // the service's most (1000, boss-accounts' MAX_LIST_LIMIT — a
+    // larger ask is clamped) and say below when even that was short.
+    let url = format!("{gateway}/api/people/accounts?limit=1000");
     let body = fetch_json(&url).await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&body)?);
@@ -181,8 +193,14 @@ pub async fn accounts(
     }
     let total_matching = rows.len();
     rows.truncate(limit as usize);
+    let tail = unread_tail(&body).map(|(read, total)| {
+        format!("Searched the first {read} of {total} accounts; the rest were not read.")
+    });
     if rows.is_empty() {
         println!("No accounts found.");
+        if let Some(t) = &tail {
+            println!("{t}");
+        }
         return Ok(());
     }
     println!(
@@ -206,6 +224,9 @@ pub async fn accounts(
             rows.len(),
             total_matching
         );
+    }
+    if let Some(t) = &tail {
+        println!("{t}");
     }
     Ok(())
 }
@@ -357,6 +378,19 @@ mod tests {
                 std::env::set_var("BOSS_GATEWAY_URL", v);
             }
         }
+    }
+
+    #[test]
+    fn an_envelope_past_its_page_names_the_unread_tail() {
+        // 2d1d298e: the accounts read is a bounded page now, so a
+        // client-side name search covers only what came back — and
+        // must say so rather than answer "No accounts found".
+        let capped = json!({"data": [{"a": 1}, {"a": 2}], "total": 5});
+        assert_eq!(unread_tail(&capped), Some((2, 5)));
+        let whole = json!({"data": [{"a": 1}], "total": 1});
+        assert_eq!(unread_tail(&whole), None);
+        let bare = json!([{"a": 1}]);
+        assert_eq!(unread_tail(&bare), None);
     }
 
     #[test]

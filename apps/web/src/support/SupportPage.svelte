@@ -27,6 +27,7 @@
   import SortHeader from '@boss/web-kit/ui/SortHeader.svelte';
   import { createSortState } from '@boss/web-kit/ui/sort-state.svelte';
   import { fetchPaged, isCapped, type Paged } from '../data/paginated';
+  import { ACCOUNTS_LIST_URL } from '../accounts/api';
   import {
     accountHealthView,
     deviceCellMeaning,
@@ -58,6 +59,7 @@
 
   let jobsPage = $state<Paged<Job> | null>(null);
   let accounts = $state<Account[]>([]);
+  let accountsPage = $state<Paged<Account> | null>(null);
   let devicesPage = $state<Paged<Asset> | null>(null);
   /// Non-null when the case-list load failed — rendered instead of
   /// the empty states, so an outage never reads as "no open cases"
@@ -80,15 +82,11 @@
     loading = true;
     (async () => {
       try {
-        const [jPaged, pResp, dPaged] = await Promise.all([
+        const [jPaged, pPaged, dPaged] = await Promise.all([
           fetchPaged<Job>('/api/jobs?department=support&limit=5000'),
-          fetch('/api/people/accounts'),
+          fetchPaged<Account>(ACCOUNTS_LIST_URL),
           fetchPaged<Asset>('/api/assets?limit=1000'),
         ]);
-        const pBody = pResp.ok ? await pResp.json() : [];
-        const accountsFailure = pResp.ok
-          ? null
-          : `/api/people/accounts: HTTP ${pResp.status}`;
         if (!cancelled) {
           // The jobs list is the page's primary dataset — its failure
           // is the page's failure. Devices/accounts enrich the rows
@@ -100,10 +98,10 @@
             jobsPage = null;
             loadFailed = jPaged.error;
           }
-          accounts = Array.isArray(pBody) ? pBody : (pBody.data ?? []);
-          accountsRead = accountsFailure
-            ? failedRead(accountsFailure)
-            : okRead;
+          accountsPage = pPaged.kind === 'ready' ? pPaged.page : null;
+          accounts = pPaged.kind === 'ready' ? [...pPaged.page.data] : [];
+          accountsRead =
+            pPaged.kind === 'ready' ? okRead : failedRead(pPaged.error);
           devicesPage = dPaged.kind === 'ready' ? dPaged.page : null;
           devicesRead =
             dPaged.kind === 'ready' ? okRead : failedRead(dPaged.error);
@@ -263,6 +261,14 @@
         : ''}. A '—' in a device column below means this page could not
       read the device, not that the case has none.
     </p>
+  {/if}
+  {#if isCapped(accountsPage)}
+    <OverflowBanner
+      showing={accounts.length}
+      total={accountsPage!.total}
+      noun="accounts loaded"
+      hint="Account Health lists only these; a case whose account is past the cap shows its id."
+    />
   {/if}
   {#if isCapped(devicesPage)}
     <OverflowBanner

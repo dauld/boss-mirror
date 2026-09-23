@@ -932,6 +932,25 @@ pub trait JobsRepository: Send + Sync {
     /// else is `ClaimConflict` naming the holder. Like
     /// `append_sign_off`, this write path owns its fields — the
     /// generic step UPDATE racing a claim cannot un-decide it.
+    ///
+    /// WHO COUNTS AS "THE CURRENT HOLDER" IS ADAPTER-SCOPED (backlog
+    /// 28dcc735). The Postgres adapter reads the claimant's aliases
+    /// from `actor_aliases` inside the claim transaction, admits a
+    /// holder spelled by any of them, and rewrites `assignee_id` to
+    /// the claimant's registered id (backlog d7fef617: steps nominated
+    /// with an agent's login refused the agent's own claim). It is
+    /// directional: an alias claiming a step the registered id holds
+    /// is refused. Pinned by
+    /// `tests/step_claim_admits_an_aliased_holder_pg.rs`.
+    ///
+    /// The in-memory adapter does NOT implement this: it has no alias
+    /// source and compares spellings exactly, so a port-level test
+    /// cannot catch a regression of the alias admission. Deliberately
+    /// so — an alias store there would be a second identity registry
+    /// to keep in step with the table. Pinned by
+    /// `in_memory::tests::an_aliased_holder_is_refused_in_memory_because_it_has_no_alias_source`.
+    /// A new adapter must decide which of the two it is and say so
+    /// here.
     async fn claim_step_at(
         &self,
         step_id: &StepId,
