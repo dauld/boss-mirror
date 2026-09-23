@@ -65,6 +65,16 @@
 # the gateway row is not the route for them — the gateway signs that
 # header from a session and answers a sessionless reader 401.
 #
+# The file store joined on 2026-09-23 (backlog 7610dd2f, David: "you
+# need to be able to attach files as an actor"). boss-content-api
+# serves /api/files on 7090, and no door reached it, so the only way to
+# attach a file to a packet was the SPA — an agent could not. `boss
+# attach` posts the file here and reads it back by id; a car's probe
+# reads the same bytes. It is the one row on this door whose WRITE is
+# the reason it is here, and the trust class is still the one above:
+# the jobs API's writes are already on this IP, and content-api checks
+# every upload as Update on its job or step through boss-policy.
+#
 # The ports are boss-ports' prod ports under boss-ports' names, and
 # the all-in-one pod listens on each (generate-configs.sh binds
 # 0.0.0.0, and the policy API, whose bind it does not set, is widened
@@ -99,3 +109,4 @@ spec:
     - {port: 7250, targetPort: 7250, name: policy}
     - {port: 7860, targetPort: 7860, name: calendar}
     - {port: 7830, targetPort: 7830, name: subject-kinds}
+    - {port: 7090, targetPort: 7090, name: content}

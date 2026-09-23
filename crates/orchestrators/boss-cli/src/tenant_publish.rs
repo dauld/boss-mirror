@@ -318,35 +318,16 @@ impl Bases {
     /// would read some other stack (CLAUDE.md §Doors: a wrong target
     /// answers instead of erroring).
     pub fn on_door(base: &str) -> Result<Self> {
-        let trimmed = base.trim();
-        let (scheme, rest) = match trimmed.split_once("://") {
-            Some((s, r)) => (s, r),
-            None => ("http", trimmed),
-        };
-        let hostport = rest.split('/').next().unwrap_or(rest);
-        // An explicit port is dropped; an IPv6 literal keeps its
-        // brackets, so only a trailing all-digit `:port` is a port.
-        let host = match hostport.rsplit_once(':') {
-            Some((h, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => h,
-            _ => hostport,
-        };
-        if scheme.is_empty() || host.is_empty() {
-            bail!(
-                "--door {base:?} names no host: give the machine door's address, the same \
-                 BOSS_JOBS_URL the estate spells (http://<host>:<jobs port>)"
-            );
-        }
-        let at = |service: &str| format!("{scheme}://{host}:{}", boss_ports::prod(service));
         Ok(Self {
-            classes: at("classes"),
-            ledger: at("ledger"),
-            locations: at("locations"),
-            calendar: at("calendar"),
-            subjects: at("subject-kinds"),
-            policy: at("policy"),
-            people: at("people"),
-            jobs: at("jobs"),
-            dispatcher: at("dispatcher"),
+            classes: service_on_door(base, "classes")?,
+            ledger: service_on_door(base, "ledger")?,
+            locations: service_on_door(base, "locations")?,
+            calendar: service_on_door(base, "calendar")?,
+            subjects: service_on_door(base, "subject-kinds")?,
+            policy: service_on_door(base, "policy")?,
+            people: service_on_door(base, "people")?,
+            jobs: service_on_door(base, "jobs")?,
+            dispatcher: service_on_door(base, "dispatcher")?,
         })
     }
 
@@ -357,6 +338,37 @@ impl Bases {
             None => "routing: each service's own localhost port (boss_ports)".to_string(),
         }
     }
+}
+
+/// One service of the machine door: `base`'s scheme and host, on the
+/// service's `boss_ports` PROD port. The rule [`Bases::on_door`] applies
+/// to every registry, and the one `boss attach` applies to the file
+/// store (backlog 7610dd2f) — kept here once, so the two cannot learn
+/// different ideas of what a host is.
+///
+/// An explicit port on `base` is dropped (it is the jobs port the
+/// estate spells), a path is not part of the host, and an IPv6 literal
+/// keeps its brackets, so only a trailing all-digit `:port` is a port.
+/// A base with no host is refused rather than resolved into a
+/// well-formed URL that would read some other stack.
+pub fn service_on_door(base: &str, service: &str) -> Result<String> {
+    let trimmed = base.trim();
+    let (scheme, rest) = match trimmed.split_once("://") {
+        Some((s, r)) => (s, r),
+        None => ("http", trimmed),
+    };
+    let hostport = rest.split('/').next().unwrap_or(rest);
+    let host = match hostport.rsplit_once(':') {
+        Some((h, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => h,
+        _ => hostport,
+    };
+    if scheme.is_empty() || host.is_empty() {
+        bail!(
+            "{base:?} names no host: give the machine door's address, the same \
+             BOSS_JOBS_URL the estate spells (http://<host>:<jobs port>)"
+        );
+    }
+    Ok(format!("{scheme}://{host}:{}", boss_ports::prod(service)))
 }
 
 /// One shared door and what this directory sends through it.

@@ -18,6 +18,7 @@
 //
 // Run via `bun test`.
 
+import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, test } from 'bun:test';
 import { ENTITY_KINDS, entityHref, type EntityKind } from '@boss/web-kit/ui/entity-href';
 import { parseRoute, type Route } from './router';
@@ -77,4 +78,32 @@ describe('entityHref — every kind resolves to its own page', () => {
       expect({ kind, route: parseRoute(path).kind }).toEqual({ kind, route: expected });
     });
   }
+});
+
+// The interaction crawl is the check a reader trusts for "links land",
+// and it cannot see this pin's failures: it judges only the hrefs the
+// mocked backend renders, on the routes it crawls, and it counts a
+// wildcard-eaten path as served. All four defects above passed it green
+// for as long as they existed (backlog d063c290). So its header must
+// say so and send the reader here, and its title must not promise more
+// than it covers. Pinned because a pointer in prose goes stale the day
+// this file is renamed, and a title is the one line everyone reads.
+describe('the interaction crawl names this pin as the cover for its blind spot', () => {
+  const crawl = readFileSync(
+    new URL('../tests/mocked/interaction-crawl.mocked.spec.ts', import.meta.url),
+    'utf8',
+  );
+
+  // Asserted as named booleans, not toContain on the file: a failure
+  // then says which claim broke instead of printing the whole spec.
+  test('its header points at this file', () => {
+    expect({ pointer: crawl.includes('apps/web/src/entity-href-routes.test.ts') }).toEqual({ pointer: true });
+  });
+
+  test('its title claims rendered links, not every link', () => {
+    expect({
+      overclaims: crawl.includes('every link lands'),
+      scoped: crawl.includes('every rendered link lands'),
+    }).toEqual({ overclaims: false, scoped: true });
+  });
 });

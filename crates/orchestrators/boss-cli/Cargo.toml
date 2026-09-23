@@ -59,7 +59,19 @@ uuid = { workspace = true }
 # publish-request bundles travel as base64 in packet metadata
 # (workflow publish-request v1, packet 0b1b32f9).
 base64 = "0.22"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
+# `multipart` + `stream`: `boss attach` sends a file as a multipart part
+# streamed from disk by `Part::file` (backlog 7610dd2f) — the bytes go
+# from the file to the socket with nothing between them.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking", "multipart", "stream"] }
+# `boss attach` states the file store's body limit from the constant the
+# content-api's route applies (UPLOAD_BODY_LIMIT_BYTES), not a copy of
+# it; its tests serve that REAL router over in-memory adapters.
+boss-content = { path = "../../core/boss-content" }
+# `boss attach` hashes the file it sent and the bytes it reads back, and
+# compares both with the row's sha256 — the same digest crate the store
+# keys objects by.
+sha2 = "0.11"
+hex = "0.4"
 # `boss job list --where` sends a JSON document as ONE query value
 # (`metadata=`); percent-encoding it is what keeps a `&` or `+` in a
 # value from splitting the query (backlog 58eef0f5). Same crate

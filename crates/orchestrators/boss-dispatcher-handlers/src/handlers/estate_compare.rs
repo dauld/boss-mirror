@@ -156,9 +156,11 @@ pub(crate) const UNITS_SCOPE: &str = "host-units";
 /// would have landed hours after CI had gone red (2026-09-05: the
 /// series ran 109 → 71 GB across eight trains with no finding at all).
 /// 35% of 228 is 80 GB: above the locomotive's floor by the three
-/// consecutive comparisons the raiser demands before it files. On a
-/// 48 GB bastion 35% is under the 16 GiB minimum, which then rules —
-/// the same reading as before for hosts that do less.
+/// consecutive comparisons the raiser demands before it files. At 45 GB
+/// and below 35% is under the 16 GiB minimum, which then rules — the
+/// same reading as before for hosts that do less. (This said a 48 GB
+/// bastion; 35% of 48 is 16.8, so there the percentage still rules by
+/// one GB — found when the finding began stating its floor, e4ec8150.)
 const DISK_TIGHT_FLOOR_GB: i64 = 16;
 const DISK_TIGHT_FLOOR_PCT: i64 = 35;
 
@@ -222,17 +224,29 @@ fn disk_tight_finding(node: &Json) -> Option<Json> {
     let id = node.get("id").and_then(Json::as_str)?;
     let free = node.get("disk_free_gb").and_then(Json::as_i64)?;
     let total = node.get("disk_gb").and_then(Json::as_i64)?;
-    // The floor is the MAX of an absolute minimum and a CAPPED
-    // percentage — `max(DISK_TIGHT_FLOOR_GB, min(pct of capacity,
-    // DISK_TIGHT_HEADROOM_CEILING_GB))`. The cap is the clause that was
-    // missing: a percentage alone rules at BOTH ends of the disk-size
-    // range, and on a big enough disk 35% is more headroom than anything
-    // in this pipeline asks for (8e425862).
-    let below_minimum = free < DISK_TIGHT_FLOOR_GB;
-    let below_capped_pct =
-        free < DISK_TIGHT_HEADROOM_CEILING_GB && free * 100 < total * DISK_TIGHT_FLOOR_PCT;
-    (total > 0 && (below_minimum || below_capped_pct))
-        .then(|| json!({ "id": id, "free_gb": free, "disk_gb": total }))
+    let floor = disk_floor_gb(total);
+    // The finding carries the floor it crossed (e4ec8150): the
+    // comparison holds that number when it decides, and an alarm that
+    // says `free_gb: 192` without it sends the reader to re-derive the
+    // rule from this file — the reduce-before-storing class.
+    (total > 0 && free < floor)
+        .then(|| json!({ "id": id, "free_gb": free, "disk_gb": total, "floor_gb": floor }))
+}
+
+/// The effective floor for a disk of `total_gb`, in whole GB: free
+/// strictly below it is `disk_tight`. It is the MAX of an absolute
+/// minimum and a CAPPED percentage — `max(DISK_TIGHT_FLOOR_GB, min(pct
+/// of capacity, DISK_TIGHT_HEADROOM_CEILING_GB))`. The cap is the clause
+/// that was missing: a percentage alone rules at BOTH ends of the
+/// disk-size range, and on a big enough disk 35% is more headroom than
+/// anything in this pipeline asks for (8e425862). The percentage is
+/// rounded UP: free is whole GB, so `free < 79.8` and `free < 80` are
+/// the same test, and the stated floor is the one the test applies.
+fn disk_floor_gb(total_gb: i64) -> i64 {
+    let pct = (total_gb * DISK_TIGHT_FLOOR_PCT + 99) / 100;
+    // Both bounds are consts with minimum < ceiling, so clamp's
+    // max-below-min panic cannot arise.
+    pct.clamp(DISK_TIGHT_FLOOR_GB, DISK_TIGHT_HEADROOM_CEILING_GB)
 }
 
 /// The self-scoped host comparison, pure: for each observed host that
@@ -1041,8 +1055,10 @@ mod tests {
             // A 228 GB host genuinely filling — below the ceiling, so
             // the percentage still rules and the raise still works.
             (60, 228, 1, "a filling 228 GB host, 60 of 228 = 26%"),
-            // A 48 GB bastion: 35% is under the 16 GiB minimum, which
-            // rules, exactly as before. Unchanged by the cap.
+            // A 48 GB bastion: tight under either rule (its floor is 17,
+            // the 16 GiB minimum rules only at 45 GB and below — see
+            // `a_disk_finding_names_the_floor_it_crossed`). Unchanged by
+            // the cap.
             (10, 48, 1, "a 48 GB bastion at 10 of 48"),
             // AT the ceiling is CLEAN, one GB under it is tight: every
             // comparison in this file is strict `<`, so "exactly at the
@@ -1071,6 +1087,45 @@ mod tests {
                 want,
                 "host scope: {why}"
             );
+        }
+    }
+
+    #[test]
+    fn a_disk_finding_names_the_floor_it_crossed() {
+        // e4ec8150: alarm e1fea3b2 carried `free_gb: 192, disk_gb: 929`
+        // for w-1 and nothing else, so a reader asking "tight against
+        // WHAT?" had to re-derive `max(16, min(35% of 929, 200))` from
+        // this file's constants. The comparison held the floor when it
+        // decided and dropped it before storing — the reduce-before-
+        // storing class. The finding now carries the number it crossed,
+        // the way `disk-report.sh` already prints `free=… floor=…`.
+        let dec = vec![json!({"id":"h","role":"talos-worker","retired":false})];
+        let dec_host = vec![json!({"id":"h","role":"forge"})];
+        for (free, total, floor, why) in [
+            // The e1fea3b2 reading: the headroom ceiling rules.
+            (
+                192,
+                929,
+                DISK_TIGHT_HEADROOM_CEILING_GB,
+                "w-1, ceiling rules",
+            ),
+            // 35% of 228 is 79.8 GB; free is whole GB, so `free < 79.8`
+            // is `free < 80` and the floor is stated as 80 — the same
+            // figure the forge's disk report prints for this host.
+            (60, 228, 80, "a 228 GB host, percentage rules"),
+            // The absolute minimum rules only at 45 GB and below: 35% of
+            // 48 is 16.8, so a 48 GB disk's floor is 17 — measured by
+            // this test's first run, which is why the case is 40 GB.
+            (10, 48, 17, "a 48 GB disk, percentage rules by one GB"),
+            (10, 40, DISK_TIGHT_FLOOR_GB, "a 40 GB disk, minimum rules"),
+        ] {
+            let cluster = compare(&dec, &cluster_obs("h", total, Some(free)));
+            let host = compare_host(&dec_host, &host_obs("h", free, total));
+            for (scope, cmp) in [("cluster", &cluster), ("host", &host)] {
+                let finding = &cmp["findings"]["disk_tight"][0];
+                assert_eq!(finding["free_gb"], free, "{scope} scope: {why}");
+                assert_eq!(finding["floor_gb"], floor, "{scope} scope: {why}");
+            }
         }
     }
 

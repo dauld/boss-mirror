@@ -24,6 +24,30 @@
 //       that issued a write must leave the refusal visible on the page
 //       — step-write-failures.mocked.spec.ts, generalised.
 //
+// WHAT (a) CANNOT SEE — backlog d063c290. Leg (a) judges the hrefs the
+// mocked backend RENDERS, on the routes in ROUTES (minus DEFERRED), and
+// "served" means only that the router does not fall through to its
+// catch-all. So three kinds of dead link pass it green:
+//
+//   - a link nobody generated: a kind whose data is absent under mocks
+//     draws no row, so its href is never on any page (ticket and
+//     opportunity had no record anywhere in the tree);
+//   - a link on a page the crawl does not open: detail pages beyond
+//     the two ROUTES seeds, and every DEFERRED route;
+//   - a link a greedy wildcard eats: an agreement href parsed as the
+//     ACCOUNT page with accountId 'agreements/<id>' — "served", by the
+//     wrong page.
+//
+// All three shapes were live at once, on four entity kinds, and this
+// crawl stayed green through every one of them until 38d4e458 retired
+// them. What covers them is the static pin
+// apps/web/src/entity-href-routes.test.ts: for EVERY kind in
+// ENTITY_KINDS it asserts parseRoute(entityHref(kind, id)) is the route
+// that kind belongs to — no data, no page, no crawl needed. A green here
+// means every RENDERED link lands; a link generator the crawl never
+// sees rendered is that pin's job. The pin also holds this paragraph's
+// pointer and the title below to their claims, so neither can drift.
+//
 // Findings name route + control + what happened. A finding on main
 // today is a real gap: it is either fixed in the page or listed in
 // KNOWN_GAPS with its text, and KNOWN_GAPS is pinned in BOTH
@@ -516,7 +540,7 @@ const isKnown = (f: Finding): boolean => KNOWN_GAPS.some((g) => g.route === f.ro
 
 const SHARDS = 4;
 
-test.describe('the interaction crawl — every link lands, every control answers, back returns', () => {
+test.describe('the interaction crawl — every rendered link lands, every control answers, back returns', () => {
   test.describe.configure({ mode: 'parallel' });
 
   for (let shard = 0; shard < SHARDS; shard++) {

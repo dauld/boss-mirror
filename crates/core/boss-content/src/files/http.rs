@@ -18,7 +18,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Multipart, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
+use axum::handler::Handler;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -31,6 +32,21 @@ use uuid::Uuid;
 /// Files larger than this go through a signed-URL redirect on
 /// download instead of streaming through the gateway.
 pub const LARGE_DOWNLOAD_THRESHOLD_BYTES: i64 = 8 * 1024 * 1024;
+
+/// The largest multipart body `POST /api/files` takes: 2,097,152 bytes
+/// (2 MiB), the WHOLE body — the file plus its framing and the two
+/// target fields — not the file alone.
+///
+/// MEASURED, NOT CHOSEN (backlog 7610dd2f, 2026-09-23). Nothing in the
+/// content-api set a body limit, so the number in force was axum's
+/// implicit default for the `Multipart` extractor: axum-core 0.5.6,
+/// `with_limited_body`, `DEFAULT_LIMIT = 2_097_152`. An implicit number
+/// can only be restated elsewhere by copying it, and `boss attach` has
+/// to state it — in its help and in its refusal — so it is declared
+/// here, applied to the route below, and read by the verb from this one
+/// constant (CLAUDE.md §9a). Raising it is an edit here; the verb
+/// follows.
+pub const UPLOAD_BODY_LIMIT_BYTES: usize = 2_097_152;
 
 /// TTL for a presigned GET URL on the large-file download path.
 /// Short — the URL leaks scope by construction; the requesting user
@@ -72,7 +88,10 @@ pub struct FilesApiState {
 pub fn router(state: FilesApiState) -> Router {
     let shared = Arc::new(state);
     let r = Router::new()
-        .route("/api/files", get(list).post(upload))
+        .route(
+            "/api/files",
+            get(list).post(upload.layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT_BYTES))),
+        )
         .route("/api/files/{id}", get(download).delete(soft_delete))
         // Session 4 — large-file path. Both routes use `_`-prefixed
         // names so they can never collide with a Uuid that parses to
@@ -198,9 +217,12 @@ async fn upload(
     let mut mime: Option<String> = None;
     let mut hasher = Sha256::new();
 
+    // `e.status()`, not a flat 400: a body past UPLOAD_BODY_LIMIT_BYTES
+    // is 413, and that status is how a caller tells "too large" from
+    // "malformed" without parsing prose (backlog 7610dd2f).
     while let Some(field) = match multipart.next_field().await {
         Ok(f) => f,
-        Err(e) => return (StatusCode::BAD_REQUEST, format!("multipart: {e}")).into_response(),
+        Err(e) => return (e.status(), format!("multipart: {e}")).into_response(),
     } {
         let name = field.name().unwrap_or("").to_string();
         match name.as_str() {
@@ -223,8 +245,7 @@ async fn upload(
                 let bytes = match field.bytes().await {
                     Ok(b) => b,
                     Err(e) => {
-                        return (StatusCode::BAD_REQUEST, format!("body read: {e}"))
-                            .into_response();
+                        return (e.status(), format!("body read: {e}")).into_response();
                     }
                 };
                 hasher.update(&bytes);
@@ -624,4 +645,92 @@ async fn soft_delete(
         return err(e);
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    //! The upload door's body limit, measured against the router itself.
+    //!
+    //! Backlog 7610dd2f (2026-09-23): an actor attaching a file through
+    //! `boss attach` is told the largest body this door takes BEFORE it
+    //! sends one, and the number it is told must be the number the door
+    //! enforces. So the limit is one constant, applied to the route and
+    //! read by the verb, and these tests hold the route to it byte-exactly:
+    //! a multipart body of exactly the limit is taken, and one byte more
+    //! is refused with 413 — the status that names the fact — rather than
+    //! the 400 the handler used to fold every multipart error into.
+    use super::*;
+    use crate::files::in_memory::{InMemoryFileRepository, InMemoryFileStorage};
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    const BOUNDARY: &str = "boss-attach-limit-test";
+
+    fn app() -> Router {
+        router(FilesApiState {
+            repo: Arc::new(InMemoryFileRepository::new()),
+            storage: Arc::new(InMemoryFileStorage::new()),
+            publisher: None,
+            policy: Arc::new(boss_policy_client::PermissivePolicyClient),
+            bucket: "test".into(),
+            #[cfg(feature = "postgres")]
+            pool: None,
+            clock: Arc::new(boss_clock_client::WallClockClient),
+        })
+    }
+
+    /// A multipart body of EXACTLY `total` bytes: the two text fields,
+    /// then one file part padded so the whole body lands on `total`.
+    fn body_of_length(total: usize) -> Vec<u8> {
+        let head = format!(
+            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"target_kind\"\r\n\r\njob\r\n\
+             --{BOUNDARY}\r\nContent-Disposition: form-data; name=\"target_id\"\r\n\r\njob-1\r\n\
+             --{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.bin\"\r\n\
+             Content-Type: application/octet-stream\r\n\r\n"
+        );
+        let tail = format!("\r\n--{BOUNDARY}--\r\n");
+        let fill = total - head.len() - tail.len();
+        let mut out = head.into_bytes();
+        out.extend(std::iter::repeat_n(b'x', fill));
+        out.extend(tail.into_bytes());
+        assert_eq!(out.len(), total);
+        out
+    }
+
+    async fn post(total: usize) -> StatusCode {
+        let req = Request::post("/api/files")
+            .header(
+                header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .header(
+                "x-boss-user",
+                r#"{"id":"agent-test","role":"platform-admin","access_tier":"operator"}"#,
+            )
+            .body(Body::from(body_of_length(total)))
+            .unwrap();
+        app().oneshot(req).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn a_body_of_exactly_the_limit_is_taken() {
+        assert_eq!(post(UPLOAD_BODY_LIMIT_BYTES).await, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn one_byte_over_the_limit_is_refused_as_too_large() {
+        assert_eq!(
+            post(UPLOAD_BODY_LIMIT_BYTES + 1).await,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    /// The number is the one axum applied implicitly before it was
+    /// declared (axum-core 0.5.6 `with_limited_body`, `DEFAULT_LIMIT`),
+    /// so declaring it refused no upload that used to be taken.
+    #[test]
+    fn the_declared_limit_is_the_two_mebibytes_the_door_already_enforced() {
+        assert_eq!(UPLOAD_BODY_LIMIT_BYTES, 2_097_152);
+    }
 }

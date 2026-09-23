@@ -356,6 +356,16 @@ fn the_route_function_sends_every_boss_accounts_path_to_accounts_and_nothing_els
         ("/api/ledger/journal-entries?limit=1", "ledger"),
         ("/api/dispatcher/rules", "dispatcher"),
         ("/api/dispatcher/rules/auto-assign/versions", "dispatcher"),
+        // The file store joined on 2026-09-23 (backlog 7610dd2f): an
+        // actor attaches a file with `boss attach`, which posts to
+        // boss-content-api's /api/files and reads the bytes back by id.
+        // `_upload-url`, `_finalize` and `_audit` are mounted under the
+        // same prefix by the same router, so they route with it.
+        ("/api/files", "content"),
+        ("/api/files?target_kind=job&target_id=j-1", "content"),
+        ("/api/files/0b8f6c1e-0000-4000-8000-000000000000", "content"),
+        ("/api/files/_audit?sample=5", "content"),
+        ("/api/filesx", "jobs"),
         ("/api/ledgers/x", "jobs"),
         ("/api/dispatchers", "jobs"),
         ("/api/jobs?kind=pr-train", "jobs"),

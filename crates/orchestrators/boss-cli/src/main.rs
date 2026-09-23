@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+mod attach;
 mod brief;
 mod built_from;
 mod cadence;
@@ -822,6 +823,8 @@ enum Commands {
     // action enum (`WorkflowAction`, `JobAction`, ...), which touches
     // no shared line at all.
     // ------------------------------------------------------------------
+    #[command(flatten)]
+    Attach(attach::Cmd),
     #[command(flatten)]
     Credential(credential::Cmd),
     #[command(flatten)]
@@ -1791,6 +1794,7 @@ async fn main() -> Result<()> {
         },
         // Per-module verbs, one arm each, ALPHABETIZED — the note on
         // `Commands` says why (84f9fbc0).
+        Commands::Attach(cmd) => attach::dispatch(cmd).await,
         Commands::Credential(cmd) => credential::dispatch(cmd).await,
         Commands::Merged(cmd) => merged::dispatch(cmd),
         Commands::Receipt(cmd) => receipt::dispatch(cmd).await,
