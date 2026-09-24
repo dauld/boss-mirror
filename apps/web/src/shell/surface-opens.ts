@@ -45,7 +45,6 @@ export const QUERY_FIELDS: ReadonlySet<string> = new Set([
   'workflowPrefix',
   'jobStatus',
   'jobOwnerId',
-  'jobSubjectKind',
   'jobSubjectId',
   'newJobSubjectKind',
   'newJobSubjectId',

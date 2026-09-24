@@ -40,6 +40,7 @@ use boss_dispatcher_handlers::handlers::{
     inventory_po_place::InventoryPoPlace,
     inventory_receive::InventoryReceive,
     jobs_age_out_step::JobsAgeOutStep,
+    jobs_agent_step_overdue::JobsAgentStepOverdue,
     jobs_auto_park::JobsAutoPark,
     jobs_clear_waiting::JobsClearWaiting,
     jobs_complete_linked_step::JobsCompleteLinkedStep,
@@ -452,6 +453,16 @@ async fn main() -> Result<()> {
             // Generic: kind, step, the bound and what to write ride the
             // rule row; the tick's own `_at` is the clock.
             handlers.register(JobsAgeOutStep::new(cfg.jobs_api_url.clone()));
+            // The same age read aimed at REAL WORK (078ddcb0): a step on
+            // an agent in a workflow the rule declares, waiting past its
+            // bound, files one urgent alarm — a payout post sat 63.6h on
+            // the agent inside a flat list of ~180. Which workflows and
+            // how many hours ride the rule row; it files and withdraws
+            // its own alarm and never touches the late step.
+            handlers.register(JobsAgentStepOverdue::new(
+                cfg.jobs_api_url.clone(),
+                platform_owner.clone(),
+            ));
             // The routing half of the same judgement (a3397b01): a
             // step whose named executor run DIED is released back to
             // `ready` and nobody's, a bound AFTER the death was

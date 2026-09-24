@@ -220,6 +220,21 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         // packet to its own terminal; nothing listens for a run's
         // close, so the loop ends at the packet.
         ("jobs.age_out_step", vec!["jobs.step.completed"]),
+        // The real-work watch (078ddcb0): an hourly clock rule that
+        // files (`jobs.job.created`) one backlog-item alarm per step
+        // held by an agent past its workflow's declared bound, and
+        // withdraws it through the step the alarm waits on
+        // (`jobs.step.completed`) or a note (`jobs.job.updated`) once
+        // the step no longer waits. Every write is to its OWN alarm; it
+        // never touches the late step, so it cannot move what it watches.
+        (
+            "jobs.agent_step_overdue",
+            vec![
+                "jobs.job.created",
+                "jobs.job.updated",
+                "jobs.step.completed",
+            ],
+        ),
         // The routing half of the same judgement (a3397b01): a step
         // held by a run that DIED is released — `ready`, unassigned,
         // the dead run's edge cleared. A step UPDATE, never a

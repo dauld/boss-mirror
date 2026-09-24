@@ -27,7 +27,6 @@
     initialDepartment = '',
     initialStatus = 'open',
     initialOwnerId = '',
-    initialSubjectKind = '',
     initialSubjectId = '',
     pageTitle,
     eyebrow = 'Work',
@@ -49,9 +48,10 @@
     initialDepartment?: string;
     initialStatus?: string;
     // #93: list-filter props. owner_id filters by Job.owner_id;
-    // subjectKind+subjectId filter by Job.subject_kind+subject_id.
+    // subjectId filters by Job.subject_id. A subjectKind prop was
+    // captured and never sent — the jobs API has no such filter — and
+    // went with backlog 45ca0f89.
     initialOwnerId?: string;
-    initialSubjectKind?: string;
     initialSubjectId?: string;
     pageTitle?: string;
     eyebrow?: string;
@@ -86,7 +86,6 @@
     const dept = initialDepartment;
     const s = status;
     const o = initialOwnerId;
-    const sk = initialSubjectKind;
     const si = subjectIdFilter;
     let cancelled = false;
     loading = true;

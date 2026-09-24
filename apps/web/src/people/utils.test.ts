@@ -9,11 +9,15 @@
 
 import { describe, expect, it } from 'bun:test';
 import type { Employee, EmploymentStatus } from './types';
-import { statusBuckets } from './utils';
+import { departmentBuckets, statusBuckets } from './utils';
 
-function emp(id: string, status: EmploymentStatus | null): Employee {
+function emp(
+  id: string,
+  status: EmploymentStatus | null,
+  department: string | null = null,
+): Employee {
   return {
-    id, name: id, email: null, role: null, department: null, skill_level: null,
+    id, name: id, email: null, role: null, department, skill_level: null,
     skills: [], hire_date: null, location: null, manager_id: null,
     employment_type: null, status, certifications: [],
   };
@@ -54,5 +58,48 @@ describe('statusBuckets', () => {
       { code: null, label: 'Unknown', count: 1 },
     ]);
     expect(buckets.reduce((n, b) => n + b.count, 0)).toBe(roster.length);
+  });
+});
+
+// The Department buttons are built from the rows the Status selection
+// admits, not from the active rows (backlog 1410f145; page audit
+// 0c0265a3 GAP 6, 2026-09-23). Built from active rows, the counts
+// contradicted the table under On leave or All, a department whose
+// people were all on leave or terminated had no button, and a row with
+// no department could not be selected by department at all.
+describe('departmentBuckets', () => {
+  const ALL = { kind: 'all' } as const;
+
+  it('counts the rows it is given, not the active ones', () => {
+    const onLeave = [emp('a', 'on-leave', 'it'), emp('b', 'on-leave', 'it'), emp('c', 'on-leave', 'ops')];
+    expect(departmentBuckets(onLeave, ALL)).toEqual([
+      { code: 'it', label: 'IT', count: 2 },
+      { code: 'ops', label: 'Ops', count: 1 },
+    ]);
+  });
+
+  it('gives rows with no department a selectable bucket, last', () => {
+    const buckets = departmentBuckets([emp('a', 'active', 'it'), emp('n', 'active', null)], ALL);
+    expect(buckets.at(-1)).toEqual({ code: null, label: 'No department', count: 1 });
+    expect(departmentBuckets([emp('a', 'active', 'it')], ALL).some((b) => b.code === null)).toBe(false);
+  });
+
+  it('puts every row in exactly one bucket', () => {
+    const rows = [emp('a', 'active', 'sales'), emp('b', 'terminated', 'it'), emp('n', null, null)];
+    const buckets = departmentBuckets(rows, ALL);
+    expect(buckets.map((b) => b.code)).toEqual(['it', 'sales', null]);
+    expect(buckets.reduce((n, b) => n + b.count, 0)).toBe(rows.length);
+  });
+
+  it('keeps the selected department as a zero bucket when the rows hold none of it', () => {
+    // Switching Status to one with no one in the selected department
+    // must not hide the active button — the table would read empty
+    // with no visible filter explaining why.
+    const rows = [emp('a', 'on-leave', 'ops')];
+    expect(departmentBuckets(rows, { kind: 'code', code: 'it' })).toEqual([
+      { code: 'it', label: 'IT', count: 0 },
+      { code: 'ops', label: 'Ops', count: 1 },
+    ]);
+    expect(departmentBuckets(rows, { kind: 'code', code: null }).at(-1)).toEqual({ code: null, label: 'No department', count: 0 });
   });
 });

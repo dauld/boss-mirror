@@ -1,6 +1,9 @@
 //! The platform station bundle (`infra/platform/stations/`) declares
-//! exactly the ACTIVE rows the migrations produce — every column — and
-//! can be the registry's only home.
+//! every ACTIVE row the migrations produce — at that version, column for
+//! column, or at a later version — and can be the registry's only home.
+//! Since 2026-09-24 it LEADS them: `design-review` v2 and the new
+//! `design-decided` exist in the bundle alone (backlog 08372fdb), the
+//! edit path migrations-declare-schema-only leaves.
 //!
 //! MEASURED 2026-09-18 on origin/main 1a09f660 (backlog 393d3234,
 //! consolidation H4, car 1 of 4). Seven migrations were the only place
@@ -23,8 +26,8 @@
 //!      (`created_at` excepted — it is when the deployment was built,
 //!      not part of the declaration).
 //!   2. The bundle can be the ONLY home: with the `stations` table
-//!      emptied, the seed's publish function recreates the migration
-//!      rows exactly — same versions, same columns, active.
+//!      emptied, the seed's publish function recreates the bundle
+//!      exactly — same versions, same columns, active.
 //!
 //! And the refusal that makes editing safe: a bundle row that differs
 //! from the live active row of the same (name, version) is refused by
@@ -62,8 +65,31 @@ fn bundle() -> Vec<StationSpec> {
     load_stations(platform_stations_path()).expect("the platform station bundle parses")
 }
 
+/// The bundle rows that sit AHEAD of the live registry: `(ahead, new)`
+/// — rows at a higher version than the live active row of their name,
+/// which a seed PUBLISHES, and names with no live row at all, which it
+/// INSERTS.
+///
+/// Derived, never assumed. The pins below took both as zero until
+/// 2026-09-24, which was true only while no station had changed since
+/// the cutover; the first bundle-only change (design-review v2 and the
+/// new design-decided, backlog 08372fdb) made them one each. The cadence
+/// pin met the same thing on its first bump (backlog cab50f4c) and this
+/// follows the rule it settled: the bundle may lead, never trail.
+fn ahead_of(live: &[StationSpec]) -> (usize, usize) {
+    let live: BTreeMap<&str, i32> = live.iter().map(|s| (s.name.as_str(), s.version)).collect();
+    bundle()
+        .iter()
+        .fold((0, 0), |(ahead, new), s| match live.get(s.name.as_str()) {
+            Some(v) if s.version > *v => (ahead + 1, new),
+            Some(_) => (ahead, new),
+            None => (ahead, new + 1),
+        })
+}
+
 /// PIN 1 — every active row the migrations produce is declared in the
-/// bundle, column for column, and the bundle declares nothing else.
+/// bundle, at its version or AHEAD of it, and where the versions match,
+/// column for column.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_bundle_declares_every_active_row_the_migrations_produce() {
     let db = TestDb::new().await;
@@ -74,32 +100,59 @@ async fn the_bundle_declares_every_active_row_the_migrations_produce() {
     let from_migrations = declarations(&live);
     let from_bundle = declarations(&bundle());
 
-    let migration_names: Vec<&String> = from_migrations.keys().collect();
-    let bundle_names: Vec<&String> = from_bundle.keys().collect();
-    assert_eq!(
-        migration_names, bundle_names,
-        "the bundle's station names must be exactly the migrations' active names \
-         (a station the migrations seed and the bundle does not declare has no home \
-         once migrations declare schema only)"
+    // EVERY MIGRATION NAME HAS A FILE; THE BUNDLE MAY HOLD MORE. This
+    // asserted the two name lists equal until 2026-09-24, which forbade
+    // the edit path the cutover created: once migrations declare schema
+    // only, a station added later exists in the bundle and nowhere else
+    // (design-decided, backlog 08372fdb). What the check was FOR still
+    // holds — a station the migrations seed and the bundle does not
+    // declare has no home — and that is the direction kept.
+    let homeless: Vec<&String> = from_migrations
+        .keys()
+        .filter(|name| !from_bundle.contains_key(*name))
+        .collect();
+    assert!(
+        homeless.is_empty(),
+        "these stations are seeded by the migrations and declared by no file under \
+         infra/platform/stations/ — they have no home once migrations declare schema \
+         only: {homeless:?}"
     );
+    // THE BUNDLE MAY BE AHEAD; IT MAY NEVER BE BEHIND; AND WHERE THE
+    // VERSIONS MATCH, EVERY COLUMN MUST AGREE — the rule the cadence pin
+    // settled on its own first bump (backlog cab50f4c, David chose the
+    // lint over plain equality).
     for (name, migrated) in &from_migrations {
         let declared = &from_bundle[name];
-        assert_eq!(
-            declared, migrated,
-            "infra/platform/stations/{name}.toml must equal the active row the \
-             migrations produce, every column (left = bundle, right = migrations)"
+        let dv = declared["version"].as_i64().expect("a bundle version");
+        let mv = migrated["version"].as_i64().expect("a migration version");
+        assert!(
+            dv >= mv,
+            "infra/platform/stations/{name}.toml declares v{dv}, BEHIND the v{mv} the \
+             migrations produce — a fresh database would seed the older row and history \
+             would silently win"
         );
+        if dv == mv {
+            assert_eq!(
+                declared, migrated,
+                "infra/platform/stations/{name}.toml is at the migrations' version but \
+                 differs from it — a column changed without the version bump that says so \
+                 (left = bundle, right = migrations)"
+            );
+        }
     }
 }
 
 /// PIN 2 — with the table emptied, the seed alone rebuilds exactly the
-/// migration rows: same versions, same columns, all active.
+/// bundle: same versions, same columns, all active.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_emptied_registry_is_rebuilt_from_the_bundle_alone() {
     let db = TestDb::new().await;
     let registry = PgStations::new(db.pool.clone());
-    let before = registry.list_active().await.expect("list_active");
-    let expected = declarations(&before);
+    // WHAT THE SEED MUST REBUILD IS THE BUNDLE, because the bundle is the
+    // home. Reading the expectation off the migrations would assert that
+    // an emptied registry comes back as HISTORY rather than as the
+    // current declaration (backlog cab50f4c, the cadence pin's same fix).
+    let expected = declarations(&bundle());
 
     sqlx::query("DELETE FROM stations")
         .execute(&db.pool)
@@ -127,7 +180,7 @@ async fn an_emptied_registry_is_rebuilt_from_the_bundle_alone() {
     assert_eq!(
         declarations(&after),
         expected,
-        "the seed must recreate the migration rows exactly — the bundle can be the only home"
+        "the seed must recreate the BUNDLE exactly — the bundle can be the only home"
     );
     for row in &after {
         assert_eq!(row.status, WorkflowStatus::Active, "{} is active", row.name);
@@ -145,34 +198,86 @@ async fn an_emptied_registry_is_rebuilt_from_the_bundle_alone() {
     }
 }
 
-/// On a registry the migrations already filled, the seed inserts
-/// nothing and says every row is present — the insert-if-missing
-/// posture every boot relies on.
+/// On a registry the migrations already filled, the seed publishes
+/// exactly the rows the bundle moved ahead, inserts exactly the
+/// stations only the bundle declares, and leaves every other row alone;
+/// a second boot then finds every row present and writes nothing — the
+/// insert-if-missing posture every boot relies on.
+///
+/// Until 2026-09-24 this asserted that the FIRST seed found everything
+/// present, which assumed no station had changed since the cutover. The
+/// first bundle-only change (backlog 08372fdb) moved one row ahead and
+/// added one name, so the property is now stated on the boot AFTER the
+/// one that delivers the change — which is the boot every later restart
+/// is.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_present_registry_is_left_untouched() {
     let db = TestDb::new().await;
     let registry = PgStations::new(db.pool.clone());
-    let before = declarations(&registry.list_active().await.expect("list_active"));
+    let migrated = registry.list_active().await.expect("list_active");
+    let before = declarations(&migrated);
+    // BEFORE the seed, because the seed is what changes it.
+    let (ahead, new) = ahead_of(&migrated);
 
-    let report = seed_stations(&registry, &bundle(), &actor(), chrono::Utc::now(), false)
+    let first = seed_stations(&registry, &bundle(), &actor(), chrono::Utc::now(), false)
         .await
         .expect("a present registry is not a failure");
     assert_eq!(
-        report.count(|o| matches!(o, SeedOutcome::Present)),
-        before.len(),
-        "every bundle row is already present: {report}"
+        first.count(|o| matches!(o, SeedOutcome::Present)),
+        bundle().len() - ahead - new,
+        "every bundle row at the live version is already present: {first}"
     );
-    assert_eq!(report.count(|o| matches!(o, SeedOutcome::Inserted)), 0);
+    assert_eq!(
+        first.count(|o| matches!(o, SeedOutcome::Published { .. })),
+        ahead,
+        "exactly the rows the bundle moved ahead are published: {first}"
+    );
+    assert_eq!(
+        first.count(|o| matches!(o, SeedOutcome::Inserted)),
+        new,
+        "exactly the stations only the bundle declares are inserted: {first}"
+    );
+    // The rows that did NOT move are untouched, declaration for
+    // declaration — which is what this pin is named for.
+    let after_first = declarations(&registry.list_active().await.expect("list_active"));
+    for (name, was) in &before {
+        let moved = bundle()
+            .iter()
+            .any(|s| &s.name == name && Some(i64::from(s.version)) > was["version"].as_i64());
+        if !moved {
+            assert_eq!(
+                after_first.get(name),
+                Some(was),
+                "{name} did not move in the bundle and must be untouched by the seed"
+            );
+        }
+    }
 
-    let outbox: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM event_outbox WHERE kind LIKE 'jobs.station.%'")
-            .fetch_one(&db.pool)
-            .await
-            .expect("count station events");
-    assert_eq!(outbox, 0, "a no-op seed records no station event");
+    let events = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM event_outbox WHERE kind LIKE 'jobs.station.%'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .expect("count station events")
+    };
+    let events_before = events().await;
+    let second = seed_stations(&registry, &bundle(), &actor(), chrono::Utc::now(), false)
+        .await
+        .expect("a present registry is not a failure");
+    assert_eq!(
+        second.count(|o| matches!(o, SeedOutcome::Present)),
+        bundle().len(),
+        "on the next boot every bundle row is present: {second}"
+    );
+    assert_eq!(
+        events().await,
+        events_before,
+        "a no-op seed records no station event"
+    );
     assert_eq!(
         declarations(&registry.list_active().await.expect("list_active")),
-        before
+        after_first
     );
 }
 
@@ -228,6 +333,12 @@ async fn a_bundle_row_that_differs_from_the_live_row_is_refused_by_field() {
 async fn a_version_bump_publishes_and_retires_the_live_row() {
     let db = TestDb::new().await;
     let registry = PgStations::new(db.pool.clone());
+    // Bring the registry to the bundle first, so the ONE bump this test
+    // makes is the only thing the seed below can publish — the bundle
+    // itself may lead the migrations (see `ahead_of`).
+    seed_stations(&registry, &bundle(), &actor(), chrono::Utc::now(), false)
+        .await
+        .expect("the bundle seeds over the migrations");
     let live = registry
         .get_active("repair")
         .await

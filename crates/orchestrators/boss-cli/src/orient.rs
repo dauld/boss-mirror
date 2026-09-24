@@ -1006,10 +1006,74 @@ pub(crate) fn my_work_lines(
 /// `operator:unidentified`, which would answer 0 and read as an empty
 /// queue — the wrong-target trap (CLAUDE.md §Doors), with the two ways
 /// to name yourself on the line.
+/// The OVERDUE block MY WORK leads with (backlog 078ddcb0): the OPEN
+/// alarms the dispatcher's `jobs.agent_step_overdue` filed for a step
+/// held by one of `identities` past the wait its workflow declares,
+/// longest wait first. Empty when there is none, so a section with no
+/// late work reads exactly as it did.
+///
+/// WHY THE ALARM AND NOT A RECOMPUTATION. The bound lives on the rule
+/// row and the wait on the packet; an assignments row carries neither.
+/// Re-deriving "late" here would be a second judgement that can
+/// disagree with the alarm the operator is also shown, so this reads
+/// the alarm — one definition, whose keys are the handler's own
+/// constants. The cost is up to an hour's lag behind the hourly tick,
+/// and the alarm packet exists either way.
+pub(crate) fn overdue_lines(alarms: &[Value], identities: &[String]) -> Vec<String> {
+    use boss_dispatcher_handlers::handlers::jobs_agent_step_overdue as od;
+    let md = |a: &Value, k: &str| a.pointer(&format!("/metadata/{k}")).cloned();
+    let text = |a: &Value, k: &str| {
+        md(a, k)
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "?".to_string())
+    };
+    let mut mine: Vec<&Value> = alarms
+        .iter()
+        .filter(|a| a.get("status").and_then(Value::as_str) == Some("open"))
+        .filter(|a| identities.iter().any(|i| *i == text(a, od::ASSIGNEE_KEY)))
+        .collect();
+    if mine.is_empty() {
+        return Vec::new();
+    }
+    let waited = |a: &Value| md(a, od::WAITED_KEY).and_then(|v| v.as_f64());
+    mine.sort_by(|a, b| {
+        waited(b)
+            .partial_cmp(&waited(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut out = vec![format!(
+        "    OVERDUE — {} real-work step(s) held past the wait its workflow declares — \
+         move these FIRST:",
+        mine.len()
+    )];
+    for a in mine {
+        let packet = text(a, od::PACKET_KEY);
+        let alarm = a.get("id").and_then(Value::as_str).unwrap_or("?");
+        let title: String = text(a, od::TITLE_KEY)
+            .chars()
+            .take(MY_WORK_TITLE_CHARS)
+            .collect();
+        let number = |k: &str| md(a, k).map_or_else(|| "?".to_string(), |v| v.to_string());
+        out.push(format!(
+            "      {} {} {} {} — waited {}h on {}, bound {}h (alarm {})",
+            &packet[..packet.len().min(8)],
+            text(a, od::WORKFLOW_KEY),
+            text(a, od::SLUG_KEY),
+            title.trim_end(),
+            number(od::WAITED_KEY),
+            text(a, od::ASSIGNEE_KEY),
+            number(od::BOUND_KEY),
+            &alarm[..alarm.len().min(8)],
+        ));
+    }
+    out
+}
+
 pub(crate) fn my_work_section(
     identities: Option<&[String]>,
     rows: &[Value],
     cars: &[Value],
+    alarms: &[Value],
     now: chrono::DateTime<chrono::Utc>,
 ) -> Vec<String> {
     let Some(ids) = identities else {
@@ -1028,10 +1092,16 @@ pub(crate) fn my_work_section(
     };
     let carried = carried_items(cars);
     let lines = my_work_lines(rows, &carried, now);
+    // Late real work leads, above every group (078ddcb0). An alarm with
+    // no row behind it still prints: the alarm is up to an hour behind
+    // the queue, and a late step is worth a line either way.
+    let overdue = overdue_lines(alarms, ids);
     if lines.is_empty() {
-        return vec![format!(
+        let mut out = vec![format!(
             "  MY WORK — nothing: no ready/active step is assigned to {who}"
         )];
+        out.extend(overdue);
+        return out;
     }
     let count = lines
         .iter()
@@ -1056,6 +1126,7 @@ pub(crate) fn my_work_section(
     let mut out = vec![format!(
         "  MY WORK — {count} ready/active step(s) assigned to {who} — yours to move, oldest first{tail}"
     )];
+    out.extend(overdue);
     out.extend(lines);
     out
 }
@@ -1692,8 +1763,34 @@ pub async fn run(all: bool) -> Result<()> {
             .await?,
         )?);
     }
+    // The open overdue-real-work alarms (078ddcb0), which MY WORK leads
+    // with. Read whenever an identity is, and narrowed on the key the
+    // handler writes — a handful at most, so a page that does not hold
+    // the whole `total` is SAID rather than read as all of them.
+    let mut overdue_alarms: Vec<Value> = Vec::new();
+    if identities.is_some() {
+        use boss_dispatcher_handlers::handlers::jobs_agent_step_overdue::STEP_KEY;
+        let body = api(
+            &http,
+            reqwest::Method::GET,
+            &format!("/api/jobs?kind=backlog-item&status=open&metadata_has={STEP_KEY}&limit=200"),
+            None,
+        )
+        .await?;
+        let total = body
+            .as_ref()
+            .and_then(|b| b.get("total"))
+            .and_then(Value::as_u64);
+        overdue_alarms = rows(body)?;
+        if total.is_none_or(|t| t > overdue_alarms.len() as u64) {
+            println!(
+                "  (overdue alarms: read {} of total {total:?} — the OVERDUE block below is partial)",
+                overdue_alarms.len()
+            );
+        }
+    }
     println!();
-    for line in my_work_section(identities.as_deref(), &my_rows, &cars, now) {
+    for line in my_work_section(identities.as_deref(), &my_rows, &cars, &overdue_alarms, now) {
         println!("{line}");
     }
 
@@ -3137,17 +3234,17 @@ mod tests {
             "2026-09-17",
             "s",
         )];
-        let full = my_work_section(Some(&ids), &one, &[], now).join("\n");
+        let full = my_work_section(Some(&ids), &one, &[], &[], now).join("\n");
         assert!(
             full.starts_with(
                 "  MY WORK — 1 ready/active step(s) assigned to claude@algedonic.dev (+ agent-claude)"
             ),
             "{full}"
         );
-        let empty = my_work_section(Some(&ids), &[], &[], now).join("\n");
+        let empty = my_work_section(Some(&ids), &[], &[], &[], now).join("\n");
         assert!(empty.contains("MY WORK — nothing"), "{empty}");
         assert!(empty.contains("claude@algedonic.dev"), "{empty}");
-        let refused = my_work_section(None, &[], &[], now).join("\n");
+        let refused = my_work_section(None, &[], &[], &[], now).join("\n");
         assert!(refused.contains("MY WORK — REFUSED"), "{refused}");
         assert!(refused.contains("BOSS_ACTOR"), "{refused}");
         assert!(refused.contains(".config/boss/actor"), "{refused}");
@@ -3237,7 +3334,7 @@ mod tests {
 
         // The section says how many of its count are carried.
         let ids = vec!["claude@algedonic.dev".to_string()];
-        let section = my_work_section(Some(&ids), &rows, &cars, now).join("\n");
+        let section = my_work_section(Some(&ids), &rows, &cars, &[], now).join("\n");
         assert!(
             section.starts_with(
                 "  MY WORK — 3 ready/active step(s) assigned to claude@algedonic.dev — \
@@ -3249,6 +3346,98 @@ mod tests {
         let plain = my_work_lines(&rows[2..], &carried_items(&[]), now);
         assert_eq!(plain[0], "    backlog-item — 1");
         assert!(!plain.join("\n").contains("carried"), "{plain:?}");
+    }
+
+    /// An open overdue alarm as the dispatcher's `jobs.agent_step_overdue`
+    /// files it — built from the handler's own key constants, so a
+    /// renamed key breaks this before it prints `?` at an operator.
+    fn overdue_alarm(id: &str, packet: &str, assignee: &str, waited: f64) -> Value {
+        use boss_dispatcher_handlers::handlers::jobs_agent_step_overdue as od;
+        json!({
+            "id": id, "kind": "backlog-item", "status": "open",
+            "metadata": {
+                od::STEP_KEY: format!("{packet}-post"),
+                od::PACKET_KEY: packet,
+                od::WORKFLOW_KEY: "receive-a-payout",
+                od::SLUG_KEY: "post",
+                od::ASSIGNEE_KEY: assignee,
+                od::TITLE_KEY: "Stripe reported a payout",
+                od::WAITED_KEY: waited,
+                od::BOUND_KEY: 4,
+            },
+        })
+    }
+
+    /// MY WORK LEADS with real work an agent has held past its declared
+    /// bound (078ddcb0): measured 2026-09-23, a receive-a-payout `post`
+    /// waited 63.6h on the agent while this section listed it flat among
+    /// ~180 ready steps, oldest first — behind days-old backlog builds.
+    /// The alarm is the definition of late; the section reads it, names
+    /// the caller's alarms above every group, and leaves another actor's
+    /// alone.
+    #[test]
+    fn my_work_leads_with_the_callers_overdue_real_work() {
+        let now = chrono::Utc::now();
+        let ids = vec![
+            "claude@algedonic.dev".to_string(),
+            "agent-claude".to_string(),
+        ];
+        let rows = vec![
+            asg(
+                "75198b15-0000-4000-8000-000000000000",
+                "backlog-item",
+                "build",
+                "Old backlog build",
+                "2026-09-01",
+                "s-old",
+            ),
+            asg(
+                "931c3bfe-e483-4d89-a89c-f2062d4dff16",
+                "receive-a-payout",
+                "post",
+                "Stripe reported a payout",
+                "2026-09-21",
+                "931c3bfe-e483-4d89-a89c-f2062d4dff16-post",
+            ),
+        ];
+        let alarms = vec![
+            overdue_alarm(
+                "a1a1a1a1-0000",
+                "931c3bfe-e483-4d89-a89c-f2062d4dff16",
+                "agent-claude",
+                63.6,
+            ),
+            overdue_alarm("b2b2b2b2-0000", "someone-else", "emp-other", 9.0),
+        ];
+        let section = my_work_section(Some(&ids), &rows, &[], &alarms, now);
+        assert!(
+            section[0].starts_with("  MY WORK — 2 ready/active"),
+            "{section:?}"
+        );
+        assert_eq!(
+            section[1],
+            "    OVERDUE — 1 real-work step(s) held past the wait its workflow declares — \
+             move these FIRST:"
+        );
+        assert_eq!(
+            section[2],
+            "      931c3bfe receive-a-payout post Stripe reported a payout — waited 63.6h \
+             on agent-claude, bound 4h (alarm a1a1a1a1)"
+        );
+        assert_eq!(section[3], "    backlog-item — 1", "{section:?}");
+        let all = section.join("\n");
+        assert!(
+            !all.contains("someone-else"),
+            "another actor's alarm: {all}"
+        );
+
+        // No alarm for the caller: the section reads exactly as before.
+        let quiet = my_work_section(Some(&ids), &rows, &[], &alarms[1..], now);
+        assert_eq!(quiet[1], "    backlog-item — 1", "{quiet:?}");
+        // A closed alarm is not late work.
+        let mut closed = alarms[0].clone();
+        closed["status"] = json!("closed");
+        assert!(overdue_lines(&[closed], &ids).is_empty());
     }
 
     /// `boss orient` reads the map from the server rather than deriving

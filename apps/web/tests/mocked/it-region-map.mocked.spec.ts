@@ -247,6 +247,32 @@ test("marshalling's own map draws a platform per station — its packets, its bo
   await expect(page.getByRole('heading', { name: 'Marshalling Yard' })).toHaveCount(0);
 });
 
+// Stations OVERLAP: on 2026-09-23 the sidings summed to 517 over 303
+// distinct packets — all 213 agent-station packets also stood in
+// q.platform-admin.task — and nothing on the board said so (backlog
+// 140a2222). The board states it, from the server's own counts.
+test('the board says its sidings overlap, so the depth column is not read as a count of the work', async ({ page }) => {
+  await mocks(page);
+  const json = (r: Route, b: unknown) =>
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(b) });
+  await page.route(/\/api\/stations\/load$/, (r) =>
+    json(r, {
+      data: [
+        { station: 'q.platform-admin.task', kind: 'constraint', depth: 297, also_elsewhere: 213 },
+        { station: 'a.platform-admin.opus-5-1m', kind: 'constraint', depth: 213, also_elsewhere: 213 },
+        { station: 'q.platform-admin.sign-off', kind: 'constraint', depth: 6, also_elsewhere: 0 },
+        { station: 'loading-dock', kind: 'batch', depth: 1, also_elsewhere: 0 },
+      ],
+      distinct_packets: 303,
+    }));
+  await page.route(/\/api\/stations\/flow/, (r) => json(r, STATION_FLOW));
+
+  await page.goto('/it/yard/marshalling');
+  const overlap = page.locator('.my-root .my-overlap');
+  await expect(overlap).toContainText('The depths sum to 517 but hold 303 distinct packets');
+  await expect(overlap).toContainText('a.platform-admin.opus-5-1m 213 of 213');
+});
+
 test("receiving's own map stands its inbound packets by channel and flags what is past the age band", async ({ page }) => {
   await mocks(page);
   const json = (r: Route, b: unknown) =>

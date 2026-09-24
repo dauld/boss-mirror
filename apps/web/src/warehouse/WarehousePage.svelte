@@ -23,6 +23,13 @@
     type StockStatus,
   } from '../parts/types';
   import type { WarehouseStatus } from './types';
+  import {
+    failedRead,
+    failedWithReason,
+    listView,
+    okRead,
+    type ReadState,
+  } from '../data/readState';
   import { href } from '../router';
 
   type Tab = 'overview' | 'inventory' | 'receiving';
@@ -35,35 +42,45 @@
   let inventory = $state<InventoryItem[]>([]);
   let purchaseOrders = $state<PurchaseOrder[]>([]);
   let status = $state<WarehouseStatus | null>(null);
-  /// Non-null when the inventory/PO reads failed — rendered instead
-  /// of "0 tracked SKUs" and empty tables, which an outage is not
-  /// (packet 3fba9c35, the false-empty sweep). The status tile keeps
-  /// its own honest "unavailable" render.
-  let loadFailed = $state<string | null>(null);
+  /// One outcome PER READ (packet 3fba9c35 made the failure visible;
+  /// backlog fcd0e29e split it): a single shared `loadFailed` blanked
+  /// the Receiving tab when only items failed, naming purchase orders,
+  /// and one network error rejected all three reads at once.
+  let itemsRead = $state<ReadState>(okRead);
+  let ordersRead = $state<ReadState>(okRead);
+  let statusRead = $state<ReadState>(okRead);
   let statusLoading = $state(true);
   let tab = $state<Tab>('overview');
 
-  async function loadAll(): Promise<void> {
+  /// One GET, settled on its own. A refusal keeps the server's status
+  /// AND its text: warehouse-status answers 503 "not configured" or 502
+  /// naming the failing leg, and the page used to keep neither, so an
+  /// operator could not tell the two apart (backlog 0dcb0200).
+  async function read(url: string): Promise<{ state: ReadState; body: unknown }> {
     try {
-      const [iResp, pResp, sResp] = await Promise.all([
-        fetch('/api/inventory/items'),
-        fetch('/api/inventory/orders'),
-        fetch('/api/inventory/warehouse-status'),
-      ]);
-      if (iResp.ok) {
-        const body = await iResp.json();
-        inventory = Array.isArray(body) ? body : (body.data ?? []);
-      }
-      if (pResp.ok) {
-        const body = await pResp.json();
-        purchaseOrders = Array.isArray(body) ? body : (body.data ?? []);
-      }
-      if (sResp.ok) status = (await sResp.json()) as WarehouseStatus;
-      const down = [iResp, pResp].find((x) => !x.ok);
-      loadFailed = down ? `HTTP ${down.status}` : null;
+      const r = await fetch(url);
+      if (!r.ok) return { state: failedWithReason(r.status, await r.text()), body: null };
+      return { state: okRead, body: await r.json() };
     } catch (e) {
-      loadFailed = e instanceof Error ? e.message : String(e);
+      return { state: failedRead(e instanceof Error ? e.message : String(e)), body: null };
     }
+  }
+
+  function rowsOf<T>(body: unknown): T[] {
+    if (Array.isArray(body)) return body as T[];
+    return (body as { data?: T[] } | null)?.data ?? [];
+  }
+
+  async function loadAll(): Promise<void> {
+    const [i, p, s] = await Promise.all([
+      read('/api/inventory/items'),
+      read('/api/inventory/orders'),
+      read('/api/inventory/warehouse-status'),
+    ]);
+    [itemsRead, ordersRead, statusRead] = [i.state, p.state, s.state];
+    if (i.state.kind === 'ok') inventory = rowsOf<InventoryItem>(i.body);
+    if (p.state.kind === 'ok') purchaseOrders = rowsOf<PurchaseOrder>(p.body);
+    if (s.state.kind === 'ok') status = s.body as WarehouseStatus;
     statusLoading = false;
   }
 
@@ -142,6 +159,8 @@
     }),
   );
 
+  let invView = $derived(listView([{ source: 'inventory', state: itemsRead }], invVisible.length));
+
   let invCritical = $derived(
     inventoryRows.filter((r) => r.status === 'critical' || r.status === 'out').length,
   );
@@ -175,6 +194,9 @@
       if (poFilter === 'open') return po.status !== 'received' && po.status !== 'closed';
       return po.status === poFilter;
     }),
+  );
+  let poView = $derived(
+    listView([{ source: 'purchase orders', state: ordersRead }], poVisible.length),
   );
 
   // Create PO modal
@@ -241,7 +263,9 @@
     {#if statusLoading && !status}
       <p class="empty" style="padding:16px">Loading warehouse status…</p>
     {:else if !status}
-      <p class="empty" style="padding:16px">Warehouse status unavailable.</p>
+      <p class="empty" style="padding:16px">
+        Warehouse status unavailable{statusRead.kind === 'failed' ? ` — ${statusRead.error}` : '.'}
+      </p>
     {:else}
       {@const s = status}
       <div class="tab-content" style="padding:16px 0; display:flex; flex-direction:column; gap:16px">
@@ -383,11 +407,11 @@
       </aside>
 
       <section class="list-section">
-        {#if loadFailed}
+        {#if invView.kind === 'failed'}
           <p class="empty load-failed" role="alert">
-            Couldn't load inventory — {loadFailed}
+            Couldn't load {invView.source} — {invView.error}
           </p>
-        {:else if invVisible.length === 0}
+        {:else if invView.kind === 'empty'}
           <p class="empty">No items match that filter.</p>
         {:else}
           <table class="data-table data-table-striped">
@@ -515,11 +539,11 @@
           </div>
         {/if}
 
-        {#if loadFailed}
+        {#if poView.kind === 'failed'}
           <p class="empty load-failed" role="alert">
-            Couldn't load purchase orders — {loadFailed}
+            Couldn't load {poView.source} — {poView.error}
           </p>
-        {:else if poVisible.length === 0}
+        {:else if poView.kind === 'empty'}
           <p class="empty">No POs match that filter.</p>
         {:else}
           <table class="data-table data-table-striped">

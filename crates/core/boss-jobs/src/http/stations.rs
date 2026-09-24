@@ -352,19 +352,48 @@ pub(super) async fn stations_load<R: JobsRepository + 'static, B: EventBus + 'st
     };
 
     let today = boss_clock_client::now_from(&state.clock).await.date_naive();
-    let mut rows: Vec<serde_json::Value> = Vec::with_capacity(stations.len());
-    for spec in &stations {
+    // Membership first, rows second: a row's `also_elsewhere` needs every
+    // station's members before any row can be written.
+    let memberships: Vec<(
+        StationSpec,
+        Vec<&(boss_core::job::Job, Vec<boss_core::job::Step>)>,
+    )> = stations
+        .iter()
         // A per-actor station binds to the caller, exactly as its own
         // queue endpoint does; an unbindable one holds nothing rather
         // than everything.
-        let Some(bound) = spec.bind_self(self_id(&user)) else {
-            continue;
-        };
-        let members: Vec<&(boss_core::job::Job, Vec<boss_core::job::Step>)> = packets
-            .iter()
-            .filter(|(job, steps)| bound.predicate.matches(job, steps))
-            .collect();
+        .filter_map(|spec| spec.bind_self(self_id(&user)))
+        .map(|bound| {
+            let members = packets
+                .iter()
+                .filter(|(job, steps)| bound.predicate.matches(job, steps))
+                .collect();
+            (bound, members)
+        })
+        .collect();
+    // STATIONS OVERLAP, so the depths do not add up to the work. A
+    // packet stands at every station whose predicate it matches: on
+    // 2026-09-23 the marshalling sidings summed to 517 over 303 distinct
+    // packets — all 213 in the agent station also stood in
+    // q.platform-admin.task — and nothing on the board said so (backlog
+    // 140a2222). How many stations each packet stands at, counted over
+    // the rows this read returns, so `distinct_packets` and each row's
+    // `also_elsewhere` are figures the server counted, not ones a reader
+    // has to derive by joining N queue reads by id.
+    let standings: BTreeMap<String, usize> = memberships
+        .iter()
+        .flat_map(|(_, members)| members.iter().map(|(job, _)| job.id.to_string()))
+        .fold(BTreeMap::new(), |mut acc, id| {
+            *acc.entry(id).or_insert(0) += 1;
+            acc
+        });
+    let mut rows: Vec<serde_json::Value> = Vec::with_capacity(memberships.len());
+    for (bound, members) in &memberships {
         let depth = members.len();
+        let also_elsewhere = members
+            .iter()
+            .filter(|(job, _)| standings.get(&job.id.to_string()).is_some_and(|n| *n > 1))
+            .count();
         let oldest = members.iter().map(|(j, _)| j.opened_on).min();
         rows.push(serde_json::json!({
             "station": bound.name,
@@ -380,12 +409,21 @@ pub(super) async fn stations_load<R: JobsRepository + 'static, B: EventBus + 'st
             // what depth should have been; zero on a network with no
             // drift, and zero for the stations that read no projected
             // key at all.
-            "unreachable": crate::station_reach::unreachable_packets(&bound, &packets, &active),
+            "unreachable": crate::station_reach::unreachable_packets(bound, &packets, &active),
             "capability_roles": bound.capability.as_ref().map(|c| c.roles.clone()),
+            // Members that also stand at another station in `data`.
+            "also_elsewhere": also_elsewhere,
         }));
     }
     let total = rows.len();
-    Json(serde_json::json!({ "data": rows, "total": total })).into_response()
+    Json(serde_json::json!({
+        "data": rows,
+        "total": total,
+        // Distinct packets across every row's members — what the depth
+        // column sums to once each packet is counted once.
+        "distinct_packets": standings.len(),
+    }))
+    .into_response()
 }
 
 /// The window `GET /api/stations/flow` counts over when the caller

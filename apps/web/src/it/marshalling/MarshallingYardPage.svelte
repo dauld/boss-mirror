@@ -31,12 +31,13 @@
     loadStations,
     loadWaits,
     longestWaits,
+    overlapLine,
     parseQueueAge,
     waitText,
     whyNotMoving,
     type Siding,
     type StationFlowEnvelope,
-    type StationLoadRow,
+    type StationLoadEnvelope,
   } from './marshalling';
   import { marshallingPlatforms, type Deck } from '../yard/world-interior';
 
@@ -60,7 +61,7 @@
   const WAIT_ROWS = 12;
 
   let windowHours = $state<number>(24);
-  let load = $state<Remote<ReadonlyArray<StationLoadRow>>>({ kind: 'loading' });
+  let load = $state<Remote<StationLoadEnvelope>>({ kind: 'loading' });
   let flow = $state<Remote<StationFlowEnvelope>>({ kind: 'loading' });
   let waits = $state<Remote<ReturnType<typeof parseQueueAge>>>({ kind: 'loading' });
 
@@ -87,9 +88,12 @@
 
   const sidings = $derived.by<ReadonlyArray<Siding>>(() =>
     load.kind === 'ready' && flow.kind === 'ready'
-      ? joinSidings(load.data, flow.data)
+      ? joinSidings(load.data.rows, flow.data)
       : [],
   );
+  // Stations overlap, so the depth column does not add up to the work;
+  // this says by how much, from the server's own counts (140a2222).
+  const overlap = $derived(load.kind === 'ready' ? overlapLine(load.data) : null);
   const holding = $derived(sidings.filter((s) => s.depth > 0));
   const clear = $derived(sidings.filter((s) => s.depth === 0));
   const constraint = $derived(constraintOf(sidings, windowHours));
@@ -214,6 +218,9 @@
         </tbody>
       </table>
     {/if}
+    {#if overlap !== null}
+      <p class="my-overlap">{overlap}</p>
+    {/if}
 
     <!-- 02 — THE WAITS. Step-level, wall clock, click opens the packet. -->
     <div class="my-section">02 — LONGEST-WAITING OBLIGATIONS</div>
@@ -298,6 +305,7 @@
   }
   .my-section::after { content: ''; flex: 1; border-top: 1px solid var(--hairline); }
   .my-quiet { color: var(--static); font-size: 13px; }
+  .my-overlap { color: var(--static); font-size: 12px; margin: 8px 0 0; max-width: 78ch; }
   .my-fail {
     color: var(--warn);
     border: 1px solid var(--warn);

@@ -4,9 +4,11 @@ import {
   drainHours,
   joinSidings,
   longestWaits,
+  overlapLine,
   parseQueueAge,
   parseStationFlow,
   parseStationLoad,
+  parseStationLoadEnvelope,
   waitText,
   whyNotMoving,
   type Siding,
@@ -119,6 +121,76 @@ describe('parseStationLoad / parseStationFlow', () => {
   test('the window comes off the envelope, never assumed by the caller', () => {
     expect(parseStationFlow(FLOW).windowHours).toBe(24);
     expect(parseStationFlow(FLOW).asOf).toBe('2026-09-09T04:00:00Z');
+  });
+});
+
+// Stations overlap: a packet stands at every station whose predicate
+// it matches. On 2026-09-23 the sidings summed to 517 over 303
+// distinct packets — all 213 agent-station packets also stood in
+// q.platform-admin.task — and nothing on the board said so, so a
+// reader adding the depth column overstated the work by 214 (backlog
+// 140a2222). The load now carries `distinct_packets` and, per row,
+// `also_elsewhere`; the board states the overlap from those.
+const OVERLAPPING = {
+  data: [
+    { station: 'q.platform-admin.task', kind: 'constraint', depth: 297, also_elsewhere: 213 },
+    { station: 'a.platform-admin.opus-5-1m', kind: 'constraint', depth: 213, also_elsewhere: 213 },
+    { station: 'q.platform-admin.sign-off', kind: 'constraint', depth: 6, also_elsewhere: 0 },
+    { station: 'loading-dock', kind: 'batch', depth: 1, also_elsewhere: 0 },
+    { station: 'q.cto.sign-off', kind: 'constraint', depth: 0, also_elsewhere: 0 },
+  ],
+  total: 5,
+  distinct_packets: 303,
+};
+
+describe('parseStationLoadEnvelope / overlapLine', () => {
+  test('the distinct count and each row share come off the envelope', () => {
+    const env = parseStationLoadEnvelope(OVERLAPPING);
+    expect(env.distinctPackets).toBe(303);
+    expect(env.rows.map((r) => r.alsoElsewhere)).toEqual([213, 213, 0, 0, 0]);
+    // The rows are the same rows the plain parser reads.
+    expect(env.rows).toEqual(parseStationLoad(OVERLAPPING));
+  });
+
+  test('an older server that sends neither field reads as unknown, never as zero', () => {
+    const env = parseStationLoadEnvelope(LOAD);
+    expect(env.distinctPackets).toBeNull();
+    expect(env.rows.every((r) => r.alsoElsewhere === null)).toBe(true);
+  });
+
+  test('overlapping sidings state the sum, the distinct count, and where they overlap', () => {
+    const line = overlapLine(parseStationLoadEnvelope(OVERLAPPING));
+    expect(line).toContain('sum to 517');
+    expect(line).toContain('303 distinct packets');
+    expect(line).toContain('214');
+    expect(line).toContain('q.platform-admin.task 213 of 297');
+    expect(line).toContain('a.platform-admin.opus-5-1m 213 of 213');
+    // A station that shares nothing is not named as overlapping.
+    expect(line).not.toContain('sign-off');
+  });
+
+  test('sidings that share no packet say the sum IS the packet count', () => {
+    const line = overlapLine(
+      parseStationLoadEnvelope({
+        data: [
+          { station: 'a', depth: 4, also_elsewhere: 0 },
+          { station: 'b', depth: 2, also_elsewhere: 0 },
+        ],
+        distinct_packets: 6,
+      }),
+    );
+    expect(line).toContain('sum to 6');
+    expect(line).toContain('no packet stands at two stations');
+  });
+
+  test('without a distinct count the sum is refused as a count of the work, not passed off as one', () => {
+    const line = overlapLine(parseStationLoadEnvelope(LOAD));
+    expect(line).toContain('sum to 50');
+    expect(line).toContain('did not say how many distinct packets');
+  });
+
+  test('an empty network needs no overlap line', () => {
+    expect(overlapLine(parseStationLoadEnvelope({ data: [], distinct_packets: 0 }))).toBeNull();
   });
 });
 

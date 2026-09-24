@@ -11,21 +11,22 @@
   import SortHeader from '@boss/web-kit/ui/SortHeader.svelte';
   import { createSortState } from '@boss/web-kit/ui/sort-state.svelte';
   import OrgTreeNode from './OrgTreeNode.svelte';
+  import { employmentTone, humanizeClassCode, type Employee } from './types';
   import {
-    employmentTone,
-    humanizeClassCode,
-    type Department,
-    type Employee,
-  } from './types';
-  import { expiringCerts, statusBuckets, tenureYears } from './utils';
+    departmentBuckets,
+    expiringCerts,
+    statusBuckets,
+    tenureYears,
+    type CodeFilter,
+  } from './utils';
   import { classesFor } from '@boss/web-kit/session/classes.svelte';
   import { href } from '../router';
 
-  type DeptFilter = Department | 'all';
-  /// A status code, `null` for the rows with no status yet ("unknown"),
-  /// or All. A union rather than a sentinel string, so no class code
-  /// can collide with the All button.
-  type StatusFilter = { kind: 'all' } | { kind: 'code'; code: string | null };
+  /// Status: a status code, `null` for the rows with no status yet
+  /// ("unknown"), or All. Department: a department code, `null` for the
+  /// rows with no department, or All.
+  type StatusFilter = CodeFilter;
+  type DeptFilter = CodeFilter;
 
   let roster = $state<Employee[]>([]);
   /// Non-null when the roster load failed — rendered instead of the
@@ -33,7 +34,7 @@
   /// 3fba9c35, the false-empty sweep).
   let loadFailed = $state<string | null>(null);
   let loading = $state(true);
-  let dept = $state<DeptFilter>('all');
+  let dept = $state<DeptFilter>({ kind: 'all' });
   let status = $state<StatusFilter>({ kind: 'code', code: 'active' });
   let query = $state('');
 
@@ -64,13 +65,6 @@
 
   let activeRoster = $derived(roster.filter((e) => e.status === 'active'));
 
-  let headcountByDept = $derived.by(() => {
-    const m = new Map<Department, number>();
-    for (const e of activeRoster)
-      if (e.department) m.set(e.department, (m.get(e.department) ?? 0) + 1);
-    return m;
-  });
-
   let expiring90 = $derived(expiringCerts(90, roster));
 
   // The Status buttons come from the (employee, status) Classes (loaded
@@ -79,10 +73,20 @@
   // terminated and null-status rows reachable only under All, uncounted.
   let statusButtons = $derived(statusBuckets(roster, classesFor('employee', 'status')));
 
+  // The rows the Status selection admits. The Department buttons count
+  // these, not the active rows — backlog 1410f145: counted from active
+  // rows they contradicted the table under On leave or All, and a
+  // department of on-leave or terminated people had no button.
+  let statusAdmitted = $derived.by(() => {
+    if (status.kind === 'all') return roster;
+    const code = status.code;
+    return roster.filter((e) => e.status === code);
+  });
+  let deptButtons = $derived(departmentBuckets(statusAdmitted, dept));
+
   let visible = $derived(
-    roster.filter((e) => {
-      if (status.kind === 'code' && e.status !== status.code) return false;
-      if (dept !== 'all' && e.department !== dept) return false;
+    statusAdmitted.filter((e) => {
+      if (dept.kind === 'code' && e.department !== dept.code) return false;
       if (query) {
         const q = query.toLowerCase();
         const hay = `${e.id} ${e.name} ${e.email} ${humanizeClassCode(e.role)}`.toLowerCase();
@@ -120,16 +124,6 @@
       location: (e) => e.location,
       status: (e) => e.status,
     }),
-  );
-
-  let DEPTS = $derived(
-    Array.from(
-      new Set(
-        activeRoster
-          .map((e) => e.department)
-          .filter((d): d is Department => d !== null),
-      ),
-    ).sort(),
   );
 
   // Tree view — group employees by manager_id so the hierarchy
@@ -198,12 +192,15 @@
       </FilterGroup>
 
       <FilterGroup label="Department">
-          <FilterButton active={dept === 'all'} onclick={() => (dept = 'all')}>
-            All ({activeRoster.length})
+          <FilterButton active={dept.kind === 'all'} onclick={() => (dept = { kind: 'all' })}>
+            All ({statusAdmitted.length})
           </FilterButton>
-          {#each DEPTS as d (d)}
-            <FilterButton active={dept === d} onclick={() => (dept = d)}>
-                {humanizeClassCode(d)} ({headcountByDept.get(d) ?? 0})
+          {#each deptButtons as b (b.code ?? '')}
+            <FilterButton
+              active={dept.kind === 'code' && dept.code === b.code}
+              onclick={() => (dept = { kind: 'code', code: b.code })}
+            >
+              {b.label} ({b.count})
             </FilterButton>
           {/each}
       </FilterGroup>

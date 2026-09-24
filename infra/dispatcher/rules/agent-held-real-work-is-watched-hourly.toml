@@ -1,0 +1,50 @@
+# Real work held by an agent ages into an alarm (backlog 078ddcb0).
+#
+# THE CASE. receive-a-payout packet 931c3bfe's `post` step sat on
+# agent-claude from 2026-09-21 01:10Z to 2026-09-23 16:46Z — 63.6 hours,
+# the $1.00 in Cash in Transit the whole time — found by the Finance W39
+# retro and the /ux/finance audit, not by anything watching. `boss orient`
+# listed it in MY WORK among ~180 ready steps, most of them backlog builds
+# and page audits. A list is not an alarm: nothing told a step that moves
+# money or answers the outside world apart from a backlog item, and
+# nothing aged it into a signal.
+#
+# THE ARGS ARE THE DECLARATION — `hours.<workflow>`, the wait an
+# agent-held step of that workflow may take before it is late, the
+# `cadence-silence-sweep-daily` idiom: this row is registry data,
+# append-only and versioned, editable through /api/dispatcher/rules with
+# no deploy. These four workflows live only in the instance's registry
+# (the company's own protocols, not the platform bundle's), and every
+# agent step in them is work someone outside, or the books, is waiting on:
+#   - receive-a-payout, 4h: a payout's money sits in Cash in Transit
+#     until `post` records it — three fields copied off the packet.
+#   - receive-a-sponsorship, 24h: a sponsor's money reconciled,
+#     recognized and thanked; a day is the courtesy of a reply.
+#   - receive-an-inquiry, 24h: a reply to someone outside; a day.
+#   - close-a-period, 72h: the month's books — steps of real length, and
+#     a period left open for more than three days per step is late.
+# DELIBERATELY UNDECLARED: `backlog-item`, `page-audit` and every other
+# platform protocol. ~200 agent-held backlog builds were days old on
+# 2026-09-24; an alarm per build would be the flat list again, shouted.
+# The shipped-rule test refuses a `backlog-item` declaration by name.
+#
+# HOURLY, NOT DAILY: the tightest bound is four hours, and a daily read
+# would let a late payout sit up to a day past it — the handler refuses
+# a firing with no `_at` for that reason.
+[[rule]]
+name = "agent-held-real-work-is-watched-hourly"
+why = """
+A TIMER over a THRESHOLD, the standing exemption: the condition is a
+step that did NOT move, and no event says "four hours passed and nobody
+recorded the payout". A Workflow definition can say who a step is for
+and what it requires at done; it cannot notice that nobody did it.
+Measured 2026-09-23: a receive-a-payout post waited 63.6h on the agent
+inside a flat list of ~180 ready steps (backlog 078ddcb0). It adds no
+routing and refuses nothing: one firing files ONE urgent alarm per late
+step (never twice for a step), withdraws it once the step no longer
+waits, and never touches the late step itself.
+"""
+schedule = { cadence = "hourly", anchor_date = "2026-09-24" }
+[[rule.do]]
+handler = "jobs.agent_step_overdue"
+args = { "hours.receive-a-payout" = "4", "hours.receive-a-sponsorship" = "24", "hours.receive-an-inquiry" = "24", "hours.close-a-period" = "72" }

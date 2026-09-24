@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   blankMeaning,
   failedRead,
+  failedWithReason,
   listView,
   okRead,
   readStateOf,
@@ -41,6 +42,20 @@ describe('a raw fetch Response becomes a read state', () => {
     const r = readStateOfResponse('/api/people/accounts', { ok: false, status: 503 });
     expect(r.kind).toBe('failed');
     expect(r.kind === 'failed' && r.error).toBe('/api/people/accounts: HTTP 503');
+  });
+});
+
+describe('a refusal that says why keeps its reason', () => {
+  // Backlog 0dcb0200. boss-inventory's warehouse-status answers 503
+  // "… not configured" or 502 naming the failing leg; the page kept
+  // neither, so "not configured" and "shipping is down" read the same.
+  test('the status and the server\'s own text both reach the error', () => {
+    const r = failedWithReason(503, 'requires jobs/assets/shipping clients — not configured\n');
+    expect(r).toEqual(failedRead('HTTP 503: requires jobs/assets/shipping clients — not configured'));
+  });
+
+  test('an empty body still names the status', () => {
+    expect(failedWithReason(502, '  ')).toEqual(failedRead('HTTP 502'));
   });
 });
 

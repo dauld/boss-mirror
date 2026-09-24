@@ -155,6 +155,15 @@ const SPAWNS_NOTHING_ON_PURPOSE: &[(&str, &str)] = &[
          sweep keyed by kind could watch.",
     ),
     (
+        "agent-held-real-work-is-watched-hourly",
+        "runs `jobs.agent_step_overdue`, which files one urgent backlog-item alarm per step \
+         held by an agent past the wait its workflow declares on the rule's args (backlog \
+         078ddcb0), and withdraws it once the step no longer waits. On an hour with no late \
+         step it produces NOTHING, and that zero is the healthy reading; what it files is an \
+         alarm keyed by step, not a packet of a kind a sweep could count. It is itself the \
+         watch on work no event reports as late.",
+    ),
+    (
         "work-session-ends-when-silent",
         "runs `jobs.age_out_step`, which completes the `active` step of every open \
          work-session whose heartbeat is older than the bound (design 511fa7d4 car 2b, \

@@ -18,10 +18,10 @@ export type Route =
       // #93: filter by Job.owner_id so "View this employee's
       // assigned jobs" links actually filter the list.
       jobOwnerId?: string;
-      // #93: filter by Job.subject_id (with optional
-      // subject_kind disambiguator). For "View this account's
-      // jobs", "View this vendor's POs", etc.
-      jobSubjectKind?: string;
+      // #93: filter by Job.subject_id. For "View this account's
+      // jobs", "View this vendor's POs", etc. There is no subject-kind
+      // half: the jobs API takes none, and the one that was parsed
+      // here was never sent (backlog 45ca0f89).
       jobSubjectId?: string;
       // Phase 3 of the create-Job UX work: deep-link from a
       // Subject detail page opens the form pre-filled.
@@ -336,7 +336,6 @@ export function parseRoute(pathname: string): Route {
     // owner_id filters by Job.owner_id; subject_id filters by
     // Job.subject_id.
     const ownerId = sp.get('owner_id');
-    const filterSubjectKind = sp.get('filter_subject_kind');
     const filterSubjectId = sp.get('subject_id');
     const r: Route = { kind: 'jobs' };
     if (jk) (r as { workflow?: string }).workflow = jk;
@@ -347,9 +346,7 @@ export function parseRoute(pathname: string): Route {
     // The truthiness check dropped the empty value (backlog 03e198e5).
     if (js !== null) (r as { jobStatus?: string }).jobStatus = js;
     if (ownerId) (r as { jobOwnerId?: string }).jobOwnerId = ownerId;
-    if (filterSubjectId) (r as { jobSubjectId?: string }).jobSubjectId = filterSubjectId;
-    if (filterSubjectKind) (r as { jobSubjectKind?: string }).jobSubjectKind = filterSubjectKind;
-    if (newJob === '1') (r as { newJobOpen?: boolean }).newJobOpen = true;
+    if (filterSubjectId) (r as { jobSubjectId?: string }).jobSubjectId = filterSubjectId;    if (newJob === '1') (r as { newJobOpen?: boolean }).newJobOpen = true;
     if (sk) (r as { newJobSubjectKind?: string }).newJobSubjectKind = sk;
     if (sid) (r as { newJobSubjectId?: string }).newJobSubjectId = sid;
     return r;

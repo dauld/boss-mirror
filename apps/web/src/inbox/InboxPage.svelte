@@ -12,6 +12,7 @@
   import { href, navigate } from '../router';
   import { session } from '@boss/web-kit/session/session.svelte';
   import { fetchRemote, type Remote } from '../data/remote';
+  import { postWrite } from './writes';
 
   /// `needs-you` is the default view, and the reason this file changed.
   ///
@@ -46,6 +47,13 @@
   let subject = $state('');
   let body = $state('');
   let sending = $state(false);
+
+  /// A write the server refused, said where it was asked (page audit
+  /// 5477d9eb; ./writes.ts has the history). Mark read's answer rides
+  /// on its row, keyed by message id; Send's rides in the modal, which
+  /// stays open so nothing typed is lost.
+  let markReadRefusals = $state<Readonly<Record<string, string>>>({});
+  let sendRefusal = $state<string | null>(null);
 
   let userId = $derived(
     session.value.kind === 'ready' ? session.value.user.id : '',
@@ -105,16 +113,29 @@
     }),
   );
 
-  async function markRead(m: Message): Promise<void> {
-    if (m.read_at !== null) return;
-    try {
-      await fetch(`/api/messages/${encodeURIComponent(m.id)}/read`, {
-        method: 'POST',
-      });
-      await refreshInbox();
-    } catch {
-      // ignore
+  /// True once the message is read. A refusal lands on the row and
+  /// answers false; an admitted write clears any earlier refusal.
+  async function markRead(m: Message): Promise<boolean> {
+    if (m.read_at !== null) return true;
+    const out = await postWrite(`/api/messages/${encodeURIComponent(m.id)}/read`);
+    markReadRefusals = Object.fromEntries(
+      Object.entries(markReadRefusals).filter(([id]) => id !== m.id),
+    );
+    if (out.kind === 'refused') {
+      markReadRefusals = { ...markReadRefusals, [m.id]: out.reason };
+      return false;
     }
+    await refreshInbox();
+    return true;
+  }
+
+  /// The entity link marks the message read, then goes. It AWAITS the
+  /// write: fired unawaited, a refusal would answer on a page already
+  /// left, which is the swallow this replaces (129da587). A refused
+  /// write keeps the viewer here, where the row says why, and the row
+  /// offers the same link without the write.
+  async function openEntity(m: Message, path: string): Promise<void> {
+    if (await markRead(m)) navigate(href(path));
   }
 
   function formatAge(iso: string): string {
@@ -134,27 +155,31 @@
   async function send(): Promise<void> {
     if (!recipientId || !subject || !body || !userId) return;
     sending = true;
-    try {
-      const r = await fetch('/api/messages/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sender_id: userId,
-          recipient_id: recipientId,
-          subject,
-          body,
-        }),
-      });
-      if (r.ok) {
-        composing = false;
-        recipientId = '';
-        subject = '';
-        body = '';
-        await refreshInbox();
-      }
-    } finally {
-      sending = false;
+    sendRefusal = null;
+    const out = await postWrite('/api/messages/send', {
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sender_id: userId,
+        recipient_id: recipientId,
+        subject,
+        body,
+      }),
+    });
+    sending = false;
+    if (out.kind === 'refused') {
+      sendRefusal = out.reason;
+      return;
     }
+    composing = false;
+    recipientId = '';
+    subject = '';
+    body = '';
+    await refreshInbox();
+  }
+
+  function openCompose(): void {
+    sendRefusal = null;
+    composing = true;
   }
 </script>
 
@@ -181,7 +206,7 @@
          sees Compose disabled with the sign-in note, not a live modal
          whose Send 403s. -->
     <WriteGate>
-      <button class="hr-action-btn" onclick={() => (composing = true)}>Compose</button>
+      <button class="hr-action-btn" onclick={openCompose}>Compose</button>
     </WriteGate>
   </div>
 
@@ -237,6 +262,9 @@
             placeholder="Write your message..."
           ></textarea>
         </div>
+        {#if sendRefusal !== null}
+          <p class="compose-refused" role="alert">Not sent — {sendRefusal}</p>
+        {/if}
         <div class="compose-actions">
           <button
             class="hr-action-btn"
@@ -316,6 +344,11 @@
                   </button>
                 {/if}
               </div>
+              {#if markReadRefusals[m.id]}
+                <p class="inbox-write-refused" role="alert">
+                  Not marked read — {markReadRefusals[m.id]}
+                </p>
+              {/if}
               <div class="inbox-subject {isUnread ? 'inbox-subject-bold' : ''}">
                 {m.subject}
               </div>
@@ -333,12 +366,23 @@
                       class="inbox-entity-link"
                       onclick={(e) => {
                         e.preventDefault();
-                        void markRead(m);
-                        navigate(href(path));
+                        void openEntity(m, path);
                       }}
                     >
                       {m.entity_ref.entity_type}: {m.entity_ref.entity_id}
                     </a>
+                    {#if markReadRefusals[m.id]}
+                      <a
+                        href={href(path)}
+                        class="inbox-entity-link inbox-open-anyway"
+                        onclick={(e) => {
+                          e.preventDefault();
+                          navigate(href(path));
+                        }}
+                      >
+                        Open without marking read
+                      </a>
+                    {/if}
                   {:else}
                     <span class="mono">
                       {m.entity_ref.entity_type}: {m.entity_ref.entity_id}

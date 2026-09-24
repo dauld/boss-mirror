@@ -223,24 +223,57 @@ pub(crate) fn feedback_question(design_title: &str, design_id: &str) -> String {
     )
 }
 
-/// The feedback's design-review step metadata with the question laid
-/// over what is already there. PATCH-on-PUT replaces `metadata`
-/// wholesale, and `authority_role` living there is what keeps the step
-/// gated — so the existing keys are kept, and only `question` is added.
-pub(crate) fn design_review_step_metadata(
-    existing: &Value,
+/// One step write this verb owes: method, path, body.
+pub(crate) type StepWrite = (reqwest::Method, String, Value);
+
+/// THE STEP MERGE DOOR, `PATCH /api/jobs/{job}/steps/{step}/metadata`:
+/// the keys named are merged into what the step holds, in one
+/// transaction against the row as it stands, and nothing unnamed is
+/// touched.
+///
+/// Every step write here used to be a PUT carrying `metadata`, and the
+/// step PUT REPLACES metadata wholesale (backlog e39a9d2a, the car after
+/// `boss prove`, 2026-09-24). Two of the three read the step first and
+/// laid their key over it — correct only if nothing wrote between the
+/// read and the PUT, and the feedback's review was read BEFORE the
+/// design was filed. The third, the review-step mirror, sent a fresh
+/// body and deleted every key the registry materializes at admission
+/// (`authority_role`, `station`, `audience`, `claimable`,
+/// `metadata_defaults`) on every design filed. The item's last car makes
+/// the PUT refuse a metadata body; the merge door is the form it routes
+/// to, so this verb is on it first.
+fn step_merge(job_id: &str, step_id: &str, md: Value) -> StepWrite {
+    (
+        reqwest::Method::PATCH,
+        format!("/api/jobs/{job_id}/steps/{step_id}/metadata"),
+        md,
+    )
+}
+
+/// The status-only flip that follows a merge: a PUT carrying no
+/// `metadata`, so it can drop no stored key.
+fn step_flip(job_id: &str, step_id: &str) -> StepWrite {
+    (
+        reqwest::Method::PUT,
+        format!("/api/jobs/{job_id}/steps/{step_id}"),
+        json!({ "status": "completed" }),
+    )
+}
+
+/// The feedback's design-review gets its question through the merge
+/// door, carrying `question` alone — so `authority_role`, which keeps
+/// the step gated, and every other key it holds stay as they are.
+pub(crate) fn feedback_question_write(
+    feedback: &str,
+    review_step: &str,
     design_title: &str,
     design_id: &str,
-) -> Value {
-    let mut md = match existing {
-        Value::Object(m) => m.clone(),
-        _ => serde_json::Map::new(),
-    };
-    md.insert(
-        "question".to_string(),
-        json!(feedback_question(design_title, design_id)),
-    );
-    Value::Object(md)
+) -> StepWrite {
+    step_merge(
+        feedback,
+        review_step,
+        json!({ "question": feedback_question(design_title, design_id) }),
+    )
 }
 
 /// Where a packet stands on its design route, as `--answers` needs it:
@@ -352,16 +385,29 @@ pub(crate) fn answerable(packet: &Value) -> std::result::Result<DesignRoute, Str
     })
 }
 
-/// The draft-design completion: `design_id` laid over the step's own
-/// metadata (PATCH-on-PUT replaces `metadata` wholesale, and
-/// `authority_role` lives there), status done.
-pub(crate) fn draft_done_body(existing: &Value, design_id: &str) -> Value {
-    let mut md = match existing {
-        Value::Object(m) => m.clone(),
-        _ => serde_json::Map::new(),
-    };
-    md.insert("design_id".to_string(), json!(design_id));
-    json!({ "status": "completed", "metadata": Value::Object(md) })
+/// The draft-design completion, in order: `design_id` through the merge
+/// door, then the status-only flip. Merge FIRST — a step's
+/// required-at-done fields are judged when it flips to completed.
+pub(crate) fn draft_done_writes(
+    feedback: &str,
+    draft_step: &str,
+    design_id: &str,
+) -> [StepWrite; 2] {
+    [
+        step_merge(feedback, draft_step, json!({ "design_id": design_id })),
+        step_flip(feedback, draft_step),
+    ]
+}
+
+/// The questions mirrored onto the filed design's own `review-design`
+/// step, through the merge door (see [`step_merge`] for why).
+pub(crate) fn review_mirror_write(
+    design: &str,
+    review_step: &str,
+    body: &Value,
+    doc_path: &str,
+) -> StepWrite {
+    step_merge(design, review_step, review_step_metadata(body, doc_path))
 }
 
 /// The review step's own copy. The tracker reads the STEP, so a doc
@@ -481,8 +527,8 @@ pub async fn run(
     // The other half of the link: the answered packet's design-review
     // step gets a real question, naming this design. The edge on the
     // design is what the close rule follows; this is what the person
-    // assigned that step reads. Merged over the step's own metadata —
-    // PATCH-on-PUT replaces it wholesale.
+    // assigned that step reads. Through the step merge door, so the
+    // step's own keys are untouched (e39a9d2a).
     if let Some((feedback, route)) = &answered {
         // RECORDED, BUT COMPLETING NOTHING. The edge went onto the
         // design at filing, which is the fact; there is no open step
@@ -498,15 +544,8 @@ pub async fn run(
                 .get("id")
                 .and_then(Value::as_str)
                 .context("the answered packet's design-review step has no id")?;
-            let existing = review.get("metadata").cloned().unwrap_or_else(|| json!({}));
-            api(
-                &http,
-                reqwest::Method::PUT,
-                &format!("/api/jobs/{feedback}/steps/{sid}"),
-                Some(json!({ "metadata": design_review_step_metadata(&existing, &title, &id) })),
-            )
-            .await
-            .with_context(|| {
+            let (method, path, md) = feedback_question_write(feedback, sid, &title, &id);
+            api(&http, method, &path, Some(md)).await.with_context(|| {
                 format!(
                     "writing the question onto {}'s design-review (the design {short} is filed \
                  and carries the edge; only the question is missing)",
@@ -523,22 +562,18 @@ pub async fn run(
                     .get("id")
                     .and_then(Value::as_str)
                     .context("the answered packet's draft-design step has no id")?;
-                let existing = draft.get("metadata").cloned().unwrap_or_else(|| json!({}));
-                api(
-                    &http,
-                    reqwest::Method::PUT,
-                    &format!("/api/jobs/{feedback}/steps/{did}"),
-                    Some(draft_done_body(&existing, &id)),
-                )
-                .await
-                .with_context(|| {
-                    format!(
-                        "completing {}'s draft-design with design_id {short} (the design is \
-                     filed, the edge and the question are written; only the draft's record \
-                     is missing)",
-                        &feedback[..8]
-                    )
-                })?;
+                for (method, path, body) in draft_done_writes(feedback, did, &id) {
+                    api(&http, method, &path, Some(body))
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "completing {}'s draft-design with design_id {short} (the design \
+                                 is filed, the edge and the question are written; only the \
+                                 draft's record is missing)",
+                                &feedback[..8]
+                            )
+                        })?;
+                }
             }
             println!(
                 "boss design: {short} answers {} — its design-review now asks for this design, \
@@ -572,15 +607,11 @@ pub async fn run(
         .and_then(Value::as_str)
         .context("the filed doc has no review-design step")?
         .to_string();
-    let step_md = review_step_metadata(&body, doc_path.as_deref().unwrap_or(""));
-    api(
-        &http,
-        reqwest::Method::PUT,
-        &format!("/api/jobs/{id}/steps/{sid}"),
-        Some(json!({ "metadata": step_md })),
-    )
-    .await
-    .context("writing the questions onto the review step")?;
+    let (method, path, step_md) =
+        review_mirror_write(&id, &sid, &body, doc_path.as_deref().unwrap_or(""));
+    api(&http, method, &path, Some(step_md))
+        .await
+        .context("writing the questions onto the review step")?;
 
     println!(
         "boss design: {short} filed with {} open question(s) — review queued",
@@ -759,19 +790,30 @@ mod tests {
     /// The feedback's design-review step is an `answer-question` with
     /// no question — the design IS the question, and it lives on the
     /// other packet. So the verb writes a real one, naming the design
-    /// and saying what deciding it does. The step's own keys survive:
-    /// PATCH-on-PUT replaces `metadata` wholesale, and `authority_role`
-    /// living there is what keeps the step gated.
+    /// and saying what deciding it does. The step's own keys survive
+    /// because the question goes through the step MERGE door carrying
+    /// `question` alone (backlog e39a9d2a): nothing else is named, so
+    /// nothing else — `authority_role`, `verdict`, the keys the registry
+    /// materialized — can be dropped.
     #[test]
-    fn the_feedbacks_design_review_gets_a_real_question_and_keeps_its_own_keys() {
-        let existing = json!({ "authority_role": "platform-admin", "verdict": "" });
-        let md = design_review_step_metadata(
-            &existing,
+    fn the_feedbacks_design_review_gets_a_real_question_through_the_merge_door() {
+        let (method, path, md) = feedback_question_write(
+            "61366e5a-d15f-472c-a667-f4cc007ef8f8",
+            "s-review",
             "A car lands where its change goes live",
             "c6bd173e-3dc9-426f-8fff-866a3b2a6117",
         );
-        assert_eq!(md["authority_role"], json!("platform-admin"));
-        assert_eq!(md["verdict"], json!(""));
+        assert_eq!(method, reqwest::Method::PATCH);
+        assert_eq!(
+            path,
+            "/api/jobs/61366e5a-d15f-472c-a667-f4cc007ef8f8/steps/s-review/metadata"
+        );
+        assert_eq!(
+            md.as_object()
+                .map(|m| m.keys().cloned().collect::<Vec<_>>()),
+            Some(vec!["question".to_string()]),
+            "the merge names only the key it adds: {md}"
+        );
         let q = md["question"].as_str().expect("a question is written");
         assert!(
             q.contains("A car lands where its change goes live") && q.contains("c6bd173e"),
@@ -988,17 +1030,69 @@ mod tests {
     }
 
     /// The draft's completion carries the id the filing returned —
-    /// copied, never retyped — over the step's own keys.
+    /// copied, never retyped — as TWO writes (backlog e39a9d2a): the id
+    /// through the step merge door, then a status-only flip. Merge
+    /// first, because `design_id` is what the flip is judged on; the flip
+    /// carries no `metadata`, so it can drop no stored key.
     #[test]
-    fn the_draft_is_completed_with_the_filed_id_and_keeps_its_own_keys() {
-        let existing = json!({ "authority_role": "platform-admin", "procedure": "file it" });
-        let body = draft_done_body(&existing, "5fc71f03-db4f-4be2-9839-484ccf29781a");
-        assert_eq!(body["status"], json!("completed"));
+    fn the_draft_merges_the_filed_id_then_flips_the_status_alone() {
+        let writes = draft_done_writes("fb-1", "s-draft", "5fc71f03-db4f-4be2-9839-484ccf29781a");
+        assert_eq!(writes.len(), 2, "one merge, one flip: {writes:?}");
+        let (method, path, body) = &writes[0];
+        assert_eq!(*method, reqwest::Method::PATCH);
+        assert_eq!(path, "/api/jobs/fb-1/steps/s-draft/metadata");
         assert_eq!(
-            body["metadata"]["design_id"],
-            json!("5fc71f03-db4f-4be2-9839-484ccf29781a")
+            body,
+            &json!({ "design_id": "5fc71f03-db4f-4be2-9839-484ccf29781a" })
         );
-        assert_eq!(body["metadata"]["authority_role"], json!("platform-admin"));
-        assert_eq!(body["metadata"]["procedure"], json!("file it"));
+        let (method, path, body) = &writes[1];
+        assert_eq!(*method, reqwest::Method::PUT);
+        assert_eq!(path, "/api/jobs/fb-1/steps/s-draft");
+        assert_eq!(body, &json!({ "status": "completed" }));
+    }
+
+    /// The questions are mirrored onto the design's own review step
+    /// through the merge door too. That step was just admitted, so every
+    /// key it holds is one the registry materialized (`authority_role`,
+    /// `station`, `audience`, `claimable`, `metadata_defaults`); a PUT of
+    /// the fresh mirror replaced all of them, on every design filed
+    /// (correction_2026_09_23 on backlog e39a9d2a, design.rs ~549-571).
+    #[test]
+    fn the_review_mirror_merges_onto_the_review_step() {
+        let q = vec![question("Q1", "which brick first?", "the cheap one")];
+        let body = design_job_body("t", "# doc", &q, false, None, "emp-owner");
+        let (method, path, md) = review_mirror_write("d-1", "s-review", &body, "docs/design/x.md");
+        assert_eq!(method, reqwest::Method::PATCH);
+        assert_eq!(path, "/api/jobs/d-1/steps/s-review/metadata");
+        assert_eq!(md, review_step_metadata(&body, "docs/design/x.md"));
+        // The merge door DELETES a key sent as null, where the PUT stored
+        // it; the mirror sends none, so nothing it means to write is lost.
+        assert!(
+            md.as_object()
+                .is_some_and(|m| m.values().all(|v| !v.is_null())),
+            "no mirrored key is null: {md}"
+        );
+    }
+
+    /// The text half of the pins above: no step write in this verb
+    /// carries a `metadata` body through the PUT any longer, so a later
+    /// edit that builds one by hand again fails here by name.
+    #[test]
+    fn no_design_step_write_puts_metadata() {
+        let src = include_str!("design.rs");
+        let production = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("split always yields a first piece");
+        for banned in [
+            "json!({ \"metadata\"",
+            "\"status\": \"completed\", \"metadata\"",
+        ] {
+            assert!(
+                !production.contains(banned),
+                "a design step write PUTs a metadata body ({banned}) — that replaces the \
+                 step's stored keys wholesale; write through step_merge (e39a9d2a)"
+            );
+        }
     }
 }

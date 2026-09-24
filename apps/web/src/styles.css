@@ -1583,6 +1583,9 @@ a:hover { color: var(--fog); }
   color: var(--static); cursor: pointer;
 }
 .inbox-mark-read:hover { border-color: var(--static); color: var(--fog); }
+/* A refused Mark read, on its row (page audit 5477d9eb, 129da587). */
+.inbox-write-refused { margin: 0 0 4px; font-size: 12px; color: var(--err); }
+.inbox-open-anyway { margin-left: 12px; }
 
 /* ==========================================================================
    Debug Gear — floating dev tools panel
@@ -1718,6 +1721,8 @@ a:hover { color: var(--fog); }
   font-family: inherit;
 }
 .compose-actions { padding: 12px 20px 16px; display: flex; gap: 8px; }
+/* A refused Send, in the modal it was asked from (2a6fab80). */
+.compose-refused { margin: 0; padding: 8px 20px 0; font-size: 13px; color: var(--err); }
 
 /* ==========================================================================
    In-app help links

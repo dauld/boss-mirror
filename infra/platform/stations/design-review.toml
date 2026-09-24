@@ -13,11 +13,24 @@
 #
 # To change this station, bump `version` — the seed refuses a row that
 # differs from the live active row of the same (name, version).
+#
+# Version 2 (2026-09-24, backlog 08372fdb, from page audit 79db48ae) is
+# the first bundle-only bump: membership is unchanged, the LENS grew.
+# `with_steps = true` because a review saved but not completed looked
+# exactly like one never touched — Save moves only a `pending` step, so
+# a `ready` review stays `ready` and its answers on the step are the
+# only trace, and the envelope carried no steps. The predicate already
+# reads the review step, so the server fetched them anyway; this only
+# stops throwing them away. The `decided` panel is the page's WORKING
+# and OUT: designs whose review completed, read from the
+# `design-decided` station beside this file rather than by widening
+# this one, because this station is the reviewer's queue and a fold is
+# not a decision waiting on anyone.
 # ---------------------------------------------------------------------------
 
 [[station]]
 name = "design-review"
-version = 1
+version = 2
 status = "active"
 title = "Design review queue"
 kind = "batch"
@@ -35,4 +48,5 @@ status_in = ["ready", "active"]
 eyebrow = "System Model · Design review"
 title = "Design review"
 subtitle = "Design docs waiting on a decision — the packet is the doc"
-panels = ["queue"]
+panels = ["queue", "decided"]
+with_steps = true

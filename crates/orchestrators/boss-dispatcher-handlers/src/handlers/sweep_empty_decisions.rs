@@ -16,7 +16,9 @@
 //!
 //! It owns no database — it reads the same public surfaces any caller
 //! reads (`/api/jobs/step-types` for which kinds are approval, then
-//! `/api/jobs`), and the ONE write completes the checklist step.
+//! `/api/jobs`), and its writes route the packet and complete the
+//! checklist step (through the step merge door, then a status-only
+//! flip — e39a9d2a).
 //! `approval` comes from the registry, never a hardcoded kind name
 //! (CLAUDE.md §9, no-step-kind-match).
 //!
@@ -24,7 +26,7 @@
 //! means `empty-decisions`, the first one). A second target,
 //! `deploy-convergence`, reads the trains' merged/converged stamps
 //! (`sweep_deploy_convergence`, backlog 8e8311f5); the routing PATCH
-//! and the checklist PUT are shared. Targets that measure a host —
+//! and the checklist completion are shared. Targets that measure a host —
 //! disk, images, conformance — arrive with an ops-request instead
 //! (`measure-*-sweep-on-inspect-ready`) and are not this handler's.
 
@@ -195,17 +197,16 @@ impl MaintenanceSweepInspect {
     }
 }
 
-/// THE ONE BODY the Inspect completion sends, for either target — so a
-/// test can hold it against the fields maintenance-sweep.toml declares
-/// for the step (`inspection_bodies_validate_against_the_step_they_complete`).
-pub(crate) fn inspection_put_body(findings: String, measured: String, items: Vec<Value>) -> Value {
+/// THE ONE METADATA the Inspect completion merges, for either target —
+/// so a test can hold it against the fields maintenance-sweep.toml
+/// declares for the step (`inspection_bodies_validate_against_the_step_they_complete`).
+/// It goes through the step MERGE door, never inside a PUT: see
+/// [`MaintenanceSweepInspect::complete`].
+pub(crate) fn inspection_metadata(findings: String, measured: String, items: Vec<Value>) -> Value {
     json!({
-        "status": "completed",
-        "metadata": {
-            "findings": findings,
-            "measured": measured,
-            "items": items,
-        },
+        "findings": findings,
+        "measured": measured,
+        "items": items,
     })
 }
 
@@ -410,11 +411,51 @@ impl Handler for MaintenanceSweepInspect {
 }
 
 impl MaintenanceSweepInspect {
-    /// The two writes every target shares. Route FIRST: the
+    /// One write, refused by name when the jobs API does not answer 2xx.
+    async fn send(
+        &self,
+        ctx: &InvocationContext,
+        method: reqwest::Method,
+        url: &str,
+        body: &Value,
+    ) -> Result<(), HandlerError> {
+        let resp = self
+            .client
+            .request(method.clone(), url)
+            .header("content-type", "application/json")
+            .header("x-boss-user", dispatcher_actor_header(&ctx.rule_name))
+            .header("x-sim-origin", sim_origin_value())
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| HandlerError::Downstream(format!("{method} {url}: {e}")))?;
+        if !resp.status().is_success() {
+            let st = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(HandlerError::Downstream(format!(
+                "{method} {url} returned {st}: {body}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The three writes every target shares, in order. Route FIRST: the
     /// Clear/Remediate predicates read `job.metadata.action_needed`, so
     /// it must be set before the Inspect completion re-evaluates them
-    /// (PATCH merges top-level keys). Then complete the checklist with
-    /// `findings`, `measured` and its `items`.
+    /// (PATCH merges top-level keys). Then MERGE `findings`, `measured`
+    /// and the checklist's `items` onto the Inspect step, then flip its
+    /// status alone.
+    ///
+    /// Why the merge and the flip are two writes (backlog e39a9d2a, the
+    /// car after `boss prove`, 2026-09-24): this was one PUT of
+    /// `{status, metadata}` built fresh, and the step PUT REPLACES
+    /// metadata wholesale, so every sweep shed the keys the registry
+    /// materialized onto its Inspect step at admission (`authority_role`,
+    /// `station`, `audience`, `claimable`, `metadata_defaults`). The
+    /// item's last car makes the PUT refuse a metadata body outright; the
+    /// merge door lands the keys against the row as it stands, in one
+    /// transaction. Merge before the flip, because the flip is where the
+    /// required-at-done `findings` and `measured` are judged.
     async fn complete(
         &self,
         ctx: &InvocationContext,
@@ -426,44 +467,28 @@ impl MaintenanceSweepInspect {
     ) -> Result<(), HandlerError> {
         let base = self.jobs_base.trim_end_matches('/');
         let action_needed = if action_needed { "true" } else { "false" };
-        let patch_url = format!("{base}/api/jobs/{}/metadata", ev.job_id);
-        let resp = self
-            .client
-            .patch(&patch_url)
-            .header("content-type", "application/json")
-            .header("x-boss-user", dispatcher_actor_header(&ctx.rule_name))
-            .header("x-sim-origin", sim_origin_value())
-            .json(&json!({ "action_needed": action_needed }))
-            .send()
-            .await
-            .map_err(|e| HandlerError::Downstream(format!("PATCH {patch_url}: {e}")))?;
-        if !resp.status().is_success() {
-            let st = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(HandlerError::Downstream(format!(
-                "PATCH {patch_url} returned {st}: {body}"
-            )));
-        }
-
-        let put_url = format!("{base}/api/jobs/{}/steps/{}", ev.job_id, ev.step_id);
-        let resp = self
-            .client
-            .put(&put_url)
-            .header("content-type", "application/json")
-            .header("x-boss-user", dispatcher_actor_header(&ctx.rule_name))
-            .header("x-sim-origin", sim_origin_value())
-            .json(&inspection_put_body(findings, measured, items))
-            .send()
-            .await
-            .map_err(|e| HandlerError::Downstream(format!("PUT {put_url}: {e}")))?;
-        if !resp.status().is_success() {
-            let st = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(HandlerError::Downstream(format!(
-                "PUT {put_url} returned {st}: {body}"
-            )));
-        }
-        Ok(())
+        let step_url = format!("{base}/api/jobs/{}/steps/{}", ev.job_id, ev.step_id);
+        self.send(
+            ctx,
+            reqwest::Method::PATCH,
+            &format!("{base}/api/jobs/{}/metadata", ev.job_id),
+            &json!({ "action_needed": action_needed }),
+        )
+        .await?;
+        self.send(
+            ctx,
+            reqwest::Method::PATCH,
+            &format!("{step_url}/metadata"),
+            &inspection_metadata(findings, measured, items),
+        )
+        .await?;
+        self.send(
+            ctx,
+            reqwest::Method::PUT,
+            &step_url,
+            &json!({ "status": "completed" }),
+        )
+        .await
     }
 }
 
@@ -537,6 +562,114 @@ mod tests {
             }
             other => panic!("a body that is not a job is a refusal, got {other:?}"),
         }
+    }
+
+    /// Backlog e39a9d2a, the car after `boss prove`: the Inspect
+    /// completion was one PUT of `{status, metadata}` built fresh, with
+    /// no read, and the step PUT REPLACES metadata wholesale — so every
+    /// sweep shed the keys the registry materialized onto its Inspect
+    /// step at admission (`authority_role`, `station`, `audience`,
+    /// `claimable`, `metadata_defaults`). Measured at the wire, against
+    /// a stub whose step PUT refuses any metadata body the way the
+    /// item's last car will: route the job, MERGE the findings onto the
+    /// step, then flip the status alone — in that order, because the
+    /// Clear/Remediate predicates read `action_needed` and the flip is
+    /// where the required-at-done findings are judged.
+    #[tokio::test]
+    async fn the_inspection_merges_its_findings_then_flips_the_status_alone() {
+        use axum::{
+            Json as AxJson, Router,
+            extract::{OriginalUri, State},
+            http::{Method, StatusCode},
+            routing::{get, patch},
+        };
+        use std::sync::Mutex;
+        type Seen = Arc<Mutex<Vec<(String, String, Value)>>>;
+        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+        async fn record(
+            State(seen): State<Seen>,
+            method: Method,
+            OriginalUri(uri): OriginalUri,
+            AxJson(body): AxJson<Value>,
+        ) -> StatusCode {
+            let refused = method == Method::PUT && body.get("metadata").is_some();
+            seen.lock()
+                .expect("lock")
+                .push((method.to_string(), uri.path().to_string(), body));
+            if refused {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::NO_CONTENT
+            }
+        }
+        let app = Router::new()
+            .route(
+                "/api/jobs/{id}",
+                get(|| async {
+                    AxJson(json!({
+                        "id": "j-sweep", "kind": "maintenance-sweep",
+                        "opened_on": "2026-09-24",
+                        "metadata": { "target": "empty-decisions", "opened_at": "2026-09-24T00:00:00Z" },
+                        "steps": [{ "id": "s-inspect", "kind": "checklist", "status": "ready" }],
+                    }))
+                }),
+            )
+            .route("/api/jobs/step-types", get(|| async { AxJson(json!([])) }))
+            .route(
+                "/api/jobs",
+                get(|| async { AxJson(json!({ "data": [], "total": 0 })) }),
+            )
+            .route("/api/jobs/{id}/metadata", patch(record))
+            .route("/api/jobs/{id}/steps/{sid}/metadata", patch(record))
+            .route("/api/jobs/{id}/steps/{sid}", axum::routing::put(record))
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let handler =
+            MaintenanceSweepInspect::with_client(reqwest::Client::new(), format!("http://{addr}"));
+        let ctx = InvocationContext {
+            rule_name: "inspect-empty-decisions-sweep-on-step-ready".into(),
+            triggering_event_id: "evt-1".into(),
+            triggering_topic: "step.ready.checklist".into(),
+            event_payload: json!({
+                "job_id": "j-sweep",
+                "step_id": "s-inspect",
+                "kind": "checklist",
+                "metadata": {},
+            }),
+        };
+        handler
+            .invoke(&[], &ctx)
+            .await
+            .expect("the inspection completes");
+        let seen = seen.lock().expect("lock").clone();
+        let shape: Vec<(&str, &str)> = seen
+            .iter()
+            .map(|(m, p, _)| (m.as_str(), p.as_str()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("PATCH", "/api/jobs/j-sweep/metadata"),
+                ("PATCH", "/api/jobs/j-sweep/steps/s-inspect/metadata"),
+                ("PUT", "/api/jobs/j-sweep/steps/s-inspect"),
+            ],
+            "route, merge, flip: {seen:?}"
+        );
+        assert_eq!(seen[0].2, json!({ "action_needed": "false" }));
+        assert_eq!(
+            seen[1].2["findings"],
+            json!("none"),
+            "the findings ride the merge"
+        );
+        assert_eq!(
+            seen[2].2,
+            json!({ "status": "completed" }),
+            "the flip carries no metadata, so it can drop no stored key"
+        );
     }
 
     fn kinds() -> BTreeSet<String> {
@@ -622,7 +755,7 @@ mod tests {
         );
     }
 
-    /// THE PIN (CLAUDE.md §9a): the body this handler PUTs and the
+    /// THE PIN (CLAUDE.md §9a): the metadata this handler merges and the
     /// fields the workflow declares for the step are two homes for one
     /// shape. Read the step off infra/platform/workflows/maintenance-
     /// sweep.toml and validate both targets' bodies against it with the
@@ -653,28 +786,22 @@ mod tests {
         let item = |label: &str| json!({"label": label, "checked": true, "checked_by": "automation:t", "checked_at": stamp});
         // empty-decisions, both with and without findings
         for lines in [vec![], vec!["j1/s1: Approve".to_string()]] {
-            let body = inspection_put_body(
+            let md = inspection_metadata(
                 findings_text(&lines),
                 "1 empty approval decision(s) among open packets since 2026-09-12".into(),
                 vec![item("x")],
             );
-            boss_jobs::step_registry::StepRegistry::validate_authored_fields(
-                &inspect.fields,
-                &body["metadata"],
-            )
-            .unwrap_or_else(|e| panic!("the step API would refuse this body: {e:?}"));
+            boss_jobs::step_registry::StepRegistry::validate_authored_fields(&inspect.fields, &md)
+                .unwrap_or_else(|e| panic!("the step API would refuse this body: {e:?}"));
         }
         // deploy-convergence, from its own inspection
         let now = chrono::DateTime::parse_from_rfc3339("2026-09-13T20:00:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
         let insp = super::super::sweep_deploy_convergence::inspect(&[], now, "automation:t");
-        let body = inspection_put_body(findings_text(&insp.findings), insp.measured, insp.items);
-        boss_jobs::step_registry::StepRegistry::validate_authored_fields(
-            &inspect.fields,
-            &body["metadata"],
-        )
-        .unwrap_or_else(|e| panic!("the step API would refuse the convergence body: {e:?}"));
+        let md = inspection_metadata(findings_text(&insp.findings), insp.measured, insp.items);
+        boss_jobs::step_registry::StepRegistry::validate_authored_fields(&inspect.fields, &md)
+            .unwrap_or_else(|e| panic!("the step API would refuse the convergence body: {e:?}"));
         // And the shape that failed live is refused here too.
         let bad = json!({"findings": ["a"], "measured": "m", "items": [item("x")]});
         assert!(

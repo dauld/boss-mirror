@@ -35,31 +35,70 @@ export type StationLens = Readonly<{
   panels?: readonly string[];
 }>;
 
-/** A packet as the station queue serves it. No `steps`: the queue
- *  endpoint fetches steps only when the predicate reads step state,
- *  and `design-review`'s predicate is a kind match.
+/** A packet as the station queue serves it. Its steps ride beside it
+ *  in the envelope's `steps` map, not on it (see `LensStep`).
  *
- *  No `subject` either, though the envelope carries one. Nothing on
- *  this page reads it any more — see `queueRows` for the join that
- *  used to and why it could never have worked. */
+ *  No `subject`, though the envelope carries one. Nothing on this page
+ *  reads it any more — see `queueRows` for the join that used to and
+ *  why it could never have worked. */
 export type QueuePacket = Readonly<{
   id: string;
   title: string;
   status: string;
   opened_on: string;
+  /** Set on a closed packet — the settled rows' date. */
+  closed_on?: string | null;
+  /** `outcome` is stamped here when a terminal step closes the packet. */
+  metadata?: unknown;
+}>;
+
+/** A member's step, as the envelope's `steps` map carries it — only
+ *  the fields this lens reads. */
+export type LensStep = Readonly<{
+  id: string;
+  kind: string;
+  spec_slug?: string | null;
+  status: string;
+  completed_on?: string | null;
+  metadata?: unknown;
 }>;
 
 /** The `GET /api/stations/{name}/queue` envelope, design-review's
  *  slice of it. Same struct yard.ts reads — kept as its own type here
  *  rather than imported so one lens cannot break another by widening
- *  what it needs. */
+ *  what it needs.
+ *
+ *  `steps` is keyed by job id and present only when the station's lens
+ *  declares `with_steps` — design-review since v2 and design-decided
+ *  (backlog 08372fdb). A registry still at design-review v1 omits it,
+ *  and every row then reads its progress as unread rather than as
+ *  untouched. */
 export type DesignQueueEnvelope = Readonly<{
   station: string;
   discipline: readonly string[];
   lens?: StationLens | null;
+  terminal_window_days?: number | null;
   total: number;
   data: readonly QueuePacket[];
+  steps?: Readonly<Record<string, readonly LensStep[]>>;
 }>;
+
+/** How far a review has got, read off the review step itself.
+ *
+ *  WHY NOT THE STEP STATUS (backlog 08372fdb). A review saved but not
+ *  completed used to render exactly like one never touched. Status
+ *  cannot tell them apart: the review surface's Save moves a step only
+ *  from `pending`, and a review in this queue is already `ready`, so it
+ *  STAYS `ready` with answers on it — measured 2026-09-24, every open
+ *  review was `ready`. The answers are the trace, so they decide it;
+ *  `active` still counts, because someone moved it on purpose.
+ *
+ *  `unread` = no steps on the wire, which is not the same claim as
+ *  "not started" and is not rendered as one. */
+export type ReviewProgress =
+  | Readonly<{ kind: 'unread' }>
+  | Readonly<{ kind: 'untouched'; asked: number }>
+  | Readonly<{ kind: 'saved'; answered: number; asked: number }>;
 
 /** An open review packet as the queue panel renders it. */
 export type ReviewPacket = Readonly<{
@@ -67,6 +106,10 @@ export type ReviewPacket = Readonly<{
   status: string;
   opened_on: string;
   title: string;
+  progress: ReviewProgress;
+  /** The review step's id when the envelope carried it — the Review
+   *  button then needs no read of its own. */
+  reviewStepId: string | null;
 }>;
 
 // The header this page rendered as literals before the registry
@@ -113,8 +156,13 @@ export function pageHeader(lens: StationLens | null | undefined): PageHeader {
  *  join that could never match: a `design-doc` packet's subject is
  *  `boss-platform`, never a doc path, so `reviewsByDocPath` keyed
  *  nothing and the live packets were invisible on the page that
- *  exists to show them. */
-export const KNOWN_PANELS = ['queue'] as const;
+ *  exists to show them.
+ *
+ *  `decided` joined on 2026-09-24 (backlog 08372fdb): the page's
+ *  WORKING and OUT — designs decided and folding, and designs settled
+ *  inside the `design-decided` station's window. Until then a design
+ *  left the page the moment its review completed. */
+export const KNOWN_PANELS = ['queue', 'decided'] as const;
 export type PanelKey = (typeof KNOWN_PANELS)[number];
 
 /** Which panels to render, in the row's declared order.
@@ -161,19 +209,160 @@ export function panelsFor(lens: StationLens | null | undefined): readonly PanelK
  *
  *  The station's declared discipline (priority, then age) is the
  *  order; this preserves it rather than sorting again, so what the
- *  page shows first is what the station would hand out first. */
-export function queueRows(packets: readonly QueuePacket[]): readonly ReviewPacket[] {
-  return packets.map((p) => ({
-    id: p.id,
-    status: p.status,
-    opened_on: p.opened_on,
-    title: p.title,
-  }));
+ *  page shows first is what the station would hand out first.
+ *
+ *  `steps` is the envelope's map; each row reads its own review step
+ *  from it for progress and for the Review button's destination. */
+export function queueRows(
+  packets: readonly QueuePacket[],
+  steps?: Readonly<Record<string, readonly LensStep[]>>,
+): readonly ReviewPacket[] {
+  return packets.map((p) => {
+    const step = reviewStepOf(steps?.[p.id]);
+    return {
+      id: p.id,
+      status: p.status,
+      opened_on: p.opened_on,
+      title: p.title,
+      progress: reviewProgress(step),
+      reviewStepId: step?.id ?? null,
+    };
+  });
 }
 
 /// Step kind backing the review surface (`step_plugins` row
 /// 'review-design', tier 0 of the design-doc-review Workflow).
 export const REVIEW_STEP_KIND = 'review-design';
+
+/** The station holding designs whose review completed — the `decided`
+ *  panel's one read (infra/platform/stations/design-decided.toml). */
+export const DECIDED_STATION = 'design-decided';
+
+function reviewStepOf(steps: readonly LensStep[] | undefined): LensStep | undefined {
+  return steps?.find((s) => s.kind === REVIEW_STEP_KIND);
+}
+
+function stepOf(steps: readonly LensStep[] | undefined, slug: string): LensStep | undefined {
+  return steps?.find((s) => s.spec_slug === slug);
+}
+
+function record(v: unknown): Readonly<Record<string, unknown>> {
+  return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+}
+
+function text(v: unknown): string | null {
+  return typeof v === 'string' && v.trim() !== '' ? v : null;
+}
+
+/** See `ReviewProgress`. An answer is a non-blank `decision` whose
+ *  anchor is one of the questions asked — the same pairing the
+ *  Workflow's `covers = "questions"` holds the step to at done. */
+export function reviewProgress(step: LensStep | undefined): ReviewProgress {
+  if (!step) return { kind: 'unread' };
+  const meta = record(step.metadata);
+  const questions = Array.isArray(meta.questions) ? meta.questions : [];
+  const asked = new Set(questions.map((q) => record(q).anchor).filter((a) => typeof a === 'string'));
+  const resolutions = Array.isArray(meta.resolutions) ? meta.resolutions : [];
+  const answered = new Set(
+    resolutions
+      .map(record)
+      .filter((r) => typeof r.anchor === 'string' && asked.has(r.anchor) && text(r.decision) !== null)
+      .map((r) => r.anchor),
+  ).size;
+  return answered > 0 || step.status === 'active'
+    ? { kind: 'saved', answered, asked: asked.size }
+    : { kind: 'untouched', asked: asked.size };
+}
+
+export function progressLabel(p: ReviewProgress): string {
+  switch (p.kind) {
+    case 'unread':
+      return '—';
+    case 'untouched':
+      return p.asked === 0
+        ? 'not started · nothing asked'
+        : `not started · ${p.asked} question${p.asked === 1 ? '' : 's'}`;
+    case 'saved':
+      return p.asked === 0 ? 'opened · nothing asked' : `saved · ${p.answered} of ${p.asked} answered`;
+  }
+}
+
+/** A design whose review has completed, as the `decided` panel draws
+ *  it. Every field is read off the packet or its steps; a step the
+ *  envelope did not carry leaves its fields null rather than guessed. */
+export type DecidedRow = Readonly<{
+  id: string;
+  title: string;
+  /** When the review completed (the review step's `completed_on`). */
+  decided_on: string | null;
+  /** The `fold` step's status — where the fold has got to. */
+  fold_status: string | null;
+  closed_on: string | null;
+  outcome: string | null;
+  /** What the fold recorded as where the decision landed. */
+  folded_into: string | null;
+}>;
+
+/** The decided station's members, split into WORKING (open: decided,
+ *  folding) and OUT (closed inside the station's terminal window),
+ *  each in the order the station handed them over. Takes `unknown`
+ *  because it is the body of a read: anything that is not an envelope
+ *  is no rows, never a throw. */
+export function decidedRows(body: unknown): Readonly<{
+  working: readonly DecidedRow[];
+  settled: readonly DecidedRow[];
+}> {
+  const env = record(body);
+  const data = Array.isArray(env.data) ? (env.data as readonly QueuePacket[]) : [];
+  const steps = record(env.steps) as Readonly<Record<string, readonly LensStep[]>>;
+  const rows = data.map((p) => {
+    const s = Array.isArray(steps[p.id]) ? steps[p.id] : undefined;
+    const fold = stepOf(s, 'fold');
+    return {
+      open: p.status === 'open',
+      row: {
+        id: p.id,
+        title: p.title,
+        decided_on: reviewStepOf(s)?.completed_on ?? null,
+        fold_status: fold?.status ?? null,
+        closed_on: p.closed_on ?? null,
+        outcome: text(record(p.metadata).outcome),
+        folded_into: text(record(fold?.metadata).folded_into),
+      },
+    };
+  });
+  return {
+    working: rows.filter((r) => r.open).map((r) => r.row),
+    settled: rows.filter((r) => !r.open).map((r) => r.row),
+  };
+}
+
+/** A date as "today" / "3d ago" / "2mo ago" — both panels' when column.
+ *  Moved here from the page on 2026-09-24 so the decided panel reads
+ *  the same words rather than a second copy of the function. */
+export function relTime(iso: string, now: Date = new Date()): string {
+  const days = Math.floor((now.getTime() - new Date(iso).getTime()) / 86_400_000);
+  if (days < 1) return 'today';
+  if (days === 1) return '1d ago';
+  if (days < 30) return `${days}d ago`;
+  if (days < 365) return `${Math.floor(days / 30)}mo ago`;
+  return `${Math.floor(days / 365)}y ago`;
+}
+
+export function foldLabel(status: string | null): string {
+  switch (status) {
+    case null:
+      return '—';
+    case 'pending':
+      return 'not yet ready';
+    case 'ready':
+      return 'waiting for a builder';
+    case 'active':
+      return 'being folded';
+    default:
+      return status;
+  }
+}
 
 /** Where Back returns to from the review surface. Without it the step
  *  surface fell back to the job page — the one place the reviewer was

@@ -27,10 +27,13 @@
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import Section from '@boss/web-kit/ui/Section.svelte';
   import { navigate } from '../../router';
+  import DecidedDesigns from './DecidedDesigns.svelte';
   import {
     pageHeader,
     panelsFor,
+    progressLabel,
     queueRows,
+    relTime,
     reviewHref,
     REVIEW_STEP_KIND,
     type DesignQueueEnvelope,
@@ -43,7 +46,7 @@
 
   const header = $derived(pageHeader(queue?.lens));
   const panels = $derived(panelsFor(queue?.lens));
-  const rows = $derived(queueRows(queue?.data ?? []));
+  const rows = $derived(queueRows(queue?.data ?? [], queue?.steps));
 
   async function load(): Promise<void> {
     loading = true;
@@ -64,9 +67,10 @@
 
   /// The `review-design` step of an open packet, resolved on demand.
   ///
-  /// The station queue serves packets without steps (it fetches them
-  /// only when the predicate reads step state), so the step id is one
-  /// read at click time for the ONE packet being opened.
+  /// Since design-review v2 (with_steps, 2026-09-24) the envelope carries
+  /// the step and `enterReview` uses it; this read is the fallback for a
+  /// registry still at v1, which serves packets without steps, so the
+  /// step id is one read at click time for the ONE packet being opened.
   ///
   /// A failure here is not an error state: `reviewHref` falls back to
   /// the job page, which is a worse door but a real one.
@@ -82,23 +86,12 @@
   }
 
   async function enterReview(packet: ReviewPacket): Promise<void> {
-    navigate(reviewHref(packet.id, await reviewStepId(packet.id)));
+    navigate(reviewHref(packet.id, packet.reviewStepId ?? (await reviewStepId(packet.id))));
   }
 
   $effect(() => {
     void load();
   });
-
-  function relTime(iso: string): string {
-    const d = new Date(iso);
-    const now = new Date();
-    const days = Math.floor((now.getTime() - d.getTime()) / 86_400_000);
-    if (days < 1) return 'today';
-    if (days === 1) return '1d ago';
-    if (days < 30) return `${days}d ago`;
-    if (days < 365) return `${Math.floor(days / 30)}mo ago`;
-    return `${Math.floor(days / 365)}y ago`;
-  }
 </script>
 
 <PageHeader eyebrow={header.eyebrow} title={header.title} subtitle={header.subtitle} />
@@ -130,6 +123,7 @@
               <tr>
                 <th>Packet</th>
                 <th>Status</th>
+                <th>Answers</th>
                 <th>Opened</th>
                 <th>Review</th>
               </tr>
@@ -139,6 +133,12 @@
                 <tr>
                   <td><strong>{packet.title}</strong></td>
                   <td class="design-status">{packet.status}</td>
+                  <td
+                    class="design-progress"
+                    class:design-saved={packet.progress.kind === 'saved'}
+                  >
+                    {progressLabel(packet.progress)}
+                  </td>
                   <td class="design-when">{relTime(packet.opened_on)}</td>
                   <td>
                     <button
@@ -155,6 +155,8 @@
           </table>
         {/if}
       </Section>
+    {:else if panel === 'decided'}
+      <DecidedDesigns />
     {/if}
   {/each}
 {/if}
@@ -192,6 +194,17 @@
     text-transform: uppercase;
     color: var(--static);
     white-space: nowrap;
+  }
+  .design-progress {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--static);
+    white-space: nowrap;
+  }
+  /* A half-made decision is work in hand — it must not read like an
+     untouched row (backlog 08372fdb). */
+  .design-saved {
+    color: var(--warn);
   }
   .design-when {
     font-family: var(--font-mono);

@@ -394,6 +394,56 @@ async fn a_failed_steps_read_fails_the_load_rather_than_shrinking_a_depth() {
     assert!(resp.1.contains(&id), "names the packet: {}", resp.1);
 }
 
+/// Stations overlap, and the load says by how much.
+///
+/// A packet stands at every station whose predicate it matches, so the
+/// depths do not add up to a packet count. On 2026-09-23 the
+/// Marshalling Yard's sidings summed to 517 over 303 distinct packets —
+/// all 213 in the agent station also stood in q.platform-admin.task —
+/// and nothing on the board said so; a reader adding the depth column
+/// overstated the work by 214 (backlog 140a2222). The load now carries
+/// the distinct count over the rows it returns, and each row how many
+/// of its members also stand at another of them, so the overlap is a
+/// figure the server counted, not one the reader has to guess at.
+#[tokio::test]
+async fn the_load_states_how_many_distinct_packets_its_depths_hold() {
+    let (app, _jobs) = app();
+    // Two parked cars stand at BOTH the dock and the brewer gate (which
+    // holds every car-kind packet); the boarded one only at the gate.
+    post_car(&app, "feat/a", "standard", "2026-08-01", false).await;
+    post_car(&app, "feat/b", "standard", "2026-08-02", false).await;
+    post_car(&app, "feat/c", "standard", "2026-08-03", true).await;
+
+    let (status, v) = get_json(&app, "/api/stations/load", "emp-ceo", "ceo").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let row = |name: &str| {
+        v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["station"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {name} row in {v}"))
+    };
+    assert_eq!(row("test-dock")["depth"], 2);
+    assert_eq!(row("brewer-gate")["depth"], 3);
+    assert_eq!(row("my-watchlist")["depth"], 0);
+
+    // 2 + 3 + 0 = 5 standings over 3 packets.
+    assert_eq!(v["distinct_packets"], 3, "{v}");
+    assert_eq!(
+        row("test-dock")["also_elsewhere"],
+        2,
+        "both dock cars are also at the gate"
+    );
+    assert_eq!(
+        row("brewer-gate")["also_elsewhere"],
+        2,
+        "the boarded car stands only here"
+    );
+    assert_eq!(row("my-watchlist")["also_elsewhere"], 0);
+}
+
 /// The raw body as text, read as the ceo — an error body is prose,
 /// not JSON, and the test needs the words.
 async fn get_text(app: &axum::Router, path: &str) -> (StatusCode, String) {

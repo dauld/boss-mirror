@@ -221,6 +221,30 @@ describe('jobs list status filter from the query string', () => {
   });
 });
 
+// `filter_subject_kind` was parsed into the route and handed to the
+// page, which captured it and never sent it: no link in the tree
+// produced it and the jobs API's ListJobsQuery has no subject_kind
+// filter, so it narrowed nothing. Deleted rather than implemented just
+// in case (backlog 45ca0f89, found by page-audit 473f4f92 GAP 8).
+describe('jobs list subject filter from the query string', () => {
+  const at = (search: string) => {
+    (globalThis as { window?: { location: { search: string; pathname: string } } }).window = {
+      location: { search, pathname: '/ux/jobs' },
+    };
+    return parseRoute('/ux/jobs') as Record<string, unknown>;
+  };
+
+  test('filter_subject_kind is not a route field: nothing downstream reads it', () => {
+    const r = at('?filter_subject_kind=account&subject_id=account-00001');
+    expect(r.kind).toBe('jobs');
+    expect('jobSubjectKind' in r).toBe(false);
+  });
+
+  test('subject_id still filters the list, the one subject filter the server takes', () => {
+    expect(at('?subject_id=account-00001').jobSubjectId).toBe('account-00001');
+  });
+});
+
 describe('personal Views route', () => {
   test('/views resolves to the Home Views surface', () => {
     expect(parseRoute('/ux/views').kind).toBe('views');

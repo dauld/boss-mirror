@@ -278,7 +278,6 @@
         initialKindPrefix={route.workflowPrefix ?? ''}
         initialStatus={route.jobStatus ?? 'open'}
         initialOwnerId={route.jobOwnerId ?? ''}
-        initialSubjectKind={route.jobSubjectKind ?? ''}
         initialSubjectId={route.jobSubjectId ?? ''}
         initialNewJobOpen={route.newJobOpen ?? false}
         initialNewJobSubjectKind={route.newJobSubjectKind ?? ''}
