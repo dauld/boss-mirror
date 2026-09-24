@@ -331,6 +331,29 @@ pub struct StepField {
     /// field authored before this existed already meant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub covers: Option<String>,
+    /// For an `array` field of `{anchor, …}` elements: the name of
+    /// another array field on the same step whose anchors an element
+    /// here may BIND, by carrying a key of that same name holding a list
+    /// of them. Checked at every write that touches either field (the
+    /// step merge door) and again at done: a bound anchor the other
+    /// field does not carry is refused, naming it. Registry data for the
+    /// relation design 26a89f11 decided — a design question binds the
+    /// exhibits it is asked about (`questions` binds `exhibits`), and a
+    /// binding to an exhibit nobody attached would render as a question
+    /// pointing at nothing. None (the default) means no binding, which is
+    /// what every field authored before this existed already meant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binds: Option<String>,
+    /// For an `array` field: the most UTF-8 bytes any one STRING value of
+    /// an element may hold, checked at every write that touches the field
+    /// and again at done. A design exhibit's `html` rides inline in step
+    /// metadata up to a bound (design 26a89f11: 256 KB), and a bound
+    /// stated nowhere is a bound nobody holds. It measures the string, not
+    /// its JSON encoding, so the number an author reads off `ls -l` is the
+    /// number the refusal names. None (the default) means unbounded, which
+    /// is what every field authored before this existed already meant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_value_max_bytes: Option<u64>,
 }
 
 /// Who supplies a step field's value — the enforcement point follows
@@ -887,6 +910,8 @@ mod tests {
             filled_by: FilledBy::Filer,
             item_keys: Vec::new(),
             covers: None,
+            binds: None,
+            item_value_max_bytes: None,
         };
         let json = serde_json::to_value(&f).unwrap();
         assert_eq!(json["filled_by"], serde_json::json!("filer"));
@@ -900,10 +925,42 @@ mod tests {
             filled_by: FilledBy::Executor,
             item_keys: Vec::new(),
             covers: None,
+            binds: None,
+            item_value_max_bytes: None,
             ..f
         };
         let json = serde_json::to_value(&exec).unwrap();
         assert_eq!(json["filled_by"], serde_json::json!("executor"));
+    }
+
+    /// `binds` and `item_value_max_bytes` (design 26a89f11, exhibits)
+    /// default to absent — every field authored before them reads as
+    /// unbound and unbounded — and round-trip when a protocol states
+    /// them, so a registry row carries the contract it was authored with.
+    #[test]
+    fn step_field_binds_and_value_bound_default_absent_and_round_trip() {
+        let bare: StepField = serde_json::from_value(serde_json::json!({
+            "name": "questions",
+            "field_type": "array",
+        }))
+        .unwrap();
+        assert_eq!(bare.binds, None);
+        assert_eq!(bare.item_value_max_bytes, None);
+        let json = serde_json::to_value(&bare).unwrap();
+        assert!(json.get("binds").is_none() && json.get("item_value_max_bytes").is_none());
+
+        let stated: StepField = serde_json::from_value(serde_json::json!({
+            "name": "exhibits",
+            "field_type": "array",
+            "binds": "other",
+            "item_value_max_bytes": 262144,
+        }))
+        .unwrap();
+        assert_eq!(stated.binds.as_deref(), Some("other"));
+        assert_eq!(stated.item_value_max_bytes, Some(262_144));
+        let back: StepField =
+            serde_json::from_value(serde_json::to_value(&stated).unwrap()).unwrap();
+        assert_eq!(back, stated);
     }
 
     #[test]

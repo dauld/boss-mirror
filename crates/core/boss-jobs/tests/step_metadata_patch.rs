@@ -793,3 +793,110 @@ async fn a_metadata_patch_wakes_a_metadata_gated_ready_when() {
          metadata patch does: {gated}"
     );
 }
+
+/// The exhibit contract of design 26a89f11 on a step's own fields:
+/// `questions` binds `exhibits`, whose strings are bounded at 16 bytes.
+fn exhibit_fields() -> Vec<boss_core::job::StepField> {
+    use boss_core::job::{FilledBy, StepField};
+    vec![
+        StepField {
+            name: "questions".into(),
+            field_type: "array".into(),
+            required: true,
+            filled_by: FilledBy::Filer,
+            item_keys: vec!["anchor".into(), "title".into(), "proposal".into()],
+            covers: None,
+            binds: Some("exhibits".into()),
+            item_value_max_bytes: None,
+        },
+        StepField {
+            name: "exhibits".into(),
+            field_type: "array".into(),
+            required: false,
+            filled_by: FilledBy::Filer,
+            item_keys: vec!["anchor".into(), "title".into(), "html".into()],
+            covers: None,
+            binds: None,
+            item_value_max_bytes: Some(16),
+        },
+    ]
+}
+
+/// THE MERGE DOOR HOLDS THE STANDING REFUSALS (design 26a89f11). A
+/// question binding an exhibit the packet does not carry, a repeated
+/// anchor, or an exhibit over the inline bound is refused 422 AS IT IS
+/// WRITTEN — naming the element — and nothing lands; the author is on
+/// the line, not the reviewer at done. A write that touches neither
+/// field (a reviewer's `resolutions`) is never judged by them.
+#[tokio::test]
+async fn the_merge_door_refuses_a_binding_to_an_exhibit_the_step_lacks() {
+    let (app, jobs) = build_app(allow_step_update());
+    let user = tech("emp-1");
+    let job = open_job("00000000-0000-0000-0000-0000000000e1", "emp-1");
+    jobs.create_job(&job).await.unwrap();
+    let mut step =
+        Step::new(job.id, "review-design", "Answer the open questions", 0).with_assignee("emp-1");
+    step.status = StepStatus::Ready;
+    step.fields = exhibit_fields();
+    step.metadata = serde_json::json!({ "resolutions": [] });
+    jobs.add_step(&step).await.unwrap();
+    let (jid, sid) = (job.id.to_string(), step.id.to_string());
+
+    let bad = serde_json::json!({
+        "questions": [{"anchor": "Q1", "title": "t", "proposal": "p", "exhibits": ["E9"]}],
+        "exhibits": [{"anchor": "E1", "title": "board", "html": "<p>x</p>"}],
+    });
+    let resp = patch_step_metadata(&app, &user, &jid, &sid, &bad.to_string()).await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        body.contains("questions[0].exhibits") && body.contains("E9"),
+        "the refusal names the element and the anchor: {body}"
+    );
+    let after = jobs.get_step(&step.id).await.unwrap().unwrap();
+    assert!(
+        after.metadata.get("exhibits").is_none(),
+        "a refused write lands nothing: {}",
+        after.metadata
+    );
+
+    let oversize = serde_json::json!({
+        "exhibits": [{"anchor": "E1", "title": "board", "html": "<p>seventeen b</p>"}],
+    });
+    let resp = patch_step_metadata(&app, &user, &jid, &sid, &oversize.to_string()).await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let good = serde_json::json!({
+        "questions": [{"anchor": "Q1", "title": "t", "proposal": "p", "exhibits": ["E1"]}],
+        "exhibits": [{"anchor": "E1", "title": "board", "html": "<p>x</p>"}],
+    });
+    let resp = patch_step_metadata(&app, &user, &jid, &sid, &good.to_string()).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Removing the exhibit a question still binds is the same refusal
+    // one write later: the binding is judged against the merged row.
+    let resp = patch_step_metadata(&app, &user, &jid, &sid, r#"{"exhibits":null}"#).await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let resp = patch_step_metadata(
+        &app,
+        &user,
+        &jid,
+        &sid,
+        r#"{"resolutions":[{"anchor":"Q1","decision":""}]}"#,
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "a reviewer's save touches neither field and is never judged by them"
+    );
+}

@@ -212,6 +212,39 @@
 }
 .step-review-design .srd-use:disabled { opacity: .5; cursor: default; }
 
+/* Exhibits — the packet's own HTML renderings (design 26a89f11), each in
+   a sandboxed frame below the prose. The frame's box is resizable so a
+   reviewer can give a prototype the height it wants. */
+.step-review-design .srd-exhibits { margin-top: 28px; }
+.step-review-design .srd-exhibits > h2 { margin-top: 0; }
+.step-review-design .srd-exhibit { margin: 0 0 24px; scroll-margin-top: 12px; }
+.step-review-design .srd-exhibit figcaption {
+  display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;
+  font-size: 13px; margin-bottom: 8px;
+}
+.step-review-design .srd-exhibit-title { font-weight: 600; }
+.step-review-design .srd-exhibit-meta { color: var(--text-dim, #78716c); font-size: 12px; }
+.step-review-design .srd-exhibit-frame {
+  height: 440px; min-height: 160px; resize: vertical; overflow: hidden;
+  border: 1px solid var(--border, #e7e5e4); border-radius: 6px; background: #fff;
+}
+.step-review-design .srd-exhibit-frame iframe {
+  display: block; width: 100%; height: 100%; border: 0; background: #fff;
+}
+.step-review-design .srd-exhibit.is-flagged .srd-exhibit-frame {
+  outline: 2px solid var(--accent, #2563eb); outline-offset: 2px;
+}
+.step-review-design .srd-q-exhibits {
+  display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
+  margin: 10px 0 0; font-size: 12px; color: var(--text-dim, #78716c);
+}
+.step-review-design .srd-q-exhibits button {
+  font: inherit; font-size: 12px; cursor: pointer; padding: 2px 8px;
+  border-radius: 4px; border: 1px solid var(--border, #e7e5e4);
+  background: var(--bg, #fafaf9); color: var(--text, #1c1917);
+}
+.step-review-design .srd-q-exhibits button:hover { border-color: var(--accent, #2563eb); }
+
 .step-review-design .srd-empty,
 .step-review-design .srd-loading {
   padding: 20px; border-radius: 6px; background: var(--bg, #f5f5f4);
@@ -255,6 +288,79 @@
     return el;
   }
 
+  // ---------------------------------------------------------------
+  // EXHIBITS — a proposal whose substance is visual rides inside the
+  // packet (design 26a89f11, David 2026-09-23).
+  //
+  // An exhibit's `html` is UNTRUSTED: any actor may write step
+  // metadata, and this surface runs in the reviewer's authenticated
+  // session. So it is never parsed into this document — no innerHTML,
+  // no renderMarkdown — and renders ONLY inside a frame that:
+  //
+  //   - is sandboxed with `allow-scripts` and nothing else. Without the
+  //     same-origin token the frame's origin is opaque: its script cannot
+  //     reach this page, its cookies, its storage or the API as the
+  //     reviewer. No forms, popups or top navigation either — the sandbox
+  //     withholds every capability it does not name.
+  //   - is loaded by `srcdoc`, set as an attribute (never spliced into
+  //     markup here), so no byte of the exhibit can close the frame.
+  //   - carries a CSP of `default-src 'none'` with inline style and
+  //     script only: no network, no fetched assets, no connections. An
+  //     exhibit that needs live data is a page, not an exhibit.
+  //
+  // The two values are constants so the test that pins them reads the
+  // same strings the frame is given.
+  // ---------------------------------------------------------------
+  const EXHIBIT_SANDBOX = 'allow-scripts';
+  const EXHIBIT_CSP = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'";
+
+  function exhibitSrcdoc(html) {
+    // The policy is the FIRST thing in the head, before one byte of the
+    // exhibit, so nothing the exhibit carries runs outside it. A policy
+    // the exhibit adds of its own can only narrow this one.
+    return (
+      '<!doctype html><html><head><meta charset="utf-8">' +
+      `<meta http-equiv="Content-Security-Policy" content="${EXHIBIT_CSP}">` +
+      '</head><body>' +
+      html +
+      '</body></html>'
+    );
+  }
+
+  function exhibitFrame(ex) {
+    const frame = document.createElement('iframe');
+    // The sandbox BEFORE the document: the flags apply to what loads.
+    frame.setAttribute('sandbox', EXHIBIT_SANDBOX);
+    frame.setAttribute('referrerpolicy', 'no-referrer');
+    frame.setAttribute('title', `Exhibit ${ex.anchor}: ${ex.title}`);
+    frame.setAttribute('srcdoc', exhibitSrcdoc(ex.html));
+    return frame;
+  }
+
+  function utf8Bytes(s) {
+    return typeof TextEncoder === 'function' ? new TextEncoder().encode(s).length : s.length;
+  }
+
+  // The exhibits a packet carries, as this surface reads them. An
+  // element without inline html (the file_refs arm, decided and not yet
+  // built) is KEPT with `html: null` and listed as not renderable here —
+  // never dropped (26a89f11: "list anchor/title/size/hash, never drop").
+  function readExhibits(raw) {
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter((e) => e && typeof e === 'object')
+      .map((e, i) => ({
+        anchor: String(e.anchor || `E${i + 1}`),
+        title: String(e.title || ''),
+        html: typeof e.html === 'string' ? e.html : null,
+      }));
+  }
+
+  // A question's bindings: the exhibit anchors its `exhibits` key names.
+  function questionExhibits(q) {
+    return Array.isArray(q && q.exhibits) ? q.exhibits.map(String) : [];
+  }
+
   function mount(container, { step, jobId, onUpdate }) {
     const docPath = (step.metadata && step.metadata.doc_path) || '';
     // resolutions: [{ anchor, decision }] — anchor matches the
@@ -268,6 +374,10 @@
 
     let doc = null;
     let questions = [];
+    let exhibits = [];
+    // Each exhibit's rendered <figure>, by anchor, so a question's
+    // binding can bring its exhibit into view beside it.
+    const exhibitFigures = {};
     // True when the questions came from the packet rather than the
     // docs API. Kept because the loader's four branches need to know
     // which of them answered; it no longer decides where answers go,
@@ -435,6 +545,77 @@
       );
     }
 
+    // The exhibits, in the READING pane below the prose — the wide pane,
+    // beside the decision rail, so a bound exhibit sits next to the
+    // question it is asked about when its card brings it into view. A
+    // theme board or a prototype squeezed into the rail's width would
+    // be reviewed at a size nobody will see it at.
+    function renderExhibits() {
+      if (!exhibits.length) return null;
+      const section = h(
+        'section',
+        { className: 'srd-exhibits' },
+        h('h2', null, `Exhibits (${exhibits.length})`),
+      );
+      exhibits.forEach((ex) => {
+        const askedBy = questions
+          .filter((q) => q.exhibits.includes(ex.anchor))
+          .map((q) => q.anchor);
+        const figure = h(
+          'figure',
+          { className: 'srd-exhibit' },
+          h(
+            'figcaption',
+            null,
+            h('span', { className: 'srd-anchor' }, ex.anchor),
+            h('span', { className: 'srd-exhibit-title' }, ex.title),
+            h(
+              'span',
+              { className: 'srd-exhibit-meta' },
+              ex.html === null
+                ? 'not carried inline — this surface renders inline exhibits only'
+                : `${utf8Bytes(ex.html).toLocaleString()} bytes · sandboxed: runs its own ` +
+                    'style and script, reaches nothing else' +
+                    (askedBy.length ? ` · asked about in ${askedBy.join(', ')}` : ''),
+            ),
+          ),
+          ex.html === null
+            ? null
+            : h('div', { className: 'srd-exhibit-frame' }, exhibitFrame(ex)),
+        );
+        exhibitFigures[ex.anchor] = figure;
+        section.appendChild(figure);
+      });
+      return section;
+    }
+
+    // A bound question's link to its exhibits: one button per anchor,
+    // bringing that exhibit into view in the reading pane and marking it.
+    function questionExhibitLinks(q) {
+      const bound = q.exhibits.filter((a) => exhibits.some((ex) => ex.anchor === a));
+      if (!bound.length) return null;
+      return h(
+        'div',
+        { className: 'srd-q-exhibits' },
+        h('span', null, 'Exhibits:'),
+        bound.map((anchor) => {
+          const btn = h(
+            'button',
+            { type: 'button', title: `Show exhibit ${anchor} beside this question` },
+            anchor,
+          );
+          btn.addEventListener('click', () => {
+            const figure = exhibitFigures[anchor];
+            if (!figure) return;
+            Object.values(exhibitFigures).forEach((f) => f.classList.remove('is-flagged'));
+            figure.classList.add('is-flagged');
+            figure.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          });
+          return btn;
+        }),
+      );
+    }
+
     function renderBody() {
       bodyDiv.replaceChildren();
       if (loadError) {
@@ -494,6 +675,8 @@
           inner.appendChild(prose);
         }
       }
+      const shown = renderExhibits();
+      if (shown) inner.appendChild(shown);
       docPane.appendChild(inner);
       bodyDiv.appendChild(docPane);
 
@@ -539,6 +722,7 @@
             }
             return q.body_md ? h('div', { className: 'srd-q-body' }, q.body_md) : null;
           })(),
+          questionExhibitLinks(q),
           // The proposal, offered rather than applied (David,
           // 2026-08-14): "give you the ability to populate the
           // resolution but I have to still click the button ...
@@ -752,7 +936,12 @@
           title: String(q.title || q.question || ''),
           proposal: typeof q.proposal === 'string' ? q.proposal : '',
           body: typeof q.body === 'string' ? q.body : '',
+          exhibits: questionExhibits(q),
         }));
+        // Exhibits ride the STEP — `boss design --exhibit` mirrors them
+        // there with the questions, and completing the review freezes
+        // them with the rest of the record.
+        exhibits = readExhibits(step.metadata.exhibits);
         // THE PROSE MAY BE ON EITHER BAG, and this reads both.
         //
         // The questions must live on the STEP — that is what makes the
@@ -818,6 +1007,7 @@
       if (!docPath && inlineMarkdown) {
         selfCarried = true;
         questions = [];
+        exhibits = readExhibits(step.metadata && step.metadata.exhibits);
         doc = {
           title: String((step.metadata && step.metadata.title) || 'Design doc'),
           content_html: null,
@@ -854,7 +1044,9 @@
                 title: String(q.title || q.question || ''),
                 proposal: typeof q.proposal === 'string' ? q.proposal : '',
                 body: typeof q.body === 'string' ? q.body : '',
+                exhibits: questionExhibits(q),
               }));
+              exhibits = readExhibits(jm.exhibits);
               doc = {
                 title: String(jm.title || 'Design doc'),
                 content_html: null,

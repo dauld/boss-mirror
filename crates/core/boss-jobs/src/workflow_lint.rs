@@ -1117,12 +1117,29 @@ fn check_item_keys_name_an_array(
                 ),
             });
         }
+        // The inline value bound (design 26a89f11) describes elements
+        // too, and on a non-array would be stored and never held.
+        if let Some(max) = field.item_value_max_bytes
+            && field.field_type != "array"
+        {
+            errs.push(WorkflowLintError {
+                workflow: spec.kind.clone(),
+                step: step.title.clone(),
+                reason: format!(
+                    "field '{}' declares item_value_max_bytes = {max} but is a '{}', not an \
+                     array — the bound is on element values and would never be checked",
+                    field.name, field.field_type
+                ),
+            });
+        }
     }
 }
 
-/// `covers` relates two ARRAY fields on ONE step — the anchors of the
-/// covered field must each be answered by an element of this one. A
-/// `covers` that names a missing field, a non-array, or itself would be
+/// `covers` and `binds` each relate two ARRAY fields on ONE step by
+/// element anchor — `covers`: every anchor of the covered field must be
+/// answered by an element here; `binds` (design 26a89f11): an element
+/// here may name anchors of the bound field, and only ones it carries. A
+/// relation that names a missing field, a non-array, or itself would be
 /// stored and never checked (or checked vacuously); refuse the spec.
 fn check_covers_names_an_array_on_the_same_step(
     spec: &WorkflowSpec,
@@ -1130,41 +1147,44 @@ fn check_covers_names_an_array_on_the_same_step(
     errs: &mut Vec<WorkflowLintError>,
 ) {
     for field in &step.fields {
-        let Some(covered) = &field.covers else {
-            continue;
-        };
-        let reason = if field.field_type != "array" {
-            Some(format!(
-                "field '{}' declares covers = '{covered}' but is a '{}', not an array — \
-                 coverage is a relation between element anchors and would never be checked",
-                field.name, field.field_type
-            ))
-        } else if covered == &field.name {
-            Some(format!(
-                "field '{}' declares covers = itself, which is vacuously true and checks nothing",
-                field.name
-            ))
-        } else {
-            match step.fields.iter().find(|f| &f.name == covered) {
-                None => Some(format!(
-                    "field '{}' declares covers = '{covered}', but this step has no field of that \
-                     name — coverage is checked at done against a field on the SAME step",
+        for (relation, target) in [("covers", &field.covers), ("binds", &field.binds)] {
+            let Some(target) = target else {
+                continue;
+            };
+            let reason = if field.field_type != "array" {
+                Some(format!(
+                    "field '{}' declares {relation} = '{target}' but is a '{}', not an array — \
+                     {relation} is a relation between element anchors and would never be checked",
+                    field.name, field.field_type
+                ))
+            } else if target == &field.name {
+                Some(format!(
+                    "field '{}' declares {relation} = itself, which is vacuously true and checks \
+                     nothing",
                     field.name
-                )),
-                Some(f) if f.field_type != "array" => Some(format!(
-                    "field '{}' declares covers = '{covered}', which is a '{}', not an array — \
-                     there are no element anchors to cover",
-                    field.name, f.field_type
-                )),
-                Some(_) => None,
+                ))
+            } else {
+                match step.fields.iter().find(|f| &f.name == target) {
+                    None => Some(format!(
+                        "field '{}' declares {relation} = '{target}', but this step has no field \
+                         of that name — {relation} is checked against a field on the SAME step",
+                        field.name
+                    )),
+                    Some(f) if f.field_type != "array" => Some(format!(
+                        "field '{}' declares {relation} = '{target}', which is a '{}', not an \
+                         array — there are no element anchors to relate",
+                        field.name, f.field_type
+                    )),
+                    Some(_) => None,
+                }
+            };
+            if let Some(reason) = reason {
+                errs.push(WorkflowLintError {
+                    workflow: spec.kind.clone(),
+                    step: step.title.clone(),
+                    reason,
+                });
             }
-        };
-        if let Some(reason) = reason {
-            errs.push(WorkflowLintError {
-                workflow: spec.kind.clone(),
-                step: step.title.clone(),
-                reason,
-            });
         }
     }
 }
@@ -1497,6 +1517,8 @@ mod tests {
             filled_by: boss_core::job::FilledBy::Filer,
             item_keys: vec!["anchor".into(), "title".into()],
             covers: None,
+            binds: None,
+            item_value_max_bytes: None,
         };
         let spec_with = |field_type: &str| {
             WorkflowSpec::platform_seed(
@@ -1552,6 +1574,8 @@ mod tests {
             filled_by: boss_core::job::FilledBy::Executor,
             item_keys: Vec::new(),
             covers: covers.map(str::to_string),
+            binds: None,
+            item_value_max_bytes: None,
         };
         let spec_with = |fields: Vec<boss_core::job::StepField>| {
             WorkflowSpec::platform_seed(
@@ -1614,6 +1638,58 @@ mod tests {
         assert!(e.iter().any(|r| r.contains("not an array")), "{e:?}");
         let e = covers_errs(vec![mk("resolutions", "array", Some("resolutions"))]);
         assert!(e.iter().any(|r| r.contains("itself")), "{e:?}");
+
+        // `binds` (design 26a89f11) is the same kind of relation — two
+        // array fields on one step, related by element anchor — so it is
+        // held to the same rule: a binds that names nothing, a
+        // non-array, or itself would be stored and never checked.
+        let bind = |name: &str, field_type: &str, binds: Option<&str>| boss_core::job::StepField {
+            binds: binds.map(str::to_string),
+            ..mk(name, field_type, None)
+        };
+        let binds_errs = |fields| {
+            validate_workflow(&spec_with(fields), &reg)
+                .into_iter()
+                .filter(|e| e.reason.contains("binds"))
+                .map(|e| e.reason)
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            binds_errs(vec![
+                bind("questions", "array", Some("exhibits")),
+                bind("exhibits", "array", None),
+            ])
+            .is_empty(),
+            "the intended shape passes"
+        );
+        let e = binds_errs(vec![bind("questions", "array", Some("exhibits"))]);
+        assert!(
+            e.iter().any(|r| r.contains("no field of that name")),
+            "{e:?}"
+        );
+        let e = binds_errs(vec![
+            bind("questions", "array", Some("exhibits")),
+            bind("exhibits", "string", None),
+        ]);
+        assert!(e.iter().any(|r| r.contains("not an array")), "{e:?}");
+        let e = binds_errs(vec![bind("questions", "array", Some("questions"))]);
+        assert!(e.iter().any(|r| r.contains("itself")), "{e:?}");
+
+        // A value bound describes array ELEMENTS, like item_keys, and on
+        // any other field would never be checked.
+        let bounded = |field_type: &str| boss_core::job::StepField {
+            item_value_max_bytes: Some(262_144),
+            ..mk("exhibits", field_type, None)
+        };
+        let bound_errs = |fields| {
+            validate_workflow(&spec_with(fields), &reg)
+                .into_iter()
+                .filter(|e| e.reason.contains("item_value_max_bytes"))
+                .map(|e| e.reason)
+                .collect::<Vec<_>>()
+        };
+        assert!(bound_errs(vec![bounded("array")]).is_empty());
+        assert_eq!(bound_errs(vec![bounded("string")]).len(), 1);
     }
 
     /// An empty string can never be a member of an enum, so `""` as a
@@ -1654,6 +1730,8 @@ mod tests {
                             filled_by: boss_core::job::FilledBy::Executor,
                             item_keys: Vec::new(),
                             covers: None,
+                            binds: None,
+                            item_value_max_bytes: None,
                         }],
                         metadata_defaults: serde_json::json!({ "route": default }),
                         terminal: Some(Terminal {
@@ -1811,6 +1889,8 @@ mod tests {
                         filled_by: boss_core::job::FilledBy::Executor,
                         item_keys: Vec::new(),
                         covers: None,
+                        binds: None,
+                        item_value_max_bytes: None,
                     }],
                     ..Default::default()
                 },
@@ -1825,6 +1905,8 @@ mod tests {
                         filled_by: boss_core::job::FilledBy::Executor,
                         item_keys: Vec::new(),
                         covers: None,
+                        binds: None,
+                        item_value_max_bytes: None,
                     }],
                     // Stamped at materialization, so the step carries the
                     // key from the moment it exists — which is why the
@@ -1897,6 +1979,8 @@ mod tests {
                         filled_by: boss_core::job::FilledBy::Executor,
                         item_keys: Vec::new(),
                         covers: None,
+                        binds: None,
+                        item_value_max_bytes: None,
                     }],
                     ..Default::default()
                 },
@@ -1911,6 +1995,8 @@ mod tests {
                         filled_by: boss_core::job::FilledBy::Executor,
                         item_keys: Vec::new(),
                         covers: None,
+                        binds: None,
+                        item_value_max_bytes: None,
                     }],
                     ..Default::default()
                 },
@@ -1969,6 +2055,8 @@ mod tests {
                         filled_by: boss_core::job::FilledBy::Executor,
                         item_keys: Vec::new(),
                         covers: None,
+                        binds: None,
+                        item_value_max_bytes: None,
                     }],
                     ..Default::default()
                 },
@@ -2022,6 +2110,8 @@ mod tests {
                         filled_by: boss_core::job::FilledBy::Executor,
                         item_keys: Vec::new(),
                         covers: None,
+                        binds: None,
+                        item_value_max_bytes: None,
                     }],
                     ..Default::default()
                 },
@@ -2137,6 +2227,8 @@ mod tests {
             filled_by: boss_core::job::FilledBy::Executor,
             item_keys: Vec::new(),
             covers: None,
+            binds: None,
+            item_value_max_bytes: None,
         }
     }
 
@@ -2188,6 +2280,8 @@ mod tests {
             filled_by: boss_core::job::FilledBy::Executor,
             item_keys: Vec::new(),
             covers: None,
+            binds: None,
+            item_value_max_bytes: None,
         });
         assert!(
             validate_workflow(&spec, &reg)

@@ -168,3 +168,79 @@ test('a step carrying only a pointer says so, and never calls a docs API', async
   await expect(page.getByText(/docs\/design\/legacy\.md/)).toBeVisible();
   expect(docsApiCalls, 'nothing may call the deleted docs API').toEqual([]);
 });
+
+// EXHIBITS, IN A REAL BROWSER (design 26a89f11, backlog 73ef81fa).
+//
+// The unit test pins the frame's attributes; this pins what they DO. The
+// review surface runs in the reviewer's authenticated session and any
+// actor may write step metadata, so an exhibit is untrusted markup that
+// must run its own script (a motion prototype is the first customer)
+// and reach NOTHING of the page around it. The exhibit below tries the
+// three things that would matter — this page's DOM, this origin's
+// storage, and the API as the reviewer — and writes what happened into
+// its own body, where the test reads it back through the frame.
+test('an exhibit runs its own script in a sandbox that reaches nothing of the page', async ({
+  page,
+}) => {
+  const errs: string[] = [];
+  const apiFromExhibit: string[] = [];
+  page.on('pageerror', (e) => errs.push(String(e)));
+
+  const PROBE =
+    '<p id="r">pending</p>' +
+    '<script>' +
+    'var out = [];' +
+    'try { out.push(parent.document.title !== undefined ? "parent:reachable" : "parent:none"); }' +
+    ' catch (e) { out.push("parent:blocked"); }' +
+    'try { localStorage.getItem("x"); out.push("storage:reachable"); }' +
+    ' catch (e) { out.push("storage:blocked"); }' +
+    'fetch("/api/jobs/exhibit-probe").then(' +
+    ' function () { out.push("fetch:reachable"); },' +
+    ' function () { out.push("fetch:blocked"); }' +
+    ').then(function () { document.getElementById("r").textContent = out.join(" "); });' +
+    '</script>';
+  const step = {
+    ...STEP,
+    metadata: {
+      ...STEP.metadata,
+      questions: [{ ...STEP.metadata.questions[0], exhibits: ['E1'] }],
+      exhibits: [{ anchor: 'E1', title: 'The isolation probe', html: PROBE }],
+    },
+  };
+
+  await installSmokeMocks(page);
+  await page.route('**/api/jobs/exhibit-probe', (r) => {
+    apiFromExhibit.push(r.request().url());
+    return r.fulfill({ json: { reached: true } });
+  });
+  await page.route('**/api/jobs/job-dd-1', (r) => r.fulfill({ json: { ...JOB, steps: [step] } }));
+  await page.route('**/api/jobs/step-plugins', (r) =>
+    r.fulfill({
+      json: [
+        {
+          kind: 'review-design',
+          label: 'Review Design',
+          category: 'platform',
+          version: 1,
+          frontend_url: '/plugins/review-design.js',
+          owning_team: 'platform',
+        },
+      ],
+    }),
+  );
+  await page.route('**/plugins/review-design.js', (r) =>
+    r.fulfill({ contentType: 'application/javascript', body: PLUGIN }),
+  );
+
+  await mountPage(page, '/jobs/job-dd-1/steps/step-1', { root: '.step-focus' });
+
+  const frame = page.frameLocator('iframe[title^="Exhibit E1"]');
+  // Its own script RAN (allow-scripts), and each reach was refused.
+  await expect(frame.locator('#r')).toHaveText('parent:blocked storage:blocked fetch:blocked', {
+    timeout: 10_000,
+  });
+  expect(apiFromExhibit, 'the exhibit reached the API').toEqual([]);
+  // The bound question names its exhibit beside it.
+  await expect(page.getByRole('button', { name: 'E1' })).toBeVisible();
+  expect(errs, `the surface threw: ${errs.join(' | ')}`).toEqual([]);
+});

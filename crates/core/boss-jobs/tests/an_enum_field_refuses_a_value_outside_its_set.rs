@@ -173,6 +173,8 @@ async fn seed() -> (Router, Arc<InMemoryJobs>) {
             filled_by: Default::default(),
             item_keys: Vec::new(),
             covers: None,
+            binds: None,
+            item_value_max_bytes: None,
         }],
     ))
     .await

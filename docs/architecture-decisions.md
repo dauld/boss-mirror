@@ -2968,7 +2968,17 @@ packet does not carry. (5) **It is proven** when the visual redesign is
 reviewed in `/it/design` with no claude.ai link. Authoring is `boss
 design --exhibit anchor|title|path.html`, read with no shell between;
 where an exhibit cannot render (a terminal, `boss brief`) it is listed
-by anchor, title, size and hash, never dropped. Not built, and not yet
+by anchor, title, size and hash, never dropped. **The inline arm is
+built** (backlog `73ef81fa`, 2026-09-24; `file_refs` measured ON that
+day, so its arm above 256 KB is the item's remaining car): the review
+step declares `exhibits = [{anchor, title, html}]` with
+`item_value_max_bytes = 262144`, and `questions` declares `binds =
+"exhibits"` — two generic `StepField` attributes, with an `anchor`
+repeated inside one field refused beside them, all judged at the step
+merge door as the write lands (only for the fields it touches) and
+again at done; `boss design --exhibit` / `--bind` refuse the same
+before filing; `review-design.js` renders each exhibit in the reading
+pane beside the decision rail, a bound question naming it. Not yet
 proven: both rounds of theme boards (`dea94998`, `a4df741a`) were
 decided from a linked Artifact.
 

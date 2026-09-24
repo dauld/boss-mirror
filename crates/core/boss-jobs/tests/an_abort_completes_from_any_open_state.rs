@@ -88,6 +88,8 @@ fn spec() -> WorkflowSpec {
                     filled_by: Default::default(),
                     item_keys: Vec::new(),
                     covers: None,
+                    binds: None,
+                    item_value_max_bytes: None,
                 }],
                 ..Default::default()
             },
