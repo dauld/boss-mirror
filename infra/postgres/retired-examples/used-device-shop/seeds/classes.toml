@@ -1,0 +1,247 @@
+# The used-device shop's class rows that 01-registries.sql seeds on EVERY
+# instance — kept as eviction candidates after the example is gone.
+#
+# WHY THIS FILE EXISTS (backlog a8991c86, car 6). David retired the
+# used-device shop on 2026-09-24: the OSS ships one example tenant,
+# Algedonic Ales. But 01-registries.sql seeded the shop's org chart on
+# every database — 26 roles, ten departments, three account types, the
+# `warehouse-zone` location kind and a `used-device-shop` companies row —
+# and an applied migration cannot be edited (migrate.sh refuses a changed
+# checksum). Those rows leave a company's instance through
+# infra/postgres/example-reference-rows.sh (boss-init on a fresh
+# instance's first start, the forge verb retire-example-reference-rows on
+# a running one), whose candidate set was read ONLY from
+# examples/*/seeds/. Deleting examples/used-device-shop would therefore
+# have left them on every fresh instance, silently: not a candidate is
+# not a refusal, it is a row nobody is asked about. The car-0 measure
+# recorded that hazard; this list is its answer.
+#
+# WHAT IT HOLDS, AND ONLY THAT. The rows examples/used-device-shop/seeds/
+# classes.toml carried that 01-registries.sql also seeds — keyed as the
+# script reads them (subject_kind, member_attribute, code). The shop's
+# own rows the migrations never seeded (its asset categories, document
+# kinds, account-team roles, `auditor`) are not here: no instance got
+# them without publishing the shop. The platform's rows are not here
+# either (`platform-admin`, `audit-readonly`, `owner`, `smoke-tester`,
+# the `it` department, `hq` and `field-region`, which the platform's
+# default locations wear) — a candidate is a row an instance may lose.
+#
+# HELD EQUAL TO THE MIGRATION, not by a comment (CLAUDE.md §9a):
+# crates/core/boss-testing/tests/example_reference_rows_sh.rs refuses a
+# row here that 01-registries.sql does not seed under the same
+# member_attribute and pins the counts below, and
+# example_reference_rows_sql.rs runs the eviction on a fresh schema with
+# examples/used-device-shop absent — what remains must be exactly what
+# the platform names, which fails if a row of the shop's is missing
+# here. A code the brewery also carries (`ceo`, `sales`, …) is listed
+# anyway: this file answers for the migration's rows, whichever example
+# is published beside it.
+
+# --- employee roles (01-registries.sql, 26 of them) --------------------
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "ceo"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "cto"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "coo"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "cfo"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "vp-sales"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "sales-mgr"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "sales-rep"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "service-mgr"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "service-tech"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "refurb-supervisor"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "refurb-tech"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "qa-lead"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "qa-tech"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "warehouse-mgr"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "warehouse-clerk"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "parts-buyer"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "controller"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "ap-specialist"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "hr-generalist"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "recruiter"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "support-specialist"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "it-manager"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "marketing-mgr"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "marketing-specialist"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "content-writer"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "role"
+code = "brand-designer"
+
+# --- employee departments (all but `it`, the platform's) ---------------
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "department"
+code = "executive"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "department"
+code = "sales"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "department"
+code = "service"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "department"
+code = "refurb"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "department"
+code = "qa"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "department"
+code = "warehouse"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "department"
+code = "finance"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "department"
+code = "people"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "department"
+code = "support"
+
+[[class]]
+subject_kind = "employee"
+member_attribute = "department"
+code = "marketing"
+
+# --- account types (the migration's "Used-device-shop example" block) --
+
+[[class]]
+subject_kind = "account"
+member_attribute = "type"
+code = "service-account"
+
+[[class]]
+subject_kind = "account"
+member_attribute = "type"
+code = "lab"
+
+[[class]]
+subject_kind = "account"
+member_attribute = "type"
+code = "clinic"
+
+# --- location kind (`hq` and `field-region` stay: loc-hq and
+# loc-field-default wear them) -------------------------------------------
+
+[[class]]
+subject_kind = "location"
+member_attribute = "kind"
+code = "warehouse-zone"
