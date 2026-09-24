@@ -659,11 +659,12 @@ pub struct RegionInputs<'a> {
     /// `opened_at`, `closed_at` and `outcome` are on its metadata.
     pub gate_runs: &'a [Job],
     /// The receiving yard's inbound packets — open, plus closed within
-    /// two windows. Steps ride the OPEN ones — they are what says a
-    /// packet has been taken in ([`taken_in`]), which is where receiving
-    /// ends and marshalling begins (design 62de32ae decision 4) — and a
-    /// closed row carries none. `None` when the workflow registry that
-    /// says which kinds are inbound could not be read.
+    /// two windows, each with its steps. On an OPEN row they say whether
+    /// the packet has been taken in ([`taken_in`]), which is where
+    /// receiving ends and marshalling begins (design 62de32ae decision
+    /// 4); on every row they say WHEN ([`taken_in_at`]), which is what
+    /// the border between the two counts. `None` when the workflow
+    /// registry that says which kinds are inbound could not be read.
     pub inbound: Option<&'a [(Job, Vec<Step>)]>,
     /// Every station but the dock. `None` when the station registry
     /// could not be read.
@@ -844,6 +845,20 @@ pub fn taken_in(steps: &[Step]) -> bool {
     steps
         .iter()
         .any(|s| s.status == StepStatus::Completed && s.kind != TRIGGER_STEP_KIND)
+}
+
+/// WHEN a packet was taken in: the earliest completion among the steps
+/// [`taken_in`] counts — the instant it crossed from receiving into
+/// marshalling, which is what the border between the two counts
+/// (`borders`, design 62de32ae). `None` for a packet nothing has taken
+/// in, and for one whose completion carries no stamp: an instant nobody
+/// recorded is not invented.
+pub(crate) fn taken_in_at(steps: &[Step]) -> Option<Instant> {
+    steps
+        .iter()
+        .filter(|s| s.status == StepStatus::Completed && s.kind != TRIGGER_STEP_KIND)
+        .filter_map(|s| s.completed_at)
+        .min()
 }
 
 /// Packet ids, ordered so a test that names an offender names it the

@@ -257,6 +257,55 @@ async fn receiving_counts_every_inbound_packet_past_one_page() {
     assert_eq!(receiving["count"], PAST_ONE_PAGE, "{receiving}");
 }
 
+/// THE CROSSING INTO MARSHALLING IS THE INTAKE, END TO END (design
+/// 62de32ae, car C). A backlog-item triaged this morning and CLOSED on
+/// that act is one crossing of receiving -> marshalling, stamped at its
+/// triage — which the handler can only see if it reads the steps of a
+/// CLOSED inbound row, not just the open ones (it read none of them,
+/// and the rail counted closures instead).
+#[tokio::test]
+async fn a_closed_packets_intake_is_a_crossing_into_marshalling() {
+    let (app, jobs) = app_with_intake();
+    let id = Uuid::from_u128(0xC105_0000_0000_0000_0000_0000_0000_0001).to_string();
+    let item = job(
+        "backlog-item",
+        &id,
+        "triaged and closed",
+        JobStatus::Closed,
+        json!({ "closed_at": "2026-09-19T10:00:00Z" }),
+    );
+    jobs.create_job_at(&item, t(NOW), &[]).await.unwrap();
+    let mut filed = step(&item.id, "filed", "filed", StepStatus::Completed, json!({}));
+    filed.kind = boss_jobs::regions::TRIGGER_STEP_KIND.into();
+    filed.completed_at = Some(t("2026-09-18T20:00:00Z"));
+    let mut triage = step(
+        &item.id,
+        "triage",
+        "triage",
+        StepStatus::Completed,
+        json!({}),
+    );
+    triage.completed_at = Some(t("2026-09-19T08:00:00Z"));
+    for s in [filed, triage] {
+        jobs.add_step_at(&s, t(NOW), &[]).await.unwrap();
+    }
+
+    let (status, b) = get(&app, "operator", "/api/yard/borders").await;
+    assert_eq!(status, StatusCode::OK, "{b}");
+    let rail = b["borders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["from"] == "receiving" && x["to"] == "marshalling")
+        .unwrap_or_else(|| panic!("no receiving -> marshalling rail in {b}"));
+    assert_eq!(rail["rate"]["samples"], 1, "{rail}");
+    assert_eq!(
+        rail["last_crossed"], "2026-09-19T08:00:00+00:00",
+        "stamped at the intake, not the close: {rail}"
+    );
+    assert_eq!(rail["waiting"], 0, "a closed packet stands nowhere: {rail}");
+}
+
 fn app() -> (axum::Router, Arc<InMemoryJobs>) {
     let jobs = Arc::new(InMemoryJobs::new());
     let policy_client: Arc<dyn PolicyClient> = Arc::new(

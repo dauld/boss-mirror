@@ -24,7 +24,19 @@
   // this owns the animation frames and the strokes. NO NEW STYLING —
   // the classes here are YardMap's, by name and by token, so the
   // visual redesign reskins one grammar (Q1, decided 2026-09-19).
-  import { untrack } from 'svelte';
+  //
+  // THE BORDERS ARE DRAWN, NOT TOOLTIPPED (design 62de32ae decision 6,
+  // decided 2026-09-24). Each rail runs along the main line above the
+  // territories (world.ts `railOf`) with the machine that moves it
+  // WRITTEN on it — its name, its lamp, its status — the waiting count
+  // standing on it and the rate beneath; the rail itself is as wide as
+  // its rate. A click opens the crossing inline, under the map: what
+  // one crossing is, the rate against the window before, the machine
+  // with where its reading came from, and every packet waiting with its
+  // own reason. All of it used to ride native hover titles, which touch
+  // cannot reach and a screenshot cannot hold. The panel is the one
+  // piece of new styling here, and it names no colour but a --map-*
+  // token, so the redesign still reskins one grammar.
   import { navigate } from '@boss/web-kit/nav';
   import {
     bandText,
@@ -40,13 +52,29 @@
   } from './regions';
   import {
     densityOf,
+    crossedText,
+    machineStatus,
     machineText,
+    railWidth,
     rateText as borderRateText,
+    unlistedText,
     waitingText,
     type Border,
     type Borders,
   } from './borders';
-  import { BORDERS, TERRITORIES, WORLD, borderPath, territoryOf, wrapWords, type Territory } from './world';
+  import {
+    BORDERS,
+    TERRITORIES,
+    WORLD,
+    labelChars,
+    railOf,
+    railWriting,
+    territoryOf,
+    territoryText,
+    wrapName,
+    wrapWords,
+    type TerritoryText,
+  } from './world';
   import { machineTitle, machineryLabel, machineryStrip } from './world-machines';
 
   type Props = Readonly<{
@@ -68,44 +96,57 @@
       .map((b) => key(b.from, b.to)),
   );
 
-  /** The rail's midpoint — where the traffic token stands. A cubic whose
-   *  control points share the endpoints' axes passes through the mean of
-   *  its endpoints at t=0.5, so this IS the curve's middle. */
-  const mid = (p: { x1: number; y1: number; x2: number; y2: number }) => ({
-    x: (p.x1 + p.x2) / 2,
-    y: (p.y1 + p.y2) / 2,
+  /** The rail each declared border draws, derived from the two
+   *  territories it joins — never placed by hand. */
+  const rails = BORDERS.flatMap((b) => {
+    const from = territoryOf(b.from);
+    const to = territoryOf(b.to);
+    return from && to ? [{ key: key(b.from, b.to), from: b.from, to: b.to, rail: railOf(from, to) }] : [];
   });
 
-  /** Everything the rail knows, for the hover — a border must not need
-   *  a second surface to explain what it is showing. */
-  function borderTitle(b: Border | undefined, from: string, to: string): string {
-    if (b === undefined) return `${from} → ${to} — the borders read answered nothing for this rail`;
-    const holds = b.holds.map((h) => `  ${h.what} — ${h.why}`).join('\n');
-    return [
-      `${from} → ${to} · ${b.state} — ${b.why}`,
-      `one crossing = ${b.crossing}`,
-      `rate: ${borderRateText(b.rate)}`,
-      `${waitingText(b)}${holds === '' ? '' : `:\n${holds}`}`,
-      `machine: ${machineText(b.machine)} (${b.machine.why})`,
-    ].join('\n');
-  }
+  /** The crossing whose panel is open under the map, by its key; null
+   *  when none is. A second click on the same rail closes it. */
+  let opened = $state<string | null>(null);
+  const toggle = (k: string): void => {
+    opened = opened === k ? null : k;
+  };
+  const onKey = (e: KeyboardEvent, k: string): void => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      toggle(k);
+    } else if (e.key === 'Escape') {
+      opened = null;
+    }
+  };
 
-  /** What the token prints: the queue depth, or `?` for a count the
+  /** What the badge prints: the queue depth, or `?` for a count the
    *  server could not take. Never 0 for "I do not know". */
   const tokenText = (b: Border | undefined): string =>
     b === undefined || b.waiting === null ? '?' : String(b.waiting);
+  /** The badge is as wide as its count. */
+  const badgeW = (b: Border | undefined): number => 10 + 6 * tokenText(b).length;
 
-  /** `3/d`, or `?` — the rate beside the rail, short enough for the gap
-   *  between two territories. The full sentence rides the title. */
+  /** `3/d`, or `?` — the rate under the rail. The comparison with the
+   *  window before is in the crossing's panel. */
   const railRate = (b: Border | undefined): string =>
     b === undefined || b.rate.current === null ? '?' : `${Math.round(b.rate.current * 10) / 10}/d`;
 
   const densityFor = (b: Border | undefined) => densityOf(b === undefined ? null : b.rate.current);
+  const widthFor = (b: Border | undefined): number => railWidth(b === undefined ? null : b.rate.current);
   const stateOfBorder = (b: Border | undefined) => b?.state ?? 'troubled';
   /** The machine's lamp: its own silence when it declares a cadence,
    *  otherwise unlit — an unlit lamp is "cannot tell", not "fine". */
   const machineLamp = (b: Border | undefined): string =>
     b === undefined || b.machine.silent === null ? 'unknown' : b.machine.silent ? 'err' : 'ok';
+  /** The machine's name as the rail writes it — the name the server
+   *  sent, broken after a hyphen when it will not fit on one line. */
+  const nameOf = (b: Border | undefined): string => b?.machine.name ?? 'no reading';
+  const statusOf = (b: Border | undefined): string => (b === undefined ? 'no reading' : machineStatus(b.machine));
+  /** The one-line account a screen reader gets for a rail. */
+  const railLabel = (b: Border | undefined, from: string, to: string): string =>
+    b === undefined
+      ? `${from} → ${to} — the borders read answered nothing for this rail`
+      : `${from} → ${to} · ${b.state} — ${b.why}. ${waitingText(b)}; ${machineText(b.machine)}. Open the crossing.`;
 
   const byName = $derived(new Map(regions.regions.map((r) => [r.name, r] as const)));
   /** A region the server answered that the layout has no territory
@@ -113,23 +154,24 @@
    *  pinned to the server's list, but a newer server is not a blank. */
   const unmapped = $derived(regions.regions.filter((r) => territoryOf(r.name) === undefined).map((r) => r.name));
 
-  // The text inside an outline: 9px mono is ~5.8px a character, and a
-  // why gets the lines the outline has room for below the trend.
-  const chars = (t: Territory): number => Math.floor((t.w - 16) / 5.8);
+  // The text inside an outline is laid out by world.ts `territoryText`
+  // — one column on the line, two on a siding — so every line of it is
+  // pinned inside its box and above the machinery strip.
   const stateOf = (r: Region | undefined) => r?.state ?? 'troubled';
   const whyOf = (r: Region | undefined) => r?.why ?? 'the server answered no reading for this region';
-  /** What a non-clear territory says under its trend: the band that
+  /** What a non-clear territory says beside its trend: the band that
    *  decided it, read against its number (design 62de32ae, decision 1),
-   *  and for trouble the why after it — three lines at most, so the
-   *  machinery strip along the bottom edge keeps its room. A payload
-   *  with no band (an older server) gives the why the three lines. */
-  function verdictLines(t: Territory, r: Region | undefined): ReadonlyArray<string> {
+   *  and for trouble the why after it — as many lines as the layout
+   *  leaves above the machinery strip. A payload with no band (an older
+   *  server) gives the why every line. */
+  function verdictLines(lt: TerritoryText, r: Region | undefined): ReadonlyArray<string> {
     const state = stateOf(r);
     if (state === 'clear') return [];
+    const n = lt.verdictLines;
     const band = bandText(r);
-    if (band === null) return wrapWords(whyOf(r), chars(t), 3);
-    const lines = wrapWords(band, chars(t), 2);
-    return state === 'troubled' ? [...lines, ...wrapWords(whyOf(r), chars(t), 3 - lines.length)] : lines;
+    if (band === null) return wrapWords(whyOf(r), lt.verdictChars, n);
+    const lines = wrapWords(band, lt.verdictChars, 2);
+    return state === 'troubled' ? [...lines, ...wrapWords(whyOf(r), lt.verdictChars, n - lines.length)] : lines;
   }
   /** The hover and the screen reader get everything the outline has no
    *  room for: the count in its unit, the state with how long it has
@@ -155,22 +197,25 @@
     viewBox="0 0 {WORLD.width} {WORLD.height}"
     role="img"
     aria-label="the IT world: the territories along the packet flow">
-    <!-- the borders: a track segment per hop of the flow, under the
-         territories so an outline sits on the rail -->
-    {#each BORDERS as b (`${b.from}→${b.to}`)}
-      {@const from = territoryOf(b.from)}
-      {@const to = territoryOf(b.to)}
-      {#if from && to}
-        {@const p = borderPath(from, to)}
-        {@const row = byBorder.get(`${b.from}→${b.to}`)}
-        <path d={p.d} class="tie" data-border="{b.from}→{b.to}" />
-        <path d={p.d} class="rail" data-state={stateOfBorder(row)} />
-        <!-- the traffic itself: dashes running along the rail, their
-             weight from the crossing rate the server measured. An
-             UNMEASURED rate gets its own band (a dotted, unlit rail),
-             never the empty-rail one. -->
-        <path d={p.d} class="traffic" data-traffic="{b.from}→{b.to}" data-density={densityFor(row)} />
-      {/if}
+    <!-- the borders: a rail per hop of the flow, along the main line
+         above the territories (world.ts `railOf`), drawn under them so
+         each drop meets its outline -->
+    {#each rails as r (r.key)}
+      {@const row = byBorder.get(r.key)}
+      {@const w = widthFor(row)}
+      <path d={r.rail.d} class="tie" data-border={r.key} />
+      <!-- THE RAIL IS AS WIDE AS ITS RATE (decision 6) — logarithmic,
+           a hairline when nothing crossed, and an unmeasured rate its
+           own dotted band, never the empty one. -->
+      <path d={r.rail.d} class="rail" data-rail={r.key} data-state={stateOfBorder(row)} data-width={w} style="stroke-width: {w}" />
+      <!-- the traffic itself: dashes running along the rail in the
+           direction of travel, their pace from the measured rate -->
+      <path
+        d={r.rail.d}
+        class="traffic"
+        data-traffic={r.key}
+        data-density={densityFor(row)}
+        style="stroke-width: {Math.max(1.5, w - 1)}" />
     {/each}
 
     <!-- the territories: an outline each, the region's numbers inside -->
@@ -179,6 +224,7 @@
       {@const state = stateOf(r)}
       {@const troubled = state === 'troubled'}
       {@const machinery = machineryStrip(t, r?.machines ?? [])}
+      {@const lt = territoryText(t)}
       <a
         class="territory machine"
         data-region={t.name}
@@ -188,28 +234,28 @@
         onclick={(e) => open(e, floorHref(t.name))}>
         <title>{titleOf(t.name, r)}</title>
         <rect x={t.x} y={t.y} width={t.w} height={t.h} class="shed" class:warn={state === 'attention'} class:err={troubled} />
-        <text x={t.x + 8} y={t.y + 18}>{t.name}</text>
-        <text x={t.x + 8} y={t.y + 44} class="count">{r ? compactCountText(r) : 'no reading'}</text>
-        <circle cx={t.x + 12} cy={t.y + 58} r="4" class="lamp {lampOf(state)}" />
+        <text x={lt.name.x} y={lt.name.y}>{t.name}</text>
+        <text x={lt.count.x} y={lt.count.y} class="count">{r ? compactCountText(r) : 'no reading'}</text>
+        <circle cx={lt.lamp.x} cy={lt.lamp.y} r="4" class="lamp {lampOf(state)}" />
         <!-- the state with how long the record says it has held
              (design 62de32ae, decision 2): "troubled for 16m" -->
-        <text x={t.x + 22} y={t.y + 62} class="state" class:err={troubled}>{stateText(r)}</text>
+        <text x={lt.state.x} y={lt.state.y} class="state" class:err={troubled}>{stateText(r)}</text>
         {#if r}
           <!-- THE KPI, each measure in its unit (decision 9), as the
                server wrote it — the region's one number to read -->
           {#if r.kpi.length > 0}
-            <text x={t.x + 8} y={t.y + 80} class="tiny kpi">
-              {#each wrapWords(r.kpi[0]!.text, chars(t), 2) as line, i (i)}
-                <tspan x={t.x + 8} dy={i === 0 ? 0 : 12}>{line}</tspan>
+            <text x={lt.kpi.x} y={lt.kpi.y} class="tiny kpi">
+              {#each wrapWords(r.kpi[0]!.text, lt.chars, lt.kpiLines) as line, i (i)}
+                <tspan x={lt.kpi.x} dy={i === 0 ? 0 : 12}>{line}</tspan>
               {/each}
             </text>
           {/if}
           <!-- the trend as the card printed it, one part per line so
                the samples do not run past the outline -->
-          <text x={t.x + 8} y={t.y + 108} class="tiny">{r.trend.metric}</text>
-          <text x={t.x + 8} y={t.y + 120} class="tiny trend">
-            {#each trendText(r.trend).split(' · ') as part, i (i)}
-              <tspan x={t.x + 8} dy={i === 0 ? 0 : 12}>{part}</tspan>
+          <text x={lt.metric.x} y={lt.metric.y} class="tiny">{r.trend.metric}</text>
+          <text x={lt.trend.x} y={lt.trend.y} class="tiny trend">
+            {#each trendText(r.trend).split(' · ').slice(0, lt.trendLines) as part, i (i)}
+              <tspan x={lt.trend.x} dy={i === 0 ? 0 : 12}>{part}</tspan>
             {/each}
           </text>
         {/if}
@@ -217,9 +263,9 @@
           <!-- THE BAND THAT DECIDED IT (decision 1), read against its
                number, where the state is — and for trouble the why:
                a verdict must name what failed (whole in the title) -->
-          <text x={t.x + 8} y={t.y + 148} class="tiny why" class:err={troubled} class:warn={!troubled}>
-            {#each verdictLines(t, r) as line, i (i)}
-              <tspan x={t.x + 8} dy={i === 0 ? 0 : 12}>{line}</tspan>
+          <text x={lt.verdict.x} y={lt.verdict.y} class="tiny why" class:err={troubled} class:warn={!troubled}>
+            {#each verdictLines(lt, r) as line, i (i)}
+              <tspan x={lt.verdict.x} dy={i === 0 ? 0 : 12}>{line}</tspan>
             {/each}
           </text>
         {/if}
@@ -258,32 +304,51 @@
       </a>
     {/each}
 
-    <!-- THE BORDER TOKENS, drawn ON TOP of the territories: what stands
-         at each border now, the machine that moves it, and the crossing
-         rate. Every state is the server's (design d2154293) — the map
-         only decides how thick to draw the rail. -->
-    {#each BORDERS as b (`t:${b.from}→${b.to}`)}
-      {@const from = territoryOf(b.from)}
-      {@const to = territoryOf(b.to)}
-      {#if from && to}
-        {@const p = borderPath(from, to)}
-        {@const m = mid(p)}
-        {@const row = byBorder.get(`${b.from}→${b.to}`)}
-        {@const state = stateOfBorder(row)}
-        <g class="crossing" data-crossing="{b.from}→{b.to}" data-state={state}
-           data-waiting={row === undefined || row.waiting === null ? 'unknown' : row.waiting}>
-          <title>{borderTitle(row, b.from, b.to)}</title>
-          <!-- the machine's lamp, above the rail: lit red once it has
-               been silent past its OWN declared cadence, unlit when
-               nothing records it -->
-          <rect x={m.x - 5} y={m.y - 22} width="10" height="10" class="glyph {machineLamp(row)}" />
-          <!-- what waits to cross, on the rail -->
-          <circle cx={m.x} cy={m.y} r="9" class="token {state}" />
-          <text x={m.x} y={m.y + 3.5} text-anchor="middle" class="token-count">{tokenText(row)}</text>
-          <!-- and the rate, under it -->
-          <text x={m.x} y={m.y + 22} text-anchor="middle" class="tiny rate">{railRate(row)}</text>
-        </g>
-      {/if}
+    <!-- THE CROSSINGS, drawn ON TOP of the territories: the machine
+         that moves each rail's traffic WRITTEN on it — its name, its
+         lamp, its status — what stands at the border now on the rail,
+         and the rate under it. Every state is the server's (design
+         d2154293); the map decides only where to write it and how wide
+         to draw the rail. A click opens the crossing under the map. -->
+    {#each rails as r (`c:${r.key}`)}
+      {@const row = byBorder.get(r.key)}
+      {@const state = stateOfBorder(row)}
+      {@const names = wrapName(nameOf(row), labelChars(r.rail.label), 2)}
+      {@const status = statusOf(row)}
+      {@const at = railWriting(r.rail, names.length, status.length)}
+      {@const bw = badgeW(row)}
+      <g
+        class="crossing"
+        class:open={opened === r.key}
+        data-crossing={r.key}
+        data-state={state}
+        data-waiting={row === undefined || row.waiting === null ? 'unknown' : row.waiting}
+        role="button"
+        tabindex="0"
+        aria-expanded={opened === r.key}
+        aria-label={railLabel(row, r.from, r.to)}
+        onclick={() => toggle(r.key)}
+        onkeydown={(e) => onKey(e, r.key)}>
+        <!-- the room the writing takes, so the whole of it is the
+             click target and not only the strokes of the letters -->
+        <rect x={r.rail.label.x} y={r.rail.label.y} width={r.rail.label.w} height={r.rail.label.h} class="hit" />
+        <!-- the machine, by the name its own registry gives it -->
+        {#each names as line, i (i)}
+          <text x={at.names[i]!.x} y={at.names[i]!.y} text-anchor={at.anchor} class="tiny machine-name">{line}</text>
+        {/each}
+        <!-- its lamp: lit red once it has been silent past its OWN
+             declared cadence, green inside it, unlit (a hollow ring)
+             when nothing can tell — and its status beside it -->
+        <circle cx={at.lamp.x} cy={at.lamp.y} r="3.5" class="machine-lamp {machineLamp(row)}" />
+        <text x={at.status.x} y={at.status.y} class="tiny machine-status" class:err={machineLamp(row) === 'err'}
+          >{status}</text>
+        <!-- what waits to cross, standing ON the rail: red only when
+             the rail is troubled -->
+        <rect x={r.rail.mid.x - bw / 2} y={r.rail.mid.y - 7} width={bw} height="14" rx="7" class="token {state}" />
+        <text x={r.rail.mid.x} y={r.rail.mid.y + 3} text-anchor="middle" class="token-count">{tokenText(row)}</text>
+        <!-- and the rate -->
+        <text x={at.rate.x} y={at.rate.y} text-anchor={at.anchor} class="tiny rate">{railRate(row)}</text>
+      </g>
     {/each}
 
     {#if unmapped.length > 0}
@@ -295,6 +360,51 @@
         >no rail drawn for: {unmappedBorders.join(', ')}</text>
     {/if}
   </svg>
+
+  {#if opened !== null}
+    <!-- THE CROSSING, INLINE (decision 6): everything the border read
+         says about one rail, under the map, where it can be read,
+         touched and screenshotted. Every sentence is the server's. -->
+    {@const open = rails.find((r) => r.key === opened)}
+    {@const row = byBorder.get(opened)}
+    {@const state = stateOfBorder(row)}
+    <div class="crossing-panel" data-panel={opened} data-state={state} role="region" aria-label="the crossing {opened}">
+      <div class="crossing-head">
+        <span class="crossing-lamp {lampOf(state)}"></span>
+        <span class="crossing-title">{open?.from ?? ''} → {open?.to ?? ''}</span>
+        <span class="crossing-state">{state}</span>
+        <button type="button" class="crossing-close" aria-label="close the crossing" onclick={() => (opened = null)}
+          >close</button>
+      </div>
+      {#if row === undefined}
+        <p class="crossing-why">the borders read answered nothing for this rail</p>
+      {:else}
+        <p class="crossing-why">{row.why}</p>
+        <dl class="crossing-facts">
+          <dt>one crossing</dt>
+          <dd>{row.crossing}</dd>
+          <dt>rate</dt>
+          <dd>{borderRateText(row.rate)}</dd>
+          <dt>last crossed</dt>
+          <dd>{crossedText(row, borders?.now ?? '')}</dd>
+          <dt>machine</dt>
+          <dd>{machineText(row.machine)} — {row.machine.why}</dd>
+          <dt>waiting</dt>
+          <dd>{waitingText(row)}</dd>
+        </dl>
+        {#if row.holds.length > 0}
+          <ol class="crossing-holds">
+            {#each row.holds as h, i (i)}
+              <li><span class="crossing-what">{h.what}</span> — {h.why}</li>
+            {/each}
+          </ol>
+        {/if}
+        {#if unlistedText(row) !== ''}
+          <p class="crossing-more">{unlistedText(row)}</p>
+        {/if}
+      {/if}
+    </div>
+  {/if}
 </section>
 
 <style>
@@ -334,30 +444,73 @@
   .rail { stroke: var(--rail); stroke-width: 2; fill: none; }
   .rail[data-state='attention'] { stroke: var(--map-warn-edge); }
   .rail[data-state='troubled'] { stroke: var(--map-bad-edge); }
-  /* The traffic: dashes running the rail from A to B. Weight and speed
-     come from the measured rate; `unknown` is deliberately a sparse,
-     unlit dotting so an unmeasured rail cannot read as an empty one. */
+  /* The traffic: dashes running the rail from A to B. Its WIDTH is the
+     rail's, from the measured rate (`railWidth`, set on the element);
+     its pace and dash come from the density band. `unknown` is
+     deliberately a sparse, unlit dotting so an unmeasured rail cannot
+     read as an empty one. */
   .traffic { fill: none; stroke: var(--map-ok-edge); stroke-linecap: round; opacity: 0.85;
     stroke-width: 2; stroke-dasharray: 2 10; animation: flow 3s linear infinite; }
   .traffic[data-density='unknown'] { stroke: var(--map-muted); stroke-dasharray: 1 7;
     opacity: 0.4; animation: none; }
   .traffic[data-density='none'] { stroke: none; animation: none; }
-  .traffic[data-density='light'] { stroke-width: 2; stroke-dasharray: 2 14; animation-duration: 4s; }
-  .traffic[data-density='steady'] { stroke-width: 3; stroke-dasharray: 4 10; animation-duration: 2.4s; }
-  .traffic[data-density='heavy'] { stroke-width: 4; stroke-dasharray: 6 6; animation-duration: 1.4s; }
+  .traffic[data-density='light'] { stroke-dasharray: 2 14; animation-duration: 4s; }
+  .traffic[data-density='steady'] { stroke-dasharray: 4 10; animation-duration: 2.4s; }
+  .traffic[data-density='heavy'] { stroke-dasharray: 6 6; animation-duration: 1.4s; }
   @keyframes flow { to { stroke-dashoffset: -48; } }
-  /* The token standing on the rail: what waits to cross, right now. */
+  /* The badge standing on the rail: what waits to cross, right now —
+     red only when the rail is troubled (review 2026-09-24, finding 5),
+     so a queue that is flowing does not shout; edged amber when a
+     declared band is crossed (car A's attention). */
   .token { fill: var(--map-surface); stroke: var(--map-rule-strong); stroke-width: 1.5; }
   .token.attention { stroke: var(--map-warn-edge); }
-  .token.troubled { stroke: var(--map-bad-edge); }
+  .token.troubled { fill: var(--map-bad-bg); stroke: var(--map-bad-edge); }
   .yard text.token-count { font-size: 9px; letter-spacing: 0; text-transform: none;
-    fill: var(--map-ink); }
+    fill: var(--map-ink); pointer-events: none; }
   .yard text.rate { fill: var(--map-muted); }
-  /* The machine's lamp above the rail. Unlit = nothing records it. */
+  /* The machine written on its rail: the name in ink, the status in the
+     muted line, red when it has been silent past its own cadence. */
+  .yard text.machine-name { fill: var(--map-ink); font-size: 10px; letter-spacing: 0; }
+  .yard text.machine-status { letter-spacing: 0; }
+  /* The machine's lamp. Lit green inside its declared cadence, red and
+     blinking past it, and a hollow broken ring when nothing can tell —
+     a different SHAPE from lit, as the machinery glyphs are. */
+  .machine-lamp { fill: var(--map-surface); stroke: var(--map-muted); stroke-width: 1; stroke-dasharray: 1.5 1.5; }
+  .machine-lamp.ok { fill: var(--map-ok-edge); stroke: var(--map-ok-edge); stroke-dasharray: none; }
+  .machine-lamp.err { fill: var(--map-bad-edge); stroke: var(--map-bad-edge); stroke-dasharray: none;
+    animation: blink 1s steps(2) infinite; }
   .glyph { fill: var(--map-surface); stroke: var(--map-rule-strong); }
-  .glyph.ok { fill: var(--map-ok-edge); stroke: var(--map-ok-edge); }
-  .glyph.err { fill: var(--map-bad-edge); stroke: var(--map-bad-edge); animation: blink 1s steps(2) infinite; }
-  .crossing { cursor: help; }
+  /* The whole of a crossing's writing is its click target. */
+  .crossing { cursor: pointer; outline: none; }
+  .crossing .hit { fill: none; pointer-events: all; }
+  .crossing:hover .hit, .crossing:focus-visible .hit { stroke: var(--map-rule); stroke-dasharray: 2 3; }
+  .crossing.open .hit { stroke: var(--map-ink); stroke-dasharray: none; }
+  /* THE CROSSING, INLINE, under the map. The deck's grammar: a hairline
+     box on the map's surface, mono labels, the why in body type. */
+  .crossing-panel { margin-top: var(--s2); border: 1px solid var(--map-rule-strong);
+    background: var(--map-surface); padding: var(--s2) var(--s3); font-size: 13px; color: var(--map-ink); }
+  .crossing-panel[data-state='troubled'] { border-color: var(--map-bad-edge); }
+  .crossing-head { display: flex; align-items: center; gap: var(--s2); font-family: var(--font-mono);
+    font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
+  .crossing-title { color: var(--map-ink); font-weight: 600; }
+  .crossing-state { color: var(--map-muted); }
+  .crossing-lamp { width: 8px; height: 8px; border-radius: 50%; background: var(--map-rule-strong); }
+  .crossing-lamp.ok { background: var(--map-ok-edge); }
+  .crossing-lamp.warn { background: var(--map-warn-edge); }
+  .crossing-lamp.err { background: var(--map-bad-edge); }
+  .crossing-close { margin-left: auto; font: inherit; color: var(--map-muted); background: none;
+    border: 1px solid var(--map-rule); padding: 2px 8px; cursor: pointer; }
+  .crossing-close:hover, .crossing-close:focus-visible { color: var(--map-ink); border-color: var(--map-ink); }
+  .crossing-why { margin: var(--s2) 0; }
+  .crossing-panel[data-state='troubled'] .crossing-why { color: var(--map-bad-ink); }
+  .crossing-facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px var(--s3); margin: 0; }
+  .crossing-facts dt { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--map-muted); }
+  .crossing-facts dd { margin: 0; overflow-wrap: anywhere; }
+  .crossing-holds { margin: var(--s2) 0 0; padding-left: 1.5em; }
+  .crossing-holds li { margin: 2px 0; overflow-wrap: anywhere; }
+  .crossing-what { font-family: var(--font-mono); font-size: 12px; }
+  .crossing-more { margin: var(--s2) 0 0; color: var(--map-muted); }
   .tie { stroke: var(--tie); stroke-width: 6; stroke-dasharray: 3 9; fill: none; }
   .shed { fill: var(--map-surface); stroke: var(--map-rule-strong); }
   .shed.err { stroke: var(--map-bad-edge); }
@@ -415,7 +568,7 @@
   .yard .glyph text.mark { font-size: 9px; letter-spacing: 0; }
   @keyframes piston { to { transform: translateX(4px); } }
   @media (prefers-reduced-motion: reduce) {
-    .lamp, .glyph, .traffic { animation: none !important; }
+    .lamp, .glyph, .traffic, .machine-lamp { animation: none !important; }
     /* A still piston is still a FILLED housing, which idle never is —
        motion is the cue, the fill is the fallback. */
     .glyph .piston { animation: none !important; }
