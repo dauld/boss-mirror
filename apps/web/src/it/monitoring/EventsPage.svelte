@@ -11,7 +11,7 @@
   //   GET /api/events/tail with the current filters. Useful for
   //   pinning a window to inspect / share.
   //
-  // Filters (source, kind substring, limit) compose into query
+  // Filters (source, kind substring, actor, limit) compose into query
   // params for both modes. Single click on a row toggles the
   // inline JSON payload. Requires operator tier; non-operators
   // get a 403 from the backend which we render inline.
@@ -21,6 +21,7 @@
   import FileAttachments from '../../content/FileAttachments.svelte';
   import { appNow, appToday } from '@boss/web-kit/sim-clock';
   import { formatDate } from '@boss/web-kit/ui/date';
+  import { actorOf, knownActors as actorsIn } from './auditActor';
 
   type AuditEntry = {
     event_id: string;
@@ -100,6 +101,9 @@
   });
   let sourceFilter = $state('');
   let kindFilter = $state('');
+  // Who acted (backlog 03f79eca) — an EXACT match on the payload's
+  // `_actor`, applied by the server in tail, stream and export alike.
+  let actorFilter = $state('');
   let limit = $state<(typeof LIMIT_CHOICES)[number]>(100);
   // Provenance filter. Defaults to `real`: the audit log was 89%
   // simulated when this landed (328,255 of 370,033 rows), so an
@@ -139,6 +143,8 @@
     const knd = kindFilter.trim();
     if (src) params.set('source', src);
     if (knd) params.set('kind', knd);
+    const act = actorFilter.trim();
+    if (act) params.set('actor', act);
     // The export honours the same lens as the view. A download that
     // silently disagreed with the table above it would be worse than
     // no export.
@@ -167,6 +173,7 @@
     // Re-run whenever filters or live-mode flag change.
     const src = sourceFilter.trim();
     const knd = kindFilter.trim();
+    const act = actorFilter.trim();
     const lim = limit;
     const prov = provenance;
     const auto = autoRefresh;
@@ -189,6 +196,7 @@
       const params = new URLSearchParams();
       if (src) params.set('source', src);
       if (knd) params.set('kind', knd);
+      if (act) params.set('actor', act);
       if (prov !== 'all') params.set('simulated', prov);
       params.set('limit', String(lim));
       try {
@@ -239,6 +247,7 @@
     const params = new URLSearchParams();
     if (src) params.set('source', src);
     if (knd) params.set('kind', knd);
+    if (act) params.set('actor', act);
     let es: EventSource | null = null;
     let pollFallbackId: number | null = null;
     try {
@@ -293,6 +302,7 @@
     for (const r of loadState.rows) set.add(r.source);
     return [...set].sort();
   });
+  let knownActors = $derived(loadState.kind === 'ready' ? actorsIn(loadState.rows) : []);
 
   function formatTimestamp(iso: string): string {
     const d = new Date(iso);
@@ -400,6 +410,19 @@
           />
         </label>
         <label class="events-filter">
+          <span>Actor</span>
+          <input
+            list="events-actors"
+            bind:value={actorFilter}
+            placeholder="e.g. agent-claude"
+          />
+          <datalist id="events-actors">
+            {#each knownActors as a (a)}
+              <option value={a}></option>
+            {/each}
+          </datalist>
+        </label>
+        <label class="events-filter">
           <span>Provenance</span>
           <select bind:value={provenance}>
             <option value="real">Real only</option>
@@ -457,7 +480,7 @@
             </button>
           </div>
           <p class="events-download-hint">
-            Exports up to 50,000 events matching the current source + kind filters
+            Exports up to 50,000 events matching the current source, kind and actor filters
             in the window above as JSON Lines (one event per line — parseable by
             <code>jq</code>, log forwarders, and most analytics tools).
             Narrow the window for large ranges.
@@ -480,6 +503,7 @@
               <th style="width:10ch">Time</th>
               <th style="width:12ch">Source</th>
               <th>Kind</th>
+              <th style="width:22ch">Actor</th>
             </tr>
           </thead>
           <tbody>
@@ -495,10 +519,11 @@
                 >{formatTimestamp(row.timestamp)}</td>
                 <td class="mono">{row.source}</td>
                 <td class="mono">{row.kind}</td>
+                <td class="mono">{actorOf(row.payload) ?? '—'}</td>
               </tr>
               {#if isOpen}
                 <tr class="events-payload-row">
-                  <td colspan="3">
+                  <td colspan="4">
                     <pre class="events-payload">{JSON.stringify(row.payload, null, 2)}</pre>
                     <div class="events-event-id">event_id: <code>{row.event_id}</code></div>
                     <!--

@@ -1,8 +1,8 @@
 //! Audit-log tail HTTP endpoint — the read surface for `audit_log`.
 //!
 //! Writers (every service's `PgAuditWriter`) insert rows; this router
-//! serves recent-first reads with filters on source, kind, and time
-//! window. Intended home: the CTO surface at `/cto/events`, where an
+//! serves recent-first reads with filters on source, kind, actor, and
+//! time window. Intended home: the CTO surface at `/cto/events`, where an
 //! operator can watch the event stream flow in ~real time.
 //!
 //! Access: Operator tier, Auditor tier, or role ∈ {ceo, cto}.
@@ -432,6 +432,27 @@ pub struct TailQuery {
     /// COALESCEs: a row predating the flag is real, because the
     /// simulator did not exist to have written it.
     pub simulated: Option<String>,
+    /// Exact match on who acted — `payload->>'_actor'`, the stamp every
+    /// writer puts on its payload (backlog 03f79eca). park-a-job,
+    /// rotate-a-credential and ship-a-change each state that the log
+    /// answers "who and when"; until this, the tail could answer only
+    /// "when", and who acted was visible only by opening a row's JSON.
+    /// Exact, not the kind filter's substring: `agent-claude` must not
+    /// also return `agent-claude-2`. A row predating the stamp has no
+    /// actor and matches no actor filter.
+    pub actor: Option<String>,
+}
+
+/// The actor clause, shared by the three reads that take one — tail,
+/// export and stream — so the lens a page sets is the lens all three
+/// apply. That the three reads each composed their own WHERE is how
+/// the provenance lens came to be honoured by one of them and ignored
+/// by two (34ea2ae0); a new filter does not repeat it.
+fn push_actor(actor: Option<&String>, sql: &mut String, binds: &mut Vec<Bind>) {
+    if let Some(actor) = actor {
+        binds.push(Bind::Str(actor.clone()));
+        sql.push_str(&format!(" AND payload->>'_actor' = ${}", binds.len()));
+    }
 }
 
 async fn tail(
@@ -474,6 +495,7 @@ async fn tail(
         binds.push(Bind::Ts(until));
         sql.push_str(&format!(" AND timestamp < ${}", binds.len()));
     }
+    push_actor(q.actor.as_ref(), &mut sql, &mut binds);
     // No bind: the two spellings are a closed set decided here, never
     // caller text reaching SQL. An unrecognised value filters nothing,
     // which keeps a typo in a URL from silently hiding the log.
@@ -517,7 +539,7 @@ async fn tail(
 /// - Append-only-friendly — the same shape the audit_log table
 ///   has on the writer side.
 ///
-/// Filters mirror /api/events/tail (source, kind, since, until).
+/// Filters mirror /api/events/tail (source, kind, since, until, actor).
 /// Cap is higher (50,000 rows) and the response is streamed so a
 /// long-range export doesn't pin server memory.
 ///
@@ -565,6 +587,7 @@ async fn export(
         binds.push(Bind::Ts(until));
         sql.push_str(&format!(" AND timestamp < ${}", binds.len()));
     }
+    push_actor(q.actor.as_ref(), &mut sql, &mut binds);
     binds.push(Bind::Int(limit));
     sql.push_str(&format!(" ORDER BY timestamp ASC LIMIT ${}", binds.len()));
 
@@ -717,11 +740,13 @@ pub struct StreamQuery {
     pub source: Option<String>,
     /// Case-insensitive substring match on `kind`.
     pub kind: Option<String>,
+    /// Exact match on `payload->>'_actor'` — [`TailQuery::actor`].
+    pub actor: Option<String>,
 }
 
 /// SSE companion to `/api/events/tail`. Pushes new audit_log rows
 /// as they land, keyed off the table's monotonic id column. Filters
-/// (source, kind) match the tail endpoint's shape.
+/// (source, kind, actor) match the tail endpoint's shape.
 ///
 /// Server-side polls the audit_log every 2s for `id > last_seen`,
 /// dedupes by id, pushes each new row as one SSE `data` frame.
@@ -751,6 +776,7 @@ async fn stream(
     let pool = state.pool.clone();
     let source_filter = q.source;
     let kind_filter = q.kind;
+    let actor_filter = q.actor;
 
     let stream = async_stream::stream! {
         // First: anchor the cursor at the current MAX(id). The
@@ -788,6 +814,7 @@ async fn stream(
                 binds.push(Bind::Str(format!("%{kind}%")));
                 sql.push_str(&format!(" AND kind ILIKE ${}", binds.len()));
             }
+            push_actor(actor_filter.as_ref(), &mut sql, &mut binds);
             sql.push_str(" ORDER BY id ASC LIMIT 500");
 
             #[derive(sqlx::FromRow)]

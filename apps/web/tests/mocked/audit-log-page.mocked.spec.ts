@@ -230,24 +230,40 @@ test.describe('/it/operate/audit — size and growth (GET /api/events/stats)', (
 });
 
 test.describe('/it/operate/audit — the stream (GET /api/events/tail)', () => {
-  test('the default read is Real only, limit 100; the rows paint Time / Source / Kind', async ({ page }) => {
+  test('the default read is Real only, limit 100; the rows paint Time / Source / Kind / Actor', async ({ page }) => {
     await installAuditReads(page);
     const seen = watch(page);
     await mountPage(page, PATH, { titleMatch: /Audit Log/ });
     await expect(stream(page)).toHaveCount(3);
-    await expect(page.locator('.events-table thead th')).toHaveText(['Time', 'Source', 'Kind']);
+    await expect(page.locator('.events-table thead th')).toHaveText(['Time', 'Source', 'Kind', 'Actor']);
     await expect(stream(page).first().locator('td').nth(1)).toHaveText('jobs');
     await expect(stream(page).first().locator('td').nth(2)).toHaveText('jobs.step.updated');
+    // Backlog 03f79eca: who acted is a column, read off the payload's
+    // `_actor`, not only a line inside the expanded JSON.
+    await expect(stream(page).locator('td:nth-child(4)')).toHaveText([
+      'agent-claude',
+      'automation:dispatcher',
+      'automation:broker',
+    ]);
     await expect(stream(page).first().locator('td').first()).toHaveAttribute('title', '2026-09-23T21:44:03.250Z');
     const first = seen.tail[0] ?? '';
     expect(param(first, 'simulated')).toBe('real');
     expect(param(first, 'limit')).toBe('100');
     expect(param(first, 'source')).toBeNull();
     expect(param(first, 'kind')).toBeNull();
+    expect(param(first, 'actor')).toBeNull();
     await expect(page.locator('.events-freshness')).toContainText(/Last: \d\d:\d\d:\d\d\.\d{3}/);
-    // Gap 03f79eca: who acted rides only inside the payload; there is
-    // no actor column.
-    await expect(page.locator('.events-table thead th', { hasText: /actor/i })).toHaveCount(0);
+  });
+
+  test('a row predating the _actor stamp paints a dash, not a blank that reads as nobody (03f79eca)', async ({ page }) => {
+    await installAuditReads(page, [
+      { event_id: 'ev-old', timestamp: '2026-09-01T00:00:00.000Z', source: 'jobs', kind: 'jobs.job.opened', payload: { id: 'job-0' } },
+    ]);
+    await mountPage(page, PATH, { titleMatch: /Audit Log/ });
+    await expect(stream(page).first().locator('td').nth(3)).toHaveText('—');
+    await stream(page).first().click();
+    // The payload row still spans every column.
+    await expect(page.locator('.events-payload-row > td')).toHaveAttribute('colspan', '4');
   });
 
   test('an EMPTY answer is "nothing here", a FAILED one is a failure line — never the same paint', async ({ page }) => {
@@ -282,6 +298,16 @@ test.describe('/it/operate/audit — the stream (GET /api/events/tail)', () => {
     await expect(kindBox).toHaveAttribute('placeholder', 'e.g. step, invoice');
     await kindBox.fill('step');
     await expect.poll(() => param(last(seen.tail), 'kind')).toBe('step');
+
+    // Backlog 03f79eca: an exact actor, offered from the actors in the
+    // current batch, sent to the snapshot AND the live stream — a lens
+    // the stream ignored would paint every other actor into the view.
+    const actorBox = page.getByLabel('Actor');
+    await expect(actorBox).toHaveAttribute('placeholder', 'e.g. agent-claude');
+    await expect(page.locator('#events-actors option')).toHaveCount(3);
+    await actorBox.fill('agent-claude');
+    await expect.poll(() => param(last(seen.tail), 'actor')).toBe('agent-claude');
+    await expect.poll(() => param(last(seen.stream), 'actor')).toBe('agent-claude');
 
     const prov = page.getByLabel('Provenance');
     await expect(prov.locator('option')).toHaveText(['Real only', 'Simulated only', 'All']);
@@ -501,7 +527,7 @@ test.describe('/it/operate/audit — Download ⤓ (GET /api/events/export)', () 
     expect(from).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect((Date.parse(to) - Date.parse(from)) / 86_400_000).toBe(7);
     await expect(panel.locator('.events-download-hint')).toHaveText(
-      'Exports up to 50,000 events matching the current source + kind filters in the window above as JSON Lines (one event per line — parseable by jq, log forwarders, and most analytics tools). Narrow the window for large ranges.',
+      'Exports up to 50,000 events matching the current source, kind and actor filters in the window above as JSON Lines (one event per line — parseable by jq, log forwarders, and most analytics tools). Narrow the window for large ranges.',
     );
     await panel.getByRole('button', { name: 'Cancel' }).click();
     await expect(panel).toHaveCount(0);
@@ -524,6 +550,7 @@ test.describe('/it/operate/audit — Download ⤓ (GET /api/events/export)', () 
     await mountPage(page, PATH, { titleMatch: /Audit Log/ });
     await page.getByLabel('Source').fill('jobs');
     await page.getByLabel('Kind contains').fill('step');
+    await page.getByLabel('Actor').fill('agent-claude');
     await page.getByRole('button', { name: 'Download ⤓' }).click();
     const panel = page.locator('.events-download-panel');
     await panel.getByLabel('From').fill('2026-09-01');
@@ -537,6 +564,9 @@ test.describe('/it/operate/audit — Download ⤓ (GET /api/events/export)', () 
     const u = req.url();
     expect(param(u, 'source')).toBe('jobs');
     expect(param(u, 'kind')).toBe('step');
+    // 03f79eca: the server applies the actor to the export as it does to
+    // the tail (tail_http.rs, export_honours_the_actor_filter).
+    expect(param(u, 'actor')).toBe('agent-claude');
     expect(param(u, 'since')).toBe('2026-09-01T00:00:00Z');
     // `until` is exclusive, so the To day is bumped by one.
     expect(param(u, 'until')).toBe('2026-09-04T00:00:00.000Z');
