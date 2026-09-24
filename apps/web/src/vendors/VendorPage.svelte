@@ -1,8 +1,7 @@
 <script lang="ts">
   // Vendor detail — port of apps/web/src/vendors/VendorPage.tsx.
   //
-  // Four-section KB surface per D2 of
-  // examples/used-device-shop/design/procurement-team-needs.md:
+  // Four-section KB surface, the account page's shape on the vendor side:
   //   1. Profile (terms + account team + active contracts)
   //   2. People (contacts directory)
   //   3. Facts (interactions timeline)

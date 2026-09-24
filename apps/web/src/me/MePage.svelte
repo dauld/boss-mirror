@@ -340,7 +340,7 @@
            and the page says so instead of swapping them for a fake
            empty day. Dismissable: the next successful refetch clears
            it anyway. -->
-      <div class="myday-stale-note" role="alert">
+      <div class="myday-stale-note load-failed" role="alert">
         <span>
           Couldn't refresh ({errLabel(loadError)}) — showing the last
           good view.
@@ -361,7 +361,7 @@
              so the page says error. Four sections of "you have no
              work" here would be the exact lie this state replaces. -->
         <Section title="Your queues" wide>
-          <div class="myday-fetch-error" role="alert">
+          <div class="myday-fetch-error load-failed" role="alert">
             <span>
               Couldn't load your queues ({errLabel(loadError)}). Your
               day is unknown, not empty.
@@ -499,7 +499,7 @@
             The watchlist station hasn't reached this deployment yet.
           </div>
         {:else if watchlist.kind === 'error'}
-          <div class="myday-empty">Couldn't load your watchlist.</div>
+          <div class="myday-empty load-failed" role="alert">Couldn't load your watchlist.</div>
         {:else if watchlist.entries.length === 0}
           <div class="myday-empty">
             You haven't filed anything. Feedback you send from the
@@ -641,15 +641,14 @@
   }
   /* Fetch failure is words, never a mimed empty queue. The stale note
      rides above a kept last-good view; the fetch-error block stands in
-     for queues the page never got. */
+     for queues the page never got. Both wear the shared failure marker
+     (sweep c3e4edcc), which draws the rail, the card and the ink; these
+     rules only lay the words out beside their button. */
   .myday-stale-note {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    padding: 8px 12px;
-    border: 1px solid var(--warn);
-    border-radius: 6px;
     font-size: 13px;
     margin: 0 0 12px 0;
   }

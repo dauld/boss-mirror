@@ -26,7 +26,7 @@
 
 import { expect, test, type Page, type Route } from '@playwright/test';
 import { TERRITORIES } from '../../src/it/yard/world';
-import { YARD_REGIONS, installSmokeMocks } from './_smokeMocks';
+import { YARD_BORDERS, YARD_REGIONS, installSmokeMocks } from './_smokeMocks';
 
 const trend = (metric: string, unit: string) => ({
   metric, unit, current: 1, previous: 1, samples: 3, previous_samples: 3,
@@ -241,10 +241,85 @@ test("marshalling's own map draws a platform per station — its packets, its bo
   // not look alike.
   await expect(over.locator('text.rate')).not.toHaveClass(/unknown/);
 
+  // THE HEAD AGAINST THE DRAWING (design 62de32ae, decision 5): the
+  // stations stand 32 while the head counts none of them as
+  // marshalling's, and the map SAYS so rather than contradicting itself.
+  await expect(page.locator('[data-drawn="marshalling"]')).toContainText(
+    'the platforms stand 32 — the head counts 0: a packet stands at every station it matches',
+  );
+
   // The board itself is mounted under the region map: the page that
   // used to live at /it/operate/marshalling, minus its page header.
   await expect(page.locator('.my-root')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Marshalling Yard' })).toHaveCount(0);
+});
+
+// EACH STATION AT THE PARTITION (design 62de32ae, the rest of decision
+// 5; car E on c3105b2a). Live on 2026-09-24 the platforms stood 562
+// under a head of 236, each station at its full depth. The server now
+// says how many of MARSHALLING'S members stand at each station, and the
+// platform stands that — its depth kept in its note.
+test("marshalling's platforms stand the server's partition per station, not each station's depth", async ({ page }) => {
+  await mocks(page);
+  const json = (r: Route, b: unknown) =>
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(b) });
+  await page.route(/\/api\/stations\/load$/, (r) => json(r, STATION_LOAD));
+  await page.route(/\/api\/stations\/flow/, (r) => json(r, STATION_FLOW));
+  await page.route(YARD_REGIONS, (r) =>
+    json(r, {
+      ...REGIONS,
+      regions: REGIONS.regions.map((x) =>
+        x.name === 'marshalling'
+          ? { ...x, count: 6, unit: 'packets at stations', places: [
+              { name: 'q.platform-admin.task', count: 5 },
+              { name: 'my-watchlist', count: 2 },
+            ] }
+          : x,
+      ),
+    }));
+
+  await page.goto('/it/yard/marshalling');
+  const interior = page.locator(`${regionSvg('marshalling')} .interior[data-interior="marshalling"]`);
+  const task = interior.locator('.platform[data-platform="q.platform-admin.task"]');
+  await expect(task).toContainText('5 / 24');
+  await expect(task.locator('title')).toHaveText(/5 of the 30 here are marshalling’s/);
+  // Five against a bound of 24 while the station holds 30: the flag
+  // never counts more packets than the platform stands.
+  await expect(task.locator('.mark')).toHaveCount(5);
+  // 5 + 2 over a head of 6: the one packet at both stations is SAID.
+  await expect(page.locator('[data-drawn="marshalling"]')).toHaveText(
+    'the platforms stand 7 — the head counts 6 packets at stations: the 1 more are packets standing at more than one station, drawn at each and counted once',
+  );
+});
+
+// THE PLANT (decision 11): the host runners stand along the world's
+// edge with their names and states written, not as 10px squares in
+// receiving.
+test('the world draws its plant along the edge, each machine with its name and state', async ({ page }) => {
+  await mocks(page);
+  const json = (r: Route, b: unknown) =>
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(b) });
+  await page.route(YARD_REGIONS, (r) =>
+    json(r, {
+      ...REGIONS,
+      plant: [
+        { id: 'runner:host:forge', name: 'forge runner', state: 'idle', why: 'last df answered exit 0' },
+        { id: 'runner:host:boss-gcp', name: 'boss-gcp runner', state: 'failed', why: 'the last converge request was refused' },
+      ],
+    }));
+  await page.goto('/it');
+  const plant = page.locator('section[aria-label="the plant — machinery serving every region"]');
+  await expect(plant).toHaveCount(1);
+  await expect(plant).toContainText('Plant · serves every region');
+  // The failed one first, with its state in words, and blinking red.
+  const glyphs = plant.locator('.glyph');
+  await expect(glyphs).toHaveCount(2);
+  await expect(glyphs.first()).toHaveAttribute('data-machine', 'runner:host:boss-gcp');
+  await expect(glyphs.first()).toContainText('boss-gcp runner · failed');
+  await expect(glyphs.first().locator('title')).toHaveText(/the last converge request was refused/);
+  await expect(plant.locator('[data-machine="runner:host:forge"]')).toContainText('forge runner · idle');
+  // No territory carries a host runner.
+  await expect(page.locator(`${WORLD_SVG} [data-machine^="runner:host"]`)).toHaveCount(0);
 });
 
 // Stations OVERLAP: on 2026-09-23 the sidings summed to 517 over 303
@@ -366,10 +441,31 @@ const ONE_ACTOR_SESSIONS = {
   ],
 };
 
-test('the shop floor draws two sessions of ONE actor as two crews — the live shape, not a crash', async ({ page }) => {
+/** One builder run on the first session, building an item. */
+const ONE_RUN = {
+  total: 1,
+  data: [
+    { id: 'fa4014f2-1794-4268-9881-f4e616f7d0ad', kind: 'agent-run', status: 'open',
+      title: 'builder run: the map should feel like a world',
+      metadata: { packet: 'c3105b2a-001d-4ae4-a172-5b7f8aba2598', step: 'build', agent: 'claude@algedonic.dev',
+        session: '87b3cf48-f17b-4126-98b4-7673a3c3576b',
+        // Ten minutes before the page reads it: the board ages a run on
+        // the wall clock, and a fixed stamp would age past the 4h bound.
+        opened_at: new Date(Date.now() - 10 * 60_000).toISOString() },
+      steps: [{ spec_slug: 'building', title: 'Building', status: 'active' }] },
+  ],
+};
+
+// THE SHOP FLOOR AS ACTORS (design 62de32ae, decision 8; car E on
+// c3105b2a): one lamp per session and per run, labelled and aged, under
+// the identity they share. The live shape is the fixture: two sessions
+// of ONE actor, which once crashed the region (846ab934).
+test('the shop floor draws its actors — a lamp per session and per run, under the identity they share', async ({ page }) => {
   await mocks(page);
-  await page.route(/\/api\/jobs\?kind=work-session/, (r) =>
-    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(ONE_ACTOR_SESSIONS) }));
+  const json = (r: Route, b: unknown) =>
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(b) });
+  await page.route(/\/api\/jobs\?kind=work-session/, (r) => json(r, ONE_ACTOR_SESSIONS));
+  await page.route(/\/api\/jobs\?kind=agent-run/, (r) => json(r, ONE_RUN));
 
   await page.goto('/it/yard/shop-floor');
   const map = page.locator(regionMap('shop-floor'));
@@ -377,14 +473,26 @@ test('the shop floor draws two sessions of ONE actor as two crews — the live s
   await expect(page.getByText('Reading the regions…')).toHaveCount(0);
 
   const interior = page.locator(`${regionSvg('shop-floor')} .interior[data-interior="shop-floor"]`);
-  await expect(interior.locator('.platform')).toHaveCount(2);
-  // Keyed by the SESSION — the key the server's machines already use.
-  await expect(interior.locator('.platform[data-platform="session:87b3cf48-f17b-4126-98b4-7673a3c3576b"]')).toHaveCount(1);
-  await expect(interior.locator('.platform[data-platform="session:7bb6e37d-d168-40b8-9675-70a42229a2bb"]')).toHaveCount(1);
-  // Labelled with who AND which session, so two crews of one actor are
-  // told apart on the picture, not only in the DOM.
-  await expect(interior).toContainText('claude@algedonic.dev · 87b3cf48');
-  await expect(interior).toContainText('claude@algedonic.dev · 7bb6e37d');
+  // ONE identity heads the group, not one crew per session.
+  await expect(interior.locator('.actor')).toHaveCount(1);
+  await expect(interior.locator('.actor[data-actor="claude@algedonic.dev"]')).toContainText('2 sessions · 1 run');
+  // A lamp per session, keyed by the session — the key the server's
+  // machines already use — and told apart on the picture by its id.
+  await expect(interior.locator('.lamp-row.session')).toHaveCount(2);
+  const busy = interior.locator('[data-lamp-row="session:87b3cf48-f17b-4126-98b4-7673a3c3576b"]');
+  await expect(busy).toContainText('session 87b3cf48 · boss-dev');
+  await expect(interior.locator('[data-lamp-row="session:7bb6e37d-d168-40b8-9675-70a42229a2bb"]')).toContainText(
+    'session 7bb6e37d',
+  );
+  // The run: its own id, the item it builds, and its age.
+  const run = interior.locator('[data-lamp-row="run:fa4014f2-1794-4268-9881-f4e616f7d0ad"]');
+  await expect(run).toHaveCount(1);
+  await expect(run).toContainText('run fa4014f2 → c3105b2a build');
+  await expect(run).toHaveAttribute('data-lamp', 'at-work');
+  await expect(run.locator('text.age')).toHaveText(/^at work \d/);
+  // The platforms and the machinery strip gave way to the lamps.
+  await expect(interior.locator('.platform')).toHaveCount(0);
+  await expect(page.locator(`${regionSvg('shop-floor')} .machinery`)).toHaveCount(0);
   await expect(page.locator('.load-failed')).toHaveCount(0);
 });
 
@@ -418,4 +526,82 @@ test('a region the layout does not know leaves the WORLD on screen, never a map 
   await page.goto('/it/yard/atlantis');
   await expect(page.locator(WORLD_SVG).locator('.territory')).toHaveCount(TERRITORIES.length);
   await expect(page.locator('section[aria-label$="region map"]')).toHaveCount(0);
+});
+
+// ---------------------------------------------------------------------
+// A REGION OWNS ITS PAGE (design 62de32ae, decision 7).
+// ---------------------------------------------------------------------
+//
+// The review of 2026-09-24 (finding 8): the view swapped and the page
+// around it did not. Every region's heading read "The IT world", the
+// world's summary sat between the region map and its floor, the
+// garage's departure board listed dock cars, and "No alerts — every
+// machine is working or idle by design" stood under a troubled shed.
+
+const dockRail = (from: string, to: string, over: Record<string, unknown> = {}) => ({
+  from, to, crossing: 'a packet crossed', state: 'clear', why: 'nothing waiting',
+  rate: { metric: 'crossings', unit: 'per day', current: 5, previous: 4, samples: 5, previous_samples: 4 },
+  last_crossed: null, waiting: 0, holds: [],
+  machine: { name: 'auto-park-on-gate-green', kind: 'dispatcher-rule', last_fired: '2026-09-19T04:53:00Z',
+    silent_for_minutes: 7, expected_every_minutes: null, silent: false, why: '' },
+  ...over,
+});
+
+test('a region page is headed by the region, with the way back and its own rails in place of the world summary', async ({ page }) => {
+  await mocks(page);
+  await page.route(YARD_BORDERS, (r) =>
+    r.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        window_hours: 24,
+        now: '2026-09-19T05:00:00Z',
+        borders: [
+          dockRail('gates', 'dock', { waiting: 6 }),
+          dockRail('dock', 'track', { state: 'troubled', why: 'the boarding rule is silent' }),
+          dockRail('track', 'arrivals'),
+        ],
+      }),
+    }));
+  await page.goto('/it/yard/dock');
+
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('IT · Dock');
+  await expect(page.getByRole('heading', { name: 'The IT world' })).toHaveCount(0);
+  const crumbs = page.locator('nav.crumbs');
+  await expect(crumbs).toContainText('The IT world');
+  await expect(crumbs.locator('[aria-current="page"]')).toContainText('Dock');
+
+  // The dock's rails, in then out — not the world's crossings total.
+  const rails = page.locator('.region-rails[data-rails="dock"] .rail-line');
+  await expect(rails).toHaveCount(2);
+  await expect(rails.nth(0)).toHaveText('in from gates · 5/day · 6 waiting · auto-park-on-gate-green · fired 7m ago');
+  await expect(rails.nth(1)).toContainText('out to track · 5/day · nothing waiting');
+  await expect(rails.nth(1)).toContainText('troubled — the boarding rule is silent');
+  await expect(page.getByText(/crossings in 24h/)).toHaveCount(0);
+
+  // The departure board is the dock's, titled for it.
+  const board = page.locator('.head[data-board="dock"]');
+  await expect(board).toContainText('Departure board · dock');
+  await expect(board).toContainText('2 in flight · 0 landed');
+
+  // The breadcrumb is the way back, as a link.
+  await crumbs.getByRole('link', { name: 'The IT world' }).click();
+  await expect(page).toHaveURL(/\/it$/);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('The IT world');
+});
+
+test("a quiet alerts strip under a troubled region does not call the region's machines fine", async ({ page }) => {
+  await mocks(page);
+  const troubled = {
+    ...REGIONS,
+    regions: REGIONS.regions.map((r) =>
+      r.name === 'shed' ? { ...r, state: 'troubled', why: '2 landed cars of ours owe a proof' } : r),
+  };
+  await page.route(YARD_REGIONS, (r) =>
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(troubled) }));
+  await page.goto('/it/yard/shed');
+
+  const strip = page.locator('.yard-alerts[data-alerts="shed"]');
+  await expect(strip).toContainText("No machine alerts in the shed — its troubled state above is the region's own reading");
+  await expect(strip).not.toContainText('every machine here is working');
 });

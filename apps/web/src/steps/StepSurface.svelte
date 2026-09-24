@@ -233,7 +233,7 @@
   />
 {:else}
   {#if registryDegraded}
-    <div class="step-registry-error" role="alert">
+    <div class="step-registry-error load-failed" role="alert">
       <span>
         Couldn't load the step-surface registry — showing the generic
         surface for now.

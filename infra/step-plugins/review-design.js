@@ -341,10 +341,12 @@
     return typeof TextEncoder === 'function' ? new TextEncoder().encode(s).length : s.length;
   }
 
-  // The exhibits a packet carries, as this surface reads them. An
-  // element without inline html (the file_refs arm, decided and not yet
-  // built) is KEPT with `html: null` and listed as not renderable here —
-  // never dropped (26a89f11: "list anchor/title/size/hash, never drop").
+  // The exhibits a packet carries, as this surface reads them: inline
+  // `html`, or — over the 256 KB inline bound — a `file_ref` into the
+  // file store with the `sha256` and `size_bytes` the attaching verb
+  // confirmed by read-back. An element carrying neither is KEPT and
+  // listed as having nothing to render — never dropped (26a89f11: "list
+  // anchor/title/size/hash, never drop").
   function readExhibits(raw) {
     if (!Array.isArray(raw)) return [];
     return raw
@@ -353,7 +355,82 @@
         anchor: String(e.anchor || `E${i + 1}`),
         title: String(e.title || ''),
         html: typeof e.html === 'string' ? e.html : null,
+        fileRef: typeof e.file_ref === 'string' && e.file_ref.trim() ? e.file_ref.trim() : null,
+        sha256: typeof e.sha256 === 'string' ? e.sha256.trim().toLowerCase() : null,
+        sizeBytes: typeof e.size_bytes === 'number' ? e.size_bytes : null,
       }));
+  }
+
+  // THE FILE_REFS ARM (design 26a89f11): an exhibit over the inline
+  // bound lives in the file store, and this surface fetches its bytes
+  // AS THE REVIEWER — the same `/api/files/{id}` the attachments panel
+  // downloads through — and then hands them, as text, to exactly the
+  // frame an inline exhibit gets (`exhibitFrame`). Nothing else changes:
+  // same sandbox, same policy, same srcdoc, and the bytes never touch
+  // this document. There is one render path, and this only feeds it.
+  //
+  // CHECKED BEFORE SHOWN. The record names the bytes that were reviewed
+  // by their sha256 and size, and the store can answer with other bytes
+  // (a detached file, a store switched off answering 200 with an
+  // `unconfigured` envelope). So a size or digest that does not match is
+  // refused, naming both — the reviewer never sees a rendering the
+  // record does not vouch for. Where the digest cannot be computed (no
+  // WebCrypto outside a secure context) or was never recorded, the
+  // exhibit renders and SAYS it was not checked; silence is the one
+  // thing it may not do.
+  async function sha256Hex(buf) {
+    const subtle = typeof crypto !== 'undefined' && crypto && crypto.subtle;
+    if (!subtle) return null;
+    const digest = await subtle.digest('SHA-256', buf);
+    return Array.from(new Uint8Array(digest))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+  }
+
+  async function loadFileExhibit(ex) {
+    let r;
+    try {
+      r = await fetch(`/api/files/${encodeURIComponent(ex.fileRef)}`, {
+        credentials: 'same-origin',
+      });
+    } catch (e) {
+      return { error: `file ${ex.fileRef} could not be fetched: ${e && e.message}` };
+    }
+    if (!r.ok) {
+      return { error: `the file store answered HTTP ${r.status} for file ${ex.fileRef}` };
+    }
+    const buf = await r.arrayBuffer();
+    if (ex.sizeBytes !== null && buf.byteLength !== ex.sizeBytes) {
+      return {
+        error:
+          `file ${ex.fileRef} served ${buf.byteLength.toLocaleString()} bytes; the record ` +
+          `says ${ex.sizeBytes.toLocaleString()} — not rendered`,
+      };
+    }
+    const digest = await sha256Hex(buf);
+    if (ex.sha256 && digest && digest !== ex.sha256) {
+      return {
+        error:
+          `file ${ex.fileRef} served bytes with sha256 ${digest}, which does not match the ` +
+          `recorded ${ex.sha256} — not rendered`,
+      };
+    }
+    let html;
+    try {
+      html = new TextDecoder('utf-8', { fatal: true }).decode(buf);
+    } catch (_) {
+      return { error: `file ${ex.fileRef} is not UTF-8 text — an exhibit is an HTML document` };
+    }
+    const checked = !!(ex.sha256 && digest);
+    return {
+      html,
+      bytes: buf.byteLength,
+      note: checked
+        ? `sha256 checked against the record`
+        : ex.sha256
+          ? 'sha256 NOT checked — this browser offers no digest outside a secure context'
+          : 'sha256 NOT checked — the record carries none',
+    };
   }
 
   // A question's bindings: the exhibit anchors its `exhibits` key names.
@@ -378,6 +455,9 @@
     // Each exhibit's rendered <figure>, by anchor, so a question's
     // binding can bring its exhibit into view beside it.
     const exhibitFigures = {};
+    // A by-reference exhibit's fetch, by anchor — one per mount however
+    // often the body re-renders.
+    const fileExhibitLoads = {};
     // True when the questions came from the packet rather than the
     // docs API. Kept because the loader's four branches need to know
     // which of them answered; it no longer decides where answers go,
@@ -561,6 +641,20 @@
         const askedBy = questions
           .filter((q) => q.exhibits.includes(ex.anchor))
           .map((q) => q.anchor);
+        const asked = askedBy.length ? ` · asked about in ${askedBy.join(', ')}` : '';
+        const sandboxed = 'sandboxed: runs its own style and script, reaches nothing else';
+        const inline = ex.html !== null;
+        const meta = h(
+          'span',
+          { className: 'srd-exhibit-meta' },
+          inline
+            ? `${utf8Bytes(ex.html).toLocaleString()} bytes · ${sandboxed}${asked}`
+            : ex.fileRef
+              ? `file ${ex.fileRef} · loading from the file store…${asked}`
+              : `carries neither inline html nor a file_ref — nothing to render${asked}`,
+        );
+        const frameBox = inline || ex.fileRef ? h('div', { className: 'srd-exhibit-frame' }) : null;
+        if (inline) frameBox.appendChild(exhibitFrame(ex));
         const figure = h(
           'figure',
           { className: 'srd-exhibit' },
@@ -569,20 +663,34 @@
             null,
             h('span', { className: 'srd-anchor' }, ex.anchor),
             h('span', { className: 'srd-exhibit-title' }, ex.title),
-            h(
-              'span',
-              { className: 'srd-exhibit-meta' },
-              ex.html === null
-                ? 'not carried inline — this surface renders inline exhibits only'
-                : `${utf8Bytes(ex.html).toLocaleString()} bytes · sandboxed: runs its own ` +
-                    'style and script, reaches nothing else' +
-                    (askedBy.length ? ` · asked about in ${askedBy.join(', ')}` : ''),
-            ),
+            meta,
           ),
-          ex.html === null
-            ? null
-            : h('div', { className: 'srd-exhibit-frame' }, exhibitFrame(ex)),
+          frameBox,
         );
+        // By reference: fetched once per mount, then handed to the SAME
+        // frame an inline exhibit gets. A failure removes the frame box
+        // and says what failed in its place.
+        if (!inline && ex.fileRef) {
+          if (!fileExhibitLoads[ex.anchor]) {
+            fileExhibitLoads[ex.anchor] = loadFileExhibit(ex).catch((e) => ({
+              error: `file ${ex.fileRef} could not be read: ${e && e.message}`,
+            }));
+          }
+          fileExhibitLoads[ex.anchor].then((got) => {
+            if (got.error) {
+              frameBox.remove();
+              meta.replaceChildren(document.createTextNode(`${got.error}${asked}`));
+              return;
+            }
+            frameBox.appendChild(exhibitFrame({ ...ex, html: got.html }));
+            meta.replaceChildren(
+              document.createTextNode(
+                `${got.bytes.toLocaleString()} bytes · file ${ex.fileRef} · ${got.note} · ` +
+                  `${sandboxed}${asked}`,
+              ),
+            );
+          });
+        }
         exhibitFigures[ex.anchor] = figure;
         section.appendChild(figure);
       });

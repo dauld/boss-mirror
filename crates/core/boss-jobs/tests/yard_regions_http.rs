@@ -610,7 +610,8 @@ async fn a_denied_caller_gets_an_empty_well_formed_map() {
 /// absent glyph is indistinguishable from a runner that does not exist.
 /// This pins the read that closes it: the handler asks the ESTATE
 /// REGISTRY which hosts should have a runner, and each declared host
-/// stands in receiving whether or not it has said anything.
+/// stands in the PLANT — the strip of machinery that serves every region
+/// (design 62de32ae, decision 11) — whether or not it has said anything.
 #[tokio::test]
 async fn a_declared_runner_host_stands_on_the_map_with_no_request_of_its_own() {
     let (app, jobs) = app();
@@ -642,7 +643,7 @@ async fn a_declared_runner_host_stands_on_the_map_with_no_request_of_its_own() {
 
     let (status, v) = get(&app, "operator", "/api/yard/regions").await;
     assert_eq!(status, StatusCode::OK, "{v}");
-    let machines = region(&v, "receiving")["machines"].as_array().unwrap();
+    let machines = v["plant"].as_array().unwrap();
     let ids: Vec<&str> = machines.iter().map(|m| m["id"].as_str().unwrap()).collect();
     assert_eq!(
         ids,

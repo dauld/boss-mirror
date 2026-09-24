@@ -16,7 +16,8 @@
 #   jobs/types.ts          a campaign Subject links to /jobs?kind=marketing-motion
 #
 # All three are TENANT kinds — `field-service` and `marketing-motion`
-# are authored in examples/used-device-shop/seeds/workflows.toml,
+# were authored in the used-device shop's seed bundle (retired
+# 2026-09-24 with that tenant, backlog a8991c86),
 # `sale` in examples/brewery/seeds/workflows.toml — hardcoded into core
 # frontend that every instance ships (CLAUDE.md §10). The Algedonic
 # instance runs neither tenant, so all five reads were structurally 0

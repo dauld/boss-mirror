@@ -32,7 +32,7 @@ fn invoice_issued_single_line_is_balanced() {
         "amount_cents": 1_200_000,
         "currency": "USD",
         "line_items": [
-            {"category": "new-sales", "amount_cents": 1_200_000, "currency": "USD"},
+            {"category": "wholesale", "amount_cents": 1_200_000, "currency": "USD"},
         ],
     });
     let draft = evaluate(&BossRuleSet, &fact("finance.invoice.issued", &payload)).unwrap();
@@ -59,27 +59,32 @@ fn invoice_issued_mixed_categories_splits_revenue() {
         "amount_cents": 1_500_000,
         "currency": "USD",
         "line_items": [
-            {"category": "new-sales", "amount_cents": 1_000_000, "currency": "USD"},
-            {"category": "service",   "amount_cents":   300_000, "currency": "USD"},
-            {"category": "service",   "amount_cents":   200_000, "currency": "USD"},
+            {"category": "wholesale", "amount_cents": 1_000_000, "currency": "USD"},
+            {"category": "taproom",   "amount_cents":   300_000, "currency": "USD"},
+            {"category": "taproom",   "amount_cents":   200_000, "currency": "USD"},
         ],
     });
     let draft = evaluate(&BossRuleSet, &fact("finance.invoice.issued", &payload)).unwrap();
     assert!(draft.is_balanced());
     assert_eq!(line_for(&draft.lines, "1100").debit_cents, 1_500_000i64);
     assert_eq!(line_for(&draft.lines, "4100").credit_cents, 1_000_000i64);
-    // Two service lines roll up into one credit to 4120.
+    // Two taproom lines roll up into one credit to 4120.
     assert_eq!(line_for(&draft.lines, "4120").credit_cents, 500_000i64);
 }
 
 #[test]
 fn invoice_issued_all_revenue_categories_resolve() {
+    // The embedded default is Algedonic Ales' chart, the one example
+    // tenant the OSS ships. Algedonic, LLC posts its revenue through
+    // `finance.sponsorship.received`, not through this map.
     let cases = [
-        ("new-sales", "4100"),
-        ("used-sales", "4110"),
-        ("service", "4120"),
-        ("parts", "4130"),
-        ("contracts", "4140"),
+        ("wholesale", "4100"),
+        ("retail", "4110"),
+        ("merchandise", "4110"),
+        ("taproom", "4120"),
+        ("event-package", "4130"),
+        ("distribution", "4140"),
+        ("uncategorized", "4140"),
     ];
     for (category, account) in cases {
         let payload = json!({
@@ -94,6 +99,29 @@ fn invoice_issued_all_revenue_categories_resolve() {
             50_000i64,
             "category {category} should credit {account}"
         );
+    }
+}
+
+/// The used-device shop's five categories left the embedded default
+/// with the shop (backlog a8991c86, 2026-09-24): no shipped tenant
+/// emits them, and the live audit log held no invoice event at all
+/// when they went. A tenant that still needs one names it in its own
+/// `BOSS_LEDGER_REVENUE_ACCOUNTS_TOML`.
+#[test]
+fn invoice_issued_with_a_retired_device_shop_category_fails() {
+    for category in ["new-sales", "used-sales", "service", "parts", "contracts"] {
+        let payload = json!({
+            "invoice_id": "inv-retired",
+            "amount_cents": 50_000,
+            "currency": "USD",
+            "line_items": [{"category": category, "amount_cents": 50_000, "currency": "USD"}],
+        });
+        match evaluate(&BossRuleSet, &fact("finance.invoice.issued", &payload)) {
+            Err(LedgerError::InvalidPayload { reason, .. }) => {
+                assert!(reason.contains(category), "reason: {reason}");
+            }
+            other => panic!("{category}: expected InvalidPayload, got {other:?}"),
+        }
     }
 }
 
@@ -423,7 +451,7 @@ fn invoice_issued_with_sales_tax_credits_2300() {
         "amount_cents": 107_250,
         "currency": "USD",
         "line_items": [
-            {"category": "service", "amount_cents": 100_000, "currency": "USD"},
+            {"category": "taproom", "amount_cents": 100_000, "currency": "USD"},
         ],
         "tax_lines": [
             {"account": "2300", "jurisdiction": "US-CA", "amount_cents": 7_250},
@@ -449,7 +477,7 @@ fn invoice_issued_zero_tax_line_is_omitted() {
         "amount_cents": 100_000,
         "currency": "USD",
         "line_items": [
-            {"category": "new-sales", "amount_cents": 100_000, "currency": "USD"},
+            {"category": "wholesale", "amount_cents": 100_000, "currency": "USD"},
         ],
         "tax_lines": [
             {"account": "2300", "jurisdiction": "US-OR", "amount_cents": 0},
@@ -469,7 +497,7 @@ fn invoice_issued_no_tax_lines_key_is_backward_compatible() {
         "amount_cents": 50_000,
         "currency": "USD",
         "line_items": [
-            {"category": "parts", "amount_cents": 50_000, "currency": "USD"},
+            {"category": "event-package", "amount_cents": 50_000, "currency": "USD"},
         ],
     });
     let draft = evaluate(&BossRuleSet, &fact("finance.invoice.issued", &payload)).unwrap();
@@ -484,7 +512,7 @@ fn invoice_issued_rejects_negative_tax() {
         "invoice_id": "inv-bad",
         "amount_cents": 100_000,
         "currency": "USD",
-        "line_items": [{"category": "service", "amount_cents": 100_000, "currency": "USD"}],
+        "line_items": [{"category": "taproom", "amount_cents": 100_000, "currency": "USD"}],
         "tax_lines": [{"account": "2300", "jurisdiction": "US-CA", "amount_cents": -500}],
     });
     assert!(matches!(
@@ -502,7 +530,7 @@ fn invoice_issued_rejects_unknown_tax_account() {
         "invoice_id": "inv-bad",
         "amount_cents": 100_000,
         "currency": "USD",
-        "line_items": [{"category": "service", "amount_cents": 100_000, "currency": "USD"}],
+        "line_items": [{"category": "taproom", "amount_cents": 100_000, "currency": "USD"}],
         "tax_lines": [{"account": "2320", "jurisdiction": "US-CA", "amount_cents": 100}],
     });
     assert!(matches!(

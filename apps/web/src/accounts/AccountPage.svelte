@@ -164,7 +164,6 @@
   {@const jobs = b.jobs}
   {@const shipments = b.shipments}
   {@const activeDevices = devices.filter((d) => d.phase !== 'decommissioned').length}
-  {@const inRefurb = devices.filter((d) => ['received', 'triaging', 'refurbing', 'qa'].includes(d.phase)).length}
   {@const openTickets = devices.reduce((s, d) => s + d.open_ticket_count, 0)}
   <!-- Tenant-aware tab filter — drop industry-shaped tabs
        when the account has no data of that shape. Brewery
@@ -238,9 +237,6 @@
         <div class="pp-glance-stat">
           <div class="pp-glance-label">Equipment</div>
           <div class="pp-glance-value">{activeDevices}</div>
-          {#if inRefurb > 0}
-            <div class="pp-glance-sub">{inRefurb} in service</div>
-          {/if}
         </div>
         <div class="pp-glance-stat">
           <div class="pp-glance-label">Open cases</div>
@@ -380,7 +376,6 @@
                   <dl class="kv">
                     <dt>Total units</dt><dd>{devices.length}</dd>
                     <dt>Active</dt><dd>{devices.filter((d) => d.phase !== 'decommissioned').length}</dd>
-                    <dt>In service queue</dt><dd>{devices.filter((d) => ['received', 'triaging', 'refurbing', 'qa'].includes(d.phase)).length}</dd>
                   </dl>
               </Section>
             {/if}

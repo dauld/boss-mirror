@@ -34,7 +34,7 @@ fn fixture(id: &str, account: &str) -> Invoice {
         line_items: vec![InvoiceLineItem {
             id: format!("{id}-l1"),
             invoice_id: id.into(),
-            revenue_category: RevenueCategory::from("new-sales"),
+            revenue_category: RevenueCategory::from("wholesale"),
             amount_cents: 5_000,
             currency: "USD".into(),
             description: "keg".into(),

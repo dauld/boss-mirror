@@ -46,6 +46,7 @@ const region = (over: Partial<Region> = {}): Region => ({
   trend: trend(),
   kpi: [],
   machines: [],
+  places: [],
   ...over,
 });
 
@@ -89,6 +90,7 @@ describe('parseRegions — the payload, parsed once', () => {
       // A payload with no machinery list draws no glyphs — never
       // invented idle ones (car 5, world-machines.test.ts).
       machines: [],
+      places: [],
     });
     // No bound on the wire (skip_serializing_if) reads as null, not 0.
     expect(m.regions[3]!.bound).toBeNull();
@@ -106,6 +108,34 @@ describe('parseRegions — the payload, parsed once', () => {
   it('refuses a state it does not know rather than drawing it clear', () => {
     const bad = { ...PAYLOAD, regions: [{ ...PAYLOAD.regions[0], state: 'fine' }] };
     expect(() => parseRegions(bad)).toThrow(/state/);
+  });
+
+  // Car E of design 62de32ae: the server says how many of a region's
+  // own members stand at each of its places (decision 5), and names
+  // the plant that serves every region (decision 11).
+  it('parses the places a region counts and the plant that serves every region', () => {
+    const withBoth = {
+      ...PAYLOAD,
+      regions: PAYLOAD.regions.map((r) =>
+        r.name === 'shed'
+          ? { ...r, places: [{ name: 'inspection-shed', count: 1 }, { name: 'siding-event', count: 1 }] }
+          : r,
+      ),
+      plant: [{ id: 'runner:host:forge', name: 'forge runner', state: 'idle', why: 'last df answered exit 0' }],
+    };
+    const m = parseRegions(withBoth);
+    expect(m.regions[3]!.places).toEqual([
+      { name: 'inspection-shed', count: 1 },
+      { name: 'siding-event', count: 1 },
+    ]);
+    expect(m.regions[0]!.places).toEqual([]);
+    expect(m.plant.map((p) => p.id)).toEqual(['runner:host:forge']);
+    // An older server sends neither: no places, and no plant — never
+    // invented idle machines.
+    expect(parseRegions(PAYLOAD).plant).toEqual([]);
+    // A plant machine in a state this client does not know is refused,
+    // as a region's is.
+    expect(() => parseRegions({ ...withBoth, plant: [{ id: 'x', name: 'x', state: 'fine', why: '' }] })).toThrow(/state/);
   });
 });
 

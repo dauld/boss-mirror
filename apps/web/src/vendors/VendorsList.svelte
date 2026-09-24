@@ -123,22 +123,27 @@
     ),
   );
 
+  // Under a failed list read every figure in the header is unknown, and
+  // "0 vendors · 0 open POs · $0.00 outstanding" above the failure line
+  // read as an answer (sweep c3e4edcc, vendors gap 2).
   let subtitle = $derived(
-    [
-      ordersUnknown
-        ? 'open POs unknown'
-        : `${totalOpenPos} open PO${totalOpenPos === 1 ? '' : 's'}`,
-      billsUnknown
-        ? 'outstanding unknown'
-        : `${formatMoney({ amount_cents: totalOutstandingCents, currency: 'USD' })} outstanding across all vendors`,
-    ].join(' · '),
+    error
+      ? 'Vendor count unknown — the read failed'
+      : [
+          ordersUnknown
+            ? 'open POs unknown'
+            : `${totalOpenPos} open PO${totalOpenPos === 1 ? '' : 's'}`,
+          billsUnknown
+            ? 'outstanding unknown'
+            : `${formatMoney({ amount_cents: totalOutstandingCents, currency: 'USD' })} outstanding across all vendors`,
+        ].join(' · '),
   );
 </script>
 
 <div class="catalog theme-exec">
   <PageHeader
     eyebrow="Know"
-    title={`${vendors.length} vendors`}
+    title={error ? 'Vendors' : `${vendors.length} vendors`}
     {subtitle}
   />
 
@@ -180,7 +185,7 @@
       {#if loading}
         <p class="empty">Loading…</p>
       {:else if error}
-        <p class="empty">Couldn't load vendors: {error}</p>
+        <p class="empty load-failed" role="alert">Couldn't load vendors: {error}</p>
       {:else if visible.length === 0}
         <p class="empty">No vendors match those filters.</p>
       {:else}

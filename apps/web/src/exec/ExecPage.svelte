@@ -276,8 +276,13 @@
       <h2>Revenue mix — trailing 12 months</h2>
       {#if summaryLoading && !summary}
         <p class="empty">Loading revenue mix…</p>
-      {:else if !summary || summary.revenue_ttm.length === 0}
-        <p class="empty">Revenue mix unavailable.</p>
+      {:else if !summary}
+        <!-- A failed summary read, on the shared failure marker (sweep
+             c3e4edcc); an empty trailing year is the line below, which
+             this one used to share. -->
+        <p class="empty load-failed" role="alert">Revenue mix unavailable — the finance summary did not answer.</p>
+      {:else if summary.revenue_ttm.length === 0}
+        <p class="empty">No revenue in the trailing 12 months.</p>
       {:else}
         <div class="mix">
           {#each mixRows as r (r.cat)}
@@ -383,7 +388,7 @@
       {#if balanceSheetLoading && !balanceSheet}
         <p class="empty">Loading balance-sheet snapshot…</p>
       {:else if !balanceSheet}
-        <p class="empty">Balance sheet unavailable.</p>
+        <p class="empty load-failed" role="alert">Balance sheet unavailable — the ledger did not answer.</p>
       {:else}
         <div style="margin-bottom:12px; font-size:13px; color:var(--static)">
           As of {balanceSheet.as_of}

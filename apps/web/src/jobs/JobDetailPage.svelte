@@ -239,7 +239,8 @@
        packet for an error on one blip is the modal's poisoning bug at
        page scale. -->
   <div class="catalog theme-exec">
-    <p class="empty">Couldn't load job: {error ?? 'not found'}</p>
+    <!-- The shared failure marker (sweep c3e4edcc). -->
+    <p class="empty load-failed" role="alert">Couldn't load job: {error ?? 'not found'}</p>
   </div>
 {:else}
   {@const j = job}

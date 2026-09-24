@@ -45,7 +45,9 @@
   import { REGION_CANVAS, regionCanvas } from './region-canvas';
   import { asFloorRegion, regionFloorView } from './floor-slices';
   import RegionFloor from './RegionFloor.svelte';
-  import { hasPlatforms, platformLayout, type Deck, type Platform } from './world-interior';
+  import { countNote, drawnNote, placesNote } from './region-page';
+  import { hasPlatforms, platformLayout, withPlaces, type Deck, type Platform } from './world-interior';
+  import { CHAR_W, actorLayout, fitText, runsDrawn, type Lamp } from './shop-floor';
   import { machineTitle, machineryLabel, machineryStrip } from './world-machines';
   import type { Territory } from './world';
   import type { Scene } from './yard-floor';
@@ -96,10 +98,55 @@
   /** That region's slice of the floor, placed on its canvas — null
    *  until the floor's read lands. */
   const view = $derived(floor !== null && floorRegion !== null ? regionFloorView(floorRegion, floor) : null);
-  /** The canvas: the slice's own size for a floor region, the fixed
-   *  region canvas for everything else (and while the floor is read). */
-  const canvas = $derived<Territory>(view === null ? rect : { ...rect, w: view.width, h: view.height });
-  const machinery = $derived(machineryStrip(canvas, r?.machines ?? []));
+  /** The queue platforms, each station standing the members the
+   *  server's partition left there (`places`, car E) rather than its
+   *  full depth. */
+  const platforms = $derived<ReadonlyArray<Platform>>(
+    deck !== null && deck.kind === 'ready' ? withPlaces(deck.platforms, r?.places ?? []) : [],
+  );
+  /** THE SHOP FLOOR'S ACTORS (design 62de32ae, decision 8), laid out on
+   *  the region's canvas — which grows to hold every lamp rather than
+   *  hiding one. Null for every other region. */
+  const actorsLaid = $derived(
+    deck !== null && deck.kind === 'ready' && deck.actors !== undefined ? actorLayout(rect, deck.actors) : null,
+  );
+  /** The canvas: the slice's own size for a floor region, as tall as
+   *  its lamps for the shop floor, the fixed region canvas for
+   *  everything else (and while the floor is read). */
+  const canvas = $derived<Territory>(
+    view !== null
+      ? { ...rect, w: view.width, h: view.height }
+      : actorsLaid !== null
+        ? { ...rect, h: actorsLaid.height }
+        : rect,
+  );
+  /** The machinery strip — except where the actors are drawn: the shop
+   *  floor's machines ARE its sessions, and each already has its lamp,
+   *  label and age in the rows above. */
+  const machinery = $derived(
+    actorsLaid !== null ? { placed: [], hidden: 0 } : machineryStrip(canvas, r?.machines ?? []),
+  );
+  /** What the interior draws against the head's count, SAID (design
+   *  62de32ae, decision 5): the platforms against it, the shop floor's
+   *  runs against its runs in flight, and a floor slice against the
+   *  places the server counted — the shed drew 5 under SHED 11. */
+  const drawn = $derived(
+    actorsLaid !== null && deck !== null && deck.kind === 'ready' && deck.actors !== undefined
+      ? countNote(r, runsDrawn(deck.actors), 'the floor draws')
+      : deck !== null && deck.kind === 'ready'
+        ? drawnNote(r, platforms)
+        : floor !== null && view !== null
+          ? placesNote(r, floor.wagons)
+          : null,
+  );
+  /** A lamp's colour class, in the yard's own lamp vocabulary. */
+  const LAMP_TONE: Readonly<Record<Lamp, string>> = {
+    'at-work': 'ok',
+    idle: 'idle',
+    waiting: 'warn',
+    silent: 'err',
+    unknown: 'unknown',
+  };
 
   // The head is a region-scale block now, not a compact one squeezed
   // into a slot: the count, the state, the trend and the why all fit,
@@ -140,6 +187,7 @@
     {#if r}<span class="region-trend">{r.trend.metric} · {trendText(r.trend)}</span>{/if}
   </div>
   <div class="region-why" class:err={troubled}>{why}</div>
+  {#if drawn}<div class="region-drawn" data-drawn={region}>{drawn}</div>{/if}
 
   <svg
     viewBox="0 0 {canvas.w} {canvas.h}"
@@ -169,10 +217,56 @@
             <tspan x={HEAD_X} dy={i === 0 ? 0 : 12}>{line}</tspan>
           {/each}
         </text>
-      {:else if deck.platforms.length === 0}
+      {:else if actorsLaid !== null}
+        <!-- THE SHOP FLOOR AS ACTORS (design 62de32ae, decision 8): one
+             lamp per session and per run, each labelled and aged, under
+             the identity they share. The lamp reads without a legend:
+             at work is green and pulses, idle is still and grey, a run
+             past its build is amber, a run unmoved past the age-out
+             bound blinks red, and a reading nobody took is a broken
+             ring with a `?`. -->
+        {#if actorsLaid.rows.length === 0}
+          <text x={HEAD_X} y="40" class="tiny">nobody is on the floor — no open session and no run in flight</text>
+        {:else}
+          <g class="interior actors" data-interior={region}>
+            {#each actorsLaid.rows as row (row.key)}
+              {#if row.kind === 'actor'}
+                <g class="actor" data-actor={row.actor.identity}>
+                  <text x={row.x} y={row.y} class="identity">{row.actor.identity}</text>
+                  <text x={row.x + row.w} y={row.y} text-anchor="end" class="tiny age"
+                    >{row.actor.sessions.length} {row.actor.sessions.length === 1 ? 'session' : 'sessions'} · {row.actor.runs}
+                    {row.actor.runs === 1 ? 'run' : 'runs'} in flight</text>
+                </g>
+              {:else}
+                {@const lamp = row.kind === 'session' ? row.session : row.run}
+                {@const age = lamp.age}
+                {@const words = row.kind === 'session' ? row.session.label : `${row.run.label} · ${row.run.title}`}
+                <g
+                  class="lamp-row {row.kind}"
+                  data-lamp-row={row.key}
+                  data-lamp={lamp.lamp}>
+                  <title>{words} — {age}</title>
+                  <circle
+                    class="lamp-bulb {LAMP_TONE[lamp.lamp]}"
+                    cx={row.x + 5}
+                    cy={row.y - 4}
+                    r={row.kind === 'session' ? 5 : 4.5} />
+                  {#if lamp.lamp === 'unknown'}
+                    <text x={row.x + 5} y={row.y - 1.5} text-anchor="middle" class="tiny bulb-mark">?</text>
+                  {/if}
+                  <text x={row.x + 16} y={row.y} class="lamp-words" class:run={row.kind === 'run'}
+                    >{fitText(words, row.w - 16 - (age.length + 3) * CHAR_W)}</text>
+                  <text x={row.x + row.w} y={row.y} text-anchor="end" class="tiny age" class:err={lamp.lamp === 'silent'}
+                    >{age}</text>
+                </g>
+              {/if}
+            {/each}
+          </g>
+        {/if}
+      {:else if platforms.length === 0}
         <text x={HEAD_X} y="40" class="tiny">no queue is declared here</text>
       {:else}
-        {@const laid = platformLayout(rect, deck.platforms)}
+        {@const laid = platformLayout(rect, platforms)}
         <g class="interior" data-interior={region}>
           {#each laid.placed as p (p.platform.key)}
             <g class="platform" data-platform={p.platform.key}>
@@ -319,6 +413,8 @@
   .region-why { font-family: var(--font-mono); font-size: 12px;
     color: var(--map-muted); margin-top: var(--s2); }
   .region-why.err { color: var(--map-bad-ink); }
+  .region-drawn { font-family: var(--font-mono); font-size: 11px; color: var(--map-muted);
+    margin-top: 4px; }
   .lamp-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block;
     background: var(--map-rule-strong); }
   .lamp-dot.ok { background: var(--map-ok-edge); }
@@ -333,6 +429,22 @@
   .yard text.standing { fill: var(--map-ink); letter-spacing: 0; }
   .yard text.rate { fill: var(--map-muted); letter-spacing: 0; }
   .yard text.unknown { fill: var(--map-muted); opacity: 0.6; font-style: italic; }
+  /* THE SHOP FLOOR'S LAMPS (decision 8). One bulb per session and per
+     run; the tone is the yard's lamp vocabulary, and what tells idle
+     from unknown is SHAPE — a solid still bulb against a broken ring —
+     as the machine glyphs tell them apart. */
+  .yard text.identity { fill: var(--map-ink); font-size: 13px; letter-spacing: 0.04em; text-transform: none; }
+  .yard text.lamp-words { fill: var(--map-ink); font-size: 11px; letter-spacing: 0; text-transform: none; }
+  .yard text.lamp-words.run { fill: var(--map-muted); }
+  .yard text.age { font-size: 11px; letter-spacing: 0; }
+  .yard text.bulb-mark { font-size: 7px; }
+  .lamp-bulb { fill: var(--map-rule-strong); stroke: none; }
+  .lamp-bulb.ok { fill: var(--map-ok-edge); animation: pulse 1.6s ease-in-out infinite; }
+  .lamp-bulb.idle { fill: var(--map-muted); opacity: 0.55; }
+  .lamp-bulb.warn { fill: var(--map-warn-edge); }
+  .lamp-bulb.err { fill: var(--map-bad-edge); animation: blink 1s steps(2) infinite; }
+  .lamp-bulb.unknown { fill: var(--map-surface); stroke: var(--map-muted); stroke-dasharray: 2 1.5; }
+  @keyframes pulse { 50% { opacity: 0.45; } }
   .lamp { fill: var(--map-rule-strong); }
   .lamp.ok { fill: var(--map-ok-edge); }
   .lamp.warn { fill: var(--map-warn-edge); }
@@ -348,7 +460,7 @@
   .yard .glyph text.mark { font-size: 9px; letter-spacing: 0; }
   @keyframes piston { to { transform: translateX(4px); } }
   @media (prefers-reduced-motion: reduce) {
-    .lamp, .lamp-dot, .glyph { animation: none !important; }
+    .lamp, .lamp-dot, .lamp-bulb, .glyph { animation: none !important; }
     /* A still piston is still a FILLED housing, which idle never is. */
     .glyph .piston { animation: none !important; }
   }

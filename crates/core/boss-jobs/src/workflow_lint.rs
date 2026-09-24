@@ -1132,6 +1132,49 @@ fn check_item_keys_name_an_array(
                 ),
             });
         }
+        // `item_one_of` (design 26a89f11's file_refs arm) is a choice
+        // between element keys; every way of stating it that no element
+        // could satisfy, or that no check would ever read, is refused.
+        if !field.item_one_of.is_empty() {
+            let keys = &field.item_one_of;
+            let mut reasons = Vec::new();
+            if field.field_type != "array" {
+                reasons.push(format!(
+                    "field '{}' declares item_one_of {keys:?} but is a '{}', not an array — \
+                     item_one_of describes array elements and would never be checked",
+                    field.name, field.field_type
+                ));
+            }
+            if keys.len() < 2 {
+                reasons.push(format!(
+                    "field '{}' declares item_one_of {keys:?} — a choice needs at least two \
+                     keys; a single required key belongs in item_keys",
+                    field.name
+                ));
+            }
+            let also_required: Vec<&String> = keys
+                .iter()
+                .filter(|k| field.item_keys.contains(k))
+                .collect();
+            if !also_required.is_empty() {
+                reasons.push(format!(
+                    "field '{}' names {also_required:?} in both item_keys and item_one_of — a \
+                     key cannot be required of every element and exclusive of the others",
+                    field.name
+                ));
+            }
+            if keys.iter().enumerate().any(|(i, k)| keys[..i].contains(k)) {
+                reasons.push(format!(
+                    "field '{}' names a key in item_one_of {keys:?} more than once",
+                    field.name
+                ));
+            }
+            errs.extend(reasons.into_iter().map(|reason| WorkflowLintError {
+                workflow: spec.kind.clone(),
+                step: step.title.clone(),
+                reason,
+            }));
+        }
     }
 }
 
@@ -1519,6 +1562,7 @@ mod tests {
             covers: None,
             binds: None,
             item_value_max_bytes: None,
+            item_one_of: Vec::new(),
         };
         let spec_with = |field_type: &str| {
             WorkflowSpec::platform_seed(
@@ -1576,6 +1620,7 @@ mod tests {
             covers: covers.map(str::to_string),
             binds: None,
             item_value_max_bytes: None,
+            item_one_of: Vec::new(),
         };
         let spec_with = |fields: Vec<boss_core::job::StepField>| {
             WorkflowSpec::platform_seed(
@@ -1690,6 +1735,47 @@ mod tests {
         };
         assert!(bound_errs(vec![bounded("array")]).is_empty());
         assert_eq!(bound_errs(vec![bounded("string")]).len(), 1);
+
+        // `item_one_of` (design 26a89f11's file_refs arm) describes array
+        // elements too, and is held the way binds is: on a non-array it
+        // would never be checked; with fewer than two keys it is not a
+        // choice; a key also in item_keys would be required AND
+        // exclusive at once; a repeated key is a choice between one
+        // thing and itself.
+        let one_of =
+            |field_type: &str, keys: &[&str], item_keys: &[&str]| boss_core::job::StepField {
+                item_one_of: keys.iter().map(|k| k.to_string()).collect(),
+                item_keys: item_keys.iter().map(|k| k.to_string()).collect(),
+                ..mk("exhibits", field_type, None)
+            };
+        let one_of_errs = |fields| {
+            validate_workflow(&spec_with(fields), &reg)
+                .into_iter()
+                .filter(|e| e.reason.contains("item_one_of"))
+                .map(|e| e.reason)
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            one_of_errs(vec![one_of(
+                "array",
+                &["html", "file_ref"],
+                &["anchor", "title"]
+            )])
+            .is_empty(),
+            "the intended shape passes"
+        );
+        let e = one_of_errs(vec![one_of("string", &["html", "file_ref"], &[])]);
+        assert!(e.iter().any(|r| r.contains("not an array")), "{e:?}");
+        let e = one_of_errs(vec![one_of("array", &["html"], &[])]);
+        assert!(e.iter().any(|r| r.contains("at least two")), "{e:?}");
+        let e = one_of_errs(vec![one_of("array", &["html", "file_ref"], &["html"])]);
+        assert!(
+            e.iter()
+                .any(|r| r.contains("item_keys") && r.contains("html")),
+            "{e:?}"
+        );
+        let e = one_of_errs(vec![one_of("array", &["html", "html"], &[])]);
+        assert!(e.iter().any(|r| r.contains("more than once")), "{e:?}");
     }
 
     /// An empty string can never be a member of an enum, so `""` as a
@@ -1732,6 +1818,7 @@ mod tests {
                             covers: None,
                             binds: None,
                             item_value_max_bytes: None,
+                            item_one_of: Vec::new(),
                         }],
                         metadata_defaults: serde_json::json!({ "route": default }),
                         terminal: Some(Terminal {
@@ -1891,6 +1978,7 @@ mod tests {
                         covers: None,
                         binds: None,
                         item_value_max_bytes: None,
+                        item_one_of: Vec::new(),
                     }],
                     ..Default::default()
                 },
@@ -1907,6 +1995,7 @@ mod tests {
                         covers: None,
                         binds: None,
                         item_value_max_bytes: None,
+                        item_one_of: Vec::new(),
                     }],
                     // Stamped at materialization, so the step carries the
                     // key from the moment it exists — which is why the
@@ -1981,6 +2070,7 @@ mod tests {
                         covers: None,
                         binds: None,
                         item_value_max_bytes: None,
+                        item_one_of: Vec::new(),
                     }],
                     ..Default::default()
                 },
@@ -1997,6 +2087,7 @@ mod tests {
                         covers: None,
                         binds: None,
                         item_value_max_bytes: None,
+                        item_one_of: Vec::new(),
                     }],
                     ..Default::default()
                 },
@@ -2057,6 +2148,7 @@ mod tests {
                         covers: None,
                         binds: None,
                         item_value_max_bytes: None,
+                        item_one_of: Vec::new(),
                     }],
                     ..Default::default()
                 },
@@ -2112,6 +2204,7 @@ mod tests {
                         covers: None,
                         binds: None,
                         item_value_max_bytes: None,
+                        item_one_of: Vec::new(),
                     }],
                     ..Default::default()
                 },
@@ -2229,6 +2322,7 @@ mod tests {
             covers: None,
             binds: None,
             item_value_max_bytes: None,
+            item_one_of: Vec::new(),
         }
     }
 
@@ -2282,6 +2376,7 @@ mod tests {
             covers: None,
             binds: None,
             item_value_max_bytes: None,
+            item_one_of: Vec::new(),
         });
         assert!(
             validate_workflow(&spec, &reg)

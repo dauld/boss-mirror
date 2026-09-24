@@ -113,7 +113,7 @@
       No plugin registered for <code class="mono">{kind}</code>.
     </div>
   {:else if loadState.kind === 'failed'}
-    <div class="step-plugin-failed" role="alert">
+    <div class="step-plugin-failed load-failed" role="alert">
       <span>
         The <code class="mono">{kind}</code> surface failed to load
         ({loadState.reason}) — using the generic form below.

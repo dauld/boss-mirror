@@ -245,7 +245,9 @@
 {#if loading}
   <p class="v-msg">Loading views…</p>
 {:else if error}
-  <p class="v-msg v-err">{error}</p>
+  <!-- The shared failure marker (sweep c3e4edcc), here and on a view
+       whose run failed. -->
+  <p class="v-msg load-failed" role="alert">{error}</p>
 {:else if views.length === 0}
   <p class="v-msg">
     No views yet. A view is a saved question — pick a source, describe what you
@@ -277,7 +279,7 @@
       </div>
 
       {#if rowErrors[v.id]}
-        <p class="v-msg v-err">{rowErrors[v.id]}</p>
+        <p class="v-msg load-failed" role="alert">{rowErrors[v.id]}</p>
       {:else if res}
         <p class="v-count">
           {res.matched}

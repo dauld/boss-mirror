@@ -48,7 +48,7 @@ async fn seed_invoice_fact(db: &TestDb, invoice_id: &str) {
         "account_id": "acct-A",
         "currency": "USD",
         "line_items": [
-            {"description": "Setup fee", "amount_cents": 50000, "category": "service"},
+            {"description": "Setup fee", "amount_cents": 50000, "category": "taproom"},
         ],
     });
     insert_audit_event(

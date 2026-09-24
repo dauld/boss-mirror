@@ -45,6 +45,15 @@
   // its one mount site — so it became the FloorDeck component and the
   // page was deleted. Every route is unchanged.
   //
+  // A REGION OWNS ITS PAGE (design 62de32ae, decision 7). The view
+  // swapped and the page around it did not: the heading still read "The
+  // IT world" inside every region, and the world's summary line sat
+  // between the region map and its floor (review 2026-09-24, finding
+  // 8). On a region the heading is the region's — "IT · Dock", under a
+  // breadcrumb back to the world — and the summary line gives way to
+  // the region's own rails in and out (region-page.ts), from the same
+  // borders read. The deck scopes its board and alerts the same way.
+  //
   // NO NEW STYLING (the visual redesign reskins): the world is drawn in
   // the yard's own strokes and tokens.
   //
@@ -53,7 +62,9 @@
   // never an empty map that reads as a calm one.
   import { onMount } from 'svelte';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
+  import Breadcrumb from '@boss/web-kit/ui/Breadcrumb.svelte';
   import { navigate } from '@boss/web-kit/nav';
+  import { railLines, regionTitle } from './region-page';
   import type { Remote } from '../../data/remote';
   import { fetchRegions, type Regions } from './regions';
   import { territoryOf } from './world';
@@ -65,6 +76,7 @@
   import type { LastGood } from './hud';
   import HudFrame from './HudFrame.svelte';
   import WorldMap from './WorldMap.svelte';
+  import PlantStrip from './PlantStrip.svelte';
   import FloorDeck from './FloorDeck.svelte';
   import CrewBoardPage from '../crew/CrewBoardPage.svelte';
   import ReceivingYardPage from '../receiving/ReceivingYardPage.svelte';
@@ -135,11 +147,21 @@
 </script>
 
 <div class="theme-exec yard-root">
-  <PageHeader
-    eyebrow="IT · Forge line"
-    title="The IT world"
-    subtitle="The territories along the packet flow, each a door to its floor, and the borders between them carrying what crosses, what waits and the machine that moves it"
-  />
+  {#if shown !== null}
+    <!-- The region's own heading, under the way back to the world it
+         was opened from — the page says where you are. -->
+    <nav class="crumbs" aria-label="breadcrumb" data-region={shown}>
+      <Breadcrumb to="/it">The IT world</Breadcrumb>
+      <span class="crumb-here" aria-current="page">› {regionTitle(shown)}</span>
+    </nav>
+    <PageHeader title={`IT · ${regionTitle(shown)}`} />
+  {:else}
+    <PageHeader
+      eyebrow="IT · Forge line"
+      title="The IT world"
+      subtitle="The territories along the packet flow, each a door to its floor, and the borders between them carrying what crosses, what waits and the machine that moves it"
+    />
+  {/if}
 
   <!-- THE HUD FRAME (design 00774ca8): the whole system, one row per
        third, above the map — and above every region's map too, because
@@ -185,6 +207,10 @@
       <WorldMap
         regions={regions.data}
         borders={borders.kind === 'ready' ? borders.data : null} />
+      <!-- THE PLANT along the world's edge (design 62de32ae, decision
+           11): the host runners serve every region, so they stand under
+           the territories rather than in one of them. -->
+      <PlantStrip machines={regions.data.plant} />
     {/if}
     <!-- A failed rails read is SAID — the territories are still drawn,
          but a map whose rails could not be read must not look like a
@@ -192,7 +218,16 @@
          the border rows on the client and double-counted about 260
          backlog items; the HUD frame above replaced it (design 00774ca8
          decision 10). -->
-    {#if borders.kind === 'failed'}
+    {#if borders.kind === 'ready' && shown !== null}
+      <!-- ON A REGION, ITS OWN RAILS (design 62de32ae decision 7): what
+           comes in, what goes out, what waits at each and the machine
+           that moves it — scoped to the borders this region has. -->
+      <div class="yard-flow region-rails" data-rails={shown}>
+        {#each railLines(borders.data, shown) as line, i (i)}
+          <div class="rail-line">{line}</div>
+        {/each}
+      </div>
+    {:else if borders.kind === 'failed'}
       <div class="yard-empty load-failed">The borders cannot be read — {borders.error}</div>
     {/if}
     <div class="yard-flow">
@@ -242,4 +277,7 @@
   .yard-flow { font-family: var(--font-mono); font-size: 11px;
     letter-spacing: var(--ls-nav); color: var(--map-muted);
     border-top: 1px solid var(--map-rule); margin-top: 28px; padding-top: 12px; }
+  .region-rails .rail-line + .rail-line { margin-top: 4px; }
+  .crumbs { font-size: 13px; color: var(--map-muted); padding-top: 16px; }
+  .crumb-here { margin-left: 4px; color: var(--map-ink); }
 </style>

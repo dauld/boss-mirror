@@ -49,10 +49,16 @@
     title="Job kinds"
     subtitle={loading
       ? 'Loading…'
-      : `${kinds.length} active kinds across ${categoryKeys.length} categories`}
+      : error
+        ? // "0 active kinds" above the failure line read as an empty
+          // registry (sweep c3e4edcc). The count is unknown.
+          'Kind count unknown — the registry read failed'
+        : `${kinds.length} active kinds across ${categoryKeys.length} categories`}
   />
   {#if error}
-    <p class="empty" style="color:var(--err)">Failed to load: {error}</p>
+    <!-- The shared failure marker (sweep c3e4edcc); no inline colour,
+         which would outrank its troubled ink. -->
+    <p class="empty load-failed" role="alert" style="margin:0 24px">Failed to load: {error}</p>
   {/if}
 
   <div style="padding:0 24px 16px">

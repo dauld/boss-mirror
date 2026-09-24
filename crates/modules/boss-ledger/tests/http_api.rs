@@ -204,7 +204,7 @@ async fn trial_balance_reflects_posted_entries() {
     //  A/R: 1000 debit, 1000 credit → balance 0
     //  Cash: 1000 debit → balance 1000
     //  Revenue Service: 1000 credit → balance 1000
-    let p_issue = json!({"invoice_id": "i1", "amount_cents": 1_000, "line_items": [{"category": "service", "amount_cents": 1_000}]});
+    let p_issue = json!({"invoice_id": "i1", "amount_cents": 1_000, "line_items": [{"category": "taproom", "amount_cents": 1_000}]});
     let p_paid = json!({"invoice_id": "i1", "amount_cents": 1_000});
     seed_entry(
         &db,
@@ -252,8 +252,8 @@ async fn trial_balance_reflects_posted_entries() {
 #[tokio::test(flavor = "multi_thread")]
 async fn trial_balance_as_of_filters_by_date() {
     let db = TestDb::new().await;
-    let p1 = json!({"invoice_id": "i1", "amount_cents": 100, "line_items": [{"category": "service", "amount_cents": 100}]});
-    let p2 = json!({"invoice_id": "i2", "amount_cents": 900, "line_items": [{"category": "service", "amount_cents": 900}]});
+    let p1 = json!({"invoice_id": "i1", "amount_cents": 100, "line_items": [{"category": "taproom", "amount_cents": 100}]});
+    let p2 = json!({"invoice_id": "i2", "amount_cents": 900, "line_items": [{"category": "taproom", "amount_cents": 900}]});
     seed_entry(
         &db,
         "finance.invoice.issued",
@@ -288,7 +288,7 @@ async fn trial_balance_as_of_filters_by_date() {
 #[tokio::test(flavor = "multi_thread")]
 async fn entries_lookup_by_account_code() {
     let db = TestDb::new().await;
-    let p = json!({"invoice_id": "i1", "amount_cents": 500, "line_items": [{"category": "new-sales", "amount_cents": 500}]});
+    let p = json!({"invoice_id": "i1", "amount_cents": 500, "line_items": [{"category": "wholesale", "amount_cents": 500}]});
     seed_entry(
         &db,
         "finance.invoice.issued",
@@ -341,7 +341,7 @@ async fn entries_lookup_by_source_pair() {
     // (here source_table='invoices', source_id='i-src-1'), fetch the
     // one journal entry it produced in a single round-trip.
     let db = TestDb::new().await;
-    let p = json!({"invoice_id": "i-src-1", "amount_cents": 500, "line_items": [{"category": "new-sales", "amount_cents": 500}]});
+    let p = json!({"invoice_id": "i-src-1", "amount_cents": 500, "line_items": [{"category": "wholesale", "amount_cents": 500}]});
     seed_entry(
         &db,
         "finance.invoice.issued",
@@ -386,7 +386,7 @@ async fn entries_source_filter_requires_both_halves() {
 #[tokio::test(flavor = "multi_thread")]
 async fn get_entry_detail_returns_lines() {
     let db = TestDb::new().await;
-    let p = json!({"invoice_id": "i1", "amount_cents": 500, "line_items": [{"category": "new-sales", "amount_cents": 500}]});
+    let p = json!({"invoice_id": "i1", "amount_cents": 500, "line_items": [{"category": "wholesale", "amount_cents": 500}]});
     let fact_id = seed_entry(
         &db,
         "finance.invoice.issued",
@@ -660,7 +660,7 @@ async fn cash_flow_unpaid_invoice_produces_no_operating_cash() {
     let payload = json!({
         "invoice_id": "cfo-1",
         "amount_cents": 1_000,
-        "line_items": [{"category": "service", "amount_cents": 1_000}],
+        "line_items": [{"category": "taproom", "amount_cents": 1_000}],
     });
     seed_entry(
         &db,
@@ -693,7 +693,7 @@ async fn cash_flow_paid_invoice_shows_cash_delta() {
     let p_issue = json!({
         "invoice_id": "cfo-2",
         "amount_cents": 1_000,
-        "line_items": [{"category": "service", "amount_cents": 1_000}],
+        "line_items": [{"category": "taproom", "amount_cents": 1_000}],
     });
     let p_paid = json!({"invoice_id": "cfo-2", "amount_cents": 1_000});
     seed_entry(
@@ -889,7 +889,7 @@ async fn bank_settlement_create_and_settle_round_trip() {
     let p_issue = json!({
         "invoice_id": "inv-bank-1",
         "amount_cents": 5_000,
-        "line_items": [{"category": "service", "amount_cents": 5_000}],
+        "line_items": [{"category": "taproom", "amount_cents": 5_000}],
     });
     seed_entry(
         &db,
@@ -995,7 +995,7 @@ async fn bank_settlement_sweep_settles_only_due_rows() {
         let p_issue = json!({
             "invoice_id": inv_id,
             "amount_cents": 1_000,
-            "line_items": [{"category": "service", "amount_cents": 1_000}],
+            "line_items": [{"category": "taproom", "amount_cents": 1_000}],
         });
         seed_entry(
             &db,
@@ -1078,7 +1078,7 @@ async fn bank_settlement_create_is_idempotent_on_id() {
     let p_issue = json!({
         "invoice_id": "inv-idem",
         "amount_cents": 2_000,
-        "line_items": [{"category": "service", "amount_cents": 2_000}],
+        "line_items": [{"category": "taproom", "amount_cents": 2_000}],
     });
     seed_entry(
         &db,
@@ -1417,7 +1417,7 @@ async fn seed_sales_tax_accrual(db: &TestDb, source_id: &str, tax_cents: i64) {
         "amount_cents": 100_000 + tax_cents,
         "currency": "USD",
         "line_items": [
-            {"category": "service", "amount_cents": 100_000, "currency": "USD"},
+            {"category": "taproom", "amount_cents": 100_000, "currency": "USD"},
         ],
         "tax_lines": [
             {"account": "2300", "jurisdiction": "US-CA", "amount_cents": tax_cents},
@@ -1830,7 +1830,7 @@ async fn seed_revenue_schedule(
               revenue_account, deferred_account, total_cents, start_date, \
               end_date, frequency, recognized_to_date_cents, \
               next_recognition_date, status) \
-         VALUES ($1, 'service_agreement', $1, $2, 'contracts', \
+         VALUES ($1, 'service_agreement', $1, $2, 'distribution', \
                  '4140', '2200', $3, $4, $5, 'monthly', 0, $6, 'active')",
     )
     .bind(id)
@@ -2016,7 +2016,7 @@ async fn auditor_role_is_rejected_from_every_ledger_write() {
                 "source_kind": "service_agreement",
                 "source_id": "sa-no-write",
                 "account_id": "p-1",
-                "revenue_category": "contracts",
+                "revenue_category": "distribution",
                 "revenue_account": "4140",
                 "deferred_account": "2200",
                 "total_cents": 1200,
@@ -2045,7 +2045,7 @@ async fn close_yearly_period_posts_closing_entries_and_locks() {
     let db = TestDb::new().await;
 
     // Seed some FY-2026 activity: $5,000 revenue + $2,000 expense.
-    // Two revenue lines ($3k service + $2k new-sales) so we exercise
+    // Two revenue lines ($3k taproom + $2k wholesale) so we exercise
     // the multi-account path. Expense side uses the payroll rule
     // (DR 6100 gross + CR 2150 + 1000), but since that mingles cash
     // and payroll-liability, use manual entries for the expense so
@@ -2054,8 +2054,8 @@ async fn close_yearly_period_posts_closing_entries_and_locks() {
         "invoice_id": "inv-close-1",
         "amount_cents": 5_000,
         "line_items": [
-            { "category": "service", "amount_cents": 3_000 },
-            { "category": "new-sales", "amount_cents": 2_000 },
+            { "category": "taproom", "amount_cents": 3_000 },
+            { "category": "wholesale", "amount_cents": 2_000 },
         ],
     });
     seed_entry(
@@ -2148,7 +2148,7 @@ async fn close_yearly_period_posts_closing_entries_and_locks() {
             .and_then(|r| r["balance_cents"].as_i64())
             .unwrap_or(0)
     };
-    assert_eq!(balance("4100"), 0, "new-sales revenue closed");
+    assert_eq!(balance("4100"), 0, "wholesale revenue closed");
     assert_eq!(balance("4120"), 0, "service revenue closed");
     assert_eq!(balance("6200"), 0, "rent expense closed");
     assert_eq!(balance("3000"), 3_000, "RE absorbed net income");
@@ -2182,7 +2182,7 @@ async fn close_yearly_period_writes_off_wip_variance() {
     let invoice_payload = json!({
         "invoice_id": "inv-wip-close-1",
         "amount_cents": 5_000,
-        "line_items": [{ "category": "new-sales", "amount_cents": 5_000 }],
+        "line_items": [{ "category": "wholesale", "amount_cents": 5_000 }],
     });
     seed_entry(
         &db,
@@ -2310,7 +2310,7 @@ async fn close_yearly_period_writes_off_wip_variance() {
 async fn close_monthly_period_is_rejected() {
     // Only yearly periods can be closed via /close — monthly use /lock.
     let db = TestDb::new().await;
-    let p = json!({"invoice_id": "i-monthly", "amount_cents": 100, "line_items": [{"category": "service", "amount_cents": 100}]});
+    let p = json!({"invoice_id": "i-monthly", "amount_cents": 100, "line_items": [{"category": "taproom", "amount_cents": 100}]});
     seed_entry(
         &db,
         "finance.invoice.issued",
@@ -2384,7 +2384,7 @@ async fn balance_sheet_holds_across_periods() {
     // to unclosed net income.
     let p_issue_old = json!({
         "invoice_id": "old", "amount_cents": 5_000,
-        "line_items": [{"category": "service", "amount_cents": 5_000}]
+        "line_items": [{"category": "taproom", "amount_cents": 5_000}]
     });
     let p_paid_old = json!({"invoice_id": "old", "amount_cents": 5_000});
     seed_entry(
@@ -2406,7 +2406,7 @@ async fn balance_sheet_holds_across_periods() {
 
     let p_issue_new = json!({
         "invoice_id": "new", "amount_cents": 3_000,
-        "line_items": [{"category": "service", "amount_cents": 3_000}]
+        "line_items": [{"category": "taproom", "amount_cents": 3_000}]
     });
     let p_paid_new = json!({"invoice_id": "new", "amount_cents": 3_000});
     seed_entry(

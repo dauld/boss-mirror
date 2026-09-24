@@ -18,11 +18,7 @@ pub fn kind_to_subject(kind: &AssetEventKind) -> &'static str {
         AssetEventKind::Identified { .. } => "identified",
         AssetEventKind::Received { .. } => "received",
         AssetEventKind::PutAway { .. } => "put_away",
-        AssetEventKind::TriageCompleted { .. } => "triage_completed",
-        AssetEventKind::RefurbStarted { .. } => "refurb_started",
         AssetEventKind::PartReplaced { .. } => "part_replaced",
-        AssetEventKind::RefurbCompleted => "refurb_completed",
-        AssetEventKind::QaPassed { .. } => "qa_passed",
         AssetEventKind::Sold { .. } => "sold",
         AssetEventKind::Shipped { .. } => "shipped",
         AssetEventKind::Installed { .. } => "installed",
@@ -107,17 +103,9 @@ mod tests {
                 source: IntakeSource::new("oem-new"),
                 oem_serial: None,
             },
-            AssetEventKind::TriageCompleted {
-                notes: String::new(),
-            },
-            AssetEventKind::RefurbStarted { bench: None },
             AssetEventKind::PartReplaced {
                 part_sku: String::new(),
                 reason: String::new(),
-            },
-            AssetEventKind::RefurbCompleted,
-            AssetEventKind::QaPassed {
-                certificate_id: None,
             },
             AssetEventKind::Sold {
                 account_id: String::new(),

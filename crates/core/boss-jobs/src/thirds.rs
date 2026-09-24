@@ -317,12 +317,20 @@ pub fn thirds(inputs: &RegionInputs<'_>, stuck: &[ThirdStuck]) -> Vec<Third> {
         .collect()
 }
 
-/// The machine cell: every machine the regions carry, counted once by
-/// state, and the failed and unjudged ones named with their region.
-pub fn machine_summary(regions: &[Region]) -> MachineSummary {
+/// Where a plant machine is said to stand in the cell: the plant serves
+/// every region and stands in none (62de32ae decision 11), so its
+/// machines are named by the strip that draws them.
+pub const PLANT: &str = "plant";
+
+/// The machine cell: every machine the regions carry AND the plant's,
+/// counted once by state, and the failed and unjudged ones named with
+/// where they stand. The plant is passed apart because it left the
+/// regions — a count over the regions alone would drop the host runners.
+pub fn machine_summary(regions: &[Region], plant: &[crate::regions::Machine]) -> MachineSummary {
     let all: Vec<(&str, &crate::regions::Machine)> = regions
         .iter()
         .flat_map(|r| r.machines.iter().map(move |m| (r.name.as_str(), m)))
+        .chain(plant.iter().map(|m| (PLANT, m)))
         .collect();
     let of = |s: MachineState| all.iter().filter(|(_, m)| m.state == s).count();
     let named = |s: MachineState| {
@@ -682,7 +690,7 @@ mod tests {
             m("d", MachineState::Failed),
             m("e", MachineState::Unknown),
         ];
-        let s = machine_summary(&out.regions);
+        let s = machine_summary(&out.regions, &[]);
         assert_eq!(
             (s.running, s.idle, s.failed, s.unknown, s.total),
             (1, 1, 1, 2, 5)

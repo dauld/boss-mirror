@@ -392,8 +392,8 @@ impl TenantMeta {
     /// Returns 1 (legacy day-tick) when `tick_duration` is `"1d"`
     /// or absent. Returns 24 for `"1h"`, 96 for `"15m"`, etc.
     ///
-    /// Per-tenant-engine callers (`boss-brewery-engine`,
-    /// `boss-used-device-shop-engine`) pass this to
+    /// Per-tenant-engine callers (today `boss-brewery-engine`)
+    /// pass this to
     /// `boss_sim::engines::run_ticks_with_handlers` so the sim
     /// loop ticks at the configured granularity. Invalid values
     /// surface during config parse via `parse_tick_duration` —

@@ -64,11 +64,15 @@ LINT=sim-boundary-audit
 # (boss_operator_baseline_seed.rs is in boss-people, etc.) — those
 # are tracked in the seed-loader-boundary follow-up; this lint covers
 # the cleanly-separable sim-side crates only.
+#
+# The engines are the GLOB, not a list: the list named both tenants and
+# outlived neither's rename, and when the used-device shop's engine was
+# deleted (backlog a8991c86, car 7) its line would have been a path that
+# silently matched nothing — the `[[ -f ]]` below skipped it on every run.
 SIM_SIDE_CRATES=()
 for path in \
     crates/orchestrators/boss-sim \
-    crates/tenants/boss-brewery-engine \
-    crates/tenants/boss-used-device-shop-engine
+    crates/tenants/*-engine
 do
     [[ -f "$path/Cargo.toml" ]] && SIM_SIDE_CRATES+=("$path")
 done

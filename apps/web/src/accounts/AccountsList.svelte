@@ -218,8 +218,12 @@
 <div class="catalog theme-exec">
   <PageHeader
     eyebrow="Customers"
-    title={`${accounts.length} accounts`}
-    subtitle={subtitleLine}
+    title={error ? 'Accounts' : `${accounts.length} accounts`}
+    subtitle={error
+      ? // "0 accounts" above the failure line read as an empty book
+        // (sweep c3e4edcc). The count is unknown, so say so.
+        'Account count unknown — the read failed'
+      : subtitleLine}
   />
 
   {#if isCapped(accountsPage)}
@@ -290,7 +294,7 @@
       {#if loading}
         <p class="empty">Loading…</p>
       {:else if error}
-        <p class="empty">Couldn't load accounts: {error}</p>
+        <p class="empty load-failed" role="alert">Couldn't load accounts: {error}</p>
       {:else if visible.length === 0}
         <p class="empty">No accounts match those filters.</p>
       {:else}

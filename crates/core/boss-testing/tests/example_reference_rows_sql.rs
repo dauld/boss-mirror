@@ -42,8 +42,8 @@
 //!     parent (`locations.parent_id`), which a reason added after the
 //!     fact could not.
 //!   * A RETIRED EXAMPLE'S MIGRATION ROWS STILL LEAVE (backlog a8991c86,
-//!     car 6). On a tree without examples/used-device-shop — the tree
-//!     car 7 leaves — the same fresh-schema line holds, because the rows
+//!     car 6). examples/used-device-shop is gone (car 7), and the
+//!     fresh-schema line above still holds on this tree, because the rows
 //!     01-registries.sql seeds for it are declared under
 //!     infra/postgres/retired-examples/; and without that list they
 //!     would not (the control).
@@ -145,14 +145,6 @@ fn evict_in(url: &str, tenant: &Path, env: Env) -> Vec<serde_json::Value> {
 
 fn evict(url: &str) -> Vec<serde_json::Value> {
     evict_for(url, &plain_tenant())
-}
-
-/// An examples directory shaped like the tree after the used-device
-/// shop's deletion (backlog a8991c86, car 7): the brewery alone.
-fn examples_without_the_device_shop() -> PathBuf {
-    let e = scratch_dir("example-reference-rows-sql-car7");
-    std::os::unix::fs::symlink(repo_root().join("examples/brewery"), e.join("brewery")).unwrap();
-    e
 }
 
 async fn set(db: &TestDb, sql: &str) -> BTreeSet<String> {
@@ -299,56 +291,18 @@ async fn classes(db: &TestDb, kind: &str, attr: &str) -> BTreeSet<String> {
 #[tokio::test(flavor = "multi_thread")]
 async fn on_a_fresh_schema_what_remains_is_exactly_what_the_platform_names() {
     let db = TestDb::new().await;
-    what_remains_is_exactly_what_the_platform_names(&db, &[]).await;
-}
+    let deleted = what_remains_is_exactly_what_the_platform_names(&db, &[]).await;
 
-/// The tree after car 7 of backlog a8991c86, which deletes
-/// examples/used-device-shop. 01-registries.sql still seeds its 26
-/// roles, ten departments, three account types, `warehouse-zone` and
-/// its companies row on every fresh instance, so they must still leave.
-///
-/// The control first: with the brewery alone and NO retired list, the
-/// rows only the device shop carried are no candidate at all — the
-/// hazard the car-0 measure recorded, reproduced. Then the same tree
-/// with the retired list (the default, beside the script): what remains
-/// is exactly what the platform names, the same line the current tree
-/// is held to, and every row the list names was on the fresh schema and
-/// left. That, with the DB-free pin in example_reference_rows_sh.rs
-/// (the list names only rows 01-registries.sql seeds), is the equality:
-/// the list holds every device-shop row the platform does not keep and
-/// the brewery does not carry, and nothing the migration did not seed.
-#[tokio::test(flavor = "multi_thread")]
-async fn without_the_device_shop_example_its_migration_rows_still_leave() {
-    let db = TestDb::new().await;
-    let url = db.url();
-    let examples = examples_without_the_device_shop();
-    let no_list = scratch_dir("example-reference-rows-sql-no-retired");
-
-    let p = plan_in(
-        &url,
-        &plain_tenant(),
-        &[
-            ("BOSS_EXAMPLES_DIR", &examples),
-            ("BOSS_RETIRED_EXAMPLES_DIR", &no_list),
-        ],
-    );
-    let deletable = keys(&p["classes"]["deletable"]);
-    for stranded in [
-        "employee:refurb-tech",
-        "employee:service",
-        "account:clinic",
-        "location:warehouse-zone",
-    ] {
-        assert!(
-            !deletable.contains(stranded),
-            "the control: without the list, {stranded} is no candidate — it would stay on every fresh instance"
-        );
-    }
-    assert!(!keys(&p["companies"]["deletable"]).contains("used-device-shop"));
-
-    let deleted =
-        what_remains_is_exactly_what_the_platform_names(&db, &[("BOSS_EXAMPLES_DIR", &examples)])
-            .await;
+    // examples/used-device-shop is gone (backlog a8991c86, car 7), and
+    // 01-registries.sql still seeds its 26 roles, ten departments, three
+    // account types, `warehouse-zone` and its companies row on every
+    // fresh instance. The line above holding on THIS tree is what the
+    // retired list buys, and every row the list names was on the fresh
+    // schema and left. That, with the DB-free pin in
+    // example_reference_rows_sh.rs (the list names only rows
+    // 01-registries.sql seeds), is the equality: the list holds every
+    // device-shop row the platform does not keep and the brewery does not
+    // carry, and nothing the migration did not seed.
     let listed: toml::Value = toml::from_str(
         &std::fs::read_to_string(
             repo_root().join("infra/postgres/retired-examples/used-device-shop/seeds/classes.toml"),
@@ -367,6 +321,36 @@ async fn without_the_device_shop_example_its_migration_rows_still_leave() {
             "{k} is on the retired list, so a fresh schema held it and the run evicted it"
         );
     }
+}
+
+/// The control for the case above: this tree (the brewery alone since
+/// car 7) with NO retired list, and the rows only the device shop
+/// carried are no candidate at all — the hazard the car-0 measure
+/// recorded, reproduced.
+#[tokio::test(flavor = "multi_thread")]
+async fn without_the_retired_list_the_device_shops_migration_rows_would_stay() {
+    let db = TestDb::new().await;
+    let url = db.url();
+    let no_list = scratch_dir("example-reference-rows-sql-no-retired");
+
+    let p = plan_in(
+        &url,
+        &plain_tenant(),
+        &[("BOSS_RETIRED_EXAMPLES_DIR", &no_list)],
+    );
+    let deletable = keys(&p["classes"]["deletable"]);
+    for stranded in [
+        "employee:refurb-tech",
+        "employee:service",
+        "account:clinic",
+        "location:warehouse-zone",
+    ] {
+        assert!(
+            !deletable.contains(stranded),
+            "the control: without the list, {stranded} is no candidate — it would stay on every fresh instance"
+        );
+    }
+    assert!(!keys(&p["companies"]["deletable"]).contains("used-device-shop"));
 }
 
 /// Plan, run and read back the eviction on a fresh schema, with the

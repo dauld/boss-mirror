@@ -241,3 +241,11 @@ export function hudOf(
         };
   return { header, read: 'ok', failed: false, rows, machines };
 }
+
+/** Where a listed machine's link goes: its region's map — or, for a
+ *  machine of the PLANT (design 62de32ae decision 11; the server's
+ *  `thirds::PLANT`), the world, because the plant strip stands under the
+ *  world map and serves every region rather than one. */
+export function machineHref(m: MachineAt): string {
+  return m.region === 'plant' ? '/it' : `/it/yard/${m.region}`;
+}

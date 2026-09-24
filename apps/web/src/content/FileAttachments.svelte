@@ -126,7 +126,8 @@
       this surface on.
     </p>
   {:else if error}
-    <p class="files-error">Couldn't load attachments — {error}</p>
+    <!-- The shared failure marker (sweep c3e4edcc) sets the ink. -->
+    <p class="files-error load-failed" role="alert">Couldn't load attachments — {error}</p>
   {:else if files.length === 0}
     <p class="files-empty">No attachments yet.</p>
   {:else}
@@ -190,9 +191,6 @@
   .files-error {
     color: var(--static);
     font-size: 0.9rem;
-  }
-  .files-error {
-    color: var(--err);
   }
   .files-list {
     list-style: none;

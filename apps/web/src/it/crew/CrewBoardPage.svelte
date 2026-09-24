@@ -20,7 +20,8 @@
   import { appToday } from '@boss/web-kit/sim-clock';
   import { formatActor } from '../../data/actor';
   import { href } from '../../router';
-  import { crewPlatforms, type Deck } from '../yard/world-interior';
+  import type { Deck } from '../yard/world-interior';
+  import { actors } from '../yard/shop-floor';
   import {
     actorCards,
     CAR_WINDOW,
@@ -108,9 +109,11 @@
       : null,
   );
 
-  // The territory's platforms, from the same fold the board renders.
-  // A failed read is a failed DECK — a region drawn with no crews on it
-  // would read as an empty shop rather than an unread one.
+  // The region's ACTORS, from the same fold the board renders (design
+  // 62de32ae, decision 8): a lamp per session and per run, under the
+  // identity they share — shop-floor.ts. A failed read is a failed DECK
+  // — a region drawn with no crews on it would read as an empty shop
+  // rather than an unread one.
   const deck = $derived<Deck>(
     crew === null
       ? { kind: 'reading' }
@@ -120,7 +123,12 @@
           ? { kind: 'unavailable', why: crew.agentRuns.error }
           : floor === null
             ? { kind: 'reading' }
-            : { kind: 'ready', region: 'shop-floor', platforms: crewPlatforms(floor.crews, floor.unlinked) },
+            : {
+                kind: 'ready',
+                region: 'shop-floor',
+                platforms: [],
+                actors: actors(floor.crews, floor.unlinked, loadedAt.toISOString()),
+              },
   );
   $effect(() => {
     ondeck(deck);

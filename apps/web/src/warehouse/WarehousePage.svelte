@@ -255,7 +255,9 @@
     {#if statusRead.kind === 'loading' && !status}
       <p class="empty" style="padding:16px">Loading warehouse status…</p>
     {:else if !status}
-      <p class="empty" style="padding:16px">
+      <!-- The shared failure marker (sweep c3e4edcc, warehouse gap 3),
+           like the Inventory and Receiving tabs' lines. -->
+      <p class="empty load-failed" role="alert" style="margin:16px 0">
         Warehouse status unavailable{statusRead.kind === 'failed' ? ` — ${statusRead.error}` : '.'}
       </p>
     {:else}

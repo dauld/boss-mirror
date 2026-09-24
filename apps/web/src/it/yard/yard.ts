@@ -1400,14 +1400,31 @@ async function fetchStationQueue(name: string): Promise<StationQueueEnvelope | n
   }
 }
 
+/** THE NEWEST PAGE OF CARS AND EVERY OPEN ONE, as one list, each car
+ *  once (car E of design 62de32ae). The page alone is a limit, not a
+ *  filter: on 2026-09-24 ten open cars awaited proof and two were in the
+ *  newest 200, so the shed drew 5 wagons under SHED 11. The open read's
+ *  row wins — it is the same packet, read with the same steps. */
+export function withOpenCars(page: readonly JobLite[], open: readonly JobLite[]): readonly JobLite[] {
+  const ids = new Set(open.map((c) => c.id));
+  return [...open, ...page.filter((c) => !ids.has(c.id))];
+}
+
 export async function fetchYard(): Promise<YardState | null> {
-  const [tr, sr, dockQueue, report, gateRuns, publishRequests, dayPage] = await Promise.all([
+  const [tr, sr, openCars, dockQueue, report, gateRuns, publishRequests, dayPage] = await Promise.all([
     // 40, not 20: the window has to hold the open trains, the five
     // arrivals the board shows, AND the arrivals the ETA medians are
     // taken over — cancelled trains sit in the same list and would
     // otherwise crowd the samples out.
     fetch('/api/jobs?kind=pr-train&limit=40'),
     fetch('/api/jobs?kind=ship-a-change&limit=200'),
+    // EVERY OPEN CAR, however old (see `withOpenCars`). Additive: a
+    // failed read leaves the page alone, and the region map's places
+    // note then names what the shed's slice falls short of.
+    fetch('/api/jobs?kind=ship-a-change&status=open&limit=500')
+      .then((r) => (r.ok ? (r.json() as Promise<{ data?: JobLite[] }>) : null))
+      .then((b) => (b && Array.isArray(b.data) ? b.data : []))
+      .catch(() => [] as JobLite[]),
     fetchStationQueue('loading-dock'),
     // The scoreboard is ADDITIVE: a yard that cannot show its stats is
     // still a yard, so this resolves to null rather than failing the
@@ -1444,7 +1461,7 @@ export async function fetchYard(): Promise<YardState | null> {
   ]);
   if (!tr.ok || !sr.ok) return null;
   const trains = ((await tr.json()) as { data?: JobLite[] }).data ?? [];
-  const ships = ((await sr.json()) as { data?: JobLite[] }).data ?? [];
+  const ships = withOpenCars(((await sr.json()) as { data?: JobLite[] }).data ?? [], openCars);
   return assembleYard(trains, ships, dockQueue, Date.now(), report, gateRuns, publishRequests, dayPage);
 }
 

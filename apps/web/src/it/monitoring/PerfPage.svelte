@@ -166,7 +166,7 @@
       </button>
       <button type="button" class="btn" onclick={resetHistograms}>Reset</button>
       {#if resetError}
-        <span class="load-failed" role="alert" style="color:var(--err)">Reset refused: {resetError}</span>
+        <span class="load-failed" role="alert">Reset refused: {resetError}</span>
       {/if}
     </div>
   </div>
@@ -174,9 +174,11 @@
   {#if loadState.kind === 'loading'}
     <div style="color:var(--static)">Loading…</div>
   {:else if loadState.kind === 'error'}
-    <div style="color:var(--err)">
+    <!-- The shared failure marker (sweep c3e4edcc) — an inline --err
+         colour outranked the marker's troubled ink, so none here. -->
+    <p class="load-failed" role="alert">
       Failed to load perf snapshot: {loadState.message}
-    </div>
+    </p>
   {:else}
     {@const snap = loadState.snap}
     <div style="color:var(--static); font-size:13px; margin-bottom:12px">

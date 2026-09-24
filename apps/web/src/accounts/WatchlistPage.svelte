@@ -238,7 +238,8 @@
 {:else if loadState.kind === 'error'}
   <div class="catalog theme-exec">
     <PageHeader eyebrow="Churn watchlist" title="Couldn't load watchlist" />
-    <p class="empty">{loadState.message}</p>
+    <!-- The shared failure marker (sweep c3e4edcc, backlog 94d5d2d2). -->
+    <p class="empty load-failed" role="alert">{loadState.message}</p>
   </div>
 {:else if loadState.kind === 'denied'}
   <div class="catalog theme-exec">

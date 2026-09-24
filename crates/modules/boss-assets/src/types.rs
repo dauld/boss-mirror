@@ -145,8 +145,8 @@ pub enum AssetEventKind {
         oem_serial: Option<String>,
     },
     /// Sets the catalog model (`sku`) once it's known — the
-    /// "register now, identify later" path (e.g. a used unit identified
-    /// during triage). Does not advance custody phase; pure
+    /// "register now, identify later" path (e.g. a unit whose model is
+    /// read off it after intake). Does not advance custody phase; pure
     /// identification. `Received` may also carry the sku when it's known
     /// at intake, so this event is only needed for late identification.
     Identified {
@@ -157,7 +157,7 @@ pub enum AssetEventKind {
     Received {
         /// Catalog SKU this physical unit is an instance of, when known
         /// at intake. `None` = received but not yet identified; a later
-        /// `Identified` event (or triage) sets it. Optional so receipt
+        /// `Identified` event sets it. Optional so receipt
         /// is pure custody, decoupled from identification.
         #[serde(default)]
         sku: Option<String>,
@@ -170,19 +170,15 @@ pub enum AssetEventKind {
     PutAway {
         bin: String,
     },
-    TriageCompleted {
-        notes: String,
-    },
-    RefurbStarted {
-        bench: Option<String>,
-    },
+    // TriageCompleted, RefurbStarted, RefurbCompleted and QaPassed —
+    // the used-device shop's refurb pipeline — retired with that tenant
+    // (backlog a8991c86, 2026-09-24): only its engine wrote them, and
+    // the system of record's audit log held none of them, nor any asset
+    // event at all. A log that did would now refuse to deserialise
+    // rather than project a phase nothing else can reach.
     PartReplaced {
         part_sku: String,
         reason: String,
-    },
-    RefurbCompleted,
-    QaPassed {
-        certificate_id: Option<String>,
     },
 
     // Commerce
@@ -289,11 +285,11 @@ pub struct AssetEvent {
 // Current-state projection
 // ---------------------------------------------------------------------------
 
-/// Where a physical unit sits in its custody/refurb/service lifecycle.
+/// Where a physical unit sits in its custody/service lifecycle.
 /// Projection-derived: `project.rs` folds the asset event log into one
 /// of these phases; callers never post a phase directly. Free-text
 /// wrapper around a kebab-case string so the vocabulary is data — the
-/// ten platform phases are seeded as Class rows under
+/// platform phases (`ORDER`) are the ACTIVE Class rows under
 /// `(subject_kind='asset', member_attribute='phase')` and a tenant
 /// extends the lifecycle by adding a row, not forking core. Serializes
 /// transparently to the bare string; the `assets.phase` column stores
@@ -308,14 +304,25 @@ impl AssetLifecyclePhase {
     /// The entry state for an identity-first asset.
     pub const REGISTERED: &'static str = "registered";
     pub const RECEIVED: &'static str = "received";
-    pub const TRIAGING: &'static str = "triaging";
-    pub const REFURBING: &'static str = "refurbing";
-    pub const QA: &'static str = "qa";
-    pub const READY: &'static str = "ready";
     pub const SHIPPED: &'static str = "shipped";
     pub const INSTALLED: &'static str = "installed";
     pub const OUT_FOR_SERVICE: &'static str = "out-for-service";
     pub const DECOMMISSIONED: &'static str = "decommissioned";
+
+    /// Every phase the projector can emit, in pipeline order — the one
+    /// list both summary adapters count over, and the one the Class
+    /// rows the migrations leave active are held equal to
+    /// (projection_persistence.rs). Until backlog a8991c86 it was spelled
+    /// twice inline and carried the refurb pipeline's triaging /
+    /// refurbing / qa / ready (retired by 20260924172233).
+    pub const ORDER: [&'static str; 6] = [
+        Self::REGISTERED,
+        Self::RECEIVED,
+        Self::SHIPPED,
+        Self::INSTALLED,
+        Self::OUT_FOR_SERVICE,
+        Self::DECOMMISSIONED,
+    ];
 
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())

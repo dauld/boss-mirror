@@ -149,8 +149,10 @@
   // wallclock default lands after every event and exports an empty file.
   // Populated when the panel opens (the sim clock is loaded by then); the
   // operator can override either date. The export inherits the page's
-  // source, kind, actor and provenance filters; the browser saves via
-  // Content-Disposition.
+  // source, kind, actor and provenance filters; the page reads the whole
+  // body with fetch and saves it as a Blob, taking only the file NAME
+  // from Content-Disposition (4630ebc0 — it was a navigation the browser
+  // saved by that header).
   function isoDate(d: Date): string {
     return d.toISOString().slice(0, 10);
   }
@@ -437,7 +439,12 @@
     {#if statsState.kind === 'loading'}
       <p class="events-stats-note">Measuring the log…</p>
     {:else if statsState.kind === 'error'}
-      <p class="events-stats-note">Stats unavailable: {statsState.message}</p>
+      <!-- The page's four failure lines — this one, the tail read's, the
+           live stream's "down" and a failed export — each carry the shared
+           marker (FAILURE_MARKER, tests/mocked/_routes.ts), which draws the
+           failed read's rail and is what the outage crawl counts (sweep
+           c3e4edcc). -->
+      <p class="events-stats-note load-failed" role="alert">Stats unavailable: {statsState.message}</p>
     {:else}
       {@const st = statsState.stats}
       <div class="events-stats">
@@ -601,7 +608,11 @@
         </div>
       {/if}
       {#if exportState.kind !== 'idle'}
-        <p class="events-download-status events-download-{exportState.kind}" role="status">
+        <p
+          class="events-download-status events-download-{exportState.kind}"
+          class:load-failed={exportState.kind === 'failed'}
+          role={exportState.kind === 'failed' ? 'alert' : 'status'}
+        >
           {exportState.kind === 'reading' ? 'Reading the export…' : exportState.message}
         </p>
       {/if}
@@ -609,7 +620,11 @@
 
   <Section title="Stream" wide>
       {#if liveState.kind !== 'off'}
-        <p class="events-live events-live-{liveState.kind}" role="status">
+        <p
+          class="events-live events-live-{liveState.kind}"
+          class:load-failed={liveState.kind === 'polling'}
+          role={liveState.kind === 'polling' ? 'alert' : 'status'}
+        >
           {#if liveState.kind === 'connecting'}
             Live stream connecting…
           {:else if liveState.kind === 'live'}
@@ -626,7 +641,7 @@
       {#if loadState.kind === 'loading'}
         <p class="empty">Loading…</p>
       {:else if loadState.kind === 'error'}
-        <p class="empty">Failed to load: {loadState.message}</p>
+        <p class="empty load-failed" role="alert">Failed to load: {loadState.message}</p>
       {:else if loadState.rows.length === 0}
         <p class="empty">No events match these filters.</p>
       {:else}
@@ -726,8 +741,8 @@
     font-size: 12px;
     color: var(--static);
   }
-  .events-live-reconnecting,
-  .events-live-polling {
+  /* The down line (polling) is the shared marker's since c3e4edcc. */
+  .events-live-reconnecting {
     color: inherit;
     font-weight: 500;
   }
@@ -799,10 +814,6 @@
     margin: 8px 0 0;
     font-size: 12px;
     color: var(--static);
-  }
-  .events-download-failed {
-    color: inherit;
-    font-weight: 500;
   }
   .events-table tbody tr.events-row {
     cursor: pointer;

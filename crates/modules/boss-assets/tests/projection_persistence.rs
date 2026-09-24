@@ -76,6 +76,31 @@ fn evt(id: &str, serial: &str, day: u32, kind: AssetEventKind) -> AssetEvent {
     }
 }
 
+/// The lifecycle vocabulary lives twice — the phases the projector can
+/// emit (`AssetLifecyclePhase::ORDER`) and the Class rows the migrations
+/// leave ACTIVE under `(asset, phase)` — so it gets an equality test
+/// (CLAUDE.md §9a). Until backlog a8991c86 retired the used-device
+/// shop's refurb pipeline, four of the ten rows (triaging, refurbing,
+/// qa, ready) named phases only that tenant's events could reach.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_active_phase_classes_are_the_phases_the_projector_emits() {
+    let db = TestDb::new().await;
+    let codes: Vec<String> = sqlx::query_scalar(
+        "SELECT code FROM classes \
+         WHERE subject_kind = 'asset' AND member_attribute = 'phase' \
+           AND retired_at IS NULL \
+         ORDER BY sort_order",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        codes,
+        AssetLifecyclePhase::ORDER,
+        "the active asset.phase Class rows, in pipeline order"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn append_received_event_creates_devices_row() {
     let db = TestDb::new().await;

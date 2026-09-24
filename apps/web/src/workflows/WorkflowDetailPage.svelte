@@ -211,7 +211,12 @@
   </div>
 {:else if loadState.kind === 'error'}
   <div class="catalog theme-exec">
-    <PageHeader eyebrow="Platform · Job kind" title={kindSlug} subtitle={loadState.message} />
+    <PageHeader eyebrow="Platform · Job kind" title={kindSlug} />
+    <!-- The failure was the header's subtitle, in the grey of any
+         subtitle; it is the shared failure marker now (sweep c3e4edcc). -->
+    <p class="empty load-failed" role="alert" style="margin:0 24px">
+      Couldn't load this Workflow: {loadState.message}
+    </p>
   </div>
 {:else}
   {@const spec = loadState.spec}

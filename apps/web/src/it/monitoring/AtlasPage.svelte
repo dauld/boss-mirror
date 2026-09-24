@@ -100,7 +100,10 @@
     {#if atlas.kind === 'loading'}
       <p class="empty">Loading Workflows…</p>
     {:else if atlas.kind === 'error'}
-      <p class="empty">Couldn't load /api/workflows: {atlas.message}</p>
+      <!-- Both of this page's failed reads wear the shared marker (sweep
+           c3e4edcc); it draws the rail the page's own class used to fake
+           in red words. -->
+      <p class="empty load-failed" role="alert">Couldn't load /api/workflows: {atlas.message}</p>
     {:else if atlas.specs.length === 0}
       <p class="empty">
         This tenant has no published Workflows. Author one at
@@ -165,7 +168,7 @@
     {:else if stations.kind === 'unavailable'}
       <p class="atlas-note">The station registry has not reached this deployment.</p>
     {:else if stations.kind === 'error'}
-      <p class="atlas-note atlas-fail">
+      <p class="atlas-note load-failed" role="alert">
         Station read FAILED — this is an outage of the read, not an empty registry.
       </p>
     {:else}
@@ -271,7 +274,6 @@
   }
   .atlas-stations { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
   .atlas-stations th, .atlas-stations td { text-align: left; padding: 0.3rem 0.6rem; border-bottom: 1px solid var(--border); }
-  .atlas-fail { color: var(--err); font-weight: 600; }
   /* A station omitting a whole kind of work must LOOK like it
      (backlog abda9ab4) — a zero renders plain, a finding does not. */
   .atlas-unreachable { color: var(--err); font-weight: 600; }

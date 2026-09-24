@@ -92,11 +92,17 @@
     title="Subjects & Classes"
     subtitle={loadingKinds
       ? 'Loading…'
-      : `${kindCount} subject kind${kindCount === 1 ? '' : 's'} · the Class registry`}
+      : error && kindCount === 0
+        ? // A failed kinds read leaves the map empty, and "0 subject
+          // kinds" read as an empty registry (sweep c3e4edcc).
+          'Subject-kind count unknown — the registry read failed'
+        : `${kindCount} subject kind${kindCount === 1 ? '' : 's'} · the Class registry`}
   />
 
   {#if error}
-    <p class="empty" style="color:var(--err); padding:0 24px">Failed to load: {error}</p>
+    <!-- The shared failure marker (sweep c3e4edcc); no inline colour or
+         padding, which would outrank its troubled ink and rail card. -->
+    <p class="empty load-failed" role="alert" style="margin:0 24px">Failed to load: {error}</p>
   {/if}
 
   <div class="sc-body">

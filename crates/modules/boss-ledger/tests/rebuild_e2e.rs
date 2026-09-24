@@ -43,8 +43,8 @@ async fn rebuild_projects_all_facts_from_empty_ledger() {
     let db = TestDb::new().await;
 
     // Seed 3 facts directly, no ledger posting yet.
-    let p1 = json!({"invoice_id": "i1", "amount_cents": 1_000, "line_items": [{"category": "service", "amount_cents": 1_000}]});
-    let p2 = json!({"invoice_id": "i2", "amount_cents": 2_500, "line_items": [{"category": "new-sales", "amount_cents": 2_500}]});
+    let p1 = json!({"invoice_id": "i1", "amount_cents": 1_000, "line_items": [{"category": "taproom", "amount_cents": 1_000}]});
+    let p2 = json!({"invoice_id": "i2", "amount_cents": 2_500, "line_items": [{"category": "wholesale", "amount_cents": 2_500}]});
     let p3 = json!({"invoice_id": "i1", "amount_cents": 1_000});
     insert_fact(
         &db,
@@ -84,7 +84,7 @@ async fn rebuild_projects_all_facts_from_empty_ledger() {
 #[tokio::test(flavor = "multi_thread")]
 async fn rebuild_is_idempotent() {
     let db = TestDb::new().await;
-    let p = json!({"invoice_id": "i1", "amount_cents": 500, "line_items": [{"category": "service", "amount_cents": 500}]});
+    let p = json!({"invoice_id": "i1", "amount_cents": 500, "line_items": [{"category": "taproom", "amount_cents": 500}]});
     insert_fact(
         &db,
         "finance.invoice.issued",
@@ -113,7 +113,7 @@ async fn rebuild_is_idempotent() {
 #[tokio::test(flavor = "multi_thread")]
 async fn rebuild_preserves_trial_balance() {
     let db = TestDb::new().await;
-    let p_issued = json!({"invoice_id": "i1", "amount_cents": 1_000, "line_items": [{"category": "service", "amount_cents": 1_000}]});
+    let p_issued = json!({"invoice_id": "i1", "amount_cents": 1_000, "line_items": [{"category": "taproom", "amount_cents": 1_000}]});
     let p_paid = json!({"invoice_id": "i1", "amount_cents": 1_000});
     // bill_approved requires `lines` (no more lump-only fallback).
     let p_bill = json!({
@@ -157,8 +157,8 @@ async fn rebuild_skips_facts_in_locked_periods() {
     let db = TestDb::new().await;
 
     // Two facts: one in March (which we'll lock), one in April (open).
-    let p_mar = json!({"invoice_id": "i-mar", "amount_cents": 1_000, "line_items": [{"category": "service", "amount_cents": 1_000}]});
-    let p_apr = json!({"invoice_id": "i-apr", "amount_cents": 2_000, "line_items": [{"category": "service", "amount_cents": 2_000}]});
+    let p_mar = json!({"invoice_id": "i-mar", "amount_cents": 1_000, "line_items": [{"category": "taproom", "amount_cents": 1_000}]});
+    let p_apr = json!({"invoice_id": "i-apr", "amount_cents": 2_000, "line_items": [{"category": "taproom", "amount_cents": 2_000}]});
     insert_fact(
         &db,
         "finance.invoice.issued",
@@ -192,7 +192,7 @@ async fn rebuild_skips_facts_in_locked_periods() {
 
     // Add a new April fact, rebuild. March should be untouched; only April
     // re-projects.
-    let p_apr2 = json!({"invoice_id": "i-apr2", "amount_cents": 500, "line_items": [{"category": "parts", "amount_cents": 500}]});
+    let p_apr2 = json!({"invoice_id": "i-apr2", "amount_cents": 500, "line_items": [{"category": "event-package", "amount_cents": 500}]});
     insert_fact(
         &db,
         "finance.invoice.issued",

@@ -1159,19 +1159,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "boss-jobs-client"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "boss-core",
- "chrono",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "boss-ledger"
 version = "0.1.0"
 dependencies = [
@@ -1672,25 +1659,6 @@ dependencies = [
  "toml 1.1.2+spec-1.1.0",
  "tower",
  "uuid",
-]
-
-[[package]]
-name = "boss-used-device-shop-engine"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "boss-jobs",
- "boss-policy",
- "boss-ports",
- "boss-sim",
- "boss-testing",
- "chrono",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "toml 1.1.2+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

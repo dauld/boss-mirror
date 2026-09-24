@@ -57,8 +57,10 @@
   />
   {#if error}
     <!-- load-failed + role=alert: the shared failure marker the outage
-         crawl asserts (tests/mocked/_routes.ts FAILURE_MARKER; backlog 7267f9ce). -->
-    <p class="empty load-failed" role="alert" style="color:var(--err)">Failed to load: {error}</p>
+         crawl asserts (tests/mocked/_routes.ts FAILURE_MARKER; backlog 7267f9ce).
+         No inline colour: the marker's own rule sets the words in troubled
+         ink, and an inline --err outranked it (sweep c3e4edcc). -->
+    <p class="empty load-failed" role="alert" style="margin:0 24px">Failed to load: {error}</p>
   {/if}
 
   {#if plugins.length === 0 && !loading && !error}

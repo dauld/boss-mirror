@@ -116,7 +116,7 @@ async fn an_ordinary_posting_on_dec_31_still_belongs_to_december() {
         dec31(2025),
         &json!({
             "invoice_id": "inv-dec-31",
-            "line_items": [{ "category": "contracts", "amount_cents": 50_000 }],
+            "line_items": [{ "category": "distribution", "amount_cents": 50_000 }],
         }),
     )
     .await;

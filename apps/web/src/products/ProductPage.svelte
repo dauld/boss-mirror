@@ -60,7 +60,7 @@
   {#if loading}
     <p class="empty">Loading product…</p>
   {:else if error}
-    <p class="empty err">{error} — <Link to={href('/ux/products')}>back to products</Link></p>
+    <p class="empty load-failed" role="alert">{error} —<Link to={href('/ux/products')}>back to products</Link></p>
   {:else if detail}
     <PageHeader
       title={detail.name}
@@ -137,9 +137,6 @@
   .empty {
     color: var(--static);
     font-style: italic;
-  }
-  .err {
-    color: var(--err);
   }
   .meta-grid {
     display: grid;

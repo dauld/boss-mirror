@@ -851,8 +851,8 @@ test.describe('/ux/warehouse — State B: empty, loading, and a failed read', ()
 
   // Gap 8 (0dcb0200), fixed: the line carries the server's status and
   // reason, so "not configured" (503) and a named leg down (502) read
-  // differently. Gap 3 (c3e4edcc, the cross-page marker sweep): the
-  // status failure is still not on the shared marker.
+  // differently. Gap 3 (c3e4edcc, the cross-page marker sweep), fixed:
+  // the status failure is on the shared marker, as an alert.
   for (const [code, reason] of [
     [503, 'warehouse-status requires jobs/assets/shipping clients — not configured'],
     [502, 'shipping: connection refused'],
@@ -863,7 +863,9 @@ test.describe('/ux/warehouse — State B: empty, loading, and a failed read', ()
       await mountWarehouse(page);
 
       await expect(overviewLine(page)).toHaveText(`Warehouse status unavailable — HTTP ${code}: ${reason}`);
-      await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
+      await expect(page.locator(`${FAILURE_MARKER}[role=alert]`)).toHaveText(
+        `Warehouse status unavailable — HTTP ${code}: ${reason}`,
+      );
       await expect(subtitle(page)).toHaveText('3 below reorder point');
       await expect(body(page).locator('section.tab-section')).toHaveCount(0);
     });

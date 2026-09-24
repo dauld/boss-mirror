@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import * as borders from './borders';
-import { hudOf, labelOf, type Figure, type HudRow } from './hud';
+import { hudOf, labelOf, machineHref, type Figure, type HudRow } from './hud';
 import { parseRegions, type Regions } from './regions';
 
 // THE HUD FRAME (design 00774ca8). What these pin, each named by the
@@ -192,5 +192,17 @@ describe('the header and a failed read', () => {
 describe('what the frame retires (decision 10)', () => {
   it('the client-side border sum is gone', () => {
     expect('summaryLine' in borders).toBe(false);
+  });
+});
+
+// The host runners left receiving for the PLANT (62de32ae decision 11),
+// and the server counts them in the machine cell under `plant`. The
+// plant strip stands under the world map, so a listed plant machine
+// opens the world — there is no /it/yard/plant to open.
+describe('a listed machine opens where it is drawn', () => {
+  it('a region machine opens its region, a plant machine the world', () => {
+    const at = (region: string) => ({ region, id: 'x', name: 'x', state: 'failed' as const, why: '' });
+    expect(machineHref(at('marshalling'))).toBe('/it/yard/marshalling');
+    expect(machineHref(at('plant'))).toBe('/it');
   });
 });

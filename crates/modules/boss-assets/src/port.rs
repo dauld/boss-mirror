@@ -100,8 +100,8 @@ pub trait AssetsRepository: Send + Sync {
     /// decommissioned) that reference the given catalog SKU.
     ///
     /// Used by the boss-catalog asset model delete guard to refuse
-    /// deleting a catalog entry while real assets in the field or
-    /// in the refurb pipeline still depend on it.
+    /// deleting a catalog entry while real assets in custody or in
+    /// the field still depend on it.
     async fn active_asset_count_for_sku(&self, sku: &str) -> Result<u64, AssetsError>;
 
     /// Aggregated assets summary for dashboards. SQL-aggregated server-

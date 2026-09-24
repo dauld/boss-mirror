@@ -78,7 +78,7 @@
     {#if feedState.kind === 'loading'}
       <p class="empty">Loading…</p>
     {:else if feedState.kind === 'error'}
-      <p class="empty">Couldn't load token ({feedState.message}).</p>
+      <p class="empty load-failed" role="alert">Couldn't load token ({feedState.message}).</p>
     {:else if feedState.kind === 'none'}
       <button class="btn" disabled={busy} onclick={() => void rotate()}>
         Generate calendar URL

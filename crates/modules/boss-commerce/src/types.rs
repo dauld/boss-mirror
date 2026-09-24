@@ -67,7 +67,7 @@ impl From<&str> for InvoiceStatus {
 
 /// Per-line revenue bucket. Open-string newtype so tenants can
 /// declare their own categories as data without recompiling the
-/// platform. Values are kebab-case ("wholesale", "service",
+/// platform. Values are kebab-case ("wholesale", "taproom",
 /// "event-package"); the postgres column is `TEXT NOT NULL` and
 /// the wire JSON is the bare string (`#[serde(transparent)]`).
 ///
@@ -297,7 +297,7 @@ mod part_conversion_tests {
         let line = InvoiceLineItem {
             id: "LINE-001".into(),
             invoice_id: "INV-2026-0042".into(),
-            revenue_category: RevenueCategory::from("new-sales"),
+            revenue_category: RevenueCategory::from("wholesale"),
             amount_cents: 125_000,
             currency: "USD".into(),
             description: "Networking switch base unit".into(),

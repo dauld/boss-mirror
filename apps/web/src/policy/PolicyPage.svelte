@@ -71,11 +71,16 @@
   <PageHeader
     eyebrow="Platform · Policy"
     title="Policy rules"
-    subtitle={`${rules.length} active rules · ${roles.length} roles`}
+    subtitle={error
+      ? // "0 active rules · 0 roles" above the failure line read as an
+        // empty policy (sweep c3e4edcc). The counts are unknown.
+        'Rule count unknown — the policy read failed'
+      : `${rules.length} active rules · ${roles.length} roles`}
   />
 
   {#if error}
-    <p class="empty" style="color:var(--err)">Failed to load rules: {error}</p>
+    <!-- The shared failure marker (sweep c3e4edcc). -->
+    <p class="empty load-failed" role="alert" style="margin:0 24px">Failed to load rules: {error}</p>
   {/if}
 
   <div style="padding:0 24px 16px; display:flex; gap:12px; align-items:center">

@@ -13,8 +13,6 @@
 // the assertion below states today's behaviour and names the backlog id,
 // so the car that closes the gap turns that assertion red and must
 // rewrite it — a gap cannot close without this file saying so:
-//   4630ebc0  a refused export replaces the app with the raw response
-//   c3e4edcc  no failure line carries the shared `.load-failed` marker
 //   91b41817  the page has two names; the row toggle is mouse-only
 //
 // THE STREAM IS MOCKED HONESTLY, AND HERE IS WHAT THAT CAN AND CANNOT
@@ -99,9 +97,12 @@ function watch(page: Page): Seen {
   return seen;
 }
 
-/// The page's reads, healthy. The stream answers 204 (installSmokeMocks'
-/// own rule) unless a test installs its own: a 204 fails the
-/// EventSource cleanly, so the page falls to its 5s poll.
+/// The page's reads, healthy. The stream answers installSmokeMocks' own
+/// rule unless a test installs its own: a well-formed empty stream that
+/// ends, so the page says it is reconnecting. It was a 204, which fails
+/// the EventSource and paints "Live stream down" — a failure line, on
+/// the shared marker since sweep c3e4edcc, which a healthy render must
+/// not show.
 async function installAuditReads(page: Page, rows: ReadonlyArray<unknown> = ROWS): Promise<void> {
   await installSmokeMocks(page);
   await page.route(STATS, (r) => json(r, AUDIT_STATS));
@@ -205,16 +206,15 @@ test.describe('/it/operate/audit — size and growth (GET /api/events/stats)', (
     await expect(page.locator('.events-top-kinds td.events-kind')).toHaveText(AUDIT_STATS.top_kinds.map((k) => k.kind));
   });
 
-  test('a failed stats read says so, in the page\'s words — and carries no load-failed marker (c3e4edcc)', async ({ page }) => {
+  test('a failed stats read says so, in the page\'s words, on the shared marker (c3e4edcc)', async ({ page }) => {
     await installAuditReads(page);
     await page.route(STATS, (r) => json(r, 'down', 500));
     await mountPage(page, PATH, { titleMatch: /Audit Log/ });
     const line = page.getByText('Stats unavailable: HTTP 500');
     await expect(line).toBeVisible();
-    // Gap 10, sweep c3e4edcc: honest words, but the shared marker is
-    // absent, so the outage crawl could not see it. The sweep's car
-    // turns this red and flips it to 1.
-    await expect(page.locator(`.events-stats-note${FAILURE_MARKER}`)).toHaveCount(0);
+    // Gap 10, closed by sweep c3e4edcc: the line wears the marker the
+    // outage crawl counts, as an alert.
+    await expect(page.locator(`.events-stats-note${FAILURE_MARKER}[role="alert"]`)).toHaveCount(1);
   });
 
   test('while the stats read is outstanding the section says it is measuring', async ({ page }) => {
@@ -283,8 +283,10 @@ test.describe('/it/operate/audit — the stream (GET /api/events/tail)', () => {
     await page.reload();
     await expect(page.getByText('Failed to load: HTTP 403: operator tier required')).toBeVisible();
     await expect(page.getByText('No events match these filters.')).toHaveCount(0);
-    // c3e4edcc again: the failure line is honest, the marker is absent.
-    await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
+    // c3e4edcc: the failure line wears the shared marker, as an alert.
+    await expect(page.locator(`${FAILURE_MARKER}[role="alert"]`)).toHaveText(
+      'Failed to load: HTTP 403: operator tier required',
+    );
   });
 
   test('each filter re-reads the tail with its own parameter', async ({ page }) => {
@@ -382,7 +384,8 @@ test.describe('/it/operate/audit — the stream (GET /api/events/tail)', () => {
     await mountPage(page, PATH, { titleMatch: /Audit Log/ });
     await stream(page).first().click();
     await expect(page.getByText("Couldn't load attachments — list files: HTTP 500")).toBeVisible();
-    await expect(page.locator(`.files-error${FAILURE_MARKER}`)).toHaveCount(0);
+    // The shared marker, as an alert (sweep c3e4edcc).
+    await expect(page.locator(`.files-error${FAILURE_MARKER}[role="alert"]`)).toHaveCount(1);
     await stream(page).nth(1).click();
     await expect(page.getByText("File attachments aren't enabled in this deployment", { exact: false })).toBeVisible();
   });
@@ -534,9 +537,10 @@ test.describe('/it/operate/audit — the live stream (EventSource /api/events/st
     // The failed stream is not retried: a non-200 answer CLOSES an
     // EventSource.
     expect(seen.stream.length).toBe(1);
-    // Gap c3e4edcc is still open: this failure line, like the page's
-    // other two, does not carry the shared marker.
-    await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
+    // Sweep c3e4edcc: the down line is the page's one failure here, and
+    // it wears the shared marker, as an alert.
+    await expect(page.locator(`${FAILURE_MARKER}[role="alert"]`)).toHaveCount(1);
+    await expect(liveLine(page)).toHaveClass(/\bload-failed\b/);
   });
 
   test('a stream whose server read failed says why, is closed, and the page polls (260879f5)', async ({ page }) => {
@@ -601,6 +605,9 @@ test.describe('/it/operate/audit — the live stream (EventSource /api/events/st
       'Live stream lost; the browser is reconnecting. Rows that land before it is back will not stream — reload to read them.',
     );
     expect(seen.stream.length).toBe(1);
+    // A reconnect is the browser's, still under way — not a failed read,
+    // so it does not wear the marker (c3e4edcc marks only "down").
+    await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
   });
 
   test('unticking Live (SSE) paints no stream line', async ({ page }) => {
@@ -733,6 +740,7 @@ test.describe('/it/operate/audit — Download ⤓ (GET /api/events/export)', () 
     // The file is saved only once its body has been read to the end
     // (4630ebc0), and the line says what was saved.
     await expect(page.locator('.events-download-status')).toHaveText('Saved audit.jsonl: 1 event.');
+    await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
   });
 
   // Backlog 4630ebc0: Save .jsonl was a window.location navigation, so a
@@ -755,6 +763,9 @@ test.describe('/it/operate/audit — Download ⤓ (GET /api/events/export)', () 
     await expect(page.locator('.events-download-status')).toHaveText(
       'The export was refused: HTTP 403: forbidden: operator tier required. Nothing was saved.',
     );
+    // The failed export is a failure line like the page's others
+    // (c3e4edcc); a saved one stays a status (pinned above).
+    await expect(page.locator(`.events-download-status${FAILURE_MARKER}[role="alert"]`)).toHaveCount(1);
     await expect(page).toHaveURL(new RegExp(`${PATH}$`));
     await expect(page.locator('h1').first()).toContainText('Audit Log');
     // The panel keeps its window open for a retry.

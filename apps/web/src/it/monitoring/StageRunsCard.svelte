@@ -167,7 +167,7 @@
   {#if loading}
     <p class="runs-msg">Reading the log…</p>
   {:else if error}
-    <p class="runs-msg runs-err">{error}</p>
+    <p class="runs-msg load-failed" role="alert">{error}</p>
   {:else if runs.length === 0}
     <p class="runs-msg">No runs of this kind yet.</p>
   {:else}
@@ -307,8 +307,5 @@
   .runs-msg {
     color: var(--text-dim);
     font-size: 13px;
-  }
-  .runs-err {
-    color: var(--err);
   }
 </style>

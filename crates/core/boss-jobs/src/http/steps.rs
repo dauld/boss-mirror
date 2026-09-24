@@ -770,6 +770,40 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
             .into_response();
     }
 
+    // THE STANDING REFUSALS, ON A PUT THAT DOES NOT COMPLETE (backlog
+    // 73ef81fa, the gap car 1 left). The merge door judges a repeated
+    // anchor, a value over an inline bound, a binding to an anchor the
+    // step lacks and two of a one-of as the write lands; completion
+    // judges them again above. A PUT carrying metadata WITHOUT completing
+    // was judged by neither, so sending the whole bag here walked round
+    // the door. Judged for the keys this write CHANGES — a PUT must
+    // resend every stored key (the omission refusal above), so "sent"
+    // would be every field, and a reviewer's resolutions save would be
+    // refused over an exhibit an author wrote before these rules existed.
+    if step.status != StepStatus::Completed && body_obj.contains_key("metadata") {
+        let changed = |k: &str| step.metadata.get(k) != old.metadata.get(k);
+        // Against the fields the step STANDS with, as the merge door
+        // judges — a body that also rewrote `fields` does not get to
+        // choose the contract its own metadata is judged by.
+        let refusals = crate::step_registry::StepRegistry::standing_refusals(
+            &old.fields,
+            &step.metadata,
+            changed,
+        );
+        if !refusals.is_empty() {
+            let msg = refusals
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("invalid step metadata: {msg}"),
+            )
+                .into_response();
+        }
+    }
+
     // Blocker gate (invariant I-4 — preconditions enforced). When the
     // caller is flipping this step to `done`, every step in
     // `blocked_by` must already be in a terminal state. Otherwise the

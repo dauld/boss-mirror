@@ -99,7 +99,11 @@
 {#if loading}
   <p class="empty">Loading the review queue…</p>
 {:else if error}
-  <p class="design-error">Error: {error}</p>
+  <!-- The shared failure marker (sweep c3e4edcc) draws the failed read's
+       rail; this page's own class keeps only the spacing. -->
+  <p class="design-error load-failed" role="alert">
+    The review queue could not be read: {error}. This is not an empty queue.
+  </p>
 {:else}
   {#each panels as panel (panel)}
     {#if panel === 'queue'}
@@ -228,7 +232,6 @@
     margin: 0 0 12px;
   }
   .design-error {
-    color: var(--err);
     margin: 12px 0;
   }
 </style>

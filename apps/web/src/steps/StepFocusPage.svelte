@@ -154,7 +154,7 @@
     {#if loading}
       <p class="step-focus-msg">Loading step…</p>
     {:else if error}
-      <p class="step-focus-msg step-focus-err">{error}</p>
+      <p class="step-focus-msg load-failed" role="alert">{error}</p>
     {:else if step && hasPlugin === true}
       <StepPluginMount
         kind={step.kind}
@@ -262,8 +262,5 @@
   .step-focus-msg {
     color: var(--text-dim);
     font-size: 14px;
-  }
-  .step-focus-err {
-    color: var(--err);
   }
 </style>

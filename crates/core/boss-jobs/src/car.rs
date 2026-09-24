@@ -696,18 +696,30 @@ impl OwnedWait {
 }
 
 /// Is this car's wait someone else's move? Only when all four hold: it
-/// DECLARED the wait, something OBSERVES it (a `seen` check), it names
-/// an OWNER, and the event has not been seen while the probe says
-/// not-yet ([`starved`] is `None`). Anything short of that is ours —
-/// the shed's troubled colour means exactly that set.
+/// DECLARED the wait, it names an OWNER, a WORLD wait has something
+/// that OBSERVES it (a `seen` check), and the event has not been seen
+/// while the probe says not-yet ([`starved`] is `None`). Anything short
+/// of that is ours — the shed's troubled colour means exactly that set.
+///
+/// WHY ONLY THE WORLD NEEDS AN OBSERVER (3881f5c9, fix shape (2)).
+/// Nothing but a `seen` check can say a Stripe charge arrived, so an
+/// unobserved world wait is ours to observe. A named actor's act is
+/// that actor's next move whether or not a check watches for it — the
+/// dev-door car, waiting on David's SSH CA ceremony with no probe at
+/// all, troubled the shed alone on 2026-09-24 though its owner was
+/// declared as data. Its bound is the patience the car declares, and a
+/// check that does exist still turns a seen-while-not-yet into ours.
 pub fn owned_wait(md: &Value) -> Option<OwnedWait> {
     let w = waits_on(md)?;
-    w.seen.as_ref()?;
+    let owner = wait_owner(md)?;
+    if owner == WaitOwner::World && w.seen.is_none() {
+        return None;
+    }
     if starved(md).is_some() {
         return None;
     }
     Some(OwnedWait {
-        owner: wait_owner(md)?,
+        owner,
         on: w.on,
         max_wait_hours: md
             .pointer(&format!("/{WAITS_ON}/{WAITS_ON_MAX_WAIT_HOURS}"))
@@ -3023,6 +3035,37 @@ mod waits_on_tests {
         assert_eq!(owned_wait(&waiting(134, Some(unowned), None)), None);
         // Undeclared.
         assert_eq!(owned_wait(&waiting(134, None, None)), None);
+    }
+
+    /// A NAMED ACTOR'S ACT NEEDS NO SEEN CHECK TO BE THEIRS (backlog
+    /// 3881f5c9, fix shape (2)). Measured 2026-09-24 16:42Z: the shed
+    /// read troubled on ONE car, the dev-door login, whose declared wait
+    /// is David's Access SSH CA ceremony — `owner: emp-david`, no
+    /// `seen`, no probe. The observation rule exists because nothing
+    /// else can say a WORLD event arrived; an actor's act has its actor,
+    /// whose next move it is, and the car's own declared patience still
+    /// bounds it. A world wait with no `seen` stays ours, and an actor's
+    /// wait whose check DID see the act while the probe says not yet is
+    /// ours too — the declaration never hides a contradiction.
+    #[test]
+    fn a_named_actors_act_is_theirs_without_a_seen_check_and_the_worlds_is_not() {
+        let act = owned("the SSH CA ceremony", None, json!("emp-david"), Value::Null);
+        assert_eq!(
+            owned_wait(&json!({ WAITS_ON: act })),
+            Some(OwnedWait {
+                owner: WaitOwner::Actor("emp-david".into()),
+                on: "the SSH CA ceremony".into(),
+                max_wait_hours: None,
+            }),
+            "declared on no probe at all, as the dev-door car is"
+        );
+        let world = owned("a Stripe charge", None, json!("world"), Value::Null);
+        assert_eq!(owned_wait(&json!({ WAITS_ON: world })), None);
+        let seen = owned("a release", Some("true"), json!("emp-david"), Value::Null);
+        assert_eq!(
+            owned_wait(&waiting(3, Some(seen), Some("2026-09-26T11:00:00Z"))),
+            None
+        );
     }
 
     /// PATIENCE IS OPTIONAL AND BOUNDED ONLY WHEN DECLARED: no

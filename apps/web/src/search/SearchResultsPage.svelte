@@ -95,7 +95,7 @@
 {#if loading}
   <p class="sr-msg">Searching…</p>
 {:else if error}
-  <p class="sr-msg sr-err">{error}</p>
+  <p class="sr-msg load-failed" role="alert">{error}</p>
 {:else if !q.trim()}
   <p class="sr-msg">Nothing to search for yet.</p>
 {:else if total === 0}
@@ -177,9 +177,6 @@
     color: var(--text-dim);
     font-size: 14px;
     padding: 16px 0;
-  }
-  .sr-err {
-    color: var(--err);
   }
   .sr-subject {
     border: 1px solid var(--border);

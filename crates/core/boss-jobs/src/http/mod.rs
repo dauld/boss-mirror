@@ -245,10 +245,6 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
             post(sim_clock_restart_epoch::<R, B>),
         )
         .route("/api/jobs/sim-clock/stream", get(sim_clock_stream::<R, B>))
-        .route(
-            "/api/jobs/phase-distribution",
-            get(jobs_phase_distribution::<R, B>),
-        )
         .route("/api/jobs/assignments", get(list_assignments::<R, B>))
         // The queue-age lens (2a0b034e): how long every outstanding
         // obligation — ready/active step on an open packet — has

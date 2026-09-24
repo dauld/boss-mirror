@@ -28,7 +28,7 @@ fn invoice(id: &str, status: InvoiceStatus, paid_on: Option<NaiveDate>) -> Invoi
         line_items: vec![InvoiceLineItem {
             id: format!("{id}-l1"),
             invoice_id: id.to_string(),
-            revenue_category: RevenueCategory::from("new-sales"),
+            revenue_category: RevenueCategory::from("wholesale"),
             amount_cents: 1_200_000,
             currency: "USD".to_string(),
             description: "Device sale".to_string(),
@@ -105,7 +105,7 @@ async fn create_invoice_emits_issued_fact() {
     assert_eq!(payload["account_id"], "account-ff-1");
     assert_eq!(payload["amount_cents"], 1_200_000);
     assert_eq!(payload["currency"], "USD");
-    assert_eq!(payload["line_items"][0]["revenue_category"], "new-sales");
+    assert_eq!(payload["line_items"][0]["revenue_category"], "wholesale");
     assert_eq!(payload["line_items"][0]["amount_cents"], 1_200_000);
 }
 

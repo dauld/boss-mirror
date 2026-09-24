@@ -29,7 +29,8 @@
 // one:
 //   gap 1 223ebcd6  orders + vendor-invoices folded an outage into
 //                   zeros — ANSWERED: each now paints `.load-failed`
-//   gap 2 c3e4edcc  the one failure line is not `.load-failed`
+//   gap 2 c3e4edcc  the one failure line is not `.load-failed` —
+//                   ANSWERED: it is, and the header says unknown
 //   gap 3 003f4db2  the route is not gated by the warehouse module
 //   gap 4 35aeb30d  the empty line blames filters when there are none
 //   gap 5 d18b68cf  a null payment_terms paints a blank cell
@@ -182,12 +183,14 @@ async function expectHeader(page: Page, title: string, subtitle: string): Promis
 
 const ZERO_SUBTITLE = '0 open POs · $0.00 outstanding across all vendors';
 const OPEN_SUBTITLE = '3 open POs · $1,296 outstanding across all vendors';
+/// Under a failed list read (c3e4edcc): the header states no figure.
+const UNKNOWN_SUBTITLE = 'Vendor count unknown — the read failed';
 
 /// The page's own search box — the shell's bar carries a second one.
 const searchbox = (page: Page) => page.locator('aside.catalog-filters').getByRole('searchbox');
 
 test.describe('/ux/vendors — the served instance (warehouse off, no inventory upstream)', () => {
-  test('the page mounts ungated and paints its one failure line, which is not the shared marker', async ({ page }) => {
+  test('the page mounts ungated and paints its one failure line, on the shared marker', async ({ page }) => {
     const seen = watch(page);
     await install(page, { vendors: noUpstream, orders: noUpstream, invoices: noUpstream }, MANIFEST_2026_09_23);
     await mountPage(page, PATH);
@@ -202,10 +205,13 @@ test.describe('/ux/vendors — the served instance (warehouse off, no inventory 
     await expect(page.locator('.module-disabled')).toHaveCount(0);
 
     await expect(empty(page)).toHaveText("Couldn't load vendors: vendors HTTP 502");
-    // Gap 2 (c3e4edcc): a `p.empty`, not the FAILURE_MARKER the outage
-    // crawl reads — and the header above it still states zeros as fact.
-    await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
-    await expectHeader(page, '0 vendors', ZERO_SUBTITLE);
+    // Gap 2 (c3e4edcc), answered: the line is the FAILURE_MARKER the
+    // outage crawl reads, and the header above it no longer states
+    // zeros as fact.
+    await expect(page.locator(`${FAILURE_MARKER}[role=alert]`)).toHaveText(
+      "Couldn't load vendors: vendors HTTP 502",
+    );
+    await expectHeader(page, 'Vendors', UNKNOWN_SUBTITLE);
     await expect(button(page, 'All (0)')).toBeVisible();
     await expect(page.locator('table.data-table')).toHaveCount(0);
 
@@ -438,19 +444,20 @@ test.describe('/ux/vendors — empty and failed reads', () => {
     await mountPage(page, PATH);
 
     await expect(empty(page)).toHaveText("Couldn't load vendors: vendors HTTP 403");
-    await expectHeader(page, '0 vendors', ZERO_SUBTITLE);
-    await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
+    await expectHeader(page, 'Vendors', UNKNOWN_SUBTITLE);
+    await expect(page.locator(FAILURE_MARKER)).toHaveCount(1);
   });
 
   test('an unreachable orders read is reported as the vendors failing', async ({ page }) => {
     await install(page, { ...FIXTURES, orders: (r: Route) => r.abort('connectionrefused') });
     await mountPage(page, PATH);
 
-    // Gap 2 (c3e4edcc): the network rejection lands in the one catch,
-    // whose line names vendors whichever read failed.
+    // The network rejection lands in the one catch, whose line names
+    // vendors whichever read failed — on the shared marker since
+    // c3e4edcc, but still misnamed.
     await expect(empty(page)).toHaveText(/^Couldn't load vendors: /);
     await expect(page.locator('table.data-table')).toHaveCount(0);
-    await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
+    await expect(page.locator(FAILURE_MARKER)).toHaveCount(1);
   });
 
   test('an invoices body that is not JSON is reported as the vendors failing', async ({ page }) => {
@@ -462,6 +469,6 @@ test.describe('/ux/vendors — empty and failed reads', () => {
 
     await expect(empty(page)).toHaveText(/^Couldn't load vendors: /);
     await expect(page.locator('table.data-table')).toHaveCount(0);
-    await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
+    await expect(page.locator(FAILURE_MARKER)).toHaveCount(1);
   });
 });

@@ -115,8 +115,8 @@ binds = "exhibits"
 
 # EXHIBITS — a proposal whose substance is visual rides INSIDE the
 # packet, not behind a claude.ai link (design 26a89f11, David
-# 2026-09-23, all five questions accepted). `[{anchor, title, html}]`:
-# the markdown stays the record's prose, and each exhibit is a
+# 2026-09-23, all five questions accepted). `[{anchor, title, html |
+# file_ref}]`: the markdown stays the record's prose, and each exhibit is a
 # self-contained HTML rendering — a theme board, a layout, a motion
 # prototype — that review-design.js renders ONLY in an
 # `<iframe sandbox="allow-scripts">` (never allow-same-origin) by srcdoc
@@ -127,18 +127,29 @@ binds = "exhibits"
 #
 # INLINE, BOUNDED, FROZEN. The html rides in step metadata up to 256 KB
 # (`item_value_max_bytes`, measured in UTF-8 bytes of the string) and is
-# frozen with the rest of the step when the review completes. The
-# file_refs arm for larger renderings is decided and not yet built — this
-# field refuses an element without `html` until it is. Not required: most
-# designs carry no exhibit, and `boss design --exhibit` writes it onto
-# this step (not bound through metadata_defaults, which would leave an
-# unexpanded token on every design that has none).
+# frozen with the rest of the step when the review completes.
+#
+# ABOVE THE BOUND, A FILE_REF. A larger rendering is attached to this
+# step in the file store (content-addressed; `boss design --exhibit`
+# attaches it through the `boss attach` path and reads it back before it
+# records anything) and the element carries `file_ref` — the file's id —
+# with the `sha256` and `size_bytes` that read-back confirmed. The review
+# surface fetches the bytes, checks them against that sha256, and hands
+# them to the SAME sandboxed frame. `item_one_of` holds the choice: every
+# exhibit carries exactly one of `html` and `file_ref` — both is refused
+# as it is written, neither at done.
+#
+# Not required: most designs carry no exhibit, and `boss design
+# --exhibit` writes it onto this step (not bound through
+# metadata_defaults, which would leave an unexpanded token on every
+# design that has none).
 [[workflow.step.fields]]
 name = "exhibits"
 field_type = "array"
 required = false
 filled_by = "filer"
-item_keys = ["anchor", "title", "html"]
+item_keys = ["anchor", "title"]
+item_one_of = ["html", "file_ref"]
 item_value_max_bytes = 262144
 
 # The answers, and the contract that makes the review a review: every

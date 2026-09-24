@@ -493,7 +493,12 @@
   <PageHeader
     eyebrow={eyebrow}
     title={titleFor}
-    subtitle={`${total.toLocaleString()} ${status || 'any-status'}`}
+    subtitle={error
+      ? // A failed read leaves `total` at 0 (or at the last filter's
+        // count), and "0 open" above the failure line reads as an
+        // answer (backlog e98cabd0, sweep c3e4edcc). Unknown, so say so.
+        'Job count unknown — the read failed'
+      : `${total.toLocaleString()} ${status || 'any-status'}`}
   />
 
   <!-- Filters: narrow the list down without leaving the page. The
@@ -722,7 +727,9 @@
       {#if loading}
         <p class="empty">Loading…</p>
       {:else if error}
-        <p class="empty">Couldn't load jobs: {error}</p>
+        <!-- The shared failure marker (sweep c3e4edcc): this line is
+             /ux/jobs's, /ux/service's and /ux/sales's. -->
+        <p class="empty load-failed" role="alert">Couldn't load jobs: {error}</p>
       {:else if jobs.length === 0}
         <p class="empty">No jobs match.</p>
       {:else}

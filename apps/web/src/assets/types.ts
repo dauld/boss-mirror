@@ -1,8 +1,8 @@
 // Asset types — shape matches /api/assets + /api/assets/summary.
 
 export type AssetLifecyclePhase =
-  | 'registered' | 'received' | 'triaging' | 'refurbing' | 'qa' | 'ready'
-  | 'shipped' | 'installed' | 'out-for-service' | 'decommissioned';
+  | 'registered' | 'received' | 'shipped' | 'installed' | 'out-for-service'
+  | 'decommissioned';
 
 export type Asset = {
   asset_id: string;

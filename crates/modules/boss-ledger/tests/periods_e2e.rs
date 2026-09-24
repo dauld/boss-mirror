@@ -69,7 +69,7 @@ async fn period_id_for(db: &TestDb, starts_on: NaiveDate) -> Uuid {
 #[tokio::test(flavor = "multi_thread")]
 async fn list_periods_reports_totals() {
     let db = TestDb::new().await;
-    let p = json!({"invoice_id": "i1", "amount_cents": 1_000, "line_items": [{"category": "service", "amount_cents": 1_000}]});
+    let p = json!({"invoice_id": "i1", "amount_cents": 1_000, "line_items": [{"category": "taproom", "amount_cents": 1_000}]});
     seed_fact_and_post(
         &db,
         "finance.invoice.issued",
@@ -91,7 +91,7 @@ async fn list_periods_reports_totals() {
 #[tokio::test(flavor = "multi_thread")]
 async fn lock_period_writes_checksum_and_pins_rule_version() {
     let db = TestDb::new().await;
-    let p = json!({"invoice_id": "i1", "amount_cents": 1_000, "line_items": [{"category": "service", "amount_cents": 1_000}]});
+    let p = json!({"invoice_id": "i1", "amount_cents": 1_000, "line_items": [{"category": "taproom", "amount_cents": 1_000}]});
     seed_fact_and_post(
         &db,
         "finance.invoice.issued",
@@ -119,7 +119,7 @@ async fn lock_period_writes_checksum_and_pins_rule_version() {
 #[tokio::test(flavor = "multi_thread")]
 async fn locking_is_deterministic_same_state_same_checksum() {
     let db = TestDb::new().await;
-    let p = json!({"invoice_id": "i1", "amount_cents": 1_000, "line_items": [{"category": "service", "amount_cents": 1_000}]});
+    let p = json!({"invoice_id": "i1", "amount_cents": 1_000, "line_items": [{"category": "taproom", "amount_cents": 1_000}]});
     seed_fact_and_post(
         &db,
         "finance.invoice.issued",
@@ -148,7 +148,7 @@ async fn posting_to_locked_period_fails_with_locked_period_error() {
     let db = TestDb::new().await;
 
     // Seed + lock March.
-    let p_mar = json!({"invoice_id": "i1", "amount_cents": 1_000, "line_items": [{"category": "service", "amount_cents": 1_000}]});
+    let p_mar = json!({"invoice_id": "i1", "amount_cents": 1_000, "line_items": [{"category": "taproom", "amount_cents": 1_000}]});
     seed_fact_and_post(
         &db,
         "finance.invoice.issued",
@@ -164,7 +164,7 @@ async fn posting_to_locked_period_fails_with_locked_period_error() {
         .unwrap();
 
     // Now try to post another fact dated in March — it must fail.
-    let p_mar2 = json!({"invoice_id": "i2", "amount_cents": 500, "line_items": [{"category": "parts", "amount_cents": 500}]});
+    let p_mar2 = json!({"invoice_id": "i2", "amount_cents": 500, "line_items": [{"category": "event-package", "amount_cents": 500}]});
     let err = seed_fact_and_post(
         &db,
         "finance.invoice.issued",
@@ -189,7 +189,7 @@ async fn posting_to_locked_period_fails_with_locked_period_error() {
 #[tokio::test(flavor = "multi_thread")]
 async fn unlock_returns_period_to_open() {
     let db = TestDb::new().await;
-    let p = json!({"invoice_id": "i1", "amount_cents": 100, "line_items": [{"category": "service", "amount_cents": 100}]});
+    let p = json!({"invoice_id": "i1", "amount_cents": 100, "line_items": [{"category": "taproom", "amount_cents": 100}]});
     seed_fact_and_post(
         &db,
         "finance.invoice.issued",
@@ -214,7 +214,7 @@ async fn unlock_returns_period_to_open() {
     assert_eq!(march.locked_rule_version, None);
 
     // Post to March again — should succeed now.
-    let p2 = json!({"invoice_id": "i2", "amount_cents": 500, "line_items": [{"category": "parts", "amount_cents": 500}]});
+    let p2 = json!({"invoice_id": "i2", "amount_cents": 500, "line_items": [{"category": "event-package", "amount_cents": 500}]});
     seed_fact_and_post(
         &db,
         "finance.invoice.issued",

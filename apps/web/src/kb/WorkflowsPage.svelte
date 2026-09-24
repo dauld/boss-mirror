@@ -108,11 +108,17 @@
     title="Workflows"
     subtitle={loading
       ? 'Loading…'
-      : `${kinds.length} active Workflow${kinds.length === 1 ? '' : 's'} across ${categoryKeys.length} categor${categoryKeys.length === 1 ? 'y' : 'ies'} — every kind of work the brewery runs`}
+      : error
+        ? // "0 active Workflows" above the failure line read as an empty
+          // registry (sweep c3e4edcc). The count is unknown, so say so.
+          'Workflow count unknown — the registry read failed'
+        : `${kinds.length} active Workflow${kinds.length === 1 ? '' : 's'} across ${categoryKeys.length} categor${categoryKeys.length === 1 ? 'y' : 'ies'} — every kind of work the brewery runs`}
   />
 
   {#if error}
-    <p class="empty" style="color:var(--err); padding:0 24px">Failed to load: {error}</p>
+    <!-- The shared failure marker (sweep c3e4edcc); an inline --err
+         colour would outrank its troubled ink, so only the margin here. -->
+    <p class="empty load-failed" role="alert" style="margin:0 24px">Failed to load: {error}</p>
   {/if}
 
   <div class="wf-toolbar">

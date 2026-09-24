@@ -1203,7 +1203,7 @@ a:hover { color: var(--fog); }
 .chip-provenance-hand-set { background: var(--wash); color: var(--warn); border-color: var(--warn); }
 .chip-provenance-data-derived { background: var(--wash); color: var(--static); border-color: var(--hairline); }
 
-/* Kanban summary for refurbishment board */
+/* Kanban summary — the Assets list's phase rail */
 .kanban {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
@@ -1218,11 +1218,6 @@ a:hover { color: var(--fog); }
   padding: 16px 18px;
   border-top: 3px solid var(--stage-color, var(--static));
 }
-.kanban-col[data-stage="intake"] { --stage-color: var(--static); }
-.kanban-col[data-stage="triage"] { --stage-color: var(--signal); }
-.kanban-col[data-stage="refurb"] { --stage-color: var(--fog); }
-.kanban-col[data-stage="qa"] { --stage-color: var(--warn); }
-.kanban-col[data-stage="ready"] { --stage-color: var(--ok); }
 .kanban-head {
   display: flex;
   align-items: baseline;
@@ -2659,13 +2654,14 @@ button.manual-tree-node {
 /* Refused writes + degraded registry (packet cc9d7fc6). Every step
    surface renders a rejected write inline via .step-write-error; the
    dispatcher renders a failed registry read as .step-registry-error
-   with a Retry beside the still-usable generic fallback. */
+   with a Retry beside the still-usable generic fallback. That banner
+   wears .load-failed (sweep c3e4edcc), which draws its card, rail and
+   ink; this rule only lays it out. */
 .step-write-error { color: var(--err); font-size: 12px; margin: 8px 0 0; }
 .step-registry-error {
   display: flex; align-items: center; gap: 10px;
-  padding: 6px 10px; margin-bottom: 10px;
-  border: 1px solid var(--err); border-radius: var(--radius);
-  color: var(--err); font-size: 12px;
+  margin-bottom: 10px;
+  font-size: 12px;
 }
 .step-registry-error span { flex: 1 1 auto; }
 
@@ -2720,17 +2716,14 @@ button.manual-tree-node {
 
 /* A registered bundle that failed to load is NOT "no plugin" — the
    banner names the reason and the generic form renders below it
-   (ff87f782). */
+   (ff87f782). It wears .load-failed (sweep c3e4edcc) for its card, rail
+   and ink; this rule only lays it out. */
 .step-plugin-failed {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 8px 12px;
   margin-bottom: 8px;
-  border: 1px solid var(--busy);
-  border-radius: var(--radius);
-  background: var(--warn-wash);
   font-size: 13px;
 }
 @keyframes step-plugin-shimmer {

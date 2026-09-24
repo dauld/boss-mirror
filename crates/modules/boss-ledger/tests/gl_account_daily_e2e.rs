@@ -64,13 +64,13 @@ fn fixture() -> Vec<(&'static str, NaiveDate, Value, &'static str)> {
         (
             "finance.invoice.issued",
             d(2026, 3, 10),
-            json!({"invoice_id": "i1", "amount_cents": 10_000, "line_items": [{"category": "service", "amount_cents": 10_000}]}),
+            json!({"invoice_id": "i1", "amount_cents": 10_000, "line_items": [{"category": "taproom", "amount_cents": 10_000}]}),
             "i1",
         ),
         (
             "finance.invoice.issued",
             d(2026, 3, 10),
-            json!({"invoice_id": "i2", "amount_cents": 2_500, "line_items": [{"category": "new-sales", "amount_cents": 2_500}]}),
+            json!({"invoice_id": "i2", "amount_cents": 2_500, "line_items": [{"category": "wholesale", "amount_cents": 2_500}]}),
             "i2",
         ),
         (

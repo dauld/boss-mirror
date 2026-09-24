@@ -71,7 +71,7 @@ async fn seed_schedule(
               revenue_account, deferred_account, total_cents, start_date, \
               end_date, frequency, recognized_to_date_cents, \
               next_recognition_date, status) \
-         VALUES ($1, 'service_agreement', $2, $3, 'contracts', \
+         VALUES ($1, 'service_agreement', $2, $3, 'distribution', \
                  '4140', '2200', $4, $5, $6, 'monthly', 0, $7, 'active')",
     )
     .bind(id)
@@ -361,13 +361,13 @@ async fn v1_and_v2_yield_same_annual_revenue_total_over_12_months() {
     let v1_payload = json!({
         "invoice_id": "inv-parity",
         "line_items": [
-            { "category": "contracts", "amount_cents": 1_200_000 },
+            { "category": "distribution", "amount_cents": 1_200_000 },
         ],
     });
     let v2_invoice_payload = json!({
         "invoice_id": "inv-parity",
         "line_items": [
-            { "category": "contracts", "amount_cents": 1_200_000, "recognition_pattern": "ratable" },
+            { "category": "distribution", "amount_cents": 1_200_000, "recognition_pattern": "ratable" },
         ],
     });
 
@@ -423,7 +423,7 @@ async fn v1_and_v2_yield_same_annual_revenue_total_over_12_months() {
             "period_start": post_date,
             "period_end": post_date,
             "amount_cents": amount,
-            "category": "contracts",
+            "category": "distribution",
             "account_id": "account-e2e-parity",
         });
         let recognition_fact = FactRef {

@@ -723,10 +723,13 @@ enum Commands {
         answers: Option<String>,
         /// A visual exhibit as `anchor|title|path.html`. Repeatable. The
         /// file is read as bytes (no shell between it and the record),
-        /// must be self-contained UTF-8 HTML of at most 256 KB, and is
-        /// rendered on /it/design in a sandboxed frame that runs its
-        /// inline style and script and reaches nothing else (design
-        /// 26a89f11). Needs questions: it rides the review step.
+        /// must be self-contained UTF-8 HTML, and is rendered on
+        /// /it/design in a sandboxed frame that runs its inline style and
+        /// script and reaches nothing else (design 26a89f11). Up to 256
+        /// KB it rides inline; above that it is attached to the review
+        /// step in the file store (as `boss attach` does, up to the
+        /// store's limit) and carried by reference with the sha256 its
+        /// read-back confirmed. Needs questions: it rides the review step.
         #[arg(long = "exhibit")]
         exhibits: Vec<String>,
         /// Bind an exhibit to the question it is asked about, as

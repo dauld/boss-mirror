@@ -650,30 +650,48 @@ fn shed_text(car: &Value) -> String {
                     clipped(&on),
                     clipped(&said)
                 ),
-                None => match boss_jobs::car::waits_on(md) {
+                None => match (boss_jobs::car::waits_on(md), actor_wait(md)) {
+                    // A named actor's act is theirs with or without an
+                    // observer (3881f5c9) — the shed's own predicate.
+                    (_, Some(whose)) => {
+                        format!("probe says NOT YET, {whose} — {}", clipped(&said))
+                    }
                     // A declaration nothing observes (e9b164a1):
                     // exempt from the bound AND never contradicted,
                     // so the line names the missing check.
-                    Some(w) if w.seen.is_none() => format!(
+                    (Some(w), None) if w.seen.is_none() => format!(
                         "probe says NOT YET, waiting on {} — no seen check, \
                          so nothing can say it arrived (boss car waits-on --seen) — {}",
                         clipped(&w.on),
                         clipped(&said)
                     ),
-                    Some(w) => format!(
+                    (Some(w), None) => format!(
                         "probe says NOT YET, waiting on {} — {}",
                         clipped(&w.on),
                         clipped(&said)
                     ),
-                    None => format!("probe says NOT YET — {}", clipped(&said)),
+                    (None, None) => format!("probe says NOT YET — {}", clipped(&said)),
                 },
             }
         }
-        Shed::WaitingOn(ev) => format!("waiting on: {}", clipped(&ev)),
+        Shed::WaitingOn(ev) => match actor_wait(car.get("metadata").unwrap_or(&Value::Null)) {
+            Some(whose) => format!("{whose} — {}", clipped(&ev)),
+            None => format!("waiting on: {}", clipped(&ev)),
+        },
         Shed::Unproven => "UNPROVEN — no probe, no event; nothing mechanical can settle it \
              (boss prove --probe)"
             .to_string(),
     }
+}
+
+/// "waiting on <actor>: <act>" when the car's wait is a named actor's
+/// act the shed counts as theirs (`boss_jobs::car::owned_wait`), else
+/// `None` — a world wait keeps the clauses above, which name its
+/// observer or the lack of one.
+fn actor_wait(md: &Value) -> Option<String> {
+    boss_jobs::car::owned_wait(md)
+        .filter(|o| matches!(o.owner, boss_jobs::car::WaitOwner::Actor(_)))
+        .map(|o| format!("waiting on {}: {}", o.owner, clipped(&o.on)))
 }
 
 /// The backlog-items an OPEN car already carries, keyed by item id, each
@@ -1211,7 +1229,44 @@ pub(crate) fn region_lines(map: &Value) -> Vec<String> {
             trend_text(r.get("trend").unwrap_or(&Value::Null))
         ));
     }
+    out.extend(plant_line(map));
     out
+}
+
+/// THE PLANT (design 62de32ae, decision 11): the machinery that serves
+/// every region — the host runners — on one line after the regions. A
+/// failed or unknown machine carries its why, because no region's state
+/// carries a plant machine's failure; a running or idle one is its word.
+/// `None` for an older payload with no `plant`, which is not an empty
+/// plant.
+fn plant_line(map: &Value) -> Option<String> {
+    let plant = map.get("plant")?.as_array()?;
+    if plant.is_empty() {
+        return Some(format!("    {:<12} no machine declared", "plant"));
+    }
+    let machines: Vec<String> = plant
+        .iter()
+        .map(|m| {
+            let name = m.get("name").and_then(Value::as_str).unwrap_or("?");
+            let state = m.get("state").and_then(Value::as_str).unwrap_or("?");
+            let why = m.get("why").and_then(Value::as_str).unwrap_or("");
+            match state {
+                "running" | "idle" => format!("{name} {state}"),
+                _ => format!("{name} {} ({why})", state.to_uppercase()),
+            }
+        })
+        .collect();
+    Some(format!(
+        "    {:<12} {} {} serving every region: {}",
+        "plant",
+        plant.len(),
+        if plant.len() == 1 {
+            "machine"
+        } else {
+            "machines"
+        },
+        machines.join(" · ")
+    ))
 }
 
 /// `dock wait 1.5h (was 2.0h)` / `arrivals 17/day (was 12/day)` /
@@ -2444,6 +2499,37 @@ mod tests {
         );
     }
 
+    /// A NAMED ACTOR'S ACT IS THAT ACTOR'S MOVE (backlog 3881f5c9): the
+    /// same line the shed's region reads — `boss_jobs::car::owned_wait`
+    /// — so an act declared on `emp-david` names him, with or without a
+    /// probe, and is not accused of missing an observer. The dev-door
+    /// car (no probe, a prose event) was the one car the live shed
+    /// called ours on 2026-09-24.
+    #[test]
+    fn a_named_actors_act_names_the_actor_and_asks_for_no_observer() {
+        let waits = json!({"on": "the Access SSH CA ceremony", "owner": "emp-david"});
+        let probed = landed(
+            "fix/probed",
+            json!({ "proof_probe": "bash x.sh", "waits_on": waits.clone(),
+                "proof_attempt": {
+                "at": "2026-09-23T07:00:00Z", "exit": 75, "not_yet": true,
+                "probe": "bash x.sh", "why": "NOT YET: no CA",
+            } }),
+        );
+        let prose = landed(
+            "fix/dev-door",
+            json!({ "proof_event": "David completes the ceremony", "waits_on": waits }),
+        );
+        let lines = shed_lines(&[probed, prose]);
+        for line in &lines {
+            assert!(
+                line.contains("waiting on emp-david: the Access SSH CA ceremony")
+                    && !line.contains("no seen check"),
+                "{line}"
+            );
+        }
+    }
+
     #[test]
     fn the_shed_lists_only_open_cars_at_proven_and_says_what_each_waits_on() {
         let mut closed = landed("fix/closed", json!({}));
@@ -3574,7 +3660,9 @@ mod tests {
     #[test]
     fn the_regions_header_prints_the_servers_cards() {
         use boss_jobs::region_states::Decided;
-        use boss_jobs::regions::{BoundKind, Measure, Region, RegionState, Regions, Trend};
+        use boss_jobs::regions::{
+            BoundKind, Machine, MachineState, Measure, Region, RegionState, Regions, Trend,
+        };
         let trend = |metric: &str, unit: &str, cur: Option<f64>, prev: Option<f64>| Trend {
             metric: metric.into(),
             unit: unit.into(),
@@ -3600,6 +3688,7 @@ mod tests {
                     // bound and its why. The machinery (car 5) is a
                     // drawing, so this reader takes none of it.
                     machines: Vec::new(),
+                    places: Vec::new(),
                 }
             };
         let map = Regions {
@@ -3676,6 +3765,24 @@ mod tests {
             stuck: Vec::new(),
             thirds: Vec::new(),
             machines: None,
+            // THE PLANT (design 62de32ae, decision 11): machinery that
+            // serves every region, printed on a line of its own after
+            // them — a failed one names its failure, since no region's
+            // state carries it.
+            plant: vec![
+                Machine {
+                    id: "runner:host:forge".into(),
+                    name: "forge runner".into(),
+                    state: MachineState::Failed,
+                    why: "the last converge request was refused".into(),
+                },
+                Machine {
+                    id: "runner:host:boss-gcp".into(),
+                    name: "boss-gcp runner".into(),
+                    state: MachineState::Idle,
+                    why: "last df answered exit 0".into(),
+                },
+            ],
         };
         // The dock's bound is a threshold, the gates' state was decided
         // by a declared band that has held 42 minutes, and both carry
@@ -3701,10 +3808,19 @@ mod tests {
         let lines = region_lines(&serde_json::to_value(&map).unwrap());
         assert_eq!(
             lines.len(),
-            9,
-            "a heading and a card per region:\n{}",
+            10,
+            "a heading, a card per region and the plant:\n{}",
             lines.join("\n")
         );
+        assert_eq!(
+            lines[9],
+            "    plant        2 machines serving every region: forge runner FAILED \
+             (the last converge request was refused) · boss-gcp runner idle",
+        );
+        // An older server sends no plant, and no line is invented for it.
+        let mut older = serde_json::to_value(&map).unwrap();
+        older.as_object_mut().unwrap().remove("plant");
+        assert_eq!(region_lines(&older).len(), 9);
         assert!(lines[0].contains("last 24h"), "{}", lines[0]);
         assert!(
             lines[1].starts_with("    dock ")

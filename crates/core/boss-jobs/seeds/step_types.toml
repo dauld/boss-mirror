@@ -1445,41 +1445,6 @@ required_roles = []
   description = "When acknowledged"
 
 [[step_type]]
-kind = "marketing-brief"
-label = "Marketing Brief"
-category = "admin"
-ux = "expanded"
-version = 1
-description = "Cross-department alignment brief with a body, target audience, and per-employee acknowledgement tracker. Used early in marketing motions when a campaign or launch needs explicit sign-off from each adjacent function (sales, support, ops) before downstream work fans out."
-typical_duration_hours = 2.0
-typical_duration_jitter = 0.5
-required_roles = []
-
-  [[step_type.fields]]
-  name = "brief_md"
-  field_type = "string"
-  required = false
-  description = "Markdown body of the brief"
-
-  [[step_type.fields]]
-  name = "audience"
-  field_type = "array"
-  required = false
-  description = "Employee IDs in scope"
-
-  [[step_type.fields]]
-  name = "circulated_at"
-  field_type = "date-time"
-  required = false
-  description = "When the brief was sent out"
-
-  [[step_type.fields]]
-  name = "acknowledgements"
-  field_type = "array"
-  required = false
-  description = "{employee_id, acknowledged_at} rows"
-
-[[step_type]]
 kind = "sr-triage"
 label = "SR Triage"
 category = "operations"
@@ -1602,35 +1567,6 @@ required_roles = []
   field_type = "string"
   required = false
   description = "Confirmed failure mode / decision from the call"
-
-[[step_type]]
-kind = "marketing-attribution"
-label = "Marketing Attribution"
-category = "admin"
-ux = "expanded"
-version = 1
-description = "Open measurement window after a marketing launch — tracks the configured measurement period, what closed it, and the analyst's close-out notes. Dedicated kind so the attribution UX plugin has a stable mount point and the motion-attribution rollup can query by step kind."
-typical_duration_hours = 2.0
-typical_duration_jitter = 0.5
-required_roles = []
-
-  [[step_type.fields]]
-  name = "measurement_days"
-  field_type = "number"
-  required = false
-  description = "Days the window stays open"
-
-  [[step_type.fields]]
-  name = "window_closes_at"
-  field_type = "date"
-  required = false
-  description = "Configured window end"
-
-  [[step_type.fields]]
-  name = "closing_notes"
-  field_type = "string"
-  required = false
-  description = "Analyst close-out notes"
 
 [[step_type]]
 kind = "training"

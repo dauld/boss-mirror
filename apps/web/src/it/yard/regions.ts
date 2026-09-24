@@ -131,7 +131,16 @@ export type Region = Readonly<{
    *  machine of ours works in, and empty on an older server — which
    *  draws no glyphs rather than inventing idle ones. */
   machines: ReadonlyArray<Machine>;
+  /** How many of the region's OWN members stand at each of its places
+   *  — marshalling's stations, the shed's three places (design
+   *  62de32ae, the rest of decision 5). The partition is the server's,
+   *  so an interior draws the head's count from these rather than a
+   *  count of its own. Empty for a region with no places, and on an
+   *  older server. */
+  places: ReadonlyArray<Place>;
 }>;
+
+export type Place = Readonly<{ name: string; count: number }>;
 
 /** A third's STUCK reading (design cf820810), exactly as the server
  *  gives it: stuck and waiting side by side and never summed; a
@@ -193,6 +202,12 @@ export type Regions = Readonly<{
   /** The machine cell. Null on an older server: not answered, never
    *  "no machines". */
   machines: MachineSummary | null;
+  /** THE PLANT (decision 11): machinery that serves every region — the
+   *  host runners — drawn as a strip along the map's edge rather than
+   *  filed under one region. Empty on an older server, which draws no
+   *  strip rather than inventing idle machines. The HUD's machine cell
+   *  counts these too, under the region `plant`. */
+  plant: ReadonlyArray<Machine>;
 }>;
 
 function asObject(raw: unknown, where: string): Record<string, unknown> {
@@ -278,10 +293,16 @@ function parseRegion(raw: unknown): Region {
     trend: parseTrend(o.trend),
     kpi: Array.isArray(o.kpi) ? o.kpi.map(parseMeasure) : [],
     machines: Array.isArray(o.machines) ? o.machines.map(parseMachine) : [],
+    places: Array.isArray(o.places) ? o.places.map(parsePlace) : [],
   };
 }
 
-const strings = (v: unknown): ReadonlyArray<string> => (Array.isArray(v) ? v.map(String) : []);
+function parsePlace(raw: unknown): Place {
+  const o = asObject(raw, 'place');
+  return { name: String(o.name ?? ''), count: numberOrNull(o.count) ?? 0 };
+}
+
+const strings =(v: unknown): ReadonlyArray<string> => (Array.isArray(v) ? v.map(String) : []);
 
 function parseThird(raw: unknown): Third {
   const o = asObject(raw, 'third');
@@ -346,6 +367,7 @@ export function parseRegions(raw: unknown): Regions {
     now: String(o.now ?? ''),
     thirds: Array.isArray(o.thirds) ? o.thirds.map(parseThird) : [],
     machines: parseMachineSummary(o.machines),
+    plant: Array.isArray(o.plant) ? o.plant.map(parseMachine) : [],
   };
 }
 

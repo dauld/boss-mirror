@@ -23,7 +23,7 @@
   import { navigate } from '@boss/web-kit/nav';
   import type { Remote } from '../../data/remote';
   import type { Regions } from './regions';
-  import { hudOf, type Figure, type LastGood } from './hud';
+  import { hudOf, machineHref, type Figure, type LastGood } from './hud';
 
   type Props = Readonly<{
     /** The latest regions read, landed at `readAt`. */
@@ -126,8 +126,8 @@
         <ul class="hud-listed">
           {#each hud.machines.listed as m (`${m.region}:${m.id}`)}
             <li>
-              <a href={`/it/yard/${m.region}`} title={m.why} data-machine={m.id}
-                onclick={(e) => open(e, `/it/yard/${m.region}`)}
+              <a href={machineHref(m)} title={m.why} data-machine={m.id}
+                onclick={(e) => open(e, machineHref(m))}
                 >{`${m.state === 'failed' ? 'failed' : 'unjudged'} · ${m.region} · ${m.name}`}</a>
             </li>
           {/each}

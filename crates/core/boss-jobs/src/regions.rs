@@ -297,6 +297,31 @@ pub struct Region {
     /// an older payload, which a client reads as empty.
     #[serde(default)]
     pub machines: Vec<Machine>,
+    /// THE PLACES INSIDE THE REGION, each with how many of the region's
+    /// OWN members stand there (design 62de32ae, the rest of decision 5;
+    /// car E on backlog c3105b2a): marshalling's stations and the shed's
+    /// three places. It is what lets an interior draw the head's count
+    /// rather than a count of its own — on 2026-09-24 marshalling's
+    /// platforms drew every station's full depth, 562 standings under a
+    /// head of 236, because the station reads carry no partition and
+    /// the only copy of it was here. A marshalling packet standing at two
+    /// stations is counted at both, so the places may sum past the head
+    /// by exactly the packets that stand twice; the shed's places are
+    /// disjoint and sum to it. Empty for a region with no such places,
+    /// and on an older payload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub places: Vec<Place>,
+}
+
+/// One place inside a region and the region's members standing there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Place {
+    /// The place as its region's interior names it: a station's registry
+    /// name, or the shed's `inspection-shed` / `siding-event` /
+    /// `siding-no-probe` — the floor's own station names
+    /// (`apps/web/src/it/yard/yard-shed.ts`).
+    pub name: String,
+    pub count: usize,
 }
 
 /// The whole map.
@@ -322,6 +347,19 @@ pub struct Regions {
     /// "not answered", never "no machines".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machines: Option<crate::thirds::MachineSummary>,
+    /// THE PLANT (design 62de32ae, decision 11): machinery that serves
+    /// every region and so belongs to none — the ops runner on each host
+    /// the estate registry declares one on. They stood in receiving until
+    /// car E, filed there because an ops-request is an inbound kind, and
+    /// the review of 2026-09-24 read that as arbitrary: neither host
+    /// runner moves a packet into receiving. The map draws them as a
+    /// strip along its edge. A failed one troubles NO region — blaming
+    /// the one it happened to be filed under is the mis-grouping this
+    /// moves away from — so its failure is carried here, on the strip and
+    /// in `boss orient`'s plant line — and it is counted in [`Self::machines`]
+    /// under the region `plant`. Absent on an older payload.
+    #[serde(default)]
+    pub plant: Vec<Machine>,
 }
 
 /// THE THREE THIRDS of the operator surface (David, 2026-09-08: queue
@@ -1311,6 +1349,8 @@ fn region(
         // Attached in one pass in `regions` below, so each region
         // function stays about its own count and trend.
         machines: Vec::new(),
+        // Set by the two regions that have places ([`Place`]).
+        places: Vec::new(),
     }
 }
 
@@ -1486,6 +1526,17 @@ fn conductor_machine(h: Option<&ConductorHealth>) -> Machine {
     }
 }
 
+/// A STATION THE SERVER CANNOT JUDGE: within its WIP limit, with flow
+/// the cube is blind to — the `(false, None)` arm below, which draws the
+/// `?` glyph. Marshalling's header counts these ("2 stations
+/// unjudged", design 62de32ae decision 11) so that blindness is itself
+/// a number; the test
+/// `marshalling_counts_the_stations_it_cannot_judge_in_its_header` holds
+/// the header's count to the glyphs'.
+fn unjudged(s: &StationReading) -> bool {
+    !s.over_limit && s.served.is_none()
+}
+
 /// THE STATIONS. Each is a registry row this process evaluated, so its
 /// presence is a fact and an empty one is genuinely idle. Flow the cube
 /// is blind to is unknown, not zero: a station holding work whose
@@ -1633,10 +1684,12 @@ fn judge_request(id: String, name: &str, verb: &str, job: &Job, steps: &[Step]) 
 /// whether or not it has said anything — the false-empty class closed
 /// at its most consequential point.
 ///
-/// They stand in RECEIVING because that is where the packets they
-/// serve stand: an ops-request is an inbound platform kind
-/// ([`inbound_kinds`]), so the region counting them is the region
-/// whose machinery answers them.
+/// They are THE PLANT ([`Regions::plant`]; design 62de32ae, decision
+/// 11). They stood in receiving until 2026-09-24, on the reasoning that
+/// an ops-request is an inbound platform kind; the review read that as
+/// arbitrary — a host runner moves nothing into receiving, and it
+/// answers the converge for arrivals and the probe for the shed alike.
+/// Machinery that serves every region belongs to none of them.
 ///
 /// A declared host with no request in the window is UNKNOWN, never
 /// idle: a runner still declares no poll interval anywhere the system
@@ -1771,7 +1824,6 @@ fn machines_of(name: &str, inputs: &RegionInputs<'_>) -> Vec<Machine> {
         "gates" => gate_bays(inputs),
         "track" => vec![conductor_machine(inputs.conductor)],
         "marshalling" => station_machines(inputs),
-        "receiving" => host_runner_machines(inputs),
         _ => Vec::new(),
     };
     out.extend(
@@ -1810,12 +1862,17 @@ pub fn regions(inputs: &RegionInputs<'_>) -> Regions {
     })
     .collect::<Vec<Region>>();
     let stuck = stuck(inputs);
+    let plant = host_runner_machines(inputs);
     Regions {
         window_hours: inputs.window_hours,
         thirds: crate::thirds::thirds(inputs, &stuck),
-        machines: Some(crate::thirds::machine_summary(&regions)),
+        // The HUD's machine cell counts the plant too: the host runners
+        // left the regions for the plant (decision 11), and a count over
+        // the regions alone would drop them.
+        machines: Some(crate::thirds::machine_summary(&regions, &plant)),
         regions,
         stuck,
+        plant,
     }
 }
 
@@ -2458,7 +2515,7 @@ pub(crate) enum StaleProof {
     Starved(crate::car::NotYetStreak),
     /// Told not yet after what it declared it waits on was seen.
     Seen(String),
-    /// Declared a wait with no `seen` check.
+    /// Declared a wait with no `seen` check that no named actor owns.
     Unobserved,
     /// Told not yet with no declared wait.
     Undeclared,
@@ -2480,20 +2537,35 @@ pub(crate) fn stale_proof(md: &Value, hours: i64) -> StaleProof {
         ShedPlace::Unproven => StaleProof::Unproven,
         ShedPlace::ProbePending { last: Some(_) } => StaleProof::Failing,
         ShedPlace::ProbePending { last: None } => StaleProof::NeverProbed,
-        ShedPlace::WaitingOn(_) => StaleProof::ProseOnly,
+        // No probe runs, so no `seen` check does either: a world event
+        // here is observed by nothing and is ours. A named actor's act
+        // is that actor's move all the same (3881f5c9) — the dev-door
+        // login, David's to perform, is this shape.
+        ShedPlace::WaitingOn(_) => match crate::car::owned_wait(md) {
+            Some(o) if matches!(o.owner, crate::car::WaitOwner::Actor(_)) => owed(o, hours),
+            _ => StaleProof::ProseOnly,
+        },
         ShedPlace::ProbeNotYet { .. } => match crate::car::starved(md) {
             Some(Starved::Undeclared(streak)) => StaleProof::Starved(streak),
             Some(Starved::SeenWhileNotYet { on, .. }) => StaleProof::Seen(on),
             None => match crate::car::waits_on(md) {
                 None => StaleProof::Undeclared,
-                Some(w) if w.seen.is_none() => StaleProof::Unobserved,
-                Some(_) => match crate::car::owned_wait(md) {
-                    Some(o) if o.overdue(hours) => StaleProof::Overdue(o),
-                    Some(o) => StaleProof::Theirs(o),
+                Some(w) => match crate::car::owned_wait(md) {
+                    Some(o) => owed(o, hours),
+                    None if w.seen.is_none() => StaleProof::Unobserved,
                     None => StaleProof::Unowned,
                 },
             },
         },
+    }
+}
+
+/// An owned wait, inside or past the patience it declared.
+fn owed(o: crate::car::OwnedWait, hours: i64) -> StaleProof {
+    if o.overdue(hours) {
+        StaleProof::Overdue(o)
+    } else {
+        StaleProof::Theirs(o)
     }
 }
 
@@ -2509,8 +2581,9 @@ pub(crate) fn stale_proof(md: &Value, hours: i64) -> StaleProof {
 /// charge, a release David opens, his destructive prune, a tenant
 /// publish, a red crawl, a failed publish) painted exactly like a broken
 /// probe. A stale wait is someone else's move only when the car
-/// DECLARES it, something OBSERVES it, and it names the OWNER
-/// (`boss_jobs::car::owned_wait`); it stays theirs until the event is
+/// DECLARES it and names the OWNER, and — for a wait on the world —
+/// something OBSERVES it (`boss_jobs::car::owned_wait`; a named actor's
+/// act needs no observer, 2026-09-24); it stays theirs until the event is
 /// seen while the probe still says not yet, or it outlives a max wait
 /// the car itself declared.
 fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
@@ -2572,6 +2645,12 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     let mut unowned: Vec<&str> = Vec::new();
     let mut overdue: Vec<(crate::car::OwnedWait, i64, &str)> = Vec::new();
     let mut theirs: Vec<(crate::car::OwnedWait, &str)> = Vec::new();
+    // The age of the oldest stale car that is OURS — what the ours band
+    // measures. Until 2026-09-24 it read the oldest car of all: "oldest
+    // open 168h > the 24h proof band, ours to move", held 6d, where the
+    // 168h car was a Stripe wait on the world and the one car that was
+    // ours was 40h old (3881f5c9).
+    let mut oldest_ours: Option<i64> = None;
     for (j, _) in &awaiting {
         let branch = j
             .metadata
@@ -2589,7 +2668,14 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
         let hours = (inputs.now - opened.with_timezone(&chrono::Utc)).num_hours();
         if hours >= PROOF_STALE_HOURS {
             stale.push((hours, branch));
-            match stale_proof(&j.metadata, hours) {
+            let class = stale_proof(&j.metadata, hours);
+            if !matches!(
+                class,
+                StaleProof::Theirs(_) | StaleProof::Unproven | StaleProof::Failing
+            ) {
+                oldest_ours = oldest_ours.max(Some(hours));
+            }
+            match class {
                 // Named by the sentences above this one, which lead
                 // whenever any car is unproven or failing.
                 StaleProof::Unproven | StaleProof::Failing => {}
@@ -2748,8 +2834,17 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
                 ),
             )
         };
+        // Each band measures the cars it names: the ours band the oldest
+        // car that is ours, from when THAT car crossed the line.
+        let (since, measured) = match oldest_ours {
+            Some(h) if band == bands::SHED_OURS_STALE => (
+                Some(inputs.now - chrono::Duration::hours(h - PROOF_STALE_HOURS)),
+                format!("oldest ours open {h}h"),
+            ),
+            _ => (stale_since, format!("oldest open {oldest}h")),
+        };
         (
-            Some((band, stale_since, format!("oldest open {oldest}h"))),
+            Some((band, since, measured)),
             format!(
                 "{} of {n} open past {PROOF_STALE_HOURS}h — oldest {oldest}h, {branch} — {whose}",
                 stale.len()
@@ -2773,15 +2868,47 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
         ),
         None => settle(Vec::new(), why, inputs.now),
     };
-    region(
-        "shed",
-        Some(n),
-        None,
-        "cars awaiting proof",
-        settled,
-        trend,
-        kpi,
-    )
+    // THE SHED'S THREE PLACES (the rest of decision 5), disjoint and
+    // summing to the head: the review drew five wagons under SHED 11,
+    // and with these the region map can say which place its slice
+    // falls short in rather than leave the reader to recount.
+    let places = SHED_PLACES
+        .iter()
+        .map(|name| Place {
+            name: (*name).to_string(),
+            count: awaiting
+                .iter()
+                .filter(|(j, _)| shed_station(&shed_place(&j.metadata)) == *name)
+                .count(),
+        })
+        .collect();
+    Region {
+        places,
+        ..region(
+            "shed",
+            Some(n),
+            None,
+            "cars awaiting proof",
+            settled,
+            trend,
+            kpi,
+        )
+    }
+}
+
+/// The shed's places as the floor names its stations
+/// (`apps/web/src/it/yard/yard-shed.ts`, `ShedPlace`), in its order.
+pub const SHED_PLACES: [&str; 3] = ["inspection-shed", "siding-event", "siding-no-probe"];
+
+/// Which of [`SHED_PLACES`] a car stands in: a probe, run or not, is the
+/// inspection shed; an event alone is the event siding; neither is the
+/// no-probe siding — the floor's `shedPlace`, over [`shed_place`].
+pub fn shed_station(place: &ShedPlace) -> &'static str {
+    match place {
+        ShedPlace::ProbePending { .. } | ShedPlace::ProbeNotYet { .. } => SHED_PLACES[0],
+        ShedPlace::WaitingOn(_) => SHED_PLACES[1],
+        ShedPlace::Unproven => SHED_PLACES[2],
+    }
 }
 
 /// A car a cancelled train released, judged: is it still waiting on
@@ -3269,7 +3396,7 @@ fn marshalling(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
         .min()
         .map(|t| (inputs.now - t).num_hours().max(0));
     #[allow(clippy::cast_precision_loss)]
-    let kpi = vec![match oldest {
+    let mut kpi = vec![match oldest {
         Some(h) => measure("oldest at a station", Some(h as f64), "hours"),
         None if n == 0 => measure_said(
             "oldest at a station",
@@ -3279,7 +3406,34 @@ fn marshalling(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
         ),
         None => measure("oldest at a station", None, "hours"),
     }];
-    region("marshalling", Some(n), None, UNIT, settled, trend, kpi)
+    // BLINDNESS COUNTED (decision 11): the stations whose flow nobody
+    // can count are drawn `?`, and the header says how many — a zero
+    // is stated too, because it is a reading.
+    let blind = stations.iter().filter(|s| unjudged(s)).count();
+    kpi.push(measure_said(
+        "stations unjudged",
+        count_value(blind),
+        "stations",
+        if blind == 0 {
+            "every station judged".to_string()
+        } else {
+            format!("{} unjudged", plural(blind, "station", "stations"))
+        },
+    ));
+    // EACH STATION AT MARSHALLING'S OWN MEMBERS (the rest of decision
+    // 5): the partition, per place, so the interior can draw the head's
+    // count instead of each station's full depth.
+    let places = stations
+        .iter()
+        .map(|s| Place {
+            name: s.name.clone(),
+            count: s.members.len(),
+        })
+        .collect();
+    Region {
+        places,
+        ..region("marshalling", Some(n), None, UNIT, settled, trend, kpi)
+    }
 }
 
 /// THE SHOP FLOOR: what is being BUILT — the runs in flight, with the
@@ -3875,6 +4029,16 @@ mod tests {
             .iter()
             .find(|m| m.id == id)
             .unwrap_or_else(|| panic!("{region} has no machine {id}"))
+            .state
+    }
+
+    /// A machine of the plant — the machinery that serves every region
+    /// (design 62de32ae, decision 11).
+    fn plant_state(r: &Regions, id: &str) -> MachineState {
+        r.plant
+            .iter()
+            .find(|m| m.id == id)
+            .unwrap_or_else(|| panic!("the plant has no machine {id}"))
             .state
     }
 
@@ -4857,6 +5021,160 @@ mod tests {
         assert!(
             shed.why.contains("only prose names") && shed.why.contains("feat/prose"),
             "{}",
+            shed.why
+        );
+    }
+
+    /// A NAMED PERSON'S ACT IS THEIRS WITH OR WITHOUT A PROBE (backlog
+    /// 3881f5c9, fix shape (2)). Measured 2026-09-24 16:42Z: GET
+    /// /api/yard/regions read the shed TROUBLED on exactly one car,
+    /// fix/the-dev-door-maps-the-access-principal-to-root — no probe, a
+    /// prose event, and a `waits_on` declaring `owner: emp-david` for
+    /// the Access SSH CA ceremony. Its next move is David's, declared as
+    /// data, and the shed called it ours because nothing observed it. A
+    /// WORLD event still needs an observer to be the world's; an actor
+    /// is its own. The control is the same car with its owner set to
+    /// the world, which stays ours.
+    #[test]
+    fn a_declared_act_of_a_named_actor_is_theirs_even_with_no_probe_to_observe_it() {
+        let car = |branch: &str, owner: &str, max: Value, probe: bool| {
+            let mut md = json!({
+                "branch": branch, "merged": true, "opened_at": "2026-09-15T10:00:00Z",
+                (crate::car::WAITS_ON): {
+                    "on": "the Access SSH CA ceremony",
+                    (crate::car::WAITS_ON_OWNER): owner,
+                    (crate::car::WAITS_ON_MAX_WAIT_HOURS): max,
+                },
+            });
+            if probe {
+                md["proof_probe"] = json!("true");
+                md["proof_attempt"] = json!({
+                    "at": "2026-09-19T11:00:00Z", "not_yet": true, "exit": 75, "probe": "true",
+                    (crate::car::NOT_YET_SINCE): "2026-09-15T11:00:00Z",
+                    (crate::car::NOT_YET_RUNS): 96,
+                });
+            } else {
+                md["proof_event"] = json!("David completes the Access SSH CA ceremony");
+            }
+            let j = job("ship-a-change", branch, JobStatus::Open, md);
+            let s = vec![
+                step(
+                    &j,
+                    "gate",
+                    StepStatus::Completed,
+                    Some("2026-09-15T06:00:00Z"),
+                ),
+                step(&j, "proven", StepStatus::Ready, None),
+            ];
+            (j, s)
+        };
+        let status = empty_status();
+        let read = |cars: &[(Job, Vec<Step>)]| {
+            let out = regions(&inputs(&status, &[], &[], cars, &[], Some(&[]), Some(&[])));
+            by_name(&out, "shed").clone()
+        };
+
+        // The live shape: prose event, no probe, David's act.
+        let shed = read(&[car("fix/dev-door", "emp-david", Value::Null, false)]);
+        assert_eq!(shed.state, RegionState::Attention, "{}", shed.why);
+        assert_eq!(shed.kpi[0].value, Some(0.0), "{}", shed.why);
+        assert!(
+            shed.why
+                .contains("waiting on emp-david: the Access SSH CA ceremony (fix/dev-door)")
+                && !shed.why.contains("only prose names"),
+            "shown as waiting on its owner, not as ours: {}",
+            shed.why
+        );
+
+        // The same act behind a probe that says not yet, no seen check.
+        let shed = read(&[car("fix/probed", "emp-david", Value::Null, true)]);
+        assert_eq!(shed.state, RegionState::Attention, "{}", shed.why);
+        assert!(!shed.why.contains("no seen check"), "{}", shed.why);
+
+        // CONTROL: the world's event with nothing observing it is ours,
+        // in both shapes.
+        let shed = read(&[car("fix/world-prose", "world", Value::Null, false)]);
+        assert_eq!(shed.state, RegionState::Troubled, "{}", shed.why);
+        assert!(shed.why.contains("only prose names"), "{}", shed.why);
+        let shed = read(&[car("fix/world-probed", "world", Value::Null, true)]);
+        assert_eq!(shed.state, RegionState::Troubled, "{}", shed.why);
+        assert!(shed.why.contains("no seen check"), "{}", shed.why);
+
+        // PATIENCE STILL BINDS: 98h open against the 48h David's car
+        // declared is ours again.
+        let shed = read(&[car("fix/late", "emp-david", json!(48), false)]);
+        assert_eq!(shed.state, RegionState::Troubled, "{}", shed.why);
+        assert!(
+            shed.why.contains("past the max wait they declared") && shed.why.contains("fix/late"),
+            "{}",
+            shed.why
+        );
+    }
+
+    /// THE OURS BAND MEASURES THE OLDEST CAR THAT IS OURS (backlog
+    /// 3881f5c9). Measured 2026-09-24 16:42Z: the band read "oldest open
+    /// 168h > the 24h proof band, ours to move", held 6d — and the 168h
+    /// car was the Stripe wait, declared on the world, while the one car
+    /// that was ours was 40h old. The header's number must be the number
+    /// of the thing it names, or checking the state against it (the
+    /// point of naming the band) checks it against the wrong car.
+    #[test]
+    fn the_ours_band_reads_the_age_of_the_oldest_car_that_is_ours() {
+        // NOW is 2026-09-19T12:00:00Z.
+        let car = |branch: &str, opened: &str, owner: Value| {
+            let j = job(
+                "ship-a-change",
+                branch,
+                JobStatus::Open,
+                json!({
+                    "branch": branch, "merged": true, "opened_at": opened,
+                    "proof_probe": "true",
+                    "proof_attempt": {
+                        "at": "2026-09-19T11:00:00Z", "not_yet": true, "exit": 75,
+                        "probe": "true",
+                        (crate::car::NOT_YET_SINCE): "2026-09-19T10:00:00Z",
+                        (crate::car::NOT_YET_RUNS): 2,
+                    },
+                    (crate::car::WAITS_ON): {
+                        "on": "an event", "seen": "true",
+                        (crate::car::WAITS_ON_OWNER): owner,
+                    },
+                }),
+            );
+            let s = vec![
+                step(
+                    &j,
+                    "gate",
+                    StepStatus::Completed,
+                    Some("2026-09-12T06:00:00Z"),
+                ),
+                step(&j, "proven", StepStatus::Ready, None),
+            ];
+            (j, s)
+        };
+        let status = empty_status();
+        let cars = vec![
+            car("feat/theirs-old", "2026-09-12T12:00:00Z", json!("world")),
+            car("fix/ours-young", "2026-09-17T20:00:00Z", Value::Null),
+        ];
+        let out = regions(&inputs(&status, &[], &[], &cars, &[], Some(&[]), Some(&[])));
+        let shed = by_name(&out, "shed");
+        assert_eq!(shed.state, RegionState::Troubled, "{}", shed.why);
+        let band = shed.band.as_ref().expect("a troubled shed names its band");
+        assert_eq!(band.id, "shed-ours-stale");
+        assert!(
+            band.reads.contains("oldest ours open 40h") && !band.reads.contains("168h"),
+            "the ours band measures the ours car: {}",
+            band.reads
+        );
+        assert_eq!(
+            band.held_minutes,
+            Some(16 * 60),
+            "40h open, past 24h for 16h — not the theirs car's 6d"
+        );
+        assert!(
+            shed.why.contains("oldest 168h, feat/theirs-old"),
+            "the sentence still leads with the oldest car of all: {}",
             shed.why
         );
     }
@@ -6084,12 +6402,10 @@ mod tests {
         let mut i = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
         i.runner_hosts = Some(&hosts);
         let out = regions(&i);
-        let drawn: Vec<&str> = machines_in(&out, "receiving")
-            .iter()
-            .map(|m| m.id.as_str())
-            .collect();
+        let drawn: Vec<&str> = out.plant.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(drawn, vec!["runner:host:forge", "runner:host:boss-gcp"]);
-        let m = machines_in(&out, "receiving")
+        let m = out
+            .plant
             .iter()
             .find(|m| m.id == "runner:host:boss-gcp")
             .expect("the declared host is drawn");
@@ -6116,7 +6432,7 @@ mod tests {
         i.runner_hosts = Some(&hosts);
         i.ops_requests = Some(&rows);
         assert_eq!(
-            machine_state(&regions(&i), "receiving", "runner:host:boss-gcp"),
+            plant_state(&regions(&i), "runner:host:boss-gcp"),
             MachineState::Idle
         );
 
@@ -6127,10 +6443,10 @@ mod tests {
         i.ops_requests = Some(&refused);
         let out = regions(&i);
         assert_eq!(
-            machine_state(&out, "receiving", "runner:host:boss-gcp"),
+            plant_state(&out, "runner:host:boss-gcp"),
             MachineState::Failed
         );
-        assert_eq!(by_name(&out, "receiving").state, RegionState::Troubled);
+        assert_eq!(by_name(&out, "receiving").state, RegionState::Clear);
 
         let in_flight = [on_host(
             ops_request("df", JobStatus::Open, None, None),
@@ -6138,7 +6454,7 @@ mod tests {
         )];
         i.ops_requests = Some(&in_flight);
         assert_eq!(
-            machine_state(&regions(&i), "receiving", "runner:host:boss-gcp"),
+            plant_state(&regions(&i), "runner:host:boss-gcp"),
             MachineState::Running
         );
 
@@ -6149,7 +6465,7 @@ mod tests {
         )];
         i.ops_requests = Some(&elsewhere);
         assert_eq!(
-            machine_state(&regions(&i), "receiving", "runner:host:boss-gcp"),
+            plant_state(&regions(&i), "runner:host:boss-gcp"),
             MachineState::Unknown
         );
     }
@@ -6163,7 +6479,8 @@ mod tests {
         let mut i = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
         i.runner_hosts = None;
         let out = regions(&i);
-        let m = machines_in(&out, "receiving")
+        let m = out
+            .plant
             .iter()
             .find(|m| m.id == "runner:hosts")
             .expect("an unread registry is still a machine");
@@ -7415,5 +7732,236 @@ mod tests {
         assert_eq!(m.count, None);
         assert_eq!(m.state, RegionState::Troubled);
         assert!(m.why.contains("still in receiving"), "{}", m.why);
+        assert!(m.places.is_empty(), "an unread partition has no places");
+    }
+
+    // -----------------------------------------------------------------
+    // THE PLACES AND THE PLANT (design 62de32ae, decisions 5 and 11;
+    // car E on backlog c3105b2a).
+    // -----------------------------------------------------------------
+
+    /// EACH STATION AT ITS PARTITIONED COUNT. Live on 2026-09-24 the
+    /// marshalling platforms drew 562 standings under a head of 236:
+    /// each station drew its full depth, because the station reads carry
+    /// no partition. The server holds it, so it says per station how many
+    /// of MARSHALLING'S members stand there — an untriaged packet at the
+    /// same station is receiving's and is not among them. A packet at
+    /// two stations is at both, and the places sum past the head by
+    /// exactly the packets that stand twice.
+    #[test]
+    fn marshalling_says_how_many_of_its_own_members_stand_at_each_station() {
+        let untriaged = admitted(
+            "backlog-item",
+            "untriaged",
+            &[("triage", "task", StepStatus::Ready)],
+        );
+        let triaged = admitted(
+            "backlog-item",
+            "triaged",
+            &[
+                ("triage", "task", StepStatus::Completed),
+                ("build", "task", StepStatus::Ready),
+            ],
+        );
+        let (u, tr) = (untriaged.0.id.to_string(), triaged.0.id.to_string());
+        let inbound = vec![untriaged, triaged];
+        let stations = vec![
+            holding("q.platform-admin.task", &[&u, &tr, "other"]),
+            holding("a.platform-admin.opus", &[&tr]),
+            holding("design-review", &[]),
+        ];
+        let status = empty_status();
+        let out = regions(&inputs(
+            &status,
+            &[],
+            &[],
+            &[],
+            &[],
+            Some(&inbound),
+            Some(&stations),
+        ));
+        let m = by_name(&out, "marshalling");
+        assert_eq!(m.count, Some(2), "{}", m.why);
+        let places: Vec<(&str, usize)> = m
+            .places
+            .iter()
+            .map(|p| (p.name.as_str(), p.count))
+            .collect();
+        assert_eq!(
+            places,
+            vec![
+                ("q.platform-admin.task", 2),
+                ("a.platform-admin.opus", 1),
+                ("design-review", 0),
+            ],
+            "every station, in the registry's order, at marshalling's own members"
+        );
+        let drawn: usize = m.places.iter().map(|p| p.count).sum();
+        assert_eq!(
+            drawn - m.count.unwrap(),
+            1,
+            "the one packet at two stations"
+        );
+        // Nothing else has places it does not declare.
+        assert!(by_name(&out, "receiving").places.is_empty());
+    }
+
+    /// THE SHED'S PLACES ARE DISJOINT AND SUM TO ITS COUNT — the three
+    /// the floor draws, named as the floor names them, so the region map
+    /// can say which of them its slice falls short in (the review drew 5
+    /// wagons under a SHED 11).
+    #[test]
+    fn the_shed_says_how_many_cars_stand_in_each_of_its_three_places() {
+        let awaiting = |branch: &str, md: Value| {
+            let mut md = md;
+            md["branch"] = json!(branch);
+            let j = job("ship-a-change", branch, JobStatus::Open, md);
+            let s = vec![
+                step(
+                    &j,
+                    "gate",
+                    StepStatus::Completed,
+                    Some("2026-09-19T06:00:00Z"),
+                ),
+                step(&j, "proven", StepStatus::Ready, None),
+            ];
+            (j, s)
+        };
+        let cars = vec![
+            awaiting("fix/a", json!({ "proof_probe": "true" })),
+            awaiting(
+                "fix/b",
+                json!({ "proof_probe": "true", "proof_event": "both" }),
+            ),
+            awaiting("fix/c", json!({ "proof_event": "the next red train" })),
+            awaiting("fix/d", json!({})),
+        ];
+        let status = empty_status();
+        let out = regions(&inputs(&status, &[], &[], &cars, &[], Some(&[]), Some(&[])));
+        let shed = by_name(&out, "shed");
+        let places: Vec<(&str, usize)> = shed
+            .places
+            .iter()
+            .map(|p| (p.name.as_str(), p.count))
+            .collect();
+        assert_eq!(
+            places,
+            vec![
+                ("inspection-shed", 2),
+                ("siding-event", 1),
+                ("siding-no-probe", 1)
+            ]
+        );
+        assert_eq!(
+            Some(shed.places.iter().map(|p| p.count).sum::<usize>()),
+            shed.count
+        );
+    }
+
+    /// STATIONS THE SERVER CANNOT JUDGE ARE COUNTED IN THE HEADER
+    /// (decision 11): blindness is itself a KPI. A station is unjudged by
+    /// the same predicate that draws its glyph `?`, so the header and the
+    /// glyphs cannot disagree about how many there are.
+    #[test]
+    fn marshalling_counts_the_stations_it_cannot_judge_in_its_header() {
+        let blind = |name: &str| StationReading {
+            name: name.into(),
+            served: None,
+            previous_served: None,
+            ..Default::default()
+        };
+        let stations = vec![
+            blind("design-review"),
+            blind("a.platform-admin.opus"),
+            holding("q.platform-admin.task", &[]),
+        ];
+        let status = empty_status();
+        let out = regions(&inputs(
+            &status,
+            &[],
+            &[],
+            &[],
+            &[],
+            Some(&[]),
+            Some(&stations),
+        ));
+        let m = by_name(&out, "marshalling");
+        let unjudged = m
+            .kpi
+            .iter()
+            .find(|k| k.name == "stations unjudged")
+            .expect("the header counts the stations it cannot judge");
+        assert_eq!(unjudged.value, Some(2.0));
+        assert_eq!(unjudged.text, "2 stations unjudged");
+        let glyphs = m
+            .machines
+            .iter()
+            .filter(|g| g.state == MachineState::Unknown)
+            .count();
+        assert_eq!(glyphs, 2, "the header's count is the glyphs' count");
+
+        let judged = vec![holding("q.platform-admin.task", &[])];
+        let out = regions(&inputs(
+            &status,
+            &[],
+            &[],
+            &[],
+            &[],
+            Some(&[]),
+            Some(&judged),
+        ));
+        let k = by_name(&out, "marshalling")
+            .kpi
+            .iter()
+            .find(|k| k.name == "stations unjudged")
+            .cloned()
+            .expect("a zero is a reading too");
+        assert_eq!(
+            (k.value, k.text.as_str()),
+            (Some(0.0), "every station judged")
+        );
+    }
+
+    /// THE HOST RUNNERS ARE THE PLANT (decision 11). They serve every
+    /// region, so they stand in none: receiving carries no host runner,
+    /// and a failed one troubles no region — it blinks on the plant
+    /// strip, where the review asked for it.
+    #[test]
+    fn the_host_runners_stand_in_the_plant_and_in_no_region() {
+        let status = empty_status();
+        let hosts = [host("forge")];
+        let refused = [on_host(
+            ops_request("converge", JobStatus::Closed, Some("refused"), None),
+            "forge",
+        )];
+        let mut i = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        i.runner_hosts = Some(&hosts);
+        i.ops_requests = Some(&refused);
+        let out = regions(&i);
+        assert!(
+            out.regions
+                .iter()
+                .all(|r| r.machines.iter().all(|m| !m.id.starts_with("runner:host"))),
+            "no region carries a host runner"
+        );
+        assert_eq!(
+            out.plant.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["runner:host:forge"]
+        );
+        assert_eq!(out.plant[0].state, MachineState::Failed);
+        assert_eq!(by_name(&out, "receiving").state, RegionState::Clear);
+        // The HUD's machine cell (design 00774ca8 decision 3) still
+        // counts it — ONCE, under the plant, neither dropped with its
+        // move out of receiving nor counted in a region as well.
+        let cell = out.machines.as_ref().expect("the cell is answered");
+        let in_regions: usize = out.regions.iter().map(|r| r.machines.len()).sum();
+        assert_eq!(cell.total, in_regions + out.plant.len());
+        let named: Vec<(&str, &str)> = cell
+            .failed_or_unknown
+            .iter()
+            .filter(|m| m.id.starts_with("runner:host"))
+            .map(|m| (m.region.as_str(), m.id.as_str()))
+            .collect();
+        assert_eq!(named, vec![("plant", "runner:host:forge")]);
     }
 }

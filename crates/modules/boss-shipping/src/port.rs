@@ -119,8 +119,7 @@ pub trait ShippingRepository: Send + Sync {
     /// GROUP BY + bounded LIMIT rather than fetching the full table
     /// and aggregating in Rust — at scale the shipments table reaches
     /// tens of thousands of rows and full-table scans trip the 5s
-    /// client timeout. See examples/used-device-shop/design/operations-needs.md E1 perf
-    /// note.
+    /// client timeout.
     async fn status_summary(
         &self,
         direction: ShipmentDirection,

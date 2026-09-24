@@ -196,6 +196,13 @@ export const SHIPMENT_DETAIL = /\/api\/shipping\/shipments\/[^/]+$/;
 /// needs a faithful fixture"; page audit 65a273d5, gap 0398c4d0): a `[]`
 /// here paints `undefined.toLocaleString()` and the page throws.
 export const EVENTS_STATS = /\/api\/events\/stats$/;
+/// The churn watchlist's scores, `{ accounts }` (RiskScoreListSchema):
+/// a `[]` is a wrong shape the page reports on the failure marker.
+export const RISK_SCORES = /\/api\/people\/accounts\/risk-scores(\?|$)/;
+/// The audit log's live stream. Not an object, but not a list either: a
+/// JSON `[]` is not an event stream, so the EventSource fails and the
+/// page says the stream is down, on the failure marker (sweep c3e4edcc).
+export const EVENTS_STREAM = /\/api\/events\/stream(\?|$)/;
 /// The live read's figures on 2026-09-23 21:44Z (the audit's controls_md,
 /// read 1), trimmed to two days and three kinds.
 export const AUDIT_STATS = {
@@ -217,7 +224,7 @@ export const AUDIT_STATS = {
 } as const;
 export const OBJECT_ENDPOINTS: ReadonlyArray<RegExp> = [
   JOBS_LIVE, JOBS_SUMMARY, YARD_STATUS, YARD_REGIONS, YARD_BORDERS, WORKFLOW_DETAIL, DISPATCHER_RULES, GATEWAY_PERF,
-  MARKETING_ASSET_DETAIL, VIEW_RESULTS, SHIPMENT_DETAIL, EVENTS_STATS,
+  MARKETING_ASSET_DETAIL, VIEW_RESULTS, SHIPMENT_DETAIL, EVENTS_STATS, RISK_SCORES, EVENTS_STREAM,
   // `{data, total}`, not a list: a bare `[]` here is the shape a wrong
   // endpoint answers, and the bar reads it as a failed roster rather
   // than an empty one — deliberately, so the org chart cannot go
@@ -266,10 +273,28 @@ export async function installApiFloor(page: Page): Promise<void> {
   // 204 fails the EventSource cleanly — no reconnect — so the client
   // falls back to its poll, which the objects below answer.
   await page.route(/\/api\/.+\/stream(\?|$)/, (r) => r.fulfill({ status: 204 }));
+  // Except the audit log's, the one stream whose refusal a page reports
+  // as a failed read: its "Live stream down" line wears the failure
+  // marker since sweep c3e4edcc, so under the 204 the empty leg found a
+  // marker on a healthy backend. A well-formed empty stream that ends
+  // instead — the browser waits `retry` to reconnect, and the page says
+  // it is reconnecting, which is no failure.
+  await page.route(EVENTS_STREAM, (r) =>
+    r.fulfill({
+      status: 200,
+      headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' },
+      body: 'retry: 3600000\n\n',
+    }),
+  );
 
   // Live job state (objects, not lists — `[]` would break these).
   await page.route(JOBS_LIVE, (r) => json(r, { counts: {}, open_total: 0, recent: [], sim_clock: {} }));
   await page.route(JOBS_SUMMARY, (r) => json(r, { counts: {}, total: 0 }));
+  // The churn watchlist's scores: `{ accounts }` (RiskScoreListSchema).
+  // Under the `[]` catch-all the page parses a wrong shape and says so on
+  // the failure marker (sweep c3e4edcc) — right for a broken backend,
+  // wrong for the empty leg.
+  await page.route(RISK_SCORES, (r) => json(r, { accounts: [] }));
   // The yard status read-model (object, not a list). An empty-but-well-
   // formed payload so the page renders its "no trains / no cars" states.
   await page.route(YARD_STATUS, (r) =>

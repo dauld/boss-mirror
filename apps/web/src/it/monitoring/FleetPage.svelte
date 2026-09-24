@@ -68,6 +68,9 @@
   let selectedNode = $state<string | null>(null);
   let loading = $state(true);
   let error = $state<string | null>(null);
+  // An empty registry is an answer, not a failed read, so it is not
+  // painted on the failure marker `error` wears (sweep c3e4edcc).
+  let noKinds = $state(false);
 
   // Decode once, defensively, at the fetch site — the route-smoke
   // crawl runs every page against an adversarial mock, and a
@@ -154,7 +157,7 @@
         if (kind) await switchTo(kind);
         else {
           loading = false;
-          error = 'no Workflows in the registry';
+          noKinds = true;
         }
       } catch (e) {
         loading = false;
@@ -269,7 +272,9 @@
 {#if loading}
   <p class="fleet-msg">Reading the fleet…</p>
 {:else if error}
-  <p class="fleet-msg fleet-err">{error}</p>
+  <p class="fleet-msg load-failed" role="alert">Couldn't read the fleet — {error}</p>
+{:else if noKinds}
+  <p class="fleet-msg">No Workflows in the registry.</p>
 {:else if dag}
   <StepDag
     nodes={dag.nodes}
@@ -380,9 +385,6 @@
   .fleet-msg {
     margin: 24px 0;
     color: var(--static);
-  }
-  .fleet-err {
-    color: var(--err);
   }
   .fleet-table {
     margin-top: 16px;

@@ -180,7 +180,7 @@
   {#if loadState.kind === 'loading'}
     <p class="conductor-msg">Loading the Conductor's recent activity…</p>
   {:else if loadState.kind === 'error'}
-    <p class="conductor-msg conductor-err">
+    <p class="conductor-msg load-failed" role="alert">
       Could not load Conductor activity — {loadState.message}
     </p>
   {:else if loadState.entries.length === 0}
@@ -262,9 +262,6 @@
     color: var(--static);
     margin: 24px 0;
     font-size: 14px;
-  }
-  .conductor-err {
-    color: var(--err);
   }
   .conductor-feed {
     margin-top: 8px;

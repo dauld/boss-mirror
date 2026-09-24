@@ -144,7 +144,7 @@ The colour groups above are operational ("which subsystem") but
 the audit-bar split is orthogonal. Four tiers in the workspace
 today:
 
-- **Tier 1 — core state-machine OS** (`crates/core/`, 26 crates).
+- **Tier 1 — core state-machine OS** (`crates/core/`, 25 crates).
   `boss-gateway`, `boss-jobs-api`, `boss-dispatcher`, `boss-policy-api`,
   `boss-classes-api`, `boss-locations-api`,
   `boss-subject-kinds-api`, `boss-calendar-api`,
@@ -167,9 +167,8 @@ today:
   `boss-cli`, `boss-sim`,
   `boss-ml-api` (wires the Tier-1 ML framework + Tier-2 plugins),
   `boss-simulator` (the standalone `/simulator` UX service).
-- **Tenants** (`crates/tenants/`, 2 crates).
-  `boss-brewery-engine` (Algedonic Ales) and
-  `boss-used-device-shop-engine`. Outside the tier system;
+- **Tenants** (`crates/tenants/`, 1 crate).
+  `boss-brewery-engine` (Algedonic Ales). Outside the tier system;
   tenant-shaped.
 
 A Tier-1 LIBRARY crate must NOT depend on a Tier-2 crate

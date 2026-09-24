@@ -78,7 +78,7 @@ async fn post_invoice_with_multiple_line_items_accepts_and_sum_matches() {
             InvoiceLineItem {
                 id: "inv-multi-1-L1".to_string(),
                 invoice_id: "inv-multi-1".to_string(),
-                revenue_category: RevenueCategory::from("new-sales"),
+                revenue_category: RevenueCategory::from("wholesale"),
                 amount_cents: 4_500_000,
                 currency: "USD".to_string(),
                 description: "New device sale".to_string(),
@@ -91,7 +91,7 @@ async fn post_invoice_with_multiple_line_items_accepts_and_sum_matches() {
             InvoiceLineItem {
                 id: "inv-multi-1-L2".to_string(),
                 invoice_id: "inv-multi-1".to_string(),
-                revenue_category: RevenueCategory::from("contracts"),
+                revenue_category: RevenueCategory::from("distribution"),
                 amount_cents: 1_200_000,
                 currency: "USD".to_string(),
                 description: "1-year service agreement".to_string(),
@@ -104,7 +104,7 @@ async fn post_invoice_with_multiple_line_items_accepts_and_sum_matches() {
             InvoiceLineItem {
                 id: "inv-multi-1-L3".to_string(),
                 invoice_id: "inv-multi-1".to_string(),
-                revenue_category: RevenueCategory::from("service"),
+                revenue_category: RevenueCategory::from("taproom"),
                 amount_cents: 300_000,
                 currency: "USD".to_string(),
                 description: "Installation + training".to_string(),
@@ -145,7 +145,7 @@ async fn post_invoice_with_mismatched_sum_rejected() {
         line_items: vec![InvoiceLineItem {
             id: "inv-bad-sum-L1".to_string(),
             invoice_id: "inv-bad-sum".to_string(),
-            revenue_category: RevenueCategory::from("new-sales"),
+            revenue_category: RevenueCategory::from("wholesale"),
             amount_cents: 500_000, // line item only has 5k
             currency: "USD".to_string(),
             description: "mismatch".to_string(),

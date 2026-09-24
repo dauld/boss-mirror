@@ -174,7 +174,8 @@
   {:else if loading}
     <p class="empty">Loading reservations…</p>
   {:else if error}
-    <p class="empty">Couldn't load calendar: {error}</p>
+    <!-- The shared failure marker (sweep c3e4edcc). -->
+    <p class="empty load-failed" role="alert">Couldn't load calendar: {error}</p>
   {:else}
     <div class="week-grid">
       {#each days as day (day.toISOString())}

@@ -50,8 +50,8 @@ export function revenueCategoryLabel(code: RevenueCategory): string {
 }
 
 // Fallback humanizer: `event-package` → `Event package`,
-// `taproom` → `Taproom`. Used when neither the tenant manifest
-// nor any of the legacy device-shop defaults below match.
+// `taproom` → `Taproom`. Used when the tenant manifest carries no
+// label for the code.
 function humanizeCategoryCode(code: string): string {
   if (!code) return '—';
   const spaced = code.replace(/-/g, ' ');

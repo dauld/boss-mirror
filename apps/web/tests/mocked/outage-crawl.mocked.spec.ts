@@ -37,7 +37,7 @@
 
 import { test, expect, type Page, type Request } from '@playwright/test';
 import { SHELL_ENDPOINTS, installSmokeMocks } from './_smokeMocks';
-import { FAILURE_MARKER, LANDING_FALLBACK, ROUTES } from './_routes';
+import { FAILURE_MARKER, ROUTES } from './_routes';
 
 /// The endpoints that stay up — SHELL_ENDPOINTS, defined beside the
 /// fixtures in _smokeMocks.ts since the interaction crawl's empty leg
@@ -62,34 +62,26 @@ const HEALTHY = SHELL_ENDPOINTS;
 /// surfaces that no longer need it. That is the half the packet's
 /// "ROUTES-style drift pin" was asking for: a roster that rots in either
 /// direction reds the gate.
+///
+/// 2026-09-24, sweep c3e4edcc: 28 entries → 12. Sixteen routes painted
+/// their failure in words without the marker (or, on /it/operate/audit,
+/// four such lines); each line now wears it, and the header above it
+/// states no count it does not have. What is left is either a read that
+/// never fires under the crawl's empty session or behind a click, or a
+/// page with no failure line at all (/ux/shop, /it/registry/new) — a
+/// different defect from a line without the marker.
 const SILENT: ReadonlyMap<string, string> = new Map([
-  ['/', 'home: /api/jobs/live + the sim-clock stream'],
-  ['/ux/me', 'My Day: /api/jobs/live; identity-keyed reads never fire under the empty mocked session'],
+  ['/', 'My Day (the bare alias): same as /ux/me'],
+  ['/ux/me', 'My Day: identity-keyed reads never fire under the empty mocked session (its two failure lines wear the marker)'],
   ['/ux/inbox', 'inbox: /api/messages/inbox/{id} never fires under the empty mocked session'],
-  ['/ux/views', 'views composer: /api/views'],
-  ['/ux/jobs', 'jobs list: /api/jobs + /api/workflows'],
-  ['/ux/accounts', 'accounts: /api/people/accounts, /api/assets, /api/commerce/invoices'],
-  ['/ux/vendors', 'vendors: /api/inventory/vendors, /orders, /vendor-invoices'],
-  ['/ux/assets', 'assets: /api/assets + /api/assets/summary'],
+  ['/ux/views', 'views composer: /api/views never fires under the empty mocked session — load() waits for a viewer id'],
   ['/ux/calendar/me', 'my calendar: identity-keyed reads never fire under the empty mocked session'],
-  ['/ux/service', 'service: /api/jobs + /api/workflows'],
-  [LANDING_FALLBACK, 'the landing page (router catch-all): /api/workflows + /api/jobs/live'],
   ['/ux/hr', 'HR: the workflow + step reads fire on the Workflows tab, not on load (see false-empty.mocked.spec.ts, which pins them)'],
-  ['/ux/sales', 'sales: /api/jobs + /api/workflows'],
-  ['/ux/shop', 'shop: /api/inventory/items + /api/workflows'],
+  ['/ux/shop', 'shop: a failed /api/inventory/items falls back to "check availability" and paints no failure line at all'],
   ['/it/registry/subjects', 'subjects+classes: reads /api/subject-kinds + /api/classes, which HEALTHY keeps up'],
-  ['/it/operate/perf', 'gateway perf: /api/gateway/perf'],
-  ['/it/operate/atlas', 'atlas: /api/views/stage-runs, /stage-durations, /api/stations'],
   ['/it/kb', 'KB: its search reads fire on a query, not on load'],
-  ['/it/design', 'design queue: /api/stations/design-review/queue'],
-  ['/it/registry', 'workflow registry: /api/workflows'],
-  ['/it/registry/new', 'new-workflow form: /api/workflows (a form, but it reads the registry to validate)'],
-  ['/it/registry/seasonal-release', 'workflow detail: /api/workflows/{kind} + /versions'],
-  ['/it/registry/policy', 'policy rules: /api/policy/rules'],
+  ['/it/registry/new', 'new-workflow form: /api/workflows + /api/subject-kinds only fill suggestion lists; a failure keeps the defaults and paints no line'],
   ['/it/auth-admin', 'auth admin: its reads fire behind a tab'],
-  ['/it/operate/bottlenecks', 'bottlenecks: /api/workflows'],
-  ['/it/operate/audit', 'audit log: /api/events/stats + /tail paint "Stats unavailable:" and "Failed to load:" in words, without the marker (sweep c3e4edcc)'],
-  ['/watchlist', 'watchlist: /api/people/accounts/risk-scores'],
   ['/hr', 'HR (bare alias): same as /ux/hr'],
 ]);
 

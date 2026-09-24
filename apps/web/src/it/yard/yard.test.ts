@@ -455,6 +455,34 @@ describe('fetchYard against the station endpoint', () => {
     ]);
   });
 
+  // THE SHED DREW 5 UNDER SHED 11 (review of 2026-09-24; car E of design
+  // 62de32ae). The floor read the newest 200 cars, and a car landed two
+  // days ago and still awaiting its proof is not among them: measured
+  // 2026-09-24, 10 open cars awaited proof and 2 were in that page. A
+  // limit is not a filter — so the floor also reads every OPEN car, and
+  // the two reads are one list, each car once.
+  test('the floor reads every open car as well as the newest page, each car once', async () => {
+    const urls: string[] = [];
+    const car = (id: string, status: string) => ({
+      id, kind: 'ship-a-change', title: id, status, opened_on: '2026-09-20',
+      metadata: { branch: `fix/${id}` }, steps: [s('proven', status === 'open' ? 'ready' : 'completed')],
+    });
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.includes('/api/stations/loading-dock/queue')) return json(envelope());
+      if (url.includes('kind=ship-a-change') && url.includes('status=open'))
+        return json({ data: [car('old-open', 'open'), car('new-open', 'open')], total: 2 });
+      if (url.includes('kind=ship-a-change')) return json({ data: [car('new-open', 'open'), car('new-closed', 'closed')] });
+      return json({ data: [] });
+    }) as typeof fetch;
+    const y = await fetchYard();
+    expect(urls).toContain('/api/jobs?kind=ship-a-change&status=open&limit=500');
+    // `cars` is the open ones; each is there once, the old one included.
+    expect(y?.cars.map((c) => c.id).sort()).toEqual(['new-open', 'old-open']);
+    expect(y?.awaitingProof.map((c) => c.id).sort()).toEqual(['new-open', 'old-open']);
+  });
+
   test('when the endpoint serves, the dock reads its own station row', async () => {
     stub(() => json(envelope({ total: 1, data: [dockJob('s1')] })));
     const y = await fetchYard();

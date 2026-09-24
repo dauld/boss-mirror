@@ -401,7 +401,7 @@ the tier it touches.**
 
 The `infra/lint/tier-import-audit.sh` script enforces the
 Tier-1-can't-depend-on-Tier-2 rule (orchestrators excluded);
-runs cleanly today (0 violations across 26 core crates; the script's
+runs cleanly today (0 violations across 25 core crates; the script's
 own line says 27 because it counts crate manifests, and `boss-expr`
 carries a nested `fuzz` crate).
 

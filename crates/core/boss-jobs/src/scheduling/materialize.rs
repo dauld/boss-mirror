@@ -6,7 +6,8 @@ use chrono::{Duration, Utc};
 
 use super::port::{SchedulingError, SchedulingRepository};
 
-/// Default 8-week materialization window per examples/used-device-shop/design/operations-needs.md D11.
+/// Default 8-week materialization window: far enough ahead to schedule
+/// against, short enough that the cron job's writes stay small.
 pub const DEFAULT_WEEKS_AHEAD: i64 = 8;
 
 /// Materialize availability rows for the next `weeks_ahead` weeks

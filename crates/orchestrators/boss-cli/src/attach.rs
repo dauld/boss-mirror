@@ -411,7 +411,7 @@ async fn run(packet: &str, file: &Path, step: Option<&str>) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use boss_content::files::http::{FilesApiState, router};
     use boss_content::files::{InMemoryFileRepository, InMemoryFileStorage};
@@ -421,7 +421,9 @@ mod tests {
     /// The REAL files router over in-memory adapters, on a loopback
     /// socket: the same handler, limit and multipart parser production
     /// runs, with a store the test can read.
-    async fn store() -> String {
+    /// Shared with `design`'s exhibit tests, which attach through this
+    /// same path (design 26a89f11's file_refs arm).
+    pub(crate) async fn store() -> String {
         serve(router(FilesApiState {
             repo: Arc::new(InMemoryFileRepository::new()),
             storage: Arc::new(InMemoryFileStorage::new()),

@@ -49,11 +49,7 @@ fn kind_tag(kind: &AssetEventKind) -> &'static str {
         AssetEventKind::Identified { .. } => "Identified",
         AssetEventKind::Received { .. } => "Received",
         AssetEventKind::PutAway { .. } => "PutAway",
-        AssetEventKind::TriageCompleted { .. } => "TriageCompleted",
-        AssetEventKind::RefurbStarted { .. } => "RefurbStarted",
         AssetEventKind::PartReplaced { .. } => "PartReplaced",
-        AssetEventKind::RefurbCompleted => "RefurbCompleted",
-        AssetEventKind::QaPassed { .. } => "QAPassed",
         AssetEventKind::Sold { .. } => "Sold",
         AssetEventKind::Shipped { .. } => "Shipped",
         AssetEventKind::Installed { .. } => "Installed",
@@ -413,8 +409,8 @@ impl AssetsRepository for PgAssets {
     }
 
     async fn active_asset_count_for_sku(&self, sku: &str) -> Result<u64, AssetsError> {
-        // "Active" means any phase except decommissioned. Devices in
-        // the refurb pipeline, in stock, or installed at accounts all
+        // "Active" means any phase except decommissioned. Assets just
+        // received, in stock, or installed all
         // count — if a model has active devices, deleting the model
         // would orphan them.
         let (count,): (i64,) = sqlx::query_as(
@@ -437,19 +433,7 @@ impl AssetsRepository for PgAssets {
                 .await
                 .map_err(|e| AssetsError::Storage(e.to_string()))?;
         let phase_map: std::collections::HashMap<String, i64> = phase_rows.into_iter().collect();
-        let phase_order = [
-            "registered",
-            "received",
-            "triaging",
-            "refurbing",
-            "qa",
-            "ready",
-            "shipped",
-            "installed",
-            "out-for-service",
-            "decommissioned",
-        ];
-        let phase_counts: Vec<PhaseRollup> = phase_order
+        let phase_counts: Vec<PhaseRollup> = AssetLifecyclePhase::ORDER
             .iter()
             .map(|p| PhaseRollup {
                 phase: p.to_string(),

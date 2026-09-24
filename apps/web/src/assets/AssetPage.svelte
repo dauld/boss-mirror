@@ -119,7 +119,7 @@
   <div class="catalog theme-exec"><p class="empty">Loading…</p></div>
 {:else if error || !device}
   <div class="catalog theme-exec">
-    <p class="empty">Couldn't load device: {error ?? 'not found'}</p>
+    <p class="empty load-failed" role="alert">Couldn't load device: {error ?? 'not found'}</p>
   </div>
 {:else}
   <div class="detail-page theme-exec">

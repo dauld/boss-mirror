@@ -706,11 +706,12 @@ describe('the failed read is a red rail', () => {
     expect([...rules.keys()].filter((s) => /\.load-failed\b/.test(s))).toEqual([RAIL]);
   });
 
-  it('no failure outside IT repaints its words inline', () => {
+  it('no failure repaints its words inline', () => {
     // An inline colour outranks every rule, so it would take the troubled
-    // ink back to the plate's red. The two left are IT surfaces, which the
-    // IT map cars (c3105b2a) own.
-    const LEFT = ['it/monitoring/PerfPage.svelte', 'it/step-plugins/StepPluginsPage.svelte'];
+    // ink back to the plate's red. The last two, both IT surfaces
+    // (PerfPage and StepPluginsPage), were cleared by the marker sweep
+    // c3e4edcc, so the list is empty and stays so.
+    const LEFT: string[] = [];
     const repainted = svelteFiles
       .filter(([, src]) =>
         [...src.matchAll(/<[a-z]+\b[^>]*>/g)].some(

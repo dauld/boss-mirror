@@ -72,7 +72,7 @@
     <header class="detail-hero">
       <h1 class="detail-title">Failed to load vendor invoice</h1>
     </header>
-    <p class="empty">{fetchState.message}</p>
+    <p class="empty load-failed" role="alert">{fetchState.message}</p>
   {:else}
     {@const bill = fetchState.bill}
     {@const moneyFmt = (c: number) => formatMoney({ amount_cents: c, currency: bill.currency })}

@@ -301,7 +301,7 @@
           {/if}
         </h2>
         {#if filteredRecentError}
-          <p class="empty">Couldn't load filtered jobs: {filteredRecentError}</p>
+          <p class="empty load-failed" role="alert">Couldn't load filtered jobs: {filteredRecentError}</p>
         {:else if filteredRecent.length === 0}
           <p class="empty">
             No open {selectedKind} jobs right now.
@@ -335,7 +335,10 @@
       </div>
     </section>
   {:else if liveError}
-    <p class="status error">Couldn't load live state: {liveError}</p>
+    <!-- This view's three failed reads wear the shared marker (sweep
+         c3e4edcc): the page's `.status.error` outranked the marker's ink,
+         so it is gone. -->
+    <p class="status load-failed" role="alert">Couldn't load live state: {liveError}</p>
   {/if}
 
   <div class="picker-row">
@@ -382,7 +385,7 @@
         {#if loading}
           <p class="status">Loading…</p>
         {:else if renderError}
-          <p class="status error">{renderError}</p>
+          <p class="status load-failed" role="alert">{renderError}</p>
         {:else}
           <div id="landing-graph" class="graph">
             <StepDag
@@ -729,10 +732,6 @@
     margin: 0;
     color: var(--static);
     font-style: italic;
-  }
-  .status.error {
-    color: var(--err);
-    font-style: normal;
   }
   .side-panel {
     background: var(--warn-wash);

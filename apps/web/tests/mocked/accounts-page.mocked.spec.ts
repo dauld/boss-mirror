@@ -662,10 +662,12 @@ test.describe('/ux/accounts — empty, loading, and a failed read', () => {
     await expect(page.getByText('Loading…', { exact: true })).toHaveCount(0);
   });
 
-  // UNFILED: the failure line is honest in its WORDS but painted as the
-  // empty state — `p.empty`, no FAILURE_MARKER and no role=alert — which
-  // is why outage-crawl lists this route in SILENT.
-  test('a failed directory read names the read, in the empty-state paint', async ({ page }) => {
+  // Sweep c3e4edcc, answered: the failure line was honest in its WORDS
+  // but painted as the empty state — `p.empty`, no FAILURE_MARKER and no
+  // role=alert, so outage-crawl listed this route in SILENT — under a
+  // header that counted "0 accounts". It wears the marker now, and the
+  // header states no count.
+  test('a failed directory read names the read, on the shared failure marker', async ({ page }) => {
     await installFleet(page);
     await page.route(ACCOUNTS, (r) => json(r, { error: 'people down' }, 503));
     await mountPage(page, PATH);
@@ -673,9 +675,11 @@ test.describe('/ux/accounts — empty, loading, and a failed read', () => {
     await expect(status(page)).toHaveText(`Couldn't load accounts: ${ACCOUNTS_URL}: HTTP 503`);
     await expect(page.getByText('No accounts match those filters.')).toHaveCount(0);
     await expect(body(page).locator('table')).toHaveCount(0);
-    await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
-    await expect(body(page).locator('[role=alert]')).toHaveCount(0);
-    await expect(title(page)).toHaveText('0 accounts');
+    await expect(body(page).locator(`${FAILURE_MARKER}[role=alert]`)).toHaveText(
+      `Couldn't load accounts: ${ACCOUNTS_URL}: HTTP 503`,
+    );
+    await expect(title(page)).toHaveText('Accounts');
+    await expect(subtitle(page)).toHaveText('Account count unknown — the read failed');
   });
 
   test('a network failure of the directory names the browser\'s own message', async ({ page }) => {

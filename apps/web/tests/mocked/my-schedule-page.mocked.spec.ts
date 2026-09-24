@@ -325,11 +325,10 @@ test.describe('/ux/calendar/me — State B: a failed read is said, never drawn a
       );
       await expect(page.locator('.week-grid')).toHaveCount(0);
       await expect(page.locator('.week-col-empty')).toHaveCount(0);
-      // The words are honest, but the line is painted with class `empty`
-      // — the class of "Sign in…" and "Loading…" — not the shared
-      // FAILURE_MARKER the outage crawl reads (_routes.ts). Pinned as it
-      // is, so the car that adopts the marker changes this line.
-      await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
+      // The line wears the shared FAILURE_MARKER the outage crawl reads
+      // (_routes.ts), as an alert — no longer only class `empty`, the
+      // class of "Sign in…" and "Loading…" (sweep c3e4edcc).
+      await expect(page.locator(`${FAILURE_MARKER}[role=alert]`)).toHaveCount(1);
       // The week buttons stay live, so the reader can retry another week.
       await expect(button(page, 'Next week →')).toBeEnabled();
     });
