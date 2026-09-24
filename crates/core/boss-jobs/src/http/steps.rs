@@ -1385,8 +1385,9 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
                 .get(step.sort_order as usize)
                 .and_then(|spec_step| spec_step.terminal.as_ref())
                 .map(|t| t.outcome.clone())
+            && let Err(e) = close_job_on_terminal(&state, &job_id, &outcome, &actor, now).await
         {
-            close_job_on_terminal(&state, &job_id, &outcome, &actor, now).await;
+            return close_not_written(&job_id, &e);
         }
     }
 
@@ -1431,78 +1432,111 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
                 .stamp_with_actor(actor.clone())
                 .await
                 .with_partition(job.partition);
-            let mut close_events = vec![
-                close_stamp.event(
-                    events::JOB_UPDATED,
-                    serde_json::to_value(&job).unwrap_or_default(),
-                ),
-                close_stamp.event(
-                    events::JOB_STATUS_CHANGED,
-                    serde_json::json!({
-                        "id": job.id.to_string(),
-                        "old_status": old_status,
-                        "new_status": new_status,
-                    }),
-                ),
-            ];
-            if new_status == JobStatus::Closed {
-                close_events.push(close_stamp.event(
-                    events::JOB_CLOSED,
-                    serde_json::json!({
-                        "id": job.id.to_string(),
-                        "closed_on": job.closed_on,
-                        // ALWAYS present, on all three emit sites,
-                        // defaulting null — the dispatcher's expr
-                        // binder makes an ABSENT identifier a
-                        // PredicateFailed → Retry → dead-letter storm
-                        // rather than a quiet false, so a rule gating
-                        // on `kind` / `outcome` needs the keys on every
-                        // close, not just the ones that have an answer.
-                        // (The `notify_on_done` field on step.done,
-                        // migration 106, is the same contract.) A
-                        // catch-all close carries no declared outcome,
-                        // so `outcome` is null here unless a terminal
-                        // already stamped one.
-                        "kind": job.kind,
-                        "outcome": job.metadata.get("outcome"),
-                        // What closed, in words. A rule that SPAWNS off
-                        // a close has to title the new packet, and the
-                        // only titles available to it are a literal or
-                        // an identifier from this payload — the arg
-                        // language has no concatenation. Without this
-                        // key, `title = "title"` binds nothing and the
-                        // whole event dead-letters (see below); with a
-                        // literal instead, every spawned packet is
-                        // named identically and the board cannot tell
-                        // them apart.
-                        "title": job.title,
-                        // WHAT the closed packet was about. A recurring
-                        // sweep names its target here
-                        // (`stale-build-caches`), and that is the only
-                        // stable identity a spawning rule can dedupe
-                        // on: the sweep's `id` differs every firing and
-                        // its `title` is templated per target, so two
-                        // days of the same finding are indistinguishable
-                        // without this. Present on all three sites for
-                        // the same reason `kind` and `title` are.
-                        "subject_id": boss_core::primitives::Subject::id(&job.subject),
-                        // D7: same delegate-subjob back-link as the
-                        // terminal-close path, so a child Job that
-                        // closes via the all-steps-terminal catch-all
-                        // (no declared `outcome` step) still triggers
-                        // the parent resolve. Null when absent.
-                        "parent_step_id": job.metadata.get("parent_step_id"),
-                    }),
-                ));
-            }
-            let _ = state
+            // `compute_job_status` answers only Open or Closed, and an
+            // Open Job is the only one that reaches here, so this
+            // transition is always a close — and it goes through the
+            // close door, never a whole-row write (backlog 29a7ea09:
+            // on car 6b23d135 this site wrote back a copy read before
+            // the terminal close committed, and erased its outcome).
+            // The adapter builds the state event from the post-close
+            // row; these markers are built from that row too.
+            let markers = |job: &Job| {
+                vec![
+                    close_stamp.event(
+                        events::JOB_STATUS_CHANGED,
+                        serde_json::json!({
+                            "id": job.id.to_string(),
+                            "old_status": old_status,
+                            "new_status": new_status,
+                        }),
+                    ),
+                    close_stamp.event(
+                        events::JOB_CLOSED,
+                        serde_json::json!({
+                            "id": job.id.to_string(),
+                            "closed_on": job.closed_on,
+                            // ALWAYS present, on all three emit sites,
+                            // defaulting null — the dispatcher's expr
+                            // binder makes an ABSENT identifier a
+                            // PredicateFailed → Retry → dead-letter storm
+                            // rather than a quiet false, so a rule gating
+                            // on `kind` / `outcome` needs the keys on every
+                            // close, not just the ones that have an answer.
+                            // (The `notify_on_done` field on step.done,
+                            // migration 106, is the same contract.) A
+                            // catch-all close carries no declared outcome,
+                            // so `outcome` is null here unless a terminal
+                            // already stamped one.
+                            "kind": job.kind,
+                            "outcome": job.metadata.get("outcome"),
+                            // What closed, in words. A rule that SPAWNS off
+                            // a close has to title the new packet, and the
+                            // only titles available to it are a literal or
+                            // an identifier from this payload — the arg
+                            // language has no concatenation. Without this
+                            // key, `title = "title"` binds nothing and the
+                            // whole event dead-letters (see below); with a
+                            // literal instead, every spawned packet is
+                            // named identically and the board cannot tell
+                            // them apart.
+                            "title": job.title,
+                            // WHAT the closed packet was about. A recurring
+                            // sweep names its target here
+                            // (`stale-build-caches`), and that is the only
+                            // stable identity a spawning rule can dedupe
+                            // on: the sweep's `id` differs every firing and
+                            // its `title` is templated per target, so two
+                            // days of the same finding are indistinguishable
+                            // without this. Present on all three sites for
+                            // the same reason `kind` and `title` are.
+                            "subject_id": boss_core::primitives::Subject::id(&job.subject),
+                            // D7: same delegate-subjob back-link as the
+                            // terminal-close path, so a child Job that
+                            // closes via the all-steps-terminal catch-all
+                            // (no declared `outcome` step) still triggers
+                            // the parent resolve. Null when absent.
+                            "parent_step_id": job.metadata.get("parent_step_id"),
+                        }),
+                    ),
+                ]
+            };
+            // A close that loses the compare-and-set (another closer
+            // got there first) writes nothing and is not a failure; a
+            // close the store REFUSED is, and it is answered, never
+            // dropped: this site discarded it with `let _ =` and said
+            // 204 over a packet left open with every step terminal.
+            let closed_on = job.closed_on.unwrap_or_else(|| now.date_naive());
+            if let Err(e) = state
                 .jobs
-                .update_job_at(&job, close_stamp.timestamp, &close_events)
-                .await;
+                .close_job_at(
+                    &job_id,
+                    closed_on,
+                    &close_owned_fields(&job),
+                    &close_stamp,
+                    &markers,
+                )
+                .await
+            {
+                return close_not_written(&job_id, &e);
+            }
         }
     }
 
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// The answer to a step write whose close did not land: a 500 NAMING
+/// THE PACKET and saying which half committed. The step row is already
+/// written, so the caller must not read this as "nothing happened" —
+/// nor, as the 204 it replaced let them, as "the packet closed"
+/// (backlog 29a7ea09).
+fn close_not_written(job_id: &boss_core::job::JobId, e: &crate::port::JobsError) -> Response {
+    tracing::error!(job_id = %job_id, error = %e, "step written, but its job close failed");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("the step was written, but closing job {job_id} failed: {e}"),
+    )
+        .into_response()
 }
 
 /// `PATCH /api/jobs/{id}/steps/{step_id}/metadata` — merge top-level
@@ -2417,22 +2451,28 @@ pub(super) async fn post_step_sign_off<R: JobsRepository + 'static, B: EventBus 
 /// (`Pending` / `Ready` / `Active`) `Skipped` so the closed Job has no
 /// dangling open work. No-ops if the Job is already terminal
 /// (Cancelled / Draft) or already Closed.
+///
+/// The close itself is [`JobsRepository::close_job_at`]: it writes only
+/// the fields a close owns and only while the row is still open
+/// (backlog 29a7ea09), and its failure is returned rather than logged,
+/// because the step write that called this has already committed and
+/// its caller would otherwise be told the completion landed whole.
 async fn close_job_on_terminal<R: JobsRepository + 'static, B: EventBus + 'static>(
     state: &Arc<JobsApiState<R, B>>,
     job_id: &boss_core::job::JobId,
     outcome: &str,
     actor: &boss_core::actor::ActorId,
     now: chrono::DateTime<chrono::Utc>,
-) {
-    let Ok(Some(mut job)) = state.jobs.get_job(job_id).await else {
-        return;
+) -> Result<(), crate::port::JobsError> {
+    let Some(mut job) = state.jobs.get_job(job_id).await? else {
+        return Ok(());
     };
     if matches!(
         job.status,
         JobStatus::Closed | JobStatus::Cancelled | JobStatus::Draft
     ) {
         // Already terminal / not-yet-open — nothing to close.
-        return;
+        return Ok(());
     }
 
     let terminal_stamp = state
@@ -2489,55 +2529,77 @@ async fn close_job_on_terminal<R: JobsRepository + 'static, B: EventBus + 'stati
     stamp_close_instant(&mut job, &now);
 
     // OUTBOX (phase 2): the close's state event + markers record in
-    // the SAME transaction as the row.
-    let close_events = [
-        terminal_stamp.event(
-            events::JOB_UPDATED,
-            serde_json::to_value(&job).unwrap_or_default(),
-        ),
-        terminal_stamp.event(
-            events::JOB_STATUS_CHANGED,
-            serde_json::json!({
-                "id": job.id.to_string(),
-                "old_status": old_status,
-                "new_status": JobStatus::Closed,
-            }),
-        ),
-        terminal_stamp.event(
-            events::JOB_CLOSED,
-            serde_json::json!({
-                "id": job.id.to_string(),
-                "closed_on": job.closed_on,
-                "outcome": outcome,
-                // Which protocol closed. Present on all three emit
-                // sites so a rule can select the Workflow it cares
-                // about as data: the close marker otherwise names no
-                // kind, and every consumer had to fetch the Job to
-                // find out whether the event was even about them.
-                "kind": job.kind,
-                // Present on all three sites for the same reason `kind`
-                // is: a spawning rule can only name the packet it
-                // creates from a literal or from this payload.
-                "title": job.title,
-                // See the status-transition site above: the subject is
-                // the recurring packet's stable identity, and the only
-                // key a spawn rule can dedupe a repeating finding on.
-                "subject_id": boss_core::primitives::Subject::id(&job.subject),
-                // D7: surface the delegate-subjob back-link (if any) on
-                // the close marker so the jobs.subjob_resolve rule can
-                // gate `when` on it without fetching the Job. Null for
-                // an ordinary (non-delegated) Job.
-                "parent_step_id": job.metadata.get("parent_step_id"),
-            }),
-        ),
-    ];
-    if let Err(e) = state
+    // the SAME transaction as the row — the adapter builds the state
+    // event from the post-close row, and these markers from it too.
+    let markers = |job: &Job| {
+        vec![
+            terminal_stamp.event(
+                events::JOB_STATUS_CHANGED,
+                serde_json::json!({
+                    "id": job.id.to_string(),
+                    "old_status": old_status,
+                    "new_status": JobStatus::Closed,
+                }),
+            ),
+            terminal_stamp.event(
+                events::JOB_CLOSED,
+                serde_json::json!({
+                    "id": job.id.to_string(),
+                    "closed_on": job.closed_on,
+                    "outcome": outcome,
+                    // Which protocol closed. Present on all three emit
+                    // sites so a rule can select the Workflow it cares
+                    // about as data: the close marker otherwise names no
+                    // kind, and every consumer had to fetch the Job to
+                    // find out whether the event was even about them.
+                    "kind": job.kind,
+                    // Present on all three sites for the same reason `kind`
+                    // is: a spawning rule can only name the packet it
+                    // creates from a literal or from this payload.
+                    "title": job.title,
+                    // See the status-transition site above: the subject is
+                    // the recurring packet's stable identity, and the only
+                    // key a spawn rule can dedupe a repeating finding on.
+                    "subject_id": boss_core::primitives::Subject::id(&job.subject),
+                    // D7: surface the delegate-subjob back-link (if any) on
+                    // the close marker so the jobs.subjob_resolve rule can
+                    // gate `when` on it without fetching the Job. Null for
+                    // an ordinary (non-delegated) Job.
+                    "parent_step_id": job.metadata.get("parent_step_id"),
+                }),
+            ),
+        ]
+    };
+    let closed_on = job.closed_on.unwrap_or_else(|| now.date_naive());
+    state
         .jobs
-        .update_job_at(&job, terminal_stamp.timestamp, &close_events)
+        .close_job_at(
+            job_id,
+            closed_on,
+            &close_owned_fields(&job),
+            &terminal_stamp,
+            &markers,
+        )
         .await
-    {
-        tracing::warn!(job_id = %job_id, error = %e, "terminal close: failed to persist closed Job");
-    }
+        .map(|_| ())
+}
+
+/// The metadata keys a close OWNS, read off the closer's own copy of
+/// the Job after it stamped them: the close instant (`closed_at`, from
+/// [`stamp_close_instant`]) and the outcome, when the copy carries one.
+/// Only these merge into the row ([`JobsRepository::close_job_at`]);
+/// every other key stays as the row holds it at write time, so a key
+/// another writer merged after this closer read the Job survives the
+/// close (backlog 29a7ea09).
+fn close_owned_fields(job: &Job) -> serde_json::Map<String, serde_json::Value> {
+    ["closed_at", "outcome"]
+        .into_iter()
+        .filter_map(|key| {
+            job.metadata
+                .get(key)
+                .map(|value| (key.to_string(), value.clone()))
+        })
+        .collect()
 }
 
 /// D6 ready marker — build the `step.ready.<kind>` event for a step
