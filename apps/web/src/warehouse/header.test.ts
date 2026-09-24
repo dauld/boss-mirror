@@ -19,11 +19,8 @@ const STATUS: WarehouseStatus = {
     in_transit_count: 1, late_count: 1, arriving_this_week_count: 2, recent: [],
   },
   outbound_shipments: { label_created: 0, picked_up: 0, in_transit: 0, exception: 0, delivered_7d: 0, recent: [] },
-  refurb_wip: { total_in_flight: 7, by_stage: [] },
-  ready_for_sale_count: 2,
   as_of: '2026-09-23T22:00:00Z',
 };
-const BREWERY: WarehouseStatus = { ...STATUS, refurb_wip: { total_in_flight: 0, by_stage: [] }, ready_for_sale_count: 0 };
 
 const items = (read = okRead, skus = 5, belowReorder = 3) => ({ read, skus, belowReorder });
 
@@ -31,12 +28,16 @@ describe('the warehouse header counts only what a read answered', () => {
   test('the status projection answers the header when it has answered', () => {
     expect(warehouseHeader({ read: okRead, body: STATUS }, items(loadingRead, 0, 0))).toEqual({
       title: '5 tracked SKUs',
-      subtitle: '3 below reorder · 3 open POs · 7 refurb WIP · 2 ready for sale',
+      subtitle: '3 below reorder · 3 open POs',
     });
   });
 
-  test('zero refurb and zero ready-for-sale drop out — the brewery shape', () => {
-    expect(warehouseHeader({ read: okRead, body: BREWERY }, items()).subtitle).toBe('3 below reorder · 3 open POs');
+  // Backlog a8991c86: two subtitle segments counted what only a retired
+  // example tenant filled. A body that still carries those keys (an
+  // older server mid-roll) adds nothing to the header.
+  test('the header names parts and purchase orders only, whatever else the body carries', () => {
+    const older = { ...STATUS, pipeline_wip: { total_in_flight: 7, by_stage: [] }, ready_for_sale_count: 2 };
+    expect(warehouseHeader({ read: okRead, body: older }, items()).subtitle).toBe('3 below reorder · 3 open POs');
   });
 
   test('with no status body the items read answers, whether status is pending or failed', () => {

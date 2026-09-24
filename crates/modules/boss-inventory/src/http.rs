@@ -6,10 +6,8 @@ use std::sync::Arc;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 
-use boss_assets_client::AssetsClient;
 use boss_classes_client::ClassesClient;
 use boss_core::publisher::DomainPublisher;
-use boss_jobs_client::JobsClient;
 use boss_shipping_client::ShippingClient;
 
 use crate::port::InventoryRepository;
@@ -30,8 +28,6 @@ use warehouse::*;
 /// Bundled so the binary constructs once and passes a single Option —
 /// tests that don't exercise `/warehouse-status` leave `clients = None`.
 pub struct WarehouseClients {
-    pub jobs: Arc<dyn JobsClient>,
-    pub assets: Arc<dyn AssetsClient>,
     pub shipping: Arc<dyn ShippingClient>,
 }
 

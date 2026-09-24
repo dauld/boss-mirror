@@ -37,9 +37,6 @@ impl AssetsClient for StubAssetsClient {
     async fn active_asset_count_for_sku(&self, _sku: &str) -> Result<u64, AssetsClientError> {
         Ok(0)
     }
-    async fn ready_for_sale_count(&self) -> Result<u64, AssetsClientError> {
-        Ok(0)
-    }
 }
 
 /// A fully wired knowledge-base service for tests:

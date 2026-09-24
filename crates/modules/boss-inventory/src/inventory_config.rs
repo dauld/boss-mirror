@@ -12,11 +12,9 @@ pub struct InventoryApiConfig {
     /// NATS URL for domain event publishing. If omitted, events are not published.
     #[serde(default)]
     pub nats_url: Option<String>,
-    /// Cross-service endpoints the warehouse-status projection fans out
-    /// to. All three must be configured for the `/warehouse-status`
+    /// The one cross-service endpoint the warehouse-status projection
+    /// fans out to. It must be configured for the `/warehouse-status`
     /// route to respond; otherwise it returns 503.
-    pub jobs_api_url: String,
-    pub assets_api_url: String,
     pub shipping_api_url: String,
     /// Base URL for the boss-classes HTTP API. Every vendor-invoice
     /// write validates a *present* `discrepancy_kind` against the Class
@@ -47,14 +45,10 @@ impl Validate for InventoryApiConfig {
                 "http_bind must not be empty".into(),
             ));
         }
-        for (name, val) in [
-            ("jobs_api_url", &self.jobs_api_url),
-            ("assets_api_url", &self.assets_api_url),
-            ("shipping_api_url", &self.shipping_api_url),
-        ] {
-            if val.is_empty() {
-                return Err(ConfigError::Validation(format!("{name} must not be empty")));
-            }
+        if self.shipping_api_url.is_empty() {
+            return Err(ConfigError::Validation(
+                "shipping_api_url must not be empty".into(),
+            ));
         }
         if self.classes_api_url.is_empty() {
             return Err(ConfigError::Validation(
@@ -80,8 +74,6 @@ mod tests {
             &path,
             r#"postgres_url = "postgres://localhost/boss"
 http_bind = "0.0.0.0:7300"
-jobs_api_url = "http://127.0.0.1:7900"
-assets_api_url = "http://127.0.0.1:7600"
 shipping_api_url = "http://127.0.0.1:7100"
 classes_api_url = "http://127.0.0.1:7800"
 "#,
@@ -104,8 +96,6 @@ classes_api_url = "http://127.0.0.1:7800"
             &path,
             r#"postgres_url = "postgres://localhost/boss"
 http_bind = "0.0.0.0:7300"
-jobs_api_url = "http://127.0.0.1:7900"
-assets_api_url = "http://127.0.0.1:7600"
 shipping_api_url = "http://127.0.0.1:7100"
 "#,
         );

@@ -47,11 +47,6 @@ pub trait AssetsClient: Send + Sync {
     /// Returns `0` for unknown SKUs. Used by the boss-catalog
     /// system-model delete guard.
     async fn active_asset_count_for_sku(&self, sku: &str) -> Result<u64, AssetsClientError>;
-
-    /// Count of assets currently in `ready` phase — post-QA, awaiting
-    /// shipment to a account. Used by the warehouse-status projection
-    /// (operations-needs session 3, E1).
-    async fn ready_for_sale_count(&self) -> Result<u64, AssetsClientError>;
 }
 
 /// Production `AssetsClient` that calls the assets HTTP API over
@@ -92,25 +87,6 @@ impl AssetsClient for ReqwestAssetsClient {
     async fn active_asset_count_for_sku(&self, sku: &str) -> Result<u64, AssetsClientError> {
         let url = format!("{}/api/assets/kb/{}/active-count", self.base_url, sku);
         self.fetch_count(&url).await
-    }
-
-    async fn ready_for_sale_count(&self) -> Result<u64, AssetsClientError> {
-        let url = format!("{}/api/assets/summary", self.base_url);
-        let body: serde_json::Value = http_client::get_json(&self.http, &url).await?;
-
-        let count = body
-            .get("phase_counts")
-            .and_then(|v| v.as_array())
-            .map(|rows| {
-                rows.iter()
-                    .find(|r| r.get("phase").and_then(|p| p.as_str()) == Some("ready"))
-                    .and_then(|r| r.get("count").and_then(|c| c.as_u64()))
-                    .unwrap_or(0)
-            })
-            .ok_or_else(|| {
-                AssetsClientError::MalformedBody(format!("missing phase_counts in {body}"))
-            })?;
-        Ok(count)
     }
 }
 
@@ -217,10 +193,6 @@ impl AssetsClient for FakeAssetsClient {
 
     async fn active_asset_count_for_sku(&self, sku: &str) -> Result<u64, AssetsClientError> {
         self.answer(sku)
-    }
-
-    async fn ready_for_sale_count(&self) -> Result<u64, AssetsClientError> {
-        self.answer("__ready_for_sale__")
     }
 }
 

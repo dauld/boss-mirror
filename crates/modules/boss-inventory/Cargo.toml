@@ -42,9 +42,7 @@ boss-ports = { path = "../../core/boss-ports" }
 boss-events = { path = "../../core/boss-events" }
 boss-ledger = { path = "../boss-ledger" }
 boss-nats = { path = "../../core/boss-nats" }
-boss-assets-client = { path = "../boss-assets-client" }
 boss-classes-client = { path = "../../core/boss-classes-client" }
-boss-jobs-client = { path = "../../core/boss-jobs-client" }
 boss-policy-client = { path = "../../core/boss-policy-client" }
 boss-shipping-client = { path = "../boss-shipping-client" }
 [dev-dependencies]

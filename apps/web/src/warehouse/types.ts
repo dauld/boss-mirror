@@ -58,18 +58,9 @@ export type OutboundShipmentSummary = {
   recent: ReadonlyArray<OutboundShipmentRow>;
 };
 
-export type RefurbStageCount = { stage: string; count: number };
-
-export type RefurbWipSummary = {
-  total_in_flight: number;
-  by_stage: ReadonlyArray<RefurbStageCount>;
-};
-
 export type WarehouseStatus = {
   parts_stock: PartsStockSummary;
   inbound_pos: InboundPoSummary;
   outbound_shipments: OutboundShipmentSummary;
-  refurb_wip: RefurbWipSummary;
-  ready_for_sale_count: number;
   as_of: string;
 };

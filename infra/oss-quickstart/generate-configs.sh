@@ -84,8 +84,6 @@ write_config inventory <<EOF
 postgres_url = "$DB_URL"
 http_bind = "0.0.0.0:$(p inventory)"
 nats_url = "$NATS_URL"
-jobs_api_url = "http://127.0.0.1:$(p jobs)"
-assets_api_url = "http://127.0.0.1:$(p assets)"
 shipping_api_url = "http://127.0.0.1:$(p shipping)"
 classes_api_url = "http://127.0.0.1:$(p classes)"
 EOF
