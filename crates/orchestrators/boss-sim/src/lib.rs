@@ -1,7 +1,7 @@
 //! `boss-sim` — shape-driven simulation primitives.
 //!
 //! The crate ships the alphabet that every per-tenant engine
-//! (`boss-brewery-engine`, `boss-used-device-shop-engine`)
+//! (today `boss-brewery-engine`)
 //! composes: the day-loop runner + Periodic / Counterparty engines
 //! (`engines`), the Workflow/Step/Subject day-loop body
 //! (`shape_driven`), the SimOutput trait and its in-memory + live

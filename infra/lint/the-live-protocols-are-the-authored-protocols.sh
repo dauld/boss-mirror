@@ -1244,7 +1244,7 @@ if [ -n "$unauthored" ]; then
     echo "    replaces one problem with a worse one. ship-a-change.toml is the" >&2
     echo "    worked example and was generated for exactly that reason." >&2
     echo "" >&2
-    echo "  A TENANT protocol (one only the brewery or the used-device-shop" >&2
+    echo "  A TENANT protocol (one only an example tenant such as the brewery" >&2
     echo "  runs) goes in that tenant's examples/<tenant>/seeds/workflows.toml" >&2
     echo "  instead, not in the platform bundle." >&2
     echo "" >&2

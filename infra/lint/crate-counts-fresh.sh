@@ -58,7 +58,9 @@ DIAGRAM=docs/architecture-diagram.md
 check_count core          "$DIAGRAM" '`crates/core/`, [0-9]+ crates'          "tier 1 in the diagram"
 check_count modules       "$DIAGRAM" '[0-9]+ crates\)\. `boss-people'         "tier 2 in the diagram"
 check_count orchestrators "$DIAGRAM" '`crates/orchestrators/`, [0-9]+ crates' "orchestrators in the diagram"
-check_count tenants       "$DIAGRAM" '`crates/tenants/`, [0-9]+ crates'       "tenants in the diagram"
+# `crates?`: one tenant engine since the used-device shop's was deleted
+# (backlog a8991c86, car 7), and "1 crates" is not a sentence.
+check_count tenants       "$DIAGRAM" '`crates/tenants/`, [0-9]+ crates?'      "tenants in the diagram"
 check_count core          CLAUDE.md  '[0-9]+ core crates'                     "tier 1 in CLAUDE.md"
 
 if [ "${1:-}" = "--self-test" ]; then

@@ -189,8 +189,8 @@ declared_names() {
 # Rule names an example tenant DECLARES in its own seeds/rules.toml —
 # the `name = "…"` key of each `[[rule]]`, read the way the ratchet
 # lint reads the product's files. A tenant file that does not exist is
-# an empty set, not an error: the used-device-shop had none until
-# 2026-09-17, and a tree with no example tenants is still a tree.
+# an empty set, not an error: the retired used-device shop had none
+# until 2026-09-17, and a tree with no example tenants is still a tree.
 tenant_declared_names() {
     local tree="$1" f
     shopt -s nullglob

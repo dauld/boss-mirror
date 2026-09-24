@@ -17,11 +17,11 @@
 //!   * A RETIRED EXAMPLE'S MIGRATION ROWS OUTLIVE IT (backlog a8991c86,
 //!     car 6). 01-registries.sql seeds the used-device shop's 26 roles,
 //!     ten departments, three account types, one location kind and a
-//!     companies row on every instance and cannot be edited, so when
-//!     examples/used-device-shop is deleted those rows must stay
+//!     companies row on every instance and cannot be edited, so with
+//!     examples/used-device-shop deleted (car 7) those rows must stay
 //!     candidates. The list that keeps them names only rows the
 //!     migration seeds, with the migration's own member_attribute, and
-//!     a tree without the example still carries every one of them.
+//!     this tree, without the example, still carries every one of them.
 //!   * THE PLATFORM'S ROWS ARE IN NO EXAMPLE SEED. The set is what an
 //!     instance may lose, so the rows the platform's own baseline and
 //!     schema need (the bootstrap admin's role/department/location,
@@ -162,7 +162,7 @@ fn seeds_is_the_example_tenants_own_rows_counted_independently() {
     assert_eq!(
         v["locations"].as_array().unwrap().len(),
         toml_headers(&brewery.join("locations.toml"), "location"),
-        "locations = the brewery's [[location]] ids (the device shop declares none: it sits at the platform's default locations)"
+        "locations = the brewery's [[location]] ids (the retired device shop declared none: it sat at the platform's default locations)"
     );
     assert_eq!(
         v["gl_accounts"].as_array().unwrap().len(),
@@ -205,7 +205,6 @@ fn seeds_is_the_example_tenants_own_rows_counted_independently() {
         "brewery/seeds/locations.toml",
         "brewery/seeds/chart_of_accounts.toml",
         "brewery/seeds/tax.toml",
-        "used-device-shop/seeds/classes.toml",
         "retired-examples/used-device-shop/seeds/classes.toml",
     ] {
         assert!(sources.contains(&s), "sources names {s}: {sources:?}");
@@ -264,14 +263,6 @@ fn migration_companies() -> BTreeSet<String> {
         .collect()
 }
 
-/// An examples directory shaped like the tree after the used-device
-/// shop's deletion (car 7): the brewery alone.
-fn examples_without_the_device_shop(name: &str) -> PathBuf {
-    let e = scratch_dir(&format!("example-reference-rows-car7-{name}"));
-    std::os::unix::fs::symlink(repo_root().join("examples/brewery"), e.join("brewery")).unwrap();
-    e
-}
-
 #[test]
 fn the_retired_device_shop_rows_are_the_ones_its_migration_seeds_and_outlive_its_example() {
     let root = repo_root();
@@ -325,10 +316,14 @@ fn the_retired_device_shop_rows_are_the_ones_its_migration_seeds_and_outlive_its
     );
     assert!(migration_companies().contains("used-device-shop"));
 
-    // Car 7's tree: the example is gone, and every row is still a
-    // candidate — the hazard the measure recorded, closed.
-    let examples = examples_without_the_device_shop("seeds");
-    let (rc, out, err) = run(&["seeds"], Some(&examples));
+    // This tree: the example is gone (car 7), and every row is still a
+    // candidate — the hazard the measure recorded, closed. The assert
+    // first, so the rest cannot pass on a tree that still has it.
+    assert!(
+        !root.join("examples/used-device-shop").exists(),
+        "examples/used-device-shop was deleted by car 7 of backlog a8991c86"
+    );
+    let (rc, out, err) = run(&["seeds"], None);
     assert_eq!(rc, 0, "{err}");
     let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
     let keys: BTreeSet<String> = class_keys(&v).into_iter().collect();
@@ -351,7 +346,7 @@ fn the_retired_device_shop_rows_are_the_ones_its_migration_seeds_and_outlive_its
         &t.join("tenant.toml"),
         "[meta]\ntenant_id = \"used-device-shop\"\n",
     );
-    let (rc, out, _) = run(&["boot", t.to_str().unwrap()], Some(&examples));
+    let (rc, out, _) = run(&["boot", t.to_str().unwrap()], None);
     assert_eq!(rc, 0, "{out}");
     assert!(out.starts_with("evict: tenant used-device-shop"), "{out}");
 
@@ -466,16 +461,6 @@ fn boot_keeps_for_an_example_and_evicts_for_a_company() {
         out.starts_with("keep: tenant brewery is an example"),
         "{out}"
     );
-
-    let (rc, out, _) = run(
-        &[
-            "boot",
-            root.join("examples/used-device-shop").to_str().unwrap(),
-        ],
-        None,
-    );
-    assert_eq!(rc, 3, "{out}");
-    assert!(out.contains("used-device-shop is an example"), "{out}");
 
     let company = scratch_dir("example-reference-rows-company");
     write(
@@ -706,8 +691,10 @@ fn the_two_doors_call_the_one_derivation() {
 }
 
 /// The measured hole (86835bf9): a tenant declaring a code an example
-/// also declares. The fixture re-declares the device shop's `sales`
-/// department, the brewery's taproom location and its `1100` account
+/// also declares. The fixture re-declares the retired device shop's
+/// `sales` department (a candidate through infra/postgres/
+/// retired-examples/ since car 7), the brewery's taproom location and its
+/// `1100` account
 /// — beside its own rows, which are no example's and change nothing.
 fn redeclaring_tenant(name: &str) -> PathBuf {
     let t = scratch_dir(&format!("example-reference-rows-redeclares-{name}"));
