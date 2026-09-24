@@ -33,8 +33,32 @@
 //! stations and step plugins, whose files declare their version the
 //! same way and so can collide the same way — each read by its own
 //! loader and its own lineage route, never a guessed key.
+//!
+//! AND AT THE ONE DOOR EVERY CAR PASSES (the closing car of 5449111c).
+//! orient says it to whoever reads orient; the 3ec04168 car was built
+//! by a briefed builder, who never does. The gap the packet named is
+//! that a green gate proves the file and nothing proves the row — so
+//! `boss gate`, which already reads the system of record before it
+//! files anything, puts every bundle row the CAR CHANGES through the
+//! same `lineage_line` against the live lineage, and refuses the launch
+//! when live will not take the row as written: it contradicts a live
+//! version, sits behind the live newest, or names a lineage an operator
+//! retired. Only a changed DECLARATION is judged (a comment edit on a
+//! file that is behind by design stays possible), only the car's own
+//! files (nothing another car or an operator did can red this one), and
+//! an unread lineage PROCEEDS with a line — "cannot answer" is not
+//! "collides", and this is the door every car passes. Every refusal
+//! has a way through that is not an override: declare the live newest
+//! plus one, or publish live first so the file writes back a row that
+//! is already present. Shape 3 of the packet, scoped to the change
+//! rather than the tree; shape 2 (a boot filing a packet) is answered
+//! by these two readers instead of a third, since a boot reporting
+//! through the API it boots is the arm that needs the patient.
 
-use boss_jobs::bundle_seed::{Declared, SeedOutcome, decide};
+use std::path::Path;
+
+use boss_jobs::bundle_seed::{Declared, SeedOutcome, decide, differing_fields};
+use boss_jobs::seed_loader::SeedLoaderError;
 
 /// What an author must hear about one bundle row, or `None` when a
 /// change to the file would publish the way it reads: the row is live
@@ -125,6 +149,201 @@ pub(crate) fn section_lines(
     out
 }
 
+/// A name's whole live lineage, read from its registry's versions
+/// route and decoded as the bundle's own type.
+async fn live_lineage<S: serde::de::DeserializeOwned>(
+    http: &reqwest::Client,
+    route: &str,
+) -> anyhow::Result<Vec<S>> {
+    let rows =
+        crate::train::rows(crate::gate::api(http, reqwest::Method::GET, route, None).await?)?;
+    rows.into_iter()
+        .map(serde_json::from_value::<S>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(anyhow::Error::from)
+}
+
+/// The rows of one bundle file whose DECLARATION a car changes: every
+/// tip row the base did not declare, or declared with any column —
+/// version included — different. A comment-only edit is none of them.
+pub(crate) fn changed_rows<S: Declared>(base: &[S], tip: Vec<S>) -> Vec<S> {
+    tip.into_iter()
+        .filter(|t| {
+            base.iter()
+                .find(|b| b.name() == t.name())
+                .is_none_or(|b| !differing_fields(b, t).is_empty())
+        })
+        .collect()
+}
+
+/// The changed paths that are ROW files of `bundle` — a `.toml`
+/// directly in its directory, the shape `load_bundle_dir` reads.
+pub(crate) fn paths_in<'a>(bundle: &str, changed: &'a [String]) -> Vec<&'a str> {
+    changed
+        .iter()
+        .map(String::as_str)
+        .filter(|p| {
+            p.strip_prefix(bundle)
+                .and_then(|rest| rest.strip_prefix('/'))
+                .is_some_and(|file| !file.contains('/') && file.ends_with(".toml"))
+        })
+        .collect()
+}
+
+/// The launch refusal: every row the car changes that the live lineage
+/// will not take as written, and the ways through that are not an
+/// override.
+pub(crate) fn car_refusal(sha: &str, lines: &[String]) -> String {
+    let mut out = format!(
+        "boss gate: REFUSED — {} bundle row(s) this car changes at {sha} would land with no \
+         effect on the system of record, which is how the boarding cooldown landed green and \
+         changed nothing (3ec04168, backlog 5449111c):\n",
+        lines.len()
+    );
+    for l in lines {
+        out.push_str(&format!("  {l}\n"));
+    }
+    out.push_str(
+        "  Bump from the LIVE newest, never the file (`boss orient` BUNDLES says it for every \
+         bundle); or publish the row live first, so the file writes back a row that is already \
+         present. Nothing was filed.",
+    );
+    out
+}
+
+/// What `boss gate` learned about the bundle rows a car changes.
+#[derive(Debug, Default)]
+pub(crate) struct CarJudgement {
+    /// One line per changed row the live lineage will not take.
+    pub(crate) refused: Vec<String>,
+    /// What could not be read, and so was not judged.
+    pub(crate) unread: Vec<String>,
+}
+
+/// One registry's changed rows, judged against their live lineage.
+#[allow(clippy::too_many_arguments)]
+async fn judge_registry<S: Declared + serde::de::DeserializeOwned>(
+    http: &reqwest::Client,
+    registry: &str,
+    bundle: &str,
+    parse: fn(&str, &str) -> Result<Vec<S>, SeedLoaderError>,
+    versions: fn(&str) -> String,
+    changed: &[String],
+    read_base: &dyn Fn(&str) -> Option<String>,
+    read_tip: &dyn Fn(&str) -> Option<String>,
+    out: &mut CarJudgement,
+) {
+    for path in paths_in(bundle, changed) {
+        // A file the car deleted declares nothing to judge.
+        let Some(text) = read_tip(path) else { continue };
+        let tip = match parse(&text, path) {
+            Ok(tip) => tip,
+            Err(e) => {
+                out.unread.push(format!("{path}: {e}"));
+                continue;
+            }
+        };
+        let base = read_base(path)
+            .and_then(|t| parse(&t, path).ok())
+            .unwrap_or_default();
+        for spec in changed_rows(&base, tip) {
+            match live_lineage::<S>(http, &versions(spec.name())).await {
+                Ok(live) => out.refused.extend(lineage_line(registry, &spec, &live)),
+                Err(e) => out
+                    .unread
+                    .push(format!("{registry}/{}: {e:#}", spec.name())),
+            }
+        }
+    }
+}
+
+/// Every versioned bundle row the car changes between `base` (its
+/// merge-base with main) and `tip`, judged against the live lineage.
+/// Never fails: what git or the system of record cannot answer comes
+/// back in `unread`, and the caller proceeds on it.
+pub(crate) async fn judge_car(
+    http: &reqwest::Client,
+    repo: &Path,
+    base: &str,
+    tip: &str,
+) -> CarJudgement {
+    use boss_jobs::seed_loader::{parse_cadence_rules, parse_stations, parse_step_plugins};
+    let mut out = CarJudgement::default();
+    if base.is_empty() {
+        out.unread
+            .push("the car's base could not be read, so no bundle row was judged".into());
+        return out;
+    }
+    let diff = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["diff", "--name-only", base, tip, "--"])
+        .args([CADENCE_BUNDLE, STATIONS_BUNDLE, STEP_PLUGINS_BUNDLE])
+        .output();
+    let changed: Vec<String> = match diff {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect(),
+        Ok(o) => {
+            out.unread.push(format!(
+                "git diff {base} {tip}: {}",
+                String::from_utf8_lossy(&o.stderr)
+                    .lines()
+                    .next()
+                    .unwrap_or("no stderr")
+            ));
+            return out;
+        }
+        Err(e) => {
+            out.unread.push(format!("could not run git: {e}"));
+            return out;
+        }
+    };
+    if changed.is_empty() {
+        return out;
+    }
+    let read_base = crate::prove::git_show_reader(repo, base);
+    let read_tip = crate::prove::git_show_reader(repo, tip);
+    judge_registry(
+        http,
+        "cadence",
+        CADENCE_BUNDLE,
+        parse_cadence_rules,
+        cadence_versions,
+        &changed,
+        &read_base,
+        &read_tip,
+        &mut out,
+    )
+    .await;
+    judge_registry(
+        http,
+        "stations",
+        STATIONS_BUNDLE,
+        parse_stations,
+        station_versions,
+        &changed,
+        &read_base,
+        &read_tip,
+        &mut out,
+    )
+    .await;
+    judge_registry(
+        http,
+        "step-plugins",
+        STEP_PLUGINS_BUNDLE,
+        parse_step_plugins,
+        step_plugin_versions,
+        &changed,
+        &read_base,
+        &read_tip,
+        &mut out,
+    )
+    .await;
+    out
+}
+
 /// One registry's half of orient's BUNDLES section: every row this
 /// checkout's bundle declares, put through the seed's decision against
 /// the lineage the system of record answers now. Never fatal — a tree
@@ -151,16 +370,7 @@ async fn registry_section<S: Declared + serde::de::DeserializeOwned>(
     };
     let (mut flagged, mut unread, mut not_live) = (Vec::new(), Vec::new(), 0);
     for spec in &specs {
-        let live = crate::gate::api(http, reqwest::Method::GET, &versions(spec.name()), None)
-            .await
-            .and_then(crate::train::rows)
-            .and_then(|rows| {
-                rows.into_iter()
-                    .map(serde_json::from_value::<S>)
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(anyhow::Error::from)
-            });
-        match live {
+        match live_lineage::<S>(http, &versions(spec.name())).await {
             Ok(live) if live.is_empty() => not_live += 1,
             Ok(live) => flagged.extend(lineage_line(registry, spec, &live)),
             Err(e) => unread.push(format!("{registry}/{}: {e:#}", spec.name())),
@@ -303,6 +513,56 @@ mod tests {
             section_lines("cadence", 3, 0, &[], &["cadence/x: HTTP 502".into()]).join("\n");
         assert!(unread.contains("UNREAD — cadence/x: HTTP 502"), "{unread}");
         assert!(unread.contains("2 of 3 row(s) judged"), "{unread}");
+    }
+
+    /// The car-side half (5449111c): only a row whose DECLARATION the
+    /// car changes is judged at launch. A comment edit on a file that
+    /// sits behind live by design changes nothing the seed reads, so it
+    /// stays possible; a new file, a column or a version is judged.
+    #[test]
+    fn only_a_row_whose_declaration_the_car_changes_is_judged() {
+        let base = [rule(2, "active", 45)];
+        assert!(changed_rows(&base, vec![rule(2, "active", 45)]).is_empty());
+        assert_eq!(changed_rows(&base, vec![rule(3, "active", 45)]).len(), 1);
+        assert_eq!(changed_rows(&base, vec![rule(2, "active", 30)]).len(), 1);
+        assert_eq!(changed_rows(&[], vec![rule(2, "active", 45)]).len(), 1);
+    }
+
+    /// Only a bundle's own row files are read — a README edit in the
+    /// same directory, or a file in another bundle, is not this one's.
+    #[test]
+    fn a_car_path_belongs_to_the_bundle_whose_directory_holds_its_toml() {
+        let changed = [
+            "infra/platform/cadence/train-window.toml".to_string(),
+            "infra/platform/cadence/README.md".to_string(),
+            "infra/platform/stations/loading-dock.toml".to_string(),
+            "infra/platform/cadence-old/x.toml".to_string(),
+        ];
+        assert_eq!(
+            paths_in(CADENCE_BUNDLE, &changed),
+            vec!["infra/platform/cadence/train-window.toml"]
+        );
+    }
+
+    /// The measured incident as the launch now sees it: 3ec04168's car
+    /// bumped the boarding rule 6 -> 7 at cooldown 30 while live v7 was
+    /// active at 45. It gated green and landed with no effect; here it
+    /// is refused before a gate slot is spent, and the refusal names
+    /// the row, the version that would publish, and the doors through.
+    #[test]
+    fn the_launch_refusal_names_every_row_and_the_way_through() {
+        let live = [rule(6, "retired", 45), rule(7, "active", 45)];
+        let base = [rule(6, "active", 45)];
+        let lines: Vec<String> = changed_rows(&base, vec![rule(7, "active", 30)])
+            .iter()
+            .filter_map(|s| lineage_line("cadence", s, &live))
+            .collect();
+        let text = car_refusal("abc1234", &lines);
+        assert!(text.contains("REFUSED"), "{text}");
+        assert!(text.contains("abc1234"), "{text}");
+        assert!(text.contains("CONTRADICTS live v7"), "{text}");
+        assert!(text.contains("declare v8"), "{text}");
+        assert!(text.contains("boss orient"), "{text}");
     }
 
     /// The packet's sweep (5449111c): stations and step plugins declare

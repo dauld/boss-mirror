@@ -1199,6 +1199,15 @@ pub async fn run(all: bool) -> Result<()> {
         println!("{line}");
     }
 
+    // REPORTING TO — who reads this session's reports, their company
+    // address and their timezone, from the people and locations
+    // registries rather than from agent memory (backlog 2de32950). Beside
+    // the memory index for the same reason: it is about what this
+    // session is handed, and it prints before any lane can fail.
+    for line in crate::reporting_to::section(&http).await {
+        println!("{line}");
+    }
+
     // THE REGIONS — the map's numbers, from the server's one definition
     // (design 0524fc95). A server without the read (older than this
     // verb) says so and the approach still prints; the lanes below are

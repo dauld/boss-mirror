@@ -593,7 +593,11 @@ queue, one read (needs `BOSS_JOBS_URL`, like every SoR verb). Its
 step assigned to the id the verb signs as or to any alias the agents
 registry ties to it, grouped by kind, oldest first — because 25 such
 steps sat on the agent's alias unseen while it read only the backlog
-station (65a89769). Run it
+station (65a89769). Its **REPORTING TO** line names the person the
+session reports to — the platform owner — with the company address off
+their employee row and the timezone off the Location that row names,
+because the stack runs UTC and those two facts used to live only in
+agent memory, where nothing consulted them (2de32950). Run it
 first; this section is the checklist behind it, and the reason each
 line exists. On its first live run it named three stranded greens —
 one of which was rescued onto the next train instead of rebuilt blind.
