@@ -133,10 +133,66 @@ export type Region = Readonly<{
   machines: ReadonlyArray<Machine>;
 }>;
 
+/** A third's STUCK reading (design cf820810), exactly as the server
+ *  gives it: stuck and waiting side by side and never summed; a
+ *  non-empty `unknown` makes `stuck` a FLOOR. */
+export type ThirdStuck = Readonly<{
+  stuck: number | null;
+  waiting: number | null;
+  unknown: ReadonlyArray<string>;
+  oldest_hours: number | null;
+  regions: ReadonlyArray<string>;
+}>;
+
+/** IS THE THIRD TAKING WORK IN FASTER THAN IT LETS WORK OUT? (design
+ *  00774ca8, decision 2) — per day, in ONE unit per third, each packet
+ *  counted once, the net written by the server. A half whose read
+ *  failed is null with the failed read in `why`. */
+export type Balance = Readonly<{
+  unit: string;
+  in_means: string;
+  out_means: string;
+  in: number | null;
+  out: number | null;
+  net: number | null;
+  in_count: number | null;
+  out_count: number | null;
+  why: string | null;
+}>;
+
+/** One HUD row: a third, its regions (the row's membership), its
+ *  balance and its stuck reading — `boss_jobs::thirds::Third`. */
+export type Third = Readonly<{
+  third: string;
+  regions: ReadonlyArray<string>;
+  balance: Balance;
+  stuck: ThirdStuck;
+}>;
+
+/** A failed or unjudged machine with the region whose map draws it. */
+export type MachineAt = Readonly<{ region: string; id: string; name: string; state: MachineState; why: string }>;
+
+/** The whole system's machines, counted once by state (decision 3). */
+export type MachineSummary = Readonly<{
+  running: number;
+  idle: number;
+  failed: number;
+  unknown: number;
+  total: number;
+  failed_or_unknown: ReadonlyArray<MachineAt>;
+}>;
+
 export type Regions = Readonly<{
   window_hours: number;
   regions: ReadonlyArray<Region>;
   now: string;
+  /** The HUD's rows, in the server's order. Empty on a server older
+   *  than the block — which the HUD draws as unanswered, never as a
+   *  balanced system. */
+  thirds: ReadonlyArray<Third>;
+  /** The machine cell. Null on an older server: not answered, never
+   *  "no machines". */
+  machines: MachineSummary | null;
 }>;
 
 function asObject(raw: unknown, where: string): Record<string, unknown> {
@@ -225,6 +281,60 @@ function parseRegion(raw: unknown): Region {
   };
 }
 
+const strings = (v: unknown): ReadonlyArray<string> => (Array.isArray(v) ? v.map(String) : []);
+
+function parseThird(raw: unknown): Third {
+  const o = asObject(raw, 'third');
+  const b = asObject(o.balance, `third ${String(o.third ?? '?')} balance`);
+  const s = asObject(o.stuck, `third ${String(o.third ?? '?')} stuck`);
+  return {
+    third: String(o.third ?? ''),
+    regions: strings(o.regions),
+    balance: {
+      unit: String(b.unit ?? ''),
+      in_means: String(b.in_means ?? ''),
+      out_means: String(b.out_means ?? ''),
+      in: numberOrNull(b.in),
+      out: numberOrNull(b.out),
+      net: numberOrNull(b.net),
+      in_count: numberOrNull(b.in_count),
+      out_count: numberOrNull(b.out_count),
+      why: typeof b.why === 'string' ? b.why : null,
+    },
+    stuck: {
+      // A count the payload does not carry is null — unanswered — never 0.
+      stuck: numberOrNull(s.stuck),
+      waiting: numberOrNull(s.waiting),
+      unknown: strings(s.unknown),
+      oldest_hours: numberOrNull(s.oldest_hours),
+      regions: strings(s.regions),
+    },
+  };
+}
+
+function parseMachineSummary(raw: unknown): MachineSummary | null {
+  if (raw === null || raw === undefined) return null;
+  const o = asObject(raw, 'machines');
+  const count = (k: string): number => {
+    const n = numberOrNull(o[k]);
+    if (n === null) throw new Error(`machines: expected a count for ${k}`);
+    return n;
+  };
+  return {
+    running: count('running'),
+    idle: count('idle'),
+    failed: count('failed'),
+    unknown: count('unknown'),
+    total: count('total'),
+    failed_or_unknown: Array.isArray(o.failed_or_unknown)
+      ? o.failed_or_unknown.map((m) => {
+          const x = asObject(m, 'machine');
+          return { ...parseMachine(x), region: String(x.region ?? '') };
+        })
+      : [],
+  };
+}
+
 /** The whole map, or a throw — a payload without `regions` is a wrong
  *  server, not an empty map. */
 export function parseRegions(raw: unknown): Regions {
@@ -234,6 +344,8 @@ export function parseRegions(raw: unknown): Regions {
     window_hours: numberOrNull(o.window_hours) ?? 0,
     regions: o.regions.map(parseRegion),
     now: String(o.now ?? ''),
+    thirds: Array.isArray(o.thirds) ? o.thirds.map(parseThird) : [],
+    machines: parseMachineSummary(o.machines),
   };
 }
 

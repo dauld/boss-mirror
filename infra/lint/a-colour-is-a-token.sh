@@ -18,7 +18,7 @@
 #
 # THE RULE. A colour is named ONCE, in a `:root` block of
 # apps/web/src/styles.css, and everything else reads it by `var(--name)`.
-# Refused anywhere else in apps/web and libs/web-kit:
+# Refused anywhere else in apps/web, apps/simulator and libs/web-kit:
 #   * a hex colour            #fff  #0E1B2E  #16a34a22
 #   * a colour function       rgb( rgba( hsl( hsla(
 #   * a named colour after a colour property   color: white
@@ -43,8 +43,13 @@
 #     No list in this file, on purpose: a marker cannot drift from the
 #     lines it heads, and fewer than three words is not a reason.
 #
-# Files read: tracked `*.svelte *.ts *.js *.css *.html` under apps/web/ and
-# libs/web-kit/.
+# Files read: tracked `*.svelte *.ts *.js *.css *.html` under apps/web/,
+# apps/simulator/ and libs/web-kit/. The simulator joined on 2026-09-24
+# (backlog 6f471ff6, car 4): it renders the same web-kit parts, yet it
+# carried its own stone-and-brew palette — 683 literals in its stylesheet,
+# 91 in its components — because nothing here read it. It now takes its
+# tokens from the one token file (its stylesheet @imports it), so it
+# has no :root of its own and no exemption.
 #
 # EXIT STATUS (house style, infra/lint/lib/git-answer.sh):
 #   0  the tree was read and every colour is a token
@@ -260,6 +265,7 @@ self_test || exit 1
 # --- the tree ----------------------------------------------------------
 files="$(git_answer "$NAME" 0 ls-files -- \
     'apps/web/*.svelte' 'apps/web/*.ts' 'apps/web/*.js' 'apps/web/*.css' 'apps/web/*.html' \
+    'apps/simulator/*.svelte' 'apps/simulator/*.ts' 'apps/simulator/*.js' 'apps/simulator/*.css' 'apps/simulator/*.html' \
     'libs/web-kit/*.svelte' 'libs/web-kit/*.ts' 'libs/web-kit/*.js' 'libs/web-kit/*.css' 'libs/web-kit/*.html')" \
     || exit "$LINT_CANNOT_ANSWER"
 

@@ -304,12 +304,14 @@
   <Section title="Run state">
     <p class="run-state">
       The simulator is currently
-      <span class="badge" class:paused>{paused ? 'paused' : 'running'}</span>.
+      <span class="plate" class:plate-busy={!paused} class:plate-troubled={paused}
+        >{paused ? 'paused' : 'running'}</span
+      >.
     </p>
     <div class="btn-row">
       <button
         type="button"
-        class="btn primary"
+        class="btn btn-primary"
         disabled={readOnly || busy}
         onclick={togglePause}
       >
@@ -317,7 +319,7 @@
       </button>
       <button
         type="button"
-        class="btn danger"
+        class="btn btn-danger-outline"
         disabled={readOnly || busy}
         onclick={restartEpoch}
       >
@@ -358,7 +360,7 @@
         />
       </label>
       <div class="btn-row">
-        <button type="submit" class="btn primary" disabled={readOnly || busy}>
+        <button type="submit" class="btn btn-primary" disabled={readOnly || busy}>
           Apply configuration
         </button>
       </div>
@@ -378,7 +380,7 @@
 </div>
 
 {#if configError}
-  <div class="notice err" role="alert">{configError}</div>
+  <div class="load-failed" role="alert">{configError}</div>
 {:else if !config}
   <div class="notice" role="status">Loading behavior config…</div>
 {:else}
@@ -542,7 +544,7 @@
   <div class="apply-row">
     <button
       type="button"
-      class="btn primary"
+      class="btn btn-primary"
       disabled={readOnly || busy}
       onclick={applyConfig}
     >
@@ -559,83 +561,44 @@
     gap: 24px;
     align-items: start;
   }
+  /* Enamel (backlog 6f471ff6, car 4). The buttons are the shared .btn
+     (the board's 13px/800 caps in a 2px ink frame; primary action blue,
+     danger in troubled words), the fields inherit the web stylesheet's
+     field rule (2px ink frame, amber halo on focus), the run state is a
+     plate, and a failed read is the .load-failed rail — all from the one
+     stylesheet the Simulator imports. What is left here is layout, and
+     colours only as tokens. */
   .notice {
-    border-radius: 6px;
-    padding: 12px 16px;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius);
+    background: var(--card);
+    padding: 12px 14px;
     margin-bottom: 16px;
-    font-size: 0.9rem;
     line-height: 1.5;
   }
   .notice.readonly {
-    background: #fef3c7;
-    border: 1px solid #fcd34d;
-    color: #92400e;
+    color: var(--warn);
   }
   .notice.ok {
-    background: #dcfce7;
-    border: 1px solid #86efac;
-    color: #166534;
+    color: var(--ok);
   }
+  /* A refused write is troubled, so it wears the failed read's rail. */
   .notice.err {
-    background: #fee2e2;
-    border: 1px solid #fca5a5;
-    color: #991b1b;
+    border: 0;
+    border-left: 8px solid var(--troubled);
+    color: var(--troubled-ink);
+    font-weight: 600;
+  }
+  .load-failed {
+    margin-bottom: 16px;
   }
   .run-state {
     margin: 0 0 12px;
-    font-size: 0.95rem;
-  }
-  .badge {
-    display: inline-block;
-    background: #dcfce7;
-    color: #166534;
-    border: 1px solid #86efac;
-    border-radius: 4px;
-    padding: 1px 8px;
-    font-size: 0.8rem;
-    font-weight: 600;
-  }
-  .badge.paused {
-    background: #fee2e2;
-    color: #991b1b;
-    border-color: #fca5a5;
   }
   .btn-row {
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
-  }
-  .btn {
-    padding: 8px 16px;
-    border-radius: 6px;
-    border: 1px solid var(--brew-amber, #d99b3a);
-    background: #fff;
-    color: var(--brew-malt, #7a3f1f);
-    font: inherit;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 80ms, opacity 80ms;
-  }
-  .btn:hover:not(:disabled) {
-    background: var(--brew-amber-bg, #fff7e0);
-  }
-  .btn.primary {
-    background: var(--brew-amber, #d99b3a);
-    color: #fff;
-  }
-  .btn.primary:hover:not(:disabled) {
-    background: #c2862c;
-  }
-  .btn.danger {
-    border-color: #fca5a5;
-    color: #991b1b;
-  }
-  .btn.danger:hover:not(:disabled) {
-    background: #fee2e2;
-  }
-  .btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
   }
   .configure-form {
     display: flex;
@@ -647,40 +610,32 @@
     flex-direction: column;
     gap: 4px;
   }
+  /* The board's field label: 13.5px/700; help 12.5px muted. */
   .field-label {
-    font-size: 0.8rem;
-    color: #78716c;
-    font-weight: 500;
-  }
-  .field input {
-    padding: 6px 10px;
-    border: 1px solid #d6d3d1;
-    border-radius: 6px;
-    font: inherit;
-    background: #fafaf9;
+    font-size: 13.5px;
+    font-weight: 700;
   }
   .field input:disabled {
     opacity: 0.6;
   }
   .hint {
     margin: 0;
-    font-size: 0.8rem;
-    color: #a8a29e;
+    font-size: 12.5px;
+    color: var(--static);
   }
   .behavior-header {
     margin: 32px 0 16px;
-    border-top: 1px solid #e7e5e4;
+    border-top: 1px solid var(--hairline);
     padding-top: 24px;
   }
   .behavior-header h2 {
     margin: 0 0 4px;
-    font-size: 1.2rem;
-    color: var(--brew-malt, #7a3f1f);
+    font-size: 18px;
+    color: var(--fog);
   }
   .behavior-sub {
     margin: 0;
-    font-size: 0.9rem;
-    color: #78716c;
+    color: var(--static);
     line-height: 1.5;
     max-width: 70ch;
   }
@@ -692,11 +647,12 @@
   }
   .subhead {
     margin: 16px 0 8px;
-    font-size: 0.85rem;
+    font-family: var(--font-mono);
+    font-size: 11px;
     font-weight: 600;
-    color: var(--brew-malt, #7a3f1f);
+    color: var(--static);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: var(--ls-label);
   }
   .rate-list {
     display: flex;
@@ -729,16 +685,15 @@
     align-items: flex-end;
     gap: 12px;
     padding: 8px 0;
-    border-bottom: 1px solid #f5f5f4;
+    border-bottom: 1px solid var(--hairline);
   }
   .cp-row:last-child {
     border-bottom: none;
   }
   .cp-name {
     flex: 1 1 100%;
-    font-size: 0.85rem;
     font-weight: 600;
-    color: #44403c;
+    color: var(--fog);
     overflow-wrap: anywhere;
   }
   .periodic-list {
@@ -757,8 +712,8 @@
     font-size: 0.85rem;
   }
   .periodic-meta {
-    color: #78716c;
-    font-size: 0.8rem;
+    color: var(--static);
+    font-size: 12.5px;
   }
   .apply-row {
     display: flex;

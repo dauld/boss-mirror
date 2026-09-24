@@ -107,6 +107,39 @@ field_type = "array"
 required = true
 filled_by = "filer"
 item_keys = ["anchor", "title", "proposal"]
+# A question may BIND the exhibits it is asked about (design 26a89f11):
+# an element's `exhibits` key lists exhibit anchors, and the review
+# surface renders those exhibits beside the question. A binding to an
+# anchor the step does not carry is refused as it is written.
+binds = "exhibits"
+
+# EXHIBITS — a proposal whose substance is visual rides INSIDE the
+# packet, not behind a claude.ai link (design 26a89f11, David
+# 2026-09-23, all five questions accepted). `[{anchor, title, html}]`:
+# the markdown stays the record's prose, and each exhibit is a
+# self-contained HTML rendering — a theme board, a layout, a motion
+# prototype — that review-design.js renders ONLY in an
+# `<iframe sandbox="allow-scripts">` (never allow-same-origin) by srcdoc
+# under CSP `default-src 'none'` with inline style and script only. The
+# surface runs in the reviewer's authenticated session and any actor may
+# write step metadata, so the sandbox is the protection, not the author
+# list.
+#
+# INLINE, BOUNDED, FROZEN. The html rides in step metadata up to 256 KB
+# (`item_value_max_bytes`, measured in UTF-8 bytes of the string) and is
+# frozen with the rest of the step when the review completes. The
+# file_refs arm for larger renderings is decided and not yet built — this
+# field refuses an element without `html` until it is. Not required: most
+# designs carry no exhibit, and `boss design --exhibit` writes it onto
+# this step (not bound through metadata_defaults, which would leave an
+# unexpanded token on every design that has none).
+[[workflow.step.fields]]
+name = "exhibits"
+field_type = "array"
+required = false
+filled_by = "filer"
+item_keys = ["anchor", "title", "html"]
+item_value_max_bytes = 262144
 
 # The answers, and the contract that makes the review a review: every
 # question's anchor must be resolved before the step can complete.

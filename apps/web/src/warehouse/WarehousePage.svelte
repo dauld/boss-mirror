@@ -446,7 +446,7 @@
 
       <section class="list-section">
         <div style="margin-bottom:12px; display:flex; gap:8px; align-items:center">
-          <button class="hr-action-btn" onclick={() => (showCreatePo = !showCreatePo)}>
+          <button class="btn btn-sm" onclick={() => (showCreatePo = !showCreatePo)}>
             {showCreatePo ? 'Cancel' : 'Create PO'}
           </button>
           {#if createPoStatus}
@@ -505,7 +505,7 @@
                 />
               </div>
               <button
-                class="hr-action-btn"
+                class="btn btn-sm btn-primary"
                 onclick={handleCreatePo}
                 disabled={!createPoVendor || !createPoSku}
               >

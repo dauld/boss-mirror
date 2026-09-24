@@ -400,14 +400,27 @@ pub(crate) fn draft_done_writes(
 }
 
 /// The questions mirrored onto the filed design's own `review-design`
-/// step, through the merge door (see [`step_merge`] for why).
+/// step, through the merge door (see [`step_merge`] for why) — with the
+/// exhibits, when the design carries any, in the same write, so the
+/// merge door judges each question's bindings against the exhibits
+/// landing beside it.
 pub(crate) fn review_mirror_write(
     design: &str,
     review_step: &str,
     body: &Value,
     doc_path: &str,
+    exhibits: &[Value],
 ) -> StepWrite {
-    step_merge(design, review_step, review_step_metadata(body, doc_path))
+    let mut md = review_step_metadata(body, doc_path);
+    // ON THE STEP ONLY. An exhibit is up to 256 KB, and the step is
+    // where the review reads it and where completion freezes it; a
+    // second copy on the job would be a copy nothing reviews and every
+    // job listing carries. Absent, not `[]`, when there are none, so a
+    // design without exhibits mirrors exactly what it always did.
+    if !exhibits.is_empty() {
+        md["exhibits"] = json!(exhibits);
+    }
+    step_merge(design, review_step, md)
 }
 
 /// The review step's own copy. The tracker reads the STEP, so a doc
@@ -424,6 +437,117 @@ pub(crate) fn review_step_metadata(body: &Value, doc_path: &str) -> Value {
     })
 }
 
+/// The inline bound on one exhibit's html, in UTF-8 bytes: design
+/// 26a89f11's 256 KB. The protocol states it as the design-doc review
+/// step's `item_value_max_bytes` on `exhibits` and the merge door holds
+/// it; this copy exists because the verb refuses BEFORE it files, which
+/// is before any registry is read — so it is pinned equal to the bundle
+/// file by `the_verbs_inline_bound_is_the_protocols` (CLAUDE.md §9a).
+pub(crate) const EXHIBIT_INLINE_MAX_BYTES: u64 = 256 * 1024;
+
+/// `anchor|title|path.html` — one `--exhibit`. The file is read as
+/// BYTES by `read` (the filesystem in production, a closure in the
+/// tests), with no shell between the file and the record: a byte a
+/// shell re-encodes is a byte the review no longer shows as authored.
+/// Refused, naming the flag: a partial triple, an unreadable, empty or
+/// non-UTF-8 file, and one over [`EXHIBIT_INLINE_MAX_BYTES`] — the
+/// file_refs arm for larger renderings is decided and not yet built.
+pub(crate) fn read_exhibit(
+    raw: &str,
+    read: impl Fn(&Path) -> std::io::Result<Vec<u8>>,
+) -> Result<Value> {
+    let parts: Vec<&str> = raw.splitn(3, '|').map(str::trim).collect();
+    let [anchor, title, path] = parts[..] else {
+        bail!("--exhibit wants `anchor|title|path.html`, got {raw:?}");
+    };
+    if anchor.is_empty() || title.is_empty() || path.is_empty() {
+        bail!("--exhibit needs all three of anchor, title and path: {raw:?}");
+    }
+    let bytes =
+        read(Path::new(path)).with_context(|| format!("--exhibit {anchor}: reading {path}"))?;
+    if bytes.is_empty() {
+        bail!("--exhibit {anchor}: {path} is empty — an exhibit with nothing in it shows nothing");
+    }
+    let size = bytes.len() as u64;
+    if size > EXHIBIT_INLINE_MAX_BYTES {
+        bail!(
+            "--exhibit {anchor}: {path} is {size} bytes, over the {EXHIBIT_INLINE_MAX_BYTES}-byte \
+             inline bound an exhibit rides under (design 26a89f11). Larger renderings go by \
+             file_refs, which is decided and not yet built into this verb — make the rendering \
+             self-contained and smaller, or split it into two exhibits."
+        );
+    }
+    let html = String::from_utf8(bytes).map_err(|_| {
+        anyhow::anyhow!(
+            "--exhibit {anchor}: {path} is not UTF-8 text — an exhibit is an HTML document, \
+             carried as a string in step metadata"
+        )
+    })?;
+    Ok(json!({ "anchor": anchor, "title": title, "html": html }))
+}
+
+/// Apply every `--bind Q|E`: exhibit anchor E joins question Q's
+/// `exhibits` list — the element key the protocol's `binds = "exhibits"`
+/// names. Refused before filing, naming the anchor: a question or an
+/// exhibit this design does not carry, and an exhibit anchor used twice
+/// (the merge door refuses both; refusing here keeps a half-filed
+/// packet from existing). Questions nothing binds carry no key.
+pub(crate) fn bind_exhibits(
+    questions: &[Value],
+    exhibits: &[Value],
+    binds: &[String],
+) -> Result<Vec<Value>> {
+    let anchor = |v: &Value| {
+        v.get("anchor")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
+    let carried: Vec<String> = exhibits.iter().map(anchor).collect();
+    if let Some(dup) = carried
+        .iter()
+        .enumerate()
+        .find(|(i, a)| carried[..*i].contains(a))
+        .map(|(_, a)| a)
+    {
+        bail!("--exhibit anchor {dup} is used twice — an anchor names one exhibit");
+    }
+    let mut out = questions.to_vec();
+    for raw in binds {
+        let (q, e) = raw
+            .split_once('|')
+            .map(|(q, e)| (q.trim(), e.trim()))
+            .filter(|(q, e)| !q.is_empty() && !e.is_empty())
+            .with_context(|| format!("--bind wants `question|exhibit` anchors, got {raw:?}"))?;
+        if !carried.iter().any(|a| a == e) {
+            bail!(
+                "--bind {raw:?}: this design carries no exhibit {e} (it carries: {}) — attach it \
+                 with --exhibit {e}|title|path.html",
+                if carried.is_empty() {
+                    "none".to_string()
+                } else {
+                    carried.join(", ")
+                }
+            );
+        }
+        let question = out
+            .iter_mut()
+            .find(|v| anchor(v) == q)
+            .with_context(|| format!("--bind {raw:?}: this design asks no question {q}"))?;
+        let list = question
+            .as_object_mut()
+            .context("a question is an object")?
+            .entry("exhibits")
+            .or_insert_with(|| json!([]));
+        if let Some(items) = list.as_array_mut()
+            && !items.iter().any(|v| v.as_str() == Some(e))
+        {
+            items.push(json!(e));
+        }
+    }
+    Ok(out)
+}
+
 /// What a design may still ASK David, in the words the drafting
 /// procedures use (backlog 4f71e608; the Workflow rows' copies are
 /// pinned by boss-jobs' the_author_decides_from_the_company_frame.rs).
@@ -431,6 +555,7 @@ pub(crate) fn review_step_metadata(body: &Value, doc_path: &str) -> Value {
 const ESCALATE_ONLY: &str = "strategy or priority trade-offs, trust and security boundaries, \
                              credentials, money, and brand or voice";
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     title: String,
     markdown: String,
@@ -439,6 +564,8 @@ pub async fn run(
     no_questions: bool,
     doc_path: Option<String>,
     answers: Option<String>,
+    exhibits: Vec<String>,
+    binds: Vec<String>,
 ) -> Result<()> {
     // Refuse before filing, not after: a doc with neither questions nor
     // the flag is the exact packet this verb exists to stop reaching a
@@ -474,6 +601,21 @@ pub async fn run(
         .iter()
         .map(|q| parse_question(q).and_then(|q| question_is_prose(&q, is_file).map(|()| q)))
         .collect::<Result<Vec<_>>>()?;
+    // EXHIBITS (design 26a89f11): read and bound-checked, and every
+    // `--bind` resolved, BEFORE anything is filed. They ride the review
+    // step, which a --no-questions doc never queues, so nothing would
+    // ever render one there — refused rather than recorded unseen.
+    if no_questions && !exhibits.is_empty() {
+        bail!(
+            "--exhibit rides the review step, and --no-questions queues no review, so nothing \
+             would render it. File the design with its questions, or without --exhibit."
+        );
+    }
+    let exhibits = exhibits
+        .iter()
+        .map(|raw| read_exhibit(raw, |p| std::fs::read(p)))
+        .collect::<Result<Vec<_>>>()?;
+    let parsed = bind_exhibits(&parsed, &exhibits, &binds)?;
     let http = reqwest::Client::new();
 
     // `--answers`: the feedback (or backlog item) this design decides.
@@ -607,8 +749,13 @@ pub async fn run(
         .and_then(Value::as_str)
         .context("the filed doc has no review-design step")?
         .to_string();
-    let (method, path, step_md) =
-        review_mirror_write(&id, &sid, &body, doc_path.as_deref().unwrap_or(""));
+    let (method, path, step_md) = review_mirror_write(
+        &id,
+        &sid,
+        &body,
+        doc_path.as_deref().unwrap_or(""),
+        &exhibits,
+    );
     api(&http, method, &path, Some(step_md))
         .await
         .context("writing the questions onto the review step")?;
@@ -617,6 +764,11 @@ pub async fn run(
         "boss design: {short} filed with {} open question(s) — review queued",
         parsed.len()
     );
+    // Each exhibit named the way a terminal lists one — anchor, title,
+    // size, hash — since a terminal cannot render it (design 26a89f11).
+    for e in &exhibits {
+        println!("  exhibit {}", crate::brief::exhibit_line(e));
+    }
     Ok(())
 }
 
@@ -1016,6 +1168,8 @@ mod tests {
             false,
             None,
             None,
+            vec![],
+            vec![],
         )
         .await
         .expect_err("a doc with neither questions nor the flag is refused");
@@ -1061,7 +1215,8 @@ mod tests {
     fn the_review_mirror_merges_onto_the_review_step() {
         let q = vec![question("Q1", "which brick first?", "the cheap one")];
         let body = design_job_body("t", "# doc", &q, false, None, "emp-owner");
-        let (method, path, md) = review_mirror_write("d-1", "s-review", &body, "docs/design/x.md");
+        let (method, path, md) =
+            review_mirror_write("d-1", "s-review", &body, "docs/design/x.md", &[]);
         assert_eq!(method, reqwest::Method::PATCH);
         assert_eq!(path, "/api/jobs/d-1/steps/s-review/metadata");
         assert_eq!(md, review_step_metadata(&body, "docs/design/x.md"));
@@ -1072,6 +1227,148 @@ mod tests {
                 .is_some_and(|m| m.values().all(|v| !v.is_null())),
             "no mirrored key is null: {md}"
         );
+    }
+
+    /// `--exhibit anchor|title|path.html` (design 26a89f11): the file is
+    /// read as BYTES, with no shell between it and the record, and rides
+    /// as `{anchor, title, html}`. A partial triple, an empty file, a
+    /// file that is not UTF-8, and one over the inline bound are each
+    /// refused before anything is filed, naming the flag and the number.
+    #[test]
+    fn an_exhibit_is_read_from_its_file_and_refused_over_the_bound() {
+        let board = b"<!doctype html><style>b{color:red}</style><b>palette</b>".to_vec();
+        let read_ok = |_: &Path| Ok(board.clone());
+        let e = read_exhibit("E1 | IT map motion | /x/board.html", read_ok).expect("an exhibit");
+        assert_eq!(e["anchor"], json!("E1"));
+        assert_eq!(e["title"], json!("IT map motion"));
+        assert_eq!(
+            e["html"].as_str().map(str::as_bytes),
+            Some(board.as_slice()),
+            "the bytes arrive as they were on disk"
+        );
+
+        for bad in ["E1|only-two", "|t|/x.html", "E1||/x.html", "E1|t|"] {
+            assert!(
+                read_exhibit(bad, read_ok).is_err(),
+                "a partial triple is refused: {bad:?}"
+            );
+        }
+        let err = read_exhibit("E1|t|/x.html", |_: &Path| Ok(Vec::new())).unwrap_err();
+        assert!(err.to_string().contains("empty"), "{err}");
+        let err = read_exhibit("E1|t|/x.html", |_: &Path| Ok(vec![0xff, 0xfe])).unwrap_err();
+        assert!(err.to_string().contains("UTF-8"), "{err}");
+        let err = read_exhibit("E1|t|/x.html", |_: &Path| {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "gone"))
+        })
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("/x.html"), "{err:#}");
+
+        let at = vec![b'a'; EXHIBIT_INLINE_MAX_BYTES as usize];
+        read_exhibit("E1|t|/x.html", |_: &Path| Ok(at.clone())).expect("exactly the bound fits");
+        let over = vec![b'a'; EXHIBIT_INLINE_MAX_BYTES as usize + 1];
+        let err = read_exhibit("E1|t|/x.html", |_: &Path| Ok(over.clone())).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains(&(EXHIBIT_INLINE_MAX_BYTES + 1).to_string())
+                && text.contains(&EXHIBIT_INLINE_MAX_BYTES.to_string()),
+            "the refusal names the size and the bound: {text}"
+        );
+    }
+
+    /// The verb's bound IS the protocol's: the design-doc review step's
+    /// `item_value_max_bytes` on `exhibits`, read out of the bundle file
+    /// the registry seeds. A copy is pinned (CLAUDE.md §9a) — the verb
+    /// must refuse before filing, which is before any registry is read.
+    #[test]
+    fn the_verbs_inline_bound_is_the_protocols() {
+        let toml = include_str!("../../../../infra/platform/workflows/design-doc.toml");
+        let line = toml
+            .lines()
+            .find(|l| l.trim_start().starts_with("item_value_max_bytes"))
+            .expect("design-doc.toml declares item_value_max_bytes");
+        let declared: u64 = line
+            .split('=')
+            .nth(1)
+            .map(str::trim)
+            .and_then(|n| n.parse().ok())
+            .expect("a number");
+        assert_eq!(declared, EXHIBIT_INLINE_MAX_BYTES);
+    }
+
+    /// `--bind Q|E` puts the exhibit anchor on the question as its
+    /// `exhibits` list — the key the protocol's `binds` names — and
+    /// refuses a question or an exhibit the design does not carry, and a
+    /// repeated exhibit anchor, before anything is filed.
+    #[test]
+    fn a_bind_attaches_an_exhibit_to_a_question_and_refuses_what_is_not_there() {
+        let qs = vec![
+            question("Q1", "which palette?", "the warm one"),
+            question("Q2", "t", "p"),
+        ];
+        let ex = vec![
+            json!({"anchor": "E1", "title": "a", "html": "x"}),
+            json!({"anchor": "E2", "title": "b", "html": "y"}),
+        ];
+        let bound =
+            bind_exhibits(&qs, &ex, &["Q1|E1".to_string(), "Q1 | E2".to_string()]).expect("binds");
+        assert_eq!(bound[0]["exhibits"], json!(["E1", "E2"]));
+        assert!(
+            bound[1].get("exhibits").is_none(),
+            "an unbound question carries no key"
+        );
+        assert_eq!(
+            bound[0]["title"],
+            json!("which palette?"),
+            "the rest untouched"
+        );
+
+        let err = bind_exhibits(&qs, &ex, &["Q1|E9".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("E9"), "{err}");
+        let err = bind_exhibits(&qs, &ex, &["Q7|E1".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("Q7"), "{err}");
+        assert!(bind_exhibits(&qs, &ex, &["Q1".to_string()]).is_err());
+        let twice = vec![ex[0].clone(), ex[0].clone()];
+        let err = bind_exhibits(&qs, &twice, &[]).unwrap_err();
+        assert!(err.to_string().contains("E1"), "{err}");
+    }
+
+    /// The exhibits ride onto the REVIEW STEP through the same merge that
+    /// mirrors the questions — the step whose completion freezes them —
+    /// and a design without exhibits mirrors exactly what it did before.
+    #[test]
+    fn exhibits_ride_the_review_mirror_and_only_when_there_are_some() {
+        let q = vec![question("Q1", "which palette?", "the warm one")];
+        let body = design_job_body("t", "# doc", &q, false, None, "emp-owner");
+        let ex = vec![json!({"anchor": "E1", "title": "board", "html": "<p>x</p>"})];
+        let (_, _, md) = review_mirror_write("d-1", "s-review", &body, "", &ex);
+        assert_eq!(md["exhibits"], json!(ex));
+        let (_, _, md) = review_mirror_write("d-1", "s-review", &body, "", &[]);
+        assert!(md.get("exhibits").is_none(), "{md}");
+        assert!(
+            body["metadata"].get("exhibits").is_none(),
+            "the bytes ride the step, not a second copy on the job"
+        );
+    }
+
+    /// An exhibit rides the REVIEW step, and `--no-questions` queues no
+    /// review: nothing would ever render it, so the pair is refused
+    /// before anything is read or filed.
+    #[tokio::test]
+    async fn an_exhibit_on_a_doc_with_no_review_is_refused() {
+        let err = run(
+            "a title".into(),
+            "a body".into(),
+            None,
+            vec![],
+            true,
+            None,
+            None,
+            vec!["E1|board|/nonexistent/board.html".into()],
+            vec![],
+        )
+        .await
+        .expect_err("refused");
+        assert!(err.to_string().contains("--no-questions"), "{err}");
     }
 
     /// The text half of the pins above: no step write in this verb

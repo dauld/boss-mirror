@@ -382,7 +382,7 @@
                 </select>
                 {#each hrKinds as k (k.kind)}
                   <button
-                    class="hr-action-btn"
+                    class="btn btn-sm"
                     onclick={() => startWorkflow(k.kind)}
                     disabled={!startTarget}
                   >

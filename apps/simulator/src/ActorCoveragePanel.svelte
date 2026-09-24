@@ -6,6 +6,7 @@
   // instead of being rediscovered by SQL. Ordering/labeling logic lives
   // in ./actor-coverage (unit-tested); this component only renders.
   import Section from '@boss/web-kit/ui/Section.svelte';
+  import StatusChip from '@boss/web-kit/ui/StatusChip.svelte';
   import { dormantRoles, sortRoles, statusLabel } from './actor-coverage';
   import type { ActorCoverage } from './types';
 
@@ -53,7 +54,7 @@
       </div>
     {/if}
 
-    <table class="cov-table">
+    <table class="data-table">
       <thead>
         <tr>
           <th class="t-role">Role</th>
@@ -71,8 +72,14 @@
             <td class="t-num">{r.acting.toLocaleString()}</td>
             <td class="t-num">{r.completions.toLocaleString()}</td>
             <td class="t-status">
+              <!-- Dormant is a state, so it is the troubled plate; an
+                   operator-held role is a deliberate exclusion, not a
+                   state, so it wears the quiet frame. -->
               {#if r.status !== 'acting'}
-                <span class="badge-{r.status}">{statusLabel(r.status)}</span>
+                <StatusChip
+                  value={statusLabel(r.status)}
+                  tone={r.status === 'dormant' ? 'err' : 'muted'}
+                />
               {/if}
             </td>
           </tr>
@@ -89,10 +96,16 @@
 </Section>
 
 <style>
+  /* Enamel (backlog 6f471ff6, car 4): every colour is a token from the
+     web app's stylesheet, which the Simulator imports. The table is the
+     shared .data-table — ink band heads, comfortable rows — and a role's
+     state is a StatusChip plate. Dormant is troubled, and troubled is the
+     loudest object on the page, so the strip naming the dormant roles
+     wears the failed read's rail. */
   .point-sub {
     margin: 0 0 10px;
-    font-size: 0.78rem;
-    color: #7a6855;
+    font-size: 12.5px;
+    color: var(--static);
   }
   .cov-headline {
     display: flex;
@@ -105,80 +118,55 @@
     align-items: baseline;
     gap: 8px;
   }
+  /* The board's summary figure: mono, 24px, 600, tabular. */
   .stat-num {
-    font-family: var(--font-display);
-    font-size: 2rem;
-    font-weight: 700;
-    color: var(--brew-malt-dark);
+    font-family: var(--font-mono);
+    font-size: 24px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--fog);
     line-height: 1;
   }
   .stat-label {
-    font-size: 0.78rem;
+    font-family: var(--font-mono);
+    font-size: 11px;
     text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--brew-malt);
+    letter-spacing: var(--ls-label);
+    color: var(--static);
   }
   .stat.alarm .stat-num,
   .stat.alarm .stat-label {
-    color: #8b2b1f;
+    color: var(--troubled-ink);
   }
   .dormant-strip {
     display: flex;
     flex-wrap: wrap;
     align-items: baseline;
     gap: 6px;
-    padding: 8px 10px;
+    padding: 12px 14px;
     margin-bottom: 12px;
-    background: rgba(139, 43, 31, 0.07);
-    border: 1px solid rgba(139, 43, 31, 0.25);
-    border-radius: 6px;
+    background: var(--card);
+    border-left: 8px solid var(--troubled);
+    border-radius: var(--radius);
   }
   .dormant-title {
-    font-size: 0.78rem;
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: #8b2b1f;
+    color: var(--troubled-ink);
   }
   .dormant-role {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.78rem;
-    color: #8b2b1f;
-    background: rgba(139, 43, 31, 0.1);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--troubled-ink);
+    background: var(--err-wash);
     padding: 0 0.45em;
-    border-radius: 3px;
-  }
-  .cov-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.85rem;
-  }
-  .cov-table th {
-    text-align: left;
-    font-size: 0.72rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--brew-malt);
-    border-bottom: 1px solid #e6d2a8;
-    padding: 2px 8px 4px;
-  }
-  .cov-table td {
-    padding: 3px 8px;
-    border-bottom: 1px solid #f0e6cf;
-  }
-  .cov-table tbody tr:nth-child(odd) {
-    background: rgba(217, 155, 58, 0.06);
+    border-radius: var(--radius);
   }
   .t-role {
-    color: var(--brew-malt-dark);
     font-weight: 600;
   }
   .t-num {
     text-align: right;
     font-variant-numeric: tabular-nums;
-  }
-  th.t-num {
-    text-align: right;
   }
   .t-status {
     text-align: right;
@@ -186,38 +174,20 @@
   }
   tr.is-dormant .t-role,
   tr.is-dormant .t-num {
-    color: #8b2b1f;
+    color: var(--troubled-ink);
   }
   tr.is-operator .t-role,
   tr.is-operator .t-num {
-    color: #a8a29e;
+    color: var(--static);
     font-weight: 400;
-  }
-  .badge-dormant {
-    font-size: 0.72rem;
-    font-weight: 600;
-    color: #8b2b1f;
-    background: rgba(139, 43, 31, 0.1);
-    border: 1px solid rgba(139, 43, 31, 0.3);
-    border-radius: 4px;
-    padding: 0 6px;
-  }
-  .badge-operator {
-    font-size: 0.72rem;
-    color: #7a6855;
-    background: #f5f0e8;
-    border: 1px solid #e6dcc8;
-    border-radius: 4px;
-    padding: 0 6px;
   }
   .cov-foot {
     margin: 8px 0 0;
-    font-size: 0.74rem;
-    color: #a8957a;
+    font-size: 12.5px;
+    color: var(--static);
   }
   .status {
     margin: 0 0 6px;
-    color: #7a6855;
-    font-style: italic;
+    color: var(--static);
   }
 </style>

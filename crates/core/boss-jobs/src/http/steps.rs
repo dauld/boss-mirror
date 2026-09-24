@@ -1484,6 +1484,43 @@ pub(super) async fn patch_step_metadata<R: JobsRepository + 'static, B: EventBus
     // lower the required sign-off authority — nor shed it with null.
     patch.remove("authority_role");
 
+    // THE STANDING REFUSALS, AS THE WRITE LANDS (design 26a89f11,
+    // exhibits). A repeated anchor, a value over the field's inline
+    // bound, or a binding to an anchor the step does not carry is what a
+    // record may never say, so it is refused here, where the writer is on
+    // the line — not at done, where it would land on the reviewer. Judged
+    // against the row AS IT WOULD STAND (the patch overlaid, null
+    // removing), and only for the fields this write touches or that bind
+    // one it touches. A step whose fields declare none of these answers
+    // exactly as before.
+    let merged_view = {
+        let mut md = old.metadata.as_object().cloned().unwrap_or_default();
+        for (k, v) in &patch {
+            if v.is_null() {
+                md.remove(k);
+            } else {
+                md.insert(k.clone(), v.clone());
+            }
+        }
+        serde_json::Value::Object(md)
+    };
+    let refusals =
+        crate::step_registry::StepRegistry::standing_refusals(&old.fields, &merged_view, |k| {
+            patch.contains_key(k)
+        });
+    if !refusals.is_empty() {
+        let msg = refusals
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("invalid step metadata: {msg}"),
+        )
+            .into_response();
+    }
+
     // The parent packet: the event stamp inherits its admission-fixed
     // partition, and the re-evaluator runs against it.
     let parent_job = state.jobs.get_job(&job_id).await.ok().flatten();

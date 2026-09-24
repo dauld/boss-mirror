@@ -310,17 +310,40 @@ pub struct Regions {
     /// an older payload, which a reader takes as not yet answered.
     #[serde(default)]
     pub stuck: Vec<ThirdStuck>,
+    /// THE HUD'S ROWS (design 00774ca8, decisions 1, 2 and 9): per third,
+    /// in [`THIRDS`] order, its regions, its balance and its stuck
+    /// reading — [`crate::thirds::thirds`]'s one definition, which the
+    /// HUD frame and `boss orient` both print. Absent on an older
+    /// payload, which a reader takes as not yet answered.
+    #[serde(default)]
+    pub thirds: Vec<crate::thirds::Third>,
+    /// THE WHOLE SYSTEM'S MACHINES, counted once by state (decision 3) —
+    /// the HUD's one machine cell. `None` on an older payload: absent is
+    /// "not answered", never "no machines".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machines: Option<crate::thirds::MachineSummary>,
 }
 
 /// THE THREE THIRDS of the operator surface (David, 2026-09-08: queue
 /// management upstream, actors building in the middle, delivery
-/// downstream) and the regions whose populations make up each third's
-/// stuck figure, in map order (design cf820810 Q2). ONE table: the block's
-/// order and its click-through both read it.
+/// downstream), in reading order, each with ALL of its regions in flow
+/// order.
+///
+/// A PARTITION since design 00774ca8 decision 1 (approved 2026-09-24):
+/// every one of the ten [`REGIONS`] belongs to exactly one third, pinned
+/// by `every_region_stands_in_exactly_one_third`. Until then the table
+/// listed only the regions whose populations make up each third's stuck
+/// figure (design cf820810 Q2), and the HUD would have had to hold the
+/// rest of each row's membership itself — the same fact in two places
+/// (CLAUDE.md 9a). [`stuck`] still reads only the regions that have a
+/// stuck part; the others simply contribute none.
 pub const THIRDS: [(&str, &[&str]); 3] = [
     ("queue-management", &["receiving", "marshalling"]),
-    ("actors-building", &["garage"]),
-    ("delivery", &["dock", "shed"]),
+    ("actors-building", &["shop-floor", "gates", "garage"]),
+    (
+        "delivery",
+        &["dock", "track", "arrivals", "shed", "publish"],
+    ),
 ];
 
 /// One third's STUCK READING (backlog 4142d821, design cf820810 car 2).
@@ -1785,11 +1808,14 @@ pub fn regions(inputs: &RegionInputs<'_>) -> Regions {
         let machines = machines_of(&r.name, inputs);
         with_machinery(r, machines, inputs.now)
     })
-    .collect();
+    .collect::<Vec<Region>>();
+    let stuck = stuck(inputs);
     Regions {
         window_hours: inputs.window_hours,
+        thirds: crate::thirds::thirds(inputs, &stuck),
+        machines: Some(crate::thirds::machine_summary(&regions)),
         regions,
-        stuck: stuck(inputs),
+        stuck,
     }
 }
 

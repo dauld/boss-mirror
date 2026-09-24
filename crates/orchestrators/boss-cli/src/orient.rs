@@ -1234,6 +1234,93 @@ fn trend_text(t: &Value) -> String {
     format!("{metric} {} (was {})", one("current"), one("previous"))
 }
 
+/// The THIRDS header — the HUD frame's rows and its machine cell, read
+/// off the SAME `/api/yard/regions` payload the map's HUD reads (design
+/// 00774ca8, decision 9: "`boss orient` prints the same block. No client
+/// adds anything up"). One line per third, in the payload's order:
+/// its balance (net per day, then its two rates and their unit), then
+/// stuck and waiting side by side, never summed. Then the machines.
+///
+/// Every unknown prints as `?` and a floor as `≥ n ?` — the three
+/// pictures the HUD draws — so an unread edge never reads as a balanced
+/// one. A server older than the block says so in one line.
+pub(crate) fn third_lines(map: &Value) -> Vec<String> {
+    let hours = map.get("window_hours").and_then(Value::as_i64).unwrap_or(0);
+    let thirds = map.get("thirds").and_then(Value::as_array);
+    let Some(thirds) = thirds.filter(|t| !t.is_empty()) else {
+        return vec!["  THIRDS — unavailable: the server sends no thirds block".to_string()];
+    };
+    let rate = |v: Option<&Value>| match v.and_then(Value::as_f64) {
+        Some(x) => format!("{x:.1}"),
+        None => "?".to_string(),
+    };
+    let mut out = vec![format!(
+        "  THIRDS — the whole system over the last {hours}h (balance · stuck · waiting)"
+    )];
+    for t in thirds {
+        let name = t.get("third").and_then(Value::as_str).unwrap_or("?");
+        let b = t.get("balance").unwrap_or(&Value::Null);
+        let net = match b.get("net").and_then(Value::as_f64) {
+            Some(x) if x > 0.0 => format!("+{x:.1}/day"),
+            Some(x) => format!("{x:.1}/day"),
+            None => "?/day".to_string(),
+        };
+        let unit = b.get("unit").and_then(Value::as_str).unwrap_or("");
+        let why = b
+            .get("why")
+            .and_then(Value::as_str)
+            .map(|w| format!(" — {w}"))
+            .unwrap_or_default();
+        let s = t.get("stuck").unwrap_or(&Value::Null);
+        let count = |k: &str| s.get(k).and_then(Value::as_u64);
+        let unknown = s
+            .get("unknown")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let stuck = match (count("stuck"), unknown) {
+            (Some(n), 0) => format!("stuck {n}"),
+            (Some(n), _) => format!("stuck ≥{n} ?"),
+            (None, _) => "stuck ?".to_string(),
+        };
+        let waiting = count("waiting").map_or_else(|| "?".to_string(), |n| n.to_string());
+        out.push(format!(
+            "    {name:<17} {net:>10} ({} in · {} out {unit}) · {stuck} · waiting {waiting}{why}",
+            rate(b.get("in")),
+            rate(b.get("out")),
+        ));
+    }
+    match map.get("machines").filter(|m| !m.is_null()) {
+        None => out.push("  MACHINES — unavailable: the server sends no machine count".to_string()),
+        Some(m) => {
+            let n = |k: &str| m.get(k).and_then(Value::as_u64).unwrap_or(0);
+            out.push(format!(
+                "  MACHINES — {} failed · {} unjudged of {} ({} running, {} idle)",
+                n("failed"),
+                n("unknown"),
+                n("total"),
+                n("running"),
+                n("idle")
+            ));
+            for x in m
+                .get("failed_or_unknown")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let s = |k: &str| x.get(k).and_then(Value::as_str).unwrap_or("?");
+                out.push(format!(
+                    "    {:<8} {:<12} {} — {}",
+                    s("state").to_uppercase(),
+                    s("region"),
+                    s("name"),
+                    s("why")
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// The BORDERS header — one line per border of the IT world map, from
 /// `GET /api/yard/borders` (design d2154293, car 2). The regions above
 /// say how much is in each place; these say what MOVES between them:
@@ -1373,6 +1460,12 @@ pub async fn run(all: bool) -> Result<()> {
     match api(&http, reqwest::Method::GET, "/api/yard/regions", None).await {
         Ok(Some(map)) => {
             for line in region_lines(&map) {
+                println!("{line}");
+            }
+            // The HUD's rows and machine cell, from the same payload
+            // (design 00774ca8): the whole system, after its parts.
+            println!();
+            for line in third_lines(&map) {
                 println!("{line}");
             }
         }
@@ -3578,8 +3671,11 @@ mod tests {
                 ),
             ],
             // Reading the stuck block is car 3's (backlog 4142d821); these
-            // lines print the regions alone.
+            // lines print the regions alone — the thirds and the machine
+            // cell print through `third_lines` (design 00774ca8).
             stuck: Vec::new(),
+            thirds: Vec::new(),
+            machines: None,
         };
         // The dock's bound is a threshold, the gates' state was decided
         // by a declared band that has held 42 minutes, and both carry
@@ -3648,6 +3744,69 @@ mod tests {
             "{}",
             lines[7]
         );
+    }
+
+    /// THE HUD'S BLOCK, PRINTED (design 00774ca8, decision 9): one line
+    /// per third in the payload's order, the net with its two rates and
+    /// unit, stuck beside waiting — a floor as `≥ n ?`, an unread edge as
+    /// `?` with its reason, never 0 — then the machine cell naming every
+    /// failed and unjudged machine. An older server says so.
+    #[test]
+    fn the_thirds_header_prints_the_huds_rows_and_machine_cell() {
+        let map = serde_json::json!({
+            "window_hours": 24,
+            "regions": [],
+            "thirds": [
+                {
+                    "third": "queue-management", "regions": ["receiving", "marshalling"],
+                    "balance": { "unit": "inbound packets", "in": 40.0, "out": 28.0, "net": 12.0,
+                                 "in_count": 40, "out_count": 28, "in_means": "", "out_means": "" },
+                    "stuck": { "third": "queue-management", "stuck": 3, "waiting": 0,
+                               "unknown": ["station q: blind"], "oldest_hours": 170, "regions": [] }
+                },
+                {
+                    "third": "actors-building", "regions": ["shop-floor", "gates", "garage"],
+                    "balance": { "unit": "runs", "in": null, "out": null, "net": null,
+                                 "in_count": null, "out_count": null, "in_means": "", "out_means": "",
+                                 "why": "the agent-run packets could not be read" },
+                    "stuck": { "third": "actors-building", "stuck": 0, "waiting": 0,
+                               "unknown": [], "oldest_hours": null, "regions": [] }
+                }
+            ],
+            "machines": { "running": 12, "idle": 11, "failed": 0, "unknown": 1, "total": 24,
+                          "failed_or_unknown": [
+                              { "region": "marshalling", "id": "station:x", "name": "x",
+                                "state": "unknown", "why": "the flow cube is blind" } ] }
+        });
+        let lines = third_lines(&map);
+        assert!(lines[0].contains("last 24h"), "{}", lines[0]);
+        assert!(
+            lines[1].contains("queue-management")
+                && lines[1].contains("+12.0/day (40.0 in · 28.0 out inbound packets)")
+                && lines[1].contains("stuck ≥3 ?")
+                && lines[1].contains("waiting 0"),
+            "{}",
+            lines[1]
+        );
+        assert!(
+            lines[2].contains("?/day (? in · ? out runs)")
+                && lines[2].contains("stuck 0 ")
+                && lines[2].contains("— the agent-run packets could not be read"),
+            "an unread edge is ?, never 0: {}",
+            lines[2]
+        );
+        assert_eq!(
+            lines[3],
+            "  MACHINES — 0 failed · 1 unjudged of 24 (12 running, 11 idle)"
+        );
+        assert!(
+            lines[4].contains("UNKNOWN") && lines[4].contains("marshalling"),
+            "{}",
+            lines[4]
+        );
+        let older = third_lines(&serde_json::json!({ "window_hours": 24, "regions": [] }));
+        assert_eq!(older.len(), 1);
+        assert!(older[0].contains("unavailable"), "{}", older[0]);
     }
 
     /// AN ACTOR-WORKED BORDER MUST NOT READ AS A DEAD RULE.

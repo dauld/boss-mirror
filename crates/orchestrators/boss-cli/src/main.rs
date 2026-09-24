@@ -721,6 +721,19 @@ enum Commands {
         /// two (backlog 5f0b2661).
         #[arg(long)]
         answers: Option<String>,
+        /// A visual exhibit as `anchor|title|path.html`. Repeatable. The
+        /// file is read as bytes (no shell between it and the record),
+        /// must be self-contained UTF-8 HTML of at most 256 KB, and is
+        /// rendered on /it/design in a sandboxed frame that runs its
+        /// inline style and script and reaches nothing else (design
+        /// 26a89f11). Needs questions: it rides the review step.
+        #[arg(long = "exhibit")]
+        exhibits: Vec<String>,
+        /// Bind an exhibit to the question it is asked about, as
+        /// `question|exhibit` anchors (e.g. `Q1|E1`). Repeatable; the
+        /// review renders a bound exhibit beside its question.
+        #[arg(long = "bind")]
+        binds: Vec<String>,
     },
     /// Prove a merged car in production by RUNNING a probe.
     ///
@@ -1757,6 +1770,8 @@ async fn main() -> Result<()> {
             no_questions,
             doc_path,
             answers,
+            exhibits,
+            binds,
         } => {
             design::run(
                 title,
@@ -1766,6 +1781,8 @@ async fn main() -> Result<()> {
                 no_questions,
                 doc_path,
                 answers,
+                exhibits,
+                binds,
             )
             .await
         }

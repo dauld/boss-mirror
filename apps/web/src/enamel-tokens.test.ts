@@ -452,6 +452,30 @@ describe('the button is Enamel’s', () => {
     );
     expect(naming.sort()).toEqual(LEFT);
   });
+
+  // Car 4 retired the families car 1 named as left over: .ni-btn (the new
+  // invoice, 4 buttons), .hr-action-btn (inbox, HR, warehouse: 6), and the
+  // job list's own scoped .btn-primary / .btn-secondary (4) now name .btn;
+  // .cto-run-btn and the debug panel's .debug-action-btn / -quick-btn had
+  // no caller at all. None of them keeps a rule, so none can come back as
+  // a second look.
+  it('the retired button families keep no rule and no caller', () => {
+    const RETIRED = /\.(?:ni-btn|hr-action-btn|cto-run-btn|debug-(?:action|quick)-btn)\b/;
+    expect([...rules.keys()].filter((sel) => RETIRED.test(sel))).toEqual([]);
+    const naming = svelteFiles
+      .filter(([, src]) => /\b(?:ni-btn|hr-action-btn|cto-run-btn|debug-action-btn|debug-quick-btn)\b/.test(src))
+      .map(([f]) => f);
+    expect(naming).toEqual([]);
+  });
+
+  it('no component draws its own .btn-primary or .btn-secondary', () => {
+    const own = svelteFiles
+      .filter(([, src]) =>
+        /\.btn-(?:primary|secondary)\b[^{};]*\{/.test(src.match(/<style[^>]*>([\s\S]*?)<\/style>/)?.[1] ?? ''),
+      )
+      .map(([f]) => f);
+    expect(own).toEqual([]);
+  });
 });
 
 /** Every .svelte file under apps/web/src and web-kit, as [path, source]. */
@@ -790,5 +814,57 @@ describe('a step’s state wears its plate in the rail and the graph', () => {
       .filter(([, decls]) => /-wash\b/.test(decls.get('background') ?? ''))
       .map(([sel]) => sel);
     expect(tinted).toEqual([]);
+  });
+});
+
+/** The Simulator is a second SPA that renders the same web-kit parts
+ *  (PerspectiveTabs, PageHeader, Section, StatusChip), and until backlog
+ *  6f471ff6 car 4 it carried a 3,156-line fork of an old copy of this
+ *  stylesheet: Inter and Fraunces from the Google CDN, the stone-and-brew
+ *  palette, 899 colour literals, and a warm-stone sidebar. A re-skin here
+ *  could not reach it. It now imports THIS file, so the tokens and the
+ *  parts are one definition for both apps (CLAUDE.md 9a: collapse before
+ *  you pin); the colour lint reads it too, and this pins the rest. The
+ *  Simulator's own unit tests run in no gate, so the pin lives here. */
+describe('the Simulator wears this stylesheet, not a copy of it', () => {
+  const SIM = join(import.meta.dir, '..', '..', 'simulator');
+  const simStyles = readFileSync(join(SIM, 'src', 'styles.css'), 'utf8');
+  const simCode = simStyles.replace(/\/\*[\s\S]*?\*\//g, '').trim();
+  const simHtml = readFileSync(join(SIM, 'index.html'), 'utf8');
+  const simSvelte = ['App.svelte', 'CockpitPage.svelte', 'ControlsPanel.svelte', 'ActorCoveragePanel.svelte', 'shell/SimShell.svelte'].map(
+    (f) => [f, readFileSync(join(SIM, 'src', f), 'utf8')] as const,
+  );
+
+  it('its stylesheet is one @import of this file, and states nothing of its own', () => {
+    const imports = [...simCode.matchAll(/@import\s+'([^']+)'\s*;/g)].map((m) => m[1] ?? '');
+    expect(imports).toHaveLength(1);
+    expect(join(SIM, 'src', imports[0] ?? '')).toBe(join(import.meta.dir, 'styles.css'));
+    expect(simCode.replace(/@import\s+'[^']+'\s*;/, '').trim()).toBe('');
+  });
+
+  it('loads no face from a font CDN — Overpass comes self-hosted with the import', () => {
+    for (const [name, src] of [['styles.css', simStyles], ['index.html', simHtml]] as const) {
+      expect(`${name}: ${/fonts\.(?:googleapis|gstatic)\.com|@import\s+url\(\s*['"]?https?:/.test(src)}`).toBe(
+        `${name}: false`,
+      );
+    }
+  });
+
+  it('its components set type only through the Enamel faces', () => {
+    const escaping = simSvelte.flatMap(([f, src]) =>
+      [...(src.match(/<style[^>]*>([\s\S]*?)<\/style>/)?.[1] ?? '').matchAll(/font-family\s*:\s*([^;]+);/g)]
+        .map((m) => (m[1] ?? '').trim())
+        .filter((v) => !/^var\(--font-(?:body|mono)\)$|^inherit$/.test(v))
+        .map((v) => `${f}: ${v}`),
+    );
+    expect(escaping).toEqual([]);
+  });
+
+  it('its shell is the web shell, not a stone copy of the old one', () => {
+    const shell = simSvelte.find(([f]) => f === 'shell/SimShell.svelte')?.[1] ?? '';
+    for (const cls of ['app-shell', 'shell-sidebar', 'shell-nav-item', 'shell-nav-item-active']) {
+      expect(`${cls}: ${new RegExp(`\\b${cls}\\b`).test(shell)}`).toBe(`${cls}: true`);
+      expect(`${cls}: ${new RegExp(`\\.${cls}\\s*\\{`).test(uncommented)}`).toBe(`${cls}: true`);
+    }
   });
 });

@@ -10,7 +10,6 @@ import {
   parseBorders,
   railWidth,
   rateText,
-  summaryLine,
   unlistedText,
   waitingText,
   type Border,
@@ -245,27 +244,6 @@ describe('the words a rail prints', () => {
     expect(densityOf(6)).toBe('steady');
     expect(densityOf(30)).toBe('heavy');
     expect(densityOf(null)).not.toBe(densityOf(0));
-  });
-});
-
-describe('summaryLine — the activity bubbled up to the high-level view', () => {
-  it('counts the crossings and names the troubled borders', () => {
-    const line = summaryLine({
-      window_hours: 24,
-      now: '',
-      borders: [border(), border({ from: 'track', to: 'arrivals', state: 'clear', waiting: 0 })],
-    });
-    expect(line).toContain('6 crossings in 24h');
-    expect(line).toContain('dock → track');
-  });
-
-  it('says a border it could not read rather than leaving it out of the count', () => {
-    const blind = border({
-      rate: { ...border().rate, current: null, previous: null, samples: 0 },
-      waiting: null,
-    });
-    const line = summaryLine({ window_hours: 24, now: '', borders: [blind] });
-    expect(line).toContain('1 border unread');
   });
 });
 

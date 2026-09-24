@@ -345,7 +345,15 @@ async fn the_yard_regions_and_borders_count_a_packet_pinned_before_its_block() {
 
     let regions = get_json(&h.app, "/api/yard/regions").await;
     let mut machines = Vec::new();
-    find_all(&regions, "id", &format!("station:{STATION}"), &mut machines);
+    // The regions themselves: the HUD's machine cell (design 00774ca8)
+    // names the same unjudged machine again, with its region, as a
+    // click-through — the machine is drawn once, in its territory.
+    find_all(
+        &regions["regions"],
+        "id",
+        &format!("station:{STATION}"),
+        &mut machines,
+    );
     let [machine] = machines.as_slice() else {
         panic!("one `station:{STATION}` machine on the regions map: {regions:#}");
     };

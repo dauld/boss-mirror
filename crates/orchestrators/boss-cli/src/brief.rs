@@ -937,6 +937,22 @@ fn sorted_metadata(row: &Value) -> BTreeMap<String, Value> {
 fn key_blocks<'a>(md: impl IntoIterator<Item = (&'a String, &'a Value)>) -> String {
     let mut out = String::new();
     for (k, v) in md {
+        // A design's EXHIBITS are the one key not printed verbatim
+        // (design 26a89f11): each is an HTML document up to 256 KB that
+        // no terminal renders, so it is LISTED — anchor, title, size,
+        // hash — never dumped and never dropped.
+        if k == "exhibits"
+            && let Some(items) = v.as_array()
+        {
+            out.push_str(&format!(
+                "\n  {k}: ({} — HTML, rendered on /it/design; listed, not printed)\n",
+                items.len()
+            ));
+            for e in items {
+                out.push_str(&format!("    {}\n", exhibit_line(e)));
+            }
+            continue;
+        }
         let rendered = match v {
             Value::String(s) => s.clone(),
             other => other.to_string(),
@@ -950,6 +966,25 @@ fn key_blocks<'a>(md: impl IntoIterator<Item = (&'a String, &'a Value)>) -> Stri
         }
     }
     out
+}
+
+/// One exhibit as a line a terminal can hold: anchor, title, the html's
+/// size in UTF-8 bytes, and its sha256 — enough to know exactly which
+/// rendering a reviewer saw and to check a copy against it. An element
+/// with no inline html says so rather than inventing a size.
+pub(crate) fn exhibit_line(e: &Value) -> String {
+    use sha2::{Digest, Sha256};
+    let s = |k: &str| e.get(k).and_then(Value::as_str);
+    let anchor = s("anchor").unwrap_or("?");
+    let title = s("title").unwrap_or("(untitled)");
+    match s("html") {
+        Some(html) => format!(
+            "{anchor} — {title} — {} bytes — sha256 {}",
+            html.len(),
+            hex::encode(Sha256::digest(html.as_bytes()))
+        ),
+        None => format!("{anchor} — {title} — no inline html"),
+    }
 }
 
 /// The step the packet is AT — ready or active — if it has one.
@@ -1764,6 +1799,53 @@ mod tests {
         assert!(out.contains("2 key(s)"));
         assert!(out.contains("triage"), "the step the packet is at: {out}");
         assert!(out.contains("cc9ddc5d-7e43-4a74-91f9-273b9ca2ba6a"));
+    }
+
+    /// AN EXHIBIT IS LISTED, NEVER DROPPED AND NEVER DUMPED (design
+    /// 26a89f11). A terminal cannot render a design's HTML exhibit, and
+    /// printing 256 KB of markup "in full" would bury the brief; the
+    /// decided form is one line per exhibit — anchor, title, size, hash —
+    /// so a builder knows exactly what the reviewer saw and can fetch it.
+    #[test]
+    fn a_brief_lists_each_exhibit_by_anchor_title_size_and_hash() {
+        let html = "<!doctype html><style>b{color:red}</style><b>palette</b>".repeat(50);
+        use sha2::Digest;
+        let digest = hex::encode(sha2::Sha256::digest(html.as_bytes()));
+        let job = json!({
+            "id": "26a89f11-0000-0000-0000-000000000000",
+            "title": "A design with a board",
+            "kind": "design-doc",
+            "status": "open",
+            "metadata": {"title": "A design with a board"},
+            "steps": [{
+                "spec_slug": "review",
+                "kind": "review-design",
+                "status": "completed",
+                "title": "Answer the open questions",
+                "metadata": {
+                    "exhibits": [
+                        {"anchor": "E1", "title": "Warm palette", "html": html},
+                        {"anchor": "E2", "title": "Cool palette", "html": "<p>x</p>"},
+                    ],
+                },
+            }],
+        });
+        let out = packet_section(&job);
+        assert!(
+            out.contains(&format!(
+                "E1 — Warm palette — {} bytes — sha256 {digest}",
+                html.len()
+            )),
+            "{out}"
+        );
+        assert!(
+            out.contains("E2 — Cool palette — 8 bytes — sha256 "),
+            "{out}"
+        );
+        assert!(
+            !out.contains("<b>palette</b>"),
+            "the markup itself is not printed: a terminal cannot render it"
+        );
     }
 
     /// THE DECISION LIVES ON THE STEPS, SO THE BRIEF PRINTS THEM

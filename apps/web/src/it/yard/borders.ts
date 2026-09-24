@@ -253,26 +253,3 @@ export function densityOf(perDay: number | null): Density {
   if (perDay < 20) return 'steady';
   return 'heavy';
 }
-
-/** The whole map's activity in one line — the summary the high-level
- *  view bubbles up: how much crossed the world this window, what is
- *  standing, and which rails are troubled (named, because a verdict
- *  must name what it is about). A border the server could not read is
- *  COUNTED AS UNREAD rather than left out of the total, so the line
- *  cannot quietly under-report. */
-export function summaryLine(borders: Borders): string {
-  const rows = borders.borders;
-  const unread = rows.filter((b) => b.rate.current === null || b.waiting === null);
-  const crossings = rows.reduce((n, b) => n + b.rate.samples, 0);
-  const waiting = rows.reduce((n, b) => n + (b.waiting ?? 0), 0);
-  const troubled = rows.filter((b) => b.state === 'troubled').map((b) => `${b.from} → ${b.to}`);
-  const parts = [
-    `${crossings} ${crossings === 1 ? 'crossing' : 'crossings'} in ${borders.window_hours}h`,
-    `${waiting} waiting at the borders`,
-  ];
-  if (unread.length > 0) {
-    parts.push(`${unread.length} ${unread.length === 1 ? 'border unread' : 'borders unread'}`);
-  }
-  if (troubled.length > 0) parts.push(`troubled: ${troubled.join(', ')}`);
-  return parts.join(' · ');
-}

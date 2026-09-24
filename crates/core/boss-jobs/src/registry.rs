@@ -369,6 +369,8 @@ fn workflow_design_spec() -> WorkflowSpec {
                 filled_by: boss_core::job::FilledBy::Executor,
                 item_keys: Vec::new(),
                 covers: None,
+                binds: None,
+                item_value_max_bytes: None,
             }],
             ..Default::default()
         },
@@ -414,6 +416,8 @@ fn workflow_design_spec() -> WorkflowSpec {
                 filled_by: boss_core::job::FilledBy::Executor,
                 item_keys: Vec::new(),
                 covers: None,
+                binds: None,
+                item_value_max_bytes: None,
             }],
             ..Default::default()
         },
@@ -545,6 +549,8 @@ fn regenerate_deployment_spec() -> WorkflowSpec {
                 filled_by: boss_core::job::FilledBy::Executor,
                 item_keys: Vec::new(),
                 covers: None,
+                binds: None,
+                item_value_max_bytes: None,
             }],
             ..Default::default()
         }
@@ -578,6 +584,8 @@ fn regenerate_deployment_spec() -> WorkflowSpec {
                     filled_by: boss_core::job::FilledBy::Executor,
                     item_keys: Vec::new(),
                     covers: None,
+                    binds: None,
+                    item_value_max_bytes: None,
                 },
                 boss_core::job::StepField {
                     name: "destroying".into(),
@@ -586,6 +594,8 @@ fn regenerate_deployment_spec() -> WorkflowSpec {
                     filled_by: boss_core::job::FilledBy::Executor,
                     item_keys: Vec::new(),
                     covers: None,
+                    binds: None,
+                    item_value_max_bytes: None,
                 },
             ],
             ..Default::default()
@@ -3529,6 +3539,8 @@ mod tests {
                 filled_by: FilledBy::Filer,
                 item_keys: Vec::new(),
                 covers: None,
+                binds: None,
+                item_value_max_bytes: None,
             },
             StepField {
                 name: "markdown".into(),
@@ -3537,6 +3549,8 @@ mod tests {
                 filled_by: FilledBy::Filer,
                 item_keys: Vec::new(),
                 covers: None,
+                binds: None,
+                item_value_max_bytes: None,
             },
             StepField {
                 name: "resolutions".into(),
@@ -3545,6 +3559,8 @@ mod tests {
                 filled_by: FilledBy::Executor,
                 item_keys: Vec::new(),
                 covers: None,
+                binds: None,
+                item_value_max_bytes: None,
             },
         ];
         step.metadata = serde_json::json!({ "title": "Packet loss" });
@@ -3573,6 +3589,8 @@ mod tests {
             filled_by: FilledBy::Filer,
             item_keys: Vec::new(),
             covers: None,
+            binds: None,
+            item_value_max_bytes: None,
         }];
 
         // An explicit null is not a value.
@@ -3613,6 +3631,8 @@ mod tests {
             filled_by: FilledBy::Filer,
             item_keys: vec!["anchor".into(), "title".into(), "proposal".into()],
             covers: None,
+            binds: None,
+            item_value_max_bytes: None,
         }];
 
         // A title-less element is named by index and key.
@@ -3668,6 +3688,8 @@ mod tests {
             filled_by: FilledBy::Filer,
             item_keys: Vec::new(),
             covers: None,
+            binds: None,
+            item_value_max_bytes: None,
         }];
         assert!(
             missing_filer_fields(std::slice::from_ref(&step)).is_empty(),

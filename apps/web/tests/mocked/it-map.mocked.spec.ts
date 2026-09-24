@@ -51,6 +51,37 @@ const REGIONS = {
     { name: 'shop-floor', count: 2, bound: 6, state: 'clear', why: '2 runs in flight, 1 crew on the floor', trend: trend('build duration', 'minutes', 64, 58) },
     { name: 'publish', count: 0, state: 'clear', why: 'no pull request awaiting a merge', trend: trend('publishes', 'per day', 1, 1) },
   ],
+  // THE HUD'S BLOCK (design 00774ca8): the server's rows — one reading a
+  // floor, one whose edges were unread, one balanced at a true zero with
+  // a troubled stuck count — and its machine cell.
+  thirds: [
+    {
+      third: 'queue-management', regions: ['receiving', 'marshalling'],
+      balance: { unit: 'inbound packets', in_means: 'an inbound packet opened', out_means: 'an inbound packet taken off the queue',
+        in: 40, out: 28, net: 12, in_count: 40, out_count: 28 },
+      stuck: { third: 'queue-management', stuck: 3, waiting: 0, oldest_hours: 170, regions: ['receiving', 'marshalling'],
+        unknown: ['station q.platform-admin.task: 305 standing — the flow cube is blind to its predicate'] },
+    },
+    {
+      third: 'actors-building', regions: ['shop-floor', 'gates', 'garage'],
+      balance: { unit: 'runs', in_means: 'a run opened', out_means: 'a run closed',
+        in: null, out: null, net: null, in_count: null, out_count: null, why: 'the agent-run packets could not be read' },
+      stuck: { third: 'actors-building', stuck: 0, waiting: 0, unknown: [], oldest_hours: null, regions: [] },
+    },
+    {
+      third: 'delivery', regions: ['dock', 'track', 'arrivals', 'shed', 'publish'],
+      balance: { unit: 'cars', in_means: 'a green gate parked as a car', out_means: 'a car closed',
+        in: 9, out: 9, net: 0, in_count: 9, out_count: 9 },
+      stuck: { third: 'delivery', stuck: 1, waiting: 2, unknown: [], oldest_hours: 30, regions: ['shed'] },
+    },
+  ],
+  machines: {
+    running: 12, idle: 11, failed: 0, unknown: 2, total: 25,
+    failed_or_unknown: [
+      { region: 'marshalling', id: 'station:design-review', name: 'design-review', state: 'unknown', why: 'the flow cube is blind to its predicate' },
+      { region: 'receiving', id: 'runner:forge', name: 'forge runner', state: 'unknown', why: 'no ops-request answered in the window' },
+    ],
+  },
 };
 
 /** The rails (design d2154293, car 2): one busy with a machine silent
@@ -234,6 +265,78 @@ test('a territory click opens its floor, and the floor opens with the region\'s 
   await expect(page).toHaveURL(/\/it\/yard\/receiving$/);
 });
 
+// THE HUD FRAME (design 00774ca8): whole-system figures, one row per
+// third in the payload's order, a machine cell beside them, and the four
+// pictures — value, zero, floor, unread — each drawn as itself.
+test('the HUD frame stands above the map, one row per third, each figure the server’s', async ({ page }) => {
+  await mocks(page);
+  await page.goto('/it');
+  const hud = page.locator('[data-hud]');
+  await expect(hud).toHaveAttribute('data-read', 'ok');
+  await expect(hud.locator('.hud-age')).toContainText('window 24h');
+  // Above the map: the frame comes first on the page.
+  const hudTop = (await hud.boundingBox())!.y;
+  const mapTop = (await page.locator('section.yard svg').boundingBox())!.y;
+  expect(hudTop).toBeLessThan(mapTop);
+
+  const rows = hud.locator('.hud-row');
+  expect(await rows.evaluateAll((els) => els.map((el) => el.getAttribute('data-third')))).toEqual([
+    'queue-management', 'actors-building', 'delivery',
+  ]);
+
+  // A value, with its rates: the server's net, never a client sum.
+  const qm = hud.locator('.hud-row[data-third="queue-management"]');
+  await expect(qm.locator('[data-cell="balance"]')).toContainText('+12/day');
+  await expect(qm.locator('[data-cell="balance"] .hud-rates [data-fig="value"]')).toHaveText(['40', '28']);
+  await expect(qm.locator('[data-cell="balance"] .hud-rates')).toContainText('inbound packets/day');
+  // A floor: ≥ n, then ? in its own band.
+  const floor = qm.locator('[data-cell="stuck"] [data-fig="floor"]');
+  await expect(floor).toContainText('≥ 3');
+  await expect(floor.locator('.q-band')).toHaveText('?');
+  await expect(floor.locator('.plate-troubled')).toHaveCount(1);
+  // Unread: ? in a dashed housing, three times, never 0.
+  const ab = hud.locator('.hud-row[data-third="actors-building"]');
+  await expect(ab.locator('[data-cell="balance"] [data-fig="unread"]')).toHaveCount(3);
+  await expect(ab.locator('[data-cell="balance"]')).not.toContainText('0');
+  // A true zero: 0, with no mark; the stuck count above zero is a plate.
+  const d = hud.locator('.hud-row[data-third="delivery"]');
+  await expect(d.locator('[data-cell="balance"] [data-fig="zero"]').first()).toHaveText('0');
+  await expect(d.locator('[data-cell="stuck"] .plate-troubled')).toHaveText('1');
+  await expect(ab.locator('[data-cell="stuck"] [data-fig="zero"]')).toHaveCount(2);
+  // Decision 4's one exception: the arrivals territory's own trend.
+  await expect(d.locator('[data-cell="arrivals"]')).toContainText('17');
+  await expect(d.locator('[data-cell="arrivals"]')).toContainText('12');
+  await expect(qm.locator('[data-cell="arrivals"]')).toHaveCount(0);
+
+  // The machine cell: failed and unjudged against a total, each
+  // unjudged machine a door to its region's map.
+  const machines = hud.locator('[data-machines]');
+  const line = machines.locator('.hud-machine-line');
+  await expect(line.locator('[data-fig]')).toHaveText(['0', '2', '25']);
+  await expect(line.locator('[data-fig="zero"]')).toHaveCount(1);
+  await expect(line).toContainText('unjudged of');
+  await expect(machines.locator('a[data-machine]')).toHaveCount(2);
+  await machines.locator('a[data-machine="station:design-review"]').click();
+  await expect(page).toHaveURL(/\/it\/yard\/marshalling$/);
+  // It does not follow the zoom: the same frame stands over the region.
+  await expect(page.locator('[data-hud] .hud-row')).toHaveCount(3);
+  await expect(page.locator('[data-hud] [data-strip]')).toHaveCount(1);
+});
+
+test('a regions read that fails turns every HUD cell to ? and says when, keeping no value', async ({ page }) => {
+  await installSmokeMocks(page);
+  await page.route(YARD_REGIONS, (r) =>
+    r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify('the backend is down') }),
+  );
+  await page.goto('/it');
+  const hud = page.locator('[data-hud]');
+  await expect(hud).toHaveAttribute('data-read', 'failed');
+  await expect(hud.locator('.hud-age')).toContainText(/read failed \d\d:\d\dZ · no good read yet/);
+  await expect(hud.locator('.hud-row')).toHaveCount(3);
+  await expect(hud.locator('[data-fig="value"], [data-fig="zero"], [data-fig="floor"]')).toHaveCount(0);
+  expect(await hud.locator('[data-fig="unread"]').count()).toBeGreaterThan(0);
+});
+
 test('a regions read that fails is said, never drawn as a clear world', async ({ page }) => {
   await installSmokeMocks(page);
   await page.route(YARD_REGIONS, (r) =>
@@ -295,9 +398,9 @@ test('a border carries its traffic, what waits on it and the machine that moves 
   await svg.locator('.crossing[data-crossing="gates→dock"]').click();
   await expect(page.locator('.crossing-panel')).toHaveCount(0);
 
-  // The activity summary, bubbled up to the high-level view.
-  await expect(page.locator('.yard-flow').first()).toContainText('crossings in 24h');
-  await expect(page.locator('.yard-flow').first()).toContainText('troubled: receiving → marshalling, dock → track');
+  // The client-side sum of these rails is retired (design 00774ca8
+  // decision 10): the whole-system figures are the HUD frame's.
+  await expect(page.locator('.yard-flow', { hasText: 'crossings in' })).toHaveCount(0);
 });
 
 test('a border the server could not measure reads unknown, never zero', async ({ page }) => {
@@ -322,8 +425,6 @@ test('a border the server could not measure reads unknown, never zero', async ({
   await expect(panel.locator('dd').nth(1)).toHaveText('no reading');
   await expect(panel).toContainText('waiting: no reading');
   await expect(panel).toContainText('nothing crossed in the two windows read');
-  // And the summary counts it as unread rather than dropping it.
-  await expect(page.locator('.yard-flow').first()).toContainText('1 border unread');
 });
 
 test('a borders read that fails is said, and the territories still paint', async ({ page }) => {

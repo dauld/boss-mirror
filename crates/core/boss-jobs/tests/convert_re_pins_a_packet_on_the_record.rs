@@ -378,6 +378,8 @@ async fn a_move_that_demands_evidence_retroactively_is_refused_and_writes_nothin
             filled_by: boss_core::job::FilledBy::Executor,
             item_keys: Vec::new(),
             covers: None,
+            binds: None,
+            item_value_max_bytes: None,
         });
     });
 

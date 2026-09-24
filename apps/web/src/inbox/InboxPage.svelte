@@ -289,7 +289,7 @@
          sees Compose disabled with the sign-in note, not a live modal
          whose Send 403s. -->
     <WriteGate>
-      <button class="hr-action-btn" onclick={openCompose}>Compose</button>
+      <button class="btn btn-sm btn-primary" onclick={openCompose}>Compose</button>
     </WriteGate>
   </div>
 
@@ -350,13 +350,13 @@
         {/if}
         <div class="compose-actions">
           <button
-            class="hr-action-btn"
+            class="btn btn-primary"
             onclick={send}
             disabled={sending || !recipientId || !subject || !body}
           >
             {sending ? 'Sending...' : 'Send'}
           </button>
-          <button class="hr-detail-btn" onclick={() => (composing = false)}>Cancel</button>
+          <button class="btn" onclick={() => (composing = false)}>Cancel</button>
         </div>
       </div>
     </div>
@@ -410,7 +410,7 @@
           Couldn't load your inbox — {inbox.error}
         </p>
         <div style="padding:0 32px">
-          <button class="hr-action-btn" onclick={() => void refreshInbox()}>Retry</button>
+          <button class="btn btn-sm" onclick={() => void refreshInbox()}>Retry</button>
         </div>
       {:else if visible.length === 0}
         <p class="empty">No messages match those filters.</p>

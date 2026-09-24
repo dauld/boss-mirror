@@ -67,6 +67,7 @@ pub mod station_seed;
 pub mod stations;
 pub mod step_metadata_write;
 pub mod stranded;
+pub mod thirds;
 pub mod trust;
 pub mod workflow_lint;
 pub mod workflow_quarantine;

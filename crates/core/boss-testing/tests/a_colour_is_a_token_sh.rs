@@ -274,6 +274,56 @@ fn every_removed_shape_is_refused_by_file_line_and_literal() {
     );
 }
 
+/// The simulator is a web app too, and it renders the same web-kit parts
+/// (backlog 6f471ff6, car 4). Until 2026-09-24 the lint read only
+/// `apps/web` and `libs/web-kit`, so `apps/simulator` kept its own stone
+/// and brew palette — 683 literals in its stylesheet and 91 in its
+/// components — under a Google-CDN Inter and Fraunces, which nothing
+/// refused. A literal there is refused like one anywhere else, and its
+/// tokens come from the same one file.
+#[test]
+fn the_simulator_is_read_like_the_web_app() {
+    let tree = Tree::new("simulator");
+    tree.tokens();
+    tree.file(
+        "apps/simulator/src/shell/SimShell.svelte",
+        "\
+<style>
+  .sim-sidebar { background: #1c1917; color: var(--fog); }
+</style>
+",
+    );
+    tree.file(
+        "apps/simulator/src/styles.css",
+        "\
+:root {
+  --brew-amber: #d99b3a;
+}
+",
+    );
+    let out = tree.run();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a literal in the simulator must be refused:\n{}",
+        text(&out)
+    );
+    let msg = text(&out);
+    for expect in [
+        "apps/simulator/src/shell/SimShell.svelte:2",
+        "#1c1917",
+        // Only the one token file's :root is where a colour belongs; a
+        // second :root in the simulator is the second palette itself.
+        "apps/simulator/src/styles.css:2",
+        "#d99b3a",
+    ] {
+        assert!(
+            msg.contains(expect),
+            "the verdict must name {expect:?}:\n{msg}"
+        );
+    }
+}
+
 /// A declaration is a paragraph, not a file: the marker exempts the lines
 /// up to the next blank line, and a marker without a reason exempts nothing.
 #[test]

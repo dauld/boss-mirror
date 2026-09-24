@@ -61,7 +61,9 @@
   import RegionMap from './RegionMap.svelte';
   import { hasPlatforms, type Deck } from './world-interior';
   import type { FloorSelection, Scene } from './yard-floor';
-  import { fetchBorders, summaryLine, type Borders } from './borders';
+  import { fetchBorders, type Borders } from './borders';
+  import type { LastGood } from './hud';
+  import HudFrame from './HudFrame.svelte';
   import WorldMap from './WorldMap.svelte';
   import FloorDeck from './FloorDeck.svelte';
   import CrewBoardPage from '../crew/CrewBoardPage.svelte';
@@ -103,6 +105,10 @@
   let regions = $state<Remote<Regions>>({ kind: 'loading' });
   let borders = $state<Remote<Borders>>({ kind: 'loading' });
   let readAt = $state<number | null>(null);
+  /** The newest regions read that succeeded, and when — the HUD's
+   *  "last good HH:MMZ" when a later read fails (design 00774ca8
+   *  decision 5). Its VALUES are never drawn once a newer read failed. */
+  let lastGood = $state<LastGood | null>(null);
 
   onMount(() => {
     let cancelled = false;
@@ -114,6 +120,7 @@
       regions = r;
       borders = b;
       readAt = Date.now();
+      if (r.kind === 'ready') lastGood = { at: readAt, data: r.data };
     }
     void tick();
     const t = setInterval(tick, 10_000);
@@ -133,6 +140,13 @@
     title="The IT world"
     subtitle="The territories along the packet flow, each a door to its floor, and the borders between them carrying what crosses, what waits and the machine that moves it"
   />
+
+  <!-- THE HUD FRAME (design 00774ca8): the whole system, one row per
+       third, above the map — and above every region's map too, because
+       it does not follow the zoom. It stands whatever the read did: a
+       failed read turns its cells to `?` rather than taking the frame
+       away. -->
+  <HudFrame read={regions} {readAt} {lastGood} />
 
   {#if regions.kind === 'loading'}
     <div class="yard-empty">Reading the regions…</div>
@@ -172,14 +186,13 @@
         regions={regions.data}
         borders={borders.kind === 'ready' ? borders.data : null} />
     {/if}
-    <!-- The activity summary, bubbled up to the high-level view: how
-         much crossed the world this window, what stands at the borders,
-         and which rails are troubled (design d2154293 car 2). A failed
-         rails read is SAID — the territories are still drawn, but a map
-         whose rails could not be read must not look like a quiet one. -->
-    {#if borders.kind === 'ready'}
-      <div class="yard-flow">{summaryLine(borders.data)}</div>
-    {:else if borders.kind === 'failed'}
+    <!-- A failed rails read is SAID — the territories are still drawn,
+         but a map whose rails could not be read must not look like a
+         quiet one. The one-line activity summary that stood here summed
+         the border rows on the client and double-counted about 260
+         backlog items; the HUD frame above replaced it (design 00774ca8
+         decision 10). -->
+    {#if borders.kind === 'failed'}
       <div class="yard-empty load-failed">The borders cannot be read — {borders.error}</div>
     {/if}
     <div class="yard-flow">

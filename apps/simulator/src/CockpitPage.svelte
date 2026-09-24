@@ -180,15 +180,19 @@
   <div class="cadence clock-strip">
     {#if currentSimDate}<span class="cad"><b>{currentSimDate}</b> sim date</span>{/if}
     {#if clock.warp_factor}<span class="cad">warp ×{clock.warp_factor}</span>{/if}
-    <span class="badge" class:paused={clock.paused}>{clock.paused ? 'Paused' : 'Running'}</span>
+    <!-- The sim clock's state is a plate, read the way the chrome bar's
+         SystemTime reads it: busy while the model runs, troubled paused. -->
+    <span class="plate" class:plate-busy={!clock.paused} class:plate-troubled={clock.paused}
+      >{clock.paused ? 'Paused' : 'Running'}</span
+    >
     {#if clock.restart_in_progress}<span class="cad muted">rebuilding…</span>{/if}
   </div>
 {:else if clockError}
-  <p class="status error">Couldn't reach clock-api: {clockError}</p>
+  <p class="load-failed" role="alert">Couldn't reach clock-api: {clockError}</p>
 {/if}
 
 {#if teleError}
-  <p class="status error">Couldn't reach the simulator daemon: {teleError}</p>
+  <p class="load-failed" role="alert">Couldn't reach the simulator daemon: {teleError}</p>
   <p class="status">The daemon exposes its telemetry on a localhost-only control port; this is
     expected if the simulator isn't running (e.g. a non-demo deployment).</p>
 {:else if !tele}
@@ -259,7 +263,7 @@
       <Section title="Audit log tail">
         <p class="point-sub">The audit log as the sim's calls land (GET /api/events/tail)</p>
         {#if eventsError}
-          <p class="status error">Couldn't load events: {eventsError}</p>
+          <p class="load-failed" role="alert">Couldn't load events: {eventsError}</p>
         {:else if events.length === 0}
           <p class="status">No events yet.</p>
         {:else}
@@ -328,6 +332,12 @@
 {/if}
 
 <style>
+  /* Enamel (backlog 6f471ff6, car 4). Every colour below is a token from
+     the web app's stylesheet, which the Simulator imports; the cream,
+     malt and amber washes of the brewery palette are white cards on
+     quiet rules, ink words and muted words. Amber is focus only, so no
+     row is striped in it. A failed read is the shared .load-failed rail
+     and the clock's state is a plate, both from that stylesheet. */
   .identity {
     display: flex;
     flex-wrap: wrap;
@@ -336,65 +346,62 @@
     gap: 12px;
     padding: 12px 16px;
     margin-bottom: 20px;
-    background: var(--brew-cream);
-    border: 1px solid #e6d2a8;
-    border-radius: 8px;
+    background: var(--card);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius);
   }
   .identity-main {
     display: flex;
     align-items: baseline;
     flex-wrap: wrap;
     gap: 6px;
-    font-size: 0.9rem;
+    font-size: 14px;
   }
-  .id-label {
-    color: #7a6855;
+  .id-label,
+  .id-via,
+  .id-sep {
+    color: var(--static);
   }
   .id-actor {
-    font-weight: 700;
-    color: var(--brew-malt-dark);
-    background: rgba(217, 155, 58, 0.16);
+    font-weight: 600;
+    color: var(--fog);
+    background: var(--ink-raised);
     padding: 0.05em 0.4em;
-    border-radius: 4px;
+    border-radius: var(--radius);
   }
   .id-role {
-    font-size: 0.78rem;
-    color: var(--brew-malt);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--static);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-  .id-sep {
-    color: #c9b896;
-  }
-  .id-via {
-    color: #7a6855;
+    letter-spacing: var(--ls-label);
   }
   .id-base {
-    color: #7a6855;
-    font-size: 0.82rem;
+    color: var(--static);
+    font-size: 12.5px;
   }
   .cadence {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
     gap: 12px;
-    font-size: 0.85rem;
-    color: var(--brew-malt);
+    font-size: 13px;
+    color: var(--static);
   }
   /* The clock strip stands on its own under the header (clock-api-sourced,
      independent of the daemon telemetry below it). */
   .clock-strip {
     margin: 4px 0 18px;
     padding: 9px 14px;
-    border: 1px solid #ece7df;
-    border-radius: 8px;
-    background: #fbf9f5;
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius);
+    background: var(--ink-raised);
   }
   .cad b {
-    color: var(--brew-malt-dark);
+    color: var(--fog);
   }
   .cad.muted {
-    color: #a8a29e;
+    color: var(--text-faint);
   }
   .cockpit-grid {
     display: grid;
@@ -410,11 +417,11 @@
   }
   .point-sub {
     margin: 0 0 10px;
-    font-size: 0.78rem;
-    color: #7a6855;
+    font-size: 12.5px;
+    color: var(--static);
   }
   .point-sub code {
-    font-size: 0.74rem;
+    font-size: 12px;
   }
   .stat {
     display: flex;
@@ -422,28 +429,31 @@
     gap: 8px;
     margin-bottom: 12px;
   }
+  /* The board's summary figure: mono, 24px, 600, tabular. */
   .stat-num {
-    font-family: var(--font-display);
-    font-size: 2.4rem;
-    font-weight: 700;
-    color: var(--brew-malt-dark);
+    font-family: var(--font-mono);
+    font-size: 24px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--fog);
     line-height: 1;
   }
   .stat-label {
-    font-size: 0.8rem;
+    font-family: var(--font-mono);
+    font-size: 11px;
     text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--brew-malt);
+    letter-spacing: var(--ls-label);
+    color: var(--static);
   }
   .kv {
     display: grid;
     grid-template-columns: 1fr auto;
     gap: 4px 16px;
     margin: 0;
-    font-size: 0.9rem;
+    font-size: 14px;
   }
   .kv dt {
-    color: #78716c;
+    color: var(--static);
   }
   .kv dd {
     margin: 0;
@@ -453,7 +463,7 @@
   }
   .kv dt.err,
   .kv dd.err {
-    color: #8b2b1f;
+    color: var(--err);
   }
   .endpoint-list,
   .tick-list,
@@ -472,17 +482,17 @@
     font-size: 0.8rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: var(--brew-malt-dark);
-    border-bottom: 1px solid #e6d2a8;
+    color: var(--fog);
+    border-bottom: 1px solid var(--hairline);
     padding-bottom: 3px;
   }
   .actor-group-sub {
     text-transform: none;
     letter-spacing: 0;
     font-weight: 400;
-    color: #a8a29e;
+    color: var(--text-faint);
     margin-left: 8px;
-    font-size: 0.78rem;
+    font-size: 12px;
   }
   .actor {
     margin: 0 0 8px;
@@ -496,7 +506,7 @@
   }
   .actor-label {
     font-weight: 600;
-    color: var(--brew-malt-dark);
+    color: var(--fog);
   }
   .actor-meta {
     display: flex;
@@ -507,20 +517,20 @@
   }
   .actor-calls {
     font-weight: 600;
-    color: var(--brew-malt-dark);
+    color: var(--fog);
   }
   .actor-rate {
-    color: var(--brew-malt);
+    color: var(--static);
   }
   .actor-distinct {
-    color: var(--brew-malt);
-    background: rgba(217, 155, 58, 0.12);
+    color: var(--static);
+    background: var(--ink-raised);
     padding: 0 0.4em;
-    border-radius: 3px;
+    border-radius: var(--radius);
     white-space: nowrap;
   }
   .actor-err {
-    color: #8b2b1f;
+    color: var(--err);
     font-weight: 600;
   }
   .endpoint-list {
@@ -533,14 +543,14 @@
     align-items: baseline;
     gap: 8px;
     padding: 2px 6px;
-    border-radius: 3px;
+    border-radius: var(--radius);
   }
   .endpoint-row:nth-child(odd) {
-    background: rgba(217, 155, 58, 0.06);
+    background: var(--wash);
   }
   .endpoint-name {
-    color: var(--brew-malt);
-    font-size: 0.76rem;
+    color: var(--static);
+    font-size: 12px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -555,10 +565,10 @@
   }
   .endpoint-calls {
     font-weight: 600;
-    color: var(--brew-malt-dark);
+    color: var(--fog);
   }
   .endpoint-err {
-    color: #8b2b1f;
+    color: var(--err);
   }
   .tick-list {
     gap: 2px;
@@ -571,11 +581,11 @@
     gap: 0.5rem;
     align-items: baseline;
     padding: 3px 8px;
-    border-bottom: 1px solid #f0e6cf;
-    font-size: 0.82rem;
+    border-bottom: 1px solid var(--hairline);
+    font-size: 13px;
   }
   .tick-date {
-    color: #7a6855;
+    color: var(--static);
     font-variant-numeric: tabular-nums;
   }
   .tick-deltas {
@@ -587,36 +597,36 @@
     font-variant-numeric: tabular-nums;
   }
   .d.done {
-    color: #166534;
+    color: var(--ok);
     font-weight: 600;
   }
   .d.claim {
-    color: var(--brew-malt);
+    color: var(--static);
   }
   .d.defer {
-    color: #92400e;
+    color: var(--warn);
   }
   .d.err {
-    color: #8b2b1f;
+    color: var(--err);
     font-weight: 600;
   }
   .event-list {
     gap: 1px;
     max-height: 300px;
     overflow-y: auto;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.78rem;
+    font-family: var(--font-mono);
+    font-size: 12px;
   }
   .event-row {
     display: grid;
     grid-template-columns: 1fr auto;
     gap: 0 0.5rem;
     padding: 3px 8px;
-    border-bottom: 1px solid #f0e6cf;
+    border-bottom: 1px solid var(--hairline);
   }
   .event-kind {
     grid-row: 1;
-    color: var(--brew-malt-dark);
+    color: var(--fog);
     font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -625,41 +635,24 @@
   .event-time {
     grid-row: 1;
     grid-column: 2;
-    color: #a8a29e;
+    color: var(--text-faint);
     text-align: right;
   }
   .event-source {
     grid-row: 2;
     grid-column: 1 / -1;
-    color: #a8957a;
-    font-size: 0.72rem;
+    color: var(--static);
+    font-size: 11px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .badge {
-    display: inline-block;
-    background: #dcfce7;
-    color: #166534;
-    border: 1px solid #86efac;
-    border-radius: 4px;
-    padding: 1px 8px;
-    font-size: 0.78rem;
-    font-weight: 600;
-  }
-  .badge.paused {
-    background: #fee2e2;
-    color: #991b1b;
-    border-color: #fca5a5;
-  }
   .status {
     margin: 0 0 6px;
-    color: #7a6855;
-    font-style: italic;
+    color: var(--static);
   }
-  .status.error {
-    color: #8b2b1f;
-    font-style: normal;
+  .load-failed {
+    margin: 0 0 12px;
   }
   @media (max-width: 820px) {
     .cockpit-grid {

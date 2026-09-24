@@ -541,11 +541,11 @@
     <!-- Admission is a write: a guest sees the entry buttons disabled
          (readonly gate) rather than a composer whose POST 403s. -->
     <WriteGate>
-      <button type="button" class="btn-primary" onclick={() => openNewJob()}>
+      <button type="button" class="btn btn-primary" onclick={() => openNewJob()}>
         Start a new Job
       </button>
       {#if adHoc}
-        <button type="button" class="btn-secondary" onclick={() => openNewJob({ kind: adHoc.kind })}>
+        <button type="button" class="btn" onclick={() => openNewJob({ kind: adHoc.kind })}>
           Create Ad Hoc Job
         </button>
       {/if}
@@ -670,14 +670,14 @@
       <div class="form-actions">
         <button
           type="submit"
-          class="btn-primary"
+          class="btn btn-primary"
           disabled={formSubmitting || !canSubmit}
         >
           {formSubmitting ? 'Creating…' : 'Create Job'}
         </button>
         <button
           type="button"
-          class="btn-secondary"
+          class="btn"
           onclick={() => {
             newJobOpen = false;
             // If the user landed via a deep-link
@@ -819,30 +819,6 @@
   .job-actions :global(.write-gate) {
     display: flex;
     gap: 12px;
-  }
-  .btn-primary,
-  .btn-secondary {
-    padding: 8px 16px;
-    border-radius: 6px;
-    font: inherit;
-    cursor: pointer;
-    border: 1.5px solid var(--brew-amber);
-  }
-  /* The filled action is Enamel's one blue. It was the old theme's amber
-     under malt text, which the Enamel re-point turned into slate on dark
-     brown — 1.2:1 (backlog 7eb59678). */
-  .btn-primary {
-    background: var(--signal);
-    border-color: var(--signal);
-    color: var(--on-band);
-  }
-  .btn-primary:disabled {
-    opacity: 0.6;
-    cursor: progress;
-  }
-  .btn-secondary {
-    background: transparent;
-    color: var(--brew-malt);
   }
   .new-job-form {
     background: var(--brew-amber-bg);

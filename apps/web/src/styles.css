@@ -1524,8 +1524,6 @@ a:hover { color: var(--fog); }
 .cto-script-desc { font-size: 12px; color: var(--static); line-height: 1.4; }
 .cto-script-details { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--hairline); }
 .cto-script-details code { font-size: 12px; background: var(--wash); padding: 1px 5px; border-radius: var(--radius); }
-.cto-run-btn { margin-top: 8px; padding: 5px 14px; font-size: 12px; font-weight: 600; background: var(--fog); color: var(--void); border: none; border-radius: var(--radius); cursor: pointer; }
-.cto-run-btn:hover { background: var(--static); }
 .cto-planned-label { display: inline-block; margin-top: 8px; font-size: 11px; color: var(--static); font-style: italic; }
 .chip-scraper { background: var(--wash); color: var(--fog); }
 .chip-monitor { background: var(--wash); color: var(--warn); }
@@ -1606,71 +1604,20 @@ a:hover { color: var(--fog); }
 }
 .debug-gear-btn:hover { opacity: 1; transform: scale(1.1); }
 
-.debug-panel {
-  position: fixed; bottom: 70px; right: 20px; z-index: 9998;
-  width: 340px; max-height: 480px; overflow-y: auto;
-  background: var(--ink); color: var(--fog); border-radius: var(--radius);
-  border: 1px solid var(--hairline);
-  font-size: 13px; font-family: system-ui, sans-serif;
-}
-.debug-panel-header {
-  display: flex; justify-content: space-between; align-items: center;
-  padding: 12px 16px; border-bottom: 1px solid var(--hairline);
-}
-.debug-panel-title { font-weight: 700; font-size: 14px; }
+/* The panel's own rules (.debug-panel, -section, -row, -action-btn,
+   -quick-btn, -log ...) had no caller since DebugGear.svelte scoped its
+   look as .debug-gear-*; deleted with the dead button families (backlog
+   6f471ff6, car 4). The compose dialog's close still borrows this one. */
 .debug-close {
   background: none; border: none; color: var(--static); cursor: pointer;
   font-size: 16px; padding: 0; line-height: 1;
 }
 .debug-close:hover { color: var(--fog); }
 
-.debug-section { padding: 12px 16px; border-bottom: 1px solid var(--hairline); }
-.debug-section:last-child { border-bottom: none; }
-.debug-section-title {
-  font-size: 10px; font-weight: 700; text-transform: uppercase;
-  letter-spacing: 0.08em; color: var(--static); margin-bottom: 8px;
-}
-.debug-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-.debug-row label { flex: 0 0 50px; font-size: 12px; color: var(--static); }
-
-.debug-action-btn {
-  width: 100%; padding: 7px 0; margin-top: 4px;
-  background: var(--signal); color: var(--void); border: none; border-radius: var(--radius);
-  font-size: 12px; font-weight: 600; cursor: pointer;
-  transition: background 0.15s;
-}
-.debug-action-btn:hover { background: var(--signal); }
-.debug-action-btn:disabled { background: var(--ink-raised); color: var(--static); cursor: default; }
-
-.debug-result { font-size: 12px; color: var(--static); margin-top: 6px; }
-.debug-error { color: var(--err); }
-
-.debug-quick-btn {
-  display: block; width: 100%; text-align: left;
-  padding: 5px 8px; margin-bottom: 4px;
-  background: var(--wash); border: 1px solid var(--hairline); border-radius: var(--radius);
-  color: var(--fog); font-size: 12px; cursor: pointer;
-  transition: border-color 0.15s;
-}
-.debug-quick-btn:hover { border-color: var(--static); }
-
-.debug-log {
-  max-height: 120px; overflow-y: auto;
-  font-family: monospace; font-size: 11px;
-  background: var(--void); border-radius: var(--radius); padding: 6px 8px;
-}
-.debug-log-empty { color: var(--static); font-style: italic; }
-.debug-log-line { color: var(--static); line-height: 1.4; }
-
 /* ==========================================================================
    HR Workflows
    ========================================================================== */
 
-.hr-action-btn {
-  padding: 5px 14px; font-size: 12px; font-weight: 600;
-  background: var(--fog); color: var(--void); border: none; border-radius: var(--radius); cursor: pointer;
-}
-.hr-action-btn:disabled { background: var(--wash); color: var(--static); cursor: default; }
 .hr-detail-btn {
   padding: 3px 10px; font-size: 11px; border: 1px solid var(--hairline);
   border-radius: var(--radius); background: var(--wash); cursor: pointer; color: var(--fog);
@@ -3075,15 +3022,6 @@ button.manual-tree-node {
 .ni-lines-table td.num, .ni-lines-table th.num { text-align: right; }
 .ni-lines-table tfoot td { border-top: 2px solid var(--border); padding-top: 10px; }
 
-.ni-btn {
-  padding: 6px 12px; border: 1px solid var(--border); border-radius: var(--radius);
-  background: var(--wash); color: var(--fog); cursor: pointer; font-size: 13px;
-}
-.ni-btn:hover { background: var(--ink-raised); }
-.ni-btn-primary { background: var(--signal); color: var(--void); border-color: var(--signal); }
-.ni-btn-primary:hover { background: var(--signal); }
-.ni-btn-primary:disabled { background: var(--static); border-color: var(--static); cursor: not-allowed; }
-.ni-btn-remove { color: var(--err); border-color: var(--err); }
 .ni-actions { display: flex; gap: 8px; margin-top: 16px; }
 
 /* --- StatusChip (@boss/web-kit/ui/StatusChip.svelte) renders the plates

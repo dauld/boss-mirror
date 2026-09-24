@@ -331,7 +331,7 @@
                   {#if lines.length > 1}
                     <button
                       type="button"
-                      class="ni-btn ni-btn-remove"
+                      class="btn btn-sm btn-danger-outline"
                       onclick={() => removeLine(i)}
                     >
                       Remove
@@ -344,7 +344,7 @@
           <tfoot>
             <tr>
               <td colspan="2">
-                <button type="button" class="ni-btn" onclick={addLine}>+ Add line</button>
+                <button type="button" class="btn btn-sm" onclick={addLine}>+ Add line</button>
               </td>
               <td class="num">
                 <strong>${totalDollars.toLocaleString()}</strong>
@@ -360,7 +360,7 @@
     <div class="ni-actions">
       <button
         type="button"
-        class="ni-btn ni-btn-primary"
+        class="btn btn-primary"
         onclick={submit}
         disabled={!canSubmit}
       >
@@ -368,7 +368,7 @@
       </button>
       <button
         type="button"
-        class="ni-btn"
+        class="btn"
         onclick={() => navigate(href('/ux/finance'))}
         disabled={saving}
       >
