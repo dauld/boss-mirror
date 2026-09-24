@@ -77,9 +77,79 @@ use std::path::{Path, PathBuf};
 /// enters no gate, so the gate's phase list, uid, fixture paths and
 /// probe-time rule are forty lines it cannot act on (backlog c8faa7f3,
 /// measured on analyst run d5e0f287).
+///
+/// `tenant` is the lane that ships a car to ANOTHER repository — a
+/// tenant repo an instance declares in `infra/cluster/instances.toml`
+/// (design fd8b5143, backlog 6a34e9bc). It builds a branch like the car
+/// lane, but in the tenant's tree, checked by `boss tenant check` rather
+/// than by this tree's gate, so none of the car lane's forty lines
+/// apply and the two it needs — which repo, and which instance answers
+/// — are filed under it.
 pub(crate) const LANE_CAR: &str = "car";
 pub(crate) const LANE_STEP: &str = "step";
-pub(crate) const LANES: [&str; 2] = [LANE_CAR, LANE_STEP];
+pub(crate) const LANE_TENANT: &str = "tenant";
+pub(crate) const LANES: [&str; 3] = [LANE_CAR, LANE_STEP, LANE_TENANT];
+
+/// The file that names each instance's tenant source — the ONE place a
+/// tenant repo is spelled, read by the converge that delivers it and by
+/// `merge-tenant-main.sh` that lands on it.
+pub(crate) const INSTANCES: &str = "infra/cluster/instances.toml";
+
+/// An instance whose tenant comes from a repository: `tenant_repo` and
+/// the `tenant_ref` the converge delivers, under the instance's section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TenantSource {
+    pub(crate) instance: String,
+    pub(crate) repo: String,
+    pub(crate) reference: String,
+}
+
+/// Every instance in `instances_toml` that names a tenant REPOSITORY,
+/// in file order. The file is read the way its own header says every
+/// reader reads it — one `key = "value"` per line under a `[section]`,
+/// by the shell, not a TOML parser — so this reader takes the same
+/// lines render-instance.sh does. An instance with a repo and no ref is
+/// left out: the converge cannot deliver it, so no car can land on it.
+pub(crate) fn tenant_sources(instances_toml: &str) -> Vec<TenantSource> {
+    let mut out = Vec::new();
+    let mut section: Option<(String, Option<String>, Option<String>)> = None;
+    let flush = |s: Option<(String, Option<String>, Option<String>)>,
+                 out: &mut Vec<TenantSource>| {
+        if let Some((instance, Some(repo), Some(reference))) = s {
+            out.push(TenantSource {
+                instance,
+                repo,
+                reference,
+            });
+        }
+    };
+    for line in instances_toml.lines().map(str::trim) {
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            flush(section.take(), &mut out);
+            section = Some((name.trim().to_string(), None, None));
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim().split('"').nth(1).map(str::to_string);
+        if let Some(s) = section.as_mut() {
+            match key.trim() {
+                "tenant_repo" => s.1 = value.filter(|v| !v.is_empty()),
+                "tenant_ref" => s.2 = value.filter(|v| !v.is_empty()),
+                _ => {}
+            }
+        }
+    }
+    flush(section, &mut out);
+    out
+}
+
+/// Where the dev pod keeps its checkout of a tenant repo: `/work/<name>`,
+/// beside `/work/boss`. The name is the repo's own last segment.
+pub(crate) fn tenant_checkout(repo: &str) -> String {
+    format!("/work/{}", repo.rsplit('/').next().unwrap_or(repo))
+}
 
 /// How an invariant's lines RELATE to the file named beside them
 /// (backlog c94ddc6f, 2026-09-19).
@@ -610,9 +680,49 @@ pub(crate) fn invariants(repo: &Path) -> Result<Vec<Invariant>> {
             "a control read on the same connection whose answer you already know, and".into(),
             "say beside the finding what the control returned.".into(),
         ],
-        lanes: vec![LANE_STEP],
+        // A tenant builder reads and writes the system of record too —
+        // it completes its own run's `building` and files nothing blind
+        // — so the address is filed under its lane as well (6a34e9bc).
+        lanes: vec![LANE_STEP, LANE_TENANT],
         grounding: Grounding::Derived(vec![Reading::read(estate, sor.clone())]),
     });
+
+    // THE TENANT LANE'S OWN INVARIANT (design fd8b5143, backlog
+    // 6a34e9bc). Which repo a tenant car is built in is the instance's
+    // declaration, never a parameter and never a builder's memory: it is
+    // the same `tenant_repo` / `tenant_ref` the converge delivers and
+    // `merge-tenant-main.sh` lands on, read out of the one file that
+    // spells it. An estate with no tenant repo files nothing here, and
+    // `boss dispatch` then refuses every tenant car for want of one.
+    let sources = tenant_sources(&read(repo, INSTANCES)?);
+    if !sources.is_empty() {
+        let mut lines = Vec::new();
+        let mut readings = Vec::new();
+        for s in &sources {
+            lines.push(format!(
+                "{} @ {} — instance `{}`'s tenant_repo / tenant_ref, checkout {}",
+                s.repo,
+                s.reference,
+                s.instance,
+                tenant_checkout(&s.repo)
+            ));
+            readings.push(Reading::read(INSTANCES, s.repo.clone()));
+            readings.push(Reading::read(INSTANCES, s.reference.clone()));
+        }
+        lines.extend([
+            "The repo is the instance's, never a parameter: a packet naming any other is".into(),
+            "refused at dispatch. Your branch starts at that ref on origin, and the ref".into(),
+            "itself moves only through merge-tenant-main on David's approval of the plan".into(),
+            "hash (plan-a-tenant-merge renders it) — never through a push of yours.".into(),
+        ]);
+        out.push(Invariant {
+            name: "the tenant repo",
+            authority: INSTANCES.to_string(),
+            lines,
+            lanes: vec![LANE_TENANT],
+            grounding: Grounding::Derived(readings),
+        });
+    }
 
     // THE PRE-FLIGHT DOOR (backlog 5d919334, 2026-09-22). CLAUDE.md
     // §Doors is where a session looks for the command to run before a
@@ -1333,7 +1443,21 @@ pub async fn run(packet_ref: Option<String>, profile_override: Option<String>) -
         Some(j) => active_row(&http, j).await,
         None => None,
     };
-    let profile = profile_override.unwrap_or_else(|| profile_for(job.as_ref(), active.as_ref()));
+    // And through the SAME venue door (6a34e9bc): a packet whose
+    // deliverable is a tenant repo is briefed as the tenant builder the
+    // dispatch would hand it to — or refused, as the dispatch would.
+    let profile = match (profile_override, job.as_ref()) {
+        (Some(p), _) => p,
+        (None, Some(j)) => {
+            let declared = profile_for(Some(j), active.as_ref());
+            let slug = now_step(j)
+                .and_then(|s| s.get("spec_slug"))
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            crate::dispatch::venue_in(&repo, j, slug, &declared)?.profile
+        }
+        (None, None) => profile_for(None, active.as_ref()),
+    };
     print!(
         "{}",
         render(
@@ -2393,7 +2517,71 @@ mod tests {
             "{:?}",
             inv.lines
         );
-        assert_eq!(inv.lanes, vec![LANE_STEP]);
+        assert_eq!(inv.lanes, vec![LANE_STEP, LANE_TENANT]);
+    }
+
+    /// THE TENANT REPO IS THE INSTANCE'S (design fd8b5143, backlog
+    /// 6a34e9bc): read out of instances.toml the way its own header says
+    /// every reader reads it, one key per line under a section. An
+    /// image-sourced instance (`tenant_dir`) names no repo, and a repo
+    /// with no ref cannot be delivered, so neither is a source.
+    #[test]
+    fn the_tenant_repo_invariant_reads_each_instances_source_from_instances_toml() {
+        let text = "\
+# a comment naming tenant_repo = \"nobody/else\"
+source = \"prod\"
+[prod]
+namespace = \"boss\"
+tenant_repo = \"acme/acme-co\"
+tenant_ref = \"main\"
+[playground]
+tenant_dir = \"examples/x\"
+[half]
+tenant_repo = \"acme/no-ref\"
+";
+        assert_eq!(
+            tenant_sources(text),
+            vec![TenantSource {
+                instance: "prod".into(),
+                repo: "acme/acme-co".into(),
+                reference: "main".into(),
+            }]
+        );
+        assert_eq!(tenant_checkout("acme/acme-co"), "/work/acme-co");
+
+        // The live file, and the invariant it becomes — filed under the
+        // tenant lane alone, naming every source the file declares.
+        let live = tenant_sources(
+            &std::fs::read_to_string(repo().join(INSTANCES)).expect("instances.toml"),
+        );
+        assert!(!live.is_empty(), "prod names its tenant repo");
+        let invs = invariants(&repo()).expect("the invariants derive");
+        let inv = invs
+            .iter()
+            .find(|i| i.name == "the tenant repo")
+            .expect("a tenant-repo invariant");
+        assert_eq!(inv.authority, INSTANCES);
+        assert_eq!(inv.lanes, vec![LANE_TENANT]);
+        for s in &live {
+            assert!(
+                inv.lines
+                    .iter()
+                    .any(|l| l.contains(&s.repo) && l.contains(&tenant_checkout(&s.repo))),
+                "{:?}",
+                inv.lines
+            );
+        }
+        assert!(
+            inv.lines.iter().any(|l| l.contains("merge-tenant-main")),
+            "names the one way the ref moves: {:?}",
+            inv.lines
+        );
+        // None of the car lane's gate facts reach a tenant builder.
+        let tenant = invariant_section(&invs, LANE_TENANT);
+        assert!(tenant.contains("the tenant repo"), "{tenant}");
+        assert!(tenant.contains("the system of record"), "{tenant}");
+        assert!(!tenant.contains("gate uid"), "{tenant}");
+        assert!(!tenant.contains("cargo jobs"), "{tenant}");
     }
 
     /// A page-audit packet pinned to v2, at its `measure` step, holding

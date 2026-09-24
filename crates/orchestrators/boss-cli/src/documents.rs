@@ -700,11 +700,80 @@ mod tests {
         // the whole point of the key.
         assert_eq!(lane(&repo(), "builder").expect("builder"), "car");
         assert_eq!(lane(&repo(), "analyst").expect("analyst"), "step");
+        assert_eq!(lane(&repo(), "tenant-builder").expect("tenant"), "tenant");
         // A profile nothing serves is briefed as it always was.
         assert_eq!(
             lane(&repo(), "no-such-profile").expect("no document is not an error"),
             DEFAULT_LANE
         );
+    }
+
+    /// THE TENANT BUILDER'S DOCUMENT (design fd8b5143, backlog
+    /// 6a34e9bc). It is read by the one profile that builds in a repo
+    /// this tree does not hold, where the only human act on the route is
+    /// David's approval of the merge — so what is pinned is exactly
+    /// that: it names the approval route by its verbs and its design,
+    /// every push it tells a builder to run pushes a BRANCH and never
+    /// main, the repo comes from the instance rather than a parameter,
+    /// and the run ends on the copied check the report refuses without.
+    #[test]
+    fn the_tenant_builder_document_names_the_approval_route_and_never_pushes_main() {
+        assert_eq!(
+            lane(&repo(), crate::dispatch::TENANT_BUILDER_PROFILE).expect("reads"),
+            crate::brief::LANE_TENANT
+        );
+        let invs = crate::brief::invariants(&repo()).expect("the invariants derive");
+        let text = section(
+            &repo(),
+            crate::dispatch::TENANT_BUILDER_PROFILE,
+            &invs,
+            None,
+        )
+        .expect("the tenant-builder rules render");
+        assert!(text.contains("# Tenant builder rules"), "{text}");
+        for phrase in [
+            // The route to tenant main, by its verbs and its decisions.
+            "merge-tenant-main",
+            "plan-a-tenant-merge",
+            "plan-sha256",
+            "passkey",
+            "17835005",
+            "fd7090cc",
+            // The repo is the instance's, quoted from its invariant.
+            "never a parameter",
+            crate::brief::INSTANCES,
+            // The check and the receipt the run lands on.
+            "boss tenant check",
+            "tenant-check.txt",
+            "result=delivered",
+            "--tenant-check-file",
+            "--tenant-branch",
+            "--tenant-sha",
+            "result=refused",
+        ] {
+            assert!(
+                text.contains(phrase),
+                "the tenant-builder rules say `{phrase}`"
+            );
+        }
+        // Every push it SHOWS is a command pushing a named branch, and
+        // none of them names main: the prose may say "never push main",
+        // a command may not do it.
+        let commands: Vec<&str> = text
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|c| c.contains(" push"))
+            .collect();
+        assert!(!commands.is_empty(), "the rules show the push: {text}");
+        for c in &commands {
+            assert!(c.contains("refs/heads/<branch>"), "pushes a branch: {c}");
+            assert!(!c.contains("main"), "never main: {c}");
+            assert!(!c.contains("--force"), "never forced: {c}");
+        }
+        // No car-lane mechanics: no park flag, no gate script.
+        assert!(!text.contains("--park-"), "{text}");
+        assert!(!text.contains("gate.sh"), "{text}");
     }
 
     /// A lane nothing is filed under is refused rather than rendered:

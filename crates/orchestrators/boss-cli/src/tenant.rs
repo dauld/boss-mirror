@@ -1133,6 +1133,58 @@ impl Report {
     }
 }
 
+/// The verdict word [`Report::render`] closes a passing check with.
+pub const PASS: &str = "PASS";
+
+/// Whether `text` is a PASSING `boss tenant check` report, read back in
+/// the shape [`Report::render`] writes it — `Ok(())`, or the reason it
+/// is not, naming what was read.
+///
+/// WHY (design fd8b5143, backlog 6a34e9bc). A tenant car has no gate, so
+/// the one artifact that says its tree is sound is this check's output,
+/// and a tenant-builder run lands on it: `boss dispatch --report`
+/// refuses a `delivered` tenant run whose receipt does not pass. The
+/// receipt is the check's own words, copied — never a builder's "it
+/// passed" — so the reader here accepts only the renderer's shape: the
+/// `boss tenant check <dir>` header first and the count line last, with
+/// no MISSING and no INVALID, ending in PASS. The pair is pinned by a
+/// test that renders a report and reads it back (CLAUDE.md 9a: the
+/// format lives in `render`, and this reader is held to it).
+pub fn passing_receipt(text: &str) -> std::result::Result<(), String> {
+    let mut lines = text.lines().map(str::trim_end).filter(|l| !l.is_empty());
+    let first = lines.next().unwrap_or("");
+    if !first.starts_with("boss tenant check ") {
+        return Err(format!(
+            "it does not open with the `boss tenant check <dir>` header the check prints (the \
+             first line is {first:?}) — the receipt is the check's own output, copied whole"
+        ));
+    }
+    let last = lines.next_back().unwrap_or("");
+    let Some((counts, verdict)) = last.rsplit_once(" — ") else {
+        return Err(format!(
+            "its last line is not the check's count line (it is {last:?}) — a receipt cut \
+             short is not a receipt"
+        ));
+    };
+    let count = |label: &str| {
+        counts.split(", ").find_map(|part| {
+            part.strip_suffix(label)
+                .and_then(|n| n.trim().parse::<usize>().ok())
+        })
+    };
+    match (count(" missing"), count(" invalid"), verdict.trim()) {
+        (Some(0), Some(0), PASS) => Ok(()),
+        (Some(_), Some(_), v) => Err(format!(
+            "the check did not pass: its verdict line reads {last:?} (verdict {v:?}) — a car \
+             lands on a PASS"
+        )),
+        _ => Err(format!(
+            "its last line is not the check's count line (it is {last:?}) — a receipt cut \
+             short is not a receipt"
+        )),
+    }
+}
+
 /// The `[meta] tenant_id` the directory declares, at either spelling;
 /// a placeholder when it cannot be read so the workflow loader still
 /// runs (the manifest row carries the real refusal).
@@ -2135,6 +2187,50 @@ mod tests {
             "{} does not pass the contract:\n{:#?}",
             dir.display(),
             bad
+        );
+    }
+
+    /// THE RECEIPT IS READ IN THE SHAPE THE CHECK WRITES IT (design
+    /// fd8b5143, backlog 6a34e9bc). A tenant-builder run lands on its
+    /// copied `boss tenant check` output, so the reader is held to the
+    /// renderer rather than to a spelling typed here: a fresh `init`
+    /// renders a passing report that it accepts, the same report with
+    /// one required file deleted renders a FAIL it refuses, and a
+    /// receipt cut short, retyped as prose, or empty is refused too.
+    #[test]
+    fn a_receipt_passes_only_as_the_rendered_output_of_a_passing_check() {
+        let dir = scratch_dir("tenant-receipt-reader");
+        init("acme", Some(&dir)).unwrap();
+        let pass = check(&dir).render(&dir);
+        assert!(check(&dir).passed(), "{pass}");
+        assert_eq!(passing_receipt(&pass), Ok(()), "{pass}");
+        // Trailing blank lines and a CRLF copy are the same receipt.
+        assert_eq!(passing_receipt(&format!("{pass}\n\n")), Ok(()));
+        assert_eq!(passing_receipt(&pass.replace('\n', "\r\n")), Ok(()));
+
+        std::fs::remove_file(dir.join("seeds/workflows.toml")).unwrap();
+        let fail = check(&dir).render(&dir);
+        assert!(!check(&dir).passed(), "{fail}");
+        let why = passing_receipt(&fail).expect_err("a FAIL is refused");
+        assert!(why.contains("did not pass"), "{why}");
+
+        // Cut short: the header without the count line.
+        let head = pass.lines().next().unwrap().to_string();
+        assert!(passing_receipt(&head).is_err());
+        // Retyped: a builder's word for it, not the check's.
+        let why = passing_receipt("boss tenant check passed — PASS").expect_err("prose");
+        assert!(why.contains("count line"), "{why}");
+        let why = passing_receipt("all good\n3 ok, 0 missing, 0 invalid, 0 unknown — PASS")
+            .expect_err("no header");
+        assert!(why.contains("header"), "{why}");
+        assert!(passing_receipt("").is_err());
+        // A count line that says PASS over a nonzero count is not one
+        // the renderer can write, and it is refused rather than trusted.
+        assert!(
+            passing_receipt(&format!(
+                "{head}\n  OK  tenant.toml  x\n3 ok, 1 missing, 0 invalid, 0 unknown — PASS\n"
+            ))
+            .is_err()
         );
     }
 
