@@ -709,7 +709,7 @@ pub(crate) async fn retire(
         );
         return Ok(());
     }
-    apply(&http, &id, &current, &writes, slug).await?;
+    apply(&http, &id, &current, &writes, slug, "boss car retire").await?;
     notes(&current, &retirement);
     Ok(())
 }
@@ -722,7 +722,7 @@ fn evidence_of(r: &Retirement) -> &str {
     }
 }
 
-async fn read(http: &reqwest::Client, id: &str) -> Result<Value> {
+pub(crate) async fn read(http: &reqwest::Client, id: &str) -> Result<Value> {
     crate::gate::api(http, reqwest::Method::GET, &format!("/api/jobs/{id}"), None)
         .await?
         .with_context(|| format!("car {id} read back empty"))
@@ -730,12 +730,15 @@ async fn read(http: &reqwest::Client, id: &str) -> Result<Value> {
 
 /// The writes, in `retire_writes`' order, then the read-back that is the
 /// only confirmation: a 204 is a claim, the closed packet is the fact.
-async fn apply(
+/// Shared with `boss prove --disproved` (08664157), whose writes are the
+/// same three in the same order; `verb` is who prints the confirmation.
+pub(crate) async fn apply(
     http: &reqwest::Client,
     id: &str,
     car_json: &Value,
     w: &car_retire::RetireWrites,
     slug: &str,
+    verb: &str,
 ) -> Result<()> {
     use reqwest::Method;
     crate::gate::api(
@@ -815,7 +818,7 @@ async fn apply(
         );
     }
     println!(
-        "boss car retire: car {} closed through `{slug}`{} — confirmed by reading it back",
+        "{verb}: car {} closed through `{slug}`{} — confirmed by reading it back",
         &id[..8.min(id.len())],
         if held.is_some() {
             ", hold released"

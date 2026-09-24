@@ -45,7 +45,7 @@
 // APIs both runtimes have — `node:net` for ports, `import.meta.url` for
 // the module's own location.
 import { realpathSync } from 'node:fs';
-import { createServer } from 'node:net';
+import { type Server, createServer } from 'node:net';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -116,14 +116,20 @@ export async function probeTree(
 // browser retrying :5174 — and kept its socket open made this wait
 // forever (backlog e3470b9a; pinned in dev-tree.test.ts, 30 of 30 runs
 // hung before this line and none after).
-function tryBind(port: number): Promise<number | null> {
+//
+// `whileBound` runs while the probe holds the port, and the probe lets
+// go only once it settles. It exists for that pin: a knock sent from
+// outside lands inside a window this short on most runs, not all of
+// them, and on a GitHub runner none landed (backlog 2c7559cb).
+function tryBind(port: number, whileBound?: WhileBound): Promise<number | null> {
   return new Promise((resolve) => {
     const probe = createServer((socket) => socket.destroy());
     probe.once('error', () => resolve(null));
-    probe.listen(port, () => {
+    probe.listen(port, async () => {
       const address = probe.address();
       const bound =
         typeof address === 'object' && address !== null ? address.port : null;
+      await whileBound?.(probe);
       probe.close(() => resolve(bound));
     });
   });
@@ -140,9 +146,19 @@ export async function freePort(): Promise<number> {
   return port;
 }
 
-async function portIsFree(port: number): Promise<boolean> {
-  return (await tryBind(port)) !== null;
+async function portIsFree(port: number, whileBound?: WhileBound): Promise<boolean> {
+  return (await tryBind(port, whileBound)) !== null;
 }
+
+// Called with the free-port probe while it is listening; the probe
+// closes only after the returned promise settles. A test seam — the
+// runner never passes one.
+export type WhileBound = (probe: Server) => Promise<void>;
+
+export type ChooseOptions = {
+  readonly probeTimeoutMs?: number;
+  readonly whileBound?: WhileBound;
+};
 
 export type Target = {
   // Where the suite will point: the preferred port, or a free one.
@@ -159,14 +175,14 @@ export type Target = {
 export async function chooseTarget(
   preferredPort: number,
   env: Record<string, string | undefined>,
-  probeTimeoutMs = 2_000,
+  { probeTimeoutMs = 2_000, whileBound }: ChooseOptions = {},
 ): Promise<Target> {
   const origin = `http://127.0.0.1:${preferredPort}`;
 
   if (isCi(env)) {
     // No reuse under CI, matching tree or not. If something already
     // holds the port, step aside rather than dying on EADDRINUSE.
-    return (await portIsFree(preferredPort))
+    return (await portIsFree(preferredPort, whileBound))
       ? { port: preferredPort, reuse: false, reason: 'CI: starting our own server' }
       : {
           port: await freePort(),
@@ -186,7 +202,7 @@ export async function chooseTarget(
       reason: `:${preferredPort} is serving a DIFFERENT tree (${tree}) — not reusing it`,
     };
   }
-  if (await portIsFree(preferredPort)) {
+  if (await portIsFree(preferredPort, whileBound)) {
     return { port: preferredPort, reuse: false, reason: 'nothing listening — starting our own' };
   }
   return {

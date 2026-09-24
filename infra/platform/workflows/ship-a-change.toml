@@ -211,6 +211,8 @@ For a deletion, the proof is absence plus survival: the symbol is gone from main
 
 PROOF CAN DECAY. `boss prove <car> --recheck` re-runs the recorded probe and says whether it still holds — a step-plugin ConfigMap preview survives exactly until the next converge.
 
+A CLAIM MEASURED FALSE IS A TERMINAL, NOT A CAR LEFT HERE. When the change landed and did not do what it said — car 6b23d135 claimed boss-dev is not the first eviction under disk pressure, and boss-dev was evicted anyway — run `boss prove <car> --disproved --probe '<cmd>' --verified-file <f> --superseded-by <landed car | backlog item>`. It requires the probe to exit 1 (a pass, a not-yet, a probe that did not run is refused), records the run verbatim in `disproof`, names the remedy, and closes the car through `disproved`, which the shed stops counting (08664157). Left at this step, the car is red that never clears.
+
 PREFER A PROBE THAT STAYS TRUE. Some probes observe a transient condition and stop holding for reasons that have nothing to do with the change. Worked example from the first real use, proving the `boss park` head-selection fix (932aa956): the probe ran the DEPLOYED binary against a branch that was gated green at one head and then rebased, and observed the refusal `no gate ... vouches for its current head 6d34a6da3b8a`. Excellent evidence — and it stopped holding the moment that branch was re-gated, because a matching receipt then existed. `--recheck` will report NO LONGER HOLDS there and be WRONG about the cause. When a durable probe exists (a flag the binary always rejects, a symbol always absent, an endpoint that always answers), prefer it; when only a transient one is available, say so in `verified` so a later reader knows a failed recheck is expected rather than a regression.
 
 BIND THE PROOF TO THE RELEASE. `boss prove` runs the probe on the host that invokes it, and records that host — but a host is not a build. Deployed releases are keyed by COMMIT SHA (`/usr/local/bin/boss` -> `/usr/local/boss/releases/<sha>/bin/boss`, with `current` and `previous` symlinks), so the probe can tie the behaviour it observes to the artifact that produced it. Make TWO exit-gated assertions in one probe:
@@ -309,3 +311,51 @@ required = true
 name = "evidence"
 field_type = "string"
 required = true
+
+# DISPROVED (backlog 08664157, 2026-09-24). A car that LANDED and whose
+# claim was then MEASURED FALSE. Car 6b23d135 claimed boss-dev is not
+# the first eviction under disk pressure; after it converged, boss-dev
+# was evicted for ephemeral-storage anyway. `boss prove` refuses to
+# record a failing probe — correctly, it is evidence AGAINST the claim —
+# so the car could only stand at `proven`, counted "ours" in the shed,
+# for ever. None of the other terminals says what happened: `merged`
+# needs a proof, `abandoned` says the work did not land when it did,
+# `settled` says there was nothing to merge, `landed-twin` says the
+# work rode inside another car.
+#
+# `boss prove <car> --disproved --probe … --verified-file … --superseded-by
+# <landed car | backlog item>` is the one writer: it runs the probe,
+# REQUIRES the probe's own "judged false" (exit 1 — a pass, a not-yet, a
+# probe that did not run or crashed are each refused), and records the
+# run verbatim in `disproof`, the meaning in `verified` and the remedy
+# in `superseded_by` BEFORE the marker readies this step — a terminal
+# nobody reaches without the evidence. It waits on `merged` as `proven`
+# does: a change that never shipped cannot be disproved in production.
+# `completed` rather than `aborted`: the delivery completed, and an
+# aborted terminal completes from any state (an-abort-completes-from-
+# any-open-state), which would let this one skip its own gate. The
+# item edge is not followed — the arrival rule fires on `merged` only,
+# so the item the car answered stays open for the remedy to close.
+[[workflow.step]]
+title = "disproved"
+kind = "outcome"
+ready_when = "steps.review.done AND job.metadata.merged = \"true\" AND job.metadata.disproved = \"true\""
+title_template = "Disproved — it landed, and its claim was measured false"
+terminal = { outcome = "disproved" }
+metadata_defaults = { outcome_kind = "completed" }
+[[workflow.step.fields]]
+name = "verified"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "disproof"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "superseded_by"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "completed_at"
+field_type = "date-time"
+required = false

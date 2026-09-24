@@ -442,6 +442,36 @@ mod tests {
         }
     }
 
+    /// EVERY PROFILE'S WORKING FILES LIVE IN THE RUN'S OWN DIRECTORY
+    /// (backlog dd747b4c). Two page-audit runs dispatched together on
+    /// 2026-09-24 wrote the same generic names at the shared scratchpad
+    /// root, and one filed five backlog-items with the other's content.
+    /// THE RUN names the directory (`dispatch::working_dir`); each
+    /// document refers to it by the phrase that section carries, so the
+    /// spelling lives once in code and every profile is held to it.
+    #[test]
+    fn every_document_sends_working_files_to_the_directory_the_run_names() {
+        let dir = repo().join(DIR);
+        for entry in std::fs::read_dir(&dir).expect("the documents directory") {
+            let path = entry.expect("entry").path();
+            if !path.to_string_lossy().ends_with("-rules.md") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("readable");
+            assert!(
+                text.contains(crate::dispatch::WORKING_DIR_REFERENCE),
+                "{} must send working files to `{}`",
+                path.display(),
+                crate::dispatch::WORKING_DIR_REFERENCE
+            );
+            assert!(
+                text.contains("dd747b4c"),
+                "{} says why a run needs its own directory",
+                path.display()
+            );
+        }
+    }
+
     /// THE ANALYST DOCUMENT — what the OTHER profile owes (backlog
     /// 8d32cc88, 2026-09-19). Eleven steps in the platform bundle
     /// declare `analyst` and every one of them was dispatched with the

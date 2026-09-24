@@ -4576,6 +4576,94 @@ mod tests {
         );
     }
 
+    /// A DISPROVED CAR LEAVES THE SHED, AND IS NOT COUNTED PROVEN (backlog
+    /// 08664157). Car 6b23d135 landed and its claim was measured false;
+    /// with no terminal it stood at `proven`, unproven and two days old,
+    /// "ours" for ever. Closed through `disproved` — `proven` skipped, the
+    /// terminal completed, `merged` still "true" — it is in neither the
+    /// count nor the ours KPI, and the proven-per-day trend does not
+    /// credit it with a proof it never had. It is still in `cars`: the
+    /// record keeps it; only the shed stops reading it as owed.
+    #[test]
+    fn a_disproved_car_leaves_the_shed_and_is_not_counted_proven() {
+        let md = json!({
+            "branch": "fix/dev-pod-not-first-evicted",
+            "merged": "true",
+            "opened_at": "2026-09-17T12:00:00Z",
+        });
+        let standing = {
+            let j = job("ship-a-change", "fix/dev-pod", JobStatus::Open, md.clone());
+            let s = vec![
+                step(
+                    &j,
+                    "review",
+                    StepStatus::Completed,
+                    Some("2026-09-18T07:00:00Z"),
+                ),
+                step(&j, "proven", StepStatus::Ready, None),
+                step(&j, "disproved", StepStatus::Pending, None),
+            ];
+            (j, s)
+        };
+        let status = empty_status();
+        let before = vec![standing];
+        let out = regions(&inputs(
+            &status,
+            &[],
+            &[],
+            &before,
+            &[],
+            Some(&[]),
+            Some(&[]),
+        ));
+        let shed = by_name(&out, "shed");
+        assert_eq!(shed.count, Some(1));
+        assert_eq!(shed.state, RegionState::Troubled, "{}", shed.why);
+
+        let mut closed_md = md;
+        closed_md["outcome"] = json!("disproved");
+        closed_md["disproved"] = json!("true");
+        let disproved = {
+            let j = job("ship-a-change", "fix/dev-pod", JobStatus::Closed, closed_md);
+            let s = vec![
+                step(
+                    &j,
+                    "review",
+                    StepStatus::Completed,
+                    Some("2026-09-18T07:00:00Z"),
+                ),
+                step(
+                    &j,
+                    "proven",
+                    StepStatus::Skipped,
+                    Some("2026-09-19T11:00:00Z"),
+                ),
+                step(
+                    &j,
+                    "disproved",
+                    StepStatus::Completed,
+                    Some("2026-09-19T11:00:00Z"),
+                ),
+            ];
+            (j, s)
+        };
+        let after = vec![disproved];
+        let out = regions(&inputs(
+            &status,
+            &[],
+            &[],
+            &after,
+            &[],
+            Some(&[]),
+            Some(&[]),
+        ));
+        let shed = by_name(&out, "shed");
+        assert_eq!(shed.count, Some(0), "{}", shed.why);
+        assert_eq!(shed.state, RegionState::Clear, "{}", shed.why);
+        assert_eq!(shed.kpi[0].text, "0 cars owed a proof are ours");
+        assert_eq!(shed.trend.current, Some(0.0), "a disproof is not a proof");
+    }
+
     /// A STALE PROOF IS EITHER ON US OR ON THE WORLD, and the shed said
     /// neither.
     ///

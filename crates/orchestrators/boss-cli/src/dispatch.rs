@@ -650,14 +650,49 @@ pub(crate) fn run_section(
          Your run is agent-run {run_id} (profile `{}`, model {}, budget ${}, effort {}).\n\
          Before `boss gate`, in the shell you gate from: export {}={run_id}\n\
          The gate-run then records this run, and a green lands it by itself.\n\
-         {}\n{}\n{isolation}",
+         {}\n{}\n{}\n{isolation}",
         settings.profile,
         settings.model,
         settings.budget_usd,
         settings.effort,
         crate::gate::AGENT_RUN_ENV,
+        working_dir_line(run_id),
         budget_line(settings.budget_usd),
         effort_line(settings),
+    )
+}
+
+/// How every rules document refers to the directory
+/// [`working_dir_line`] names — one phrase, so a document cannot point
+/// at a place the prompt never names (pinned in `documents`).
+pub(crate) const WORKING_DIR_REFERENCE: &str = "working directory THE RUN names";
+
+/// The run's own working directory, relative to the scratchpad of the
+/// session that launched it: `run-` and the run id's first eight
+/// characters, the spelling every report already uses for a run.
+pub(crate) fn working_dir(run_id: &str) -> String {
+    format!("run-{}", run_id.chars().take(8).collect::<String>())
+}
+
+/// A PLACE FOR WORKING FILES (backlog dd747b4c, 2026-09-24). Every run
+/// a session launches shares that session's scratchpad, and until this
+/// line nothing named a place inside it, so each run wrote at the root
+/// under whatever generic names came to mind. Page-audit runs 36f05857
+/// and a3b88dbf, launched in parallel, both wrote `t1..t5` there, and
+/// the /it run overwrote the receiving run's files between write and
+/// filing: five backlog-items went in under the wrong audit, caught
+/// only because the run re-read its titles. The path is relative
+/// because the scratchpad's absolute path belongs to the harness, which
+/// shows it to the agent and never to this verb.
+pub(crate) fn working_dir_line(run_id: &str) -> String {
+    format!(
+        "Your working directory: {}/ inside your session's scratchpad directory — create it \
+         before your first write. This is the {WORKING_DIR_REFERENCE} in your rules: every \
+         working file (id lists, drafts, field files, commit message, probe, gate script, \
+         logs) goes there, never at the scratchpad root, which every run the session \
+         launches shares (backlog dd747b4c: two parallel runs wrote the same names there and \
+         one filed five items carrying the other's content).",
+        working_dir(run_id)
     )
 }
 
@@ -2634,6 +2669,36 @@ mod tests {
         assert!(s.contains("Budget: $5 declared"), "{s}");
         assert!(s.contains("not a limit"), "{s}");
         assert!(!s.contains("stop and report before"), "{s}");
+    }
+
+    /// EVERY RUN GETS A WORKING DIRECTORY OF ITS OWN (backlog dd747b4c).
+    /// Measured 2026-09-24: page-audit runs 36f05857 and a3b88dbf were
+    /// dispatched together, and neither prompt named a place for working
+    /// files, so both wrote `ids.txt`, `t1..t5` and `g1..g5` at the root
+    /// of the scratchpad they share with the session that launched them.
+    /// The second overwrote the first between write and filing, and five
+    /// backlog-items were filed under the receiving audit carrying the
+    /// /it audit's content. The directory is derived from the run id, so
+    /// two runs cannot be handed the same one.
+    #[test]
+    fn the_run_section_names_a_working_directory_derived_from_the_run_id() {
+        const RUN: &str = "5b1d2c3e-0000-4000-8000-000000000001";
+        const OTHER: &str = "a3b88dbf-0000-4000-8000-000000000002";
+        assert_eq!(working_dir(RUN), "run-5b1d2c3e");
+        assert_ne!(working_dir(RUN), working_dir(OTHER));
+
+        let s = run_section(RUN, &block(), None);
+        assert!(s.contains("Your working directory: run-5b1d2c3e/"), "{s}");
+        assert!(
+            s.contains("scratchpad"),
+            "it says where the directory lives: {s}"
+        );
+        assert!(s.contains("dd747b4c"), "the line says why: {s}");
+        let other = run_section(OTHER, &block(), None);
+        assert!(other.contains("run-a3b88dbf/") && !other.contains("run-5b1d2c3e"));
+        // The rules documents refer to it by this phrase, so the section
+        // must be the thing that phrase names.
+        assert!(s.contains(WORKING_DIR_REFERENCE), "{s}");
     }
 
     /// The declared effort must reach a CONTROL (backlog e720dd00):

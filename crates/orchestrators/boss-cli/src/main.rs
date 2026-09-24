@@ -18,6 +18,7 @@ mod delivery_policy;
 mod design;
 mod dispatch;
 mod dispatch_hook;
+mod disprove;
 mod dock_preview;
 mod doctor;
 mod documents;
@@ -826,6 +827,22 @@ enum Commands {
         /// an override nobody can find is the same defect again.
         #[arg(long, value_name = "REASON")]
         probe_anyway: Option<String>,
+        /// Record that the car's claim is MEASURED FALSE and close it
+        /// through ship-a-change's `disproved` terminal (backlog
+        /// 08664157). The probe must FAIL — exit 1, the probe's own
+        /// "judged false"; a pass, a not-yet, a probe that did not run
+        /// or crashed is refused — and its run is recorded verbatim, the
+        /// way a proof is. Only a landed car still owed its proof can
+        /// take it; the car is closed, never deleted, and the shed stops
+        /// counting it. Needs --superseded-by and --verified(-file).
+        #[arg(long, requires = "superseded_by", conflicts_with_all = ["recheck", "replace", "exit_only", "unattended", "method", "method_file"])]
+        disproved: bool,
+        /// With --disproved: where the real remedy lives — the landed
+        /// car that fixed it (branch or id) or the backlog item that
+        /// carries the fix (id). Resolved and checked before anything is
+        /// written.
+        #[arg(long, requires = "disproved", value_name = "CAR_OR_ITEM")]
+        superseded_by: Option<String>,
     },
     /// Publish a branch to the forge, in one verb, and verify it.
     ///
@@ -1868,6 +1885,8 @@ async fn main() -> Result<()> {
             from_car,
             unattended,
             probe_anyway,
+            disproved,
+            superseded_by,
         } => {
             if unattended {
                 return prove::run_unattended(&car, chrono::Utc::now()).await;
@@ -1878,6 +1897,20 @@ async fn main() -> Result<()> {
                 verified,
                 verified_file.as_deref(),
             )?;
+            if disproved {
+                return disprove::run(
+                    &car,
+                    probe,
+                    expect,
+                    from_car,
+                    verified,
+                    superseded_by.as_deref().unwrap_or_default(),
+                    dry_run,
+                    probe_anyway,
+                    chrono::Utc::now(),
+                )
+                .await;
+            }
             let method = crate::prose::opt_text_or_file(
                 "--method",
                 "--method-file",
@@ -2572,6 +2605,40 @@ mod tests {
             assert!(
                 got.starts_with(prefix),
                 "`{name}` about-text drifted: expected it to start with {prefix:?}, got {got:?}"
+            );
+        }
+    }
+
+    /// `boss prove --disproved` (08664157) always names its remedy, and
+    /// the remedy means nothing without it; it cannot ride a recheck, a
+    /// replace, an exit-only assertion or the unattended door.
+    #[test]
+    fn a_disproof_names_its_remedy_and_rides_no_other_mode() {
+        let base = [
+            "boss",
+            "prove",
+            "6b23d135",
+            "--probe",
+            "exit 1",
+            "--verified-file",
+            "why.md",
+        ];
+        let with = |extra: &[&'static str]| {
+            let mut v: Vec<&str> = base.to_vec();
+            v.extend_from_slice(extra);
+            Cli::try_parse_from(v)
+        };
+        with(&["--disproved", "--superseded-by", "fix/the-scratch-floor"])
+            .unwrap_or_else(|e| panic!("a disproof with its remedy parses: {e}"));
+        assert!(with(&["--disproved"]).is_err(), "no remedy");
+        assert!(
+            with(&["--superseded-by", "08664157"]).is_err(),
+            "a remedy with nothing disproved"
+        );
+        for other in ["--recheck", "--replace", "--exit-only"] {
+            assert!(
+                with(&["--disproved", "--superseded-by", "x", other]).is_err(),
+                "--disproved with {other}"
             );
         }
     }

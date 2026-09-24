@@ -9,7 +9,8 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { serve } from 'bun';
-import { type Socket, connect } from 'node:net';
+import { once } from 'node:events';
+import { type Server, type Socket, connect } from 'node:net';
 
 import { TREE_ID, TREE_PATH, chooseTarget, freePort } from './dev-tree';
 
@@ -104,30 +105,35 @@ describe('chooseTarget', () => {
   // the probe wait forever. Measured before the fix: with this knocker,
   // chooseTarget never returned. Raced against a bound well inside the
   // test timeout so a hang reads as a hang, not as a 5s timeout.
+  //
+  // The knock is made FROM INSIDE the probe's listening window, through
+  // the whileBound seam, and the seam returns only once the probe has
+  // ACCEPTED it — so the connection close() used to wait on exists on
+  // every run. Until 2026-09-24 four knockers retried from outside and
+  // the test asserted that one had landed; on the GitHub runner of
+  // publish PR #243 the probe opened and closed before any did, and the
+  // precondition failed with the fix intact (backlog 2c7559cb).
   test('a client knocking on the free port cannot hang the probe', async () => {
     const port = await freePort();
     const held: Socket[] = [];
-    let knocking = true;
-    const knock = (): void => {
-      if (!knocking) return;
+    let landed = 0;
+    const knockAndWaitForTheAccept = async (probe: Server): Promise<void> => {
+      const accepted = once(probe, 'connection');
       const socket = connect(port, '127.0.0.1');
-      socket.once('connect', () => held.push(socket));
-      socket.once('error', () => setTimeout(knock, 1));
+      held.push(socket);
+      await Promise.all([once(socket, 'connect'), accepted]);
+      landed += 1;
     };
-    // Several knockers, so one of them lands inside the probe's
-    // listening window on every run rather than on most of them.
-    for (let i = 0; i < 4; i += 1) knock();
 
     try {
       const outcome = await Promise.race([
-        chooseTarget(port, { CI: '1' }),
+        chooseTarget(port, { CI: '1' }, { whileBound: knockAndWaitForTheAccept }),
         Bun.sleep(1_500).then(() => 'hung' as const),
       ]);
 
       expect(outcome).not.toBe('hung');
-      expect(held.length).toBeGreaterThan(0);
+      expect(landed).toBe(1);
     } finally {
-      knocking = false;
       for (const socket of held) socket.destroy();
     }
   });

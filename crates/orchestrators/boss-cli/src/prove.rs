@@ -452,7 +452,10 @@ pub(crate) fn judge(o: &Outcome, expect: Option<&str>) -> Result<()> {
              \n  stdout: {}\n  stderr: {}\n\n\
              A probe that fails is evidence AGAINST the claim. Fix the change, \
              or fix the probe if the probe is what is wrong — but nothing is \
-             recorded either way.",
+             recorded either way. If the change LANDED and the claim is \
+             measured false, that is a terminal of its own: `boss prove <car> \
+             --disproved --superseded-by <remedy>` records the failing run and \
+             closes the car (08664157).",
             o.exit,
             if o.stdout.trim().is_empty() {
                 "(empty)"
@@ -1403,7 +1406,7 @@ pub(crate) fn override_reason(given: Option<&str>) -> Result<Option<&str>> {
 /// and this process's directory at the hand door. Reading it anywhere
 /// else would answer about a tree the probe never opens, which is the
 /// class of mistake this whole area exists to refuse.
-fn probe_tree(shell: &Shell) -> crate::freshness::TreeObservation {
+pub(crate) fn probe_tree(shell: &Shell) -> crate::freshness::TreeObservation {
     crate::freshness::observe_tree(shell.cwd.as_deref().unwrap_or_else(|| Path::new(".")))
 }
 
