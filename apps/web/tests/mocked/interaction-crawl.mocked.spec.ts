@@ -183,10 +183,10 @@ const CLICK_TIMEOUT_MS = 15_000;
 /// page is read. It is the TIMEOUT of a wait for the click's
 /// navigation, never a sleep the navigation must fit inside (see the
 /// race in clickLeg), and it starts only once every request the click
-/// issued has been answered — that wait has its own bound, generous
-/// because a mock answers in-process and only a starved host is slow.
+/// issued has been answered — that wait is bounded by the suite's stated
+/// expect budget, generous because a mock answers in-process and only a
+/// starved host is slow.
 const SETTLE_MS = 250;
-const ANSWER_TIMEOUT_MS = 10_000;
 
 /// Every visible, enabled button in scope, keyed so the same control
 /// rendered twice (a row action repeated per row) is clicked once:
@@ -229,7 +229,7 @@ async function paint(page: Page): Promise<string> {
     // the late edge, not the rule): the read landed on a destroyed
     // context. Read the document that replaced it, once, rather than
     // red the crawl on the host's timing.
-    await page.waitForLoadState('domcontentloaded', { timeout: 10_000 }).catch(() => undefined);
+    await page.waitForLoadState('domcontentloaded').catch(() => undefined);
     return paintNow(page);
   }
 }
@@ -253,7 +253,7 @@ const RESPONSE_MARKERS = `${DIALOGS}, [role="alert"], [role="status"]`;
 async function open(page: Page, route: string): Promise<boolean> {
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      await page.goto(route, { waitUntil: 'commit', timeout: 20_000 });
+      await page.goto(route, { waitUntil: 'commit' });
       await expect(page.locator('.app-shell')).toBeVisible({ timeout: 20_000 });
       await page.waitForTimeout(400);
       return true;
@@ -407,6 +407,7 @@ async function clickLeg(
       // the real click misses, so it keeps the short wait: fifteen
       // seconds per SVG track before a click that lands anyway is the
       // crawl's own time, not a finding.
+      // short on purpose: a missed non-button click is dispatched below, so its timing out is not a finding
       await target.click({ timeout: next.tag === 'button' ? CLICK_TIMEOUT_MS : 3_000 });
     } catch (e) {
       // A `<g role="button">` in an SVG (the yard map's track) has no
@@ -430,12 +431,20 @@ async function clickLeg(
     // answered (bounded), then the settle is the TIMEOUT of a race
     // against a URL change, and a change that wins is followed to a
     // committed, parsed document before anything reads the page.
-    const answeredBy = Date.now() + ANSWER_TIMEOUT_MS;
-    while (inFlight.size && Date.now() < answeredBy) await page.waitForTimeout(25);
+    //
+    // The answers are waited for under the suite's stated expect budget
+    // (a poll every 25 ms, as the loop it replaced), and so are the
+    // best-effort waits below: each carried 10 000 ms of its own until
+    // backlog de205627, a tighter cap than the suite states, and one that
+    // gives up quietly — a click still waiting on a starved host was then
+    // read as "no observable response" or "back landed on", a finding
+    // about the host rather than the page.
+    await expect.poll(() => inFlight.size, { intervals: [25] }).toBe(0).catch(() => undefined);
     const navigated = await page
+      // short on purpose: SETTLE_MS is a race the click may lose — timing out means it navigated nowhere
       .waitForURL((u) => u.href !== urlBefore, { waitUntil: 'commit', timeout: SETTLE_MS })
       .then(() => true, () => false);
-    if (navigated) await page.waitForLoadState('domcontentloaded', { timeout: 10_000 }).catch(() => undefined);
+    if (navigated) await page.waitForLoadState('domcontentloaded').catch(() => undefined);
     if (writes.length) tally.writes += writes.length;
     if (errors.length) findings.push({ route, control: next.label, what: `pageerror: ${errors.join(' | ')}` });
 
@@ -459,13 +468,13 @@ async function clickLeg(
       if (leg === 'refused' && writes.length) {
         findings.push({ route, control: next.label, what: `write refused (${writes.join(', ')}) and the page navigated to ${landed} as if it had succeeded` });
       }
-      await page.goBack({ waitUntil: 'commit', timeout: 10_000 }).catch(() => undefined);
+      await page.goBack({ waitUntil: 'commit' }).catch(() => undefined);
       await page.waitForTimeout(250);
       if (pathOf(page) !== route) {
         if (leg === 'main') findings.push({ route, control: next.label, what: `navigated to ${landed}; back landed on ${pathOf(page)}` });
         if (!(await open(page, route))) break;
       } else {
-        await expect(page.locator('.app-shell')).toBeVisible({ timeout: 10_000 }).catch(() => undefined);
+        await expect(page.locator('.app-shell')).toBeVisible().catch(() => undefined);
       }
       continue;
     }

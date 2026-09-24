@@ -263,12 +263,68 @@ pub struct TrainStatus {
 
 /// The first ready-or-active step — the exact place the train sits —
 /// as [`standing_at`] spells it, the phrase `boss orient` prints too.
-fn at_step(steps: &[Step]) -> Option<String> {
-    steps.iter().find_map(|s| match s.status {
-        StepStatus::Ready => Some(standing_at(&s.title, "ready")),
-        StepStatus::Active => Some(standing_at(&s.title, "active")),
-        _ => None,
-    })
+///
+/// EXCEPT AT THE MERGE. A train standing at `merged` with its `ci` step
+/// completed is spelled by [`awaiting_merge`] from that completed step's
+/// verdict — the live one on the job (`ci_verdict_latest`) when the
+/// conductor has noticed it move — never by the `merged` step's title:
+/// "DEPARTED — merged into main (ready, not yet done)" still read as
+/// departed for trains f7bd1e9d and 02801b05, red and never going to
+/// merge (a2d4d842).
+fn at_step(job_md: &Value, steps: &[Step]) -> Option<String> {
+    let at = steps
+        .iter()
+        .find(|s| matches!(s.status, StepStatus::Ready | StepStatus::Active))?;
+    let ci = find_step(steps, &CI).filter(|s| s.status == StepStatus::Completed);
+    let at_merge = at.spec_slug.as_deref() == Some(MERGED.slug) || at.title == MERGED.title;
+    if at_merge && let Some(ci) = ci {
+        let verdict = meta_str(job_md, "ci_verdict_latest")
+            .or_else(|| meta_str(&ci.metadata, "result"))
+            .unwrap_or("unknown");
+        return Some(awaiting_merge(
+            verdict,
+            meta_str(&ci.metadata, "checks"),
+            meta_str(&ci.metadata, "train_gate"),
+        ));
+    }
+    let status = if at.status == StepStatus::Ready {
+        "ready"
+    } else {
+        "active"
+    };
+    Some(standing_at(&at.title, status))
+}
+
+/// Where a train stands when its CI has spoken and its merge has not
+/// happened: the verdict, the failing checks by name when it is red,
+/// and that it has NOT merged — the one fact the `merged` step's
+/// perfect-tense title could never say. `checks` is the `ci` step's
+/// `name:CONCLUSION, …` summary; `gate_line` its `train_gate` line,
+/// which names the train gate as the failing half when the forge's
+/// checks name none. `boss orient` calls this on raw JSON, so the
+/// terminal and the yard say the same words.
+pub fn awaiting_merge(verdict: &str, checks: Option<&str>, gate_line: Option<&str>) -> String {
+    match verdict {
+        "failing" => {
+            let mut failed: Vec<&str> = checks
+                .unwrap_or_default()
+                .split(", ")
+                .filter_map(|c| c.trim().rsplit_once(':'))
+                .filter(|(_, conclusion)| *conclusion == "FAILURE")
+                .map(|(name, _)| name)
+                .collect();
+            if failed.is_empty() && gate_line.is_some_and(|g| g.starts_with("train gate: RED")) {
+                failed.push("train gate");
+            }
+            if failed.is_empty() {
+                "CI verdict RED — not merged".to_string()
+            } else {
+                format!("CI verdict RED ({} failed) — not merged", failed.join(", "))
+            }
+        }
+        "green" => "CI verdict green — not merged yet".to_string(),
+        other => format!("CI verdict {other} — not merged"),
+    }
 }
 
 /// A step a packet is STANDING AT, spelled so its name cannot be read
@@ -432,7 +488,7 @@ pub fn train_status(
         id: job.id.to_string(),
         title: job.title.clone(),
         phase,
-        at_step: at_step(steps),
+        at_step: at_step(&job.metadata, steps),
         block: block_of(job, steps, phase, stall_before),
         ci_result: find_step(steps, &CI)
             .and_then(|s| meta_str(&s.metadata, "result"))
@@ -3027,8 +3083,34 @@ mod tests {
     /// name cannot be read as the fact it names.
     #[test]
     fn a_step_the_train_stands_at_carries_its_status_beside_its_title() {
-        let steps = vec![
-            done("ci", "Yard inspection — CI verdict", "2026-09-23T07:20:56Z"),
+        let claimed = vec![step(
+            "converged",
+            "In transit — cluster converged",
+            StepStatus::Active,
+            json!({}),
+        )];
+        assert_eq!(
+            at_step(&json!({}), &claimed).as_deref(),
+            Some("In transit — cluster converged (active, not yet done)")
+        );
+    }
+
+    /// The shape trains f7bd1e9d and 02801b05 had on 2026-09-24: `ci`
+    /// completed `failing` with `CI / web` named, `merged` READY. The
+    /// fix above (648a68a9) still printed "DEPARTED — merged into main
+    /// (ready, not yet done)" for a train that could never depart, while
+    /// main had not moved (a2d4d842). A train at its merge is spelled
+    /// from the step it COMPLETED and the verdict that step holds.
+    fn at_the_merge(ci: Value) -> Vec<Step> {
+        let mut ci_md = ci;
+        ci_md["completed_at"] = json!("2026-09-24T17:20:32Z");
+        vec![
+            step(
+                "ci",
+                "Yard inspection — CI verdict",
+                StepStatus::Completed,
+                ci_md,
+            ),
             step(
                 "merged",
                 "DEPARTED — merged into main",
@@ -3041,21 +3123,62 @@ mod tests {
                 StepStatus::Pending,
                 json!({}),
             ),
-        ];
-        assert_eq!(
-            at_step(&steps).as_deref(),
-            Some("DEPARTED — merged into main (ready, not yet done)")
-        );
+        ]
+    }
 
-        let claimed = vec![step(
-            "converged",
-            "In transit — cluster converged",
-            StepStatus::Active,
-            json!({}),
-        )];
+    #[test]
+    fn a_red_train_at_its_merge_reads_red_and_never_departed() {
+        let steps = at_the_merge(json!({
+            "result": "failing",
+            "forge_result": "failing",
+            "checks": "CI / build-image (pull_request):SUCCESS, CI / locomotive (pull_request):SUCCESS, \
+                       CI / web (pull_request):FAILURE, CI / reclaim (pull_request):SUCCESS",
+            "train_gate": "train gate: running",
+        }));
+        let at = at_step(&json!({}), &steps).unwrap();
         assert_eq!(
-            at_step(&claimed).as_deref(),
-            Some("In transit — cluster converged (active, not yet done)")
+            at,
+            "CI verdict RED (CI / web (pull_request) failed) — not merged"
+        );
+        assert!(!at.contains("DEPARTED") && !at.contains("merged into main"));
+    }
+
+    #[test]
+    fn a_red_gate_under_a_green_forge_is_named_as_the_train_gate() {
+        let steps = at_the_merge(json!({
+            "result": "failing",
+            "forge_result": "green",
+            "checks": "CI / web (pull_request):SUCCESS",
+            "train_gate": "train gate: RED — the cars aboard are struck unless every failure lies in a file no car changed",
+        }));
+        assert_eq!(
+            at_step(&json!({}), &steps).as_deref(),
+            Some("CI verdict RED (train gate failed) — not merged")
+        );
+    }
+
+    #[test]
+    fn a_green_train_at_its_merge_says_it_has_not_merged_yet() {
+        let steps = at_the_merge(json!({"result": "green", "checks": "CI / web:SUCCESS"}));
+        assert_eq!(
+            at_step(&json!({}), &steps).as_deref(),
+            Some("CI verdict green — not merged yet")
+        );
+    }
+
+    /// The `ci` step is frozen at its first verdict; the conductor keeps
+    /// the moving one on the job as `ci_verdict_latest`. The label reads
+    /// the live one, the way the yard's lamp should.
+    #[test]
+    fn the_label_reads_the_live_verdict_over_the_frozen_one() {
+        let steps = at_the_merge(json!({"result": "failing", "checks": "CI / web:FAILURE"}));
+        assert_eq!(
+            at_step(&json!({"ci_verdict_latest": "green"}), &steps).as_deref(),
+            Some("CI verdict green — not merged yet")
+        );
+        assert_eq!(
+            at_step(&json!({"ci_verdict_latest": "aborted"}), &steps).as_deref(),
+            Some("CI verdict aborted — not merged")
         );
     }
 

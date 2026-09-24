@@ -55,7 +55,7 @@ test.describe('Admin new job kind — name-it entry', () => {
     await expect(create).toBeEnabled();
 
     await Promise.all([
-      page.waitForURL(new RegExp(`/it/registry/authoring/${JOB_ID}`), { timeout: 15_000 }),
+      page.waitForURL(new RegExp(`/it/registry/authoring/${JOB_ID}`)),
       create.click(),
     ]);
     // Landed on the workspace for the new design Job. Its h1 paints only

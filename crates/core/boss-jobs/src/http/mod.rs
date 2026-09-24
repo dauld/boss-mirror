@@ -31,6 +31,7 @@ pub mod machine_gate;
 
 mod borders;
 mod census;
+mod flights;
 mod jobs;
 mod kinds;
 mod plugins;
@@ -47,6 +48,7 @@ mod yard;
 
 use borders::*;
 use census::*;
+use flights::*;
 use jobs::*;
 use kinds::*;
 use plugins::*;
@@ -246,6 +248,11 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
         )
         .route("/api/jobs/sim-clock/stream", get(sim_clock_stream::<R, B>))
         .route("/api/jobs/assignments", get(list_assignments::<R, B>))
+        // The flights read (design c4c2a607, backlog 73c31776): the
+        // codes on for the CALLER, judged from the open packets that
+        // carry a `flight` block against their pinned protocol rows. A
+        // code it does not list is off.
+        .route("/api/flights/mine", get(flights_mine::<R, B>))
         // The queue-age lens (2a0b034e): how long every outstanding
         // obligation — ready/active step on an open packet — has
         // waited. Read-only, own row shape; Job and Step untouched.

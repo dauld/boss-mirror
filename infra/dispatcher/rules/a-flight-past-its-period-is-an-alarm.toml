@@ -1,0 +1,41 @@
+# Flags cannot rot (design c4c2a607 §4, backlog 73c31776 car 1).
+#
+# A flight is an open packet carrying a `flight` block
+# (`infra/platform/workflows/flight-a-change.toml`). Its fork lives in
+# SOURCE — `flightOn('<code>')` — so a flight nobody decides, or one
+# decided and never cleaned out, is a second code path that outlives the
+# question it was built to answer. Hourly, this files one alarm per
+# rotting flight per case:
+#   - PAST ITS PERIOD: turned on more than `observe_days` + `grace_days`
+#     (7) ago and no verdict (neither `decide` nor `pull` completed). An
+#     `extend` restarts the clock with the period it names.
+#   - DECIDED, NOT CLEANED UP: `decide` or `pull` completed more than
+#     `cleanup_days` (14) ago and `cleanup` has not.
+#
+# THE ARGS ARE THE DECLARATION: which steps start the clock, decide, and
+# clean up, and both bounds, ride this row — `jobs.flight_overdue` names
+# no protocol and no step, so reshaping `flight-a-change` is an edit to
+# this file, not a deploy. The handler's own test holds every slug here
+# to a step the shipped protocol has.
+#
+# HOURLY, NOT DAILY: the bounds are days, but the handler judges against
+# the tick's instant (`_at`), which only a sub-day cadence carries — the
+# idiom of `agent-held-real-work-is-watched-hourly`. On an hour with no
+# rotting flight it files nothing, and that zero is the healthy reading.
+[[rule]]
+name = "a-flight-past-its-period-is-an-alarm"
+why = """
+A TIMER over a THRESHOLD, the standing exemption: the condition is a
+decision that did NOT happen, and no event says "the observe period
+ended a week ago and nobody decided" or "the verdict is two weeks old and
+the fork is still in the code". A Workflow definition can say what a
+flight's steps require; it cannot notice that nobody took one. Design
+c4c2a607 (David, 2026-09-24): flags must not rot. It adds no routing and
+refuses nothing: one firing files ONE alarm per flight per case (never
+twice), withdraws it once the flight is decided or cleaned up, and never
+touches the flight's packet.
+"""
+schedule = { cadence = "hourly", anchor_date = "2026-09-24" }
+[[rule.do]]
+handler = "jobs.flight_overdue"
+args = { started_by = "\"turn-on,extend\"", decided_by = "\"decide,pull\"", cleaned_by = "\"cleanup\"", grace_days = "7", cleanup_days = "14" }

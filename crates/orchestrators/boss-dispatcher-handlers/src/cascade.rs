@@ -235,6 +235,20 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
                 "jobs.step.completed",
             ],
         ),
+        // The stale-flight watch (design c4c2a607, 73c31776): an hourly
+        // clock rule that files (`jobs.job.created`) one backlog-item
+        // alarm per flight past its observe period or decided and not
+        // cleaned up, and withdraws it through the step the alarm waits
+        // on (`jobs.step.completed`) or a note (`jobs.job.updated`).
+        // Every write is to its OWN alarm; it never touches the flight.
+        (
+            "jobs.flight_overdue",
+            vec![
+                "jobs.job.created",
+                "jobs.job.updated",
+                "jobs.step.completed",
+            ],
+        ),
         // The routing half of the same judgement (a3397b01): a step
         // held by a run that DIED is released — `ready`, unassigned,
         // the dead run's edge cleared. A step UPDATE, never a

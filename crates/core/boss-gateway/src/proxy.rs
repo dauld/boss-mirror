@@ -66,7 +66,7 @@ impl ProxyConfig {
         }
     }
 
-    fn upstream_url(&self) -> &str {
+    pub(crate) fn upstream_url(&self) -> &str {
         self.upstream.get_or_init(|| {
             let env_key = format!("BOSS_{}_UPSTREAM", self.name.to_uppercase());
             if let Ok(v) = std::env::var(&env_key) {

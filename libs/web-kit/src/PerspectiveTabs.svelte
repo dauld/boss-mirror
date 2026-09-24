@@ -327,4 +327,19 @@
     gap: 14px;
     flex: 0 0 auto;
   }
+
+  /* ON A PHONE (design 62de32ae decision 12, car G; the width is
+     PHONE_QUERY in ui/phone.ts, pinned by its test). Measured at 390px:
+     the bar's content ran to 877px, so the tab you are on, search,
+     feedback and sign-in were past the edge of the screen with no way
+     to reach them. The band keeps its 44px — every shell offsets below
+     it — and scrolls sideways inside itself instead; the wordmark gives
+     its room to the tabs, the mark stays. A scroll container clips what
+     hangs out of it, so the More menu is pinned under the band rather
+     than to its button. */
+  @media (max-width: 720px) {
+    .perspective-tabs { gap: 12px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+    .perspective-brand-name, .perspective-brand-sub { display: none; }
+    .perspective-more-menu { position: fixed; top: 44px; left: 8px; right: 8px; }
+  }
 </style>

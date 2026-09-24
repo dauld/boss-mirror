@@ -484,6 +484,36 @@ a:hover { color: var(--fog); }
 }
 .shell-main { grid-column: 2; }
 
+/* THE PHONE SHELL (design 62de32ae decision 12, car G). Measured
+   2026-09-24 at 390px on /it: the page was 1246px wide. The fixed
+   sidebar's 200px column is reserved at every width, and the content
+   column is `1fr` — `minmax(auto, 1fr)` — so it grew to its widest
+   child's min-content: the world map's 900px floor plus the gutters,
+   1046px. No page could have a phone view inside that. At phone width
+   the sidebar collapses into one row of its own links under the tab
+   bar, scrolling sideways inside itself, and the content column may be
+   narrower than its content (`minmax(0, 1fr)`), so a wide map scrolls
+   in its own frame instead of widening the page. The width is
+   PHONE_QUERY in it/yard/phone-strip.ts, pinned equal by its test. */
+@media (max-width: 720px) {
+  .app-shell { grid-template-columns: minmax(0, 1fr); }
+  .shell-sidebar {
+    position: static;
+    width: auto;
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: none;
+    border-bottom: 1px solid var(--hairline);
+  }
+  .shell-nav { display: flex; align-items: center; gap: var(--s1); padding: var(--s2); overflow: visible; }
+  .shell-nav-personal, .shell-nav-group { display: flex; gap: var(--s1); margin: 0; padding: 0; border: none; }
+  .shell-nav-group-label, .shell-sidebar-footer { display: none; }
+  .shell-nav-item { white-space: nowrap; }
+  .shell-main { grid-column: 1; min-width: 0; }
+  .shell-content { padding: 0 16px 24px; }
+}
+
 /* My Day page */
 .me-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .me-stats { display: flex; gap: 12px; flex-wrap: wrap; }

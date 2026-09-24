@@ -1092,6 +1092,129 @@ impl Conductor {
         cars
     }
 
+    /// The files one car changed, from the conductor's clone: `git diff
+    /// --name-only origin/main...<boarded head>` — three dots, from the
+    /// merge-base, so a car on an older base reports its own change and
+    /// not main's since. Any git failure answers empty, which names the
+    /// car for nothing: no hold, the release alone.
+    fn car_changed_files(&self, head: &str) -> Vec<String> {
+        let range = format!("origin/main...{head}");
+        sh(&[
+            "git",
+            "-C",
+            self.cfg.clone.as_str(),
+            "diff",
+            "--name-only",
+            &range,
+        ])
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            stdout_str(&o)
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Brake the car(s) a JUDGED red names (a2d4d842): a file the
+    /// verdict locates that exactly ONE car aboard changed puts that car
+    /// on hold — `boss hold`'s marker on its open review step, so the
+    /// dock will not board it and `boss release` takes it off. Without
+    /// it the car goes back to the dock, re-boards the next train alone,
+    /// goes red again on the same file, and only its second strike stops
+    /// it — one more train spent learning what this one already said.
+    ///
+    /// BEST-EFFORT and silent-proof: every refusal logs a line naming
+    /// the car and why, and nothing here can abort the cancel.
+    async fn hold_named_cars(
+        &self,
+        t: &Value,
+        tid: &str,
+        named: &[String],
+        gate_fails: &[String],
+        gate_excerpt: &[(String, String)],
+        rollup: Option<&Value>,
+    ) {
+        let located = verdict_located_files(gate_fails, gate_excerpt, rollup);
+        if located.is_empty() {
+            log(format!(
+                "train {}: judged red names no file — releasing without a hold",
+                id8(tid)
+            ));
+            return;
+        }
+        let cars = self.boarded_cars(t).await;
+        let aboard = releasable_cars(&cars, tid);
+        let car_files: Vec<(String, Vec<String>)> = aboard
+            .iter()
+            .filter_map(|c| {
+                let id = c.get("id").and_then(Value::as_str)?;
+                let head = boarded_head(c)?;
+                Some((id.to_string(), self.car_changed_files(head)))
+            })
+            .collect();
+        let to_hold = cars_to_hold(&located, &car_files);
+        if to_hold.is_empty() {
+            log(format!(
+                "train {}: judged red in {} — no single car aboard changed it, so none is held",
+                id8(tid),
+                located.join(", ")
+            ));
+        }
+        for (cid, files) in to_hold {
+            let Some(car) = aboard
+                .iter()
+                .find(|c| c.get("id").and_then(Value::as_str) == Some(cid.as_str()))
+            else {
+                continue;
+            };
+            let review = match crate::steps::holdable(car) {
+                Ok(r) => r,
+                Err(why) => {
+                    log(format!("car {}: not held — {why}", id8(&cid)));
+                    continue;
+                }
+            };
+            if let Some(already) = review
+                .get("metadata")
+                .and_then(boss_jobs::stranded::hold_reason)
+            {
+                log(format!("car {}: already held ({already})", id8(&cid)));
+                continue;
+            }
+            let Some(sid) = review.get("id").and_then(Value::as_str) else {
+                log(format!(
+                    "car {}: not held — its review step has no id",
+                    id8(&cid)
+                ));
+                continue;
+            };
+            let reason = judged_red_hold_reason(tid, named, &files);
+            if self.cfg.dry {
+                log(format!("DRY: would hold car {} ({reason})", id8(&cid)));
+                continue;
+            }
+            match self
+                .api(
+                    Method::PATCH,
+                    &format!("/api/jobs/{cid}/steps/{sid}/metadata"),
+                    Some(crate::steps::hold_patch(&reason)),
+                )
+                .await
+            {
+                Ok(_) => log(format!("held car {}: {reason}", id8(&cid))),
+                Err(e) => log(format!(
+                    "car {}: hold not written (non-fatal; the cancel and its strike stand): {e}",
+                    id8(&cid)
+                )),
+            }
+        }
+    }
+
     /// The evidence `red_outside_consist` judges, read from the
     /// conductor's own clone, where the train was assembled on main:
     /// the consist's changed files (`git diff --name-only
@@ -1542,26 +1665,60 @@ impl Conductor {
                 }
                 _ => None,
             };
+            // A JUDGED red — CI and the train gate both finished, one of
+            // them red, the red naming its check — does not wait out the
+            // stall rule (a2d4d842): trains f7bd1e9d and 02801b05 held
+            // the one track 40 and 27 minutes on 2026-09-24, each red on
+            // a named `CI / web` with its gate red on the same
+            // svelte-check, until an operator cancelled by hand. The
+            // six-hour rule stays the backstop for every red this does
+            // not judge.
+            let judged = judged_red_checks(
+                &t,
+                forge_verdict,
+                gate.as_ref(),
+                info.get("statusCheckRollup"),
+                &gate_fails,
+            );
             // (reason, strike, outside release granted)
             let cancel = match decision {
                 Some(OutsideRelease::Release(reason)) => Some((reason, false, true)),
-                _ => auto_cancel_reason(&t, verdict, now, policy.stall_hours).map(|reason| {
-                    // Anything but a granted release is today's path,
-                    // strikes and all — an unread consist or a spent
-                    // release proves nothing for the cars.
-                    let reason = match &spent_note {
-                        Some(note) => format!("{reason} — {note}"),
-                        None => reason,
-                    };
-                    let strike = verdict_strikes_cars(verdict, info.get("statusCheckRollup"));
-                    (reason, strike, false)
-                }),
+                _ => judged
+                    .as_deref()
+                    .map(|named| judged_red_cancel_reason(named, policy.stall_hours))
+                    .or_else(|| auto_cancel_reason(&t, verdict, now, policy.stall_hours))
+                    .map(|reason| {
+                        // Anything but a granted release is today's path,
+                        // strikes and all — an unread consist or a spent
+                        // release proves nothing for the cars.
+                        let reason = match &spent_note {
+                            Some(note) => format!("{reason} — {note}"),
+                            None => reason,
+                        };
+                        let strike = verdict_strikes_cars(verdict, info.get("statusCheckRollup"));
+                        (reason, strike, false)
+                    }),
             };
             if self.cfg.auto_cancel
                 && info.get("state").and_then(Value::as_str) == Some("OPEN")
                 && let Some((reason, strike, outside_release)) = cancel
             {
                 log(format!("train {} auto-cancelling: {reason}", id8(&tid)));
+                // The car the failure names is braked BEFORE the release
+                // clears its train marker, so it never reads boardable
+                // in between. Best-effort: a hold that cannot be written
+                // leaves the cancel and its strike standing.
+                if !outside_release && let Some(named) = judged.as_deref() {
+                    self.hold_named_cars(
+                        &t,
+                        &tid,
+                        named,
+                        &gate_fails,
+                        &gate_excerpt,
+                        info.get("statusCheckRollup"),
+                    )
+                    .await;
+                }
                 if self.cfg.dry {
                     log(format!("DRY: would cancel {} ({reason})", id8(&tid)));
                 } else {
@@ -5100,6 +5257,192 @@ mod tests {
             deleted.contains(&"feat/x".to_string()),
             "the rerail original was never a car, so only its record can \
              reach it — leaked forever without this: {deleted:?}"
+        );
+    }
+
+    // -- a judged red brakes the car it names (a2d4d842) -------------------
+    //
+    // Train f7bd1e9d's shape: two cars aboard, the verdict locating its
+    // failure in apps/web/src/it/yard/phone-strip.test.ts, which only car
+    // G changed. Real git for the per-car diff (the conductor's clone,
+    // with origin/main at the base both cars branched from) and an
+    // in-process jobs API recording the step-metadata PATCH, because the
+    // claim is that the hold lands on the RIGHT car's review step through
+    // the door `boss hold` uses — a faked diff would only prove this file
+    // agrees with itself.
+
+    fn rev_parse_head(dir: &std::path::Path) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git rev-parse");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn commit_file(clone: &std::path::Path, from: &str, path: &str, body: &str) -> String {
+        git_ok(clone, &["checkout", "-q", from]);
+        let file = clone.join(path);
+        std::fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&file, body).expect("write");
+        git_ok(clone, &["add", "-A"]);
+        git_ok(clone, &["commit", "-qm", path]);
+        rev_parse_head(clone)
+    }
+
+    type StepPatches = std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>>;
+
+    async fn hold_jobs_api(cars: Vec<Value>) -> (String, StepPatches) {
+        use axum::extract::Path;
+        use axum::routing::{get, patch};
+        use axum::{Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        let patches: StepPatches = Arc::new(Mutex::new(Vec::new()));
+        let rec = patches.clone();
+        let app = Router::new()
+            .route(
+                "/api/jobs/{id}",
+                get(move |Path(id): Path<String>| {
+                    let cars = cars.clone();
+                    async move {
+                        Json(
+                            cars.into_iter()
+                                .find(|c| c["id"] == json!(id))
+                                .unwrap_or(json!({})),
+                        )
+                    }
+                }),
+            )
+            .route(
+                "/api/jobs/{id}/steps/{sid}/metadata",
+                patch(
+                    move |Path((id, sid)): Path<(String, String)>, Json(body): Json<Value>| {
+                        let rec = rec.clone();
+                        async move {
+                            rec.lock().unwrap().push((id, sid, body));
+                            Json(json!({}))
+                        }
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), patches)
+    }
+
+    fn aboard_car(id: &str, head: &str, review_md: Value) -> Value {
+        json!({
+            "id": id, "kind": "ship-a-change", "status": "open",
+            "metadata": {"train": "t1", "boarded_head": head},
+            "steps": [{"id": format!("{id}-rev"), "spec_slug": "review",
+                       "title": "Open for review", "status": "ready", "metadata": review_md}]
+        })
+    }
+
+    const PHONE_STRIP: &str = "apps/web/src/it/yard/phone-strip.test.ts";
+
+    fn judged_excerpt() -> Vec<(String, String)> {
+        vec![(
+            "svelte-check".to_string(),
+            format!(
+                "/gate-target/repo/{PHONE_STRIP}:83:26\n\
+                 Error: Conversion of type '{{ thirds: {{ third: string; }}[]; }}' may be a mistake\n"
+            ),
+        )]
+    }
+
+    #[tokio::test]
+    async fn a_judged_red_holds_the_one_car_that_changed_the_failing_file() {
+        let (_g, clone) = clone_fixture("judged-red-hold");
+        let base = rev_parse_head(&clone);
+        let car_g = commit_file(&clone, &base, PHONE_STRIP, "the cast\n");
+        let shed = commit_file(
+            &clone,
+            &base,
+            "crates/core/boss-jobs/src/car.rs",
+            "// shed\n",
+        );
+        let cars = vec![
+            aboard_car("c-g", &car_g, json!({})),
+            aboard_car("c-shed", &shed, json!({})),
+        ];
+        let (jobs, patches) = hold_jobs_api(cars).await;
+        let mut c = cleanup_conductor(
+            "forgejo",
+            Box::new(OperatorCancelForge {
+                close_ok: true,
+                close_called: Default::default(),
+            }),
+        );
+        c.cfg.jobs = jobs;
+        c.cfg.clone = clone.display().to_string();
+        let train = json!({"id": "t1", "metadata": {"boarded_jobs": ["c-g", "c-shed"]}});
+        let named = vec![
+            "CI / web (pull_request)".to_string(),
+            "svelte-check".to_string(),
+        ];
+
+        c.hold_named_cars(&train, "t1", &named, &[], &judged_excerpt(), None)
+            .await;
+
+        let patches = patches.lock().unwrap().clone();
+        assert_eq!(
+            patches.len(),
+            1,
+            "one car held, the shed car not: {patches:?}"
+        );
+        let (id, sid, body) = &patches[0];
+        assert_eq!((id.as_str(), sid.as_str()), ("c-g", "c-g-rev"));
+        let hold = body["hold"].as_str().unwrap_or_default();
+        assert!(
+            hold.contains(PHONE_STRIP) && hold.contains("CI / web (pull_request)"),
+            "the hold names the file and the check: {hold}"
+        );
+        assert_eq!(
+            boss_jobs::stranded::hold_reason(body).as_deref(),
+            Some(hold),
+            "written in the one shape the dock's hold predicate reads"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_car_already_held_keeps_its_own_reason() {
+        let (_g, clone) = clone_fixture("judged-red-held");
+        let base = rev_parse_head(&clone);
+        let car_g = commit_file(&clone, &base, PHONE_STRIP, "the cast\n");
+        let cars = vec![aboard_car(
+            "c-g",
+            &car_g,
+            json!({"hold": "waiting on a rebase by hand"}),
+        )];
+        let (jobs, patches) = hold_jobs_api(cars).await;
+        let mut c = cleanup_conductor(
+            "forgejo",
+            Box::new(OperatorCancelForge {
+                close_ok: true,
+                close_called: Default::default(),
+            }),
+        );
+        c.cfg.jobs = jobs;
+        c.cfg.clone = clone.display().to_string();
+        let train = json!({"id": "t1", "metadata": {"boarded_jobs": ["c-g"]}});
+
+        c.hold_named_cars(
+            &train,
+            "t1",
+            &["svelte-check".into()],
+            &[],
+            &judged_excerpt(),
+            None,
+        )
+        .await;
+
+        assert!(
+            patches.lock().unwrap().is_empty(),
+            "an operator's hold is not overwritten"
         );
     }
 }

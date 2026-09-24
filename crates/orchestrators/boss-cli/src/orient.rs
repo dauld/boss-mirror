@@ -54,19 +54,58 @@ fn at_step(v: &Value) -> String {
 /// done (648a68a9); the phrase is the server's (`yard::standing_at`),
 /// so this line and the yard cannot disagree. `at_step` itself stays the
 /// bare title — the shed and the residue sweep compare it to one.
+///
+/// AT THE MERGE the line is spelled from the completed `ci` step and its
+/// verdict (`yard::awaiting_merge`) — the live one on the train when
+/// the conductor noticed it move — because "DEPARTED — merged into main
+/// (ready, not yet done)" still read as departed for red trains that
+/// would never merge (f7bd1e9d, 02801b05; a2d4d842).
 fn in_transit_line(t: &Value) -> String {
     let title = t.get("title").and_then(Value::as_str).unwrap_or("?");
-    let at = t
+    let steps: Vec<&Value> = t
         .get("steps")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
+        .collect();
+    let slug_of = |s: &Value| {
+        s.get("spec_slug")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let ci = steps
+        .iter()
+        .find(|s| slug_of(s).as_deref() == Some("ci"))
+        .filter(|s| s.get("status").and_then(Value::as_str) == Some("completed"));
+    let at = steps
+        .iter()
         .find_map(|s| {
             let status = s.get("status").and_then(Value::as_str)?;
-            matches!(status, "ready" | "active").then(|| {
-                let step = s.get("title").and_then(Value::as_str).unwrap_or("?");
-                boss_jobs::yard::standing_at(step, status)
-            })
+            if !matches!(status, "ready" | "active") {
+                return None;
+            }
+            if slug_of(s).as_deref() == Some("merged")
+                && let Some(ci) = ci
+            {
+                let ci_md = |k: &str| {
+                    ci.get("metadata")
+                        .and_then(|m| m.get(k))
+                        .and_then(Value::as_str)
+                };
+                let verdict = md_str(t, "ci_verdict_latest");
+                let verdict = if verdict.is_empty() {
+                    ci_md("result").unwrap_or("unknown")
+                } else {
+                    verdict
+                };
+                return Some(boss_jobs::yard::awaiting_merge(
+                    verdict,
+                    ci_md("checks"),
+                    ci_md("train_gate"),
+                ));
+            }
+            let step = s.get("title").and_then(Value::as_str).unwrap_or("?");
+            Some(boss_jobs::yard::standing_at(step, status))
         })
         .unwrap_or_else(|| "—".to_string());
     format!("    {title}  at: {at}")
@@ -2163,19 +2202,51 @@ mod tests {
     fn a_train_in_transit_names_the_status_of_the_step_it_stands_at() {
         use serde_json::json;
         let train = json!({
-            "title": "PR train 2026-09-23 07:01",
+            "title": "PR train 2026-09-22 20:01",
             "steps": [
-                {"title": "Yard inspection — CI verdict", "status": "completed"},
-                {"title": "DEPARTED — merged into main", "status": "ready"},
-                {"title": "Train arrived", "status": "pending"},
+                {"spec_slug": "deployed", "title": "In transit — deployed to the playground", "status": "completed"},
+                {"spec_slug": "converged", "title": "In transit — cluster converged", "status": "ready"},
+                {"spec_slug": "arrived", "title": "Train arrived", "status": "pending"},
             ],
         });
         assert_eq!(
             super::in_transit_line(&train),
-            "    PR train 2026-09-23 07:01  at: DEPARTED — merged into main (ready, not yet done)"
+            "    PR train 2026-09-22 20:01  at: In transit — cluster converged (ready, not yet done)"
         );
         let nowhere = json!({"title": "PR train x", "steps": []});
         assert_eq!(super::in_transit_line(&nowhere), "    PR train x  at: —");
+    }
+
+    /// Train f7bd1e9d, 2026-09-24 17:20Z: CI red on a named `CI / web`,
+    /// `merged` READY, main unmoved — and this line still read "DEPARTED
+    /// — merged into main (ready, not yet done)" (a2d4d842). At the merge
+    /// the line is spelled from the completed `ci` step and its verdict,
+    /// in the yard's words (`boss_jobs::yard::awaiting_merge`).
+    #[test]
+    fn a_red_train_at_its_merge_reads_red_and_never_departed() {
+        use serde_json::json;
+        let train = json!({
+            "title": "PR train 2026-09-24 17:17",
+            "metadata": {},
+            "steps": [
+                {"spec_slug": "ci", "title": "Yard inspection — CI verdict", "status": "completed",
+                 "metadata": {"result": "failing",
+                              "checks": "CI / build-image (pull_request):SUCCESS, CI / locomotive (pull_request):SUCCESS, CI / web (pull_request):FAILURE, CI / reclaim (pull_request):SUCCESS",
+                              "train_gate": "train gate: running"}},
+                {"spec_slug": "merged", "title": "DEPARTED — merged into main", "status": "ready"},
+                {"spec_slug": "deployed", "title": "In transit — deployed to the playground", "status": "pending"},
+            ],
+        });
+        assert_eq!(
+            super::in_transit_line(&train),
+            "    PR train 2026-09-24 17:17  at: CI verdict RED (CI / web (pull_request) failed) — not merged"
+        );
+        let mut green = train.clone();
+        green["metadata"]["ci_verdict_latest"] = json!("green");
+        assert_eq!(
+            super::in_transit_line(&green),
+            "    PR train 2026-09-24 17:17  at: CI verdict green — not merged yet"
+        );
     }
 
     /// A TRAIN's gate-run (128b5496) in the GATING lane is the train being
