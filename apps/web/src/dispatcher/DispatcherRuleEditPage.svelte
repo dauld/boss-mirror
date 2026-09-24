@@ -33,9 +33,15 @@
 
   let isNew = $derived(ruleName === 'new');
 
+  // `missing` (the read answered: no versions) and `failed` (the read
+  // did not answer) used to be one `error` arm painting its message as
+  // the header subtitle, so a dispatcher outage read like a rule that
+  // does not exist, with no marker for the outage crawl (backlog
+  // d7732e88).
   type LoadState =
     | { kind: 'loading' }
-    | { kind: 'error'; message: string }
+    | { kind: 'missing'; message: string }
+    | { kind: 'failed'; message: string }
     | { kind: 'ready'; versions: ReadonlyArray<RuleVersion> };
 
   let loadState = $state<LoadState>({ kind: 'loading' });
@@ -77,7 +83,7 @@
     try {
       const versions = await listVersions(ruleName);
       if (versions.length === 0) {
-        loadState = { kind: 'error', message: `No versions found for "${ruleName}".` };
+        loadState = { kind: 'missing', message: `No versions found for "${ruleName}".` };
         return;
       }
       // Seed from the active version, else the latest (versions are
@@ -86,7 +92,7 @@
       seedFrom(seed);
       loadState = { kind: 'ready', versions };
     } catch (e) {
-      loadState = { kind: 'error', message: e instanceof Error ? e.message : String(e) };
+      loadState = { kind: 'failed', message: e instanceof Error ? e.message : String(e) };
     }
   }
 
@@ -212,10 +218,23 @@
   <div class="catalog theme-exec">
     <p class="empty">Loading…</p>
   </div>
-{:else if loadState.kind === 'error'}
+{:else if loadState.kind === 'missing'}
   <div class="catalog theme-exec">
     <Breadcrumb to={href('/it/registry/rules')}>← All dispatcher rules</Breadcrumb>
     <PageHeader eyebrow="Platform · Dispatcher rule" title={ruleName} subtitle={loadState.message} />
+  </div>
+{:else if loadState.kind === 'failed'}
+  <div class="catalog theme-exec">
+    <Breadcrumb to={href('/it/registry/rules')}>← All dispatcher rules</Breadcrumb>
+    <PageHeader
+      eyebrow="Platform · Dispatcher rule"
+      title={ruleName}
+      subtitle="Versions unknown — the registry read failed"
+    />
+    <!-- load-failed + role=alert: the shared marker the outage crawl
+         asserts (tests/mocked/_routes.ts FAILURE_MARKER), in the rules
+         list's own words for its failed read (backlog d7732e88). -->
+    <p class="empty load-failed" role="alert" style="color:var(--err); padding:0 24px">Failed to load: {loadState.message}</p>
   </div>
 {:else}
   {@const versions = loadState.versions}

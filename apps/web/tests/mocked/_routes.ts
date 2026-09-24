@@ -13,9 +13,11 @@
 /// Every top-level surface a ceo persona reaches, from the router's
 /// exact-match routes. Pure-action / form-submit routes (/login,
 /// /finance/new, /finance/journal-entries/new) are excluded — the crawls
-/// assert surfaces RENDER, not that forms submit. Two detail routes are
+/// assert surfaces RENDER, not that forms submit. Detail routes are
 /// included (a Workflow + a marketing asset) because the mock seeds them,
-/// and that is where the omitted-field crashes live.
+/// and that is where the omitted-field crashes live — and one per
+/// parameterised catalog path (the rule editor), because a pattern is
+/// not a URL a crawl can open.
 ///
 /// Pinned against the route catalog by route-smoke.mocked.spec.ts, so a
 /// newly registered surface is crawled by default — by BOTH crawls.
@@ -32,6 +34,14 @@ export const ROUTES: ReadonlyArray<string> = [
   // this list crawls exactly what the catalog declares and nothing
   // else answers.
   '/it', '/it/registry/subjects', '/it/registry/dispatcher', '/it/registry/rules',
+  // The rule editor — a detail route, because its catalog path is the
+  // pattern /it/registry/rules/:ruleName (car 3071e235) and a pattern
+  // is not a URL. route-smoke's drift test holds every parameterised
+  // catalog path to a row here that routes to it (backlog d7732e88).
+  // Under the mock's `[]` catch-all the versions read answers empty, so
+  // the editor paints "No versions found"; under the outage it paints
+  // `load-failed`.
+  '/it/registry/rules/auto-park-on-gate-green',
   '/it/operate/perf',
   '/it/operate/atlas', '/it/registry/step-plugins', '/it/kb', '/it/design',
   '/it/design/experiments',

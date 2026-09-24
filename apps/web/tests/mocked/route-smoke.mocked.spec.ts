@@ -166,11 +166,17 @@ test.describe('the crawl covers every registered surface', () => {
 
   test('every catalog route is crawled or deferred with a reason', async () => {
     const { ROUTE_CATALOG } = await import('../../src/shell/nav-catalog');
-    const crawled = new Set(ROUTES);
+    const openedAs = await patternOf();
+    // A parameterised catalog path (/it/registry/rules/:ruleName) is a
+    // pattern no crawl can open, so it counts as crawled when a ROUTES
+    // row OPENS as it — routePattern, the spelling surface-opens records
+    // and the catalog uses. This filter used to drop every path with a
+    // `:` on the comment "covered by the detail routes above", which
+    // nothing checked: no row rendered the rule editor (backlog d7732e88).
+    const crawled = new Set([...ROUTES, ...ROUTES.map(openedAs)]);
     const missing = Object.values(ROUTE_CATALOG)
       .map((r) => (r as { path: string }).path)
-      // Parameterised paths are covered by the detail routes above.
-      .filter((p) => typeof p === 'string' && !p.includes(':'))
+      .filter((p) => typeof p === 'string')
       .filter((p) => !crawled.has(p) && !DEFERRED.has(p))
       .sort();
     expect(
@@ -179,4 +185,27 @@ test.describe('the crawl covers every registered surface', () => {
         `or to DEFERRED with the reason they cannot be crawled yet`,
     ).toEqual([]);
   });
+
+  test('a parameterised path is crawled through a row that opens as it — the rule editor', async () => {
+    // The test above counts a `:` catalog path as crawled only through a
+    // ROUTES row whose routePattern equals it. The rule editor's catalog
+    // path is that pattern (car 3071e235), so its row must open as it,
+    // or the editor is registered and never rendered (backlog d7732e88).
+    const openedAs = await patternOf();
+    const editors = ROUTES.filter((r) => openedAs(r) === '/it/registry/rules/:ruleName');
+    expect(editors).toEqual(['/it/registry/rules/auto-park-on-gate-green']);
+  });
 });
+
+/// The pattern a crawled path opens as — the router's parse, spelled by
+/// routePattern the way surface-opens records it and the catalog names a
+/// parameterised path. parseRoute reads the query string off `window`
+/// for /jobs and /search; this is Node and ROUTES carries no query, so
+/// it gets the one field it reads, empty (as interaction-crawl's
+/// servedBySpa does).
+async function patternOf(): Promise<(path: string) => string> {
+  const { parseRoute } = await import('../../src/router');
+  const { routePattern } = await import('../../src/shell/surface-opens');
+  (globalThis as { window?: unknown }).window = { location: { search: '' } };
+  return (path) => routePattern(parseRoute(path), path);
+}
