@@ -2230,8 +2230,10 @@ pub(crate) fn tenant_receipt_verdict(
     }
 }
 
-/// The report, against an explicit base — the seam the wire tests go
-/// through.
+/// The report, against an explicit base, for a run with no tenant
+/// receipt — the seam the wire tests go through. The verb itself calls
+/// [`report_with_receipt_at`], so this exists only under test.
+#[cfg(test)]
 pub(crate) async fn report_at(
     http: &reqwest::Client,
     base: &str,
