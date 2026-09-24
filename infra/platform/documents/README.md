@@ -26,6 +26,15 @@ are about EVIDENCE and REFUSAL — measuring now rather than quoting the
 brief, an empty read as a wrong read until a control says otherwise, a
 gap list that matches the ids filed — not about cargo.
 
+A THIRD, SELECTED BY THE PACKET. `tenant-builder-rules.md` (design
+fd8b5143, backlog 6a34e9bc) serves a packet whose deliverable is in a
+tenant repository (`metadata.tenant_repo`): `boss dispatch` briefs such
+a packet in the `tenant` lane when its step's block names a car-lane
+profile, rather than refusing it. It builds a branch of the tenant repo
+the instance declares, checks it with `boss tenant check`, and ends
+`delivered` on that check's copied output; landing on tenant main is
+`merge-tenant-main` on David's approval, never a push of the builder's.
+
 WHICH PROFILES NEED A DOCUMENT IS NOT A LIST HERE (CLAUDE.md 9a): the
 tests in `boss_cli::documents` read the profiles off the platform
 Workflow bundle's `agent` blocks and require a document for each, so a
