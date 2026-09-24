@@ -3,7 +3,7 @@
 //! Per `docs/architecture-decisions.md` §Calendar (the
 //! jobs↔calendar hook reserves before persistence). Every
 //! step whose metadata carries the trio (`scheduled_at` as
-//! RFC3339, `duration_hours` as a positive number, `assignee_id`
+//! RFC3339, `duration_minutes` as a positive number, `assignee_id`
 //! as a string) gets a calendar reservation when it transitions
 //! to `active`; the reservation is cancelled when the step
 //! transitions to `skipped` (an abandoned branch).
@@ -80,11 +80,11 @@ pub async fn apply_step_transition(
     let leaving_active = old.status == StepStatus::Active && new.status == StepStatus::Skipped;
 
     if entering_progress {
-        let Some((scheduled_at, duration_hours, assignee_id)) = scheduling_fields(new) else {
+        let Some((scheduled_at, duration_minutes, assignee_id)) = scheduling_fields(new) else {
             return Ok(HookOutcome::NoOp);
         };
         let end =
-            scheduled_at + chrono::Duration::milliseconds((duration_hours * 3_600_000.0) as i64);
+            scheduled_at + chrono::Duration::milliseconds((duration_minutes * 60_000.0) as i64);
         let window = match TimeWindow::new(scheduled_at, end) {
             Ok(w) => w,
             Err(msg) => {
@@ -134,9 +134,15 @@ pub async fn apply_step_transition(
     Ok(HookOutcome::NoOp)
 }
 
-/// Pull (scheduled_at, duration_hours, assignee_id) out of step
+/// Pull (scheduled_at, duration_minutes, assignee_id) out of step
 /// metadata. Returns `None` if any are missing or malformed —
 /// "incomplete schedule" means "no reservation".
+///
+/// `duration_minutes` is the one name: the `scheduling` StepType
+/// declares it and the Schedule button writes it. This read
+/// `duration_hours` until 2026-09-24 — a name no StepType declares and
+/// nothing writes into step metadata — so no scheduled step ever
+/// reserved (backlog a0b8e5bd).
 fn scheduling_fields(step: &Step) -> Option<(DateTime<Utc>, f64, String)> {
     let assignee = step.assignee_id.as_ref()?.trim();
     if assignee.is_empty() {
@@ -150,7 +156,7 @@ fn scheduling_fields(step: &Step) -> Option<(DateTime<Utc>, f64, String)> {
         .map(|dt| dt.with_timezone(&Utc))?;
     let duration = step
         .metadata
-        .get("duration_hours")
+        .get("duration_minutes")
         .and_then(|v| v.as_f64())
         .filter(|n| *n > 0.0)?;
     Some((scheduled, duration, assignee.to_string()))
@@ -167,14 +173,14 @@ mod tests {
         status: StepStatus,
         assignee: Option<&str>,
         scheduled_at: Option<&str>,
-        duration_hours: Option<f64>,
+        duration_minutes: Option<f64>,
     ) -> Step {
         let mut metadata = serde_json::Map::new();
         if let Some(s) = scheduled_at {
             metadata.insert("scheduled_at".into(), json!(s));
         }
-        if let Some(d) = duration_hours {
-            metadata.insert("duration_hours".into(), json!(d));
+        if let Some(d) = duration_minutes {
+            metadata.insert("duration_minutes".into(), json!(d));
         }
         Step {
             id: StepId::new(),
@@ -206,13 +212,13 @@ mod tests {
             StepStatus::Pending,
             Some("emp-1"),
             Some("2026-04-27T10:00:00Z"),
-            Some(2.0),
+            Some(120.0),
         );
         let new = step_with(
             StepStatus::Active,
             Some("emp-1"),
             Some("2026-04-27T10:00:00Z"),
-            Some(2.0),
+            Some(120.0),
         );
         let out = apply_step_transition(None, &old, &new, "test")
             .await
@@ -227,14 +233,14 @@ mod tests {
             StepStatus::Pending,
             Some("emp-1"),
             Some("2026-04-27T10:00:00Z"),
-            Some(2.0),
+            Some(120.0),
         );
         let new = {
             let mut s = step_with(
                 StepStatus::Active,
                 Some("emp-1"),
                 Some("2026-04-27T10:00:00Z"),
-                Some(2.0),
+                Some(120.0),
             );
             // Re-use the SAME id as old for the reservation_ref_id.
             s.id = old.id;
@@ -247,19 +253,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_schedule_buttons_write_makes_a_reservation() {
+        // The step shaped EXACTLY as SchedulingSurface.svelte's
+        // `persist('active')` PUTs it: status active, the assignee on
+        // the step, and metadata carrying location / scheduled_at /
+        // `duration_minutes` as an integer — the name the live
+        // `scheduling` StepType declares. Until 2026-09-24 the hook
+        // read `duration_hours`, which nothing writes, so this exact
+        // write reserved nothing (backlog a0b8e5bd).
+        let fake = Arc::new(FakeCalendarClient::new());
+        let cal: Arc<dyn CalendarClient> = fake.clone();
+        let metadata = json!({
+            "location": "bay-3",
+            "scheduled_at": "2026-04-27T10:00:00Z",
+            "duration_minutes": 90,
+        });
+        let old = step_with(StepStatus::Ready, None, None, None);
+        let mut new = old.clone();
+        new.status = StepStatus::Active;
+        new.assignee_id = Some("emp-1".into());
+        new.metadata = metadata;
+
+        let out = apply_step_transition(Some(&cal), &old, &new, "emp-1")
+            .await
+            .unwrap();
+        assert_eq!(out, HookOutcome::Reserved);
+
+        let calls = fake.calls();
+        let Some(FakeCall::Reserve(req)) = calls.last() else {
+            panic!("expected a Reserve call, got {calls:?}");
+        };
+        assert_eq!(req.subject, Subject::new("employee", "emp-1"));
+        assert_eq!(req.reason_ref_id, new.id.to_string());
+        assert_eq!(
+            req.window.end - req.window.start,
+            chrono::Duration::minutes(90),
+            "the window is the step's duration_minutes, not hours"
+        );
+    }
+
+    #[tokio::test]
     async fn missing_assignee_skips_reservation() {
         let cal: Arc<dyn CalendarClient> = Arc::new(FakeCalendarClient::new());
         let old = step_with(
             StepStatus::Pending,
             None,
             Some("2026-04-27T10:00:00Z"),
-            Some(2.0),
+            Some(120.0),
         );
         let new = step_with(
             StepStatus::Active,
             None,
             Some("2026-04-27T10:00:00Z"),
-            Some(2.0),
+            Some(120.0),
         );
         let out = apply_step_transition(Some(&cal), &old, &new, "test")
             .await
@@ -270,8 +316,8 @@ mod tests {
     #[tokio::test]
     async fn missing_scheduled_at_skips_reservation() {
         let cal: Arc<dyn CalendarClient> = Arc::new(FakeCalendarClient::new());
-        let old = step_with(StepStatus::Pending, Some("emp-1"), None, Some(2.0));
-        let new = step_with(StepStatus::Active, Some("emp-1"), None, Some(2.0));
+        let old = step_with(StepStatus::Pending, Some("emp-1"), None, Some(120.0));
+        let new = step_with(StepStatus::Active, Some("emp-1"), None, Some(120.0));
         let out = apply_step_transition(Some(&cal), &old, &new, "test")
             .await
             .unwrap();
@@ -308,13 +354,13 @@ mod tests {
             StepStatus::Pending,
             Some("emp-1"),
             Some("2026-04-27T10:00:00Z"),
-            Some(2.0),
+            Some(120.0),
         );
         let new = step_with(
             StepStatus::Active,
             Some("emp-1"),
             Some("2026-04-27T10:00:00Z"),
-            Some(2.0),
+            Some(120.0),
         );
         let out = apply_step_transition(Some(&cal), &old, &new, "test")
             .await
@@ -331,7 +377,7 @@ mod tests {
             StepStatus::Active,
             Some("emp-1"),
             Some("2026-04-27T10:00:00Z"),
-            Some(2.0),
+            Some(120.0),
         );
         let mut new = old.clone();
         new.status = StepStatus::Skipped;
@@ -357,7 +403,7 @@ mod tests {
             StepStatus::Active,
             Some("emp-1"),
             Some("2026-04-27T10:00:00Z"),
-            Some(2.0),
+            Some(120.0),
         );
         let mut new = old.clone();
         new.status = StepStatus::Completed;
@@ -379,13 +425,13 @@ mod tests {
             StepStatus::Active,
             Some("emp-1"),
             Some("2026-04-27T10:00:00Z"),
-            Some(2.0),
+            Some(120.0),
         );
         let new = step_with(
             StepStatus::Active,
             Some("emp-1"),
             Some("2026-04-27T14:00:00Z"),
-            Some(3.0),
+            Some(180.0),
         );
         let out = apply_step_transition(Some(&cal), &old, &new, "test")
             .await

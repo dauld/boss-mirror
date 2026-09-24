@@ -18,6 +18,18 @@
 //! "VolumePermissionChangeInProgress … taking longer than expected".
 //! The ownership is already right after the first mount, so
 //! `OnRootMismatch` skips the walk.
+//!
+//! WHAT THIS DOES NOT BUY, measured 2026-09-24 (backlog 3f2a08ab): the
+//! pod was evicted again at 01:27Z with both halves in force. Priority
+//! orders pods only WITHIN the "exceeds its request" class, and the
+//! pod's /scratch held ~430 GiB against a 100Gi request (the eviction
+//! freed that much: 136 GiB free before, 567 after), while each gate
+//! stayed inside its 90Gi. So whenever w-1 reaches the kubelet's 15%
+//! line this pod is still first. The request and the class stay right —
+//! they order the pod correctly the day its usage fits — but the
+//! protection that holds today is keeping the node off that line: the
+//! scratch floor, which since that date `infra/dev/wt-cargo` runs
+//! before every build (`dev_scratch_reclaim_sh.rs`, `wt_cargo_sh.rs`).
 
 use boss_testing::repo_root;
 

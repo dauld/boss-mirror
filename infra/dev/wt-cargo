@@ -81,6 +81,35 @@ if [ ! -d "$dir" ]; then
 fi
 export CARGO_TARGET_DIR="$dir"
 
+# THE FLOOR FOLLOWS THE BUILD (backlog 3f2a08ab, 2026-09-24). The dev
+# pod was evicted with the reclaim sidecar's 25% scratch floor in force:
+# the sidecar reads the floor hourly, and w-1 went from above it to the
+# kubelet's 15% line in under 27 minutes (the gate receipts' free_gb,
+# 284 GiB at 00:53Z to 136 at the 01:27Z eviction). Builds are what
+# fill /scratch, so each one runs the floor's sibling pass first — the
+# sidecar's own script, in its `--scratch-floor` mode, whose comment
+# has the measurement and why the floor, not the pod's priority, is
+# what keeps this pod alive. Above the floor it is one df and silent.
+#
+# The pass is handed THIS door's scratch root and the SEED as the
+# primary: the pod's CARGO_TARGET_DIR (the seed) was just re-pointed at
+# this worktree's dir above, and handed through, the pass would read
+# the warm seed as a sibling it may take. This worktree's own target is
+# touched first, because the pass takes idle targets oldest first and a
+# builder that read code for half an hour holds an idle one — it must
+# not be taken the moment before it builds. A failed pass is named and
+# the build goes on: the hourly pass reports a floor it cannot meet.
+touch "$dir"
+reclaim=${WT_RECLAIM:-$here/../cluster/dev-scratch-reclaim.sh}
+if [ -f "$reclaim" ]; then
+    rrc=0
+    SCRATCH_MOUNT="${WT_TARGET_ROOT:-/scratch}" CARGO_TARGET_DIR="$seed" \
+        bash "$reclaim" --scratch-floor >&2 || rrc=$?
+    [ "$rrc" -eq 0 ] || echo "wt-cargo: WARNING — the scratch-floor pass exited $rrc; building anyway" >&2
+else
+    echo "wt-cargo: WARNING — no scratch-floor pass at $reclaim; /scratch is watched only hourly" >&2
+fi
+
 # THE BOUND IS READ, NOT TYPED. pod-build.env is the one home of the
 # pod's cargo job count; it sits beside this script, and the symlink
 # under /work/tools/bin is resolved so the checkout it points at is the

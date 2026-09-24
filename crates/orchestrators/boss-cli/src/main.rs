@@ -693,6 +693,10 @@ enum Commands {
         #[arg(long, conflicts_with = "markdown")]
         markdown_file: Option<std::path::PathBuf>,
         /// An open question as `anchor|title|proposal`. Repeatable.
+        /// Only for strategy or priority trade-offs, trust and security
+        /// boundaries, credentials, money, and brand or voice — every
+        /// other choice the author decides from the company frame and
+        /// writes into the markdown with its reason (backlog 4f71e608).
         #[arg(long = "question")]
         questions: Vec<String>,
         /// Record it without queuing a review — for a doc that states

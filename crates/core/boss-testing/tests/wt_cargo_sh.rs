@@ -49,6 +49,11 @@ struct Fixture {
     niced: PathBuf,
     /// Written by the `cp` stub, once per call, with its argv.
     copied: PathBuf,
+    /// The stub scratch-floor pass wt-cargo runs before each build.
+    reclaim: PathBuf,
+    /// Written by that stub: its argv, the scratch mount and primary it
+    /// was handed, and every dir under the mount with its mtime.
+    reclaimed: PathBuf,
 }
 
 impl Fixture {
@@ -109,12 +114,34 @@ impl Fixture {
                  exit \"$STUB_CP_FAIL\"\n\
              fi\n",
         );
+        // The scratch-floor pass: never the real one here, which would
+        // take a df of whatever filesystem the test runs on. Records
+        // what it was handed and exits STUB_RECLAIM_RC.
+        let reclaim = root.join("reclaim-stub.sh");
+        let reclaimed = root.join("reclaimed.txt");
+        write_exec(
+            &reclaim,
+            "#!/usr/bin/env bash\n\
+             {\n\
+               echo \"argv=$* mount=${SCRATCH_MOUNT:-unset} primary=${CARGO_TARGET_DIR:-unset}\"\n\
+               for d in \"$SCRATCH_MOUNT\"/*/; do\n\
+                 [ -d \"$d\" ] && echo \"dir=$(basename \"$d\") mtime=$(stat -c %Y \"$d\")\"\n\
+               done\n\
+             } >> \"$STUB_RECLAIMED\"\n\
+             exit \"${STUB_RECLAIM_RC:-0}\"\n",
+        );
         Self {
             root,
             bin,
             niced,
             copied,
+            reclaim,
+            reclaimed,
         }
+    }
+
+    fn reclaim_calls(&self) -> String {
+        std::fs::read_to_string(&self.reclaimed).unwrap_or_default()
     }
 
     /// A real git repository whose basename is `name` — the script
@@ -166,6 +193,9 @@ impl Fixture {
             .env("STUB_COPIED", &self.copied)
             .env("WT_SEED", seed)
             .env("WT_TARGET_ROOT", self.targets())
+            .env("WT_RECLAIM", &self.reclaim)
+            .env("STUB_RECLAIMED", &self.reclaimed)
+            .env_remove("STUB_RECLAIM_RC")
             .env_remove("WT_JOBS")
             .env_remove("STUB_CP_FAIL")
             .env_remove("STUB_EXECUTABLES")
@@ -521,4 +551,140 @@ fn the_count_pass_is_skipped_where_it_would_not_apply() {
             "{args:?} is not a whole-crate suite run: {out}"
         );
     }
+}
+
+/// THE FLOOR FOLLOWS THE BUILD (backlog 3f2a08ab, 2026-09-24): the dev
+/// pod was evicted with the 25% scratch floor in force, because the
+/// sidecar checks it hourly and w-1 fell from above the floor to the
+/// kubelet's 15% line in under 27 minutes. The builds are what fill
+/// /scratch, so each one runs the floor's sibling pass first — on this
+/// door's own scratch root, with the SEED named as the primary (the pod
+/// sets CARGO_TARGET_DIR to it, and this script re-points that variable
+/// at the worktree's dir — handed through, the floor pass would read
+/// the caller's dir as the primary and the warm seed as a sibling it
+/// may take).
+#[test]
+fn a_build_first_runs_the_scratch_floor_pass_on_its_own_scratch_root() {
+    let f = Fixture::new("floor");
+    let wt = f.worktree("agent-floor0001");
+    let seed = f.root.join("seed");
+    boss_testing::create_dir(&seed);
+
+    let (rc, out) = f.run(&wt, &seed, &[]);
+    assert_eq!(rc, 0, "wt-cargo failed: {out}");
+    let calls = f.reclaim_calls();
+    let first = calls
+        .lines()
+        .next()
+        .unwrap_or_else(|| panic!("wt-cargo never ran the scratch-floor pass: {out}"));
+    assert_eq!(
+        first,
+        format!(
+            "argv=--scratch-floor mount={} primary={}",
+            f.targets().display(),
+            seed.display()
+        ),
+        "the pass runs in its floor mode, on this door's root, with the seed as primary"
+    );
+}
+
+/// The floor pass takes idle siblings, least recently used first — and
+/// a builder that has been reading for half an hour has an idle target.
+/// Its own must not be the one taken the moment before it builds, so
+/// the door marks it live first.
+#[test]
+fn the_callers_own_target_is_marked_live_before_the_floor_pass_runs() {
+    let f = Fixture::new("floor-own");
+    let wt = f.worktree("agent-floor0002");
+    let seed = f.root.join("seed");
+    boss_testing::create_dir(&seed);
+    let own = f.targets().join("target-agent-floor0002");
+    boss_testing::create_dir(&own);
+    let ok = Command::new("touch")
+        .args(["-d", "-5 hours"])
+        .arg(&own)
+        .status()
+        .expect("touch")
+        .success();
+    assert!(ok, "touch -d");
+
+    let (rc, out) = f.run(&wt, &seed, &[]);
+    assert_eq!(rc, 0, "wt-cargo failed: {out}");
+    let calls = f.reclaim_calls();
+    let mtime: u64 = calls
+        .lines()
+        .find_map(|l| l.strip_prefix("dir=target-agent-floor0002 mtime="))
+        .unwrap_or_else(|| panic!("the stub never saw the caller's target: {calls}"))
+        .parse()
+        .expect("mtime is a number");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    assert!(
+        now.saturating_sub(mtime) < 600,
+        "the caller's target must read as live (mtime {mtime}, now {now}) when the \
+         floor pass looks at it: {calls}"
+    );
+}
+
+/// A reclaim that fails is the hourly pass's to report; it never stops
+/// a build, and it is never silent either.
+#[test]
+fn a_floor_pass_that_fails_never_stops_the_build() {
+    let f = Fixture::new("floor-fails");
+    let wt = f.worktree("agent-floor0003");
+    let seed = f.root.join("no-such-seed");
+    let (rc, out) = f.run(&wt, &seed, &[("STUB_RECLAIM_RC", "3")]);
+    assert_eq!(rc, 0, "a failed floor pass must not fail the build: {out}");
+    assert!(out.contains("argv=test"), "cargo still ran: {out}");
+    assert!(
+        out.contains("scratch-floor pass exited 3"),
+        "the failure is named: {out}"
+    );
+}
+
+/// Unstubbed, the door runs the sidecar's own script out of the tree
+/// beside it — one reclaim, two triggers — and a floor of 0% keeps the
+/// real pass a no-op on whatever filesystem this test runs on.
+#[test]
+fn the_default_floor_pass_is_the_sidecars_own_script() {
+    let f = Fixture::new("floor-default");
+    let wt = f.worktree("agent-floor0004");
+    let seed = f.root.join("no-such-seed");
+    let mut cmd = Command::new(repo_root().join(SCRIPT));
+    cmd.args(["build", "-p", "boss-cli"])
+        .current_dir(&wt)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                f.bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("STUB_NICED", &f.niced)
+        .env("STUB_COPIED", &f.copied)
+        .env("WT_SEED", &seed)
+        .env("WT_TARGET_ROOT", f.targets())
+        .env("BOSS_SCRATCH_FLOOR_PCT", "0")
+        .env_remove("WT_RECLAIM")
+        .env_remove("CARGO_TARGET_DIR");
+    let out = cmd.output().expect("run wt-cargo");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(
+        !text.contains("scratch-floor"),
+        "the tree's own pass is found, and above its floor it says nothing: {text}"
+    );
+    assert!(
+        repo_root()
+            .join("infra/cluster/dev-scratch-reclaim.sh")
+            .is_file(),
+        "the pass wt-cargo runs by default is the sidecar's"
+    );
 }

@@ -378,6 +378,13 @@ pub(crate) fn review_step_metadata(body: &Value, doc_path: &str) -> Value {
     })
 }
 
+/// What a design may still ASK David, in the words the drafting
+/// procedures use (backlog 4f71e608; the Workflow rows' copies are
+/// pinned by boss-jobs' the_author_decides_from_the_company_frame.rs).
+/// Everything else the author decides from the company frame.
+const ESCALATE_ONLY: &str = "strategy or priority trade-offs, trust and security boundaries, \
+                             credentials, money, and brand or voice";
+
 pub async fn run(
     title: String,
     markdown: String,
@@ -396,7 +403,13 @@ pub async fn run(
              decision already made.\n\n\
              Pass questions as `--question 'Q1|title|proposal'` (repeatable). A doc \
              with neither reaches the reviewer with nothing to answer, which is the \
-             failure this verb exists to prevent."
+             failure this verb exists to prevent.\n\n\
+             A question is for David, and only for {ESCALATE_ONLY}. Every other \
+             choice, decide from the company frame (one person plus agents; a hosting \
+             business on the open-source release; our instance runs only the modules \
+             it uses; the demo tenant's leftovers cleared out, then cleaned up), write it into \
+             the markdown with its reason, and file with --no-questions when none are \
+             left (backlog 4f71e608)."
         );
     }
     // The body: read from the file named, or the text given — and a
@@ -942,6 +955,36 @@ mod tests {
             question_is_prose(&bad, none).is_err(),
             "a path title is refused"
         );
+    }
+
+    /// The refusal of a doc with no questions is the one place this verb
+    /// instructs an author on questions, and it used to say only "a
+    /// design doc needs open questions" — so the author filled the flag
+    /// with choices the company frame answered, and David got three of
+    /// them on design e1dba350 (backlog 4f71e608). It now names what a
+    /// question is FOR, in the words the drafting procedures use, and
+    /// offers `--no-questions` for a doc whose choices were decided.
+    #[tokio::test]
+    async fn the_no_questions_refusal_says_what_a_question_is_for() {
+        let err = run(
+            "a title".into(),
+            "a body".into(),
+            None,
+            vec![],
+            false,
+            None,
+            None,
+        )
+        .await
+        .expect_err("a doc with neither questions nor the flag is refused");
+        let text = err.to_string();
+        for phrase in [
+            "strategy or priority trade-offs, trust and security boundaries, credentials, money, and brand or voice",
+            "decide",
+            "--no-questions",
+        ] {
+            assert!(text.contains(phrase), "the refusal says `{phrase}`: {text}");
+        }
     }
 
     /// The draft's completion carries the id the filing returned —

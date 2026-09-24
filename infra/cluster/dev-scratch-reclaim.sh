@@ -96,6 +96,10 @@
 # WHAT RUNS IT. The `reclaim` sidecar in boss-dev.yaml fires it hourly
 # (the disk-floor-sweep.timer cadence: above the floor a pass is one
 # log line; below it a pass frees GBs, well ahead of the fill rate).
+# "Well ahead" was false on 2026-09-24 (backlog 3f2a08ab: the floor
+# crossed to the eviction line in under 27 minutes), so since then
+# infra/dev/wt-cargo also runs `--scratch-floor` — the floor's sibling
+# pass alone — before every build; the long form is at that mode.
 # It is also safe to run by hand:
 #   kubectl exec -n boss-dev deploy/boss-dev -c reclaim -- \
 #     bash /work/boss/infra/cluster/dev-scratch-reclaim.sh
@@ -1274,6 +1278,53 @@ if [ "${1:-}" = "--cli" ]; then
     install_tree_cli
     [ "$problems" -eq 0 ] || exit 1
     [ "$CLI_RESULT" != "not yet" ] || exit 75
+    exit 0
+fi
+
+# `--scratch-floor`: the scratch floor's sibling pass ALONE, run by
+# infra/dev/wt-cargo before every build (backlog 3f2a08ab). WHY: the
+# dev pod was evicted at 2026-09-24 01:27Z with the 25% floor in force.
+# The gate receipts' free_gb (GiB free on w-1's ephemeral xfs, one
+# reading per verdict) date the drain: 487 at 21:47Z, 378 at 00:01,
+# 284 at 00:53, 218 at 01:14, 159 at 01:20, 136 at the eviction, 567
+# at 01:31 — ~430 GiB of it this pod's own /scratch. The hourly passes
+# at 21:58, 22:59 and 23:59 took no floor target, and the ~01:00 pass
+# filed nothing, so it found the floor met; from there w-1 went from
+# above 232 GiB free to the kubelet's 139 in under 27 minutes. A 93 GiB
+# margin read once an hour cannot hold a drain that crosses it in 27
+# minutes, so the reclaim follows the EVENT that fills the disk, as the
+# forge's did (the_reclaim_follows_the_build.rs): each build is where
+# /scratch grows, so each build checks first.
+#
+# WHY THE FLOOR, AND NOT THE PRIORITY, IS THE PROTECTION. The kubelet
+# ranks eviction candidates by "usage exceeds request" FIRST and by
+# priority only within that class. This pod requests 100Gi and its
+# /scratch held ~430 GiB of real bytes — more by the kubelet's measure,
+# which walks st_blocks and so counts every reflink-seeded sibling at
+# full size — while each gate stayed inside its 90Gi. So the pod was
+# the only low-priority pod over its request, and the boss-dev-session
+# class never came into play: once w-1 reaches the 15% line, this pod
+# is first whatever its priority. Staying off that line is the only
+# lever, and it is this one.
+#
+# What it does NOT do, on purpose: the worktree, age, checkout and CLI
+# legs (the hourly pass's; a build must not wait on git or a registry),
+# and the incremental trim (it defers whenever any cargo runs, which on
+# a busy pod is always — that deferral is the hourly pass's to report).
+# Above the floor it is one df and says nothing. Concurrent builds race
+# to it, so one takes the lock and the rest build on.
+if [ "${1:-}" = "--scratch-floor" ]; then
+    kb=$(free_kb "$SCRATCH_MOUNT")
+    [ -n "$kb" ] || exit 0
+    floor_gb=$(( $(size_kb "$SCRATCH_MOUNT") / 1024 / 1024 * SCRATCH_FLOOR_PCT / 100 ))
+    [ $((kb / 1024 / 1024)) -lt "$floor_gb" ] || exit 0
+    if command -v flock >/dev/null 2>&1 && { exec 9>>"$SCRATCH_MOUNT/.dev-scratch-reclaim.lock"; } 2>/dev/null; then
+        flock -n 9 || exit 0
+    fi
+    log "$SCRATCH_MOUNT $((kb / 1024 / 1024))GB free < ${floor_gb}GB floor (${SCRATCH_FLOOR_PCT}%) — the build-triggered floor pass"
+    WT_PASS_REASON="scratch-floor: the build-triggered pass runs only the floor's sibling reclaim"
+    reclaim_targets_to_floor "$floor_gb"
+    record_pass
     exit 0
 fi
 

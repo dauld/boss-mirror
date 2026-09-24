@@ -164,11 +164,17 @@ fn ls_remote_calls(scratch: &Path) -> String {
 }
 
 fn run(scratch: &Path, extra: &[(&str, &str)]) -> Output {
+    run_with(scratch, &[], extra)
+}
+
+/// `run`, with arguments after the script (a mode such as `--cli`).
+fn run_with(scratch: &Path, args: &[&str], extra: &[(&str, &str)]) -> Output {
     let bin = stub_curl(scratch);
     stub_git(scratch);
     let installer = stub_installer(scratch);
     let mut cmd = Command::new("bash");
     cmd.arg(repo_root().join("infra/cluster/dev-scratch-reclaim.sh"))
+        .args(args)
         // The CLI leg goes to the stub installer below, never to the
         // registry; the stub's log is what the CLI tests read.
         .env("BOSS_CLI_INSTALLER", &installer)
@@ -1719,4 +1725,115 @@ fn a_floor_share_that_is_not_a_percentage_is_refused() {
             say(&out)
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// THE FLOOR FOLLOWS THE BUILD (backlog 3f2a08ab, 2026-09-24).
+// ---------------------------------------------------------------------
+// The dev pod was evicted at 01:27Z with the 25% floor in force. The
+// gate receipts' free_gb (GiB free on w-1's ephemeral xfs, read at each
+// verdict) date the drain: 487 at 21:47Z, 378 at 00:01, 284 at 00:53,
+// 218 at 01:14, 159 at 01:20, 136 at the eviction, then 567 at 01:31 —
+// ~430 GiB of it the dev pod's own /scratch. The hourly passes at
+// 21:58, 22:59 and 23:59 took no floor target, and the ~01:00 pass
+// filed nothing, so it found the floor met: from above 232 GiB to 136
+// in under 27 minutes, against a 93 GiB margin and a 60-minute timer.
+// So `wt-cargo` — the event that fills /scratch — runs the floor's
+// sibling pass itself before each build, and this mode is that pass
+// alone: one df above the floor, the idle siblings below it, and none
+// of the hourly pass's other legs.
+
+#[test]
+fn the_scratch_floor_mode_takes_idle_siblings_and_runs_no_other_pass() {
+    let root = boss_testing::scratch_dir("boss-dsr-floor-mode");
+    let _guard = Scratch(root.clone());
+    boss_testing::create_dir(&root.join("work").join("wt"));
+    boss_testing::create_dir(&root.join("work").join("repo"));
+    let bin = stub_curl(&root);
+    stub_df(&bin);
+    let primary = target_dir(&root, "target", 0);
+    let oldest = sized_target(&root, "target-idle-5h", 5, 3);
+    let older = sized_target(&root, "target-idle-3h", 3, 3);
+    let newer = sized_target(&root, "target-idle-1h", 1, 3);
+    let live = sized_target(&root, "target-building-now", 0, 3);
+
+    // The same arithmetic as the hourly floor test above: two targets
+    // take the fixture from 5.5 GB free to 11.5, over a 10 GB floor.
+    let cap = du_kb(&root) + 5 * 1024 + 512;
+    let out = run_with(
+        &root,
+        &["--scratch-floor"],
+        &[
+            ("BOSS_SCRATCH_FLOOR_PCT", "50"),
+            ("STUB_DF_SCRATCH", root.to_str().expect("utf-8 path")),
+            ("STUB_DF_CAP_KB", &cap.to_string()),
+            ("STUB_DF_SIZE_GB", "20"),
+        ],
+    );
+    let text = say(&out);
+    assert!(
+        !oldest.exists(),
+        "the oldest idle target goes first\n{text}"
+    );
+    assert!(
+        !older.exists(),
+        "then the next, while under the floor\n{text}"
+    );
+    assert!(newer.exists(), "and it stops when the floor is met\n{text}");
+    assert!(live.exists(), "a live target is a build's\n{text}");
+    assert!(primary.exists(), "the primary is never removed\n{text}");
+    assert!(
+        install_log(&root).is_empty(),
+        "the floor mode must not run the CLI leg — it runs before every build\n{text}"
+    );
+    assert!(
+        ls_remote_calls(&root).is_empty(),
+        "the floor mode must not touch git\n{text}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("worktree pass") && !stdout.contains("stale-target pass"),
+        "the floor mode runs the floor's sibling pass and nothing else\n{text}"
+    );
+    let log = curl_log(&root);
+    let put = log
+        .lines()
+        .find(|l| l.starts_with("PUT "))
+        .unwrap_or_else(|| panic!("an acting floor pass records itself\n{log}\n{text}"));
+    assert!(
+        put.contains("\"floor_targets_reclaimed\":\"2\""),
+        "the packet counts what the floor pass took\n{put}\n{text}"
+    );
+    assert!(
+        put.contains("scratch-floor"),
+        "the packet says which pass this was, so a reader can tell a build-triggered \
+         pass from the hourly one\n{put}\n{text}"
+    );
+    assert_eq!(out.status.code(), Some(0), "a met floor is clean\n{text}");
+}
+
+#[test]
+fn above_the_floor_the_scratch_floor_mode_is_silent_and_takes_nothing() {
+    let root = boss_testing::scratch_dir("boss-dsr-floor-mode-quiet");
+    let _guard = Scratch(root.clone());
+    boss_testing::create_dir(&root.join("work").join("wt"));
+    boss_testing::create_dir(&root.join("work").join("repo"));
+    let primary = target_dir(&root, "target", 0);
+    // Stale by the hourly pass's 12h — it would take this one. The
+    // floor mode is not the age pass and must leave it alone.
+    let stale = target_dir(&root, "target-landed-yesterday", 30);
+    let out = run_with(&root, &["--scratch-floor"], &[]);
+    let text = say(&out);
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(stale.exists(), "above the floor nothing is taken\n{text}");
+    assert!(primary.exists(), "{text}");
+    assert!(
+        out.stdout.is_empty() && out.stderr.is_empty(),
+        "it runs before every build, so above the floor it says nothing\n{text}"
+    );
+    assert!(
+        curl_log(&root).is_empty(),
+        "a pass that took nothing files nothing\n{text}"
+    );
+    assert!(install_log(&root).is_empty(), "{text}");
 }

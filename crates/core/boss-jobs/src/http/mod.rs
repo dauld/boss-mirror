@@ -92,7 +92,7 @@ pub struct JobsApiState<R: JobsRepository, B: EventBus> {
     /// Cross-service client for the global calendar primitive
     /// (`docs/architecture-decisions.md` §Calendar). When set, scheduling
     /// steps that transition `ready → active` with full
-    /// metadata (`scheduled_at`, `duration_hours`, `assignee_id`)
+    /// metadata (`scheduled_at`, `duration_minutes`, `assignee_id`)
     /// reserve the assignee's time; conflicts surface as 409.
     /// `None` keeps every existing test path working — the
     /// reservation hook is purely additive.

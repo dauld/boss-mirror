@@ -119,7 +119,12 @@ audience = { role = "platform-admin" }
 # live (measured 2026-09-18) writing a design, never code. Same block
 # shape as `build` below; see the note there (c87fb59b car 1).
 agent = { profile = "analyst", model = "opus-5[1m]", budget_usd = 2, effort = "medium" }
-metadata_defaults = { procedure = "File the design-doc that answers this item: `boss design <title> --markdown-file <file> --question 'Qn|title|proposal' ... --answers <this packet>`. The verb writes the design's id here as design_id and completes this step; the founder's design-review opens on it, asking for that design at /it/design." }
+# The procedure's second paragraph (backlog 4f71e608, 2026-09-24):
+# design e1dba350 carried three questions the company frame answered,
+# so the author now decides those and asks only the five classes named.
+# Pinned with page-audit's sites by
+# the_author_decides_from_the_company_frame.rs.
+metadata_defaults = { procedure = "File the design-doc that answers this item: `boss design <title> --markdown-file <file> --question 'Qn|title|proposal' ... --answers <this packet>`. The verb writes the design's id here as design_id and completes this step; the founder's design-review opens on it, asking for that design at /it/design.\n\nDECIDE WHAT THE FRAME DECIDES; ASK ONLY WHAT IT CANNOT (backlog 4f71e608). A --question goes to David, and David, 2026-09-24: \"I do sort of think you are pushing too many questions to me that you could answer on your own. Remember we are building a company, run by one person plus agents, that is going to run a hosting business based on its open source release.\" That frame, he said, is the common-sense guide to our audits' gap analysis and to clearing out, then cleaning up, the demo tenant's leftover pieces. And: \"I can always provide feedback later too as our software is designed for making low cost changes.\" So every choice that frame answers — one person plus agents; a hosting business on the open-source release; our instance runs only the modules it uses and the rest stay for the example tenants; the demo tenant's leftovers cleared out, then cleaned up — is DECIDED in the markdown with its reason, and recorded on this item as `decided_<date>` (`boss job patch <this packet> <file.json>` with the object {\"decided_2026-09-24\": \"<the decision> — because <the reason>\"}, the date read from `date -u +%F`, never typed). Only strategy or priority trade-offs, trust and security boundaries, credentials, money, and brand or voice may ride as a --question. With none left, file with --no-questions — a doc that records decisions rather than asking for them — and David corrects any of them later through the ordinary cheap-change path." }
 [[workflow.step.fields]]
 name = "design_id"
 field_type = "string"
