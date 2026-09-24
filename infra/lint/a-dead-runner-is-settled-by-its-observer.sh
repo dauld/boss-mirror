@@ -21,9 +21,15 @@
 # byte for byte) under stub `kubectl` and `curl` and asserts:
 #
 #   1. a gate Job with status.failed > 0 whose packet is open with the
-#      verdict step not yet completed gets ONE PUT: verdict `lost`, and a
+#      verdict step not yet completed gets ONE merge through the step
+#      merge door (PATCH …/steps/{id}/metadata): verdict `lost`, and a
 #      receipt that names the Job and its Failed condition (reason and
-#      time) — a verdict must name what failed (CLAUDE.md §Diagnosis);
+#      time) — a verdict must name what failed (CLAUDE.md §Diagnosis) —
+#      and THEN ONE status-only PUT that carries no metadata. Until
+#      2026-09-24 this was one PUT of {status, metadata}, which replaced
+#      every key the registry materialized on the step (backlog
+#      e39a9d2a); the merge goes first because `verdict` is required at
+#      done and the flip is where that is judged;
 #   2. a failed Job whose packet already carries a verdict is left alone
 #      (a red gate's runner exits non-zero AFTER reporting — the report
 #      is the truth, the exit code is not a second verdict);
@@ -170,7 +176,8 @@ echo "kubectl stub: unexpected args: $*" >&2
 exit 99
 STUB
 # curl: records every request (method, url, body) in order; answers the
-# observation POST 202, a packet GET with its fixture, a step PUT 204.
+# observation POST 202, a packet GET with its fixture, a step merge
+# PATCH 204, a step PUT 204.
 cat >"$tmp/bin/curl" <<'STUB'
 #!/usr/bin/env bash
 method=GET; url=""; body=""; prev=""; want_code=""
@@ -190,6 +197,9 @@ case "$method $url" in
         id="${url##*/api/jobs/}"
         if [[ -f "$FIXTURES/packet-$id.json" ]]; then cat "$FIXTURES/packet-$id.json"; else printf '{"error":"not found"}'; fi
         [[ -n "$want_code" ]] && printf '\n200' ;;
+    "PATCH "*/steps/*/metadata)
+        if [[ -n "${MERGE_FAILS:-}" ]]; then code=500; else code=204; fi
+        [[ -n "$want_code" ]] && printf '%s' "$code" ;;
     "PUT "*/steps/*) [[ -n "$want_code" ]] && printf '204' ;;
     *) printf '{"error":"stub has no answer for %s %s"}' "$method" "$url"; [[ -n "$want_code" ]] && printf '\n500' ;;
 esac
@@ -213,25 +223,37 @@ grep -q 'POST	http://stub/api/estate/observation' "$tmp/log-settle" \
     || { cat "$tmp/out-settle" >&2; fail "the node observation was not posted — the settle must ride behind it, never replace it"; }
 puts=$(grep -c '^PUT	' "$tmp/log-settle")
 [[ "$puts" -eq 1 ]] || { cat "$tmp/log-settle" "$tmp/out-settle" >&2; fail "expected exactly ONE step write (the dead runner's), got $puts"; }
-grep -q "^PUT	http://stub/api/jobs/$DEAD/steps/bfdc7ff5-0000-4000-8000-000000000002	" "$tmp/log-settle" \
-    || { cat "$tmp/log-settle" >&2; fail "the one write did not go to the dead runner's gate-verdict step"; }
-put_body=$(grep "^PUT	http://stub/api/jobs/$DEAD/" "$tmp/log-settle" | cut -f3-)
+merges=$(grep -c '^PATCH	' "$tmp/log-settle")
+[[ "$merges" -eq 1 ]] || { cat "$tmp/log-settle" "$tmp/out-settle" >&2; fail "expected exactly ONE step merge (the dead runner's verdict), got $merges"; }
+step_url="http://stub/api/jobs/$DEAD/steps/bfdc7ff5-0000-4000-8000-000000000002"
+grep -q "^PATCH	$step_url/metadata	" "$tmp/log-settle" \
+    || { cat "$tmp/log-settle" >&2; fail "the verdict was not merged through the dead runner's gate-verdict step merge door"; }
+grep -q "^PUT	$step_url	" "$tmp/log-settle" \
+    || { cat "$tmp/log-settle" >&2; fail "the flip did not go to the dead runner's gate-verdict step"; }
+# Merge FIRST: the flip is where the required-at-done `verdict` is judged.
+[[ "$(grep -n "^PATCH	$step_url/metadata	" "$tmp/log-settle" | cut -d: -f1)" -lt \
+   "$(grep -n "^PUT	$step_url	" "$tmp/log-settle" | cut -d: -f1)" ]] \
+    || { cat "$tmp/log-settle" >&2; fail "the flip was sent before the verdict merge"; }
+put_body=$(grep "^PUT	$step_url	" "$tmp/log-settle" | cut -f3-)
 [[ "$(printf '%s' "$put_body" | jq -r '.status')" == "completed" ]] \
     || fail "the settle does not complete the step (body: $put_body)"
-[[ "$(printf '%s' "$put_body" | jq -r '.metadata.verdict')" == "lost" ]] \
-    || fail "the verdict written is not \`lost\` (body: $put_body)"
-receipt=$(printf '%s' "$put_body" | jq -r '.metadata.receipt')
+[[ "$(printf '%s' "$put_body" | jq -c 'has("metadata")')" == "false" ]] \
+    || fail "the flip carries metadata — a step PUT's metadata replaces every stored key wholesale (e39a9d2a) (body: $put_body)"
+merge_body=$(grep "^PATCH	$step_url/metadata	" "$tmp/log-settle" | cut -f3-)
+[[ "$(printf '%s' "$merge_body" | jq -r '.verdict')" == "lost" ]] \
+    || fail "the verdict merged is not \`lost\` (body: $merge_body)"
+receipt=$(printf '%s' "$merge_body" | jq -r '.receipt')
 for must in 'gate-docs-a-probe-shape-f-x8c5q' 'BackoffLimitExceeded' '2026-09-11T19:20:30Z'; do
     grep -qF "$must" <<<"$receipt" \
         || fail "the receipt does not name '$must' — a verdict must name what failed and when (receipt: $receipt)"
 done
-grep -q "$REPORTED" "$tmp/log-settle" && grep -q "^PUT	http://stub/api/jobs/$REPORTED" "$tmp/log-settle" \
+grep -q "$REPORTED" "$tmp/log-settle" && grep -qE "^(PUT|PATCH)	http://stub/api/jobs/$REPORTED" "$tmp/log-settle" \
     && fail "a failed Job whose packet already carries a verdict was written again — the runner's report is the truth, its exit code is not a second verdict"
 grep -q "$LIVE" "$tmp/log-settle" \
     && fail "a live Job's packet was touched — nothing has finished, so nothing may be settled"
 
 # ----- 6: a packet a live sibling is still gating is left alone ------
-grep -q "^PUT	http://stub/api/jobs/$CONTESTED" "$tmp/log-settle" \
+grep -qE "^(PUT|PATCH)	http://stub/api/jobs/$CONTESTED" "$tmp/log-settle" \
     && { cat "$tmp/log-settle" >&2; fail "a packet with a LIVE runner on it was settled from its DEAD sibling — the green that run is about to report cannot be recorded on a closed packet (53b9a103)"; }
 grep -q 'gate-feat-the-chrome-bar-xkxgl' "$tmp/out-settle" \
     || { cat "$tmp/out-settle" >&2; fail "the skipped settle did not name the live sibling holding the packet — quiet is a loan against the next diagnosis"; }
@@ -240,13 +262,26 @@ grep -q 'gate-feat-the-chrome-bar-b7n6j' "$tmp/out-settle" \
 grep -q 'gate-docs-a-probe-shape-f-x8c5q' "$tmp/out-settle" \
     || { cat "$tmp/out-settle" >&2; fail "the settle was not spoken on stdout — quiet is a loan against the next diagnosis"; }
 
+# ----- 1b: a merge that did not land is not followed by a flip -------
+# The flip would be refused for the missing required-at-done `verdict`
+# anyway; sending it anyway only adds a second failure to the log. The
+# step stays open, so the next pass tries again, and the skip is spoken.
+MERGE_FAILS=1 run_observer mergefail; rc=$?
+[[ $rc -eq 0 ]] || { cat "$tmp/out-mergefail" >&2; fail "the observer exited $rc when the verdict merge failed — a second duty took the first with it"; }
+grep -q "^PATCH	$step_url/metadata	" "$tmp/log-mergefail" \
+    || { cat "$tmp/log-mergefail" >&2; fail "the verdict merge was not attempted"; }
+grep -q '^PUT	' "$tmp/log-mergefail" \
+    && { cat "$tmp/log-mergefail" >&2; fail "a step was flipped after its verdict merge failed"; }
+grep -q 'NOT settled' "$tmp/out-mergefail" \
+    || { cat "$tmp/out-mergefail" >&2; fail "a failed verdict merge was not spoken on stdout"; }
+
 # ----- 4: a refused read costs nothing but a line --------------------
 JOBS_FORBIDDEN=1 run_observer refused; rc=$?
 [[ $rc -eq 0 ]] || { cat "$tmp/out-refused" >&2; fail "the observer exited $rc when the jobs read was refused — a second duty took the first with it"; }
 grep -q 'POST	http://stub/api/estate/observation' "$tmp/log-refused" \
     || fail "the observation was not posted when the jobs read was refused"
-grep -q '^PUT	' "$tmp/log-refused" && fail "a refused read still produced a step write"
+grep -qE '^(PUT|PATCH)	' "$tmp/log-refused" && fail "a refused read still produced a step write"
 grep -qi 'forbidden' "$tmp/out-refused" \
     || { cat "$tmp/out-refused" >&2; fail "the refused jobs read was not spoken on stdout with the server's reason"; }
 
-echo "a-dead-runner-is-settled-by-its-observer: ok — one Failed runner settled lost with its Job and condition named; a reported, a live and a live-sibling-contested Job untouched; a refused read costs one line"
+echo "a-dead-runner-is-settled-by-its-observer: ok — one Failed runner settled lost with its Job and condition named, merged then flipped with a status-only PUT, and not flipped when the merge failed; a reported, a live and a live-sibling-contested Job untouched; a refused read costs one line"

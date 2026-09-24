@@ -511,18 +511,38 @@ spec:
                                     | .id' "$WORK/packet.json" | head -n 1)
                       [ -n "$step" ] || continue
                       jq -n --arg job "$job" --arg reason "$reason" --arg at "$at" --arg message "$message" '{
-                        status: "completed",
-                        metadata: {
-                          verdict: "lost",
-                          receipt: ("NO VERDICT WAS PRODUCED. Runner Job " + $job + " is Failed in Kubernetes (" + $reason + " at " + $at + (if $message == "" then "" else ": " + $message end) + "), so the checks never finished and this run says nothing about the branch. Settled as LOST by the cluster observer from the Job status; an infrastructure death is not a consist failure. Re-gate for a real verdict.")
-                        }
+                        verdict: "lost",
+                        receipt: ("NO VERDICT WAS PRODUCED. Runner Job " + $job + " is Failed in Kubernetes (" + $reason + " at " + $at + (if $message == "" then "" else ": " + $message end) + "), so the checks never finished and this run says nothing about the branch. Settled as LOST by the cluster observer from the Job status; an infrastructure death is not a consist failure. Re-gate for a real verdict.")
                       }' >"$WORK/settle.json"
-                      scode=$(api_curl -s -o /dev/null -w '%{http_code}' -X PUT \
+                      # TWO WRITES: THE KEYS THROUGH THE MERGE DOOR, THEN
+                      # THE STATUS ALONE (backlog e39a9d2a, 2026-09-24).
+                      # This was one PUT of {status, metadata: {verdict,
+                      # receipt}} built with no read. The step PUT REPLACES
+                      # metadata wholesale and the registry materializes
+                      # keys onto every step at admission, so each settle
+                      # shed them - the same defect the gate-runner and
+                      # boss gate's refusals had on this same step. The
+                      # merge goes first because verdict is required at
+                      # done and the flip is where that is judged; a merge
+                      # that did not answer 2xx is not followed by a flip
+                      # (it would be refused the same way), and the next
+                      # pass finds the step still open and tries again.
+                      scode=$(api_curl -s -o /dev/null -w '%{http_code}' -X PATCH \
                         -H "content-type: application/json" \
                         -H "x-boss-user: {\"id\":\"automation:estate-observer\",\"role\":\"platform-admin\",\"access_tier\":\"operator\"}" \
                         --data-binary @"$WORK/settle.json" \
-                        "$JOBS_API/api/jobs/$packet/steps/$step") || scode="curl $?"
-                      echo "dead runner $job ($reason at $at): packet $packet settled lost -> $scode"
+                        "$JOBS_API/api/jobs/$packet/steps/$step/metadata") || scode="curl $?"
+                      case "$scode" in
+                        2??)
+                          scode=$(api_curl -s -o /dev/null -w '%{http_code}' -X PUT \
+                            -H "content-type: application/json" \
+                            -H "x-boss-user: {\"id\":\"automation:estate-observer\",\"role\":\"platform-admin\",\"access_tier\":\"operator\"}" \
+                            --data-binary '{"status":"completed"}' \
+                            "$JOBS_API/api/jobs/$packet/steps/$step") || scode="curl $?"
+                          echo "dead runner $job ($reason at $at): packet $packet settled lost -> $scode" ;;
+                        *)
+                          echo "dead runner $job ($reason at $at): packet $packet NOT settled - the verdict merge answered $scode; the next pass tries again" ;;
+                      esac
                     done <"$WORK/dead-gates.tsv"
                   else
                     echo "gate jobs unread — no dead runner can be settled this pass: $(cat "$WORK/gate-jobs.err")"

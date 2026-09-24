@@ -1983,6 +1983,37 @@ fn proven_metadata(
     md
 }
 
+/// The two writes that complete `proven` with a proof, in order: the
+/// proof's keys through the step's MERGE door, then a status-only flip.
+/// Pure, so the shape is pinned without a socket, and shared by the
+/// attended and the unattended door so neither can drift alone.
+///
+/// Why two writes and not the one PUT this used to be (e39a9d2a, the
+/// car after the gate's refused verdicts, 2026-09-24): the step PUT
+/// REPLACES `metadata` wholesale, and the registry materializes keys
+/// onto every step at admission (`metadata_defaults`, `authority_role`,
+/// `station`, `audience`, `claimable`), so a fresh `{verified, proof,
+/// completed_at}` body deleted every stored key it did not name, on
+/// every proof. The item's last car makes the PUT refuse such a body
+/// outright; this verb would then fail to record the proofs it exists
+/// to record. The merge door lands the keys against the row as it
+/// stands, in one transaction. It goes FIRST because `verified` and
+/// `proof` are required at done and the flip is where that is judged.
+fn proven_writes(car_id: &str, step_id: &str, md: &Value) -> Vec<(reqwest::Method, String, Value)> {
+    vec![
+        (
+            reqwest::Method::PATCH,
+            format!("/api/jobs/{car_id}/steps/{step_id}/metadata"),
+            md.clone(),
+        ),
+        (
+            reqwest::Method::PUT,
+            format!("/api/jobs/{car_id}/steps/{step_id}"),
+            json!({"status": "completed"}),
+        ),
+    ]
+}
+
 // ---------------------------------------------------------------------
 // THE UNATTENDED DOOR — `boss prove <car> --from-car --unattended`
 // ---------------------------------------------------------------------
@@ -2341,19 +2372,16 @@ pub(crate) async fn run_unattended(car_id: &str, now: chrono::DateTime<chrono::U
         let proof = proof_json(&probe, Some(&expect), &o, &here, &at, &tree, None);
         let mut md = proven_metadata(&verified, &serde_json::to_string(&proof)?, None, now);
         md["proven_by"] = json!(PROVEN_BY);
-        crate::gate::api(
-            &http,
-            reqwest::Method::PUT,
-            &format!("/api/jobs/{car_id}/steps/{step_id}"),
-            Some(json!({"status": "completed", "metadata": md})),
-        )
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "the probe passed but recording it on {short} failed — {e}; re-file the \
-                 ops-request or run boss prove {short} --from-car"
-            )
-        })?;
+        for (method, path, body) in proven_writes(car_id, &step_id, &md) {
+            crate::gate::api(&http, method, &path, Some(body))
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "the probe passed but recording it on {short} failed — {e}; re-file \
+                         the ops-request or run boss prove {short} --from-car"
+                    )
+                })?;
+        }
         println!(
             "boss prove: {}",
             unattended_verdict_line(&short, &verdict, &expect, "")
@@ -2875,13 +2903,9 @@ pub(crate) async fn run(
         return Ok(());
     }
 
-    crate::gate::api(
-        &http,
-        reqwest::Method::PUT,
-        &format!("/api/jobs/{car_id}/steps/{sid}"),
-        Some(json!({"status": "completed", "metadata": md})),
-    )
-    .await?;
+    for (method, path, body) in proven_writes(&car_id, &sid, &md) {
+        crate::gate::api(&http, method, &path, Some(body)).await?;
+    }
 
     println!("boss prove: {short} proven — the probe is recorded and re-runnable");
     Ok(())
@@ -3511,6 +3535,65 @@ mod tests {
         let free = json!({"fields": [{"name": "note", "field_type": "string"}]});
         assert!(check_enum_field(&free, "note", "anything at all").is_ok());
         assert!(check_enum_field(&json!({}), "method", "whatever").is_ok());
+    }
+
+    /// A PROOF IS MERGED, THEN THE STEP FLIPS WITH A STATUS-ONLY BODY
+    /// (backlog e39a9d2a, the car after the gate's refused verdicts).
+    /// The `proven` step carries keys the registry materialized at
+    /// admission (`authority_role`, `station`, `audience`, `claimable`,
+    /// `metadata_defaults`); a PUT whose `metadata` is a fresh
+    /// `{verified, proof, completed_at}` replaced them wholesale on
+    /// every proof. The merge goes first because `verified` and `proof`
+    /// are required at done, and the flip is where that is judged.
+    #[test]
+    fn a_proof_merges_its_keys_then_flips_the_status_alone() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-24T01:00:00Z")
+            .unwrap()
+            .into();
+        let md = proven_metadata("v", "{\"exit\":0}", None, now);
+        let writes = proven_writes("car-1", "s-proven", &md);
+        assert_eq!(writes.len(), 2, "one merge, one flip: {writes:?}");
+
+        let (method, path, body) = &writes[0];
+        assert_eq!(*method, reqwest::Method::PATCH);
+        assert_eq!(path, "/api/jobs/car-1/steps/s-proven/metadata");
+        assert_eq!(body, &md, "the merge carries exactly the proof's keys");
+
+        let (method, path, body) = &writes[1];
+        assert_eq!(*method, reqwest::Method::PUT);
+        assert_eq!(path, "/api/jobs/car-1/steps/s-proven");
+        assert_eq!(
+            body,
+            &json!({"status": "completed"}),
+            "the flip carries no metadata, so it can drop no stored key"
+        );
+    }
+
+    /// Both doors that complete `proven` — the attended `boss prove` and
+    /// the forge's `--unattended` — write through [`proven_writes`], so
+    /// neither can drift back to a metadata-carrying PUT on its own. The
+    /// text half of the pin above: a later edit that builds the body by
+    /// hand again fails here by name.
+    #[test]
+    fn no_proof_completion_puts_metadata() {
+        let src = include_str!("prove.rs");
+        let production = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("split always yields a first piece");
+        let banned = ["\"completed\", \"metadata\"", "\"completed\",\"metadata\""];
+        for b in banned {
+            assert!(
+                !production.contains(b),
+                "a proof completion PUTs a metadata body ({b}) — that replaces the \
+                 step's stored keys wholesale; write through proven_writes (e39a9d2a)"
+            );
+        }
+        assert_eq!(
+            production.matches("proven_writes(").count(),
+            3,
+            "the definition and its two callers (attended, unattended)"
+        );
     }
 
     #[test]

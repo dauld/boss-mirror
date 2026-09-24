@@ -1961,8 +1961,51 @@ exhibits (§Design docs, `26a89f11`) exist to close. Landed (#586,
 `apps/web/src/styles.css`, with no fallback and every value still
 today's colour, pinned by `it/yard/map-palette.test.ts` so a retired
 token fails the test rather than repainting in silence. Not built: the
-Transit palette itself, and the rest of the SPA and www on it; the SPA
-still paints the dark theme.
+palette itself (Enamel, below), and the rest of the SPA and www on it;
+the SPA still paints the dark theme.
+
+**Its parts are Enamel — Transit taken to station signage — with
+comfortable rows** (design `a4df741a`, David 2026-09-24; board: "I
+like Enamel. Let's start there."; density: "Let's do comfortable rows.
+We are here all the time, so we want it easy on the eyes."). Round 2
+drew the parts every page is built from — buttons, state pills, a
+packet's progress line, a form with a validation error, the three
+honest states (loading, empty, failed), a table at two densities, the
+spacing scale, and a composed `/it/design/audits` — twice, from
+identical HTML so that only the tokens differed: Transit as drawn
+(pill buttons, tinted pills, one blue) and Enamel. Decided: (1)
+**Enamel is where the look starts**, on the Transit palette: night ink
+`#0E1B2E` on white, `#0F6E9F` for action and progress, Overpass and
+Overpass Mono; corners squared to 4px (3px on fields and chips);
+buttons uppercase and tracked in 2px frames; keyboard focus an amber
+ring, the one amber outside a state; headers and table heads as enamel
+bands, white on night ink; **states as solid plates that always carry
+their word** — clear `#0B6B4F`, busy `#F2C230` under ink, troubled
+`#C8283D`, pending dashed, ready solid blue, completed solid ink; and
+**every department owns a line colour, run as a rail down the left of
+its pages** — identity, never state, which is why no plate is read by
+colour alone. A failed read is a red rail on the same device, so it
+reads as "this line is down" and never as an empty list. (2)
+**Comfortable rows are the default** (the boards' 12px cell padding
+against compact's 5px). The proposal kept compact for working lists —
+queues, the yard, the audit log — and the answer names no such
+exception; read here as comfortable there too, since those are the
+pages the operator is on all the time. The spacing scale is the app's
+existing `--s1`–`--s7`, unchanged, with 72 for page gutters only.
+"Start there" makes Enamel a starting point rather than a frozen spec:
+the board named its own risks, loudness on dense pages and four
+department lines plus three states to keep apart, and its line colours
+(IT `#0F6E9F`, Brewing `#B98A00`, Finance `#0B6B4F`, People `#7A3E9D`)
+and the BOSS mark are sketches, not finished identity — Finance's
+sketch is exactly the clear plate's green. The boards were again a
+linked claude.ai Artifact, so the values are written here rather than
+left behind the link. Not built, any of it: `apps/web/src/styles.css`
+still paints the dark Space Grotesk system; the item the doc named to
+build these tokens (`42f66fb3`) closed on 2026-09-23 on the map's
+`--map-*` groundwork alone, and no open item carries them; and every
+page audit's `styled` step is still the marker the machine skips
+(`infra/platform/workflows/page-audit.toml`), so applying the look per
+route waits on a new version of that kind.
 
 **One map per floor: the region map draws its own slice of the yard,
 and YardPage retires** (design `fe77a1d2`, David 2026-09-23, all three
@@ -2903,8 +2946,8 @@ reviewed in `/it/design` with no claude.ai link. Authoring is `boss
 design --exhibit anchor|title|path.html`, read with no shell between;
 where an exhibit cannot render (a terminal, `boss brief`) it is listed
 by anchor, title, size and hash, never dropped. Not built, and not yet
-proven: the theme board (`dea94998`) was decided from a linked
-Artifact.
+proven: both rounds of theme boards (`dea94998`, `a4df741a`) were
+decided from a linked Artifact.
 
 **The legacy corpus is translated once, not indexed forever.** All 52
 markdown docs become packets and the directory stops being read;
