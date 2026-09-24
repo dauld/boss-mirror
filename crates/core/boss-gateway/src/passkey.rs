@@ -186,6 +186,17 @@ fn people_segment<'a>(value: &'a str, what: &str) -> Result<&'a str, ErrResp> {
     }
 }
 
+/// A JOB OR STEP ID FROM THE CALLER, OR A REFUSAL (backlog 18b9e09d,
+/// the residual of a0dd9387). `assert_begin` formats the caller's
+/// `job_id` into a jobs request path, so it gets the same treatment as
+/// [`people_segment`] — refused with 400 before any request — but
+/// stricter, because every job and step id IS a UUID (`define_id!` over
+/// a Uuid in boss-core). The parsed value is what goes on: formatted
+/// back, it is hex and hyphens only, whatever spelling the caller used.
+fn uuid_segment(value: &str, what: &str) -> Result<Uuid, ErrResp> {
+    Uuid::parse_str(value).map_err(|_| err(StatusCode::BAD_REQUEST, format!("malformed {what}")))
+}
+
 /// `DELETE /api/auth/passkey/credentials/{credential_id}` — remove one
 /// of the session's own passkeys. The rule lives in boss-people (the
 /// last one stays, 409 in the user's terms); this proxies for the
@@ -427,9 +438,27 @@ pub fn sign_as_gateway(rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
     }
 }
 
+/// A server-side call made FOR a signed-in session, carrying ONE
+/// identity — the session's — plus the machine token, exactly what the
+/// role_headers middleware stamps on that session's own proxied
+/// traffic. The downstream policy extractor reads the first
+/// `x-boss-user`, and reqwest's `header` appends, so a request built
+/// from [`sign_as_gateway`] with the session's identity added after it
+/// ran with the gateway's platform-admin scope: `assert_begin`'s step
+/// read did exactly that until backlog 18b9e09d (2026-09-24). A read
+/// made on an employee's behalf is that employee's read.
+fn sign_as_session(rb: reqwest::RequestBuilder, user_json: String) -> reqwest::RequestBuilder {
+    let rb = rb.header("x-boss-user", user_json);
+    match boss_core::machine_token::from_env() {
+        Some(token) => rb.header(boss_core::machine_token::HEADER, token),
+        None => rb,
+    }
+}
+
 impl PasskeyState {
     /// Machine-token-stamped server-side call as the gateway — see
-    /// [`sign_as_gateway`].
+    /// [`sign_as_gateway`]. Only for the ceremony's OWN storage calls;
+    /// a read on the session's behalf goes through [`sign_as_session`].
     fn request(&self, method: reqwest::Method, url: String) -> reqwest::RequestBuilder {
         sign_as_gateway(self.http.request(method, url))
     }
@@ -699,8 +728,17 @@ pub async fn assert_begin(
     };
     let refused =
         |reason: &str, r: ErrResp| presence_refused("assert_begin", Some(&employee_id), reason, r);
+    // Both ids come from the caller's body, and the job id becomes a
+    // request path: a UUID, or a refusal before any request (18b9e09d).
+    let (job_id, step_id) = match (
+        uuid_segment(&body.job_id, "job id"),
+        uuid_segment(&body.step_id, "step id"),
+    ) {
+        (Ok(j), Ok(s)) => (j, s.to_string()),
+        (Err(r), _) | (_, Err(r)) => return refused("malformed id", r),
+    };
     // The step's CURRENT content is what the passkey will approve.
-    let job_url = format!("{}/api/jobs/{}", state.jobs_base, body.job_id);
+    let job_url = format!("{}/api/jobs/{job_id}", state.jobs_base);
     let job: Value = {
         let user_json = json!({
             "id": employee_id,
@@ -711,9 +749,9 @@ pub async fn assert_begin(
             "department": sess.department,
         })
         .to_string();
-        let resp = state
-            .request(reqwest::Method::GET, job_url)
-            .header("x-boss-user", user_json)
+        // Read as the session, never as the gateway: the employee sees
+        // only what their own scope lets them (18b9e09d).
+        let resp = sign_as_session(state.http.get(job_url), user_json)
             .send()
             .await;
         match resp {
@@ -744,7 +782,7 @@ pub async fn assert_begin(
     };
     let Some(step) = job["steps"]
         .as_array()
-        .and_then(|s| s.iter().find(|s| s["id"] == body.step_id.as_str()))
+        .and_then(|s| s.iter().find(|s| s["id"] == step_id.as_str()))
     else {
         return refused(
             "no such step on that job",
@@ -783,7 +821,7 @@ pub async fn assert_begin(
             "employee_id": employee_id,
             "challenge": URL_SAFE_NO_PAD.encode(&challenge),
             "flow": "presence",
-            "step_id": body.step_id,
+            "step_id": step_id,
             "shape_hash": shape_hash,
             "nonce": nonce,
         }))

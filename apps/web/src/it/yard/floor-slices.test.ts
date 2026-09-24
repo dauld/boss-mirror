@@ -374,3 +374,27 @@ describe('the region map renders its slice, and every mark on it selects', () =>
     expect(existsSync(join(import.meta.dir, 'YardMap.svelte'))).toBe(false);
   });
 });
+
+// A REGION MAP THAT CANNOT BE DRAWN SAYS SO (backlog 846ab934). On
+// 2026-09-24 the shop floor threw each_key_duplicate on live data and
+// the page sat on "Reading the regions…" for good: nothing caught the
+// render failure, so it looked like a read still coming. The mocked
+// spec pins the key fix; this pins the net under whatever throws next,
+// which no fixture can plant without planting a defect.
+describe('the region map is mounted inside an error boundary', () => {
+  const mapPage = readFileSync(join(import.meta.dir, 'MapPage.svelte'), 'utf8');
+  const map = readFileSync(join(import.meta.dir, 'RegionMap.svelte'), 'utf8');
+  const strip = (s: string) => s.replace(/<!--[\s\S]*?-->/g, '');
+
+  it('turns a render failure into the failure line, never the loading line', () => {
+    const bounded = strip(mapPage).match(/<svelte:boundary>([\s\S]*?)<\/svelte:boundary>/);
+    expect(bounded).not.toBeNull();
+    expect(bounded![1]).toContain('<RegionMap');
+    expect(bounded![1]).toMatch(/\{#snippet failed\(error\)\}[\s\S]*?class="yard-empty load-failed"[\s\S]*?\{\/snippet\}/);
+  });
+
+  it('keys its platforms by what they ARE, never by their label', () => {
+    expect(map).toContain('{#each laid.placed as p (p.platform.key)}');
+    expect(map).not.toContain('(p.platform.name)}');
+  });
+});

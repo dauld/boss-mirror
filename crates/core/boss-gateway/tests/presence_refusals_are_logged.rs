@@ -39,6 +39,10 @@ const LIVE_CHALLENGE: &str = "chal-live-9a2c";
 const CREDENTIAL_ID: &str = "Y3JlZC1zZWNyZXQtaWQ";
 const STORED_CHALLENGE: &str = "c3RvcmVkLWNoYWxsZW5nZS1ieXRlcy0zMi1sb25nLi4";
 const NONCE: &str = "nonce-must-not-log-5e";
+/// Job and step ids are UUIDs, and the begin refuses anything else
+/// before it reads (backlog 18b9e09d).
+const JOB: &str = "5e2a7c9f-1b3d-4e6a-8c0f-2d4b6a8c0e1f";
+const STEP: &str = "9f1b3d5a-7c2e-4a8b-b0d6-3e5a7c9b1d4f";
 
 #[derive(Clone, Default)]
 struct Captured(Arc<Mutex<Vec<u8>>>);
@@ -158,7 +162,7 @@ async fn a_refused_presence_ceremony_logs_its_reason_and_no_credential_material(
     let (status, body) = call(
         &router,
         "/api/auth/passkey/assert/begin",
-        json!({"job_id": "job-1", "step_id": "step-1"}),
+        json!({"job_id": JOB, "step_id": STEP}),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");

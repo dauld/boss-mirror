@@ -44,7 +44,15 @@ export type Flag = Readonly<{ from: 'head' | 'tail'; n: number }>;
 
 /** One queue, drawn as a platform with its packets standing on it. */
 export type Platform = Readonly<{
-  /** The queue's own name — a station, or an inbound channel. */
+  /** WHICH queue — unique among a region's platforms, and what the map
+   *  keys it on. Apart from `name` since backlog 846ab934: the shop
+   *  floor named its crews by actor and keyed them on that name, and
+   *  live every crew is the same actor, so the keyed each threw and
+   *  the region never drew. A station and a channel are their own key;
+   *  a crew is `session:<id>`, the spelling the server's machines use. */
+  key: string;
+  /** The queue's own name — a station, or an inbound channel. The
+   *  label, which need not be unique. */
   name: string;
   /** Packets standing on it. `null` is a count nobody could take. */
   standing: number | null;
@@ -96,6 +104,7 @@ export function marshallingPlatforms(
         ? `${s.flow.served} left in ${windowHours}h`
         : `rate not counted — ${s.flow.reason}`;
     return {
+      key: s.station,
       name: s.station,
       standing: s.depth,
       bound: s.wipLimit,
@@ -121,7 +130,13 @@ export function marshallingPlatforms(
  *  `unlinked` is the runs no listed session claims — a hand dispatch,
  *  or a session outside the read window. They get a platform of their
  *  own rather than being dropped, because a run drawn nowhere is the
- *  false-empty class. */
+ *  false-empty class.
+ *
+ *  A CREW IS A SESSION, NOT AN ACTOR (backlog 846ab934). One agent
+ *  identity runs many sessions at once — on 2026-09-24 all three crews
+ *  on the floor were `claude@algedonic.dev` — so the platform is keyed
+ *  by the session and labelled with who AND which session, or two
+ *  crews of one actor could not be told apart on the picture either. */
 export function crewPlatforms(
   crews: ReadonlyArray<Crew>,
   unlinked: ReadonlyArray<unknown>,
@@ -131,7 +146,8 @@ export function crewPlatforms(
     const state = c.idle === null ? 'silence not measured' : c.idle ? 'idle' : 'at work';
     const prompts = c.session.promptCount === null ? null : `${c.session.promptCount} prompts`;
     return {
-      name: who,
+      key: `session:${c.session.id}`,
+      name: `${who} · ${c.session.id.slice(0, 8)}`,
       standing: c.runs.length,
       bound: null,
       rate: null,
@@ -147,6 +163,7 @@ export function crewPlatforms(
     : [
         ...sorted,
         {
+          key: 'no session',
           name: 'no session',
           standing: unlinked.length,
           bound: null,
@@ -176,6 +193,7 @@ export function receivingPlatforms(
     const stale = ages.filter((d) => d > AGE_THRESHOLDS.stale).length;
     const oldest = ages[0];
     return {
+      key: channel,
       name: channel,
       standing: ages.length,
       // A channel has no WIP bound — what it is read against is the

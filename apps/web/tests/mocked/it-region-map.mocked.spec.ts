@@ -287,6 +287,64 @@ test('a queue read that failed is said, never drawn as an empty region', async (
   await expect(page.locator(`${regionSvg('marshalling')} [data-interior]`)).toHaveCount(0);
 });
 
+// ---------------------------------------------------------------------
+// THE TWO REGION VIEWS THAT NEVER DREW ON LIVE DATA (backlog 846ab934,
+// the IT map review of 2026-09-24, findings 1 and 9).
+// ---------------------------------------------------------------------
+
+/** The live shape of the shop floor, measured 2026-09-24 (the review's
+ *  world-titles.txt, lines 25–29): every open session is the SAME
+ *  actor — one agent identity, many sessions. Two here is enough to
+ *  collide. The platforms were keyed by actor, so the region map threw
+ *  each_key_duplicate and the page sat on "Reading the regions…"; a
+ *  fixture with a different actor per session could never catch it. */
+const ONE_ACTOR_SESSIONS = {
+  total: 2,
+  data: [
+    { id: '87b3cf48-f17b-4126-98b4-7673a3c3576b', kind: 'work-session', title: 'a session', status: 'open',
+      metadata: { actor: 'claude@algedonic.dev', host: 'boss-dev', started_at: '2026-09-24T03:00:00Z',
+        last_active_at: '2026-09-24T04:40:00Z', prompt_count: 40 } },
+    { id: '7bb6e37d-d168-40b8-9675-70a42229a2bb', kind: 'work-session', title: 'another session', status: 'open',
+      metadata: { actor: 'claude@algedonic.dev', host: 'boss-dev', started_at: '2026-09-24T04:00:00Z',
+        last_active_at: '2026-09-24T04:45:00Z', prompt_count: 7 } },
+  ],
+};
+
+test('the shop floor draws two sessions of ONE actor as two crews — the live shape, not a crash', async ({ page }) => {
+  await mocks(page);
+  await page.route(/\/api\/jobs\?kind=work-session/, (r) =>
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(ONE_ACTOR_SESSIONS) }));
+
+  await page.goto('/it/yard/shop-floor');
+  const map = page.locator(regionMap('shop-floor'));
+  await expect(map).toHaveCount(1);
+  await expect(page.getByText('Reading the regions…')).toHaveCount(0);
+
+  const interior = page.locator(`${regionSvg('shop-floor')} .interior[data-interior="shop-floor"]`);
+  await expect(interior.locator('.platform')).toHaveCount(2);
+  // Keyed by the SESSION — the key the server's machines already use.
+  await expect(interior.locator('.platform[data-platform="session:87b3cf48-f17b-4126-98b4-7673a3c3576b"]')).toHaveCount(1);
+  await expect(interior.locator('.platform[data-platform="session:7bb6e37d-d168-40b8-9675-70a42229a2bb"]')).toHaveCount(1);
+  // Labelled with who AND which session, so two crews of one actor are
+  // told apart on the picture, not only in the DOM.
+  await expect(interior).toContainText('claude@algedonic.dev · 87b3cf48');
+  await expect(interior).toContainText('claude@algedonic.dev · 7bb6e37d');
+  await expect(page.locator('.load-failed')).toHaveCount(0);
+});
+
+test('publish, which has no floor yet, SAYS so rather than reading forever', async ({ page }) => {
+  await mocks(page);
+  await page.goto('/it/yard/publish');
+  const map = page.locator(regionMap('publish'));
+  await expect(map).toHaveCount(1);
+  await expect(map.locator('.region-why')).toContainText('no pull request awaiting a merge');
+  // Publish is neither a floor region nor a platform region, so no read
+  // will ever land for it: a loading line there is a lie that never
+  // resolves, and reads as an outage.
+  await expect(map).toContainText('no floor drawn for this region yet');
+  await expect(map).not.toContainText('reading what is inside');
+});
+
 test('a direct load of /it/yard/<region> renders the region map and never the world', async ({ page }) => {
   await mocks(page);
   await page.goto('/it/yard/gates');

@@ -165,8 +165,8 @@
       {:else}
         {@const laid = platformLayout(rect, deck.platforms)}
         <g class="interior" data-interior={region}>
-          {#each laid.placed as p (p.platform.name)}
-            <g class="platform" data-platform={p.platform.name}>
+          {#each laid.placed as p (p.platform.key)}
+            <g class="platform" data-platform={p.platform.key}>
               <title
                 >{p.platform.name} — {p.platform.note}{p.perMark > 1
                   ? ` · the track is the whole queue: one mark is ${Math.round(p.perMark)} packets`
@@ -200,6 +200,11 @@
           {/if}
         </g>
       {/if}
+    {:else if floorRegion === null}
+      <!-- Neither a floor nor a queue region — publish, today. No read
+           will ever land for it, so "reading…" here never resolved and
+           read as an outage (backlog 846ab934). Say what is true. -->
+      <text x={HEAD_X} y="40" class="tiny">no floor drawn for this region yet</text>
     {:else if floor === null || view === null}
       <text x={HEAD_X} y="40" class="tiny">reading what is inside…</text>
     {:else}

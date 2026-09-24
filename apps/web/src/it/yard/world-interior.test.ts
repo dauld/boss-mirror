@@ -177,6 +177,7 @@ describe('the receiving interior — one platform per channel', () => {
 describe('where the platforms go inside the outline', () => {
   const t = territoryOf('marshalling')!;
   const platform = (name: string, standing: number | null, bound: number | null = null): Platform => ({
+    key: name,
     name,
     standing,
     bound,
@@ -319,13 +320,41 @@ describe('crewPlatforms — a platform per crew, the busiest first', () => {
     const busy: Crew = { session: session({ id: 's1', actor: 'a@x' }), runs: [run('r1'), run('r2')], idle: false };
     const quiet: Crew = { session: session({ id: 's2', actor: 'b@x', promptCount: 3 }), runs: [], idle: true };
     const platforms = crewPlatforms([quiet, busy], []);
-    expect(platforms.map((p) => p.name)).toEqual(['a@x', 'b@x']);
+    expect(platforms.map((p) => p.name)).toEqual(['a@x · s1', 'b@x · s2']);
     expect(platforms[0]!.standing).toBe(2);
     // What a crew FINISHED in the window is not in this read, so the
     // rate is unknown — a 0 would say the crew shipped nothing.
     expect(platforms[0]!.rate).toBeNull();
     expect(platforms[0]!.note).toContain('at work');
     expect(platforms[1]!.note).toContain('idle');
+  });
+
+  // THE LIVE SHAPE (backlog 846ab934, measured 2026-09-24 by the IT map
+  // review): three crews on the floor, every one of them the SAME actor,
+  // `claude@algedonic.dev` — one agent identity, many sessions, which is
+  // the normal case here. The platforms were named AND keyed by actor,
+  // so the region map's keyed each threw each_key_duplicate and the
+  // shop floor never drew. A crew is a SESSION; its key says which.
+  it('keys and names two sessions of ONE actor as two platforms — a crew is a session, not an actor', () => {
+    const one: Crew = { session: session({ id: '87b3cf48-f17b-4126-98b4-7673a3c3576b' }), runs: [run('r1')], idle: false };
+    const two: Crew = { session: session({ id: '7bb6e37d-d168-40b8-9675-70a42229a2bb' }), runs: [], idle: true };
+    const platforms = crewPlatforms([one, two], [run('r9')]);
+    expect(platforms.map((p) => p.key)).toEqual([
+      'session:87b3cf48-f17b-4126-98b4-7673a3c3576b',
+      'session:7bb6e37d-d168-40b8-9675-70a42229a2bb',
+      'no session',
+    ]);
+    // The label still says WHO, and tells the two apart by session.
+    expect(platforms[0]!.name).toBe('claude@algedonic.dev · 87b3cf48');
+    expect(platforms[1]!.name).toBe('claude@algedonic.dev · 7bb6e37d');
+    expect(new Set(platforms.map((p) => p.name)).size).toBe(platforms.length);
+  });
+
+  it('keys a queue platform by the queue it is, so the region map keys never collide', () => {
+    const marshalled = marshallingPlatforms([siding({ station: 'q.a', depth: 1 }), siding({ station: 'q.b', depth: 2 })], 24);
+    expect(marshalled.map((p) => p.key).sort()).toEqual(['q.a', 'q.b']);
+    const received = receivingPlatforms([], '2026-09-24', []);
+    expect(received.map((p) => p.key)).toEqual(received.map((p) => p.name));
   });
 
   it('says so when a crew\'s silence could not be judged', () => {

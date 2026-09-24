@@ -37,6 +37,10 @@ const EMPLOYEE: &str = "emp-refusal-text-3";
 const STORED: &str = "stored-value-the-browser-must-not-read";
 const CHALLENGE: &str = "chal-text-61d0";
 const CREDENTIAL_ID: &str = "dGV4dC1jcmVkLWlk";
+/// Job and step ids are UUIDs, and the begin refuses anything else
+/// before it reads (backlog 18b9e09d).
+const JOB: &str = "0c4e1f8a-2b6d-4a9e-8f3c-5d7b9e1a3c5f";
+const STEP: &str = "7a9c1e3b-5d8f-4b2a-9c6e-1f3a5b7d9e2c";
 
 /// jobs + people in one stub, every read answering 200 with a body
 /// that is not the shape asked for, and the removal succeeding.
@@ -110,7 +114,7 @@ async fn an_unreachable_jobs_service_is_named_without_its_url() {
         &router,
         "POST",
         "/api/auth/passkey/assert/begin",
-        json!({"job_id": "job-1", "step_id": "step-1"}),
+        json!({"job_id": JOB, "step_id": STEP}),
     )
     .await;
     assert_eq!(
@@ -127,7 +131,7 @@ async fn a_malformed_upstream_answer_is_named_without_quoting_it() {
     let cases = [
         (
             "/api/auth/passkey/assert/begin",
-            json!({"job_id": "job-1", "step_id": "step-1"}),
+            json!({"job_id": JOB, "step_id": STEP}),
             "job malformed",
         ),
         (

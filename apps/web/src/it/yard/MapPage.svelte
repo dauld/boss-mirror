@@ -142,14 +142,28 @@
       <!-- THE REGION'S OWN MAP, in place of the world's. Its canvas is
            its own, so what it shows is laid out for the region rather
            than for the slot its rectangle occupies on the world line. -->
-      <RegionMap
-        region={shown}
-        regions={regions.data}
-        {floor}
-        {deck}
-        selected={selection?.selected ?? ''}
-        onselect={(key) => selection?.select(key)}
-        onleave={() => navigate('/it')} />
+      <!-- A MAP THAT CANNOT BE DRAWN SAYS SO (backlog 846ab934). On
+           2026-09-24 the shop floor threw each_key_duplicate on live
+           data and, with nothing to catch it, the whole page stayed on
+           "Reading the regions…" — a loading line over a crash, the
+           answer-instead-of-an-error class. The boundary turns any
+           render failure of the region map into the failure line the
+           outage crawl reads, naming the error. -->
+      <svelte:boundary>
+        <RegionMap
+          region={shown}
+          regions={regions.data}
+          {floor}
+          {deck}
+          selected={selection?.selected ?? ''}
+          onselect={(key) => selection?.select(key)}
+          onleave={() => navigate('/it')} />
+        {#snippet failed(error)}
+          <div class="yard-empty load-failed" data-region={shown}>
+            The {shown} region cannot be drawn — {error instanceof Error ? error.message : String(error)}
+          </div>
+        {/snippet}
+      </svelte:boundary>
     {:else}
       <WorldMap
         regions={regions.data}

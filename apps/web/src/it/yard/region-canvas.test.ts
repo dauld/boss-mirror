@@ -82,6 +82,7 @@ describe('the region canvas', () => {
 // of their constants, so a change to either side is caught here.
 
 const platform = (name: string): Platform => ({
+  key: name,
   name,
   standing: 3,
   bound: null,
