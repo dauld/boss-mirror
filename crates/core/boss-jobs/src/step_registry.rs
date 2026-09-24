@@ -400,7 +400,7 @@ impl StepRegistry {
         let mut errors = Vec::new();
         for field in fields
             .iter()
-            .filter(|f| touched(&f.name) || f.binds.as_deref().is_some_and(|b| touched(b)))
+            .filter(|f| touched(&f.name) || f.binds.as_deref().is_some_and(&touched))
         {
             let elements = items(&field.name);
             // AN ANCHOR IS AN IDENTIFIER. `covers` and `binds` both read
@@ -1473,8 +1473,8 @@ mod tests {
             .expect("the bundle carries design-doc")
             .steps
             .into_iter()
-            .find(|s| s.kind == "review-design")
-            .expect("design-doc has a review-design step")
+            .find(|s| s.title == "review")
+            .expect("design-doc has a review step")
             .fields;
         let field = |n: &str| {
             fields
