@@ -18,18 +18,30 @@
 import { expect, test, type Page, type Route } from '@playwright/test';
 import { YARD_BORDERS, YARD_REGIONS, installSmokeMocks } from './_smokeMocks';
 import { BORDERS } from '../../src/it/yard/world';
-import { LAYOUT_THIRDS } from '../../src/it/yard/phone-strip';
-
 const PHONE = { width: 390, height: 844 };
 
 const trend = { metric: 'm', unit: 'per day', current: 1, previous: 1, samples: 1, previous_samples: 1 };
+
+/** The server's partition, as the regions read carries it (car F's
+ *  `thirds` block, boss_jobs::regions::THIRDS) — the strip's grouping
+ *  is read from here and nowhere else. */
+const THIRDS = [
+  { third: 'queue-management', regions: ['receiving', 'marshalling'] },
+  { third: 'actors-building', regions: ['shop-floor', 'gates', 'garage'] },
+  { third: 'delivery', regions: ['dock', 'track', 'arrivals', 'shed', 'publish'] },
+] as const;
 
 /** Every region clear with a KPI in its unit, but for three: receiving
  *  on a declared band, the gates troubled, and marshalling unread. */
 const REGIONS = {
   window_hours: 24,
   now: '2026-09-24T12:00:00Z',
-  regions: LAYOUT_THIRDS.flatMap((t) => t.regions).map((name) => {
+  thirds: THIRDS.map(({ third, regions }) => ({
+    third, regions,
+    balance: { unit: 'packets', in_means: 'in', out_means: 'out', in: 1, out: 1, net: 0, in_count: 1, out_count: 1 },
+    stuck: { third, stuck: 0, waiting: 0, unknown: [], oldest_hours: null, regions: [] },
+  })),
+  regions: THIRDS.flatMap((t) => t.regions).map((name) => {
     const base = {
       name, count: 1, state: 'clear', why: 'fine', trend,
       kpi: [{ name: 'kpi', value: 1, unit: 'things', text: `${name} kpi 1 thing` }],
@@ -155,10 +167,10 @@ test('on a phone the world is a strip: one row per region in flow order, under t
 
   const thirds = strip.locator('.strip-third');
   expect(await thirds.evaluateAll((els) => els.map((el) => el.getAttribute('data-third')))).toEqual(
-    LAYOUT_THIRDS.map((t) => t.third),
+    THIRDS.map((t) => t.third),
   );
   await expect(strip.locator('.strip-third-label')).toHaveText(['Queue management', 'Actors building', 'Delivery']);
-  for (const t of LAYOUT_THIRDS) {
+  for (const t of THIRDS) {
     const rows = strip.locator(`.strip-third[data-third="${t.third}"] .strip-row`);
     expect(await rows.evaluateAll((els) => els.map((el) => el.getAttribute('data-region')))).toEqual([...t.regions]);
   }

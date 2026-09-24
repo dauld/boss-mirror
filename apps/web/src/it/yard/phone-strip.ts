@@ -11,23 +11,25 @@
 // waiting and rate are the server's (regions.ts, borders.ts), in their
 // own words; this module only decides which row each goes on.
 //
-// THE THIRDS ARE THE SERVER'S WHEN IT SENDS THEM. Car F of the same
-// design (design 00774ca8, the HUD frame) makes `boss_jobs::regions::
-// THIRDS` a partition and ships it on the regions read as `thirds`,
-// each with its regions in flow order. Until that payload arrives this
-// strip stands in the same partition as the layout declares it
-// (LAYOUT_THIRDS), and says which it used — so the day the server sends
-// the block, the strip reads it without an edit here, and this copy is
-// the one to delete.
+// THE THIRDS ARE THE SERVER'S. Car F of the same design (design
+// 00774ca8, the HUD frame; landed in train #632) made `boss_jobs::
+// regions::THIRDS` a partition — every region in exactly one third,
+// pinned by `every_region_stands_in_exactly_one_third` — and ships it on
+// the regions read as `thirds`, each third's regions in flow order. The
+// strip groups by that block and holds no copy of the partition: this
+// car's first draft stood one in until F landed, and the copy went the
+// day it could.
 //
-// NOTHING IS DROPPED. A region no third names gets a row under its own
-// heading, and a region a third names that the payload did not carry
-// gets a row reading "no reading" — the map's rule that unknown is drawn
+// NOTHING IS DROPPED. A region no third names — or every region, on a
+// server older than the block — gets a row under its own heading, in the
+// layout's order; a region a third names that the payload did not carry
+// gets a row reading "no reading". The map's rule that unknown is drawn
 // as unknown, applied to membership.
 
 import type { Border, Borders } from './borders';
 import { waitingText } from './borders';
 import type { Region, Regions } from './regions';
+import { TERRITORIES } from './world';
 
 /** THE ONE PHONE BREAKPOINT is web-kit's (ui/phone.ts), because the
  *  chrome bar turns over at it too. The shell's collapse (styles.css)
@@ -35,17 +37,6 @@ import type { Region, Regions } from './regions';
  *  phone-strip.test.ts: a width between two numbers would get a strip
  *  inside a desktop shell. */
 export { PHONE_MAX_WIDTH, PHONE_QUERY } from '@boss/web-kit/ui/phone';
-
-export type Membership = Readonly<{ third: string; regions: ReadonlyArray<string> }>;
-
-/** The partition car F declares (`THIRDS` in boss-jobs/src/regions.rs
- *  on that car), each third's regions in the order a car walks them.
- *  The stand-in until the server sends its own — see the header. */
-export const LAYOUT_THIRDS: ReadonlyArray<Membership> = [
-  { third: 'queue-management', regions: ['receiving', 'marshalling'] },
-  { third: 'actors-building', regions: ['shop-floor', 'gates', 'garage'] },
-  { third: 'delivery', regions: ['dock', 'track', 'arrivals', 'shed', 'publish'] },
-];
 
 /** The heading a third prints. A third this client has no words for
  *  prints its own name, de-hyphenated — never nothing. */
@@ -56,24 +47,6 @@ const THIRD_LABELS: Readonly<Record<string, string>> = {
   unplaced: 'In no third',
 };
 export const thirdLabel = (third: string): string => THIRD_LABELS[third] ?? third.replace(/-/g, ' ');
-
-const isMembership = (v: unknown): v is Membership => {
-  if (typeof v !== 'object' || v === null) return false;
-  const o = v as Readonly<Record<string, unknown>>;
-  return typeof o.third === 'string' && Array.isArray(o.regions) && o.regions.every((r) => typeof r === 'string');
-};
-
-/** Which thirds to group under: the payload's `thirds` block when the
- *  server sent a well-formed one, else the layout's. Read structurally,
- *  so this compiles against the payload type with or without car F. */
-export function thirdsOf(read: Regions): Readonly<{ source: 'server' | 'layout'; thirds: ReadonlyArray<Membership> }> {
-  const payload: Readonly<Record<string, unknown>> = read;
-  const served = payload.thirds;
-  if (Array.isArray(served) && served.length > 0 && served.every(isMembership)) {
-    return { source: 'server', thirds: served.map((t) => ({ third: t.third, regions: [...t.regions] })) };
-  }
-  return { source: 'layout', thirds: LAYOUT_THIRDS };
-}
 
 /** One row of the strip. `region` is undefined when the read did not
  *  carry it; `rails` is null when the borders were not read — both are
@@ -86,37 +59,36 @@ export type StripRow = Readonly<{
 
 export type StripGroup = Readonly<{ third: string; label: string; rows: ReadonlyArray<StripRow> }>;
 
-/** The line's order — the layout's thirds flattened, then anything else
- *  the payload carries, in its own order. Orders the regions no third
- *  names. */
-const FLOW: ReadonlyArray<string> = LAYOUT_THIRDS.flatMap((t) => t.regions);
-const flowRank = (name: string, payload: ReadonlyArray<string>): number => {
-  const at = FLOW.indexOf(name);
-  return at >= 0 ? at : FLOW.length + payload.indexOf(name);
+/** The layout's order (world.ts: the line as a car walks it, then the
+ *  sidings), then anything else the payload carries, in its own order.
+ *  Orders the regions no third names. */
+const LAYOUT: ReadonlyArray<string> = TERRITORIES.map((t) => t.name);
+const layoutRank = (name: string, payload: ReadonlyArray<string>): number => {
+  const at = LAYOUT.indexOf(name);
+  return at >= 0 ? at : LAYOUT.length + payload.indexOf(name);
 };
 
 export function stripGroups(read: Regions, borders: Borders | null): ReadonlyArray<StripGroup> {
-  const { thirds } = thirdsOf(read);
   const payload = read.regions.map((r) => r.name);
   const row = (name: string): StripRow => ({
     name,
     region: read.regions.find((r) => r.name === name),
     rails: borders === null ? null : borders.borders.filter((b) => b.to === name),
   });
-  const placed = new Set(thirds.flatMap((t) => t.regions));
-  const groups: ReadonlyArray<StripGroup> = thirds.map((t) => ({
+  const placed = new Set(read.thirds.flatMap((t) => t.regions));
+  const groups: ReadonlyArray<StripGroup> = read.thirds.map((t) => ({
     third: t.third,
     label: thirdLabel(t.third),
     rows: t.regions.map(row),
   }));
-  const known = [...new Set([...FLOW, ...payload])];
-  const unplaced = known
+  const unplaced = [...new Set([...LAYOUT, ...payload])]
     .filter((n) => !placed.has(n))
-    .sort((a, b) => flowRank(a, payload) - flowRank(b, payload));
+    .sort((a, b) => layoutRank(a, payload) - layoutRank(b, payload));
   return unplaced.length === 0
     ? groups
     : [...groups, { third: 'unplaced', label: thirdLabel('unplaced'), rows: unplaced.map(row) }];
 }
+
 
 /** What a non-clear row says under its KPI — the same verdict the
  *  world's territory prints: the band that decided the state (decision

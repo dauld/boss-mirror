@@ -2,24 +2,16 @@ import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Border, Borders } from './borders';
-import { REGION_NAMES, type Region, type Regions } from './regions';
+import { REGION_NAMES, type Region, type Regions, type Third } from './regions';
 import { BORDERS } from './world';
-import {
-  LAYOUT_THIRDS,
-  PHONE_MAX_WIDTH,
-  PHONE_QUERY,
-  railLine,
-  stripGroups,
-  thirdsOf,
-  verdictOf,
-} from './phone-strip';
+import { PHONE_MAX_WIDTH, PHONE_QUERY, railLine, stripGroups, verdictOf } from './phone-strip';
 
 // THE PHONE STRIP MAP (design 62de32ae decision 12, car G): one row
 // per region in flow order, grouped under the three thirds, each row
 // the state, the KPI and the in-rail's waiting count and rate. These pin
-// the grouping (the server's partition wins; the layout's stands in
-// until it is sent), that no region is dropped or drawn twice, and the
-// words a rail prints — an unread rail is "no reading", never 0.
+// the grouping (the server's `thirds` block, car F — the strip holds no
+// copy of it), that no region is dropped or drawn twice, and the words a
+// rail prints — an unread rail is "no reading", never 0.
 
 const trend = { metric: 'm', unit: 'per day', current: null, previous: null, samples: 0, previous_samples: 0 };
 
@@ -38,10 +30,28 @@ const region = (name: string, over: Partial<Region> = {}): Region => ({
   ...over,
 });
 
+/** A third as the server sends it; only its name and regions matter to
+ *  the strip, the rest is the HUD's. */
+const third = (name: string, members: ReadonlyArray<string>): Third => ({
+  third: name,
+  regions: members,
+  balance: { unit: 'u', in_means: '', out_means: '', in: null, out: null, net: null, in_count: null, out_count: null, why: null },
+  stuck: { stuck: 0, waiting: 0, unknown: [], oldest_hours: null, regions: [] },
+});
+
+/** The partition the server sends (boss_jobs::regions::THIRDS). */
+const SERVED: ReadonlyArray<Third> = [
+  third('queue-management', ['receiving', 'marshalling']),
+  third('actors-building', ['shop-floor', 'gates', 'garage']),
+  third('delivery', ['dock', 'track', 'arrivals', 'shed', 'publish']),
+];
+
 const regions = (over: Partial<Regions> = {}): Regions => ({
   window_hours: 24,
   now: '2026-09-24T12:00:00Z',
   regions: REGION_NAMES.map((n) => region(n)),
+  thirds: SERVED,
+  machines: null,
   ...over,
 });
 
@@ -61,51 +71,40 @@ const border = (from: string, to: string, over: Partial<Border> = {}): Border =>
 
 const borders = (rows: ReadonlyArray<Border>): Borders => ({ window_hours: 24, borders: rows, now: '' });
 
-describe('the thirds a strip groups under', () => {
-  it('the layout partition places every region exactly once, in flow order', () => {
-    const placed = LAYOUT_THIRDS.flatMap((t) => t.regions);
-    expect([...placed].sort()).toEqual([...REGION_NAMES].sort());
-    expect(new Set(placed).size).toBe(placed.length);
-    expect(LAYOUT_THIRDS.map((t) => t.third)).toEqual(['queue-management', 'actors-building', 'delivery']);
-    // The line's order, as a car walks it: shop floor -> gates -> dock ->
-    // track -> arrivals -> shed (decision 3); the garage hangs under the
-    // gates, publish off arrivals.
-    expect(placed).toEqual([
-      'receiving', 'marshalling', 'shop-floor', 'gates', 'garage', 'dock', 'track', 'arrivals', 'shed', 'publish',
+const names = (groups: ReturnType<typeof stripGroups>) =>
+  groups.map((g) => [g.third, g.rows.map((r) => r.name)] as const);
+
+describe('the strip’s rows', () => {
+  it('groups by the server’s thirds, in their order and each third’s own order', () => {
+    expect(names(stripGroups(regions(), null))).toEqual([
+      ['queue-management', ['receiving', 'marshalling']],
+      ['actors-building', ['shop-floor', 'gates', 'garage']],
+      ['delivery', ['dock', 'track', 'arrivals', 'shed', 'publish']],
+    ]);
+    // The server's block decides, whatever it says — none of it is ours.
+    expect(names(stripGroups(regions({ thirds: [third('the rest', ['dock', 'receiving'])] }), null))[0]).toEqual([
+      'the rest',
+      ['dock', 'receiving'],
     ]);
   });
 
-  it('reads the server’s thirds when the payload carries them, and says which it used', () => {
-    const served = [
-      { third: 'queue-management', regions: ['receiving'] },
-      { third: 'the rest', regions: ['marshalling', 'dock'] },
-    ];
-    const got = thirdsOf({ ...regions(), thirds: served } as Regions);
-    expect(got.source).toBe('server');
-    expect(got.thirds).toEqual(served);
-  });
-
-  it('stands in the layout partition for a server that sends none, or a malformed block', () => {
-    expect(thirdsOf(regions()).source).toBe('layout');
-    expect(thirdsOf({ ...regions(), thirds: [] } as Regions).source).toBe('layout');
-    expect(thirdsOf({ ...regions(), thirds: [{ third: 7 }] } as unknown as Regions).source).toBe('layout');
-  });
-});
-
-describe('the strip’s rows', () => {
-  it('draws every region once, grouped, and a region no third names under its own heading', () => {
-    const served = [
-      { third: 'queue-management', regions: ['receiving', 'marshalling'] },
-      { third: 'delivery', regions: ['dock'] },
-    ];
-    const groups = stripGroups({ ...regions(), thirds: served } as Regions, null);
+  it('draws every region once, and a region no third names under its own heading in the layout’s order', () => {
+    const partial = [third('queue-management', ['receiving', 'marshalling']), third('delivery', ['dock'])];
+    const groups = stripGroups(regions({ thirds: partial }), null);
     const drawn = groups.flatMap((g) => g.rows.map((r) => r.name));
     expect([...drawn].sort()).toEqual([...REGION_NAMES].sort());
     expect(new Set(drawn).size).toBe(drawn.length);
     const last = groups[groups.length - 1]!;
     expect(last.third).toBe('unplaced');
-    // In the line's own order, not the payload's.
-    expect(last.rows.map((r) => r.name)).toEqual(['shop-floor', 'gates', 'garage', 'track', 'arrivals', 'shed', 'publish']);
+    expect(last.label).toBe('In no third');
+    // The line as a car walks it, then the sidings — not the payload's order.
+    expect(last.rows.map((r) => r.name)).toEqual(['shop-floor', 'gates', 'track', 'arrivals', 'shed', 'garage', 'publish']);
+  });
+
+  it('a server older than the thirds block still draws every region, under one heading that says so', () => {
+    const groups = stripGroups(regions({ thirds: [] }), null);
+    expect(groups.map((g) => g.third)).toEqual(['unplaced']);
+    expect(groups[0]!.rows).toHaveLength(REGION_NAMES.length);
   });
 
   it('a region a third names that the payload does not carry is a row with no reading, never dropped', () => {
@@ -179,8 +178,12 @@ describe('the phone breakpoint lives once', () => {
     const styles = readFileSync(join(import.meta.dir, '..', '..', 'styles.css'), 'utf8');
     const shell = [...styles.matchAll(/@media\s*(\([^)]*\))\s*\{[^@]*?\.app-shell\b/g)].map((m) => m[1]);
     expect(shell).toEqual([PHONE_QUERY]);
-    const page = readFileSync(join(import.meta.dir, 'MapPage.svelte'), 'utf8');
-    const pageQueries = [...page.matchAll(/@media\s*(\([^)]*\))/g)].map((m) => m[1]);
-    expect(pageQueries).toEqual([PHONE_QUERY]);
+    // The page, and the HUD frame above the map (car F), which stacks its
+    // rows at the width the strip takes over.
+    for (const file of ['MapPage.svelte', 'HudFrame.svelte']) {
+      const src = readFileSync(join(import.meta.dir, file), 'utf8');
+      const queries = [...src.matchAll(/@media\s*(\([^)]*\))/g)].map((m) => m[1]);
+      expect({ file, queries }).toEqual({ file, queries: [PHONE_QUERY] });
+    }
   });
 });

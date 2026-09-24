@@ -13,7 +13,7 @@
   import { navigate } from '@boss/web-kit/nav';
   import type { Borders } from './borders';
   import { countText, floorHref, kpiText, lampOf, stateText, type Regions } from './regions';
-  import { railLine, stripGroups, thirdsOf, verdictOf } from './phone-strip';
+  import { railLine, stripGroups, verdictOf } from './phone-strip';
 
   type Props = Readonly<{
     regions: Regions;
@@ -24,7 +24,6 @@
   let { regions, borders = null }: Props = $props();
 
   const groups = $derived(stripGroups(regions, borders));
-  const source = $derived(thirdsOf(regions).source);
 
   function open(e: MouseEvent, href: string): void {
     if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
@@ -33,7 +32,7 @@
   }
 </script>
 
-<section class="strip" aria-label="the IT world, one row per region" data-thirds={source}>
+<section class="strip" aria-label="the IT world, one row per region">
   {#each groups as g (g.third)}
     <div class="strip-third" data-third={g.third}>
       <h2 class="strip-third-label">{g.label}</h2>
