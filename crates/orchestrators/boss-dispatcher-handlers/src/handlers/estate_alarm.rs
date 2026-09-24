@@ -38,9 +38,12 @@
 //! - HARD findings only — `not_ready` (a declared node that is sick),
 //!   `declared_not_observed` (a declared node that is GONE),
 //!   `disk_tight` (a host below the floor a gate needs),
-//!   `units_unhealthy` (a watched unit the observer derived sick), and
+//!   `units_unhealthy` (a watched unit the observer derived sick),
 //!   `dead_letters_unrecorded` (a dispatcher dead-letter with no
-//!   durable record anywhere else, 8834804a).
+//!   durable record anywhere else, 8834804a), and `door_dark` (a door
+//!   half dark past its declared band, e6406701 — band-judged, so it
+//!   raises on sight rather than after PERSIST_N; see
+//!   [`banded_findings`]).
 //!   `observed_not_declared` is a paperwork gap and `drift` is config
 //!   — real, but not 03:00-urgent, and an alarm that cries over
 //!   paperwork trains operators to ignore it.
@@ -89,7 +92,7 @@ use serde_json::{Value, json};
 use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext};
 
 use super::common::{api_client, get_json, owner_for_filing, post_json, rows_or_refuse};
-use super::estate_compare::{HOST_SCOPE, KNOWN_SCOPE, UNITS_SCOPE};
+use super::estate_compare::{DOOR_SCOPE, HOST_SCOPE, KNOWN_SCOPE, UNITS_SCOPE};
 
 /// Consecutive same-series comparisons a hard finding must survive to
 /// raise. Three: at the tightened 15-minute observer cadence that is
@@ -121,10 +124,16 @@ const STALE_MIN_CADENCE_S: i64 = 60;
 /// series per host, identity in `nodes[0].id`); `false` = one series
 /// for the whole scope. The scope names are `estate_compare`'s own
 /// consts — one definition, not a copy.
-const WATCHED_SERIES: [(&str, bool); 3] = [
+///
+/// The door series (backlog e6406701) is one series for the scope, like
+/// the cluster's: an observer that stops probing the door is
+/// `unobserved:door`, or the door watch would die as quietly as the
+/// door did.
+const WATCHED_SERIES: [(&str, bool); 4] = [
     (KNOWN_SCOPE, false),
     (HOST_SCOPE, true),
     (UNITS_SCOPE, true),
+    (DOOR_SCOPE, false),
 ];
 
 pub struct EstateAlarm {
@@ -191,6 +200,10 @@ fn hard_findings(comparison: &Value) -> Vec<(String, Value)> {
         // reader that owes nothing to the jobs API — the path CLAUDE.md
         // §Diagnosis asks of an arm. Keyed on the dispatcher's id.
         ("dead_letters_unrecorded", "dead_letters_unrecorded"),
+        // A door half dark past its declared band (backlog e6406701):
+        // keyed `<door>/<half>`, so WHICH half is down is the finding.
+        // Band-judged — see [`banded_findings`] — so it raises on sight.
+        ("door_dark", "door_dark"),
     ] {
         for v in entries(comparison, field) {
             let id = v
@@ -215,6 +228,36 @@ fn hard_findings(comparison: &Value) -> Vec<(String, Value)> {
         }
     }
     out
+}
+
+/// The hard findings whose persistence the INSTRUMENT already
+/// integrated over time: a door half is `door_dark` only once it has
+/// been dark for its declared band (`infra/estate/doors.toml`, judged in
+/// `estate_compare::compare_door`). They raise on the first comparison
+/// that carries them — the silence sweep's reasoning ("the staleness
+/// window IS the persistence"): counting [`PERSIST_N`] more comparisons
+/// on top would make the declared band a lie by ten minutes.
+fn banded_findings(comparison: &Value) -> Vec<(String, Value)> {
+    hard_findings(comparison)
+        .into_iter()
+        .filter(|(k, _)| k.starts_with("door_dark:"))
+        .collect()
+}
+
+/// The keys that say a condition has NOT recovered: every hard key,
+/// plus a door half dark again inside its band (`door_dimming`), keyed
+/// as the `door_dark` it would become. A door that answered once and
+/// went dark again is not answering, and closing its alarm on three
+/// dimming readings would re-raise it a quarter-hour later — the flap
+/// the band exists to absorb. `estate.recover` judges by this set.
+pub(super) fn unrecovered_keys(comparison: &Value) -> BTreeSet<String> {
+    let mut keys = hard_finding_keys(comparison);
+    keys.extend(
+        entries(comparison, "door_dimming")
+            .filter_map(|v| v.get("id").and_then(Value::as_str))
+            .map(|id| format!("door_dark:{id}")),
+    );
+    keys
 }
 
 /// Just the keys of [`hard_findings`] — the set the persistence
@@ -469,6 +512,57 @@ fn alarm_body(
     })
 }
 
+/// The urgent packet one door half dark past its band becomes (backlog
+/// e6406701). The title names the half, what it points at and the band
+/// — WHICH door is down is the first question, and a person reading the
+/// queue should not have to open the packet to learn it. No persistence
+/// count: the band is the persistence. No `host`: the door series' rows
+/// carry none, and `estate.recover` matches the packet to them by
+/// `(scope, host)` (3908d555).
+fn door_body(key: &str, entry: &Value, evidence: &str, owner: &str) -> Value {
+    let text = |k: &str| entry.get(k).and_then(Value::as_str).unwrap_or("?");
+    let half = text("half");
+    let target = text("target");
+    let band = entry
+        .get("band_s")
+        .and_then(Value::as_i64)
+        .map(|s| format!("{}-minute", s / 60))
+        .unwrap_or_else(|| "undeclared".to_string());
+    let metadata = json!({
+        "area": "estate",
+        "estate_finding": key,
+        "scope": DOOR_SCOPE,
+        "detail": format!(
+            "Raised by estate.alarm from the door series (backlog e6406701; \
+             incident 55d001b0, where both of the dev pod's ssh doors were dark \
+             ~36h and a person found it). The {half} half of door `{door}` \
+             ({target}) has been dark since {since}, past its {band} band \
+             declared in infra/estate/doors.toml. Why the probe failed: \
+             {reason}. The prober is infra/estate/observe-door.sh on the forge, \
+             outside the pod, so this alarm does not depend on the pod it is \
+             about. It closes itself once the half answers again \
+             (estate.recover). Latest reading: {latest}. Evidence: {evidence}. \
+             The series rides /api/estate/comparisons?scope=door.",
+            door = text("door"),
+            since = text("dark_since"),
+            reason = text("reason"),
+            latest = excerpt(entry),
+        ),
+    });
+    json!({
+        "kind": "backlog-item",
+        "title": format!(
+            "ESTATE ALARM: {key} — the {half} half ({target}) is dark past its {band} band"
+        ),
+        "subject": {"subject_kind": "custom", "id": "bosspipeline"},
+        "owner_id": owner,
+        "priority": "urgent",
+        "status": "open",
+        "tags": [],
+        "metadata": super::common::with_lane(metadata, InputChannel::Telemetry),
+    })
+}
+
 /// The dedup key of one stale series: `unobserved:<series>` — one
 /// condition per quiet host, even when both of its series go dark;
 /// `unobserved:kubernetes-nodes` for the cluster observer.
@@ -576,7 +670,20 @@ impl Handler for EstateAlarm {
         // --- The persistence half: does the TRIGGERING comparison's
         // finding survive the last PERSIST_N of its own series? Only
         // worth a fetch when it found something hard at all.
-        let hard = hard_findings(comparison);
+        //
+        // A band-judged finding (a door half dark past its declared band,
+        // backlog e6406701) needs no series read: the band already
+        // integrated it over time. It goes straight to the dedup below.
+        let banded = banded_findings(comparison);
+        for (key, entry) in &banded {
+            to_raise
+                .entry(key.clone())
+                .or_insert_with(|| door_body(key, entry, &evidence, &owner));
+        }
+        let hard: Vec<(String, Value)> = hard_findings(comparison)
+            .into_iter()
+            .filter(|(k, _)| !banded.iter().any(|(b, _)| b == k))
+            .collect();
         if !hard.is_empty() {
             // The recorded series IS the state (the handler keeps
             // none). Scope travels down in the query — a page across
@@ -1049,6 +1156,80 @@ mod tests {
         );
     }
 
+    // ----- the door scope (backlog e6406701) -----
+
+    fn door_entry(half: &str, target: &str) -> Value {
+        json!({"id": format!("dev-ssh/{half}"), "door": "dev-ssh", "half": half,
+               "target": target, "reason": "connection refused",
+               "dark_since": "2026-09-24T11:40:00Z", "dark_for_s": 1200, "band_s": 900})
+    }
+
+    fn door_comparison(dark: &[Value], dimming: &[Value]) -> Value {
+        json!({
+            "scope": "door",
+            "findings": { "door_dark": dark, "door_dimming": dimming },
+        })
+    }
+
+    #[test]
+    fn a_door_dark_past_its_band_is_hard_and_a_dimming_one_is_not() {
+        let c = door_comparison(
+            &[door_entry("lan", "10.20.0.35:22")],
+            &[door_entry("public", "dev.algedonic.dev")],
+        );
+        // One key per HALF: which half is down is the finding.
+        assert_eq!(
+            hard_finding_keys(&c),
+            BTreeSet::from(["door_dark:dev-ssh/lan".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_door_finding_is_judged_by_its_band_not_by_counting_comparisons() {
+        // The band already integrated the darkness over time, the way
+        // STALE_MULTIPLIER does for silence: waiting PERSIST_N more
+        // comparisons would make the declared band a lie by ten minutes.
+        let c = door_comparison(&[door_entry("lan", "10.20.0.35:22")], &[]);
+        let banded: Vec<String> = banded_findings(&c).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(banded, vec!["door_dark:dev-ssh/lan".to_string()]);
+        // Every other hard finding still waits for its persistence.
+        assert!(banded_findings(&comparison("kubernetes-nodes", &["cp-2"], &[])).is_empty());
+    }
+
+    #[test]
+    fn the_door_alarm_names_the_half_its_target_and_its_band() {
+        let entry = door_entry("lan", "10.20.0.35:22");
+        let b = door_body("door_dark:dev-ssh/lan", &entry, "evt", "emp-owner");
+        let title = b["title"].as_str().unwrap();
+        assert!(title.contains("door_dark:dev-ssh/lan"), "{title}");
+        assert!(title.contains("lan half"), "{title}");
+        assert!(title.contains("10.20.0.35:22"), "{title}");
+        assert!(title.contains("15-minute band"), "{title}");
+        assert!(
+            !title.contains("consecutive"),
+            "the band is the persistence: {title}"
+        );
+        assert_eq!(b["priority"], "urgent");
+        assert_eq!(b["owner_id"], "emp-owner");
+        assert_eq!(b["metadata"]["estate_finding"], "door_dark:dev-ssh/lan");
+        assert_eq!(b["metadata"]["scope"], "door");
+        // No host: the door series' rows carry none, and the packet's
+        // (scope, host) is what estate.recover closes it by (3908d555).
+        assert!(b["metadata"].get("host").is_none(), "{b}");
+        let detail = b["metadata"]["detail"].as_str().unwrap();
+        assert!(detail.contains("connection refused"), "{detail}");
+        assert!(detail.contains("2026-09-24T11:40:00Z"), "{detail}");
+        assert!(detail.contains("infra/estate/doors.toml"), "{detail}");
+    }
+
+    #[test]
+    fn the_door_series_is_watched_for_silence_as_one_series() {
+        // An observer that stops posting is its own alarm
+        // (`unobserved:door`), or the door watch dies quietly the way
+        // the door did.
+        assert!(WATCHED_SERIES.contains(&(DOOR_SCOPE, false)));
+    }
+
     // ----- the silence sweep (a7a19a1a) -----
 
     fn obs_row(scope: &str, host: &str, at: &str) -> Value {
@@ -1373,5 +1554,62 @@ mod no_data_array_tests {
         let quiet = json!({ "scope": "kubernetes-nodes", "findings": {} });
         let res = handler(stub.base.clone()).invoke(&[], &firing(quiet)).await;
         assert_refused_by_name(res, "the observations read");
+    }
+
+    fn door_dark_comparison() -> Value {
+        json!({
+            "scope": "door",
+            "findings": {
+                "door_dark": [{"id": "dev-ssh/lan", "door": "dev-ssh", "half": "lan",
+                               "target": "10.20.0.35:22", "reason": "connection refused",
+                               "dark_since": "2026-09-24T11:40:00Z",
+                               "dark_for_s": 1200, "band_s": 900}],
+                "door_dimming": [],
+            },
+        })
+    }
+
+    #[tokio::test]
+    async fn a_door_dark_past_its_band_files_one_packet_without_reading_the_series() {
+        // No comparisons route: a read of the series would 404 and the
+        // pass would fail. The band is the persistence, so none is made.
+        let stub = serve(vec![
+            ("/api/estate/observations", empty_listing()),
+            ("/api/jobs", empty_listing()),
+        ])
+        .await;
+        let res = handler(stub.base.clone())
+            .invoke(&[], &firing(door_dark_comparison()))
+            .await;
+        assert!(res.is_ok(), "{res:?}");
+        let posts: Vec<(String, Value)> = stub
+            .sent()
+            .into_iter()
+            .filter(|(w, _)| w == "POST /api/jobs")
+            .collect();
+        assert_eq!(posts.len(), 1, "{posts:?}");
+        assert_eq!(
+            posts[0].1["metadata"]["estate_finding"],
+            "door_dark:dev-ssh/lan"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_door_already_raised_is_not_raised_again() {
+        let open = json!({
+            "data": [{"id": "a1", "status": "open",
+                      "metadata": {"estate_finding": "door_dark:dev-ssh/lan", "scope": "door"}}],
+            "total": 1,
+        });
+        let stub = serve(vec![
+            ("/api/estate/observations", empty_listing()),
+            ("/api/jobs", open),
+        ])
+        .await;
+        let res = handler(stub.base.clone())
+            .invoke(&[], &firing(door_dark_comparison()))
+            .await;
+        assert!(res.is_ok(), "{res:?}");
+        assert!(stub.writes().is_empty(), "{:?}", stub.writes());
     }
 }

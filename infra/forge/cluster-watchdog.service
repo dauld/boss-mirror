@@ -20,4 +20,14 @@ Environment=WATCHDOG_STATE=/home/david/.boss-watchdog-dark
 Environment=WATCHDOG_DARK_LIMIT=3
 ExecStartPre=-/home/david/boss/infra/boss-maintenance-wrap.sh maintenance-cluster-watchdog "Cluster watchdog"
 ExecStart=/home/david/boss/infra/forge/cluster-watchdog.sh
+# The dev pod's ssh doors, probed from here — outside the pod they open
+# onto (backlog e6406701; incident 55d001b0: both doors dark ~36h and a
+# person found it). SECOND, so the loop that acts never waits on a
+# probe of something else, and `-` so a failed reading never fails this
+# unit. systemd runs no later line after a failed one, so while the
+# watchdog exits non-zero (hands needed: the system of record itself is
+# dark) the door goes unread; that shows as a gap in the door series
+# once the record answers, never as a reading that was not taken. The
+# door list and its band are infra/estate/doors.toml.
+ExecStart=-/home/david/boss/infra/estate/observe-door.sh
 ExecStopPost=-/home/david/boss/infra/boss-step.sh maintenance-cluster-watchdog run
