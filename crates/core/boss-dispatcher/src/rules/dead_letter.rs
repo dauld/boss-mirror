@@ -153,8 +153,10 @@ pub fn annotation_target(topic: &str, payload: &Value) -> Option<Target> {
     })
 }
 
-/// The metadata key every dead-letter annotation writes.
-pub const METADATA_KEY: &str = "dead_letter";
+/// The metadata key every dead-letter annotation writes. One copy, in
+/// the jobs crate beside the per-rule rollup that reads it for the
+/// rules list (backlog 43c4451a).
+pub use boss_jobs::dispatcher_firings::DEAD_LETTER_KEY as METADATA_KEY;
 
 /// The `PATCH /api/jobs/{id}/metadata` body for one dead-letter.
 ///
@@ -413,6 +415,28 @@ mod tests {
         assert_eq!(failures.len(), 2);
         assert_eq!(failures[0], "r-a/h.a: 503");
         assert_eq!(failures[1], "r-b/h.b: 422 bad account");
+    }
+
+    /// The rules list counts dead-letters per rule by READING this
+    /// annotation (`boss_jobs::dispatcher_firings::dead_letter_rules`),
+    /// which parses the `failures` spelling this module writes. The two
+    /// live in two crates, so this is the equality test that holds them
+    /// together (CLAUDE.md §9a): change the Display above and the rule
+    /// a rollup reads moves with it, or this fails (backlog 43c4451a).
+    #[test]
+    fn the_rollup_reads_every_rule_the_annotation_names() {
+        let n = note(
+            vec![
+                failure("r-b", "h.b", "422 bad/account"),
+                failure("r-a", "h.a", "GET /api/jobs returned 503"),
+            ],
+            8,
+        );
+        let p = annotation_patch(&n, chrono::Utc::now());
+        assert_eq!(
+            boss_jobs::dispatcher_firings::dead_letter_rules(&p[METADATA_KEY]),
+            ["r-a", "r-b"]
+        );
     }
 
     /// IDEMPOTENCE, at the shape level: the patch is exactly one

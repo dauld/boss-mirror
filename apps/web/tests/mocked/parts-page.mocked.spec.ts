@@ -501,8 +501,15 @@ test.describe('/ux/parts — State B: empty, loading, and a failed read', () => 
     ]);
   });
 
-  // Gap 5 (f867d71c): while loading, the header and buttons count zeros.
-  test('a pending read paints "Loading…" beside a zero header', async ({ page }) => {
+  /// No filter button may carry a parenthesised count.
+  async function expectNoCountedButton(page: Page): Promise<void> {
+    await expect(body(page).getByRole('button', { name: /\(\d+\)/ })).toHaveCount(0);
+  }
+
+  // Gap 5 (f867d71c), fixed: while loading, the header and the buttons
+  // counted the `[]` the inventory starts as. They state no count until
+  // the list is read (src/parts/stock-counts.ts).
+  test('a pending read states no count, then counts once the list is read', async ({ page }) => {
     let release: () => void = () => {};
     const held = new Promise<void>((resolve) => { release = resolve; });
     await installParts(page);
@@ -513,12 +520,17 @@ test.describe('/ux/parts — State B: empty, loading, and a failed read', () => 
     await mountPage(page, PATH);
 
     await expect(status(page)).toHaveText('Loading…');
-    await expect(body(page).locator('h1.exec-title')).toHaveText('0 parts');
-    await expect(body(page).locator('header p')).toHaveText('0 need attention · 0 out · 0 critical');
-    await expect(button(page, 'All (0)')).toBeVisible();
+    await expect(body(page).locator('h1.exec-title')).toHaveText('Parts');
+    await expect(body(page).locator('header p')).toHaveText('Loading stock…');
+    await expect(button(page, 'All')).toBeVisible();
+    await expect(button(page, 'Needs attention')).toBeVisible();
+    await expectNoCountedButton(page);
     release();
     await expect(skuColumn(page)).toHaveText(SKUS);
     await expect(page.getByText('Loading…', { exact: true })).toHaveCount(0);
+    await expect(body(page).locator('h1.exec-title')).toHaveText('6 parts');
+    await expect(body(page).locator('header p')).toHaveText('3 need attention · 1 out · 1 critical');
+    await expect(button(page, 'All (6)')).toBeVisible();
   });
 
   for (const [name, re] of [
@@ -539,15 +551,31 @@ test.describe('/ux/parts — State B: empty, loading, and a failed read', () => 
     });
   }
 
-  // Gap 5 (f867d71c): a failed row source counts zero above an honest alert.
-  test('a failed inventory read paints "0 need attention" above the alert', async ({ page }) => {
+  // Gap 5 (f867d71c), fixed: a failed row source counted zero above an
+  // honest alert. Its header and buttons now say the counts are unknown.
+  test('a failed inventory read states no count above the alert', async ({ page }) => {
     await installParts(page);
     await page.route(ITEMS, (r) => json(r, { error: 'down' }, 500));
     await mountPage(page, PATH);
     await expect(page.locator(FAILURE_MARKER)).toHaveText("Couldn't load parts — HTTP 500");
-    await expect(body(page).locator('h1.exec-title')).toHaveText('0 parts');
-    await expect(body(page).locator('header p')).toHaveText('0 need attention · 0 out · 0 critical');
-    await expect(button(page, 'Needs attention (0)')).toBeVisible();
+    await expect(body(page).locator('h1.exec-title')).toHaveText('Parts');
+    await expect(body(page).locator('header p')).toHaveText('Counts unknown: parts did not load');
+    await expect(body(page).locator('header')).not.toContainText('0 need attention');
+    await expect(button(page, 'Needs attention')).toBeVisible();
+    await expectNoCountedButton(page);
+  });
+
+  // The same rule when the inventory itself was read and a catalog read
+  // failed: the rows exist in memory, but the page shows a failure, not
+  // them, so their counts are not the page's to state either.
+  test('a failed catalog read beside a good inventory read counts nothing', async ({ page }) => {
+    await installParts(page);
+    await page.route(MODELS, (r) => json(r, { error: 'down' }, 503));
+    await mountPage(page, PATH);
+    await expect(page.locator(FAILURE_MARKER)).toHaveText("Couldn't load parts — HTTP 503");
+    await expect(body(page).locator('h1.exec-title')).toHaveText('Parts');
+    await expect(body(page).locator('header p')).toHaveText('Counts unknown: parts did not load');
+    await expectNoCountedButton(page);
   });
 
   test('a network failure names the browser\'s own message', async ({ page }) => {

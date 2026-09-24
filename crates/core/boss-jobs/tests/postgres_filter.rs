@@ -591,3 +591,97 @@ async fn a_kind_set_narrows_the_rows_and_the_total_and_an_empty_set_is_none() {
     let (rows, total) = repo.list_jobs(&both, 100, 0).await.unwrap();
     assert_eq!((rows.len(), total), (0, 0));
 }
+
+/// `department` at the Postgres layer: a packet's own
+/// `metadata.department` (a non-empty string) places it, else its
+/// kind's declaration does — the same legs as the in-memory adapter's
+/// `department_keeps_what_a_packet_names_else_what_its_kind_declares`,
+/// asserted on the count query too, since it is written separately.
+///
+/// The claim behind 481d7939 (2026-09-23): the warehouse's retro and
+/// page-audits named `department = warehouse`, their kinds declare no
+/// department, and `?department=warehouse` answered total 0.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_department_keeps_what_a_packet_names_else_what_its_kind_declares() {
+    let db = TestDb::new().await;
+    let repo = boss_jobs::PgJobs::new(db.pool.clone());
+    let co = Subject::new("custom", "algedonic");
+
+    for (id, kind, metadata) in [
+        (
+            "00000000-0000-0000-0000-0000000000e1",
+            "receive-a-payout",
+            serde_json::Value::Null,
+        ),
+        (
+            "00000000-0000-0000-0000-0000000000e2",
+            "department-retro",
+            serde_json::json!({ "department": "finance" }),
+        ),
+        (
+            "00000000-0000-0000-0000-0000000000e3",
+            "page-audit",
+            serde_json::json!({ "department": "warehouse" }),
+        ),
+        // Its own word beats its kind's.
+        (
+            "00000000-0000-0000-0000-0000000000e4",
+            "receive-a-payout",
+            serde_json::json!({ "department": "sales" }),
+        ),
+        // An empty string and a non-string name nothing.
+        (
+            "00000000-0000-0000-0000-0000000000e5",
+            "receive-a-payout",
+            serde_json::json!({ "department": "" }),
+        ),
+        (
+            "00000000-0000-0000-0000-0000000000e6",
+            "receive-a-payout",
+            serde_json::json!({ "department": 7 }),
+        ),
+        (
+            "00000000-0000-0000-0000-0000000000e7",
+            "backlog-item",
+            serde_json::json!({}),
+        ),
+    ] {
+        let mut j = job(id, kind, co.clone());
+        j.metadata = metadata;
+        repo.create_job(&j).await.unwrap();
+    }
+    let dept = |code: &str, kinds: &[&str]| JobFilter {
+        department: Some(boss_jobs::port::DepartmentFilter {
+            code: code.into(),
+            declaring_kinds: kinds.iter().map(|k| k.to_string()).collect(),
+        }),
+        ..Default::default()
+    };
+
+    let (rows, total) = repo
+        .list_jobs(&dept("finance", &["receive-a-payout"]), 100, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        (rows.len(), total),
+        (4, 4),
+        "the plain payout, the finance retro, and the two naming no word"
+    );
+
+    let (rows, total) = repo
+        .list_jobs(&dept("warehouse", &[]), 100, 0)
+        .await
+        .unwrap();
+    assert_eq!((rows.len(), total), (1, 1));
+    assert_eq!(rows[0].kind, "page-audit");
+
+    let (rows, total) = repo.list_jobs(&dept("sales", &[]), 100, 0).await.unwrap();
+    assert_eq!((rows.len(), total), (1, 1), "a packet's own word wins");
+    assert_eq!(rows[0].kind, "receive-a-payout");
+
+    let (rows, total) = repo
+        .list_jobs(&dept("no-such-department-zz", &[]), 100, 0)
+        .await
+        .unwrap();
+    assert_eq!((rows.len(), total), (0, 0), "none, not every packet");
+}

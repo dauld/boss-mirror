@@ -1119,6 +1119,13 @@ impl JobsRepository for PgJobs {
         // Policy-scope binds ($7..$9) default to NULL / empty arrays
         // when scope is `All`, which the NULL-OR guards short-circuit.
         let prefix_pattern = filter.kind_prefix.as_ref().map(|p| format!("{p}%"));
+        // The department filter is two binds: its code and its
+        // declaring kinds, both NULL when no department was asked for.
+        let department_code = filter.department.as_ref().map(|d| d.code.as_str());
+        let department_kinds = filter
+            .department
+            .as_ref()
+            .map(|d| d.declaring_kinds.as_slice());
 
         // Translate the scope into three mutually-exclusive parameter
         // sets. Exactly one of scope_owner / scope_owners /
@@ -1198,6 +1205,20 @@ impl JobsRepository for PgJobs {
               -- department nobody declares answers zero packets
               -- instead of every packet (cc76f755).
               AND ($16::text[] IS NULL OR kind = ANY($16))
+              -- $17 is a department code and $18 the kinds whose
+              -- workflow declares it (DepartmentFilter::keeps): a
+              -- packet naming a department (a non-empty string, the
+              -- rule of department::carried) is in THAT one; a packet
+              -- naming none is in its kind's. Retros and page-audits
+              -- name theirs and their kinds declare none (481d7939).
+              AND (
+                $17::text IS NULL
+                OR CASE WHEN jsonb_typeof(metadata->'department') = 'string'
+                             AND metadata->>'department' <> ''
+                        THEN metadata->>'department' = $17
+                        ELSE kind = ANY($18::text[])
+                   END
+              )
               -- opened_on is a DATE: a busy day is one big tie, and a
               -- LIMIT over an arbitrary order returns an arbitrary
               -- subset (2026-09-07 held 398 closed pr-trains; the
@@ -1226,6 +1247,8 @@ impl JobsRepository for PgJobs {
             .bind(filter.partition.map(Partition::as_str))
             .bind(filter.metadata_has.as_deref())
             .bind(filter.kinds.as_deref())
+            .bind(department_code)
+            .bind(department_kinds)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| JobsError::Storage(e.to_string()))?;
@@ -1267,6 +1290,16 @@ impl JobsRepository for PgJobs {
               -- Same kind-set clause as the list query, for the same
               -- reason.
               AND ($14::text[] IS NULL OR kind = ANY($14))
+              -- Same department clause as the list query, for the same
+              -- reason.
+              AND (
+                $15::text IS NULL
+                OR CASE WHEN jsonb_typeof(metadata->'department') = 'string'
+                             AND metadata->>'department' <> ''
+                        THEN metadata->>'department' = $15
+                        ELSE kind = ANY($16::text[])
+                   END
+              )
             "#,
         )
         .bind(filter.kind.as_deref())
@@ -1283,6 +1316,8 @@ impl JobsRepository for PgJobs {
         .bind(filter.partition.map(Partition::as_str))
         .bind(filter.metadata_has.as_deref())
         .bind(filter.kinds.as_deref())
+        .bind(department_code)
+        .bind(department_kinds)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| JobsError::Storage(e.to_string()))?;

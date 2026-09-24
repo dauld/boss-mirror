@@ -40,12 +40,11 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-/// How long a firing row is kept. Unlike a cadence rule's few firings
-/// an hour, the rules runner fires tens per second at warp, so the
-/// writer prunes its own table — a measurement record nobody trims is
-/// a log. Thirty days is the window `surface_opens` keeps, and becomes
-/// a retention row when that registry lands (backlog 16115a17).
-pub const RETENTION_DAYS: i64 = 30;
+/// How long a firing row is kept — defined beside the table's reader,
+/// where the rules list says "no firing in the last N days" by the same
+/// number (backlog 43c4451a); this crate depends on that one, so the
+/// one copy lives there and the prune reads it from here.
+pub use boss_jobs::dispatcher_firings::RETENTION_DAYS;
 
 /// How often the sink prunes, at most. The prune is one indexed DELETE
 /// and the retention window is a month, so an hour of slack costs

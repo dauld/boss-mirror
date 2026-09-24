@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::events;
 use crate::in_memory::compute_job_status;
 use crate::policy_glue::scope_matches;
-use crate::port::{JobFilter, JobScope, JobsRepository, LaunchCalendarRow};
+use crate::port::{DepartmentFilter, JobFilter, JobScope, JobsRepository, LaunchCalendarRow};
 use crate::registry::{WorkflowError, WorkflowRegistry, WorkflowSpec};
 use crate::step_plugins::{StepPluginError, StepPluginRegistry, StepPluginSpec};
 use crate::step_registry::StepRegistry;
@@ -37,6 +37,7 @@ mod plugins;
 mod queue_age;
 mod refusals;
 mod regions;
+mod rule_firings;
 mod sim_clock;
 mod stations;
 mod steps;
@@ -52,6 +53,7 @@ use plugins::*;
 use queue_age::*;
 use refusals::*;
 use regions::*;
+use rule_firings::*;
 use sim_clock::*;
 use stations::*;
 use steps::*;
@@ -272,6 +274,11 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
         // above; a border whose flow cannot be computed answers unknown,
         // never zero.
         .route("/api/yard/borders", get(yard_borders::<R, B>))
+        // Every dispatcher rule's newest firing and its dead-letters —
+        // the rules list's second reading of the record the borders
+        // read, so a stalled rule no longer paints like an idle one
+        // (backlog 43c4451a).
+        .route("/api/yard/rule-firings", get(yard_rule_firings::<R, B>))
         .route("/api/jobs", get(list_jobs::<R, B>))
         .route("/api/jobs", post(create_job::<R, B>))
         .route("/api/jobs/{id}", get(get_job::<R, B>))

@@ -1,8 +1,9 @@
 //! `GET /api/jobs?department=<code>` — a department's jobs, at the
 //! layer that consumes them.
 //!
-//! WHY THIS FILE EXISTS. A packet carries no department; its workflow
-//! row does (`metadata.department`). Until 2026-09-18 the listing
+//! WHY THIS FILE EXISTS. A department is declared as data in two
+//! places: a workflow row's `metadata.department`, and — for the kinds
+//! that serve every department — the packet's own. Until 2026-09-18 the listing
 //! never read a `department` parameter, and an unknown query param is
 //! silently ignored — so `?department=sales` on prod answered 1944,
 //! the unfiltered total, with a straight face (backlog cc76f755). A
@@ -21,7 +22,12 @@
 //!      probe that proves the server converged reads exactly this,
 //!      because an old server answers the unfiltered count instead.
 //!
-//!   3. Without a registry the question cannot be answered, and the
+//!   3. A packet that carries `metadata.department` is on that
+//!      department's view even when its kind declares nothing — the
+//!      retros and page-audits every department has, which the kind
+//!      join alone never showed (backlog 481d7939, 2026-09-23).
+//!
+//!   4. Without a registry the question cannot be answered, and the
 //!      handler says so (503, like every other registry-backed door)
 //!      rather than answering everything.
 
@@ -80,6 +86,10 @@ fn registry() -> Arc<InMemoryWorkflows> {
             serde_json::json!({ "department": "finance" }),
         ),
         spec("backlog-item", serde_json::json!({})),
+        // The governance kinds serve every department, so their rows
+        // declare none; each PACKET names its department instead.
+        spec("department-retro", serde_json::json!({})),
+        spec("page-audit", serde_json::json!({})),
     ] {
         kinds.seed(s).expect("seed");
     }
@@ -146,6 +156,11 @@ fn packet(n: u8, kind: &str, title: &str) -> Job {
         tags: vec![],
         partition: boss_core::partition::Partition::Real,
     }
+}
+
+fn with_department(mut job: Job, code: &str) -> Job {
+    job.metadata = serde_json::json!({ "department": code });
+    job
 }
 
 async fn get(app: &Router, query: &str) -> (StatusCode, String) {
@@ -248,6 +263,64 @@ async fn department_intersects_with_kind_and_status() {
     assert_eq!(body["total"], 0);
 
     let body = list(&app, "department=sales&status=closed").await;
+    assert_eq!(body["total"], 0);
+}
+
+/// A packet that carries `metadata.department` is on that department's
+/// view, whatever its kind declares. Measured 2026-09-23 (backlog
+/// 481d7939): the warehouse retro and two warehouse page-audits carried
+/// `department = warehouse` and `?department=warehouse` answered 0; the
+/// finance retro was absent from `?department=finance`, which answered
+/// 1 (the payout). The governance kinds — department-retro, page-audit,
+/// backlog-item — are platform rows that declare no department, because
+/// they serve every department; the packet names which one.
+#[tokio::test]
+async fn a_packet_carrying_the_department_is_on_its_view() {
+    let (app, jobs) = app(Some(registry()));
+    seed(&jobs).await;
+    for j in [
+        with_department(
+            packet(6, "department-retro", "the warehouse retro"),
+            "warehouse",
+        ),
+        with_department(
+            packet(7, "page-audit", "the warehouse page audit"),
+            "warehouse",
+        ),
+        with_department(
+            packet(8, "department-retro", "the finance retro"),
+            "finance",
+        ),
+        packet(9, "receive-a-payout", "a payout"),
+    ] {
+        jobs.create_job(&j).await.expect("seed");
+    }
+
+    let warehouse = list(&app, "department=warehouse").await;
+    assert_eq!(
+        titles(&warehouse),
+        vec![
+            "the warehouse page audit".to_string(),
+            "the warehouse retro".to_string()
+        ],
+        "a department no kind declares still has the packets that name it"
+    );
+    assert_eq!(warehouse["total"], 2);
+
+    let finance = list(&app, "department=finance").await;
+    assert_eq!(
+        titles(&finance),
+        vec!["a payout".to_string(), "the finance retro".to_string()],
+        "the kind-declared packet AND the packet that names the department"
+    );
+    assert_eq!(finance["total"], 2);
+
+    // Intersects with `kind` like every other filter.
+    let retros = list(&app, "department=warehouse&kind=department-retro").await;
+    assert_eq!(titles(&retros), vec!["the warehouse retro".to_string()]);
+
+    // The control leg still holds: nothing names or declares it.
+    let body = list(&app, "department=no-such-department-zz&limit=1").await;
     assert_eq!(body["total"], 0);
 }
 

@@ -82,3 +82,44 @@ async fn the_newest_firing_of_the_named_rule_is_what_is_served() {
     assert_eq!(last.firing_id, "dispatcher:auto-park-on-gate-green:evt-2");
     assert_eq!(last.fired_on, "jobs.gate.green");
 }
+
+/// The rules list's read (backlog 43c4451a): the newest firing of EVERY
+/// rule, one row each, off the same columns the writer fills — an empty
+/// table answering an empty list, never an error.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_rules_newest_firing_is_one_row_per_rule() {
+    let db = TestDb::new().await;
+    let repo = PgDispatcherFirings::new(db.pool.clone());
+    assert!(repo.last_firings().await.unwrap().is_empty());
+
+    for (id, rule, at) in [
+        ("evt-1", "auto-park-on-gate-green", "2026-09-19T09:00:00Z"),
+        ("evt-2", "auto-park-on-gate-green", "2026-09-19T11:30:00Z"),
+        ("evt-3", "auto-park-on-gate-green", "2026-09-19T10:00:00Z"),
+        (
+            "evt-4",
+            "complete-marker-on-step-ready",
+            "2026-09-18T12:00:00Z",
+        ),
+    ] {
+        insert(&db.pool, &format!("dispatcher:{rule}:{id}"), rule, at).await;
+    }
+
+    let all = repo.last_firings().await.unwrap();
+    assert_eq!(
+        all.iter()
+            .map(|f| (f.rule.as_str(), f.fired_at))
+            .collect::<Vec<_>>(),
+        [
+            (
+                "auto-park-on-gate-green",
+                Utc.with_ymd_and_hms(2026, 9, 19, 11, 30, 0).unwrap()
+            ),
+            (
+                "complete-marker-on-step-ready",
+                Utc.with_ymd_and_hms(2026, 9, 18, 12, 0, 0).unwrap()
+            ),
+        ]
+    );
+    assert_eq!(all[0].fired_on, "jobs.gate.green");
+}

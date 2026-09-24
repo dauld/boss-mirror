@@ -10,11 +10,18 @@
   import Breadcrumb from '@boss/web-kit/ui/Breadcrumb.svelte';
   import { listActiveRules, type DispatcherRule } from './ruleAuthoring';
   import { describeTrigger } from './cascadeToGraph';
+  import { fetchRuleFirings, ruleActivity, type RuleFirings } from './ruleFirings';
+  import type { Remote } from '../data/remote';
   import { href } from '../router';
 
   let rules = $state<ReadonlyArray<DispatcherRule>>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
+  // When each rule last fired and whether it is dead-lettering
+  // (backlog 43c4451a) — a second read, beside the list rather than in
+  // front of it: the rules still paint when this one fails, and each
+  // activity cell then says "unknown" rather than "none".
+  let firings = $state<Remote<RuleFirings>>({ kind: 'loading' });
 
   async function load(): Promise<void> {
     loading = true;
@@ -30,6 +37,9 @@
 
   $effect(() => {
     void load();
+    void fetchRuleFirings().then((r) => {
+      firings = r;
+    });
   });
 
   let sorted = $derived([...rules].sort((a, b) => a.name.localeCompare(b.name)));
@@ -87,10 +97,13 @@
               <th>Trigger</th>
               <th class="num">Do steps</th>
               <th class="num">Version</th>
+              <th>Last fired</th>
+              <th>Dead-letters</th>
             </tr>
           </thead>
           <tbody>
             {#each sorted as r (r.name)}
+              {@const act = ruleActivity(r, firings)}
               <tr>
                 <td>
                   <Link to={href(`/it/registry/rules/${encodeURIComponent(r.name)}`)}>
@@ -103,6 +116,19 @@
                 <td><code class="mono" style="font-size:12px">{describeTrigger(r)}</code></td>
                 <td class="num">{r.do.length}</td>
                 <td class="num">{r.version}</td>
+                <td title={act.lastFiredWhy}>{act.lastFired}</td>
+                <!-- A dead-letter newer than the newest firing is a rule
+                     failing NOW — the stalled shape an idle row used to
+                     share (backlog 43c4451a). The count links to the
+                     packet holding the newest, where the error is. -->
+                <td class="dead-letters" class:failing={act.failing} title={act.deadLettersWhy}
+                    style={act.failing ? 'color:var(--err)' : undefined}>
+                  {#if act.deadLetterJob}
+                    <Link to={href(`/jobs/${act.deadLetterJob}`)}>{act.deadLetters}</Link>
+                  {:else}
+                    {act.deadLetters}
+                  {/if}
+                </td>
               </tr>
             {/each}
           </tbody>

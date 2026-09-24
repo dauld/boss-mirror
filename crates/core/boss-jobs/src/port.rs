@@ -44,15 +44,18 @@ pub struct JobFilter {
     /// both match `kind_prefix = "refurb"`).
     pub kind_prefix: Option<String>,
     /// Keep only packets whose `kind` is IN this set — and `Some(vec![])`
-    /// keeps NOTHING. The department listing's filter (backlog
-    /// cc76f755, 2026-09-18): jobs carry no department column; the
-    /// workflow row does (`metadata.department`), so the HTTP handler
-    /// resolves a department to the kinds declaring it and asks for
-    /// exactly those. An empty set answering the unfiltered count
-    /// would be the trap the packet was filed on — measured on prod,
-    /// `?department=sales` answered 1944, the unfiltered total,
-    /// because nothing read the parameter at all.
+    /// keeps NOTHING. Born as the department listing's filter (backlog
+    /// cc76f755, 2026-09-18), which has its own field now
+    /// (`department`); the regions read's inbound kind set still asks
+    /// for exactly a set of kinds. An empty set answering the
+    /// unfiltered count would be the trap cc76f755 was filed on —
+    /// measured on prod, `?department=sales` answered 1944, the
+    /// unfiltered total, because nothing read the parameter at all.
     pub kinds: Option<Vec<String>>,
+    /// Keep only the packets IN one department — the `?department=`
+    /// listing's filter. See [`DepartmentFilter`] for which packets
+    /// that is; `None` is no filter.
+    pub department: Option<DepartmentFilter>,
     pub status: Option<JobStatus>,
     /// A retention window on TERMINAL packets: keep everything still
     /// live, plus anything closed on or after this date. Drop
@@ -134,6 +137,46 @@ pub struct JobFilter {
     /// either entirely simulated or entirely real — so filtering here
     /// never splits a kind's packets across two answers.
     pub partition: Option<Partition>,
+}
+
+/// Which packets are IN a department — `GET /api/jobs?department=`.
+///
+/// A department is declared as data in two places, and a packet is in
+/// the one its OWN `metadata.department` names, or — when it names
+/// none — the one its kind's active workflow row declares
+/// (`crate::department::carried`, the same rule for both). One packet,
+/// one department: the packet's word is the more specific, so it wins.
+///
+/// Why the packet's word counts at all (backlog 481d7939, measured
+/// 2026-09-23): the kinds every department has — `department-retro`,
+/// `page-audit`, the `backlog-item`s a page audit files — are platform
+/// rows that declare no department, because they serve all of them;
+/// each packet carries the department it is about, and its schema
+/// requires it. Joined over kinds alone, the warehouse's retro and two
+/// page-audits answered `?department=warehouse` with total 0, and the
+/// finance retro was absent from finance's view. Membership stays data
+/// — the handler resolves `declaring_kinds` from the registry and the
+/// packet carries its own word — never a list of kinds in code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DepartmentFilter {
+    /// The department code asked for.
+    pub code: String,
+    /// The kinds whose ACTIVE workflow row declares `code`
+    /// (`crate::department::kinds_declaring`). Empty is a real answer —
+    /// no kind declares it — and then only packets naming it match.
+    pub declaring_kinds: Vec<String>,
+}
+
+impl DepartmentFilter {
+    /// Whether a packet of `kind` carrying `metadata` is in this
+    /// department. The Postgres adapter spells the same rule as a
+    /// `CASE` over the same two sources; each is pinned by a test.
+    pub fn keeps(&self, kind: &str, metadata: &serde_json::Value) -> bool {
+        match crate::department::carried(metadata) {
+            Some(own) => own == self.code,
+            None => self.declaring_kinds.iter().any(|k| k == kind),
+        }
+    }
 }
 
 /// The policy-scope slice applied to a listing. Mirrors the shapes

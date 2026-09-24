@@ -86,26 +86,29 @@ pub(super) struct ListJobsQuery {
     /// (`metadata ? $n`). Letters, digits, underscore; a dotted path
     /// is refused because `?` does not walk one.
     metadata_has: Option<String>,
-    /// `department=<code>` keeps the packets of the kinds whose ACTIVE
-    /// workflow row declares `metadata.department = <code>` — a
-    /// packet carries no department, its workflow does, and the
-    /// registry is the one copy (`crate::department`). A code nothing
-    /// declares is `total: 0`, never the unfiltered count: measured
-    /// on prod on 2026-09-18, `?department=sales` answered 1944 —
-    /// every packet — because nothing read the parameter (backlog
-    /// cc76f755). Needs the registry; without one it is a 503, not an
-    /// answer.
+    /// `department=<code>` keeps the packets IN that department: those
+    /// whose own `metadata.department` is `<code>`, and — when a packet
+    /// names none — those of the kinds whose ACTIVE workflow row
+    /// declares it (`crate::port::DepartmentFilter`; the packet's word
+    /// counts since backlog 481d7939, when the retros and page-audits
+    /// that name a department appeared on no department's view). A code
+    /// nothing declares or names is `total: 0`, never the unfiltered
+    /// count: measured on prod on 2026-09-18, `?department=sales`
+    /// answered 1944 — every packet — because nothing read the
+    /// parameter (backlog cc76f755). Needs the registry; without one it
+    /// is a 503, not an answer.
     department: Option<String>,
 }
 
-/// Resolve `department=<code>` to the kind set the port narrows on:
-/// the active kinds declaring it (`crate::department::kinds_declaring`),
-/// which may be empty — and empty is a real filter (no packet), not
-/// no filter. `None` when the param was not sent.
-async fn kinds_for_department<R: JobsRepository, B: EventBus>(
+/// Resolve `department=<code>` to the filter the port narrows on: the
+/// code, and the active kinds declaring it
+/// (`crate::department::kinds_declaring`), which may be empty — and
+/// empty is a real filter (only the packets naming it), not no filter.
+/// `None` when the param was not sent.
+async fn department_filter<R: JobsRepository, B: EventBus>(
     code: Option<&str>,
     state: &JobsApiState<R, B>,
-) -> Result<Option<Vec<String>>, Response> {
+) -> Result<Option<DepartmentFilter>, Response> {
     let Some(code) = code else {
         return Ok(None);
     };
@@ -117,7 +120,10 @@ async fn kinds_for_department<R: JobsRepository, B: EventBus>(
         )
             .into_response()
     })?;
-    Ok(Some(crate::department::kinds_declaring(&specs, code)))
+    Ok(Some(DepartmentFilter {
+        code: code.to_string(),
+        declaring_kinds: crate::department::kinds_declaring(&specs, code),
+    }))
 }
 
 /// Parse `metadata=<json>` into the containment document the port
@@ -218,15 +224,15 @@ pub(super) async fn list_jobs<R: JobsRepository + 'static, B: EventBus + 'static
         Ok(p) => p,
         Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
     };
-    let kinds = match kinds_for_department(q.department.as_deref(), &state).await {
-        Ok(k) => k,
+    let department = match department_filter(q.department.as_deref(), &state).await {
+        Ok(d) => d,
         Err(resp) => return resp,
     };
 
     let filter = JobFilter {
         kind: q.kind,
         kind_prefix: q.kind_prefix,
-        kinds,
+        department,
         status: q.status,
         owner_id: q.owner_id,
         subject_id: q.subject_id,
@@ -485,6 +491,7 @@ pub(super) async fn jobs_live<R: JobsRepository + 'static, B: EventBus + 'static
         kind: None,
         kind_prefix: None,
         kinds: None,
+        department: None,
         status: Some(boss_core::job::JobStatus::Open),
         closed_since: None,
         priority: None,

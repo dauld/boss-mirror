@@ -468,6 +468,14 @@ fn build_router(
             "/api/yard/borders",
             axum::routing::get(|s, r| proxy::handle(s, r, &proxy::JOBS)),
         )
+        // Every dispatcher rule's newest firing and dead-letters, read by
+        // the rules list at /it/registry/rules (backlog 43c4451a). Same
+        // upstream as the borders, whose record it re-reads, and routed
+        // in the car that adds the fetch.
+        .route(
+            "/api/yard/rule-firings",
+            axum::routing::get(|s, r| proxy::handle(s, r, &proxy::JOBS)),
+        )
         // The agent-run record — which actor built what, and what it
         // cost. `GET /api/agent-runs[?actor_id=&branch=&since=]` lists
         // the rows and `/cost` rolls them up; both live on the jobs

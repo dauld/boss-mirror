@@ -10,9 +10,11 @@
 // (backlog cc76f755, 2026-09-18).
 //
 // WHICH PACKETS ARE THE DEPARTMENT'S is the server's question, not
-// this file's: `GET /api/jobs?department=<code>` narrows to the kinds
-// whose active workflow row declares `metadata.department = <code>`.
-// A packet carries no department; its workflow does. Before that
+// this file's: `GET /api/jobs?department=<code>` keeps the packets
+// whose own `metadata.department` is `<code>` (a retro, a page audit,
+// the items an audit files) and, for a packet naming none, those of
+// the kinds whose active workflow row declares it (backlog 481d7939,
+// `DepartmentFilter` in boss-jobs). Before that
 // parameter existed the listing ignored it and answered the
 // unfiltered count (1944 on prod), which is the reading this page
 // must never make — so the loader keeps `total` and the page reports

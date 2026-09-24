@@ -25,6 +25,12 @@
 //                    longer holds the route in SILENT;
 //   gap 4 (f9e34a2c) why/source/authored/when and authored_registry are
 //                    received and not rendered;
+//   gap 5 (43c4451a) no row said when its rule last fired or whether it
+//                    was dead-lettering, so a stalled rule and an idle one
+//                    painted the same — FIXED: a second read,
+//                    /api/yard/rule-firings, fills a Last fired and a
+//                    Dead-letters column, and a dead-letter newer than
+//                    the newest firing says "failing";
 //   gap 6 (0a98d93f) no registry tab bar — FIXED: the page renders under
 //                    the registry tabs, with a Rules tab of its own;
 //   gap 7 (3071e235) the editor the row links and "+ New rule" land on
@@ -138,9 +144,31 @@ const payload = (rules: unknown[]) => ({
   authored_registry: { dir: '/opt/boss/infra/dispatcher/rules-the-page-does-not-render', rules: 3, error: null },
 });
 
+/// The activity read (gap 5, backlog 43c4451a): when each rule last fired
+/// and its dead-letters, as boss-jobs http/rule_firings.rs answers it.
+/// auto-park fired an hour before `now` and is idle; the tenant rule fired
+/// two days ago and dead-lettered twice since — the stalled shape. The two
+/// scheduled rules and the triggerless row have no firing row.
+const FIRINGS = /\/api\/yard\/rule-firings$/;
+const STALLED_JOB = 'a1b2c3d4-0000-4000-8000-000000000001';
+const ACTIVITY = {
+  now: '2026-09-24T12:00:00Z',
+  retention_days: 30,
+  firings: [
+    { rule: 'auto-park-on-gate-green', fired_on: 'step.done.gate-verdict', fired_at: '2026-09-24T11:00:00Z' },
+    { rule: 'tenant-reorder-on-low-stock', fired_on: 'inventory.stock.low', fired_at: '2026-09-22T12:00:00Z' },
+  ],
+  firings_error: null,
+  dead_letters: [
+    { rule: 'tenant-reorder-on-low-stock', packets: 2, newest_at: '2026-09-24T11:45:00Z', newest_job_id: STALLED_JOB },
+  ],
+  dead_letters_error: null,
+};
+
 async function install(page: Page, rules: unknown[] = ROWS): Promise<void> {
   await installSmokeMocks(page);
   await page.route(RULES, (r) => json(r, payload(rules)));
+  await page.route(FIRINGS, (r) => json(r, ACTIVITY));
 }
 
 /// The shell's own write: App.svelte posts one surface-open per
@@ -187,7 +215,7 @@ async function backHere(page: Page, rows: number): Promise<void> {
 }
 
 test.describe('/it/registry/rules — the rows', () => {
-  test('header, guidance line, and one row per rule sorted by name with four columns', async ({ page }) => {
+  test('header, guidance line, and one row per rule sorted by name with six columns', async ({ page }) => {
     await install(page);
     await mountPage(page, PAGE, { titleMatch: new RegExp(TITLE) });
 
@@ -201,26 +229,29 @@ test.describe('/it/registry/rules — the rows', () => {
     await expect(section).toHaveCount(1);
     expect((await section.locator('h3').textContent())?.trim()).toBe('Active rules');
     const heads = await section.locator('thead th').allTextContents();
-    expect(heads.map((h) => h.trim())).toEqual(['Rule', 'Trigger', 'Do steps', 'Version']);
+    expect(heads.map((h) => h.trim())).toEqual(['Rule', 'Trigger', 'Do steps', 'Version', 'Last fired', 'Dead-letters']);
 
     await expect(page.locator('.catalog tbody tr td:first-child')).toHaveText(SORTED);
     const row = (name: string) => page.locator('.catalog tbody tr').filter({ hasText: name });
     // describeTrigger's three branches: an event, a schedule (both cadence
-    // spellings), and neither.
+    // spellings), and neither. The last two cells are gap 5's: an idle
+    // event rule, the stalled one, scheduled rules (whose firings the
+    // schedule runner does not record) and a rule with no firing row.
     await expect(row('auto-park-on-gate-green').locator('td')).toHaveText([
-      'auto-park-on-gate-green', 'on step.done.gate-verdict', '1', '2',
+      'auto-park-on-gate-green', 'on step.done.gate-verdict', '1', '2', '1h ago', 'none',
     ]);
     await expect(row('sensors-poll-every-5-minutes').locator('td')).toHaveText([
-      'sensors-poll-every-5-minutes', 'every 5 minutes · from 2026-09-17', '1', '1',
+      'sensors-poll-every-5-minutes', 'every 5 minutes · from 2026-09-17', '1', '1', 'not recorded', 'none',
     ]);
     await expect(row('department-retros-weekly').locator('td')).toHaveText([
-      'department-retros-weekly', 'every week · from 2026-09-21', '1', '7',
+      'department-retros-weekly', 'every week · from 2026-09-21', '1', '7', 'not recorded', 'none',
     ]);
     await expect(row('tenant-reorder-on-low-stock').locator('td')).toHaveText([
-      'tenant-reorder-on-low-stock', 'on inventory.stock.low', '2', '4',
+      'tenant-reorder-on-low-stock', 'on inventory.stock.low', '2', '4', '2d ago',
+      '2, newest 15m ago — failing since its last firing',
     ]);
     await expect(row('a-rule-with-no-trigger').locator('td')).toHaveText([
-      'a-rule-with-no-trigger', 'no trigger recorded', '1', '1',
+      'a-rule-with-no-trigger', 'no trigger recorded', '1', '1', 'none in 30d', 'none',
     ]);
 
     // GAP 4 (backlog f9e34a2c), pinned as it stands: the read carries
@@ -270,8 +301,50 @@ test.describe('/it/registry/rules — the rows', () => {
   });
 });
 
+test.describe('/it/registry/rules — a stalled rule and an idle one are two rows (gap 5)', () => {
+  test('the stalled rule says failing and links the packet holding its newest dead-letter', async ({ page }) => {
+    const reads: string[] = [];
+    page.on('request', (r) => {
+      if (FIRINGS.test(new URL(r.url()).pathname)) reads.push(r.url());
+    });
+    await install(page);
+    await mountPage(page, PAGE, { titleMatch: new RegExp(TITLE) });
+    await expect(page.locator('.catalog tbody tr')).toHaveCount(ROWS.length);
+    expect(await settledReads(page, () => reads.length, 1)).toBe(1);
+
+    const cell = (name: string) =>
+      page.locator('.catalog tbody tr').filter({ hasText: name }).locator('td.dead-letters');
+    await expect(cell('tenant-reorder-on-low-stock')).toHaveClass(/failing/);
+    await expect(cell('auto-park-on-gate-green')).not.toHaveClass(/failing/);
+    await expect(page.locator('.catalog td.dead-letters.failing')).toHaveCount(1);
+
+    const link = cell('tenant-reorder-on-low-stock').locator('a');
+    await expect(link).toHaveAttribute('href', `/jobs/${STALLED_JOB}`);
+    expect(parseRoute(`/jobs/${STALLED_JOB}`)).toEqual({ kind: 'jobDetail', jobId: STALLED_JOB });
+    // The hover names the instants, so "1h ago" can be checked.
+    await expect(
+      page.locator('.catalog tbody tr').filter({ hasText: 'auto-park-on-gate-green' }).locator('td').nth(4),
+    ).toHaveAttribute('title', 'fired 2026-09-24T11:00:00Z on step.done.gate-verdict');
+  });
+
+  test('an activity read that fails leaves the rules painted and every activity cell unknown', async ({ page }) => {
+    await installSmokeMocks(page);
+    await page.route(RULES, (r) => json(r, payload(ROWS)));
+    await page.route(FIRINGS, (r) => r.fulfill({ status: 503, contentType: 'text/plain', body: 'jobs down' }));
+    await mountPage(page, PAGE, { titleMatch: new RegExp(TITLE) });
+
+    await expect(page.locator('.catalog tbody tr')).toHaveCount(ROWS.length);
+    await expect(page.locator('.catalog header.exec-header p')).toHaveText(SUBTITLE('5 active rules'));
+    // Unknown, never "none" — a failed read painted as no failures is a
+    // stopped rule reading healthy.
+    await expect(page.locator('.catalog tbody td:nth-child(5)')).toHaveText(Array(ROWS.length).fill('unknown'));
+    await expect(page.locator('.catalog tbody td:nth-child(6)')).toHaveText(Array(ROWS.length).fill('unknown'));
+    await expect(page.locator('.catalog tbody td:nth-child(6)').first()).toHaveAttribute('title', /HTTP 503/);
+  });
+});
+
 test.describe('/it/registry/rules — the controls', () => {
-  test('one unfiltered read, no buttons, no forms, no writes, and one link per rule plus two', async ({ page }) => {
+  test('one unfiltered read, no buttons, no forms, no writes, and one link per rule plus three', async ({ page }) => {
     const writes = watchWrites(page);
     const reads: string[] = [];
     page.on('request', (r) => {
@@ -285,9 +358,10 @@ test.describe('/it/registry/rules — the controls', () => {
     expect(new URL(reads[0]!).search, 'the page reads every active rule, unfiltered').toBe('');
     await expect(page.locator('.catalog button')).toHaveCount(0);
     await expect(page.locator('.catalog form')).toHaveCount(0);
-    // The breadcrumb, the header's "+ New rule", and the rows. The
-    // empty state's inline "+ New rule" is absent while rules exist.
-    await expect(page.locator('.catalog a')).toHaveCount(2 + ROWS.length);
+    // The breadcrumb, the header's "+ New rule", the rows, and the one
+    // dead-letter count that names a packet (gap 5). The empty state's
+    // inline "+ New rule" is absent while rules exist.
+    await expect(page.locator('.catalog a')).toHaveCount(3 + ROWS.length);
     await expect(page.getByRole('link', { name: '+ New rule' })).toHaveCount(1);
     expect(writes.map((w) => `${w.method()} ${w.url()}`)).toEqual([]);
   });
@@ -371,7 +445,7 @@ test.describe('/it/registry/rules — the controls', () => {
     );
     await mountPage(page, PAGE, { titleMatch: new RegExp(TITLE) });
 
-    const rowLinks = page.locator('.catalog tbody a');
+    const rowLinks = page.locator('.catalog tbody td:first-child a');
     await expect(rowLinks).toHaveCount(ROWS.length);
     const hrefs = await rowLinks.evaluateAll((as) => as.map((a) => a.getAttribute('href') ?? ''));
     expect(hrefs).toEqual(SORTED.map((n) => `${PAGE}/${encodeURIComponent(n)}`));

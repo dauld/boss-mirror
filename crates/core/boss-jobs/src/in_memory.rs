@@ -103,6 +103,14 @@ fn matches_filter(job: &Job, filter: &JobFilter) -> bool {
     {
         return false;
     }
+    // The packet's own department word, else its kind's declaration —
+    // the rule lives on the filter so this adapter and the SQL one's
+    // CASE have one statement of it to be pinned against.
+    if let Some(ref department) = filter.department
+        && !department.keeps(&job.kind, &job.metadata)
+    {
+        return false;
+    }
     // The retention window replaces the status equality when set:
     // "live OR closed on/after this date". Same contract as the SQL
     // adapter, which expresses it as a CASE over the same two columns
@@ -1223,6 +1231,7 @@ mod tests {
     use chrono::{NaiveDate, TimeZone};
 
     use super::*;
+    use crate::port::DepartmentFilter;
 
     fn test_date() -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 4, 16).unwrap()
@@ -1485,6 +1494,65 @@ mod tests {
         };
         let (_, total) = repo.list_jobs(&both, 100, 0).await.unwrap();
         assert_eq!(total, 0);
+    }
+
+    /// `department` keeps the packets IN one department: the packet's
+    /// own `metadata.department` when it names one, else its kind's
+    /// declaration (backlog 481d7939 — retros and page-audits name
+    /// their department and their kinds declare none). The same legs
+    /// run against the Postgres adapter in `tests/postgres_filter.rs`.
+    #[tokio::test]
+    async fn department_keeps_what_a_packet_names_else_what_its_kind_declares() {
+        let repo = InMemoryJobs::new();
+        let named = |kind: &str, dept: serde_json::Value| {
+            let mut j = make_job(kind);
+            j.metadata = serde_json::json!({ "department": dept });
+            j
+        };
+        for j in [
+            make_job("receive-a-payout"),                    // kind declares finance
+            named("department-retro", "finance".into()),     // names finance
+            named("page-audit", "warehouse".into()),         // names warehouse
+            named("receive-a-payout", "sales".into()),       // its own word wins
+            named("receive-a-payout", "".into()),            // "" names nothing
+            named("receive-a-payout", serde_json::json!(7)), // a non-string names nothing
+            named("backlog-item", serde_json::Value::Null),  // nothing, kind declares nothing
+        ] {
+            repo.create_job(&j).await.unwrap();
+        }
+        let dept = |code: &str, kinds: &[&str]| JobFilter {
+            department: Some(DepartmentFilter {
+                code: code.into(),
+                declaring_kinds: kinds.iter().map(|k| k.to_string()).collect(),
+            }),
+            ..Default::default()
+        };
+
+        let (_, total) = repo
+            .list_jobs(&dept("finance", &["receive-a-payout"]), 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            total, 4,
+            "the plain payout, the finance retro, and the two naming no word"
+        );
+
+        let (jobs, total) = repo
+            .list_jobs(&dept("warehouse", &[]), 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(total, 1, "no kind declares warehouse; one packet names it");
+        assert_eq!(jobs[0].kind, "page-audit");
+
+        let (jobs, total) = repo.list_jobs(&dept("sales", &[]), 100, 0).await.unwrap();
+        assert_eq!(total, 1, "a packet's own word beats its kind's");
+        assert_eq!(jobs[0].kind, "receive-a-payout");
+
+        let (_, total) = repo
+            .list_jobs(&dept("no-such-department-zz", &[]), 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(total, 0, "nothing names or declares it: none, not all");
     }
 
     // `opened_on` is a DATE. On 2026-09-07 one day held 398 closed

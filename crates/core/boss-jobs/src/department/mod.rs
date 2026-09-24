@@ -1,14 +1,23 @@
 //! WHICH KINDS A DEPARTMENT'S WORK IS — the join behind
 //! `GET /api/jobs?department=<code>`.
 //!
-//! A packet carries no department. Its WORKFLOW does: the tenant's
-//! rows declare `metadata.department` (`receive-an-inquiry` and
-//! `receive-a-sponsorship` say `sales`, `publish-the-landing-page`
+//! A department's work kinds are declared on their WORKFLOW: the
+//! tenant's rows declare `metadata.department` (`receive-an-inquiry`
+//! and `receive-a-sponsorship` say `sales`, `publish-the-landing-page`
 //! says `marketing`, `receive-a-payout` says `finance`; the platform
 //! bundle declares none). So "the sales department's jobs" is the
 //! packets of the kinds whose ACTIVE workflow row declares `sales` —
-//! the current operating model, read from the registry, never a
-//! second copy of it on the packet.
+//! the current operating model, read from the registry.
+//!
+//! PLUS the packets that name the department themselves (backlog
+//! 481d7939, 2026-09-23). The kinds every department has —
+//! `department-retro`, `page-audit`, the `backlog-item`s an audit
+//! files — are platform rows that declare no department because they
+//! serve all of them; their packets carry `metadata.department`, and
+//! the retro and page-audit schemas require it. Joined over kinds
+//! alone they appeared on no department's view. A packet's own word
+//! wins over its kind's (`crate::port::DepartmentFilter`), and both are
+//! read by one rule (`carried`).
 //!
 //! Measured before this existed (backlog cc76f755, 2026-09-18):
 //! `?department=sales` answered 1944 — the unfiltered total — because
@@ -44,7 +53,17 @@ pub const KEY: &str = "department";
 
 /// The department a workflow row declares, if it declares one.
 pub fn declared(spec: &WorkflowSpec) -> Option<&str> {
-    spec.metadata
+    carried(&spec.metadata)
+}
+
+/// The department a metadata document names under [`KEY`] — a
+/// non-empty string, or nothing. ONE rule for a workflow row and for a
+/// packet (`crate::port::DepartmentFilter`): an empty string or a
+/// non-string names no department, so a packet whose step defaults
+/// ship `department = ""` falls back to its kind's declaration instead
+/// of leaving every department's view.
+pub fn carried(metadata: &serde_json::Value) -> Option<&str> {
+    metadata
         .get(KEY)
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
