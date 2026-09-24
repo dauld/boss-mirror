@@ -1133,7 +1133,7 @@ pub(crate) fn my_work_section(
 
 /// The REGIONS header — the IT system map's KPI cards, one line
 /// each, from `GET /api/yard/regions` (design 0524fc95, car 1). The
-/// server owns these numbers now: the count, the clear/busy/troubled
+/// server owns these numbers now: the count, the clear/attention/troubled
 /// state and the trend are ONE definition in `boss_jobs::regions`, the
 /// same one the map reads, so this verb and the yard cannot disagree
 /// about how many trains are in transit or what the time at CI is. The
@@ -1144,10 +1144,17 @@ pub(crate) fn my_work_section(
 /// `clear` is printed upper-case so trouble reads as trouble. The
 /// `window_hours` the server answered rides the heading, because a
 /// rate without its window is not a number.
+///
+/// ONE VOCABULARY, EACH STATE WITH ITS BAND (design 62de32ae): clear /
+/// attention / troubled, a non-clear state followed by how long the
+/// record says it has held ("TROUBLED for 16m") and the declared band
+/// that decided it, read against its number ("[oldest 5d > the 3-day
+/// triage band]"); the count carries its unit, a bound says whether it
+/// is a capacity or a threshold, and the region's KPI leads the trend.
 pub(crate) fn region_lines(map: &Value) -> Vec<String> {
     let hours = map.get("window_hours").and_then(Value::as_i64).unwrap_or(0);
     let mut out = vec![format!(
-        "  REGIONS — the IT system map over the last {hours}h (count · state · trend)"
+        "  REGIONS — the IT system map over the last {hours}h (count · state · kpi · trend)"
     )];
     let regions = map
         .get("regions")
@@ -1160,20 +1167,47 @@ pub(crate) fn region_lines(map: &Value) -> Vec<String> {
             Some(Value::Number(n)) => n.to_string(),
             _ => "?".to_string(),
         };
-        let bound = r
-            .get("bound")
-            .and_then(Value::as_i64)
-            .map(|b| format!(" of {b}"))
-            .unwrap_or_default();
+        let unit = r.get("unit").and_then(Value::as_str).unwrap_or("");
+        let bound = match (
+            r.get("bound").and_then(Value::as_i64),
+            r.get("bound_kind").and_then(Value::as_str),
+        ) {
+            (Some(b), Some("threshold")) => format!(" {unit} · threshold {b}"),
+            (Some(b), _) => format!(" of {b} {unit}"),
+            (None, _) => format!(" {unit}"),
+        };
+        let band = r.get("band").filter(|b| !b.is_null());
         let state = r.get("state").and_then(Value::as_str).unwrap_or("?");
         let state = if state == "clear" {
             state.to_string()
         } else {
-            state.to_uppercase()
+            let held = band
+                .and_then(|b| b.get("held"))
+                .and_then(Value::as_str)
+                .map(|h| format!(" for {h}"))
+                .unwrap_or_default();
+            format!("{}{held}", state.to_uppercase())
+        };
+        let decided = band
+            .and_then(|b| b.get("reads"))
+            .and_then(Value::as_str)
+            .map(|reads| format!("[{reads}] "))
+            .unwrap_or_default();
+        let kpi: Vec<&str> = r
+            .get("kpi")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|m| m.get("text").and_then(Value::as_str))
+            .collect();
+        let kpi = if kpi.is_empty() {
+            String::new()
+        } else {
+            format!("{} · ", kpi.join(" · "))
         };
         let why = r.get("why").and_then(Value::as_str).unwrap_or("");
         out.push(format!(
-            "    {name:<12} {count:>5}{bound:<6} {state:<9} {}  — {why}",
+            "    {name:<12} {count:>5}{bound:<32} {state:<18} {kpi}{}  — {decided}{why}",
             trend_text(r.get("trend").unwrap_or(&Value::Null))
         ));
     }
@@ -3446,7 +3480,8 @@ mod tests {
     /// breaks this before it can print `?` at an operator.
     #[test]
     fn the_regions_header_prints_the_servers_cards() {
-        use boss_jobs::regions::{Region, RegionState, Regions, Trend};
+        use boss_jobs::region_states::Decided;
+        use boss_jobs::regions::{BoundKind, Measure, Region, RegionState, Regions, Trend};
         let trend = |metric: &str, unit: &str, cur: Option<f64>, prev: Option<f64>| Trend {
             metric: metric.into(),
             unit: unit.into(),
@@ -3461,9 +3496,13 @@ mod tests {
                     name: name.into(),
                     count,
                     bound,
+                    bound_kind: bound.map(|_| BoundKind::Capacity),
+                    unit: "things".into(),
                     state,
                     why: why.into(),
+                    band: None,
                     trend,
+                    kpi: Vec::new(),
                     // orient prints a region as a LINE — its count, its
                     // bound and its why. The machinery (car 5) is a
                     // drawing, so this reader takes none of it.
@@ -3485,7 +3524,7 @@ mod tests {
                     "gates",
                     Some(3),
                     Some(3),
-                    RegionState::Busy,
+                    RegionState::Attention,
                     "3 of 3 bays in use — at the bound",
                     trend("gate duration", "minutes", Some(14.0), None),
                 ),
@@ -3533,7 +3572,7 @@ mod tests {
                     "marshalling",
                     Some(4),
                     None,
-                    RegionState::Busy,
+                    RegionState::Clear,
                     "4 packets standing at 2 stations",
                     trend("served", "per day", Some(6.0), Some(6.0)),
                 ),
@@ -3542,6 +3581,27 @@ mod tests {
             // lines print the regions alone.
             stuck: Vec::new(),
         };
+        // The dock's bound is a threshold, the gates' state was decided
+        // by a declared band that has held 42 minutes, and both carry
+        // their KPI in its units (design 62de32ae).
+        let mut map = map;
+        map.regions[0].bound_kind = Some(BoundKind::Threshold);
+        map.regions[0].unit = "cars parked".into();
+        map.regions[1].unit = "bays in use".into();
+        map.regions[1].band = Some(Decided {
+            id: "gates-at-bound".into(),
+            reads: "every bay in use for 30m".into(),
+            hold_minutes: 30,
+            since: Some("2026-09-24T11:18:00+00:00".into()),
+            held_minutes: Some(42),
+            held: Some("42m".into()),
+        });
+        map.regions[1].kpi = vec![Measure {
+            name: "bays in use".into(),
+            value: Some(3.0),
+            unit: "bays".into(),
+            text: "3 of 3 bays in use".into(),
+        }];
         let lines = region_lines(&serde_json::to_value(&map).unwrap());
         assert_eq!(
             lines.len(),
@@ -3552,16 +3612,24 @@ mod tests {
         assert!(lines[0].contains("last 24h"), "{}", lines[0]);
         assert!(
             lines[1].starts_with("    dock ")
-                && lines[1].contains(" 2 of 4 ")
+                && lines[1].contains(" 2 cars parked · threshold 4 ")
                 && lines[1].contains("clear")
                 && lines[1].contains("dock wait 1.5h (was 2.0h)"),
             "{}",
             lines[1]
         );
         assert!(
-            lines[2].contains("BUSY") && lines[2].contains("gate duration 14m (was —)"),
-            "{}",
+            lines[2].contains(" 3 of 3 bays in use ")
+                && lines[2].contains("ATTENTION for 42m")
+                && lines[2].contains("3 of 3 bays in use · gate duration 14m (was —)")
+                && lines[2].contains("— [every bay in use for 30m] 3 of 3 bays"),
+            "the state, how long it held, the KPI and the band that decided it: {}",
             lines[2]
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("BUSY")),
+            "busy is gone from the vocabulary:\n{}",
+            lines.join("\n")
         );
         assert!(
             lines[3].contains("TROUBLED")

@@ -35,10 +35,18 @@ const REGIONS = {
     { name: 'dock', count: 3, bound: 5, state: 'clear', why: '3 cars parked', trend: trend('dock wait', 'hours', 4.25, 3) },
     { name: 'gates', count: 1, bound: 3, state: 'troubled', why: '1 bay holds a corpse — a gate-run past its own deadline', trend: trend('gate duration', 'minutes', 11, 9.5) },
     { name: 'track', count: 0, bound: 1, state: 'clear', why: 'no train in transit', trend: trend('time at CI', 'minutes', null, 14) },
-    { name: 'shed', count: 2, state: 'busy', why: '2 landed cars await their probe', trend: trend('time to proven', 'hours', 1, 1.5) },
+    { name: 'shed', count: 2, state: 'attention', why: '2 landed cars await their probe', trend: trend('time to proven', 'hours', 1, 1.5) },
     { name: 'arrivals', count: 17, state: 'clear', why: '17 trains arrived in the window', trend: trend('arrivals', 'per day', 17, 12) },
     { name: 'garage', count: 0, state: 'clear', why: 'nothing gated red', trend: trend('reds', 'per day', 0, 2) },
-    { name: 'receiving', count: 4, state: 'busy', why: '4 inbound, oldest 5 days', trend: trend('inbound', 'per day', 4, 6) },
+    // Design 62de32ae car A: a non-clear state names the declared band
+    // that decided it and how long the record says it has held, and
+    // the count and the KPI carry their units.
+    {
+      name: 'receiving', count: 4, unit: 'packets standing', state: 'attention', why: '4 inbound, oldest 5 days',
+      band: { id: 'receiving-aging', reads: 'oldest 5d > the 3-day triage band', hold_minutes: 0, since: '2026-09-18T00:00:00+00:00', held_minutes: 2160, held: '36h' },
+      kpi: [{ name: 'oldest untriaged', value: 5, unit: 'days', text: 'oldest untriaged 5 days' }],
+      trend: trend('inbound', 'per day', 4, 6),
+    },
     { name: 'marshalling', count: null, state: 'troubled', why: 'the station registry could not be read', trend: trend('served', 'per day', null, null) },
     { name: 'shop-floor', count: 2, bound: 6, state: 'clear', why: '2 runs in flight, 1 crew on the floor', trend: trend('build duration', 'minutes', 64, 58) },
     { name: 'publish', count: 0, state: 'clear', why: 'no pull request awaiting a merge', trend: trend('publishes', 'per day', 1, 1) },
@@ -164,8 +172,27 @@ test('a troubled territory looks troubled where it is and carries its why', asyn
   await expect(dock.locator('text.why')).toHaveCount(0);
   await expect(dock.locator('rect.shed.err')).toHaveCount(0);
   await expect(dock.locator('.lamp.ok')).toHaveCount(1);
-  // Busy wears the warn stroke.
+  // Attention wears the warn stroke.
   await expect(svg.locator('.territory[data-region="shed"] rect.shed.warn')).toHaveCount(1);
+});
+
+test('a state that is not clear says how long it has held and names the band that decided it', async ({ page }) => {
+  await mocks(page);
+  await page.goto('/it');
+  const receiving = page.locator('section.yard svg .territory[data-region="receiving"]');
+  await expect(receiving).toHaveAttribute('data-state', 'attention');
+  await expect(receiving.locator('text.state')).toHaveText('attention for 36h');
+  // The band against its number, where the state is — not in a legend.
+  // (wrapped over tspans, so read line by line)
+  await expect(receiving.locator('text.why.warn tspan').first()).toHaveText('oldest 5d > the');
+  await expect(receiving.locator('text.why.warn tspan').nth(1)).toHaveText('3-day triage band');
+  // The KPI in its unit, as the server wrote it.
+  await expect(receiving.locator('text.kpi tspan').first()).toHaveText('oldest untriaged 5');
+  await expect(receiving.locator('text.kpi tspan').nth(1)).toHaveText('days');
+  // The hover carries the count in its unit and the whole band.
+  await expect(receiving.locator('title').first()).toContainText(
+    'receiving · 4 packets standing · attention for 36h [oldest 5d > the 3-day triage band]',
+  );
 });
 
 test('a territory click opens its floor, and the floor opens with the region\'s state and why at the head of its panel', async ({ page }) => {

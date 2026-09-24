@@ -103,7 +103,7 @@
     withConverge,
   } from './yard-converge';
   import { yardAlerts, type Alert } from './yard-alerts';
-  import { fetchRegions, floorSelection, lampOf, type Regions } from './regions';
+  import { bandText, fetchRegions, floorSelection, lampOf, stateText, type Regions } from './regions';
   import { yardSignals } from './yard-signals';
   import { production as productionOf } from './yard-production';
   import DepartureBoard from './DepartureBoard.svelte';
@@ -652,7 +652,7 @@
               data-region={focusRegion.name}
               data-state={focusRegion.state}>
               <span class="yard-lamp-dot {lampOf(focusRegion.state)}"></span>
-              <span>{focusRegion.name} · {focusRegion.state} — {focusRegion.why}</span>
+              <span>{focusRegion.name} · {stateText(focusRegion)}{bandText(focusRegion) ? ` · ${bandText(focusRegion)}` : ''} — {focusRegion.why}</span>
             </div>
           {:else if regionsRead.kind === 'failed'}
             <div class="yard-alert yard-region-head err" data-region={focus} data-state="unread">
