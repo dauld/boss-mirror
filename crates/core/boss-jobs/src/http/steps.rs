@@ -687,6 +687,26 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
             )
                 .into_response();
         }
+
+        // AN UNCHANGED RE-SEND OF A TERMINAL STEP WRITES NOTHING (backlog
+        // 29a7ea09). The freeze above lets it through so a racing writer
+        // stays harmless — and it was not: it still rewrote the step row,
+        // re-ran the re-evaluator and ran the all-steps-terminal catch-all
+        // close below. Measured on car 6b23d135, 2026-09-24T22:18:10Z: a
+        // direct PUT completed the `disproved` terminal and its close
+        // stamped `outcome=disproved` (.556307); the dispatcher's
+        // complete-marker-on-step-ready re-sent the completion (.576623, a
+        // bare STEP_UPDATED — the step was already completed), and its
+        // catch-all, having read the Job before that close committed,
+        // wrote the whole row back closed with no outcome (.586476). A
+        // write that changes nothing cannot have made a packet closable,
+        // so it has nothing to close: answer 204 and touch nothing.
+        // (Both closes are still whole-row writes; a writer that DOES
+        // change a step can still race one — the compare-and-set close
+        // is the rest of 29a7ea09.)
+        if step == old {
+            return StatusCode::NO_CONTENT.into_response();
+        }
     }
 
     // Auto-stamp completed_on on the done-transition if the caller
