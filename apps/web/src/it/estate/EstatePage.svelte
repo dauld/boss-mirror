@@ -3,7 +3,8 @@
   // (59ef456a: three hand-written accounts of the machines were wrong
   // the same way on 2026-08-30; this page reads the system so nobody
   // writes that doc again). Declared beside observed beside the
-  // difference, and the dev-workspace door at the bottom.
+  // difference, then the loops that keep the estate (0d9b2960), and the
+  // dev-workspace door at the bottom.
   import { onMount } from 'svelte';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import { formatRelative } from '@boss/web-kit/ui/date';
@@ -14,6 +15,9 @@
     fetchEstate,
     latestByScope,
     latestComparison,
+    LOOP_OK_OUTCOMES,
+    loopAge,
+    loopHost,
     type EstateState,
   } from './estate';
 
@@ -138,7 +142,56 @@
       </div>
     {/if}
 
-    <div class="estate-section">02 — THE DEV WORKSPACE</div>
+    <!-- THE LOOPS (backlog 0d9b2960, page audit 2cff1d6e GAP 10): the
+         packets the estate's own loops leave, so "did the loop run" is
+         answered here. Every cell is its own read, and a failed read says
+         so in that cell — an unread loop is not a loop that did not run. -->
+    <div class="estate-section">02 — THE LOOPS</div>
+    <p class="estate-hint">
+      Did each loop run: its newest finished packet (outcome and age) and any packet still open,
+      each linked. The host is the one the packet names; where a packet names none, the page says so
+      rather than guess.
+    </p>
+    <table class="estate-table estate-loops">
+      <thead>
+        <tr><th>loop</th><th>host</th><th>newest finished</th><th>open</th></tr>
+      </thead>
+      <tbody>
+        {#each estate.loops as l (`${l.kind}:${l.host ?? ''}`)}
+          <tr data-loop={l.kind}>
+            <td class="estate-id">{l.label}</td>
+            <td class="estate-addr">{loopHost(l)}</td>
+            <td class="estate-loop-latest">
+              {#if l.latest.kind === 'failed'}
+                <span class="estate-drift load-failed">unread: {l.latest.error}</span>
+              {:else if l.latest.kind === 'ready'}
+                {#if l.latest.data}
+                  {@const p = l.latest.data}
+                  <a class={LOOP_OK_OUTCOMES.has(p.outcome ?? '') ? 'estate-ok' : 'estate-drift'} href={`/ux/jobs/${p.id}`}>{p.outcome ?? p.status}</a>
+                  <span class="estate-age">{loopAge(p.at, loadedAt)}</span>
+                {:else}
+                  <span class="estate-drift">no finished run recorded</span>
+                {/if}
+              {/if}
+            </td>
+            <td class="estate-loop-open">
+              {#if l.open.kind === 'failed'}
+                <span class="estate-drift load-failed">unread: {l.open.error}</span>
+              {:else if l.open.kind === 'ready'}
+                {#each l.open.data as o (o.id)}
+                  <a href={`/ux/jobs/${o.id}`}>open</a>
+                  <span class="estate-age">{loopAge(o.at, loadedAt)}</span>
+                {:else}
+                  <span class="estate-quiet">none</span>
+                {/each}
+              {/if}
+            </td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
+
+    <div class="estate-section">03 — THE DEV WORKSPACE</div>
     <div class="estate-door">
       <p class="estate-hint">
         The workspace answers on <code>{DEV_DOOR_HOST}</code>, from anywhere, behind Cloudflare
@@ -193,6 +246,7 @@
     min-width: 150px;
   }
   .estate-when { color: var(--static); font-size: 12px; margin-left: auto; }
+  .estate-age { color: var(--static); font-size: 12px; margin-left: 8px; }
   .estate-ok { color: var(--signal); }
   .estate-drift { color: var(--warn); }
   .estate-door { display: flex; flex-direction: column; gap: 8px; }

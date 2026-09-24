@@ -170,6 +170,34 @@ describe('parseRoute — wildcard does not shadow specific cases', () => {
   });
 });
 
+// The /ux/products search box writes its query back as `q` (backlog
+// 1c2db4c2), so the route must hand it to the page on a reload or a
+// shared link; absent and empty both mean no query.
+describe('products list search from the query string', () => {
+  const at = (search: string) => {
+    (globalThis as { window?: { location: { search: string; pathname: string } } }).window = {
+      location: { search, pathname: '/ux/products' },
+    };
+    return parseRoute('/ux/products') as { kind: string; q?: string };
+  };
+
+  test('a query is carried through', () => {
+    const r = at('?q=pale+ale');
+    expect(r.kind).toBe('products');
+    expect(r.q).toBe('pale ale');
+  });
+
+  test('no query is the empty string, and is still the list route', () => {
+    expect(at('')).toEqual({ kind: 'products', q: '' });
+    expect(at('?q=')).toEqual({ kind: 'products', q: '' });
+  });
+
+  test('a product page does not read the list query', () => {
+    const r = parseRoute('/ux/products/FP-IPA-1-2-BBL');
+    expect(r).toEqual({ kind: 'product', productSku: 'FP-IPA-1-2-BBL' });
+  });
+});
+
 describe('global search results route', () => {
   test('/search carries the query through', () => {
     (globalThis as { window?: { location: { search: string; pathname: string } } }).window = {

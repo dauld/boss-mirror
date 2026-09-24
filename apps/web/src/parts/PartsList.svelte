@@ -22,6 +22,18 @@
   import { rowLink } from '@boss/web-kit/ui/RowLink';
   import { href, navigate } from '../router';
   import { getLabel } from '@boss/web-kit/session/manifest.svelte';
+  import { departmentLabel } from '@boss/web-kit/nav';
+  import { departments } from '@boss/web-kit/session/departments.svelte';
+  import DepartmentThirds from '../departments/DepartmentThirds.svelte';
+
+  // The department whose packets this page lists beside its parts —
+  // the catalog entry's `department`, handed in by App.svelte the way
+  // the two queues get theirs. The four reads below are stock; none is
+  // a jobs read, so until this prop a warehouse packet could never
+  // appear on the warehouse's page (backlog 044dffa1, page audit
+  // 63d810aa). Empty draws no panel.
+  let { department = '' } = $props<{ department?: string }>();
+  const departmentName = $derived(departmentLabel(department, departments()));
 
   type RowKind = 'ingredient' | 'packaging' | 'spare' | 'consumable';
   type Filter = 'all' | 'needs-attention' | RowKind | StockStatus;
@@ -291,4 +303,13 @@
       {/if}
     </section>
   </div>
+
+  {#if department}
+    <!-- Apart from the parts table (its own class, not list-section),
+         so nothing that reads the stock list reads a packet. -->
+    <section class="department-jobs">
+      <h2>{departmentName} jobs</h2>
+      <DepartmentThirds code={department} />
+    </section>
+  {/if}
 </div>

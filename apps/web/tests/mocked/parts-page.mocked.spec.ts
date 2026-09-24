@@ -15,7 +15,10 @@
 //   State B — the module on (the brewery's tenant.toml): PartsList —
 //             1 link kind (the SKU cell, once per row), 6 stock-status
 //             buttons + up to 4 kind buttons, 1 search input, 4 reads,
-//             0 writes.
+//             0 writes — and, below the list, the warehouse
+//             department's own packets (backlog 044dffa1): a fifth
+//             read, the jobs listing narrowed by department, pinned in
+//             its own block at the end so the four above stay exact.
 //
 // Lines that pin a FILED gap's current behaviour name the gap. They are
 // meant to be edited by the car that fixes it, so the fix shows up here
@@ -574,6 +577,82 @@ test.describe('/ux/parts — State B: empty, loading, and a failed read', () => 
 
     await page.route(ITEMS, (r) => json(r, { data: ITEMS_BODY }));
     await page.reload();
+    await expect(skuColumn(page)).toHaveText(SKUS);
+  });
+});
+
+// Backlog 044dffa1 (page audit 63d810aa, 2026-09-23): none of the four
+// reads above is a jobs read, so a warehouse packet could never appear
+// on the warehouse's page — not today (no protocol declares the
+// department) and not once one does. The page now makes the department
+// read every department's own view makes (departments/department.ts),
+// keyed by the catalog entry's `department`, and draws the same three
+// thirds. Its rows sit in `.department-jobs`, apart from the parts
+// table, so the parts pins above keep counting parts.
+test.describe('/ux/parts — State B: the warehouse department\'s packets (044dffa1)', () => {
+  const DEPT_JOBS = /\/api\/jobs\?(.*&)?department=warehouse(&|$)/;
+  const panel = (page: Page) => page.locator('.department-jobs');
+
+  const job = (
+    id: string, title: string, status: string, stepStatuses: ReadonlyArray<string>,
+    closed_on: string | null = null,
+  ) => ({
+    id, kind: 'receive-a-delivery', title, status, priority: 'standard',
+    subject: { subject_kind: 'purchase_order', id: 'PO-1' }, owner_id: 'emp-1',
+    opened_on: '2026-09-20', due_on: null, closed_on, metadata: {}, tags: [],
+    steps: stepStatuses.map((s, i) => ({ id: `s${i}`, kind: 'task', status: s })),
+  });
+  const JOBS = [
+    job('11111111-0000-0000-0000-000000000001', 'Receive the hop delivery', 'open', ['completed', 'active']),
+    job('11111111-0000-0000-0000-000000000002', 'Reorder pale malt', 'open', ['ready', 'pending']),
+    job('11111111-0000-0000-0000-000000000003', 'Count bin A-01', 'closed', ['completed'], '2026-09-22'),
+  ];
+
+  test('mount reads the department listing once and draws In / Working / Out beside the parts', async ({ page }) => {
+    const urls: string[] = [];
+    page.on('request', (req) => {
+      if (DEPT_JOBS.test(req.url())) urls.push(req.url());
+    });
+    await installParts(page);
+    await page.route(DEPT_JOBS, (r) => json(r, { data: JOBS, total: JOBS.length }));
+    await mountPage(page, PATH);
+
+    await expect(panel(page).locator('h2')).toHaveText('Warehouse jobs');
+    await expect(panel(page).locator('h3')).toHaveText(['In (1)', 'Working (1)', 'Out (1)']);
+    const sections = panel(page).locator('section.list-section');
+    await expect(sections.nth(0).locator('tbody tr td:nth-child(3)')).toHaveText(['Reorder pale malt']);
+    await expect(sections.nth(1).locator('tbody tr td:nth-child(3)')).toHaveText(['Receive the hop delivery']);
+    await expect(sections.nth(2).locator('tbody tr td:nth-child(3)')).toHaveText(['Count bin A-01']);
+    // The id cell is the short id (its last eight hex digits).
+    await expect(panel(page).getByRole('link', { name: '00000002', exact: true })).toHaveAttribute(
+      'href', '/ux/jobs/11111111-0000-0000-0000-000000000002',
+    );
+
+    // The parts table is untouched by the panel beside it.
+    await expect(page.locator('.catalog-layout tbody tr')).toHaveCount(ROWS.length);
+
+    expect(await settledReads(page, () => urls.length, 1)).toBe(1);
+    const q = new URL(urls[0]!).searchParams;
+    expect([q.get('department'), q.get('closed_within'), q.get('limit')]).toEqual(['warehouse', '30', '200']);
+  });
+
+  test('a department no protocol declares yet says so, and is not a failure', async ({ page }) => {
+    await installParts(page);
+    await page.route(DEPT_JOBS, (r) => json(r, { data: [], total: 0 }));
+    await mountParts(page);
+    await expect(panel(page).locator('p.empty')).toHaveText(
+      'No jobs in Warehouse: no packet of a kind whose workflow declares this department is live or closed in the last 30 days.',
+    );
+    await expect(panel(page).locator('table')).toHaveCount(0);
+    await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
+  });
+
+  test('a failed department read is said, and the parts still render', async ({ page }) => {
+    await installParts(page);
+    await page.route(DEPT_JOBS, (r) => json(r, { error: 'down' }, 503));
+    await mountParts(page);
+    await expect(panel(page).locator(FAILURE_MARKER)).toContainText("Couldn't load this department's jobs:");
+    await expect(panel(page).locator(FAILURE_MARKER)).toContainText('HTTP 503');
     await expect(skuColumn(page)).toHaveText(SKUS);
   });
 });

@@ -670,4 +670,14 @@ describe('a surface that lists a department names the department', () => {
     expect(ROUTE_CATALOG.sales.department).toBe('sales');
     expect(ROUTE_CATALOG.service.department).toBe('support');
   });
+
+  // Backlog 044dffa1 (2026-09-23, page audit 63d810aa): /ux/parts made
+  // four reads and none was a jobs read, so a warehouse packet — once a
+  // protocol declares the department — could never appear on the
+  // warehouse's own page. The department rides here, beside the path,
+  // for the reason the two queues' do.
+  it('the parts surface lists the warehouse department it sits under', () => {
+    expect(ROUTE_CATALOG.parts.app).toBe('warehouse');
+    expect(ROUTE_CATALOG.parts.department).toBe('warehouse');
+  });
 });

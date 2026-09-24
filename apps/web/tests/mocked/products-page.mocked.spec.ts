@@ -295,7 +295,7 @@ test.describe('/ux/products — State B, the module on: the list', () => {
 });
 
 test.describe('/ux/products — State B: the search input', () => {
-  test('matches SKU, name and kind, case-insensitively, client-side, and never reaches the URL', async ({ page }) => {
+  test('matches SKU, name and kind, case-insensitively, client-side, and rides in the URL as q without a history entry', async ({ page }) => {
     const seen = watch(page);
     await installProducts(page);
     await mountProducts(page);
@@ -323,17 +323,41 @@ test.describe('/ux/products — State B: the search input', () => {
     await search(page).fill('');
     await expect(skuColumn(page)).toHaveText(SKUS);
 
-    // Gap 8 (1c2db4c2): the query lives in component state — no read,
-    // no query string, no history entry.
+    // Gap 8 (1c2db4c2), fixed: the query rides in the URL as `q` — still
+    // no read and no history entry (replaceState), but a reload comes
+    // back filtered, with the box holding what was typed.
     expect(seen.reads, 'search is client-side').toHaveLength(READS_AT_MOUNT);
     await search(page).fill('stout');
+    await expect.poll(() => new URL(page.url()).search).toBe('?q=stout');
     expect(new URL(page.url()).pathname).toBe(PATH);
-    expect(new URL(page.url()).search).toBe('');
     expect(await page.evaluate(() => window.history.length)).toBe(depth);
     await page.reload();
-    await expect(skuColumn(page)).toHaveText(SKUS);
-    await expect(search(page)).toHaveValue('');
+    await expect(search(page)).toHaveValue('stout');
+    await expect(skuColumn(page)).toHaveText(['CAN-STOUT-4PK']);
     expect(seen.writes.map((r) => `${r.method()} ${r.url()}`)).toEqual([]);
+  });
+
+  test('clearing the box takes q back out of the URL, and parameters it does not own ride through', async ({ page }) => {
+    await installProducts(page);
+    await mountPage(page, `${PATH}?from=home`);
+    await expect(list(page).locator('tbody tr')).toHaveCount(ROWS.length);
+
+    await search(page).fill('pale ale');
+    await expect.poll(() => new URL(page.url()).searchParams.get('q')).toBe('pale ale');
+    expect(new URL(page.url()).searchParams.get('from')).toBe('home');
+
+    await search(page).fill('');
+    await expect.poll(() => new URL(page.url()).search).toBe('?from=home');
+    await expect(skuColumn(page)).toHaveText(SKUS);
+  });
+
+  test('a shared link opens the list already filtered, and mounting rewrites nothing', async ({ page }) => {
+    await installProducts(page);
+    await mountPage(page, `${PATH}?q=HAZY`);
+
+    await expect(search(page)).toHaveValue('HAZY');
+    await expect(skuColumn(page)).toHaveText(['KEG-IPA-HALF']);
+    expect(new URL(page.url()).search).toBe('?q=HAZY');
   });
 });
 

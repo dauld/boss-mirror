@@ -65,7 +65,9 @@ export type Route =
   | { kind: 'employee'; empId: string }
   | { kind: 'parts' }
   | { kind: 'part'; partSku: string }
-  | { kind: 'products' }
+  /// `q` is the list's search box, read back off the query so a
+  /// filtered view survives a reload and can be linked (1c2db4c2).
+  | { kind: 'products'; q: string }
   | { kind: 'product'; productSku: string }
   | { kind: 'finance' }
   | { kind: 'newInvoice' }
@@ -262,7 +264,9 @@ export function parseRoute(pathname: string): Route {
   const partM = p.match(/^\/parts\/(.+)$/);
   if (partM) return { kind: 'part', partSku: decodeURIComponent(partM[1]!) };
 
-  if (p === '/products') return { kind: 'products' };
+  if (p === '/products') {
+    return { kind: 'products', q: new URLSearchParams(window.location.search).get('q') ?? '' };
+  }
   const prodM = p.match(/^\/products\/(.+)$/);
   if (prodM) return { kind: 'product', productSku: decodeURIComponent(prodM[1]!) };
 

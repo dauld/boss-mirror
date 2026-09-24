@@ -13,6 +13,7 @@
 // empty estate (the false-empty family).
 
 import { fetchRemote, type Remote } from '../../data/remote';
+import { sinceText } from '../yard/yard-floor';
 
 export type EstateNode = Readonly<{
   id: string;
@@ -71,10 +72,75 @@ export type Comparison = Readonly<{
   counts: ComparisonCounts;
 }>;
 
+// THE LOOPS (backlog 0d9b2960; page audit 2cff1d6e, GAP 10). The
+// estate is kept by loops — the hosts converge themselves, observe
+// their units and the other hosts, the forge watches the cluster from
+// outside, the runners answer ops-requests — and every run leaves a
+// packet. This page showed none of them, so "did the loop run" had no
+// answer here while ~2,000 packets of each kind sat in the log. The
+// newest TERMINAL of each loop is that answer (outcome and age); an
+// open packet is a run in flight, or one that never finished.
+//
+// PER HOST where the packet names one, and only there. Measured
+// 2026-09-24: an ops-request carries `metadata.host`; the forge and
+// boss-gcp converges stamp `node_id` on their run step; the watchdog,
+// the cluster converge and both observers name no host (observe-host
+// runs on BOTH the forge and boss-gcp under one kind, and neither
+// packet says which). The page says "not named on the packet" rather
+// than guess one from a unit file it cannot read.
+
+/** A loop the page reads by kind. Pinned to infra/platform/workflows by
+ *  estate.test.ts, so a renamed kind is a red test rather than a row
+ *  that reads "never finished" forever. */
+export type EstateLoop = Readonly<{ kind: string; label: string }>;
+
+export const ESTATE_LOOPS: readonly EstateLoop[] = [
+  { kind: 'maintenance-forge-converge', label: 'forge converge' },
+  { kind: 'maintenance-boss-gcp-converge', label: 'boss-gcp converge' },
+  { kind: 'maintenance-cluster-converge', label: 'cluster converge' },
+  { kind: 'maintenance-cluster-watchdog', label: 'cluster watchdog' },
+  { kind: 'maintenance-estate-observe-host', label: 'observe hosts' },
+  { kind: 'maintenance-estate-observe-units', label: 'observe units' },
+];
+
+/** The ops-request loop is read once per host that DECLARES it answers
+ *  them — the `ops-runner` role (infra/estate/roles.toml: "which hosts
+ *  should be answering ... so silence has something to be silence
+ *  from"). Its packets carry `metadata.host`, so the split is the
+ *  server's filter, not this page's. */
+export const OPS_REQUEST_KIND = 'ops-request';
+export const OPS_RUNNER_ROLE = 'ops-runner';
+
+/** The success terminals of the loops above; every other terminal they
+ *  declare (failed, refused) renders as trouble. Held to the workflow
+ *  files by estate.test.ts. */
+export const LOOP_OK_OUTCOMES: ReadonlySet<string> = new Set(['completed', 'answered']);
+
+/** One packet of a loop, reduced to what "did it run" needs. */
+export type LoopPacket = Readonly<{
+  id: string;
+  status: string;
+  /** `metadata.outcome`, stamped on close; null while open. */
+  outcome: string | null;
+  /** When it closed (a terminal) or opened (an open packet). */
+  at: string | null;
+  /** The host the packet names, or null when it names none. */
+  host: string | null;
+}>;
+
+export type LoopPlan = Readonly<{ kind: string; label: string; host: string | null }>;
+
+export type LoopRow = LoopPlan & Readonly<{
+  /** Ready-and-null is a kind with no closed packet at all. */
+  latest: Remote<LoopPacket | null>;
+  open: Remote<readonly LoopPacket[]>;
+}>;
+
 export type EstateState = Readonly<{
   nodes: Remote<readonly EstateNode[]>;
   observations: Remote<readonly Observation[]>;
   comparisons: Remote<readonly Comparison[]>;
+  loops: readonly LoopRow[];
 }>;
 
 // THE DEV WORKSPACE DOOR (design 5fc71f03, David 2026-09-18; backlog
@@ -230,11 +296,81 @@ export function comparisonVerdict(c: Comparison): { ok: boolean; text: string } 
   return { ok: false, text: problems.join('; ') };
 }
 
+const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
+
+export function parseLoopPackets(raw: unknown): readonly LoopPacket[] {
+  return asArray(raw).map((r) => {
+    const o = r as Record<string, unknown>;
+    if (typeof o.id !== 'string' || typeof o.status !== 'string') {
+      throw new Error('jobs row missing id/status');
+    }
+    const md = (o.metadata ?? {}) as Record<string, unknown>;
+    const steps = Array.isArray(o.steps) ? (o.steps as Record<string, unknown>[]) : [];
+    const run = steps.find((s) => s.spec_slug === 'run');
+    const runMd = (run?.metadata ?? {}) as Record<string, unknown>;
+    const open = o.status === 'open';
+    return {
+      id: o.id,
+      status: o.status,
+      outcome: open ? null : str(md.outcome),
+      at: open ? (str(o.opened_at) ?? str(md.opened_at)) : (str(md.closed_at) ?? str(o.closed_on)),
+      host: str(md.host) ?? str(runMd.node_id),
+    };
+  });
+}
+
+/** The rows the page reads: every declared loop, then the ops-request
+ *  loop per live host declaring the runner role. With the registry
+ *  unreadable the runner row is kept, unfiltered — "did ANY runner
+ *  answer" is still a question the log can settle. */
+export function loopPlan(nodes: Remote<readonly EstateNode[]>): readonly LoopPlan[] {
+  const loops = ESTATE_LOOPS.map((l) => ({ ...l, host: null }));
+  if (nodes.kind !== 'ready') return [...loops, { kind: OPS_REQUEST_KIND, label: 'ops-request', host: null }];
+  const runners = nodes.data.filter((n) => !n.retired && n.roles.includes(OPS_RUNNER_ROLE));
+  return [...loops, ...runners.map((n) => ({ kind: OPS_REQUEST_KIND, label: 'ops-request', host: n.id }))];
+}
+
+/** Newest terminal = the first closed row (the listing is newest-opened
+ *  first); open = every open packet of the kind, typically none or one. */
+export function loopQueries(kind: string, host: string | null): { latest: string; open: string } {
+  const narrow = host === null ? '' : `&metadata=${encodeURIComponent(JSON.stringify({ host }))}`;
+  return {
+    latest: `/api/jobs?kind=${encodeURIComponent(kind)}&status=closed&limit=1${narrow}`,
+    open: `/api/jobs?kind=${encodeURIComponent(kind)}&status=open${narrow}`,
+  };
+}
+
+/** The host a row is about, from the query or the packet — never
+ *  guessed (see THE LOOPS above). */
+export function loopHost(row: LoopRow): string {
+  if (row.host) return row.host;
+  const fromLatest = row.latest.kind === 'ready' ? (row.latest.data?.host ?? null) : null;
+  const fromOpen = row.open.kind === 'ready' ? (row.open.data.find((p) => p.host)?.host ?? null) : null;
+  return fromLatest ?? fromOpen ?? 'not named on the packet';
+}
+
+/** How long ago, to the minute — a five-minute loop dated "today"
+ *  answers nothing. The board's own reading (yard-floor sinceText). */
+export function loopAge(at: string | null, now: Date): string {
+  return at ? `${sinceText(at, now.getTime())} ago` : 'undated';
+}
+
+async function fetchLoop(plan: LoopPlan): Promise<LoopRow> {
+  const q = loopQueries(plan.kind, plan.host);
+  const [latest, open] = await Promise.all([
+    fetchRemote(q.latest, (raw) => parseLoopPackets(raw)[0] ?? null),
+    fetchRemote(q.open, parseLoopPackets),
+  ]);
+  return { ...plan, latest, open };
+}
+
 export async function fetchEstate(): Promise<EstateState> {
-  const [nodes, observations, comparisons] = await Promise.all([
-    fetchRemote('/api/estate/nodes', parseNodes),
+  const nodesRead = fetchRemote('/api/estate/nodes', parseNodes);
+  const [nodes, observations, comparisons, loops] = await Promise.all([
+    nodesRead,
     fetchRemote('/api/estate/observations?limit=20', parseObservations),
     fetchRemote('/api/estate/comparisons?limit=20', parseComparisons),
+    nodesRead.then((n) => Promise.all(loopPlan(n).map(fetchLoop))),
   ]);
-  return { nodes, observations, comparisons };
+  return { nodes, observations, comparisons, loops };
 }

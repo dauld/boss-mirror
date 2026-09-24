@@ -328,11 +328,13 @@
     {:else if route.kind === 'employee'}
       <EmployeePage empId={route.empId} />
     {:else if route.kind === 'parts'}
-      <PartsList />
+      <!-- The warehouse's packets beside its stock, by the catalog
+           entry's department like the two queues above (044dffa1). -->
+      <PartsList department={ROUTE_CATALOG.parts.department ?? ''} />
     {:else if route.kind === 'part'}
       <PartPage partSku={route.partSku} />
     {:else if route.kind === 'products'}
-      <ProductsList />
+      <ProductsList initialQuery={route.q} />
     {:else if route.kind === 'product'}
       <ProductPage sku={route.productSku} />
     {:else if route.kind === 'shipping'}

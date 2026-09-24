@@ -11,6 +11,13 @@
   import { href } from '../router';
   import { entityHref } from '@boss/web-kit/ui/entity-href';
   import type { Product, ProductDetail } from './types';
+  import { productsSearch } from './searchQuery';
+
+  const { initialQuery = '' } = $props<{
+    /// The `q` parseRoute read off the URL — a reload or a shared
+    /// link opens the list already filtered (1c2db4c2).
+    initialQuery?: string;
+  }>();
 
   let products = $state<Product[]>([]);
   let totals = $state<Record<string, number>>({});
@@ -19,7 +26,23 @@
   /// 3fba9c35, the false-empty sweep).
   let loadFailed = $state<string | null>(null);
   let loading = $state(true);
-  let query = $state('');
+  // The prop seeds the box once; after mount the box is the truth and
+  // the URL follows it.
+  // svelte-ignore state_referenced_locally
+  let query = $state(initialQuery);
+
+  // The query lives in the URL, not only in page state: a reload used
+  // to come back unfiltered and a filtered view could not be linked
+  // (backlog 1c2db4c2, page audit 6b4e43a1 gap 8). replaceState, not a
+  // navigation — /ux/jobs's rule (f8027805): a keystroke is not a place
+  // the back button should step through, and App re-parses the route on
+  // popstate only. The write is the inverse of parseRoute's read, so a
+  // mount rewrites nothing.
+  $effect(() => {
+    const { pathname, search, hash } = window.location;
+    const next = productsSearch(search, query);
+    if (next !== search) window.history.replaceState(window.history.state, '', pathname + next + hash);
+  });
 
   $effect(() => {
     let cancelled = false;
