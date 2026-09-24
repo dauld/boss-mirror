@@ -273,6 +273,36 @@ test('the board says its sidings overlap, so the depth column is not read as a c
   await expect(overlap).toContainText('a.platform-admin.opus-5-1m 213 of 213');
 });
 
+// The waits table cut to 12 of 320 real obligations on 2026-09-23 and
+// said neither number (backlog 18683a0a, page-audit 7c228914 gap 8).
+// Fourteen real waits and one simulated: twelve rows, and a line under
+// them that counts the two it cut and the one it would not rank.
+test('the waits table counts what its cap leaves out, so a limit does not read as a filter', async ({ page }) => {
+  await mocks(page);
+  const json = (r: Route, b: unknown) =>
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(b) });
+  await page.route(/\/api\/stations\/load$/, (r) => json(r, STATION_LOAD));
+  await page.route(/\/api\/stations\/flow/, (r) => json(r, STATION_FLOW));
+  const wait = (i: number, simulated: boolean) => ({
+    job_id: `wait-${i}`, job_kind: 'backlog-item', job_title: `packet ${i}`, step_title: 'Build the change',
+    status: 'ready', assignee_id: null, simulated, partition: simulated ? 'simulated' : 'real',
+    exact: true, waiting_days: 20 - i,
+  });
+  await page.route(/\/api\/jobs\/queue-age$/, (r) =>
+    json(r, {
+      data: [...Array.from({ length: 14 }, (_, i) => wait(i, false)), wait(99, true)],
+      total: 15,
+      now: '2026-09-19T05:00:00Z',
+    }));
+
+  await page.goto('/it/yard/marshalling');
+  const count = page.locator('.my-root .my-waits-count');
+  await expect(count).toHaveText(
+    '12 of 14 outstanding obligations, longest first · +2 more not shown · 1 on simulated or shadow packets not ranked',
+  );
+  await expect(page.locator('.my-root a', { hasText: /^packet \d+$/ })).toHaveCount(12);
+});
+
 test("receiving's own map stands its inbound packets by channel and flags what is past the age band", async ({ page }) => {
   await mocks(page);
   const json = (r: Route, b: unknown) =>

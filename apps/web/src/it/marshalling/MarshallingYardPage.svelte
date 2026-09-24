@@ -34,6 +34,7 @@
     overlapLine,
     parseQueueAge,
     waitText,
+    waitsCountLine,
     whyNotMoving,
     type Siding,
     type StationFlowEnvelope,
@@ -100,6 +101,9 @@
   const blind = $derived(sidings.filter((s) => s.flow.kind === 'unavailable'));
   const longest = $derived(
     waits.kind === 'ready' ? longestWaits(waits.data.waits, WAIT_ROWS) : [],
+  );
+  const waitsCount = $derived(
+    waits.kind === 'ready' ? waitsCountLine(waits.data.waits, WAIT_ROWS) : '',
   );
 
   function clearText(s: Siding): string {
@@ -260,6 +264,9 @@
           {/each}
         </tbody>
       </table>
+      <!-- The cap is a display choice, not a filter: say what it left
+           out (backlog 18683a0a). -->
+      <p class="my-waits-count">{waitsCount}</p>
     {/if}
 
     <!-- 03 — WHAT THIS PAGE CANNOT COUNT. Stated, not omitted. -->
@@ -305,7 +312,7 @@
   }
   .my-section::after { content: ''; flex: 1; border-top: 1px solid var(--hairline); }
   .my-quiet { color: var(--static); font-size: 13px; }
-  .my-overlap { color: var(--static); font-size: 12px; margin: 8px 0 0; max-width: 78ch; }
+  .my-overlap, .my-waits-count { color: var(--static); font-size: 12px; margin: 8px 0 0; max-width: 78ch; }
   .my-fail {
     color: var(--warn);
     border: 1px solid var(--warn);

@@ -10,6 +10,7 @@ import {
   parseStationLoad,
   parseStationLoadEnvelope,
   waitText,
+  waitsCountLine,
   whyNotMoving,
   type Siding,
 } from './marshalling';
@@ -369,6 +370,36 @@ describe('parseQueueAge / longestWaits', () => {
     const out = longestWaits(parseQueueAge(QUEUE_AGE).waits, 1);
     expect(out.length).toBe(1);
     expect(out[0]?.jobKind).toBe('publish-to-github');
+  });
+});
+
+// The table showed 12 of 320 real obligations on 2026-09-23 and said
+// neither number (backlog 18683a0a, page-audit 7c228914 gap 8): a limit
+// that does not count what it leaves out reads as a filter.
+describe('waitsCountLine', () => {
+  const waits = parseQueueAge(QUEUE_AGE).waits;
+
+  test('a cut table names the total and how many it leaves out', () => {
+    expect(waitsCountLine(waits, 1)).toBe(
+      '1 of 2 outstanding obligations, longest first · +1 more not shown · 1 on simulated or shadow packets not ranked',
+    );
+  });
+
+  test('an uncut table still states its total', () => {
+    expect(waitsCountLine(waits, 12)).toBe(
+      '2 of 2 outstanding obligations, longest first · 1 on simulated or shadow packets not ranked',
+    );
+  });
+
+  test('the simulated clause is absent when nothing simulated was left out', () => {
+    const real = waits.filter((w) => !w.simulated);
+    expect(waitsCountLine(real, 12)).toBe('2 of 2 outstanding obligations, longest first');
+    expect(waitsCountLine(real.slice(0, 1), 12)).toBe('1 of 1 outstanding obligation, longest first');
+  });
+
+  test('the count agrees with what longestWaits shows', () => {
+    const shown = longestWaits(waits, 1).length;
+    expect(waitsCountLine(waits, 1).startsWith(`${shown} of `)).toBe(true);
   });
 });
 

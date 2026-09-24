@@ -419,6 +419,32 @@ export function longestWaits(waits: ReadonlyArray<Wait>, limit: number): Readonl
     .slice(0, Math.max(0, limit));
 }
 
+/**
+ * What the waits table leaves out, counted — the line under it.
+ *
+ * On 2026-09-23 the table showed 12 of 320 real obligations and said
+ * neither number (backlog 18683a0a, page-audit 7c228914 gap 8), so a
+ * display cap read as "these are the waits". The platform map already
+ * draws "+N more" for what it cannot place; this is the same courtesy.
+ * The total is always stated, cut or not, and the not-real waits
+ * `longestWaits` drops (simulated or shadow — `simulated` is derived as
+ * not-real at the parse) are counted too: dropping them is right, and
+ * saying so is what keeps it from being a silent filter.
+ */
+export function waitsCountLine(waits: ReadonlyArray<Wait>, limit: number): string {
+  const real = waits.filter((w) => !w.simulated).length;
+  const simulated = waits.length - real;
+  const shown = Math.min(real, Math.max(0, limit));
+  const noun = real === 1 ? 'obligation' : 'obligations';
+  return [
+    `${shown} of ${real} outstanding ${noun}, longest first`,
+    ...(shown < real ? [`+${real - shown} more not shown`] : []),
+    ...(simulated > 0
+      ? [`${simulated} on simulated or shadow packets not ranked`]
+      : []),
+  ].join(' · ');
+}
+
 /** How long it has waited — and, when the stamp is a fallback, that it
  *  is a floor rather than the figure. */
 export function waitText(w: Wait): string {
