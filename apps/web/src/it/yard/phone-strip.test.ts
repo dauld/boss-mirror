@@ -119,7 +119,11 @@ describe('the strip’s rows', () => {
   it('each row carries the rails INTO its region, in the borders’ order; the garage has two', () => {
     const b = borders(BORDERS.map((x) => border(x.from, x.to)));
     const rows = stripGroups(regions(), b).flatMap((g) => g.rows);
-    const into = (name: string) => rows.find((r) => r.name === name)!.rails;
+    const into = (name: string): ReadonlyArray<Border> => {
+      const rails = rows.find((r) => r.name === name)!.rails;
+      if (rails === null) throw new Error(`${name}: the rails were read, yet the row says unread`);
+      return rails;
+    };
     expect(into('receiving')).toEqual([]);
     expect(into('dock').map((r) => r.from)).toEqual(['gates']);
     expect(into('garage').map((r) => r.from)).toEqual(['gates', 'track']);
