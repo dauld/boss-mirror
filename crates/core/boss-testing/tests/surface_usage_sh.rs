@@ -11,9 +11,11 @@
 //! never-opened list must then be the catalog minus that one path, read
 //! off THIS tree's nav catalog.
 
+use boss_testing::announce::{await_announced_port, with_announce};
 use boss_testing::repo_root;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 const JOB_ID: &str = "0123456789abcdef";
 
@@ -27,8 +29,6 @@ log, started, mode = sys.argv[1], sys.argv[2], sys.argv[3]
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.bind(("127.0.0.1", 0))
 port = sock.getsockname()[1]
-with open(started, "w") as f:
-    f.write(str(port))
 OPEN = {"data": [{"id": "0123456789abcdef", "kind": "maintenance-surface-usage", "status": "open", "created_at": "2026-09-17T05:30:35Z", "metadata": {}}], "total": 1}
 ROLLUP = {"since": "2026-09-16T05:30:00Z", "until": "2026-09-17T05:30:00Z", "rows": [
   {"actor_id": "emp-david", "route": "/it", "opens": 7, "last_at": "2026-09-17T01:00:00Z"},
@@ -78,6 +78,10 @@ class H(http.server.BaseHTTPRequestHandler):
         self._reply(204, b"")
 srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H, bind_and_activate=False)
 srv.socket.close(); srv.socket = sock; srv.server_address = sock.getsockname(); srv.server_activate()
+# Announced once listening, and through boss_testing's announce (prepended),
+# which renames the file into place: the test reads it the moment it
+# exists (backlog 0d1e557e).
+announce(started, str(port))
 srv.serve_forever()
 "#;
 
@@ -142,8 +146,8 @@ fn start_stub(case: &str, mode: &str) -> Stub {
     let log = dir.join("calls.log");
     let _ = std::fs::remove_file(&log);
     let _ = std::fs::remove_file(&started);
-    boss_testing::write_exec(&script, STUB);
-    let child = Command::new("python3")
+    boss_testing::write_exec(&script, &with_announce(STUB));
+    let mut child = Command::new("python3")
         .arg(&script)
         .arg(&log)
         .arg(&started)
@@ -152,19 +156,7 @@ fn start_stub(case: &str, mode: &str) -> Stub {
         .stderr(Stdio::inherit())
         .spawn()
         .expect("python3");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while !started.exists() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the stub never announced its port"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    let port: u16 = std::fs::read_to_string(&started)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let port = await_announced_port(&mut child, &started, Duration::from_secs(20));
     Stub { child, port, log }
 }
 

@@ -48,10 +48,17 @@
     title="Step UX plugins"
     subtitle={loading
       ? 'Loading…'
-      : `${plugins.length} active plugin${plugins.length === 1 ? '' : 's'} across ${categoryKeys.length} categor${categoryKeys.length === 1 ? 'y' : 'ies'}`}
+      : error
+        ? // A failed read leaves `plugins` at [] — counting that would
+          // paint the empty registry's "0 active plugins" beside the
+          // failure line (backlog 044f55e4). The count is unknown, so say so.
+          'Plugin count unknown — the registry read failed'
+        : `${plugins.length} active plugin${plugins.length === 1 ? '' : 's'} across ${categoryKeys.length} categor${categoryKeys.length === 1 ? 'y' : 'ies'}`}
   />
   {#if error}
-    <p class="empty" style="color:var(--err)">Failed to load: {error}</p>
+    <!-- load-failed + role=alert: the shared failure marker the outage
+         crawl asserts (tests/mocked/_routes.ts FAILURE_MARKER; backlog 7267f9ce). -->
+    <p class="empty load-failed" role="alert" style="color:var(--err)">Failed to load: {error}</p>
   {/if}
 
   {#if plugins.length === 0 && !loading && !error}

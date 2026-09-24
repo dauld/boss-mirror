@@ -403,6 +403,7 @@
       <ItTabs group="registry" active="/it/registry/dispatcher" />
       <DispatcherCascadePage />
     {:else if route.kind === 'dispatcherRulesList'}
+      <ItTabs group="registry" active="/it/registry/rules" />
       <DispatcherRulesPage />
     {:else if route.kind === 'dispatcherRuleEdit'}
       <DispatcherRuleEditPage ruleName={route.ruleName} />

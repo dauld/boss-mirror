@@ -21,9 +21,11 @@
 //! live, one kind admitted that no file authors. Anything else the lint
 //! finds would be a fact about the fixture, not about the script.
 
+use boss_testing::announce::{await_announced_port, with_announce};
 use boss_testing::repo_root;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 const DRIFTED_KIND: &str = "backlog-item";
 const LIVE_ONLY_KIND: &str = "zeta-live-only";
@@ -41,8 +43,6 @@ log, started, registry, mode = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.bind(("127.0.0.1", 0))
 port = sock.getsockname()[1]
-with open(started, "w") as f:
-    f.write(str(port))
 OPEN = {"data": [{"id": "0123456789abcdef", "kind": "maintenance-protocol-drift", "status": "open", "created_at": "2026-09-15T05:20:35Z", "metadata": {}}], "total": 1}
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -75,6 +75,10 @@ class H(http.server.BaseHTTPRequestHandler):
         self._reply(204, b"")
 srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H, bind_and_activate=False)
 srv.socket.close(); srv.socket = sock; srv.server_address = sock.getsockname(); srv.server_activate()
+# Announced once listening, and through boss_testing's announce (prepended),
+# which renames the file into place: the test reads it the moment it
+# exists (backlog 0d1e557e).
+announce(started, str(port))
 srv.serve_forever()
 "#;
 
@@ -256,8 +260,8 @@ fn start_stub(case: &str, mode: &str) -> Stub {
     let _ = std::fs::remove_file(&log);
     let _ = std::fs::remove_file(&started);
     std::fs::write(&registry, registry_fixture().0).unwrap();
-    boss_testing::write_exec(&script, STUB);
-    let child = Command::new("python3")
+    boss_testing::write_exec(&script, &with_announce(STUB));
+    let mut child = Command::new("python3")
         .arg(&script)
         .arg(&log)
         .arg(&started)
@@ -267,19 +271,7 @@ fn start_stub(case: &str, mode: &str) -> Stub {
         .stderr(Stdio::inherit())
         .spawn()
         .expect("python3");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while !started.exists() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the stub never announced its port"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    let port: u16 = std::fs::read_to_string(&started)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let port = await_announced_port(&mut child, &started, Duration::from_secs(20));
     Stub { child, port, log }
 }
 

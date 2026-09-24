@@ -21,6 +21,7 @@
 //! Skips rather than fails when `python3` or `curl` is absent, so a
 //! machine without them does not manufacture a red.
 
+use boss_testing::announce::{await_announced_port, with_announce};
 use boss_testing::repo_root;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -76,14 +77,14 @@ fn missing(tool: &str) -> bool {
 /// It announces two facts by writing the files it is told to, because
 /// they are the two the test has to wait on and cannot see from outside:
 /// `started` before the delay, and `bound` once its listener exists.
+/// `announce` is boss_testing's, prepended by `with_announce`: it renames
+/// each file into place, because `started` carries the port and a reader
+/// that saw it between `open` and `write` parsed an empty string
+/// (backlog 0d1e557e).
 const STUB: &str = r#"
 import http.server, json, socket, sys, time
 log, mode, delay = sys.argv[1], sys.argv[2], float(sys.argv[3])
 JOB, started_at, bound_at = sys.argv[4], sys.argv[5], sys.argv[6]
-
-def announce(path, text="ok"):
-    with open(path, "w") as f:
-        f.write(text)
 
 # THE STUB OWNS ITS PORT FROM THE FIRST INSTANT. It used to be handed a
 # port the test had bound and released — a window in which any of the
@@ -229,7 +230,7 @@ fn start_stub(tag: &str, mode: &str, delay_secs: f32) -> Stub {
     let script = dir.join("stub.py");
     let started = dir.join("started");
     let bound = dir.join("bound");
-    std::fs::write(&script, STUB).expect("write stub");
+    std::fs::write(&script, with_announce(STUB)).expect("write stub");
     let child = Command::new("python3")
         .arg(&script)
         .arg(dir.join("puts.log"))
@@ -266,18 +267,8 @@ fn start_stub(tag: &str, mode: &str, delay_secs: f32) -> Stub {
     // `started` first, ALWAYS: a stub with a delay owes the test `delay`
     // seconds of darkness, and measuring that from `spawn()` hands
     // python's boot time to the race in the other direction.
-    stub.await_fact(
-        &started,
-        Duration::from_secs(30),
-        "the stub process never started",
-    );
     // `started` carries the port the stub bound — read it, never guess it.
-    stub.port = std::fs::read_to_string(&started)
-        .expect("started marker")
-        .trim()
-        .parse()
-        .expect("the started marker carries the stub's port");
-    assert!(stub.port != 0, "the stub announced port 0");
+    stub.port = await_announced_port(&mut stub.child, &started, Duration::from_secs(30));
     if delay_secs == 0.0 {
         stub.await_fact(&bound, Duration::from_secs(10), "the stub never bound");
     }

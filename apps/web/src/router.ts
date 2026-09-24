@@ -341,7 +341,11 @@ export function parseRoute(pathname: string): Route {
     const r: Route = { kind: 'jobs' };
     if (jk) (r as { workflow?: string }).workflow = jk;
     if (jkp) (r as { workflowPrefix?: string }).workflowPrefix = jkp;
-    if (js) (r as { jobStatus?: string }).jobStatus = js;
+    // `!== null`, not truthiness: an EMPTY status is a deep link asking
+    // for every status (EmployeePage's owned-jobs link sends
+    // `status=`), and only an ABSENT one takes the page's open default.
+    // The truthiness check dropped the empty value (backlog 03e198e5).
+    if (js !== null) (r as { jobStatus?: string }).jobStatus = js;
     if (ownerId) (r as { jobOwnerId?: string }).jobOwnerId = ownerId;
     if (filterSubjectId) (r as { jobSubjectId?: string }).jobSubjectId = filterSubjectId;
     if (filterSubjectKind) (r as { jobSubjectKind?: string }).jobSubjectKind = filterSubjectKind;

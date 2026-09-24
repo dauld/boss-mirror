@@ -83,7 +83,6 @@ const SILENT: ReadonlyMap<string, string> = new Map([
   ['/it/registry/rules', 'rules: /api/dispatcher/rules'],
   ['/it/operate/perf', 'gateway perf: /api/gateway/perf'],
   ['/it/operate/atlas', 'atlas: /api/views/stage-runs, /stage-durations, /api/stations'],
-  ['/it/registry/step-plugins', 'step plugins: /api/jobs/step-plugins'],
   ['/it/kb', 'KB: its search reads fire on a query, not on load'],
   ['/it/design', 'design queue: /api/stations/design-review/queue'],
   ['/it/registry', 'workflow registry: /api/workflows'],

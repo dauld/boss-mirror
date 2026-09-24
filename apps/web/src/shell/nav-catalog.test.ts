@@ -314,6 +314,52 @@ describe('nav catalog — app assignment', () => {
     expect(ROUTE_CATALOG['system-yard'].path).toBe('/it');
   });
 
+  // A row a fixed-perspective group lists must be one that perspective
+  // can render. AppShell's visible() runs inPerspective on every row,
+  // which drops any catalog row whose app (looked up by permKey, as the
+  // shell does) is not the app being rendered — so a row listed under
+  // the wrong app is dead text: no role ever sees it, and nothing says
+  // so. Home's Mine group carried `exec` (app executive) that way until
+  // backlog e8fe5e5a (2026-09-24), one group down from the Work group's
+  // role lists (0f9be7c0). Exec was never reachable through Home; it is
+  // the Executive app's row, and every department tab is offered to
+  // every role (appsFor takes the departments alone), so removing the
+  // dead row takes no route away from anyone.
+  it('every row the Home and IT sidebars list is one that app renders', () => {
+    const shell = readFileSync(new URL('./AppShell.svelte', import.meta.url), 'utf8');
+    const between = (from: string, to: string): string => {
+      const start = shell.indexOf(from);
+      const end = shell.indexOf(to, start);
+      // A marker that moved would make the slice empty and the check
+      // vacuous; refuse that rather than pass it.
+      expect(start, `marker not found: ${from}`).toBeGreaterThanOrEqual(0);
+      expect(end, `marker not found: ${to}`).toBeGreaterThan(start);
+      return shell.slice(start, end);
+    };
+    const rowsOf = (src: string): ReadonlyArray<string> =>
+      [...src.matchAll(/ROUTE_CATALOG(?:\.(\w[\w-]*)|\['([^']+)'\])/g)].map((m) => (m[1] ?? m[2])!);
+    const groups: ReadonlyArray<readonly [AppId, ReadonlyArray<string>]> = [
+      ['home', rowsOf(between('const WORK', 'const IT_GROUPS'))],
+      ['home', rowsOf(between('const HOME_GROUPS', 'let MAIN'))],
+      ['it', rowsOf(between('const IT_GROUPS', '// Home —'))],
+    ];
+    for (const [, rows] of groups) expect(rows.length).toBeGreaterThan(0);
+    // The shell's own rule, restated: a permKey-less row is always in
+    // perspective; otherwise it renders under the app of the catalog
+    // entry its permKey names.
+    const catalog = ROUTE_CATALOG as Readonly<Record<string, NavItem | undefined>>;
+    const renderedUnder = (key: string): AppId | 'anywhere' => {
+      const permKey = catalog[key]?.permKey;
+      return permKey === undefined ? 'anywhere' : (catalog[permKey]?.app ?? 'home');
+    };
+    const dead = groups.flatMap(([app, rows]) =>
+      rows
+        .filter((k) => renderedUnder(k) !== 'anywhere' && renderedUnder(k) !== app)
+        .map((k) => `${k} (listed under ${app}, renders under ${renderedUnder(k)})`),
+    );
+    expect(dead, `sidebar rows no role can ever see: ${dead.join(', ')}`).toEqual([]);
+  });
+
   it('nothing from the original System Model set has left the IT app', () => {
     // The half of the pin that matters most: a surface silently
     // changing app is the failure this list was written for.

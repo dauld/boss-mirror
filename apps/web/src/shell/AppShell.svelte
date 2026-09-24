@@ -192,6 +192,11 @@
   // Home — personal work, whichever domain it belongs to: "what am I
   // meant to be doing" is one question, and its answer (All jobs, My
   // Day) crosses every department freely.
+  //
+  // Mine lists Home surfaces only. It carried Exec until backlog
+  // e8fe5e5a (2026-09-24), a row visible() dropped for every role —
+  // Exec's catalog app is executive — so it never rendered here; it is
+  // the Executive department's row, under a tab every role is offered.
   const HOME_GROUPS: ReadonlyArray<NavGroup> = [
     WORK,
     {
@@ -203,7 +208,6 @@
         ROUTE_CATALOG.inbox,
         ROUTE_CATALOG.views,
         ROUTE_CATALOG.schedule,
-        ROUTE_CATALOG.exec,
       ],
     },
   ];

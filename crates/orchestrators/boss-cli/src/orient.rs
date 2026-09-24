@@ -3349,6 +3349,9 @@ mod tests {
                     trend("served", "per day", Some(6.0), Some(6.0)),
                 ),
             ],
+            // Reading the stuck block is car 3's (backlog 4142d821); these
+            // lines print the regions alone.
+            stuck: Vec::new(),
         };
         let lines = region_lines(&serde_json::to_value(&map).unwrap());
         assert_eq!(

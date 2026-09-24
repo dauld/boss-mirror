@@ -4,6 +4,8 @@
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
   import { appNow, appToday } from '@boss/web-kit/sim-clock';
+  import { okRead, type ReadState } from '../data/readState';
+  import { loadOwnerNames, ownerIdsOf } from './ownerNames';
 
   type LaunchCalendarRow = {
     job_id: string;
@@ -51,7 +53,8 @@
   /// (packet 3fba9c35, the false-empty sweep).
   let loadFailed = $state<string | null>(null);
   let loading = $state(true);
-  let empNames = $state<Map<string, string>>(new Map());
+  let empNames = $state<ReadonlyMap<string, string>>(new Map());
+  let peopleRead = $state<ReadState>(okRead);
 
   let from = $derived(todayIso());
   let to = $derived(shiftDays(appNow(), WINDOW_DAYS[windowPreset]));
@@ -90,19 +93,19 @@
     };
   });
 
+  // Names only the owners shown, one row each, and says so when a name
+  // cannot load. Until backlog 0268a829 this read the whole roster, and
+  // a refusal or a network error was dropped, so the owners silently
+  // became ids (see ./ownerNames.ts).
+  let ownerIds = $derived(ownerIdsOf(data));
   $effect(() => {
+    const ids = ownerIds;
     let cancelled = false;
     (async () => {
-      try {
-        const r = await fetch('/api/people');
-        if (r.ok) {
-          const body = (await r.json()) as Array<{ id: string; name: string }>;
-          const m = new Map<string, string>();
-          for (const e of body) m.set(e.id, e.name);
-          if (!cancelled) empNames = m;
-        }
-      } catch {
-        // ignore
+      const out = await loadOwnerNames(ids);
+      if (!cancelled) {
+        empNames = out.names;
+        peopleRead = out.read;
       }
     })();
     return () => {
@@ -161,6 +164,11 @@
   {:else if grouped.length === 0}
     <p class="empty">No marketing motions in this window.</p>
   {:else}
+    {#if peopleRead.kind === 'failed'}
+      <p class="load-failed" role="alert" style="font-size:12px; margin-bottom:12px">
+        Couldn't load owner names — {peopleRead.error}. Owners show as ids.
+      </p>
+    {/if}
     <div style="display:flex; flex-direction:column; gap:20px">
       {#each grouped as block (block.date)}
         {@const label = block.date === 'unscheduled' ? 'Unscheduled' : formatLongDate(block.date)}

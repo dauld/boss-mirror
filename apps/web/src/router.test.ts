@@ -190,6 +190,37 @@ describe('global search results route', () => {
   });
 });
 
+// An ABSENT status and an EMPTY one are two different requests. With
+// no `status` the page defaults to open; `status=` is a deep link
+// asking for every status, the same thing the page's own All button
+// sets. EmployeePage links "View this employee's owned jobs" as
+// `/ux/jobs?owner_id=…&status=`, and the router's truthiness check
+// dropped the empty value, so that link showed open jobs only (backlog
+// 03e198e5, found by page-audit 473f4f92 GAP 7).
+describe('jobs list status filter from the query string', () => {
+  const at = (search: string) => {
+    (globalThis as { window?: { location: { search: string; pathname: string } } }).window = {
+      location: { search, pathname: '/ux/jobs' },
+    };
+    return parseRoute('/ux/jobs') as { kind: string; jobStatus?: string };
+  };
+
+  test('an explicit empty status is carried as the empty string (all statuses)', () => {
+    const r = at('?owner_id=emp-1&status=');
+    expect(r.kind).toBe('jobs');
+    expect(r.jobStatus).toBe('');
+  });
+
+  test('an absent status is left unset, so the page defaults to open', () => {
+    const r = at('?owner_id=emp-1');
+    expect('jobStatus' in r).toBe(false);
+  });
+
+  test('a named status is carried through', () => {
+    expect(at('?status=closed').jobStatus).toBe('closed');
+  });
+});
+
 describe('personal Views route', () => {
   test('/views resolves to the Home Views surface', () => {
     expect(parseRoute('/ux/views').kind).toBe('views');

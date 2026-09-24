@@ -14,9 +14,11 @@
 //! The stub API below records the PATCH it receives; the fixture repo
 //! carries enough landings that the row is well past 128 KiB.
 
+use boss_testing::announce::{await_announced_port, with_announce};
 use boss_testing::repo_root;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 const STUB: &str = r#"
 import http.server, json, sys, socket
@@ -24,8 +26,6 @@ log = sys.argv[1]; started = sys.argv[2]
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.bind(("127.0.0.1", 0))
 port = sock.getsockname()[1]
-with open(started, "w") as f:
-    f.write(str(port))
 OPEN = {"data": [{"id": "0123456789abcdef", "kind": "maintenance-codebase-metrics", "status": "open", "created_at": "2026-09-14T05:14:35Z", "metadata": {}}], "total": 1}
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -42,6 +42,10 @@ class H(http.server.BaseHTTPRequestHandler):
         self._reply(204, b"")
 srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H, bind_and_activate=False)
 srv.socket.close(); srv.socket = sock; srv.server_address = sock.getsockname(); srv.server_activate()
+# Announced once listening, and through boss_testing's announce (prepended),
+# which renames the file into place: the test reads it the moment it
+# exists (backlog 0d1e557e).
+announce(started, str(port))
 srv.serve_forever()
 "#;
 
@@ -112,8 +116,8 @@ fn start_stub(case: &str) -> Stub {
     let log = dir.join("patches.log");
     let _ = std::fs::remove_file(&log);
     let _ = std::fs::remove_file(&started);
-    boss_testing::write_exec(&script, STUB);
-    let child = Command::new("python3")
+    boss_testing::write_exec(&script, &with_announce(STUB));
+    let mut child = Command::new("python3")
         .arg(&script)
         .arg(&log)
         .arg(&started)
@@ -121,19 +125,7 @@ fn start_stub(case: &str) -> Stub {
         .stderr(Stdio::inherit())
         .spawn()
         .expect("python3");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while !started.exists() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the stub never announced its port"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    let port: u16 = std::fs::read_to_string(&started)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let port = await_announced_port(&mut child, &started, Duration::from_secs(20));
     Stub { child, port, log }
 }
 

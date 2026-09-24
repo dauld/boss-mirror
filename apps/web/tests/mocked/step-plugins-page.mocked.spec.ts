@@ -10,13 +10,12 @@
 // how the rows are grouped and ordered, or what the header claims when
 // the read fails.
 //
-// THIS SPEC PINS THE PAGE AS IT IS, INCLUDING TWO FILED DEFECTS, and
-// says so at each one. Gap 1 (backlog 7267f9ce): the failure line has
-// no FAILURE_MARKER and no role=alert. Gap 2 (backlog 044f55e4): under
-// a failed read the header still counts "0 active plugins across 0
-// categories" — the same words the empty backend paints. The car that
-// fixes either one flips the assertion named for it here; that is the
-// point of pinning it rather than skipping it.
+// This spec first pinned the page as it was, including two filed
+// defects, and one car closed both on 2026-09-24 by flipping the
+// assertions named for them: gap 1 (backlog 7267f9ce), the failure line
+// had no FAILURE_MARKER and no role=alert; gap 2 (backlog 044f55e4),
+// under a failed read the header counted "0 active plugins across 0
+// categories" — the same words the empty backend paints.
 //
 // The fixture is four of the twelve live rows (read 2026-09-23 through
 // boss-api), listed out of order so the per-category sort is visible.
@@ -168,21 +167,22 @@ test.describe('/it/registry/step-plugins — the controls', () => {
     expect(writes.map((w) => `${w.method()} ${w.url()}`)).toEqual([]);
   });
 
-  test('the six registry tabs land on catalogued routes, and back returns here', async ({ page }) => {
+  test('the seven registry tabs land on catalogued routes, and back returns here', async ({ page }) => {
     const writes = watchWrites(page);
     await install(page);
     await mountPage(page, PAGE, { titleMatch: new RegExp(TITLE) });
 
+    // Rules joined the strip beside Dispatcher (backlog 0a98d93f).
     const tabs = page.locator('nav.it-tabs[aria-label="IT registry"] a');
-    await expect(tabs).toHaveText(['Workflows', 'Dispatcher', 'Step plugins', 'Policy', 'Subjects', 'Drift']);
+    await expect(tabs).toHaveText(['Workflows', 'Dispatcher', 'Rules', 'Step plugins', 'Policy', 'Subjects', 'Drift']);
     const hrefs = await tabs.evaluateAll((as) => as.map((a) => a.getAttribute('href') ?? ''));
     const catalogPaths = new Set(Object.values(ROUTE_CATALOG).map((r) => (r as { path: string }).path));
     for (const h of hrefs) {
       expect(catalogPaths.has(h), `${h} is a ROUTE_CATALOG path`).toBe(true);
       expect(catalogued(h), `${h} lights a catalogued section`).not.toBeNull();
     }
-    await expect(tabs.nth(2)).toHaveAttribute('aria-current', 'page');
-    await expect(tabs.nth(2)).toHaveAttribute('href', PAGE);
+    await expect(tabs.nth(3)).toHaveAttribute('aria-current', 'page');
+    await expect(tabs.nth(3)).toHaveAttribute('href', PAGE);
 
     for (const [i, h] of hrefs.entries()) {
       if (h === PAGE) continue;
@@ -249,17 +249,21 @@ test.describe('/it/registry/step-plugins — empty and failed are never the same
     await expect(page.getByText('No plugins installed yet')).toHaveCount(0);
     await expect(page.locator('.catalog table')).toHaveCount(0);
 
-    // GAP 1 (backlog 7267f9ce), pinned as it stands: the line carries
-    // neither FAILURE_MARKER nor role=alert, which is why outage-crawl
-    // holds this route in SILENT. The fixing car flips both counts to 1
-    // and deletes that SILENT line.
-    await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
-    await expect(page.locator('.catalog [role=alert]')).toHaveCount(0);
+    // GAP 1 (backlog 7267f9ce), closed: the failure line carries the
+    // shared FAILURE_MARKER and role=alert, so outage-crawl asserts this
+    // route instead of holding it in SILENT.
+    await expect(page.locator(FAILURE_MARKER)).toHaveCount(1);
+    await expect(page.locator('.catalog [role=alert]')).toHaveCount(1);
+    await expect(page.locator(`.catalog ${FAILURE_MARKER}[role=alert]`)).toHaveText(
+      'Failed to load: HTTP 503: jobs down',
+    );
 
-    // GAP 2 (backlog 044f55e4), pinned as it stands: the header counts
-    // the failed read as an empty registry — the same words the empty
-    // test above asserts. The fixing car replaces this with a header
-    // that says the count is unknown.
-    await expect(page.locator('header.exec-header p')).toHaveText('0 active plugins across 0 categories');
+    // GAP 2 (backlog 044f55e4), closed: a failed read leaves the count
+    // unknown, and the header says so rather than counting nothing as
+    // "0 active plugins across 0 categories" — the empty registry's
+    // words, asserted by the test above.
+    const subtitle = page.locator('header.exec-header p');
+    await expect(subtitle).toHaveText('Plugin count unknown — the registry read failed');
+    await expect(subtitle).not.toContainText(/\d/);
   });
 });

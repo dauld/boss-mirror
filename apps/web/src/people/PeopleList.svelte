@@ -16,13 +16,16 @@
     humanizeClassCode,
     type Department,
     type Employee,
-    type EmploymentStatus,
   } from './types';
-  import { expiringCerts, tenureYears } from './utils';
+  import { expiringCerts, statusBuckets, tenureYears } from './utils';
+  import { classesFor } from '@boss/web-kit/session/classes.svelte';
   import { href } from '../router';
 
   type DeptFilter = Department | 'all';
-  type StatusFilter = EmploymentStatus | 'all';
+  /// A status code, `null` for the rows with no status yet ("unknown"),
+  /// or All. A union rather than a sentinel string, so no class code
+  /// can collide with the All button.
+  type StatusFilter = { kind: 'all' } | { kind: 'code'; code: string | null };
 
   let roster = $state<Employee[]>([]);
   /// Non-null when the roster load failed — rendered instead of the
@@ -31,7 +34,7 @@
   let loadFailed = $state<string | null>(null);
   let loading = $state(true);
   let dept = $state<DeptFilter>('all');
-  let status = $state<StatusFilter>('active');
+  let status = $state<StatusFilter>({ kind: 'code', code: 'active' });
   let query = $state('');
 
   $effect(() => {
@@ -70,9 +73,15 @@
 
   let expiring90 = $derived(expiringCerts(90, roster));
 
+  // The Status buttons come from the (employee, status) Classes (loaded
+  // at boot by App.svelte), plus Unknown when a row has no status —
+  // backlog 01c268d6: the hand-written Active / On leave pair left
+  // terminated and null-status rows reachable only under All, uncounted.
+  let statusButtons = $derived(statusBuckets(roster, classesFor('employee', 'status')));
+
   let visible = $derived(
     roster.filter((e) => {
-      if (status !== 'all' && e.status !== status) return false;
+      if (status.kind === 'code' && e.status !== status.code) return false;
       if (dept !== 'all' && e.department !== dept) return false;
       if (query) {
         const q = query.toLowerCase();
@@ -175,13 +184,15 @@
       </FilterGroup>
 
       <FilterGroup label="Status">
-          <FilterButton active={status === 'active'} onclick={() => (status = 'active')}>
-              Active ({roster.filter((e) => e.status === 'active').length})
-          </FilterButton>
-          <FilterButton active={status === 'on-leave'} onclick={() => (status = 'on-leave')}>
-              On leave ({roster.filter((e) => e.status === 'on-leave').length})
-          </FilterButton>
-          <FilterButton active={status === 'all'} onclick={() => (status = 'all')}>
+          {#each statusButtons as b (b.code ?? '')}
+            <FilterButton
+              active={status.kind === 'code' && status.code === b.code}
+              onclick={() => (status = { kind: 'code', code: b.code })}
+            >
+              {b.label} ({b.count})
+            </FilterButton>
+          {/each}
+          <FilterButton active={status.kind === 'all'} onclick={() => (status = { kind: 'all' })}>
             All ({roster.length})
           </FilterButton>
       </FilterGroup>

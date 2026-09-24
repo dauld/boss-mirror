@@ -22,7 +22,8 @@
 //   gap 2 (cae1a377) the failure line carries no FAILURE_MARKER;
 //   gap 4 (f9e34a2c) why/source/authored/when and authored_registry are
 //                    received and not rendered;
-//   gap 6 (0a98d93f) no registry tab bar;
+//   gap 6 (0a98d93f) no registry tab bar — FIXED: the page renders under
+//                    the registry tabs, with a Rules tab of its own;
 //   gap 7 (3071e235) the editor the row links and "+ New rule" land on
 //                    has no ROUTE_CATALOG path of its own.
 // Gap 8 (a9c4ad40) asked for both throw branches of the page's one read
@@ -220,10 +221,11 @@ test.describe('/it/registry/rules — the rows', () => {
     await expect(page.getByText('rules-the-page-does-not-render')).toHaveCount(0);
     await expect(page.getByText('jobs.auto-park')).toHaveCount(0);
 
-    // GAP 6 (backlog 0a98d93f), pinned as it stands: App.svelte renders
-    // this route with no ItTabs bar, where every registry sibling has
-    // one. The fixing car flips this to the six registry tabs.
-    await expect(page.locator('nav.it-tabs')).toHaveCount(0);
+    // GAP 6 (backlog 0a98d93f), fixed: the page carries the registry
+    // tab bar its siblings carry, with a Rules tab of its own lit — it
+    // was rendered bare, and 0 of 784 surface-opens reached it.
+    await expect(page.locator('nav.it-tabs')).toHaveCount(1);
+    await expect(page.locator('nav.it-tabs[aria-label="IT registry"] a[aria-current="page"]')).toHaveText('Rules');
   });
 
   test('one rule says rule in the singular', async ({ page }) => {
@@ -274,6 +276,34 @@ test.describe('/it/registry/rules — the controls', () => {
     // empty state's inline "+ New rule" is absent while rules exist.
     await expect(page.locator('.catalog a')).toHaveCount(2 + ROWS.length);
     await expect(page.getByRole('link', { name: '+ New rule' })).toHaveCount(1);
+    expect(writes.map((w) => `${w.method()} ${w.url()}`)).toEqual([]);
+  });
+
+  test('the registry tabs, Rules among them, land on catalogued routes, and back returns here', async ({ page }) => {
+    // GAP 6 (backlog 0a98d93f): the tab strip is the way in. Before it
+    // the only in-app entries were the cascade's "Edit rules →" link and
+    // this page's own breadcrumb.
+    const writes = watchWrites(page);
+    await install(page);
+    await mountPage(page, PAGE, { titleMatch: new RegExp(TITLE) });
+
+    const tabs = page.locator('nav.it-tabs[aria-label="IT registry"] a');
+    await expect(tabs).toHaveText(['Workflows', 'Dispatcher', 'Rules', 'Step plugins', 'Policy', 'Subjects', 'Drift']);
+    await expect(tabs.nth(2)).toHaveAttribute('aria-current', 'page');
+    await expect(tabs.nth(2)).toHaveAttribute('href', PAGE);
+    await expect(page.locator('nav.it-tabs button')).toHaveCount(0);
+    const hrefs = await tabs.evaluateAll((as) => as.map((a) => a.getAttribute('href') ?? ''));
+    for (const h of hrefs) {
+      expect(catalogPaths().has(h), `${h} is a ROUTE_CATALOG path`).toBe(true);
+      expect(catalogued(h), `${h} lights a catalogued section`).not.toBeNull();
+    }
+
+    for (const [i, h] of hrefs.entries()) {
+      if (h === PAGE) continue;
+      await tabs.nth(i).click();
+      await expect(page).toHaveURL((u) => u.pathname === h);
+      await backHere(page, ROWS.length);
+    }
     expect(writes.map((w) => `${w.method()} ${w.url()}`)).toEqual([]);
   });
 

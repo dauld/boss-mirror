@@ -329,6 +329,49 @@ async fn the_read_answers_every_region_each_with_count_state_and_trend() {
     assert_eq!(receiving["state"], "troubled");
 }
 
+/// THE STUCK BLOCK RIDES THE SAME READ (backlog 4142d821, design
+/// cf820810 car 2): one entry per third, in the operator surface's order,
+/// computed here so the HUD and `boss orient` read it rather than
+/// recompute it. With no workflow registry wired the intake cannot be
+/// read, and the queue-management third says so in `unknown` — a floor,
+/// never a confident zero.
+#[tokio::test]
+async fn the_read_carries_a_stuck_block_per_third_and_an_unread_intake_is_unknown() {
+    let (app, jobs) = app();
+    seed(&jobs).await;
+    let (status, v) = get(&app, "operator", "/api/yard/regions").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let thirds: Vec<&str> = v["stuck"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no stuck block: {v}"))
+        .iter()
+        .map(|t| t["third"].as_str().unwrap())
+        .collect();
+    assert_eq!(thirds, ["queue-management", "actors-building", "delivery"]);
+    let queue = &v["stuck"][0];
+    assert!(
+        queue["unknown"].as_array().unwrap().iter().any(|u| u
+            .as_str()
+            .unwrap()
+            .contains("inbound kinds could not be read")),
+        "{queue}"
+    );
+    assert!(
+        queue["regions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "receiving"),
+        "{queue}"
+    );
+    // The parked car declares no edge and nothing has landed: delivery
+    // has nothing stuck and nothing waiting.
+    let delivery = &v["stuck"][2];
+    assert_eq!(delivery["stuck"], 0, "{delivery}");
+    assert_eq!(delivery["waiting"], 0, "{delivery}");
+    assert_eq!(delivery["oldest_hours"], Value::Null, "{delivery}");
+}
+
 #[tokio::test]
 async fn the_window_is_a_query_parameter_and_a_bad_one_is_refused() {
     let (app, jobs) = app();

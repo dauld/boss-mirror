@@ -26,6 +26,10 @@
     registry: [
       { label: 'Workflows', path: '/it/registry' },
       { label: 'Dispatcher', path: '/it/registry/dispatcher' },
+      // The authoring list of the rules the cascade draws. Rendered bare
+      // until 2026-09-24, reachable only through the cascade's "Edit
+      // rules →" link, and 0 of 784 surface-opens reached it (0a98d93f).
+      { label: 'Rules', path: '/it/registry/rules' },
       { label: 'Step plugins', path: '/it/registry/step-plugins' },
       { label: 'Policy', path: '/it/registry/policy' },
       { label: 'Subjects', path: '/it/registry/subjects' },
