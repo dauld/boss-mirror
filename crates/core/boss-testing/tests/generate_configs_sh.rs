@@ -20,13 +20,16 @@ const BREWERY: &str = "examples/brewery/seeds/tenant.toml";
 
 /// Every name the generator's `p` and `PORT[...]` lookups ask for,
 /// with made-up ports: the script refuses an unknown name (`:?`), so a
-/// missing entry here fails loudly rather than skipping a file.
+/// missing entry here fails loudly rather than skipping a file. The
+/// calendar gets a port of its own so a URL read off ITS row can be
+/// told apart from one read off any other paired service's.
 const STUB_PORTS: &str = "#!/usr/bin/env bash
 case \"${1:-}\" in
   --paired)
-    for n in shipping messages inventory commerce people accounts assets catalog calendar jobs; do
+    for n in shipping messages inventory commerce people accounts assets catalog jobs; do
       echo \"$n:7000:8000\"
-    done ;;
+    done
+    echo \"calendar:7020:8020\" ;;
   --solo)
     for n in ml ledger content policy classes locations subject-kinds events products campaigns customers; do
       echo \"$n:7100\"
@@ -147,4 +150,35 @@ fn no_files_root_leaves_the_file_store_off() {
     );
     // The rest of the service is unchanged either way.
     assert!(cfg.get("postgres_url").is_some() && cfg.get("http_bind").is_some());
+}
+
+// ---------------------------------------------------------------------
+// The step calendar hook (backlog aa6b4b5c, found by design e1dba350,
+// measured 2026-09-24 on origin/main). boss-jobs-api builds its calendar
+// client ONLY when `calendar_api_url` is set (JobsApiConfig), and this
+// generator — the one writer of /etc/boss-jobs-api.toml on every
+// container pod, the live instance included — never wrote it, so the
+// reservation hook was a no-op everywhere and no step could reserve.
+// The service it points at runs in the same container on every tenant:
+// the launcher gates boss-calendar-api on no module (tenant-modules.sh
+// `service_module` lists none for it), so a tenant's `calendar = false`
+// hides the SPA's Release calendar entry and nothing else.
+
+#[test]
+fn the_jobs_api_reaches_the_calendar_on_the_port_boss_ports_gives_it() {
+    let etc = generate("jobs-calendar", &[]);
+    let path = etc.join("boss-jobs-api.toml");
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let cfg: toml::Value = toml::from_str(&text)
+        .unwrap_or_else(|e| panic!("{} is not TOML: {e}\n{text}", path.display()));
+    // 7020 is the stub table's calendar row and no other service's, so
+    // this reads the URL off the calendar's own port — one source of
+    // ports (boss-ports), never a second spelled copy here.
+    assert_eq!(
+        cfg.get("calendar_api_url").and_then(|v| v.as_str()),
+        Some("http://127.0.0.1:7020"),
+        "boss-jobs-api must be told where boss-calendar-api listens, or the step \
+         reservation hook stays off on every instance: {cfg:?}"
+    );
 }
