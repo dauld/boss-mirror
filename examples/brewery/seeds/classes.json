@@ -13,11 +13,6 @@
         "people",
         "policy",
         "workflows"
-      ],
-      "work": [
-        "exec",
-        "shipping",
-        "jobs"
       ]
     }
   },
@@ -36,11 +31,6 @@
         "people",
         "policy",
         "workflows"
-      ],
-      "work": [
-        "exec",
-        "marketing-assets",
-        "jobs"
       ]
     }
   },
@@ -57,11 +47,6 @@
         "jobs",
         "policy",
         "workflows"
-      ],
-      "work": [
-        "exec",
-        "people",
-        "jobs"
       ]
     }
   },
@@ -80,11 +65,6 @@
         "people",
         "policy",
         "workflows"
-      ],
-      "work": [
-        "exec",
-        "sales",
-        "accounts"
       ]
     }
   },
@@ -103,11 +83,6 @@
         "qa",
         "people",
         "schedule"
-      ],
-      "work": [
-        "jobs",
-        "parts",
-        "qa"
       ]
     }
   },
@@ -124,10 +99,6 @@
         "products",
         "qa",
         "schedule"
-      ],
-      "work": [
-        "jobs",
-        "parts"
       ]
     }
   },
@@ -143,10 +114,6 @@
         "parts",
         "products",
         "schedule"
-      ],
-      "work": [
-        "jobs",
-        "parts"
       ]
     }
   },
@@ -162,10 +129,6 @@
         "parts",
         "products",
         "schedule"
-      ],
-      "work": [
-        "jobs",
-        "parts"
       ]
     }
   },
@@ -181,10 +144,6 @@
         "parts",
         "products",
         "schedule",
-        "people"
-      ],
-      "work": [
-        "jobs",
         "people"
       ]
     }
@@ -202,11 +161,6 @@
         "shipping",
         "people",
         "schedule"
-      ],
-      "work": [
-        "jobs",
-        "warehouse",
-        "shipping"
       ]
     }
   },
@@ -228,10 +182,6 @@
         "jobs",
         "warehouse",
         "schedule"
-      ],
-      "work": [
-        "jobs",
-        "warehouse"
       ]
     }
   },
@@ -245,10 +195,6 @@
       "surfaces": [
         "jobs",
         "warehouse"
-      ],
-      "work": [
-        "warehouse",
-        "jobs"
       ]
     }
   },
@@ -265,11 +211,6 @@
         "parts",
         "products",
         "people"
-      ],
-      "work": [
-        "qa",
-        "jobs",
-        "parts"
       ]
     }
   },
@@ -286,10 +227,6 @@
         "parts",
         "products",
         "qa"
-      ],
-      "work": [
-        "qa",
-        "jobs"
       ]
     }
   },
@@ -305,10 +242,6 @@
         "qa",
         "parts",
         "products"
-      ],
-      "work": [
-        "qa",
-        "jobs"
       ]
     }
   },
@@ -331,10 +264,6 @@
         "parts",
         "products",
         "shipping"
-      ],
-      "work": [
-        "warehouse",
-        "shipping"
       ]
     }
   },
@@ -349,10 +278,6 @@
         "warehouse",
         "parts",
         "products"
-      ],
-      "work": [
-        "warehouse",
-        "parts"
       ]
     }
   },
@@ -366,10 +291,6 @@
       "surfaces": [
         "warehouse",
         "shipping"
-      ],
-      "work": [
-        "shipping",
-        "warehouse"
       ]
     }
   },
@@ -391,9 +312,6 @@
         "shipping",
         "jobs",
         "schedule"
-      ],
-      "work": [
-        "shipping"
       ]
     }
   },
@@ -410,10 +328,6 @@
         "products",
         "people",
         "schedule"
-      ],
-      "work": [
-        "jobs",
-        "parts"
       ]
     }
   },
@@ -429,10 +343,6 @@
         "parts",
         "products",
         "schedule"
-      ],
-      "work": [
-        "jobs",
-        "parts"
       ]
     }
   },
@@ -448,10 +358,6 @@
         "parts",
         "products",
         "schedule"
-      ],
-      "work": [
-        "jobs",
-        "parts"
       ]
     }
   },
@@ -463,11 +369,6 @@
     "sort_order": 90,
     "metadata": {
       "surfaces": [
-        "sales",
-        "accounts",
-        "jobs"
-      ],
-      "work": [
         "sales",
         "accounts",
         "jobs"
@@ -493,11 +394,6 @@
         "marketing-assets",
         "calendar",
         "jobs"
-      ],
-      "work": [
-        "marketing-assets",
-        "calendar",
-        "jobs"
       ]
     }
   },
@@ -512,10 +408,6 @@
         "calendar",
         "jobs",
         "marketing-assets"
-      ],
-      "work": [
-        "calendar",
-        "jobs"
       ]
     }
   },
@@ -527,10 +419,6 @@
     "sort_order": 102,
     "metadata": {
       "surfaces": [
-        "marketing-assets",
-        "calendar"
-      ],
-      "work": [
         "marketing-assets",
         "calendar"
       ]
@@ -546,9 +434,6 @@
       "surfaces": [
         "calendar",
         "schedule"
-      ],
-      "work": [
-        "calendar"
       ]
     }
   },
@@ -562,9 +447,6 @@
       "surfaces": [
         "calendar",
         "schedule"
-      ],
-      "work": [
-        "calendar"
       ]
     }
   },
@@ -587,11 +469,6 @@
         "accounts",
         "vendors",
         "jobs"
-      ],
-      "work": [
-        "finance",
-        "accounts",
-        "jobs"
       ]
     }
   },
@@ -606,10 +483,6 @@
         "finance",
         "accounts",
         "jobs"
-      ],
-      "work": [
-        "finance",
-        "accounts"
       ]
     }
   },
@@ -626,10 +499,6 @@
         "parts",
         "products",
         "jobs"
-      ],
-      "work": [
-        "finance",
-        "vendors"
       ]
     }
   },
@@ -644,10 +513,6 @@
         "finance",
         "exec",
         "jobs"
-      ],
-      "work": [
-        "finance",
-        "exec"
       ]
     }
   },
@@ -662,10 +527,6 @@
         "finance",
         "people",
         "jobs"
-      ],
-      "work": [
-        "finance",
-        "people"
       ]
     }
   },
@@ -677,10 +538,6 @@
     "sort_order": 130,
     "metadata": {
       "surfaces": [
-        "people",
-        "jobs"
-      ],
-      "work": [
         "people",
         "jobs"
       ]
@@ -704,13 +561,6 @@
         "system-subjects",
         "system-design",
         "jobs"
-      ],
-      "work": [
-        "policy",
-        "workflows",
-        "system-step-plugins",
-        "system-monitoring",
-        "exec"
       ]
     }
   },
@@ -731,12 +581,6 @@
         "system-subjects",
         "system-design",
         "jobs"
-      ],
-      "work": [
-        "policy",
-        "workflows",
-        "system-step-plugins",
-        "system-monitoring"
       ]
     }
   },
@@ -750,10 +594,6 @@
       "surfaces": [
         "system-monitoring",
         "system-kb",
-        "jobs"
-      ],
-      "work": [
-        "system-monitoring",
         "jobs"
       ]
     }
@@ -840,14 +680,7 @@
     "code": "ceo",
     "display_name": "Chief Executive Officer",
     "member_attribute": "role",
-    "sort_order": 310,
-    "metadata": {
-      "work": [
-        "jobs",
-        "exec",
-        "sales"
-      ]
-    }
+    "sort_order": 310
   },
   {
     "subject_kind": "employee",
@@ -866,11 +699,6 @@
         "parts",
         "products",
         "vendors"
-      ],
-      "work": [
-        "jobs",
-        "finance",
-        "exec"
       ]
     }
   },
@@ -879,26 +707,14 @@
     "code": "coo",
     "display_name": "Chief Operating Officer",
     "member_attribute": "role",
-    "sort_order": 330,
-    "metadata": {
-      "work": [
-        "jobs",
-        "exec"
-      ]
-    }
+    "sort_order": 330
   },
   {
     "subject_kind": "employee",
     "code": "cto",
     "display_name": "Chief Technology Officer",
     "member_attribute": "role",
-    "sort_order": 340,
-    "metadata": {
-      "work": [
-        "jobs",
-        "system-monitoring"
-      ]
-    }
+    "sort_order": 340
   },
   {
     "subject_kind": "employee",
@@ -915,10 +731,6 @@
         "parts",
         "products",
         "vendors"
-      ],
-      "work": [
-        "finance",
-        "jobs"
       ]
     }
   },
@@ -931,10 +743,6 @@
     "metadata": {
       "surfaces": [
         "people"
-      ],
-      "work": [
-        "people",
-        "jobs"
       ]
     }
   },
@@ -947,10 +755,6 @@
     "metadata": {
       "surfaces": [
         "people"
-      ],
-      "work": [
-        "people",
-        "jobs"
       ]
     }
   },
@@ -965,10 +769,6 @@
         "catalog",
         "accounts",
         "sales"
-      ],
-      "work": [
-        "sales",
-        "accounts"
       ]
     }
   },
@@ -985,11 +785,6 @@
         "people",
         "warehouse",
         "vendors",
-        "shipping"
-      ],
-      "work": [
-        "warehouse",
-        "parts",
         "shipping"
       ]
     }

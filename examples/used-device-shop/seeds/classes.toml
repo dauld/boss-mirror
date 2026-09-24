@@ -193,7 +193,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "auditor"
 display_name = "Auditor"
-metadata = { department = "finance", is_management = false, work = ["finance", "jobs"] }
+metadata = { department = "finance", is_management = false }
 sort_order = 400
 
 # ---------------------------------------------------------------------------
@@ -223,7 +223,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "ceo"
 display_name = "CEO"
-metadata = { department = "executive", is_management = true, is_executive = true, work = ["jobs", "exec", "sales"] }
+metadata = { department = "executive", is_management = true, is_executive = true }
 sort_order = 10
 
 [[class]]
@@ -231,7 +231,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "cto"
 display_name = "CTO"
-metadata = { department = "executive", is_management = true, is_executive = true, work = ["jobs", "system-monitoring"] }
+metadata = { department = "executive", is_management = true, is_executive = true }
 sort_order = 11
 
 [[class]]
@@ -239,7 +239,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "coo"
 display_name = "COO"
-metadata = { department = "executive", is_management = true, is_executive = true, work = ["jobs", "exec"] }
+metadata = { department = "executive", is_management = true, is_executive = true }
 sort_order = 12
 
 [[class]]
@@ -247,7 +247,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "cfo"
 display_name = "CFO"
-metadata = { department = "executive", is_management = true, is_executive = true, work = ["jobs", "finance", "exec"] }
+metadata = { department = "executive", is_management = true, is_executive = true }
 sort_order = 13
 
 [[class]]
@@ -255,7 +255,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "vp-sales"
 display_name = "VP Sales"
-metadata = { department = "sales", is_management = true, work = ["sales", "accounts", "jobs"] }
+metadata = { department = "sales", is_management = true }
 sort_order = 20
 
 [[class]]
@@ -263,7 +263,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "sales-mgr"
 display_name = "Sales Manager"
-metadata = { department = "sales", is_management = true, work = ["sales", "accounts", "jobs"] }
+metadata = { department = "sales", is_management = true }
 sort_order = 21
 
 [[class]]
@@ -271,7 +271,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "sales-rep"
 display_name = "Sales Rep"
-metadata = { department = "sales", is_management = false, work = ["sales", "accounts"] }
+metadata = { department = "sales", is_management = false }
 sort_order = 22
 
 [[class]]
@@ -279,7 +279,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "service-mgr"
 display_name = "Service Manager"
-metadata = { department = "service", is_management = true, work = ["jobs", "service", "support"] }
+metadata = { department = "service", is_management = true }
 sort_order = 30
 
 [[class]]
@@ -287,7 +287,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "service-tech"
 display_name = "Service Tech"
-metadata = { department = "service", is_management = false, work = ["service", "jobs"] }
+metadata = { department = "service", is_management = false }
 sort_order = 31
 
 [[class]]
@@ -295,7 +295,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "refurb-supervisor"
 display_name = "Refurb Supervisor"
-metadata = { department = "refurb", is_management = true, work = ["jobs", "qa"] }
+metadata = { department = "refurb", is_management = true }
 sort_order = 40
 
 [[class]]
@@ -303,7 +303,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "refurb-tech"
 display_name = "Refurb Tech"
-metadata = { department = "refurb", is_management = false, work = ["jobs"] }
+metadata = { department = "refurb", is_management = false }
 sort_order = 41
 
 [[class]]
@@ -311,7 +311,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "qa-lead"
 display_name = "QA Lead"
-metadata = { department = "qa", is_management = true, work = ["qa", "jobs"] }
+metadata = { department = "qa", is_management = true }
 sort_order = 50
 
 [[class]]
@@ -319,7 +319,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "qa-tech"
 display_name = "QA Tech"
-metadata = { department = "qa", is_management = false, work = ["qa", "jobs"] }
+metadata = { department = "qa", is_management = false }
 sort_order = 51
 
 [[class]]
@@ -327,7 +327,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "warehouse-mgr"
 display_name = "Warehouse Manager"
-metadata = { department = "warehouse", is_management = true, work = ["warehouse", "parts", "shipping"] }
+metadata = { department = "warehouse", is_management = true }
 sort_order = 60
 
 [[class]]
@@ -335,7 +335,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "warehouse-clerk"
 display_name = "Warehouse Clerk"
-metadata = { department = "warehouse", is_management = false, work = ["warehouse", "shipping"] }
+metadata = { department = "warehouse", is_management = false }
 sort_order = 61
 
 [[class]]
@@ -343,7 +343,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "parts-buyer"
 display_name = "Parts Buyer"
-metadata = { department = "warehouse", is_management = false, work = ["parts", "warehouse"] }
+metadata = { department = "warehouse", is_management = false }
 sort_order = 62
 
 [[class]]
@@ -351,7 +351,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "controller"
 display_name = "Controller"
-metadata = { department = "finance", is_management = true, work = ["finance", "jobs"] }
+metadata = { department = "finance", is_management = true }
 sort_order = 70
 
 [[class]]
@@ -359,7 +359,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "ap-specialist"
 display_name = "AP Specialist"
-metadata = { department = "finance", is_management = false, work = ["finance", "jobs"] }
+metadata = { department = "finance", is_management = false }
 sort_order = 71
 
 [[class]]
@@ -367,7 +367,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "hr-generalist"
 display_name = "HR Generalist"
-metadata = { department = "people", is_management = false, work = ["people", "jobs"] }
+metadata = { department = "people", is_management = false }
 sort_order = 80
 
 [[class]]
@@ -375,7 +375,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "recruiter"
 display_name = "Recruiter"
-metadata = { department = "people", is_management = false, work = ["people", "jobs"] }
+metadata = { department = "people", is_management = false }
 sort_order = 81
 
 [[class]]
@@ -383,7 +383,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "support-specialist"
 display_name = "Support Specialist"
-metadata = { department = "support", is_management = false, work = ["support", "jobs"] }
+metadata = { department = "support", is_management = false }
 sort_order = 90
 
 [[class]]
@@ -391,7 +391,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "it-manager"
 display_name = "IT Manager"
-metadata = { department = "people", is_management = true, work = ["policy", "workflows", "system-step-plugins", "system-monitoring", "jobs"] }
+metadata = { department = "people", is_management = true }
 sort_order = 91
 
 [[class]]
@@ -399,7 +399,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "marketing-mgr"
 display_name = "Marketing Manager"
-metadata = { department = "marketing", is_management = true, work = ["marketing-assets", "calendar", "jobs"] }
+metadata = { department = "marketing", is_management = true }
 sort_order = 100
 
 [[class]]
@@ -407,7 +407,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "marketing-specialist"
 display_name = "Marketing Specialist"
-metadata = { department = "marketing", is_management = false, work = ["marketing-assets", "jobs"] }
+metadata = { department = "marketing", is_management = false }
 sort_order = 101
 
 [[class]]
@@ -415,7 +415,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "content-writer"
 display_name = "Content Writer"
-metadata = { department = "marketing", is_management = false, work = ["marketing-assets"] }
+metadata = { department = "marketing", is_management = false }
 sort_order = 102
 
 [[class]]
@@ -423,7 +423,7 @@ subject_kind = "employee"
 member_attribute = "role"
 code = "brand-designer"
 display_name = "Brand Designer"
-metadata = { department = "marketing", is_management = false, work = ["marketing-assets"] }
+metadata = { department = "marketing", is_management = false }
 sort_order = 103
 
 [[class]]

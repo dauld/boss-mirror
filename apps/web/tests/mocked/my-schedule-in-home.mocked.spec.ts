@@ -27,11 +27,15 @@ const json = (r: Route, body: unknown, status = 200): Promise<void> =>
 /// which is the shape both live roles have (GET /api/classes?subject_kind=
 /// employee, 2026-09-24: platform-admin and audit-readonly carry no
 /// `surfaces` key).
-function roleRow(code: string, surfaces?: ReadonlyArray<string>): Record<string, unknown> {
+function roleRow(
+  code: string,
+  surfaces?: ReadonlyArray<string>,
+  extra: Readonly<Record<string, unknown>> = {},
+): Record<string, unknown> {
   return {
     subject_kind: 'employee', code, display_name: code, parent_code: null,
     member_attribute: 'role',
-    metadata: surfaces === undefined ? {} : { surfaces },
+    metadata: surfaces === undefined ? { ...extra } : { ...extra, surfaces },
     sort_order: 1, retired_at: null,
   };
 }
@@ -84,5 +88,27 @@ test.describe('My schedule is a Home row, gated by the role Class row alone', ()
   test('a Class row declaring schedule shows it once', async ({ page }) => {
     await homeAs(page, 'senior-brewer', roleRow('senior-brewer', ['jobs', 'parts', 'schedule']));
     await expect(scheduleRows(page)).toHaveCount(1);
+  });
+});
+
+const allJobsRows = (page: Page) =>
+  page.locator(`.shell-sidebar a[href="${ROUTE_CATALOG.jobs.path}"]`);
+
+test.describe("Home's Work group is All jobs, for every role", () => {
+  // Backlog 0f9be7c0 (2026-09-24): the shell drops every Home entry
+  // whose catalog app is not home, so a per-role Work list could only
+  // ever render `jobs` — and a role whose list left `jobs` out got an
+  // empty Work group. A row still carrying the retired `metadata.work`
+  // key is the shape that showed it: sales-rep's list was
+  // ['sales', 'accounts'], neither a Home surface.
+  test('a role row carrying a legacy work list still sees All jobs', async ({ page }) => {
+    await homeAs(page, 'sales-rep', roleRow('sales-rep', undefined, { work: ['sales', 'accounts'] }));
+    await expect(allJobsRows(page)).toHaveCount(1);
+    await expect(allJobsRows(page)).toHaveText('All jobs');
+  });
+
+  test('the live roster sees All jobs once', async ({ page }) => {
+    await homeAs(page, 'platform-admin', roleRow('platform-admin'));
+    await expect(allJobsRows(page)).toHaveCount(1);
   });
 });
