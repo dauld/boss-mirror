@@ -812,7 +812,11 @@ a door that stops being true is a defect worth a car.
   correctly. The step API refuses metadata writes to a completed step and
   its 409 names this endpoint as the way to annotate instead — which is
   how it was found, in the conductor's journal, failing every ten minutes
-  for weeks (`f402a681`). On 2026-08-27 a session made ~28 hand-built
+  for weeks (`f402a681`). **To CORRECT what a completed step says, use
+  `boss correct <packet> --step <slug> --field <name>`** (`--reads-file`
+  / `--should-read-file` for the prose), never an invented metadata key:
+  it appends to the job's reserved `corrections` list, which the job GET
+  hands to every reader of that step (design `4105b020`). On 2026-08-27 a session made ~28 hand-built
   calls before finding this door at all, ~14 of them writes carrying a
   forged `emp-david` actor, so the audit log credits a human with an
   agent's work.

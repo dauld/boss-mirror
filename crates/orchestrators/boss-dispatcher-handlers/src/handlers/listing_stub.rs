@@ -162,9 +162,8 @@ pub(crate) fn terminal_step_refusal(sid: &str) -> Response {
         axum::Json(json!({
             "error": "step is terminal — these fields are immutable",
             "step_id": sid,
-            "hint": "a completed step is a record of what happened. To correct or \
-                     annotate it, write to the parent job's metadata \
-                     (PATCH /api/jobs/{id}/metadata) instead.",
+            // The real API's own constant, not a copy of its sentence.
+            "hint": boss_jobs::corrections::TERMINAL_STEP_HINT,
         })),
     )
         .into_response()

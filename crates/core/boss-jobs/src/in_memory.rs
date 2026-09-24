@@ -358,6 +358,35 @@ impl JobsRepository for InMemoryJobs {
         Ok(merged)
     }
 
+    async fn append_step_correction_at(
+        &self,
+        id: &JobId,
+        entry: &serde_json::Value,
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<(Job, usize), JobsError> {
+        // Under the lock, against the row as it stands — the Pg
+        // adapter's one UPDATE, as Rust.
+        let (job, index) = {
+            let mut state = self.inner.lock().expect("poisoned");
+            let Some(job) = state.jobs.get_mut(&job_key(id)) else {
+                return Err(JobsError::NotFound(*id));
+            };
+            let (md, index) = crate::corrections::appended(&job.metadata, entry);
+            job.metadata = md;
+            (job.clone(), index)
+        };
+        let updated = stamp.event(
+            crate::events::JOB_UPDATED,
+            serde_json::to_value(&job).unwrap_or_default(),
+        );
+        let corrected = stamp.event(
+            crate::events::STEP_CORRECTED,
+            crate::corrections::corrected_payload(&id.to_string(), entry, index),
+        );
+        self.record_all(&[updated, corrected]);
+        Ok((job, index))
+    }
+
     async fn list_estate_nodes(&self) -> Result<Vec<crate::port::EstateNode>, JobsError> {
         // Empty until a declaration lands, exactly as a fresh database
         // is (backlog ee368d0c) — no invented fixtures a test would

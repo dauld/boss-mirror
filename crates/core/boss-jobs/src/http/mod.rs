@@ -359,6 +359,12 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
             "/api/jobs/{id}/steps/{step_id}/metadata",
             patch(patch_step_metadata::<R, B>),
         )
+        // A correction beside a completed step — the one writer of the
+        // job's append-only `corrections` list (design 4105b020).
+        .route(
+            "/api/jobs/{id}/steps/{step_id}/corrections",
+            post(post_step_correction::<R, B>),
+        )
         .route(
             "/api/jobs/{id}/steps/{step_id}/claim",
             post(claim_step::<R, B>),

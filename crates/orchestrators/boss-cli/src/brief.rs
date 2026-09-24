@@ -843,7 +843,82 @@ pub(crate) fn packet_section(job: &Value) -> String {
                 .unwrap_or_default(),
             md.len(),
         ));
-        out.push_str(&key_blocks(&md));
+        // Each correction the server handed this step, printed under
+        // the field it corrects (design 4105b020): the original stays
+        // in full, and the correction arrives beside it rather than in
+        // a job-metadata key the reader would have to think to open.
+        let corrections: Vec<&Value> = step
+            .get("corrections")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().collect())
+            .unwrap_or_default();
+        out.push_str(&key_blocks_corrected(&md, &corrections));
+    }
+    out
+}
+
+/// [`key_blocks`], with each key followed by the corrections that name
+/// it as their `field`.
+fn key_blocks_corrected(md: &BTreeMap<String, Value>, corrections: &[&Value]) -> String {
+    md.iter()
+        .map(|(k, v)| key_blocks([(k, v)]) + &correction_lines(k, corrections))
+        .collect()
+}
+
+/// The lines a reader of `field` owes the corrections of it, in the
+/// list's order. A correction later withdrawn says by which entry; a
+/// withdrawal names the entry it withdraws. `reads` / `should read` /
+/// `why` keep their own lines, because the prose here is exactly the
+/// kind that was damaged once already.
+fn correction_lines(field: &str, corrections: &[&Value]) -> String {
+    let s = |c: &Value, k: &str| c.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let index = |c: &Value| c.get("index").and_then(Value::as_u64);
+    let mut out = String::new();
+    for c in corrections
+        .iter()
+        .filter(|c| c.get("field").and_then(Value::as_str) == Some(field))
+    {
+        let i = index(c)
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| "?".into());
+        let signed = format!("by {} at {}", s(c, "by"), s(c, "at"));
+        if let Some(target) = c.get("withdraws").and_then(Value::as_u64) {
+            out.push_str(&format!(
+                "    ↳ correction [{i}] withdraws [{target}], {signed}: {}\n",
+                s(c, "why")
+            ));
+            continue;
+        }
+        let withdrawn_by = corrections
+            .iter()
+            .find(|w| {
+                index(c).is_some_and(|i| w.get("withdraws").and_then(Value::as_u64) == Some(i))
+            })
+            .and_then(|w| index(w))
+            .map(|w| format!(" (withdrawn by [{w}])"))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "    ↳ correction [{i}]{withdrawn_by}, {signed}:\n"
+        ));
+        for (label, key) in [
+            ("reads:       ", "reads"),
+            ("should read: ", "should_read"),
+            ("why:         ", "why"),
+        ] {
+            let text = s(c, key);
+            if key == "why" && text.is_empty() {
+                continue;
+            }
+            let mut lines = text.lines();
+            out.push_str(&format!("        {label} {}\n", lines.next().unwrap_or("")));
+            for more in lines {
+                out.push_str(&format!(
+                    "        {:width$} {more}\n",
+                    "",
+                    width = label.len()
+                ));
+            }
+        }
     }
     out
 }
@@ -1753,6 +1828,70 @@ mod tests {
         let triage = out.find("step `triage`").expect("triage");
         let design = out.find("step `design`").expect("design");
         assert!(triage < design, "{out}");
+    }
+
+    /// A CORRECTION IS PRINTED UNDER THE FIELD IT CORRECTS (design
+    /// 4105b020). The job GET hands each step its own `corrections`;
+    /// the brief is a reader of step metadata like any other, so the
+    /// damaged sentence and its correction arrive together — the
+    /// original first, never replaced — and a withdrawn correction says
+    /// so.
+    #[test]
+    fn a_completed_steps_corrections_print_under_the_field_they_correct() {
+        let damaged = "Ordering trap confirmed:  is required of every rule";
+        let job = json!({
+            "id": "f3e091f0-0000-4000-8000-000000000000",
+            "metadata": {},
+            "steps": [
+                { "spec_slug": "triage", "kind": "task", "status": "completed",
+                  "title": "Measure the claim, choose a route",
+                  "metadata": { "disposition": "build", "evidence": damaged, "zeta": "z" },
+                  "corrections": [
+                      { "index": 0, "step": "s", "field": "evidence",
+                        "reads": "confirmed:  is", "should_read": "confirmed: `why` is",
+                        "why": "the shell ate the word", "by": "agent-claude",
+                        "at": "2026-09-19T19:10:00Z" },
+                      { "index": 2, "step": "s", "field": "evidence",
+                        "reads": "every rule", "should_read": "every rule file",
+                        "why": "", "by": "agent-claude", "at": "2026-09-20T00:00:00Z" },
+                      { "index": 3, "step": "s", "field": "evidence", "withdraws": 2,
+                        "why": "the original was right", "by": "emp-david",
+                        "at": "2026-09-21T00:00:00Z" },
+                  ] },
+            ],
+        });
+        let out = packet_section(&job);
+        let original = out.find(damaged).expect("the original is printed");
+        let first = out
+            .find("correction [0]")
+            .expect("the correction is printed");
+        let next_key = out.find("  zeta:").expect("the next key");
+        assert!(
+            original < first && first < next_key,
+            "under its field, before the next key: {out}"
+        );
+        assert!(out.contains("reads:        confirmed:  is\n"), "{out}");
+        assert!(out.contains("should read:  confirmed: `why` is\n"), "{out}");
+        assert!(
+            out.contains("why:          the shell ate the word\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("by agent-claude at 2026-09-19T19:10:00Z"),
+            "{out}"
+        );
+        assert!(out.contains("correction [2] (withdrawn by [3])"), "{out}");
+        assert!(
+            out.contains("correction [3] withdraws [2], by emp-david"),
+            "{out}"
+        );
+        // Nothing is printed under a field nobody corrected.
+        let disposition = out.find("  disposition:").expect("disposition");
+        let evidence = out.find("  evidence:").expect("evidence");
+        assert!(
+            !out[disposition..evidence].contains("correction ["),
+            "{out}"
+        );
     }
 
     #[test]

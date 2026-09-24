@@ -1220,7 +1220,34 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
 pub(super) struct JobDetail {
     #[serde(flatten)]
     job: Job,
-    steps: Vec<Step>,
+    steps: Vec<StepDetail>,
+}
+
+/// A step as the packet read hands it out: the row, plus the entries of
+/// the job's `corrections` list that target it (design 4105b020).
+/// READERS GET IT WITHOUT ASKING — a correction that lives only where
+/// the next reader has to think to look is the defect the list exists
+/// to retire. Omitted when there are none, so an uncorrected step reads
+/// exactly as it always has.
+#[derive(Serialize)]
+pub(super) struct StepDetail {
+    #[serde(flatten)]
+    step: Step,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    corrections: Vec<serde_json::Value>,
+}
+
+impl JobDetail {
+    pub(super) fn new(job: Job, steps: Vec<Step>) -> Self {
+        let steps = steps
+            .into_iter()
+            .map(|step| StepDetail {
+                corrections: crate::corrections::for_step(&job.metadata, &step.id.to_string()),
+                step,
+            })
+            .collect();
+        Self { job, steps }
+    }
 }
 
 /// An 8..=36-char run of hex and hyphens — the canonical id text minus
@@ -1240,7 +1267,7 @@ async fn job_detail_response<R: JobsRepository + 'static, B: EventBus + 'static>
         // A packet whose steps cannot be read is not a packet with no
         // steps: the detail page would draw it empty (f6c97006).
         Ok(Some(job)) => match state.jobs.list_steps(job_id).await {
-            Ok(steps) => Json(JobDetail { job, steps }).into_response(),
+            Ok(steps) => Json(JobDetail::new(job, steps)).into_response(),
             Err(e) => steps_unreadable(job_id, &e),
         },
         Ok(None) => (StatusCode::NOT_FOUND, "job not found").into_response(),
@@ -1408,6 +1435,7 @@ pub(super) async fn job_stream<R: JobsRepository + 'static, B: EventBus + 'stati
             Option<String>,    // priority as text
             Option<String>,    // closed_on as ISO string
             Vec<(boss_core::job::StepId, String, Option<String>)>,
+            usize,             // corrections appended (design 4105b020)
         );
         fn signature(
             job: &boss_core::job::Job,
@@ -1432,6 +1460,9 @@ pub(super) async fn job_stream<R: JobsRepository + 'static, B: EventBus + 'stati
                 Some(format!("{:?}", job.priority)),
                 job.closed_on.map(|d| d.to_string()),
                 step_sig,
+                // A correction changes no step status, so without this
+                // an open page would never be sent the frame carrying it.
+                crate::corrections::list(&job.metadata).len(),
             )
         }
 
@@ -1458,7 +1489,7 @@ pub(super) async fn job_stream<R: JobsRepository + 'static, B: EventBus + 'stati
                 }
             };
             let sig = signature(&job, &steps);
-            let detail = JobDetail { job, steps };
+            let detail = JobDetail::new(job, steps);
             if let Ok(json) = serde_json::to_string(&detail) {
                 yield Ok::<_, Infallible>(SseEvent::default().data(json));
             }
@@ -1496,7 +1527,7 @@ pub(super) async fn job_stream<R: JobsRepository + 'static, B: EventBus + 'stati
             };
             let sig = signature(&job, &steps);
             if last_sig != sig {
-                let detail = JobDetail { job, steps };
+                let detail = JobDetail::new(job, steps);
                 if let Ok(json) = serde_json::to_string(&detail) {
                     yield Ok::<_, Infallible>(SseEvent::default().data(json));
                 }
@@ -1539,6 +1570,11 @@ pub(super) async fn update_job<R: JobsRepository + 'static, B: EventBus + 'stati
     // keeps the JOB_UPDATED event payload (and the in-memory
     // adapter) agreeing with the row.
     job.partition = existing.partition;
+    // So is the corrections list, and for the same reason: this route
+    // REPLACES metadata, so a body built without the list — or with an
+    // edited one — would rewrite an append-only record. The stored list
+    // wins (design 4105b020); its one writer is the corrections door.
+    crate::corrections::carry_forward(&mut job.metadata, &existing.metadata);
 
     // Pick the right policy action: transitioning to Closed is a Close
     // action (more restricted than Update); everything else is Update.
@@ -1703,6 +1739,12 @@ pub(super) async fn patch_job_metadata<R: JobsRepository + 'static, B: EventBus 
         )
             .into_response();
     };
+    // The reserved, append-only corrections list (design 4105b020) is
+    // not a free key: a set here could rewrite it and a null erase it.
+    // Its one writer is the corrections door, which the refusal names.
+    if patch.contains_key(crate::corrections::CORRECTIONS_KEY) {
+        return (StatusCode::CONFLICT, crate::corrections::PATCH_REFUSAL).into_response();
+    }
 
     let existing = match state.jobs.get_job(&job_id).await {
         Ok(Some(existing)) => existing,

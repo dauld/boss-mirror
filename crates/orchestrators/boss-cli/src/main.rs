@@ -11,6 +11,7 @@ mod car;
 mod census;
 mod channels;
 mod core_changes;
+mod correct;
 mod credential;
 mod delivery_policy;
 mod design;
@@ -903,6 +904,8 @@ enum Commands {
     // ------------------------------------------------------------------
     #[command(flatten)]
     Attach(attach::Cmd),
+    #[command(flatten)]
+    Correct(correct::Cmd),
     #[command(flatten)]
     Credential(credential::Cmd),
     #[command(flatten)]
@@ -1948,6 +1951,7 @@ async fn main() -> Result<()> {
         // Per-module verbs, one arm each, ALPHABETIZED — the note on
         // `Commands` says why (84f9fbc0).
         Commands::Attach(cmd) => attach::dispatch(cmd).await,
+        Commands::Correct(cmd) => correct::dispatch(cmd).await,
         Commands::Credential(cmd) => credential::dispatch(cmd).await,
         Commands::Merged(cmd) => merged::dispatch(cmd),
         Commands::Receipt(cmd) => receipt::dispatch(cmd).await,

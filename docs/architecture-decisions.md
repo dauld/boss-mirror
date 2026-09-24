@@ -1266,8 +1266,16 @@ completed step — a damaged sentence needs a signature, not a review;
 and field for each; the 409 hint names the new door instead, and two
 weeks after it ships the scan is re-run with a target of zero new
 ad-hoc keys. `reproof` and `regate_receipt` stay as they are: they
-supersede by precedence, and each has its reader. Not yet built: the
-409 still sends an author to free-form job metadata.
+supersede by precedence, and each has its reader. Built (first car,
+2026-09-24): the door, its refusals and a withdrawal that must name a
+live entry of the same step and say why; the event, spelled
+`jobs.step.corrected` in the jobs crate's namespace and recorded beside
+the JOB_UPDATED row state in one transaction; the PATCH refusal, and
+the job PUT carrying the stored list forward so a whole-metadata body
+cannot erase it; `step.corrections` on the job GET and its live stream;
+`boss correct`; `boss brief`; and the terminal-freeze hint, one constant
+(`boss_jobs::corrections::TERMINAL_STEP_HINT`) at both sites and in the
+dispatcher's test double. Not yet built: the shared web marker.
 
 ## Finance & ledger
 
