@@ -1,0 +1,5 @@
+{
+  "recorded_at": "2026-09-24T12:47:00Z",
+  "read": "BOSS_SOR_SERVICE=gateway boss-api GET /api/tenant/manifest",
+  "body": {"display_name":"Algedonic, LLC","tenant_id":"algedonic","modules":{"calendar":false,"equipment":false,"exec":true,"finance":true,"parts":false,"qa":false,"shipping":false,"shop":false,"sim":false,"support":true,"warehouse":false}}
+}

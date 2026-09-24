@@ -145,10 +145,11 @@
     };
   });
 
+  // Blocked and Pending sign-off were offered here until 2026-09-24:
+  // no Job ever held either, so each could only answer "No jobs
+  // match." (page audit 473f4f92, retired in backlog 3c3dc8f3).
   const STATUS_OPTIONS = [
     { v: 'open', l: 'Open' },
-    { v: 'blocked', l: 'Blocked' },
-    { v: 'pending-sign-off', l: 'Pending sign-off' },
     { v: 'closed', l: 'Closed' },
     { v: '', l: 'All' },
   ];

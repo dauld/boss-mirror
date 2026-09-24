@@ -149,7 +149,7 @@ async fn an_unviable_row_with_open_jobs_pinned_is_reported_and_boot_continues() 
     // Two open Jobs pinned to v1 of the offending Workflow, plus a
     // closed one that does not count.
     seed_open_job(&jobs, "incident-post-mortem", 1, JobStatus::Open).await;
-    seed_open_job(&jobs, "incident-post-mortem", 1, JobStatus::Blocked).await;
+    seed_open_job(&jobs, "incident-post-mortem", 1, JobStatus::Draft).await;
     seed_open_job(&jobs, "incident-post-mortem", 1, JobStatus::Closed).await;
 
     // 2026-09-07: this is the shape that crash-looped the system of

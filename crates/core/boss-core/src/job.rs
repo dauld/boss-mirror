@@ -73,13 +73,22 @@ impl Subject {
 }
 
 /// Lifecycle status of a Job.
+///
+/// Four words: `draft` and `open` are live, `closed` and `cancelled`
+/// are terminal. `Blocked` and `PendingSignOff` were retired on
+/// 2026-09-24 (backlog 3c3dc8f3): nothing ever set either — a step
+/// paused on a dependency is a `Pending` step on an `Open` Job, and
+/// completion refuses an unsigned step — and on the day they went,
+/// 0 of 16,963 Jobs and 0 of 97,909 `jobs.job.*` audit events (the
+/// whole log, 2026-09-16 onward) carried either word. What they did
+/// do was render as two status filters that could only ever answer
+/// "No jobs match." A retired word now fails to deserialize, and the
+/// `jobs.status` CHECK refuses it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum JobStatus {
     Draft,
     Open,
-    Blocked,
-    PendingSignOff,
     Closed,
     Cancelled,
 }
@@ -784,12 +793,31 @@ mod tests {
 
     #[test]
     fn job_status_kebab_case() {
-        let s = JobStatus::PendingSignOff;
-        let json = serde_json::to_string(&s).unwrap();
-        assert_eq!(json, r#""pending-sign-off""#);
+        for (s, wire) in [
+            (JobStatus::Draft, r#""draft""#),
+            (JobStatus::Open, r#""open""#),
+            (JobStatus::Closed, r#""closed""#),
+            (JobStatus::Cancelled, r#""cancelled""#),
+        ] {
+            let json = serde_json::to_string(&s).unwrap();
+            assert_eq!(json, wire);
+            let back: JobStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, s);
+        }
+    }
 
-        let back: JobStatus = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, JobStatus::PendingSignOff);
+    /// `blocked` and `pending-sign-off` were retired (backlog 3c3dc8f3):
+    /// no Job and no `jobs.job.*` event ever held either. A retired word
+    /// must be REFUSED where it arrives — a query parameter answers 400
+    /// naming the four live statuses — never read as some other status,
+    /// because a filter that silently widens or narrows is a wrong
+    /// answer that looks like a result.
+    #[test]
+    fn a_retired_job_status_is_refused_not_read_as_another() {
+        for retired in [r#""blocked""#, r#""pending-sign-off""#] {
+            let parsed = serde_json::from_str::<JobStatus>(retired);
+            assert!(parsed.is_err(), "{retired} still parses: {parsed:?}");
+        }
     }
 
     #[test]

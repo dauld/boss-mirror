@@ -452,7 +452,7 @@ async fn stalled_ticket_severity_scales_with_days_idle() {
     )
     .await;
     seed_service_job(&db.pool, "field-service", "SN-STALL-INFO", "open", 3).await;
-    seed_service_job(&db.pool, "repair", "SN-STALL-WARN", "blocked", 8).await;
+    seed_service_job(&db.pool, "repair", "SN-STALL-WARN", "open", 8).await;
     seed_service_job(&db.pool, "depot-return", "SN-STALL-CRIT", "open", 20).await;
 
     let app = next_actions_router(

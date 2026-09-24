@@ -143,7 +143,7 @@ fn titles(body: &serde_json::Value) -> Vec<String> {
 async fn seed(jobs: &InMemoryJobs) {
     for j in [
         feedback(1, JobStatus::Open, None),
-        feedback(2, JobStatus::Blocked, None),
+        feedback(2, JobStatus::Draft, None),
         feedback(3, JobStatus::Closed, Some(day(2026, 8, 14))),
         // 4 and 7 straddle the cutoff for a 14-day window taken on
         // 16 Aug: 2 Aug is exactly the boundary, 1 Aug is one day past
@@ -182,7 +182,7 @@ async fn closed_within_keeps_live_work_and_a_recent_tail() {
     );
     assert!(
         got.contains(&"feedback 2".to_string()),
-        "blocked work is live work"
+        "draft work is live work"
     );
     assert!(got.contains(&"feedback 3".to_string()), "closed 2 days ago");
     assert!(
@@ -237,7 +237,7 @@ async fn zero_days_is_a_real_window_not_an_absent_one() {
     assert_eq!(
         body["total"],
         2,
-        "only the open and blocked packets, got {:?}",
+        "only the open and draft packets, got {:?}",
         titles(&body)
     );
 }

@@ -51,7 +51,7 @@ fn arb_history_row() -> impl Strategy<Value = ServiceHistoryRow> {
         prop_oneof![
             Just("open".to_string()),
             Just("closed".to_string()),
-            Just("blocked".to_string()),
+            Just("draft".to_string()),
         ],
         (-365i64..365).prop_map(|d| {
             NaiveDate::from_ymd_opt(2026, 4, 24).unwrap() + chrono::Duration::days(d)

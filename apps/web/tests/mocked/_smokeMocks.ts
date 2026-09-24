@@ -18,6 +18,7 @@ import type { Page, Route } from '@playwright/test';
 // world.ts is pinned to the server's REGIONS and BORDERS by
 // world.test.ts and borders.test.ts, so this is one definition deep.
 import { BORDERS, TERRITORIES } from '../../src/it/yard/world';
+import LIVE_RECORDING from './live-tenant-manifest.json' with { type: 'json' };
 
 const json = (r: Route, body: unknown, status = 200): Promise<void> =>
   r.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
@@ -32,15 +33,39 @@ export const MODULES_ON: Readonly<Record<string, boolean>> = {
   parts: true, qa: true, shipping: true, support: true, warehouse: true, shop: true, sim: true,
 };
 
-/// The LIVE tenant's modules, as the gateway served them on 2026-09-19
-/// (`GET /api/tenant/manifest` → `"modules":{}`): nothing listed, so
-/// every gated surface is off. MODULES_ON above is shaped so a module
-/// gate cannot be seen at all — every gate answers "on" — which is how
-/// /ux/support stayed gated on 'shipping' and labelled "Shipments" with
-/// no mocked spec able to notice (backlog 5b2f3240, gap 10 of the
-/// /ux/support audit). A spec that pins a gate installs this shape
-/// through installTenantManifest, after installSmokeMocks.
-export const MODULES_LIVE: Readonly<Record<string, boolean>> = {};
+/// The LIVE tenant's modules: the `modules` of the manifest the live
+/// gateway served, read out of live-tenant-manifest.json — a RECORDING,
+/// with the time it was taken and the read that took it, never a shape
+/// typed here. MODULES_ON above is shaped so a module gate cannot be
+/// seen at all — every gate answers "on" — which is how /ux/support
+/// stayed gated on 'shipping' and labelled "Shipments" with no mocked
+/// spec able to notice (backlog 5b2f3240, gap 10 of the /ux/support
+/// audit). A spec that pins a gate "as live" installs this shape through
+/// installTenantManifest, after installSmokeMocks.
+///
+/// This was a literal `{}` documented as the live manifest of
+/// 2026-09-19, and it went on saying so after the instance began serving
+/// eleven keys with exec, finance and support true — so every spec that
+/// rendered "the live instance" rendered those three off, and the
+/// products spec kept a second, correct copy beside it (41454ce1). A
+/// mocked run cannot read the instance, so the recording cannot refresh
+/// itself; what it can do is carry its date into every test title that
+/// renders it, and be one file to overwrite — the body verbatim from the
+/// read it names — after which every "as live" leg re-judges the page
+/// against the new shape and fails by name where the page changed.
+export const MODULES_LIVE: Readonly<Record<string, boolean>> = LIVE_RECORDING.body.modules;
+
+/// When the recording above was taken (UTC, as `date -u` read it). Specs
+/// put it in the titles of their live legs, so a reader of a run sees
+/// how old "live" is.
+export const LIVE_MANIFEST_RECORDED_AT: string = LIVE_RECORDING.recorded_at;
+
+/// A manifest listing no modules: what the gateway answers when it finds
+/// no tenant.toml (api.rs `tenant_manifest_now`), and what the live one
+/// served until it did not. Every module is off. This is its own shape,
+/// not "live", so a leg that means "nothing listed" keeps meaning it
+/// whatever the recording says.
+export const MODULES_NONE: Readonly<Record<string, boolean>> = {};
 
 /// `GET /api/tenant/manifest` with the given modules — the one place a
 /// spec says which tenant it is rendering for. Registered routes win in

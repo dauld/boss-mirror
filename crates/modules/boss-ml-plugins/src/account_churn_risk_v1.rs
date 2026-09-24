@@ -136,7 +136,7 @@ async fn collect_factors(
         "SELECT COUNT(*)::bigint FROM jobs \
          WHERE subject_kind = 'account' \
            AND subject_id = $1 \
-           AND status IN ('open', 'blocked')",
+           AND status = 'open'",
     )
     .bind(account_id)
     .fetch_one(ctx.pool)

@@ -223,7 +223,7 @@ kind = "declarative-rule"
 version = "v1"
 status = "active"
 description = """
-Open / blocked service-side Jobs (field-service, service, repair, \
+Open service-side Jobs (field-service, service, repair, \
 depot-return) on a device at this account, untouched ≥3 days. \
 Severity: critical ≥14d, warning ≥7d, info ≥3d."""
 
@@ -247,7 +247,7 @@ FROM jobs j
 INNER JOIN assets s ON s.asset_id = j.subject_id AND s.holder_kind = 'account'
 WHERE j.kind IN ('field-service', 'service', 'repair', 'depot-return')
   AND j.subject_kind = 'asset'
-  AND j.status IN ('open', 'blocked')
+  AND j.status = 'open'
   AND $1::date - j.updated_at::date >= 3"""
   score_expr = "score"
   entity_type = "account"

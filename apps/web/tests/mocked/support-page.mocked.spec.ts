@@ -8,14 +8,18 @@
 // shape under which a module gate cannot be seen. That is how
 // /ux/support stayed gated on 'shipping' and announced itself as
 // "Shipments is not enabled" (gap 3, fixed by f9b43965) with no spec
-// able to notice. The gate legs below render against MODULES_LIVE, the
-// manifest the live gateway served on 2026-09-19 (`"modules":{}`), and
-// against a manifest that lists ONLY support — so a gate keyed on any
-// other module id fails here by name.
+// able to notice. The gate legs below render against a manifest listing
+// no modules, against a manifest that lists ONLY support — so a gate
+// keyed on any other module id fails here by name — and against
+// MODULES_LIVE, the recorded live manifest, which lists support true.
+// This file said the live gateway served `"modules":{}`; it did on
+// 2026-09-19 and stopped, and nothing here could notice (41454ce1).
 
 import { expect, test, type Page, type Route } from '@playwright/test';
 import { mountPage } from './_helpers';
-import { installSmokeMocks, installTenantManifest, MODULES_LIVE } from './_smokeMocks';
+import {
+  installSmokeMocks, installTenantManifest, LIVE_MANIFEST_RECORDED_AT, MODULES_LIVE, MODULES_NONE,
+} from './_smokeMocks';
 
 const json = (r: Route, body: unknown, status = 200): Promise<void> =>
   r.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
@@ -71,7 +75,7 @@ async function column(page: Page, index: number): Promise<string[]> {
 test.describe('/ux/support module gate — against the live-shaped manifest', () => {
   test('a manifest listing no modules renders the notice, naming Support', async ({ page }) => {
     await installSupportReads(page);
-    await installTenantManifest(page, MODULES_LIVE);
+    await installTenantManifest(page, MODULES_NONE);
     await mountPage(page, '/ux/support');
 
     const notice = page.locator('.module-disabled');
@@ -85,6 +89,15 @@ test.describe('/ux/support module gate — against the live-shaped manifest', ()
   test('a manifest listing ONLY support renders the page', async ({ page }) => {
     await installSupportReads(page);
     await installTenantManifest(page, { support: true });
+    await mountPage(page, '/ux/support', { titleMatch: /3 open cases/ });
+
+    await expect(page.locator('.module-disabled')).toHaveCount(0);
+  });
+
+  test(`the live manifest recorded ${LIVE_MANIFEST_RECORDED_AT} (support = true) renders the page`, async ({ page }) => {
+    expect(MODULES_LIVE['support'], 'the recording lists support').toBe(true);
+    await installSupportReads(page);
+    await installTenantManifest(page, MODULES_LIVE);
     await mountPage(page, '/ux/support', { titleMatch: /3 open cases/ });
 
     await expect(page.locator('.module-disabled')).toHaveCount(0);

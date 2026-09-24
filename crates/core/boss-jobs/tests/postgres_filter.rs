@@ -189,11 +189,12 @@ async fn closed_since_keeps_live_and_recent_and_drops_the_rest() {
     );
     cancelled.status = JobStatus::Cancelled;
     cancelled.closed_on = Some(d(1, 6));
-    // A blocked packet with no close date: live is live regardless of
+    // A draft packet with no close date: live is live regardless of
     // how long ago it opened, and it is the half of the rule that a
-    // naive `closed_on >= $x` would silently delete. Blocked rather
-    // than Open so the assertion cannot pass by accident on a default.
-    open.status = JobStatus::Blocked;
+    // naive `closed_on >= $x` would silently delete. Draft rather
+    // than Open so the assertion cannot pass by accident on a default
+    // (it was Blocked until that status was retired, backlog 3c3dc8f3).
+    open.status = JobStatus::Draft;
 
     for j in [&open, &recent, &old, &cancelled] {
         repo.create_job(j).await.unwrap();

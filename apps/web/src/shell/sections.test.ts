@@ -162,6 +162,21 @@ describe('the module gate a route answers to', () => {
     expect(moduleForRoute({ kind: 'myCalendar' })).toBeNull();
   });
 
+  test('the service schedule answers to the Service queue, not My schedule', () => {
+    // Backlog 3b50fe11 (decided 2026-09-24): /ux/service/schedule is the
+    // service department's week grid of every tech, not a personal
+    // schedule, yet its kind lit the `schedule` row — so once eff0c5e5
+    // pointed myCalendar there too, two different pages highlighted
+    // Home > My schedule, and the tech grid was ungated. It lights the
+    // service department's own row and takes that row's module gate.
+    expect(sectionForRoute({ kind: 'schedule' })).toBe('service');
+    expect(appForRoute({ kind: 'schedule' })).toBe(ROUTE_CATALOG.service.app!);
+    expect(moduleForRoute({ kind: 'schedule' })).toEqual({ id: 'support', label: 'Service queue' });
+    // One page per My schedule row: only /ux/calendar/me lights it.
+    const lightingMySchedule = ROUTE_KINDS.filter((kind) => sectionForRoute({ kind } as Route) === 'schedule');
+    expect(lightingMySchedule).toEqual(['myCalendar']);
+  });
+
   test('a route requires exactly the module that hides its own nav row', () => {
     // The drift this refuses: the module that HIDES a sidebar row and
     // the module that gates the ROUTE behind it are one fact.

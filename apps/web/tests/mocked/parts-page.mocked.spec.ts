@@ -26,7 +26,9 @@
 
 import { expect, test, type Page, type Request, type Route } from '@playwright/test';
 import { mountPage, settledReads } from './_helpers';
-import { installSmokeMocks, installTenantManifest, MODULES_LIVE } from './_smokeMocks';
+import {
+  installSmokeMocks, installTenantManifest, LIVE_MANIFEST_RECORDED_AT, MODULES_LIVE, MODULES_NONE,
+} from './_smokeMocks';
 import { FAILURE_MARKER } from './_routes';
 import { ROUTE_CATALOG } from '../../src/shell/nav-catalog';
 
@@ -198,9 +200,10 @@ async function inlineManifest(page: Page, modules: Readonly<Record<string, boole
 
 test.describe('/ux/parts — State A, the parts module off (the live instance)', () => {
   for (const [name, modules] of [
-    ['a manifest listing no modules', MODULES_LIVE],
-    // The live manifest's own two flags, read 2026-09-23.
-    ['a manifest with parts = false and warehouse = false', { parts: false, warehouse: false }],
+    ['a manifest listing no modules', MODULES_NONE],
+    // The recorded live manifest, not a typed copy of two of its flags
+    // (41454ce1): parts and warehouse are both false in it.
+    [`the live manifest recorded ${LIVE_MANIFEST_RECORDED_AT} (parts = false)`, MODULES_LIVE],
   ] as const) {
     test(`${name} renders ModuleDisabled, and its one button goes home and back`, async ({ page }) => {
       const seen = watch(page);
@@ -246,7 +249,7 @@ test.describe('/ux/parts — State A, the parts module off (the live instance)',
   test('without an inlined manifest the page behind the gate reads once before the notice replaces it', async ({ page }) => {
     const seen = watch(page);
     await installParts(page);
-    await installTenantManifest(page, { parts: false, warehouse: false });
+    await installTenantManifest(page, MODULES_LIVE);
     await mountPage(page, PATH);
     await expect(page.locator('.module-disabled h1')).toHaveText('Not enabled for this tenant');
     await expect(page.locator('.catalog-filters')).toHaveCount(0);

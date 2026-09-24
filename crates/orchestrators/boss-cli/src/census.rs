@@ -30,7 +30,7 @@
 //!
 //! - **Universe.** `http/stations.rs` filters `status = Open`. The
 //!   census evaluates exactly the open set. Packets that are live but
-//!   NOT at status=open (draft / blocked / pending-sign-off) are
+//!   NOT at status=open (draft) are
 //!   outside every station queue's universe by construction; they are
 //!   counted and named in the time section rather than silently folded
 //!   into the orphan number, because their invisibility has a different
@@ -78,8 +78,9 @@ use boss_jobs::stations::StationSpec;
 // role, which `identity::header` carries for every verb alike.
 
 /// Job statuses that mean "still in the network". Terminal is the
-/// complement: closed + cancelled.
-const LIVE_STATUSES: [&str; 4] = ["draft", "open", "blocked", "pending-sign-off"];
+/// complement: closed + cancelled. (`blocked` and `pending-sign-off`
+/// were retired, backlog 3c3dc8f3.)
+const LIVE_STATUSES: [&str; 2] = ["draft", "open"];
 const TERMINAL_STATUSES: [&str; 2] = ["closed", "cancelled"];
 
 /// Page size for packet fetches. `MAX_LIMIT` in the jobs API is 1000;
@@ -1460,6 +1461,24 @@ mod tests {
     use boss_jobs::stations::StationKind;
     use serde_json::json;
 
+    /// Every status the census asks the jobs API about is one the API
+    /// can parse. The census reads one `/api/jobs/summary?status=<s>`
+    /// per word, and the API deserializes `status` into `JobStatus`, so
+    /// a word the enum no longer holds is a 400 that fails the whole
+    /// census at runtime — the compiler cannot see a string. When
+    /// `blocked` and `pending-sign-off` were retired (backlog 3c3dc8f3)
+    /// these two lists were the copies that would have gone on asking.
+    #[test]
+    fn every_status_the_census_asks_for_is_one_the_api_parses() {
+        for s in LIVE_STATUSES.iter().chain(TERMINAL_STATUSES.iter()) {
+            let parsed = serde_json::from_value::<JobStatus>(json!(s));
+            assert!(
+                parsed.is_ok(),
+                "census asks for status={s}, which JobStatus refuses"
+            );
+        }
+    }
+
     /// Orphans are forge heads no packet claims — main is not work, and
     /// a claimed branch belongs to whichever category claimed it
     /// (car / gate-run), never here. Parses `git ls-remote --heads`
@@ -2192,10 +2211,8 @@ mod tests {
                     total: 43,
                 }],
                 by_status: [
-                    ("draft".to_string(), 0),
+                    ("draft".to_string(), 1),
                     ("open".to_string(), 2),
-                    ("blocked".to_string(), 1),
-                    ("pending-sign-off".to_string(), 0),
                     ("closed".to_string(), 40),
                     ("cancelled".to_string(), 0),
                 ]
@@ -2312,12 +2329,12 @@ mod tests {
 
     #[test]
     fn live_packets_outside_the_queue_universe_are_called_out_separately() {
-        // A blocked packet is invisible to every station queue for a
+        // A draft packet is invisible to every station queue for a
         // different reason than an orphan, and folding it into the
         // orphan count would misdirect whoever acts on the number.
         let out = render(&sample_census());
         assert!(out.contains("1 live packet(s) are not at status=open"));
-        assert!(out.contains("blocked 1"));
+        assert!(out.contains("draft 1"));
         assert!(!out.contains("ORPHANS (0 stations matched) — 2"));
     }
 
@@ -2468,7 +2485,7 @@ mod tests {
             } else if target.starts_with("/api/jobs/summary") {
                 if target.contains("status=open") {
                     json!({"counts": {"ship-a-change": 2, "user-feedback": 1}, "total": 3})
-                } else if target.contains("status=blocked") {
+                } else if target.contains("status=draft") {
                     json!({"counts": {"ship-a-change": 1}, "total": 1})
                 } else if target.contains("status=closed") {
                     json!({"counts": {"pr-train": 1}, "total": 1})
@@ -2506,7 +2523,7 @@ mod tests {
         let t = &census.conservation_over_time;
         assert_eq!(t.stale, 2);
         assert_eq!(t.open, 3);
-        assert_eq!(t.other_live, 1, "the blocked packet from the summary");
+        assert_eq!(t.other_live, 1, "the draft packet from the summary");
         assert_eq!(t.terminal, 1);
         assert_eq!(t.age_histogram.iter().map(|b| b.packets).sum::<usize>(), 3);
 

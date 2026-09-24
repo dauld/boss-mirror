@@ -17,7 +17,7 @@
 //!    is_primary contact).
 //! 4. **churn-risk** — declarative-rule joining ml_predictions for the
 //!    `account-churn-risk-composite-v1` plugin.
-//! 5. **stalled-ticket** — declarative-rule (open/blocked service Jobs
+//! 5. **stalled-ticket** — declarative-rule (open service Jobs
 //!    untouched ≥3 days).
 //! 6. **preventive-maintenance-due** — declarative-rule (installed assets beyond
 //!    preventive_maintenance_interval_months).

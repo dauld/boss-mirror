@@ -100,8 +100,9 @@ const ORPHAN_ID_CAP: usize = 20;
 
 /// The non-terminal statuses — a packet in one of these has been
 /// admitted and not reached a terminal, so Q1 says it must be visible
-/// somewhere. Kebab-case as the API speaks it.
-const NON_TERMINAL: [&str; 4] = ["draft", "open", "blocked", "pending-sign-off"];
+/// somewhere. Kebab-case as the API speaks it. (`blocked` and
+/// `pending-sign-off` were retired, backlog 3c3dc8f3.)
+const NON_TERMINAL: [&str; 2] = ["draft", "open"];
 const TERMINAL: [&str; 2] = ["closed", "cancelled"];
 
 pub struct NetworkCensus {
@@ -213,7 +214,7 @@ impl NetworkCensus {
 /// One partition's headline totals.
 struct PartitionTotals {
     by_status: serde_json::Value,
-    /// Non-terminal count — draft + open + blocked + pending-sign-off.
+    /// Non-terminal count — draft + open.
     open_total: i64,
     closed_on_census_day: i64,
 }
@@ -486,6 +487,22 @@ impl Handler for NetworkCensus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every status the census tallies is one the jobs API can parse:
+    /// it asks `/api/jobs?status=<s>` per word, and a word `JobStatus`
+    /// no longer holds is a 400 that fails the daily census at runtime,
+    /// where no compiler looks. Held when `blocked` and
+    /// `pending-sign-off` were retired (backlog 3c3dc8f3).
+    #[test]
+    fn every_status_the_census_tallies_is_one_the_api_parses() {
+        for s in NON_TERMINAL.iter().chain(TERMINAL.iter()) {
+            let parsed = serde_json::from_value::<boss_core::job::JobStatus>(json!(s));
+            assert!(
+                parsed.is_ok(),
+                "census tallies status={s}, which JobStatus refuses"
+            );
+        }
+    }
 
     fn page(jobs: serde_json::Value) -> Vec<serde_json::Value> {
         serde_json::from_value(jobs).expect("a fixture page is an array")

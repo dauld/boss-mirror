@@ -35,7 +35,7 @@ function closedAs(outcome: string | null, over: Partial<WatchlistJob> = {}) {
 describe('outcomeOf', () => {
   test('an in-flight packet has no terminal state to show', () => {
     expect(outcomeOf(job())).toBeNull();
-    expect(outcomeOf(job({ status: 'blocked' }))).toBeNull();
+    expect(outcomeOf(job({ status: 'draft' }))).toBeNull();
   });
 
   test('the three feedback terminals read in plain words', () => {

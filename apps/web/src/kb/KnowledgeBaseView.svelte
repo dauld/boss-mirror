@@ -221,7 +221,7 @@
   });
 
   let openJobs = $derived(
-    jobs.filter((j) => j.status === 'open' || j.status === 'blocked'),
+    jobs.filter((j) => j.status === 'open'),
   );
   let closedJobs = $derived(jobs.filter((j) => j.status === 'closed'));
 

@@ -24,7 +24,9 @@
 
 import { expect, test, type Page, type Request, type Route } from '@playwright/test';
 import { mountPage, settledReads } from './_helpers';
-import { installSmokeMocks, installTenantManifest, MODULES_LIVE } from './_smokeMocks';
+import {
+  installSmokeMocks, installTenantManifest, LIVE_MANIFEST_RECORDED_AT, MODULES_LIVE, MODULES_NONE,
+} from './_smokeMocks';
 import { FAILURE_MARKER } from './_routes';
 import { ROUTE_CATALOG } from '../../src/shell/nav-catalog';
 
@@ -36,16 +38,6 @@ const json = (r: Route, body: unknown, status = 200): Promise<void> =>
 const LIST = /\/api\/products$/;
 const DETAIL = /\/api\/products\/[^/]+$/;
 const detailRoute = (sku: string) => new RegExp(`/api/products/${sku}$`);
-
-/// The manifest the live gateway served on 2026-09-23 (page audit
-/// 6b4e43a1, measure step): eleven keys, three of them true. It is
-/// spelled here rather than read from MODULES_LIVE, which still holds
-/// the 2026-09-19 shape `{}` (filed as 41454ce1); both are rendered
-/// below, and both gate the page off.
-const MODULES_LIVE_2026_09_23: Readonly<Record<string, boolean>> = {
-  calendar: false, equipment: false, exec: true, finance: true, parts: false, qa: false,
-  shipping: false, shop: false, sim: false, support: true, warehouse: false,
-};
 
 // ── Fixtures ────────────────────────────────────────────────────────
 // Four products in an arrival order that is NOT the page's sku order,
@@ -153,8 +145,11 @@ async function inlineManifest(page: Page, modules: Readonly<Record<string, boole
 
 test.describe('/ux/products — State A, the parts module off (the live instance)', () => {
   for (const [name, modules] of [
-    ['the live manifest of 2026-09-23 (parts = false)', MODULES_LIVE_2026_09_23],
-    ['a manifest listing no modules', MODULES_LIVE],
+    // The recorded live manifest (page audit 6b4e43a1 spelled it here
+    // as a second copy, because MODULES_LIVE still said `{}`; 41454ce1
+    // collapsed the two).
+    [`the live manifest recorded ${LIVE_MANIFEST_RECORDED_AT} (parts = false)`, MODULES_LIVE],
+    ['a manifest listing no modules', MODULES_NONE],
   ] as const) {
     test(`${name} renders ModuleDisabled, and its one button goes home and back`, async ({ page }) => {
       const seen = watch(page);
@@ -204,8 +199,8 @@ test.describe('/ux/products — State A, the parts module off (the live instance
   test('a deep link to one product renders the same notice, and reads nothing', async ({ page }) => {
     const seen = watch(page);
     await installProducts(page);
-    await installTenantManifest(page, MODULES_LIVE_2026_09_23);
-    await inlineManifest(page, MODULES_LIVE_2026_09_23);
+    await installTenantManifest(page, MODULES_LIVE);
+    await inlineManifest(page, MODULES_LIVE);
     await mountPage(page, `${PATH}/KEG-IPA-HALF`);
 
     const notice = page.locator('.module-disabled');
@@ -231,7 +226,7 @@ test.describe('/ux/products — State A, the parts module off (the live instance
     const held = new Promise<void>((resolve) => { release = resolve; });
     await page.route(/\/api\/tenant\/manifest$/, async (r) => {
       await held;
-      await json(r, { display_name: 'Algedonic, LLC', tenant_id: 'algedonic', modules: MODULES_LIVE_2026_09_23, labels: {} });
+      await json(r, { display_name: 'Algedonic, LLC', tenant_id: 'algedonic', modules: MODULES_LIVE, labels: {} });
     });
     await mountPage(page, PATH);
 

@@ -231,12 +231,14 @@ fn parse_subject(kind: &str, ref_id: &str) -> Subject {
     Subject::new(kind, ref_id)
 }
 
+/// The `jobs.status` column read back. Its CHECK constraint
+/// (20260924123307) admits exactly these four words — `blocked` and
+/// `pending-sign-off` were retired with their enum variants (backlog
+/// 3c3dc8f3) — so the fallback arm is unreachable from a real row.
 fn parse_job_status(s: &str) -> JobStatus {
     match s {
         "draft" => JobStatus::Draft,
         "open" => JobStatus::Open,
-        "blocked" => JobStatus::Blocked,
-        "pending-sign-off" => JobStatus::PendingSignOff,
         "closed" => JobStatus::Closed,
         "cancelled" => JobStatus::Cancelled,
         _ => JobStatus::Draft,
@@ -247,8 +249,6 @@ pub(crate) fn job_status_str(s: JobStatus) -> &'static str {
     match s {
         JobStatus::Draft => "draft",
         JobStatus::Open => "open",
-        JobStatus::Blocked => "blocked",
-        JobStatus::PendingSignOff => "pending-sign-off",
         JobStatus::Closed => "closed",
         JobStatus::Cancelled => "cancelled",
     }
@@ -2142,7 +2142,7 @@ impl JobsRepository for PgJobs {
         from: chrono::NaiveDate,
         to: chrono::NaiveDate,
     ) -> Result<Vec<LaunchCalendarRow>, JobsError> {
-        // Every open/pending/pending-sign-off Job joined to each of its
+        // Every live (draft/open) Job joined to each of its
         // launch steps (the ones carrying launch_date), one row per
         // launch step. The Job's kind is not read: a packet is on the
         // calendar because a step carries the `launch_date` field the

@@ -36,7 +36,7 @@ describe('jobsFilterSearch', () => {
 
   test('parameters the filters do not own ride through untouched', () => {
     expect(
-      jobsFilterSearch('?owner_id=emp-1&kind_prefix=ship&new=1', { ...none, status: 'blocked' }),
-    ).toBe('?owner_id=emp-1&kind_prefix=ship&new=1&status=blocked');
+      jobsFilterSearch('?owner_id=emp-1&kind_prefix=ship&new=1', { ...none, status: 'closed' }),
+    ).toBe('?owner_id=emp-1&kind_prefix=ship&new=1&status=closed');
   });
 });

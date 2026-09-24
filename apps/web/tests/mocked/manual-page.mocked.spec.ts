@@ -184,13 +184,28 @@ test.describe('/manual — tree links', () => {
     }
   });
 
+  // The tree read answers LATE here on purpose. mountPage returns on the
+  // h1, which paints before the tree's read answers, and this test used
+  // to snapshot the labels straight away — under gate load it read an
+  // empty tree and redded two gates on 2026-09-24 (d1a9a2f1, and the
+  // backlog item 0eda772f that filed it). The delay makes that race
+  // the ordinary case, so a snapshot taken before the tree is drawn
+  // fails every run rather than one run in a busy hour.
   test('each link lands on the catalogued manual surface, at its own section', async ({ page }) => {
     await installManualReads(page);
+    await page.route(TREE, async (r) => {
+      await new Promise((ok) => setTimeout(ok, 750));
+      await json(r, SECTIONS);
+    });
     await mountPage(page, '/ux/manual', { titleMatch: /Company manual/ });
 
     // The surface the links belong to is the catalog's `manual` row.
     expect(route(ROUTE_CATALOG.manual.path)).toEqual({ kind: 'manual' });
-    const hrefs = await page.locator('.manual-tree-label').evaluateAll((as) =>
+    // evaluateAll is a snapshot and does not wait; the count assertion
+    // does, so the snapshot below reads the drawn tree.
+    const labels = page.locator('.manual-tree-label');
+    await expect(labels).toHaveCount(SECTIONS.length);
+    const hrefs = await labels.evaluateAll((as) =>
       as.map((a) => a.getAttribute('href')),
     );
     expect(hrefs.length).toBe(SECTIONS.length);

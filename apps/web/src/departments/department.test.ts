@@ -63,10 +63,9 @@ describe('thirdOf — which third a packet stands in', () => {
     expect(thirdOf(job('a', 'open', ['active', 'pending']))).toBe('working');
     expect(thirdOf(job('b', 'open', ['completed', 'ready']))).toBe('working');
     expect(thirdOf(job('c', 'open', ['skipped', 'ready']))).toBe('working');
-    // Blocked and pending-sign-off are live: something happened, then
-    // it stopped — that is working, not inbound.
-    expect(thirdOf(job('d', 'blocked', ['completed', 'pending']))).toBe('working');
-    expect(thirdOf(job('e', 'pending-sign-off', ['completed', 'active']))).toBe('working');
+    // Any non-terminal status is live: a draft whose step has moved is
+    // working, not inbound.
+    expect(thirdOf(job('d', 'draft', ['completed', 'pending']))).toBe('working');
   });
 
   it('a terminal packet is OUT whatever its steps say', () => {

@@ -30,7 +30,9 @@
 
 import { expect, test, type Page, type Request, type Route } from '@playwright/test';
 import { mountPage, settledReads } from './_helpers';
-import { installSmokeMocks, installTenantManifest, MODULES_LIVE } from './_smokeMocks';
+import {
+  installSmokeMocks, installTenantManifest, LIVE_MANIFEST_RECORDED_AT, MODULES_LIVE, MODULES_NONE,
+} from './_smokeMocks';
 import { FAILURE_MARKER } from './_routes';
 import { ROUTE_CATALOG } from '../../src/shell/nav-catalog';
 
@@ -111,8 +113,9 @@ test.describe('/ux/calendar/me — State A, the calendar module off (the live in
   // `schedule` row now — the row whose path it is, always-on, in Home —
   // so the module being off changes nothing about this page.
   for (const [name, modules] of [
-    ['a manifest listing no modules', MODULES_LIVE],
+    ['a manifest listing no modules', MODULES_NONE],
     ['a manifest with calendar = false', { calendar: false }],
+    [`the live manifest recorded ${LIVE_MANIFEST_RECORDED_AT}`, MODULES_LIVE],
   ] as const) {
     test(`${name} still renders My schedule under Home, and reads its week once`, async ({ page }) => {
       const seen = watch(page);

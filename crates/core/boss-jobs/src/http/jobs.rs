@@ -582,8 +582,6 @@ pub(super) fn job_status_str_public(s: JobStatus) -> &'static str {
     match s {
         JobStatus::Draft => "draft",
         JobStatus::Open => "open",
-        JobStatus::Blocked => "blocked",
-        JobStatus::PendingSignOff => "pending-sign-off",
         JobStatus::Closed => "closed",
         JobStatus::Cancelled => "cancelled",
     }

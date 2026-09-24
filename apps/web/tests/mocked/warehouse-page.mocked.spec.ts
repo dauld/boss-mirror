@@ -32,7 +32,9 @@
 
 import { expect, test, type Page, type Request, type Route } from '@playwright/test';
 import { mountPage, settledReads } from './_helpers';
-import { installSmokeMocks, installTenantManifest, MODULES_LIVE, MODULES_ON } from './_smokeMocks';
+import {
+  installSmokeMocks, installTenantManifest, LIVE_MANIFEST_RECORDED_AT, MODULES_LIVE, MODULES_NONE, MODULES_ON,
+} from './_smokeMocks';
 import { FAILURE_MARKER } from './_routes';
 import { departmentJobsPath, ROUTE_CATALOG } from '../../src/shell/nav-catalog';
 import { moduleForRoute, sectionForRoute } from '../../src/shell/sections';
@@ -196,13 +198,13 @@ async function inlineManifest(page: Page, modules: Readonly<Record<string, boole
   }, modules);
 }
 
-/// The live manifest's three flags, read 2026-09-23 22:11Z.
-const LIVE_FLAGS = { warehouse: false, parts: false, shipping: false };
-
+// The live leg reads the recorded live manifest (warehouse, parts and
+// shipping false), not a typed copy of its three flags: that copy and
+// MODULES_LIVE disagreed about the same instance (41454ce1).
 test.describe('/ux/warehouse — State A, the warehouse module off (the live instance)', () => {
   for (const [name, modules] of [
-    ['a manifest listing no modules', MODULES_LIVE],
-    ['a manifest with warehouse, parts and shipping false', LIVE_FLAGS],
+    ['a manifest listing no modules', MODULES_NONE],
+    [`the live manifest recorded ${LIVE_MANIFEST_RECORDED_AT} (warehouse = false)`, MODULES_LIVE],
   ] as const) {
     test(`${name} renders ModuleDisabled, and its one button goes home and back`, async ({ page }) => {
       const seen = watch(page);
@@ -247,7 +249,7 @@ test.describe('/ux/warehouse — State A, the warehouse module off (the live ins
   test('without an inlined manifest the page behind the gate reads once before the notice replaces it', async ({ page }) => {
     const seen = watch(page);
     await installWarehouse(page);
-    await installTenantManifest(page, LIVE_FLAGS);
+    await installTenantManifest(page, MODULES_LIVE);
     await mountPage(page, PATH);
     await expect(page.locator('.module-disabled h1')).toHaveText('Not enabled for this tenant');
     await expect(page.getByRole('tab', { name: 'Overview' })).toHaveCount(0);

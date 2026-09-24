@@ -6,12 +6,14 @@
 // (route-smoke, interaction-crawl, and outage-crawl, which lists it in
 // SILENT): nothing clicked a tier or state button, searched, followed
 // an account link, failed ONE of its reads, or rendered it under the
-// manifest the live instance serves (`"modules":{}`, so `support` is
-// off and the ticket read is skipped).
+// manifest the live instance serves (MODULES_LIVE, the recorded live
+// manifest: `support` is on, so the ticket read is made). This header
+// said the live manifest was `"modules":{}` with the ticket read
+// skipped; that was true on 2026-09-19 and stopped (41454ce1).
 //
 // The page, counted (AccountsList.svelte):
-//   reads  — 3 with the support module off (the live instance), 4 with
-//            it on: the account directory, /api/assets,
+//   reads  — 3 with the support module off, 4 with it on (the live
+//            instance): the account directory, /api/assets,
 //            /api/jobs?department=support (support on only), and
 //            /api/commerce/invoices?limit=10000;
 //   writes — 0;
@@ -35,7 +37,9 @@
 
 import { expect, test, type Page, type Request, type Route } from '@playwright/test';
 import { mountPage, settledReads } from './_helpers';
-import { installSmokeMocks, installTenantManifest, MODULES_LIVE } from './_smokeMocks';
+import {
+  installSmokeMocks, installTenantManifest, LIVE_MANIFEST_RECORDED_AT, MODULES_LIVE,
+} from './_smokeMocks';
 import { FAILURE_MARKER } from './_routes';
 import { ROUTE_CATALOG } from '../../src/shell/nav-catalog';
 
@@ -161,12 +165,16 @@ async function installFleet(page: Page): Promise<void> {
   await page.route(INVOICES, (r) => json(r, paged(INVOICES_BODY, 10_000)));
 }
 
-/// The live instance: the manifest it serves (no modules), INLINED as the
-/// gateway inlines it into index.html (`window.__BOSS_TENANT_MANIFEST__`,
-/// 5578e42d) so the shell is ready before first paint, and the live
-/// directory. Assets and invoices answer empty: neither service is on
-/// the machine door's port table, so their live volume is undetermined
-/// (the audit's measure step), and empty is the honest stand-in.
+/// The live instance: the manifest it serves (MODULES_LIVE, support on),
+/// INLINED as the gateway inlines it into index.html
+/// (`window.__BOSS_TENANT_MANIFEST__`, 5578e42d) so the shell is ready
+/// before first paint, and the live directory. Assets and invoices
+/// answer empty: neither service is on the machine door's port table,
+/// so their live volume is undetermined (the audit's measure step), and
+/// empty is the honest stand-in. The ticket read answers empty because
+/// it IS empty: `/api/jobs?department=support&limit=5000` answered
+/// total 0 on 2026-09-24, on the read whose accounts control answered
+/// the one sponsor below.
 async function installLive(page: Page): Promise<void> {
   await installSmokeMocks(page);
   await installTenantManifest(page, MODULES_LIVE);
@@ -178,6 +186,7 @@ async function installLive(page: Page): Promise<void> {
   await installAccountClasses(page);
   await page.route(ACCOUNTS, (r) => json(r, paged([SPONSOR], 1000)));
   await page.route(ASSETS, (r) => json(r, paged([], 1000)));
+  await page.route(JOBS, (r) => json(r, paged([], 5000)));
   await page.route(INVOICES, (r) => json(r, paged([], 10_000)));
 }
 
@@ -219,18 +228,20 @@ async function mountFleet(page: Page): Promise<void> {
 
 // ── The live instance ───────────────────────────────────────────────
 
-test.describe('/ux/accounts — the live instance (no modules, one account)', () => {
-  test('mount makes three reads, skips the ticket read, writes nothing, and paints one row', async ({ page }) => {
+test.describe(`/ux/accounts — the live instance (the manifest recorded ${LIVE_MANIFEST_RECORDED_AT}, one account)`, () => {
+  test('mount makes the four reads, the ticket read among them, writes nothing, and paints one row', async ({ page }) => {
+    expect(MODULES_LIVE['support'], 'the recording lists support').toBe(true);
     const seen = watch(page);
     await installLive(page);
     await mountPage(page, PATH);
     await expect(body(page).locator('tbody tr')).toHaveCount(1);
 
-    expect(await settledReads(page, () => seen.reads.length, 3)).toBe(3);
-    expect([...seen.reads].sort()).toEqual([ACCOUNTS_URL, ASSETS_URL, INVOICES_URL].sort());
-    // Gap 4ddeb106: two of the three reads are a device fleet's (assets)
-    // and an AR ledger's (invoices); on this instance they answer nothing
-    // an account row shows, so their three columns stay hidden.
+    expect(await settledReads(page, () => seen.reads.length, 4)).toBe(4);
+    expect([...seen.reads].sort()).toEqual([...PAGE_READS].sort());
+    // Gap 4ddeb106: three of the four reads are a device fleet's (assets),
+    // a service desk's (tickets) and an AR ledger's (invoices); on this
+    // instance they answer nothing an account row shows, so their four
+    // columns stay hidden.
 
     await expect(page.locator('.module-disabled')).toHaveCount(0);
     await expect(body(page).locator('.exec-eyebrow')).toHaveText('Customers');

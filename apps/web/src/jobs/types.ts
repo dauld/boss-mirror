@@ -39,8 +39,10 @@ export type Subject = {
   id: string;
 };
 
-export type JobStatus =
-  | 'draft' | 'open' | 'blocked' | 'pending-sign-off' | 'closed' | 'cancelled';
+/** Mirrors `boss_core::job::JobStatus`. `blocked` and `pending-sign-off`
+ *  were retired (backlog 3c3dc8f3): no Job ever held either, and the
+ *  API now refuses both. */
+export type JobStatus = 'draft' | 'open' | 'closed' | 'cancelled';
 
 /**
  * Five-state predicate-driven lifecycle (mirrors `boss_core::job::StepStatus`).

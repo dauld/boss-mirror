@@ -167,7 +167,12 @@ const SECTION_FOR_KIND: Readonly<Record<Route['kind'], string>> = {
   // Release calendar and was gated on the calendar module — off on the
   // live instance, so the page was ModuleDisabled (eff0c5e5).
   myCalendar: 'schedule',
-  schedule: 'schedule',
+  // /ux/service/schedule is the service department's week grid of
+  // every tech, not a personal schedule: it lights the Service queue
+  // row and takes that row's module gate. It lit `schedule` until
+  // 2026-09-24, so with the line above two pages lit My schedule
+  // (backlog 3b50fe11).
+  schedule: 'service',
   exec: 'exec',
   warehouse: 'warehouse',
   // The department jobs view: its app is the route's own code, not a

@@ -1196,26 +1196,21 @@ pub fn blockers_satisfied(statuses: &[(StepId, StepStatus)]) -> bool {
 /// Compute the job status from its steps.
 ///
 /// v2 has no per-step Blocked state, so a Job is `Open` until every
-/// step reaches a terminal state (`Completed` / `Skipped`), at which
-/// point it's `Closed` (or `PendingSignOff` if a completed step still
-/// awaits sign-off). External pauses are a dispatcher concern, not a
-/// derived status here.
+/// step reaches a terminal state (`Completed` / `Skipped`) with every
+/// sign-off it requires collected, at which point it's `Closed`.
+/// External pauses are a dispatcher concern, not a derived status here.
 pub fn compute_job_status(steps: &[Step]) -> JobStatus {
-    if steps.is_empty() {
-        return JobStatus::Open;
-    }
     let all_terminal = steps
         .iter()
         .all(|s| matches!(s.status, StepStatus::Completed | StepStatus::Skipped));
-    if all_terminal {
-        // Defensive: completion validation refuses to complete a step
-        // with unsatisfied stamps, so this state should be unreachable
-        // under the sign-off contract; kept while the PendingSignOff
-        // status exists.
-        let unsigned = steps.iter().any(|s| !s.sign_offs_satisfied());
-        if unsigned {
-            return JobStatus::PendingSignOff;
-        }
+    // An outstanding sign-off keeps the Job `Open`, never `Closed`.
+    // Completion validation refuses to complete a step with
+    // unsatisfied stamps, so this arm is defensive; it answered
+    // `PendingSignOff` until that status was retired (backlog
+    // 3c3dc8f3), and open is the live status that says the same thing
+    // — the Job is not done.
+    let signed = steps.iter().all(|s| s.sign_offs_satisfied());
+    if !steps.is_empty() && all_terminal && signed {
         return JobStatus::Closed;
     }
     JobStatus::Open
@@ -1920,8 +1915,10 @@ mod tests {
             Step::new(job_id, "generic", "QA", 0).with_sign_offs_required(vec!["qa-lead".into()]);
         s.status = StepStatus::Completed;
         // no stamp collected — sign-off outstanding (defensive state;
-        // completion validation normally prevents reaching this)
-        assert_eq!(compute_job_status(&[s]), JobStatus::PendingSignOff);
+        // completion validation normally prevents reaching this). The
+        // Job is not done, so it stays open; it read `PendingSignOff`
+        // until that status was retired (backlog 3c3dc8f3).
+        assert_eq!(compute_job_status(&[s]), JobStatus::Open);
     }
 
     #[test]
@@ -1958,9 +1955,9 @@ mod tests {
         let d = |m, day| NaiveDate::from_ymd_opt(2026, m, day).unwrap();
 
         let mut live = make_job("user-feedback");
-        // Blocked, not Open: live is live regardless of age, and this
+        // Draft, not Open: live is live regardless of age, and this
         // is the half of the rule a bare `closed_on >= x` deletes.
-        live.status = JobStatus::Blocked;
+        live.status = JobStatus::Draft;
         let mut recent = make_job("user-feedback");
         recent.status = JobStatus::Closed;
         recent.closed_on = Some(d(8, 14));
