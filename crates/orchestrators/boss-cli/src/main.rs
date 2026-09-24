@@ -626,6 +626,20 @@ enum Commands {
         /// `<projects>/*/*/subagents/agent-*.jsonl` naming the run).
         #[arg(long, requires = "report")]
         transcript: Option<std::path::PathBuf>,
+        /// With --report, for a TENANT run (design fd8b5143, backlog
+        /// 6a34e9bc): the file the run wrote `boss tenant check`'s
+        /// output to — the receipt, copied, never retyped. A tenant run
+        /// that ended `delivered` is refused a report without one that
+        /// PASSES, because a tenant car has no gate to go green.
+        #[arg(long, requires_all = ["report", "tenant_branch", "tenant_sha"])]
+        tenant_check_file: Option<std::path::PathBuf>,
+        /// With --tenant-check-file: the tenant branch it checked.
+        #[arg(long, requires = "tenant_check_file")]
+        tenant_branch: Option<String>,
+        /// With --tenant-check-file: the full sha of that branch, read
+        /// from git.
+        #[arg(long, requires = "tenant_check_file")]
+        tenant_sha: Option<String>,
         /// Dispatch anyway when a car carrying this packet's fix has
         /// already MERGED (a7837d81). The refusal is not a guess about
         /// the tree: it names the car, its branch and its merge. Force
@@ -1801,11 +1815,27 @@ async fn main() -> Result<()> {
             spend_usd,
             tokens,
             transcript,
+            tenant_check_file,
+            tenant_branch,
+            tenant_sha,
             force,
             ..
         } => {
             let packet = packet.expect("clap requires a packet without --next");
             if report {
+                // Read at the boundary, whole: the receipt is the check's
+                // own output, and a file is how it arrives uncopied-by-hand.
+                let tenant = match tenant_check_file {
+                    Some(path) => Some(dispatch::TenantReceipt {
+                        check: anyhow::Context::with_context(
+                            std::fs::read_to_string(&path),
+                            || format!("reading the tenant check receipt {}", path.display()),
+                        )?,
+                        branch: tenant_branch.unwrap_or_default(),
+                        sha: tenant_sha.unwrap_or_default(),
+                    }),
+                    None => None,
+                };
                 dispatch::report(
                     packet,
                     crate::prose::text_or_file(
@@ -1817,6 +1847,7 @@ async fn main() -> Result<()> {
                     spend_usd,
                     tokens,
                     transcript,
+                    tenant,
                     chrono::Utc::now(),
                 )
                 .await
