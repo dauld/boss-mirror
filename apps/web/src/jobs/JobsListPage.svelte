@@ -709,6 +709,7 @@
           <button
             type="button"
             class="filter-button {status === opt.v ? 'filter-button-active' : ''}"
+            aria-pressed={status === opt.v}
             onclick={() => (status = opt.v)}
           >
             {opt.l}

@@ -3,11 +3,15 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   REGION_NAMES,
+  bandText,
+  compactCountText,
   countText,
   floorHref,
   floorSelection,
+  kpiText,
   lampOf,
   parseRegions,
+  stateText,
   trendText,
   type Region,
   type Trend,
@@ -34,9 +38,13 @@ const region = (over: Partial<Region> = {}): Region => ({
   name: 'dock',
   count: 3,
   bound: null,
+  bound_kind: null,
+  unit: '',
   state: 'clear',
   why: '3 cars parked',
+  band: null,
   trend: trend(),
+  kpi: [],
   machines: [],
   ...over,
 });
@@ -49,10 +57,10 @@ const PAYLOAD = {
     { name: 'dock', count: 3, bound: 5, state: 'clear', why: '3 cars parked', trend: { metric: 'dock wait', unit: 'hours', current: 4.25, previous: 3, samples: 6, previous_samples: 5 } },
     { name: 'gates', count: 1, bound: 3, state: 'troubled', why: '1 bay holds a corpse — gate-run past its own deadline', trend: { metric: 'gate duration', unit: 'minutes', current: 11, previous: 9.5, samples: 20, previous_samples: 18 } },
     { name: 'track', count: 0, bound: 1, state: 'clear', why: 'no train in transit', trend: { metric: 'time at CI', unit: 'minutes', current: null, previous: 14, samples: 0, previous_samples: 4 } },
-    { name: 'shed', count: 2, state: 'busy', why: '2 landed cars await their probe', trend: { metric: 'time to proven', unit: 'hours', current: 1, previous: 1.5, samples: 3, previous_samples: 7 } },
+    { name: 'shed', count: 2, state: 'attention', why: '2 landed cars await their probe', trend: { metric: 'time to proven', unit: 'hours', current: 1, previous: 1.5, samples: 3, previous_samples: 7 } },
     { name: 'arrivals', count: 17, state: 'clear', why: '17 trains arrived in the window', trend: { metric: 'arrivals', unit: 'per day', current: 17, previous: 12, samples: 17, previous_samples: 12 } },
     { name: 'garage', count: 0, state: 'clear', why: 'nothing gated red', trend: { metric: 'reds', unit: 'per day', current: 0, previous: 2, samples: 0, previous_samples: 2 } },
-    { name: 'receiving', count: 4, state: 'busy', why: '4 inbound, oldest 5 days', trend: { metric: 'inbound', unit: 'per day', current: 4, previous: 6, samples: 4, previous_samples: 6 } },
+    { name: 'receiving', count: 4, state: 'attention', why: '4 inbound, oldest 5 days', trend: { metric: 'inbound', unit: 'per day', current: 4, previous: 6, samples: 4, previous_samples: 6 } },
     { name: 'marshalling', count: null, state: 'troubled', why: 'the station registry could not be read', trend: { metric: 'served', unit: 'per day', current: null, previous: null, samples: 0, previous_samples: 0 } },
     { name: 'shop-floor', count: 2, bound: 6, state: 'clear', why: '2 runs in flight, 1 crew on the floor', trend: { metric: 'build duration', unit: 'minutes', current: 64, previous: 58, samples: 5, previous_samples: 4 }, machines: [{ id: 'session:s1', name: 'claude@algedonic.dev', state: 'running', why: 'last prompt 3 min ago; 2 runs in flight' }] },
     { name: 'publish', count: 1, state: 'troubled', why: 'https://mirror/pull/240 — the scan read failure — 109 alert(s) over 14 rule(s), no disposition recorded', trend: { metric: 'publishes', unit: 'per day', current: 1, previous: 1, samples: 1, previous_samples: 1 } },
@@ -69,9 +77,15 @@ describe('parseRegions — the payload, parsed once', () => {
       name: 'gates',
       count: 1,
       bound: 3,
+      // An older payload carries no kind, unit, band or KPI: each reads
+      // as absent — never as a made-up value.
+      bound_kind: null,
+      unit: '',
       state: 'troubled',
       why: '1 bay holds a corpse — gate-run past its own deadline',
+      band: null,
       trend: { metric: 'gate duration', unit: 'minutes', current: 11, previous: 9.5, samples: 20, previous_samples: 18 },
+      kpi: [],
       // A payload with no machinery list draws no glyphs — never
       // invented idle ones (car 5, world-machines.test.ts).
       machines: [],
@@ -176,9 +190,84 @@ describe('trendText — this window against the previous, in the unit', () => {
 });
 
 describe('lampOf — the yard\'s own lamp for a state', () => {
-  it('clear is ok, busy is warn, troubled is err', () => {
+  it('clear is ok, attention is warn, troubled is err', () => {
     expect(lampOf('clear')).toBe('ok');
-    expect(lampOf('busy')).toBe('warn');
+    expect(lampOf('attention')).toBe('warn');
     expect(lampOf('troubled')).toBe('err');
+  });
+});
+
+// Design 62de32ae, "The IT map, round 3: meaning before drawing" — car A:
+// one vocabulary, every non-clear state with the declared band that
+// decided it and how long it has held, every count and KPI with its unit.
+describe('one state vocabulary, each state with its band (62de32ae decisions 1, 2, 5, 9)', () => {
+  it('the three words are the server\'s RegionState, in its order (CLAUDE.md §9a)', () => {
+    const src = readFileSync(
+      join(import.meta.dir, '..', '..', '..', '..', '..', 'crates', 'core', 'boss-jobs', 'src', 'regions.rs'),
+      'utf8',
+    );
+    const block = src.match(/pub enum RegionState \{([^}]*)\}/);
+    expect(block, 'boss_jobs::regions::RegionState is where the words live').not.toBeNull();
+    const words = [...block![1]!.matchAll(/^\s*([A-Z][a-z]+),/gm)].map((m) => m[1]!.toLowerCase());
+    expect(words).toEqual(['clear', 'attention', 'troubled']);
+  });
+
+  it('refuses the retired word rather than drawing a new meaning under it', () => {
+    const old = { ...PAYLOAD, regions: [{ ...PAYLOAD.regions[0], state: 'busy' }] };
+    expect(() => parseRegions(old)).toThrow(/state/);
+    const kind = { ...PAYLOAD, regions: [{ ...PAYLOAD.regions[0], bound_kind: 'quota' }] };
+    expect(() => parseRegions(kind)).toThrow(/bound kind/);
+  });
+
+  it('parses the band, the unit, the bound kind and the KPI the server sends', () => {
+    const wire = {
+      ...PAYLOAD,
+      regions: [
+        {
+          ...PAYLOAD.regions[6],
+          bound_kind: null,
+          unit: 'packets standing',
+          band: {
+            id: 'receiving-aging',
+            reads: 'oldest 5d > the 3-day triage band',
+            hold_minutes: 0,
+            since: '2026-09-18T00:00:00+00:00',
+            held_minutes: 2160,
+            held: '36h',
+          },
+          kpi: [{ name: 'oldest untriaged', value: 5, unit: 'days', text: 'oldest untriaged 5 days' }],
+        },
+      ],
+    };
+    const r = parseRegions(wire).regions[0]!;
+    expect(r.unit).toBe('packets standing');
+    expect(r.band?.reads).toBe('oldest 5d > the 3-day triage band');
+    expect(stateText(r)).toBe('attention for 36h');
+    expect(bandText(r)).toBe('oldest 5d > the 3-day triage band');
+    expect(kpiText(r)).toBe('oldest untriaged 5 days');
+    expect(countText(r)).toBe('4 packets standing');
+  });
+
+  it('a clear state, or one with no onset on record, is the bare word — never a made-up duration', () => {
+    expect(stateText(region())).toBe('clear');
+    expect(bandText(region())).toBeNull();
+    const noOnset = region({
+      state: 'attention',
+      band: { id: 'track-gate-waiting', reads: 'a train gate not filed for 10m', hold_minutes: 10, since: null, held_minutes: null, held: null },
+    });
+    expect(stateText(noOnset)).toBe('attention');
+    expect(stateText(undefined)).toBe('troubled');
+  });
+
+  it('a threshold is never drawn as room: the dock reads "6 cars parked · threshold 1", the gates "3 / 3 bays in use"', () => {
+    expect(countText(region({ count: 6, bound: 1, bound_kind: 'threshold', unit: 'cars parked' }))).toBe(
+      '6 cars parked · threshold 1',
+    );
+    expect(countText(region({ count: 3, bound: 3, bound_kind: 'capacity', unit: 'bays in use' }))).toBe(
+      '3 / 3 bays in use',
+    );
+    expect(compactCountText(region({ count: 6, bound: 1, bound_kind: 'threshold' }))).toBe('6 · threshold 1');
+    expect(compactCountText(region({ count: 3, bound: 3, bound_kind: 'capacity' }))).toBe('3 / 3');
+    expect(compactCountText(region({ count: null }))).toBe('no reading');
   });
 });

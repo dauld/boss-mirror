@@ -504,7 +504,6 @@ dependencies = [
  "boss-core",
  "boss-events",
  "boss-inventory-client",
- "boss-jobs-client",
  "boss-nats",
  "boss-people-client",
  "boss-policy",

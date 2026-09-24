@@ -25,7 +25,6 @@ boss-events = { path = "../../core/boss-events" }
 boss-nats = { path = "../../core/boss-nats" }
 boss-people-client = { path = "../boss-people-client" }
 boss-catalog-client = { path = "../boss-catalog-client" }
-boss-jobs-client = { path = "../../core/boss-jobs-client" }
 boss-inventory-client = { path = "../boss-inventory-client" }
 async-trait = { workspace = true }
 chrono = { workspace = true }

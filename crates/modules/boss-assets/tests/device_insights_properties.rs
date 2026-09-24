@@ -7,67 +7,34 @@
 //!
 //! Properties encoded:
 //!
-//! 1. `prop_service_history_total_counts_input_exactly` — the
-//!    summary's `total` equals the input slice length, even when
-//!    that exceeds the preview cap.
-//!
-//! 2. `prop_service_history_preview_is_capped` — `recent` never
-//!    exceeds `SERVICE_HISTORY_PREVIEW_LIMIT` and never exceeds
-//!    `total`.
-//!
-//! 3. `prop_failure_modes_sorted_descending_and_capped` — ranked
+//! 1. `prop_failure_modes_sorted_descending_and_capped` — ranked
 //!    output is ordered by frequency descending and capped at
 //!    `FAILURE_MODE_PREVIEW_LIMIT`.
 //!
-//! 4. `prop_likely_failure_parts_only_high_usage` — the join filter
+//! 2. `prop_likely_failure_parts_only_high_usage` — the join filter
 //!    never emits a part whose `high_usage` is false, regardless of
 //!    how the stock levels line up.
 //!
-//! 5. `prop_missing_model_empties_model_fields` — when `model =
+//! 3. `prop_missing_model_empties_model_fields` — when `model =
 //!    None`, the response has empty failure-mode + likely-parts
 //!    vectors and `None` for model_sku / model_name / manufacturer.
+//!
+//! Two service-history properties (total counts the input, preview is
+//! capped) left with the section they pinned: it projected prior
+//! `field-service` Jobs, a protocol only the retiring device-shop
+//! example authored and no instance publishes (backlog a8991c86,
+//! car 3).
 
 use boss_assets::asset_insights::{
-    CatalogModelSummary, FAILURE_MODE_PREVIEW_LIMIT, FailureMode, PartStockLevel,
-    SERVICE_HISTORY_PREVIEW_LIMIT, ServiceHistoryRow, SparePart, build_asset_insights,
+    CatalogModelSummary, FAILURE_MODE_PREVIEW_LIMIT, FailureMode, PartStockLevel, SparePart,
+    build_asset_insights,
 };
-use chrono::{NaiveDate, TimeZone, Utc};
+use chrono::{TimeZone, Utc};
 use proptest::prelude::*;
 
 // ---------------------------------------------------------------------------
 // Generators
 // ---------------------------------------------------------------------------
-
-fn arb_history_row() -> impl Strategy<Value = ServiceHistoryRow> {
-    (
-        "[A-Z]{2}-[0-9]{1,5}",
-        "[A-Z][a-z]{2,10}",
-        prop_oneof![
-            Just("emergency".to_string()),
-            Just("urgent".to_string()),
-            Just("standard".to_string()),
-            Just("scheduled".to_string()),
-        ],
-        prop_oneof![
-            Just("open".to_string()),
-            Just("closed".to_string()),
-            Just("draft".to_string()),
-        ],
-        (-365i64..365).prop_map(|d| {
-            NaiveDate::from_ymd_opt(2026, 4, 24).unwrap() + chrono::Duration::days(d)
-        }),
-    )
-        .prop_map(
-            |(job_id, title, priority, status, opened_on)| ServiceHistoryRow {
-                job_id,
-                title,
-                priority,
-                status,
-                opened_on,
-                closed_on: None,
-            },
-        )
-}
 
 fn arb_failure_mode() -> impl Strategy<Value = FailureMode> {
     (
@@ -149,42 +116,10 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
     #[test]
-    fn prop_service_history_total_counts_input_exactly(
-        history in prop::collection::vec(arb_history_row(), 0..50),
-    ) {
-        let total_in = history.len() as i64;
-        let insights = build_asset_insights(
-            "SN-001".into(),
-            None,
-            history,
-            Vec::new(),
-            as_of(),
-        );
-        prop_assert_eq!(insights.service_history.total, total_in);
-    }
-
-    #[test]
-    fn prop_service_history_preview_is_capped(
-        history in prop::collection::vec(arb_history_row(), 0..50),
-    ) {
-        let insights = build_asset_insights(
-            "SN-001".into(),
-            None,
-            history,
-            Vec::new(),
-            as_of(),
-        );
-        let recent = &insights.service_history.recent;
-        prop_assert!(recent.len() <= SERVICE_HISTORY_PREVIEW_LIMIT);
-        prop_assert!((recent.len() as i64) <= insights.service_history.total);
-    }
-
-    #[test]
     fn prop_failure_modes_sorted_descending_and_capped(model in arb_model()) {
         let insights = build_asset_insights(
             "SN-001".into(),
             Some(model),
-            Vec::new(),
             Vec::new(),
             as_of(),
         );
@@ -211,7 +146,6 @@ proptest! {
         let insights = build_asset_insights(
             "SN-001".into(),
             Some(model.clone()),
-            Vec::new(),
             stock,
             as_of(),
         );
@@ -238,16 +172,14 @@ proptest! {
 
     #[test]
     fn prop_missing_model_empties_model_fields(
-        history in prop::collection::vec(arb_history_row(), 0..5),
         stock in prop::collection::vec(arb_stock_level(), 0..5),
     ) {
         // When no model is supplied, the aggregator has nothing to rank
         // or join against — every model-derived field must be empty
-        // regardless of how much history or stock noise is passed in.
+        // regardless of how much stock noise is passed in.
         let insights = build_asset_insights(
             "SN-MISSING".into(),
             None,
-            history,
             stock,
             as_of(),
         );

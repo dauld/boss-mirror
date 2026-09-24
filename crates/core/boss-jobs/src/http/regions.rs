@@ -3,7 +3,7 @@
 //!
 //! Nine regions — dock, gates, track, shed, arrivals, garage,
 //! receiving, marshalling, shop-floor — each with a count, a
-//! clear/busy/troubled
+//! clear/attention/troubled
 //! state and a trend over the window, computed ONCE here from the rows
 //! this process already reads for the yard status, so the map (car 2),
 //! the yard and `boss orient` answer with one voice. The aggregation is
@@ -674,10 +674,17 @@ async fn marshalling_stations<R: JobsRepository + 'static, B: EventBus + 'static
             .filter(|spec| spec.name != "loading-dock")
             .filter_map(|spec| {
                 let bound = spec.bind_self(self_id(user))?;
-                let members: Vec<String> = packets
+                let standing: Vec<&Job> = packets
                     .iter()
                     .filter(|(job, steps)| bound.predicate.matches(job, steps))
-                    .map(|(job, _)| job.id.to_string())
+                    .map(|(job, _)| job)
+                    .collect();
+                let members: Vec<String> = standing.iter().map(|job| job.id.to_string()).collect();
+                // The marshalling KPI's ages (design 62de32ae, decision 9),
+                // per member, so the partition can narrow them.
+                let opened = standing
+                    .iter()
+                    .filter_map(|job| Some((job.id.to_string(), regions::opened_at(job)?)))
                     .collect();
                 let over_limit = bound
                     .wip_limit
@@ -694,6 +701,7 @@ async fn marshalling_stations<R: JobsRepository + 'static, B: EventBus + 'static
                     members,
                     served,
                     previous_served: served.zip(served_both).map(|(w, b)| b - w),
+                    opened,
                 })
             })
             .collect(),

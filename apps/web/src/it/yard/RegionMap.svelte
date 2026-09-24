@@ -31,8 +31,11 @@
   import { navigate } from '@boss/web-kit/nav';
   import {
     REGION_NAMES,
+    bandText,
     countText,
+    kpiText,
     lampOf,
+    stateText,
     trendText,
     type Region,
     type RegionName,
@@ -127,7 +130,13 @@
     <span class="region-name">{region}</span>
     <span class="region-count">{r ? countText(r) : 'no reading'}</span>
     <span class="lamp-dot lamp {lampOf(state)}"></span>
-    <span class="region-state" class:err={troubled}>{state}</span>
+    <!-- The state with how long the record says it has held, and the
+         declared band that decided it read against its number
+         (design 62de32ae, decisions 1 and 2) — so a state can always
+         be checked against the number beside it. -->
+    <span class="region-state" class:err={troubled} class:warn={state === 'attention'}>{stateText(r)}</span>
+    {#if bandText(r)}<span class="region-band" class:err={troubled} data-band={r?.band?.id}>{bandText(r)}</span>{/if}
+    {#if r && r.kpi.length > 0}<span class="region-kpi">{kpiText(r)}</span>{/if}
     {#if r}<span class="region-trend">{r.trend.metric} · {trendText(r.trend)}</span>{/if}
   </div>
   <div class="region-why" class:err={troubled}>{why}</div>
@@ -143,7 +152,7 @@
       width={canvas.w - 1}
       height={canvas.h - 1}
       class="shed"
-      class:warn={state === 'busy'}
+      class:warn={state === 'attention'}
       class:err={troubled} />
 
     {#if hasPlatforms(region)}
@@ -301,6 +310,11 @@
   .region-count { font-size: 18px; font-weight: 600; color: var(--map-ink); }
   .region-state { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--map-muted); }
   .region-state.err { color: var(--map-bad-ink); }
+  .region-state.warn { color: var(--map-warn-ink); }
+  .region-band { font-size: 11px; color: var(--map-warn-ink); border: 1px solid var(--map-warn-edge);
+    padding: 1px 6px; }
+  .region-band.err { color: var(--map-bad-ink); border-color: var(--map-bad-edge); }
+  .region-kpi { font-size: 12px; color: var(--map-ink); }
   .region-trend { font-size: 11px; color: var(--map-muted); }
   .region-why { font-family: var(--font-mono); font-size: 12px;
     color: var(--map-muted); margin-top: var(--s2); }

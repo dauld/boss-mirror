@@ -479,10 +479,11 @@
     font-size: 12px;
     color: var(--text-dim);
   }
+  /* Enamel's field label, the board's `.field label` (backlog 6f471ff6). */
   .step-field-label {
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--text-dim);
+    font-size: 13.5px;
+    font-weight: 700;
+    color: var(--text);
   }
   .step-ask-legend {
     margin-left: auto;

@@ -14,7 +14,6 @@ use boss_core::primitives::ClassRef;
 use boss_core::publisher::DomainPublisher;
 use boss_inventory_client::InventoryClient;
 
-use boss_jobs_client::JobsClient;
 use boss_people_client::{PeopleClient, PeopleClientError};
 use boss_policy::{Action, Decision, Resource};
 use boss_policy_client::{CurrentUser, PolicyClient};
@@ -65,7 +64,6 @@ struct PaginatedResponse<T: Serialize> {
 /// None` and the route responds 503.
 pub struct InsightsClients {
     pub catalog: Arc<dyn CatalogClient>,
-    pub jobs: Arc<dyn JobsClient>,
     pub inventory: Arc<dyn InventoryClient>,
 }
 
@@ -229,9 +227,8 @@ async fn active_asset_count_for_sku<R: AssetsRepository + 'static, B: EventBus +
 
 /// `GET /api/assets/{asset_id}/insights` — backs the SR 360 + Device
 /// 360 Insights sections. Fans out to catalog (failure modes + spare
-/// parts BOM), jobs (service history), and inventory (stock for
-/// high-usage parts). See [`crate::asset_insights`] for the shape
-/// and aggregator rules.
+/// parts BOM) and inventory (stock for high-usage parts). See
+/// [`crate::asset_insights`] for the shape and aggregator rules.
 async fn asset_insights<R: AssetsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<AssetsApiState<R, B>>>,
     Path(serial): Path<String>,
@@ -239,7 +236,7 @@ async fn asset_insights<R: AssetsRepository + 'static, B: EventBus + 'static>(
     let Some(clients) = &state.insights_clients else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            "device-insights requires catalog/jobs/inventory clients — not configured",
+            "device-insights requires catalog/inventory clients — not configured",
         )
             .into_response();
     };
@@ -254,34 +251,17 @@ async fn asset_insights<R: AssetsRepository + 'static, B: EventBus + 'static>(
     };
 
     // Fetch the catalog model first so we know which SKUs to ask
-    // inventory about. Service history can run in parallel since it
-    // only needs the serial. An unidentified asset (no sku yet — it
-    // was Registered but not Identified) has no catalog model, so skip
+    // inventory about. An unidentified asset (no sku yet — it was
+    // Registered but not Identified) has no catalog model, so skip
     // the catalog call entirely; the model-derived panels render empty
     // until it's identified.
-    let sku = current_state.sku.clone();
-    let model_fut = async {
-        match &sku {
-            Some(s) => clients.catalog.model_summary_by_sku(s).await,
-            None => Ok(None),
-        }
+    let model_res = match &current_state.sku {
+        Some(s) => clients.catalog.model_summary_by_sku(s).await,
+        None => Ok(None),
     };
-    let (model_res, history_res) = tokio::join!(
-        model_fut,
-        clients.jobs.list_jobs(
-            Some("field-service"),
-            Some(&serial),
-            SERVICE_HISTORY_FETCH_LIMIT,
-        )
-    );
-
     let model = match model_res {
         Ok(m) => m,
         Err(e) => return (StatusCode::BAD_GATEWAY, format!("catalog: {e}")).into_response(),
-    };
-    let history = match history_res {
-        Ok(jobs) => crate::service_history::project_service_history(&jobs),
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("jobs: {e}")).into_response(),
     };
 
     let stock = if let Some(m) = &model {
@@ -304,18 +284,11 @@ async fn asset_insights<R: AssetsRepository + 'static, B: EventBus + 'static>(
     let insights = build_asset_insights(
         serial,
         model,
-        history,
         stock,
         boss_clock_client::now_from(&state.clock).await,
     );
     Json(insights).into_response()
 }
-
-/// Upper bound on the service-history rows we fetch from jobs. The
-/// aggregator further caps the preview to the frontend-visible top-N;
-/// this is just a server-side ceiling to keep the `/api/jobs` response
-/// bounded when a serial has a deep history.
-const SERVICE_HISTORY_FETCH_LIMIT: u32 = 50;
 
 async fn get_asset<R: AssetsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<AssetsApiState<R, B>>>,

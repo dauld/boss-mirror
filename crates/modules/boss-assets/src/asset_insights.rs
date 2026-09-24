@@ -4,10 +4,16 @@
 //! section of the SR 360 + Device 360 views (operations-needs session
 //! 3, E4). Given a serial, assembles:
 //!
-//! - Service history (prior `field-service` Jobs on the same serial)
 //! - Prior failure modes on the device's model (ranked by frequency)
 //! - Likely-failure parts on-hand (high-usage spare parts joined with
 //!   inventory stock)
+//!
+//! A third section, service history, listed prior `field-service`
+//! Jobs on the serial. `field-service` was authored only in the
+//! retiring device-shop example's seed bundle — no instance publishes
+//! it (the Algedonic instance read 0 such Jobs and no Workflow row,
+//! 2026-09-24) — so the section, its jobs-API fan-out and its
+//! properties were retired with that tenant (backlog a8991c86, car 3).
 //!
 //! Device usage hours and contract coverage are v1.1 follow-ups —
 //! assets doesn't track hours yet, and contract coverage needs a
@@ -19,7 +25,6 @@ use serde::{Deserialize, Serialize};
 
 // Re-exported so callers can import the nested types from one place
 // and the wire shape has one Rust-side anchor.
-pub use crate::service_history::ServiceHistoryRow;
 pub use boss_catalog_client::{CatalogModelSummary, FailureMode, SparePart};
 pub use boss_inventory_client::PartStockLevel;
 
@@ -30,17 +35,9 @@ pub struct DeviceInsights {
     pub model_sku: Option<String>,
     pub model_name: Option<String>,
     pub manufacturer: Option<String>,
-    pub service_history: ServiceHistorySummary,
     pub prior_failure_modes: Vec<FailureModeInsight>,
     pub likely_failure_parts: Vec<LikelyFailurePart>,
     pub as_of: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct ServiceHistorySummary {
-    pub total: i64,
-    /// Most recent rows, capped at `SERVICE_HISTORY_PREVIEW_LIMIT`.
-    pub recent: Vec<ServiceHistoryRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -62,7 +59,6 @@ pub struct LikelyFailurePart {
     pub stock: Option<PartStockLevel>,
 }
 
-pub const SERVICE_HISTORY_PREVIEW_LIMIT: usize = 10;
 pub const FAILURE_MODE_PREVIEW_LIMIT: usize = 5;
 
 /// Combine the pre-fetched inputs into the wire shape. Pure function —
@@ -70,14 +66,9 @@ pub const FAILURE_MODE_PREVIEW_LIMIT: usize = 5;
 pub fn build_asset_insights(
     serial: String,
     model: Option<CatalogModelSummary>,
-    service_history: Vec<ServiceHistoryRow>,
     parts_stock: Vec<PartStockLevel>,
     as_of: DateTime<Utc>,
 ) -> DeviceInsights {
-    let total_history = service_history.len() as i64;
-    let mut recent = service_history;
-    recent.truncate(SERVICE_HISTORY_PREVIEW_LIMIT);
-
     let (model_sku, model_name, manufacturer, prior_failure_modes, likely_failure_parts) =
         match model {
             Some(m) => {
@@ -99,10 +90,6 @@ pub fn build_asset_insights(
         model_sku,
         model_name,
         manufacturer,
-        service_history: ServiceHistorySummary {
-            total: total_history,
-            recent,
-        },
         prior_failure_modes,
         likely_failure_parts,
         as_of,
@@ -165,17 +152,6 @@ mod tests {
             .and_utc()
     }
 
-    fn hist(id: &str, opened: NaiveDate) -> ServiceHistoryRow {
-        ServiceHistoryRow {
-            job_id: id.to_string(),
-            title: format!("{id} visit"),
-            priority: "standard".to_string(),
-            status: "closed".to_string(),
-            opened_on: opened,
-            closed_on: Some(opened + chrono::Duration::days(1)),
-        }
-    }
-
     fn fm(code: &str, freq: f32) -> FailureMode {
         FailureMode {
             code: code.to_string(),
@@ -205,26 +181,6 @@ mod tests {
         }
     }
 
-    // --- service-history ---------------------------------------------------
-
-    #[test]
-    fn service_history_total_reflects_full_input_even_after_preview_truncation() {
-        let history: Vec<ServiceHistoryRow> = (0..15)
-            .map(|i| {
-                hist(
-                    &format!("J-{i}"),
-                    NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
-                )
-            })
-            .collect();
-        let insights = build_asset_insights("SN-1".into(), None, history, vec![], ts(2026, 4, 22));
-        assert_eq!(insights.service_history.total, 15);
-        assert_eq!(
-            insights.service_history.recent.len(),
-            SERVICE_HISTORY_PREVIEW_LIMIT
-        );
-    }
-
     // --- failure-mode ranking ---------------------------------------------
 
     #[test]
@@ -244,8 +200,7 @@ mod tests {
             ],
             spare_parts: vec![],
         };
-        let insights =
-            build_asset_insights("SN-1".into(), Some(model), vec![], vec![], ts(2026, 4, 22));
+        let insights = build_asset_insights("SN-1".into(), Some(model), vec![], ts(2026, 4, 22));
         let codes: Vec<&str> = insights
             .prior_failure_modes
             .iter()
@@ -274,8 +229,7 @@ mod tests {
             ],
         };
         let stock = vec![stk("P-HIGH", 10, 8, false)];
-        let insights =
-            build_asset_insights("SN-1".into(), Some(model), vec![], stock, ts(2026, 4, 22));
+        let insights = build_asset_insights("SN-1".into(), Some(model), stock, ts(2026, 4, 22));
         let skus: Vec<&str> = insights
             .likely_failure_parts
             .iter()
@@ -296,8 +250,7 @@ mod tests {
 
     #[test]
     fn missing_model_zeroes_model_blocks() {
-        let insights =
-            build_asset_insights("SN-OPAQUE".into(), None, vec![], vec![], ts(2026, 4, 22));
+        let insights = build_asset_insights("SN-OPAQUE".into(), None, vec![], ts(2026, 4, 22));
         assert_eq!(insights.serial, "SN-OPAQUE");
         assert!(insights.model_sku.is_none());
         assert!(insights.prior_failure_modes.is_empty());
@@ -307,7 +260,7 @@ mod tests {
     #[test]
     fn as_of_round_trips_through_builder() {
         let when = ts(2026, 4, 22);
-        let insights = build_asset_insights("SN-1".into(), None, vec![], vec![], when);
+        let insights = build_asset_insights("SN-1".into(), None, vec![], when);
         assert_eq!(insights.as_of, when);
     }
 
@@ -348,15 +301,6 @@ mod tests {
         }
     }
 
-    prop_compose! {
-        fn arb_history_row()(ix in 0u32..10_000) -> ServiceHistoryRow {
-            hist(
-                &format!("J-{ix}"),
-                NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
-            )
-        }
-    }
-
     fn model_with(modes: Vec<FailureMode>, parts: Vec<SparePart>) -> CatalogModelSummary {
         CatalogModelSummary {
             sku: "LUM".into(),
@@ -370,23 +314,6 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(200))]
 
-        // Service-history total reflects the full input, preview caps
-        // at SERVICE_HISTORY_PREVIEW_LIMIT.
-        #[test]
-        fn prop_service_history_total_and_preview_cap(
-            history in vec(arb_history_row(), 0..30),
-        ) {
-            let n = history.len();
-            let insights = build_asset_insights(
-                "SN-1".into(), None, history, vec![], ts(2026, 4, 22),
-            );
-            prop_assert_eq!(insights.service_history.total, n as i64);
-            prop_assert!(
-                insights.service_history.recent.len() <= SERVICE_HISTORY_PREVIEW_LIMIT,
-            );
-            prop_assert!(insights.service_history.recent.len() <= n);
-        }
-
         // Failure-mode ranking is descending by frequency and never
         // exceeds the preview cap.
         #[test]
@@ -396,7 +323,7 @@ mod tests {
             let insights = build_asset_insights(
                 "SN-1".into(),
                 Some(model_with(modes, vec![])),
-                vec![], vec![], ts(2026, 4, 22),
+                vec![], ts(2026, 4, 22),
             );
             let ranked = &insights.prior_failure_modes;
             prop_assert!(ranked.len() <= FAILURE_MODE_PREVIEW_LIMIT);
@@ -419,7 +346,7 @@ mod tests {
             let insights = build_asset_insights(
                 "SN-1".into(),
                 Some(model_with(vec![], parts)),
-                vec![], stock, ts(2026, 4, 22),
+                stock, ts(2026, 4, 22),
             );
             prop_assert_eq!(insights.likely_failure_parts.len(), high_count);
             for row in &insights.likely_failure_parts {
@@ -427,23 +354,19 @@ mod tests {
             }
         }
 
-        // Missing model collapses every model-dependent field; passing
-        // service history still counts.
+        // Missing model collapses every model-dependent field.
         #[test]
         fn prop_missing_model_zeroes_model_fields(
-            history in vec(arb_history_row(), 0..10),
             stock in vec(arb_stock(), 0..10),
         ) {
-            let n = history.len();
             let insights = build_asset_insights(
-                "SN-OPAQUE".into(), None, history, stock, ts(2026, 4, 22),
+                "SN-OPAQUE".into(), None, stock, ts(2026, 4, 22),
             );
             prop_assert!(insights.model_sku.is_none());
             prop_assert!(insights.model_name.is_none());
             prop_assert!(insights.manufacturer.is_none());
             prop_assert!(insights.prior_failure_modes.is_empty());
             prop_assert!(insights.likely_failure_parts.is_empty());
-            prop_assert_eq!(insights.service_history.total, n as i64);
         }
 
         // Serial + as_of pass through by value regardless of other inputs.
@@ -452,14 +375,13 @@ mod tests {
             serial in "SN-[0-9]{1,6}",
             modes in vec(arb_failure_mode(), 0..10),
             parts in vec(arb_spare_part(), 0..10),
-            history in vec(arb_history_row(), 0..10),
             stock in vec(arb_stock(), 0..10),
         ) {
             let when = ts(2026, 4, 22);
             let insights = build_asset_insights(
                 serial.clone(),
                 Some(model_with(modes, parts)),
-                history, stock, when,
+                stock, when,
             );
             prop_assert_eq!(insights.serial, serial);
             prop_assert_eq!(insights.as_of, when);

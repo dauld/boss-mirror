@@ -24,7 +24,6 @@ pub mod port;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 pub mod project;
-pub mod service_history;
 pub mod sse;
 pub mod types;
 

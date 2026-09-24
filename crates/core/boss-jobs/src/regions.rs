@@ -10,9 +10,11 @@
 //! bubbles KPIs up needs ONE definition per number. This module is it:
 //! a pure function over rows the handler reads, answering a list of
 //! REGIONS — dock, gates, track, shed, arrivals, garage, receiving,
-//! marshalling — each with a `count` (what is here), a `state`
-//! (clear / busy / troubled, from the thresholds the yard and the
-//! alarms already use) and a `trend` (this window versus the previous).
+//! marshalling — each with a `count` (what is here, in a stated unit), a
+//! `state` (clear / attention / troubled, each non-clear one naming the
+//! declared band that decided it and how long it has held —
+//! [`crate::region_states`], design 62de32ae), a `kpi` and a `trend`
+//! (this window versus the previous).
 //!
 //! THE JUDGEMENTS ARE THE YARD'S OWN. Where `crate::yard` already
 //! decides something server-side — a train's block, a gate bay's
@@ -33,6 +35,7 @@ use boss_core::job::{Job, JobStatus, Step, StepStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::region_states::{self as bands, Finding, Settled, settle};
 use crate::registry::WorkflowSpec;
 use crate::yard::{ConductorHealth, Reading, YardStatus};
 
@@ -93,18 +96,100 @@ pub fn parse_window(raw: Option<&str>) -> Result<i64, String> {
     Ok(hours)
 }
 
-/// What a region's card says at a glance. `Clear` is room to spare and
-/// nothing wrong; `Busy` is at a bound or holding work that waits on
-/// the machine (a train due, a bay full, a queue formed); `Troubled` is
-/// a threshold the yard or an alarm already enforces, crossed — or a
-/// reading that could not be taken, which is refused like a failure
-/// rather than drawn as clear.
+/// What a region's card — or a border's rail — says at a glance: ONE
+/// vocabulary everywhere (design 62de32ae, decision 1; the meanings and
+/// the bands that decide them are [`crate::region_states`]).
+///
+/// `Clear` is flowing within its declared bounds, which INCLUDES busy
+/// and healthy — a dock with a train due. `Attention` is a declared band
+/// crossed. `Troubled` is ours and not moving, or a reading that could
+/// not be taken, which is refused like a failure rather than drawn as
+/// clear.
+///
+/// `busy` was the middle word until 2026-09-24, and it meant three
+/// things at once — a train due, bays at their bound, and a week-old
+/// intake backlog — so six of ten regions wore it and the colour said
+/// nothing. It is gone rather than aliased: a reader that still expects
+/// it fails its parse loudly (the map's `parseRegion` throws on an
+/// unknown state) instead of drawing a new meaning under an old word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RegionState {
     Clear,
-    Busy,
+    Attention,
     Troubled,
+}
+
+/// What a region's bound IS (design 62de32ae, decision 5): the most a
+/// place can hold (`capacity` — three gate bays, one track, the run
+/// cap), or the depth at which something is due (`threshold` — the
+/// dock's boarding depth). The review read "DOCK 6 / 1" as six cars in
+/// a space for one; the same `n / bound` meant capacity on the gates
+/// and a trigger on the dock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BoundKind {
+    Capacity,
+    Threshold,
+}
+
+/// ONE NUMBER OF A REGION'S KPI, with its unit (design 62de32ae,
+/// decisions 5 and 9). `value` is `None` where it could not be measured
+/// — never zero for "no reading" — and `text` is the sentence the map
+/// and `boss orient` both print, written here so the two say it with
+/// one voice.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Measure {
+    /// What is measured: `oldest untriaged`, `cars that cannot board`.
+    pub name: String,
+    pub value: Option<f64>,
+    /// `days`, `minutes`, `cars`, `trains`, `bays`, `runs`…
+    pub unit: String,
+    /// The measurement as a phrase: "oldest untriaged 7 days".
+    pub text: String,
+}
+
+/// A measure whose text is `<name> <value> <unit>`, or `<name>: no
+/// reading` when it could not be taken.
+fn measure(name: &str, value: Option<f64>, unit: &str) -> Measure {
+    let text = match value {
+        Some(v) => format!("{name} {} {unit}", number_text(v)),
+        None => format!("{name}: no reading"),
+    };
+    Measure {
+        name: name.to_string(),
+        value,
+        unit: unit.to_string(),
+        text,
+    }
+}
+
+/// A measure whose sentence the region writes itself, because the
+/// number reads better inside it ("3 of 3 bays in use").
+fn measure_said(name: &str, value: Option<f64>, unit: &str, text: String) -> Measure {
+    Measure {
+        name: name.to_string(),
+        value,
+        unit: unit.to_string(),
+        text,
+    }
+}
+
+/// A count as a measure value.
+#[allow(clippy::cast_precision_loss)]
+fn count_value(n: usize) -> Option<f64> {
+    Some(n as f64)
+}
+
+/// A number as a sentence prints it: whole where it is whole, one
+/// decimal otherwise.
+fn number_text(v: f64) -> String {
+    let r = (v * 10.0).round() / 10.0;
+    if r.fract() == 0.0 {
+        format!("{r:.0}")
+    } else {
+        format!("{r:.1}")
+    }
 }
 
 /// WHAT A MACHINE IS DOING, in the record — a CLOSED set, so a glyph
@@ -178,11 +263,33 @@ pub struct Region {
     /// the gate concurrency, the boarding depth, the single track.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound: Option<usize>,
+    /// What the bound is — a capacity or a threshold. Present exactly
+    /// when `bound` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_kind: Option<BoundKind>,
+    /// What the count counts, in words: `cars parked`, `bays in use`.
+    /// A number without its unit is how "35 arrivals" (trains) came to
+    /// sit beside "17 landed" (cars) with nothing saying which was which.
+    /// Empty on an older payload.
+    #[serde(default)]
+    pub unit: String,
     pub state: RegionState,
     /// One sentence naming why the state is what it is. A verdict must
     /// name what failed (CLAUDE.md §Diagnosis).
     pub why: String,
+    /// THE BAND THAT DECIDED A NON-CLEAR STATE (design 62de32ae,
+    /// decisions 1 and 2): its id, the reading against it ("oldest 7d >
+    /// the 3-day triage band"), the period it had to hold, and how long
+    /// the record says it has held — "troubled for 6m". Absent when the
+    /// region is clear, and on an older payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub band: Option<crate::region_states::Decided>,
     pub trend: Trend,
+    /// THE REGION'S KPI (design 62de32ae, decision 9): one or two
+    /// measures, each with its unit, primary first. Empty on an older
+    /// payload.
+    #[serde(default)]
+    pub kpi: Vec<Measure>,
     /// The machinery standing in this region — the gate bays, the
     /// conductor, the stations, the runners — each judged HERE, on the
     /// server, so one definition answers the map, the floor and the
@@ -260,6 +367,12 @@ pub struct StationReading {
     pub members: Vec<String>,
     pub served: Option<i64>,
     pub previous_served: Option<i64>,
+    /// When each member opened, where the record holds it — the
+    /// marshalling KPI's age (design 62de32ae, decision 9). Keyed by
+    /// member rather than reduced to one oldest instant, because the
+    /// partition ([`marshalling_view`]) narrows `members` to what is
+    /// marshalling's, and the oldest of what REMAINS is the number.
+    pub opened: std::collections::BTreeMap<String, Instant>,
 }
 
 /// The role a node declares when it answers ops-request packets — a
@@ -444,7 +557,7 @@ pub fn publish_prs(packets: &[(Job, Vec<Step>)]) -> Vec<PublishPr> {
 /// packet (`drift_refresh`, rewritten daily by
 /// `publish-github-pr.sh --measure`) is what makes the sentence a
 /// reading rather than an age.
-fn held_publish(packets: &[(Job, Vec<Step>)], now: Instant) -> Option<String> {
+fn held_publish(packets: &[(Job, Vec<Step>)], now: Instant) -> Option<(String, Instant)> {
     let (job, steps, since) = packets
         .iter()
         .filter(|(job, steps)| {
@@ -468,14 +581,18 @@ fn held_publish(packets: &[(Job, Vec<Step>)], now: Instant) -> Option<String> {
         ),
         None => "no drift measurement is on the packet".to_string(),
     };
-    Some(format!(
-        "the publish packet opened {} has been held {} at {waiting_at} with no pull request — past the {STALLED_PUBLISH_HOURS}h a publish may stand, and no day behind it is published; {drift}",
-        since.format("%Y-%m-%d"),
-        plural(
-            usize::try_from((now - since).num_hours()).unwrap_or(0),
-            "hour",
-            "hours"
+    Some((
+        format!(
+            "the publish packet opened {} has been held {} at {waiting_at} with no pull request — past the {STALLED_PUBLISH_HOURS}h a publish may stand, and no day behind it is published; {drift}",
+            since.format("%Y-%m-%d"),
+            plural(
+                usize::try_from((now - since).num_hours()).unwrap_or(0),
+                "hour",
+                "hours"
+            ),
         ),
+        // The band is crossed the day after the packet opened.
+        since + chrono::Duration::hours(STALLED_PUBLISH_HOURS),
     ))
 }
 
@@ -1131,25 +1248,75 @@ pub(crate) fn plural(n: usize, one: &str, many: &str) -> String {
     }
 }
 
+/// One region's card, from its count, its unit, its settled state (every
+/// state passes through [`crate::region_states::settle`]) and its KPI.
 fn region(
     name: &str,
     count: Option<usize>,
-    bound: Option<usize>,
-    state: RegionState,
-    why: String,
+    bound: Option<(usize, BoundKind)>,
+    unit: &str,
+    settled: Settled,
     trend: Trend,
+    kpi: Vec<Measure>,
 ) -> Region {
     Region {
         name: name.to_string(),
         count,
-        bound,
-        state,
-        why,
+        bound: bound.map(|(b, _)| b),
+        bound_kind: bound.map(|(_, k)| k),
+        unit: unit.to_string(),
+        state: settled.state,
+        why: settled.why,
+        band: settled.band,
         trend,
+        kpi,
         // Attached in one pass in `regions` below, so each region
         // function stays about its own count and trend.
         machines: Vec::new(),
     }
+}
+
+/// A region whose input could not be read: troubled on the shared
+/// [`bands::UNREAD`] band, at once, with the read named — never an empty
+/// region that reads as clear.
+fn unread_settled(why: &str, now: Instant) -> Settled {
+    settle(
+        vec![Finding::new(
+            bands::UNREAD,
+            None,
+            String::new(),
+            why.to_string(),
+        )],
+        String::new(),
+        now,
+    )
+}
+
+/// An instant from a yard stamp: RFC 3339, or a bare date read at its
+/// midnight (several yard rows carry `opened_on` where no instant was
+/// stamped) — coarser, and never later than the truth.
+fn stamp_instant(stamp: &str) -> Option<Instant> {
+    parse_instant(stamp).or_else(|| {
+        chrono::NaiveDate::parse_from_str(stamp, "%Y-%m-%d")
+            .ok()?
+            .and_hms_opt(0, 0, 0)
+            .map(|t| chrono::DateTime::from_naive_utc_and_offset(t, chrono::Utc))
+    })
+}
+
+/// WHEN "AT LEAST `bound` OF THESE HELD" BEGAN, from the members' own
+/// start instants: with them sorted, the count of current members
+/// already started at `t` reaches `bound` exactly when the `bound`-th
+/// oldest started — so the condition has held at least since then. A
+/// member that left in between only makes the true onset EARLIER, never
+/// later, so this never over-states a hold. `None` when fewer than
+/// `bound` starts are known.
+fn onset_of_count(mut starts: Vec<Instant>, bound: usize) -> Option<Instant> {
+    if bound == 0 {
+        return None;
+    }
+    starts.sort_unstable();
+    starts.get(bound - 1).copied()
 }
 
 // ---------------------------------------------------------------------
@@ -1601,7 +1768,7 @@ pub fn regions(inputs: &RegionInputs<'_>) -> Regions {
     .into_iter()
     .map(|r| {
         let machines = machines_of(&r.name, inputs);
-        with_machinery(r, machines)
+        with_machinery(r, machines, inputs.now)
     })
     .collect();
     Regions {
@@ -1616,14 +1783,21 @@ pub fn regions(inputs: &RegionInputs<'_>) -> Regions {
 /// when someone zooms in. The machine's own sentence leads the `why`:
 /// a verdict must name what failed, and the region's existing reason
 /// is kept behind it rather than overwritten.
-fn with_machinery(region: Region, machines: Vec<Machine>) -> Region {
+fn with_machinery(region: Region, machines: Vec<Machine>, now: Instant) -> Region {
     let failed = machines
         .iter()
         .find(|m| m.state == MachineState::Failed)
         .map(|m| format!("{}: {}", m.name, m.why));
     match failed {
+        // The shared band, at once: a machine's failure is already its
+        // own judgement (a bay past its deadline, a station not
+        // draining), and the record gives it no onset to hold against.
         Some(lead) if region.state != RegionState::Troubled => Region {
             state: RegionState::Troubled,
+            band: Some(bands::decide(
+                &Finding::new(bands::MACHINE_FAILED, None, String::new(), lead.clone()),
+                now,
+            )),
             why: format!("{lead} · {}", region.why),
             machines,
             ..region
@@ -1692,7 +1866,7 @@ fn behind_of(holds: &[&crate::car::EdgeHold], kind: &str) -> Vec<String> {
 /// could board. So the parked cars' declared ordering edges are judged
 /// here by the conductor's own function ([`dock_edges`]), and while any
 /// car is held on one the region says "N parked, M cannot board (waiting
-/// behind X)" and stays busy rather than promising a train. An edge that
+/// behind X)" and asks for attention (past its hold) rather than promising a train. An edge that
 /// can NEVER clear — an abandoned or missing predecessor — troubles the
 /// region: the conductor refuses it identically every window until a
 /// person acts, and a troubled thing must look troubled.
@@ -1716,96 +1890,142 @@ fn dock(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     });
     let (cur, prev) = split(w, waits);
     let trend = duration_trend("dock wait", "hours", cur, prev);
+    // The dock's bound is the BOARDING DEPTH — a threshold at which a
+    // train is due, not room for that many cars (decision 5).
     let bound = status
         .boarding
         .dock_threshold
-        .and_then(|t| usize::try_from(t).ok());
+        .and_then(|t| usize::try_from(t).ok())
+        .map(|b| (b, BoundKind::Threshold));
+    const UNIT: &str = "cars parked";
     match inputs.dock_reading {
         Reading::Unread => region(
             "dock",
             None,
             bound,
-            RegionState::Troubled,
-            "the loading-dock station row could not be read".to_string(),
+            UNIT,
+            unread_settled("the loading-dock station row could not be read", inputs.now),
             trend,
+            vec![measure("cars that cannot board", None, "cars")],
         ),
         Reading::Read => {
             use crate::car::{EDGE_HOLD_NEEDS_HUMAN, EDGE_HOLD_WAITING, EdgeOutcome};
             let depth = status.dock.len();
             let parked = plural(depth, "car parked", "cars parked");
             let edges = dock_edges(inputs);
-            let holds: Vec<&crate::car::EdgeHold> = edges
+            let held: Vec<(&crate::yard::DockCar, &crate::car::EdgeHold)> = edges
                 .iter()
-                .filter_map(|(_, o)| match o {
-                    EdgeOutcome::Hold(h) => Some(h),
+                .filter_map(|(car, o)| match o {
+                    EdgeOutcome::Hold(h) => Some((*car, h)),
                     _ => None,
                 })
                 .collect();
+            let holds: Vec<&crate::car::EdgeHold> = held.iter().map(|(_, h)| *h).collect();
             let unjudged = edges
                 .iter()
                 .filter(|(_, o)| matches!(o, EdgeOutcome::BoardUnjudged(_)))
                 .count();
             let waiting = behind_of(&holds, EDGE_HOLD_WAITING);
             let stuck = behind_of(&holds, EDGE_HOLD_NEEDS_HUMAN);
-            let (state, why) = if !holds.is_empty() {
-                let clauses: Vec<String> = [
-                    (!waiting.is_empty()).then(|| format!("waiting behind {}", waiting.join(", "))),
-                    (!stuck.is_empty()).then(|| {
-                        format!(
-                            "stuck behind {}, an edge that can never be satisfied — a human \
-                             must clear it",
-                            stuck.join(", ")
-                        )
-                    }),
-                ]
-                .into_iter()
-                .flatten()
-                .collect();
-                (
-                    if stuck.is_empty() {
-                        RegionState::Busy
-                    } else {
-                        RegionState::Troubled
-                    },
-                    format!(
-                        "{parked}, {} cannot board ({})",
-                        holds.len(),
-                        clauses.join("; ")
-                    ),
-                )
-            } else if status.boarding.threshold_met == Some(true) {
-                (
-                    RegionState::Busy,
-                    format!("{parked} — the boarding depth is met, a train is due"),
-                )
-            } else {
-                (RegionState::Clear, parked)
+            // A held car has been unable to board at least since it
+            // parked — the car's own `gate` completion, else the dock
+            // row's stamp.
+            let parked_at = |car: &crate::yard::DockCar| {
+                inputs
+                    .cars
+                    .iter()
+                    .find(|(j, _)| j.id.to_string() == car.id)
+                    .and_then(|(_, s)| {
+                        step_done_at(find_step(s, crate::car::GATE_SLUG, crate::car::GATE))
+                    })
+                    .or_else(|| stamp_instant(&car.parked_since))
             };
+            let onset = |kind: &str| {
+                held.iter()
+                    .filter(|(_, h)| h.kind == kind)
+                    .filter_map(|(car, _)| parked_at(car))
+                    .min()
+            };
+            let mut findings = Vec::new();
+            if !stuck.is_empty() {
+                findings.push(Finding::new(
+                    bands::DOCK_EDGE_NEVER_CLEARS,
+                    onset(EDGE_HOLD_NEEDS_HUMAN),
+                    String::new(),
+                    format!(
+                        "{parked}, {} cannot board — stuck behind {}, an edge that can never be \
+                         satisfied; a human must clear it",
+                        holds.len(),
+                        stuck.join(", ")
+                    ),
+                ));
+            }
+            if !waiting.is_empty() {
+                findings.push(Finding::new(
+                    bands::DOCK_CANNOT_BOARD,
+                    onset(EDGE_HOLD_WAITING),
+                    String::new(),
+                    format!(
+                        "{parked}, {} cannot board (waiting behind {})",
+                        holds.len(),
+                        waiting.join(", ")
+                    ),
+                ));
+            }
+            // A TRAIN DUE IS CLEAR (decision 1): the boarding depth met is
+            // the designed state two minutes after any departure, and it
+            // painted the dock amber on every read.
+            let clear_why = if !holds.is_empty() {
+                format!("{parked}, {} waiting behind an edge", holds.len())
+            } else if status.boarding.threshold_met == Some(true) {
+                format!("{parked} — the boarding depth is met, a train is due")
+            } else {
+                parked
+            };
+            let settled = settle(findings, clear_why, inputs.now);
             // Unknown is not zero: an edge nobody could judge boards (the
             // conductor fails open on it too), and the region says so.
-            let why = if unjudged > 0 {
-                format!(
-                    "{why} · {} could not be read — the conductor boards {} anyway",
-                    plural(unjudged, "ordering edge", "ordering edges"),
-                    if unjudged == 1 {
-                        "its car"
-                    } else {
-                        "their cars"
-                    }
-                )
+            let settled = if unjudged > 0 {
+                Settled {
+                    why: format!(
+                        "{} · {} could not be read — the conductor boards {} anyway",
+                        settled.why,
+                        plural(unjudged, "ordering edge", "ordering edges"),
+                        if unjudged == 1 {
+                            "its car"
+                        } else {
+                            "their cars"
+                        }
+                    ),
+                    ..settled
+                }
             } else {
-                why
+                settled
             };
-            region("dock", Some(depth), bound, state, why, trend)
+            region(
+                "dock",
+                Some(depth),
+                bound,
+                UNIT,
+                settled,
+                trend,
+                vec![measure_said(
+                    "cars that cannot board",
+                    count_value(holds.len()),
+                    "cars",
+                    format!("{} cannot board", plural(holds.len(), "car", "cars")),
+                )],
+            )
         }
     }
 }
 
 /// THE GATES: bays in use, of the policy's bound. Troubled when a bay
 /// holds a corpse (`stale` — active past the gate Job's own deadline,
-/// `yard::GATE_MAX_ACTIVE_HOURS`); busy at the bound or with a line
-/// waiting for a slot. The trend is the gate duration, opened to
-/// judged, for runs judged in each window.
+/// `yard::GATE_MAX_ACTIVE_HOURS`); attention when the bays have been
+/// full, or a line for a slot has stood, past the band's hold. The
+/// trend is the gate duration, opened to judged, for runs judged in
+/// each window.
 fn gates(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     let g = &inputs.status.gates;
     let capacity = usize::try_from(g.capacity).unwrap_or(0);
@@ -1818,42 +2038,107 @@ fn gates(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     });
     let (cur, prev) = split(w, durations);
     let trend = duration_trend("gate duration", "minutes", cur, prev);
-    let stale = g.active.iter().filter(|a| a.stale).count();
-    let (state, why) = if stale > 0 {
-        (
-            RegionState::Troubled,
+    let stale: Vec<&crate::yard::ActiveGate> = g.active.iter().filter(|a| a.stale).collect();
+    let mut findings = Vec::new();
+    if !stale.is_empty() {
+        findings.push(Finding::new(
+            bands::GATES_CORPSE,
+            // A run became a corpse the moment it outlived the deadline.
+            stale
+                .iter()
+                .filter_map(|a| stamp_instant(&a.since))
+                .min()
+                .map(|s| s + chrono::Duration::hours(crate::yard::GATE_MAX_ACTIVE_HOURS)),
+            format!(
+                "{} active past {}h",
+                plural(stale.len(), "run", "runs"),
+                crate::yard::GATE_MAX_ACTIVE_HOURS
+            ),
             format!(
                 "{} active past the gate deadline — a corpse holding a bay",
-                plural(stale, "run", "runs")
+                plural(stale.len(), "run", "runs")
             ),
+        ));
+    }
+    // AT THE BOUND, OR A LINE FOR A BAY. Full bays have held since the
+    // bay that filled them opened ([`onset_of_count`]); a line has
+    // stood since its first run queued. Either being true is the
+    // condition, so it has held since the earlier of the two.
+    let full = (capacity > 0 && active >= capacity).then(|| {
+        onset_of_count(
+            g.active
+                .iter()
+                .filter_map(|a| stamp_instant(&a.since))
+                .collect(),
+            capacity,
         )
-    } else if !g.queued.is_empty() {
-        (
-            RegionState::Busy,
+    });
+    let line = (!g.queued.is_empty()).then(|| {
+        g.queued
+            .iter()
+            .filter_map(|q| stamp_instant(&q.queued_at))
+            .min()
+    });
+    if full.is_some() || line.is_some() {
+        let since = [full.flatten(), line.flatten()].into_iter().flatten().min();
+        let why = if g.queued.is_empty() {
+            format!("{active} of {capacity} bays in use — at the bound")
+        } else {
             format!(
                 "{active} of {capacity} bays in use, {} waiting for a slot",
                 plural(g.queued.len(), "run", "runs")
-            ),
-        )
-    } else if active >= capacity && capacity > 0 {
-        (
-            RegionState::Busy,
-            format!("{active} of {capacity} bays in use — at the bound"),
-        )
-    } else {
-        (
-            RegionState::Clear,
+            )
+        };
+        findings.push(Finding::new(
+            bands::GATES_AT_BOUND,
+            since,
+            String::new(),
+            why,
+        ));
+    }
+    let settled = settle(
+        findings,
+        format!("{active} of {capacity} bays in use"),
+        inputs.now,
+    );
+    let kpi = vec![
+        measure_said(
+            "bays in use",
+            count_value(active),
+            "bays",
             format!("{active} of {capacity} bays in use"),
-        )
-    };
-    region("gates", Some(active), Some(capacity), state, why, trend)
+        ),
+        match trend.current {
+            Some(m) => measure_said(
+                "gate duration",
+                Some(m),
+                "minutes",
+                format!("gates take {} minutes (median)", number_text(m)),
+            ),
+            None => measure_said(
+                "gate duration",
+                None,
+                "minutes",
+                format!("no gate judged in {}h", w.hours),
+            ),
+        },
+    ];
+    region(
+        "gates",
+        Some(active),
+        Some((capacity, BoundKind::Capacity)),
+        "bays in use",
+        settled,
+        trend,
+        kpi,
+    )
 }
 
 /// THE TRACK: trains in transit. Troubled when the yard names a block
 /// on any of them (`TrainStatus::block` — a red PR, a deploy refusal,
 /// a converge overdue, a stall past the policy) or the conductor is
 /// still waiting to file a train's gate ([`train_gate_troubled`]);
-/// busy while a pre-merge train holds the single track. The trend is
+/// clear while a pre-merge train holds the single track (the track working). The trend is
 /// the time at CI — the `pr` stamp to the `ci` verdict — for trains
 /// that arrived in each window.
 fn track(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
@@ -1887,31 +2172,110 @@ fn track(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     });
     let (cur, prev) = split(w, ci_times);
     let trend = duration_trend("time at CI", "minutes", cur, prev);
-    let (state, why) = if !blocked.is_empty() {
-        (
-            RegionState::Troubled,
+    let mut findings = Vec::new();
+    if !blocked.is_empty() {
+        // A block that carries its own start (a deploy refusal, a stall)
+        // says how long; the others are stated without one.
+        let since = trains
+            .iter()
+            .filter_map(|t| match &t.block {
+                Some(crate::yard::TrainBlock::DeployBlocked { since, .. }) => {
+                    since.as_deref().and_then(stamp_instant)
+                }
+                Some(crate::yard::TrainBlock::Stalled { since }) => stamp_instant(since),
+                _ => None,
+            })
+            .min();
+        findings.push(Finding::new(
+            bands::TRACK_BLOCKED,
+            since,
+            String::new(),
             format!("blocked: {}", blocked.join(", ")),
-        )
-    } else if !gate_waits.is_empty() {
-        (
-            RegionState::Troubled,
-            format!("gate not filed yet: {}", gate_waits.join(", ")),
-        )
-    } else if on_track > 0 {
-        (
-            RegionState::Busy,
+        ));
+    }
+    // The two gate markers, split by what they mean (decision 1): CI
+    // alone judged the train — degraded, ours — is trouble; a gate the
+    // conductor is still retrying against the bound is a wait to watch.
+    let fallback: Vec<&str> = inputs
+        .open_trains
+        .iter()
+        .filter(|(j, _)| !md_str(&j.metadata, TRAIN_GATE_FALLBACK).is_empty())
+        .map(|(j, _)| j.title.as_str())
+        .collect();
+    if !fallback.is_empty() {
+        findings.push(Finding::new(
+            bands::TRACK_GATE_FALLBACK,
+            None,
+            String::new(),
             format!(
-                "{} — a train holds the track",
-                plural(trains.len(), "train in transit", "trains in transit")
+                "judged by CI alone, the gate not filed: {}",
+                fallback.join(", ")
             ),
+        ));
+    }
+    let waiting: Vec<&str> = gate_waits
+        .iter()
+        .copied()
+        .filter(|t| !fallback.contains(t))
+        .collect();
+    if !waiting.is_empty() {
+        findings.push(Finding::new(
+            bands::TRACK_GATE_WAITING,
+            None,
+            String::new(),
+            format!("gate not filed yet: {}", waiting.join(", ")),
+        ));
+    }
+    // A pre-merge train holding the single track is the track WORKING —
+    // clear, with the train named (decision 1).
+    let clear_why = if on_track > 0 {
+        format!(
+            "{} — a train holds the track",
+            plural(trains.len(), "train in transit", "trains in transit")
         )
     } else {
-        (
-            RegionState::Clear,
-            plural(trains.len(), "train in transit", "trains in transit"),
-        )
+        plural(trains.len(), "train in transit", "trains in transit")
     };
-    region("track", Some(trains.len()), Some(1), state, why, trend)
+    let settled = settle(findings, clear_why, inputs.now);
+    // THE KPI: how long the oldest train has stood at the stage it is at
+    // — from its last completed step (the stage's start), else from its
+    // own opening.
+    let at_stage = inputs
+        .open_trains
+        .iter()
+        .filter_map(|(j, s)| {
+            let start = s
+                .iter()
+                .filter_map(|st| step_done_at(Some(st)))
+                .max()
+                .or_else(|| opened_at(j))?;
+            Some((inputs.now - start).num_minutes().max(0))
+        })
+        .max();
+    #[allow(clippy::cast_precision_loss)]
+    let kpi = vec![match at_stage {
+        Some(m) => measure_said(
+            "train age at its stage",
+            Some(m as f64),
+            "minutes",
+            format!("oldest train {m} minutes at its stage"),
+        ),
+        None => measure_said(
+            "train age at its stage",
+            None,
+            "minutes",
+            "no train in transit".to_string(),
+        ),
+    }];
+    region(
+        "track",
+        Some(trains.len()),
+        Some((1, BoundKind::Capacity)),
+        "trains in transit",
+        settled,
+        trend,
+        kpi,
+    )
 }
 
 /// The cars standing in the inspection shed: open cars whose live step
@@ -2095,8 +2459,8 @@ pub(crate) fn stale_proof(md: &Value, hours: i64) -> StaleProof {
 /// THE SHED: landed cars awaiting proof — open cars whose live step is
 /// `proven`. Troubled when one is UNPROVEN (no probe, no event: nothing
 /// mechanical can settle it) or its probe is FAILING, or when a car
-/// past [`PROOF_STALE_HOURS`] waits on something that is OURS; busy
-/// while any waits and none is ours. The trend is cars proven per day.
+/// past [`PROOF_STALE_HOURS`] waits on something that is OURS; attention
+/// when a car is past the band and none is ours, clear while none is past it. The trend is cars proven per day.
 ///
 /// TROUBLED MEANS OURS (backlog 3881f5c9). Until 2026-09-23 every stale
 /// car troubled the shed, so it read red while its own words said
@@ -2204,14 +2568,46 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     starved.sort_by_key(|(s, _)| std::cmp::Reverse(s.hours));
 
     let n = awaiting.len();
-    let (state, why) = if !unproven.is_empty() {
+    // THE KPI (decision 9): cars owed a proof whose move is OURS — the
+    // unproven, the failing, and every stale car whose wait is not a
+    // declared, observed, owned one.
+    let ours_stale = never_probed
+        + starved.len()
+        + seen.len()
+        + unobserved.len()
+        + undeclared.len()
+        + prose_only.len()
+        + unowned.len()
+        + overdue.len();
+    let ours = unproven.len() + failing.len() + ours_stale;
+    let kpi = vec![measure_said(
+        "cars owed a proof that are ours",
+        count_value(ours),
+        "cars",
+        format!(
+            "{} owed a proof {} ours",
+            plural(ours, "car", "cars"),
+            if ours == 1 { "is" } else { "are" }
+        ),
+    )];
+    // When the stale band was crossed: a car crosses it PROOF_STALE_HOURS
+    // after it opened, so the oldest stale car's crossing is the onset.
+    let stale_since = stale
+        .first()
+        .map(|(hours, _)| inputs.now - chrono::Duration::hours(*hours - PROOF_STALE_HOURS));
+    // Which band the shed's sentence falls under, and its onset. The
+    // unproven and the failing carry no onset the record holds — the
+    // car's landing is not stamped on it — so they are stated at once.
+    let (decided_by, why): (Option<(bands::Band, Option<Instant>, String)>, String) = if !unproven
+        .is_empty()
+    {
         (
-            RegionState::Troubled,
+            Some((bands::SHED_UNPROVEN, None, String::new())),
             format!("UNPROVEN — no probe, no event: {}", unproven.join(", ")),
         )
     } else if !failing.is_empty() {
         (
-            RegionState::Troubled,
+            Some((bands::SHED_FAILING, None, String::new())),
             format!("probe FAILING: {}", failing.join(", ")),
         )
     } else if let Some((oldest, branch)) = stale.first().copied() {
@@ -2222,7 +2618,7 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
         // whether anyone here can unstick it, and since 3881f5c9 it
         // also decides the colour: only a declared, observed, owned
         // wait is someone else's move, and a shed of nothing else is
-        // busy, not troubled. Every other answer is ours, each named
+        // attention, not troubled. Every other answer is ours, each named
         // for what there is to do — run the probe, read one that cannot
         // pass (adef5ddf), read one blind to its own event (b461341d),
         // write the seen check (e9b164a1), or declare whose move it is.
@@ -2296,13 +2692,15 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
             .map(|(o, branch)| format!("waiting on {}: {} ({branch})", o.owner, o.on))
             .collect::<Vec<_>>()
             .join("; ");
-        let (state, whose) = if ours.is_empty() {
-            (RegionState::Busy, format!("none ours — {waits}"))
+        // Past the band and none ours is ATTENTION, not trouble: the
+        // line is crossed, and the move is the declared owner's.
+        let (band, whose) = if ours.is_empty() {
+            (bands::SHED_THEIRS_STALE, format!("none ours — {waits}"))
         } else if theirs.is_empty() {
-            (RegionState::Troubled, ours.join("; "))
+            (bands::SHED_OURS_STALE, ours.join("; "))
         } else {
             (
-                RegionState::Troubled,
+                bands::SHED_OURS_STALE,
                 format!(
                     "{}; the rest wait on their declared owner — {waits}",
                     ours.join("; ")
@@ -2310,21 +2708,39 @@ fn shed(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
             )
         };
         (
-            state,
+            Some((band, stale_since, format!("oldest open {oldest}h"))),
             format!(
                 "{} of {n} open past {PROOF_STALE_HOURS}h — oldest {oldest}h, {branch} — {whose}",
                 stale.len()
             ),
         )
     } else if n > 0 {
+        // Landed and inside the day, each with a way to settle: the shed
+        // working (decision 1).
         (
-            RegionState::Busy,
+            None,
             plural(n, "landed car awaiting proof", "landed cars awaiting proof"),
         )
     } else {
-        (RegionState::Clear, "every landed car is proven".to_string())
+        (None, "every landed car is proven".to_string())
     };
-    region("shed", Some(n), None, state, why, trend)
+    let settled = match decided_by {
+        Some((band, since, measured)) => settle(
+            vec![Finding::new(band, since, measured, why)],
+            String::new(),
+            inputs.now,
+        ),
+        None => settle(Vec::new(), why, inputs.now),
+    };
+    region(
+        "shed",
+        Some(n),
+        None,
+        "cars awaiting proof",
+        settled,
+        trend,
+        kpi,
+    )
 }
 
 /// A car a cancelled train released, judged: is it still waiting on
@@ -2355,8 +2771,8 @@ pub(crate) fn awaiting_repair(car: &Job) -> bool {
 /// ARRIVALS: trains that arrived in the window. Troubled while a train
 /// cancelled in the window WITH cars aboard — a red train, whose cars
 /// went back to the dock (a board the consist check refused carries
-/// none and is not trouble) — still has a car [`awaiting_repair`]; busy
-/// while an arrival's siding is still converging. The trend is
+/// none and is not trouble) — still has a car [`awaiting_repair`]; clear
+/// (arrivals arriving) while an arrival's siding is still converging. The trend is
 /// arrivals per day; a cancellation stays in the record, not the state.
 fn arrivals(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     fn outcome(j: &Job) -> &str {
@@ -2387,32 +2803,78 @@ fn arrivals(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
         .iter()
         .filter(|s| matches!(s.landing, crate::landing::Landing::Converging { .. }))
         .count();
-    let (state, why) = if !red.is_empty() {
-        (
-            RegionState::Troubled,
+    let mut findings = Vec::new();
+    if !red.is_empty() {
+        findings.push(Finding::new(
+            bands::ARRIVALS_RED_UNREPAIRED,
+            None,
+            String::new(),
             format!(
                 "{} cancelled with cars aboard still awaiting repair: {}",
                 plural(red.len(), "train", "trains"),
                 red.join(", ")
             ),
-        )
-    } else if converging > 0 {
-        (
-            RegionState::Busy,
-            format!(
-                "{} in {}h, {} still converging",
-                plural(cur, "arrival", "arrivals"),
-                w.hours,
-                plural(converging, "siding", "sidings")
-            ),
+        ));
+    }
+    // Sidings still converging are arrivals ARRIVING — good news, and
+    // clear (decision 1); the review found them painted amber.
+    let clear_why = if converging > 0 {
+        format!(
+            "{} in {}h, {} still converging",
+            plural(cur, "train arrived", "trains arrived"),
+            w.hours,
+            plural(converging, "siding", "sidings")
         )
     } else {
-        (
-            RegionState::Clear,
-            format!("{} in {}h", plural(cur, "arrival", "arrivals"), w.hours),
+        format!(
+            "{} in {}h",
+            plural(cur, "train arrived", "trains arrived"),
+            w.hours
         )
     };
-    region("arrivals", Some(cur), None, state, why, trend)
+    let settled = settle(findings, clear_why, inputs.now);
+    // THE KPI (decision 9): trains AND cars, each in its own unit — "35
+    // arrivals" beside "17 landed" said neither which was which. A car
+    // landed in the window is a landed car (`car::is_landed`) that
+    // closed inside it.
+    let landed = inputs
+        .cars
+        .iter()
+        .filter(|(j, _)| serde_json::to_value(j).is_ok_and(|v| crate::car::is_landed(&v)))
+        .filter_map(|(j, _)| closed_at(j))
+        .filter(|t| w.current(*t))
+        .count();
+    let kpi = vec![
+        measure_said(
+            "trains arrived",
+            count_value(cur),
+            "trains",
+            format!(
+                "{} in {}h",
+                plural(cur, "train arrived", "trains arrived"),
+                w.hours
+            ),
+        ),
+        measure_said(
+            "cars landed",
+            count_value(landed),
+            "cars",
+            format!(
+                "{} in {}h",
+                plural(landed, "car landed", "cars landed"),
+                w.hours
+            ),
+        ),
+    ];
+    region(
+        "arrivals",
+        Some(cur),
+        None,
+        "trains arrived",
+        settled,
+        trend,
+        kpi,
+    )
 }
 
 /// THE GARAGE: work off the main line — cars held on the dock, greens
@@ -2478,7 +2940,8 @@ fn garage(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
             .iter()
             .filter(|l| under_repair(inputs.gate_runs, &l.branch, &l.packet_id))
             .count();
-    let (state, why) = if stranded > 0 || limbo > 0 {
+    let mut findings = Vec::new();
+    if stranded > 0 || limbo > 0 {
         let mut parts = Vec::new();
         if stranded > 0 {
             parts.push(format!(
@@ -2506,19 +2969,60 @@ fn garage(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
         } else {
             parts.push("nothing aimed at any of them".to_string());
         }
-        (RegionState::Troubled, parts.join("; "))
-    } else if count > 0 {
-        (
-            RegionState::Busy,
-            format!("{held} held, {red} red awaiting rework"),
-        )
+        // A green is stranded from the moment it went green; the hold is
+        // the grace in which auto-park is still filing its car.
+        let since = s
+            .stranded
+            .iter()
+            .map(|g| g.since.as_str())
+            .chain(s.limbo.iter().map(|l| l.since.as_str()))
+            .filter_map(stamp_instant)
+            .min();
+        findings.push(Finding::new(
+            bands::GARAGE_STRANDED,
+            since,
+            String::new(),
+            parts.join("; "),
+        ));
+    }
+    let waiting_why = format!("{held} held, {red} red awaiting rework");
+    if held + red > 0 {
+        let since = s
+            .garage
+            .iter()
+            .map(|g| g.since.as_str())
+            .chain(s.held.iter().map(|g| g.since.as_str()))
+            .chain(s.held_cars.iter().map(|h| h.car.parked_since.as_str()))
+            .filter_map(stamp_instant)
+            .min();
+        findings.push(Finding::new(
+            bands::GARAGE_WAITING,
+            since,
+            String::new(),
+            waiting_why.clone(),
+        ));
+    }
+    let clear_why = if count > 0 {
+        waiting_why
     } else {
-        (
-            RegionState::Clear,
-            "nothing held, stranded or red".to_string(),
-        )
+        "nothing held, stranded or red".to_string()
     };
-    region("garage", Some(count), None, state, why, trend)
+    let settled = settle(findings, clear_why, inputs.now);
+    let kpi = vec![measure_said(
+        "reds awaiting rework",
+        count_value(red),
+        "cars",
+        format!("{} awaiting rework", plural(red, "red", "reds")),
+    )];
+    region(
+        "garage",
+        Some(count),
+        None,
+        "held, stranded or red",
+        settled,
+        trend,
+        kpi,
+    )
 }
 
 /// RECEIVING: inbound packets standing — feedback, alarms, findings,
@@ -2527,15 +3031,19 @@ fn garage(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
 /// the packet is marshalling's, never both ([`members`]). The receiving
 /// yard's own bands decide the state: any
 /// packet older than [`STALE_DAYS`] is troubled, older than
-/// [`AGING_DAYS`] busy. The trend is inbound arrivals per day.
+/// [`AGING_DAYS`] attention. The trend is inbound arrivals per day.
 fn receiving(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
+    const UNIT: &str = "packets standing";
     let Some(inbound) = inputs.inbound else {
         return region(
             "receiving",
             None,
             None,
-            RegionState::Troubled,
-            "the workflow registry that names the inbound kinds could not be read".to_string(),
+            UNIT,
+            unread_settled(
+                "the workflow registry that names the inbound kinds could not be read",
+                inputs.now,
+            ),
             Trend {
                 metric: "inbound".to_string(),
                 unit: "per day".to_string(),
@@ -2544,6 +3052,7 @@ fn receiving(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
                 samples: 0,
                 previous_samples: 0,
             },
+            vec![measure("oldest untriaged", None, "days")],
         );
     };
     let (cur, prev) = count_split(w, inbound.iter().filter_map(|(j, _)| opened_at(j)));
@@ -2552,44 +3061,72 @@ fn receiving(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     // THE PARTITION (design 62de32ae decision 4): standing here means not
     // yet taken in, and held by no region of its own.
     let open: Vec<&Job> = receiving_standing(inputs).unwrap_or_default();
-    let oldest = open
-        .iter()
-        .map(|j| (today - j.opened_on).num_days())
-        .max()
-        .unwrap_or(0);
+    let oldest_day = open.iter().map(|j| j.opened_on).min();
+    let oldest = oldest_day.map_or(0, |d| (today - d).num_days());
     let n = open.len();
-    let (state, why) = if oldest > STALE_DAYS {
-        (
-            RegionState::Troubled,
+    // A band in whole days from `opened_on` is crossed at the midnight
+    // that makes the age exceed it — which IS its onset, read off the
+    // packet's own date.
+    let crossed = |band_days: i64| {
+        oldest_day
+            .and_then(|d| d.checked_add_days(chrono::Days::new(u64::try_from(band_days + 1).ok()?)))
+            .and_then(|d| d.and_hms_opt(0, 0, 0))
+            .map(|t| chrono::DateTime::from_naive_utc_and_offset(t, chrono::Utc))
+    };
+    let mut findings = Vec::new();
+    if oldest > STALE_DAYS {
+        findings.push(Finding::new(
+            bands::RECEIVING_STALE,
+            crossed(STALE_DAYS),
+            format!("oldest {oldest}d"),
             format!(
                 "{} standing, the oldest {oldest} days (past the {STALE_DAYS}-day band)",
                 plural(n, "packet", "packets")
             ),
-        )
-    } else if oldest > AGING_DAYS {
-        (
-            RegionState::Busy,
+        ));
+    }
+    if oldest > AGING_DAYS {
+        findings.push(Finding::new(
+            bands::RECEIVING_AGING,
+            crossed(AGING_DAYS),
+            format!("oldest {oldest}d"),
             format!(
                 "{} standing, the oldest {oldest} days (past the {AGING_DAYS}-day triage band)",
                 plural(n, "packet", "packets")
             ),
-        )
-    } else {
-        (
-            RegionState::Clear,
-            format!("{} standing", plural(n, "packet", "packets")),
-        )
-    };
-    region("receiving", Some(n), None, state, why, trend)
+        ));
+    }
+    let settled = settle(
+        findings,
+        format!("{} standing", plural(n, "packet", "packets")),
+        inputs.now,
+    );
+    // THE KPI (decision 9). Its second half — the share whose channel is
+    // unrecorded — is not measured here yet: the channel rule is the
+    // client's (`receiving.ts::channelOf`), and a second copy of it needs
+    // its own equality pin (CLAUDE.md §9a), so it is left as named residue
+    // on backlog c3105b2a rather than ported unpinned.
+    #[allow(clippy::cast_precision_loss)]
+    let kpi = vec![match oldest_day {
+        Some(_) => measure("oldest untriaged", Some(oldest as f64), "days"),
+        None => measure_said(
+            "oldest untriaged",
+            None,
+            "days",
+            "nothing untriaged".to_string(),
+        ),
+    }];
+    region("receiving", Some(n), None, UNIT, settled, trend, kpi)
 }
 
 /// MARSHALLING: packets standing at a station other than the dock,
 /// counted once each. The marshalling yard's grammar decides the
 /// state: a station over its WIP limit, or holding work that nothing
 /// left in the window (not draining), is troubled; any station holding
-/// work is busy. The trend is packets served per day, summed over the
+/// work that drains is clear. The trend is packets served per day, summed over the
 /// stations whose flow the cube can count.
 fn marshalling(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
+    const UNIT: &str = "packets at stations";
     // THE PARTITION (design 62de32ae decision 4): each station holding
     // only what is marshalling's — never a packet still in receiving or
     // held by a region of its own.
@@ -2600,8 +3137,8 @@ fn marshalling(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
                 "marshalling",
                 None,
                 None,
-                RegionState::Troubled,
-                why.to_string(),
+                UNIT,
+                unread_settled(why, inputs.now),
                 Trend {
                     metric: "served".to_string(),
                     unit: "per day".to_string(),
@@ -2610,6 +3147,7 @@ fn marshalling(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
                     samples: 0,
                     previous_samples: 0,
                 },
+                vec![measure("oldest at a station", None, "hours")],
             );
         }
     };
@@ -2649,36 +3187,58 @@ fn marshalling(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
         .collect();
     let holding = stations.iter().filter(|s| !s.members.is_empty()).count();
     let n = distinct.len();
-    let (state, why) = if !over.is_empty() {
-        (
-            RegionState::Troubled,
+    let mut findings = Vec::new();
+    if !over.is_empty() {
+        findings.push(Finding::new(
+            bands::MARSHALLING_OVER_LIMIT,
+            None,
+            String::new(),
             format!("over the WIP limit: {}", over.join(", ")),
-        )
-    } else if !stuck.is_empty() {
-        (
-            RegionState::Troubled,
+        ));
+    }
+    if !stuck.is_empty() {
+        findings.push(Finding::new(
+            bands::MARSHALLING_NOT_DRAINING,
+            None,
+            String::new(),
             format!(
                 "not draining — nothing left in {}h: {}",
                 w.hours,
                 stuck.join(", ")
             ),
-        )
-    } else if holding > 0 {
-        (
-            RegionState::Busy,
-            format!(
-                "{} standing at {}",
-                plural(n, "packet", "packets"),
-                plural(holding, "station", "stations")
-            ),
+        ));
+    }
+    // Packets standing at stations that drain is the yard working —
+    // clear (decision 1).
+    let clear_why = if holding > 0 {
+        format!(
+            "{} standing at {}",
+            plural(n, "packet", "packets"),
+            plural(holding, "station", "stations")
         )
     } else {
-        (
-            RegionState::Clear,
-            "nothing waiting at any station".to_string(),
-        )
+        "nothing waiting at any station".to_string()
     };
-    region("marshalling", Some(n), None, state, why, trend)
+    let settled = settle(findings, clear_why, inputs.now);
+    // THE KPI (decision 9): the oldest packet standing at a station, in
+    // hours from its opening — of the members the partition left here.
+    let oldest = stations
+        .iter()
+        .flat_map(|s| s.members.iter().filter_map(|m| s.opened.get(m)))
+        .min()
+        .map(|t| (inputs.now - t).num_hours().max(0));
+    #[allow(clippy::cast_precision_loss)]
+    let kpi = vec![match oldest {
+        Some(h) => measure("oldest at a station", Some(h as f64), "hours"),
+        None if n == 0 => measure_said(
+            "oldest at a station",
+            None,
+            "hours",
+            "nothing standing".to_string(),
+        ),
+        None => measure("oldest at a station", None, "hours"),
+    }];
+    region("marshalling", Some(n), None, UNIT, settled, trend, kpi)
 }
 
 /// THE SHOP FLOOR: what is being BUILT — the runs in flight, with the
@@ -2698,14 +3258,17 @@ fn marshalling(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
 /// duration — a run's own open-to-close, for the runs that closed in
 /// each window.
 fn shop_floor(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
+    const UNIT: &str = "runs in flight";
+    let bound = inputs.run_capacity.map(|c| (c, BoundKind::Capacity));
     let Some(runs) = inputs.agent_runs else {
         return region(
             "shop-floor",
             None,
-            inputs.run_capacity,
-            RegionState::Troubled,
-            "the agent-run packets could not be read".to_string(),
+            bound,
+            UNIT,
+            unread_settled("the agent-run packets could not be read", inputs.now),
             duration_trend("build duration", "minutes", Vec::new(), Vec::new()),
+            vec![measure("runs in flight", None, "runs")],
         );
     };
     let durations = runs.iter().filter_map(|(j, _)| {
@@ -2724,13 +3287,17 @@ fn shop_floor(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     // Finished, and still holding its slot: `building` completed, the
     // handback never recorded. The run's own step is the only place
     // this shows — the packet is open and looks like work in progress.
-    let unreported = in_flight
+    // When each finished-but-unreported run finished: its `building`
+    // completion is the onset its hold is read against — the few
+    // seconds before a handback lands flapped this region on 2026-09-24.
+    let finished_at: Vec<Instant> = in_flight
         .iter()
         .filter(|(_, steps)| {
-            step_done_at(find_step(steps, "building", "Building")).is_some()
-                && step_done_at(find_step(steps, "reported", "Report recorded")).is_none()
+            step_done_at(find_step(steps, "reported", "Report recorded")).is_none()
         })
-        .count();
+        .filter_map(|(_, steps)| step_done_at(find_step(steps, "building", "Building")))
+        .collect();
+    let unreported = finished_at.len();
     // A crew count is only stated where the sessions were READ: an
     // unread session list is not a floor with nobody on it, and the
     // clause is left off rather than printed as a zero.
@@ -2738,44 +3305,79 @@ fn shop_floor(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
         .sessions
         .map(|s| plural(s.len(), "crew on the floor", "crews on the floor"));
     let count = in_flight.len();
-    let at_cap = inputs.run_capacity.is_some_and(|cap| count >= cap);
-    let (state, why) = if unreported > 0 {
-        (
-            RegionState::Troubled,
+    let mut findings = Vec::new();
+    if unreported > 0 {
+        findings.push(Finding::new(
+            bands::SHOP_FLOOR_UNREPORTED,
+            finished_at.iter().min().copied(),
+            String::new(),
             format!(
                 "{} finished and not reported — each holds a slot until the handback lands",
                 plural(unreported, "run", "runs")
             ),
-        )
-    } else if at_cap {
-        (
-            RegionState::Busy,
+        ));
+    }
+    if let Some(cap) = inputs.run_capacity.filter(|cap| count >= *cap) {
+        findings.push(Finding::new(
+            bands::SHOP_FLOOR_AT_CAP,
+            onset_of_count(
+                in_flight.iter().filter_map(|(j, _)| opened_at(j)).collect(),
+                cap,
+            ),
+            String::new(),
             format!(
                 "{} — at the cap, the next dispatch is refused",
                 plural(count, "run in flight", "runs in flight")
             ),
-        )
-    } else {
-        (
-            RegionState::Clear,
-            [
-                Some(plural(count, "run in flight", "runs in flight")),
-                crews,
-            ]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<String>>()
-            .join(", "),
-        )
-    };
-    region(
-        "shop-floor",
-        Some(count),
-        inputs.run_capacity,
-        state,
-        why,
-        trend,
-    )
+        ));
+    }
+    let settled = settle(
+        findings,
+        [
+            Some(plural(count, "run in flight", "runs in flight")),
+            crews,
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<String>>()
+        .join(", "),
+        inputs.now,
+    );
+    // THE KPI (decision 9): runs in flight against the cap, and the
+    // sessions silent past the crew board's idle line — each only where
+    // it was read.
+    let silent_after = CREW_IDLE_HOURS * 60;
+    let mut kpi = vec![measure_said(
+        "runs in flight",
+        count_value(count),
+        "runs",
+        match inputs.run_capacity {
+            Some(cap) => format!("{count} of {cap} runs in flight"),
+            None => format!(
+                "{} (no cap declared)",
+                plural(count, "run in flight", "runs in flight")
+            ),
+        },
+    )];
+    if let Some(sessions) = inputs.sessions {
+        let silent = sessions
+            .iter()
+            .filter(|s| {
+                meta_instant(&s.metadata, "last_active_at")
+                    .is_some_and(|beat| (inputs.now - beat).num_minutes() > silent_after)
+            })
+            .count();
+        kpi.push(measure_said(
+            "sessions silent",
+            count_value(silent),
+            "sessions",
+            format!(
+                "{} silent past {silent_after} minutes",
+                plural(silent, "session", "sessions")
+            ),
+        ));
+    }
+    region("shop-floor", Some(count), bound, UNIT, settled, trend, kpi)
 }
 
 /// THE PUBLISH REGION (design cb38d806, backlog eee42416) — the
@@ -2805,14 +3407,23 @@ fn shop_floor(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
 /// The trend is publishes per day: the PRs opened in each window, which
 /// is §1's own number.
 fn publish(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
+    const UNIT: &str = "pull requests awaiting merge";
     let Some(packets) = inputs.publish_packets else {
         return region(
             "publish",
             None,
             None,
-            RegionState::Troubled,
-            "the publish-to-github packets could not be read".to_string(),
+            UNIT,
+            unread_settled(
+                "the publish-to-github packets could not be read",
+                inputs.now,
+            ),
             rate_trend("publishes", w, 0, 0),
+            vec![measure(
+                "mirror pull requests awaiting merge",
+                None,
+                "pull requests",
+            )],
         );
     };
     let prs = publish_prs(packets);
@@ -2827,12 +3438,16 @@ fn publish(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
         .iter()
         .filter(|p| (inputs.now - p.opened).num_hours() >= STALLED_PUBLISH_HOURS)
         .min_by_key(|p| p.opened);
-    let (state, why) = if let Some(p) = unjudged {
-        (
-            RegionState::Troubled,
+    let mut findings = Vec::new();
+    if let Some(p) = unjudged {
+        findings.push(Finding::new(
+            bands::PUBLISH_UNJUDGED_RED,
+            None,
+            String::new(),
             format!("{} — {}", p.url, p.reading()),
-        )
-    } else if let Some(p) = stalled {
+        ));
+    }
+    if let Some(p) = stalled {
         let age = plural(
             usize::try_from((inputs.now - p.opened).num_hours()).unwrap_or(0),
             "hour",
@@ -2851,25 +3466,42 @@ fn publish(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
                 p.url, p.state_read_at
             )
         };
-        (RegionState::Troubled, why)
-    } else if let Some(why) = held_publish(packets, inputs.now) {
-        (RegionState::Troubled, why)
-    } else if let Some(p) = open.first() {
-        (
-            RegionState::Busy,
-            format!(
-                "{} — {} awaiting a merge",
-                p.url,
-                plural(open.len(), "pull request", "pull requests")
-            ),
-        )
-    } else {
-        (
-            RegionState::Clear,
-            "no pull request awaiting a merge".to_string(),
-        )
+        findings.push(Finding::new(
+            bands::PUBLISH_PR_STALLED,
+            Some(p.opened + chrono::Duration::hours(STALLED_PUBLISH_HOURS)),
+            String::new(),
+            why,
+        ));
+    }
+    if let Some((why, since)) = held_publish(packets, inputs.now) {
+        findings.push(Finding::new(
+            bands::PUBLISH_HELD,
+            Some(since),
+            String::new(),
+            why,
+        ));
+    }
+    // A pull request inside its day is the publish WORKING — a person
+    // merges it — and clear (decision 1).
+    let clear_why = match open.first() {
+        Some(p) => format!(
+            "{} — {} awaiting a merge",
+            p.url,
+            plural(open.len(), "pull request", "pull requests")
+        ),
+        None => "no pull request awaiting a merge".to_string(),
     };
-    region("publish", Some(open.len()), None, state, why, trend)
+    let settled = settle(findings, clear_why, inputs.now);
+    let kpi = vec![measure_said(
+        "mirror pull requests awaiting merge",
+        count_value(open.len()),
+        "pull requests",
+        format!(
+            "{} awaiting merge",
+            plural(open.len(), "mirror pull request", "mirror pull requests")
+        ),
+    )];
+    region("publish", Some(open.len()), None, UNIT, settled, trend, kpi)
 }
 
 // ---------------------------------------------------------------------
@@ -2906,18 +3538,11 @@ impl StuckPart {
 /// Hours from a stamp to `now`: an RFC 3339 instant, or a bare date read
 /// at its midnight (a dock row's `parked_since` is `opened_on`).
 fn hours_since(stamp: &str, now: Instant) -> Option<i64> {
-    parse_instant(stamp)
-        .or_else(|| {
-            chrono::NaiveDate::parse_from_str(stamp, "%Y-%m-%d")
-                .ok()?
-                .and_hms_opt(0, 0, 0)
-                .map(|t| chrono::DateTime::from_naive_utc_and_offset(t, chrono::Utc))
-        })
-        .map(|t| (now - t).num_hours())
+    stamp_instant(stamp).map(|t| (now - t).num_hours())
 }
 
 /// RECEIVING: intake packets past the [`AGING_DAYS`] triage band — the
-/// band [`receiving`] turns busy on, read the same way (whole days since
+/// band [`receiving`] turns attention on, read the same way (whole days since
 /// `opened_on`). Every one is ours: nothing has taken it in.
 fn receiving_stuck(inputs: &RegionInputs<'_>) -> StuckPart {
     let Some(standing) = receiving_standing(inputs) else {
@@ -3233,6 +3858,54 @@ mod tests {
         assert_eq!(out.window_hours, 24);
     }
 
+    /// EVERY KPI STATES ITS UNIT (design 62de32ae, decisions 5 and 9):
+    /// each region names what its count counts, carries at least one
+    /// measure with a unit and a sentence, and a bound says whether it is
+    /// a capacity or a threshold — on an empty yard and on an unread one
+    /// alike. And the middle word is spelled `attention` on the wire.
+    #[test]
+    fn every_region_states_its_unit_its_kpi_and_what_its_bound_is() {
+        let status = empty_status();
+        let read = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        let mut unread = inputs(&status, &[], &[], &[], &[], None, None);
+        unread.dock_reading = Reading::Unread;
+        unread.agent_runs = None;
+        unread.publish_packets = None;
+        for out in [regions(&read), regions(&unread)] {
+            for r in &out.regions {
+                assert!(!r.unit.is_empty(), "{} names no unit for its count", r.name);
+                assert!(!r.kpi.is_empty(), "{} carries no KPI", r.name);
+                for m in &r.kpi {
+                    assert!(
+                        !m.unit.is_empty() && !m.text.is_empty(),
+                        "{}: {m:?}",
+                        r.name
+                    );
+                }
+                assert_eq!(
+                    r.bound.is_some(),
+                    r.bound_kind.is_some(),
+                    "{}: a bound says what it is",
+                    r.name
+                );
+                assert_eq!(
+                    r.band.is_some(),
+                    r.state != RegionState::Clear,
+                    "{}: every non-clear state names its band, and a clear one none — {}",
+                    r.name,
+                    r.why
+                );
+            }
+        }
+        assert_eq!(
+            serde_json::to_value(RegionState::Attention).unwrap(),
+            json!("attention")
+        );
+        // The unread regions name the shared band that decided them.
+        let out = regions(&unread);
+        assert_eq!(by_name(&out, "dock").band.as_ref().unwrap().id, "unread");
+    }
+
     #[test]
     fn an_unread_dock_and_unread_registries_are_troubled_not_empty() {
         let status = empty_status();
@@ -3247,11 +3920,12 @@ mod tests {
         }
     }
 
-    /// A train the yard already judges blocked (a red PR) and one whose
-    /// gate the conductor cannot file — both trouble on the track, from
-    /// the yard's own predicate and the ported client one.
+    /// A train the yard already judges blocked (a red PR) troubles the
+    /// track; one whose gate the conductor has not filed yet asks for
+    /// attention, and one judged by CI alone troubles it — the yard's own
+    /// predicate and the ported client one, split by what each means.
     #[test]
-    fn a_blocked_train_or_an_unfiled_train_gate_troubles_the_track() {
+    fn a_blocked_train_or_an_unfiled_train_gate_is_read_on_the_track() {
         let train = job("pr-train", "train #470", JobStatus::Open, json!({}));
         let steps = vec![
             step(
@@ -3324,12 +3998,27 @@ mod tests {
         );
         let out = regions(&inputs(&status, &open, &[], &[], &[], Some(&[]), Some(&[])));
         let track = by_name(&out, "track");
-        assert_eq!(track.state, RegionState::Troubled);
+        // The conductor retrying against a full bound is a wait to
+        // watch, not trouble (design 62de32ae, decision 1); the marker
+        // carries no stamp, so it is stated at once with no duration.
+        assert_eq!(track.state, RegionState::Attention);
         assert!(
             track.why.contains("gate not filed yet: train #471"),
             "{}",
             track.why
         );
+        let band = track.band.as_ref().unwrap();
+        assert_eq!(band.id, "track-gate-waiting");
+        assert_eq!(band.held_minutes, None);
+
+        // CI alone judged the train — the gate could not be filed at
+        // all, a degraded verdict that is ours: trouble.
+        let mut open = open;
+        open[0].0.metadata = json!({ TRAIN_GATE_FALLBACK: "gate unavailable; CI alone" });
+        let out = regions(&inputs(&status, &open, &[], &[], &[], Some(&[]), Some(&[])));
+        let track = by_name(&out, "track");
+        assert_eq!(track.state, RegionState::Troubled, "{}", track.why);
+        assert!(track.why.contains("judged by CI alone"), "{}", track.why);
         // A blank marker is no marker (yard.ts `text()`).
         assert!(!train_gate_troubled(&json!({ TRAIN_GATE_WAIT_REASON: "" })));
         assert!(train_gate_troubled(
@@ -3337,10 +4026,11 @@ mod tests {
         ));
     }
 
-    /// A healthy pre-merge train holds the single track: busy, not
-    /// troubled; a merged one converging holds nothing.
+    /// A healthy pre-merge train holds the single track: CLEAR — the
+    /// track working, which is what it is for (design 62de32ae, decision
+    /// 1) — with the train named and its age at the stage as the KPI.
     #[test]
-    fn a_pre_merge_train_holds_the_track_and_reads_busy() {
+    fn a_pre_merge_train_holds_the_track_and_reads_clear() {
         let train = job("pr-train", "train #472", JobStatus::Open, json!({}));
         let steps = vec![
             step(
@@ -3363,8 +4053,20 @@ mod tests {
             BoardingReadings::default(),
         );
         let out = regions(&inputs(&status, &open, &[], &[], &[], Some(&[]), Some(&[])));
-        assert_eq!(by_name(&out, "track").state, RegionState::Busy);
-        assert_eq!(by_name(&out, "track").bound, Some(1));
+        let track = by_name(&out, "track");
+        assert_eq!(track.state, RegionState::Clear, "{}", track.why);
+        assert!(
+            track.why.contains("a train holds the track"),
+            "{}",
+            track.why
+        );
+        assert!(track.band.is_none());
+        assert_eq!(track.bound, Some(1));
+        assert_eq!(track.bound_kind, Some(BoundKind::Capacity));
+        assert_eq!(track.unit, "trains in transit");
+        // The `pr` step completed at 11:01 and NOW is 12:00.
+        assert_eq!(track.kpi[0].value, Some(59.0));
+        assert_eq!(track.kpi[0].text, "oldest train 59 minutes at its stage");
     }
 
     /// Arrivals per day this window against the previous, and the time
@@ -3622,7 +4324,11 @@ mod tests {
         let out = regions(&inputs(&status, &[], &[], &cars, &[], Some(&[]), Some(&[])));
         let shed = by_name(&out, "shed");
         assert_eq!(shed.count, Some(2));
-        assert_eq!(shed.state, RegionState::Busy, "{}", shed.why);
+        // Landed inside the day, each with a way to settle: the shed
+        // working, which is clear (design 62de32ae, decision 1).
+        assert_eq!(shed.state, RegionState::Clear, "{}", shed.why);
+        assert_eq!(shed.unit, "cars awaiting proof");
+        assert_eq!(shed.kpi[0].text, "0 cars owed a proof are ours");
         assert_eq!(shed.trend.metric, "proven");
         assert_eq!(shed.trend.current, Some(1.0));
         assert_eq!(shed.trend.previous, Some(1.0));
@@ -3898,7 +4604,7 @@ mod tests {
             "a declared wait not yet seen is the world's, at 96h: {}",
             shed.why
         );
-        assert_eq!(shed.state, RegionState::Busy, "{}", shed.why);
+        assert_eq!(shed.state, RegionState::Attention, "{}", shed.why);
 
         let shed = read(&[car("fix/contradicted", Some("2026-09-19T10:00:00Z"))]);
         assert!(
@@ -3985,7 +4691,7 @@ mod tests {
     /// the world, not on us" — the region said the waits were not ours
     /// and painted them red anyway, so red stopped meaning ours to fix.
     /// Troubled is now only ours; a declared, observed, owned wait —
-    /// on the world or on a named actor's act — is busy and says whose,
+    /// on the world or on a named actor's act — asks for attention (never trouble) and says whose,
     /// until it runs past a max wait the car itself declared.
     #[test]
     fn the_shed_is_troubled_only_by_waits_that_are_ours() {
@@ -4040,12 +4746,26 @@ mod tests {
 
         // THEIRS: the world's event and a named actor's act, 98h open.
         let shed = read(&[world(), david()]);
+        // Past the band and not ours: ATTENTION, never trouble — and the
+        // band that decided it is named, with how long it has been past.
         assert_eq!(
             shed.state,
-            RegionState::Busy,
+            RegionState::Attention,
             "declared, observed, owned waits are not ours: {}",
             shed.why
         );
+        let band = shed
+            .band
+            .as_ref()
+            .expect("a non-clear state names its band");
+        assert_eq!(band.id, "shed-theirs-stale");
+        assert!(band.reads.contains("oldest open 98h"), "{}", band.reads);
+        assert_eq!(
+            band.held_minutes,
+            Some(74 * 60),
+            "98h open, past 24h for 74h"
+        );
+        assert_eq!(shed.kpi[0].value, Some(0.0), "none of them is ours");
         assert!(
             shed.why
                 .contains("waiting on the world: a Stripe charge (feat/stripe)")
@@ -4139,7 +4859,7 @@ mod tests {
         };
         let status = empty_status();
 
-        // FRESH: landed this morning, still working. Must stay busy, or
+        // FRESH: landed this morning, still working. Must stay clear, or
         // the signal fires on every landing and stops meaning anything.
         let fresh = vec![aged("fix/fresh", "2026-09-19T06:00:00Z")];
         let out = regions(&inputs(
@@ -4154,7 +4874,7 @@ mod tests {
         let shed = by_name(&out, "shed");
         assert_eq!(
             shed.state,
-            RegionState::Busy,
+            RegionState::Clear,
             "a car six hours old is working, not troubled: {}",
             shed.why
         );
@@ -4236,9 +4956,9 @@ mod tests {
         let shed = by_name(&out, "shed");
         assert_eq!(
             shed.state,
-            RegionState::Busy,
-            "a car with no opened_at has no age, so it is busy — never troubled for a \
-             field it does not carry: {}",
+            RegionState::Clear,
+            "a car with no opened_at has no age, so it is not past any band — never \
+             troubled for a field it does not carry: {}",
             shed.why
         );
     }
@@ -4319,15 +5039,16 @@ mod tests {
     /// the sentence it says two minutes after a healthy departure —
     /// because only the conductor ever asked whether a car could board.
     /// A car held on its declared ordering edge is counted, named by
-    /// what it waits behind, and the region stays busy WITHOUT promising
-    /// a train.
+    /// what it waits behind, and — once it has stood past the band's
+    /// hold — the region asks for ATTENTION without promising a train.
     #[test]
-    fn a_car_waiting_behind_its_edge_keeps_the_dock_busy_and_promises_no_train() {
+    fn a_car_waiting_behind_its_edge_asks_for_attention_and_promises_no_train() {
         let first = parked("fix/first-half", json!({}));
         let pred_id = first.0.id.to_string();
         let second = parked("fix/second-half", json!({ "boards_after": pred_id }));
         let cars = vec![first.clone(), second];
-        let status = dock_at_depth(&cars);
+        let mut status = dock_at_depth(&cars);
+        status.boarding.dock_threshold = Some(2);
         let preds = vec![(
             pred_id.clone(),
             crate::car::Predecessor::Found(packet_value(&first.0, &first.1)),
@@ -4336,13 +5057,22 @@ mod tests {
         i.predecessors = &preds;
         let out = regions(&i);
         let dock = by_name(&out, "dock");
-        assert_eq!(dock.state, RegionState::Busy, "{}", dock.why);
+        // Parked since the dock row's date (no `gate` stamp on this car),
+        // so twelve hours past the 60m hold.
+        assert_eq!(dock.state, RegionState::Attention, "{}", dock.why);
         assert_eq!(dock.count, Some(2), "parked is still parked");
         let behind = format!("fix/first-half (car {})", &pred_id[..8]);
         assert_eq!(
             dock.why,
             format!("2 cars parked, 1 cannot board (waiting behind {behind})")
         );
+        let band = dock.band.as_ref().expect("the band that decided it");
+        assert_eq!(band.id, "dock-cannot-board");
+        assert_eq!(band.held_minutes, Some(12 * 60));
+        // The boarding depth is a THRESHOLD, not room for two cars.
+        assert_eq!(dock.bound, Some(2));
+        assert_eq!(dock.bound_kind, Some(BoundKind::Threshold));
+        assert_eq!(dock.kpi[0].text, "1 car cannot board");
         assert!(
             !dock.why.contains("a train is due"),
             "a dock with a car the conductor will refuse must not promise a train: {}",
@@ -4401,7 +5131,8 @@ mod tests {
         i.predecessors = &preds;
         let out = regions(&i);
         let dock = by_name(&out, "dock");
-        assert_eq!(dock.state, RegionState::Busy, "{}", dock.why);
+        // A train due is the dock WORKING (design 62de32ae, decision 1).
+        assert_eq!(dock.state, RegionState::Clear, "{}", dock.why);
         assert!(
             dock.why
                 .starts_with("1 car parked — the boarding depth is met, a train is due"),
@@ -4432,7 +5163,43 @@ mod tests {
         );
     }
 
-    /// The gates: a stale bay is trouble; a queue is busy; the trend is
+    /// HYSTERESIS, READ FROM THE RECORD (design 62de32ae, decision 2). A
+    /// car that parked twenty minutes ago behind a predecessor still in
+    /// flight has not yet held the dock band's hour: the region stays
+    /// clear and SAYS the condition is settling, with how long of how
+    /// long — never hidden, never flipped early.
+    #[test]
+    fn a_car_held_inside_the_bands_hold_is_settling_and_the_dock_stays_clear() {
+        let first = parked("fix/first-half", json!({}));
+        let pred_id = first.0.id.to_string();
+        let (j, mut s) = parked("fix/second-half", json!({ "boards_after": pred_id }));
+        s.push(step(
+            &j,
+            crate::car::GATE_SLUG,
+            StepStatus::Completed,
+            Some("2026-09-19T11:40:00Z"),
+        ));
+        let cars = vec![first.clone(), (j, s)];
+        let status = dock_at_depth(&cars);
+        let preds = vec![(
+            pred_id,
+            crate::car::Predecessor::Found(packet_value(&first.0, &first.1)),
+        )];
+        let mut i = inputs(&status, &[], &[], &cars, &[], Some(&[]), Some(&[]));
+        i.predecessors = &preds;
+        let out = regions(&i);
+        let dock = by_name(&out, "dock");
+        assert_eq!(dock.state, RegionState::Clear, "{}", dock.why);
+        assert!(dock.band.is_none());
+        assert!(
+            dock.why.contains("settling: 2 cars parked, 1 cannot board")
+                && dock.why.contains("held 20m of the 60m it must hold"),
+            "{}",
+            dock.why
+        );
+    }
+
+    /// The gates: a stale bay is trouble; full bays settle into attention; the trend is
     /// the run duration from the rows' own stamps.
     #[test]
     fn the_gates_read_the_bound_and_a_stale_bay_is_trouble() {
@@ -4499,9 +5266,16 @@ mod tests {
         assert_eq!(gates.bound, Some(3));
         assert_eq!(gates.state, RegionState::Troubled, "{}", gates.why);
         assert!(gates.why.contains("corpse"), "{}", gates.why);
+        // The run became a corpse when it outlived the deadline: opened
+        // 01:00, deadline 3h, so a corpse since 04:00 — eight hours.
+        let band = gates.band.as_ref().unwrap();
+        assert_eq!(band.id, "gates-corpse");
+        assert_eq!(band.held_minutes, Some(8 * 60));
         assert_eq!(gates.trend.metric, "gate duration");
         assert_eq!(gates.trend.current, Some(30.0));
         assert_eq!(gates.trend.previous, Some(60.0));
+        assert_eq!(gates.kpi[0].text, "1 of 3 bays in use");
+        assert_eq!(gates.kpi[1].text, "gates take 30 minutes (median)");
         // The garage's trend: reds per day.
         let garage = by_name(&out, "garage");
         assert_eq!(garage.trend.metric, "reds");
@@ -4509,8 +5283,54 @@ mod tests {
         assert_eq!(garage.trend.previous, Some(1.0));
     }
 
+    /// BAYS AT THE BOUND ARE CAPACITY, NOT TROUBLE — until they have been
+    /// full for the band's half hour. The onset is the bay that FILLED
+    /// them (the third-oldest start of three), read off the runs' own
+    /// stamps, so the same rows answer the same state on every read.
+    #[test]
+    fn full_bays_ask_for_attention_only_after_the_band_holds() {
+        let gate = |branch: &str, since: &str| crate::yard::ActiveGate {
+            branch: branch.into(),
+            packet_id: branch.into(),
+            since: since.into(),
+            stale: false,
+            train: None,
+        };
+        let read = |starts: [&str; 3]| {
+            let mut status = empty_status();
+            status.gates.capacity = 3;
+            status.gates.active = starts
+                .iter()
+                .enumerate()
+                .map(|(i, s)| gate(&format!("fix/{i}"), s))
+                .collect();
+            let out = regions(&inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[])));
+            by_name(&out, "gates").clone()
+        };
+        // Filled five minutes ago: clear, and settling.
+        let g = read([
+            "2026-09-19T11:00:00Z",
+            "2026-09-19T11:10:00Z",
+            "2026-09-19T11:55:00Z",
+        ]);
+        assert_eq!(g.state, RegionState::Clear, "{}", g.why);
+        assert!(g.why.contains("held 5m of the 30m"), "{}", g.why);
+        // Filled forty minutes ago: attention, for 40m.
+        let g = read([
+            "2026-09-19T11:20:00Z",
+            "2026-09-19T11:00:00Z",
+            "2026-09-19T11:10:00Z",
+        ]);
+        assert_eq!(g.state, RegionState::Attention, "{}", g.why);
+        let band = g.band.unwrap();
+        assert_eq!(band.id, "gates-at-bound");
+        assert_eq!(band.held_minutes, Some(40));
+        assert_eq!(band.since.as_deref(), Some("2026-09-19T11:20:00+00:00"));
+        assert_eq!(g.bound_kind, Some(BoundKind::Capacity));
+    }
+
     /// A stranded green — a green gate no car claims — troubles the
-    /// garage; a held car alone is busy.
+    /// garage; a held car alone asks for attention past its hold.
     #[test]
     fn a_stranded_green_troubles_the_garage() {
         let run = job(
@@ -4670,7 +5490,17 @@ mod tests {
         ));
         let r = by_name(&out, "receiving");
         assert_eq!(r.count, Some(2));
-        assert_eq!(r.state, RegionState::Busy, "{}", r.why);
+        // Past the triage band: ATTENTION, with the band named against
+        // the number beside it (design 62de32ae, decision 1) — and the
+        // band was crossed the midnight the oldest turned four days old.
+        assert_eq!(r.state, RegionState::Attention, "{}", r.why);
+        let band = r.band.as_ref().unwrap();
+        assert_eq!(band.id, "receiving-aging");
+        assert_eq!(band.reads, "oldest 5d > the 3-day triage band");
+        assert_eq!(band.since.as_deref(), Some("2026-09-18T00:00:00+00:00"));
+        assert_eq!(band.held_minutes, Some(36 * 60));
+        assert_eq!(r.unit, "packets standing");
+        assert_eq!(r.kpi[0].text, "oldest untriaged 5 days");
         assert_eq!(r.trend.current, Some(1.0));
         assert_eq!(r.trend.previous, Some(0.0));
 
@@ -4703,6 +5533,7 @@ mod tests {
                 members: vec!["p1".into(), "p2".into()],
                 served: Some(4),
                 previous_served: Some(2),
+                opened: [("p1".to_string(), t("2026-09-18T12:00:00Z"))].into(),
             },
             StationReading {
                 name: "design-review".into(),
@@ -4710,6 +5541,7 @@ mod tests {
                 members: vec!["p2".into()],
                 served: Some(1),
                 previous_served: Some(0),
+                opened: [("p2".to_string(), t("2026-09-19T06:00:00Z"))].into(),
             },
             StationReading {
                 name: "my-watchlist".into(),
@@ -4717,6 +5549,7 @@ mod tests {
                 members: vec![],
                 served: None,
                 previous_served: None,
+                opened: Default::default(),
             },
         ];
         let status = empty_status();
@@ -4731,7 +5564,9 @@ mod tests {
         ));
         let m = by_name(&out, "marshalling");
         assert_eq!(m.count, Some(2), "p2 stands at two stations, counted once");
-        assert_eq!(m.state, RegionState::Busy, "{}", m.why);
+        // Standing at stations that drain is the yard working.
+        assert_eq!(m.state, RegionState::Clear, "{}", m.why);
+        assert_eq!(m.kpi[0].text, "oldest at a station 24 hours");
         assert_eq!(m.trend.current, Some(5.0));
         assert_eq!(m.trend.previous, Some(2.0));
 
@@ -5131,6 +5966,7 @@ mod tests {
                 members: vec!["a".into(), "b".into()],
                 served: None,
                 previous_served: None,
+                opened: Default::default(),
             },
             StationReading {
                 name: "backlog".into(),
@@ -5138,6 +5974,7 @@ mod tests {
                 members: vec!["c".into()],
                 served: Some(3),
                 previous_served: Some(2),
+                opened: Default::default(),
             },
             StationReading {
                 name: "quiet".into(),
@@ -5145,6 +5982,7 @@ mod tests {
                 members: vec![],
                 served: Some(0),
                 previous_served: Some(0),
+                opened: Default::default(),
             },
         ];
         let out = regions(&inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&rows)));
@@ -5401,18 +6239,75 @@ mod tests {
         assert_eq!(f.trend.current, Some(60.0), "the one run that closed");
     }
 
+    /// At the cap the next dispatch is refused — a band crossed, so
+    /// ATTENTION once it has held its quarter hour (both runs opened at
+    /// 11:00, an hour before NOW).
     #[test]
-    fn a_floor_at_the_registrys_capacity_is_busy_because_the_next_dispatch_is_refused() {
+    fn a_floor_at_the_registrys_capacity_asks_for_attention_because_the_next_dispatch_is_refused() {
         let status = empty_status();
         let runs: Vec<(Job, Vec<Step>)> = (0..2)
             .map(|_| (run(true, "2026-09-19T11:00:00Z", None), Vec::new()))
             .collect();
-        let sessions = Vec::new();
+        let sessions = vec![
+            session("a@x", Some("2026-09-19T11:50:00Z")),
+            session("b@x", Some("2026-09-19T09:00:00Z")),
+        ];
         let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
         let r = regions(&floor(base, &runs, &sessions, Some(2)));
         let f = by_name(&r, "shop-floor");
-        assert_eq!(f.state, RegionState::Busy, "{}", f.why);
+        assert_eq!(f.state, RegionState::Attention, "{}", f.why);
         assert!(f.why.contains("at the cap"), "{}", f.why);
+        assert_eq!(f.band.as_ref().unwrap().held_minutes, Some(60));
+        assert_eq!(f.kpi[0].text, "2 of 2 runs in flight");
+        assert_eq!(
+            f.kpi[1].text, "1 session silent past 60 minutes",
+            "the crew board's idle line, in minutes"
+        );
+    }
+
+    /// THE FLAP THE REVIEW MEASURED (design 62de32ae, decision 2): a run
+    /// is "finished and not reported" for the seconds between its build
+    /// ending and its handback landing, and shop-floor went clear ->
+    /// troubled -> clear across reads twenty seconds apart. Inside the
+    /// band's ten minutes the floor stays clear and says it is settling;
+    /// past them it is troubled, for as long as the record shows.
+    #[test]
+    fn a_run_finished_moments_ago_is_settling_and_never_flaps_the_floor_red() {
+        let status = empty_status();
+        let finished = |at: &str| {
+            let j = run(true, "2026-09-19T09:00:00Z", None);
+            let steps = vec![
+                step(&j, "building", StepStatus::Completed, Some(at)),
+                step(&j, "reported", StepStatus::Ready, None),
+            ];
+            vec![(j, steps)]
+        };
+        let sessions = Vec::new();
+        let runs = finished("2026-09-19T11:59:40Z");
+        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        let f = by_name(
+            &regions(&floor(base, &runs, &sessions, Some(6))),
+            "shop-floor",
+        )
+        .clone();
+        assert_eq!(f.state, RegionState::Clear, "{}", f.why);
+        assert!(f.why.contains("settling"), "{}", f.why);
+
+        let runs = finished("2026-09-19T11:44:00Z");
+        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        let f = by_name(
+            &regions(&floor(base, &runs, &sessions, Some(6))),
+            "shop-floor",
+        )
+        .clone();
+        assert_eq!(f.state, RegionState::Troubled, "{}", f.why);
+        let band = f.band.unwrap();
+        assert_eq!(band.id, "shop-floor-unreported");
+        assert_eq!(
+            band.held_minutes,
+            Some(16),
+            "troubled for 16m, read off the record"
+        );
     }
 
     /// A run that finished and never reported still holds its slot —
@@ -5650,7 +6545,13 @@ mod tests {
         )];
         let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
         let out = regions(&with_publish(base, Some(&judged)));
-        assert_eq!(by_name(&out, "publish").state, RegionState::Busy);
+        // A PR inside its day, judged, awaiting a person's merge: the
+        // publish working (design 62de32ae, decision 1).
+        assert_eq!(by_name(&out, "publish").state, RegionState::Clear);
+        assert_eq!(
+            by_name(&out, "publish").kpi[0].text,
+            "1 mirror pull request awaiting merge"
+        );
     }
 
     /// What `publish-github-pr.sh --measure` writes onto a publish
@@ -6078,6 +6979,7 @@ mod tests {
                 members: members.iter().map(|m| (*m).to_string()).collect(),
                 served,
                 previous_served: served,
+                opened: Default::default(),
             };
         let stations = vec![
             station("design-review", &["px", aging_id.as_str()], Some(0), false),

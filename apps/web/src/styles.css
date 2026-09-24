@@ -86,8 +86,10 @@
   --band-raised: rgba(255, 255, 255, 0.10);
   --band-rule: rgba(255, 255, 255, 0.40);
 
-  /* --- Keyboard focus: an amber ring, the one amber outside a state. --- */
+  /* --- Keyboard focus: an amber ring, the one amber outside a state. A
+     focused field wears it as a halo instead, the board's --halo. --- */
   --focus: #D9A400;
+  --halo: rgba(217, 164, 0, 0.35);
 
   /* --- States are solid PLATES that always carry their word, so none is
      ever read by colour alone. Each plate names the ink its word is set
@@ -109,6 +111,10 @@
   --ok: var(--clear);
   --warn: #6B4A00;
   --err: var(--troubled);
+  /* The round-2 board sets troubled's WORDS a shade deeper than its plate
+     wherever they explain rather than label: a field's error line (and the
+     failed read's words). 8.1:1 on white. */
+  --troubled-ink: #9B1C2C;
   --ok-wash: rgba(11, 107, 79, 0.10);
   --warn-wash: rgba(242, 194, 48, 0.22);
   --err-wash: rgba(200, 40, 61, 0.08);
@@ -257,6 +263,52 @@ a:hover { color: var(--fog); }
 :focus-visible {
   outline: 3px solid var(--focus);
   outline-offset: 2px;
+}
+
+/* Enamel's field (backlog 6f471ff6, car 2): the round-2 board's `.field`
+   — 14px words at 9px 12px in a 2px night-ink frame squared to 3px. Before
+   this there was no shared field rule; 42 rules drew fields in 1px
+   hairlines, five of them focused in a blue outline.
+
+   Written with zero specificity (:where), so it is what a field IS unless
+   its component says otherwise: every input a person types into, every
+   select and textarea, and no box that is ticked, slid, picked or pressed.
+   The shared field classes below (.step-field, .filter-input, .ni-input
+   ...) draw no frame of their own and inherit this one.
+
+   Focus is the board's: the frame turns the action blue inside a 3px amber
+   halo, the ring every other control wears drawn as a glow around a box.
+   Invalid is read off aria-invalid, never a class, so a field cannot look
+   wrong without announcing it; its error line is .field-error, named from
+   the field by aria-describedby. It comes after focus, so a focused
+   invalid field stays red. */
+:where(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]):not([type="hidden"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="image"])),
+:where(select),
+:where(textarea) {
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--card);
+  border: var(--frame) solid var(--border-strong);
+  border-radius: var(--radius-field);
+  padding: 9px 12px;
+}
+:where(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]):not([type="hidden"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="image"])):focus,
+:where(select):focus,
+:where(textarea):focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--halo);
+}
+:where(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]):not([type="hidden"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="image"]))[aria-invalid="true"],
+:where(select)[aria-invalid="true"],
+:where(textarea)[aria-invalid="true"] {
+  border-color: var(--troubled);
+}
+.field-error {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--troubled-ink);
 }
 
 /* --- Instrument type utilities -------------------------------------------
@@ -458,40 +510,6 @@ a:hover { color: var(--fog); }
 .me-links { display: flex; flex-direction: column; gap: 4px; }
 .me-links a { font-size: 13px; color: var(--fog); text-decoration: underline; padding: 2px 0; }
 
-/* Persona switcher (demo only). */
-.persona-switcher {
-  position: fixed;
-  bottom: 16px;
-  left: 216px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  border-radius: var(--radius);
-  background: var(--ink);
-  border: 1px solid var(--hairline);
-  z-index: 30;
-  font-size: 12px;
-}
-.persona-label {
-  color: var(--static);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  font-size: 10px;
-  font-weight: 600;
-}
-.persona-select {
-  border: none;
-  background: transparent;
-  font-family: inherit;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--fog);
-  padding: 2px 4px;
-  cursor: pointer;
-  outline: none;
-  max-width: 280px;
-}
 
 /* =============================================================================
    Theme — EXEC (editorial layout)
@@ -528,34 +546,6 @@ a:hover { color: var(--fog); }
   padding: var(--s7) max(var(--s5), calc((100% - var(--exec-measure)) / 2))
     var(--s8);
 }
-
-/* Omnibox — global search in nav bar */
-.omnibox { position: relative; margin-right: 4px; }
-.omnibox-input {
-  width: 160px; padding: 4px 10px; font-size: 12px; font-family: inherit;
-  border: 1px solid var(--hairline); border-radius: var(--radius); background: var(--void); color: var(--fog);
-  transition: width 0.2s, border-color 0.15s;
-}
-.omnibox-input:focus { width: 240px; outline: none; border-color: var(--signal); background: var(--void); }
-.omnibox-input::placeholder { color: var(--static); }
-.omnibox-dropdown {
-  position: absolute; top: calc(100% + 6px); left: 0; width: 360px;
-  background: var(--ink); border: 1px solid var(--hairline); border-radius: var(--radius);
-  z-index: 100;
-  max-height: 400px; overflow-y: auto;
-}
-.omnibox-group {
-  font-size: 11px; font-weight: 600; color: var(--static); text-transform: uppercase;
-  letter-spacing: 0.05em; padding: 10px 14px 4px;
-}
-.omnibox-result {
-  display: flex; gap: 8px; align-items: baseline; width: 100%;
-  text-align: left; padding: 6px 14px; border: none; background: none;
-  font-family: inherit; font-size: 13px; cursor: pointer;
-}
-.omnibox-result:hover, .omnibox-result-active { background: var(--wash); }
-.omnibox-result-label { font-weight: 500; white-space: nowrap; }
-.omnibox-result-detail { color: var(--static); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* The page header is Enamel's title (backlog 6f471ff6, car 1): the round-2
    board's composed page runs band -> label -> uppercase title + subtitle,
@@ -846,30 +836,30 @@ a:hover { color: var(--fog); }
   color: var(--text-dim);
   margin-bottom: 8px;
 }
-.filter-input {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 8px 10px;
-  font-size: 13px;
-  color: var(--text);
-  font-family: inherit;
-}
-.filter-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+/* .filter-input (web-kit SearchInput) is Enamel's field, drawn by the one
+   field rule near the top; it keeps its class as a hook and no look. */
 
-.filter-btn {
+/* Enamel's filter chip (backlog 6f471ff6, car 2): the round-2 board's
+   `.chip` — 12.5px at 5px 12px, squared to 3px, in a 2px ink frame; the
+   pressed chip is solid ink under white words. It is pressed by
+   aria-pressed, the attribute a screen reader announces, so a chip cannot
+   look chosen without saying so; the -active classes stay in the markup as
+   test hooks and draw nothing. .filter-button is the same chip under the
+   name two pages (jobs, assets) gave it. (This app's .chip is a TAG, a
+   quiet framed word, so the board's chip lives under these names.) */
+.filter-btn, .filter-button {
   text-align: left;
-  background: transparent;
-  border: none;
-  padding: 6px 10px;
-  border-radius: var(--radius);
-  font-size: 13px;
-  color: var(--text-dim);
+  background: var(--card);
+  border: var(--frame) solid var(--border-strong);
+  padding: 5px 12px;
+  border-radius: var(--radius-field);
+  font-size: 12.5px;
+  color: var(--text);
   cursor: pointer;
   font-family: inherit;
 }
-.filter-btn:hover { background: var(--wash); color: var(--text); }
-.filter-btn-active { background: var(--wash); color: var(--text); font-weight: 500; }
+.filter-btn:hover, .filter-button:hover { background: var(--wash); }
+.filter-btn[aria-pressed="true"], .filter-button[aria-pressed="true"] { background: var(--fog); color: var(--void); border-color: var(--fog); font-weight: 700; }
 
 .catalog-grid {
   display: grid;
@@ -1436,8 +1426,6 @@ a:hover { color: var(--fog); }
 .shop-quote-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; margin-bottom: 16px; }
 .shop-quote-field { display: flex; flex-direction: column; gap: 4px; }
 .shop-quote-field label { font-size: 12px; font-weight: 500; color: var(--static); }
-.shop-quote-field input, .shop-quote-field select, .shop-quote-field textarea {
-  padding: 8px 12px; border: 1px solid var(--hairline); border-radius: var(--radius); font-size: 14px; font-family: inherit; }
 .shop-quote-field textarea { resize: vertical; }
 .shop-quote-field-wide { grid-column: 1 / -1; }
 .shop-quote-actions { display: flex; gap: 8px; }
@@ -1465,7 +1453,6 @@ a:hover { color: var(--fog); }
 .provider-config h5 { font-size: 12px; font-weight: 600; color: var(--static); text-transform: uppercase; letter-spacing: 0.05em; margin: 12px 0 8px; }
 .provider-config-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .provider-config-row label { font-size: 13px; min-width: 120px; color: var(--static); }
-.provider-config-input { flex: 1; padding: 5px 10px; border: 1px solid var(--hairline); border-radius: var(--radius); font-size: 13px; background: var(--void); color: var(--fog); }
 .provider-config-actions { display: flex; gap: 8px; margin-top: 12px; align-items: center; }
 .provider-config-actions .at-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .provider-coming-soon { font-size: 11px; font-style: italic; color: var(--static); margin-left: 4px; }
@@ -1511,8 +1498,6 @@ a:hover { color: var(--fog); }
 .chip-model-training { background: var(--wash); color: var(--warn); }
 .chip-model-stale { background: var(--wash); color: var(--err); }
 .cto-toolbox-filters { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
-.cto-filter-chip { cursor: pointer; font-size: 12px; padding: 3px 10px; border: 1px solid var(--hairline); border-radius: var(--radius); background: var(--wash); color: var(--static); transition: all 0.15s; }
-.cto-filter-chip.active { background: var(--fog); color: var(--void); border-color: var(--fog); }
 .cto-script-count { font-size: 12px; color: var(--static); margin-left: auto; }
 .cto-scripts { display: flex; flex-direction: column; gap: 8px; }
 .cto-script-card { padding: 12px 14px; border: 1px solid var(--hairline); border-radius: var(--radius); background: var(--ink-raised); cursor: pointer; transition: border-color 0.15s; }
@@ -1631,11 +1616,6 @@ a:hover { color: var(--fog); }
 }
 .debug-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .debug-row label { flex: 0 0 50px; font-size: 12px; color: var(--static); }
-.debug-input {
-  flex: 1; background: var(--void); border: 1px solid var(--hairline); border-radius: var(--radius);
-  color: var(--fog); padding: 4px 8px; font-size: 12px; font-family: monospace;
-}
-.debug-input:focus { outline: none; border-color: var(--static); }
 
 .debug-action-btn {
   width: 100%; padding: 7px 0; margin-top: 4px;
@@ -1670,10 +1650,6 @@ a:hover { color: var(--fog); }
    HR Workflows
    ========================================================================== */
 
-.hr-select {
-  padding: 5px 10px; font-size: 13px; border: 1px solid var(--hairline);
-  border-radius: var(--radius); background: var(--void); color: var(--fog);
-}
 .hr-action-btn {
   padding: 5px 14px; font-size: 12px; font-weight: 600;
   background: var(--fog); color: var(--void); border: none; border-radius: var(--radius); cursor: pointer;
@@ -1715,15 +1691,8 @@ a:hover { color: var(--fog); }
 .compose-title { font-weight: 700; font-size: 16px; }
 .compose-field { padding: 8px 20px; }
 .compose-field label { display: block; font-size: 12px; font-weight: 600; color: var(--static); margin-bottom: 4px; }
-.compose-input {
-  width: 100%; padding: 6px 10px; font-size: 14px;
-  border: 1px solid var(--hairline); border-radius: var(--radius); box-sizing: border-box;
-}
-.compose-textarea {
-  width: 100%; padding: 8px 10px; font-size: 13px; line-height: 1.5;
-  border: 1px solid var(--hairline); border-radius: var(--radius); resize: vertical; box-sizing: border-box;
-  font-family: inherit;
-}
+.compose-input { width: 100%; box-sizing: border-box; }
+.compose-textarea { width: 100%; line-height: 1.5; resize: vertical; box-sizing: border-box; }
 .compose-actions { padding: 12px 20px 16px; display: flex; gap: 8px; }
 /* A refused Send, in the modal it was asked from (2a6fab80). */
 .compose-refused { margin: 0; padding: 8px 20px 0; font-size: 13px; color: var(--err); }
@@ -2132,24 +2101,6 @@ a:hover { color: var(--fog); }
   gap: 8px;
   margin-bottom: 4px;
 }
-.admin-field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
-.admin-field > span { color: var(--text-dim); font-size: 12px; }
-.admin-field input[type="text"],
-.admin-field input[type="date"],
-.admin-field select,
-.admin-field textarea {
-  padding: 6px 8px;
-  font-size: 13px;
-  font-family: inherit;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--card);
-  color: var(--text);
-}
-.admin-field textarea { font-family: var(--font-mono, ui-monospace, monospace); }
-.admin-field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.admin-field-inline { flex-direction: row; align-items: center; gap: 8px; }
-.admin-field-inline > span { flex: 1; }
 .admin-form-actions {
   display: flex;
   align-items: center;
@@ -2580,14 +2531,6 @@ button.manual-tree-node {
    ========================================================================== */
 
 .jl-filters { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; }
-.jl-select {
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  font-size: 13px;
-  background: var(--card);
-  color: var(--text);
-}
 .jl-count { font-size: 13px; color: var(--text-dim); margin-left: auto; }
 
 /* Kind-filter chips — long-tail counterpart to the 5 pre-saved
@@ -2724,13 +2667,11 @@ button.manual-tree-node {
 .step-repair-form { display: flex; flex-direction: column; gap: 12px; }
 .step-repair-context { display: flex; flex-direction: column; gap: 12px; }
 
-/* Form fields */
-.step-field { display: flex; flex-direction: column; gap: 4px; }
-.step-field label { font-size: 12px; font-weight: 500; color: var(--text-dim); }
-.step-field input, .step-field select, .step-field textarea {
-  padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius);
-  font-size: 13px; background: var(--card); color: var(--text);
-}
+/* Form fields. A step's field is the board's `.field`: its control is
+   Enamel's field (the one rule near the top draws it), and its label is
+   13.5px, 700, in night ink (backlog 6f471ff6, car 2). */
+.step-field { display: flex; flex-direction: column; gap: 5px; }
+.step-field label { font-size: 13.5px; font-weight: 700; color: var(--text); }
 .step-field textarea { resize: vertical; }
 
 /* KB context cards */
@@ -2959,11 +2900,7 @@ button.manual-tree-node {
   display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px;
   padding: 6px; background: var(--wash); border-radius: var(--radius);
 }
-.pp-team-select {
-  flex: 1 1 auto; min-width: 120px; padding: 3px 6px;
-  border: 1px solid var(--border); border-radius: var(--radius);
-  font-size: 11px; background: var(--void); color: var(--fog);
-}
+.pp-team-select { flex: 1 1 auto; min-width: 120px; }
 .pp-team-post, .pp-team-cancel {
   padding: 3px 10px; border: 1px solid var(--border); border-radius: var(--radius);
   background: var(--wash); color: var(--fog); font-size: 11px; cursor: pointer;
@@ -2976,16 +2913,8 @@ button.manual-tree-node {
 .pp-note-body { font-style: italic; color: var(--fog); }
 .pp-note-meta { color: var(--text-dim); margin-top: 4px; font-style: normal; }
 .pp-note-compose { margin-bottom: 12px; }
-.pp-note-textarea {
-  width: 100%; box-sizing: border-box; padding: 6px 8px;
-  border: 1px solid var(--border); border-radius: var(--radius);
-  font: inherit; font-size: 12px; resize: vertical;
-}
+.pp-note-textarea { width: 100%; box-sizing: border-box; resize: vertical; }
 .pp-note-compose-row { display: flex; gap: 6px; margin-top: 6px; align-items: center; }
-.pp-note-kind {
-  padding: 3px 6px; border: 1px solid var(--border); border-radius: var(--radius);
-  font-size: 11px; background: var(--void); color: var(--fog);
-}
 .pp-note-post {
   padding: 3px 10px; border: 1px solid var(--border); border-radius: var(--radius);
   background: var(--wash); color: var(--fog); font-size: 11px; font-weight: 500; cursor: pointer;
@@ -3032,11 +2961,6 @@ button.manual-tree-node {
 .trial-balance-tab { display: grid; gap: 16px; }
 
 .tb-controls { display: flex; justify-content: flex-end; margin-bottom: 8px; gap: 8px; }
-
-.tb-asof input {
-  border: 1px solid var(--border); border-radius: var(--radius);
-  padding: 4px 6px; font-size: 13px; background: var(--void); color: var(--fog);
-}
 
 .tb-table, .tb-periods, .tb-entries, .tb-entry-lines {
   width: 100%; border-collapse: collapse; font-size: 13px;
@@ -3098,23 +3022,11 @@ button.manual-tree-node {
 /* Step assignment + schedule row on GenericSurface */
 .step-assign-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
 .step-assign-row label { font-size: 12px; color: var(--text-dim); min-width: 72px; }
-.step-assign-row select, .step-assign-row input[type="date"] {
-  padding: 4px 8px; border: 1px solid var(--border); border-radius: var(--radius);
-  font-size: 13px; background: var(--void); color: var(--fog); min-width: 200px;
-}
+.step-assign-row select, .step-assign-row input[type="date"] { min-width: 200px; }
 .step-assign-row .small { color: var(--text-dim); font-size: 11px; }
 .jd-info-action { padding: 8px 12px 12px; }
 .jd-info-action .error { color: var(--err); margin-top: 6px; }
 .jd-assign-inline { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.jd-assign-inline select {
-  font: inherit;
-  padding: 2px 4px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--card);
-  color: var(--text);
-  max-width: 260px;
-}
 .jd-assign-edit {
   background: transparent;
   border: none;
@@ -3140,10 +3052,6 @@ button.manual-tree-node {
 .ni-field label { font-size: 12px; font-weight: 600; color: var(--text-dim); }
 .ni-field-row { display: flex; gap: 16px; flex-wrap: wrap; }
 .ni-field-row .ni-field { flex: 1; min-width: 140px; margin-bottom: 0; }
-.ni-input {
-  padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius);
-  font-size: 13px; background: var(--void); color: var(--fog);
-}
 .ni-num { text-align: right; width: 120px; }
 .ni-hint { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
 

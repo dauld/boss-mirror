@@ -16,7 +16,6 @@ use boss_assets::sse::{self, SseHub};
 use boss_catalog_client::ReqwestCatalogClient;
 use boss_classes_client::{ClassesClient, ReqwestClassesClient};
 use boss_inventory_client::ReqwestInventoryClient;
-use boss_jobs_client::ReqwestJobsClient;
 use boss_nats::NatsEventBus;
 use boss_people_client::{PeopleClient, ReqwestPeopleClient};
 use clap::Parser;
@@ -66,12 +65,10 @@ async fn main() -> Result<()> {
 
     let insights_clients = InsightsClients {
         catalog: Arc::new(ReqwestCatalogClient::new(cfg.catalog_api_url.clone())),
-        jobs: Arc::new(ReqwestJobsClient::new(cfg.jobs_api_url.clone())),
         inventory: Arc::new(ReqwestInventoryClient::new(cfg.inventory_api_url.clone())),
     };
     info!(
         catalog = %cfg.catalog_api_url,
-        jobs = %cfg.jobs_api_url,
         inventory = %cfg.inventory_api_url,
         "device-insights cross-service clients configured"
     );

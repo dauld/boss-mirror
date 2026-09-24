@@ -11,14 +11,15 @@
   //   GET /api/events/tail with the current filters. Useful for
   //   pinning a window to inspect / share.
   //
-  // Filters (source, kind substring, actor, limit) compose into query
-  // params for both modes. Single click on a row toggles the
+  // Filters (source, kind substring, actor, limit, and a since/until
+  // window) compose into query params for both modes. Single click on a row toggles the
   // inline JSON payload. Requires operator tier; non-operators
   // get a 403 from the backend which we render inline.
 
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import Section from '@boss/web-kit/ui/Section.svelte';
   import FileAttachments from '../../content/FileAttachments.svelte';
+  import { packetOf, windowBound } from './auditRetro';
   import { appNow, appToday } from '@boss/web-kit/sim-clock';
   import { formatDate } from '@boss/web-kit/ui/date';
   import { actorOf, knownActors as actorsIn } from './auditActor';
@@ -56,7 +57,8 @@
     | { kind: 'connecting' }
     | { kind: 'live' }
     | { kind: 'reconnecting' }
-    | { kind: 'polling'; reason: string };
+    | { kind: 'polling'; reason: string }
+    | { kind: 'windowed' };
   let liveState = $state<LiveState>({ kind: 'off' });
 
   // Size and growth (168b3f25). David, 2026-09-02: "We need size and
@@ -114,6 +116,15 @@
     const t = setInterval(() => void loadStats(), STATS_RELOAD_MS);
     return () => clearInterval(t);
   });
+  // The window a retro or an incident reads (backlog 62a0bbee). The
+  // tail is the newest `limit` rows, at most 500 — about ten minutes of
+  // log — so without a window nothing older was readable here, only
+  // exportable. Both are `datetime-local` values in the zone the rows
+  // are painted in; auditRetro.ts turns them into the UTC instants the
+  // tail takes (`since` inclusive, `until` exclusive). An Until closes
+  // the window, so the live stream is not opened while one is set.
+  let sinceInput = $state('');
+  let untilInput = $state('');
   let sourceFilter = $state('');
   let kindFilter = $state('');
   // Who acted (backlog 03f79eca) — an EXACT match on the payload's
@@ -228,6 +239,8 @@
     const lim = limit;
     const prov = provenance;
     const auto = autoRefresh;
+    const since = windowBound(sinceInput);
+    const until = windowBound(untilInput);
 
     let cancelled = false;
     // Frames this run applied before its snapshot answered (697f9f87).
@@ -249,6 +262,8 @@
       if (knd) params.set('kind', knd);
       if (act) params.set('actor', act);
       if (prov !== 'all') params.set('simulated', prov);
+      if (since) params.set('since', since);
+      if (until) params.set('until', until);
       params.set('limit', String(lim));
       try {
         const r = await fetch(`/api/events/tail?${params.toString()}`, {
@@ -282,11 +297,13 @@
     // recent window immediately, regardless of mode.
     void fetchSnapshot();
 
-    if (!auto) {
+    if (!auto || until) {
       // Snapshot mode — explicit reload only via the user
       // tapping the filter inputs (which retriggers this $effect).
-      // No interval timer.
-      liveState = { kind: 'off' };
+      // No interval timer. An Until puts the page here too: the
+      // stream pushes rows as they land, and none that lands now can
+      // fall before it (62a0bbee).
+      liveState = auto ? { kind: 'windowed' } : { kind: 'off' };
       return () => {
         cancelled = true;
       };
@@ -521,6 +538,14 @@
             {/each}
           </select>
         </label>
+        <label class="events-filter" title="Rows at or after this time">
+          <span>Since</span>
+          <input type="datetime-local" bind:value={sinceInput} max={untilInput || undefined} />
+        </label>
+        <label class="events-filter" title="Rows before this time — the live stream stops while it is set">
+          <span>Until</span>
+          <input type="datetime-local" bind:value={untilInput} min={sinceInput || undefined} />
+        </label>
         <label class="events-filter events-auto">
           <input type="checkbox" bind:checked={autoRefresh} />
           <span>Live (SSE)</span>
@@ -591,6 +616,8 @@
             Live stream connected. New rows appear at the top as they land.
           {:else if liveState.kind === 'reconnecting'}
             Live stream lost; the browser is reconnecting. Rows that land before it is back will not stream — reload to read them.
+          {:else if liveState.kind === 'windowed'}
+            Live stream off: the Until bound closes the window, so no new row can land in it. Clear Until to follow the log.
           {:else}
             Live stream down: {liveState.reason}. Re-reading the tail every 5 s.
           {/if}
@@ -628,10 +655,17 @@
                 <td class="mono">{actorOf(row.payload) ?? '—'}</td>
               </tr>
               {#if isOpen}
+                {@const packet = packetOf(row.kind, row.payload)}
                 <tr class="events-payload-row">
                   <td colspan="4">
                     <pre class="events-payload">{JSON.stringify(row.payload, null, 2)}</pre>
                     <div class="events-event-id">event_id: <code>{row.event_id}</code></div>
+                    <!-- The packet this row belongs to, one click away
+                         rather than an id to copy out of the JSON
+                         (62a0bbee). auditRetro.ts says which key. -->
+                    {#if packet}
+                      <div class="events-packet">packet: <a href="/jobs/{packet}">{packet}</a></div>
+                    {/if}
                     <!--
                       Event-attached files render inline next to the
                       event that produced them. Per design Q6 events
@@ -805,10 +839,14 @@
     padding-top: 12px;
     border-top: 1px dashed var(--border);
   }
-  .events-event-id {
+  .events-event-id,
+  .events-packet {
     padding: 4px 16px 10px;
     font-size: 11px;
     color: var(--static);
+  }
+  .events-packet a {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
 
   .events-stats-note { margin: 0; opacity: 0.8; }

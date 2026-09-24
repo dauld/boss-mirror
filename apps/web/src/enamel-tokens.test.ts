@@ -99,6 +99,8 @@ describe('the Enamel tokens are the decided values', () => {
     ['--border-strong', '#0E1B2E'], // rule-strong: frames are ink
     ['--signal', '#0F6E9F'], // action and progress
     ['--focus', '#D9A400'], // the one amber outside a state
+    ['--halo', 'rgba(217, 164, 0, 0.35)'], // a focused field's amber halo
+    ['--troubled-ink', '#9B1C2C'], // troubled as words: a field's error line
     ['--band', '#0E1B2E'], // enamel bands: headers, table heads
     ['--on-band', '#FFFFFF'],
     ['--clear', '#0B6B4F'],
@@ -178,6 +180,7 @@ describe('every word the palette carries is legible (AA, 4.5:1)', () => {
     ['--warn', '--void'],
     ['--err', '--void'],
     ['--err', '--ink-raised'],
+    ['--troubled-ink', '--void'],
     // a primary button, a nav badge: white on the action blue
     ['--void', '--signal'],
     ['--on-band', '--band'],
@@ -448,5 +451,182 @@ describe('the button is Enamel’s', () => {
       ),
     );
     expect(naming.sort()).toEqual(LEFT);
+  });
+});
+
+/** Every .svelte file under apps/web/src and web-kit, as [path, source]. */
+const svelteFiles: ReadonlyArray<readonly [string, string]> = (() => {
+  const glob = new Bun.Glob('**/*.svelte');
+  const roots: ReadonlyArray<readonly [string, string]> = [
+    ['', import.meta.dir],
+    ['web-kit/', join(import.meta.dir, '../../../libs/web-kit/src')],
+  ];
+  return roots.flatMap(([prefix, root]) =>
+    [...glob.scanSync(root)].map(
+      (file) => [`${prefix}${file}`, readFileSync(join(root, file), 'utf8')] as const,
+    ),
+  );
+})();
+
+/** A text-entry control, with zero specificity: every input a person types
+ *  into, and no box that is ticked, slid, picked or pressed. */
+const TEXT_ENTRY =
+  ':where(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]):not([type="hidden"]):not([type="button"]):not([type="submit"]):not([type="reset"]):not([type="image"]))';
+
+/** A selector that styles a field: an input, a select or a textarea, by
+ *  element or by a class named for one. Ticks and radios are not fields. */
+const FIELD_SELECTOR = /(?:^|[\s>+~(])(?:input|select|textarea)\b|-(?:input|select|textarea|search)\b/;
+const isFieldSelector = (sel: string): boolean =>
+  FIELD_SELECTOR.test(sel) && !/checkbox|radio/.test(sel);
+
+/** Enamel's field (backlog 6f471ff6, car 2). The round-2 board's `.field`
+ *  under `.t-enamel`: 14px words, padding 9px 12px, in a 2px night-ink frame
+ *  squared to 3px; focus turns the frame the action blue inside a 3px amber
+ *  halo; an invalid field's frame turns troubled, and its error line is
+ *  12.5px, 600, in troubled ink. Before this car there was no shared field
+ *  rule: 42 rules drew fields in 1px hairlines, five of them with a blue
+ *  focus outline, and aria-invalid appeared nowhere among 157 fields. */
+describe('the field is Enamel’s', () => {
+  it('frames every text-entry control the page does not style itself', () => {
+    expect(decl(TEXT_ENTRY, 'border')).toBe('var(--frame) solid var(--border-strong)');
+    expect(decl(TEXT_ENTRY, 'border-radius')).toBe('var(--radius-field)');
+    expect(decl(TEXT_ENTRY, 'padding')).toBe('9px 12px');
+    expect(decl(TEXT_ENTRY, 'font-size')).toBe('14px');
+    expect(decl(TEXT_ENTRY, 'font-family')).toBe('inherit');
+    expect(decl(TEXT_ENTRY, 'color')).toBe('var(--text)');
+    expect(decl(TEXT_ENTRY, 'background')).toBe('var(--card)');
+  });
+
+  it('is the same rule for a select and a textarea', () => {
+    expect(rules.get(':where(select)')).toEqual(rules.get(TEXT_ENTRY));
+    expect(rules.get(':where(textarea)')).toEqual(rules.get(TEXT_ENTRY));
+  });
+
+  it('focuses in the action blue inside an amber halo, not a blue outline', () => {
+    for (const sel of [TEXT_ENTRY, ':where(select)', ':where(textarea)']) {
+      expect(decl(`${sel}:focus`, 'outline')).toBe('none');
+      expect(decl(`${sel}:focus`, 'border-color')).toBe('var(--accent)');
+      expect(decl(`${sel}:focus`, 'box-shadow')).toBe('0 0 0 3px var(--halo)');
+    }
+  });
+
+  it('reads invalid off aria-invalid, so the look and the announcement cannot disagree', () => {
+    for (const sel of [TEXT_ENTRY, ':where(select)', ':where(textarea)']) {
+      expect(decl(`${sel}[aria-invalid="true"]`, 'border-color')).toBe('var(--troubled)');
+    }
+    expect([...rules.keys()].filter((s) => /\.invalid\b/.test(s))).toEqual([]);
+  });
+
+  it('sets the error line in troubled ink, 12.5px, 600', () => {
+    expect(decl('.field-error', 'color')).toBe('var(--troubled-ink)');
+    expect(decl('.field-error', 'font-size')).toBe('12.5px');
+    expect(decl('.field-error', 'font-weight')).toBe('600');
+  });
+
+  it('labels a step’s field in 13.5px, 700, night ink', () => {
+    expect(decl('.step-field label', 'font-size')).toBe('13.5px');
+    expect(decl('.step-field label', 'font-weight')).toBe('700');
+    expect(decl('.step-field label', 'color')).toBe('var(--text)');
+  });
+
+  it('no shared rule in styles.css draws a field in its own frame or outline', () => {
+    // Printing strips a date field to its words; that is not a look.
+    const LEFT = ['body.boss-printing .finance-print-area input[type="date"]'];
+    const drawing = [...rules]
+      .filter(([sel]) => isFieldSelector(sel) && !sel.startsWith(':where('))
+      .filter(([, d]) => ['border', 'border-radius', 'outline'].some((p) => d.has(p)))
+      .map(([sel]) => sel);
+    expect(drawing).toEqual(LEFT);
+  });
+
+  it('the components still drawing their own field frame are only these', () => {
+    // A ratchet, not a destination: each is a page's scoped rule, left for
+    // the next car so this one migrates the shared field and stays small.
+    // Two web-kit controls keep their own: GlobalSearch is a white field let
+    // into the band (7eb59678 car 2), and FeedbackControl also renders in
+    // the simulator, which does not load this stylesheet until it wears
+    // Enamel itself (c6db2cfb) — without its own rule it would fall to the
+    // browser's field there.
+    const LEFT = [
+      'auth/AuthAdminPage.svelte',
+      'auth/LoginPage.svelte',
+      'dispatcher/DispatcherCascadePage.svelte',
+      'finance/MonthlyClosePackageButton.svelte',
+      'it/monitoring/EventsPage.svelte',
+      'jobs/JobsListPage.svelte',
+      'jobs/TriageBoard.svelte',
+      'kb/WorkflowsPage.svelte',
+      'landing/SystemModelLiveView.svelte',
+      'steps/ProductionConsumeSurface.svelte',
+      'steps/ReceivingSurface.svelte',
+      'web-kit/FeedbackControl.svelte',
+      'web-kit/GlobalSearch.svelte',
+      'workflows/StepInspector.svelte',
+    ];
+    const drawing = svelteFiles
+      .filter(([, src]) => {
+        const css = (src.match(/<style[^>]*>([\s\S]*?)<\/style>/)?.[1] ?? '').replace(
+          /\/\*[\s\S]*?\*\//g,
+          '',
+        );
+        return [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].some(
+          (m) =>
+            (m[1] ?? '').split(',').some((s) => isFieldSelector(s.trim())) &&
+            /(?:^|[;\s])border(?:-width)?\s*:\s*(?!none|0\b)/.test(m[2] ?? ''),
+        );
+      })
+      .map(([file]) => file);
+    expect(drawing.sort()).toEqual(LEFT);
+  });
+
+  it('the one form that validates a field as it is typed wires aria-invalid to its error', () => {
+    const editor = svelteFiles.find(([f]) => f === 'workflows/StepDagEditor.svelte')?.[1] ?? '';
+    expect(editor).toMatch(/aria-invalid=\{metaError\[idx\] \? 'true' : undefined\}/);
+    expect(editor).toMatch(/aria-describedby=\{metaError\[idx\] \? `sde-meta-err-\$\{idx\}` : undefined\}/);
+    expect(editor).toMatch(/<span class="field-error" id=\{`sde-meta-err-\$\{idx\}`\}>/);
+  });
+});
+
+/** Enamel's filter chip (backlog 6f471ff6, car 2): the round-2 board's
+ *  `.chip` under `.t-enamel` — 12.5px, padding 5px 12px, squared to 3px, in
+ *  a 2px ink frame; the pressed chip is solid ink under white words, and it
+ *  is pressed by `aria-pressed`, so a chip cannot look chosen without
+ *  saying so. Before this car FilterButton — on 16 pages — was a frameless
+ *  word on a 4% wash when active, with no aria-pressed anywhere outside IT. */
+describe('the filter chip is Enamel’s', () => {
+  it('is 12.5px in a 2px ink frame squared to 3px', () => {
+    expect(decl('.filter-btn', 'font-size')).toBe('12.5px');
+    expect(decl('.filter-btn', 'padding')).toBe('5px 12px');
+    expect(decl('.filter-btn', 'border')).toBe('var(--frame) solid var(--border-strong)');
+    expect(decl('.filter-btn', 'border-radius')).toBe('var(--radius-field)');
+    expect(decl('.filter-btn', 'background')).toBe('var(--card)');
+    expect(decl('.filter-btn', 'color')).toBe('var(--text)');
+  });
+
+  it('is pressed in solid ink under white words, read off aria-pressed', () => {
+    const pressed = '.filter-btn[aria-pressed="true"]';
+    expect(decl(pressed, 'background')).toBe('var(--fog)');
+    expect(decl(pressed, 'color')).toBe('var(--void)');
+    expect(decl(pressed, 'border-color')).toBe('var(--fog)');
+    expect(decl(pressed, 'font-weight')).toBe('700');
+    // the -active class is a test hook now, never a second look
+    expect(rules.has('.filter-btn-active')).toBe(false);
+  });
+
+  it('.filter-button is the same chip', () => {
+    expect(rules.get('.filter-button')).toEqual(rules.get('.filter-btn'));
+    expect(rules.get('.filter-button[aria-pressed="true"]')).toEqual(
+      rules.get('.filter-btn[aria-pressed="true"]'),
+    );
+  });
+
+  it('every filter chip a component draws says whether it is pressed', () => {
+    const silent = svelteFiles.flatMap(([file, src]) =>
+      [...src.matchAll(/<button\b[^>]*>/g)]
+        .map((m) => m[0])
+        .filter((tag) => /\bfilter-(?:btn|button)\b/.test(tag) && !/aria-pressed=/.test(tag))
+        .map(() => file),
+    );
+    expect(silent).toEqual([]);
   });
 });

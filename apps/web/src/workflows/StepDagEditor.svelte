@@ -305,14 +305,19 @@
               metadata_defaults
               <span class="sde-field-hint">raw JSON object seeded onto every instance of this step</span>
             </span>
+            <!-- An edit that is not a JSON object is refused here, so the
+                 field says it is invalid and names its error line
+                 (Enamel's invalid field, backlog 6f471ff6 car 2). -->
             <textarea
               rows="3"
               value={metaValue(idx, step)}
               oninput={(e) => onMetaInput(idx, (e.target as HTMLTextAreaElement).value)}
               class="mono sde-meta"
+              aria-invalid={metaError[idx] ? 'true' : undefined}
+              aria-describedby={metaError[idx] ? `sde-meta-err-${idx}` : undefined}
             ></textarea>
             {#if metaError[idx]}
-              <span class="sde-meta-error">{metaError[idx]}</span>
+              <span class="field-error" id={`sde-meta-err-${idx}`}>{metaError[idx]}</span>
             {/if}
           </label>
         </div>
@@ -451,13 +456,10 @@
     font-weight: 400;
     margin-left: 4px;
   }
+  /* The control itself is Enamel's field (styles.css); this only sizes it. */
   .sde-field input,
   .sde-field select,
   .sde-field textarea {
-    padding: 5px 7px;
-    font-size: 13px;
-    border: 1px solid var(--hairline);
-    border-radius: 5px;
     width: 100%;
     box-sizing: border-box;
   }
@@ -480,10 +482,6 @@
     font-size: 12px;
     line-height: 1.4;
     resize: vertical;
-  }
-  .sde-meta-error {
-    color: var(--err);
-    font-size: 11px;
   }
   .sde-warn {
     color: var(--warn);

@@ -10,6 +10,7 @@
   // A View holds a query and a layout, never rows. Its content comes
   // from the same projections every other surface reads, which is why
   // two people running the same View see the same numbers.
+  import FilterButton from '@boss/web-kit/ui/FilterButton.svelte';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import Section from '@boss/web-kit/ui/Section.svelte';
   import { session } from '@boss/web-kit/session/session.svelte';
@@ -201,14 +202,9 @@
       <span>Columns <em>none selected shows everything</em></span>
       <div class="v-chips">
         {#each availableFields as f (f)}
-          <button
-            type="button"
-            class="v-chip"
-            class:v-chip-on={draftColumns.includes(f)}
-            onclick={() => toggleColumn(f)}
-          >
+          <FilterButton active={draftColumns.includes(f)} onclick={() => toggleColumn(f)}>
             {f}
-          </button>
+          </FilterButton>
         {/each}
       </div>
     </div>
@@ -355,13 +351,6 @@
     font-style: normal;
     color: var(--static);
   }
-  .v-field input,
-  .v-field select {
-    padding: 6px;
-    font-size: 13px;
-    font: inherit;
-    font-size: 13px;
-  }
   .mono {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
@@ -369,19 +358,6 @@
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-  }
-  .v-chip {
-    border: 1px solid var(--border);
-    background: var(--card);
-    border-radius: 999px;
-    padding: 3px 10px;
-    font-size: 12px;
-    cursor: pointer;
-  }
-  .v-chip-on {
-    background: var(--band);
-    color: var(--on-band);
-    border-color: var(--border-strong);
   }
   .v-actions {
     grid-column: 1 / -1;

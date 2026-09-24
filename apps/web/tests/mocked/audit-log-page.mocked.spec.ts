@@ -51,14 +51,16 @@ const FILES = /\/api\/files\?/;
 
 /// Three rows in the shape /api/events/tail returns: every payload
 /// carries `_actor`, `_partition`, `_simulated` (3 of 3 live rows, the
-/// audit's needs_md), and a jobs.* payload carries the packet `id`.
+/// audit's needs_md), and a jobs.step.* payload carries its packet as
+/// `job_id` beside the step's own `id` — the shape boss-jobs writes
+/// (events.rs, step_state_payload).
 const ROWS = [
   {
     event_id: 'ev-3',
     timestamp: '2026-09-23T21:44:03.250Z',
     source: 'jobs',
     kind: 'jobs.step.updated',
-    payload: { id: 'job-1', _actor: 'agent-claude', _partition: 'jobs', _simulated: false },
+    payload: { id: 'step-1', step_id: 'step-1', job_id: 'job-1', _actor: 'agent-claude', _partition: 'jobs', _simulated: false },
   },
   {
     event_id: 'ev-2',
@@ -338,9 +340,8 @@ test.describe('/it/operate/audit — the stream (GET /api/events/tail)', () => {
     await expect(lim.locator('option')).toHaveText(['50', '100', '200', '500']);
     await lim.selectOption('500');
     await expect.poll(() => param(last(seen.tail), 'limit')).toBe('500');
-    // Gap 62a0bbee: 500 is the widest view; there is no since/until
-    // control on the page.
-    await expect(page.locator('.events-filters input[type="date"]')).toHaveCount(0);
+    // 500 rows is no longer the furthest the page reads: the Since and
+    // Until window is pinned in "a Since / Until window ..." (62a0bbee).
   });
 
   test('a row opens its payload, event id and attachments on click, and closes on a second click', async ({ page }) => {
@@ -358,9 +359,12 @@ test.describe('/it/operate/audit — the stream (GET /api/events/tail)', () => {
     // canEdit=false: no upload surface, no Detach button.
     await expect(open.locator('.files-drop')).toHaveCount(0);
     await expect(open.locator('.files-delete')).toHaveCount(0);
-    // Gap 62a0bbee: a jobs.* row carries its packet id and does not
-    // link to it.
-    await expect(open.locator('a[href*="/jobs/job-1"]')).toHaveCount(0);
+    // Backlog 62a0bbee: a row that belongs to a packet links to it —
+    // the step event's `job_id`, never the step's own `id`.
+    const packet = open.locator('.events-packet a');
+    await expect(packet).toHaveAttribute('href', '/jobs/job-1');
+    await expect(packet).toHaveText('job-1');
+    await expect(open.locator('a[href="/jobs/step-1"]')).toHaveCount(0);
     await row.click();
     await expect(page.locator('.events-payload-row')).toHaveCount(0);
     // Gap 91b41817: the toggle is a bare <tr onclick> — no tabindex and
@@ -381,6 +385,64 @@ test.describe('/it/operate/audit — the stream (GET /api/events/tail)', () => {
     await expect(page.locator(`.files-error${FAILURE_MARKER}`)).toHaveCount(0);
     await stream(page).nth(1).click();
     await expect(page.getByText("File attachments aren't enabled in this deployment", { exact: false })).toBeVisible();
+  });
+
+  test('a row that belongs to no packet opens with no packet link (62a0bbee)', async ({ page }) => {
+    await installAuditReads(page);
+    await mountPage(page, PATH, { titleMatch: /Audit Log/ });
+    // The dispatcher row's payload carries `rule`, no `job_id`.
+    await stream(page).nth(1).click();
+    const open = page.locator('.events-payload-row');
+    await expect(open.locator('.events-event-id')).toHaveText('event_id: ev-2');
+    await expect(open.locator('.events-packet')).toHaveCount(0);
+  });
+
+  test('a Since / Until window reads any stretch of the log, and an Until stops the live stream (62a0bbee)', async ({ page }) => {
+    // 500 rows was the widest view — about ten minutes of log — so a
+    // retro or an incident could read no further back without the
+    // export. The tail has always taken `since` (inclusive) and `until`
+    // (exclusive); the page now sends them.
+    await installAuditReads(page);
+    const seen = watch(page);
+    await mountPage(page, PATH, { titleMatch: /Audit Log/ });
+    await expect(stream(page)).toHaveCount(3);
+    await expect.poll(() => seen.stream.length).toBe(1);
+    expect(param(last(seen.tail), 'since')).toBeNull();
+    expect(param(last(seen.tail), 'until')).toBeNull();
+
+    // The inputs hold the browser's zone, the zone the rows are painted
+    // in; the read carries the UTC instant.
+    const inUtc = (local: string) => page.evaluate((v) => new Date(v).toISOString(), local);
+    const since = page.getByLabel('Since');
+    await expect(since).toHaveAttribute('type', 'datetime-local');
+    await since.fill('2026-09-20T08:00');
+    const sinceUtc = await inUtc('2026-09-20T08:00');
+    await expect.poll(() => param(last(seen.tail), 'since')).toBe(sinceUtc);
+    expect(param(last(seen.tail), 'until')).toBeNull();
+    // A Since alone leaves the window open at the top: new rows still
+    // land inside it, so the stream reopens with the read.
+    await expect.poll(() => seen.stream.length).toBeGreaterThan(1);
+
+    const streams = seen.stream.length;
+    await page.getByLabel('Until').fill('2026-09-20T09:30');
+    const untilUtc = await inUtc('2026-09-20T09:30');
+    await expect.poll(() => param(last(seen.tail), 'until')).toBe(untilUtc);
+    expect(param(last(seen.tail), 'since')).toBe(sinceUtc);
+    // An Until closes the window: no row landing now can fall inside
+    // it, so no stream is opened and the line says why.
+    await expect(liveLine(page)).toHaveText(
+      'Live stream off: the Until bound closes the window, so no new row can land in it. Clear Until to follow the log.',
+    );
+    await page.waitForTimeout(500);
+    expect(seen.stream.length).toBe(streams);
+    await expect(page.getByLabel('Live (SSE)')).toBeChecked();
+
+    // Clearing both bounds is the unbounded tail again, streaming.
+    await page.getByLabel('Until').fill('');
+    await since.fill('');
+    await expect.poll(() => param(last(seen.tail), 'since')).toBeNull();
+    expect(param(last(seen.tail), 'until')).toBeNull();
+    expect(seen.stream.length).toBeGreaterThan(streams);
   });
 });
 

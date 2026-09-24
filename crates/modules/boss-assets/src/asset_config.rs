@@ -28,11 +28,12 @@ pub struct AssetsApiConfig {
     /// log. Required: the startup-time validate() rejects an empty
     /// value rather than silently no-op'ing the check.
     pub classes_api_url: String,
-    /// Base URLs for the device-insights projection fan-out. All
-    /// three must be configured for `/api/assets/{asset_id}/insights`
-    /// to respond; otherwise the route returns 503.
+    /// Base URLs for the device-insights projection fan-out. Both
+    /// must be configured for `/api/assets/{asset_id}/insights` to
+    /// respond; otherwise the route returns 503. A third, the jobs
+    /// API, fed the service-history section and left with it
+    /// (backlog a8991c86, car 3).
     pub catalog_api_url: String,
-    pub jobs_api_url: String,
     pub inventory_api_url: String,
 }
 
@@ -69,7 +70,6 @@ impl Validate for AssetsApiConfig {
         }
         for (name, val) in [
             ("catalog_api_url", &self.catalog_api_url),
-            ("jobs_api_url", &self.jobs_api_url),
             ("inventory_api_url", &self.inventory_api_url),
         ] {
             if val.is_empty() {
@@ -85,6 +85,10 @@ mod tests {
     use super::*;
     use boss_testing::{scratch_dir, scratch_path, write_file};
 
+    /// No `jobs_api_url`: the insights fan-out asked the jobs API only
+    /// for prior `field-service` Jobs, the device-shop example's
+    /// protocol, retired with its service-history section (backlog
+    /// a8991c86, car 3), so the assets API no longer talks to jobs.
     #[test]
     fn loads_valid_toml() {
         let path = scratch_dir("boss-assets-config-valid").join("valid.toml");
@@ -95,7 +99,6 @@ http_bind = "0.0.0.0:7600"
 people_api_url = "http://127.0.0.1:7500"
 classes_api_url = "http://127.0.0.1:7800"
 catalog_api_url = "http://127.0.0.1:7750"
-jobs_api_url = "http://127.0.0.1:7900"
 inventory_api_url = "http://127.0.0.1:7300"
 "#,
         );
@@ -134,7 +137,6 @@ people_api_url = "http://127.0.0.1:7500"
 http_bind = "0.0.0.0:7600"
 people_api_url = "http://127.0.0.1:7500"
 catalog_api_url = "http://127.0.0.1:7750"
-jobs_api_url = "http://127.0.0.1:7900"
 inventory_api_url = "http://127.0.0.1:7300"
 "#,
         );

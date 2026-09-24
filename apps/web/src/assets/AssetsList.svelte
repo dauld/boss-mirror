@@ -137,6 +137,7 @@
         <button
           type="button"
           class="filter-button {phaseFilter === 'all' ? 'filter-button-active' : ''}"
+          aria-pressed={phaseFilter === 'all'}
           onclick={() => (phaseFilter = 'all')}
         >
           All ({totalDevices.toLocaleString()})
@@ -147,6 +148,7 @@
             <button
               type="button"
               class="filter-button {phaseFilter === phase ? 'filter-button-active' : ''}"
+              aria-pressed={phaseFilter === phase}
               onclick={() => (phaseFilter = phase)}
             >
               {PHASE_LABEL[phase]} ({count.toLocaleString()})

@@ -133,7 +133,6 @@ http_bind = "0.0.0.0:$(p assets)"
 nats_url = "$NATS_URL"
 people_api_url = "http://127.0.0.1:$(p people)"
 catalog_api_url = "http://127.0.0.1:$(p catalog)"
-jobs_api_url = "http://127.0.0.1:$(p jobs)"
 inventory_api_url = "http://127.0.0.1:$(p inventory)"
 classes_api_url = "http://127.0.0.1:$(p classes)"
 EOF
