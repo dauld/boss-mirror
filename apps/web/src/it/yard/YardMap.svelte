@@ -13,10 +13,26 @@
   // Every machine and every token is a button: clicking (or Enter /
   // Space on) any of them selects it, and the page's entity panel shows
   // its facts and the verbs that apply. The map draws; it never decides.
+  //
+  // WHERE things stand is not decided here either (design fe77a1d2, car
+  // 1): floor-slices.ts lays the floor out one region at a time, and
+  // this map draws the union of the six slices over scenery hung off
+  // the same frame.
   import { fade } from 'svelte/transition';
-  import { ARRIVALS_DRAWN, STAGES, drawnWagons, type Bay, type Loco, type Scene, type Wagon } from './yard-floor';
+  import { ARRIVALS_DRAWN, STAGES, type Bay, type Scene } from './yard-floor';
   import { DELIVERY_CHANNELS, type DeliveryChannel } from './yard';
   import { clusterLabel, runnerLabel, runnerProgress } from './yard-machines';
+  import {
+    LANE_ROW_H,
+    QUEUE_ROW_H,
+    STAGE_X,
+    VIEW_W,
+    WAGON_W,
+    bayY,
+    floorPlan,
+    queueY as queueRowY,
+    sidingY as sidingRowY,
+  } from './floor-slices';
 
   type Props = Readonly<{
     scene: Scene;
@@ -26,75 +42,29 @@
   }>;
   let { scene, selected, onselect }: Props = $props();
 
-  // ---- layout: everything hangs off the mainline's y, which drops
-  // when the policy allows more than three bays. ----
-  const BAY_H = 52;
-  /** A wagon body is WAGON_W wide (an eleven-character nameplate at 9px
-   *  mono fits), and slots step WAGON_STEP so neighbours never cover it. */
-  const WAGON_W = 70;
-  const WAGON_STEP = 74;
-  const VIEW_W = 1240;
-  const STAGE_X: readonly number[] = [620, 700, 780, 860, 940, 1000, 1056];
-  const bayY = (i: number): number => 70 + i * BAY_H;
+  // ---- layout: the frame and the six slices (floor-slices.ts). The
+  // names below are the ones the scenery has always read, now read off
+  // the frame rather than computed here. ----
+  const plan = $derived(floorPlan(scene));
+  const gates = $derived(plan.slices.gates);
+  const track = $derived(plan.slices.track);
   const nBays = $derived(scene.bays.length);
-  // The QUEUE LANE — a holding siding between the mainline and the gate
-  // branch, drawn only when something waits. Runs stand in it in their
-  // place in line, four to a row, and the mainline drops to make room:
-  // the yard grows a lane rather than hiding one.
-  const QUEUE_PER_ROW = 4;
-  const QUEUE_ROW_H = 34;
-  const queued = $derived(scene.wagons.filter(w => w.station === 'gate-queue'));
-  const queueRows = $derived(Math.ceil(queued.length / QUEUE_PER_ROW));
+  const queueRows = $derived(plan.frame.queueRows);
   const queueRowIndexes = $derived(Array.from({ length: queueRows }, (_, i) => i));
-  const queueTop = $derived(70 + nBays * BAY_H + 8);
-  const queueY = (row: number): number => queueTop + row * QUEUE_ROW_H;
-  const mainY = $derived(
-    Math.max(250, 70 + nBays * BAY_H + 24 + (queueRows > 0 ? queueRows * QUEUE_ROW_H + 12 : 0)),
-  );
-  // THE ARRIVALS SIDINGS (design c6bd173e, car 1): four rows off one
-  // ladder down the left, one per delivery channel in DELIVERY_CHANNELS
-  // order — data, config, software, infra — then the cancelled siding a
-  // step apart, and the inspection band under them. A siding is ONE row
-  // of up to ARRIVALS_DRAWN wagons at the inspection lanes' columns,
-  // with its own "+N" plate at the row's end: a full software siding
-  // hides no data wagon. The single stack that stood here grew two
-  // columns downward (2026-09-08); four labelled rows across the same
-  // width stay readable at 1280 px.
-  const SIDING_ROW_H = 38;
-  /** Below the mainline's own sign ("The track · …" at mainY + 32). */
-  const SIDING_TOP = 60;
-  const sidingY = (i: number): number => mainY + SIDING_TOP + i * SIDING_ROW_H;
-  const sidingIndex = (ch: DeliveryChannel | undefined): number =>
-    Math.max(0, DELIVERY_CHANNELS.indexOf(ch ?? 'software'));
-  const cancelledY = $derived(sidingY(DELIVERY_CHANNELS.length) + 10);
-  const drawn = $derived(drawnWagons(scene.wagons));
+  const queueTop = $derived(plan.frame.queueTop);
+  const queueY = (row: number): number => queueRowY(plan.frame, row);
+  const mainY = $derived(plan.frame.mainY);
+  const sidingY = (i: number): number => sidingRowY(plan.frame, i);
+  const cancelledY = $derived(plan.frame.cancelledY);
   const onSiding = (ch: DeliveryChannel) => scene.wagons.filter(w => w.station === 'arrivals' && w.siding === ch);
   /** How many landed wagons the siding's plate stands for. */
   const sidingHidden = (ch: DeliveryChannel): number => Math.max(0, onSiding(ch).length - ARRIVALS_DRAWN);
-  // THE INSPECTION SHED AND ITS TWO SIDINGS — the band under the
-  // arrivals ladder. Three lanes, each as tall as it needs
-  // to be: the yard GROWS a lane rather than hiding wagons, the way the
-  // gate queue does, so nothing here is ever capped or counted away.
-  const LANE_COLS = 8;
-  const LANE_ROW_H = 34;
-  const LANE_X = 640;
-  const lane = (station: Wagon['station']) => scene.wagons.filter(w => w.station === station);
-  const inspecting = $derived(lane('inspection-shed'));
-  const onEvent = $derived(lane('siding-event'));
-  const noProbe = $derived(lane('siding-no-probe'));
-  const laneRows = (n: number): number => Math.max(1, Math.ceil(n / LANE_COLS));
-  // Below the cancelled siding's wheels, with room for the shed's sign —
-  // the band must not sit on another machine's click area.
-  const shedY = $derived(cancelledY + 44);
-  const eventY = $derived(shedY + laneRows(inspecting.length) * LANE_ROW_H + 22);
-  const noProbeY = $derived(eventY + laneRows(onEvent.length) * LANE_ROW_H + 20);
-  const laneBottom = $derived(noProbeY + laneRows(noProbe.length) * LANE_ROW_H + 8);
-  const laneXY = (top: number, slot: number): readonly [number, number] => [
-    LANE_X + (slot % LANE_COLS) * WAGON_STEP,
-    top + 14 + Math.floor(slot / LANE_COLS) * LANE_ROW_H,
-  ];
+  const shedY = $derived(plan.frame.shedY);
+  const eventY = $derived(plan.frame.eventY);
+  const noProbeY = $derived(plan.frame.noProbeY);
+  const laneBottom = $derived(plan.frame.laneBottom);
   const shed = $derived(scene.machines.inspection);
-  const height = $derived(Math.max(mainY + 150, laneBottom + 10));
+  const height = $derived(plan.frame.height);
   // The machines the page feeds from outside the yard status, and the
   // clock their elapsed readings run on (the scene's — the server's
   // when the status served).
@@ -106,48 +76,6 @@
   /** The shed is 130 wide; a long reason is cut on the map and whole in
    *  the aria-label and the entity panel. */
   const runnerShort = $derived(runnerText.length > 26 ? `${runnerText.slice(0, 25)}…` : runnerText);
-  const limboY = $derived((nBays > 0 ? bayY(nBays - 1) : 70) + 48);
-  const locoById = $derived(new Map(scene.locos.map(l => [l.id, l])));
-
-  function locoX(l: Loco): number {
-    const a = STAGE_X[l.stage] ?? STAGE_X[STAGE_X.length - 1] ?? 0;
-    const b = STAGE_X[l.stage + 1] ?? a;
-    return a + (b - a) * Math.max(0, Math.min(1, l.progress));
-  }
-
-  function wagonXY(w: Wagon): readonly [number, number] {
-    switch (w.station) {
-      case 'approach':
-        return [34 + w.slot * WAGON_STEP, mainY - 2];
-      case 'gate-queue':
-        return [
-          30 + (w.slot % QUEUE_PER_ROW) * WAGON_STEP,
-          queueY(Math.floor(w.slot / QUEUE_PER_ROW)),
-        ];
-      case 'gate':
-        return [240, bayY(w.slot) + 16];
-      case 'limbo':
-        return [380, limboY - w.slot * 24];
-      case 'dock':
-        return [412 + w.slot * WAGON_STEP, mainY - 2];
-      case 'garage':
-        return [436 + w.slot * WAGON_STEP, mainY + 68];
-      case 'train': {
-        const l = w.trainId ? locoById.get(w.trainId) : undefined;
-        return [(l ? locoX(l) : STAGE_X[0] ?? 0) - (WAGON_W + 6) - w.slot * WAGON_STEP, mainY - 2];
-      }
-      case 'arrivals':
-        return [LANE_X + w.slot * WAGON_STEP, sidingY(sidingIndex(w.siding))];
-      case 'cancelled':
-        return [LANE_X + w.slot * WAGON_STEP, cancelledY];
-      case 'inspection-shed':
-        return laneXY(shedY, w.slot);
-      case 'siding-event':
-        return laneXY(eventY, w.slot);
-      case 'siding-no-probe':
-        return laneXY(noProbeY, w.slot);
-    }
-  }
 
   function bayLabel(b: Bay): string {
     if (!b.busy || b.branch === null) return `bay ${b.index + 1} · idle`;
@@ -189,9 +117,9 @@
     <line x1="20" y1={mainY} x2={VIEW_W - 20} y2={mainY} class="tie" />
     <line x1="20" y1={mainY - 4} x2={VIEW_W - 20} y2={mainY - 4} class="rail" />
     <line x1="20" y1={mainY + 4} x2={VIEW_W - 20} y2={mainY + 4} class="rail" />
-    {#each scene.bays as b (b.index)}
+    {#each gates.bays as p (p.bay.index)}
       <path
-        d="M200 {mainY} C 215 {mainY}, 210 {bayY(b.index) + 18}, 228 {bayY(b.index) + 18} L 372 {bayY(b.index) + 18}"
+        d="M200 {mainY} C 215 {mainY}, 210 {p.y + 18}, 228 {p.y + 18} L 372 {p.y + 18}"
         class="rail" />
     {/each}
     <path d="M400 {mainY} C 420 {mainY}, 410 {mainY + 70}, 430 {mainY + 70} L 590 {mainY + 70}" class="rail" />
@@ -210,7 +138,8 @@
     <text x="620" y={mainY + 32}>The track · one train at a time</text>
 
     <!-- the gate sheds -->
-    {#each scene.bays as b (b.index)}
+    {#each gates.bays as p (p.bay.index)}
+      {@const b = p.bay}
       <g
         class="machine"
         class:selected={selected === `bay:${b.index}`}
@@ -221,22 +150,22 @@
         onkeydown={pickKey(`bay:${b.index}`)}>
         <rect
           x="226"
-          y={bayY(b.index) - 8}
+          y={p.y - 8}
           width="150"
           height="40"
           class="shed"
           class:busy={b.busy && !b.stale}
           class:warn={b.stale} />
-        <rect x="234" y={bayY(b.index) + 26} width="120" height="3" class="barbg" />
+        <rect x="234" y={p.y + 26} width="120" height="3" class="barbg" />
         <rect
           x="234"
-          y={bayY(b.index) + 26}
+          y={p.y + 26}
           width={Math.round(120 * b.progress)}
           height="3"
           class="barfill"
           class:warn={b.stale} />
-        <text x="360" y={bayY(b.index) + 8} class="gear" class:spin={b.busy}>✳</text>
-        <text x="234" y={bayY(b.index) - 12} class="tiny">{bayLabel(b)}</text>
+        <text x="360" y={p.y + 8} class="gear" class:spin={b.busy}>✳</text>
+        <text x="234" y={p.y - 12} class="tiny">{bayLabel(b)}</text>
       </g>
     {/each}
 
@@ -463,7 +392,7 @@
         x="620"
         y={shedY - 14}
         width={VIEW_W - 628}
-        height={laneRows(inspecting.length) * LANE_ROW_H + 6}
+        height={plan.frame.shedRows * LANE_ROW_H + 6}
         class="shed"
         class:busy={shed.inspecting > 0 && shed.failed === 0}
         class:err={shed.failed > 0} />
@@ -478,10 +407,13 @@
     </g>
 
     <!-- tokens: keyed by id, moved by transform, so a station change
-         slides the same node -->
+         slides the same node — including from one region's slice into
+         the next, since the plan's union keeps one node per wagon -->
     <g class="tokens">
-      {#each drawn.drawn as w (w.id)}
-        {@const [x, y] = wagonXY(w)}
+      {#each plan.wagons as p (p.wagon.id)}
+        {@const w = p.wagon}
+        {@const x = p.x}
+        {@const y = p.y}
         <g
           class="token wagon {w.tone}"
           class:landed={w.station === 'arrivals' || w.station === 'cancelled'}
@@ -510,12 +442,13 @@
           <text x="8" y="4">{w.tag}</text>
         </g>
       {/each}
-      {#each scene.locos as l (l.id)}
+      {#each track.locos as p (p.loco.id)}
+        {@const l = p.loco}
         <g
           class="token loco"
           class:blocked={l.blocked !== null}
           class:selected={selected === `train:${l.id}`}
-          style="transform: translate({locoX(l)}px, {mainY - 2}px)"
+          style="transform: translate({p.x}px, {p.y}px)"
           role="button"
           tabindex="0"
           aria-label="{l.title}{l.channel ? ` — ${l.channel} train` : ''}{l.blocked ? ` — ${l.blocked}` : ''}"

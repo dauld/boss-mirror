@@ -99,6 +99,10 @@ pub(super) struct MapRows {
     publish_packets: Option<Vec<(Job, Vec<Step>)>>,
     /// The bound those runs are read against, from the agents registry.
     run_capacity: Option<usize>,
+    /// THE DOCK'S ORDERING EDGES (backlog 4142d821): each predecessor a
+    /// parked car declares, read by id the way the conductor reads it —
+    /// found, absent, or unreadable, one reading per id.
+    predecessors: Vec<(String, crate::car::Predecessor)>,
 }
 
 impl MapRows {
@@ -124,6 +128,7 @@ impl MapRows {
             sessions: self.sessions.as_deref(),
             publish_packets: self.publish_packets.as_deref(),
             run_capacity: self.run_capacity,
+            predecessors: &self.predecessors,
             now,
             window_hours,
         }
@@ -163,6 +168,7 @@ pub(super) async fn read_map<R: JobsRepository + 'static, B: EventBus + 'static>
             sessions: Some(Vec::new()),
             publish_packets: Some(Vec::new()),
             run_capacity: None,
+            predecessors: Vec::new(),
         });
     }
     let scope = job_scope_from_predicate(user, &predicate);
@@ -264,6 +270,13 @@ pub(super) async fn read_map<R: JobsRepository + 'static, B: EventBus + 'static>
         };
         cars.push((job, steps));
     }
+
+    // THE DOCK'S ORDERING EDGES (backlog 4142d821, design cf820810 Q7):
+    // the predecessor each parked car declares, read by id — the question
+    // the conductor asks before it boards the car, asked here so the dock
+    // stops promising a train the conductor will refuse.
+    let predecessors =
+        read_predecessors(state, &regions::declared_edges(&read.status, &cars)).await;
 
     // Gate-runs: rows only. `opened_at`, `closed_at` and `outcome` are
     // on the metadata, which is all the duration and the reds need.
@@ -391,7 +404,41 @@ pub(super) async fn read_map<R: JobsRepository + 'static, B: EventBus + 'static>
         sessions,
         publish_packets,
         run_capacity,
+        predecessors,
     })
+}
+
+/// Each declared predecessor, read the way the conductor reads it
+/// (`edge_hold` in boss-cli's conductor): a row that came back is
+/// `Found` with its steps, a row the store does not hold is `Absent`,
+/// and every failure is `Unreadable` — which the dock, like the
+/// conductor, counts as boardable and SAYS it could not judge. One
+/// failed read therefore never fails the map, and never reads as "no
+/// such car" either.
+async fn read_predecessors<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &Arc<JobsApiState<R, B>>,
+    ids: &[String],
+) -> Vec<(String, crate::car::Predecessor)> {
+    use crate::car::Predecessor;
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let reading = match parse_job_id(id) {
+            // The edge is ref-checked and prefix-normalised at the write,
+            // so a stored value that is not an id is a malformed stamp —
+            // not an answer about any Job.
+            None => Predecessor::Unreadable(format!("'{id}' is not a job id")),
+            Some(job_id) => match state.jobs.get_job(&job_id).await {
+                Ok(None) => Predecessor::Absent,
+                Err(e) => Predecessor::Unreadable(e.to_string()),
+                Ok(Some(job)) => match state.jobs.list_steps(&job.id).await {
+                    Ok(steps) => Predecessor::Found(regions::packet_value(&job, &steps)),
+                    Err(e) => Predecessor::Unreadable(e.to_string()),
+                },
+            },
+        };
+        out.push((id.clone(), reading));
+    }
+    out
 }
 
 /// How many publish packets the map reads. The cadence is daily, so

@@ -782,11 +782,13 @@ pub const NO_ITEM_REASON: &str = "no_item_reason";
 /// without anyone watching. `--hold` stays: a declared edge and a human
 /// brake are different tools (design doc 364f892e, backlog d3320278).
 ///
-/// The READ side is the conductor's — `boss train board` filters its
-/// candidates on it and names which of four situations holds when it
-/// refuses. The key lives here because the writers (`boss gate
-/// --park-after`, the auto-park handler) and that reader must not keep
-/// two spellings of one fact (CLAUDE.md §9a).
+/// Two READERS, one judgement: `boss train board` filters its candidates
+/// on it, and the dock region (`regions::dock_edges`) counts the cars it
+/// holds — both through [`boards_after_outcome`] below, which names which
+/// of four situations holds (backlog 4142d821). The key lives here
+/// because the writers (`boss gate --park-after`, the auto-park handler)
+/// and those readers must not keep two spellings of one fact (CLAUDE.md
+/// §9a).
 pub const BOARDS_AFTER: &str = "boards_after";
 
 /// The gate-run key `boss gate --park-after` stamps, which the auto-park
@@ -1291,6 +1293,212 @@ fn park_triage_evidence(car_id: &str, branch: &str) -> String {
          the car is filed rather than left un-triaged until the car merges \
          (backlog ca76d8f9, a29c3687)."
     )
+}
+
+// ---------------------------------------------------------------------------
+// THE DECLARED ORDERING EDGE, JUDGED — one answer for the conductor and the dock
+//
+// Moved here from `boss-cli/src/train/boarding.rs` (backlog 4142d821, design
+// cf820810 Q7). Until then only the conductor asked whether a parked car's
+// `boards_after` predecessor had landed, so the conductor refused the car
+// every 60 seconds while the dock region counted it as boardable and said
+// "the boarding depth is met, a train is due" — the sentence it says two
+// minutes after a healthy departure. Two readers of one edge must not keep
+// two answers to "can this car board" (CLAUDE.md §9a), so the judgement
+// lives in core beside the key it reads, and both take it from here.
+//
+// The words below are the conductor's own and are unchanged by the move:
+// four situations, told apart at a glance, because an operator reading them
+// is deciding whether the pipeline is stuck (d3320278):
+//
+//   still in flight  — nobody does anything; it departs on its own
+//   landed           — satisfied; the car boards (no refusal at all)
+//   abandoned        — a human must break the edge; it will never clear
+//   no such Job      — a human must fix the reference
+//
+// AND IT MUST NEVER FREEZE A LANDING: an edge that cannot be READ boards the
+// car and says why (`BoardUnjudged`). The edge exists to stop a known
+// collision, not to become a new way for the pipeline to stop.
+// ---------------------------------------------------------------------------
+
+/// The structured marker a boarding-edge hold leaves on its `left_behind`
+/// entry, so the window's own refusal line is composed from DATA and not
+/// from sniffing the reason string back apart.
+pub const EDGE_HOLD: &str = "edge_hold";
+/// The predecessor is still in flight — self-clearing, no action.
+pub const EDGE_HOLD_WAITING: &str = "waiting";
+/// The edge can never be satisfied as declared — a person must act.
+pub const EDGE_HOLD_NEEDS_HUMAN: &str = "needs_human";
+
+/// What a reader managed to learn about a car's declared predecessor.
+/// `Unreadable` is a first-class answer, not an error: "I could not ask"
+/// must be distinguishable from "it is not there".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Predecessor {
+    /// The Job came back — as the jobs API serves it, with its `steps` —
+    /// judged by this file's own predicates so no reader can disagree with
+    /// the rest of the system about what "landed" means.
+    Found(Value),
+    /// The jobs API answered that there is no such Job.
+    Absent,
+    /// The read itself failed — a blip, an outage, a malformed body.
+    Unreadable(String),
+}
+
+/// Why a car may not board on its declared edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EdgeHold {
+    /// The reason, journal and Job chip alike — ONE string, as every
+    /// other skip reason is.
+    pub reason: String,
+    /// `EDGE_HOLD_WAITING` or `EDGE_HOLD_NEEDS_HUMAN`.
+    pub kind: &'static str,
+    /// The predecessor as a reader names it — its branch and id8 where
+    /// the packet came back, the id8 alone where it did not. Structured
+    /// so the dock can say "waiting behind X" without parsing `reason`.
+    pub behind: String,
+}
+
+/// What boarding should do about a car's declared edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EdgeOutcome {
+    /// Board it: the edge is satisfied, or there is none.
+    Board,
+    /// Board it, and SAY why the edge could not be judged. Fail-open by
+    /// design — see the section comment.
+    BoardUnjudged(String),
+    /// Leave it behind, with the reason named on it.
+    Hold(EdgeHold),
+}
+
+/// The predecessor a car's METADATA declares, if it declares one. A blank
+/// value is no declaration — the metadata door deletes a null key but a
+/// `""` is a real stored value, and `jobs_clear_waiting` shows `""` is how
+/// an edge gets cleared in practice.
+pub fn boards_after_of(md: &Value) -> Option<String> {
+    md.get(BOARDS_AFTER)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// The predecessor a car (a whole packet) declared, if it declared one.
+pub fn declared_predecessor(car: &Value) -> Option<String> {
+    car.get("metadata").and_then(boards_after_of)
+}
+
+/// The first eight characters of an id — the spelling every journal,
+/// report and surface prints.
+fn id8(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+/// How to name a predecessor in a refusal an operator reads: its BRANCH
+/// where we have it, never a bare id (MEMORY: refer by protocol + title).
+/// The id8 rides along so the packet is still findable.
+fn predecessor_name(declared: &str, pred: Option<&Value>) -> String {
+    let branch = pred
+        .and_then(|p| p.pointer("/metadata/branch"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if branch.is_empty() {
+        format!("car {}", id8(declared))
+    } else {
+        format!("{branch} (car {})", id8(declared))
+    }
+}
+
+/// Where a live predecessor actually is, so "still in flight" names a
+/// place rather than asserting a mood. The three states are this file's
+/// (`is_boarded` / `is_parked` / `is_building`), in the order a car
+/// passes through them backwards.
+fn in_flight_at(pred: &Value) -> String {
+    if is_boarded(pred) {
+        let train = pred
+            .pointer("/metadata/train")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if train.is_empty() {
+            "aboard a train".to_string()
+        } else {
+            format!("aboard train {}", id8(train))
+        }
+    } else if is_parked(pred) {
+        "parked at the dock".to_string()
+    } else if is_building(pred) {
+        "still building".to_string()
+    } else {
+        "open".to_string()
+    }
+}
+
+/// How a spent predecessor ended, read off the packet rather than
+/// guessed, so the refusal says what the record says.
+fn spent_as(pred: &Value) -> String {
+    let status = pred
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("not open");
+    match pred.pointer("/metadata/outcome").and_then(Value::as_str) {
+        Some(o) if !o.is_empty() => format!("{status}, outcome '{o}'"),
+        _ => format!("{status}, no landing recorded"),
+    }
+}
+
+/// PURE: what boarding does about one car's declared edge.
+///
+/// The four situations, and the exact words each gets. They are written
+/// to be told apart at a glance by an operator scanning the journal:
+/// "STILL IN FLIGHT" carries "no action needed", and both unsatisfiable
+/// cases carry "a human must". That distinction is the feature — not the
+/// hold (David on d3320278: "the refusal's wording matters as much as its
+/// existence").
+pub fn boards_after_outcome(declared: &str, pred: &Predecessor) -> EdgeOutcome {
+    match pred {
+        // FAIL-OPEN, LOUDLY. A car that would have boarded yesterday must
+        // not be held because the system of record blipped while the
+        // conductor asked about its edge.
+        Predecessor::Unreadable(cause) => EdgeOutcome::BoardUnjudged(format!(
+            "boards after car {}, and that packet could not be read ({cause}) — boarding \
+             anyway: an unreadable edge is not evidence of a collision, and holding the \
+             dock on a read failure would stop every train",
+            id8(declared)
+        )),
+        Predecessor::Absent => EdgeOutcome::Hold(EdgeHold {
+            reason: format!(
+                "boards after car {}, which DOES NOT EXIST — a human must fix \
+                 metadata.{} on this car (the edge is ref-checked at the write, so this \
+                 id was stored before the edge was declared, or with ref-checking off)",
+                id8(declared),
+                BOARDS_AFTER
+            ),
+            kind: EDGE_HOLD_NEEDS_HUMAN,
+            behind: predecessor_name(declared, None),
+        }),
+        Predecessor::Found(p) if is_landed(p) => EdgeOutcome::Board,
+        Predecessor::Found(p) if is_open(p) => EdgeOutcome::Hold(EdgeHold {
+            reason: format!(
+                "boards after {}, which is STILL IN FLIGHT ({}) — no action needed; this \
+                 car boards on a later window once that one lands",
+                predecessor_name(declared, Some(p)),
+                in_flight_at(p)
+            ),
+            kind: EDGE_HOLD_WAITING,
+            behind: predecessor_name(declared, Some(p)),
+        }),
+        Predecessor::Found(p) => EdgeOutcome::Hold(EdgeHold {
+            reason: format!(
+                "boards after {}, which was ABANDONED ({}) — the edge can never be \
+                 satisfied; a human must clear metadata.{} on this car, or abandon it too",
+                predecessor_name(declared, Some(p)),
+                spent_as(p),
+                BOARDS_AFTER
+            ),
+            kind: EDGE_HOLD_NEEDS_HUMAN,
+            behind: predecessor_name(declared, Some(p)),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -2679,5 +2887,296 @@ mod waits_on_tests {
         assert_eq!(read(json!(0)).max_wait_hours, None);
         assert_eq!(read(json!(-5)).max_wait_hours, None);
         assert_eq!(read(json!("48")).max_wait_hours, None);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The declared ordering edge — the four refusals, and the fail-open.
+// ---------------------------------------------------------------------------
+
+/// WHAT AN OPERATOR DEPENDS ON HERE IS THE WORDING, so the wording is
+/// what these assert. David on d3320278: *"the refusal's wording matters
+/// as much as its existence: the dock's no-departure line is read by an
+/// operator deciding whether the pipeline is stuck, so 'held: boards
+/// after <car>, which is abandoned' has to be distinguishable from
+/// 'held: boards after <car>, still in flight' — the first needs a
+/// human, the second does not."*
+///
+/// A test that only checked "it held" would let the four collapse into
+/// one message a release later, which is the quiet hold the feature
+/// exists to remove.
+///
+/// Moved from `boss-cli/src/train/boarding.rs` with the function they
+/// pin (backlog 4142d821): the words are unchanged, and so are these.
+#[cfg(test)]
+mod boards_after_tests {
+    use super::{
+        EDGE_HOLD_NEEDS_HUMAN, EDGE_HOLD_WAITING, EdgeOutcome, Predecessor, boards_after_of,
+        boards_after_outcome, declared_predecessor,
+    };
+    use serde_json::{Value, json};
+
+    const PRED: &str = "bbbbbbbb-1111-2222-3333-444444444444";
+
+    /// A predecessor packet: open, with a branch, and whatever extra
+    /// metadata / steps the situation needs.
+    fn pred(status: &str, md: Value, steps: Value) -> Value {
+        let mut metadata = json!({"branch": "fix/the-predecessor"});
+        if let (Some(dst), Some(src)) = (metadata.as_object_mut(), md.as_object()) {
+            for (k, v) in src {
+                dst.insert(k.clone(), v.clone());
+            }
+        }
+        json!({"id": PRED, "status": status, "metadata": metadata, "steps": steps})
+    }
+
+    fn review(status: &str) -> Value {
+        json!([{"spec_slug": "review", "status": status}])
+    }
+
+    fn hold_reason(declared: &str, p: &Predecessor) -> String {
+        match boards_after_outcome(declared, p) {
+            EdgeOutcome::Hold(h) => h.reason,
+            other => panic!("expected a hold, got {other:?}"),
+        }
+    }
+
+    /// (1) STILL IN FLIGHT — nobody needs to do anything, and the line
+    /// says so outright. It also names WHERE the predecessor is, because
+    /// "in flight" alone sends the reader to the yard to find out.
+    #[test]
+    fn a_predecessor_in_flight_holds_and_asks_for_nobody() {
+        let p = Predecessor::Found(pred(
+            "open",
+            json!({"train": "77777777-aaaa-bbbb-cccc-dddddddddddd"}),
+            review("ready"),
+        ));
+        let r = hold_reason(PRED, &p);
+        assert!(
+            r.contains("STILL IN FLIGHT") && r.contains("aboard train 77777777"),
+            "it must name the state AND where: {r}"
+        );
+        assert!(
+            r.contains("no action needed"),
+            "an operator deciding whether the pipeline is stuck must be told it is not: {r}"
+        );
+        assert!(
+            !r.contains("human"),
+            "a self-clearing hold must never read as one that needs a person: {r}"
+        );
+        assert_eq!(
+            match boards_after_outcome(PRED, &p) {
+                EdgeOutcome::Hold(h) => h.kind,
+                other => panic!("{other:?}"),
+            },
+            EDGE_HOLD_WAITING
+        );
+    }
+
+    /// The dock and the build are in-flight states too, and each names
+    /// itself — a car waiting on one still building is a different wait
+    /// from one waiting on a car about to merge.
+    #[test]
+    fn in_flight_names_the_dock_and_the_build_separately() {
+        let parked = hold_reason(
+            PRED,
+            &Predecessor::Found(pred("open", json!({}), review("ready"))),
+        );
+        assert!(parked.contains("parked at the dock"), "{parked}");
+        let building = hold_reason(
+            PRED,
+            &Predecessor::Found(pred(
+                "open",
+                json!({}),
+                json!([{"spec_slug": "gate", "status": "ready"}]),
+            )),
+        );
+        assert!(building.contains("still building"), "{building}");
+    }
+
+    /// (2) LANDED — the edge is satisfied and the car boards. If this
+    /// ever holds, the bug is in the filter and not on the dock.
+    #[test]
+    fn a_landed_predecessor_satisfies_the_edge() {
+        for landed in [
+            pred("closed", json!({"outcome": "merged"}), json!([])),
+            pred("open", json!({"merged": "true"}), review("ready")),
+        ] {
+            assert_eq!(
+                boards_after_outcome(PRED, &Predecessor::Found(landed.clone())),
+                EdgeOutcome::Board,
+                "a landed predecessor must board its successor: {landed}"
+            );
+        }
+    }
+
+    /// (3) ABANDONED — it can NEVER clear, so the line says a human must
+    /// act, says what to do, and reports how the record says it ended.
+    #[test]
+    fn an_abandoned_predecessor_names_a_human_and_what_to_clear() {
+        let p = Predecessor::Found(pred(
+            "closed",
+            json!({"outcome": "abandoned"}),
+            review("ready"),
+        ));
+        let r = hold_reason(PRED, &p);
+        assert!(r.contains("ABANDONED"), "{r}");
+        assert!(
+            r.contains("can never be satisfied"),
+            "waiting is futile and the line must say so: {r}"
+        );
+        assert!(
+            r.contains("a human must clear metadata.boards_after"),
+            "name the fix, not just the fault: {r}"
+        );
+        assert!(
+            r.contains("closed, outcome 'abandoned'"),
+            "report what the record says, not a guess: {r}"
+        );
+        assert!(
+            !r.contains("no action needed"),
+            "this one DOES need action: {r}"
+        );
+        assert_eq!(
+            match boards_after_outcome(PRED, &p) {
+                EdgeOutcome::Hold(h) => h.kind,
+                other => panic!("{other:?}"),
+            },
+            EDGE_HOLD_NEEDS_HUMAN
+        );
+    }
+
+    /// A cancelled predecessor is spent, not landed — the same refusal,
+    /// and it must not be read as in flight just because `outcome` is
+    /// missing.
+    #[test]
+    fn a_cancelled_predecessor_is_spent_not_in_flight() {
+        let r = hold_reason(
+            PRED,
+            &Predecessor::Found(pred("cancelled", json!({}), review("ready"))),
+        );
+        assert!(
+            r.contains("ABANDONED") && r.contains("cancelled, no landing recorded"),
+            "{r}"
+        );
+    }
+
+    /// (4) NO SUCH JOB — a human must fix the REFERENCE, which is a
+    /// different repair from breaking a live edge, so it gets different
+    /// words. The line also says this should have been impossible, so the
+    /// reader knows to suspect the write path and not the car.
+    #[test]
+    fn a_dangling_edge_says_the_job_does_not_exist() {
+        let r = hold_reason(PRED, &Predecessor::Absent);
+        assert!(r.contains("DOES NOT EXIST"), "{r}");
+        assert!(
+            r.contains("a human must fix metadata.boards_after"),
+            "fix the reference, do not break the edge: {r}"
+        );
+        assert!(r.contains("ref-checked"), "say why this is surprising: {r}");
+    }
+
+    /// THE ASSERTION THE FEATURE IS TRUSTED ON: no two of the four read
+    /// the same, and each side of the needs-a-human line is recognisable
+    /// without reading the whole sentence.
+    #[test]
+    fn the_four_situations_are_told_apart_by_their_words() {
+        let in_flight = hold_reason(
+            PRED,
+            &Predecessor::Found(pred("open", json!({}), review("ready"))),
+        );
+        let abandoned = hold_reason(
+            PRED,
+            &Predecessor::Found(pred("closed", json!({"outcome": "abandoned"}), json!([]))),
+        );
+        let absent = hold_reason(PRED, &Predecessor::Absent);
+        let unjudged = match boards_after_outcome(PRED, &Predecessor::Unreadable("boom".into())) {
+            EdgeOutcome::BoardUnjudged(note) => note,
+            other => panic!("an unreadable edge must still board: {other:?}"),
+        };
+        let landed = boards_after_outcome(
+            PRED,
+            &Predecessor::Found(pred("closed", json!({"outcome": "merged"}), json!([]))),
+        );
+
+        let all = [&in_flight, &abandoned, &absent, &unjudged];
+        for (i, a) in all.iter().enumerate() {
+            for b in all.iter().skip(i + 1) {
+                assert_ne!(a, b, "two situations read identically");
+            }
+        }
+        assert_eq!(landed, EdgeOutcome::Board, "landed is not a refusal at all");
+        // The one-glance test: does this need a person?
+        assert!(!in_flight.contains("human") && in_flight.contains("no action needed"));
+        assert!(abandoned.contains("a human must") && !abandoned.contains("no action needed"));
+        assert!(absent.contains("a human must") && !absent.contains("no action needed"));
+        assert!(unjudged.contains("boarding anyway"));
+    }
+
+    /// THE HAZARD THIS CAR WAS WARNED ABOUT. A read failure must not
+    /// hold the dock: the conductor boards the car it cannot judge and
+    /// says why, loudly. Refusing everything it could not evaluate would
+    /// freeze every landing, and the gate does not run the conductor.
+    #[test]
+    fn an_unreadable_edge_boards_the_car_and_says_why() {
+        let note = match boards_after_outcome(
+            PRED,
+            &Predecessor::Unreadable("HTTP 503 Service Unavailable".into()),
+        ) {
+            EdgeOutcome::BoardUnjudged(n) => n,
+            other => panic!("fail-open is the whole point: {other:?}"),
+        };
+        assert!(note.contains("HTTP 503"), "carry the cause: {note}");
+        assert!(note.contains("boarding anyway"), "{note}");
+        assert!(
+            note.contains("would stop every train"),
+            "say why fail-open is the right choice here: {note}"
+        );
+    }
+
+    /// THE REGRESSION THAT MATTERS MOST: every car in flight today has
+    /// no edge, and must behave exactly as it did before this car.
+    #[test]
+    fn a_car_with_no_edge_declares_no_predecessor() {
+        for md in [
+            json!({"branch": "fix/x"}),
+            json!({"branch": "fix/x", "boards_after": ""}),
+            json!({"branch": "fix/x", "boards_after": "   "}),
+            json!({"branch": "fix/x", "boards_after": Value::Null}),
+        ] {
+            let car = json!({"id": "c", "status": "open", "metadata": md});
+            assert_eq!(
+                declared_predecessor(&car),
+                None,
+                "no edge, or a cleared one, is not a constraint: {car}"
+            );
+        }
+        let declared = json!({"id": "c", "metadata": {"boards_after": PRED}});
+        assert_eq!(declared_predecessor(&declared).as_deref(), Some(PRED));
+        assert_eq!(
+            boards_after_of(&json!({"boards_after": PRED})).as_deref(),
+            Some(PRED),
+            "the dock reads the edge off a Job's metadata, the conductor off the packet — \
+             one reading of one key"
+        );
+    }
+
+    /// THE DOCK'S HALF (backlog 4142d821): a hold names what it waits
+    /// behind as DATA, so the dock region can say "waiting behind X"
+    /// without parsing the reason sentence back apart.
+    #[test]
+    fn a_hold_names_what_it_waits_behind() {
+        let in_flight = Predecessor::Found(pred("open", json!({}), review("ready")));
+        match boards_after_outcome(PRED, &in_flight) {
+            EdgeOutcome::Hold(h) => {
+                assert_eq!(h.behind, "fix/the-predecessor (car bbbbbbbb)");
+                assert!(h.reason.contains(&h.behind), "{}", h.reason);
+            }
+            other => panic!("{other:?}"),
+        }
+        match boards_after_outcome(PRED, &Predecessor::Absent) {
+            EdgeOutcome::Hold(h) => assert_eq!(h.behind, "car bbbbbbbb", "no packet, no branch"),
+            other => panic!("{other:?}"),
+        }
     }
 }

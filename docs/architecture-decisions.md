@@ -868,8 +868,12 @@ and recomputed by no client; (7) **the dock is repaired first, as its
 own car**: `boards_after_outcome` moves into `boss_jobs::car` so the
 dock and the conductor share one reading, and the dock says "N parked,
 M cannot board" and stays busy rather than claiming a train is due.
-Not yet built: `boards_after_outcome` is still the conductor's alone,
-and the regions read carries no `stuck` block.
+Built (7), 2026-09-24: `boss_jobs::car::boards_after_outcome` is the
+one judgement, the regions read fetches each parked car's declared
+predecessor by id, and the dock says "N parked, M cannot board (waiting
+behind X)" — busy, or troubled when the edge can never clear. Not yet
+built: the regions read carries no `stuck` block (6), and the HUD and
+`boss orient` do not read one.
 
 ## Step types are property bundles; the alphabet is the mechanisms
 

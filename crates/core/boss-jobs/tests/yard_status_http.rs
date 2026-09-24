@@ -1996,3 +1996,130 @@ async fn a_held_green_behind_a_page_of_train_holds_is_still_read() {
         "the held green behind a page of train holds, and no train in the lane: {body}"
     );
 }
+
+/// The yard's answer as text — an error body is prose, and the test
+/// needs its words.
+async fn get_text(app: &axum::Router, role: &str) -> (StatusCode, String) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/yard/status")
+                .header("x-boss-user", user_header(role))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&body).into_owned())
+}
+
+/// A gate-run's steps ARE its verdict. Read as empty, the stranded green
+/// in `seed_full` had no green, and it fell out of the stranded lane
+/// under a 200 (backlog f6c97006). A failed read now fails the yard,
+/// naming the packet, as a failed train steps read already did
+/// (31783deb).
+#[tokio::test]
+async fn a_gate_run_whose_steps_cannot_be_read_fails_the_yard_naming_it() {
+    const STRANDED: &str = "55555555-5555-5555-5555-555555555555";
+    let (app, jobs) = app_with(vec![depth_rule(), clock_rule()], vec![policy_row()]);
+    seed_full(&jobs).await;
+    let (status, body) = get(&app, "operator").await;
+    assert_eq!(status, StatusCode::OK, "control: {body}");
+    assert_eq!(body["stranded"][0]["packet_id"], STRANDED, "{body}");
+
+    jobs.fail_steps_read(&JobId::from_uuid(Uuid::parse_str(STRANDED).unwrap()));
+    let (status, text) = get_text(&app, "operator").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{text}");
+    assert!(text.contains(STRANDED), "names the packet: {text}");
+}
+
+/// A converge's evidence is on its `run` step. Read as empty, a converge
+/// that LANDED a config car read as a packet with no run inside a window
+/// that reaches the merge — and the siding said `converging`, a
+/// confident not-yet. A failed read leaves the window unread, and the
+/// row says so (backlog f6c97006).
+#[tokio::test]
+async fn a_converge_whose_steps_cannot_be_read_leaves_the_landing_unread() {
+    const TRAIN: &str = "aaaaaaaa-0000-0000-0000-000000000001";
+    const CAR: &str = "aaaaaaaa-0000-0000-0000-000000000002";
+    const CONVERGE: &str = "aaaaaaaa-0000-0000-0000-000000000003";
+    let (app, jobs) = app_with(vec![depth_rule(), clock_rule()], vec![policy_row()]);
+    let now = t(NOW);
+
+    let train = job(
+        "pr-train",
+        TRAIN,
+        "train #300",
+        JobStatus::Open,
+        json!({ "boarded_jobs": [CAR], "delivery_channel": "config" }),
+    );
+    jobs.create_job_at(&train, now, &[]).await.unwrap();
+    jobs.add_step_at(
+        &step(
+            &train.id,
+            "merged",
+            "Merged into main",
+            StepStatus::Completed,
+            json!({ "completed_at": "2026-09-03T06:45:00Z", "merge_ref": "abcdef123456" }),
+        ),
+        now,
+        &[],
+    )
+    .await
+    .unwrap();
+    let car = job(
+        "ship-a-change",
+        CAR,
+        "a manifest fix",
+        JobStatus::Open,
+        json!({ "branch": "fix/manifest", "delivery_channel": "config", "train": TRAIN }),
+    );
+    jobs.create_job_at(&car, now, &[]).await.unwrap();
+    // Opened before the merge, so the window reaches it: "none matched"
+    // would be a reading, which is exactly what makes an empty run wrong.
+    let converge = job(
+        "maintenance-cluster-converge",
+        CONVERGE,
+        "cluster converge",
+        JobStatus::Closed,
+        json!({ "opened_at": "2026-09-03T06:00:00Z", "closed_at": "2026-09-03T07:00:00Z" }),
+    );
+    jobs.create_job_at(&converge, now, &[]).await.unwrap();
+    jobs.add_step_at(
+        &step(
+            &converge.id,
+            "run",
+            "run",
+            StepStatus::Completed,
+            json!({ "result": "ok", "build_head": "abcdef123456" }),
+        ),
+        now,
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let landing_of = |body: &Value| {
+        body["sidings"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|r| r["id"] == CAR))
+            .map(|r| r["landing"]["kind"].clone())
+            .unwrap_or(Value::Null)
+    };
+    let (status, body) = get(&app, "operator").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(landing_of(&body), "landed", "control: {body}");
+
+    jobs.fail_steps_read(&converge.id);
+    let (status, body) = get(&app, "operator").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        landing_of(&body),
+        "unread",
+        "an unread converge is not a converging one: {body}"
+    );
+}

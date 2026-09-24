@@ -600,6 +600,28 @@ pub(super) fn stamp_close_instant(job: &mut Job, now: &chrono::DateTime<chrono::
     }
 }
 
+/// The answer to a steps read that failed: a 500 NAMING THE PACKET.
+///
+/// Every handler that reads a packet's steps used to answer this with
+/// `list_steps(..).unwrap_or_default()`, and an empty step list is a
+/// well-formed, confident claim — "this packet has no steps" — so the
+/// failure shrank whatever the handler counted or listed and the 200
+/// said nothing (backlog f6c97006, after c11e9d3c found the shape in
+/// the station queue). The lint `a-steps-read-failure-is-not-empty`
+/// refuses the shape under `http/`; this is what a handler returns in
+/// its place. The adapter's own error rides along, but the packet id is
+/// written here because the Postgres error does not carry it.
+pub(super) fn steps_unreadable(
+    job_id: &boss_core::job::JobId,
+    e: &crate::port::JobsError,
+) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("the steps of packet {job_id} could not be read: {e}"),
+    )
+        .into_response()
+}
+
 // ---------------------------------------------------------------------------
 // Shared id parsers
 // ---------------------------------------------------------------------------

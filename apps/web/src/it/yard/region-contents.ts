@@ -39,8 +39,12 @@ import type { Scene, Station, Wagon } from './yard-floor';
  *  nowhere, the false-empty class). The groupings are the ones
  *  regions.ts already made when it named each region's floor panel:
  *  the gates region IS the approach — publishing, queued, in a bay, in
- *  limbo — and the cancelled siding is drawn in the arrivals yard. */
-const STATION_REGION: Readonly<Record<Station, RegionName>> = {
+ *  limbo — and the cancelled siding is drawn in the arrivals yard.
+ *
+ *  `as const` keeps each value's literal, so the record also DEFINES
+ *  the floor regions (`FloorRegion`) and which stations each one holds
+ *  (`StationOf`) — the keys floor-slices.ts lays the floor out by. */
+const STATION_REGION = {
   approach: 'gates',
   'gate-queue': 'gates',
   gate: 'gates',
@@ -53,9 +57,20 @@ const STATION_REGION: Readonly<Record<Station, RegionName>> = {
   'inspection-shed': 'shed',
   'siding-event': 'shed',
   'siding-no-probe': 'shed',
-};
+} as const satisfies Readonly<Record<Station, RegionName>>;
 
-export function regionOfStation(station: Station): RegionName {
+/** The six regions the yard's floor stands wagons in — read off
+ *  STATION_REGION's values, so a region no station maps to is not one. */
+export type FloorRegion = (typeof STATION_REGION)[Station];
+
+/** The stations a floor region holds: `StationOf<'gates'>` is
+ *  approach | gate-queue | gate | limbo. A layout keyed by it must name
+ *  every one of them and no other region's (floor-slices.ts). */
+export type StationOf<R extends FloorRegion> = {
+  [S in Station]: (typeof STATION_REGION)[S] extends R ? S : never;
+}[Station];
+
+export function regionOfStation(station: Station): FloorRegion {
   return STATION_REGION[station];
 }
 
@@ -64,7 +79,7 @@ export function regionOfStation(station: Station): RegionName {
  *  hold queues instead, and their interior is a platform deck
  *  (world-interior.ts, car 4), so they are absent here by design. */
 export const INTERIOR_REGIONS: ReadonlyArray<RegionName> = REGION_NAMES.filter((name) =>
-  Object.values(STATION_REGION).includes(name),
+  (Object.values(STATION_REGION) as ReadonlyArray<RegionName>).includes(name),
 );
 
 export function hasInterior(region: string): boolean {

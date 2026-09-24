@@ -366,6 +366,34 @@ async fn a_failed_steps_read_fails_the_queue_rather_than_dropping_the_packet() {
     assert!(resp.1.contains(&id), "names the packet: {}", resp.1);
 }
 
+/// The same defect on the one-call congestion read: a depth computed
+/// over a packet whose steps were silently empty is a smaller number,
+/// not an error (backlog c11e9d3c). Written with 59c34790 and left out
+/// of that car because it needs 6c06ef65's `resolved_open_packets`,
+/// which answers a failed read with a 500; restored once both were on
+/// main, since nothing else pinned the load's answer (f6c97006).
+#[tokio::test]
+async fn a_failed_steps_read_fails_the_load_rather_than_shrinking_a_depth() {
+    let (app, jobs) = app();
+    let id = post_car(&app, "feat/a", "standard", "2026-08-01", false).await;
+
+    let (status, v) = get_json(&app, "/api/stations/load", "emp-ceo", "ceo").await;
+    assert_eq!(status, StatusCode::OK);
+    let dock = v["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["station"] == "test-dock")
+        .cloned()
+        .unwrap();
+    assert_eq!(dock["depth"], 1, "control: readable, the dock holds it");
+
+    jobs.fail_steps_read(&boss_core::job::JobId::from_uuid(id.parse().unwrap()));
+    let resp = get_text(&app, "/api/stations/load").await;
+    assert_eq!(resp.0, StatusCode::INTERNAL_SERVER_ERROR, "{}", resp.1);
+    assert!(resp.1.contains(&id), "names the packet: {}", resp.1);
+}
+
 /// The raw body as text, read as the ceo — an error body is prose,
 /// not JSON, and the test needs the words.
 async fn get_text(app: &axum::Router, path: &str) -> (StatusCode, String) {

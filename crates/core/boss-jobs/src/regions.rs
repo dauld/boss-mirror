@@ -531,8 +531,50 @@ pub struct RegionInputs<'a> {
     /// `None` when the registry could not be read, which is one
     /// unknown machine and never an estate with no runners in it.
     pub runner_hosts: Option<&'a [RunnerHost]>,
+    /// THE DOCK'S ORDERING EDGES (backlog 4142d821, design cf820810 Q7):
+    /// the reading of every predecessor a parked car declares
+    /// ([`crate::car::BOARDS_AFTER`]), keyed by the id it declares. Read
+    /// BY ID, not out of `cars`, because a predecessor that landed a week
+    /// ago is outside every window and still decides whether its
+    /// successor boards. [`declared_edges`] names the ids to read, so the
+    /// handler and the dock cannot disagree about the set; a declared id
+    /// with no reading here is judged unreadable, never satisfied.
+    pub predecessors: &'a [(String, crate::car::Predecessor)],
     pub now: chrono::DateTime<chrono::Utc>,
     pub window_hours: i64,
+}
+
+/// The predecessors the dock's parked cars declare, deduplicated, in dock
+/// order — the ids the handler reads for [`RegionInputs::predecessors`].
+/// A dock row whose car is not among `cars` declares nothing this pass
+/// can see, the same as a car with no edge.
+pub fn declared_edges(status: &YardStatus, cars: &[(Job, Vec<Step>)]) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for id in status
+        .dock
+        .iter()
+        .filter_map(|d| cars.iter().find(|(j, _)| j.id.to_string() == d.id))
+        .filter_map(|(j, _)| crate::car::boards_after_of(&j.metadata))
+    {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+/// A packet as the jobs API serves it — the row with its `steps` — which
+/// is the shape `crate::car`'s predicates read, so a predecessor judged
+/// here is judged exactly as the conductor judges the one it fetched.
+pub fn packet_value(job: &Job, steps: &[Step]) -> Value {
+    let mut v = serde_json::to_value(job).unwrap_or_default();
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert(
+            "steps".to_string(),
+            serde_json::to_value(steps).unwrap_or_default(),
+        );
+    }
+    v
 }
 
 // ---------------------------------------------------------------------
@@ -1324,12 +1366,70 @@ fn with_machinery(region: Region, machines: Vec<Machine>) -> Region {
     }
 }
 
-/// THE DOCK: cars parked and boardable. Busy when the boarding depth
-/// is met — a train is due — and troubled only when the dock row could
-/// not be read (an unread dock is not an empty one, 52fed017). The
-/// trend is the DOCK WAIT: how long the cars that boarded in the
+/// Each parked car that declares an ordering edge, with the conductor's
+/// OWN judgement of it — `car::boards_after_outcome`, the function the
+/// conductor boards by — so the dock and the conductor cannot disagree
+/// about whether a car can board (backlog 4142d821, design cf820810 Q7).
+/// A car that declares no edge is not listed; a declared predecessor with
+/// no reading in [`RegionInputs::predecessors`] is judged unreadable,
+/// which boards (fail-open, as the conductor is) and is said.
+pub(crate) fn dock_edges<'a>(
+    inputs: &RegionInputs<'a>,
+) -> Vec<(&'a crate::yard::DockCar, crate::car::EdgeOutcome)> {
+    use crate::car::{Predecessor, boards_after_of, boards_after_outcome};
+    let status: &'a YardStatus = inputs.status;
+    status
+        .dock
+        .iter()
+        .filter_map(|d| {
+            let (job, _) = inputs.cars.iter().find(|(j, _)| j.id.to_string() == d.id)?;
+            let declared = boards_after_of(&job.metadata)?;
+            let pred = inputs
+                .predecessors
+                .iter()
+                .find(|(id, _)| *id == declared)
+                .map(|(_, p)| p.clone())
+                .unwrap_or_else(|| {
+                    Predecessor::Unreadable("the predecessor was not read on this pass".into())
+                });
+            Some((d, boards_after_outcome(&declared, &pred)))
+        })
+        .collect()
+}
+
+/// The predecessors the held cars wait behind, of one hold kind, each
+/// named once however many cars wait behind it.
+fn behind_of(holds: &[&crate::car::EdgeHold], kind: &str) -> Vec<String> {
+    holds
+        .iter()
+        .filter(|h| h.kind == kind)
+        .fold(Vec::new(), |mut names: Vec<String>, h| {
+            if !names.contains(&h.behind) {
+                names.push(h.behind.clone());
+            }
+            names
+        })
+}
+
+/// THE DOCK: cars parked, and whether they can board. Busy when the
+/// boarding depth is met — a train is due — and troubled when the dock
+/// row could not be read (an unread dock is not an empty one, 52fed017).
+/// The trend is the DOCK WAIT: how long the cars that boarded in the
 /// window stood on the dock first, from the car's `gate` stamp to its
 /// train's `collect` stamp.
+///
+/// A CAR THE CONDUCTOR WILL REFUSE IS NOT A TRAIN DUE (backlog 4142d821,
+/// design cf820810 Q7). Three cars once sat unable to board for nine and
+/// a half hours while this region said "the boarding depth is met, a
+/// train is due" — the sentence it says two minutes after a healthy
+/// departure — because only the conductor ever asked whether a car
+/// could board. So the parked cars' declared ordering edges are judged
+/// here by the conductor's own function ([`dock_edges`]), and while any
+/// car is held on one the region says "N parked, M cannot board (waiting
+/// behind X)" and stays busy rather than promising a train. An edge that
+/// can NEVER clear — an abandoned or missing predecessor — troubles the
+/// region: the conductor refuses it identically every window until a
+/// person acts, and a troubled thing must look troubled.
 fn dock(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     let status = inputs.status;
     let boarded_at: std::collections::HashMap<String, Instant> = inputs
@@ -1364,20 +1464,71 @@ fn dock(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
             trend,
         ),
         Reading::Read => {
+            use crate::car::{EDGE_HOLD_NEEDS_HUMAN, EDGE_HOLD_WAITING, EdgeOutcome};
             let depth = status.dock.len();
-            let (state, why) = if status.boarding.threshold_met == Some(true) {
+            let parked = plural(depth, "car parked", "cars parked");
+            let edges = dock_edges(inputs);
+            let holds: Vec<&crate::car::EdgeHold> = edges
+                .iter()
+                .filter_map(|(_, o)| match o {
+                    EdgeOutcome::Hold(h) => Some(h),
+                    _ => None,
+                })
+                .collect();
+            let unjudged = edges
+                .iter()
+                .filter(|(_, o)| matches!(o, EdgeOutcome::BoardUnjudged(_)))
+                .count();
+            let waiting = behind_of(&holds, EDGE_HOLD_WAITING);
+            let stuck = behind_of(&holds, EDGE_HOLD_NEEDS_HUMAN);
+            let (state, why) = if !holds.is_empty() {
+                let clauses: Vec<String> = [
+                    (!waiting.is_empty()).then(|| format!("waiting behind {}", waiting.join(", "))),
+                    (!stuck.is_empty()).then(|| {
+                        format!(
+                            "stuck behind {}, an edge that can never be satisfied — a human \
+                             must clear it",
+                            stuck.join(", ")
+                        )
+                    }),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
                 (
-                    RegionState::Busy,
+                    if stuck.is_empty() {
+                        RegionState::Busy
+                    } else {
+                        RegionState::Troubled
+                    },
                     format!(
-                        "{} — the boarding depth is met, a train is due",
-                        plural(depth, "car parked", "cars parked")
+                        "{parked}, {} cannot board ({})",
+                        holds.len(),
+                        clauses.join("; ")
                     ),
                 )
-            } else {
+            } else if status.boarding.threshold_met == Some(true) {
                 (
-                    RegionState::Clear,
-                    plural(depth, "car parked", "cars parked"),
+                    RegionState::Busy,
+                    format!("{parked} — the boarding depth is met, a train is due"),
                 )
+            } else {
+                (RegionState::Clear, parked)
+            };
+            // Unknown is not zero: an edge nobody could judge boards (the
+            // conductor fails open on it too), and the region says so.
+            let why = if unjudged > 0 {
+                format!(
+                    "{why} · {} could not be read — the conductor boards {} anyway",
+                    plural(unjudged, "ordering edge", "ordering edges"),
+                    if unjudged == 1 {
+                        "its car"
+                    } else {
+                        "their cars"
+                    }
+                )
+            } else {
+                why
             };
             region("dock", Some(depth), bound, state, why, trend)
         }
@@ -2474,6 +2625,7 @@ mod tests {
             sessions: Some(&[]),
             publish_packets: Some(&[]),
             run_capacity: None,
+            predecessors: &[],
             now: t(NOW),
             window_hours: 24,
         }
@@ -3569,6 +3721,146 @@ mod tests {
         assert_eq!(dock.trend.current, Some(2.0));
         assert_eq!(dock.trend.previous, None);
         assert_eq!(dock.trend.samples, 2);
+    }
+
+    /// A parked car on the dock — open, review ready — with this metadata.
+    fn parked(branch: &str, extra: Value) -> (Job, Vec<Step>) {
+        let mut md = json!({ "branch": branch });
+        if let (Some(dst), Some(src)) = (md.as_object_mut(), extra.as_object()) {
+            for (k, v) in src {
+                dst.insert(k.clone(), v.clone());
+            }
+        }
+        let j = job("ship-a-change", branch, JobStatus::Open, md);
+        let s = vec![step(&j, crate::car::REVIEW_SLUG, StepStatus::Ready, None)];
+        (j, s)
+    }
+
+    /// A status whose dock holds these cars, at the boarding depth.
+    fn dock_at_depth(cars: &[(Job, Vec<Step>)]) -> YardStatus {
+        let mut status = empty_status();
+        status.dock = cars.iter().map(|(j, _)| crate::yard::dock_car(j)).collect();
+        status.boarding.threshold_met = Some(true);
+        status
+    }
+
+    /// THE INCIDENT'S SURFACE (backlog 4142d821, design cf820810 Q7).
+    /// Three cars sat unable to board for nine and a half hours while
+    /// this region said "the boarding depth is met, a train is due" —
+    /// the sentence it says two minutes after a healthy departure —
+    /// because only the conductor ever asked whether a car could board.
+    /// A car held on its declared ordering edge is counted, named by
+    /// what it waits behind, and the region stays busy WITHOUT promising
+    /// a train.
+    #[test]
+    fn a_car_waiting_behind_its_edge_keeps_the_dock_busy_and_promises_no_train() {
+        let first = parked("fix/first-half", json!({}));
+        let pred_id = first.0.id.to_string();
+        let second = parked("fix/second-half", json!({ "boards_after": pred_id }));
+        let cars = vec![first.clone(), second];
+        let status = dock_at_depth(&cars);
+        let preds = vec![(
+            pred_id.clone(),
+            crate::car::Predecessor::Found(packet_value(&first.0, &first.1)),
+        )];
+        let mut i = inputs(&status, &[], &[], &cars, &[], Some(&[]), Some(&[]));
+        i.predecessors = &preds;
+        let out = regions(&i);
+        let dock = by_name(&out, "dock");
+        assert_eq!(dock.state, RegionState::Busy, "{}", dock.why);
+        assert_eq!(dock.count, Some(2), "parked is still parked");
+        let behind = format!("fix/first-half (car {})", &pred_id[..8]);
+        assert_eq!(
+            dock.why,
+            format!("2 cars parked, 1 cannot board (waiting behind {behind})")
+        );
+        assert!(
+            !dock.why.contains("a train is due"),
+            "a dock with a car the conductor will refuse must not promise a train: {}",
+            dock.why
+        );
+        assert_eq!(
+            declared_edges(&status, &cars),
+            vec![pred_id],
+            "the handler reads exactly the predecessors this region judges"
+        );
+    }
+
+    /// An edge that can NEVER clear is not a wait: the conductor refuses
+    /// the car identically every window until a person acts, so the
+    /// region says so and looks troubled (CLAUDE.md §Diagnosis: a
+    /// troubled packet must look troubled).
+    #[test]
+    fn a_car_behind_an_edge_that_can_never_clear_troubles_the_dock() {
+        let gone = "cccccccc-1111-2222-3333-444444444444".to_string();
+        let held = parked("fix/orphan", json!({ "boards_after": gone }));
+        let cars = vec![held];
+        let status = dock_at_depth(&cars);
+        let preds = vec![(gone, crate::car::Predecessor::Absent)];
+        let mut i = inputs(&status, &[], &[], &cars, &[], Some(&[]), Some(&[]));
+        i.predecessors = &preds;
+        let out = regions(&i);
+        let dock = by_name(&out, "dock");
+        assert_eq!(dock.state, RegionState::Troubled, "{}", dock.why);
+        assert!(
+            dock.why.starts_with("1 car parked, 1 cannot board"),
+            "{}",
+            dock.why
+        );
+        assert!(
+            dock.why.contains("car cccccccc") && dock.why.contains("a human must clear"),
+            "name what it is stuck behind, and whose move it is: {}",
+            dock.why
+        );
+    }
+
+    /// FAIL-OPEN, AS THE CONDUCTOR IS. An edge whose predecessor could
+    /// not be read boards the car, so it is not counted as held — but
+    /// the region says it could not judge it rather than staying silent.
+    /// And a dock with no edges at all reads exactly as it did.
+    #[test]
+    fn an_unread_edge_boards_as_the_conductor_boards_it_and_says_so() {
+        let pred_id = "dddddddd-1111-2222-3333-444444444444".to_string();
+        let car = parked("fix/after-a-blip", json!({ "boards_after": pred_id }));
+        let cars = vec![car];
+        let status = dock_at_depth(&cars);
+        let preds = vec![(
+            pred_id,
+            crate::car::Predecessor::Unreadable("HTTP 503".into()),
+        )];
+        let mut i = inputs(&status, &[], &[], &cars, &[], Some(&[]), Some(&[]));
+        i.predecessors = &preds;
+        let out = regions(&i);
+        let dock = by_name(&out, "dock");
+        assert_eq!(dock.state, RegionState::Busy, "{}", dock.why);
+        assert!(
+            dock.why
+                .starts_with("1 car parked — the boarding depth is met, a train is due"),
+            "{}",
+            dock.why
+        );
+        assert!(
+            dock.why.contains("1 ordering edge could not be read"),
+            "{}",
+            dock.why
+        );
+
+        let plain = vec![parked("fix/no-edge", json!({}))];
+        let status = dock_at_depth(&plain);
+        let out = regions(&inputs(
+            &status,
+            &[],
+            &[],
+            &plain,
+            &[],
+            Some(&[]),
+            Some(&[]),
+        ));
+        assert_eq!(
+            by_name(&out, "dock").why,
+            "1 car parked — the boarding depth is met, a train is due",
+            "a car with no edge — every car but one today — reads as it always did"
+        );
     }
 
     /// The gates: a stale bay is trouble; a queue is busy; the trend is

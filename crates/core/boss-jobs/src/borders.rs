@@ -632,11 +632,23 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
                 Some(true) => "parked — the boarding depth is met, a train is due".to_string(),
                 _ => "parked, waiting for the boarding depth or the clock rule".to_string(),
             };
+            // A car the conductor will refuse on its declared ordering
+            // edge is listed with the conductor's own refusal, not as a
+            // train due (backlog 4142d821) — judged by the one function
+            // both read, through the dock region's own reading.
+            let edge_holds: Vec<(&str, String)> = crate::regions::dock_edges(r)
+                .into_iter()
+                .filter_map(|(d, o)| match o {
+                    crate::car::EdgeOutcome::Hold(h) => Some((d.id.as_str(), h.reason)),
+                    _ => None,
+                })
+                .collect();
             holds.extend(status.dock.iter().map(|c| {
-                hold(
-                    c.branch.as_deref().unwrap_or(c.title.as_str()),
-                    waiting_for.clone(),
-                )
+                let why = edge_holds.iter().find(|(id, _)| *id == c.id).map_or_else(
+                    || waiting_for.clone(),
+                    |(_, reason)| format!("cannot board — {reason}"),
+                );
+                hold(c.branch.as_deref().unwrap_or(c.title.as_str()), why)
             }));
             Flow::of(w, stamps, status.dock.len() + status.held_cars.len(), holds)
         }
@@ -1137,6 +1149,7 @@ mod tests {
             sessions: None,
             publish_packets: None,
             run_capacity: None,
+            predecessors: &[],
             now: t(NOW),
             window_hours: DEFAULT_WINDOW_HOURS,
         }
@@ -1313,6 +1326,58 @@ mod tests {
         assert_eq!(b.state, RegionState::Troubled);
         assert_eq!(b.waiting, None);
         assert!(b.why.contains("loading-dock"), "why: {}", b.why);
+    }
+
+    /// The dock region's per-car half (backlog 4142d821): a car held on
+    /// its declared ordering edge is listed with the conductor's own
+    /// refusal, not as "a train is due" beside the cars that can board.
+    #[test]
+    fn a_car_held_on_its_edge_is_listed_with_the_conductors_own_words() {
+        let parked = |branch: &str, md: Value| {
+            let j = job("ship-a-change", branch, JobStatus::Open, md);
+            let s = vec![step(&j, crate::car::REVIEW_SLUG, StepStatus::Ready, None)];
+            (j, s)
+        };
+        let first = parked("fix/first-half", json!({ "branch": "fix/first-half" }));
+        let pred_id = first.0.id.to_string();
+        let second = parked(
+            "fix/second-half",
+            json!({ "branch": "fix/second-half", "boards_after": pred_id }),
+        );
+        let cars = vec![first.clone(), second];
+        let mut status = empty_status();
+        status.dock = cars.iter().map(|(j, _)| crate::yard::dock_car(j)).collect();
+        status.boarding.threshold_met = Some(true);
+        let preds = vec![(
+            pred_id,
+            crate::car::Predecessor::Found(crate::regions::packet_value(&first.0, &first.1)),
+        )];
+        let mut inputs = region_inputs(&status, &cars, &[], &[], Some(&[]), Some(&[]));
+        inputs.predecessors = &preds;
+        let out = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
+        });
+        let b = only(&out, "gates", "track");
+        let why_of = |what: &str| {
+            b.holds
+                .iter()
+                .find(|h| h.what == what)
+                .map(|h| h.why.clone())
+                .unwrap_or_else(|| panic!("no hold for {what}: {:?}", b.holds))
+        };
+        let held = why_of("fix/second-half");
+        assert!(
+            held.starts_with("cannot board — boards after fix/first-half")
+                && held.contains("STILL IN FLIGHT"),
+            "{held}"
+        );
+        assert!(!held.contains("a train is due"), "{held}");
+        assert!(
+            why_of("fix/first-half").contains("a train is due"),
+            "the car that CAN board is still due"
+        );
     }
 
     #[test]

@@ -1703,8 +1703,15 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
             return (StatusCode::NOT_FOUND, "job not found").into_response();
         };
         let needs_steps = bound.as_ref().is_some_and(|s| s.predicate.needs_steps());
+        // A failed steps read is a 500 naming the packet, not an empty
+        // list: empty cannot match a step clause, so the claim was
+        // refused 409 "packet is not at this station" — a confident
+        // wrong answer to a question the door never read (f6c97006).
         let steps = if needs_steps {
-            let steps = state.jobs.list_steps(&job_id).await.unwrap_or_default();
+            let steps = match state.jobs.list_steps(&job_id).await {
+                Ok(steps) => steps,
+                Err(e) => return steps_unreadable(&job_id, &e),
+            };
             crate::agent_spec::resolved_steps(&steps, active_row.as_ref())
         } else {
             Vec::new()

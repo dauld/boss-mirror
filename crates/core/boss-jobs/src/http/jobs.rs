@@ -262,9 +262,18 @@ pub(super) async fn list_jobs<R: JobsRepository + 'static, B: EventBus + 'static
     // spelling of the verb's exit on the request (50fede8b): a
     // request-level reader never had to fetch them. Held by
     // tests/a_listed_packet_carries_its_steps.rs.
+    //
+    // So a failed steps read FAILS the list, naming the packet. It used
+    // to answer `unwrap_or_default()`: the row went out with `steps: []`,
+    // which is exactly the row the ops-runner skips as "has no execute
+    // step" — a read failure the wire could not tell from a packet
+    // without work (backlog f6c97006).
     let mut enriched: Vec<serde_json::Value> = Vec::with_capacity(jobs.len());
     for job in &jobs {
-        let steps = state.jobs.list_steps(&job.id).await.unwrap_or_default();
+        let steps = match state.jobs.list_steps(&job.id).await {
+            Ok(steps) => steps,
+            Err(e) => return steps_unreadable(&job.id, &e),
+        };
         let mut j = serde_json::to_value(job).unwrap_or_default();
         j["steps"] = serde_json::to_value(&steps).unwrap_or_default();
         enriched.push(j);
@@ -1228,10 +1237,12 @@ async fn job_detail_response<R: JobsRepository + 'static, B: EventBus + 'static>
     job_id: &boss_core::job::JobId,
 ) -> Response {
     match state.jobs.get_job(job_id).await {
-        Ok(Some(job)) => {
-            let steps = state.jobs.list_steps(job_id).await.unwrap_or_default();
-            Json(JobDetail { job, steps }).into_response()
-        }
+        // A packet whose steps cannot be read is not a packet with no
+        // steps: the detail page would draw it empty (f6c97006).
+        Ok(Some(job)) => match state.jobs.list_steps(job_id).await {
+            Ok(steps) => Json(JobDetail { job, steps }).into_response(),
+            Err(e) => steps_unreadable(job_id, &e),
+        },
         Ok(None) => (StatusCode::NOT_FOUND, "job not found").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -1427,9 +1438,25 @@ pub(super) async fn job_stream<R: JobsRepository + 'static, B: EventBus + 'stati
         // Push initial snapshot. last_sig is bound from the
         // success branch so the compiler doesn't warn about a
         // dead-write on a `None` initializer that's never read.
+        // A steps read that fails is never pushed as a packet with no
+        // steps (backlog f6c97006): the first frame is then an `error`
+        // naming the packet, like the not-found one below, and a failed
+        // read on a later tick pushes an `unavailable` frame and keeps
+        // the last true signature, so the page holds what it last knew
+        // rather than drawing the packet empty until the next good read.
         let initial = state.jobs.get_job(&job_id).await;
         let mut last_sig: JobSig = if let Ok(Some(job)) = initial {
-            let steps = state.jobs.list_steps(&job_id).await.unwrap_or_default();
+            let steps = match state.jobs.list_steps(&job_id).await {
+                Ok(steps) => steps,
+                Err(e) => {
+                    yield Ok::<_, Infallible>(
+                        SseEvent::default()
+                            .event("error")
+                            .data(format!("the steps of packet {job_id} could not be read: {e}")),
+                    );
+                    return;
+                }
+            };
             let sig = signature(&job, &steps);
             let detail = JobDetail { job, steps };
             if let Ok(json) = serde_json::to_string(&detail) {
@@ -1456,7 +1483,17 @@ pub(super) async fn job_stream<R: JobsRepository + 'static, B: EventBus + 'stati
                 );
                 break;
             };
-            let steps = state.jobs.list_steps(&job_id).await.unwrap_or_default();
+            let steps = match state.jobs.list_steps(&job_id).await {
+                Ok(steps) => steps,
+                Err(e) => {
+                    yield Ok::<_, Infallible>(
+                        SseEvent::default()
+                            .event("unavailable")
+                            .data(format!("the steps of packet {job_id} could not be read: {e}")),
+                    );
+                    continue;
+                }
+            };
             let sig = signature(&job, &steps);
             if last_sig != sig {
                 let detail = JobDetail { job, steps };
@@ -1746,6 +1783,15 @@ pub(super) async fn patch_job_metadata<R: JobsRepository + 'static, B: EventBus 
 /// returns the obstacles rather than a bare no, because each one names
 /// the step it concerns and an operator's next question is always
 /// "which step, and what changed".
+///
+/// A SAFE MOVE IS NOT YET ENOUGH (backlog 1e973965, 2026-09-23). This
+/// door moves one column, so a step row keeps what the admission version
+/// wrote on it and a step the target inserts is never created — it once
+/// answered `converted: true` for a page-audit whose pending steps still
+/// read v1. So it asks
+/// [`crate::protocol_conversion::convertibility_for_repin`], which adds
+/// to the safety verdict every change this door cannot carry, until a
+/// re-pin re-projects pending steps (design 7cf202a9 Q2, 4347a1af).
 pub(super) async fn convert_job<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
     Path(id): Path<String>,
@@ -1842,7 +1888,7 @@ pub(super) async fn convert_job<R: JobsRepository + 'static, B: EventBus + 'stat
         .filter_map(|s| s.spec_slug.clone())
         .collect();
 
-    let verdict = crate::protocol_conversion::convertibility_for_packet(&from, &to, &done);
+    let verdict = crate::protocol_conversion::convertibility_for_repin(&from, &to, &done);
     if !verdict.is_automatic() {
         return (
             StatusCode::CONFLICT,

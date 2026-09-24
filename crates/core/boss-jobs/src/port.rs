@@ -885,8 +885,9 @@ pub trait JobsRepository: Send + Sync {
     ///
     /// So conversion gets its own door, and the door is narrow: it
     /// changes exactly one column, and the caller is expected to have
-    /// asked [`crate::protocol_conversion::convertibility_for_packet`]
-    /// first. Widening `update_job` instead would have let any PUT
+    /// asked [`crate::protocol_conversion::convertibility_for_repin`]
+    /// first — which refuses, besides an unsafe move, any change this
+    /// one column cannot carry onto the step rows (1e973965). Widening `update_job` instead would have let any PUT
     /// re-pin a packet by accident, which is the failure this shape
     /// exists to prevent (bfc74b3a).
     async fn repin_workflow_version_at(
