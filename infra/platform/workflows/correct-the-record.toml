@@ -99,7 +99,20 @@ title = "applied"
 kind = "task"
 ready_when = "steps.review.done AND steps.review.metadata.verdict = \"accepted\""
 title_template = "Land it where the claim lives"
-fields = [{ name = "landed", field_type = "string", required = true }]
+# THROUGH THE DOOR (design 4105b020, the plan's later item on backlog
+# 56727f95). This step asked for `landed`, a free-text string, and the
+# only place it could land was never where the claim lived: a published
+# claim sits in a COMPLETED step (a design-doc's markdown, a triage's
+# evidence), the step API refuses to rewrite one, and the correction
+# went beside it under a key of its author's invention — which no
+# reader of that step ever saw. The corrections door appends one entry
+# to the packet's reserved `corrections` list and the job GET hands it
+# to the step, so the evidence here is what the door ANSWERED, copied
+# not retyped: the packet, the step, and the correction's index.
+# Pinned by crates/core/boss-jobs/tests/platform_bundle_correct_the_record.rs,
+# which reads the verb's spelling out of the API's own 409 hint.
+metadata_defaults = { procedure = "The false claim lives in a completed step: the evidence step's `where` names the packet. Append the correction beside it through the door: `boss correct <packet> --step <slug> --field <name>` with --reads-file (the damaged excerpt, EXACTLY as the step stores it), --should-read-file (what it should read) and --why-file (this packet's measurement and method). Use the -file twins, not argv: prose with backticks dies in the shell (backlog 2376b89e). The step is never rewritten; every reader of it is handed the correction beside it. Record in `correction` the line the verb printed — it names the packet, the step and the correction's index [N], the entry the jobs.step.corrected event carries — copied, not retyped. The door refuses an open step (edit that one instead), a field the step does not hold, and an excerpt that is not in the stored text; a refusal is the answer to act on, never a reason to write the correction into job metadata under a key of your own. A claim that lives only in a file under git lands as a car instead, and `correction` quotes what `boss merged <branch>` answered for it." }
+fields = [{ name = "correction", field_type = "string", required = true }]
 
 [[workflow.step]]
 title = "corrected"
