@@ -103,6 +103,7 @@
     withConverge,
   } from './yard-converge';
   import { yardAlerts, type Alert } from './yard-alerts';
+  import { alertsFor, boardFor, quietText } from './region-page';
   import { bandText, fetchRegions, floorSelection, lampOf, stateText, type Regions } from './regions';
   import { yardSignals } from './yard-signals';
   import { production as productionOf } from './yard-production';
@@ -269,6 +270,20 @@
   // THE ALERTS STRIP: what is wrong on the floor right now, derived
   // from the scene (yard-alerts.ts) — each a button to its subject.
   const alerts = $derived<readonly Alert[]>(floor ? yardAlerts(floor, statusData, nowMs) : []);
+  // A REGION OWNS ITS PAGE (design 62de32ae, decision 7): the strip and
+  // the departure board are the REGION's, each counting what it left to
+  // the other regions (region-page.ts). The quiet line reads the
+  // region's own state, so it cannot say "every machine is working"
+  // under a troubled head.
+  const scopedAlerts = $derived(floor ? alertsFor(alerts, focus, floor) : { here: [], elsewhere: 0 });
+  const board = $derived(floor ? boardFor(floor, focus) : { rows: [], elsewhere: 0 });
+  const quiet = $derived(
+    quietText(
+      focus,
+      regionsRead.kind === 'loading' ? 'reading' : (focusRegion?.state ?? 'unread'),
+      scopedAlerts.elsewhere,
+    ),
+  );
 
   // THE LOWER DECK: what the floor produced today, and what fired what,
   // both read off the packets the page already holds plus the
@@ -614,16 +629,18 @@
     <!-- THE ALERTS STRIP: what is wrong right now, each a button to
          its subject. Quiet when every machine is working or idle by
          design. -->
-    <div class="yard-alerts" aria-live="polite">
-      {#each alerts as a (a.id)}
+    <div class="yard-alerts" aria-live="polite" data-alerts={focus}>
+      {#each scopedAlerts.here as a (a.id)}
         <button type="button" class="yard-alert {a.sev}" onclick={() => select(a.subject)}>
           <span class="yard-lamp-dot {a.sev}"></span>
           <span>{a.text}</span>
           {#if a.since}<time class="yard-mono">since {clockOf(a.since)}</time>{/if}
         </button>
       {/each}
-      {#if alerts.length === 0}
-        <span class="yard-quiet"><span class="yard-lamp-dot ok"></span>No alerts — every machine is working or idle by design.</span>
+      {#if scopedAlerts.here.length === 0}
+        <span class="yard-quiet"><span class="yard-lamp-dot {focusRegion && focusRegion.state !== 'clear' ? lampOf(focusRegion.state) : 'ok'}"></span>{quiet}</span>
+      {:else if scopedAlerts.elsewhere > 0}
+        <span class="yard-quiet">+{scopedAlerts.elsewhere} elsewhere on the floor</span>
       {/if}
     </div>
 
@@ -638,7 +655,14 @@
     <!-- THE DECK: the departure board and the entity panel -->
     <div class="yard-deck">
       <div class="yard-panel">
-        <DepartureBoard scene={floor} {selected} onselect={select} {nowMs} />
+        <DepartureBoard
+          scene={floor}
+          {selected}
+          onselect={select}
+          {nowMs}
+          rows={board.rows}
+          region={focus}
+          elsewhere={board.elsewhere} />
       </div>
       <div class="yard-panel yard-entity" aria-live="polite">
         {#if selected === floorSelection(focus)}

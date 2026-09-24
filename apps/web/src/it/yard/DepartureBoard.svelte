@@ -5,19 +5,32 @@
   // rows are the scene's `boardRows`, already ordered (yard-floor.ts),
   // so this table and the map can never disagree about a car's place.
   // Clicking a row selects the car, the same selection the map makes.
-  import { sinceText, type Scene } from './yard-floor';
+  //
+  // A REGION'S BOARD (design 62de32ae, decision 7): under a region's map
+  // the board lists that region's rows (`rows`, region-page.ts
+  // `boardFor`), is titled for it, and COUNTS what it left to the other
+  // regions — the garage's board used to list dock cars and trains at
+  // CI, and a board that filters in silence reads as an empty floor.
+  import { sinceText, type BoardRow, type Scene } from './yard-floor';
 
   type Props = Readonly<{
     scene: Scene;
     selected: string;
     onselect: (key: string) => void;
     nowMs: number;
+    /** The rows to list — the whole floor's when absent. */
+    rows?: ReadonlyArray<BoardRow>;
+    /** The region the rows are scoped to, for the title. */
+    region?: string | null;
+    /** Rows standing in other regions, left off this board. */
+    elsewhere?: number;
   }>;
-  let { scene, selected, onselect, nowMs }: Props = $props();
+  let { scene, selected, onselect, nowMs, rows = undefined, region = null, elsewhere = 0 }: Props = $props();
 
   const wagonById = $derived(new Map(scene.wagons.map(w => [w.id, w])));
-  const inFlight = $derived(scene.boardRows.filter(r => !r.landed));
-  const landed = $derived(scene.boardRows.filter(r => r.landed));
+  const listed = $derived(rows ?? scene.boardRows);
+  const inFlight = $derived(listed.filter(r => !r.landed));
+  const landed = $derived(listed.filter(r => r.landed));
 
   const pickKey = (key: string) => (e: KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === ' ') {
@@ -53,9 +66,9 @@
   {/if}
 {/snippet}
 
-<h2 class="head">
-  Departure board
-  <small>{inFlight.length} in flight · {landed.length} landed</small>
+<h2 class="head" data-board={region ?? 'floor'}>
+  {region === null ? 'Departure board' : `Departure board · ${region}`}
+  <small>{inFlight.length} in flight · {landed.length} landed{elsewhere > 0 ? ` · ${elsewhere} elsewhere on the floor` : ''}</small>
 </h2>
 <div class="scroll">
   <table class="board">
@@ -65,7 +78,7 @@
     <tbody>
       {#each inFlight as r (r.id)}{@render row(r)}{/each}
       {#if inFlight.length === 0}
-        <tr><td colspan="4" class="empty">nothing in flight</td></tr>
+        <tr><td colspan="4" class="empty">{region === null ? 'nothing in flight' : `nothing in flight in the ${region}`}</td></tr>
       {/if}
       {#if landed.length > 0}
         <tr class="sep"><td colspan="4" class="label">Landed</td></tr>
